@@ -459,16 +459,26 @@ has **no branch and no framing yet**.
   `FrontendView.fold_projection` to `true` for semantic frontends, which
   Stage 2 deliberately left `false` (Q#FD21).
 
-## dired Stage 2 framing lane — PR #171 AT REVISION 5, AWAITING APPROVAL
+## dired Stage 2 framing lane — PR #171 AT REVISION 6, AWAITING APPROVAL
 
-- Portable branch: `githubsucks/dired-stage2-framing` (head `e7f811b`);
+- Portable branch: `githubsucks/dired-stage2-framing`;
   worktree `../pmacs-dired-stage1`. **PR #171**, base `main`, integrated
   up to `main` @ `ad41cf1`. Framing only —
-  `docs/dired-stage2-framing.md`, now **2,304 lines**, no runtime code.
-- **Status: PROPOSED, never formally approved.** GitHub records no
-  formal review on it. The commit history embodies four revisions and
-  three review rounds; **that is not the same as approval**, and it must
-  not be read as one.
+  `docs/dired-stage2-framing.md`, now **~2,630 lines**, no runtime code.
+  This lane rides that PR.
+- **Status: PROPOSED, never approved.** **Revision 5 was reviewed and
+  NOT approved** — six findings, four P1 — and revision 6 answers them.
+  The commit history embodies five revisions and four review rounds;
+  **that is not the same as approval**, and it must not be read as one.
+- **Round 5's single theme, worth carrying because it will recur:** rev
+  5 changed the slice split and the ownership of a decision, and the
+  prose did not follow. Four of the six findings were that same defect
+  in different places — stale slice labels, an acceptance allocation
+  that contradicted the code split, and a PR body still describing
+  revision *1*'s two-slice plan. **When a cut changes, sweep for the
+  label, do not patch the instance.** Rev 6's own sweep found four more
+  the review had not cited, one of which was wrong in both halves
+  (`x`'s report tagged 2a, `remove_dir_all` tagged 2b).
 - **Rev 4 was scouted at `c8ec8f3`, which is dired Stage 1's own merge
   commit (#165)** — so dired Stage 1 and find-file (#162) were always
   its base, not new arrivals. Eighteen PRs landed on top before the
@@ -504,14 +514,32 @@ has **no branch and no framing yet**.
   serialize-and-await batch contract the framing proposes.
 - **The typed-edit chain does not reach dired** — verified rather than
   assumed. Its lessons bind the framing's two *new* hooks instead.
-- **Scope has MOVED OUT of this lane.** Rev 5 added Q#DR25 to adopt
-  `set_generated_contents` at the head of 2b, because dired's listing is
-  a generated buffer whose paint bypasses an intercept over a still
-  writable rope. That turned out to be a **class bug, not dired's** —
-  the same idiom is in listview, compile and search/grep — so it is now
-  owned by the generated-buffer immutability lane. **#171 needs a
-  revision 6 that defers Q#DR25 to that lane** once its framing is
-  approved; do not implement Q#DR25 from this document.
+- **Scope MOVED OUT of this lane, and rev 6 records the handoff.**
+  Rev 5 added Q#DR25 to adopt `set_generated_contents` at the head of
+  2b, because dired's listing is a generated buffer whose paint bypasses
+  an intercept over a still writable rope. That turned out to be a
+  **class bug, not dired's** — the same idiom is in listview, compile
+  and search/grep, and **no Lua caller anywhere sets `read_only`**
+  because there is no Lua `set_read_only` to call — so it is owned by
+  the generated-buffer immutability lane. **Done: rev 6 withdraws
+  Q#DR25**, and §3.1 hands that lane what this one's re-scout found,
+  including the trap that
+  `dired_buffer_is_read_only_and_round_trips_input` passes **either
+  way** and is therefore not coverage of the adoption. Do not implement
+  Q#DR25 from this document.
+- **Two substrate facts rev 6 added that outlive this lane.** (1) Buffer
+  removal is **two phases** and **no existing Rust path composes them**:
+  `EditorCore::kill_buffer` (`src/editor_core.rs:4590`) does windows and
+  registry, `after_buffer_removed` (`src/lua_bindings/mod.rs:1602`) does
+  keymaps/config/folds/`on_removed`, and only the Lua binding
+  `pmacs.buffer.kill` (`mod.rs:5476-5491`) runs both — while
+  `apply_resource_op`'s delete uses `remove_buffer_and_fire`, which
+  skips phase 1, **so a window displaying the deleted buffer keeps a
+  removed id**. That is a third defect on that arm beside the missing
+  dirty check and the first-match lookup. (2) The drain outcome must
+  carry deletions as well as renames, **in settle order**, because a
+  directory rename and a delete beneath it can settle in the same tick
+  and reconciling them out of order targets the wrong path.
 - Intended serial implementation once approved: **2a** rename/delete
   reconciliation substrate with no dired UI, **2b** marks and
   operations, **2c** mkdir/copy/recursive-delete primitives, then Stage

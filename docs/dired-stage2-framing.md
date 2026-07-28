@@ -1,10 +1,11 @@
 # Dired Stage 2 — marks and operations — framing
 
-**Revision 5 — 2026-07-28. Status: PROPOSED — NOT APPROVED. This
+**Revision 6 — 2026-07-28. Status: PROPOSED — NOT APPROVED. This
 document has never received a formal framing approval, and it needs one
-from the user before any implementation branch is cut.** Its four
-commits embody three rounds of review findings; that is not the same as
-approval, and GitHub records no review on PR #171.
+from the user before any implementation branch is cut.** Its commits
+embody four rounds of review findings; that is not the same as approval.
+Revision 5 was reviewed and **not approved** — six findings, four P1.
+§0's round-5 section says what each one changed.
 
 **Ground truth: re-scouted 2026-07-28 against canonical `main` @
 `6bee09d`** (`Merge pull request #184 from levineuwirth/bottom-panel-stage2b`).
@@ -42,6 +43,125 @@ numbers drift and this document has now watched them drift twice.
 
 ## 0. Revision history
 
+### Review round 5 (rev 5 → rev 6) — six findings, four P1, none approved
+
+Round 5's theme is **one theme, not six**: rev 5 changed the slice split
+and the ownership of a decision, and the prose did not follow. Four of
+the six findings are that same defect in different places. Every cited
+line was verified against the tree before being acted on; **all six
+hold**, and two of them are *understated* — see R2 and R4.
+
+- **R1 (P1) — rev 5 was superseded by its own ledger entry, and by a
+  PR body older still.** Verified: `docs/active-work.md:507` records
+  that Q#DR25 has **moved out of this lane** — dired's
+  `bypass_intercept`-over-a-writable-rope paint turned out to be a
+  **class** bug, the same idiom appearing in listview, `compile.lua` and
+  the search/grep panel, with **zero Lua callers anywhere setting
+  `read_only`** — and that a separate lane now owns it (branch
+  `generated-buffer-immutability`, worktree
+  `../pmacs-generated-immutability`, framing in progress). Meanwhile
+  rev 5 still called the adoption a fix "Stage 2 may not skip" (§1) and
+  assigned it to 2b (§10), and the **GitHub PR body** still described
+  revision *1*'s two-slice plan against `c8ec8f3`. Three sources, three
+  different stories. **Rev 6 reconciles all three:** §1 and §3.1 now
+  defer to the lane, §10's table drops the row, Q#DR25 is restated as a
+  deferral in §11 and §15, and the PR body is rewritten. *Dired's
+  adoption is not cancelled — it is owned elsewhere*, and this document
+  now says where rather than deleting the problem. **Correcting one
+  thing rev 5 got wrong in the other direction:** rev 5's §0.5 claimed
+  Q#DR25 "closes dired's quarter of that gap". That was already
+  arguable, and the class-bug finding settles it — dired was never a
+  quarter of anything; it was one instance of one idiom.
+- **R2 (P1) — the acceptance allocation contradicted the code split,
+  and the review understates it by one.** Verified: items **23–24** test
+  `apply_resource_op`'s delete arm and fire-and-forget `pmacs.fs.remove`
+  — both pure **2a** substrate — yet sat under a `**2b** — deletion
+  policy` header and inside 2b's `1–24` table range. Conversely item
+  **33** asserts an open dired buffer follows a directory rename, which
+  needs a `dired.lua` subscriber, while §10 and §16 both define 2a as
+  containing **no dired code at all**. Rev 6 **moves 23–24 into 2a** and
+  **moves 33 into 2b**, and justifies the direction rather than leaving
+  both readings open (§13). **The review asked for a choice on 33 and
+  the choice is 2b**, because 2a's entire review rationale — §10's "with
+  no dired surface at all" and §16's "its diff contains no dired code" —
+  is what makes it reviewable as substrate rather than as a dired
+  feature, and admitting one dired subscriber to satisfy one acceptance
+  item would spend that. The cost is stated: between 2a and 2b a
+  directory rename leaves dired handles stale, which is **exactly the
+  status quo** and so is not a regression. **The undercount:** moving 33
+  out leaves 2a shipping `resource.renamed` with no acceptance on the
+  hook itself, so rev 6 adds **item 50** pinning the hook's own contract
+  (fires once per *successful* rename, with normalized absolute paths),
+  which is what 2b's subscriber attaches to.
+- **R3 (P1) — `TickOutcome` could not carry what §6 asked of it.**
+  Verified: the struct as specified held `settled` and `renames` only,
+  while §6 required deletion to emerge "via the same `TickOutcome`". As
+  written `_tick` could not learn which settled `FsRemove` to reconcile
+  or which path to pass to `resource.deleted`. Rev 6 replaces the two
+  ad-hoc vectors with **one ordered `Vec<ResourceOp>`** and makes
+  `PendingJob` carry a single `Option<ResourceOp>` rather than rev 5's
+  `rename_paths` (§5). Ordering is the reason it is one vector and not
+  two: a directory rename and a delete beneath it can settle in the same
+  tick, and reconciling them out of order reconciles the wrong path.
+  A single enum field also refuses the impossible both-`Some` state, the
+  argument `ResolvedTarget`'s own doc makes at `src/editor_core.rs:100-102`.
+- **R4 (P1) — `reconcile_delete` stopped short of the real removal
+  lifecycle, and the substrate is worse than the review says.** The
+  review is right that removal is two phases — `EditorCore::kill_buffer`
+  (`src/editor_core.rs:4590`) for window and side-window cleanup, and
+  `after_buffer_removed` (`src/lua_bindings/mod.rs:1602`) for keymaps,
+  buffer-local config, folds and `on_removed` callbacks. **What it does
+  not say is that no existing Rust path composes them, and the one
+  `apply_resource_op` uses is the incomplete one.** Verified:
+  `pmacs.buffer.kill` (`install_buffer_kill`, `mod.rs:5476-5491`) *does*
+  compose both, and its doc comment says it is late-bound precisely
+  because it "needs an `EditorCore` handle to redirect any windows
+  showing the doomed buffer before removal". But `apply_resource_op`'s
+  delete arm calls **`remove_buffer_and_fire`** (`mod.rs:1592`) =
+  `registry.remove` + `after_buffer_removed`, with **no window cleanup**
+  — and `BufferRegistry::remove` touches only `buffers` and `order`. So
+  **an LSP-authored delete leaves any window displaying that buffer
+  pointing at a removed id**, which is a *third* defect on that arm that
+  rev 5 never named, alongside the missing dirty check and the
+  first-match lookup. §6 now specifies both phases, the failure modes
+  (`ConcurrentEdit` on a mid-edit buffer, and the refusal to kill the
+  **last** remaining buffer), and acceptance items 51–53.
+- **R5 (P2) — the "every consumer" claim was false for Lean.** Verified
+  the contradiction: §1 listed `lean.lua`'s progress table among the
+  consumers reconciliation reaches, while §11 correctly said Stage 2
+  does not write that subscriber. **The deferral was right and the
+  summary was wrong**, which is the direction rev 6 fixes: Stage 2
+  supplies the hook; Lean's URI-keyed state stays stale until its owner
+  adopts it. Owner 6 remains in §5's census — it is still evidence that
+  `forget_uri` cannot be complete — it is just no longer claimed as
+  fixed.
+- **R6 (P2) — pre-three-slice text in the file inventory.** Verified
+  both halves: §7 requires `builtin/runtime/minibuffer.lua` to join
+  `src/editor.rs`'s explicit `include_str!` load sequence (which is a
+  real edit to `src/editor.rs` — the sequence is ~30 entries at
+  `src/editor.rs:395-660`), contradicting §16's "2b is `dired.lua` plus
+  one killring binding"; and `+` and `C` were still tagged **2b** in §1's
+  table though §10 puts them in 2c.
+
+**The sweep the review asked for caught four more instances of the same
+defect**, none of them cited:
+
+| Where | Said | Should say |
+|---|---|---|
+| §4, the set-based class list | "`C` (copy, **2b**)" | 2c |
+| §7, the confirmation surface | "`x`, `D`, and (in **2b**) a recursive delete and an overwriting copy" | 2c |
+| §8, `d`/`x` | "reported as such in **2a**; **2b**'s `remove_dir_all`" | **wrong twice** — `x`'s report is a **2b** surface, and `remove_dir_all` is **2c** |
+| §8, the op sections | "**`+`** (create directory, **2b**)" and "**`C`** (copy, **2b**)" | 2c |
+
+The §8 line is the clearest survivor of the two-slice era: under rev 1's
+plan "2a" was the mark layer and "2b" was the primitives, so a
+sentence written then reads one slice off in *both* halves after the
+three-way cut. All are corrected. The three historical round sections
+keep their original labels, where "2b" means the old primitives slice —
+flagged in the note at the head of round 1 rather than retconned.
+
+---
+
 ### Re-scout round 4 (rev 4 → rev 5) — `c8ec8f3` → `6bee09d`, 153 commits
 
 No reviewer produced these; a re-scout did. Rev 4's design survives, but
@@ -70,8 +190,11 @@ its *internal* ones wrong). Every claim below was read on the tree at
   (`src/buffer.rs:568-577`) without ever consulting the intercept chain.
   Stage 2 writes that buffer on every mark, every unmark, every toggle,
   and after every batch, so it multiplies the exposure rather than
-  inheriting it quietly. Rev 5 adopts the primitive as **Q#DR25** (§3,
-  §10) and states the three traps the handoff attaches to it.
+  inheriting it quietly. Rev 5 adopted the primitive as **Q#DR25**.
+  **Round 5 withdrew that** — the same idiom turned out to be in
+  `listview.lua`, `compile.lua` and the search/grep panel, so it is a
+  class bug with its own lane (R1). The re-scout finding stands; only
+  its owner changed. See §3.1.
 - **N2 (shape change) — #182 (Journey Stage 1a) demoted dired to a
   replaceable slot, and rewrote the function Stage 2's operations run
   inside.** `resolve_target_buffer` gained a `ResolvedTarget::Directory`
@@ -498,8 +621,13 @@ claim that only became true when #182 landed.
   buffers" — and classifies dired, with listview, as **"the cheap
   half"**, because both already write whole-buffer replaces and so need
   none of the streaming variant the three appending buffers require.
-  Q#DR25 closes dired's quarter of that gap. It does **not** close the
-  other three, and this framing does not claim progress on them.
+  **Rev 5 claimed Q#DR25 closed "dired's quarter" of that gap; rev 6
+  withdraws both the decision and the claim** (R1). Dired was never a
+  quarter of anything — it is one instance of one idiom, and the missing
+  capability (no Lua `set_read_only`, so no Lua caller can assert
+  `read_only` at all) is shared by all four. **Stage 2 therefore makes
+  no progress on §14's generated-buffer gap, and no longer says it
+  does**; the `generated-buffer-immutability` lane owns it (§3.1).
   Separately, §14's tree-primitive point is untouched: Stage 2 adds no
   tree, and `i` (insert subdirectory) stays deferred (§11) precisely so
   it can land on a shared primitive rather than inventing one.
@@ -552,8 +680,8 @@ The Emacs dired working loop: select a set of files, then act on it.
 | `R` | `dired.do-rename` | Rename the entry **at point** (§4) |
 | `w` | `dired.copy-filename` | Copy the marked filenames to the kill ring |
 | `M` | `dired.do-chmod` | Mode bits on the marked set; **refuses symlinks** (NEW — Q#DR19) |
-| `+` | `dired.create-directory` | Create a subdirectory (**2b**) |
-| `C` | `dired.do-copy` | Copy the marked set (or entry at point) (**2b**) |
+| `+` | `dired.create-directory` | Create a subdirectory (**2c**) |
+| `C` | `dired.do-copy` | Copy the marked set (or entry at point) (**2c**) |
 
 `w` is carried forward from the parent's approved table; **`M` is new
 scope** and needs explicit approval, since the parent listed neither it
@@ -563,23 +691,31 @@ Two small public surfaces come with it, both because the operations have
 nowhere to land otherwise: **`pmacs.buffer.set_name`** (Q#DR21) and
 **`pmacs.killring.push`** (Q#DR22).
 
-**And one correctness fix to Stage 1 that Stage 2 may not skip
-(Q#DR25, new in rev 5): dired's listing becomes a genuinely immutable
-generated buffer**, written through `pmacs.buffer.set_generated_contents`
-rather than an erroring intercept over a writable rope. On `main` today
-`M-x buffer.undo` empties a dired listing — no keybinding required — and
-every mark, unmark, toggle and post-batch revert Stage 2 adds is another
-write to that undo stack. §3 states the change; §10 places it at the
-head of 2b.
+**Not in Stage 2, and no longer this document's decision (Q#DR25,
+withdrawn in rev 6 — R1): dired's listing becoming a genuinely
+immutable generated buffer.** Rev 5 added it here as a fix "Stage 2 may
+not skip". It is a real defect — `M-x buffer.undo` empties a dired
+listing on `main` today — but it is **not dired's defect**: the same
+erroring-intercept-over-a-writable-rope idiom is in `listview.lua`,
+`compile.lua` and the search/grep panel, and **no Lua caller anywhere
+sets `read_only`**. A class bug gets a class fix, so it now belongs to
+the **generated-buffer immutability lane** (branch
+`generated-buffer-immutability`). §3.1 records what that lane inherits
+from this one; §11 and §15 carry the deferral. **Stage 2 must not
+implement it**, and Stage 2's acceptance must not pin it.
 
-Plus, invisibly: **renaming or deleting a path starts reconciling every
-consumer that holds it** — buffer path *and* name, the fourteen
+Plus, invisibly: **renaming or deleting a path starts reconciling the
+consumers this stage can reach** — buffer path *and* name, the fourteen
 URI-keyed LSP store families and the attached diagnostic view, dired's
-own pathless handles, `lean.lua`'s URI-keyed progress table, and the
-workspace-edit applier (§5, §6). That is a correctness fix to shared
-substrate; it is the reason `R` is safe on a directory at all, and it
-closes a path on which an LSP-authored delete currently destroys unsaved
-work.
+own pathless handles, and the workspace-edit applier (§5, §6) — **and
+fires a hook so the ones it cannot reach are able to reconcile
+themselves.** That distinction is load-bearing and rev 5 blurred it
+(R5): `lean.lua`'s URI-keyed progress table is **not** reconciled by
+this stage. Stage 2 supplies `resource.renamed`; Lean's state stays
+stale until Lean's owner subscribes (§11). What Stage 2 *does* deliver
+is a correctness fix to shared substrate: it is the reason `R` is safe
+on a directory at all, and it closes a path on which an LSP-authored
+delete currently destroys unsaved work.
 
 Not in Stage 2: `wdired` (Stage 3), subdirectory insertion (`i`),
 shell commands on marks (`!`), regexp marking (`% m`), and
@@ -720,8 +856,10 @@ Rust-only. The nearest existing confirm is `autosave.lua:219-224`, a
 (`:521-528`) — **no mark state; §3 adds it.** `render_entry` (`:334-349`)
 hardcodes `BLANK_MARK` in column 0. `paint` (`:369-372`) is a wholesale
 `buf:replace` with `bypass_intercept = true`; the read-only intercept
-(`:509-511`) rejects everything else. **Both of those are what Q#DR25
-replaces** (§3). `seat_cursor` (`:405-416`) re-seats by basename and
+(`:509-511`) rejects everything else. **Both of those are what the
+`generated-buffer-immutability` lane replaces** — rev 5 proposed to do
+it here and rev 6 withdrew that (§3.1, R1); Stage 2 leaves `paint` and
+the intercept exactly as Stage 1 built them. `seat_cursor` (`:405-416`) re-seats by basename and
 carries the warning that `move_to_line` is **ambient** — every
 post-`await` seat must first check `pmacs.window.buffer()`.
 `entry_at_cursor` (`:381-385`) maps cursor line *n* to `entries[n]`,
@@ -767,8 +905,9 @@ The three traps the handoff attaches to it, each verified here:
   (`src/buffer.rs:559-566`) clears the v0.1 `undo`/`redo` stacks **and**,
   under `#[cfg(feature = "crdt")]`, calls `crdt.clear_undo_history()` —
   because CRDT mode bypasses the v0.1 stacks entirely. Consequence for
-  §14: the `crdt`-featured `dired_acceptance` run is not a formality
-  here; it is the only run in which the CRDT half of Q#DR25 is live.
+  §14: whichever lane adopts the primitive, the `crdt`-featured run is
+  the only one in which that half is live — a default-feature run
+  exercises the v0.1 stacks alone.
 
 There is deliberately **no** Lua `set_read_only`
 (`src/lua_bindings/mod.rs:3074-3078` states the reason: it would let a
@@ -854,9 +993,10 @@ Dired participates in neither `pmacs.typed_edit` nor
 `pmacs.hook.add` at all. Nor does the generated-buffer write drag it in
 — `set_generated_contents`'s binding runs `notify_buffer_edit_to_windows`
 and nothing else, and `EditorCore::notify_buffer_edit`
-(`src/editor_core.rs:1814-1828`) runs no Lua hook. **So Q#DR25 does not
-put dired writes on the chain**, which is the answer to the obvious
-worry about N1 and N4 interacting.
+(`src/editor_core.rs:1814-1828`) runs no Lua hook. **So adopting the
+generated-buffer primitive would not put dired writes on the chain
+either** — recorded for the lane that will do it (§3.1), since it is the
+obvious worry about N1 and N4 interacting and the answer is no.
 
 What *does* inherit from the chain is §5's two new hooks, because they
 are new fan-outs. The relevant facts:
@@ -915,44 +1055,72 @@ draw:
 behavior, and the alternative silently converts flags into marks.
 `U` clears both.
 
-### 3.1 The listing becomes a genuinely immutable generated buffer (Q#DR25, new in rev 5)
+### 3.1 The listing's write path — deferred to the generated-buffer lane (Q#DR25, withdrawn in rev 6)
 
-Stage 1 protected the listing with an erroring intercept over a writable
-rope, which was the best available idiom when #165 landed. #178 replaced
-that idiom. Stage 2 adopts the replacement, in `dired.lua` only:
+Rev 5 decided here that dired's `paint` would adopt
+`pmacs.buffer.set_generated_contents`, dropping the erroring intercept.
+**Round 5 withdrew that decision from this document** (R1), and the
+reason is worth stating precisely because it changes what the fix *is*,
+not merely who does it.
 
-- `paint` becomes
-  `pmacs.buffer.set_generated_contents(handle.buf, render_text(handle))`,
-  dropping the `bypass_intercept` replace entirely.
-- `claim_handle`'s `pmacs.buffer.add_intercept` (`dired.lua:509-511`)
-  is **removed**. It becomes redundant: the rope-level `read_only` the
-  primitive asserts refuses ordinary edits, undo, redo, and remote CRDT
-  imports alike, which is strictly more than the intercept refused.
-- `pmacs.buffer.set_round_trip_input(buf, true)` (`:516`) **stays**, per
-  §2 — the two protections cover different copies and neither implies
-  the other.
+The defect is real and rev 5 characterised it correctly: dired sets no
+rope-level `read_only` — `claim_handle` installs an intercept and
+`set_round_trip_input`, nothing more (`dired.lua:506-519`) — while
+`Buffer::undo` reaches the rope through `ensure_writable`
+(`src/buffer.rs:568-577`) without consulting the intercept chain, and
+`M-x buffer.undo` (`builtin/commands/default.lua:179`) is reachable from
+M-x with no binding. So a dired listing is emptiable today.
 
-**Why this belongs in Stage 2 rather than a standalone fix.** It is a
-three-line change to one file with no Rust at all, and it touches the
-exact function every Stage 2 operation calls. Landing it separately
-would mean two PRs racing on `paint`. It goes at the **head of 2b**
-(§10), before the mark layer, so that every mark-layer acceptance
-exercises the new write path rather than the old one. If the user would
-rather see it land on its own — it is, after all, a live defect on a
-step-3 journey surface — it detaches cleanly and 2b rebases onto it;
-this framing states the preference, not a constraint.
+**What rev 5 got wrong is the scope.** It framed this as dired's
+quarter of a four-writer inventory. It is not a quarter of anything: the
+same idiom — erroring intercept, `bypass_intercept` write, writable rope
+— is in `listview.lua`, `compile.lua` and the search/grep panel, and
+**no Lua caller anywhere sets `read_only`**, because there is
+deliberately no Lua `set_read_only` to call
+(`src/lua_bindings/mod.rs:3074-3078` says why). One idiom, one missing
+capability, four instances. Fixing dired's instance inside a dired stage
+would have produced a fourth bespoke adoption and left the shared
+question — what a Lua-owned generated buffer is *supposed* to do —
+unanswered for the fourth time.
 
-**The acceptance trap, stated because it would otherwise be missed.**
-`tests/dired_acceptance.rs`'s
-`dired_buffer_is_read_only_and_round_trips_input` (`:969`) asserts
-`status(&s).contains("read-only")`. `BufferError::ReadOnly` renders as
-``buffer `{name}` (id {id:?}) is read-only`` (`src/buffer.rs:1794`), so
-**that test passes both before and after the swap** — it has no bite
-against Q#DR25 and must not be mistaken for coverage of it. The pin that
-bites is a new one: **`M-x buffer.undo` on a dired listing leaves the
-listing intact** (§13 item 48), which fails against `main` today.
+**It is therefore owned by the `generated-buffer-immutability` lane**,
+whose framing is in progress. Stage 2 does not implement it, does not
+gate on it, and carries no acceptance for it.
 
----
+**What that lane inherits from this one**, recorded here so the re-scout
+is not repeated:
+
+- The three obligations the primitive carries, all verified at
+  `6bee09d`: an intercept is not `read_only`; the returned `Edit` **must**
+  be fanned out (the Lua binding already does it,
+  `src/lua_bindings/mod.rs:3092`, releasing the registry borrow first);
+  and `clear_history` (`src/buffer.rs:559-566`) must clear **whichever**
+  history exists, since CRDT mode bypasses the v0.1 stacks and keeps its
+  own in loro's `UndoManager` — so any acceptance for this must run
+  under **both** default and `crdt` features or it exercises one half.
+- Adoption does **not** replace `set_round_trip_input`. The protections
+  cover different copies: rope-level `read_only` refuses the op at the
+  daemon, while round-trip input stops a semantic frontend applying
+  optimistically to its **own mirror**, which a daemon-side refusal
+  arrives too late to prevent. `dired.lua:516` stays either way.
+- **A trap for that lane's acceptance.**
+  `tests/dired_acceptance.rs:969`'s
+  `dired_buffer_is_read_only_and_round_trips_input` asserts
+  `status(&s).contains("read-only")`, and `BufferError::ReadOnly`
+  renders as ``buffer `{name}` (id {id:?}) is read-only``
+  (`src/buffer.rs:1794`). **That test passes both before and after the
+  swap**, so it is not coverage of the adoption and must not be counted
+  as such. The pin with bite is `M-x buffer.undo` leaving the listing
+  intact, which fails against `main` today.
+
+**What Stage 2 owes it: nothing but non-interference.** Stage 2 changes
+`paint`'s *callers* (every mark and batch repaints) but not `paint`
+itself, so the two lanes touch `dired.lua` in different places. If the
+immutability lane lands first, Stage 2b rebases onto a `paint` that
+already writes through the primitive and needs no change; if Stage 2b
+lands first, the lane adopts a `paint` with more callers and still needs
+no change to them. **Neither ordering creates a conflict**, which is why
+this is a deferral rather than a dependency.
 
 ## 4. Target sets: which operations are set-based (Q#DR13)
 
@@ -961,7 +1129,7 @@ Operations fall into **three** classes, and the class is a property of
 the command, not a special case:
 
 **Set-based** — `D` (delete), `M` (chmod), `w` (copy filename), and `C`
-(copy, 2b) target:
+(copy, 2c) target:
 
 > **the marked set, or — if nothing is marked — the entry at point.**
 
@@ -1314,28 +1482,52 @@ tick's" renames, which — as the review notes — needs either a second
 queue or a scan of every settled entry. Neither was named, and both are
 the one-off side channel `COHERENCE.md` §9 objects to.
 
-Instead, **`tick` returns a structured outcome**:
+Instead, **`tick` returns a structured outcome**. Rev 5's shape carried
+`settled` and `renames` only, which §6 then asked to also deliver
+deletions — an impossible read (R3). Rev 6 fixes the shape:
 
 ```rust
+/// A settled filesystem mutation, with the paths the worker consumed.
+pub enum ResourceOp {
+    Rename { from: PathBuf, to: PathBuf },
+    Remove { path: PathBuf },
+}
+
 pub struct TickOutcome {
     pub settled: Vec<JobId>,
-    pub renames: Vec<(PathBuf, PathBuf)>,
+    /// Successful resource mutations, in settle order.
+    pub resources: Vec<ResourceOp>,
 }
 ```
 
-Settle identity and rename metadata come out of **one** transaction, from
-the loop at `:1074-1108` that already borrows `pending` and reads
-`job.kind`. `renames` carries only jobs that settled
-`PendingState::Complete` — a failed or cancelled rename reconciles
-nothing. The ~17 in-crate `let _ = rt.tick();` call sites are unaffected;
-`_tick` reads `.settled` for the Lua table it already builds and
-`.renames` for the reconciliation.
+**One ordered vector, not two fields.** A `renames` and a `deletes`
+vector would lose the relative order of operations that settle in the
+same tick, and that order is load-bearing: rename `dir` → `newdir` and
+delete `dir/child.txt` can settle together, and reconciling the delete
+first targets a path that no longer exists while reconciling it second
+targets `newdir/child.txt`. Only one of those is right, and only an
+ordered sequence can express which.
 
-`PendingJob` still gains `rename_paths: Option<(PathBuf, PathBuf)>`,
-since `dispatch_fs_rename` currently **moves** both paths into the worker
-closure (`:871-879`) and nothing retains them. §0.5 states why that field
-is the coherent choice over a side map, and that a general
-`purpose`/`owner` should later subsume it.
+`resources` carries **only** jobs that settled `PendingState::Complete`
+— a failed or cancelled mutation reconciles nothing, and fires no hook.
+Settle identity and resource metadata still come out of **one**
+transaction, from the loop at `:1074-1108` that already borrows
+`pending` and reads `job.kind`. The ~17 in-crate `let _ = rt.tick();`
+call sites are unaffected; `_tick` reads `.settled` for the Lua table it
+already builds and `.resources` for the reconciliation.
+
+**`PendingJob` gains one field, `resource: Option<ResourceOp>`** —
+rather than rev 5's `rename_paths` plus the separate remove-path §6
+implied. `dispatch_fs_rename` **moves** both paths into the worker
+closure (`:871-879`) and `dispatch_fs_remove` (`:893`) moves its one,
+so nothing retains them either way. A single enum field rather than two
+`Option`s is deliberate: two would admit a both-`Some` state that cannot
+occur, which is exactly the argument `ResolvedTarget`'s own doc makes
+against a shape whose "three states that cannot occur" every caller
+would have to re-establish by hand (`src/editor_core.rs:100-102`).
+§0.5 states why carrying this on the job at all is the coherent choice
+over a side map, and that a general `purpose`/`owner` should later
+subsume it.
 
 ### Additivity
 
@@ -1370,13 +1562,67 @@ today**, silently, and a second buffer on the same path survives.
 ### One seam
 
 **`EditorCore::reconcile_delete(path) -> DeleteReconcile { killed,
-kept_modified }`**, symmetric with `reconcile_rename`:
+kept_modified, refused }`**, symmetric with `reconcile_rename`:
 
 - walks the **whole** registry by normalized equality **or
   path-component prefix**, so descendants of a deleted directory are
   included and a second buffer on one path is not missed;
-- **kills unmodified** buffers;
-- **keeps modified ones alive** and returns them, so a caller can report.
+- **kills unmodified** buffers, through the full two-phase lifecycle
+  below;
+- **keeps modified ones alive** and returns them, so a caller can report;
+- returns anything it **could not** kill separately from what it kept
+  deliberately — the two are different events and collapsing them makes
+  a failure look like a policy decision.
+
+#### "Kills" means two phases, and no existing Rust path does both (R4)
+
+Rev 5 said "kills" and stopped. Buffer removal in this substrate is two
+distinct phases, and the important part is that **the only place they
+are composed is a Lua binding**:
+
+| Phase | What it does | Where |
+|---|---|---|
+| 1. Core | Refuses unknown ids and **refuses to kill the last remaining buffer**; drops the id from `round_trip_buffers`; **closes** side windows showing it (Q#BP10a — closed, not redirected, or an unrelated buffer is stranded in the panel slot); redirects every other window to a fallback (`*scratch*` or any other buffer), resetting `text_view`, `cursor`, `selection`, `overlays`, `view_top` and `goal_col`; then `registry.remove` | `EditorCore::kill_buffer`, `src/editor_core.rs:4590` |
+| 2. Lua-side | Clears buffer-scoped keymaps, buffer-local config, folds, and fires the registered `on_removed` callbacks | `after_buffer_removed`, `src/lua_bindings/mod.rs:1602` |
+
+**`pmacs.buffer.kill` composes both** (`install_buffer_kill`,
+`mod.rs:5476-5491`), and its doc comment says exactly why it has to be
+late-bound: it "needs an `EditorCore` handle to redirect any windows
+showing the doomed buffer before removal".
+
+**`apply_resource_op`'s delete arm does not.** It calls
+`remove_buffer_and_fire` (`mod.rs:1592`), which is `registry.remove` +
+`after_buffer_removed` — **phase 2 without phase 1**. And
+`BufferRegistry::remove` touches only `self.buffers` and `self.order`;
+nothing in it looks at windows. So **an LSP-authored delete leaves any
+window displaying that buffer pointing at a removed id.** That is a
+*third* defect on that arm, alongside the missing dirty check and the
+raw first-match lookup, and rev 5 named neither it nor the phase split.
+
+**So `reconcile_delete` composes the same pair `pmacs.buffer.kill`
+composes**, for every id it kills, and `apply_resource_op`'s delete arm
+is rerouted through it — which is what makes the window bug go away as a
+side effect of the seam rather than as a separate patch. Note the
+layering consequence: phase 2 lives in `lua_bindings` and needs `&Lua`,
+so `reconcile_delete` returns the killed ids and its **caller** runs
+phase 2 over them, exactly as `pmacs.buffer.kill` does. `EditorCore` does
+not gain a Lua handle.
+
+**Failure modes, all of which a batch must survive (§9):**
+
+- **The last buffer cannot be killed.** `kill_buffer` returns
+  `"cannot kill the last remaining buffer"`. Deleting the file behind
+  the only open buffer therefore deletes the file and **keeps** the
+  buffer — reported, not silently ignored, and returned in `refused`.
+- **A mid-edit buffer refuses removal.** `BufferRegistry::remove`
+  returns `RegistryError::ConcurrentEdit` when `editing_in_progress()`,
+  leaving the registry untouched. Phase 1 having already redirected
+  windows, a partial kill is possible here; the reconcile must treat a
+  phase-1 failure as "keep the buffer" and not run phase 2, or callbacks
+  fire for a buffer that still exists.
+- **Neither failure aborts the reconciliation of other buffers.** A
+  directory delete reaching twelve descendants must not stop at the one
+  that is mid-edit.
 
 **Both paths call it**: the drain harvest for `pmacs.fs.remove`, and
 `apply_resource_op`'s delete arm, replacing its first-match lookup.
@@ -1403,9 +1649,11 @@ dired.
 
 Rev 2 left this ambiguous, and the two options really do produce
 different primitive contracts. Rev 3 chooses the one symmetric with
-rename: **`remove` is harvested in the drain**, via the same
-`TickOutcome`, firing **`resource.deleted(path)`**. `PendingJob` retains
-the path for `JobKind::FsRemove` exactly as for `FsRename`.
+rename: **`remove` is harvested in the drain**, through the same
+`TickOutcome.resources` sequence, firing **`resource.deleted(path)`**.
+`PendingJob` carries the path for `JobKind::FsRemove` in the same
+`Option<ResourceOp>` field it carries a rename's pair in (§5, R3) — one
+field, one enum, so the two cannot both be set.
 
 The reason is the same as Q#DR14's: a **fire-and-forget** `pmacs.fs.remove`
 must reconcile too, and dired firing the hook itself after its own
@@ -1473,12 +1721,19 @@ caller would still need the harvest. Named in §11.
 
 ## 7. Confirmation (Q#DR15)
 
-Destructive operations confirm: `x`, `D`, and (in 2b) a recursive delete
+Destructive operations confirm: `x`, `D`, and (in 2c) a recursive delete
 and an overwriting copy. There is no helper to do it with (C4).
 
 **Stage 2 adds `builtin/runtime/minibuffer.lua` defining
 `pmacs.minibuffer.confirm { prompt, on_yes }`**, loaded before
 `dired.lua` in `editor.rs`'s explicit sequence.
+
+**That sequence is a real edit to `src/editor.rs`** — around thirty
+`include_str!` entries at `src/editor.rs:395-660`, each naming its
+chunk — so **2b touches a Rust file**, which §16 now says and rev 5 did
+not (R6). Ordering is load-bearing, not cosmetic: `dired.lua` calls
+`pmacs.minibuffer.confirm` at load-time-registered command bodies, so
+the defining chunk must run first.
 
 It takes **no completion source**, and that is the decision, not an
 omission:
@@ -1520,7 +1775,7 @@ crash-recovery prompt, which does not belong in a dired PR.
 `D`-flagged basenames, applies §6's visited-path policy, confirms with the
 count, then deletes serially (§9) via `pmacs.fs.remove`, which handles
 files and empty directories (C5). A non-empty directory fails with the
-kernel's `ENOTEMPTY`, **reported as such** in 2a; 2b's `remove_dir_all`
+kernel's `ENOTEMPTY`, **reported as such** in 2b; 2c's `remove_dir_all`
 plus `dired.recursive-deletes` addresses it. Then revert once.
 
 **`D` (delete now).** Same deletion path and same §6 policy, targeting
@@ -1577,10 +1832,10 @@ the §4 set.
 > approved text. A refusal is reported per entry and does not abort the
 > batch.
 
-**`+` (create directory, 2b).** Prompts for a name, no source, resolved
+**`+` (create directory, 2c).** Prompts for a name, no source, resolved
 against `handle.path`. `opts.parents` for `create_dir_all`.
 
-**`C` (copy, 2b) — full command flow (F7).** Targets the §4 set.
+**`C` (copy, 2c) — full command flow (F7).** Targets the §4 set.
 
 1. **Destination prompt.** One source prompts for a destination path;
    **several sources require an existing directory** and the command
@@ -1652,21 +1907,25 @@ called it, and the three rounds of findings on the reconciliation half are
 the evidence — every one of G1, G3, H1, H2, and H3 was about the
 transaction, not about marks.
 
-**Rev 5 keeps the three-PR cut unchanged** and adds Q#DR25 to the head
-of 2b. The cut was re-examined against the re-scout and still holds: 2a
-is still substrate-only, 2b is still the dired surface, 2c is still the
-three additive primitives, and Stage 3 is still wdired. Nothing that
-landed in the 153 commits moves work across those lines — #178 lands
-inside 2b (it is dired-local), #182 changed the *shape* of dired's entry
-point but added no Stage 2 work, and #179/#181 added none.
+**Rev 6 keeps the three-PR cut unchanged.** The cut was re-examined
+against the round-4 re-scout and again after round 5, and still holds:
+2a is substrate-only, 2b is the dired surface, 2c is the three additive
+primitives, and Stage 3 is wdired. Nothing that landed in the 153
+commits moves work across those lines — #182 changed the *shape* of
+dired's entry point but added no Stage 2 work, and #179/#181 added none.
+**Q#DR25 has left the table entirely** (R1): it is the
+`generated-buffer-immutability` lane's, not 2b's (§3.1). And the
+acceptance row is corrected (R2) — rev 5's allocation put two
+substrate items in 2b and one dired item in 2a.
 
 | | **2a — reconciliation** | **2b — marks and operations** | **2c — new primitives** |
 |---|---|---|---|
-| User-visible surface | **none** | `m u U t d x D R w M`, plus a listing that survives `M-x buffer.undo` | `+ C`, recursive delete |
-| Rust | `reconcile_rename`, `reconcile_delete`, `TickOutcome`, `PendingJob` paths, `forget_uri` (14 stores + `documents` + route purge + URI-scoped drain), `View::rename_resource` + the window sweep, `apply_resource_op` (rename **and** delete arms), `apply_workspace_edit` origin, `pmacs.buffer.set_name` | `pmacs.killring.push` | `mkdir`, `copy`, `remove_dir_all`; `JobKind` 12 → 15 |
-| Lua | the two hook subscribers in `lsp.lua` | **Q#DR25 (`paint` → `set_generated_contents`, drop the intercept)**, then all of `dired.lua`'s mark/op layer, plus `minibuffer.lua` | two ops |
+| User-visible surface | **none** | `m u U t d x D R w M` | `+ C`, recursive delete |
+| Rust | `reconcile_rename`, `reconcile_delete` (both kill phases), `ResourceOp` + `TickOutcome`, `PendingJob.resource`, `forget_uri` (14 stores + `documents` + route purge + URI-scoped drain), `View::rename_resource` + the window sweep, `apply_resource_op` (rename **and** delete arms), `apply_workspace_edit` origin, `pmacs.buffer.set_name` | `pmacs.killring.push` | `mkdir`, `copy`, `remove_dir_all`; `JobKind` 12 → 15 |
+| Lua | the two hook subscribers in `lsp.lua` | all of `dired.lua`'s mark/op layer, **including its `resource.renamed` subscriber**, plus `minibuffer.lua` | two ops |
+| Other files | — | **`src/editor.rs`**, to add `minibuffer.lua` to the explicit load sequence (R6) | — |
 | Config keys | none | none | `dired.recursive-deletes` |
-| Acceptance | items 25–38 | 1–24, 39–41, **48–49** | 42–47 |
+| Acceptance | 23–38, **50–53** | 1–22, 39–41 | 42–47 |
 
 **Why 2a first, with no dired surface at all.** It is a self-contained
 substrate correctness fix that stands on its own merits: it closes a path
@@ -1705,7 +1964,7 @@ that deserve an undivided reviewer.
   candidate fix is a settled-entry sweep with a reap policy, which is a
   decision about handle lifetime, not a patch.
 - **A general `purpose`/`owner` field on `PendingJob`**, per
-  `COHERENCE.md` §9, which should subsume §5's `rename_paths`.
+  `COHERENCE.md` §9, which should subsume §5's `resource` field.
 - **Migrating `autosave.lua` to `pmacs.minibuffer.confirm`** (§7).
 - **Multi-file `R` into a target directory**, and `%`-regexp marking —
   both need a target/pattern concept Stage 2 does not build. This is why
@@ -1752,18 +2011,22 @@ that deserve an undivided reviewer.
   claim of this framing; it is a claim of the tree.
 - **Recursive copy** — 2c refuses directory sources; a real `copy -r`
   primitive is separate.
-- **The other three non-adopters of `set_generated_contents`** (new in
-  rev 5). Q#DR25 closes dired's quarter of the handoff §4 / `COHERENCE.md`
-  §14 inventory. The remaining three — listview panels
-  (`builtin/runtime/listview.lua:60-61`), `compile.lua`'s `ensure_slot`
-  serving `*compilation*` **and** `*shell-command*`, and the independent
-  `*search-results*` panel (`builtin/commands/default.lua:869`) — stay
-  emptiable. Listview is the other cheap half (whole-buffer replace);
-  the three appending writers need a **streaming variant of the
-  primitive that does not exist**, which is why this is a lane and not a
-  rider. Note the handoff's warning: `ensure_slot` does **not** cover
-  `*search-results*`, and `*workers*`/`*help*`/`*buffer-list*` are
-  generated but do not use this idiom, so they are not in scope either.
+- **The whole generated-buffer immutability class, including dired's
+  instance** (Q#DR25, withdrawn from this document in rev 6 — R1).
+  Dired's `paint` writes through `bypass_intercept` over a writable
+  rope behind an erroring intercept, so `M-x buffer.undo` empties a
+  listing. So do `listview.lua`, `compile.lua`'s `ensure_slot`
+  (`*compilation*` **and** `*shell-command*`) and the independent
+  `*search-results*` panel — one idiom, four instances, and **no Lua
+  caller anywhere sets `read_only`** because there is deliberately no
+  Lua `set_read_only`. Owned by the **`generated-buffer-immutability`
+  lane**; §3.1 records what that lane inherits from this re-scout, and
+  why neither landing order conflicts with Stage 2b. Note the two
+  sub-shapes that lane must reconcile and this one did not have to:
+  dired and listview write **whole-buffer replaces** and are the cheap
+  half, while `*compilation*`, `*shell-command*` and `*search-results*`
+  **append** per batch and need a streaming variant of the primitive
+  that does not exist.
 - **Two persisted path owners, named not fixed** (rev 5, W5).
   `saveplace.lua` keys its places file by path (`load_places`, `:31-45`;
   `restore_active`, `:69-79`) and `recentf.lua` keeps a path MRU list
@@ -1776,10 +2039,14 @@ that deserve an undivided reviewer.
   transaction to rewrite persisted state, which is a persistence-arc
   question. A `resource.renamed` subscriber in each is the cheap fix
   whenever someone wants it.
-- **`lean.lua`'s `M.file_progress` is not re-rooted** (rev 5, owner 6).
-  Stage 2 supplies the hook that makes a subscriber possible and does
-  not write one — Lean's arc owns that file, and Stage 5's goal view is
-  the consumer that would notice.
+- **`lean.lua`'s `M.file_progress` is not re-rooted** (rev 5, owner 6;
+  reaffirmed in rev 6, R5). Stage 2 supplies the hook that makes a
+  subscriber possible and **does not write one** — Lean's arc owns that
+  file, and Stage 5's goal view is the consumer that would notice.
+  Round 5 found §1 claiming the opposite; **this deferral was the
+  correct half and §1 was corrected to match it**, not the other way
+  round. Until Lean subscribes, a rename leaves its progress entry under
+  the old URI, and nothing in Stage 2 detects that.
 
 ---
 
@@ -1815,11 +2082,14 @@ that deserve an undivided reviewer.
 - **B5.** `describe_key_identifies_every_default_binding` stays green
   without further surgery — #165 already taught it per-binding mode
   context, and Stage 2 only adds more bindings in the same mode.
-- **B6** *(new in rev 5, N1)*. Q#DR25 needs **no Rust**: the primitive,
-  its Lua binding, and the fan-out all exist
-  (`src/buffer.rs:545`, `src/lua_bindings/mod.rs:3079-3095`). Falsified
-  if adopting it requires a new binding, a `set_read_only` exposure, or
-  any change outside `builtin/runtime/dired.lua`. *Not obvious in one
+- **B6** *(added in rev 5; **retired** in rev 6, R1 — it was a bet
+  about Q#DR25, which is no longer this document's.* Handed to §3.1 for
+  the `generated-buffer-immutability` lane, where it is worth keeping:
+  the primitive, its Lua binding and the fan-out all exist
+  (`src/buffer.rs:545`, `src/lua_bindings/mod.rs:3079-3095`), so
+  dired's adoption should need no Rust — falsified if it requires a new
+  binding, a `set_read_only` exposure, or any change outside
+  `builtin/runtime/dired.lua`. *Not obvious in one
   respect:* dropping the intercept removes the only thing that currently
   produces dired's refusal **message**, so if any Stage 1 acceptance
   depends on the intercept's exact wording rather than on the substring
@@ -1900,6 +2170,11 @@ that deserve an undivided reviewer.
 21. Deleting a directory kills buffers on its **descendants**.
 22. An open dired handle on a deleted directory is closed
     (`resource.deleted`).
+*(Items 23–24 moved to 2a in rev 6 — R2. They exercise
+`apply_resource_op` and the drain harvest, neither of which 2b builds.)*
+
+**2a — reconciliation (§5, §6)**
+
 23. **`apply_resource_op`'s delete** no longer kills a **modified**
     buffer, and now reaches **descendants** and a **second buffer on the
     same path** (G4 — today it is raw-path first-match with no modified
@@ -1907,8 +2182,6 @@ that deserve an undivided reviewer.
 24. A **fire-and-forget** `pmacs.fs.remove` reconciles too — never taking
     the handle still kills the unmodified buffer, which is what makes the
     drain harvest the right seam rather than dired firing the hook.
-
-**2a — reconciliation (§5, §6)**
 
 25. **No-await rename**: dispatch `pmacs.fs.rename`, never take the
     result, pump — the open buffer's path has moved. *(Fails if the
@@ -1939,10 +2212,6 @@ that deserve an undivided reviewer.
 32. A rename **across project roots** re-runs `ensure_server` and the
     buffer ends up attached to a **different** server; a same-root rename
     reuses the existing one (#161's affinity key).
-33. **An open dired buffer on the renamed directory** follows it: its
-    `handle.path`, **its buffer name** (`*dired:<new path>*`), and
-    `handle_for_path` dedup under the new path all move together (G2 —
-    asserting `handle.path` alone would pass with the name still stale).
 34. **The workspace-edit origin**: renaming the *active* file through
     the full `apply_workspace_edit` path leaves **no phantom empty
     buffer** at the obsolete path, and the user is returned to the
@@ -1988,32 +2257,42 @@ that deserve an undivided reviewer.
 47. Recursive delete happens only with `dired.recursive-deletes` enabled
     **and** a confirm; disabled, the non-empty directory still fails.
 
-**2b — the generated-buffer invariant (§3.1, Q#DR25, new in rev 5)**
+**2b — the dired subscriber (moved from 2a in rev 6, R2)**
 
-48. **`M-x buffer.undo` on a dired listing leaves the listing intact.**
-    Driven through `pmacs.command.invoke` (or the M-x path), not through
-    a chord — the command is reachable with no binding, which is the
-    whole point. *(This is the pin with bite: it fails against `main`
-    today, where the listing is emptied.)* Its sibling asserts **redo**
-    is equally refused, since `Buffer::redo` takes the same
-    `ensure_writable` path.
-49. **A repaint after the swap still reaches a displaying window.** Mark
-    an entry in a dired buffer shown in **two** windows and assert the
-    mark column changed in **both** — the fan-out obligation the
-    handoff attaches to the primitive. *(An implementation that called
-    `Buffer::set_generated_contents` from Rust and swallowed the `Edit`
-    would paint stale ranges; the Lua binding discharges this at
-    `mod.rs:3092`, and this pins that the Lua path is the one used.)*
-    Run under **both** default and `crdt` features: `clear_history`
-    clears loro's `UndoManager` only under `crdt`, so the default run
-    does not exercise that half at all.
+33. **An open dired buffer on the renamed directory** follows it: its
+    `handle.path`, **its buffer name** (`*dired:<new path>*`), and
+    `handle_for_path` dedup under the new path all move together (G2 —
+    asserting `handle.path` alone would pass with the name still stale).
+    *Lives in 2b because the subscriber it tests lives in `dired.lua`,
+    and 2a ships no dired code (§10, §16). 2a pins the hook it attaches
+    to instead — item 50.*
 
-Note explicitly what does **not** count as coverage of Q#DR25:
-`dired_acceptance.rs`'s existing
-`dired_buffer_is_read_only_and_round_trips_input` (`:969`) passes both
-before and after the swap, because `BufferError::ReadOnly` renders with
-the substring `is read-only` and the test asserts
-`status(&s).contains("read-only")` (§3.1).
+**2a — the hook and the removal lifecycle (new in rev 6)**
+
+50. **`resource.renamed` fires exactly once per successful rename**,
+    with `(old, new)` as **normalized absolute** paths, and **does not
+    fire** for a rename that failed or was cancelled. *(R2 — without
+    this, moving item 33 to 2b would leave 2a shipping a hook with no
+    acceptance at all. The normalization half matters because
+    `ResolvedTarget::Directory`'s doc warns that normalization does not
+    happen on every path into the core, so a path-keyed subscriber
+    needs the canonical form.)* The symmetric assertion for
+    `resource.deleted` accompanies it.
+51. **A killed buffer completes BOTH removal phases** (R4): after a
+    delete reconciles, an `on_removed` callback registered for that
+    buffer **has fired**, and its buffer-local keymap entries and folds
+    are gone. *(Fails against an implementation that calls only
+    `EditorCore::kill_buffer`, which does no phase-2 cleanup.)*
+52. **A window displaying the deleted buffer is redirected, not left
+    dangling** (R4): with the buffer shown in a window, deleting the
+    file leaves that window on a valid fallback buffer, and **no window
+    holds a removed id**. *(Fails against `remove_buffer_and_fire`,
+    which is what `apply_resource_op` uses today — it does no window
+    cleanup at all.)*
+53. **The last-buffer and mid-edit refusals are reported, not silent**
+    (R4): deleting the file behind the **only** open buffer keeps the
+    buffer and says so; and a delete reaching a directory of buffers
+    where one refuses removal still reconciles the rest.
 
 **Bite obligations.** Each of these must fail against a stated mutation:
 
@@ -2031,15 +2310,27 @@ the substring `is read-only` and the test asserts
 | 34 | the applier restoring by path instead of by buffer handle |
 | 39 | a completion source added to `confirm` |
 | 40 | the batch changed to dispatch-all-then-await |
-| 48 | `paint` reverted to `bypass_intercept` over a writable rope (i.e. `main` today) |
-| 49 | the `Edit` returned by `set_generated_contents` swallowed instead of fanned out |
+| 50 | the hook fired for a **failed** rename, or fired with the un-normalized path |
+| 51 | `reconcile_delete` calling only `EditorCore::kill_buffer`, so phase 2 never runs |
+| 52 | `reconcile_delete` calling only `remove_buffer_and_fire`, so windows keep a removed id (this is `apply_resource_op` today) |
+
+*(Rev 5's items 48–49 and their bites left with Q#DR25 — R1. They belong
+to the `generated-buffer-immutability` lane, and §3.1 hands over the one
+that matters: `M-x buffer.undo` leaving the listing intact is the pin
+with bite, and the existing `dired_buffer_is_read_only_and_round_trips_input`
+is **not** coverage because it passes either way.)*
+
+Note that **51 and 52 are a matched pair, and neither alone is
+sufficient** — each existing removal path passes one and fails the
+other, which is exactly why the framing had to name both phases (R4).
 
 `dired.lua` is an existing file now, so `scripts/bite`'s
 swap-over-`git show` mode applies — but per #165's lesson, **commit
-before biting**. Items 30, 33, and 34 came from round 2 and item 31 from
-round 3; each is a case where the previous revision's design would have
-passed a weaker test. Note that **item 20 has no bite for the interval it
-cannot close** (H1) — only for the check it does make.
+before biting**. Items 30, 33, and 34 came from round 2, item 31 from
+round 3, and items 50–53 from round 5; each is a case where the previous
+revision's design would have passed a weaker test. Note that **item 20
+has no bite for the interval it cannot close** (H1) — only for the check
+it does make.
 
 ## 14. Gates (per PR)
 
@@ -2063,26 +2354,29 @@ this stage (N3):**
   by its own declaration, seven of its rows assert on dired, and its
   step-3 and step-5 rows run *through* the surface Stage 2 modifies.
   **Assert the count, not just the colour** — a row silently dropped is
-  exactly what the ratchet exists to prevent, and Q#DR25 changes how
-  dired's buffer is written underneath those rows.
+  exactly what the ratchet exists to prevent, and 2b changes the
+  contents those rows read.
 - **`gpu_invocation_acceptance`**, which is where #183 put the GPU
   journey row
   (`public_gpu_directory_target_reaches_dired_and_leaves_the_daemon_usable`).
   It drives a **real daemon child process**, so it is in the blast
-  radius of any change to how a dired buffer is written or protected —
-  Q#DR25 makes the listing rope-level `read_only`, and a daemon-side
-  refusal is exactly what that test's frontend would see. Note this row
+  radius of any change to how a dired buffer is written or protected.
+  That makes it a **required gate for the
+  `generated-buffer-immutability` lane too**, which will make the
+  listing rope-level `read_only` — a daemon-side refusal is exactly what
+  this test's frontend would see. Note this row
   is **not** in `journey_acceptance.rs`; running only that file leaves
   the GPU half of the journey unpinned.
 
-Also add **`typed_edit_chain_acceptance` (13 tests)** to 2b's list, not
-because dired joins the chain — it does not (§2, N4) — but because
-Q#DR25 changes a `buffer.after-edit`-adjacent write path and the chain
-is the tree's most order-sensitive consumer of edits.
+*(Rev 5 also added `typed_edit_chain_acceptance` to 2b's list on
+Q#DR25's account. With Q#DR25 gone (R1) that reason goes with it — dired
+joins neither the chain nor `buffer.after-edit` (§2, N4), and 2b changes
+no write path. It is not a 2b gate.)*
 
-2b's `dired_acceptance` run is expected to **grow** by items 48–49 and
-otherwise hold at its current **25**; a *drop* there means Q#DR25 broke
-a Stage 1 pin rather than superseding one, and the two are not the same.
+**2a's dired-facing gate is `dired_acceptance` at an unchanged 25**, not
+a grown one: 2a ships no dired code, so a moved count there means it
+touched something it should not have. **2b's** is expected to grow by the
+mark, operation and subscriber items.
 
 ---
 
@@ -2216,24 +2510,47 @@ a Stage 1 pin rather than superseding one, and the two are not the same.
   non-region text: push the entry, mirror to the OS clipboard, and
   **break the kill chain**. `push_entry` is private and `copy()` requires
   a region, so `w` has no surface without it. (§8)
-- **Q#DR25** *(new in rev 5, N1)* **Dired's listing becomes a genuinely
-  immutable generated buffer.** `paint` writes through
-  `pmacs.buffer.set_generated_contents` instead of a
-  `bypass_intercept` `buf:replace`, and `claim_handle`'s erroring
-  intercept is **removed** as redundant — rope-level `read_only` refuses
-  strictly more (ordinary edits, **undo, redo**, and remote CRDT
-  imports). `set_round_trip_input` **stays**: the two protections cover
-  different copies, and a daemon-side refusal arrives after a semantic
-  frontend has already painted its own mirror. This is a correctness fix
-  to **Stage 1**, not new Stage 2 surface: on `main` today `M-x
-  buffer.undo` empties a dired listing, and dired is now a **step-3
-  journey surface** (§0.5). It lands at the head of 2b because it is
-  dired-local, needs no Rust, and touches the one function every Stage 2
-  operation calls — but it detaches cleanly if the user prefers it
-  standalone. The fan-out obligation is discharged by the existing Lua
-  binding (`mod.rs:3092`); the history-clearing obligation covers the
-  CRDT `UndoManager` too, which is why the `crdt` acceptance run is
-  load-bearing rather than routine. (§3.1, §10, §13 items 48–49)
+- **Q#DR25** *(added in rev 5; **withdrawn from this document** in rev
+  6, R1)* Dired's listing becoming a genuinely immutable generated
+  buffer is **not Stage 2's decision to make**. The defect is real —
+  `M-x buffer.undo` empties a dired listing on `main` today — but it is
+  a **class** defect, not dired's: the same erroring-intercept-over-a-
+  writable-rope idiom appears in `listview.lua`, `compile.lua` and the
+  search/grep panel, and **no Lua caller anywhere sets `read_only`**,
+  because no Lua `set_read_only` exists to call. It is owned by the
+  **`generated-buffer-immutability`** lane. Stage 2 does not implement
+  it, does not gate on it, and carries no acceptance for it; §3.1
+  records what that lane inherits from this document's re-scout, and why
+  the two lanes can land in either order without conflicting. (§3.1,
+  §11)
+- **Q#DR26** *(new in rev 6, R3)* The drain outcome is **one ordered
+  sequence of settled resource mutations**, not a field per mutation
+  kind: `TickOutcome { settled, resources: Vec<ResourceOp> }` with
+  `ResourceOp::{Rename { from, to }, Remove { path }}`, and `PendingJob`
+  carrying a single `Option<ResourceOp>`. Ordered because a directory
+  rename and a delete beneath it can settle in the same tick and
+  reconciling them out of order targets the wrong path; one enum rather
+  than two `Option`s because two would admit a both-`Some` state that
+  cannot occur — `ResolvedTarget`'s own doc makes that argument at
+  `src/editor_core.rs:100-102`. Rev 5's `renames`-only shape could not
+  express deletion at all, though §6 required it to. (§5, §6)
+- **Q#DR27** *(new in rev 6, R4)* "Kill a buffer" means **both** removal
+  phases, and `reconcile_delete` composes them for every id it kills:
+  `EditorCore::kill_buffer` (`src/editor_core.rs:4590` — last-buffer and
+  unknown-id refusals, side-window close, window redirect to a fallback,
+  registry removal) **then** `after_buffer_removed`
+  (`src/lua_bindings/mod.rs:1602` — keymaps, buffer-local config, folds,
+  `on_removed` callbacks). The composition already exists in exactly one
+  place, `pmacs.buffer.kill` (`mod.rs:5476-5491`), whose doc says it is
+  late-bound precisely because it needs the core to redirect windows;
+  `apply_resource_op` uses the **other**, incomplete path
+  (`remove_buffer_and_fire`, `mod.rs:1592`) and therefore leaves a
+  displaying window pointing at a removed id — a third defect on that
+  arm beside the missing dirty check and the first-match lookup. Phase 2
+  needs `&Lua`, so `reconcile_delete` returns the killed ids and its
+  caller runs phase 2; `EditorCore` gains no Lua handle. Both refusals
+  (last buffer, mid-edit `ConcurrentEdit`) are reported and neither
+  aborts the rest of the batch. (§6, §13 items 51–53)
 
 ## 16. Branch and PR plan
 
@@ -2278,8 +2595,10 @@ the document is longer, the re-scout is done, and **the census is six**
 not a constant* — and it applies to the ledger's copy of this
 framing's numbers exactly as it applied to the framing's copy of the
 tree's. Whoever refreshes the lane should take the six-owner table from
-§5 rather than re-deriving it, and should note that Q#DR25 added scope
-the lane does not yet mention.
+§5 rather than re-deriving it. Rev 6 removes the other half of what rev
+5 said here: Q#DR25 **left** this lane rather than adding scope to it
+(R1), and the ledger already records that at `docs/active-work.md:507`
+— which is how round 5 caught the framing contradicting it.
 
 ### Ownership warning: 2a must not run concurrently with Journey Stage 1b
 
@@ -2300,5 +2619,15 @@ change (surface the spawn failure with guidance) and 2a's is a
 sequenced in either order provided only one is open at a time. Taken
 late it is three merge rounds, which this arc has already paid twice.
 
-Stage 2b and 2c carry no such overlap: 2b is `dired.lua` plus one
-killring binding, and 2c is three additive `pmacs.fs` primitives.
+Stage 2b and 2c carry no such overlap, but **2b's file list is wider
+than rev 5 said** (R6). It is `dired.lua`'s mark, operation and
+subscriber layer; the new `builtin/runtime/minibuffer.lua`; the
+`pmacs.killring.push` binding; **and `src/editor.rs`**, because
+`minibuffer.lua` has to join the explicit `include_str!` load sequence
+there (`src/editor.rs:395-660`, ~30 entries) and must be ordered
+**before** `dired.lua`. That is a one-line addition to a file no other
+lane in flight is editing, so it changes no ownership conclusion — but
+"2b is `dired.lua` plus one killring binding" was simply false, and a
+reader sizing the ownership warning off it would have sized it wrong.
+2c is three additive `pmacs.fs` primitives plus their two dired
+commands.
