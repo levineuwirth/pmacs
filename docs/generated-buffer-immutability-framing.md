@@ -3,11 +3,55 @@
 **PROPOSED — needs explicit user approval before implementation. DO NOT
 implement, DO NOT merge.**
 
-**Revision 1 — scouted against canonical `githubsucks/main` @ `ad41cf1`,
+**Revision 2 — scouted against canonical `githubsucks/main` @ `ad41cf1`,
 2026-07-28. Every claim below about pmacs was executed, not read.** The
-reproductions in §0 are transcripts of throwaway probes run in this
-worktree at `ad41cf1` and deleted before the commit; the counts in §1
+reproductions in §0 and §2 are transcripts of throwaway probes run in this
+worktree at `ad41cf1` and deleted before each commit; the counts in §1
 are whole greps with the arithmetic shown, never `| head`.
+
+## Revision history
+
+**Revision 2 answers five review findings on PR #188 @ `9101bf5` — three
+P1, two P2 — and two sweeps the review asked for by class rather than by
+item. Nothing was silently rewritten; each change is attributed below.**
+
+| finding | what it changed |
+|---|---|
+| **P1-1** — three Stage 2 criteria are non-discriminating | Stage 2 criteria 3, 4 and 5 rewritten (§6). All three **passed on the pre-image**: ordinary edits are already refused by the existing intercept, and `Buffer::undo` checks `read_only` *before* it looks at history (`src/buffer.rs:1302`), so "undo returns false" passes against an implementation that locks and never clears. The new wording uses a **bypass write** or Rust-side `Buffer::is_read_only()` to prove locking, and **lifts the lock inside a Rust test** before asserting `NothingToUndo` / `can_undo() == false` to prove clearing. Confirmed against the tree. |
+| **P1-2** — staging omits the ownership prerequisite | New §2.8 (measured), new **Q#GB13**, amended **Q#GB5**, and staging changes in §5: ownership-by-handle is now a **prerequisite of the stage that locks each writer**, not a follow-up. Confirmed and materially worse than the review stated — §2.8 measures that a *failed* `pmacs.compile.run` already leaves a foreign buffer permanently un-editable today, and that `M-x buffer.undo` is currently the **only** way to recover a clobbered one. This arc removes that accidental safety net, which is exactly why it cannot ship without ownership. |
+| **P1-3** — `mark_clean` can suppress recovery | New §2.9 and a rewritten **Q#GB10**. **Revision 1 was wrong**: it claimed `is_modified` "drives only the mode-line indicator and the buffer-list column". It is also read by `src/autosave.rs:363` — the skip that decides whether a crash-recovery slot is written — and `src/desktop.rs:302`. The rule chosen and framed: **a generated write refuses a buffer that has a `file_path`**, which bounds the contents clobber and the lock as well as the flag. |
+| **P2-4** — Q#GB6 conflates byte extent with line extent | **Q#GB6** rewritten. `win.view_top` is a **line index** (`src/window.rs:373-374`) bounded by `TextView::line_count`; `win.cursor` is a byte position bounded by `Buffer::len`. The clamp is now per-coordinate and ungated, matching `rebuild_views_for`'s own shape (`src/editor_core.rs:1853-1857`), and §6 gains a longer-in-bytes / fewer-in-lines pin. |
+| **P2-5** — the CRDT-dark count was knowingly stale | **Re-measured at `ad41cf1`: 276 dark** (3,251 vs 3,527), with the command shown in §10. Revision 1 quoted **264**, which `docs/active-work.md:107-115` explicitly labels historical with "the number moves with every merge and must be re-measured, not quoted". |
+
+**Sweep A — every criterion re-audited against its pre-image, not only
+3–5.** Two results beyond the cited items. First, **eight criteria pass
+on `main` by design** and their bites name a *non-`main`* pre-image; that
+is legitimate (`docs/agent-handoff.md` §5: "bite against every pre-image
+the fix could plausibly have taken"), but revision 1 did not say so, and
+an unlabelled always-green criterion is indistinguishable from a vacuous
+one. §6 now carries a **pre-image column for every criterion**. Second,
+**Stage 1 criterion 7's stated bite was wrong**: a "partial conversion"
+that keeps a `bypass_intercept` write beside the primitive does not
+produce a stale paint, it **raises** at the bypass write (§2.4,
+measured), so the criterion could never have failed the way it claimed.
+Restated as an explicit mutation bite.
+
+**Sweep B — "a capability was made public without bounding who may use it
+on what."** Two results beyond P1-2 and P1-3. First, the pathless rule
+bounds *what* but not *who*: any Lua, including a third-party package,
+can still permanently lock `*scratch*` — pathless, the default buffer,
+and the quit target of five different code paths. Second, and decisive,
+**the two halves of the protection are not symmetric**: the intercept is
+removable (`remove_intercept`, `src/lua_bindings/mod.rs:3433`, used by
+the REPL at `repl/init.lua:325-327`) and the rope lock is one-way from
+Lua. That falsifies revision 1's stated reason for deferring the unlock
+("a binding whose only consumer does not exist yet cannot be pinned"):
+the brick scenario **is** a consumer and **is** pinnable. **Q#GB7 is
+upgraded from "name it, do not build it" to "ship the unlock in Stage
+1."**
+
+**Revision 1** — initial framing: the confirmed bug, the classified
+census, the primitive decision, staging, and acceptance.
 
 This closes the class-wide half of the invariant `Buffer::set_generated_contents`
 opened in terminal copy mode (#178) and that `docs/agent-handoff.md` §4 and
@@ -27,6 +71,12 @@ Two things the arc turns out NOT to be, both discovered by measurement:
   buffer the shipped primitive has locked **refuses `bypass_intercept`
   writes** (§2.4, measured) — so partial adoption is impossible and a
   new Rust primitive is required.
+- **Added in revision 2:** it is **not** safe to lock these buffers
+  before fixing who owns them. Three of the five writers adopt any
+  buffer that shares their name (§2.8, measured), and the only thing
+  that currently recovers a clobbered user buffer is `M-x buffer.undo`
+  — this arc's bug. Ownership is a prerequisite, not a follow-up
+  (Q#GB13).
 
 ---
 
@@ -385,7 +435,19 @@ cursor after C-p  = 29           (motion did not recover it)
 A shrinking generated write leaves the window cursor 27 bytes past the
 end of the buffer, indefinitely. **This ships today in terminal copy
 mode** — refresh a snapshot to a shorter one with the point low in the
-buffer and this is the state — and every adopter inherits it. Q#GB6.
+buffer and this is the state — and every adopter inherits it.
+
+**The two coordinates fail on different axes** (review P2-4). `cursor` is
+a byte position (`src/window.rs:366-367`) bounded by `Buffer::len()`;
+`view_top` is a **line index** (`:373-374`, "First buffer *line* shown at
+the top") bounded by `TextView::line_count()` (`src/text_view.rs:67`).
+The transcript above is the byte case. The line case is **not measured**
+— staging it needs a scrolled window — but it is available from the types
+alone: a write that grows in bytes while collapsing lines invalidates
+`view_top` on a write no byte-length comparison calls a shrink.
+`rebuild_views_for` already clamps each against its own bound
+(`src/editor_core.rs:1853-1857`); the clamp added to
+`notify_buffer_edit` must do the same. Q#GB6.
 
 ### 2.7 What `buffer.after-edit` does and does not do
 
@@ -396,6 +458,102 @@ buffer and this is the state — and every adopter inherits it. Q#GB6.
 hook"). Consequence for §3: a generated write does not run arbitrary Lua,
 so the *fan-out* is not a re-entrancy hazard — but a scoped primitive's
 **callback body** still is, because it is arbitrary owner Lua.
+
+### 2.8 Three writers adopt any buffer that shares their name — measured
+
+**The invariant already exists in this codebase; three writers simply do
+not honour it.** `terminal.lua:300-305` states it verbatim:
+
+> `pmacs.buffer.create` takes any caller-chosen name, so a foreign buffer
+> may already be called `*terminal-copy: sh*` [...] **found-by-name is NOT
+> adoption**: ownership means "this buffer is in the handle table above",
+> exactly as in dired.
+
+`dired.lua:476-504` implements the same rule: `claim_handle` looks up its
+**handle table** first, and on a name collision disambiguates
+`<2>`…`<99>` (`NAME_VARIANT_LIMIT`, `:474`) or raises. Three writers
+instead adopt:
+
+| writer | line | code |
+|---|---|---|
+| `listview.ensure_panel` | `listview.lua:95` | `find_buffer_by_name(name) or pmacs.buffer.create(name)` |
+| `compile.ensure_slot` | `compile.lua:263` | `buffer_named(name) or pmacs.buffer.create(name)` |
+| `ensure_search_panel` | `default.lua:861-868` | name scan over `pmacs.buffer.list()`, then `buf or create` |
+
+Measured at `ad41cf1`, a user buffer named `*references*` and then a
+references panel:
+
+```
+foreign BEFORE               = "my precious notes"
+foreign AFTER listview.open  = "H\nr1"
+buffers named *references*ish = 1              (no disambiguation happened)
+ordinary edit to MINE now    = false | intercept rejected the edit:
+                               listview.lua:102: *references* is read-only
+```
+
+The user's buffer is clobbered **and left permanently un-editable**,
+because `ensure_panel` installs an erroring intercept whose handle it
+discards.
+
+**Compile is worse, and it is worse on a path that fails.**
+`pmacs.compile.run` calls `ensure_slot` (`compile.lua:1090`) *before*
+`start_run` validates `opts.display` (`:752-757`). Measured:
+
+```
+compile.run('true', { display = 'bogus' })
+  = false | compile.lua:754: compile.run: unknown display "bogus"
+foreign *compilation* contents after the FAILED call = "my precious notes"
+ordinary edit to MINE after the FAILED call
+  = false | intercept rejected the edit: compile.lua:267: *compilation* is read-only
+```
+
+A call that **raised and did nothing else** left the user's buffer
+uneditable. Q#GB5's revision-1 recommendation — an empty
+`set_generated_contents` at the end of `ensure_slot` — would make that
+same failing call **empty the buffer and lock the rope**. Q#GB5 is
+amended accordingly.
+
+**Why this is a prerequisite and not a follow-up.** Today the clobber is
+recoverable, and the thing that recovers it is *this arc's bug*:
+
+```
+after clobber = "H\nr1"
+after undo 1  = ""
+after undo 2  = "my precious notes"
+```
+
+`M-x buffer.undo` is currently the only way back. After adoption the rope
+is `read_only`, the history is cleared by the same call that wrote, and
+§1.3 measured that **no Lua binding can clear `read_only`**. The arc
+therefore converts a recoverable clobber into an unrecoverable one, and
+it removes the accidental safety net in the same commit that removes the
+need for it. Q#GB13.
+
+**Dired needs none of this work** — it already disambiguates — which is
+why it is the cheaper of Stage 1's two adopters despite being the newer
+one.
+
+### 2.9 `is_modified` reaches autosave and desktop persistence — a revision-1 error
+
+**Revision 1 stated that the flag "drives only the mode-line indicator
+and the buffer-list column". That is wrong**, and it was wrong because
+the sweep was `grep -rn '\.modified' builtin` plus a narrow `src` path
+rather than `grep -rn 'is_modified' src`. The full sweep finds two more
+consumers, both load-bearing:
+
+- **`src/autosave.rs:359-364`** — the per-buffer skip:
+  `let Some(path) = buf.file_path() else { continue };` then
+  `if !buf.is_modified() { continue; }`. A clean buffer gets **no
+  crash-recovery slot written**.
+- **`src/desktop.rs:298-303`** — `SavedBuffer { path, modified: b.is_modified() }`,
+  again only for buffers with a `file_path`.
+
+Both gate on `file_path()` being `Some` before they read the flag. That
+is the fact Q#GB10's revised rule turns on.
+
+Also found in the same sweep, and reused below: `src/instance_buffer.rs:401`
+("rendered buffer must be marked clean") is a third generated-buffer
+writer that already marks clean, alongside `workers_buffer::render`.
 
 ---
 
@@ -568,41 +726,99 @@ write synchronously in the same call, so the window is not observable.
 `*compilation*` and returns, leaving it empty and writable until
 `start_run`. Recommendation: `ensure_slot` ends with
 `pmacs.buffer.set_generated_contents(slot.buf, "")`, using the shipped
-primitive; no third surface is needed. Note the pre-existing hazard this
-inherits and does not create: `ensure_slot` is
-`buffer_named(name) or create`, so it can adopt a foreign buffer, which
-`start_run:794`'s delete-all already clobbers today.
+primitive; no third surface is needed.
 
-**Q#GB6 — Clamp the window cursor on a generated write.** §2.6 measures a
-shipped defect: a shrinking generated write leaves `win.cursor` past the
-end of the rope, and neither paint nor `C-p` recovers it. Recommendation:
-clamp `win.cursor` and `win.view_top` in `EditorCore::notify_buffer_edit`
-when the buffer shrank — a **clamp**, not a call to `rebuild_views_for`,
-because a rebuild is O(buffer length) and would run per streaming op.
+**Amended in revision 2 (review P1-2), and the amendment is a hard
+ordering constraint, not a caveat.** `ensure_slot` is
+`buffer_named(name) or create` (`compile.lua:263`), and
+`pmacs.compile.run` calls it **before** `start_run` validates
+`opts.display` (`:1090` vs `:752-757`). §2.8 measures that a
+`display = "bogus"` call today raises *and still leaves a foreign
+`*compilation*` permanently un-editable*; with the empty write placed at
+the end of `ensure_slot` that same failing call would **empty the buffer
+and lock the rope**, unrecoverably. So the lock may only be installed
+once **Q#GB13's ownership rule guarantees `slot.buf` is a buffer compile
+created**. With ownership in place the buffer is provably fresh and the
+placement in `ensure_slot` is correct; without it, no placement is.
+
+**Q#GB6 — Clamp each window coordinate against its OWN post-edit bound.**
+§2.6 measures a shipped defect: a shrinking generated write leaves
+`win.cursor` past the end of the rope, and neither paint nor `C-p`
+recovers it. Recommendation: clamp in `EditorCore::notify_buffer_edit`
+— a **clamp**, not a call to `rebuild_views_for`, because a rebuild is
+O(buffer length) and would run per streaming op.
+
+**Revised in revision 2 (review P2-4). Revision 1 said "clamp when the
+buffer shrank", which conflates two different extents.** The two
+coordinates are bounded by different things:
+
+- **`win.cursor` is a byte position** (`src/window.rs:366-367`, "Byte
+  position of this window's cursor"), bounded by `Buffer::len()`.
+- **`win.view_top` is a line index** (`src/window.rs:373-374`, "First
+  buffer **line** shown at the top of this window's viewport"), bounded
+  by `TextView::line_count()` (`src/text_view.rs:67`).
+
+A replacement can **grow in bytes while collapsing many lines into one**
+— `"a\nb\nc\nd\ne\nf\n"` (12 bytes, 7 lines) replaced by a single
+80-byte line — leaving `view_top` invalid on a write that a byte-length
+comparison calls a *growth*. So the trigger cannot be "the buffer
+shrank": the clamp runs **unconditionally**, each coordinate against its
+own bound, exactly as `rebuild_views_for` already does
+(`src/editor_core.rs:1853-1857`, which clamps `cursor` against `len` and
+`view_top` against `line_count().saturating_sub(1)`).
+
+**Argued from the types and from `rebuild_views_for`'s existing shape,
+not measured** — unlike §2.6's cursor case, the `view_top` case needs a
+scrolled window to stage and was not staged. §6 Stage 1 criterion 8b is
+what turns the argument into a pin.
+
 Recommended for **Stage 1**, because Stage 1's adopters refresh shrinking
 panels constantly and because it fixes terminal copy mode retroactively.
 Alternative if the user prefers a narrower Stage 1: its own lane, in
 which case Stage 1 must say so out loud rather than inherit it silently.
 
-**Q#GB7 — wdired needs an unlock, and Lua cannot express one.** Dired
-Stage 3 (`docs/dired-framing.md` §5) makes a dired buffer editable by
-removing the read-only intercept and swapping the major mode. Once
-dired's rope is `read_only`, removing the intercept is no longer
-sufficient — and §1.3 measured that **no Lua binding can clear
-`read_only`**. Recommendation: **name it, do not build it.** A binding
-whose only consumer does not exist yet cannot be pinned against a real
-caller, and "asserting that a value was stored is not asserting that
-anything reads it" is a lesson this repo has already paid for. Stage 1
-records it as a hard prerequisite on dired Stage 3's framing.
+**Q#GB7 — Ship a one-way unlock in Stage 1. Revision 2 reverses revision
+1's recommendation, and sweep B is why.**
 
-If the user rules the other way, the two shapes are: expose
-`pmacs.buffer.set_read_only(buf, on)` — which **contradicts
+The wdired case is unchanged: dired Stage 3 (`docs/dired-framing.md` §5)
+makes a dired buffer editable by removing the read-only intercept and
+swapping the major mode; once dired's rope is `read_only` that is no
+longer sufficient, and §1.3 measured that **no Lua binding can clear
+`read_only`**. Revision 1 deferred the binding on the grounds that "a
+binding whose only consumer does not exist yet cannot be pinned against a
+real caller".
+
+**Sweep B falsifies that reason.** The two halves of the protection are
+not symmetric:
+
+- the **intercept** half is removable — `remove_intercept`
+  (`src/lua_bindings/mod.rs:3433`), which the REPL actually calls
+  (`repl/init.lua:325-327`);
+- the **rope** half is one-way from Lua, permanently.
+
+And `{ generated = true }` is public Lua callable on **any** buffer id.
+Even with Q#GB10's pathless rule, a third-party package — or a typo in
+one — can permanently lock `*scratch*`: pathless, the default buffer, and
+the quit target of five separate code paths (`dired.lua:914`,
+`compile.lua:1052`, `listview.lua:190`, `default.lua:585`, `:1150`).
+That is a caller-visible failure that exists **today**, has a consumer,
+and is directly pinnable — which is exactly what revision 1 said the
+binding lacked.
+
+Recommendation: **`pmacs.buffer.unlock_generated(buf)` — one-way, clears
+`read_only` and nothing else — shipped in Stage 1.** One-way rather than
+`set_read_only(buf, on)` because unlocking removes protection and can
+therefore never brick anything, whereas a settable lock reintroduces
+precisely the "lock with no door" trap `docs/agent-handoff.md` §4 warns
+about. It is strictly weaker than the setter and strictly sufficient for
+both consumers (the brick escape, and dired Stage 3's mode swap).
+
+If the user prefers the symmetric setter instead, note that
+`pmacs.buffer.set_read_only(buf, on)` **contradicts
 `docs/agent-handoff.md` §4's "there is deliberately no Lua
-`set_read_only`"**, and needs an explicit ruling rather than a quiet
-addition, though the objection behind that invariant ("it also refuses
-the owner's refresh") is answered once `{ generated = true }` ships — or
-a one-way `pmacs.buffer.unlock_generated(buf)`, strictly weaker because
-it can never lock anything.
+`set_read_only`"** and needs an explicit ruling rather than a quiet
+addition — though the objection behind that invariant ("it also refuses
+the owner's refresh") is answered once `{ generated = true }` ships.
 
 **Q#GB8 — The REPL is out of this arc.** §2.5. Same root cause, different
 remedy, its own lane. Its measured exposure is recorded above so the next
@@ -616,17 +832,48 @@ not a bug fix, and it should not ride a bug-fix arc. `*workers*`
 additionally writes from Rust with its own fan-out pair and already
 `mark_clean`s, so it is not a like-for-like conversion.
 
-**Q#GB10 — Mark generated buffers clean.** `set_generated_contents`
-leaves `is_modified = true` (measured: `modified=true` after one write),
-so every adopter shows `*` in the mode line
-(`src/editor.rs:3704`) and in `*buffer-list*` (`default.lua:395`).
-`workers_buffer::render` calls `Buffer::mark_clean()` (`:95`) for exactly
-this reason. Recommendation: `apply_generated_edit` marks clean.
-**This changes shipped `set_generated_contents` behaviour** and therefore
-the terminal snapshot, so it belongs in Stage 2 alongside the
-reimplementation, not smuggled into Stage 1. Verified non-blocking: the
-flag drives only the mode-line indicator and the buffer-list column —
-`grep` finds no quit-time or kill-time prompt reading it.
+**Q#GB10 — Refuse a generated write on a path-backed buffer; then, and
+only then, mark clean.** Rewritten in revision 2 (review P1-3).
+
+`set_generated_contents` leaves `is_modified = true` (measured), so every
+adopter shows `*` in the mode line (`src/editor.rs:3704`) and in
+`*buffer-list*` (`default.lua:395`). `workers_buffer::render` calls
+`Buffer::mark_clean()` (`src/workers_buffer.rs:95`) and
+`instance_buffer.rs:401` asserts the same for its own rendered buffer,
+so marking clean is the established convention for a generated buffer.
+
+**Revision 1's justification was wrong.** It said the flag "drives only
+the mode-line indicator and the buffer-list column". §2.9 measures two
+more consumers: `src/autosave.rs:363`, the skip that decides whether a
+crash-recovery slot is written, and `src/desktop.rs:302`. Since
+`{ generated = true }` is public Lua on any buffer id, a caller could
+replace a **file-backed** buffer's contents, mark it clean, and suppress
+autosave recovery for it.
+
+**The rule, stated explicitly rather than left implicit:
+`Buffer::apply_generated_edit` (and therefore `set_generated_contents`)
+returns an error for a buffer whose `file_path()` is `Some`.** Then
+`mark_clean` is unconditionally safe, because **both** consumers gate on
+`file_path()` before they read the flag (`autosave.rs:359-364`,
+`desktop.rs:298-303`).
+
+Why refuse rather than the alternative "retain modified state for
+path-backed buffers": the flag rule fixes only the flag. A generated
+write on a file buffer would still **replace its contents and lock its
+rope**, and §1.3 measured that Lua cannot unlock. Refusing bounds all
+three harms with one rule, and it is the narrower capability.
+
+**Verified non-breaking.** None of the six generated families is
+path-backed: they are all `pmacs.buffer.create`d, and no builtin Lua sets
+a buffer path — `grep -rn "set_path\|set_buffer_path" builtin` finds no
+call sites (only a comment in `dired.lua:42` and `lsp.lua`'s own
+`active_buffer_path` local). Path binding happens Rust-side in
+`from_file` / `find_file` only.
+
+**This changes shipped `set_generated_contents` behaviour** — both the
+new refusal and `mark_clean` — and therefore the terminal snapshot, so it
+belongs in Stage 2 alongside the reimplementation, not smuggled into
+Stage 1.
 
 **Q#GB11 — Staging.** §5.
 
@@ -644,6 +891,46 @@ exactly as `tests/terminal_copy_mode_acceptance.rs:582-584` already does.
 That is a concrete, verified integration cost of Stage 2, not a surprise
 to discover during implementation.
 
+**Q#GB13 — Ownership by handle is a prerequisite, not a follow-up.** New
+in revision 2 (review P1-2). `listview.ensure_panel` (`listview.lua:95`),
+`compile.ensure_slot` (`compile.lua:263`) and `ensure_search_panel`
+(`default.lua:861-868`) adopt any buffer that shares their name. §2.8
+measures the consequence today (a clobbered, permanently un-editable user
+buffer — and, for compile, from a call that *raised*), and measures that
+`M-x buffer.undo` is currently the **only** recovery. Locking the rope
+removes that recovery, so the rule must land in the same stage as the
+lock.
+
+Recommendation: adopt the rule the tree already states at
+`terminal.lua:300-305` and implements at `dired.lua:476-504` —
+**ownership means "this buffer is in my handle table"**, a name collision
+disambiguates `<2>`…`<99>`, and exhausting the limit raises rather than
+adopting. Three writers, one shape, each in the stage that locks it:
+listview in Stage 1, compile and search in Stage 2. Dired and terminal
+already comply.
+
+Alternative considered and rejected: a standalone Stage 0 that fixes all
+three at once. Rejected because each writer's ownership fix is only
+load-bearing for the stage that locks that writer, and a lone ownership
+PR reads as unmotivated churn without the lock that makes it urgent. If
+the user prefers the standalone shape, the acceptance criteria in §6 move
+with it unchanged.
+
+**Q#GB14 — The lock is not observable from Lua, and the pins depend on
+it.** New in revision 2, out of P1-1's fix. `describe.buffer` returns
+`name`, `length`, `modified`, `view_count` and nothing else
+(`buffer_info_table`, `src/lua_bindings/mod.rs:6352-6364`), so no Lua
+assertion can read `read_only` directly. Two discriminators are
+available and both are used in §6: a **`bypass_intercept` write**, which
+lands on `main` and raises `` buffer `X` (id BufferId(n)) is read-only ``
+once the rope is locked (measured, §2.4), and **Rust-side
+`Buffer::is_read_only()`** (`src/buffer.rs:494`, already `pub`).
+Recommendation: use both, and do **not** add a Lua surface for it — the
+acceptance suites are Rust and need no new public API. Optional and
+separable: adding `read_only` to `buffer_info_table` would be a
+read-only introspection field with no new capability, useful if
+Lua-level pins are ever wanted; it is not required by this arc.
+
 ---
 
 ## 5. Staging
@@ -654,15 +941,32 @@ it is not the obvious one.
 ### Stage 1 — `generated-buffer-immutability-stage1`
 
 `dired.lua` and `listview.lua` adopt `pmacs.buffer.set_generated_contents`.
-No new primitive.
 
+- **Prerequisite, in this PR, before the lock (Q#GB13):**
+  `listview.ensure_panel` (`listview.lua:95`) stops adopting a
+  same-named foreign buffer. Ownership is the handle table (`panels`);
+  a name collision disambiguates `<2>`…`<99>` and raises at the limit,
+  matching `dired.lua:486-504`. **`dired.lua` needs no ownership work**
+  — it already complies, which is why it is the cheaper of the two
+  adopters.
+- **Prerequisite, in this PR (Q#GB7):**
+  `pmacs.buffer.unlock_generated(buf)`, a one-way clear of `read_only`.
+  It is the escape from a bricked buffer and dired Stage 3's mode-swap
+  door. Sweep B upgraded this from a deferral.
 - `listview.lua:50-62` — `render`'s delete-all + insert-all becomes one
   `set_generated_contents(buf, body)`.
 - `dired.lua:369-372` — `paint`'s whole-buffer replace becomes one
   `set_generated_contents(handle.buf, text)`.
 - Both keep their erroring intercept (named error, per the layering at
   `terminal.lua:351-366`) and both keep `set_round_trip_input`.
-- Plus Q#GB6's cursor clamp, if approved.
+- Plus Q#GB6's per-coordinate clamp, if approved.
+
+**Revision 2 grew Stage 1 by two prerequisites and one reversal.** Both
+additions are load-bearing for the lock rather than adjacent to it: the
+ownership rule is what makes locking safe, and the unlock is what makes
+a mistake survivable. Stage 1 is no longer a pure-Lua change — the
+unlock is a new binding — and §5's earlier claim that it was has been
+corrected below.
 
 **Why this cut, and why Stage 1 is not merely "the cheap half":** it is
 the *worse-exposure* half. `compile.lua:219` and
@@ -687,25 +991,37 @@ diff at `dired.lua:371` and `listview.lua:60-61` is written once.
 
 ### Stage 2 — `generated-buffer-immutability-stage2`
 
-`Buffer::apply_generated_edit` + the `{ generated = true }` option +
-`set_generated_contents` reimplemented over it + Q#GB10's `mark_clean` +
-conversion of all 13 remaining write sites (`compile.lua` 9,
-`builtin/commands/default.lua` 4) + Q#GB5's `ensure_slot` lock + the
-three `compile_mode_acceptance` intruder tests updated per Q#GB12.
+- **Prerequisite, in this PR, before the lock (Q#GB13):**
+  `compile.ensure_slot` (`compile.lua:263`) and `ensure_search_panel`
+  (`default.lua:861-868`) stop adopting same-named foreign buffers, same
+  shape as Stage 1's listview fix.
+- `Buffer::apply_generated_edit` + the `{ generated = true }` option +
+  `set_generated_contents` reimplemented over it.
+- Q#GB10's path-backed refusal **and** `mark_clean` — one rule, both
+  halves, since the refusal is what makes the flag change safe.
+- Conversion of all 13 remaining write sites (`compile.lua` 9,
+  `builtin/commands/default.lua` 4).
+- Q#GB5's `ensure_slot` lock, which is only placeable once ownership
+  lands.
+- The three `compile_mode_acceptance` intruder tests updated per Q#GB12.
 
 All the new Rust and all the review risk in one PR, which is the point of
 the cut.
 
 **Amendments to the briefed cut:**
 
-1. **Q#GB7 (wdired) is recorded in Stage 1, not built in it.** Stage 1
-   makes dired's rope read-only, which creates an obligation for dired
-   Stage 3 that does not exist today. Recording it is the deliverable;
-   building an unlock binding with no caller is not.
-2. **Q#GB10 (`mark_clean`) lands in Stage 2, not Stage 1**, because it
+1. **Q#GB13 (ownership) is a prerequisite of the stage that locks each
+   writer**, not a follow-up and not a separate PR. §2.8 is the
+   argument: this arc removes the only recovery a clobbered buffer
+   currently has.
+2. **Q#GB7 (unlock) is now built in Stage 1, not merely recorded** —
+   revision 1 had this backwards. Sweep B found the pinnable consumer
+   revision 1 said did not exist.
+3. **Q#GB10 (path refusal + `mark_clean`) lands in Stage 2**, because it
    edits `set_generated_contents` itself and therefore changes the
-   already-shipped terminal snapshot. Stage 1 stays a pure-Lua change
-   (plus Q#GB6, if approved).
+   already-shipped terminal snapshot. **Stage 1 is no longer pure Lua**
+   (Q#GB7's binding), which revision 1 claimed and revision 2
+   withdraws.
 
 **Where the REPL lands: neither stage.** Q#GB8.
 
@@ -718,89 +1034,194 @@ A criterion that only exercises the intercept, or only the chords, proves
 nothing — that is precisely what `compile.lua`'s idiom already achieves
 and what this bug already defeats.
 
+**Revision 2 re-audited every criterion, not only the three the review
+named (sweep A).** Each now carries an explicit pre-image class, because
+an unlabelled always-green criterion is indistinguishable from a vacuous
+one:
+
+| class | meaning |
+|---|---|
+| **`main`** | fails on `ad41cf1`. A regression pin in the ordinary sense. |
+| **fix-shape** | **passes on `main` by design**; fails against a specific *wrong implementation*, named in the criterion. Legitimate per `docs/agent-handoff.md` §5 ("bite against every pre-image the fix could plausibly have taken"), where `acc 6` deliberately passes on `main`. |
+| **mutation** | passes on `main`; fails against a named one-line mutation of the fix. |
+| **structural** | no behavioural pre-image. Rides **alongside** the others, never instead — a structural comparison of two authorities does not catch a misrouted consumer. |
+
+**Q#GB14: the lock is not observable from Lua.** `describe.buffer`
+carries no `read_only` field, so every "is it locked" assertion below
+uses a **`bypass_intercept` write** (lands on `main`, raises
+`` buffer `X` (id BufferId(n)) is read-only `` once locked) or Rust-side
+`Buffer::is_read_only()`. An *ordinary* edit is not a discriminator: the
+intercept refuses it either way.
+
 ### Stage 1
 
-1. **`C-/` cannot empty a listview panel.** Driven by `dispatch_key`,
-   not by a Lua call. *Bite:* on `ad41cf1` this measured
-   `"H\nrow-one\nrow-two"` → `""`.
-2. **`M-x buffer.undo` cannot empty a listview panel**, driven through
-   the real minibuffer (`M-x`, type `buffer.undo`, RET) — not
-   `pmacs.command.invoke`, which is the programmatic path. *Bite:* same
-   empty result on the pre-image; and a chord-only fix passes 1 and
-   fails this.
-3. **`C-/` and `M-x buffer.undo` cannot empty a dired listing.** *Bite:*
-   measured — one undo takes the listing to `""`.
-4. **The owner's own refresh still works after the lock** — `g` on a
-   listview panel and on a dired buffer re-renders new content. *Bite:*
-   this is the criterion that falsifies the **obvious wrong fix**, not
-   the pre-image: a naive `set_read_only(true)` at creation passes 1–3
-   and fails here, which is the failure mode `src/buffer.rs:521-524`
-   exists to prevent. Assert the *new* content appears, not that the
-   call did not raise.
-5. **An ordinary edit is still refused with the intercept's named
-   message.** *Bite:* deleting the intercept while keeping the rope lock
-   passes 1–4 and fails this; the layering at `terminal.lua:351-366`
+1. **[`main`] `C-/` cannot empty a listview panel.** Driven by
+   `dispatch_key`, not a Lua call. *Bite:* measured — `"H\nrow-one\nrow-two"`
+   → `""`.
+2. **[`main`] `M-x buffer.undo` cannot empty a listview panel**, driven
+   through the real minibuffer (`M-x`, type `buffer.undo`, RET), not
+   `pmacs.command.invoke`. *Bite:* same empty result; and a chord-only
+   fix passes 1 and fails this.
+3. **[`main`] `C-/` and `M-x buffer.undo` cannot empty a dired listing.**
+   *Bite:* measured — one undo takes the listing to `""`.
+4. **[fix-shape] The owner's own refresh still works after the lock** —
+   `g` on a listview panel and on a dired buffer renders *new* content.
+   *Bite:* a naive `set_read_only(true)` at creation passes 1–3 and fails
+   here; that is the failure mode `src/buffer.rs:521-524` exists to
+   prevent. Assert the new content appears, not that the call did not
+   raise.
+5. **[fix-shape] An ordinary edit is refused by the INTERCEPT, not by
+   the rope** — assert on the message text, which distinguishes them.
+   Measured, both forms: the intercept produces
+   `intercept rejected the edit: ... listview.lua:102: *probe-panel* is read-only`;
+   the rope produces `` buffer `*probe*` (id BufferId(4)) is read-only ``.
+   *Bite:* an adopter that deletes the intercept and relies on the rope
+   passes 1–4 and fails this. The layering at `terminal.lua:351-366`
    requires the named error to survive.
-6. **`set_round_trip_input` is still set on both.** Pinned ungated, via
-   `dispatch_idle_for` reporting **false** while the panel is focused —
-   the shape `tests/terminal_copy_mode_acceptance.rs` criterion 16 uses,
-   which needs no CRDT. *Bite:* delete the `set_round_trip_input` call
-   and 1–5 all still pass; only this fails. A daemon-side refusal does
-   nothing for a replica's own mirror.
-7. **A refresh reaches the window, not just the rope** — pinned by
-   **painting** a shrinking render (many rows → one) and asserting row 1
-   is empty, for each adopter. *Bite:* not redundant with #178's
-   criterion 16d, because it catches a **partial** conversion — an
-   adopter that keeps one `bypass_intercept` write beside the primitive
-   — which 16d cannot see.
-8. **Cursor clamp (only if Q#GB6 is approved).** After a shrinking
-   refresh, `pmacs.editor.cursor() <= buf:len()`, and `C-p` moves. *Bite:*
-   measured on `ad41cf1` — cursor 29, len 2, `C-p` leaves it at 29. This
-   pin **fails on `main` today**, including for terminal copy mode, which
-   is the evidence it is a real fix and not bookkeeping.
-9. **Structural, riding alongside and never instead of 1–8:** no
-   `bypass_intercept` write remains in `dired.lua` or `listview.lua`.
-   A structural comparison of two authorities does not catch a misrouted
-   consumer; keep the consumer-level assertions.
+6. **[fix-shape] `set_round_trip_input` is still set on both.** Pinned
+   ungated via `dispatch_idle_for` reporting **false** while the panel is
+   focused — the shape `tests/terminal_copy_mode_acceptance.rs` criterion
+   16 uses, which needs no CRDT. *Bite:* delete the
+   `set_round_trip_input` call and 1–5 all still pass; only this fails.
+   A daemon-side refusal does nothing for a replica's own mirror.
+7. **[mutation] A refresh reaches the window, not just the rope** —
+   pinned by **painting** a shrinking render (many rows → one) and
+   asserting row 1 is empty, for each adopter. **Revision 2 corrected
+   this criterion's bite (sweep A).** Revision 1 claimed it caught a
+   "partial conversion" that kept a `bypass_intercept` write beside the
+   primitive; that is wrong — such a conversion **raises** at the bypass
+   write (§2.4, measured) and never reaches a stale paint. The real bite
+   is the one-line mutation *delete the `notify_buffer_edit_to_windows`
+   call in the `set_generated_contents` binding*
+   (`src/lua_bindings/mod.rs:3092`), which a reviewer can perform.
+8. **[`main`] Cursor clamp (Q#GB6).** After a shrinking refresh,
+   `pmacs.editor.cursor() <= buf:len()` and `C-p` moves. *Bite:* measured
+   on `ad41cf1` — cursor 29, len 2, `C-p` leaves it at 29. Fails on
+   `main` today, including for terminal copy mode.
+   **8b. [`main`] `view_top` clamp, on a LONGER buffer (Q#GB6, review
+   P2-4).** With a window scrolled so `view_top` sits on line 5, replace
+   `"a\nb\nc\nd\ne\nf\n"` (12 bytes, 7 lines) with a single line **longer
+   than 12 bytes**, then require `view_top < TextView::line_count()`.
+   *Bite:* a clamp gated on "the buffer shrank" passes 8 and fails 8b,
+   which is the whole of P2-4. Unlike 8, this case is argued from the
+   types and from `rebuild_views_for`'s existing clamp
+   (`src/editor_core.rs:1853-1857`), **not measured** — staging it needs
+   a scrolled window.
+9. **[`main`] A foreign buffer named `*references*` is never adopted
+   (Q#GB13).** Create a plain buffer of that name with user text, then
+   open the references panel. Assert **both** halves: the user's bytes
+   survive **and** an ordinary edit to the user's buffer still lands;
+   and the panel appears under a disambiguated name. *Bite:* measured —
+   `"my precious notes"` → `"H\nr1"`, one buffer not two, and the user's
+   buffer is left permanently un-editable. The second half is what fails
+   if adoption is merely made "safe" by skipping the render.
+10. **[fix-shape] The disambiguation limit raises rather than adopting**,
+    matching `dired.lua:493-503` / `terminal.lua:309-315`. *Bite:* an
+    implementation that falls back to adoption once the limit is
+    exhausted passes 9 and fails this.
+11. **[`main`] The unlock is real and is narrow (Q#GB7).** On a plain
+    buffer with no intercept: `set_generated_contents` locks it (a
+    bypass write raises), `unlock_generated` releases it (a bypass write
+    lands), and an ordinary edit then lands too. Separately, on a
+    listview panel: after `unlock_generated`, an ordinary edit is still
+    refused **by the intercept**, asserted on the message text per
+    criterion 5. *Bite:* a no-op unlock fails the first half; an unlock
+    that also tears down the intercept — "unprotect" rather than
+    "unlock" — fails the second.
+12. **[structural] No `bypass_intercept` write remains in `dired.lua` or
+    `listview.lua`**, and `listview.ensure_panel` contains no
+    find-by-name adoption. Rides alongside 1–11, never instead.
 
 ### Stage 2
 
-1. **`M-x buffer.undo` cannot destroy `*compilation*` /
+1. **[`main`] `M-x buffer.undo` cannot destroy `*compilation*` /
    `*shell-command*` / `*search-results*` content — and the criterion
    must assert the *exit marker survives*, not that the buffer is
-   non-empty.** *Bite, and this is the whole point:* on `ad41cf1` the
-   measured result of `M-x buffer.undo` on `*shell-command*` is
+   non-empty.** *Bite, and this is the whole point:* measured, the result
+   of `M-x buffer.undo` on `*shell-command*` is
    `[shell exited with code 0]` replaced by
    `[output desynced by external edit]`. The buffer is still non-empty,
    so a "not empty" assertion **passes with the bug live**. The revision
    guard *marks* the corruption; it does not prevent it.
-2. **A streaming run's incremental writes still land**, including CR
-   overwrite semantics (a progress-bar fixture) and erase-to-eol. Assert
-   the produced content, not the absence of an error. *Bite:* the
-   pre-image is the tempting half-conversion — reset via
-   `set_generated_contents`, stream via `bypass_intercept` — which raises
-   `is read-only` at the first append (measured, §2.4).
-3. **The buffer is locked BETWEEN batches, not only after the run.**
-   Attempt an ordinary edit mid-run and require the refusal. *Bite:* a
-   scope-shaped implementation that unlocks for a whole run passes 1 and
-   2 and fails this. A state predicate, not a geometric readout.
-4. **History does not accumulate across a long run:** `buf:undo()`
-   returns false and the contents are unchanged after N batches.
-5. **`ensure_slot` leaves `*compilation*` locked before any run**
-   (Q#GB5). *Bite:* create the slot without running anything, then
-   attempt an ordinary edit; without the explicit lock it lands.
-6. **`mark_clean` (Q#GB10):** `pmacs.describe.buffer(b).modified` is
-   `false` after a generated write. *Bite:* fails against `ad41cf1`,
-   where it measures `true`.
-7. **Both configurations** — default and `--features crdt` — for
-   criteria 1–4. CRDT must not be the only home of any of them; CI never
-   enables the feature, and 264 tests are already dark for that reason.
-8. **Structural, alongside:** zero `bypass_intercept` writes remain in
-   `compile.lua` and in `default.lua`'s search panel (comments excepted;
-   §1.1's arithmetic is the reference).
-9. **The three intruder tests still assert what they were written to
-   assert** after being converted to a Rust-side `read_only` lift
-   (Q#GB12), rather than being deleted or weakened.
+2. **[fix-shape] A streaming run's incremental writes still land**,
+   including CR overwrite semantics (a progress-bar fixture) and
+   erase-to-eol. Assert the produced content, not the absence of an
+   error. *Bite:* the tempting half-conversion — reset via
+   `set_generated_contents`, stream via `bypass_intercept` — raises
+   `is read-only` at the first append (§2.4, measured).
+3. **[`main`] The rope is locked BETWEEN batches, not only after the
+   run.** Mid-run, after one output batch has landed and before the
+   next, a **`bypass_intercept`** write must be refused and
+   `Buffer::is_read_only()` must be `true`. **Rewritten in revision 2
+   (review P1-1).** Revision 1 said "attempt an ordinary edit and require
+   the refusal", which **passes on `main`** — the intercept refuses
+   ordinary edits today whether or not the rope is locked. A bypass write
+   is the discriminator: it lands on `main` (`compile.lua` performs nine
+   of them) and raises once the rope is locked. *Bite:* a scope-shaped
+   implementation that unlocks for a whole run passes 1 and 2 and fails
+   this. A state predicate, not a geometric readout.
+4. **[`main`, and also fix-shape] History is discarded per generated
+   write, asserted past the lock.** In a Rust acceptance test, after N
+   batches: `buffer.set_read_only(false)`, then assert `buffer.undo()`
+   is `Err(BufferError::NothingToUndo)` and — under `--features crdt` —
+   that the CRDT reports `can_undo() == false`; restore the lock.
+   **Rewritten in revision 2 (review P1-1).** `Buffer::undo` calls
+   `ensure_writable()` **first** (`src/buffer.rs:1302`) and returns
+   `ReadOnly` before it ever looks at the stacks, so revision 1's
+   "`buf:undo()` returns false" **passes against an implementation that
+   locks the rope and never clears history**. Lifting the lock inside the
+   test is what makes the assertion about history rather than about the
+   lock. `tests/terminal_copy_mode_acceptance.rs:582-584` is the existing
+   precedent for a Rust-side lift. This criterion fails on `main` (where
+   history accumulates) *and* against the locks-but-never-clears
+   implementation, which is the strongest pairing available.
+5. **[`main`] `ensure_slot` leaves `*compilation*` locked before any
+   run (Q#GB5).** Create the slot without running anything, then require
+   a **`bypass_intercept`** write to be refused and `is_read_only()` to
+   be `true`. **Rewritten in revision 2 (review P1-1):** revision 1's
+   "attempt an ordinary edit; without the explicit lock it lands"
+   **passes on `main`**, because `ensure_slot` installs the erroring
+   intercept at `compile.lua:266` at creation time.
+6. **[`main`] A generated write on a path-backed buffer is refused
+   (Q#GB10).** Open a file, then call `set_generated_contents` on its
+   buffer: the call must error and the buffer's contents, lock state and
+   `is_modified` must all be unchanged. Second half: after an ordinary
+   edit, autosave still queues that buffer. *Bite:* without the guard the
+   call replaces the file buffer's contents, locks the rope, and — with
+   `mark_clean` — makes `autosave.rs:363` skip it, so a crash loses the
+   user's edits with **no recovery slot**. Assert the autosave queue, not
+   just the flag: asserting a value was stored is not asserting anything
+   reads it.
+7. **[`main`] `mark_clean` (Q#GB10).**
+   `pmacs.describe.buffer(b).modified` is `false` after a generated
+   write on a pathless buffer. *Bite:* measures `true` on `ad41cf1`.
+8. **[`main`] Foreign buffers named `*compilation*`, `*shell-command*`
+   and `*search-results*` are never adopted (Q#GB13)** — same two-halved
+   shape as Stage 1 criterion 9, plus the limit criterion of 10. *Bite:*
+   measured on `ad41cf1` for `*compilation*`.
+9. **[`main`] A FAILED `pmacs.compile.run` leaves a foreign
+   `*compilation*` untouched AND editable.** Call it with
+   `display = "bogus"` against a pre-existing foreign buffer of that
+   name. *Bite:* measured — today the call raises at
+   `compile.lua:754`, the contents survive, and the user's buffer is
+   nonetheless left permanently un-editable (`ensure_slot` ran first and
+   installed an intercept it discarded the handle for). With Q#GB5's
+   lock placed naively it would additionally be **emptied and locked**.
+   This is the criterion that pins the ordering constraint, and it fails
+   on `main` today for the intercept half alone.
+10. **Coverage, not a criterion: both configurations** — default and
+    `--features crdt` — for criteria 1–5. CRDT must not be the only home
+    of any of them; CI never enables the feature.
+11. **[structural] Zero `bypass_intercept` writes remain** in
+    `compile.lua` and in `default.lua`'s search panel (comments
+    excepted; §1.1's arithmetic is the reference), and neither
+    `ensure_slot` nor `ensure_search_panel` contains a find-by-name
+    adoption.
+12. **[fix-shape] The three intruder tests still assert what they were
+    written to assert** after being converted to a Rust-side `read_only`
+    lift (Q#GB12), rather than being deleted or weakened. *Bite:* a
+    conversion that drops the intruder edit entirely leaves the desync
+    machinery unpinned while the suite stays green.
 
 ---
 
@@ -822,12 +1243,16 @@ and what this bug already defeats.
 
 - **The REPL's undo exposure** (Q#GB8), with the §2.5 measurement.
 - **Class C: `*buffer-list*`, `*help*`, `*workers*`** (Q#GB9).
-- **wdired's unlock** (Q#GB7) — a hard prerequisite recorded onto dired
-  Stage 3's framing.
 - **Suppress-rather-than-clear history recording**, if Stage 2's
   measurement says the per-op clear costs anything.
-- **`COHERENCE.md` §14's listview consumer list is wrong** (§1.5). Not
-  edited here; carried in the PR body.
+- **`read_only` in `describe.buffer`** (Q#GB14) — separable, no new
+  capability, not required by this arc.
+- **`COHERENCE.md` §14's listview consumer list is wrong** (§1.5), and
+  `docs/agent-handoff.md` §4's inventory is keyed by `bypass_intercept`
+  and therefore misses Class C. Neither file is edited here; both
+  carried in the PR body.
+- **Removed from this list in revision 2: wdired's unlock.** It is now
+  Stage 1 work (Q#GB7), because sweep B found it a pinnable consumer.
 
 ## 9. Coherence impact (`COHERENCE.md` §20)
 
@@ -843,6 +1268,12 @@ emptiable by one keystroke.
 - **Priority 5 (finish the workbench convergence)** is the priority this
   serves. It is a correctness debt inside an existing primitive rather
   than a new primitive, so it is wiring, not model.
+- **§14 consistency, added in revision 2:** Q#GB13 makes three writers
+  honour an ownership rule the tree already states (`terminal.lua:300-305`)
+  and already implements twice (dired, terminal). That is §14's thesis
+  applied to a discipline rather than a view — five generated-buffer
+  owners converging on one identity rule instead of three of them
+  inventing find-by-name.
 - **§6 interaction islands — none added.** No new keymap scope, no new
   dispatch shadow, no new precedence rung. The count stays at six. This
   arc deliberately does **not** add undo-chord rebindings anywhere; the
@@ -878,8 +1309,10 @@ Plus, per stage:
 
 - **Stage 1** — `cargo test --test dired_acceptance` and
   `--test listview_acceptance`, plus `--test terminal_copy_mode_acceptance`
-  if Q#GB6 lands, since the cursor clamp changes the shipped snapshot
-  path.
+  if Q#GB6 lands, since the clamp changes the shipped snapshot path.
+  **Stage 1 now touches Rust** (Q#GB7's `unlock_generated` binding and
+  Q#GB6's clamp), so `cargo test --lib` and `--lib --features crdt` are
+  load-bearing for it rather than formalities.
 - **Stage 2** — `cargo test --test compile_mode_acceptance` **and**
   `--test compile_mode_crdt_acceptance`, plus
   `--test terminal_copy_mode_acceptance` (the `set_generated_contents`
@@ -889,7 +1322,23 @@ Plus, per stage:
   search-panel criteria need a new home rather than an existing one to
   extend.
 - **Do not gate any new test on `#[cfg(feature = "crdt")]` unless it
-  genuinely needs CRDT.** CI never enables the feature.
+  genuinely needs CRDT.** CI never enables the feature — measured at
+  `ad41cf1`, **276 tests are dark** as a result:
+
+  ```
+  cargo test --all-targets --no-default-features --features lua54 -- --list \
+    | grep -c ': test$'          # 3251   (CI's exact flags)
+  cargo test --all-targets --no-default-features --features lua54,crdt -- --list \
+    | grep -c ': test$'          # 3527
+  ```
+
+  3,527 − 3,251 = **276**. **Re-measured in revision 2 (review P2-5).**
+  Revision 1 quoted **264**, which `docs/active-work.md:107-115` labels
+  historical (#168's reading at `1b6a084`) and explicitly warns against:
+  "the number moves with every merge and must be re-measured, not
+  quoted." The ledger's own most recent figure is 273 at `74301d1`; this
+  arc's base is later, and the number should be re-measured again rather
+  than quoted from here.
 - **Judge the touched suites by elapsed time as well as verdict** where
   they reach for a sibling binary (`docs/agent-handoff.md` §5).
 - Commit before gating: `cargo fmt` after a commit splits the worktree

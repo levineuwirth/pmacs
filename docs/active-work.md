@@ -459,6 +459,64 @@ has **no branch and no framing yet**.
   `FrontendView.fold_projection` to `true` for semantic frontends, which
   Stage 2 deliberately left `false` (Q#FD21).
 
+## Generated-buffer immutability framing lane — PR #188 OPEN, PROPOSED
+
+- Portable branch: `githubsucks/generated-buffer-immutability`; worktree
+  `../pmacs-generated-immutability`. **PR #188**, base `main`, forked from
+  `githubsucks/main` @ `ad41cf1`. Framing only —
+  `docs/generated-buffer-immutability-framing.md`, revision 2, plus this
+  lane. **No runtime code, no protocol change.**
+- **PROPOSED — one review round closed (five findings, three P1, two P2).
+  Not approved. Do not implement, do not merge.**
+- **What it frames.** The class-wide half of the `set_generated_contents`
+  invariant that `docs/agent-handoff.md` §4 and `COHERENCE.md` §14 both
+  record as unfinished: `Buffer::undo` gates on `ensure_writable()`
+  (`src/buffer.rs:1302`) and never consults the intercept chain, so the
+  `add_intercept`-plus-`bypass_intercept` idiom leaves the rope writable
+  and every affected buffer emptiable. All five families were reproduced
+  by execution at `ad41cf1`, not inferred; the transcripts are in the
+  document's §0 and §2.
+- **Recommended primitive:** `Buffer::apply_generated_edit(op)`, exposed
+  as a `{ generated = true }` option on the existing Lua mutators, with
+  `set_generated_contents` reimplemented as its whole-buffer wrapper. It
+  is the only candidate in which the buffer is never observably unlocked.
+- **Two stages, two PRs.** Stage 1 — listview ownership fix, a one-way
+  `unlock_generated` binding, dired and listview adopting the shipped
+  primitive, and the window-coordinate clamp. Stage 2 — the new
+  primitive, compile's nine write sites, the search panel's four,
+  compile/search ownership, and the path-backed refusal plus
+  `mark_clean`.
+- **Three facts from this lane that other lanes need before it merges:**
+  - **`bypass_intercept` is the wrong inventory key.** It misses
+    `*buffer-list*`, `*help*` and `*workers*`, which are generated with
+    plain writes and no intercept at all. `docs/agent-handoff.md` §4's
+    four-row table inherits that blind spot.
+  - **`COHERENCE.md` §14's listview consumer list is wrong.**
+    `pmacs.listview.open` has three production callers, all in
+    `lsp.lua` — `*references*` (`:2056`), `*outline*` (`:2102`),
+    `*lsp-help*` (`:2513`). `*buffer-list*` is hand-rolled
+    (`default.lua:387`) and `*search-results*` is independent.
+  - **Three writers adopt any buffer sharing their name** —
+    `listview.lua:95`, `compile.lua:263`, `default.lua:861-868` — against
+    a rule the tree already states at `terminal.lua:300-305` and
+    implements at `dired.lua:476-504`. Measured: a foreign
+    `*references*` is clobbered and left permanently un-editable, and a
+    `pmacs.compile.run` that **raises on validation** still leaves a
+    foreign `*compilation*` un-editable. Today `M-x buffer.undo` — this
+    arc's bug — is the only recovery, so the arc must not lock these
+    buffers before fixing ownership.
+- **Overlap warning.** Stage 2 touches `src/lua_bindings/mod.rs`'s buffer
+  mutator bindings and `src/buffer.rs`. Do not run it concurrently with
+  the `apply_resource_op` lane or the bottom-panel 2B work without
+  assigning those files to one lane first. The framing itself touches
+  neither.
+- **Re-measured at `ad41cf1` while scouting: 276 CRDT-dark tests**
+  (3,251 vs 3,527), by
+  `cargo test --all-targets --no-default-features --features lua54[,crdt] -- --list | grep -c ': test$'`.
+  Recorded here because the section above asks for exactly that and
+  warns against quoting a stale figure; it does not replace that
+  section's per-target census, which was not re-derived.
+
 ## dired Stage 2 framing lane — PR #171 OPEN, STALE, DO NOT MERGE AS-IS
 
 - Portable branch: `githubsucks/dired-stage2-framing` (head `ab42a79`,
