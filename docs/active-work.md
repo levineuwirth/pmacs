@@ -1,6 +1,6 @@
 # Active work — cross-machine resume ledger
 
-**Snapshot: 2026-07-26.** This file records volatile work that has not
+**Snapshot: 2026-07-28.** This file records volatile work that has not
 landed on `main`. Read it after `docs/agent-handoff.md`. Remove completed
 entries when their PR merges; do not let this become a second permanent
 backlog.
@@ -27,19 +27,12 @@ landed regardless of what a lane says.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `42025e4` (Lean 4 Stage 4b #181, atop the dired
-  Stage 1 landed docs #169 and the PTY-terminate diagnostic #176,
-  terminal copy mode #178, the GPU-terminal-input landed docs #168, Lean
-  4 Stage 4a #179, bottom-panel Stage 2A #177, the bottom-panel Stage 2
-  framing #175, terminal configuration Stage 1 #173, Lean 4 Stage 3b
-  #170, Stage 3a #167, the CRDT undo repro #157, the inline-math
-  landed-doc refresh #172, the bottom-panel landed-doc refresh #156, the
-  inline-math slice #158, dired Stage 1 #165, the GPU terminal input fix
-  #166, Lean 4 Stage 2 #161, the dired framing #164, COHERENCE.md #163,
-  find-file #162, Lean 4 Stage 1 #160, and the minimap blank-slab fix
-  #159; protocol v20). The previous snapshot named `74301d1`, and **the
-  recovery floor advances with it**: the check below now requires
-  `42025e4` or newer, so a tree at `74301d1` no longer passes. That is
+  `githubsucks/main` @ `c2d56ff` (Journey Stage 1a #182, which
+  incorporated terminal configuration + copy mode #180, atop Lean 4
+  Stage 4b #181 and the previously recorded landed work; protocol v20).
+  The previous snapshot named `42025e4`, and **the recovery floor
+  advances with it**: the check below now requires `c2d56ff` or newer,
+  so a tree at `42025e4` no longer passes. That is
   deliberate — the floor moves with the base, because a check that
   accepts an older commit than the declared base passes on a tree the
   rest of this file does not describe.
@@ -78,7 +71,7 @@ git worktree list
 git status --short --branch
 ```
 
-The `git log` command must expose `42025e4` — the base named above — or a
+The `git log` command must expose `c2d56ff` — the base named above — or a
 newer intentional main. Keep this threshold and the canonical-base line in
 step: a recovery check that accepts an older commit than the base it
 declares canonical will pass on a tree the rest of this file does not
@@ -178,50 +171,91 @@ If it does not, stop and repair the remote/fetch configuration.
   to recur; the next occurrence carries its own evidence under whoever's
   PR, and a Stage B framing follows then.
 
-## Journey Stage 1a — PR #182 OPEN, review round 1 closed
+## Journey/GPU directory-target ratchet — PR #183 GATED ON PUBLIC PATH
 
-- Framing `docs/journey-stage1a-framing.md` **rev 8** (four review
-  rounds, two correction revisions found during implementation, one from
-  review round 1 of PR #182).
-  Branch `journey-stage1a-directory-open`, based on `githubsucks/main`
-  @ `42025e4` (rebased onto `74301d1`, then integrated `42025e4` and the
-  landed-docs work below by merge — the branch is under review, so its
-  history is no longer rewritten).
-- Recovery: `git fetch githubsucks && git checkout
-  journey-stage1a-directory-open`. Everything below is committed and
-  pushed; nothing depends on a worktree or `/tmp`.
-- **Ships:** the directory arm on `resolve_target_buffer`,
-  `EditorState::open` rewritten as a caller of it (the unification), the
-  `path.open-directory` chain + `pmacs.path.directory_handler` fallback
-  slot, `pmacs.window.commit_to` with its scoped frontend and preflight,
-  the nonconstructible destination userdata, the daemon bootstrap arm,
-  and `tests/journey_acceptance.rs` (**24 pins** as of rev 8 — a count,
-  not a constant; re-read it rather than quoting this line). No protocol
-  change — still v20.
-- **Doc updates ride the PR** per COHERENCE §25: §2 grade + step-3
-  verdict row, §20 Priority 1 + the arc list, the GPU initial-target
-  framing's Q#GT6 / acceptance 10 supersession, handoff §1.
-- **Bite results** (each mutation run against the full suite): scope
-  stops swapping `core.active_frontend` → N6a + P3 fail, nothing else;
-  preflight moved after the callback → P1 + P2 fail, nothing else; drop
-  the `ScopedFrontend` arm from `acting_frontend` → N4b fails, nothing
-  else. That last mutation is why N4b exists — it left N4 green.
-  Round 1 of PR #182 added two more: dired's `display` back to
-  `switch_buffer`, and `prev` read from the ambient window → each fails
-  **N4c** alone. **The scope pins the frontend, not the window** — every
-  routing pin before N4c varied frontend identity and none varied the
-  selected window within one frontend, so 23 green pins missed it.
-- Ordering: PR #177 MERGED (2026-07-26), so 1a was unblocked. 1a lands
-  before dired Stage 2. When 1a lands, Stage 2 must re-scout and revise
-  its framing around the scoped `pmacs.window.commit_to` boundary before
-  its implementation branch is cut. That revision is a prerequisite, not
-  a review-time discovery.
-- **Named deferrals carried out of this stage:** dired's *interactive*
-  paths (`C-x d`, tree descent, refresh) still rely on the ambient
-  frontend a tick later and are not migrated onto captured destinations;
-  the stale startup scratch buffer is still not removed (only the false
-  doc comment is corrected); `resolve_target_buffer`'s directory arm has
-  no picker, only the chain that leaves room for one.
+- **Approved correction, not new product behavior.** GPU initial-target
+  framing Q#GT6 / acceptance 10 and Journey Stage 1a N2/N5 already make
+  a directory target a success; `COHERENCE.md` §2 treats that path as a
+  protected journey. The stale GPU integration test still listed `"."`
+  among malformed/unloadable targets after #182 landed.
+- Branch `journey-gpu-directory-ratchet`, based directly on canonical
+  `main` @ `c2d56ff`. Recovery: `git fetch githubsucks && git checkout
+  journey-gpu-directory-ratchet`. Everything described here is
+  committed and pushed; nothing depends on the `/tmp` worktree.
+- PR #183:
+  <https://github.com/levineuwirth/pmacs/pull/183>. It is intentionally
+  open and unmerged pending user review.
+- **Scope is one acceptance ratchet:** remove `"."` from the four
+  genuinely invalid cases and drive the public `pmacs --gpu .` root
+  broker through the real managed GPU connector. The positive requires
+  snapshot-first + `InitialTargetResult::Opened`, then consumes the
+  post-quiescence replacement snapshot and requires dired's canonical
+  header plus a known directory entry before proving the same daemon can
+  open a following file target. The private display-less acceptance
+  probe now reports its snapshot count and final materialized text so
+  that public path is observable. No normal frontend/daemon behavior,
+  protocol, framing decision, or coherence grade changes.
+- **Review round 1: three findings, all real and corrected.** The
+  first test stopped at the deliberately pre-existing bootstrap
+  document, so it did not pin the resolver's later dired commit. The
+  Stage 2 rev-5 recovery bullet named rev 4's framing branch. And the
+  durable handoff still named pre-Journey `main` even though this ledger
+  had advanced. The first is now a post-quiescence transport assertion;
+  the latter two are corrected in this revision. The complete matrix
+  below is green on the corrected tree.
+- **Live public-path check tightened that correction further.** A user
+  report that `pmacs --gpu .` differed from `pmacs .` did not reproduce:
+  the live default daemon delivered both snapshots, and a traced
+  windowed invocation applied both and displayed dired. It nevertheless
+  exposed that the corrected acceptance still attached a raw protocol
+  client rather than invoking the public root broker and real GPU
+  connector. The test now covers those surfaces and passes **15/15**;
+  its full matrix is green at `34b8f28`.
+- **Review round 2 found and fixed one failure-path cleanup gap at
+  `dc2dc42`.** The public-path test waited directly for dired's second
+  snapshot, but `ManagedProbe` only retained a spawned daemon's PID after
+  a successful wait. If the exact missing-snapshot regression recurred,
+  the timeout would therefore be unable to terminate that daemon. The
+  test now consumes the initial ready report first, retaining lifecycle
+  facts before it starts the post-quiescence assertion.
+- **Review-round-2 gates are green:** `cargo fmt --check`; strict
+  workspace clippy; library **1,849 passed / 3 ignored**; CRDT library
+  **2,034 passed / 4 ignored**; focused public-path test **1/1** and full
+  GPU invocation suite **15/15**; M4 **121 passed / 3 ignored / 1
+  filtered**; required GPU package **202/202**; `git diff --check`.
+  The first in-sandbox GPU-package attempt reproduced the repository's
+  documented Unix-socket restriction as three attach failures plus a
+  blocked peer read; the authoritative out-of-sandbox rerun passed all
+  **202** tests in under one second.
+- **Full gate matrix is green on the public-path revision at `34b8f28`:**
+  - `cargo fmt --check`;
+  - strict workspace clippy;
+  - library **1,849 passed / 3 ignored**;
+  - CRDT library **2,034 passed / 4 ignored**;
+  - touched GPU initial-target suite **15/15**;
+  - connected Journey/Dired/find-file/theme/bottom-panel acceptance
+    suites **125/125**;
+  - M4 **121 passed / 3 ignored / 1 filtered**;
+  - required GPU package **202/202**;
+  - `git diff --check`;
+  - isolated-config, one-invocation full workspace sweep green on its
+    final run.
+- **Gate diagnostics retained:** initial fresh-worktree attempts without
+  the documented `pmacs-gpu` prerequisite and without out-of-sandbox
+  Unix-socket permission were setup failures, not product evidence.
+  During the review rerun, an in-sandbox library attempt reproduced the
+  latter setup failure as `EPERM` in three attach socket tests; the
+  authoritative out-of-sandbox rerun passed all **1,849** non-ignored
+  tests.
+  The first full-workspace attempt then exhausted the `/tmp` filesystem
+  quota while linking. Moving only the disposable Cargo target to disk
+  let the sweep run; its first completed pass exposed one transient
+  `pmacs-gpu` font-facts unit-test red after the standalone GPU gate had
+  passed. The exact test passed immediately against the identical build,
+  and the required complete one-invocation rerun was green, including
+  GPU **202/202**.
+- This side quest lands before bottom-panel 2B-1 opens its PR. After it
+  merges, 2B-1 integrates the new `main` and reruns its full matrix.
 
 ## The CRDT half of the test corpus is dark in CI — NEEDS A LANE
 
@@ -358,10 +392,43 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
-## Bottom-panel lane (Arc 7) — Stages 1, 2A + framing MERGED; 2B is next
+## Bottom-panel lane (Arc 7) — 2B-1 GATED; waiting on ratchet side quest
 
-Stage 1, the Stage 2 framing, and Stage 2A are all on `main`. **Stage 2B
-has not started.**
+Stage 1, the Stage 2 framing, and Stage 2A are on `main`. Framing
+revision 5's three-way split of 2B was explicitly approved on
+2026-07-27. **Stage 2B-1 is implemented, integrated with canonical
+`main`, and pushed at `b9123c2`; no PR is open.** Its own omissions found
+by gating are corrected. The Journey/GPU ratchet lane above is its sole
+remaining dependency.
+
+- **Stage 2B-1 branch:** `bottom-panel-stage2b`, based on
+  `githubsucks/main` @ `c2d56ff` by merge because review had begun.
+  Recovery: `git fetch githubsucks && git checkout
+  bottom-panel-stage2b`. Everything is committed and pushed; nothing
+  depends on a worktree or `/tmp`.
+- **Ships only the v21 wire layer:** the four wire shapes, version bump,
+  shared cell-grid validator, and version-ladder move. It has no
+  producer, consumer, or capability change; `panel_capable` stays
+  `false`, so this slice changes no user-visible journey grade.
+- **Review round 1 closed:** two P1s and one P2, all corrected at
+  `9b364ad`: `PanelFrame` now identifies its buffer, the transport
+  ratchet covers the actual attach path rather than a detached codec
+  assertion, and shared grid bounds have one validator.
+- **The full gate found and corrected two further 2B-1 omissions at
+  `b9123c2`:** the statusline version ladder still pinned v20/rejected
+  v21, and Vterm Stage 3 pinned v20 both structurally and in its real
+  headless probe. Those ratchets now expect v21 and, where applicable,
+  reject v22.
+- **Green evidence except for the main-side stale ratchet this side
+  quest owns:** formatting and strict Clippy; default/CRDT libraries;
+  every bottom-panel, folding, GPU-font, statusline, semantic, Vterm,
+  M4, and required-GPU gate; and the isolated-config full-workspace
+  sweep. The exact counts and the classified M8 timing rerun live at
+  `b9123c2`.
+- **Next ordering is fixed:** 2B-2 branches from `main` only after 2B-1
+  lands; 2B-3 branches only after 2B-2 lands. The daemon epoch machine
+  belongs to 2B-2; the GPU band and negotiated capability flip belong
+  to 2B-3.
 
 - **Stage 2A MERGED as #177** (`main` @ `0a3fcd1`, 2026-07-26, all twelve
   checks green at `8424172`, three review rounds). Branch
@@ -374,19 +441,7 @@ has not started.**
   `primary_document_window` returns `view.active` in every existing
   configuration, so this is seam adoption that becomes load-bearing in
   2B.
-- **Stage 2B is approved and unstarted.** It branches from `main`, **not
-  stacked on 2A**, per the framing §9. Scope: protocol v21, the daemon
-  panel projection, the GPU band, and the negotiated `panel_capable`
-  flip. `docs/bottom-panel-stage2-framing.md` §7.2 carries its five
-  acceptance criteria (A2B-1..5) plus the reassertion of parent
-  criterion 52, and §8 records **no open items**, so 2B needs no further
-  framing round. Its sharpest trap is §5.3's three-boundary split: the
-  GPU `text_area_bottom` is `status_band_top`,
-  `geometry_capacity_bottom` and `document_text_bottom` at once, and a
-  blanket rewrite moves the status chrome along with the document while
-  still satisfying an "everything moved" assertion — hence A2B-4's
-  contrast form.
-- Verification on the merge result: `cargo fmt --check` clean; strict
+- **Stage 2A verification on its merge result:** `cargo fmt --check` clean; strict
   workspace Clippy clean; **1,832 default + 2,015 CRDT** library tests;
   `bottom_panel_stage2a_acceptance` **17**; bottom-panel Stage 1 46;
   statusline segments 8 CRDT; m11_5 semantic 2 CRDT; GPU initial target
@@ -442,26 +497,31 @@ has not started.**
   `docs/agent-handoff.md` §1; the two round lessons are in §5.
 - Landed-docs follow-up merged as **#156** (`main` @ `d152120`,
   2026-07-25).
-- **Stage 2 framing: `docs/bottom-panel-stage2-framing.md` revision 4**,
-  on branch `githubsucks/bottom-panel-stage2-framing` (three commits,
-  one per revision), worktree `../pmacs-bp-stage2`, based on
-  `githubsucks/main` @ `ccf29e3`. Round 1 closed 2 blocking + 3 high;
+- **Stage 2 framing: `docs/bottom-panel-stage2-framing.md` revision 5**
+  is commit `56301ed` on branch `githubsucks/bottom-panel-stage2b`,
+  worktree `../pmacs-bp-stage2b`. Revisions 1–4 remain on
+  `githubsucks/bottom-panel-stage2-framing` (head `4fbd47f`, four
+  framing commits, revision 4 at `49757e5`). Round 1 closed 2 blocking +
+  3 high;
   round 2 closed 1 blocking + 2 high + 1 medium and decided both open
   items; round 3 closed 1 blocking + 1 high + 1 medium. No open items
-  remain. The approved
+  remain. Revision 5 adds no decision; it records the approved
+  2B-1/2B-2/2B-3 implementation split. The
   parent framing `docs/bottom-panel-framing.md` (rev 4) remains
   authoritative, **including its acceptance criteria 37–55**.
 - Retained, carrying nothing unmerged: branch `bottom-panel` and worktree
   `../pmacs-bottom-panel`.
-- **Stage 2 ships as two serial slices**, 2A landing before 2B branches:
+- **Stage 2 ships as four serial implementation slices**, each landing
+  before the next branches:
   **2A** = classified §1.3 census routing + `paint_frame` per-window
   painter extraction (with the active-window auto-scroll preparation), no
-  protocol change; **2B** = protocol **v21**
+  protocol change; **2B-1** = protocol **v21**
   (`InstanceMessage::PanelFrame` plus
   `FrontendEvent::{FrontendCellGeometry, PanelResizeRows, PanelPointer}`,
   gated both directions, each extended enum byte-pinned on its own
-  previous final variant), daemon panel projection, the GPU band, and the
-  negotiated `panel_capable` flip. Stage 3 is the adopter default flip.
+  previous final variant); **2B-2** = daemon panel projection and epoch
+  machine; **2B-3** = the GPU band and negotiated `panel_capable` flip.
+  Stage 3 is the adopter default flip.
 - **Correction — this entry previously mis-stated the census contract.**
   It is **not** "route every consumer through `primary_document_window`".
   Q#BP14 classifies the 23 reads into four classes and routes only the

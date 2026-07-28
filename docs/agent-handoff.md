@@ -1,6 +1,9 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-26, after terminal copy mode (#178) — `C-c C-t`
+**Last updated: 2026-07-28, after Journey Stage 1a (#182), which made
+directory startup one coherent local/daemon/GPU path and incorporated
+the terminal configuration + copy mode landed-doc work (#180); following
+terminal copy mode (#178) — `C-c C-t`
 materializes a terminal's whole retained range into an ordinary buffer,
 plus `Buffer::set_generated_contents`, the first genuinely immutable
 generated-buffer write path — and its landed-doc pair (#168); following
@@ -39,10 +42,12 @@ reads it the way you just did.
 For volatile branches, checkpoints, verification, and recovery
 commands, read `docs/active-work.md` immediately after this file.
 
-## 1. Where the project stands (2026-07-26)
+## 1. Where the project stands (2026-07-28)
 
-- `main` @ `42025e4` (Lean 4 Stage 4b #181, atop the dired Stage 1
-  landed docs #169 and the PTY-terminate diagnostic #176, terminal copy
+- `main` @ `c2d56ff` (Journey Stage 1a #182, incorporating terminal
+  configuration + copy mode landed docs #180, atop Lean 4 Stage 4b #181,
+  the dired Stage 1 landed docs #169 and the PTY-terminate diagnostic
+  #176, terminal copy
   mode #178, the GPU-terminal-input landed docs #168, Lean 4 Stage 4a
   #179, bottom-panel Stage 2A
   #177, the bottom-panel Stage 2 framing #175, terminal configuration
