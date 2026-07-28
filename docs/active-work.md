@@ -313,8 +313,9 @@ revision 5's three-way split of 2B was explicitly approved on
 2B-1 is implemented and integrated with canonical `main` @ `7fd646d`.
 Review round 2's four findings are corrected at `ab7c207`; the
 gate-found GPU/PTY probe barrier is corrected and the complete suite is
-green at `9e20175`. PR #184 is open and must not merge before user
-review.**
+green at `9e20175`. The follow-up fixture-specific probe correction is
+committed and proportionally regated at `9c79ce1`. PR #184 is open and
+must not merge before user review.**
 
 - **Stage 2B-1 branch:** `bottom-panel-stage2b`, based on
   `githubsucks/main` @ `7fd646d` by merge because review had begun.
@@ -353,6 +354,14 @@ review.**
   sampled a blank frame. The probe now waits for the exact child-output
   observation its acceptance asserts. The formerly failing exact
   GPU/PTY test passes, and the full nine-test Stage 3 target passes.
+- **Follow-up review corrected the probe barrier's fixture leak at
+  `9c79ce1`.** The generic runner hard-coded the producer fixture's
+  `VTERMROW` breadcrumb, so the CAT input fixture could satisfy every
+  assertion but never satisfy the loop exit and waited out the
+  20-second safety deadline. Producer probes now name their required
+  frame text while input probes finish on the latched echo. The report
+  exposes `completion_observed`, and both paths assert it, so a
+  deadline-driven pass cannot hide the stall again.
 - **The full gate found and corrected two 2B-1 omissions:** the
   statusline version ladder still pinned v20/rejected v21, and Vterm
   Stage 3 pinned v20 both structurally and in its real headless probe.
@@ -409,6 +418,15 @@ review.**
     passed all **1,849 + 3 ignored**, and the matching CRDT run passed.
     This is retained as environment classification, not presented as a
     clean first attempt.
+- **The fixture-specific follow-up is proportionally green at
+  `9c79ce1`:** formatting and strict workspace Clippy; protocol
+  **17/17**; bottom-panel Stage 2B-1 **16/16**; Vterm Stage 3 **9/9
+  CRDT** with the real daemon + PTY + required wgpu probe in **5.72 s**;
+  the formerly stalled CAT path **1/1 in 0.32 s**; required GPU
+  **202/202**; and `git diff --check`. The first Stage 2B-1 and Vterm
+  attempts inside the restricted tool sandbox reproduced the classified
+  Unix-socket `Operation not permitted` denial; their authoritative
+  outside-sandbox reruns passed.
 - **Next ordering is fixed:** 2B-2 branches from `main` only after 2B-1
   lands; 2B-3 branches only after 2B-2 lands. The daemon epoch machine
   belongs to 2B-2; the GPU band and negotiated capability flip belong
