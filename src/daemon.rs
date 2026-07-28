@@ -6132,6 +6132,97 @@ mod tests {
         );
     }
 
+    /// Criterion 49's font/scale/resize race, and the reason Q#BP16 step
+    /// 3 compares the payload's geometry epoch against **both** the
+    /// shipped declaration and the daemon's latest accepted one.
+    ///
+    /// A declaration accepted between two renders makes the two diverge:
+    /// the frontend is still looking at a frame answering the old epoch,
+    /// so a gesture matching that frame passes the session-side check
+    /// alone. Only the daemon-side comparison catches it — which is
+    /// exactly "an older retained frame neither paints nor accepts input
+    /// after a new `geometry_epoch` until a matching `Present` arrives".
+    #[test]
+    fn a_gesture_answering_a_superseded_geometry_is_dropped() {
+        let mut editor = crate::editor::EditorState::new();
+        let fid = FrontendId(712);
+        let (document, panel) = semantic_panel_view(&editor, fid, true);
+        let panel = panel.expect("panel window");
+        let mut semantic_states = HashMap::new();
+        semantic_states.insert(
+            fid,
+            crate::semantic_render::SemanticRenderState::for_peer(fid, PROTOCOL_VERSION),
+        );
+        editor.accept_semantic_frame_geometry(fid, 1, CellSize::new(24, 80));
+        let (geometry_epoch, panel_epoch) = shipped_declaration(&editor, fid, &mut semantic_states);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+
+        // Q#BP2S1: a font or scale change that leaves `CellSize`
+        // IDENTICAL still advances the epoch, and no frame answering it
+        // has been painted yet.
+        assert_eq!(
+            editor.accept_semantic_frame_geometry(fid, 2, CellSize::new(24, 80)),
+            crate::editor_core::GeometryUpdate::Advanced
+        );
+        assert_eq!(
+            semantic_states[&fid]
+                .panel_declaration()
+                .map(|frame| frame.geometry_epoch),
+            Some(geometry_epoch),
+            "fixture precondition: the SHIPPED declaration still answers the \
+             old epoch, so the session-side check alone would accept"
+        );
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut HashMap::new(),
+            FrontendEvent::PanelPointer {
+                frontend_id: fid,
+                geometry_epoch,
+                panel_epoch,
+                buffer_id,
+                coord: pmacs_protocol::CellCoord::new(0, 0),
+                kind: pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left),
+                mods: pmacs_protocol::Modifiers::default(),
+            },
+        );
+
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            document,
+            "a gesture hit-tested against superseded geometry must drop"
+        );
+
+        // The accepted counterpart: once a frame answering the new epoch
+        // ships, the same gesture shape is honored again.
+        let (fresh_geometry, fresh_panel) = shipped_declaration(&editor, fid, &mut semantic_states);
+        assert_eq!(fresh_geometry, 2, "the new frame answers the new epoch");
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut HashMap::new(),
+            FrontendEvent::PanelPointer {
+                frontend_id: fid,
+                geometry_epoch: fresh_geometry,
+                panel_epoch: fresh_panel,
+                buffer_id,
+                coord: pmacs_protocol::CellCoord::new(0, 0),
+                kind: pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left),
+                mods: pmacs_protocol::Modifiers::default(),
+            },
+        );
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            panel,
+            "…and a gesture answering the CURRENT geometry is accepted"
+        );
+    }
+
     /// Criteria 49/50 for the resize event: matching epochs move the
     /// stored request, a stale presentation epoch does not.
     #[test]
@@ -6185,6 +6276,74 @@ mod tests {
             editor.core.borrow().windows[&panel].params.fixed_rows,
             Some(9),
             "matching epochs move the stored request"
+        );
+    }
+
+    /// Parent acceptance 40, at the seam it would actually break: a
+    /// semantic frontend's `Resize` must not mint frame geometry, even
+    /// when its view is panel-capable.
+    ///
+    /// Stage 1's gate was `panel_capable_for`, which was equivalent to
+    /// "grid" only because no semantic session could be panel-capable.
+    /// Once one can be, that gate feeds it exactly the placeholder
+    /// Q#BP15a forbids — and the failure would show up as a wrongly
+    /// sized first panel, far from this line.
+    #[test]
+    fn a_semantic_resize_does_not_mint_frame_geometry() {
+        let mut editor = crate::editor::EditorState::new();
+        let fid = FrontendId(710);
+        semantic_panel_view(&editor, fid, true);
+        let mut semantic_states = HashMap::new();
+        semantic_states.insert(
+            fid,
+            crate::semantic_render::SemanticRenderState::for_peer(fid, PROTOCOL_VERSION),
+        );
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut HashMap::new(),
+            FrontendEvent::Resize {
+                frontend_id: fid,
+                size: CellSize::new(24, 80),
+            },
+        );
+
+        assert_eq!(
+            editor.core.borrow().frame_geometry_for(fid),
+            None,
+            "40: only FrontendCellGeometry is a semantic frontend's \
+             authoritative cell-equivalent declaration"
+        );
+
+        // The discriminating half: a GRID frontend's resize still is its
+        // declaration, so the gate is not simply switched off.
+        let grid = FrontendId(711);
+        let view = build_fresh_frontend_view(&mut editor, true, true);
+        editor.core.borrow_mut().register_frontend_view(grid, view);
+        let mut render_states = HashMap::new();
+        render_states.insert(grid, RenderState::new(CellSize::new(24, 80)));
+        dispatch_panel_event(
+            &mut editor,
+            grid,
+            PROTOCOL_VERSION,
+            &mut HashMap::new(),
+            &mut render_states,
+            FrontendEvent::Resize {
+                frontend_id: grid,
+                size: CellSize::new(30, 90),
+            },
+        );
+        assert_eq!(
+            editor
+                .core
+                .borrow()
+                .frame_geometry_for(grid)
+                .map(|geometry| geometry.total),
+            Some(CellSize::new(30, 90)),
+            "a grid frontend's real frame size IS its declaration"
         );
     }
 
