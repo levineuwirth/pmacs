@@ -9,9 +9,17 @@ approval, and GitHub records no review on PR #171.
 **Ground truth: re-scouted 2026-07-28 against canonical `main` @
 `6bee09d`** (`Merge pull request #184 from levineuwirth/bottom-panel-stage2b`).
 Rev 4 was scouted at `c8ec8f3` — which is dired Stage 1's *own* merge
-commit — and `main` has moved **153 commits** since. Rev 5 is that
+commit — and `main` had moved **153 commits** since. Rev 5 is that
 re-scout: §0's round-4 section states exactly what moved, what it
 invalidated, and what survived unchanged.
+
+**`main` then moved again mid-re-scout, to `0442d78`** (#174,
+`fix-m4-sink-races`), and this branch is merged up to it. #174 touches
+`tests/m4_acceptance.rs` only, changes no source, and intersects this
+document at exactly one point — a §11 deferral, which it **confirms**
+rather than invalidates. Every scouting claim below therefore holds at
+`0442d78` as well as at `6bee09d`; the `6bee09d` anchor is kept as the
+one the census was actually read against.
 
 Continues `docs/dired-framing.md` (rev 7, approved; Stage 0 merged as
 #162, Stage 1 as #165). That document's §6 and §7 carry the *approved*
@@ -1731,10 +1739,17 @@ that deserve an undivided reviewer.
   notifications only). Pre-existing; whether stale results should survive
   a restart is its own question, and `forget_uri` deliberately does not
   answer it.
-- **The rooturi sink's weak wait predicate** (`m4_acceptance.rs:5487`) —
+- **The rooturi sink's weak wait predicate** (`m4_acceptance.rs:5499`) —
   same class as the config-sink race fixed in #174, not observed failing,
   and the obvious fix would trade a precise regression diff for a vague
   timeout. Needs a record terminator in the fake server first.
+  **Confirmed in rev 5, and now backed in-tree:** #174 merged during
+  this re-scout (`main` @ `0442d78`), fixed the *config* sink by waiting
+  for a complete JSONL record (`ends_with('\n')` rather than
+  `contains("probe")`), and **deliberately left the rooturi predicate
+  alone**, adding a comment at `m4_acceptance.rs:5486-5496` giving the
+  same three reasons this deferral gives. So this item is no longer a
+  claim of this framing; it is a claim of the tree.
 - **Recursive copy** — 2c refuses directory sources; a real `copy -r`
   primitive is separate.
 - **The other three non-adopters of `set_generated_contents`** (new in
