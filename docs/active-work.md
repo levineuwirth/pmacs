@@ -211,6 +211,22 @@ If it does not, stop and repair the remote/fetch configuration.
   client rather than invoking the public root broker and real GPU
   connector. The test now covers those surfaces and passes **15/15**;
   its full matrix is green at `34b8f28`.
+- **Review round 2 found and fixed one failure-path cleanup gap at
+  `dc2dc42`.** The public-path test waited directly for dired's second
+  snapshot, but `ManagedProbe` only retained a spawned daemon's PID after
+  a successful wait. If the exact missing-snapshot regression recurred,
+  the timeout would therefore be unable to terminate that daemon. The
+  test now consumes the initial ready report first, retaining lifecycle
+  facts before it starts the post-quiescence assertion.
+- **Review-round-2 gates are green:** `cargo fmt --check`; strict
+  workspace clippy; library **1,849 passed / 3 ignored**; CRDT library
+  **2,034 passed / 4 ignored**; focused public-path test **1/1** and full
+  GPU invocation suite **15/15**; M4 **121 passed / 3 ignored / 1
+  filtered**; required GPU package **202/202**; `git diff --check`.
+  The first in-sandbox GPU-package attempt reproduced the repository's
+  documented Unix-socket restriction as three attach failures plus a
+  blocked peer read; the authoritative out-of-sandbox rerun passed all
+  **202** tests in under one second.
 - **Full gate matrix is green on the public-path revision at `34b8f28`:**
   - `cargo fmt --check`;
   - strict workspace clippy;
