@@ -459,6 +459,78 @@ has **no branch and no framing yet**.
   `FrontendView.fold_projection` to `true` for semantic frontends, which
   Stage 2 deliberately left `false` (Q#FD21).
 
+## Resource-op delete guard lane — PR #186 OPEN, PROPOSED, DO NOT MERGE
+
+- Portable branch: `githubsucks/resource-op-delete-guard`; worktree
+  `../pmacs-resource-op-delete`. **PR #186**, base `main`, forked from
+  `ad41cf1` with **no drift** (`main` is still `ad41cf1`). Currently
+  framing only — `docs/resource-op-delete-guard-framing.md`, revision 2
+  — plus this lane entry. No runtime code yet.
+- **This PR becomes the implementation PR.** Revision 2 dropped rev 1's
+  framing-PR-then-implementation-PR plan as a one-feature/one-branch/
+  one-PR violation. The framing is revised in place; implementation
+  commits land on this same branch **only after explicit user
+  approval**.
+- **Live data-loss bug, reproduced four ways against `ad41cf1`.**
+  `pmacs.buffer.apply_resource_op`'s delete arm removes the path from
+  disk and *then* drops any buffer bound to it, with no dirty check at
+  any link — not the arm, not `remove_buffer_and_fire`, and not
+  `BufferRegistry::remove`, whose only guard is `editing_in_progress`.
+  Reachable through any language server's `WorkspaceEdit`. The four
+  modes: (a) the plain case returns `Ok(())` with file and buffer both
+  gone; (b) `ignore_if_not_exists = true` does **zero** filesystem work
+  and still destroys the buffer; (c) `recursive = true` reconciles
+  **nothing**, so a whole tree leaves orphaned buffers — the most
+  destructive arm does the least reconciliation, and it bypasses any
+  exact-path guard; (d) removal is not `kill_buffer`, so windows are
+  left bound to a removed `BufferId` and the registry can be driven to
+  **empty**.
+- **Approved in principle after review round 1**, revision 1 rejected.
+  Settled: refuse unconditionally; take delete-side prefix-awareness now
+  rather than waiting on #171. Withdrawn: rev 1's buffer-first ordering.
+  The design is now `stat/no-op → enumerate and validate → mutate
+  filesystem → reconcile`, which keeps `on_removed`'s "path already
+  gone" invariant and makes a failed deletion leave buffers intact
+  automatically.
+- **Four facts a re-scout should not have to rediscover**, all verified
+  at `ad41cf1`:
+  - **No caller reliably surfaces a raise.** The server pump runs under
+    `pcall(handle_server_requests)` (`builtin/runtime/lsp.lua:1892`), so
+    a raise unwinds past the `send_response` and the server is never
+    answered; and the two user-initiated paths route uncaught coroutine
+    errors through `pmacs.error`, which is **undefined** (11 call sites
+    in `builtin/`, zero definitions). Refusals must travel as values.
+  - **A partial batch is already the status quo** — verified: two delete
+    ops, the second raises, the first stayed applied. LSP 3.18 says so
+    too: resource-op-bearing edits get `FailureHandlingKind.Abort`,
+    "all operations executed before the failing operation stay
+    executed". Any framing claiming batch atomicity here is wrong.
+  - **`find_by_path` is singular and duplicates are reachable.**
+    `BufferRegistry::find_by_path` returns the first match in insertion
+    order, `EditorCore::find_buffer_for_path` inherits that, and
+    `pmacs.buffer.from_file` creates path-bound buffers with **no
+    dedup** — so a clean first match can hide a modified second. The
+    guard needs a full scan with component-aware `Path::starts_with`.
+  - **pmacs advertises no `workspace.workspaceEdit` capability at all** —
+    `"applyEdit": true` but no `documentChanges`, no
+    `resourceOperations`, no `failureHandling`; `grep -rn
+    failureHandling` returns 0. Parked, not fixed here.
+- **Ownership claim, per the dired lane's own warning below:** dired
+  Stage 2a is "rename/delete reconciliation substrate" and overlaps
+  `builtin/runtime/lsp.lua`. **This lane claims the delete half of that
+  substrate and the `apply_workspace_edit` applier for its duration**;
+  dired Stage 2 keeps the rename half. Whichever lands second adopts the
+  first's shared lookup helper. Do not run the two concurrently over
+  `builtin/runtime/lsp.lua` without re-splitting that claim.
+- Files the implementation will touch: `src/lua_bindings/mod.rs`,
+  `builtin/runtime/lsp.lua`, `tests/m4_acceptance.rs`,
+  `src/bin/pmacs_fake_lsp.rs`. **Not** `src/daemon.rs`,
+  `pmacs-protocol/`, `builtin/runtime/dired.lua`,
+  `docs/agent-handoff.md` or `COHERENCE.md`. No protocol change.
+- Recovery from a clean checkout:
+  `git fetch githubsucks && git worktree add ../pmacs-resource-op-delete
+  -b resource-op-delete-guard githubsucks/resource-op-delete-guard`.
+
 ## dired Stage 2 framing lane — PR #171 OPEN, STALE, DO NOT MERGE AS-IS
 
 - Portable branch: `githubsucks/dired-stage2-framing` (head `ab42a79`,
