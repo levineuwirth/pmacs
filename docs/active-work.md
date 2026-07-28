@@ -1,6 +1,6 @@
 # Active work — cross-machine resume ledger
 
-**Snapshot: 2026-07-27.** This file records volatile work that has not
+**Snapshot: 2026-07-28.** This file records volatile work that has not
 landed on `main`. Read it after `docs/agent-handoff.md`. Remove completed
 entries when their PR merges; do not let this become a second permanent
 backlog.
@@ -27,12 +27,11 @@ landed regardless of what a lane says.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `c2d56ff` (Journey Stage 1a #182, which
-  incorporated terminal configuration + copy mode #180, atop Lean 4
-  Stage 4b #181 and the previously recorded landed work; protocol v20).
-  The previous snapshot named `42025e4`, and **the recovery floor
-  advances with it**: the check below now requires `c2d56ff` or newer,
-  so a tree at `42025e4` no longer passes. That is
+  `githubsucks/main` @ `7fd646d` (Journey/GPU directory-target ratchet
+  #183, atop Journey Stage 1a #182 and the previously recorded landed
+  work; protocol v20). The previous snapshot named `c2d56ff`, and **the
+  recovery floor advances with it**: the check below now requires
+  `7fd646d` or newer, so a tree at `c2d56ff` no longer passes. That is
   deliberate — the floor moves with the base, because a check that
   accepts an older commit than the declared base passes on a tree the
   rest of this file does not describe.
@@ -71,7 +70,7 @@ git worktree list
 git status --short --branch
 ```
 
-The `git log` command must expose `c2d56ff` — the base named above — or a
+The `git log` command must expose `7fd646d` — the base named above — or a
 newer intentional main. Keep this threshold and the canonical-base line in
 step: a recovery check that accepts an older commit than the base it
 declares canonical will pass on a tree the rest of this file does not
@@ -306,18 +305,16 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
-## Bottom-panel lane (Arc 7) — 2B-1 GATED; PR HELD ON MAIN RATCHET
+## Bottom-panel lane (Arc 7) — 2B-1 INTEGRATED; FULL GATES PENDING
 
 Stage 1, the Stage 2 framing, and Stage 2A are on `main`. Framing
 revision 5's three-way split of 2B was explicitly approved on
 2026-07-27. **Stage 2B-1 is implemented, integrated with canonical
-`main`, and its full matrix has run. No PR is open: one deterministic
-touched-suite assertion is stale on canonical `main` after #182 and
-must be corrected separately before this branch can claim a green
-gate.**
+`main` @ `7fd646d`, and has no remaining dependency. Its full matrix is
+being rerun on the integrated tree before a PR opens.**
 
 - **Stage 2B-1 branch:** `bottom-panel-stage2b`, based on
-  `githubsucks/main` @ `c2d56ff` by merge because review had begun.
+  `githubsucks/main` @ `7fd646d` by merge because review had begun.
   Recovery: `git fetch githubsucks && git checkout
   bottom-panel-stage2b`. Everything described through the integration
   checkpoint is committed and pushed; nothing depends on a worktree or
@@ -334,7 +331,7 @@ gate.**
   statusline version ladder still pinned v20/rejected v21, and Vterm
   Stage 3 pinned v20 both structurally and in its real headless probe.
   Those ratchets now expect v21 and, where applicable, reject v22.
-- **Green evidence on the corrected tree:** formatting and strict
+- **Pre-integration green evidence at `b9123c2`:** formatting and strict
   workspace Clippy; library **1,849 passed + 3 ignored default** and
   **2,034 passed + 4 ignored CRDT**; bottom-panel Stage 1 / 2A / 2B-1
   **46 / 17 / 15**; folding Stage 2 **48**; GPU font **11**; statusline
@@ -347,16 +344,12 @@ gate.**
   `m8_1_acceptance::read_dir_supersede_cancels_in_flight_predecessor`;
   the exact pin, its full 10-test target, and the complete workspace
   rerun all passed.
-- **Sole deterministic red — reproduced unchanged on canonical
-  `main`:** `gpu_initial_target_acceptance` is **13/14**, failing
-  `malformed_or_unloadable_targets_fail_closed_without_poisoning_the_daemon`.
-  Its invalid-target table still includes `"."` and demands only a
-  failure result, while #182 deliberately made a directory target valid
-  and therefore sends the result plus snapshot. The identical failure
-  reproduces at the tree-identical #182 head `7a3a55d`; 2B-1 changes no
-  initial-target behavior. Correct this as a Journey/GPU-initial-target
-  ratchet side quest on `main`, then integrate it here and rerun that
-  touched gate before opening the 2B-1 PR.
+- **The former deterministic red is resolved on `main`.** PR #183
+  corrected `gpu_initial_target_acceptance` through the public
+  `pmacs --gpu .` path, consumed the asynchronous dired snapshot, and
+  retained the managed daemon before the wait so failure cleanup remains
+  effective. The code integration auto-composed; the full matrix still
+  has to prove the combined tree.
 - **Next ordering is fixed:** 2B-2 branches from `main` only after 2B-1
   lands; 2B-3 branches only after 2B-2 lands. The daemon epoch machine
   belongs to 2B-2; the GPU band and negotiated capability flip belong
@@ -429,10 +422,12 @@ gate.**
   `docs/agent-handoff.md` §1; the two round lessons are in §5.
 - Landed-docs follow-up merged as **#156** (`main` @ `d152120`,
   2026-07-25).
-- **Stage 2 framing: `docs/bottom-panel-stage2-framing.md` revision 5**,
-  on branch `githubsucks/bottom-panel-stage2-framing` (three commits,
-  one per pre-implementation revision), worktree `../pmacs-bp-stage2`, based on
-  `githubsucks/main` @ `ccf29e3`. Round 1 closed 2 blocking + 3 high;
+- **Stage 2 framing: `docs/bottom-panel-stage2-framing.md` revision 5**
+  is commit `56301ed` on branch `githubsucks/bottom-panel-stage2b`,
+  worktree `../pmacs-bp-stage2b`. Revisions 1–4 remain on
+  `githubsucks/bottom-panel-stage2-framing` (head `4fbd47f`, four
+  framing commits, revision 4 at `49757e5`). Round 1 closed 2 blocking +
+  3 high;
   round 2 closed 1 blocking + 2 high + 1 medium and decided both open
   items; round 3 closed 1 blocking + 1 high + 1 medium. No open items
   remain. Revision 5 adds no decision; it records the approved

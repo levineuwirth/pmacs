@@ -936,10 +936,20 @@ fn run_headless_managed_probe(
         }
     };
     let mut client = managed.client;
+    let initial_message = client.take_initial_message();
     let initial_target_ready = matches!(
-        client.take_initial_message(),
+        initial_message.as_ref(),
         Some(InstanceMessage::BufferSnapshot { .. })
     );
+    let mut buffer_facts = ManagedProbeBufferFacts::default();
+    if let Some(message) = initial_message.as_ref()
+        && let Err(error) = buffer_facts.observe(message)
+    {
+        let contents = format!("phase=error\nerror={error}\n");
+        let _ = write_probe_report(report, &contents);
+        eprintln!("pmacs-gpu managed probe: {error}");
+        return 7;
+    }
     let daemon = managed.daemon;
     let protocol = client.server_protocol_version();
 
@@ -961,8 +971,14 @@ fn run_headless_managed_probe(
     let mut last_wait_result = None;
     let mut last_disconnect = String::new();
     if ready
-        && let Err(error) =
-            write_managed_probe_report(report, "ready", protocol, &daemon, &disconnect)
+        && let Err(error) = write_managed_probe_report(
+            report,
+            "ready",
+            protocol,
+            &daemon,
+            &buffer_facts,
+            &disconnect,
+        )
     {
         eprintln!(
             "pmacs-gpu managed probe: writing {} failed: {error}",
@@ -976,11 +992,23 @@ fn run_headless_managed_probe(
         }
         match event_rx.recv_timeout(Duration::from_millis(50)) {
             Ok(AttachEvent::Message(message)) => {
-                if matches!(*message, InstanceMessage::BufferSnapshot { .. }) && !ready {
+                let is_snapshot = matches!(*message, InstanceMessage::BufferSnapshot { .. });
+                if let Err(error) = buffer_facts.observe(&message) {
+                    let contents = format!("phase=error\nerror={error}\n");
+                    let _ = write_probe_report(report, &contents);
+                    eprintln!("pmacs-gpu managed probe: {error}");
+                    return 7;
+                }
+                if is_snapshot {
                     ready = true;
-                    if let Err(error) =
-                        write_managed_probe_report(report, "ready", protocol, &daemon, &disconnect)
-                    {
+                    if let Err(error) = write_managed_probe_report(
+                        report,
+                        "ready",
+                        protocol,
+                        &daemon,
+                        &buffer_facts,
+                        &disconnect,
+                    ) {
                         eprintln!(
                             "pmacs-gpu managed probe: writing {} failed: {error}",
                             report.display()
@@ -1006,9 +1034,14 @@ fn run_headless_managed_probe(
                 || wait_result != last_wait_result
                 || disconnect != last_disconnect)
         {
-            if let Err(error) =
-                write_managed_probe_report(report, "ready", protocol, &daemon, &disconnect)
-            {
+            if let Err(error) = write_managed_probe_report(
+                report,
+                "ready",
+                protocol,
+                &daemon,
+                &buffer_facts,
+                &disconnect,
+            ) {
                 eprintln!(
                     "pmacs-gpu managed probe: writing {} failed: {error}",
                     report.display()
@@ -1021,9 +1054,14 @@ fn run_headless_managed_probe(
         }
 
         if ready && stdin_closed {
-            if let Err(error) =
-                write_managed_probe_report(report, "complete", protocol, &daemon, &disconnect)
-            {
+            if let Err(error) = write_managed_probe_report(
+                report,
+                "complete",
+                protocol,
+                &daemon,
+                &buffer_facts,
+                &disconnect,
+            ) {
                 eprintln!(
                     "pmacs-gpu managed probe: writing {} failed: {error}",
                     report.display()
@@ -1043,11 +1081,42 @@ fn run_headless_managed_probe(
     }
 }
 
+#[derive(Default)]
+struct ManagedProbeBufferFacts {
+    snapshots: u32,
+    last_snapshot_text: String,
+}
+
+impl ManagedProbeBufferFacts {
+    fn observe(&mut self, message: &InstanceMessage) -> Result<(), String> {
+        let InstanceMessage::BufferSnapshot { crdt_snapshot, .. } = message else {
+            return Ok(());
+        };
+        let doc = loro::LoroDoc::new();
+        doc.import(crdt_snapshot)
+            .map_err(|error| format!("BufferSnapshot import failed: {error:?}"))?;
+        self.snapshots += 1;
+        self.last_snapshot_text = doc.get_text(LORO_TEXT_CONTAINER).to_string();
+        Ok(())
+    }
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
+
 fn write_managed_probe_report(
     report: &Path,
     phase: &str,
     protocol: u32,
     daemon: &attach::ManagedDaemonFacts,
+    buffer_facts: &ManagedProbeBufferFacts,
     disconnect: &str,
 ) -> std::io::Result<()> {
     use std::fmt::Write as _;
@@ -1056,6 +1125,12 @@ fn write_managed_probe_report(
     let _ = writeln!(out, "phase={phase}");
     let _ = writeln!(out, "server_protocol_version={protocol}");
     let _ = writeln!(out, "buffer_snapshot=true");
+    let _ = writeln!(out, "buffer_snapshots={}", buffer_facts.snapshots);
+    let _ = writeln!(
+        out,
+        "last_snapshot_hex={}",
+        hex_bytes(buffer_facts.last_snapshot_text.as_bytes())
+    );
     let _ = writeln!(out, "spawned_daemon={}", daemon.spawned_daemon());
     let _ = writeln!(
         out,
