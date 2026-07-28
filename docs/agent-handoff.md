@@ -1,9 +1,13 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-26, after Lean 4 Stage 4a (#179) — the typed-edit
+**Last updated: 2026-07-26, after terminal copy mode (#178) — `C-c C-t`
+materializes a terminal's whole retained range into an ordinary buffer,
+plus `Buffer::set_generated_contents`, the first genuinely immutable
+generated-buffer write path — and its landed-doc pair (#168); following
+Lean 4 Stage 4a (#179) — the typed-edit
 consumer chain — and bottom-panel Stage 2A (#177), the classified census
 routing that makes every Projection-class consumer ask
-`primary_document_window`; following the bottom-panel Stage 2 framing
+`primary_document_window`; the bottom-panel Stage 2 framing
 (#175), terminal configuration Stage 1 (#173) — profiles, scrollback, a
 per-terminal configurable escape key, and the `C-c t` opening binding —
 Lean 4 stages 3a and 3b (#167, #170), pmacs' first Lean language server;
@@ -37,8 +41,10 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-26)
 
-- `main` @ `74301d1` (the dired Stage 1 landed-doc refresh #169 atop
-  Lean 4 Stage 4a #179, bottom-panel Stage 2A
+- `main` @ `42025e4` (Lean 4 Stage 4b #181, atop the dired Stage 1
+  landed docs #169 and the PTY-terminate diagnostic #176, terminal copy
+  mode #178, the GPU-terminal-input landed docs #168, Lean 4 Stage 4a
+  #179, bottom-panel Stage 2A
   #177, the bottom-panel Stage 2 framing #175, terminal configuration
   Stage 1 #173, Lean 4 Stage 3b #170, Stage 3a #167, the CRDT undo repro
   #157, the inline-math landed-doc refresh #172, the bottom-panel
@@ -55,11 +61,100 @@ commands, read `docs/active-work.md` immediately after this file.
   standard new work is evaluated against. Per `CLAUDE.md`, **every new
   framing doc must state its coherence impact** — journey steps touched,
   interaction islands added, config-registry adoption, background-work
-  attribution. Its §2 grades the golden journey **broken at step 3**
-  (`pmacs .` exits 1).
-- **Lean 4 arc (Arc 8) — stages 1, 2, 3a, 3b LANDED**
-  (`docs/lean4-mode-framing.md`; #160, #161, #167, #170; merge
-  `d400f30`). pmacs edits Lean 4: `arborium-lean` highlighting, a
+  attribution. Its §2 grades the golden journey; **Journey Stage 1a
+  moved that grade off "broken at step 3"** — see the arc bullet below.
+- **Journey arc (P1) — Stage 1a LANDED**
+  (`docs/journey-stage1a-framing.md`). `pmacs .` opens a directory
+  instead of exiting 1, on **one** path: `resolve_target_buffer` gained a
+  `ResolvedTarget::Directory` arm *ahead* of the load, `EditorState::open`
+  became a caller of it rather than a parallel implementation, and the
+  daemon/GPU bootstrap shares the same arm. Which surface handles a
+  directory is the `path.open-directory` chain with dired as a
+  replaceable fallback slot. `tests/journey_acceptance.rs` is the new
+  cross-subsystem ratchet (steps 2, 3, 5 seeded; **stages add rows, none
+  removes them**). No protocol change.
+  - **A hook a builtin subscribes to can never be first-claimant-wins
+    for users.** `HookRegistry::add` only appends and builtins load
+    before `init.lua`, so a dired subscription would always claim before
+    any user listener. That is why dired is a *slot*
+    (`pmacs.path.directory_handler`) and not a subscriber — and why
+    clearing the slot has to leave startup succeeding with a status,
+    not exiting 1.
+  - **A raise and a `false` are indistinguishable in `proceed`.**
+    `run_short_circuit` returns `proceed = false` for both; only
+    `HookOutcome.errors` separates them, and it decides whether to
+    *report*, not whether to fall back. Getting this backwards produces a
+    fallback that runs after a user's resolver crashed mid-handling.
+  - **The listing is async; the bootstrap is synchronous.** The whole
+    post-await commit therefore runs against a destination captured at
+    request time (`pmacs.window.commit_to`), which preflights every
+    precondition *before* invoking the callback — dired mutates handle
+    state, `prev`, and paint long before it reaches anything that could
+    refuse, so validating at display time is four mutations too late.
+    Awaiting inside a commit is refused: a yield would restore the scope
+    while the coroutine is still parked.
+  - **The scope swaps `core.active_frontend`, not just an override** —
+    `pmacs.window.buffer()`'s no-arg arm reads the ambient active buffer
+    directly, so dired's `prev` capture would otherwise follow whatever
+    frontend happened to be dispatching. The override *also* exists, and
+    is load-bearing in exactly one case: a commit reached from inside an
+    interactive command, where the origin would otherwise outrank the
+    ambient value. Bite-testing found N4 green without it.
+  - **`replace_active_buffer` does not drop the startup scratch buffer**,
+    despite its doc comment having claimed so for as long as it has
+    existed. Its body is one `switch_active_buffer` call. The comment is
+    corrected here; changing the lifetime is separate work.
+  - Stage 1b is the named remainder: compile binding + Cargo defaults,
+    LSP spawn guidance, welcome buffer.
+- **Terminal configuration + copy mode arc — COMPLETE**
+  (`docs/terminal-config-and-copy-mode-framing.md` rev 4; Stage 1 #173,
+  Stage 2 #178; no protocol change in either, still v20). Stage 1 ships
+  profiles, scrollback, a per-terminal configurable escape key and the
+  `C-c t` opener; Stage 2 ships copy mode — `M-x terminal.copy-mode` /
+  `C-c C-t`.
+  - **The snapshot MATERIALIZES into an ordinary buffer.** That is the
+    arc's organizing decision: isearch, motion, selection and the kill
+    ring work with no new substrate, and "keys must not reach the child"
+    dissolves structurally, because the transport arm keys on
+    `is_terminal(buffer_id)` and a snapshot is not a terminal. **The
+    dispatch-shadow count therefore stays at six.**
+  - **`prune` reacts to buffer removal rather than causing it** — it
+    filters on `!registry.contains(buffer_id)`, so a child exiting does
+    **not** remove the terminal buffer. That is what makes `on_removed` a
+    sound teardown hook, and why a finished command's output stays
+    readable.
+  - **Ownership means "in our own handle table", never found-by-name**
+    (dired's F7 rule, re-learned here): snapshot writes use
+    `bypass_intercept`, so adopting a same-named foreign buffer clobbers
+    user data. Snapshot identity is keyed by **comparing buffer handles
+    in an array** — `BufferIdLua` implements `__eq` but each wrapper is a
+    distinct table key, so comparison works and hashing does not.
+  - **Profiles are a raw Lua table**, joining `pmacs.lsp.config` and
+    `pmacs.pair.sets`, because `ConfigValue` is four scalars with no
+    table kind. The two open-time settings resolve through the **global**
+    chain (they are read before the identity buffer exists); only
+    `terminal.escape-key` resolves per buffer, and its cache lives on
+    **`TerminalSession`** so its lifetime is the terminal's —
+    `value_epoch` alone is not a sufficient key, because it does not
+    advance when focus moves between terminals holding different
+    buffer-local values.
+  - **Criterion 17 is deliberately unpinned, and its bite is now stated
+    correctly.** A real semantic frontend proving neither copy is mutated
+    needs the actual GPU binary (the optimistic apply exists only in
+    `pmacs-gpu/src/main.rs`; the headless `SemanticClient` has no
+    optimistic path), i.e. the `a37` footing §5 warns about. After
+    `set_generated_contents` the eventual test must look for
+    **unauthorized mirror mutation plus daemon refusal — divergence**,
+    not the "mutates both sides silently" the criterion originally
+    specified, which can no longer happen and would pass for the wrong
+    reason. *A fix can invalidate a test that was never written.*
+  - Test instruments worth reusing: **`cat -v` is the echo probe**,
+    because the screen rejects C0 controls before they reach cells so a
+    raw echoed `Ctrl-X` is invisible; and such probes must **count
+    occurrences rather than test presence**, because a single-character
+    probe collides with the child's own banner text.
+- **Lean 4 arc (Arc 8) — stages 1, 2, 3a, 3b, 4a, 4b ALL LANDED**
+  (`docs/lean4-mode-framing.md`; #160, #161, #167, #170, #179, #181). pmacs edits Lean 4: `arborium-lean` highlighting, a
   `lean4` major mode, `⟨⟩ ⦃⦄ ⟮⟯` pairs, and a `lake serve` language
   server with a Lake-aware outermost root, a lazy toolchain probe, a
   one-shot `lean --server` fallback, and `waitForDiagnostics`. **No
@@ -102,8 +197,9 @@ commands, read `docs/active-work.md` immediately after this file.
     config swap invalidates. The durable lesson is to heal at
     **consumption** — the point where a stale record is handed out — not
     at the moment of the swap.
-  - **Stage 4a (typed-edit consumer chain) MERGED as #179** (`main` @
-    `a27f646`, two review rounds). It is substrate only:
+  - **Stage 4a (the typed-edit consumer chain) MERGED as #179**
+    (branch `lean4-stage4a-typed-edit-chain`, framing rev 8; it is part
+    of the main anchor above). It is substrate only:
     `builtin/runtime/typed_edit.lua` owns the
     single `buffer.after-edit` subscriber and the single one-shot read,
     `pair.lua` becomes its first registered consumer, and
@@ -128,8 +224,8 @@ commands, read `docs/active-work.md` immediately after this file.
     reason had been copied into a module comment, an acceptance
     criterion, a test comment, and the ledger. **Correct the source a
     rationale derives from, not only the sites that quote it.**
-  - **Stage 4b (the Unicode input method) is implemented and in review**
-    (branch `lean4-stage4b-input-method`, framing rev 9): a vendored
+  - **Stage 4b (the Unicode input method) MERGED as #181**
+    (framing rev 9): a vendored
     1,855-entry table generated from `leanprover/vscode-lean4@17d1d08`
     by `scripts/regen-lean-abbrev`, plus a consumer registered on the
     Stage 4a chain at priority 50, ahead of pairing. **A consumer
@@ -992,6 +1088,72 @@ before trusting them:
   `$UID`, use `(id -u)`). Check `$SHELL` here before assuming.
 
 ## 4. Substrate invariants (do not undo; tests enforce most of these)
+
+**Generated buffers: `Buffer::set_generated_contents` is the ONE
+authorized write** (terminal copy mode #178) — lift `read_only`, replace
+via a single whole-buffer `Replace` skipping intercepts, discard history,
+re-assert `read_only`, and **return the `Edit`**. Three things make it a
+unit rather than a convenience:
+
+- **An intercept is not read-only.** `Buffer::undo` reaches the rope
+  through `ensure_writable` and never consults the intercept chain, so an
+  intercept-only "read-only" buffer is emptied by `M-x buffer.undo`.
+  Rebinding the undo *chords* buffer-locally does **not** close it —
+  `compile.lua`'s own comment says so ("command/menu undo stays
+  dispatchable"). Only rope-level `read_only` does.
+- **A bare `set_read_only` would be worse than nothing**, because it also
+  refuses the owner's refresh — the operation such buffers exist for.
+  That is why the pairing, not the setter, is the primitive. There is
+  deliberately no Lua `set_read_only`.
+- **A rope write is only half of an edit.** The returned `Edit` must be
+  fanned out (`notify_buffer_edit_to_windows`, which also queues the
+  daemon-origin CRDT op). Skip it and a displaying window keeps a
+  `TextView` line index describing the previous contents — the next paint
+  indexes the new rope with stale ranges and trips
+  `assertion failed: end <= self.len()` — while replica mirrors never
+  import the write at all.
+
+History clearing is load-bearing twice (nothing can pop entries
+`read_only` makes unreachable, so they leak), and must clear **whichever
+history the buffer has**: the v0.1 stacks are bypassed in CRDT mode, where
+it lives in loro's `UndoManager`. That has no `clear`, and needs none — a
+manager records only what happens after construction, so
+`CrdtState::clear_undo_history` rebinds a fresh one to the same doc.
+
+**Not yet adopted — the inventory is four writer mechanisms covering
+five buffers.** *Every remaining intercept-protected writer* uses the
+older idiom: an erroring intercept plus `set_round_trip_input`, written
+through `bypass_intercept`, with the rope left writable. All are
+emptiable by `M-x buffer.undo`:
+
+| writer | buffers | shape |
+|---|---|---|
+| `builtin/runtime/listview.lua:60-61` | every listview panel | delete-all + insert |
+| `builtin/runtime/compile.lua` (`ensure_slot`) | `*compilation*`, `*shell-command*` | **append** per output batch |
+| `builtin/commands/default.lua:869` | `*search-results*` | reset per query, then **append** per match batch |
+| `builtin/runtime/dired.lua:371` | every dired buffer | whole-buffer replace |
+
+**Do not read `ensure_slot` as covering the search panel** — it serves
+`*compilation*` and `*shell-command*` only (`compile.lua:1090,1125`).
+`*search-results*` is an independent panel with its own intercept,
+round-trip mark and writes, and `compile.lua` names it only in a
+predicate. Nor is the scope "every generated buffer": `*workers*`,
+`*help*` and `*buffer-list*` are generated too but do not use this
+idiom, and the REPL package's intercept
+(`builtin/packages/repl/init.lua:187`) is an op-filtering editing
+policy, not a read-only panel — neither group belongs to this lane.
+
+Adoption is not a one-line swap. It inherits the fan-out obligation, and
+the three appending buffers need a **streaming variant** of the
+primitive; listview and dired already write whole-buffer replaces and
+are the cheap half. Recorded in `COHERENCE.md` §14.
+
+**And it does not replace `set_round_trip_input`.** The protection is
+layered across two copies: rope-level `read_only` refuses the op at the
+daemon; round-trip input stops a semantic frontend applying
+optimistically to its **own mirror**, which a daemon-side refusal cannot
+reach — the refusal arrives after the frontend has already painted, so it
+buys divergence, not prevention.
 
 **Command boundaries (Arc 2 kill-ring substrate)** —
 `EditorCore.command_history: HashMap<FrontendId, CommandBoundary{this, last}>`,

@@ -3650,7 +3650,72 @@ fn install_path_module(lua: &Lua) -> mlua::Result<Table> {
             )
         })?,
     )?;
+    // Journey Stage 1a (Q#JR7): the directory fallback.
+    //
+    // The resolver for a directory open is a two-tier arrangement, and
+    // the split is forced by how registration works rather than chosen
+    // for elegance. `path.open-directory` is a short-circuit hook that
+    // **no builtin subscribes to** — because `HookRegistry::add` only
+    // appends and builtins load before `init.lua`, a subscribing builtin
+    // would always claim first and no user listener could ever run. So
+    // the hook is the user's chain, and the default surface is this
+    // slot, consulted only when the chain declines.
+    //
+    // A slot, not a `pmacs.config` setting: `ConfigValue` is four
+    // scalars and a handler is none of them (the same reason terminal
+    // profiles could not be settings). It is an UNOWNED singleton —
+    // last writer wins, no owning package, no `SourceLocation`, no
+    // removal lifecycle, absent from every inspection surface. That is a
+    // real `COHERENCE.md` §13 gap, recorded rather than dressed up: when
+    // §20 Priority 3 lands registration ownership and `hook.remove`,
+    // this becomes an ordinary lowest-priority subscription carrying its
+    // owner and this slot is deleted rather than extended.
+    //
+    // Readable as `pmacs.path.directory_handler` so a replacement can
+    // capture and chain to the previous one; `nil` disables directory
+    // opening entirely, which is what makes that path testable.
+    path.set("directory_handler", mlua::Value::Nil)?;
+    path.set(
+        "set_directory_handler",
+        lua.create_function(|lua, handler: mlua::Value| {
+            match &handler {
+                mlua::Value::Nil | mlua::Value::Function(_) => {}
+                other => {
+                    return Err(mlua::Error::runtime(format!(
+                        "pmacs.path.set_directory_handler: expected a function or nil, got {}",
+                        other.type_name()
+                    )));
+                }
+            }
+            let pmacs: Table = lua.globals().get("pmacs")?;
+            let path: Table = pmacs.get("path")?;
+            path.set("directory_handler", handler)?;
+            Ok(())
+        })?,
+    )?;
     Ok(path)
+}
+
+/// Lua handle for a captured directory destination (Q#JR14d).
+///
+/// Deliberately **nonconstructible from Lua** and read-only. The same
+/// value is passed to every `path.open-directory` listener in turn: as a
+/// table, an earlier listener could mutate it and then decline,
+/// redirecting later listeners or the fallback to a window the user
+/// never asked for — and any Lua could fabricate a plausible
+/// frontend/window/buffer triple and hand it to `commit_to`. Userdata
+/// with no constructor and no setters makes both unrepresentable rather
+/// than merely discouraged.
+///
+/// The single accessor exists because dired needs the exact window for
+/// its `display{window = …}` target; nothing needs the frontend or the
+/// captured buffer, which stay private to the preflight.
+pub(crate) struct DirectoryDestinationLua(pub(crate) crate::editor_core::DirectoryDestination);
+
+impl mlua::UserData for DirectoryDestinationLua {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("window", |_, this, ()| Ok(this.0.window.raw()));
+    }
 }
 
 /// Build the `pmacs.ansi.*` table. The only entry today is
@@ -6937,6 +7002,26 @@ pub fn install_async(
             lua.create_function(move |_, id: u64| Ok(rt.is_complete(id)))?,
         )?;
     }
+
+    // Journey Stage 1a (Q#JR14b): `pmacs.window.commit_to` runs its
+    // callback inside a Rust-stack RAII scope. Yielding out of that
+    // scope would let the guard's dynamic extent and the coroutine's
+    // suspension diverge — the guard would restore the frontend override
+    // while the continuation is still parked, so the rest of the commit
+    // would silently run ambient again, which is the exact bug the scope
+    // exists to prevent. `Handle:await` therefore refuses inside it.
+    //
+    // Enforced here rather than documented in the framing, because a
+    // rule that only exists in prose is one a future caller breaks
+    // without noticing.
+    async_mod.set(
+        "_in_commit_scope",
+        lua.create_function(|lua, ()| {
+            Ok(lua
+                .app_data_ref::<crate::editor::CommitScopeActive>()
+                .is_some_and(|scope| scope.active()))
+        })?,
+    )?;
 
     {
         let rt = runtime.clone();

@@ -26,7 +26,6 @@ use unicode_width::UnicodeWidthStr;
 use crate::async_runtime::SharedAsyncRuntime;
 use crate::cell::{CellCoord, CellSize};
 use crate::editor_core::EditorCore;
-use crate::file_io::load_file;
 use crate::frontend::{Event, Frontend, KeyEvent, KeyEventKind, MouseEvent, install_panic_hook};
 use crate::key::{Chord, display_sequence};
 use crate::keymap_stack::{Action, KeyDispatcher};
@@ -77,6 +76,109 @@ pub(crate) struct InteractiveCommandOriginGuard {
 impl Drop for InteractiveCommandOriginGuard {
     fn drop(&mut self) {
         self.origin.0.set(self.previous);
+    }
+}
+
+/// A frontend scope for **background** work — deliberately NOT
+/// [`InteractiveCommandOrigin`] (Journey Stage 1a, Q#JR14e).
+///
+/// An async continuation (a settled directory listing, and eventually
+/// any other post-await window work) needs to act for the frontend that
+/// *requested* it rather than whichever one happens to be ambient when
+/// the worker finishes. Reusing the interactive origin for that would be
+/// wrong twice over:
+///
+/// 1. **It does not scope enough.** Only `acting_frontend` consults it,
+///    so `pmacs.window.display` would be scoped while no-arg
+///    `pmacs.window.buffer()` (which reads `active_buffer_id()`
+///    directly) and `pmacs.editor.move_to_line` (which mutates the
+///    core's ambient active window) stayed ambient — and those are
+///    precisely the calls that capture and seat.
+/// 2. **It is authenticated user-command authority.** It is what
+///    distinguishes a user command's edit from a plugin's or the data
+///    API's: the pre-edit unfold guard, `invoke_interactive`'s
+///    command-boundary rotation, and the terminal surface's "requires an
+///    interactive frontend context" checks all key off it. A background
+///    listing must not acquire any of that.
+///
+/// So this is a separate slot, resolved *ahead* of the interactive
+/// origin, whose guard **also** swaps `EditorCore::active_frontend` —
+/// which is what covers the core-ambient APIs `acting_frontend` never
+/// sees. That swap is not a workaround: `pmacs.window.buffer()`'s no-arg
+/// arm documents its own correctness as resting on "dispatch sets
+/// `active_frontend` to the acting frontend before running a command",
+/// and this restores that invariant for a continuation.
+#[derive(Clone, Default)]
+pub(crate) struct ScopedFrontend(Rc<Cell<Option<FrontendId>>>);
+
+impl ScopedFrontend {
+    /// The override in force, if any.
+    #[must_use]
+    pub(crate) fn current(&self) -> Option<FrontendId> {
+        self.0.get()
+    }
+
+    /// Enter a background frontend scope, also swapping the core's
+    /// ambient `active_frontend`. Both are restored on drop, on every
+    /// exit path including a raising callback.
+    pub(crate) fn enter(
+        &self,
+        core: &SharedCore,
+        commit_scope: &CommitScopeActive,
+        frontend_id: FrontendId,
+    ) -> ScopedFrontendGuard {
+        let previous = self.0.replace(Some(frontend_id));
+        let previous_active = {
+            let mut core = core.borrow_mut();
+            let was = core.active_frontend;
+            core.active_frontend = frontend_id;
+            was
+        };
+        let previous_commit = commit_scope.0.replace(true);
+        ScopedFrontendGuard {
+            scope: self.clone(),
+            core: core.clone(),
+            previous,
+            previous_active,
+            commit_scope: commit_scope.clone(),
+            previous_commit,
+        }
+    }
+}
+
+pub(crate) struct ScopedFrontendGuard {
+    scope: ScopedFrontend,
+    core: SharedCore,
+    previous: Option<FrontendId>,
+    previous_active: FrontendId,
+    /// Cleared together with the scope, so an awaiting callback cannot
+    /// leave `await` refused after the commit ends (Q#JR14b).
+    commit_scope: CommitScopeActive,
+    previous_commit: bool,
+}
+
+impl Drop for ScopedFrontendGuard {
+    fn drop(&mut self) {
+        self.scope.0.set(self.previous);
+        self.core.borrow_mut().active_frontend = self.previous_active;
+        self.commit_scope.0.set(self.previous_commit);
+    }
+}
+
+/// Whether a `pmacs.window.commit_to` callback is currently running
+/// (Journey Stage 1a, Q#JR14b).
+///
+/// Read from Lua as `pmacs._async._in_commit_scope()`; `Handle:await`
+/// refuses while it is set. Lives beside the scope guard so the two can
+/// never disagree.
+#[derive(Clone, Default)]
+pub struct CommitScopeActive(Rc<Cell<bool>>);
+
+impl CommitScopeActive {
+    /// Whether a commit callback is on the stack.
+    #[must_use]
+    pub fn active(&self) -> bool {
+        self.0.get()
     }
 }
 
@@ -261,6 +363,13 @@ impl EditorState {
         let mut lua_host = LuaHost::with_registry(registry).expect("Lua runtime initialization");
         let interactive_origin = InteractiveCommandOrigin::default();
         lua_host.lua().set_app_data(interactive_origin.clone());
+        // Q#JR14e/Q#JR14b: the background frontend scope and the
+        // commit-scope flag live only as Lua app data -- `commit_to` and
+        // `Handle:await` are the only readers, and both reach them that
+        // way. No `EditorState` field, so there is no second handle that
+        // could disagree with the one the guard restores.
+        lua_host.lua().set_app_data(ScopedFrontend::default());
+        lua_host.lua().set_app_data(CommitScopeActive::default());
         lua_host
             .attach_editor(&core)
             .expect("editor bindings + builtin chunks");
@@ -790,35 +899,65 @@ impl EditorState {
 
     /// Construct an editor for a path. Empty buffer with `[new file]`
     /// status if the path does not exist; loaded contents otherwise.
+    ///
+    /// Journey Stage 1a (Q#JR1): this is a thin caller of
+    /// [`EditorCore::resolve_target_buffer`], not a second
+    /// implementation of it. That primitive documents itself as "one
+    /// primitive, so two path-normalization, dedup, and hook
+    /// transactions cannot drift apart" — and local startup, which had
+    /// hand-written the same three-arm shape, was not one of its callers
+    /// until now.
+    ///
+    /// Two things this caller still owns, and must keep owning:
+    ///
+    /// * **The window install.** `resolve_target_buffer` deliberately
+    ///   does not touch windows, so the caller places the buffer.
+    ///   Startup uses [`Self::replace_active_buffer`], which switches
+    ///   the ACTIVE window — an `install_buffer_in_window` into some
+    ///   other window would load the file and leave the user looking at
+    ///   scratch (Q#JR3).
+    ///
+    ///   It does **not** destroy the scratch buffer, despite what
+    ///   `replace_active_buffer`'s own doc comment has long claimed:
+    ///   that function only calls `switch_active_buffer`, which
+    ///   reassigns the window's `buffer_id` and removes nothing. The
+    ///   startup scratch survives in the registry, and did before this
+    ///   stage too. Changing that is buffer-lifetime work with its own
+    ///   consequences (what else may hold the id, what `C-x b` should
+    ///   list) and is deliberately not smuggled in here.
+    /// * **Firing the hook outside the core borrow.** Listeners
+    ///   re-enter `pmacs.editor.*`, which re-borrows the core
+    ///   (Q#JR1a) — the same reason the daemon bootstrap and
+    ///   `display_file` both fire theirs after their borrow blocks end.
+    ///
+    /// A directory resolves to [`ResolvedTarget::Directory`] and is
+    /// dispatched to the directory resolver chain rather than opened as
+    /// a buffer (Q#JR6); see [`Self::open_directory_target`].
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "stable public entry point mirroring `pmacs PATH` and \
+                  `run(Option<PathBuf>)`; the body stopped consuming the \
+                  PathBuf when this became a `resolve_target_buffer` caller, \
+                  and churning the signature would touch every caller for no \
+                  behavioral gain"
+    )]
     pub fn open(path: PathBuf) -> io::Result<Self> {
-        let display_name = path.display().to_string();
-        let state = Self::new();
+        let mut state = Self::new();
+        let resolved = state
+            .core
+            .borrow_mut()
+            .resolve_target_buffer(&path)
+            .map_err(io::Error::other)?;
         let mut fire_after_load = false;
-        match load_file(&path) {
-            Ok((bytes, meta)) => {
-                let new_id = state
-                    .lua_host
-                    .registry()
-                    .borrow_mut()
-                    .create_from_bytes(display_name, &bytes);
-                state.replace_active_buffer(new_id);
-                let mut core = state.core.borrow_mut();
-                core.set_buffer_path(new_id, Some(path));
-                core.set_buffer_meta(new_id, Some(meta));
-                fire_after_load = true;
-                Ok(())
+        match resolved {
+            crate::editor_core::ResolvedTarget::Buffer { id, fire } => {
+                state.replace_active_buffer(id);
+                fire_after_load = matches!(fire, crate::editor_core::HookKind::AfterLoad);
             }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                let new_id = state.lua_host.registry().borrow_mut().create(display_name);
-                state.replace_active_buffer(new_id);
-                let mut core = state.core.borrow_mut();
-                core.set_buffer_path(new_id, Some(path));
-                core.status = "[new file]".into();
-                Ok(())
+            crate::editor_core::ResolvedTarget::Directory { path } => {
+                state.open_directory_target(&path);
             }
-            Err(e) => Err(e),
-        }?;
-        let mut state = state;
+        }
         if fire_after_load {
             // Fire the hook *after* the borrow on `core` is released
             // (block above ends). Listeners may legitimately re-enter
@@ -830,9 +969,147 @@ impl EditorState {
         Ok(state)
     }
 
-    /// Switch the active window to `buffer_id`, dropping any old
-    /// scratch buffer if the active window's previous buffer has no
-    /// other windows referencing it. Returns silently on a stale id.
+    /// Capture the destination a directory open must commit to
+    /// (Q#JR14), or `None` when `frontend` has no document window.
+    ///
+    /// Synchronous by necessity: the listing settles a tick or more
+    /// later, and by then the ambient frontend, selected window, and
+    /// active buffer may all name something else.
+    pub(crate) fn capture_directory_destination(
+        &self,
+        frontend: crate::protocol::FrontendId,
+        window: crate::window::WindowId,
+    ) -> Option<crate::editor_core::DirectoryDestination> {
+        let core = self.core.borrow();
+        let buffer = core.windows.get(&window)?.buffer_id;
+        Some(crate::editor_core::DirectoryDestination {
+            frontend,
+            window,
+            buffer,
+        })
+    }
+
+    /// Local-startup directory open (Q#JR6): resolve the destination
+    /// from `LOCAL`'s document window and dispatch the resolver chain.
+    ///
+    /// Public because it is the whole of what `pmacs DIRECTORY` does
+    /// after resolution — acceptance drives this rather than
+    /// `resolve_target_buffer`, so a directory arm with no production
+    /// caller cannot pass.
+    pub fn open_directory_target(&mut self, path: &std::path::Path) {
+        // Canonicalize here as well as in the resolver arm. The two are
+        // not redundant: this is a public "open this directory" seam, so
+        // a caller that did not come through `resolve_target_buffer`
+        // must still hand the chain a canonical path (Q#JR8) --- and
+        // normalization is idempotent, so the startup path pays nothing.
+        let path = crate::editor_core::normalize_buffer_path(path.to_path_buf());
+        let path = path.as_path();
+        let window = self
+            .core
+            .borrow()
+            .primary_document_window(crate::protocol::FrontendId::LOCAL);
+        let dest = window.and_then(|window| {
+            self.capture_directory_destination(crate::protocol::FrontendId::LOCAL, window)
+        });
+        let Some(dest) = dest else {
+            self.core.borrow_mut().status =
+                format!("cannot open {}: no document window", path.display());
+            return;
+        };
+        self.dispatch_directory_open(path, dest);
+    }
+
+    /// Run the directory resolver chain for `path`, then its fallback
+    /// (Journey Stage 1a, Q#JR7/Q#JR15).
+    ///
+    /// Order is user chain first, builtin default second — see
+    /// `install_path_module` for why that cannot be expressed as two
+    /// hook subscriptions.
+    ///
+    /// **A raising listener stops the chain AND suppresses the
+    /// fallback.** `run_short_circuit` returns `proceed = false` both
+    /// for a literal `false` (a claim) and for a raise, so `proceed`
+    /// alone already suppresses correctly; `errors` is what distinguishes
+    /// them, and it decides only whether to *report*. Running the
+    /// fallback after a user's resolver crashed would open dired on a
+    /// directory that resolver may have been part-way through handling,
+    /// so a crash is treated as a claim that failed — reported through
+    /// the `*errors*` buffer (which `run_hook` already does) and the
+    /// status line (which it does not), and visible in both.
+    pub(crate) fn dispatch_directory_open(
+        &mut self,
+        path: &std::path::Path,
+        dest: crate::editor_core::DirectoryDestination,
+    ) {
+        let display = path.display().to_string();
+        let args = {
+            let lua = self.lua_host.lua();
+            let destination =
+                match lua.create_userdata(crate::lua_bindings::DirectoryDestinationLua(dest)) {
+                    Ok(userdata) => mlua::Value::UserData(userdata),
+                    Err(error) => {
+                        self.core.borrow_mut().status = format!("cannot open {display}: {error}");
+                        return;
+                    }
+                };
+            let path_value = match lua.create_string(display.as_bytes()) {
+                Ok(string) => mlua::Value::String(string),
+                Err(error) => {
+                    self.core.borrow_mut().status = format!("cannot open {display}: {error}");
+                    return;
+                }
+            };
+            mlua::MultiValue::from_vec(vec![path_value, destination])
+        };
+
+        match self.lua_host.run_hook("path.open-directory", args.clone()) {
+            // A listener raised. `run_hook` has already appended the
+            // record to *errors*; add the status line, and do NOT fall
+            // back (Q#JR15).
+            Some(outcome) if !outcome.errors.is_empty() => {
+                self.core.borrow_mut().status =
+                    format!("cannot open {display}: a path.open-directory listener failed");
+                return;
+            }
+            // Claimed: a listener returned false.
+            Some(outcome) if !outcome.proceed => return,
+            // Declined, or no listeners at all.
+            _ => {}
+        }
+
+        let handler = {
+            let lua = self.lua_host.lua();
+            lua.globals()
+                .get::<mlua::Table>("pmacs")
+                .and_then(|pmacs| pmacs.get::<mlua::Table>("path"))
+                .and_then(|path| path.get::<mlua::Value>("directory_handler"))
+                .unwrap_or(mlua::Value::Nil)
+        };
+        let mlua::Value::Function(handler) = handler else {
+            // The slot is clear: nothing surfaces directories. The
+            // session started fine and simply has nothing to show for
+            // the argument, so this is a status message and NOT a
+            // startup failure (Q#JR10).
+            self.core.borrow_mut().status = format!("no handler for directory {display}");
+            return;
+        };
+        if let Err(error) = handler.call::<()>(args) {
+            self.core.borrow_mut().status = format!("cannot open {display}: {error}");
+        }
+    }
+
+    /// Switch the active window to `buffer_id`. Returns silently on a
+    /// stale id.
+    ///
+    /// **Corrected (Journey Stage 1a).** This comment previously claimed
+    /// it dropped "any old scratch buffer if the active window's
+    /// previous buffer has no other windows referencing it". It never
+    /// did: the body is one `switch_active_buffer` call, which reassigns
+    /// `aw.buffer_id` and removes nothing from the registry. The claim
+    /// was load-bearing enough that a framing decision (Q#JR3) and an
+    /// acceptance pin were written against it before anyone checked the
+    /// body. Removing the stale scratch may well be worth doing; it is
+    /// separate work, and this comment no longer promises it.
     fn replace_active_buffer(&self, buffer_id: crate::buffer::BufferId) {
         let mut core = self.core.borrow_mut();
         let _ = core.switch_active_buffer(buffer_id);

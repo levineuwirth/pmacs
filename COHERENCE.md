@@ -95,7 +95,7 @@ remain open to them.
 
 | § | Concern | Grade | One-line state |
 |---|---|---|---|
-| 2 | Golden product journey | **Broken at entry** | `pmacs .` exits 1; only "launch" and "edit" pass cleanly zero-config |
+| 2 | Golden product journey | **Runs to step 5** | `pmacs .` opens the directory (Journey Stage 1a); thin from step 6 on |
 | 3 | Zero-configuration state | **Partial** | Defaults genuinely strong; missing-tool failure is silent, not graceful |
 | 4 | Progressive disclosure | **Inverted** | The advanced level is real; the beginner level is the missing one |
 | 5 | Unified discoverability | **Substrate without surface** | Best-in-class registration metadata; almost no way for a user to reach it |
@@ -112,7 +112,7 @@ remain open to them.
 | 16 | Semantic frontend | **Strong** | v6..=v20 negotiated protocol; degradation practiced; TUI/GPU share the model |
 | 17 | Distribution | **Missing** | CI is test-only; no binaries, channels, checksums, or update path |
 | 18 | Onboarding | **Missing** | No welcome, no tutorial; `C-h` deletes a word; `M-x` is the only door in |
-| 19 | Coherence acceptance tests | **Missing (culture ready)** | Superb per-arc acceptance discipline; zero cross-subsystem journey tests |
+| 19 | Coherence acceptance tests | **Started** | `tests/journey_acceptance.rs` exists (steps 2, 3, 5); the other five scenarios are still unwritten |
 
 Three cross-cutting patterns explain most of the table; they are
 detailed in §1.1–§1.3: **substrate without surface**, **the silence
@@ -339,7 +339,8 @@ the journey.
 
 ### Ground truth: the journey today
 
-**Grade: broken at step 3.** Verified empirically at audit time:
+**Grade: reaches step 5; thin from step 6 on.** Was **broken at step 3**
+at audit time:
 
 ```
 $ ./target/release/pmacs .
@@ -347,15 +348,23 @@ pmacs: Is a directory (os error 21)
 EXIT=1
 ```
 
-The literal first arrow of the diagram above fails. `load_file`
+The literal first arrow of the diagram above failed. `load_file`
 (`src/file_io.rs:81-87`) does `File::open` (succeeds on a directory)
 then `read_to_end` → EISDIR, which is not `NotFound`, so
-`EditorState::open` returns `Err` and `main` prints and exits
-(`src/main.rs:411-414`). Multiple file arguments are also rejected
-(`"multiple files not yet supported"`, `src/main.rs:227`). Everything
-from step 6 onward is gated on a file being open, and the only
-zero-config way to open one is naming it on the command line — which
-requires already knowing the path.
+`EditorState::open` returned `Err` and `main` printed and exited.
+
+**Journey Stage 1a fixed that arrow** (`docs/journey-stage1a-framing.md`).
+`resolve_target_buffer` now answers `ResolvedTarget::Directory` *ahead*
+of the load, `pmacs .` lists the directory in dired, `RET` visits a
+file, and a self-insert lands in it — steps 3 and 5 run end to end,
+pinned by `tests/journey_acceptance.rs`. Which surface opens a directory
+is a `path.open-directory` chain with dired as a replaceable fallback,
+so this did not grow a second directory surface.
+
+Still true: multiple file arguments are rejected (`"multiple files not
+yet supported"`, `src/main.rs:227`), and everything from step 6 onward
+is gated on a file being open — but the zero-config way to open one is
+no longer "already know the path".
 
 Full verdict table:
 
@@ -363,7 +372,7 @@ Full verdict table:
 |---|---|---|---|
 | 1 | Install | **Partial** | Source build only: `cargo build --release --workspace --features pmacs/crdt` (`README.md`). No binaries, no packaging. Runtime deps (`/bin/sh`, git, tar, coreutils) documented, never checked at runtime |
 | 2 | Launch unconfigured | **Works** | `EditorState::new()` → empty `*scratch*`; missing config is not an error (`src/config.rs:7-9`); recentf/saveplace/autosave default-on |
-| 3 | Open real project | **Missing at the CLI** | `pmacs .` still exits 1 (above): `load_file` does `File::open` (which succeeds on a directory) then `read_to_end` → EISDIR, which is not `NotFound`, so `resolve_target_buffer`'s create-a-`[new file]` arm never fires. Dired Stage 1 (merged #165) supplies the buffer a directory should resolve *to*; routing `pmacs .` into it is Journey Stage 1's work, which must not invent a second directory surface |
+| 3 | Open real project | **Works at the CLI** | Journey Stage 1a: `resolve_target_buffer` answers `ResolvedTarget::Directory` before the EISDIR-producing load, and `EditorState::open` / the daemon bootstrap dispatch the `path.open-directory` chain, whose fallback is dired (#165's buffer, reached rather than duplicated). Startup no longer fails: an unreadable directory, a crashed resolver, and a cleared handler all report on the status line and leave the session running. Because the listing is async and the bootstrap is synchronous, the commit runs against a destination captured at request time (`pmacs.window.commit_to`) rather than against the ambient frontend |
 | 4 | Understand interface | **Partial** | Mode line gives name/modified/L:C/scroll + mode/LSP/terminal segments; but no welcome text (`EditorCore::new` sets `status: String::new()`), no cheat sheet, and `C-h` deletes a word (§18) |
 | 5 | Edit | **Works** | Full CUA + Emacs keymap in 161 lines (`builtin/keymaps/default.lua`); isearch, query-replace, kill ring, undo/redo, auto-indent/pair/comment, atomic save. Genuinely excellent zero-config |
 | 6 | Language intelligence | **Partial** | Rust grammar bundled and auto-attaches; rust-analyzer preconfigured (`builtin/runtime/lsp.lua:44-52`) — but a missing binary fails silently (§1.2) and highlighting masks it. No LSP status command exists to diagnose |
@@ -1225,14 +1234,23 @@ Primitive-by-primitive against the list above:
   `compile.lua`'s own comment admits ("command/menu undo stays
   dispatchable"). `Buffer::set_generated_contents` (write + discard
   history + assert `read_only`, in one authorized call) now fixes this
-  for the terminal snapshot; `*compilation*` and listview panels have
-  not yet adopted it and remain emptiable. **A second half of the same
+  for the terminal snapshot; **four writer mechanisms have not yet adopted
+  it and remain emptiable** — listview panels; `compile.lua`'s
+  `ensure_slot`, which serves `*compilation*` **and** `*shell-command*`;
+  the independent `*search-results*` panel in
+  `builtin/commands/default.lua`; and dired buffers. All pair an erroring
+  intercept with `bypass_intercept` writes over a still-writable rope.
+  (`*workers*`, `*help*` and `*buffer-list*` are generated but do not use
+  this idiom.) **A second half of the same
   caveat, found in round 3: a rope write is only half of an edit.** The
   owner-authorized write must be fanned out to the windows showing the
   buffer and queued for replica mirrors, or the displaying window keeps
   a line index describing the previous contents and the next paint
   indexes the new rope with stale ranges. Adoption is therefore not a
-  one-line swap.
+  one-line swap — and the three appending buffers (`*compilation*`,
+  `*shell-command*`, `*search-results*`) need a streaming variant of the
+  primitive that does not exist yet. Listview and dired already write
+  whole-buffer replaces and are the cheap half.
 - **Diagnostics collection** ✓ — `DiagnosticStore` + signs + unified
   `error.next` source.
 - **Transient selector** ✓ — the minibuffer (though its `source`
@@ -1446,20 +1464,24 @@ subsystems, complementing (not replacing) subsystem tests:
 
 ### Ground truth
 
-**Grade: missing — but the culture that would make them excellent is the
-project's strongest process asset.**
+**Grade: started — the first suite exists; five of the six scenarios
+above do not.**
 
-Zero cross-subsystem journey tests exist. Every acceptance suite in the
-tree pins one subsystem's contract (superbly — bite-verified,
-falsified-by-revert, vacuity-checked). Several of the scenarios above
-are currently *untestable* because the behavior doesn't exist (install
-in-session, disable, open a directory); the ones that are testable
-(first launch, command discovery, worker cancellation, remote
-attach/reconnect) could be written today and would immediately pin the
-journey against regression. The first coherence acceptance suite should
-be the §2 journey itself, growing a step at a time as steps become
-real — that is how "the journey is a release gate" stops being
-aspirational.
+At audit time zero cross-subsystem journey tests existed. **Journey
+Stage 1a created `tests/journey_acceptance.rs`**, the §2 journey itself,
+seeded with steps 2 (launch unconfigured), 3 (open a real project), and
+5 (edit immediately), and declared a ratchet: stages add rows, none
+removes them. That is the "first launch" scenario, partially — missing
+tools still have no actionable guidance to assert.
+
+The rest is unchanged. Every other acceptance suite in the tree pins one
+subsystem's contract (superbly — bite-verified, falsified-by-revert,
+vacuity-checked). Command discovery, workspace lifecycle, worker
+ownership, package lifecycle, and remote execution have no
+cross-subsystem suite; several remain *untestable* because the behavior
+doesn't exist (install in-session, disable). Steps 6–12 join
+`journey_acceptance.rs` as later stages make them real — that is how
+"the journey is a release gate" stops being aspirational.
 
 (Related lesson already in the handoff: `compile_mode_acceptance`
 accidentally reads the real user config — an *unintentional*
@@ -1477,14 +1499,18 @@ missing runtime entity — a real arc).
 ### Priority 1: Protect the golden product journey
 
 Establish the end-to-end workflow; treat regressions as release
-blockers. **State: broken at step 3 (§2). Mostly wiring, and unusually
-cheap:** directory-argument handling (the remaining half of step 3 —
-dired Stage 1 landed the buffer it should resolve to); a find-file
-surface (**done**: #162 open-by-path, #165 browsing); surfacing the
-LSP spawn failure with guidance (§1.2); a
+blockers. **State: runs to step 5; thin from step 6 (§2). Mostly wiring,
+and unusually cheap:** directory-argument handling (**done**: Journey
+Stage 1a); a find-file surface (**done**: #162 open-by-path, #165
+browsing); surfacing the LSP spawn failure with guidance (§1.2); a
 compile keybinding + `cargo build`/`test` default from the existing
-`ProjectKind::Cargo`; a terminal keybinding; a welcome buffer. The
-journey acceptance suite (§19) is the ratchet that keeps it fixed.
+`ProjectKind::Cargo`; a terminal keybinding (**done**: `C-c t`, #173); a
+welcome buffer. The journey acceptance suite (§19) is the ratchet that
+keeps it fixed — it **exists now** (`tests/journey_acceptance.rs`,
+Stage 1a), seeded with steps 2, 3, and 5.
+
+Journey Stage 1b is the named remainder: the compile binding + Cargo
+defaults, LSP spawn guidance, and the welcome buffer.
 
 ### Priority 2: Make workspace and location explicit
 
@@ -1548,11 +1574,13 @@ Candidate arc cuts, honoring one-feature-one-branch-one-PR and the
 framing workflow (each needs its own scout + framing before any
 implementation — this list is direction, not commitment):
 
-1. **Journey Stage 1** (P1): directory open + compile defaults +
-   LSP-failure surfacing + bindings + welcome buffer + the first
-   journey acceptance suite. Dired Stage 1 has landed (#165), so the
-   buffer a directory resolves *to* already exists; this arc routes
-   `pmacs .` into it rather than growing a second directory surface.
+1. **Journey Stage 1** (P1): split at the new-Rust-primitive line.
+   **Stage 1a — landed**: directory open, the `EditorState::open` →
+   `resolve_target_buffer` unification, the destination-scope substrate,
+   and the first journey acceptance suite. It routes `pmacs .` into
+   #165's dired buffer rather than growing a second directory surface.
+   **Stage 1b — remaining**: compile defaults, LSP-failure surfacing,
+   bindings, welcome buffer.
 2. **Discovery surface** (P4): the describe/list/where-is command
    family, M-x rich rows, help unification, help prefix.
 3. **Transient keymap layer** (§6): the overlay scope + lifetime
