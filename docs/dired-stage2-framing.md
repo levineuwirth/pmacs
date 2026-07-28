@@ -2261,13 +2261,25 @@ to be worth fixing.
 
 **Ledger note (corrected in rev 5, W6):** this framing branch
 deliberately touches **only** this file. Rev 4 said the durable records
-were held by open PR #169; **#169 merged** as `74301d1`. The current
-holder is **PR #185** (`docs-landed-state-184`), which owns
-`docs/active-work.md`, `docs/agent-handoff.md`, and `COHERENCE.md`. A
-second edit to any of the three from here would conflict for no benefit,
-so the Stage 2 lane goes in once #185 has landed. *(This is the ledger
-contention treadmill the ops lessons name: with several PRs open, every
-merge re-conflicts the rest in `docs/active-work.md`. Integrate late.)*
+were held by open PR #169; **#169 merged** as `74301d1`, and its
+successor **#185 merged as `ad41cf1` during this re-scout**, so
+`docs/active-work.md`, `docs/agent-handoff.md`, and `COHERENCE.md` are
+now unheld. This branch still does not touch them — the ops lesson is
+that a standalone docs-refresh PR restarts the contention treadmill, and
+the ledger's own protocol puts the lane refresh with the work.
+
+**Two things the landed ledger now needs, and this PR is not the place
+for either.** `docs/active-work.md`'s dired Stage 2 lane still records
+this branch at head `ab42a79`, describes the document as *1,570 lines*,
+says *"the re-scout is under way"*, and states the rename census as
+**five** path owners. Rev 5 makes all four stale: the head has moved,
+the document is longer, the re-scout is done, and **the census is six**
+(§5, W5). That is the standing lesson restated — *a census is a reading,
+not a constant* — and it applies to the ledger's copy of this
+framing's numbers exactly as it applied to the framing's copy of the
+tree's. Whoever refreshes the lane should take the six-owner table from
+§5 rather than re-deriving it, and should note that Q#DR25 added scope
+the lane does not yet mention.
 
 ### Ownership warning: 2a must not run concurrently with Journey Stage 1b
 
