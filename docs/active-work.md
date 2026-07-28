@@ -305,20 +305,20 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
-## Bottom-panel lane (Arc 7) — 2B-1 INTEGRATED; FULL GATES PENDING
+## Bottom-panel lane (Arc 7) — 2B-1 GATED; PR READY
 
 Stage 1, the Stage 2 framing, and Stage 2A are on `main`. Framing
 revision 5's three-way split of 2B was explicitly approved on
 2026-07-27. **Stage 2B-1 is implemented, integrated with canonical
-`main` @ `7fd646d`, and has no remaining dependency. Its full matrix is
-being rerun on the integrated tree before a PR opens.**
+`main` @ `7fd646d`, and fully gated at `c8895a8`; it has no remaining
+dependency. The branch is ready to push and open for review.**
 
 - **Stage 2B-1 branch:** `bottom-panel-stage2b`, based on
   `githubsucks/main` @ `7fd646d` by merge because review had begun.
   Recovery: `git fetch githubsucks && git checkout
   bottom-panel-stage2b`. Everything described through the integration
-  checkpoint is committed and pushed; nothing depends on a worktree or
-  `/tmp`. No PR exists yet.
+  and gate checkpoint is committed; nothing depends on a worktree or
+  `/tmp`.
 - **Ships only the v21 wire layer:** the four wire shapes, version bump,
   shared cell-grid validator, and version-ladder move. It has no
   producer, consumer, or capability change; `panel_capable` stays
@@ -348,8 +348,23 @@ being rerun on the integrated tree before a PR opens.**
   corrected `gpu_initial_target_acceptance` through the public
   `pmacs --gpu .` path, consumed the asynchronous dired snapshot, and
   retained the managed daemon before the wait so failure cleanup remains
-  effective. The code integration auto-composed; the full matrix still
-  has to prove the combined tree.
+  effective. The code integration auto-composed.
+- **The complete post-integration gate is green at `c8895a8`:**
+  formatting; strict workspace Clippy; library **1,849 passed + 3
+  ignored default** and **2,034 passed + 4 ignored CRDT**; bottom-panel
+  Stage 1 / 2A / 2B-1 **46 / 17 / 15**; folding Stage 2 **48**; GPU font
+  **11**; statusline **8 CRDT**; m11_5 semantic **2 CRDT**; GPU initial
+  target and invocation **15 / 15 CRDT**; Vterm Stages 1 / 2 / 3
+  **10 / 6 / 9 CRDT**, including the required real daemon + PTY + wgpu
+  probe; M4 **121 passed + 3 ignored + 1 filtered**; required GPU
+  **202/202**; the isolated-config, one-invocation full workspace sweep;
+  and `git diff --check`.
+  - The first required-GPU pass was **201/202** on
+    `a_fraction_draws_rule_pixels_between_its_operand_rows`, a rendering
+    test structurally outside this lane's protocol-only GPU diff. The
+    exact test passed immediately in isolation with one test thread, and
+    the mandatory complete rerun passed **202/202**. This is retained as
+    classified gate evidence, not erased as a clean first pass.
 - **Next ordering is fixed:** 2B-2 branches from `main` only after 2B-1
   lands; 2B-3 branches only after 2B-2 lands. The daemon epoch machine
   belongs to 2B-2; the GPU band and negotiated capability flip belong
