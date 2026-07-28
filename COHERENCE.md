@@ -107,7 +107,7 @@ remain open to them.
 | 11 | Config layering + provenance | **Partial (foundation only)** | Typed registry is right; 5 settings live in it; no value provenance |
 | 12 | Profiles | **Missing** | One hardcoded default keymap; not a named concept |
 | 13 | Package lifecycle UX | **Resolution without lifecycle** | Mature resolver/lockfile; init-only install; no uninstall/disable/search |
-| 14 | Workbench primitives | **Partial (best trajectory)** | Listview is a real shared primitive; bottom panel landed (#155) |
+| 14 | Workbench primitives | **Partial (best trajectory)** | Listview is a real primitive but only 3 call sites, all LSP panels; buffer-list and search re-implement it; bottom panel landed (#155) |
 | 15 | Contextual affordances | **Weak** | Right-click menu only; code actions apply first-blindly; no git integration at all |
 | 16 | Semantic frontend | **Strong** | v6..=v21 schema support; production attach remains v20 during the dark panel slice; degradation practiced |
 | 17 | Distribution | **Missing** | CI is test-only; no binaries, channels, checksums, or update path |
@@ -728,7 +728,7 @@ Facts that define the gap:
   reports false and neither classifier can fire there.
 
 **The counter-example that proves the idiom:** the entire picker/panel
-family — listview (references, outline), project-search, buffer-list,
+family — listview (references, outline, lsp-help), project-search, buffer-list,
 compile-mode, REPL, terminal scroll commands — uses ordinary
 **buffer-local keymaps** via `pmacs.keymap.bind { scope = "buffer" }`
 (`builtin/runtime/listview.lua:76-88` and siblings). These are
@@ -1219,11 +1219,34 @@ keyboard behavior, persistence, and accessibility.
 Primitive-by-primitive against the list above:
 
 - **Editable text view** ✓ — the buffer itself, everywhere.
-- **List** ✓ — **listview is a real shared primitive**, the strongest
-  coherence asset in the UI layer: references, outline, buffer-list,
-  and project-search all use it, with a shared buffer-local keymap
-  idiom (RET/SPC visit, n/p, g refresh, q quit) that is inspectable and
-  rebindable (§6's counter-example).
+- **List** ◐ — listview is a real shared primitive with a shared
+  buffer-local keymap idiom (RET/SPC visit, n/p, g refresh, q quit)
+  that is inspectable and rebindable (§6's counter-example). **But its
+  adoption is narrower than this document claimed, and the correction
+  matters more than the grade.** Measured at `ad41cf1`: there are
+  exactly **three** `pmacs.listview.open` call sites, **all three in
+  `builtin/runtime/lsp.lua`** — `*references*` (`:2056`), `*outline*`
+  (`:2102`) and `*lsp-help*` (`:2513`). The three other `listview`
+  mentions under `builtin/` are comments in `compile.lua` and
+  `dired.lua` citing "the listview idiom", which is a *pattern being
+  copied*, not the primitive being used.
+  - **`*buffer-list*` and project-search do NOT use it**, contrary to
+    the previous wording here. `*buffer-list*` is built independently
+    in `builtin/commands/default.lua` — its own comment calls it "a
+    regular buffer named `*buffer-list*`" (`:348`, `:367`). This
+    document previously asserted both that buffer-list uses listview
+    and, twenty lines below, that it does not; the second was right.
+  - **So the asset is one subsystem's, not the UI layer's.** Every
+    consumer is an LSP panel, and the two surfaces most often cited as
+    proof of sharing re-implement the pattern by hand. A primitive
+    three sibling call sites deep in one file is a good primitive with
+    an adoption problem, which is a different remediation from a
+    missing one: the work is migrating `*buffer-list*` and search
+    onto it, not building it.
+  - **Copying the idiom propagated a defect**, which is the concrete
+    cost of counting imitators as adopters: the erroring-intercept
+    pattern the comments copy is exactly the one the Output-channel
+    bullet below records as *not* read-only.
 - **Output channel** ✓ — the compile-mode `*compilation*` model
   (streamed, intercept-read-only, error-rule parsing), reused by grep
   and shell-command. **Caveat found in terminal copy mode's review
