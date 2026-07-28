@@ -907,14 +907,15 @@ fn a_passive_panel_keeps_its_view_top_while_a_focused_one_scrolls_to_its_caret()
     session.declare(1, ROWS, COLS);
     open_panel(&session, "*panel*", 4);
     let panel = session.side_window().expect("side window");
-    let body: String = (0..40).map(|n| format!("line {n}\n")).collect();
+    let body = vec!["line-of-text"; 40].join("\n");
+    let last_byte = body.len() as u64;
     set_panel_text(&session, &body);
 
     // Put the panel's caret far below its viewport while it is PASSIVE.
     {
         let mut core = session.state.core.borrow_mut();
         let window = core.windows.get_mut(&panel).expect("panel window");
-        window.cursor = 200;
+        window.cursor = last_byte;
         window.view_top = 0;
     }
     let _ = session.present();
