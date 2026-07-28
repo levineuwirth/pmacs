@@ -223,6 +223,34 @@ mod crdt {
         stream: UnixStream,
     }
 
+    impl TargetSession {
+        fn wait_for_replacement_snapshot(&mut self) -> (pmacs::buffer::BufferId, String) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                assert!(
+                    Instant::now() < deadline,
+                    "target frontend did not receive a replacement buffer snapshot"
+                );
+                match read_message::<InstanceMessage>(&mut self.stream)
+                    .expect("read target frontend after bootstrap")
+                {
+                    InstanceMessage::BufferSnapshot {
+                        buffer_id,
+                        crdt_snapshot,
+                    } if buffer_id != self.buffer_id => {
+                        let replica =
+                            CrdtState::new(self.frontend_id.0).expect("replacement buffer replica");
+                        replica
+                            .import_snapshot(&crdt_snapshot)
+                            .expect("import replacement buffer snapshot");
+                        return (buffer_id, replica.materialize_string());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     fn attach_target(socket: &Path, cwd: &Path, path: &Path) -> TargetSession {
         use std::os::unix::ffi::OsStrExt;
 
@@ -666,12 +694,34 @@ mod crdt {
     fn directory_target_reaches_ready_and_leaves_the_daemon_usable() {
         let temp = secure_tempdir();
         let socket = temp.path().join("directory-target.sock");
+        let listed_name = "listed-before-bootstrap.txt";
+        fs::write(temp.path().join(listed_name), "listed\n").expect("write listed file");
         let mut daemon = spawn_daemon(&socket, &[]);
 
         // Journey Stage 1a superseded the old IsADirectory failure:
         // `attach_target` requires the production snapshot-first sequence
-        // followed by `InitialTargetResult::Opened`.
-        let directory = attach_target(&socket, temp.path(), Path::new("."));
+        // followed by `InitialTargetResult::Opened`. The synchronous
+        // snapshot is deliberately the pre-existing document; dired's
+        // post-await commit replaces it on a later daemon tick.
+        let mut directory = attach_target(&socket, temp.path(), Path::new("."));
+        let bootstrap_buffer = directory.buffer_id;
+        let (dired_buffer, listing) = directory.wait_for_replacement_snapshot();
+        assert_ne!(
+            dired_buffer, bootstrap_buffer,
+            "the asynchronous resolver must replace the bootstrap document"
+        );
+        let canonical = fs::canonicalize(temp.path()).expect("canonical directory");
+        let mut lines = listing.lines();
+        let expected_header = format!("{}:", canonical.display());
+        assert_eq!(
+            lines.next(),
+            Some(expected_header.as_str()),
+            "the replacement snapshot must be dired's directory surface:\n{listing}"
+        );
+        assert!(
+            lines.any(|line| line.trim_end().ends_with(listed_name)),
+            "dired must list the file that existed before bootstrap:\n{listing}"
+        );
 
         fs::write(temp.path().join("still-alive.txt"), "alive\n").expect("write survivor");
         let survivor = attach_target(&socket, temp.path(), Path::new("still-alive.txt"));

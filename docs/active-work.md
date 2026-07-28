@@ -1,6 +1,6 @@
 # Active work — cross-machine resume ledger
 
-**Snapshot: 2026-07-27.** This file records volatile work that has not
+**Snapshot: 2026-07-28.** This file records volatile work that has not
 landed on `main`. Read it after `docs/agent-handoff.md`. Remove completed
 entries when their PR merges; do not let this become a second permanent
 backlog.
@@ -171,7 +171,7 @@ If it does not, stop and repair the remote/fetch configuration.
   to recur; the next occurrence carries its own evidence under whoever's
   PR, and a Stage B framing follows then.
 
-## Journey/GPU directory-target ratchet — PR #183 OPEN, GATED
+## Journey/GPU directory-target ratchet — PR #183 REGATING REVIEW ROUND 1
 
 - **Approved correction, not new product behavior.** GPU initial-target
   framing Q#GT6 / acceptance 10 and Journey Stage 1a N2/N5 already make
@@ -188,10 +188,20 @@ If it does not, stop and repair the remote/fetch configuration.
 - **Scope is one acceptance ratchet:** remove `"."` from the four
   genuinely invalid cases and add a transport-level positive which
   requires snapshot-first + `InitialTargetResult::Opened` for `"."`,
-  then proves the same daemon can open a following file target. No
-  production source, protocol, framing decision, or coherence grade
-  changes.
-- **Full gate matrix is green at `486ce16`:**
+  then consumes the post-quiescence replacement snapshot and requires
+  dired's canonical header plus a known directory entry before proving
+  the same daemon can open a following file target. No production
+  source, protocol, framing decision, or coherence grade changes.
+- **Review round 1: three findings, all real and corrected.** The
+  first test stopped at the deliberately pre-existing bootstrap
+  document, so it did not pin the resolver's later dired commit. The
+  Stage 2 rev-5 recovery bullet named rev 4's framing branch. And the
+  durable handoff still named pre-Journey `main` even though this ledger
+  had advanced. The first is now a post-quiescence transport assertion;
+  the latter two are corrected in this revision. The touched suite is
+  green **15/15**; the full gate matrix is being rerun before this round
+  closes.
+- **Pre-review full gate matrix was green at `486ce16`:**
   - `cargo fmt --check`;
   - strict workspace clippy;
   - library **1,849 passed / 3 ignored**;
@@ -457,10 +467,12 @@ remaining dependency.
   `docs/agent-handoff.md` §1; the two round lessons are in §5.
 - Landed-docs follow-up merged as **#156** (`main` @ `d152120`,
   2026-07-25).
-- **Stage 2 framing: `docs/bottom-panel-stage2-framing.md` revision 5**,
-  on branch `githubsucks/bottom-panel-stage2-framing` (three commits,
-  one per pre-implementation revision), worktree `../pmacs-bp-stage2`, based on
-  `githubsucks/main` @ `ccf29e3`. Round 1 closed 2 blocking + 3 high;
+- **Stage 2 framing: `docs/bottom-panel-stage2-framing.md` revision 5**
+  is commit `56301ed` on branch `githubsucks/bottom-panel-stage2b`,
+  worktree `../pmacs-bp-stage2b`. Revisions 1–4 remain on
+  `githubsucks/bottom-panel-stage2-framing` (head `4fbd47f`, four
+  framing commits, revision 4 at `49757e5`). Round 1 closed 2 blocking +
+  3 high;
   round 2 closed 1 blocking + 2 high + 1 medium and decided both open
   items; round 3 closed 1 blocking + 1 high + 1 medium. No open items
   remain. Revision 5 adds no decision; it records the approved
