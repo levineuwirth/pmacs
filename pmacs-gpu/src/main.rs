@@ -779,11 +779,20 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .map(std::time::Duration::from_millis);
+    // Normal probes stop only after their fixture-specific evidence arrives.
+    // A producer fixture names the text it must paint; an input fixture uses
+    // the latched echo observation. Keeping that choice outside this generic
+    // runner prevents one fixture's breadcrumb from forcing another fixture
+    // to sit on the 20-second safety deadline.
+    let expected_frame_text = std::env::var("PMACS_GPU_PROBE_EXPECT_TEXT")
+        .ok()
+        .filter(|value| !value.is_empty());
     let quiet = observe_window.is_some();
     let deadline = std::time::Instant::now()
         + observe_window.unwrap_or_else(|| std::time::Duration::from_secs(20));
     let mut sent_input = false;
     let mut sent_resize = false;
+    let mut completion_observed = false;
     while std::time::Instant::now() < deadline {
         let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(200)) else {
             continue;
@@ -857,15 +866,20 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
                         facts.observed_resized_frame = true;
                     }
                 }
+                let fixture_evidence_observed = expected_frame_text.as_deref().map_or_else(
+                    || facts.input_echo_observed,
+                    |expected| facts.last_frame_text.contains(expected),
+                );
                 // Do not exit merely because resize/composition happened
-                // first: that races the PTY child's initial output and
+                // first: that races the fixture's required PTY evidence and
                 // produces a self-contradictory "successful" probe report
                 // whose later acceptance assertion must reject it.
                 if !quiet
                     && facts.observed_resized_frame
                     && facts.rendered_nonuniform_frames >= 2
-                    && facts.last_frame_text.contains("VTERMROW")
+                    && fixture_evidence_observed
                 {
+                    completion_observed = true;
                     break;
                 }
             }
@@ -898,6 +912,7 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
     let _ = writeln!(out, "last_title={}", facts.last_title.unwrap_or_default());
     let _ = writeln!(out, "last_frame_text={}", facts.last_frame_text);
     let _ = writeln!(out, "input_echo_observed={}", facts.input_echo_observed);
+    let _ = writeln!(out, "completion_observed={completion_observed}");
     let _ = writeln!(out, "disconnect={}", facts.disconnect.unwrap_or_default());
     if let Err(error) = std::fs::write(report, out) {
         eprintln!(
