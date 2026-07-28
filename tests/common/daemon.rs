@@ -26,7 +26,7 @@ use tempfile::TempDir;
 #[cfg(feature = "crdt")]
 use pmacs::cell::CellSize;
 #[cfg(feature = "crdt")]
-use pmacs::protocol::{AttachRequest, PROTOCOL_VERSION};
+use pmacs::protocol::AttachRequest;
 use pmacs::protocol::{FrontendCapabilities, Hello};
 use pmacs::transport::read_message;
 #[cfg(feature = "crdt")]
@@ -294,7 +294,7 @@ pub fn attach_multi(daemon: &TestDaemon) -> (Hello, UnixStream) {
         .unwrap();
     let hello: Hello = read_message(&mut stream).expect("read Hello");
     let req = AttachRequest {
-        protocol_version: PROTOCOL_VERSION,
+        protocol_version: hello.protocol_version,
         frontend_capabilities: multi_frontend_caps(),
         initial_size: CellSize::new(24, 80),
     };

@@ -668,6 +668,33 @@ pub fn config_u32(lua: &Lua, name: &str, buffer_id: Option<BufferId>, fallback: 
     }
 }
 
+/// Read a `String` setting plus the registry epoch that keys any cache
+/// built from it (Q#TC4c).
+///
+/// The epoch is returned WITH the value deliberately: a caller caching a
+/// parsed form needs both, and reading them in two calls would let a
+/// `set` land between them and produce a cache stamped with the wrong
+/// epoch. `fallback` covers a bare core whose runtime never defined the
+/// setting, matching [`config_u32`].
+#[must_use]
+pub fn config_string_and_epoch(
+    lua: &Lua,
+    name: &str,
+    buffer_id: Option<BufferId>,
+    fallback: &str,
+) -> (String, u64) {
+    let Some(registry) = lua.app_data_ref::<config::SharedConfigRegistry>() else {
+        return (fallback.to_owned(), 0);
+    };
+    let borrowed = registry.borrow();
+    let epoch = borrowed.value_epoch();
+    let value = match borrowed.get(name, buffer_id) {
+        Ok(crate::config_registry::ConfigValue::Str(v)) => v.clone(),
+        _ => fallback.to_owned(),
+    };
+    (value, epoch)
+}
+
 /// Short-circuit a binding when the init phase has completed.
 ///
 /// Lifecycle-affecting Lua APIs (currently just `pmacs.attach`; M5.6d+)
@@ -3041,6 +3068,36 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
     {
         let reg = registry.clone();
         buffer.set(
+            // Replace a generated buffer's contents and leave it genuinely
+            // immutable — the one authorized door through `read_only`.
+            //
+            // Deliberately NOT an exposed `set_read_only`: that would let a
+            // caller lock a buffer with no way to refresh it, which is the
+            // failure mode that kept generated-buffer immutability deferred.
+            // Pairing the lock with the write in a single call is what makes
+            // it safe to ship.
+            "set_generated_contents",
+            lua.create_function(move |lua, (id, text): (BufferIdLua, mlua::String)| {
+                let edit = {
+                    let mut registry = reg.borrow_mut();
+                    let buffer = registry.get_mut(id.0).map_err(mlua::Error::external)?;
+                    buffer
+                        .set_generated_contents(&text.as_bytes())
+                        .map_err(mlua::Error::external)?
+                };
+                // The registry borrow is released first: the fan-out
+                // re-enters the core, and a live borrow would panic.
+                // Skipping it is not an option — see
+                // `Buffer::set_generated_contents`.
+                notify_buffer_edit_to_windows(lua, id.0, &edit);
+                Ok(())
+            })?,
+        )?;
+    }
+
+    {
+        let reg = registry.clone();
+        buffer.set(
             "from_bytes",
             lua.create_function(move |_, (name, bytes): (String, mlua::String)| {
                 let id = reg.borrow_mut().create_from_bytes(name, &bytes.as_bytes());
@@ -3593,7 +3650,72 @@ fn install_path_module(lua: &Lua) -> mlua::Result<Table> {
             )
         })?,
     )?;
+    // Journey Stage 1a (Q#JR7): the directory fallback.
+    //
+    // The resolver for a directory open is a two-tier arrangement, and
+    // the split is forced by how registration works rather than chosen
+    // for elegance. `path.open-directory` is a short-circuit hook that
+    // **no builtin subscribes to** — because `HookRegistry::add` only
+    // appends and builtins load before `init.lua`, a subscribing builtin
+    // would always claim first and no user listener could ever run. So
+    // the hook is the user's chain, and the default surface is this
+    // slot, consulted only when the chain declines.
+    //
+    // A slot, not a `pmacs.config` setting: `ConfigValue` is four
+    // scalars and a handler is none of them (the same reason terminal
+    // profiles could not be settings). It is an UNOWNED singleton —
+    // last writer wins, no owning package, no `SourceLocation`, no
+    // removal lifecycle, absent from every inspection surface. That is a
+    // real `COHERENCE.md` §13 gap, recorded rather than dressed up: when
+    // §20 Priority 3 lands registration ownership and `hook.remove`,
+    // this becomes an ordinary lowest-priority subscription carrying its
+    // owner and this slot is deleted rather than extended.
+    //
+    // Readable as `pmacs.path.directory_handler` so a replacement can
+    // capture and chain to the previous one; `nil` disables directory
+    // opening entirely, which is what makes that path testable.
+    path.set("directory_handler", mlua::Value::Nil)?;
+    path.set(
+        "set_directory_handler",
+        lua.create_function(|lua, handler: mlua::Value| {
+            match &handler {
+                mlua::Value::Nil | mlua::Value::Function(_) => {}
+                other => {
+                    return Err(mlua::Error::runtime(format!(
+                        "pmacs.path.set_directory_handler: expected a function or nil, got {}",
+                        other.type_name()
+                    )));
+                }
+            }
+            let pmacs: Table = lua.globals().get("pmacs")?;
+            let path: Table = pmacs.get("path")?;
+            path.set("directory_handler", handler)?;
+            Ok(())
+        })?,
+    )?;
     Ok(path)
+}
+
+/// Lua handle for a captured directory destination (Q#JR14d).
+///
+/// Deliberately **nonconstructible from Lua** and read-only. The same
+/// value is passed to every `path.open-directory` listener in turn: as a
+/// table, an earlier listener could mutate it and then decline,
+/// redirecting later listeners or the fallback to a window the user
+/// never asked for — and any Lua could fabricate a plausible
+/// frontend/window/buffer triple and hand it to `commit_to`. Userdata
+/// with no constructor and no setters makes both unrepresentable rather
+/// than merely discouraged.
+///
+/// The single accessor exists because dired needs the exact window for
+/// its `display{window = …}` target; nothing needs the frontend or the
+/// captured buffer, which stay private to the preflight.
+pub(crate) struct DirectoryDestinationLua(pub(crate) crate::editor_core::DirectoryDestination);
+
+impl mlua::UserData for DirectoryDestinationLua {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("window", |_, this, ()| Ok(this.0.window.raw()));
+    }
 }
 
 /// Build the `pmacs.ansi.*` table. The only entry today is
@@ -6594,6 +6716,54 @@ pub fn install_async(
 ) -> mlua::Result<()> {
     lua.set_app_data(runtime.clone());
     let pmacs: Table = lua.globals().get("pmacs")?;
+
+    // Arc 8 Stage 3a (framing Q#LN20): the one *synchronous* filesystem
+    // primitive Lua has. `pmacs.fs` is otherwise an async, handle-
+    // returning surface built in `builtin/runtime/fs.lua`, so this
+    // arrives through a private table that file re-exports rather than
+    // joining the `_dispatch_fs_*` family it would not belong to.
+    //
+    // Installed here, alongside those dispatchers, purely for load
+    // order: `make_async_runtime` runs before `fs.lua` is evaluated,
+    // whereas `install_project` — the other plausible home — runs after
+    // it, so a canonicalizer placed there is nil when `fs.lua` reads it.
+    //
+    // Synchronous on purpose, and that is the whole point. The consumer
+    // is a function-valued `pmacs.lsp.config[lang].root`, which
+    // `project_root_for` calls from `ensure_server` <- `attach_buffer`
+    // <- the `buffer.after-load` hook — no coroutine, nothing to await
+    // on. An awaitable canonicalizer would be unusable there for exactly
+    // the reason `pmacs.fs.stat` already is, leaving #161's
+    // canonical-root obligation undischarged. The cost is one syscall on
+    // a path the editor is already opening; `pmacs.project.detect`
+    // canonicalizes synchronously on the same hook today.
+    {
+        let fs_priv = lua.create_table()?;
+        fs_priv.set(
+            "canonicalize",
+            lua.create_function(|_, path: String| {
+                // nil rather than an error for a path that cannot be
+                // resolved: asking about a deleted file or a broken
+                // symlink is ordinary, and raising would surface through
+                // `resolve_root_fn`'s pcall as a config bug, which it is
+                // not.
+                //
+                // `to_str`, NOT `display()`. A resolution that lands on
+                // non-UTF-8 bytes has no faithful string form, and
+                // `display()` would substitute U+FFFD and hand back a
+                // path that does not exist on disk — strictly worse than
+                // nil here, because this value becomes a server-affinity
+                // key via `file_uri_for` and would silently fail to
+                // round-trip. Unrepresentable is a decline, matching how
+                // the fs layer already treats non-UTF-8 symlink targets.
+                Ok(std::fs::canonicalize(&path)
+                    .ok()
+                    .and_then(|p| p.to_str().map(str::to_owned)))
+            })?,
+        )?;
+        pmacs.set("_fs", fs_priv)?;
+    }
+
     let async_mod = lua.create_table()?;
 
     {
@@ -6832,6 +7002,26 @@ pub fn install_async(
             lua.create_function(move |_, id: u64| Ok(rt.is_complete(id)))?,
         )?;
     }
+
+    // Journey Stage 1a (Q#JR14b): `pmacs.window.commit_to` runs its
+    // callback inside a Rust-stack RAII scope. Yielding out of that
+    // scope would let the guard's dynamic extent and the coroutine's
+    // suspension diverge — the guard would restore the frontend override
+    // while the continuation is still parked, so the rest of the commit
+    // would silently run ambient again, which is the exact bug the scope
+    // exists to prevent. `Handle:await` therefore refuses inside it.
+    //
+    // Enforced here rather than documented in the framing, because a
+    // rule that only exists in prose is one a future caller breaks
+    // without noticing.
+    async_mod.set(
+        "_in_commit_scope",
+        lua.create_function(|lua, ()| {
+            Ok(lua
+                .app_data_ref::<crate::editor::CommitScopeActive>()
+                .is_some_and(|scope| scope.active()))
+        })?,
+    )?;
 
     {
         let rt = runtime.clone();
@@ -8805,6 +8995,25 @@ fn install_terminal(
                 };
                 core.borrow_mut().clipboard_set_for(key.frontend_id, bytes);
                 Ok(true)
+            })?,
+        )?;
+    }
+
+    {
+        let manager = manager.clone();
+        terminal.set(
+            "_copy_retained",
+            // Q#TC7: returns the whole retained range as a string, through
+            // the same serializer selection-copy uses. Takes an explicit
+            // buffer rather than resolving the active view, because copy
+            // mode reads a terminal that may not be displayed — and
+            // because the caller already holds the handle it keyed its
+            // snapshot on.
+            lua.create_function(move |lua, buffer: BufferIdLua| {
+                let Some(bytes) = manager.borrow().copy_retained(buffer.0) else {
+                    return Ok(None);
+                };
+                Ok(Some(lua.create_string(&bytes)?))
             })?,
         )?;
     }

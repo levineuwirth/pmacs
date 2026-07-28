@@ -77,6 +77,17 @@ end
 -- inside a coroutine spawned by pmacs.async --- a bare call from main
 -- thread will raise on the first yield.
 function Handle:await()
+  -- Journey Stage 1a (Q#JR14b): `pmacs.window.commit_to` scopes the
+  -- acting frontend for the dynamic extent of its callback, using an
+  -- RAII guard on the Rust stack. Yielding out of that extent would
+  -- restore the scope while this coroutine is still parked, so the rest
+  -- of the commit would resume ambient -- silently reintroducing the
+  -- misrouting the scope exists to prevent. Do the awaiting BEFORE
+  -- entering the commit, which is what dired does with its listing.
+  if async_mod._in_commit_scope() then
+    error("await: cannot await inside pmacs.window.commit_to; " ..
+      "await first, then commit")
+  end
   if not async_mod._is_complete(self._id) then
     -- Yield self so pmacs.async's step() can park us. R46 carve-out:
     -- this `coroutine.yield` is runtime code; package code uses

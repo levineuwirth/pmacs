@@ -77,7 +77,7 @@ use nix::unistd::Pid;
 use tempfile::TempDir;
 
 use pmacs::attach::PMACS_TEST_SSH_BIN;
-use pmacs::protocol::{Hello, PROTOCOL_VERSION};
+use pmacs::protocol::{ADVERTISED_PROTOCOL_VERSION, Hello};
 use pmacs::transport::read_message;
 
 // ---------------------------------------------------------------------------
@@ -385,7 +385,7 @@ fn daemon_attach_bridges_hello_from_existing_daemon() {
     // verbatim. (No AttachRequest sent — the daemon will hold the
     // attach slot until the bridge stdin closes below.)
     let hello: Hello = read_message(&mut bridge_stdout).expect("read Hello via bridge");
-    assert_eq!(hello.protocol_version, PROTOCOL_VERSION);
+    assert_eq!(hello.protocol_version, ADVERTISED_PROTOCOL_VERSION);
 
     // Tear down: drop bridge stdin → bridge's stdin→socket copy sees
     // EOF, shuts down the socket write half, the daemon notices and
@@ -424,7 +424,7 @@ fn daemon_attach_auto_starts_missing_daemon() {
     // bound the socket and the bridge connected.
     let hello: Hello =
         read_message(&mut bridge_stdout).expect("read Hello via auto-started daemon");
-    assert_eq!(hello.protocol_version, PROTOCOL_VERSION);
+    assert_eq!(hello.protocol_version, ADVERTISED_PROTOCOL_VERSION);
 
     // The lockfile must exist now: `acquire_lock` writes it on
     // daemon startup. (Existence of the lockfile is what proves

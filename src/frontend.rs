@@ -439,6 +439,11 @@ impl Frontend {
             // Q#GT4 — this pre-window semantic bootstrap result cannot
             // legitimately reach the grid TUI.
             | InstanceMessage::InitialTargetResult(_)
+            // Q#BP15 — the panel band is painted by the GPU frontend;
+            // the grid TUI renders its side windows through the cell
+            // grid and negotiates no panel capability, so this cannot
+            // legitimately reach here.
+            | InstanceMessage::PanelFrame(_)
             | InstanceMessage::ResourceOffer { .. }
             // T M11.6 — DispatchIdle is consumed by `attach.rs`'s
             // optimistic-apply gate; if any reaches this render path
