@@ -305,20 +305,21 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
-## Bottom-panel lane (Arc 7) — 2B-1 GATED; PR READY
+## Bottom-panel lane (Arc 7) — 2B-1 GATED; PR #184 OPEN FOR REVIEW
 
 Stage 1, the Stage 2 framing, and Stage 2A are on `main`. Framing
 revision 5's three-way split of 2B was explicitly approved on
 2026-07-27. **Stage 2B-1 is implemented, integrated with canonical
 `main` @ `7fd646d`, and fully gated at `c8895a8`; it has no remaining
-dependency. The branch is ready to push and open for review.**
+dependency. PR #184 is open and must not merge before user review.**
 
 - **Stage 2B-1 branch:** `bottom-panel-stage2b`, based on
   `githubsucks/main` @ `7fd646d` by merge because review had begun.
   Recovery: `git fetch githubsucks && git checkout
   bottom-panel-stage2b`. Everything described through the integration
-  and gate checkpoint is committed; nothing depends on a worktree or
-  `/tmp`.
+  and gate checkpoint is committed and pushed; nothing depends on a
+  worktree or `/tmp`. PR #184:
+  <https://github.com/levineuwirth/pmacs/pull/184>.
 - **Ships only the v21 wire layer:** the four wire shapes, version bump,
   shared cell-grid validator, and version-ladder move. It has no
   producer, consumer, or capability change; `panel_capable` stays
