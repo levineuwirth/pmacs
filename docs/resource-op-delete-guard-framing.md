@@ -1,10 +1,10 @@
 # Framing — `apply_resource_op` delete destroys unsaved work
 
-**Revision 2.** Status: **PROPOSED — needs explicit user approval before
+**Revision 3.** Status: **PROPOSED — needs explicit user approval before
 implementation. DO NOT implement, DO NOT merge.** Lane:
 `resource-op-delete-guard`, worktree `../pmacs-resource-op-delete`,
-based on `githubsucks/main` @ `ad41cf1` (re-checked at revision 2: no
-drift, `main` is still `ad41cf1`).
+rebased at revision 3 onto `githubsucks/main` @ `7586905` (PR #189,
+COHERENCE.md only — no bearing on any decision here).
 
 This is a live data-loss bug, reproduced four ways against `ad41cf1`
 (§1.1). A language server can destroy a buffer's unsaved edits *and*
@@ -18,6 +18,77 @@ design is approved, the implementation lands on this same branch and in
 this same PR (§8).
 
 ## Revision history
+
+### Revision 2 → 3, after review round 2
+
+Round 2 confirmed everything central from round 1 as fixed and raised
+four P1s. All four accepted; two sweeps run.
+
+**P1-1 — the ownership boundary was stale.** Revision 2 described PR
+#171 as "OPEN, STALE, 153 commits behind, under re-scout" and said it
+claimed the **rename** side only. Re-checked directly: #171 is at
+**revision 7, `fd7ae37`, merge-base `ad41cf1`, 0 commits behind** — not
+stale. Revision 6 had assigned **both** rename and delete to Stage 2a,
+with the **opposite** policy: its `reconcile_delete` "kills unmodified
+buffers and keeps modified ones alive", i.e. the file is deleted and the
+modified buffer orphaned, and its §11 named that orphaning as accepted
+residue. Two lanes, opposite answers, same event. §1.12 and Q#RD5 now
+carry the settled split verbatim, and #171 revision 7 has adopted it
+from the other side.
+
+**P1-2 — the LSP failure-handling claim was wrong.** Revision 2 said the
+spec "assigns `Abort` to any edit containing resource operations" and
+rested B2 on it. **It does not.** Recovery is described by the client's
+advertised `failureHandling`; `Abort` is one of four strategies, and
+only `TextOnlyTransactional` degrades to abort when resource changes are
+present. pmacs advertises **none** (§1.11, established by revision 2's
+own sweep), so the spec assigns pmacs no strategy at all. §1.7 and B2 are
+rewritten to stand on **verified pmacs behaviour** — §1.6's reproduced
+partial batch — rather than on borrowed protocol authority. This was the
+document's second external-spec overclaim; every external claim now
+carries a direct quote or is marked not established (§1.15).
+
+**P1-3 — Q#RD7 had no implementable, tested reporting seam.** Three gaps
+confirmed by reading: `_parse_workspace_edit` is called at
+`builtin/runtime/lsp.lua:1835`, **outside** the `apply_workspace_edit`
+call revision 2 proposed to wrap, and it is fallible
+(`lua_to_json(edit)?`, `src/lua_bindings/mod.rs:10161`), so "always
+answers" was false for a parse failure; `append_to_errors_buffer`
+(`src/lua.rs:401`) is **private**, so revision 2's promise to log
+through it was not implementable from where it was made, and a Lua
+preflight rejection never reaches Rust anyway; and acceptance 13 tested
+the response but not the promised `*errors*` trace. Q#RD7 is rewritten
+around **one seam at the server-request boundary**, and of the two
+options offered, this revision **picks wrapping parse-plus-apply**
+rather than narrowing the claim — the fix is one line up from the
+existing wrap and it makes "always answers" true rather than qualified.
+
+**P1-4 — clean duplicate reconciliation was unspecified.** Revision 2
+said validation scans every match but never said what reconciliation
+does afterwards. Now an explicit decision, **Q#RD10**, taking the user's
+steer: **validate every match, reconcile only today's first exact-path
+match.** Widening would enlarge the parked lifecycle defect that Q#RD5
+exists to contain; the surviving clean duplicate is named as residue
+handed to #171, not left silent. Acceptance 14 pins it in both
+directions.
+
+**Sweep — external claims.** Every non-repo claim re-audited (§1.15).
+One was a paraphrase standing in for a quote: revision 2 asserted that
+"in Emacs `kill-buffer` on a modified file-visiting buffer prompts"
+without establishing it. It is true, but **not for the reason a reader
+would assume**, and the precise version matters to the argument — see
+§1.13, which now quotes `Fkill_buffer` and the `INTERACTIVE` macro.
+
+**Sweep — cross-lane claims.** Beyond P1-1: revision 2's Q#RD8 said mode
+(d) "needs its own lane and a census". **It has one** — #171's
+`reconcile_delete` composes both removal phases and adopts the trap
+verbatim. Q#RD8 and §6 now name the owner instead of describing the
+defect as unowned. Q#RD6 additionally **claims the shared query
+explicitly**, per the boundary's "whichever lands first owns the query",
+so the duplicate resolves in one direction. And a gap neither lane
+closes — `pmacs.fs.remove` has no dirty check of its own — is now named
+as explicitly out of scope with its owner (§6), because "both lanes
+guard deletion" otherwise reads as the primitive being guarded.
 
 ### Revision 1 → 2, after review round 1
 
@@ -333,25 +404,52 @@ first". True — but URI resolution is the *only* precondition; the plan
 loop (`:1302-1336`) validates nothing about the filesystem or the
 registry. That loop is where Q#RD3's conflict check goes.
 
-### 1.7 The batch is sequential, and the protocol says so
+### 1.7 The batch is sequential; the protocol assigns pmacs no failure strategy
 
-Claims about **the LSP specification** (3.18), not about pmacs:
+Claims about **the LSP specification** (3.18), each a direct quote, not
+a paraphrase — and note carefully what they do *not* say.
 
-- "If resource operations are present, clients need to execute the
-  operations in the order in which they are provided."
-- `FailureHandlingKind.Abort`: "All operations executed before the
-  failing operation stay executed."
-- `FailureHandlingKind.TextOnlyTransactional`: "If the workspace edit
-  contains only textual file changes they are executed transactionally.
-  **If resource changes are part of the change the failure handling
-  strategy is abort.**"
+**Sequential execution** — this is the load-bearing one, and it is
+unconditional:
 
-So the protocol itself declines to promise transactionality for exactly
-the edits this lane is about. **This is the evidence that revision 1's
-"whole-batch atomicity" claim was unsupportable**, and the reason Q#RD3
-now describes an early conflict check instead. Sequential execution is
-also why a snapshot preflight is necessarily incomplete: an earlier op
-can change the facts a later op's precondition was evaluated against.
+> "If resource operations are present, clients need to execute the
+> operations in the order in which they are provided."
+
+**Failure recovery is the client's declared choice, not a fixed rule:**
+
+> "How the client recovers from the failure is described by the client
+> capability: `workspace.workspaceEdit.failureHandling`"
+
+`FailureHandlingKind` has four values, quoted from the spec's own
+namespace block:
+
+| Value | Doc comment (verbatim) |
+|---|---|
+| `Abort` | "Applying the workspace change is simply aborted if one of the changes provided fails. All operations executed before the failing operation stay executed." |
+| `Transactional` | "All operations are executed transactionally. That means they either all succeed or no changes at all are applied to the workspace." |
+| `TextOnlyTransactional` | "If the workspace edit contains only textual file changes they are executed transactionally. If resource changes (create, rename or delete file) are part of the change the failure handling strategy is abort." |
+| `Undo` | "The client tries to undo the operations already executed. But there is no guarantee that this is succeeding." |
+
+**Revision 3 correction.** Revision 2 read this as "the protocol assigns
+`Abort` to any edit containing resource operations". **That is wrong.**
+`Abort` is one of four strategies a *client* may advertise;
+`Transactional` covers all operations and `Undo` attempts rollback. Only
+`TextOnlyTransactional` degrades to abort in the presence of resource
+changes, and that degradation is a property of *that* strategy, not of
+resource operations in general.
+
+**And pmacs advertises none of them** (§1.11). So the specification does
+not tell us what pmacs should do here; it tells us the question is the
+client's to answer. Revision 2 borrowed authority it did not have.
+
+What survives, and is sufficient: **sequential execution is
+unconditional**, which is why a snapshot preflight is necessarily
+incomplete — an earlier op can change the facts a later op's
+precondition was evaluated against. That, plus §1.6's *verified* pmacs
+behaviour (a partial batch already happens today on I/O error), is the
+whole basis for Q#RD3 and B2. The justification is that **partial
+application is already what pmacs does and is safer than data loss** —
+not that the protocol blesses it.
 
 ### 1.8 What prompting would actually cost — corrected
 
@@ -445,12 +543,40 @@ contents and modified state. Delete **destroys**. Rename treats the
 buffer as the valuable thing and the path as a mutable attribute; delete
 treats the buffer as a cache of the file.
 
-Both arms share the §1.4 lookup defects. `docs/dired-framing.md:807-819`
-and the dired Stage 1 entry under "Closed since the last snapshot" in
-`docs/active-work.md` claim the **rename** side for dired Stage 2. §6
-draws the boundary; the dired lane is recorded as **OPEN, STALE, DO NOT
-MERGE AS-IS** and under re-scout, which is why this lane does not wait
-on it.
+Both arms share the §1.4 lookup defects.
+
+**Cross-lane state, re-checked directly at revision 3 rather than
+inherited.** PR #171 (dired Stage 2) is at **revision 7, `fd7ae37`,
+merge-base `ad41cf1`, 0 commits behind `main`**. Revision 2 of this
+document described it as "OPEN, STALE, 153 commits behind, under
+re-scout" and said it claimed the rename side only; **both halves of
+that were out of date**. Its revision 6 assigned rename *and* delete
+reconciliation to Stage 2a with the opposite policy — `reconcile_delete`
+killing unmodified buffers and keeping modified ones alive, so the file
+is deleted and the modified buffer orphaned, with that orphaning named
+as accepted residue.
+
+**The settled split** (identical wording carried by both lanes):
+
+> #186 owns the urgent **pre-filesystem refusal** for synchronous
+> `apply_resource_op`. #171 later owns **full post-delete lifecycle
+> reconciliation**, including the **async race where a buffer becomes
+> modified after dired dispatch**. #171's revision 7 adopts the refusal
+> and stops saying LSP intentionally deletes modified files.
+
+#171 revision 7 has adopted this from its side: its Q#DR18 takes this
+document's Q#RD1 refusal rather than re-deciding it, and it records the
+reason the refusal cannot simply be extended to cover dired — **dired
+never calls `apply_resource_op`**. It calls `pmacs.fs.remove`, which
+dispatches a worker, so a synchronous refusal inside the primitive
+cannot reach it at any strength. That asynchronous window is #171's, and
+naming it here is what keeps this lane from appearing to close a defect
+it does not close.
+
+The older in-tree note at `docs/dired-framing.md:807-819` (Stage 1-era)
+still describes the rename-side lookup defect accurately, but it is
+superseded as a statement of plan by #171's Stage 2 document, which
+exists only on that branch.
 
 ### 1.13 Prior art — claims about **Emacs**, not pmacs
 
@@ -471,20 +597,59 @@ Verified against `lisp/progmodes/eglot.el`, `emacs-mirror/emacs`
       (delete-file path recursive))))
 ```
 
-The buffer is killed **before** the file is deleted, and in Emacs
-`kill-buffer` on a modified file-visiting buffer prompts — so the
-consent gate precedes the irreversible step. (Eglot ignores
-`kill-buffer`'s return value, so declining still deletes the file, but
-the buffer and its text survive. Even that failure mode is milder than
-pmacs's.) Note also that the `exists` guard means `ignoreIfNotExists`
-does **not** fall through to the buffer kill — the asymmetry mode (b)
-exposes in pmacs.
+The buffer is killed **before** the file is deleted. Note also that the
+`exists` guard means `ignoreIfNotExists` does **not** fall through to
+the buffer kill — the asymmetry mode (b) exposes in pmacs.
 
-*Revision 2 note:* Emacs's ordering is **not** what Q#RD2 adopts.
-Emacs can afford buffer-first because `kill-buffer` is itself the
-consent gate; pmacs has no such gate, so it validates first and
-reconciles last (Q#RD2), which yields the same safety without firing
-callbacks against a file that still exists.
+**Revision 3 precision.** Revision 2 asserted that "in Emacs
+`kill-buffer` on a modified file-visiting buffer prompts", which was a
+paraphrase carrying real weight in the argument. It is true, but the
+mechanism is not the obvious one and the difference matters. From
+`Fkill_buffer` (`src/buffer.c`):
+
+```c
+    /* Is this a modified buffer that's visiting a file? */
+    modified = !NILP (BVAR (b, filename))
+      && BUF_MODIFF (b) > BUF_SAVE_MODIFF (b);
+
+    /* Query if the buffer is still modified.  */
+    if (INTERACTIVE && modified)
+      {
+	/* Ask whether to kill the buffer, and exit if the user says
+	   "no".  */
+	if (NILP (calln (Qkill_buffer__possibly_save, buffer)))
+	  return unbind_to (count, Qnil);
+```
+
+and `INTERACTIVE` is (`src/commands.h`):
+
+```c
+/* Nonzero if input is coming from the keyboard.  */
+
+#define INTERACTIVE (NILP (Vexecuting_kbd_macro) && !noninteractive)
+```
+
+So the gate is **"Emacs has a keyboard"**, not "this function was
+reached through `call-interactively`". Eglot's `do-delete` calls
+`kill-buffer` programmatically from Lisp and **still prompts** in a
+normal session — but **does not** in batch mode or while a keyboard
+macro is executing. Revision 2's sentence was right for a reason it
+never established, and false in two environments it never considered.
+
+Two riders, both verified: eglot ignores `kill-buffer`'s return value,
+so declining the kill still deletes the file — the buffer and its text
+survive, which is milder than pmacs's failure but is not a refusal. And
+the prompt is **not** `buffer-offer-save`, whose own docstring says so:
+"Note that this option has no effect on `kill-buffer'; if you want to
+control what happens when a buffer is killed, use
+`kill-buffer-query-functions'."
+
+*Ordering note (rev 2, sharpened at rev 3):* Emacs's ordering is **not**
+what Q#RD2 adopts. Emacs can afford buffer-first because `kill-buffer`
+is itself the consent gate — conditionally, per the `INTERACTIVE` gate
+above. pmacs has no such gate at all, so it validates first and
+reconciles last (Q#RD2), which yields the same safety unconditionally
+and without firing callbacks against a file that still exists.
 
 **Eglot confirms server-initiated edits by default, as a whole-batch
 decision taken before anything is applied.** `eglot-confirm-server-edits`
@@ -516,6 +681,32 @@ One indirect acceptance exercises it:
 fake server (`src/bin/pmacs_fake_lsp.rs:834`). **Its deleted `c.rs` is
 never opened**, so the entire buffer-reconciliation half is untested.
 That suite and that fake are where §5's pins belong.
+
+### 1.15 External-claim audit (revision 3)
+
+Two external-spec overclaims in two revisions is a pattern, not an
+accident, so every claim in this document that is **not** about this
+repository is listed here with its evidence. The standing rule for
+revision 4 onward: an external claim carries a direct quote or it is
+marked not established.
+
+| # | Claim | Source | Status |
+|---|---|---|---|
+| 1 | Resource ops execute in provided order | LSP 3.18 `WorkspaceEdit` | **Quoted**, §1.7. Unconditional. |
+| 2 | Recovery is described by the client's `failureHandling` | LSP 3.18 | **Quoted**, §1.7. |
+| 3 | The four `FailureHandlingKind` doc comments | LSP 3.18 | **Quoted verbatim**, §1.7 table. |
+| 4 | ~~The spec assigns `Abort` to resource-op edits~~ | — | **WITHDRAWN** (P1-2). Never supported; it conflated one client-selectable strategy with a protocol rule. |
+| 5 | `documentChanges` / `resourceOperations` / `failureHandling` capability doc comments | LSP 3.18 | **Quoted**, §1.11. |
+| 6 | eglot's `do-delete` body | `lisp/progmodes/eglot.el`, emacs-mirror master | **Quoted from source**, §1.13. |
+| 7 | `eglot-confirm-server-edits` default and the `peaceful` conjunction | same | **Quoted from source**, §1.13. |
+| 8 | Emacs prompts when killing a modified file-visiting buffer | `src/buffer.c` + `src/commands.h` | **Quoted at rev 3**, §1.13. Was a bare paraphrase at rev 2; the real gate is `INTERACTIVE`, i.e. keyboard present — not `call-interactively` — so it does **not** hold in batch or during a keyboard macro. |
+| 9 | `buffer-offer-save` does not affect `kill-buffer` | `lisp/files.el` docstring | **Quoted**, §1.13. |
+
+Not established, and therefore not claimed anywhere in this document:
+what `lsp-mode` (as distinct from eglot) does with `DeleteFile`; and the
+exact `ApplyWorkspaceEditResult` field list beyond `applied` and
+`failureReason`, which this document uses only because pmacs's own code
+already sends them (`builtin/runtime/lsp.lua:1841`).
 
 
 ## 2. The decision space
@@ -704,13 +895,22 @@ guard is bypassed by the most destructive arm. Therefore:
 The asymmetry is deliberate and is the point: **inspect widely, mutate
 narrowly.**
 
-**Boundary with dired.** `docs/dired-framing.md:807-819` and the ledger
-claim prefix-aware, normalize-before-lookup rebinding for the **rename**
-side. This lane takes the **delete** side only. Taking it now rather
-than consuming dired Stage 2's helper is settled, and is supported by
-the ledger's own assessment of that lane: PR #171 is **OPEN, STALE, DO
-NOT MERGE AS-IS**, 153 commits behind at the last snapshot, under
-re-scout. Whichever lands second adopts the first's helper.
+**Boundary with dired — restated at rev 3.** The settled split (§1.12,
+quoted there verbatim and carried identically by #171) is:
+
+> #186 owns the urgent **pre-filesystem refusal** for synchronous
+> `apply_resource_op`. #171 later owns **full post-delete lifecycle
+> reconciliation**, including the **async race where a buffer becomes
+> modified after dired dispatch**.
+
+**The stale justification is withdrawn.** Revision 2 supported taking
+the delete side now by citing the ledger's "OPEN, STALE, 153 commits
+behind, under re-scout" assessment of #171. That re-scout has finished;
+#171 is at revision 7, integrated to `ad41cf1`. **The conclusion is
+unchanged and rests on urgency alone** — this is a live data-loss bug
+with a reproduction, and a refusal that must precede the filesystem call
+cannot be deferred to a lane that acts after it. It no longer rests on
+any claim about #171's freshness, and it must not be re-argued from one.
 
 ### Q#RD6 — The shared query scans **all** path-bound buffers — **REWRITTEN at rev 2**
 
@@ -732,6 +932,15 @@ The shared query therefore:
 - is the **single** query used by both the primitive's validation phase
   and the Lua preflight (Q#RD3).
 
+**This lane claims the query.** The boundary's rule is "whichever lands
+first owns the query and the other adopts it", and #171 revision 7
+records that this rule's four clauses are character-for-character what
+it had written independently for `reconcile_delete`. To stop both lanes
+asserting ownership: **#186 owns and implements the shared walk**, #171
+adopts it and extends it to `reconcile_rename`. If #171 lands first the
+claim inverts and this decision is what gets deleted — but it is stated
+in one direction so the duplicate resolves rather than persisting.
+
 "Modified" is `Buffer::is_modified()`. No new notion of dirtiness.
 
 Explicitly **not** guarded: a clean buffer. A delete whose target is
@@ -739,26 +948,57 @@ open but unmodified proceeds and removes the buffer, as today.
 Overreach would break `m4_15` and would fail legitimate deletes for
 users who merely have the file open.
 
-### Q#RD7 — Failures travel as values, are always answered, and leave a durable trace — **WIDENED at rev 2**
+### Q#RD7 — One reporting seam at the server-request boundary — **REWRITTEN at rev 3**
 
-§1.5 established that **no** caller reliably surfaces a raise. So:
+§1.5 established that **no** caller reliably surfaces a raise. Revision
+2 answered that with three promises that did not compose into anything
+implementable; revision 3 replaces them with **one seam**.
 
-- **Every primitive call inside `apply_workspace_edit` is wrapped**, and
-  every execution failure — refusal or I/O error — is converted to the
-  existing `nil, message` return. No exception escapes the applier.
+**Where the seam is: the server-request boundary**, i.e. the
+`workspace/applyEdit` arm of `handle_server_requests`
+(`builtin/runtime/lsp.lua:1833-1843`). Everything below hangs off that
+single point.
+
+- **Wrap parse *and* apply, not apply alone.** Revision 2 wrapped "every
+  primitive call inside `apply_workspace_edit`", which does not cover
+  `pmacs.lsp._parse_workspace_edit` — it is called at `lsp.lua:1835`,
+  one line **above** `apply_workspace_edit`, and it is fallible
+  (`lua_to_json(edit)?`, `src/lua_bindings/mod.rs:10161`). A parse
+  failure therefore escaped, was swallowed by
+  `pcall(handle_server_requests)`, and left the server unanswered — the
+  exact defect being fixed, one line out of scope.
+
+  **Of the two options offered in review, this revision picks wrapping
+  parse-plus-apply** rather than narrowing "always answers" to applier
+  execution failures. Reason: the narrow option documents a hole instead
+  of closing one, and the wrap already exists — it moves up one line.
+  With it, **"always answers" is true without qualification**.
+- **Every failure becomes a value.** Refusal, I/O error, and parse
+  failure all converge on the existing `nil, message` shape, which all
+  three callers already handle. No exception escapes the applier.
+- **The unattended caller always answers**: `{ applied = false,
+  failureReason = ... }` in every failure case, including parse failure.
+- **The durable trace is written at this boundary, not in the
+  primitive.** Revision 2 promised logging through
+  `LuaHost::append_to_errors_buffer` (`src/lua.rs:401`). Two problems,
+  both confirmed: it is **private**, so it is not callable from where
+  the promise was made; and a **Lua preflight** rejection never reaches
+  the Rust primitive at all, so primitive-side logging would miss the
+  common unattended case entirely. So: a **narrow Lua-callable surface**
+  that appends one attributed record to `*errors*`, invoked at the
+  server-request boundary **after any `applied = false`**, with the
+  label `lsp:workspace/applyEdit`. One call site, one label, reachable
+  from the layer that actually knows the outcome.
 - **The origin buffer is restored best-effort on the failure path too.**
   Today `pcall(pmacs.buffer.find_or_open, origin)` runs only after a
   successful loop; an early failure return would strand the user in
   whatever buffer the last op left active.
-- **The unattended caller always answers.** Path 1 must send
-  `{ applied = false, failureReason = ... }` in every failure case.
-  Today the raise unwinds past the send and the server waits forever.
-- **The refusal is also recorded in `*errors*`** via the existing
-  Rust-side `append_to_errors_buffer` idiom (§1.10), so it survives the
-  status line being cleared on the next keystroke and leaves a trace on
-  the path the user was never watching.
 - The message **names the buffer** and says what to do. Not a bare
   errno.
+
+Acceptance 13 tests **both** halves of the boundary — the response the
+server receives *and* the `*errors*` record — because revision 2 tested
+only the first while promising the second.
 
 ### Q#RD8 — The window/last-buffer defects do **not** land here
 
@@ -771,9 +1011,16 @@ clean *disjoint* sets. `kill_buffer` handles the last-buffer refusal,
 **not** keymaps, config, folds or `on_removed` callbacks;
 `remove_buffer_and_fire` handles exactly the latter and none of the
 former. Neither is a superset, so "just call `kill_buffer` instead"
-would silently regress four cleanups. Unifying them needs its own census
-and its own lane — and per Q#RD5 this lane must not enlarge the surface
-that lane will have to fix.
+would silently regress four cleanups.
+
+**Revision 3 — that lane now exists.** Revision 2 said mode (d) "needs
+its own lane and a census", which was true when written and is not now.
+#171's `reconcile_delete` composes both phases for every id it kills and
+reroutes `apply_resource_op`'s delete arm through it, and #171 revision
+7 records the disjoint-set trap independently. So mode (d) is **owned,
+not unowned**, and per Q#RD5 this lane's job is narrower than it looked:
+not merely "don't fix it here" but **don't enlarge the surface #171 has
+to fix**.
 
 ### Q#RD9 — **WITHDRAWN at rev 2**
 
@@ -784,6 +1031,36 @@ mutation succeeds, so there is no lost buffer to restore. The decision
 number is retained rather than reused, so review can see it went away
 rather than being renumbered.
 
+### Q#RD10 — Validate every match; reconcile today's first match only — **NEW at rev 3**
+
+Q#RD6 makes validation scan **all** path-bound buffers. Revision 2 never
+said what *reconciliation* does afterwards when several match, which
+left the common duplicate case undefined. It is now decided:
+
+- **Validation: every match.** If any buffer bound to the path — or
+  beneath it, for a recursive delete — is modified, the op refuses.
+  A clean first match must not be able to hide a modified second (§1.4).
+- **Reconciliation: exactly today's behaviour.** After a *successful*
+  delete, the single first exact-path match is removed, as
+  `find_by_path` does now. Additional clean duplicates are left in
+  place.
+
+**Why not remove them all.** Every extra removal goes through
+`remove_buffer_and_fire`, which is phase 2 without phase 1 (Q#RD8) — so
+removing N duplicates creates up to N dangling windows and brings the
+registry N steps closer to empty. That is precisely the parked defect
+Q#RD5 is written to contain, and widening it here would hand #171 a
+larger problem in exchange for tidiness this lane does not need.
+
+**The honest cost**, stated rather than buried: a surviving clean
+duplicate is left bound to a path that no longer exists — the same
+orphan shape as mode (c), on a narrower trigger. It is **residue handed
+to #171**, whose lifecycle transaction can then remove all matches
+safely because it composes both phases. This lane's contract is that no
+*unsaved* work is lost, not that the registry ends tidy.
+
+Acceptance 14 pins both directions, so neither widening nor narrowing
+can happen silently.
 
 ## 4. Bets (falsifiable)
 
@@ -791,11 +1068,18 @@ rather than being renumbered.
   deleting a file the user has unsaved edits in is a conflict the user
   must resolve. Falsified by a real server whose normal operation
   deletes files the user is actively editing.
-- **B2 — Mid-batch refusal is acceptable because the protocol already
-  specifies it.** §1.7's `Abort` semantics are the spec's own answer for
-  resource-op-bearing edits. Falsified if a server is found that
-  requires transactional application and degrades badly under `Abort`.
-  Acceptance 12 pins the observable behaviour either way.
+- **B2 — Mid-batch refusal is acceptable because partial application is
+  already what pmacs does, and is safer than data loss.**
+  *Rewritten at rev 3 (P1-2).* Revision 2 rested this on the protocol
+  "assigning `Abort`" to resource-op edits, which it does not (§1.7):
+  recovery is the client's advertised choice and pmacs advertises none.
+  The bet now stands on repository evidence — §1.6 **verified** that an
+  op failing mid-batch leaves earlier ops applied on `main` today — plus
+  the ordering judgement that a partial refactor the user can see and
+  redo beats unsaved work they cannot recover. Falsified if a server is
+  found that requires transactional application and degrades badly under
+  partial application. Acceptance 12 pins the observable behaviour
+  either way.
 - **B3 — Prefix-aware validation does not over-refuse.** Falsified if a
   common workflow deletes a directory while an unrelated modified buffer
   sits beneath it and the refusal is judged unhelpful.
@@ -892,28 +1176,68 @@ that passes against its pre-image has no bite and is rejected.
     preflight-only fix that claims atomicity — these are the cases
     revision 1's atomicity claim asserted could not happen.
 
-13. **The refusal reaches the server on the unattended path**, and the
-    user-initiated paths report on the status line naming the buffer.
+13. **The refusal reaches the server on the unattended path AND leaves
+    the durable trace** (Q#RD7). Assert **both**: the server receives
+    `applied = false` with a non-empty `failureReason`, *and* `*errors*`
+    contains a record carrying the `lsp:workspace/applyEdit` label. The
+    user-initiated paths additionally report on the status line naming
+    the buffer.
     *Bite:* fails against a fix that refuses by raising. A direct-call
     test on `apply_resource_op` does **not** satisfy this and is
     rejected as insufficient — the guard must be pinned through the
-    outermost user-reachable seam.
+    outermost user-reachable seam. **The `*errors*` half fails against
+    revision 2**, which promised the trace and tested only the response;
+    asserting the response alone is what let that gap survive a round.
 
-14. **`m4_15_workspace_edit_resource_ops_apply_in_order` stays green
+14. **Clean duplicates: every match validated, one match reconciled**
+    (Q#RD10). Two clean buffers bound to one path; delete succeeds.
+    Assert exactly one is removed and one remains.
+    *Bite:* fails in **both** directions — against an implementation
+    that removes all matches (widening the parked defect) and against
+    one whose validation only consulted the first match. Pair with
+    criterion 6, which covers the modified-second case; this one covers
+    the all-clean case that criterion 6 cannot see.
+
+15. **A parse failure still answers the server** (Q#RD7). Feed the
+    `workspace/applyEdit` arm an edit payload that makes
+    `_parse_workspace_edit` fail, and assert the server still receives
+    `applied = false` with a `failureReason`.
+    *Bite:* fails against `ad41cf1` **and** against revision 2's
+    proposed wrap, which covered `apply_workspace_edit` only and left
+    the parse one line outside — the concrete reason "always answers"
+    was untrue as written.
+
+16. **`m4_15_workspace_edit_resource_ops_apply_in_order` stays green
     unmodified**, pinning no-regression from outside. Its `c.rs` is
     never opened, so it exercises exactly the unguarded case that must
     keep working (Q#RD6).
 
-15. **Every new test is checked with `scripts/bite`** and none reports
+17. **Every new test is checked with `scripts/bite`** and none reports
     VACUOUS.
 
 
 ## 6. Parked — not deferred-and-forgotten
 
 - **Mode (d): the dangling window and the emptiable registry** (§1.1,
-  Q#RD8). Needs its own lane and a census, because the two removal paths
-  clean disjoint sets and the obvious unification regresses four
-  cleanups. Q#RD5 is written to avoid enlarging it.
+  Q#RD8). **Owned by #171** as of its revision 7 — `reconcile_delete`
+  composes both removal phases and reroutes `apply_resource_op`'s delete
+  arm through it. Revision 2 of this document called it unowned; that
+  was true when written and is not now. Q#RD5 and Q#RD10 are written to
+  avoid enlarging what that lane must fix.
+- **`pmacs.fs.remove` is guarded by neither lane — explicitly out of
+  scope here** (named in #171 revision 7 §11). After both lanes land,
+  the refusal sits at the `apply_resource_op` primitive (this lane) and
+  in dired's policy layer (#171), but `pmacs.fs.remove` is public Lua
+  API with **no dirty check of its own**, so a third caller inherits
+  neither guard — the guards are one layer *above* it on each side.
+  Verified latent rather than live: `pmacs.fs.remove`
+  (`builtin/runtime/fs.lua:187`) has **zero production callers**, its
+  only references being `tests/m8_1_acceptance.rs:438`, `:439`, `:472`.
+  **This lane does not extend scope to cover it.** It belongs with the
+  primitive-level fs guards, i.e. #171's `pmacs.fs.*` work or a
+  successor lane — recorded here because "both lanes guard deletion"
+  otherwise reads as a claim that the primitive is guarded, and it is
+  not.
 - **`kill_buffer` and `editor.quit` have the same gap** (§1.4).
   `editor.before-quit` exists as a veto channel with no subscriber. This
   lane sets the precedent; those are separate lanes.
@@ -974,10 +1298,18 @@ It will **not** touch `src/daemon.rs`, `pmacs-protocol/`,
 `builtin/runtime/dired.lua`, `docs/agent-handoff.md` or `COHERENCE.md`.
 No protocol change.
 
-**Ownership note.** `docs/active-work.md` records that dired Stage 2a —
-"rename/delete reconciliation substrate" — overlaps
-`builtin/runtime/lsp.lua` and warns against running it concurrently with
-other work touching those files "without assigning those files to one
-lane first". This lane claims the **delete** half of that substrate and
-`builtin/runtime/lsp.lua`'s applier for its duration; the lane entry in
-`docs/active-work.md` records the claim.
+**Ownership note — restated at rev 3 against #171 revision 7.** The
+settled split is quoted in §1.12 and Q#RD5 and is carried identically by
+both lanes. Concretely, this lane claims for its duration:
+
+- the **pre-filesystem refusal** inside synchronous `apply_resource_op`;
+- the **shared walk query** of Q#RD6 (`whichever lands first owns the
+  query`), which #171 then adopts for `reconcile_rename`;
+- `builtin/runtime/lsp.lua`'s `apply_workspace_edit` and the
+  `workspace/applyEdit` server-request boundary.
+
+It explicitly does **not** claim: full post-delete lifecycle
+reconciliation, the dired async race between dispatch and
+`remove_blocking`, the rename side of the walk, or `pmacs.fs.remove`
+(§6). Revision 2's version of this note was written against a stale
+reading of #171 and is superseded.

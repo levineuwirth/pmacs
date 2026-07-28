@@ -485,13 +485,35 @@ has **no branch and no framing yet**.
   exact-path guard; (d) removal is not `kill_buffer`, so windows are
   left bound to a removed `BufferId` and the registry can be driven to
   **empty**.
-- **Approved in principle after review round 1**, revision 1 rejected.
-  Settled: refuse unconditionally; take delete-side prefix-awareness now
-  rather than waiting on #171. Withdrawn: rev 1's buffer-first ordering.
-  The design is now `stat/no-op → enumerate and validate → mutate
-  filesystem → reconcile`, which keeps `on_removed`'s "path already
-  gone" invariant and makes a failed deletion leave buffers intact
-  automatically.
+- **Approved in principle after review round 1; revision 2 raised four
+  P1s; revision 3 answers them. Still PROPOSED, still not approved for
+  implementation.** Settled: refuse unconditionally; take the delete
+  side now. Withdrawn: rev 1's buffer-first ordering. The design is
+  `stat/no-op → enumerate and validate → mutate filesystem →
+  reconcile`, which keeps `on_removed`'s "path already gone" invariant
+  and makes a failed deletion leave buffers intact automatically.
+- **The settled cross-lane split with #171 — identical wording in both
+  lanes, do not paraphrase:**
+
+  > #186 owns the urgent **pre-filesystem refusal** for synchronous
+  > `apply_resource_op`. #171 later owns **full post-delete lifecycle
+  > reconciliation**, including the **async race where a buffer becomes
+  > modified after dired dispatch**. #171's revision 7 adopts the
+  > refusal and stops saying LSP intentionally deletes modified files.
+
+  #186 additionally **owns the shared walk query** (scan every
+  path-bound buffer, normalize once, component-aware `Path::starts_with`)
+  under the boundary's "whichever lands first owns the query"; #171
+  adopts it and extends it to `reconcile_rename`. **Neither lane guards
+  `pmacs.fs.remove`** — zero production callers today, named out of
+  scope by both.
+- **#171's real state, re-checked 2026-07-28:** revision 7, head
+  `fd7ae37`, merge-base `ad41cf1`, **0 commits behind**. It is **not**
+  the "153 commits behind, under re-scout" lane described further down
+  this file and in #186's revision 2 — that re-scout has finished.
+  **This cross-lane fact rotted twice in one arc** because the two lanes
+  were briefed hours apart; re-read the other lane's head before citing
+  its state, never a summary of it.
 - **Four facts a re-scout should not have to rediscover**, all verified
   at `ad41cf1`:
   - **No caller reliably surfaces a raise.** The server pump runs under
@@ -500,11 +522,17 @@ has **no branch and no framing yet**.
     answered; and the two user-initiated paths route uncaught coroutine
     errors through `pmacs.error`, which is **undefined** (11 call sites
     in `builtin/`, zero definitions). Refusals must travel as values.
-  - **A partial batch is already the status quo** — verified: two delete
-    ops, the second raises, the first stayed applied. LSP 3.18 says so
-    too: resource-op-bearing edits get `FailureHandlingKind.Abort`,
-    "all operations executed before the failing operation stay
-    executed". Any framing claiming batch atomicity here is wrong.
+  - **A partial batch is already the status quo** — verified in-repo:
+    two delete ops, the second raises, the first stayed applied. Any
+    framing claiming batch atomicity here is wrong. **Do not justify
+    this from the LSP spec.** Revision 2 of #186 wrote that LSP 3.18
+    "assigns `FailureHandlingKind.Abort` to resource-op-bearing edits";
+    **it does not** — recovery is described by the client's advertised
+    `workspace.workspaceEdit.failureHandling`, `Abort` is one of four
+    strategies, only `TextOnlyTransactional` degrades to abort for
+    resource changes, and **pmacs advertises none of them**. The
+    justification is repository evidence plus the judgement that a
+    visible partial refactor beats unrecoverable unsaved work.
   - **`find_by_path` is singular and duplicates are reachable.**
     `BufferRegistry::find_by_path` returns the first match in insertion
     order, `EditorCore::find_buffer_for_path` inherits that, and
@@ -515,13 +543,22 @@ has **no branch and no framing yet**.
     `"applyEdit": true` but no `documentChanges`, no
     `resourceOperations`, no `failureHandling`; `grep -rn
     failureHandling` returns 0. Parked, not fixed here.
-- **Ownership claim, per the dired lane's own warning below:** dired
-  Stage 2a is "rename/delete reconciliation substrate" and overlaps
-  `builtin/runtime/lsp.lua`. **This lane claims the delete half of that
-  substrate and the `apply_workspace_edit` applier for its duration**;
-  dired Stage 2 keeps the rename half. Whichever lands second adopts the
-  first's shared lookup helper. Do not run the two concurrently over
-  `builtin/runtime/lsp.lua` without re-splitting that claim.
+- **Ownership claim, concretely.** For this lane's duration #186 owns:
+  the pre-filesystem refusal inside synchronous `apply_resource_op`; the
+  **shared walk query**; and `builtin/runtime/lsp.lua`'s
+  `apply_workspace_edit` plus the `workspace/applyEdit` server-request
+  boundary. It does **not** own: full post-delete lifecycle
+  reconciliation, the dired async race between dispatch and
+  `remove_blocking`, the rename side of the walk, or `pmacs.fs.remove`.
+  Do not run the two lanes concurrently over `builtin/runtime/lsp.lua`
+  without re-splitting that claim.
+- **Two residues #186 deliberately leaves for #171**, both named rather
+  than silent: after a successful *clean* recursive delete, descendant
+  buffers stay orphaned-and-clean (widening removal would promote the
+  dangling-window/empty-registry defect from exact-path to tree-wide);
+  and after a successful delete with several clean duplicates on one
+  path, only the first is reconciled. #186 validates **every** match but
+  reconciles **one**, which is today's behaviour preserved on purpose.
 - Files the implementation will touch: `src/lua_bindings/mod.rs`,
   `builtin/runtime/lsp.lua`, `tests/m4_acceptance.rs`,
   `src/bin/pmacs_fake_lsp.rs`. **Not** `src/daemon.rs`,
