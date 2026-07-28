@@ -1,13 +1,16 @@
 # Bottom panel Stage 2 — the GPU panel band (framing)
 
 **Revision 6 — PR #184 review correction; the underlying Stage 2
-framing remains APPROVED 2026-07-27. 2A is merged and 2B-1 is under
-review. Ground truth: canonical `main` @ `7fd646d`, protocol v20 on
-`main`; `bottom-panel-stage2b` reserves the v21 schema while its
-server-first production handshake continues to advertise v20.**
+framing remains APPROVED 2026-07-27. 2A (#177) and 2B-1 (#184) are both
+merged, and 2B-2 is the next slice. Ground truth: canonical `main` @
+`6bee09d`, where protocol schema support is `v6..=v21` while the
+production server-first handshake still deliberately advertises v20.**
 Revisions 1–4 were pre-implementation; rev 5 recorded the three-way
 slice of Stage 2B after its first slice was already built; rev 6
-corrects that slice's mixed-version and gate contracts.
+corrects that slice's mixed-version and gate contracts. **No revision
+bump accompanies 2B-1's merge** — the status sentence and ground-truth
+anchor above are landed-state facts, and no design decision in this
+document changed when #184 landed.
 
 Stage 1 (#155, merge `e745068`) gave pmacs window placement, window
 parameters, TUI side windows, the divider, and the adopter `display`
