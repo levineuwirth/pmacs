@@ -716,8 +716,8 @@ fn a37_real_daemon_real_pty_and_headless_gpu_render_one_terminal_session() {
 
     assert_eq!(
         facts.get("server_protocol_version").copied(),
-        Some("20"),
-        "the real daemon negotiated v20 with the real client: {text}"
+        Some("21"),
+        "the real daemon negotiated v21 with the real client: {text}"
     );
     assert_eq!(
         facts.get("entered_terminal_mode").copied(),
@@ -846,7 +846,7 @@ fn terminal_mode_keeps_reporting_presence_so_peers_drop_the_stale_caret() {
         panic!("timed out waiting for {what}");
     }
 
-    assert_eq!(PROTOCOL_VERSION, 20);
+    assert_eq!(PROTOCOL_VERSION, 21);
     let daemon = common::daemon::TestDaemon::spawn_with_env_and_init(
         &[
             ("PMACS_INSTANCE_SEMANTIC_RENDER", "1"),

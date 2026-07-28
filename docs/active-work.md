@@ -306,12 +306,15 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
-## Bottom-panel lane (Arc 7) — 2B-1 IN GATING
+## Bottom-panel lane (Arc 7) — 2B-1 GATED; PR HELD ON MAIN RATCHET
 
 Stage 1, the Stage 2 framing, and Stage 2A are on `main`. Framing
 revision 5's three-way split of 2B was explicitly approved on
 2026-07-27. **Stage 2B-1 is implemented, integrated with canonical
-`main`, and awaiting its full gate result before a PR is opened.**
+`main`, and its full matrix has run. No PR is open: one deterministic
+touched-suite assertion is stale on canonical `main` after #182 and
+must be corrected separately before this branch can claim a green
+gate.**
 
 - **Stage 2B-1 branch:** `bottom-panel-stage2b`, based on
   `githubsucks/main` @ `c2d56ff` by merge because review had begun.
@@ -327,6 +330,33 @@ revision 5's three-way split of 2B was explicitly approved on
   `9b364ad`: `PanelFrame` now identifies its buffer, the transport
   ratchet covers the actual attach path rather than a detached codec
   assertion, and shared grid bounds have one validator.
+- **The full gate found and corrected two 2B-1 omissions:** the
+  statusline version ladder still pinned v20/rejected v21, and Vterm
+  Stage 3 pinned v20 both structurally and in its real headless probe.
+  Those ratchets now expect v21 and, where applicable, reject v22.
+- **Green evidence on the corrected tree:** formatting and strict
+  workspace Clippy; library **1,849 passed + 3 ignored default** and
+  **2,034 passed + 4 ignored CRDT**; bottom-panel Stage 1 / 2A / 2B-1
+  **46 / 17 / 15**; folding Stage 2 **48**; GPU font **11**; statusline
+  **8 CRDT**; m11_5 semantic **2 CRDT**; Vterm Stages 1 / 2 / 3
+  **10 / 6 / 9 CRDT**, with Stage 3's real daemon + PTY + wgpu probe
+  required and green; M4 **121 passed + 3 ignored + 1 filtered**;
+  required GPU **202**; and the isolated-config, one-invocation full
+  workspace sweep green on rerun. Its first pass hit the known
+  completion-before-supersede race in
+  `m8_1_acceptance::read_dir_supersede_cancels_in_flight_predecessor`;
+  the exact pin, its full 10-test target, and the complete workspace
+  rerun all passed.
+- **Sole deterministic red — reproduced unchanged on canonical
+  `main`:** `gpu_initial_target_acceptance` is **13/14**, failing
+  `malformed_or_unloadable_targets_fail_closed_without_poisoning_the_daemon`.
+  Its invalid-target table still includes `"."` and demands only a
+  failure result, while #182 deliberately made a directory target valid
+  and therefore sends the result plus snapshot. The identical failure
+  reproduces at the tree-identical #182 head `7a3a55d`; 2B-1 changes no
+  initial-target behavior. Correct this as a Journey/GPU-initial-target
+  ratchet side quest on `main`, then integrate it here and rerun that
+  touched gate before opening the 2B-1 PR.
 - **Next ordering is fixed:** 2B-2 branches from `main` only after 2B-1
   lands; 2B-3 branches only after 2B-2 lands. The daemon epoch machine
   belongs to 2B-2; the GPU band and negotiated capability flip belong
