@@ -62,6 +62,21 @@ define {
 }
 
 define {
+  name = "path.open-directory",
+  description = "Fired when a directory path is opened (Journey Stage 1a). " ..
+                "Receives the canonical absolute path and an opaque " ..
+                "destination. Return false to CLAIM the directory and stop " ..
+                "the fan-out; return nothing to decline. No builtin " ..
+                "subscribes -- because hook callbacks only ever append, a " ..
+                "subscribing builtin would always claim before any user " ..
+                "listener could run, so this hook is the user's chain and " ..
+                "pmacs.path.directory_handler is the default surface it " ..
+                "falls back to. A callback that RAISES stops the chain and " ..
+                "suppresses that fallback.",
+  kind = "short-circuit",
+}
+
+define {
   name = "editor.before-quit",
   description = "Fired before the editor exits. Return false to veto.",
   kind = "short-circuit",

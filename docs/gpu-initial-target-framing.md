@@ -282,8 +282,17 @@ observers; they are not the transport implementation.
 - Any `NotFound` from the initial load creates an empty path-backed buffer,
   including when a parent is currently absent; save-time errors remain
   save-time errors, matching local `pmacs FILE`.
-- `PermissionDenied`, `IsADirectory`, invalid path bytes at the OS boundary,
-  and other non-`NotFound` errors fail startup.
+- `PermissionDenied`, invalid path bytes at the OS boundary, and other
+  non-`NotFound` errors fail startup.
+- **`IsADirectory` is superseded by Journey Stage 1a**
+  (`docs/journey-stage1a-framing.md`). A directory no longer reaches the
+  load at all: `resolve_target_buffer` answers `ResolvedTarget::Directory`
+  ahead of it, so a directory target now *succeeds*, dispatching the
+  `path.open-directory` chain and replying `Opened`. Deliberate
+  supersession, not drift — the whole point of that stage is that
+  `pmacs .` must not exit 1, and a daemon/GPU bootstrap that still failed
+  would leave the two entry points disagreeing about the same argument.
+  Non-directory failures are unchanged.
 - The buffer display name may use `Path::display()` and therefore replacement
   characters; this must never replace the raw backing path used for dedup,
   load, or save.
@@ -550,12 +559,17 @@ process behavior.
 9. **New file:** a nonexistent target produces an empty snapshot, `[new file]`
    status/path identity, accepts an edit/save through the real session, and
    creates the requested file under the launcher cwd—not the daemon cwd.
-10. **Open error:** a directory/permission-denied target returns a specific
+10. **Open error:** a permission-denied target returns a specific
     failure before ready/window creation and makes root fail. The daemon shuts
     down that failed session's socket; a client that lingers or sends another
     event cannot reach uninstalled session state. An existing daemon remains
     connectable; a pre-existing frontend's active buffer and contents remain
     unchanged.
+    **Amended by Journey Stage 1a:** the *directory* case is deliberately
+    superseded and moved to the success path — see Q#GT6. A directory
+    target now reaches ready and the document window shows dired, pinned
+    by `initial_target_directory_reaches_ready` and its two siblings in
+    `src/daemon.rs`. Permission-denied is unchanged and still fails.
 11. **Dedup preserves unsaved edits:** frontend A opens and modifies a file
     without saving; target-launch frontend B opens the same normalized path and
     receives A's authoritative unsaved text with the same `BufferId`, not disk

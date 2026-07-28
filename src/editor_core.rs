@@ -94,6 +94,77 @@ pub enum HookKind {
     None,
 }
 
+/// What a path resolved to (Journey Stage 1a, Q#JR5).
+///
+/// A sum type rather than `(Option<BufferId>, HookKind)`: that pair
+/// admits three states that cannot occur (`None` with `AfterLoad`,
+/// `Some` with a directory, …), and every caller would have to
+/// re-establish by hand which combinations are real.
+///
+/// **Do not confuse [`HookKind`] here with [`crate::hook::HookKind`]** —
+/// unrelated types sharing a name. This one says *which* lifecycle hook
+/// to fire; that one says how a hook's callbacks fan out. Every site
+/// touching both writes them path-qualified (Q#JR5b).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ResolvedTarget {
+    /// A file buffer, plus the hook the caller must fire with the
+    /// destination window active.
+    Buffer {
+        /// The resolved buffer.
+        id: BufferId,
+        /// Which lifecycle hook this resolution owes.
+        fire: HookKind,
+    },
+    /// A directory. No buffer is created (Q#JR6) — the directory
+    /// resolver chain decides what surfaces it, and dired builds its own
+    /// buffer through `claim_handle` rather than adopting one.
+    ///
+    /// `path` is **normalized** — absolute, tilde-expanded, lexically
+    /// clean. This is not free and must not be assumed: normalization
+    /// otherwise happens inside [`Self::set_buffer_path`], which never
+    /// runs on this arm, so a caller resolving `"."` would keep `"."`
+    /// (Q#JR8). A handler keying state by path needs the canonical form.
+    Directory {
+        /// The normalized directory path.
+        path: PathBuf,
+    },
+}
+
+/// Where a directory open was requested, captured **synchronously** at
+/// resolve time (Journey Stage 1a, Q#JR14).
+///
+/// The listing that satisfies a directory open is asynchronous
+/// (`pmacs.fs.read_dir` is worker-dispatched and must be awaited), so the
+/// code that finally builds and displays the listing runs a tick or more
+/// later — outside interactive dispatch, where `pmacs.window.*` acts on
+/// the *ambient* frontend by documented design (`builtin/runtime/dired.lua`).
+/// Without a captured destination, a second frontend dispatching in the
+/// meantime silently redirects the listing.
+///
+/// All three fields are load-bearing:
+///
+/// * `frontend` — the scope the commit must run in.
+/// * `window` — the exact destination; the ambient selected window is
+///   not it.
+/// * `buffer` — what that window held at capture time, so **stale
+///   intent loses to the user** (Q#JR14c). A user who replaced the
+///   buffer while the listing was in flight is newer information than
+///   the launch argument, and must not be overwritten.
+///
+/// Exposed to Lua only as nonconstructible userdata (Q#JR14d): as a
+/// table, the *same* value is handed to every resolver listener in turn,
+/// so one could mutate it and then decline — redirecting later listeners
+/// — and any Lua could fabricate a plausible triple.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DirectoryDestination {
+    /// Frontend that requested the directory.
+    pub frontend: FrontendId,
+    /// Window the listing must land in.
+    pub window: WindowId,
+    /// Buffer that window held at capture time (stale-intent check).
+    pub buffer: BufferId,
+}
+
 /// A `display_buffer` request (Q#BP3).
 ///
 /// `height` and `dedicated` are deliberately option-valued at the policy
@@ -880,18 +951,41 @@ impl EditorCore {
     /// One primitive, so two path-normalization, dedup, and hook
     /// transactions cannot drift apart.
     ///
+    /// A **directory** resolves to [`ResolvedTarget::Directory`] before
+    /// any load is attempted (Journey Stage 1a, Q#JR5/Q#JR6). Without
+    /// that arm the load runs and fails: `File::open` succeeds on a
+    /// directory and `read_to_end` then returns `EISDIR`, which is not
+    /// `NotFound`, so the `[new file]` arm never fires and every caller
+    /// saw a hard error — the reason `pmacs .` exited 1 and the golden
+    /// journey was graded broken at step 3 (`COHERENCE.md` §2).
+    ///
     /// # Errors
     /// Any load failure other than `NotFound`.
-    pub fn resolve_target_buffer(&mut self, path: &Path) -> Result<(BufferId, HookKind), String> {
+    pub fn resolve_target_buffer(&mut self, path: &Path) -> Result<ResolvedTarget, String> {
+        // Ahead of the load, deliberately: see the EISDIR note above.
+        if path.is_dir() {
+            return Ok(ResolvedTarget::Directory {
+                path: normalize_buffer_path(path.to_path_buf()),
+            });
+        }
         match self.get_or_load_buffer(path) {
-            Ok((buffer_id, true)) => Ok((buffer_id, HookKind::AfterLoad)),
-            Ok((buffer_id, false)) => Ok((buffer_id, HookKind::AfterSwitch)),
+            Ok((id, true)) => Ok(ResolvedTarget::Buffer {
+                id,
+                fire: HookKind::AfterLoad,
+            }),
+            Ok((id, false)) => Ok(ResolvedTarget::Buffer {
+                id,
+                fire: HookKind::AfterSwitch,
+            }),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let display_path = path.display().to_string();
                 let buffer_id = self.registry.borrow_mut().create(display_path);
                 self.set_buffer_path(buffer_id, Some(path.to_path_buf()));
                 "[new file]".clone_into(&mut self.status);
-                Ok((buffer_id, HookKind::None))
+                Ok(ResolvedTarget::Buffer {
+                    id: buffer_id,
+                    fire: HookKind::None,
+                })
             }
             Err(error) => Err(format!("cannot open {}: {error}", path.display())),
         }
@@ -3473,15 +3567,55 @@ impl EditorCore {
         existing: Option<BufferId>,
         window: Option<WindowId>,
     ) -> Result<WindowId, String> {
+        self.probe_display_target_inner(fid, existing, window)
+    }
+
+    /// Whether `window` will accept `incoming` as its buffer — the one
+    /// dedication rule, shared by every consumer (Journey Stage 1a,
+    /// Q#JR14f).
+    ///
+    /// A dedicated window refuses anything other than what it already
+    /// shows; an undedicated one accepts anything. `incoming` is
+    /// deliberately optional, and the `None` case is not a degenerate
+    /// spelling of "don't care" — it means **the replacement buffer does
+    /// not exist yet**, and a dedicated window must therefore be treated
+    /// as ineligible:
+    ///
+    /// | caller | `incoming` | dedicated window |
+    /// |---|---|---|
+    /// | [`Self::display_buffer`] exact-target arm | `Some(request.buffer_id)` | eligible only when already showing it |
+    /// | [`Self::probe_display_target`] | its existing-buffer result | preserves the load-before-placement probe |
+    /// | `commit_to` preflight | `None` | always ineligible |
+    ///
+    /// `commit_to` passes `None` because a directory open's destination
+    /// is validated *before* the handler builds its buffer. Passing the
+    /// captured bootstrap buffer instead would approve a window
+    /// dedicated to *that* buffer, the handler would then claim and paint
+    /// a different one, and the exact display would refuse afterwards —
+    /// after the mutations the preflight exists to prevent.
+    ///
+    /// Extracted rather than reimplemented per caller: two copies of a
+    /// rule that must agree is exactly the drift this stage's
+    /// path-resolution unification exists to close, and a future
+    /// eligibility rule added to only one copy would reopen it.
+    #[must_use]
+    pub fn window_accepts_buffer(&self, window: WindowId, incoming: Option<BufferId>) -> bool {
+        self.windows.get(&window).is_some_and(|w| {
+            !w.params.dedicated || incoming.is_some_and(|buffer_id| w.buffer_id == buffer_id)
+        })
+    }
+
+    fn probe_display_target_inner(
+        &self,
+        fid: FrontendId,
+        existing: Option<BufferId>,
+        window: Option<WindowId>,
+    ) -> Result<WindowId, String> {
         let view = self
             .views
             .get(&fid)
             .ok_or_else(|| format!("frontend {fid:?} has no window layout"))?;
-        let eligible = |id: WindowId| {
-            self.windows.get(&id).is_some_and(|w| {
-                !w.params.dedicated || existing.is_some_and(|buffer_id| w.buffer_id == buffer_id)
-            })
-        };
+        let eligible = |id: WindowId| self.window_accepts_buffer(id, existing);
         if let Some(target) = window {
             if !view.layout.iter_ids().contains(&target) {
                 return Err(format!(
@@ -3563,7 +3697,7 @@ impl EditorCore {
                 .windows
                 .get(&target)
                 .ok_or_else(|| format!("display: window {} is not live", target.raw()))?;
-            if window.params.dedicated && window.buffer_id != request.buffer_id {
+            if !self.window_accepts_buffer(target, Some(request.buffer_id)) {
                 return Err(format!(
                     "display: window {} is dedicated to another buffer",
                     target.raw()
@@ -5298,6 +5432,45 @@ mod tests {
         let s = fresh();
         assert!(s.active_window_for(FrontendId(42)).is_none());
         assert!(s.active_window_for(FrontendId::LOCAL).is_some());
+    }
+
+    /// Journey Stage 1a (Q#JR14f): the three decisive rows of the shared
+    /// eligibility predicate.
+    ///
+    /// The `None` row is the one that exists for `commit_to`, and it is
+    /// not a "don't care": a directory open validates its destination
+    /// *before* the handler creates the buffer that will land there, so
+    /// there is no incoming id to compare and a dedicated window must be
+    /// refused. Approving it would let the handler claim and paint, and
+    /// the display would refuse afterwards — after the mutations the
+    /// preflight exists to prevent.
+    #[test]
+    fn window_accepts_buffer_matrix() {
+        let mut s = fresh();
+        let window = s.views[&FrontendId::LOCAL].active;
+        let current = s.windows[&window].buffer_id;
+        let other = s.registry.borrow_mut().create(String::from("other"));
+
+        // Undedicated: accepts anything, including "not decided yet".
+        assert!(s.window_accepts_buffer(window, Some(current)));
+        assert!(s.window_accepts_buffer(window, Some(other)));
+        assert!(s.window_accepts_buffer(window, None));
+
+        s.windows.get_mut(&window).expect("live").params.dedicated = true;
+
+        // Dedicated: only what it already shows.
+        assert!(
+            s.window_accepts_buffer(window, Some(current)),
+            "a dedicated window still accepts the buffer it displays"
+        );
+        assert!(
+            !s.window_accepts_buffer(window, Some(other)),
+            "a dedicated window refuses a different buffer"
+        );
+        assert!(
+            !s.window_accepts_buffer(window, None),
+            "a dedicated window refuses an as-yet-unbuilt replacement"
+        );
     }
 
     #[test]

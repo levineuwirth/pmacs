@@ -1,8 +1,8 @@
 # Bottom panel Stage 2 — the GPU panel band (framing)
 
-**Revision 5 — 2A merged, 2B in progress. Ground truth: canonical
-`main` @ `42025e4`, protocol v20 on `main` and v21 on
-`bottom-panel-stage2b`, 2026-07-26.** Revisions 1–4 were
+**Revision 5 — APPROVED 2026-07-27; 2A merged, 2B-1 in progress.
+Ground truth: canonical `main` @ `c2d56ff`, protocol v20 on `main` and
+v21 on `bottom-panel-stage2b`.** Revisions 1–4 were
 pre-implementation; rev 5 records the three-way slice of Stage 2B
 (§0.0, §7.2, §9) after its first slice was already built.
 
@@ -885,7 +885,7 @@ suites: the shared validator and the wire enums are exactly the kind of
 change whose breakage surfaces in a consumer rather than at its own
 definition.
 
-Gates for both: the standing suite from `CLAUDE.md`, plus the **touched
+Gates for each slice: the standing suite from `CLAUDE.md`, plus the **touched
 acceptance suites named explicitly** — the standing rule is to run the
 suites a change touches, and "standing suite" does not name them:
 
