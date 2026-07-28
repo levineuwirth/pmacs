@@ -171,7 +171,7 @@ If it does not, stop and repair the remote/fetch configuration.
   to recur; the next occurrence carries its own evidence under whoever's
   PR, and a Stage B framing follows then.
 
-## Journey/GPU directory-target ratchet — IN GATING, no PR
+## Journey/GPU directory-target ratchet — GATED, PR PENDING
 
 - **Approved correction, not new product behavior.** GPU initial-target
   framing Q#GT6 / acceptance 10 and Journey Stage 1a N2/N5 already make
@@ -188,10 +188,29 @@ If it does not, stop and repair the remote/fetch configuration.
   then proves the same daemon can open a following file target. No
   production source, protocol, framing decision, or coherence grade
   changes.
-- Touched suite is **15/15 CRDT** after building its documented
-  `pmacs-gpu` prerequisite. Full standing gates are pending. Initial
-  fresh-worktree attempts without that binary and without out-of-sandbox
+- **Full gate matrix is green at `486ce16`:**
+  - `cargo fmt --check`;
+  - strict workspace clippy;
+  - library **1,849 passed / 3 ignored**;
+  - CRDT library **2,034 passed / 4 ignored**;
+  - touched GPU initial-target suite **15/15**;
+  - connected Journey/Dired/find-file/theme/bottom-panel acceptance
+    suites **125/125**;
+  - M4 **121 passed / 3 ignored / 1 filtered**;
+  - required GPU package **202/202**;
+  - `git diff --check`;
+  - isolated-config, one-invocation full workspace sweep green on its
+    final run.
+- **Gate diagnostics retained:** initial fresh-worktree attempts without
+  the documented `pmacs-gpu` prerequisite and without out-of-sandbox
   Unix-socket permission were setup failures, not product evidence.
+  The first full-workspace attempt then exhausted the `/tmp` filesystem
+  quota while linking. Moving only the disposable Cargo target to disk
+  let the sweep run; its first completed pass exposed one transient
+  `pmacs-gpu` font-facts unit-test red after the standalone GPU gate had
+  passed. The exact test passed immediately against the identical build,
+  and the required complete one-invocation rerun was green, including
+  GPU **202/202**.
 - This side quest lands before bottom-panel 2B-1 opens its PR. After it
   merges, 2B-1 integrates the new `main` and reruns its full matrix.
 
