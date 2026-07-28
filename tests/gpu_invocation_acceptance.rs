@@ -721,6 +721,13 @@ mod crdt {
         // alive through Journey N2's asynchronous dired commit. Snapshot
         // one is the deliberately pre-existing bootstrap document; snapshot
         // two is the post-quiescence directory surface.
+        // Capture the spawned daemon's PID from the ready report first so
+        // ManagedProbe::drop can terminate it if snapshot two never arrives.
+        let ready = directory.wait_ready();
+        assert_eq!(
+            ready.get("spawned_daemon").map(String::as_str),
+            Some("true")
+        );
         let facts = directory.wait_for("buffer_snapshots", "2");
         let listing = decode_hex(&facts["last_snapshot_hex"]);
         let canonical = fs::canonicalize(temp.path()).expect("canonical directory");
