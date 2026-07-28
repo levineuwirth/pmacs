@@ -459,17 +459,64 @@ has **no branch and no framing yet**.
   `FrontendView.fold_projection` to `true` for semantic frontends, which
   Stage 2 deliberately left `false` (Q#FD21).
 
-## dired Stage 2 framing lane — PR #171 AT REVISION 6, AWAITING APPROVAL
+## dired Stage 2 framing lane — PR #171 AT REVISION 7, AWAITING APPROVAL
 
 - Portable branch: `githubsucks/dired-stage2-framing`;
   worktree `../pmacs-dired-stage1`. **PR #171**, base `main`, integrated
   up to `main` @ `ad41cf1`. Framing only —
   `docs/dired-stage2-framing.md`, now **~2,630 lines**, no runtime code.
   This lane rides that PR.
-- **Status: PROPOSED, never approved.** **Revision 5 was reviewed and
-  NOT approved** — six findings, four P1 — and revision 6 answers them.
-  The commit history embodies five revisions and four review rounds;
-  **that is not the same as approval**, and it must not be read as one.
+- **Status: PROPOSED, never approved.** Revision 5 was reviewed and NOT
+  approved (six findings, four P1); revision 6 answered them; **revision
+  7 resolves a cross-lane conflict with PR #186**. The commit history
+  embodies six revisions and five rounds of findings; **that is not the
+  same as approval**, and it must not be read as one.
+- **CROSS-LANE SPLIT WITH PR #186 — settled, recorded verbatim so the
+  two lanes cannot diverge again:**
+
+  > #186 owns the urgent **pre-filesystem refusal** for synchronous
+  > `apply_resource_op`. #171 later owns **full post-delete lifecycle
+  > reconciliation**, including the **async race where a buffer becomes
+  > modified after dired dispatch**. #171's revision 7 adopts the
+  > refusal and stops saying LSP intentionally deletes modified files.
+
+  **PR #186 (`resource-op-delete-guard`) owns the pre-filesystem
+  refusal.** Do not implement a competing dirty check from #171. Rev 7
+  adopts #186's Q#RD1 (refuse, do not prompt, do not save, do not back
+  up) and its Q#RD6 shared query (scan every path-bound buffer, not
+  first-match; normalize once; component-aware `Path::starts_with`);
+  whichever lane lands first owns that query and the other adopts it.
+  The two fit deliberately: #186's Q#RD5 keeps reconciliation
+  **exact-path** so it does not promote the dangling-window and
+  last-buffer defects tree-wide, and #171's Q#DR27 is the lane that
+  makes widening safe.
+- **What rev 7 removed.** Rev 6 said an LSP-authored delete removes the
+  file and orphans the modified buffer as accepted residue. That is
+  withdrawn — **20 matched lines across 13 passages** were censused and
+  reclassified: 4 ownership claims reassigned to #186, 4 policy claims
+  deleted, 3 ground-truth statements kept but attributed, 2 async-race
+  claims kept and narrowed.
+- **What rev 7 kept, and it is now one path not two.** The async race —
+  a buffer modified between dired's pre-dispatch check and
+  `remove_blocking`'s syscall — survives #186's refusal, because **dired
+  never goes through `apply_resource_op`**: it calls `pmacs.fs.remove`,
+  which dispatches a worker no in-applier guard can see. Rev 6 carried
+  this as "two paths, LSP and dired"; after #186 the LSP path has no
+  residue at all.
+- **A gap neither lane closes, named in rev 7 §11:** `pmacs.fs.remove`
+  is public Lua API with **no dirty check of its own**. After both lanes
+  land the guards sit one layer above it on each side — at
+  `apply_resource_op` (#186) and in dired's policy layer (#171) — so a
+  third caller inherits neither. Latent, not live: it has zero
+  production callers today.
+- **LSP failure-handling, verified against the 3.18 spec** because #186
+  got it wrong and this lane was checked for the same error. **This lane
+  never made the claim** — it asserts nothing about `WorkspaceEdit`
+  recovery. For the record: only `textOnlyTransactional` degrades to
+  abort for resource operations; `transactional` covers them; and the
+  specification states **no default** for a client that does not
+  advertise `failureHandling` (pmacs advertises none). So "Abort applies
+  by omission" does not follow.
 - **Round 5's single theme, worth carrying because it will recur:** rev
   5 changed the slice split and the ownership of a decision, and the
   prose did not follow. Four of the six findings were that same defect

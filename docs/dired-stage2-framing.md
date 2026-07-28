@@ -1,11 +1,12 @@
 # Dired Stage 2 — marks and operations — framing
 
-**Revision 6 — 2026-07-28. Status: PROPOSED — NOT APPROVED. This
+**Revision 7 — 2026-07-28. Status: PROPOSED — NOT APPROVED. This
 document has never received a formal framing approval, and it needs one
 from the user before any implementation branch is cut.** Its commits
-embody four rounds of review findings; that is not the same as approval.
-Revision 5 was reviewed and **not approved** — six findings, four P1.
-§0's round-5 section says what each one changed.
+embody five rounds of findings; that is not the same as approval.
+Revision 6 answered review round 5; **revision 7 resolves a cross-lane
+conflict with PR #186**, which framed the opposite answer to the same
+event. §0's round-6 section says what the reconciliation changed.
 
 **Ground truth: re-scouted 2026-07-28 against canonical `main` @
 `6bee09d`** (`Merge pull request #184 from levineuwirth/bottom-panel-stage2b`).
@@ -42,6 +43,167 @@ numbers drift and this document has now watched them drift twice.
 ---
 
 ## 0. Revision history
+
+### Round 6 (rev 6 → rev 7) — cross-lane reconciliation with PR #186
+
+Not a review of this document. **PR #186**
+(`docs/resource-op-delete-guard-framing.md`, branch
+`resource-op-delete-guard`, based on the same `ad41cf1`) frames a guard
+for `apply_resource_op`'s delete arm that **refuses before touching
+disk** when any affected buffer is modified. Rev 6 said the opposite for
+the same event: the file *is* deleted, the modified buffer survives
+orphaned, and §11 named that orphaning as accepted residue. Two lanes,
+two answers, same call site.
+
+**The settled split, recorded verbatim so the two lanes cannot diverge
+again:**
+
+> #186 owns the urgent **pre-filesystem refusal** for synchronous
+> `apply_resource_op`. #171 later owns **full post-delete lifecycle
+> reconciliation**, including the **async race where a buffer becomes
+> modified after dired dispatch**. #171's revision 7 adopts the refusal
+> and stops saying LSP intentionally deletes modified files.
+
+Rev 7 adopts it. **This was not re-litigated**, and the changes below
+are what adopting it costs this document.
+
+#### The census of orphaning claims, and its arithmetic
+
+Built by grep over the whole file, then classified by reading each site's
+enclosing passage rather than the matched line. The pattern set was
+`orphan`, `destroys/destroy/destroying unsaved`, `unsaved work`,
+`keeps/keep modified`, `kept_modified`, `still deletes the file`,
+`no longer destroys`, `accepted the refactor`.
+
+**20 matched lines, resolving to 13 distinct passages**, classified:
+
+| Class | Count | What it said | Rev 7 |
+|---|---|---|---|
+| **A — ownership** | **4** | that *this lane* closes the LSP-delete data-loss defect | **Reassigned to #186.** §1, §10, §13 item 23, §16 |
+| **B — policy** | **4** | that an LSP-authored delete *intentionally* removes the file and orphans the buffer, as accepted residue | **Deleted.** §6's asymmetric split, §6's residue paragraph, §11's deferral, Q#DR18 |
+| **C — ground truth** | **3** | that the defect exists on `main` today | **Kept — it is still true — but attributed to #186 as the fixer.** §0's round-4 list, §2, §6 |
+| **D — the async race** | **2** | that a buffer modified after dispatch is orphaned | **Kept, and narrowed** — see below |
+
+Class C is deliberately not deleted: `main` at `ad41cf1` really does
+destroy unsaved work on that arm, and a framing that stopped saying so
+because another lane is fixing it would be describing a tree that does
+not exist yet. What changed is the attribution, not the fact.
+
+#### What changed in Q#DR18
+
+The decision is **rewritten, not withdrawn** — `reconcile_delete`
+survives, and the coordinator's instruction is explicit that the shared
+seam is not cancelled. Three changes:
+
+- **The synchronous path refuses before disk.** For `apply_resource_op`,
+  a modified buffer in the affected set means the delete **fails**,
+  changing nothing on disk and nothing in the registry (#186 Q#RD1).
+  Rev 6's "still deletes the file, because the user accepted the
+  refactor" is gone.
+- **`reconcile_delete`'s modified arm is no longer *reached* on that
+  path** — not removed from the seam. `DeleteReconcile.kept_modified`
+  stays, because the **asynchronous** path still reaches it (Class D).
+  Saying "the field is unreachable" would be wrong; saying "the sync
+  caller can no longer produce it" is right.
+- **The walk rule is adopted from #186, not reinvented.** #186's Q#RD6
+  already specifies the shared query — scans **every** path-bound
+  buffer rather than first-match, normalizes once, and matches with
+  component-aware `Path::starts_with` so `/tree` does not match
+  `/tree-sibling`. That is character-for-character the rule rev 6 wrote
+  for `reconcile_delete`, arrived at independently. **Whichever lands
+  first owns the query and the other adopts it**, which is #186's own
+  Q#RD5 boundary wording. `reconcile_rename` then uses the same query —
+  #186's §6 explicitly parks "the rename side of prefix-aware,
+  normalizing lookup" as dired Stage 2's.
+
+#### What residue survives the refusal, and why
+
+- **The async race is real, and rev 7 narrows whose it is.** #186's
+  refusal is synchronous and lives inside `apply_resource_op`. **Dired
+  never goes through `apply_resource_op`** — it calls `pmacs.fs.remove`,
+  which dispatches a worker (§2), so the refusal cannot reach it at any
+  strength. Dired's own pre-dispatch check closes the window up to
+  dispatch; between dispatch and `remove_blocking`'s `remove_file` the
+  interval stays open, and a buffer modified in it is orphaned.
+  **Correcting rev 6's framing of this:** rev 6 called it "the residue
+  rev 3 scoped to the LSP path applies to dired too — one deferral, two
+  paths". After #186 that is backwards. The LSP path has no residue,
+  because it refuses. **It is one deferral, one path, and the path is
+  dired's** — it always was, and rev 6 obscured it by bundling.
+- **The full post-delete lifecycle** stays this lane's, and #186 hands
+  it over explicitly rather than by omission. Its Q#RD8 parks "the
+  window/last-buffer defects" and states the trap rev 6's R4 found
+  independently: `kill_buffer` and `remove_buffer_and_fire` clean
+  **disjoint** sets, so neither is a superset and "just call
+  `kill_buffer`" silently regresses four cleanups. Its Q#RD5 then
+  deliberately keeps reconciliation **exact-path** — leaving descendant
+  buffers orphaned-and-clean after a recursive delete — precisely
+  because widening it "would promote mode (d)'s dangling-window and
+  last-buffer defects from an exact-path defect to a tree-wide one".
+  **That is this lane's Q#DR27.** #186 narrows on purpose so that #171
+  can widen safely once the lifecycle is correct; the two decisions fit,
+  and neither is complete alone.
+
+#### The LSP failure-handling claim — checked, and not inherited
+
+The coordinator flagged that #186 mis-assigns `Abort` to edits
+containing resource operations and warned this document might carry the
+same error. **It does not.** `grep` over this file for
+`failureHandling|failure handling|Abort|transactional` returns **10
+lines, none of which is a claim about the LSP specification** — every
+one is about hook fan-out or dired's own batch semantics ("a per-entry
+failure does not abort the batch"). Rev 6 asserted nothing about
+`WorkspaceEdit` recovery.
+
+The one adjacent claim was §6's *"refusing mid-edit leaves a
+half-applied refactor"*, offered as the reason the LSP arm should
+delete anyway. That was a claim about consequence rather than about the
+protocol — but it was the load-bearing support for Class B, and it goes
+with it.
+
+Verified against the **LSP 3.18** specification so the record is
+accurate for both lanes:
+
+- `abort` — *"Applying the workspace change is simply aborted if one of
+  the changes provided fails. All operations executed before the failing
+  operation stay executed."* **No mention of resource operations.**
+- `transactional` — *"All operations are executed transactionally. That
+  means they either all succeed or no changes at all are applied to the
+  workspace."* This **does** cover resource operations.
+- `textOnlyTransactional` — *"If the workspace edit contains only
+  textual file changes they are executed transactionally. If resource
+  changes (create, rename or delete file) are part of the change the
+  failure handling strategy is abort."* **This is the only kind that
+  degrades for resource ops**, and it is the sentence that gets
+  misattributed to `abort`.
+- `undo` — *"The client tries to undo the operations already executed.
+  But there is no guarantee that this is succeeding."*
+- The `failureHandling` capability is described only as *"The failure
+  handling strategy of a client if applying the workspace edit fails."*
+  **The specification states no default for a client that does not
+  advertise it.**
+
+So "pmacs advertises none, therefore `Abort` semantics apply by
+omission" does not follow, and neither does "the protocol declines to
+promise transactionality for resource-op edits" — `transactional`
+promises exactly that. Recorded here rather than only in a review
+comment because this document's §6 will sit next to #186's §1.7 in the
+same arc, and the corrected reading should be findable from either.
+
+#### One supporting citation in #186 that has gone stale
+
+Not a disagreement with the split, and not grounds to revisit it —
+#186's Q#RD5 justifies taking the delete side now partly by citing "the
+ledger's own assessment of that lane: PR #171 is **OPEN, STALE, DO NOT
+MERGE AS-IS**, 153 commits behind at the last snapshot, under re-scout."
+That was accurate when written and is no longer: #171 completed the
+re-scout, is integrated to `ad41cf1`, and is at revision 7. The
+*conclusion* stands on urgency alone — #186 fixes live data loss and
+this lane is not implementable until its framing is approved — so
+nothing about the split changes. Recorded so #186's next revision can
+drop a citation that would otherwise read as current.
+
+---
 
 ### Review round 5 (rev 5 → rev 6) — six findings, four P1, none approved
 
@@ -342,7 +504,8 @@ still doing a raw-path `find_by_path` first-match rebind
 (`src/lua_bindings/mod.rs:3306`) and its delete arm still killing
 through `remove_buffer_and_fire` with **no modified check**
 (`:3339-3341`) — **so an LSP-authored delete still destroys unsaved work
-on `main` today**; `apply_workspace_edit` still capturing `origin` as a
+on `main` today** (still true at `ad41cf1`; **PR #186 is what fixes it**,
+not this lane — see round 6); `apply_workspace_edit` still capturing `origin` as a
 **string** and restoring with `find_or_open` (`builtin/runtime/lsp.lua:1338`,
 `:1352`), its own comment still conceding the path *"may have just been
 renamed or deleted"*; `resolve_target_buffer`'s `NotFound` arm still
@@ -714,8 +877,15 @@ themselves.** That distinction is load-bearing and rev 5 blurred it
 this stage. Stage 2 supplies `resource.renamed`; Lean's state stays
 stale until Lean's owner subscribes (§11). What Stage 2 *does* deliver
 is a correctness fix to shared substrate: it is the reason `R` is safe
-on a directory at all, and it closes a path on which an LSP-authored
-delete currently destroys unsaved work.
+on a directory at all, and it gives rename and delete **one** registry
+walk instead of the raw first-match lookup each arm does today.
+
+**What this lane no longer claims** (rev 7, round 6): closing the
+LSP-authored delete that destroys unsaved work. That defect is real on
+`main` and is **PR #186's**, which refuses the delete *before disk*
+rather than reconciling after it. This lane inherits the refusal and
+owns what remains once it is in place — the full post-delete lifecycle,
+and the async race #186's synchronous guard cannot reach (§6).
 
 Not in Stage 2: `wdired` (Stage 3), subdirectory insertion (`i`),
 shell commands on marks (`!`), regexp marking (`% m`), and
@@ -1558,6 +1728,10 @@ and unmentioned. Verified: `apply_resource_op`'s delete arm
 lookup §5 fixes for rename, with **no descendant handling and no
 modified check**. So an LSP-authored delete **destroys unsaved work
 today**, silently, and a second buffer on the same path survives.
+**That data-loss half is PR #186's to fix** (rev 7, round 6): it refuses
+the delete before disk. What this lane takes from the same arm is the
+lookup — descendants and duplicate path-bound buffers — and the removal
+lifecycle (Q#DR27).
 
 ### One seam
 
@@ -1569,7 +1743,13 @@ kept_modified, refused }`**, symmetric with `reconcile_rename`:
   included and a second buffer on one path is not missed;
 - **kills unmodified** buffers, through the full two-phase lifecycle
   below;
-- **keeps modified ones alive** and returns them, so a caller can report;
+- **keeps modified ones alive** and returns them, so a caller can
+  report. *(Rev 7, round 6: the **synchronous** caller can no longer
+  produce this outcome — #186 refuses the delete before disk when any
+  affected buffer is modified, so `apply_resource_op` never reaches a
+  live file with a dirty buffer. The arm is retained for the
+  **asynchronous** path, which `pmacs.fs.remove` puts on a worker where
+  no in-applier guard can see it.)*;
 - returns anything it **could not** kill separately from what it kept
   deliberately — the two are different events and collapsing them makes
   a failure look like a policy decision.
@@ -1627,23 +1807,38 @@ not gain a Lua handle.
 **Both paths call it**: the drain harvest for `pmacs.fs.remove`, and
 `apply_resource_op`'s delete arm, replacing its first-match lookup.
 
-The **policy split is deliberate and asymmetric**, and this is the part
-worth arguing with:
+**Both paths refuse. The policy is symmetric** (rev 7 — round 6; rev 6
+had them asymmetric, and that half is withdrawn):
 
 - **dired refuses the whole entry** when a visited buffer is modified —
-  the file is never deleted. A direct user gesture on a file with unsaved
-  changes should stop, not proceed-and-cope.
-- **`apply_resource_op` still deletes the file**, because the delete is
-  part of a server-authored workspace edit the user already accepted, and
-  refusing mid-edit leaves a half-applied refactor. But it **no longer
-  destroys the buffer**: a modified buffer survives the delete with its
-  contents. That is strictly better than today and changes no file-side
-  behavior.
+  the file is never deleted. A direct user gesture on a file with
+  unsaved changes should stop, not proceed-and-cope.
+- **`apply_resource_op` refuses the operation** when any affected buffer
+  is modified — **before touching disk**, so nothing is deleted and
+  nothing is removed from the registry. That is **PR #186's Q#RD1**, not
+  this lane's decision, and this lane adopts it.
 
-The residue — an LSP-driven delete can still orphan a modified buffer —
-is **named, not fixed** (§11). Fixing it properly means deciding what a
-partially-applied workspace edit does, which is a larger question than
-dired.
+Rev 6 argued the opposite for the LSP arm: that the delete should
+proceed because "the user already accepted the refactor" and refusing
+mid-edit "leaves a half-applied refactor", with the orphaned buffer as
+accepted residue. **That is withdrawn.** Two reasons it was wrong beyond
+the cross-lane conflict:
+
+- Accepting a *refactor* is not accepting the loss of edits made after
+  it was requested, and pmacs cannot tell the two apart from inside the
+  applier.
+- The "half-applied refactor" argument leaned on an assumption about
+  `WorkspaceEdit` recovery that this document never actually checked.
+  Checked now, against **LSP 3.18** (§0, round 6): only
+  `textOnlyTransactional` degrades to abort for resource operations,
+  `transactional` covers them, and the specification states **no
+  default** for a client that does not advertise `failureHandling` —
+  which pmacs does not. So the protocol does not license "deleting
+  anyway is the safer half", and the argument had no support.
+
+**So on the synchronous path there is no orphan to reconcile.** The
+residue that remains is the asynchronous one, below — and it is dired's
+alone.
 
 ### Deletion is harvested, not hand-fired (G4)
 
@@ -1674,7 +1869,10 @@ lands) is the primitive's.
 deletes and leaves an orphaned buffer. The reasoning: the orphan is
 indistinguishable from a normal buffer, and the next `C-x C-s` silently
 resurrects the file. A refusal is visible, recoverable, and the user can
-save-or-discard and retry.
+save-or-discard and retry. **PR #186 reached the same conclusion
+independently for the LSP arm** (its Q#RD1 — "refuse, do not prompt, do
+not save, do not back up"), which is why rev 7's policy is symmetric
+rather than split.
 
 ### Checked twice — and still only best-effort (G4, narrowed H1)
 
@@ -1706,9 +1904,15 @@ worth being precise about:
   because it runs at drain time on whatever state exists then;
 - the **file** is gone.
 
-Which means **the orphaned-modified-buffer residue rev 3 scoped to the LSP
-path applies to dired too**, on this narrow race. §11 carries it as one
-deferral, not two.
+Which means the orphaned-modified-buffer residue is **dired's, and only
+dired's** (rev 7 — round 6). Rev 6 called it "the residue rev 3 scoped
+to the LSP path applies to dired too — one deferral, two paths". After
+#186 that is backwards: **the LSP path has no residue, because it
+refuses before disk.** Dired's remains because **dired never goes
+through `apply_resource_op`** — it calls `pmacs.fs.remove`, which
+dispatches a worker (§2), so a synchronous guard inside the applier
+cannot reach it at any strength. §11 carries it as **one deferral, one
+path**.
 
 Closing it properly needs one of two things this stage should not invent:
 a **reservation** (some lock or generation the worker re-validates before
@@ -1928,11 +2132,18 @@ substrate items in 2b and one dired item in 2a.
 | Acceptance | 23–38, **50–53** | 1–22, 39–41 | 42–47 |
 
 **Why 2a first, with no dired surface at all.** It is a self-contained
-substrate correctness fix that stands on its own merits: it closes a path
-where an LSP-authored delete **destroys unsaved work today**
-(`mod.rs:3313-3341`), and one where renaming the active file through a
-workspace edit **materializes a phantom buffer** (`lsp.lua:1352`). Neither
-needs dired to be worth fixing, and neither is dired's fault. Landing it
+substrate correctness fix that stands on its own merits: it closes the
+path where renaming the active file through a workspace edit
+**materializes a phantom buffer** (`lsp.lua:1352`); it replaces the
+raw first-match, un-normalized registry lookup that **both**
+`apply_resource_op` arms use with one shared prefix-aware query; and it
+supplies the **full removal lifecycle** that neither existing path
+performs (§6, Q#DR27). None of that needs dired to be worth fixing, and
+none of it is dired's fault. *(Rev 6 also claimed 2a closes the
+LSP-authored delete that destroys unsaved work. **PR #186 owns that** —
+it refuses before disk rather than reconciling after — so rev 7 drops
+the claim. What is left is still substrate-level and still worth its own
+review round.)* Landing it
 alone also means the LSP lifecycle work — a fourteen-store inventory, an
 in-flight route purge, an awaiter drain, and a new `View` hook swept across
 every window — gets a review round of its own rather than sharing one with
@@ -1977,16 +2188,30 @@ that deserve an undivided reviewer.
 - **A no-replace rename primitive** (G6) — `renameat2(RENAME_NOREPLACE)`
   on Linux, `renamex_np` on macOS, link/unlink elsewhere. Until then `R`'s
   refusal is a TOCTOU-bounded preflight, which §8 states plainly.
-- **A delete can still orphan a modified buffer** — one deferral, two
-  paths (H1). On the LSP path this is by design (the user accepted the
-  refactor); on dired's it is the residue of the open
-  dispatch-to-syscall interval. Stage 2 stops both from *destroying* the
-  buffer; the file still goes. Closing dired's half needs a
-  **reservation** the worker re-validates, or a **synchronous** delete
-  path — the latter would also make the delete harvest unnecessary for
-  dired, but puts N blocking syscalls on the main thread and leaves every
-  other `pmacs.fs.remove` caller unprotected. Closing the LSP half means
-  deciding what a partially-applied workspace edit does.
+- **The async race: a buffer modified after dired dispatch is still
+  orphaned** — **one deferral, one path** (H1; narrowed in rev 7, round
+  6). Rev 6 carried this as two paths, LSP and dired. It is dired's
+  alone: **#186 refuses the synchronous `apply_resource_op` delete
+  before disk**, so that path orphans nothing, while dired calls
+  `pmacs.fs.remove`, which **dispatches a worker** — the interval
+  between dired's pre-dispatch check and `remove_blocking`'s
+  `remove_file` is not closed by anything, and a buffer modified inside
+  it loses its file. Closing it needs a **reservation** the worker
+  re-validates before the syscall, or a **synchronous** delete path —
+  the latter would also make the delete harvest unnecessary for dired,
+  but puts N blocking syscalls on the main thread for an N-entry batch.
+  Note this is the *only* thing left of rev 6's orphaning story; the
+  LSP half went away with #186 rather than being solved here.
+- **`pmacs.fs.remove` itself is guarded by neither lane** (new in rev 7,
+  round 6). After both land, the refusal exists at the
+  `apply_resource_op` primitive (#186) and in dired's policy layer
+  (§6) — but `pmacs.fs.remove` is public Lua API with **no dirty check
+  of its own**, so a third caller inherits neither guard. This is
+  latent rather than live: §2 verified `pmacs.fs.remove` has **zero
+  production callers** (only `tests/m8_1_acceptance.rs:438,439,472`).
+  Naming it because the natural reading of "both lanes guard deletion"
+  is that the primitive is guarded, and it is not — the guards are one
+  layer above it on each side.
 - **A passive window that never received a `DiagnosticView` still has
   none** (H3). `_attach_view` takes `active_window_mut()` and errors
   otherwise (`lua_bindings/diag.rs:218-224`); `ensure_overlay` +
@@ -2095,6 +2320,15 @@ that deserve an undivided reviewer.
   depends on the intercept's exact wording rather than on the substring
   `read-only`, this bet fails. §3.1 checked the one test that looked
   like a risk and it does not.
+- **B8** *(new in rev 7, round 6)*. Adopting #186's refusal costs this
+  lane **no design change beyond deletion**: `reconcile_delete`'s
+  signature, its callers, the drain harvest and `resource.deleted` are
+  all unaffected, because the refusal happens *before* the seam rather
+  than inside it. Falsified if 2a turns out to need a different seam
+  shape once #186 has landed — most plausibly if #186's validation phase
+  ends up owning the affected-set query in a form `reconcile_delete`
+  cannot reuse, in which case the two must be reconciled before 2a is
+  cut rather than after.
 - **B7** *(new in rev 5, N3)*. The journey ratchet stays at **≥ 24**
   rows in `tests/journey_acceptance.rs` and keeps its GPU row in
   `tests/gpu_invocation_acceptance.rs`, with no row weakened. Falsified
@@ -2175,10 +2409,15 @@ that deserve an undivided reviewer.
 
 **2a — reconciliation (§5, §6)**
 
-23. **`apply_resource_op`'s delete** no longer kills a **modified**
-    buffer, and now reaches **descendants** and a **second buffer on the
-    same path** (G4 — today it is raw-path first-match with no modified
-    check, so it destroys unsaved work).
+23. **`apply_resource_op`'s delete reaches descendants and a second
+    buffer on the same path** — the raw-path first-match lookup replaced
+    by the shared prefix-aware, normalizing query (G4). *(Rev 7, round
+    6: the **modified**-buffer half of this item moved to **PR #186**,
+    which refuses the delete before disk, so by the time this lane's
+    reconciliation runs there is no modified buffer on the synchronous
+    path to spare. Assert the lookup fix here; #186 asserts the
+    refusal. If #186 has not landed when 2a is implemented, this item
+    still stands on the lookup alone.)*
 24. A **fire-and-forget** `pmacs.fs.remove` reconciles too — never taking
     the handle still kills the unmodified buffer, which is what makes the
     drain harvest the right seam rather than dired firing the hook.
@@ -2435,24 +2674,45 @@ mark, operation and subscriber items.
   `mkdir`/`copy`/`remove_dir_all` with `+ C` and recursive delete. 2a
   first because a bug in it is silent data loss, and because every
   blocking finding across three rounds landed on it. (§10)
-- **Q#DR18** *(new in rev 2, F2; given a seam in rev 3, G4)* Deleting a
-  path something holds. **One shared `EditorCore::reconcile_delete`**,
-  symmetric with `reconcile_rename` — whole registry, equality or
-  path-component prefix, kills unmodified buffers and **keeps modified
-  ones** — called by both the drain harvest and `apply_resource_op`,
-  replacing the latter's raw first-match lookup. `remove` is **harvested
-  in the drain** like rename, firing **`resource.deleted(path)`**, so a
-  fire-and-forget remove reconciles too. The **policy** is deliberately
-  asymmetric: dired **refuses the whole entry** when a visited buffer is
-  modified, while an LSP-authored delete still removes the file (the user
-  accepted the refactor) but **no longer destroys the buffer**. The
-  modified check runs **before** the confirm *and again before each
-  dispatch*, because another frontend can edit while the prompt is open —
-  but it is a **pre-dispatch check, not a lock** (H1): `pmacs.fs.remove`
-  dispatches a worker, so the dispatch-to-syscall interval stays open
-  and the promise is stated at that strength, as G6 forced for `R`.
-  Deliberately diverges from Emacs, which orphans the
-  buffer and lets the next save resurrect the file. (§6)
+- **Q#DR18** *(new in rev 2, F2; seam in rev 3, G4; **policy rewritten
+  in rev 7, round 6**)* Deleting a path something holds.
+
+  **The seam is unchanged and is not cancelled.** One shared
+  `EditorCore::reconcile_delete`, symmetric with `reconcile_rename`,
+  called by both the drain harvest and `apply_resource_op`, replacing
+  the latter's raw first-match lookup. Its walk is the **shared
+  prefix-aware, normalizing query** — every path-bound buffer, not the
+  first match; normalized once; component-aware `Path::starts_with` so
+  `/tree` does not match `/tree-sibling`. **That query is #186's Q#RD6**;
+  whichever lane lands first owns it and the other adopts it, which is
+  #186's own boundary wording, and `reconcile_rename` then shares it.
+  `remove` is still **harvested in the drain** like rename, firing
+  **`resource.deleted(path)`**, so a fire-and-forget remove reconciles
+  too.
+
+  **The policy is now symmetric: both paths refuse.** Rev 6 had dired
+  refusing while an LSP-authored delete proceeded and orphaned the
+  buffer as accepted residue. **Withdrawn.** For the synchronous
+  `apply_resource_op` path a modified buffer in the affected set means
+  the delete is **refused before disk** — nothing removed, nothing
+  deleted — which is **PR #186's Q#RD1**, adopted here rather than
+  re-decided. dired refuses the entry on the same condition.
+
+  **`DeleteReconcile.kept_modified` stays, and is not dead.** The
+  synchronous caller can no longer produce it, because the refusal
+  happens earlier; the **asynchronous** path still can, since dired
+  goes through `pmacs.fs.remove`, which dispatches a worker that #186's
+  in-applier guard never sees. dired's modified check therefore still
+  runs **before** the confirm *and again before each dispatch* — but it
+  is a **pre-dispatch check, not a lock** (H1), the interval from
+  dispatch to `remove_blocking` stays open, and the promise is stated at
+  that strength, as G6 forced for `R`. That interval is the whole of
+  this lane's remaining orphaning residue (§11).
+
+  Deliberately diverges from Emacs, which orphans the buffer and lets
+  the next save resurrect the file — a conclusion **#186 reached
+  independently** for the LSP arm (its Q#RD1: refuse, do not prompt, do
+  not save, do not back up). (§6)
 - **Q#DR19** *(new in rev 2, F3)* `M` (chmod) is **new scope** beyond the
   parent's approved table and needs explicit approval. It **refuses
   symlink entries**, because `chmod` follows links while the listing is
@@ -2571,10 +2831,14 @@ lands.
 **Naming 2a for the substrate, not for dired**, following #161's
 precedent: its diff contains no dired code, and a cross-cutting
 correctness fix to rename/delete reconciliation must not be reviewable
-only as a dired feature. The PR body should lead with the two defects it
-closes on `main` today — the LSP-authored delete that destroys unsaved
-work, and the workspace-edit phantom buffer — because neither needs dired
-to be worth fixing.
+only as a dired feature. The PR body should lead with the defects it
+closes on `main` — the **workspace-edit phantom buffer**, the **raw
+first-match lookup** shared by both `apply_resource_op` arms, and the
+**incomplete removal lifecycle** (Q#DR27) — because none needs dired to
+be worth fixing. *(Rev 7: it should **not** lead with the
+LSP-authored delete that destroys unsaved work. That is **PR #186's**,
+and 2a's body should say so and cite it rather than appearing to claim
+it.)*
 
 **Ledger note (corrected in rev 5, W6):** this framing branch
 deliberately touches **only** this file. Rev 4 said the durable records
