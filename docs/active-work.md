@@ -20,6 +20,13 @@ would stop re-conflicting in this file.
 number appears in `git log --first-parent githubsucks/main`, it has
 landed regardless of what a lane says.
 
+**Two open PRs had no lane here at all before this snapshot** — #174 and
+#171 — and both now have one. An open PR is exactly the volatile work
+this file exists to record, so its absence is a ledger defect rather
+than a tidy omission: #171 drifted **153 commits** while invisible here,
+and its still-green old CI run describes a tree nobody has looked at
+since. When a PR is opened, give it a lane.
+
 ## Repository authority
 
 - Canonical development URL:
@@ -438,6 +445,112 @@ has **no branch and no framing yet**.
   GPU-optimistic interactive unfold (parent R2-3); and flipping
   `FrontendView.fold_projection` to `true` for semantic frontends, which
   Stage 2 deliberately left `false` (Q#FD21).
+
+## M4 config-sink race lane — PR #174 OPEN, REVIVED AND REGATED
+
+> **This ledger had no lane for #174 at all until this snapshot, and
+> that is the defect worth naming.** An open PR is precisely the
+> volatile work this file exists to record; two of them were invisible
+> here (see the dired framing lane below), which is how one of them
+> drifted 153 commits without anyone noticing.
+
+- Portable branch: `githubsucks/fix-m4-sink-races`; worktree
+  `../pmacs-m4-sink-race`. **PR #174**, base `main`.
+- **Revived 2026-07-28**: it was 130 commits behind, so canonical `main`
+  @ `6bee09d` was merged in at `302c21c` and the whole gate suite rerun.
+  The diff against `main` is unchanged at **25 lines in one file**
+  (`tests/m4_acceptance.rs`).
+- **The fix is one predicate.**
+  `m4_5_initial_config_pushed_via_did_change_configuration` waited for
+  `contains("probe")` and then asserted `"probe":true` — six bytes
+  further on. The sink is JSONL written by a *separate process*, so the
+  test could read a half-written line; Linux wins that race reliably and
+  macOS/lua54 did not, reporting `{"rust":{"probe":`. It now waits for a
+  trailing newline, which is true only once a whole record has landed.
+  **Any "wait until the file mentions X, then assert Y about the file"
+  shape races whenever Y is stricter than X.**
+- **The structural claim was re-verified against current `main`, not
+  inherited from the original scout.** `src/bin/pmacs_fake_lsp.rs` *did*
+  change upstream (Lean 4 stages 3b, `1e1be67` / `cdaea66`), so the "one
+  `writeln!` is the only writer" argument could have rotted. It has not:
+  the config sink is still a single `writeln!` at `:433` on a
+  `create+append` handle. `tests/m4_acceptance.rs` itself has **zero**
+  upstream commits since the merge base `ccf29e3`, which is why the
+  merge was clean.
+- **The race cannot be falsified locally, but the wait can be — and was,
+  two ways.** Replacing the predicate with an unsatisfiable one fails
+  the test at `m4_acceptance.rs:317` with "async pump deadline
+  exceeded", proving `pump_async` asserts rather than falling through
+  and that the new predicate genuinely has to become true. Restoring the
+  *old* predicate leaves the test passing locally, which confirms rather
+  than assumes that a green local run cannot tell the two apart. Treat
+  the local suite as a regression check and the structural argument as
+  the reason.
+- **The sibling weak predicate is deliberately left alone.** `m4_26`
+  (`:5487`) has the same shape, and the obvious fix makes it *worse* —
+  waiting for the expected value turns a genuine `rootUri` regression
+  into a five-second timeout with a misleading message, trading a
+  precise diff for a vague hang. Closing it properly means giving that
+  sink a record terminator in the fake server, and it has never been
+  observed failing. The reasoning is a comment at the call site so the
+  next person does not repeat the first instinct.
+- Gates on `302c21c`: fmt; strict workspace Clippy; library **1,849 + 3
+  ignored** default and **2,034 + 4 ignored** CRDT; m4 **121 passed + 3
+  ignored + 1 filtered** with basedpyright skipped; the two touched
+  tests run explicitly **2/2**; required GPU **202/202**;
+  `git diff --check`.
+- **No ledger entry was added on the PR branch itself** — this file was
+  owned by the landed-state sync while #174 was revived, and a
+  drive-by lane there would have re-conflicted it for no benefit. This
+  is that entry.
+
+## dired Stage 2 framing lane — PR #171 OPEN, STALE, DO NOT MERGE AS-IS
+
+- Portable branch: `githubsucks/dired-stage2-framing` (head `ab42a79`,
+  four framing commits); worktree `../pmacs-dired-stage1`. **PR #171**,
+  base `main`. Framing only — `docs/dired-stage2-framing.md`, 1,570
+  lines, no runtime code.
+- **Measured 2026-07-28: 4 commits ahead of `main`, 153 behind**, merge
+  base `c8ec8f3`. GitHub reports it mergeable, and its old CI run is
+  green — **both facts are about a tree nobody has looked at in 153
+  commits**, and the document still says PROPOSED.
+- **The commit history embodies three review rounds. That is not the
+  same as approval**, and GitHub records no formal review or comment on
+  it. Do not read the round count as a green light.
+- **Its dependencies moved materially underneath it**, which is the real
+  reason not to merge. Note that dired Stage 1 (#165) and find-file
+  (#162) are its *base*, not new arrivals — the merge base `c8ec8f3`
+  **is** #165's merge commit. Eighteen PRs landed after it, and at least
+  three change ground the framing stands on:
+  - **#178 gave generated buffers a write invariant**
+    (`Buffer::set_generated_contents`). Dired's listing is a generated
+    buffer, and dired is named in the handoff as one of the writer
+    mechanisms that has **not** adopted it. Stage 2's marks and
+    operations write that buffer constantly.
+  - **#182 (Journey Stage 1a) made `resolve_target_buffer` the single
+    directory-open path**, with dired demoted to a *replaceable slot*
+    (`pmacs.path.directory_handler`) rather than a hook subscriber. Any
+    Stage 2 claim about how a directory reaches dired is now describing
+    a mechanism that no longer exists in that form.
+  - **#179/#181 landed the typed-edit consumer chain**, which is the
+    fan-out a rename transaction has to survive.
+
+  Re-scout against `6bee09d`, publish a new revision, and get explicit
+  framing approval before any implementation.
+- **The rename problem the framing must still answer**, restated because
+  it is the hard part: a rename is a transaction across **five** path
+  owners — the buffer path, the buffer name, the URI-keyed LSP stores
+  plus `DiagnosticView` (whose URI is set once at construction), dired's
+  pathless handles, and a captured Lua local that no transaction can
+  reach.
+- Intended serial implementation once approved: **2a** rename/delete
+  reconciliation substrate with no dired UI, **2b** marks and
+  operations, **2c** mkdir/copy/recursive-delete primitives, then Stage
+  3 wdired.
+- **Ownership warning:** dired 2a overlaps `src/editor_core.rs`,
+  `builtin/runtime/lsp.lua`, and the URI-keyed LSP state with other
+  coherence work. Do not run it concurrently with Journey Stage 1b
+  without assigning those files to one lane first.
 
 ## Parked lane: kill-ring browser + persistence
 
