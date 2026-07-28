@@ -1343,10 +1343,10 @@ its asks are already practiced.**
 - Versioned protocol schema `SUPPORTED=[6..=21]` with deliberate
   encoding-breaking bumps, both-frontends support required per bump,
   and byte-pin discipline for appended variants (handoff §4). The v21
-  bottom-panel family is reserved but dark in Stage 2B-1: because
-  `Hello` is server-first, the production daemon still advertises v20
-  so shipped v20 clients remain attachable; compatible v21 activation
-  belongs to Stage 2B-3.
+  bottom-panel family landed with Stage 2B-1 (#184) and is reserved but
+  dark: because `Hello` is server-first, the production daemon still
+  advertises v20 so shipped v20 clients remain attachable; compatible
+  v21 activation belongs to Stage 2B-3.
 - Two genuine frontends share the conceptual model; CRDT concurrent
   editing with presence across them; remote attach + reconnect.
 - **Graceful per-frontend degradation is practiced, not aspirational**:
