@@ -93,9 +93,9 @@ mod crdt {
     use pmacs::cell::CellSize;
     use pmacs::crdt::CrdtState;
     use pmacs::protocol::{
-        AttachRequest, FrontendCapabilities, FrontendEvent, FrontendId, Hello, InitialTarget,
-        InitialTargetResult, InstanceCapabilities, InstanceIdentity, InstanceMessage,
-        PROTOCOL_VERSION, SessionBootstrapRequest,
+        ADVERTISED_PROTOCOL_VERSION, AttachRequest, FrontendCapabilities, FrontendEvent,
+        FrontendId, Hello, InitialTarget, InitialTargetResult, InstanceCapabilities,
+        InstanceIdentity, InstanceMessage, PROTOCOL_VERSION, SessionBootstrapRequest,
     };
     use pmacs::transport::{read_message, write_message};
 
@@ -244,11 +244,11 @@ mod crdt {
             .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("set target frontend timeout");
         let hello: Hello = read_message(&mut stream).expect("target frontend Hello");
-        assert_eq!(hello.protocol_version, PROTOCOL_VERSION);
+        assert_eq!(hello.protocol_version, ADVERTISED_PROTOCOL_VERSION);
         write_message(
             &mut stream,
             &AttachRequest {
-                protocol_version: PROTOCOL_VERSION,
+                protocol_version: hello.protocol_version,
                 frontend_capabilities: FrontendCapabilities {
                     multi_frontend: true,
                     crdt_replica: true,
@@ -583,7 +583,7 @@ mod crdt {
             facts
                 .get("server_protocol_version")
                 .and_then(|value| value.parse::<u32>().ok()),
-            Some(PROTOCOL_VERSION)
+            Some(ADVERTISED_PROTOCOL_VERSION)
         );
         assert_eq!(
             facts.get("spawned_daemon").map(String::as_str),

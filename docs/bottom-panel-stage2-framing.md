@@ -1,7 +1,13 @@
 # Bottom panel Stage 2 — the GPU panel band (framing)
 
-**Revision 4 — pre-implementation. Ground truth: canonical `main` @
-`ccf29e3`, protocol v20, 2026-07-25.**
+**Revision 6 — PR #184 review correction; the underlying Stage 2
+framing remains APPROVED 2026-07-27. 2A is merged and 2B-1 is under
+review. Ground truth: canonical `main` @ `7fd646d`, protocol v20 on
+`main`; `bottom-panel-stage2b` reserves the v21 schema while its
+server-first production handshake continues to advertise v20.**
+Revisions 1–4 were pre-implementation; rev 5 recorded the three-way
+slice of Stage 2B after its first slice was already built; rev 6
+corrects that slice's mixed-version and gate contracts.
 
 Stage 1 (#155, merge `e745068`) gave pmacs window placement, window
 parameters, TUI side windows, the divider, and the adopter `display`
@@ -26,7 +32,82 @@ geometries), Q#BP16 (pointer transport), Q#BP17 (fold projection), and
 
 ## 0. Revision history
 
-### 0.0 Round 3 (rev 3 → rev 4) — 1 blocking, 1 high, 1 medium, all closed
+### 0.0 Rev 5 → rev 6 — PR #184 review round 2, four findings closed
+
+- **R6-1 (P1) — v21 is reserved, not advertised, in 2B-1.** The
+  protocol's handshake is server-first. An existing v20 TUI or GPU
+  frontend rejects a `Hello { protocol_version: 21 }` before it can
+  send an `AttachRequest`, so rev 5's claim that a v21 daemon and v20
+  peer "still negotiate 20" was impossible. 2B-1 therefore extends the
+  schema and accepted-version ladder to v21 while the production daemon
+  continues advertising v20. A real-daemon acceptance emulates the
+  shipped v20 rejection point and then requires the attachment to reach
+  its initial grid. **2B-3 owns both a compatibility-preserving
+  activation mechanism and the production move to v21; it may not
+  simply change the unsolicited `Hello` to 21.**
+- **R6-2 (P2) — durable protocol claims move with the wire.**
+  `COHERENCE.md` and `docs/agent-handoff.md` now distinguish v21 schema
+  support from the still-v20 production handshake.
+- **R6-3 (P2) — the gate contract names the actual decomposition.**
+  §9 now names 2B-1's
+  `bottom_panel_stage2b_protocol_acceptance` suite and the exact planned
+  daemon/GPU suite names for 2B-2 and 2B-3 instead of the nonexistent
+  `bottom_panel_stage2b_acceptance`.
+- **R6-4 (P2) — "one byte over" means exactly one.** The panel and
+  copied terminal boundary fixtures replace a one-byte cluster with a
+  two-byte cluster, and each independently asserts a total of
+  `limit + 1`.
+
+### 0.1 Rev 4 → rev 5 — the three-way slice of 2B (not a review round)
+
+This revision changes no decision. It splits one approved
+implementation slice into three and reallocates the acceptance
+criteria across them.
+
+- **R5-1 — why.** Rev 4 §9 scoped 2B as a single PR: v21 protocol,
+  daemon panel projection, GPU band, and the negotiated
+  `panel_capable` flip. Implementation showed that to be roughly four
+  thousand lines spanning `pmacs-protocol`, `src/daemon.rs`, and
+  `pmacs-gpu` — three review surfaces with different failure modes, in
+  one diff. The same argument that produced 2A/2B applies again one
+  level down, and it is the argument this arc has already accepted
+  twice (Lean 4 stages 3a/3b and 4a/4b).
+- **R5-2 — the boundary rule.** A slice ends where the next thing to
+  build has a different *authority*: the wire format, the daemon that
+  produces frames, and the frontend that paints them. Each slice is
+  independently reviewable against a subset of the parent criteria,
+  and each is additive — no slice makes a previously-passing assertion
+  fail.
+  **Criteria that span a boundary are named in every slice they touch,
+  with their half stated**, rather than assigned wholesale to one. The
+  clearest case is parent 39: its shared-validation and
+  transport-budget halves are wire properties provable in 2B-1, while
+  "the previous valid frame is retained" and "a duplicate does no
+  work" are receiver-state properties that need the epoch machine and
+  land in 2B-2.
+- **R5-3 — this revision is retroactive for slice 1, and that is a
+  process defect worth recording.** `bottom-panel-stage2b` already
+  carries the v21 protocol layer (three commits, one review round
+  closed) written before this revision existed. The workflow is
+  framing → approval → branch → implement; slice 1 inverted it. The
+  slicing decision was sound, but it was taken in code and discovered
+  in the branch rather than proposed in the document, which is exactly
+  how a stage's scope drifts without anyone deciding that it should.
+  Rev 5 exists to put the decision back where it belongs before slices
+  2 and 3 are written.
+- **R5-4 — two of the three slices ship dark, deliberately.** Nothing
+  in 2B-1 or 2B-2 is reachable by a user: `panel_capable` stays
+  `false` for every negotiated semantic session until 2B-3. Rev 5
+  incorrectly described that posture as a production v21 negotiation
+  that remained compatible with v20 clients; rev 6 R6-1 supersedes
+  that claim. The actual dark posture keeps the server-first
+  production handshake on v20 while the v21 schema is reserved. This
+  is the same posture 2A took ("seam adoption that becomes
+  load-bearing in 2B"), and it means the arc must not stall between
+  2B-1 and 2B-3. Recorded here so a stall is visible as a decision
+  rather than inherited as a default.
+
+### 0.2 Round 3 (rev 3 → rev 4) — 1 blocking, 1 high, 1 medium, all closed
 
 - **R3-1 (blocker).** Rev 3's three-boundary model was right but its
   call-site table was wrong in five places, and each error was a real
@@ -54,7 +135,7 @@ geometries), Q#BP16 (pointer transport), Q#BP17 (fold projection), and
   `cell.attachment.is_some()` rejection. It is now classified — and
   **shared**, with the reasoning pinned.
 
-### 0.1 Round 2 (rev 2 → rev 3) — 1 blocking, 2 high, 1 medium, all closed
+### 0.3 Round 2 (rev 2 → rev 3) — 1 blocking, 2 high, 1 medium, all closed
 
 - **R2-1 (blocker).** Rev 2's "one document-bottom seam" conflated two
   boundaries that must **diverge** once a panel exists. Several sites it
@@ -81,7 +162,7 @@ geometries), Q#BP16 (pointer transport), Q#BP17 (fold projection), and
 - Both §8 open items are decided (§5.3): `BASE_DIVIDER_HEIGHT = 4.0` at
   scale 1.0, and `TEXT_TOP` stays unscaled.
 
-### 0.2 Round 1 (rev 1 → rev 2) — 2 blocking, 3 high, 3 revision points, all closed
+### 0.4 Round 1 (rev 1 → rev 2) — 2 blocking, 3 high, 3 revision points, all closed
 
 - **R1-1 (blocker).** Rev 1 said all 23 census reads route through
   `primary_document_window`. That contradicts Q#BP14, which routes only
@@ -128,9 +209,10 @@ geometries), Q#BP16 (pointer transport), Q#BP17 (fold projection), and
 | Byte pin `InstanceMessage::InitialTargetResult` | `pmacs-protocol/src/message.rs:1145` | Holds — still the enum's final variant |
 | Byte pin `FrontendEvent::TerminalPointer` | final variant of its enum | Holds |
 
-**Protocol is still v20** (`pmacs-protocol/src/message.rs:1568`); no
-intervening PR bumped it. Q#BP9's conditional resolves: **Stage 2 is
-v21**, no reservation was taken and none was needed.
+**Protocol was still v20 at this re-scout**; no intervening PR had
+bumped it. Q#BP9's conditional resolved: **Stage 2 reserves v21**.
+Rev 6 R6-1 adds the server-first compatibility constraint discovered
+during 2B-1 review.
 
 Fifteen PRs merged between the parent's last re-scout (`47581f4`) and
 this one: #149, #150, #152–#155, #158–#166. Nothing in the parent's
@@ -322,13 +404,18 @@ undedicated (Q#BP2c). "It receives no new events" is insufficient — if
 the daemon nevertheless places that frontend's window in a side panel
 it cannot render, the window becomes invisible. The gate is on
 placement, not only on transport. Parent acceptance 51 pins the mixed
-session.
+session. **The production daemon does not advertise v21 in 2B-1 or
+2B-2.** Because `Hello` is server-first, 2B-3 must add or prove a
+compatibility-preserving way to activate v21 before applying this rule;
+merely advertising 21 would strand already-shipped v20 clients before
+they can identify themselves.
 
 ## 4. Revisions to the parent framing
 
 Only these; everything else stands.
 
-- **Q#BP9 resolves to v21.**
+- **Q#BP9 resolves to the v21 schema, with production advertisement
+  held at v20 until 2B-3 supplies compatible activation.**
 - **Q#BP15a's epoch ownership is specified** by §3.1's table and API
   split, replacing the parent's one-line "frontend-owned" statement.
 - **Q#BP8's statusline criterion splits** per §3.3: one read reroutes,
@@ -589,11 +676,20 @@ exactly once.
 - **Section this serves:** `COHERENCE.md` §14, which records the panel
   primitive as landed for Stage 1 and names "Stage 2 (GPU band)
   pending its own framing" as the open item.
+- **Which slice pays the coherence debt (rev 5).** The journey claim
+  above is Stage 2B-3's alone. 2A, 2B-1, and 2B-2 close **no** journey
+  divergence: with `panel_capable = false`, a GPU user still gets the
+  Stage 1 non-side fallback on steps 7–10 after all three land. Stated
+  explicitly so no slice's PR can claim the arc's coherence benefit
+  before the flip earns it — three quarters of this stage is
+  preparation, and only the last quarter is the improvement.
 
 ## 7. Acceptance
 
 **Parent criteria 37–55 remain authoritative and are not replaced.**
-This section maps them to the two slices and adds only refinements.
+This section maps them to the four slices — 2A, then 2B-1/2B-2/2B-3 —
+and adds only refinements. A criterion that spans a slice boundary is
+named in each slice it touches, with its half stated.
 
 ### 7.1 Stage 2A — classified census routing + painter extraction
 
@@ -638,18 +734,83 @@ Refinements 2A adds:
   scroll state**. Byte-identical cells alone would not catch a clamp
   that silently moved to the wrong window.
 
-### 7.2 Stage 2B — v21 protocol + daemon projection + GPU band
+### 7.2 Stage 2B — v21 protocol, daemon projection, GPU band
 
-Parent criteria that apply in full: **37, 38, 39, 40, 41, 45, 46, 47,
-48, 49, 50, 51, 53, 54, 55**, plus re-assertion of **42, 43, 44, and
-52** **through the actual negotiated capability flip** rather than
+Stage 2B as a whole owns parent criteria **37, 38, 39, 40, 41, 45, 46,
+47, 48, 49, 50, 51, 53, 54, 55**, plus re-assertion of **42, 43, 44,
+and 52** **through the actual negotiated capability flip** rather than
 through a test-only panel-capable semantic view. 52's 2B form is the
 production one: a real semantic frontend with `fold_projection = false`
 displaying a folded buffer in a panel shows every source line, and the
 panel path never reaches `fold_map_for_window`.
 
-Refinements 2B adds:
+Per §0.0 R5-1 those land across three slices. Each slice's own gate run
+is the standing suite plus §9's named acceptance suites; **only 2B-3
+changes what a user sees.**
 
+#### 7.2.1 Slice 2B-1 — the v21 wire layer
+
+**Authority: `pmacs-protocol`.** The four wire shapes Q#BP9 names, the
+version bump, and the shared cell-grid validator. No producer, no
+consumer, no capability change.
+
+- **37, in full.** `PanelFrame` round-trips including `panel_epoch` and
+  `geometry_epoch`, with independent byte pins on the previous final
+  `InstanceMessage::InitialTargetResult` and
+  `FrontendEvent::TerminalPointer` variants. **Both pins must be
+  falsified by revert**, not merely observed passing: a byte pin that
+  never saw the shift it exists to catch pins nothing.
+- **39, the wire half only.** Shared cell/topology/glyph/area
+  validation; an area-bounded panel wider than 512 columns is accepted
+  while a terminal frame retains its 512-column PTY cap; the maximum
+  legal panel encoding stays below the transport limit. **The ratchet's
+  fixture must be shown to spend the whole aggregate glyph budget** —
+  otherwise it measures something smaller than the worst case and the
+  bound it proves is not the bound that matters. The worst case is
+  `1 × MAX_PANEL_VISIBLE_CELLS`, a legal panel geometry no terminal can
+  express, so the terminal's own ratchet has never covered it.
+  **39's receiver half — atomic rejection with retention of the
+  previous valid frame, and a duplicate doing no work — is 2B-2.**
+- **The version ladder moves with the bump.** `PROTOCOL_VERSION`
+  becomes 21, `SUPPORTED_PROTOCOL_VERSIONS` accepts `6..=21` and
+  rejects 22, and any test whose *name* encodes the old number is
+  renamed. A ladder pin that passes across a bump was not pinning the
+  version. **`ADVERTISED_PROTOCOL_VERSION` remains 20 in 2B-1 and
+  2B-2** because the unsolicited `Hello` precedes any client version
+  signal. A real daemon must remain attachable by a client whose
+  supported range ends at 20.
+- **Shared bounds are aliased, not duplicated.** Every constant the
+  terminal screen and the panel validator both enforce is one
+  definition with the other as an alias, so truncation and validation
+  cannot drift apart.
+- **Not in this slice:** the daemon arm that drops panel events from a
+  grid session is exhaustiveness bookkeeping the bump forces, not
+  projection. It asserts only that a grid session's panel declaration
+  is dropped rather than trusted.
+
+#### 7.2.2 Slice 2B-2 — the daemon panel projection and epoch machine
+
+**Authority: `src/daemon.rs`.** Produces `PanelFrame`; derives the
+grid; owns stale-event rejection. Exercised through a **test-only**
+panel-capable semantic view — `panel_capable` stays `false` in
+production negotiation until 2B-3.
+
+- **38** (open → replace buffer → hidden by a tiny frame → reappear →
+  close, with authoritative `Absent` and a new epoch on
+  replacement/reappearance), **40** (first open at a non-80×24 frame
+  stays absent until real `FrontendCellGeometry` arrives, never
+  consulting the 24×80 attach placeholder), **49**, **50**, **51**,
+  **53**.
+- **39's receiver half**, per §7.2.1.
+- **41, the daemon half:** the daemon alone derives the grid; an older
+  retained frame neither paints nor accepts input after a new
+  `geometry_epoch` until a matching `Present` arrives; row-clamping
+  preserves the stored request; zero, non-finite, and non-positive
+  metric inputs fail closed to zero usable geometry. *The pixel→cell
+  formula and its call sites are 2B-3.*
+- **42, 43, 44, 45, 52** in their projection form, through the
+  test-only panel-capable view. Their production re-assertion through
+  the real flip is 2B-3.
 - **A2B-1.** The epoch state machine of §3.1 is pinned row by row,
   including the lower-epoch-identical-data rejection and the
   same-epoch-different-total rejection, and each row's
@@ -660,7 +821,35 @@ Refinements 2B adds:
   hides (a subsequent real resize must not paint a stale-geometry
   panel), and a frontend that exhausts latches — a retained `Present`
   whose epoch still matches cannot make the band reappear, and only a
-  fresh session clears the latch.
+  fresh session clears the latch. **A2B-1's grid-exhaustion half is
+  2B-2; its frontend-latch half needs a real frontend and is 2B-3.**
+  Both halves are named here so neither is lost at the seam.
+
+#### 7.2.3 Slice 2B-3 — the GPU band and the capability flip
+
+**Authority: `pmacs-gpu`, plus the compatibility-preserving negotiation
+activation.** This is the only slice a user can observe, and the only
+one that closes the journey divergence in §6. It must not advertise
+v21 in the server-first `Hello` until an existing v20 client can still
+attach.
+
+- **46** (band + divider shrink the document text area by exactly their
+  pixel height; carets, hits, and scroll geometry respect the reduced
+  area), **47** (divider drag, `window.min-height`, `RowResize` hover,
+  and the stalled-writer tail-coalescing), **48** (`PanelPointer`
+  driving selection, terminal mouse reporting, and click-to-focus
+  without disturbing the document mirror), **54** (the
+  `--headless-probe` run: one real daemon, real PTY, real wgpu, through
+  a panel-hosted terminal), **55**.
+- **41, the GPU half:** the pixel→cell conversion pinned at fractional
+  widths and heights, and geometry refresh on window resize, font
+  change, and scale change.
+- **42, 43, 44, 45, 52 re-asserted through the production flip**, not
+  the test-only view. This is the point of the re-assertion: a
+  test-only panel-capable view can be constructed wrongly and agree
+  with itself, so the production negotiation path must carry the same
+  assertions.
+- **A2B-1's frontend-latch half**, per §7.2.2.
 - **A2B-2.** A font or scale change that leaves `CellSize` **identical**
   still produces a new `geometry_epoch`, and the older `PanelFrame`
   neither paints nor hit-tests until a matching `Present` arrives. This
@@ -688,7 +877,10 @@ Refinements 2B adds:
   its chrome.
 - **A2B-5.** `panel_capable` is true only for a v21+ negotiated
   authenticated semantic session; a v20 semantic session is never
-  **placed** in a side window, not merely denied the events.
+  **placed** in a side window, not merely denied the events. The same
+  acceptance must attach an actual v20 client to the production daemon
+  after v21 activation, so the new path cannot pass by breaking the old
+  handshake before placement is evaluated.
 
 ## 8. Open items
 
@@ -704,26 +896,54 @@ fixes. It belongs to a spacing-system change of its own.
 
 ## 9. Slices, branches, and gates
 
-Per review round 1: **two serial implementation PRs**, each a named
-slice under this framing so one-feature/one-branch/one-PR holds. **2A
-lands before 2B branches** — not stacked.
+Per review round 1 and §0.0 R5-1: **four serial implementation PRs**,
+each a named slice under this framing so one-feature/one-branch/one-PR
+holds. **Each slice lands before the next branches** — none are
+stacked, and each is cut from `main`.
 
-- **Stage 2A** — classified census routing + per-window painter
-  extraction. Branch `bottom-panel-stage2a`. No protocol change. The
-  three-boundary GPU split is **2B**, not 2A: it is only observable
-  once a band can be installed.
-- **Stage 2B** — v21 protocol, daemon panel projection, GPU band, and
-  the negotiated `panel_capable` flip. Branch `bottom-panel-stage2b`,
-  cut from `main` after 2A merges. Repeats 2A's relevant census
+- **Stage 2A — MERGED as #177** (`main` @ `0a3fcd1`). Classified census
+  routing + per-window painter extraction. Branch
+  `bottom-panel-stage2a`. No protocol change. The three-boundary GPU
+  split is **2B-3**, not 2A: it is only observable once a band can be
+  installed.
+- **Stage 2B-1 — the v21 wire layer.** Branch `bottom-panel-stage2b`.
+  The four wire shapes, the version bump, the shared cell-grid
+  validator, and the version-ladder move. The v21 schema is reserved
+  while the production daemon continues advertising v20. **No
+  producer, no consumer, no capability change** — `panel_capable`
+  stays `false`.
+- **Stage 2B-2 — the daemon panel projection and epoch machine.** Cut
+  from `main` after 2B-1 merges. Produces `PanelFrame` and owns
+  stale-event rejection, exercised through a **test-only**
+  panel-capable semantic view. Still no production flip.
+- **Stage 2B-3 — the GPU band and the negotiated flip.** Cut from
+  `main` after 2B-2 merges. The three-boundary text-area split, the
+  divider, pointer routing, the compatibility-preserving v21
+  activation, and `panel_capable = true` for a v21+ negotiated
+  authenticated semantic session. **This is the slice that changes
+  what a user sees**, and it repeats 2A's and 2B-2's relevant
   assertions through the real capability flip.
 
-Gates for both: the standing suite from `CLAUDE.md`, plus the **touched
+**Each slice runs the full gate set below, not a subset of it.** A
+slice that touches only `pmacs-protocol` still runs the GPU and vterm
+suites: the shared validator and the wire enums are exactly the kind of
+change whose breakage surfaces in a consumer rather than at its own
+definition.
+
+Gates for each slice: the standing suite from `CLAUDE.md`, plus the **touched
 acceptance suites named explicitly** — the standing rule is to run the
 suites a change touches, and "standing suite" does not name them:
 
-- `bottom_panel_stage1_acceptance` — the substrate both slices build on.
-- `bottom_panel_stage2a_acceptance` / `bottom_panel_stage2b_acceptance`
-  — new, one per slice.
+- `bottom_panel_stage1_acceptance` — the substrate all four Stage 2
+  slices build on.
+- `bottom_panel_stage2a_acceptance` — Stage 2A's classified census and
+  painter extraction.
+- `bottom_panel_stage2b_protocol_acceptance` — Stage 2B-1's v21 schema,
+  server-first v20 compatibility, byte pins, and shared validation.
+- `bottom_panel_stage2b_daemon_acceptance` — the exact suite name
+  reserved for Stage 2B-2's projection and epoch machine.
+- `bottom_panel_stage2b_gpu_acceptance` — the exact suite name reserved
+  for Stage 2B-3's band, compatible activation, and capability flip.
 - `statusline_segments_acceptance` — the fan-out target change (§3.3).
 - `m11_5_semantic_acceptance` — the semantic census (§3.2).
 - `gpu_initial_target_acceptance` — parent criterion 55.

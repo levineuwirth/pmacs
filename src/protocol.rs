@@ -1683,7 +1683,7 @@ mod tests {
     // --- M5.5a handshake & postcard round-trips ---
 
     #[test]
-    fn protocol_version_is_twenty_for_gpu_initial_targets() {
+    fn protocol_version_is_twenty_one_for_the_bottom_panel_band() {
         // Pin the value: T M10.5 bumped 1→2 (v1.0 wire: CrdtOp /
         // PresenceUpdate). T M11.1 bumped 2→3 (v1.1 wire: the
         // SemanticFrame family + FrontendEvent::Viewport). T M11.6
@@ -1722,7 +1722,13 @@ mod tests {
         // variant, see the placement pins).
         // GPU initial targets bump 19→20 with a semantic-only
         // SessionBootstrapRequest and appended InitialTargetResult.
-        assert_eq!(PROTOCOL_VERSION, 20);
+        // Bottom panel Stage 2 bumps 20→21 (`InstanceMessage::PanelFrame`,
+        // daemon-gated, plus `FrontendEvent::{FrontendCellGeometry,
+        // PanelResizeRows, PanelPointer}`, frontend-gated — the second
+        // bump that gates in BOTH directions; all four appended after
+        // their enum's final v20 variant, see the placement pins in
+        // `bottom_panel_stage2b_protocol_acceptance`).
+        assert_eq!(PROTOCOL_VERSION, 21);
     }
 
     #[test]
@@ -1798,17 +1804,18 @@ mod tests {
         // minibuffer), v13 (`LineNumbers`), v14 (`LineNumberMode`), v15
         // (`CompletionPopup`), v16 (`ThemeFacts`), v17 (`FontFacts`),
         // v18 (`StatuslineSegments`), v19 (the vterm terminal family),
-        // and v20 (semantic initial-target bootstrap) all interoperate.
-        for accepted in 6..=20 {
+        // v20 (semantic initial-target bootstrap), and v21 (the bottom
+        // panel band) all interoperate.
+        for accepted in 6..=21 {
             assert!(
                 is_supported_protocol_version(accepted),
                 "v{accepted} must be accepted"
             );
         }
-        for rejected in [0, 1, 2, 3, 4, 5, 21, u32::MAX] {
+        for rejected in [0, 1, 2, 3, 4, 5, 22, u32::MAX] {
             assert!(
                 !is_supported_protocol_version(rejected),
-                "v{rejected} must be rejected by a v20 binary"
+                "v{rejected} must be rejected by a v21 binary"
             );
         }
     }

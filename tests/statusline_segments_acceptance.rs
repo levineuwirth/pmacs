@@ -786,15 +786,16 @@ fn a12_builtin_lsp_provider_tracks_real_attachment_and_unknown_label() {
 #[test]
 fn a13_17_26_protocol_semantic_init_late_join_and_version_cost() {
     // Vterm Stage 3 appended the terminal family as v19; GPU initial targets
-    // appended the semantic bootstrap family as v20. This acceptance owns the
-    // STATUSLINE variant's placement and gate, so it tracks the current wire
-    // version rather than pinning 18: the v18 floor it actually cares about is
-    // asserted below and in `peer_accepts_statusline_message`.
-    assert_eq!(PROTOCOL_VERSION, 20);
-    for version in 6..=20 {
+    // appended the semantic bootstrap family as v20; bottom-panel Stage 2B-1
+    // appended the panel family as v21. This acceptance owns the STATUSLINE
+    // variant's placement and gate, so it tracks the current wire version
+    // rather than pinning 18: the v18 floor it actually cares about is asserted
+    // below and in `peer_accepts_statusline_message`.
+    assert_eq!(PROTOCOL_VERSION, 21);
+    for version in 6..=21 {
         assert!(is_supported_protocol_version(version));
     }
-    assert!(!is_supported_protocol_version(21));
+    assert!(!is_supported_protocol_version(22));
     let sample = InstanceMessage::StatuslineSegments {
         buffer_id: BufferId::from_raw(9),
         left: vec![StatuslineSegment {

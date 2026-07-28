@@ -27,12 +27,11 @@ landed regardless of what a lane says.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `c2d56ff` (Journey Stage 1a #182, which
-  incorporated terminal configuration + copy mode #180, atop Lean 4
-  Stage 4b #181 and the previously recorded landed work; protocol v20).
-  The previous snapshot named `42025e4`, and **the recovery floor
-  advances with it**: the check below now requires `c2d56ff` or newer,
-  so a tree at `42025e4` no longer passes. That is
+  `githubsucks/main` @ `7fd646d` (Journey/GPU directory-target ratchet
+  #183, atop Journey Stage 1a #182 and the previously recorded landed
+  work; protocol v20). The previous snapshot named `c2d56ff`, and **the
+  recovery floor advances with it**: the check below now requires
+  `7fd646d` or newer, so a tree at `c2d56ff` no longer passes. That is
   deliberate — the floor moves with the base, because a check that
   accepts an older commit than the declared base passes on a tree the
   rest of this file does not describe.
@@ -71,7 +70,7 @@ git worktree list
 git status --short --branch
 ```
 
-The `git log` command must expose `c2d56ff` — the base named above — or a
+The `git log` command must expose `7fd646d` — the base named above — or a
 newer intentional main. Keep this threshold and the canonical-base line in
 step: a recovery check that accepts an older commit than the base it
 declares canonical will pass on a tree the rest of this file does not
@@ -170,92 +169,6 @@ If it does not, stop and repair the remote/fetch configuration.
 - **The lane closes when this merges.** It does not wait for the flake
   to recur; the next occurrence carries its own evidence under whoever's
   PR, and a Stage B framing follows then.
-
-## Journey/GPU directory-target ratchet — PR #183 GATED ON PUBLIC PATH
-
-- **Approved correction, not new product behavior.** GPU initial-target
-  framing Q#GT6 / acceptance 10 and Journey Stage 1a N2/N5 already make
-  a directory target a success; `COHERENCE.md` §2 treats that path as a
-  protected journey. The stale GPU integration test still listed `"."`
-  among malformed/unloadable targets after #182 landed.
-- Branch `journey-gpu-directory-ratchet`, based directly on canonical
-  `main` @ `c2d56ff`. Recovery: `git fetch githubsucks && git checkout
-  journey-gpu-directory-ratchet`. Everything described here is
-  committed and pushed; nothing depends on the `/tmp` worktree.
-- PR #183:
-  <https://github.com/levineuwirth/pmacs/pull/183>. It is intentionally
-  open and unmerged pending user review.
-- **Scope is one acceptance ratchet:** remove `"."` from the four
-  genuinely invalid cases and drive the public `pmacs --gpu .` root
-  broker through the real managed GPU connector. The positive requires
-  snapshot-first + `InitialTargetResult::Opened`, then consumes the
-  post-quiescence replacement snapshot and requires dired's canonical
-  header plus a known directory entry before proving the same daemon can
-  open a following file target. The private display-less acceptance
-  probe now reports its snapshot count and final materialized text so
-  that public path is observable. No normal frontend/daemon behavior,
-  protocol, framing decision, or coherence grade changes.
-- **Review round 1: three findings, all real and corrected.** The
-  first test stopped at the deliberately pre-existing bootstrap
-  document, so it did not pin the resolver's later dired commit. The
-  Stage 2 rev-5 recovery bullet named rev 4's framing branch. And the
-  durable handoff still named pre-Journey `main` even though this ledger
-  had advanced. The first is now a post-quiescence transport assertion;
-  the latter two are corrected in this revision. The complete matrix
-  below is green on the corrected tree.
-- **Live public-path check tightened that correction further.** A user
-  report that `pmacs --gpu .` differed from `pmacs .` did not reproduce:
-  the live default daemon delivered both snapshots, and a traced
-  windowed invocation applied both and displayed dired. It nevertheless
-  exposed that the corrected acceptance still attached a raw protocol
-  client rather than invoking the public root broker and real GPU
-  connector. The test now covers those surfaces and passes **15/15**;
-  its full matrix is green at `34b8f28`.
-- **Review round 2 found and fixed one failure-path cleanup gap at
-  `dc2dc42`.** The public-path test waited directly for dired's second
-  snapshot, but `ManagedProbe` only retained a spawned daemon's PID after
-  a successful wait. If the exact missing-snapshot regression recurred,
-  the timeout would therefore be unable to terminate that daemon. The
-  test now consumes the initial ready report first, retaining lifecycle
-  facts before it starts the post-quiescence assertion.
-- **Review-round-2 gates are green:** `cargo fmt --check`; strict
-  workspace clippy; library **1,849 passed / 3 ignored**; CRDT library
-  **2,034 passed / 4 ignored**; focused public-path test **1/1** and full
-  GPU invocation suite **15/15**; M4 **121 passed / 3 ignored / 1
-  filtered**; required GPU package **202/202**; `git diff --check`.
-  The first in-sandbox GPU-package attempt reproduced the repository's
-  documented Unix-socket restriction as three attach failures plus a
-  blocked peer read; the authoritative out-of-sandbox rerun passed all
-  **202** tests in under one second.
-- **Full gate matrix is green on the public-path revision at `34b8f28`:**
-  - `cargo fmt --check`;
-  - strict workspace clippy;
-  - library **1,849 passed / 3 ignored**;
-  - CRDT library **2,034 passed / 4 ignored**;
-  - touched GPU initial-target suite **15/15**;
-  - connected Journey/Dired/find-file/theme/bottom-panel acceptance
-    suites **125/125**;
-  - M4 **121 passed / 3 ignored / 1 filtered**;
-  - required GPU package **202/202**;
-  - `git diff --check`;
-  - isolated-config, one-invocation full workspace sweep green on its
-    final run.
-- **Gate diagnostics retained:** initial fresh-worktree attempts without
-  the documented `pmacs-gpu` prerequisite and without out-of-sandbox
-  Unix-socket permission were setup failures, not product evidence.
-  During the review rerun, an in-sandbox library attempt reproduced the
-  latter setup failure as `EPERM` in three attach socket tests; the
-  authoritative out-of-sandbox rerun passed all **1,849** non-ignored
-  tests.
-  The first full-workspace attempt then exhausted the `/tmp` filesystem
-  quota while linking. Moving only the disposable Cargo target to disk
-  let the sweep run; its first completed pass exposed one transient
-  `pmacs-gpu` font-facts unit-test red after the standalone GPU gate had
-  passed. The exact test passed immediately against the identical build,
-  and the required complete one-invocation rerun was green, including
-  GPU **202/202**.
-- This side quest lands before bottom-panel 2B-1 opens its PR. After it
-  merges, 2B-1 integrates the new `main` and reruns its full matrix.
 
 ## The CRDT half of the test corpus is dark in CI — NEEDS A LANE
 
@@ -392,39 +305,128 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
-## Bottom-panel lane (Arc 7) — 2B-1 GATED; waiting on ratchet side quest
+## Bottom-panel lane (Arc 7) — 2B-1 REGATED; PR #184 OPEN FOR REVIEW
 
 Stage 1, the Stage 2 framing, and Stage 2A are on `main`. Framing
 revision 5's three-way split of 2B was explicitly approved on
-2026-07-27. **Stage 2B-1 is implemented, integrated with canonical
-`main`, and pushed at `b9123c2`; no PR is open.** Its own omissions found
-by gating are corrected. The Journey/GPU ratchet lane above is its sole
-remaining dependency.
+2026-07-27; revision 6 records PR #184's review correction. **Stage
+2B-1 is implemented and integrated with canonical `main` @ `7fd646d`.
+Review round 2's four findings are corrected at `ab7c207`; the
+gate-found GPU/PTY probe barrier is corrected and the complete suite is
+green at `9e20175`. The follow-up fixture-specific probe correction is
+committed and proportionally regated at `9c79ce1`. PR #184 is open and
+must not merge before user review.**
 
 - **Stage 2B-1 branch:** `bottom-panel-stage2b`, based on
-  `githubsucks/main` @ `c2d56ff` by merge because review had begun.
+  `githubsucks/main` @ `7fd646d` by merge because review had begun.
   Recovery: `git fetch githubsucks && git checkout
-  bottom-panel-stage2b`. Everything is committed and pushed; nothing
-  depends on a worktree or `/tmp`.
-- **Ships only the v21 wire layer:** the four wire shapes, version bump,
-  shared cell-grid validator, and version-ladder move. It has no
-  producer, consumer, or capability change; `panel_capable` stays
-  `false`, so this slice changes no user-visible journey grade.
+  bottom-panel-stage2b`. Everything described through the integration
+  and gate checkpoint is committed and pushed; nothing depends on a
+  worktree or `/tmp`. PR #184:
+  <https://github.com/levineuwirth/pmacs/pull/184>.
+- **Ships only the reserved v21 wire layer:** the four wire shapes,
+  schema version, shared cell-grid validator, and accepted-version
+  ladder move. The production daemon continues advertising v20 because
+  its `Hello` is server-first; v21 activation belongs to 2B-3. This
+  slice has no producer, consumer, or capability change;
+  `panel_capable` stays `false`, so it changes no user-visible journey
+  grade and existing v20 clients remain attachable.
 - **Review round 1 closed:** two P1s and one P2, all corrected at
   `9b364ad`: `PanelFrame` now identifies its buffer, the transport
   ratchet covers the actual attach path rather than a detached codec
   assertion, and shared grid bounds have one validator.
-- **The full gate found and corrected two further 2B-1 omissions at
-  `b9123c2`:** the statusline version ladder still pinned v20/rejected
-  v21, and Vterm Stage 3 pinned v20 both structurally and in its real
-  headless probe. Those ratchets now expect v21 and, where applicable,
-  reject v22.
-- **Green evidence except for the main-side stale ratchet this side
-  quest owns:** formatting and strict Clippy; default/CRDT libraries;
-  every bottom-panel, folding, GPU-font, statusline, semantic, Vterm,
-  M4, and required-GPU gate; and the isolated-config full-workspace
-  sweep. The exact counts and the classified M8 timing rerun live at
-  `b9123c2`.
+- **Review round 2 found four issues, corrected at `ab7c207`:** the
+  server-first `Hello` made the advertised v20↔v21 compatibility
+  one-way; `COHERENCE.md` and `docs/agent-handoff.md` still named only
+  v20 schema support; framing §9 named a nonexistent aggregate 2B
+  suite instead of the three exact 2B slice suites; and the panel plus
+  copied terminal "one byte over" fixtures were actually two bytes
+  over. The correction keeps production advertisement at v20, adds a
+  real-daemon existing-v20-client acceptance, updates all three durable
+  records, names the exact slice suites, and asserts both rejecting
+  fixtures are exactly `limit + 1`.
+- **The full gate exposed and corrected a contradiction in Vterm Stage
+  3's headless probe at `9e20175`.** Its loop exited as soon as resize
+  plus two nonuniform composites were observed, while its acceptance
+  later required the PTY child's `VTERMROW` output in the final frame.
+  The v20-compatible handshake made that scheduling race deterministic:
+  terminal mode, five frames, and resize all succeeded, but the report
+  sampled a blank frame. The probe now waits for the exact child-output
+  observation its acceptance asserts. The formerly failing exact
+  GPU/PTY test passes, and the full nine-test Stage 3 target passes.
+- **Follow-up review corrected the probe barrier's fixture leak at
+  `9c79ce1`.** The generic runner hard-coded the producer fixture's
+  `VTERMROW` breadcrumb, so the CAT input fixture could satisfy every
+  assertion but never satisfy the loop exit and waited out the
+  20-second safety deadline. Producer probes now name their required
+  frame text while input probes finish on the latched echo. The report
+  exposes `completion_observed`, and both paths assert it, so a
+  deadline-driven pass cannot hide the stall again.
+- **The full gate found and corrected two 2B-1 omissions:** the
+  statusline version ladder still pinned v20/rejected v21, and Vterm
+  Stage 3 pinned v20 both structurally and in its real headless probe.
+  Those ratchets now expect v21 and, where applicable, reject v22.
+- **Pre-integration green evidence at `b9123c2`:** formatting and strict
+  workspace Clippy; library **1,849 passed + 3 ignored default** and
+  **2,034 passed + 4 ignored CRDT**; bottom-panel Stage 1 / 2A / 2B-1
+  **46 / 17 / 15**; folding Stage 2 **48**; GPU font **11**; statusline
+  **8 CRDT**; m11_5 semantic **2 CRDT**; Vterm Stages 1 / 2 / 3
+  **10 / 6 / 9 CRDT**, with Stage 3's real daemon + PTY + wgpu probe
+  required and green; M4 **121 passed + 3 ignored + 1 filtered**;
+  required GPU **202**; and the isolated-config, one-invocation full
+  workspace sweep green on rerun. Its first pass hit the known
+  completion-before-supersede race in
+  `m8_1_acceptance::read_dir_supersede_cancels_in_flight_predecessor`;
+  the exact pin, its full 10-test target, and the complete workspace
+  rerun all passed.
+- **The former deterministic red is resolved on `main`.** PR #183
+  corrected `gpu_initial_target_acceptance` through the public
+  `pmacs --gpu .` path, consumed the asynchronous dired snapshot, and
+  retained the managed daemon before the wait so failure cleanup remains
+  effective. The code integration auto-composed.
+- **The previous complete post-integration gate was green at `c8895a8`:**
+  formatting; strict workspace Clippy; library **1,849 passed + 3
+  ignored default** and **2,034 passed + 4 ignored CRDT**; bottom-panel
+  Stage 1 / 2A / 2B-1 **46 / 17 / 15**; folding Stage 2 **48**; GPU font
+  **11**; statusline **8 CRDT**; m11_5 semantic **2 CRDT**; GPU initial
+  target and invocation **15 / 15 CRDT**; Vterm Stages 1 / 2 / 3
+  **10 / 6 / 9 CRDT**, including the required real daemon + PTY + wgpu
+  probe; M4 **121 passed + 3 ignored + 1 filtered**; required GPU
+  **202/202**; the isolated-config, one-invocation full workspace sweep;
+  and `git diff --check`.
+  - The first required-GPU pass was **201/202** on
+    `a_fraction_draws_rule_pixels_between_its_operand_rows`, a rendering
+    test structurally outside this lane's protocol-only GPU diff. The
+    exact test passed immediately in isolation with one test thread, and
+    the mandatory complete rerun passed **202/202**. This is retained as
+    classified gate evidence, not erased as a clean first pass.
+- **The corrected review-round-2 head is fully green at `9e20175`:**
+  formatting; strict workspace Clippy; library **1,849 passed + 3
+  ignored default** and **2,034 passed + 4 ignored CRDT**; bottom-panel
+  Stage 1 / 2A / 2B-1 **46 / 17 / 16**; folding Stage 2 **48**; GPU
+  font **11**; statusline **8 CRDT**; m11_5 semantic **2 CRDT**; GPU
+  initial target and invocation **15 / 15 CRDT**; the handshake
+  consumers m5_5 / m5_7 / mode-system wiring **36 / 7 / 1 CRDT**
+  (the release-only m5 perf test remains ignored by its standing
+  contract); Vterm Stages 1 / 2 / 3 **10 / 6 / 9 CRDT**, including the
+  required real daemon + PTY + wgpu probe; M4 **121 passed + 3 ignored
+  + 1 filtered**; required GPU **202/202**; the isolated-config,
+  one-invocation full workspace sweep; and `git diff --check`.
+  - An initial default-library attempt inside the restricted tool
+    sandbox produced three `Operation not permitted` failures in
+    socket-based attach tests. The authoritative outside-sandbox rerun
+    passed all **1,849 + 3 ignored**, and the matching CRDT run passed.
+    This is retained as environment classification, not presented as a
+    clean first attempt.
+- **The fixture-specific follow-up is proportionally green at
+  `9c79ce1`:** formatting and strict workspace Clippy; protocol
+  **17/17**; bottom-panel Stage 2B-1 **16/16**; Vterm Stage 3 **9/9
+  CRDT** with the real daemon + PTY + required wgpu probe in **5.72 s**;
+  the formerly stalled CAT path **1/1 in 0.32 s**; required GPU
+  **202/202**; and `git diff --check`. The first Stage 2B-1 and Vterm
+  attempts inside the restricted tool sandbox reproduced the classified
+  Unix-socket `Operation not permitted` denial; their authoritative
+  outside-sandbox reruns passed.
 - **Next ordering is fixed:** 2B-2 branches from `main` only after 2B-1
   lands; 2B-3 branches only after 2B-2 lands. The daemon epoch machine
   belongs to 2B-2; the GPU band and negotiated capability flip belong
@@ -497,8 +499,9 @@ remaining dependency.
   `docs/agent-handoff.md` §1; the two round lessons are in §5.
 - Landed-docs follow-up merged as **#156** (`main` @ `d152120`,
   2026-07-25).
-- **Stage 2 framing: `docs/bottom-panel-stage2-framing.md` revision 5**
-  is commit `56301ed` on branch `githubsucks/bottom-panel-stage2b`,
+- **Stage 2 framing: `docs/bottom-panel-stage2-framing.md` revision 6**
+  is on branch `githubsucks/bottom-panel-stage2b` (revision 5 is commit
+  `56301ed` there),
   worktree `../pmacs-bp-stage2b`. Revisions 1–4 remain on
   `githubsucks/bottom-panel-stage2-framing` (head `4fbd47f`, four
   framing commits, revision 4 at `49757e5`). Round 1 closed 2 blocking +
@@ -506,7 +509,9 @@ remaining dependency.
   round 2 closed 1 blocking + 2 high + 1 medium and decided both open
   items; round 3 closed 1 blocking + 1 high + 1 medium. No open items
   remain. Revision 5 adds no decision; it records the approved
-  2B-1/2B-2/2B-3 implementation split. The
+  2B-1/2B-2/2B-3 implementation split. Revision 6 corrects the
+  server-first compatibility contract, durable protocol claims, exact
+  acceptance-suite names, and `limit + 1` fixture. The
   parent framing `docs/bottom-panel-framing.md` (rev 4) remains
   authoritative, **including its acceptance criteria 37–55**.
 - Retained, carrying nothing unmerged: branch `bottom-panel` and worktree
@@ -515,12 +520,14 @@ remaining dependency.
   before the next branches:
   **2A** = classified §1.3 census routing + `paint_frame` per-window
   painter extraction (with the active-window auto-scroll preparation), no
-  protocol change; **2B-1** = protocol **v21**
+  protocol change; **2B-1** = reserved protocol schema **v21**, with
+  production advertisement held at v20,
   (`InstanceMessage::PanelFrame` plus
   `FrontendEvent::{FrontendCellGeometry, PanelResizeRows, PanelPointer}`,
   gated both directions, each extended enum byte-pinned on its own
   previous final variant); **2B-2** = daemon panel projection and epoch
-  machine; **2B-3** = the GPU band and negotiated `panel_capable` flip.
+  machine; **2B-3** = compatible v21 activation, the GPU band, and the
+  negotiated `panel_capable` flip.
   Stage 3 is the adopter default flip.
 - **Correction — this entry previously mis-stated the census contract.**
   It is **not** "route every consumer through `primary_document_window`".

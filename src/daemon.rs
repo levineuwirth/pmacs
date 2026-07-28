@@ -67,9 +67,9 @@ use crate::lockfile::{self, LockError, LockHandle};
 use crate::presence::{PresenceSnapshot, SessionRegistry};
 use crate::protocol::crossterm_translate::{key_to_crossterm, mouse_to_crossterm};
 use crate::protocol::{
-    AttachRequest, FrontendEvent, FrontendId, GoodbyeReason, Hello, InitialTarget,
-    InitialTargetResult, InstanceCapabilities, InstanceIdentity, InstanceMessage, InstanceSignal,
-    MAX_INITIAL_TARGET_ERROR_BYTES, MAX_INITIAL_TARGET_PATH_BYTES, PROTOCOL_VERSION, PointerKind,
+    ADVERTISED_PROTOCOL_VERSION, AttachRequest, FrontendEvent, FrontendId, GoodbyeReason, Hello,
+    InitialTarget, InitialTargetResult, InstanceCapabilities, InstanceIdentity, InstanceMessage,
+    InstanceSignal, MAX_INITIAL_TARGET_ERROR_BYTES, MAX_INITIAL_TARGET_PATH_BYTES, PointerKind,
     SelectionSnapshot, SessionBootstrapRequest,
 };
 use crate::socket_path::{SocketPathError, ensure_runtime_subdir};
@@ -712,7 +712,7 @@ fn per_attach_thread(
     // mismatch path without changing the default.
     let instance_caps_for_hello = instance_capabilities_with_env_override();
     let hello = Hello {
-        protocol_version: PROTOCOL_VERSION,
+        protocol_version: ADVERTISED_PROTOCOL_VERSION,
         assigned_frontend_id: frontend_id,
         instance_identity: daemon_state.build_identity(),
         instance_capabilities: instance_caps_for_hello.clone(),
@@ -739,7 +739,7 @@ fn per_attach_thread(
         let _ = write_message(
             &mut stream,
             &InstanceMessage::Goodbye(GoodbyeReason::VersionMismatch {
-                server: PROTOCOL_VERSION,
+                server: ADVERTISED_PROTOCOL_VERSION,
                 client: req.protocol_version,
             }),
         );
@@ -3392,12 +3392,27 @@ fn apply_event(
                  (grid terminals resize through the Stage 2 layout path)"
             );
         }
+        FrontendEvent::FrontendCellGeometry { .. }
+        | FrontendEvent::PanelResizeRows { .. }
+        | FrontendEvent::PanelPointer { .. } => {
+            // Bottom panel Stage 2 — panel declarations belong to
+            // negotiated panel-capable semantic sessions and are routed
+            // by the authenticated source in `handle_dispatcher_event`.
+            // A grid session has no panel band at all, so one arriving
+            // here is a protocol violation; drop it rather than letting
+            // a payload-trusted id reach a view.
+            eprintln!(
+                "pmacs daemon: panel declaration from a grid session; dropping \
+                 (grid sessions negotiate no panel band)"
+            );
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::PROTOCOL_VERSION;
 
     #[test]
     fn daemon_state_starts_frontend_id_at_two() {
