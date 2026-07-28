@@ -5483,6 +5483,18 @@ fn m4_26_auto_attach_roots_server_at_opened_files_project() {
 
     // The fake writes the received rootUri on `initialize`; wait for
     // the side-channel to carry the scheme.
+    //
+    // NOTE: this predicate is weaker than the `assert_eq!` below, the same
+    // shape that made the config sink in
+    // `m4_5_initial_config_pushed_via_did_change_configuration` race. It is
+    // left as-is deliberately. Waiting for the expected value instead would
+    // turn a genuine regression — `rootUri` falling back to the cwd, which
+    // the `assert_ne!`s below exist to catch — into a five-second timeout
+    // with a misleading "server didn't initialize?" message, trading a
+    // precise diff for a vague hang. Closing it properly means giving the
+    // rooturi sink a record terminator in `src/bin/pmacs_fake_lsp.rs` and
+    // waiting for that; it has never been observed failing, so that is a
+    // separate change rather than a drive-by.
     assert!(
         pump_until_file_contains(&mut state, &sink, "file://", 5),
         "fake never recorded a rootUri (server didn't initialize?)"
@@ -6831,9 +6843,21 @@ fn m4_5_initial_config_pushed_via_did_change_configuration() {
         "fake never initialized"
     );
     // A few more ticks for the push + the server's sink write to land.
+    //
+    // Wait for a COMPLETE record, not for a substring of one. The sink is
+    // JSONL written by a separate process (`writeln!` in
+    // `src/bin/pmacs_fake_lsp.rs`, one line per push), so a substring
+    // predicate can be satisfied by a half-written line and the assertion
+    // below then reads the truncation. That is a real race, not a platform
+    // quirk: `probe` lands six bytes before `"probe":true` is complete, and
+    // macOS/lua54 lost it in CI, reporting `{"rust":{"probe":`.
+    //
+    // The trailing newline is the strongest available predicate because it
+    // waits for exactly the unit the assertion reads, and it stays correct
+    // if the payload's field order or spelling ever changes.
     let sink_probe = sink.clone();
     pump_async(&mut state, move |_| {
-        std::fs::read_to_string(&sink_probe).is_ok_and(|s| s.contains("probe"))
+        std::fs::read_to_string(&sink_probe).is_ok_and(|s| s.ends_with('\n'))
     });
 
     let recorded = std::fs::read_to_string(&sink).unwrap_or_else(|e| {
