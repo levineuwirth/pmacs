@@ -1,15 +1,13 @@
 # Framing — `apply_resource_op` delete destroys unsaved work
 
-**Revision 4.** Status: **PROPOSED — needs explicit user approval before
+**Revision 5.** Status: **PROPOSED — needs explicit user approval before
 implementation. DO NOT implement, DO NOT merge.** Lane:
 `resource-op-delete-guard`, worktree `../pmacs-resource-op-delete`,
 based on `githubsucks/main` @ `7586905`.
 
-Every count in this document was produced by a command run at revision
-4, with its output pasted at the point of use. That is a reaction to
-this lane's own record: it shipped a stale line count, then a stale
-commit count, then a stale ledger citation, in three consecutive
-revisions — each by carrying a measurement across a base change.
+Revision 5 removes volatile sibling-branch counts from the normative
+contract. A count is a reading, not a dependency; where history retains
+one, it names the revision at which it was measured.
 
 This is a live data-loss bug, reproduced four ways against `ad41cf1`
 (§1.1). A language server can destroy a buffer's unsaved edits *and*
@@ -23,6 +21,50 @@ design is approved, the implementation lands on this same branch and in
 this same PR (§8).
 
 ## Revision history
+
+### Revision 4 → 5, after review round 4
+
+Round 4 accepted the core and both surfaced decisions — the defensive
+parse stub and fail-closed filesystem uncertainty — but found two
+contract defects plus a ledger-ownership defect. All accepted.
+
+**P1 — the narrowed reporting promise had one stale consumer.** Q#RD7
+correctly says the unattended path always **attempts** a response while
+the channel remains live, but §2.1 still said it **always answers**.
+That normative consumer now uses the exact Q#RD7 promise. The revision
+4 audit missed it because the literal search `always answers` did not
+match Markdown's `**always** answers`. §1.15 therefore adds one more
+procedural rule: search normalized prose or term stems, not only an
+exact rendered phrase containing markup.
+
+**P1 — Q#RD12 called a three-row verdict total when it was not.** It
+omitted absent-without-ignore, defined `conflict` as a named modified
+buffer while also assigning stat failures with no buffer to it, and did
+not carry Q#RD2's `editing_in_progress` condition into the shared query.
+The verdict is now `no-op` / `clear` / `refuse`, with a required message
+on every refusal and an optional buffer name only for buffer-caused
+refusals. The total mapping is explicit: absent-plus-ignore is `no-op`;
+absent without ignore and an unanswerable stat are `refuse`; a modified
+or mid-edit affected buffer is `refuse`; only a present target with a
+clean, quiescent affected set is `clear`. Criteria 11c and 11d pin the
+two filesystem refusal directions before any earlier batch op mutates.
+
+**P1 — merge order was being used as ledger ownership.** Revision 4
+rewrote #171's full lane entry from #186. #171 revision 8 landed 67
+seconds earlier with different state, making #186's copy stale before
+it was pushed; #186's own `3 / 0` count was also one short because the
+revision commit itself had not yet been counted. The sibling block is
+restored to `main`'s version, so #186 no longer changes it. #171 owns
+its entry on its branch. This lane records only the stable split it
+depends on and checks the pushed sibling framing for semantic changes,
+without copying its volatile head/count/line state.
+
+**Coordination decision.** #186 lands before #171 for a product reason,
+not a merge convenience: it closes live data loss, and #171 explicitly
+adopts its refusal and shared query. #171 integrates the result and
+reconciles its own ledger entry. The generated-buffer lane is
+independent; `journey-stage1a-directory-open` has no unmerged ledger
+delta.
 
 ### Revision 3 → 4, after review round 3
 
@@ -634,36 +676,27 @@ treats the buffer as a cache of the file.
 
 Both arms share the §1.4 lookup defects.
 
-**Cross-lane state, re-measured at revision 4.** PR #171 (dired
-Stage 2) is at **revision 7, `fd7ae37`, merge-base `ad41cf1`**:
+**Cross-lane contract, rechecked at revision 5.** PR #171's pushed
+revision 8 (`7ecea94`) retains revision 7's split unchanged. This
+document deliberately does **not** copy its ahead/behind count, line
+count, or full lane status: those are volatile state owned by #171's
+branch, and revision 4 proved that a sibling copy can be false before
+the copying commit is pushed. The historical correction still matters:
+revision 2 described #171 as stale and rename-only, while its revision 6
+had assigned rename *and* delete reconciliation to Stage 2a with the
+opposite policy — `reconcile_delete` killing unmodified buffers and
+keeping modified ones alive, so the file was deleted and the modified
+buffer orphaned. Revision 7 withdrew that policy and established the
+split below; revision 8 does not reopen it.
 
-```
-$ git rev-list --left-right --count fd7ae37...7586905
-13      2
-```
-
-Thirteen ahead, **two behind** — and those two are exactly PR #189's
-COHERENCE change, so no cross-lane conclusion turns on them. Revision 3
-of this document said "0 commits behind"; that was measured against
-`ad41cf1` and reported after `main` had moved to `7586905`, which is the
-third instance in this lane of quoting a census as a constant. Revision 2 of this
-document described it as "OPEN, STALE, 153 commits behind, under
-re-scout" and said it claimed the rename side only; **both halves of
-that were out of date**. Its revision 6 assigned rename *and* delete
-reconciliation to Stage 2a with the opposite policy — `reconcile_delete`
-killing unmodified buffers and keeping modified ones alive, so the file
-is deleted and the modified buffer orphaned, with that orphaning named
-as accepted residue.
-
-**The settled split** (identical wording carried by both lanes):
+**The stable ownership split carried by both lanes:**
 
 > #186 owns the urgent **pre-filesystem refusal** for synchronous
 > `apply_resource_op`. #171 later owns **full post-delete lifecycle
 > reconciliation**, including the **async race where a buffer becomes
-> modified after dired dispatch**. #171's revision 7 adopts the refusal
-> and stops saying LSP intentionally deletes modified files.
+> modified after dired dispatch**.
 
-#171 revision 7 has adopted this from its side: its Q#DR18 takes this
+#171 has adopted this from its side: its Q#DR18 takes this
 document's Q#RD1 refusal rather than re-deciding it, and it records the
 reason the refusal cannot simply be extended to cover dired — **dired
 never calls `apply_resource_op`**. It calls `pmacs.fs.remove`, which
@@ -798,10 +831,13 @@ contradictory. A withdrawal recorded in an audit while the claim stays
 load-bearing elsewhere is worse than no withdrawal, because the audit
 converts an error into a false assurance.
 
-**So the audit procedure is, from revision 4:** for each row, grep the
-whole document for the claim's terms and check every hit, not the
-defining section. Revision 4 ran that and found two surviving
-consumers (§1.15 is the audit; the fix is in Q#RD3 and §1.11).
+**So the audit procedure is, from revision 5:** for each row, search the
+whole document for the claim's terms and check every hit, not only the
+defining section. Search normalized prose or multiple term stems as
+well as exact phrases: revision 4's literal `always answers` search
+missed §2.1's `**always** answers` because Markdown markup split the
+phrase. Revision 4 found the two surviving `Abort` consumers; revision
+5 found and fixed that reporting consumer.
 
 | # | Claim | Source | Status |
 |---|---|---|---|
@@ -846,14 +882,15 @@ filesystem failure leaves every buffer intact automatically, and
 already gone, preserving today's invariant.
 
 **Layer 2 — the applier (early conflict check + robust reporting).**
-`apply_workspace_edit`'s existing plan loop gains a modified-buffer
-conflict check for delete ops and returns its existing `nil, message`.
-This is a **filter, not a transaction** (§1.7): it catches the common
-case cheaply, before anything is mutated, and it is honest that a
-sequential batch can still refuse mid-flight. What makes mid-flight
-refusal survivable is Q#RD7: each primitive call is wrapped, every
-failure becomes `nil, message`, the origin buffer is restored
-best-effort, and the unattended caller **always** answers the server.
+`apply_workspace_edit`'s existing plan loop gains a delete-precondition
+check and returns its existing `nil, message`. This is a **filter, not a
+transaction** (§1.7): it catches the plan-time buffer conflict and
+filesystem refusals cheaply, before anything is mutated, and it is
+honest that a sequential batch can still refuse mid-flight. What makes
+mid-flight refusal survivable is Q#RD7: each primitive call is wrapped,
+every failure becomes `nil, message`, the origin buffer is restored
+best-effort, and the unattended caller always **attempts** a response
+while the response channel remains live.
 
 Neither layer is redundant. Layer 1 alone leaves every batch failure
 reported through a channel that does not work (§1.5). Layer 2 alone
@@ -952,12 +989,13 @@ affected buffers → mutate the filesystem → reconcile the registry.**
 
 ### Q#RD3 — The preflight is an early conflict check, **not** a transaction — **DOWNGRADED at rev 2**
 
-`apply_workspace_edit`'s plan loop gains a modified-buffer conflict
-check for delete ops and returns its existing `nil, message`. It is
-described in the code comment and here as a **filter**:
+`apply_workspace_edit`'s plan loop gains a delete-precondition check and
+returns its existing `nil, message`. It is described in the code comment
+and here as a **filter**:
 
-- **What it guarantees:** when the conflict is visible at plan time,
-  nothing in the batch is mutated at all, and the user gets one clear
+- **What it guarantees:** a plan-time modified/mid-edit buffer, a known
+  missing target without `ignore_if_not_exists`, or an unanswerable stat
+  refuses before anything in the batch is mutated, with one clear
   message.
 - **What it does not guarantee, stated plainly:** `documentChanges` are
   sequential (§1.7). An earlier text edit can dirty a clean buffer, and
@@ -973,9 +1011,9 @@ described in the code comment and here as a **filter**:
 - Revision 1 called this "whole-batch atomicity" and said "nothing in
   the batch is mutated". **That was false and is withdrawn.**
 
-The check needs a path-keyed modified query that Lua lacks (§1.4). It
-must be **one** query shared with the primitive's validation phase, so
-the two cannot drift apart.
+The check needs a synchronous filesystem-and-buffer query that Lua lacks
+(§1.4, Q#RD12). It must be **one** query shared with the primitive's
+stat/validation phases, so the two cannot drift apart.
 
 ### Q#RD4 — `ignore_if_not_exists` short-circuits at **both** layers — **WIDENED at rev 2**
 
@@ -1012,8 +1050,8 @@ guard is bypassed by the most destructive arm. Therefore:
 The asymmetry is deliberate and is the point: **inspect widely, mutate
 narrowly.**
 
-**Boundary with dired — restated at rev 3.** The settled split (§1.12,
-quoted there verbatim and carried identically by #171) is:
+**Boundary with dired — restated at rev 5.** The settled split (§1.12,
+also carried by #171) is:
 
 > #186 owns the urgent **pre-filesystem refusal** for synchronous
 > `apply_resource_op`. #171 later owns **full post-delete lifecycle
@@ -1023,8 +1061,9 @@ quoted there verbatim and carried identically by #171) is:
 **The stale justification is withdrawn.** Revision 2 supported taking
 the delete side now by citing the ledger's "OPEN, STALE, 153 commits
 behind, under re-scout" assessment of #171. That re-scout has finished;
-#171 is at revision 7, integrated to `ad41cf1`. **The conclusion is
-unchanged and rests on urgency alone** — this is a live data-loss bug
+#171 has completed the re-scout and retains the settled split through
+its pushed revision 8. **The conclusion is unchanged and rests on
+urgency alone** — this is a live data-loss bug
 with a reproduction, and a refusal that must precede the filesystem call
 cannot be deferred to a lane that acts after it. It no longer rests on
 any claim about #171's freshness, and it must not be re-argued from one.
@@ -1050,8 +1089,8 @@ The shared query therefore:
   and the Lua preflight (Q#RD3).
 
 **This lane claims the query.** The boundary's rule is "whichever lands
-first owns the query and the other adopts it", and #171 revision 7
-records that this rule's four clauses are character-for-character what
+first owns the query and the other adopts it", and #171's current
+framing records that this rule's four clauses are character-for-character what
 it had written independently for `reconcile_delete`. To stop both lanes
 asserting ownership: **#186 owns and implements the shared walk**, #171
 adopts it and extends it to `reconcile_rename`. If #171 lands first the
@@ -1220,7 +1259,7 @@ than dressing up a reachable payload — a criterion that cannot fail is
 not a pin, and pretending otherwise is the defect this decision exists
 to avoid.
 
-### Q#RD12 — The preflight needs a structured Rust-backed seam, not a registry walk alone — **NEW at rev 4**
+### Q#RD12 — The preflight needs a total Rust-backed verdict, not a registry walk alone — **REWRITTEN at rev 5**
 
 Q#RD4 requires the Lua preflight to distinguish **absent + ignore** (a
 no-op the preflight must let through) from **present + ignore** (a real
@@ -1240,28 +1279,51 @@ Nothing in Lua closes that gap today:
   preflight that disagrees with the primitive on the one input that
   matters.
 
-**The seam: one synchronous Rust binding returning a structured verdict**,
-evaluated with the *same* `symlink_metadata` call the primitive uses, so
-the two layers cannot disagree by construction:
+**The seam: one synchronous internal Rust binding,
+`pmacs.buffer._delete_verdict(spec)`, returning a structured verdict.**
+It accepts the same `path`, `recursive`, and `ignore_if_not_exists`
+fields as the delete primitive and delegates to the same Rust helper,
+including the same `symlink_metadata` call and affected-set walk, so the
+two layers cannot disagree by construction. The Lua-visible shape is
+`{ kind = "...", message = ..., buffer_name = ... }`; `message` is
+required and non-empty for `refuse`, and `buffer_name` is present only
+when a buffer caused the refusal:
 
 | Verdict | Meaning |
 |---|---|
 | `no-op` | path absent **and** `ignore_if_not_exists` set — the op will do nothing; the preflight must not reject it |
-| `clear` | the delete may proceed: no matching buffer is modified |
-| `conflict` | at least one matching buffer (at the path, or beneath it for a recursive delete) is modified — refuse, with the buffer named |
+| `clear` | path present, and every affected buffer is clean and not mid-edit — the delete may proceed |
+| `refuse` | delete must not proceed: missing without ignore, stat uncertainty, or an affected buffer modified/mid-edit; `message` states which, and buffer-caused refusals name it |
 
-**Error contract.** The binding is total over its inputs and does not
-raise for ordinary filesystem conditions — absence is a verdict, not an
-error. It raises only on argument-type violations, matching the rest of
-the `pmacs.buffer` surface. A stat error that is neither success nor
-`NotFound` (e.g. `EACCES` on a parent directory) yields `conflict`, not
-`clear`: the preflight must never report "safe to delete" on the
-strength of a question it could not answer. That asymmetry is
-deliberate — the failure direction is toward refusing.
+**Total mapping and error contract.**
 
-This binding **is** the single shared query of Q#RD6: the walk is its
-buffer half, the `symlink_metadata` call its filesystem half, and the
-primitive's validation phase calls the same function so drift is
+1. `symlink_metadata == NotFound` plus `ignore_if_not_exists` yields
+   `no-op`.
+2. `NotFound` without ignore yields `refuse` with the ordinary delete
+   I/O message. Catching this deterministic failure in the plan makes
+   that case more atomic than today without claiming the batch is a
+   transaction; dynamic failures remain possible.
+3. Any other stat error (for example `EACCES` or `NotADirectory`) yields
+   `refuse` carrying that I/O reason. The preflight never reports safe
+   on the strength of a question it could not answer.
+4. A present path whose affected set contains a modified or
+   `editing_in_progress` buffer yields `refuse` naming that buffer.
+5. Only a present path with a clean, quiescent affected set yields
+   `clear`.
+
+The binding raises only on argument-type violations, matching the rest
+of the `pmacs.buffer` surface. Ordinary filesystem conditions and buffer
+refusals are values.
+
+The callers consume the same Rust enum in different forms. The
+primitive returns `Ok(())` for `no-op`, turns `refuse` into its ordinary
+Lua error carrying the verdict message, and reaches filesystem mutation
+only for `clear`. The Lua plan lets `no-op` and `clear` through and
+returns its existing `nil, message` for `refuse`.
+
+This helper **is** the single shared query of Q#RD6: the walk is its
+buffer half, `symlink_metadata` its filesystem half, the binding
+serializes its result, and the primitive consumes it directly. Drift is
 impossible rather than merely discouraged.
 
 ## 4. Bets (falsifiable)
@@ -1391,6 +1453,23 @@ that passes against its pre-image has no bite and is rejected.
     input on which realpath and `symlink_metadata` disagree, and the
     reason Q#RD12 specifies the latter.
 
+11c. **Absent without ignore refuses in the plan, before earlier ops**
+    (Q#RD3, Q#RD12). A batch contains a text edit followed by a delete
+    of a missing target with `ignore_if_not_exists = false`. Assert
+    `applied = false`, a non-empty NotFound-style `failureReason`, and
+    that the earlier text edit was not applied.
+    *Bite:* fails if the verdict maps this state to `clear` and leaves
+    the primitive to discover it mid-batch; that implementation would
+    partially apply the text edit before returning the known error.
+
+11d. **An unanswerable stat fails closed in the plan** (Q#RD12). Use a
+    regular file as a would-be parent and target its child, producing
+    `NotADirectory` on the supported CI platforms. Assert
+    `applied = false`, the earlier batch op did not apply, and the
+    `failureReason` carries the filesystem cause.
+    *Bite:* fails if a non-NotFound stat error is collapsed to `clear`
+    or if the binding raises past the value-returning boundary.
+
 12. **Edit-then-delete and rename-into-delete still answer the server**
     (Q#RD3, Q#RD7). Two batches that defeat the snapshot preflight: one
     where an earlier text edit dirties the buffer a later op deletes,
@@ -1505,7 +1584,8 @@ suites; `cargo test --test m4_acceptance -- --skip basedpyright`;
 `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`; `git diff --check`.
 
 Touched suites: **`m4_acceptance`** (the resource-op home, §1.14, and
-the home of criteria 1–14 and 16) and **`lsp_dispatch_seams_acceptance`**
+the home of criteria 1–14 including 11a–11d, and 16) and
+**`lsp_dispatch_seams_acceptance`**
 (criterion 15's throwing parse stub, Q#RD11). Both appear in §8's touch
 table; revision 3 named the second here but omitted it there, and the
 two lists are now maintained together.
@@ -1532,16 +1612,16 @@ approved the implementation commits land on this same branch.
 
 **Implementation does not begin until the user approves this revision.**
 
-**Files the implementation will touch** — reconciled at rev 4 against
+**Files the implementation will touch** — reconciled at rev 5 against
 the gate list below and §5, which revision 3 left disagreeing:
 
 | File | Why |
 |---|---|
 | `src/lua_bindings/mod.rs` | the delete arm's four phases (Q#RD2); the shared query binding and its structured verdict (Q#RD6, Q#RD12); the narrow `*errors*` append surface (Q#RD7) |
 | `builtin/runtime/lsp.lua` | the preflight conflict check (Q#RD3); the parse-plus-apply wrap, origin restore, and boundary logging (Q#RD7) |
-| `tests/m4_acceptance.rs` | criteria 1–14, 16 |
+| `tests/m4_acceptance.rs` | criteria 1–14 including 11a–11d, and 16 |
 | `tests/lsp_dispatch_seams_acceptance.rs` | criterion 15's throwing parse stub (Q#RD11) — this file was named in the gate list but omitted from revision 3's touch list |
-| `src/bin/pmacs_fake_lsp.rs` | fake modes: blocked delete; edit-then-delete; rename-into-delete; absent-plus-ignore; present-plus-ignore (11a); dangling-symlink (11b) |
+| `src/bin/pmacs_fake_lsp.rs` | fake modes: blocked delete; edit-then-delete; rename-into-delete; absent-plus-ignore; present-plus-ignore (11a); dangling-symlink (11b); absent-without-ignore (11c); unanswerable-stat (11d) |
 
 It will **not** touch `src/daemon.rs`, `pmacs-protocol/`,
 `builtin/runtime/dired.lua`, `docs/agent-handoff.md` or `COHERENCE.md`.
@@ -1552,8 +1632,8 @@ alongside the rest, that is a permitted simplification — but then
 `lsp_dispatch_seams_acceptance` drops out of the gate list too, and the
 two lists move together. Revision 3's defect was that they did not.
 
-**Ownership note — restated at rev 3 against #171 revision 7.** The
-settled split is quoted in §1.12 and Q#RD5 and is carried identically by
+**Ownership note — rechecked at rev 5 against #171's pushed revision
+8.** The settled split is quoted in §1.12 and Q#RD5 and is carried by
 both lanes. Concretely, this lane claims for its duration:
 
 - the **pre-filesystem refusal** inside synchronous `apply_resource_op`;
