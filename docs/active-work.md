@@ -533,17 +533,23 @@ has **no branch and no framing yet**.
   ```
   $ git merge-base HEAD githubsucks/main
   5e186c798236e244a0a6f68d5df79458b4856106
-  $ git rev-list --left-right --count HEAD...githubsucks/main
-  4       0
   ```
 
-  **Re-measure before quoting this anywhere.** `main` moved TWICE while
-  this lane's round-1 fixes were being written — #192 and then #193 —
-  and each move invalidated the count above. `main` has branch
-  protection, so a stale base is not merely untidy: all 12 checks must
-  pass on the merging head, and a conflicting PR builds no merge ref at
-  all, so a green run from before the move reads as current when it is
-  not.
+  That is the whole durable fact, and it is deliberately the ONLY
+  number pasted here. **An ahead-count cannot be recorded in the file
+  it counts**: writing it is a commit, so the value is stale by one the
+  instant it is written, and the previous attempt at this entry proved
+  it — a pasted `4 0` read `5 0` at the pushed head. Run
+  `git rev-list --left-right --count HEAD...githubsucks/main` when you
+  need it; the merge-base above is what tells you whether the answer is
+  still meaningful.
+
+  **Re-measure the merge-base too before relying on it.** `main` moved
+  TWICE while this lane's round-1 fixes were being written — #192 and
+  then #193. `main` has branch protection now, so a stale base is not
+  merely untidy: all 12 checks must pass on the merging head, and a
+  conflicting PR builds no merge ref at all, so a green run from before
+  the move reads as current when it is not.
 - **The framing's §8 branch plan is superseded and cannot be followed.**
   It says "one PR — #186, which becomes the implementation PR", written
   when #186 was still open. #186 merged as framing-only, so the
