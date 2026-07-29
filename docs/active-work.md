@@ -890,6 +890,18 @@ has **no branch and no framing yet**.
   justifies exempting `main` pushes by appeal to "the
   branch-protection record" — that record now exists, so the
   justification is real rather than aspirational.
+- **Required status checks are NAME-COUPLED to job names, and this
+  lane's own deferrals will break them.** A required context that no
+  longer exists does not fail — it leaves every PR pinned on
+  "Expected — waiting for status", indefinitely, which is
+  `main` becoming unmergeable by policy rather than by a red run.
+  Three deferrals above change job names or the matrix: the macOS trim
+  (§6.4) removes two contexts outright, and nextest (§6.3) or the
+  serial/parallel split (§6.2) rename or add them.
+  **Rule: any job rename, removal, or matrix change updates the
+  branch-protection required-checks list in the same motion.** Recorded
+  here because this is the entry that both enabled protection and named
+  the lanes that will invalidate it.
 - Recovery from a clean checkout:
   `git fetch githubsucks && git worktree add ../pmacs-ci3
   -b ci-timeouts-concurrency githubsucks/ci-timeouts-concurrency`.

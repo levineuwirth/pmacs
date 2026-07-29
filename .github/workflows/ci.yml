@@ -49,7 +49,8 @@ concurrency:
 # once, and a cold macOS debug build of this workspace plus the suite is
 # the plausible way a HEALTHY run exceeds its ceiling. The test job
 # therefore gets 35 rather than 25 — roughly 2x its observed max — while
-# everything else keeps 25 against a sub-4-minute observed max.
+# everything else keeps 25 against a sub-4-minute observed max, except
+# `m6-perf-gates`, which keeps its own tighter 15.
 #
 # DIAGNOSIS, WRITTEN BEFORE IT HAPPENS: four test legs timing out
 # simultaneously, shortly after a Rust release, is a cold cache and not
