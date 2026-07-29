@@ -84,13 +84,58 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-analyzer
       - uses: Swatinem/rust-cache@v2
+      # Arm the external-tool-gated tests (see `TEST_IMPROVEMENT.md`
+      # §1.2). Before this step nothing installed these tools, so every
+      # test guarded on them returned early and reported GREEN without
+      # executing its body — a whole block of real-language-server and
+      # multi-shell coverage that had never once run in CI. Installing
+      # them is only half the fix; the `PMACS_REQUIRE_*` variables below
+      # are what turn a future missing tool back into a failure instead
+      # of silently restoring the vacuum.
+      #
+      # Linux only for now, deliberately. macOS would need the brew
+      # equivalents and roughly doubles the install cost on the slowest
+      # leg of the matrix; arming one platform already converts these
+      # from never-executed to executed, and the second is incremental.
+      # The tests still skip cleanly on macOS because the variables are
+      # unset there.
+      - name: Install external tools that gate acceptance tests (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clangd zsh fish lua5.4
+          # `locate_lua` looks for `lua` or `luajit` by name; the
+          # distro package installs `lua5.4` only.
+          sudo ln -sf "$(command -v lua5.4)" /usr/local/bin/lua
+          go install golang.org/x/tools/gopls@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          npm install -g vscode-langservers-extracted yaml-language-server
       - run: cargo build --all-targets --no-default-features --features ${{ matrix.lua }}
       # Several acceptance binaries spawn real daemon / PTY child
       # processes. Keep the harness serial so macOS runners do not
       # expose cross-test process lifecycle races that are unrelated
       # to the behavior under test.
+      #
+      # PMACS_REQUIRE_* make a missing tool fatal rather than a silent
+      # skip, exactly as PMACS_REQUIRE_GPU already does for the headless
+      # render job. Set only where the install step ran.
+      #
+      # PMACS_REQUIRE_PYRIGHT is deliberately NOT set and basedpyright
+      # is deliberately NOT installed: that test has no timeout and
+      # hangs forever (root cause is the non-interruptible reader-thread
+      # join in `RuntimeHandles::drop`, already a named deferral in
+      # `src/process.rs`). This job has no `timeout-minutes`, so arming
+      # it today would trade a vacuous green for a six-hour hang on four
+      # legs. It gets armed after the hang fix and the CI timeouts land,
+      # and its own variable exists so that flip is one line.
       - run: cargo test --all-targets --no-default-features --features ${{ matrix.lua }} -- --test-threads=1
+        env:
+          PMACS_REQUIRE_LSP: ${{ runner.os == 'Linux' && '1' || '' }}
+          PMACS_REQUIRE_SHELLS: ${{ runner.os == 'Linux' && '1' || '' }}
+          PMACS_REQUIRE_LUA: ${{ runner.os == 'Linux' && '1' || '' }}
       - run: cargo test --doc --no-default-features --features ${{ matrix.lua }}
       # The workspace default member is only the root `pmacs` package, so
       # the runs above never execute pmacs-protocol's own tests — the

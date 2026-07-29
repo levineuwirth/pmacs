@@ -521,6 +521,60 @@ has **no branch and no framing yet**.
   `FrontendView.fold_projection` to `true` for semantic frontends, which
   Stage 2 deliberately left `false` (Q#FD21).
 
+## Test-improvement arc, lane 2 — silent-skip arming
+
+- Portable branch: `githubsucks/silent-skip-arming`, worktree
+  `../pmacs-skiparm`. Base measured at write time, pasted below.
+  Implements `TEST_IMPROVEMENT.md` §1.2 and §5.4.
+- **The defect:** `let Ok(_) = which_binary(x) else { eprintln!(..);
+  return; }` reports GREEN when the tool is absent, and CI installed
+  none of the tools. A block of real-language-server and multi-shell
+  tests had therefore **never once executed their bodies** in CI while
+  reporting success. A suite that cannot distinguish "passed" from
+  "never ran" is worse than a missing one, because it reads as
+  coverage.
+- **The fix is the project's own pattern.** `PMACS_REQUIRE_*` already
+  makes a missing GPU fatal for `vterm_stage3_acceptance`; this adds
+  `PMACS_REQUIRE_LSP`, `PMACS_REQUIRE_SHELLS` and `PMACS_REQUIRE_LUA`,
+  plus the CI step that installs the tools. Per-tool variables, not one
+  blanket flag, so a tool that must stay unarmed keeps its decision
+  visible at the call site.
+- **`basedpyright` is deliberately NOT installed and NOT armed.** Its
+  test has no timeout and hangs forever — root cause is the
+  non-interruptible reader-thread join in `RuntimeHandles::drop`,
+  already a named deferral in `src/process.rs`. The `test` job has no
+  `timeout-minutes` either. Arming it today would trade a vacuous green
+  for a six-hour hang across four legs. `PMACS_REQUIRE_PYRIGHT` exists
+  and is never set, so the flip is one line once lane 4 (the hang) and
+  lane 3 (timeouts) land. **Do not arm it before both.**
+- **A trap found while writing the workflow, not after:** the natural
+  Actions idiom `${{ runner.os == 'Linux' && '1' || '' }}` sets the
+  variable to the EMPTY STRING elsewhere, and `var_os().is_some()` is
+  true for `Some("")`. That would have armed the guard on exactly the
+  runners with no tools installed. The helper therefore treats empty as
+  unset. `PMACS_REQUIRE_GPU` has the same latent shape and is safe only
+  because it is set literally.
+- **Verified by execution in all three states**, on a tool genuinely
+  absent from this machine (`vscode-json-language-server`): unset ->
+  skips green; armed -> hard failure naming the CI step; empty string
+  -> skips green. The armed failure is the bite, and on `main` it
+  cannot occur because no guard exists.
+- **The tests pass when they actually run** — which was the open
+  question, since none of them had. Armed locally: 11 `m6_5` + 8 `m6_8`
+  REPL tests green, and all six real-LSP tests (clangd x2, gopls x2,
+  rust-analyzer x2) green individually.
+- Linux only for now, deliberately: macOS needs the brew equivalents
+  and roughly doubles install cost on the slowest matrix leg. The
+  variables stay unset there, so those tests skip cleanly.
+- Also removes the **documentation lane**, whose disposition the ledger
+  left undecided pending confirmation that its branch carried nothing
+  unique. Confirmed by measurement: `githubsucks/handoff-2026-07-20` is
+  **1 ahead, 365 behind**, and its entire unique diff is four doc files
+  at 42 insertions against 88 deletions — merging it would *revert*
+  current documentation. The section said "whoever confirms the branch
+  carries nothing unique removes the section"; this is that.
+
+
 ## Parked lane: kill-ring browser + persistence
 
 - Portable branch: `githubsucks/kill-ring-browser`
@@ -542,32 +596,6 @@ git worktree add --track \
   ../pmacs-kill-ring-browser \
   githubsucks/kill-ring-browser
 ```
-
-## Documentation lane — STALE, AND ITS DISPOSITION IS UNDECIDED
-
-> **Measured 2026-07-28, not inferred:** `githubsucks/handoff-2026-07-20`
-> is at `c11d7e7`, **1 commit ahead of `main` and 320 behind**. Its
-> whole diff against `main` is four documentation files
-> (`docs/active-work.md`, `docs/agent-handoff.md`,
-> `docs/roadmap-2026-07.md`, `docs/vterm-framing.md`), every one of
-> which has been rewritten repeatedly since by the landed-doc PRs
-> #156/#168/#169/#172/#180. Rule 4 removes a lane on merge *or
-> abandonment*, and this one looks abandoned in substance — but "looks
-> abandoned" is not the same as a decision, and no PR was ever opened
-> for it. **This snapshot deliberately annotates rather than deletes:
-> whoever confirms the branch carries nothing unique removes the
-> section.** The bullets below are its original claims, preserved as
-> written and now unverified.
-
-- Portable branch: `githubsucks/handoff-2026-07-20`
-- Carries synchronized `AGENTS.md` / `CLAUDE.md`, this ledger, the
-  durable handoff refresh, and the keybinding reference correction.
-- It changes no runtime code.
-- Review and merge this documentation branch separately; it must not be
-  folded into a feature framing branch.
-- Now also absorbs both landed arcs: Vterm Stage 1 (#126) and the config
-  registry (#127). Canonical `main` is merged into it up to `2e37c04`,
-  so its diff against `main` is documentation only.
 
 ## Closed since the last snapshot
 
