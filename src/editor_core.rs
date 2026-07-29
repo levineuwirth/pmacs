@@ -236,6 +236,28 @@ pub struct PanelReconciliation {
     pub released_terminal: Option<WindowId>,
 }
 
+/// What a frame-geometry declaration did (Q#BP2S1, Stage 2 §3.1).
+///
+/// Three-valued rather than a boolean because the caller must act
+/// differently on each, and collapsing the middle arm is a defect in one
+/// direction or the other: folded into `Advanced` it reconciles panel
+/// layout on every repeated declaration; folded into `Rejected` it
+/// reports a stale-event condition that never happened. A `Duplicate`
+/// **is** accepted — which is why a narrower internal boolean would have
+/// to be named `advanced`, never `accepted`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum GeometryUpdate {
+    /// The epoch advanced and the declaration was stored verbatim. Run
+    /// panel reconciliation.
+    Advanced,
+    /// Same epoch, same total: already current. Do no work.
+    Duplicate,
+    /// Same epoch with a different total, a lower epoch, the reserved
+    /// epoch `0`, an unknown frontend, or allocator exhaustion. Drop the
+    /// event before any reconciliation.
+    Rejected,
+}
+
 /// Row extent of an arbitrary subtree, derived from its leaves' computed
 /// rects: leaves tile their parent, so the union's height is the node's.
 fn node_row_extent(node: &LayoutNode, placements: &HashMap<WindowId, crate::window::Rect>) -> u32 {
@@ -3240,29 +3262,182 @@ impl EditorCore {
         (geometry.total.rows >= 2 && geometry.total.cols > 0).then(|| geometry.total.rows - 1)
     }
 
-    /// Cache a frontend's authoritative frame capacity (Q#BP2b).
+    /// A frontend's current authoritative frame-geometry declaration.
+    ///
+    /// The panel producer echoes `geometry_epoch` into every
+    /// [`pmacs_protocol::panel::PanelFrame`] it ships, and the daemon
+    /// compares an inbound panel event's epoch against it (Q#BP16 step
+    /// 3), so the epoch has to be readable, not only the size.
+    #[must_use]
+    pub fn frame_geometry_for(
+        &self,
+        fid: FrontendId,
+    ) -> Option<crate::window::DeclaredFrameGeometry> {
+        self.views.get(&fid)?.frame_geometry
+    }
+
+    /// Cache a frontend's authoritative frame capacity — the **grid /
+    /// `LOCAL`** allocator (Q#BP2b, Stage 2 §3.1).
     ///
     /// Grid / `LOCAL` views call this from their real attach and resize
-    /// sizes with an internally minted epoch; a semantic view stays
-    /// `None` until Stage 2's authenticated declaration. A repeated
-    /// identical size is not a new declaration.
-    pub fn declare_frame_geometry(&mut self, fid: FrontendId, total: crate::cell::CellSize) {
+    /// sizes with an internally minted epoch; a semantic view never takes
+    /// this path at all — it goes through
+    /// [`Self::accept_frame_geometry`], which applies the frontend-owned
+    /// epoch verbatim and does **no** value dedup.
+    ///
+    /// Value dedup is correct *here* and only here: a grid frontend's
+    /// cells are the unit it declares, so an unchanged grid under
+    /// unchanged metrics leaves any existing frame valid. It is wrong on
+    /// the semantic path, where a font or scale change can invalidate a
+    /// panel frame while [`crate::cell::CellSize`] is identical — the
+    /// case daemon-side dedup cannot see (Q#BP2S1).
+    ///
+    /// **Exhaustion fails closed.** Allocation is checked rather than
+    /// saturating: `saturating_add` pins at `u64::MAX`, after which two
+    /// different geometries share one declaration id. On exhaustion the
+    /// authoritative declaration is *cleared* to `None` (unknown), which
+    /// is already non-presentable under Q#BP2b, so the caller's
+    /// reconciliation hides the panel. Retaining the last valid geometry
+    /// would keep painting a panel sized to a frame that no longer
+    /// exists.
+    pub fn declare_frame_geometry(
+        &mut self,
+        fid: FrontendId,
+        total: crate::cell::CellSize,
+    ) -> GeometryUpdate {
         let Some(view) = self.views.get_mut(&fid) else {
-            return;
+            return GeometryUpdate::Rejected;
         };
         if view
             .frame_geometry
             .is_some_and(|geometry| geometry.total == total)
         {
-            return;
+            return GeometryUpdate::Duplicate;
         }
-        let next = view
-            .frame_geometry
-            .map_or(1, |geometry| geometry.geometry_epoch.saturating_add(1));
+        let next = match view.frame_geometry {
+            None => Some(1),
+            Some(geometry) => geometry.geometry_epoch.checked_add(1),
+        };
+        let Some(next) = next else {
+            view.frame_geometry = None;
+            return GeometryUpdate::Rejected;
+        };
         view.frame_geometry = Some(crate::window::DeclaredFrameGeometry {
             geometry_epoch: next,
             total,
         });
+        GeometryUpdate::Advanced
+    }
+
+    /// Accept a **semantic** frontend's authoritative geometry
+    /// declaration (Q#BP15a, Stage 2 §3.1).
+    ///
+    /// Deliberately a second method rather than
+    /// [`Self::declare_frame_geometry`] with an optional epoch: the two
+    /// regimes differ in whether value dedup applies, and one ambiguous
+    /// entry point would let a future caller silently take the wrong one.
+    ///
+    /// | Incoming declaration | Result |
+    /// | --- | --- |
+    /// | epoch **greater** than stored | [`GeometryUpdate::Advanced`], stored **verbatim**, even when `total` is unchanged |
+    /// | same epoch, same `total` | [`GeometryUpdate::Duplicate`] |
+    /// | same epoch, **different** `total` | [`GeometryUpdate::Rejected`] |
+    /// | **lower** epoch, any `total` | [`GeometryUpdate::Rejected`] |
+    ///
+    /// The last row is not an optimization: a lower epoch carrying
+    /// *identical* data is still stale, and accepting it would let a
+    /// reordered declaration resurrect geometry the frontend has moved
+    /// past.
+    ///
+    /// Epoch `0` is reserved for "never declared" and is rejected on the
+    /// wire.
+    pub fn accept_frame_geometry(
+        &mut self,
+        fid: FrontendId,
+        geometry_epoch: u64,
+        total: crate::cell::CellSize,
+    ) -> GeometryUpdate {
+        if geometry_epoch == 0 {
+            return GeometryUpdate::Rejected;
+        }
+        let Some(view) = self.views.get_mut(&fid) else {
+            return GeometryUpdate::Rejected;
+        };
+        match view.frame_geometry {
+            Some(stored) if geometry_epoch < stored.geometry_epoch => GeometryUpdate::Rejected,
+            Some(stored) if geometry_epoch == stored.geometry_epoch => {
+                if stored.total == total {
+                    GeometryUpdate::Duplicate
+                } else {
+                    GeometryUpdate::Rejected
+                }
+            }
+            _ => {
+                view.frame_geometry = Some(crate::window::DeclaredFrameGeometry {
+                    geometry_epoch,
+                    total,
+                });
+                GeometryUpdate::Advanced
+            }
+        }
+    }
+
+    /// The **third** geometry of Q#BP15a: the panel grid the daemon
+    /// derives and paints, or `None` when no panel is presentable.
+    ///
+    /// Columns are the frontend's full declared width. Rows are the
+    /// stored `fixed_rows` request clamped by Q#BP2's recursive document
+    /// minimum ([`Self::panel_allocation`]) and then by the shared wire
+    /// area budget, so a very wide frame cannot produce a frame the
+    /// protocol would reject. **The stored request is never rewritten**
+    /// — a later narrower geometry restores it.
+    ///
+    /// Returns `None` — the Q#BP2b hidden arm — when geometry is unknown,
+    /// when the panel is hidden or absent, when the frame declares zero
+    /// columns, or when even [`MIN_WINDOW_OUTER_ROWS`] rows would exceed
+    /// the area budget.
+    #[must_use]
+    pub fn panel_grid_size(&self, fid: FrontendId) -> Option<crate::cell::CellSize> {
+        if self.views.get(&fid)?.panel_hidden {
+            return None;
+        }
+        self.presentable_panel_grid(fid)
+    }
+
+    /// The panel grid this frontend's layout and geometry **could**
+    /// present, ignoring the cached `panel_hidden` bit.
+    ///
+    /// This is the single derivation behind both [`Self::panel_grid_size`]
+    /// and [`Self::reconcile_panel_layout_core`]'s satisfiability test,
+    /// and it is one function on purpose (review round 1, R1-1). When the
+    /// wire-area clamp lived only in the renderer, the daemon shipped an
+    /// authoritative `Absent` while `panel_hidden` stayed `false` — so
+    /// keys still reached the invisible window and a panel terminal kept
+    /// its controller. Q#BP2b is explicit that hiding is a **durable
+    /// state transition**, never a per-frame effect, and two derivations
+    /// of "can this panel be shown" is exactly how it became one.
+    ///
+    /// The area bound is a transport-safety limit rather than a frontend
+    /// policy, so it is applied uniformly rather than only on the
+    /// semantic path. It cannot bind for a grid frontend at any physically
+    /// reachable width — two rows fit until roughly 131,000 columns — so
+    /// one shared rule costs nothing and removes the drift.
+    #[must_use]
+    fn presentable_panel_grid(&self, fid: FrontendId) -> Option<crate::cell::CellSize> {
+        let view = self.views.get(&fid)?;
+        self.side_window_for(fid)?;
+        let geometry = view.frame_geometry?;
+        let cols = geometry.total.cols;
+        if cols == 0 {
+            return None;
+        }
+        let area_rows = self.frontend_area_rows(fid)?;
+        let rows = self.panel_allocation(fid, area_rows)?;
+        let budget_rows =
+            u32::try_from(pmacs_protocol::panel::MAX_PANEL_VISIBLE_CELLS / (cols as usize).max(1))
+                .unwrap_or(u32::MAX);
+        let rows = rows.min(budget_rows);
+        (rows >= MIN_WINDOW_OUTER_ROWS).then(|| crate::cell::CellSize::new(rows, cols))
     }
 
     /// Core half of the idempotent panel-reconciliation transaction
@@ -3285,13 +3460,14 @@ impl EditorCore {
             return result;
         };
         let was_hidden = self.views.get(&fid).is_some_and(|view| view.panel_hidden);
-        // Unknown geometry (a semantic view before Stage 2's declaration)
-        // and a zero-column frame are both non-presentable, and follow the
-        // hidden arm rather than being sized against a placeholder.
-        let satisfiable = self
-            .frontend_area_rows(fid)
-            .and_then(|rows| self.panel_allocation(fid, rows))
-            .is_some();
+        // Unknown geometry (a semantic view before Stage 2's declaration),
+        // a zero-column frame, a layout that cannot spare the rows, and a
+        // grid the shared wire budget cannot carry are ALL non-presentable
+        // and all follow the hidden arm. One derivation, shared with the
+        // renderer (R1-1): a condition that only the renderer knew about
+        // produced a blank band with the durable state still saying
+        // "visible".
+        let satisfiable = self.presentable_panel_grid(fid).is_some();
         let Some(view) = self.views.get_mut(&fid) else {
             return result;
         };
