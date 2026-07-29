@@ -9669,3 +9669,180 @@ fn rd20_the_user_facing_message_reports_partial_application() {
     );
     assert!(a.exists(), "the file survives the refused delete");
 }
+
+/// Criterion 21 (review round 2) — batch dependency comparison uses
+/// the same lexical path form as the buffer registry. Distinct URI
+/// spellings such as `/tree/./x` and `/tree/x` reach the same
+/// filesystem entry and therefore must be treated as the same target.
+///
+/// Bite: fails against raw-string `paths_related`, which judges the
+/// delete against the initial filesystem, fabricates `NotFound`, and
+/// refuses the legal ordered batch before its create runs.
+#[test]
+fn rd21_equivalent_dot_path_create_then_delete_is_not_preflight_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let anchor = dir.path().join("anchor.rs");
+    let victim = dir.path().join("victim.rs");
+    let witness = dir.path().join("witness.rs");
+    std::fs::write(&anchor, b"anchor\n").expect("write anchor");
+    let dot_uri = format!("file://{}/./victim.rs", dir.path().display());
+    assert_ne!(
+        dot_uri,
+        rd_uri(&victim),
+        "fixture: the URI spellings must differ"
+    );
+
+    let mut state = pmacs::editor::EditorState::new();
+    let plan = serde_json::json!({
+        "documentChanges": [
+            { "kind": "create", "uri": dot_uri },
+            { "kind": "delete", "uri": rd_uri(&victim) },
+            { "kind": "create", "uri": rd_uri(&witness) }
+        ]
+    });
+    let sink = rd_plan_server(&mut state, dir.path(), &plan);
+    rd_open(&mut state, "B", &anchor);
+    rd_wait_initialized(&mut state);
+
+    rd_trigger_apply_edit(&mut state);
+    let response = rd_wait_response(&mut state, &sink, 10);
+    assert!(
+        rd_applied(&response),
+        "lexically equivalent paths name the same target, so the ordered \
+         create/delete batch is legal: {response:?}"
+    );
+    assert!(!victim.exists(), "the created target was deleted");
+    assert!(
+        witness.exists(),
+        "THE BITE: the batch ran past the delete, so success is not vacuous"
+    );
+}
+
+/// Criterion 22a (review round 2) — zero COMPLETED plan items does not
+/// imply zero mutation. Text edits within one `TextDocumentEdit` run
+/// sequentially, so a later edit can reject after an earlier one
+/// changed the buffer.
+///
+/// Bite: fails against a renderer that keys "nothing was mutated" only
+/// on `applied_op_count == 0`.
+#[test]
+fn rd22a_partial_edits_inside_one_item_are_reported_conservatively() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("target.rs");
+    std::fs::write(&target, b"abcdef\n").expect("write target");
+
+    let mut state = pmacs::editor::EditorState::new();
+    let plan = serde_json::json!({
+        "documentChanges": [{
+            "textDocument": { "uri": rd_uri(&target), "version": 1 },
+            "edits": [
+                {
+                    "range": {
+                        "start": { "line": 0, "character": 4 },
+                        "end":   { "line": 0, "character": 5 }
+                    },
+                    "newText": "X"
+                },
+                {
+                    "range": {
+                        "start": { "line": 0, "character": 1 },
+                        "end":   { "line": 0, "character": 2 }
+                    },
+                    "newText": "Y"
+                }
+            ]
+        }]
+    });
+    let sink = rd_plan_server(&mut state, dir.path(), &plan);
+    rd_open(&mut state, "B", &target);
+    rd_wait_initialized(&mut state);
+    state
+        .lua_host
+        .lua()
+        .load(
+            "N = 0 \
+             pmacs.buffer.add_intercept(B, function(op) \
+               N = N + 1 \
+               if N == 2 then error('second edit rejected') end \
+               return op \
+             end)",
+        )
+        .exec()
+        .expect("install deterministic second-edit failure");
+
+    rd_trigger_apply_edit(&mut state);
+    let response = rd_wait_response(&mut state, &sink, 10);
+    assert!(!rd_applied(&response), "the second edit rejects");
+    let text: String = state
+        .lua_host
+        .lua()
+        .load("return B:slice(0, B:len())")
+        .eval()
+        .expect("read back");
+    assert_eq!(
+        text, "abcdXf\n",
+        "THE BITE: the first edit in the same item remains applied"
+    );
+    let reason = rd_reason(&response);
+    assert!(
+        reason.contains("first operation") && reason.contains("changed state"),
+        "the response must conservatively report the failing item's possible \
+         mutation: {reason:?}"
+    );
+    assert!(
+        !reason.contains("nothing was mutated"),
+        "the response must not deny the mutation visible in the buffer: {reason:?}"
+    );
+}
+
+/// Criterion 22b (review round 2) — the same conservative reporting
+/// covers a resource primitive. The rename arm creates destination
+/// parents before attempting the rename, so a missing source can leave
+/// a directory behind even though the first plan item failed.
+///
+/// Bite: fails against a text-edit-only repair that still reports
+/// "nothing was mutated" for a failing resource operation.
+#[test]
+fn rd22b_a_failing_resource_item_can_leave_filesystem_state() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let anchor = dir.path().join("anchor.rs");
+    let missing = dir.path().join("missing.rs");
+    let created_parent = dir.path().join("created-parent");
+    let destination = created_parent.join("destination.rs");
+    std::fs::write(&anchor, b"anchor\n").expect("write anchor");
+    assert!(!missing.exists(), "fixture: rename source must be absent");
+    assert!(
+        !created_parent.exists(),
+        "fixture: destination parent must start absent"
+    );
+
+    let mut state = pmacs::editor::EditorState::new();
+    let plan = serde_json::json!({
+        "documentChanges": [{
+            "kind": "rename",
+            "oldUri": rd_uri(&missing),
+            "newUri": rd_uri(&destination)
+        }]
+    });
+    let sink = rd_plan_server(&mut state, dir.path(), &plan);
+    rd_open(&mut state, "B", &anchor);
+    rd_wait_initialized(&mut state);
+
+    rd_trigger_apply_edit(&mut state);
+    let response = rd_wait_response(&mut state, &sink, 10);
+    assert!(!rd_applied(&response), "renaming an absent source fails");
+    assert!(
+        created_parent.is_dir(),
+        "THE BITE: the primitive created its destination parent before failing"
+    );
+    let reason = rd_reason(&response);
+    assert!(
+        reason.contains("first operation") && reason.contains("changed state"),
+        "the response must conservatively report possible filesystem effects: \
+         {reason:?}"
+    );
+    assert!(
+        !reason.contains("nothing was mutated"),
+        "the response must not deny the directory left on disk: {reason:?}"
+    );
+}

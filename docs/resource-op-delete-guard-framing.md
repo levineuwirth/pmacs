@@ -1,13 +1,13 @@
 # Framing — `apply_resource_op` delete destroys unsaved work
 
-**Revision 5, plus §9.** Status: **APPROVED and MERGED as #186
+**Revision 5, plus §§9–10.** Status: **APPROVED and MERGED as #186
 (framing only); the implementation is PR #190** on branch
 `resource-op-delete-guard-impl`, worktree `../pmacs-rd-impl`. The
 revision-5 body below is unchanged except for the two bookkeeping
-edits §9.6 names and makes in place; **§9 records the corrections
-implementation review round 1 found**, including two corrections to
-this document. The "DO NOT implement, DO NOT merge" banner this line
-replaces was true when revision 5 was written and is not now.
+edits §9.6 names and makes in place; **§§9–10 record the corrections
+implementation review rounds 1–2 found**, including corrections to this
+document. The "DO NOT implement, DO NOT merge" banner this line replaces
+was true when revision 5 was written and is not now.
 
 Revision 5's lane header — `resource-op-delete-guard`, worktree
 `../pmacs-resource-op-delete`, based on `githubsucks/main` @
@@ -1543,10 +1543,10 @@ that passes against its pre-image has no bite and is rejected.
 17. **Every new test is checked with `scripts/bite`** and none reports
     VACUOUS.
 
-**Criteria 18, 19a–19c and 20 are added by §9**, after implementation
-review round 1. They are listed there, with their pre-images, rather
-than interleaved here, so this section stays readable as the record of
-what revision 5 asked for.
+**Criteria 18, 19a–19c and 20 are added by §9; criteria 21 and
+22a–22b by §10**, after implementation review rounds 1 and 2. They are
+listed there, with their pre-images, rather than interleaved here, so
+this section stays readable as the record of what revision 5 asked for.
 
 
 ## 6. Parked — not deferred-and-forgotten
@@ -1600,7 +1600,7 @@ suites; `cargo test --test m4_acceptance -- --skip basedpyright`;
 
 Touched suite: **`m4_acceptance`** — the resource-op home (§1.14) and
 the home of every criterion, 1–16 including 11a–11d, plus §9's 18,
-19a–19c and 20.
+19a–19c and 20, and §10's 21 and 22a–22b.
 
 *Amended at implementation (§9.6).* Revision 5 also named
 **`lsp_dispatch_seams_acceptance`**, for criterion 15's throwing parse
@@ -1647,7 +1647,7 @@ the gate list below and §5, which revision 3 left disagreeing:
 |---|---|
 | `src/lua_bindings/mod.rs` | the delete arm's four phases (Q#RD2); the shared query binding and its structured verdict (Q#RD6, Q#RD12); the narrow `*errors*` append surface (Q#RD7) |
 | `builtin/runtime/lsp.lua` | the preflight conflict check (Q#RD3); the parse-plus-apply wrap, origin restore, and boundary logging (Q#RD7) |
-| `tests/m4_acceptance.rs` | criteria 1–16 including 11a–11d, plus §9's 18, 19a–19c and 20 — **including criterion 15's throwing parse stub**, per the permitted simplification below (§9.6) |
+| `tests/m4_acceptance.rs` | criteria 1–16 including 11a–11d, plus §9's 18, 19a–19c and 20 and §10's 21 and 22a–22b — **including criterion 15's throwing parse stub**, per the permitted simplification below (§9.6) |
 | `src/bin/pmacs_fake_lsp.rs` | **one parameterized mode, `applyeditplan`**, whose `WorkspaceEdit` is read from a test-written file, plus a sink for the client's response — see §9.6 for why one mode replaced the eight named below |
 
 ~~`tests/lsp_dispatch_seams_acceptance.rs`~~ — struck at implementation
@@ -1875,3 +1875,102 @@ never considered. The rest of the guard was swept for that shape.
 **Nothing else in this lane decides an affected set.** The reporting
 path names a buffer only inside a refusal it already computed, and
 `restore_origin` is best-effort by construction.
+
+
+## 10. Corrections found during implementation — review round 2
+
+This section records the two remaining findings on the round-1 repair.
+Neither changes the feature boundary, Q#RD1's refusal, Q#RD2's phase
+order, or Q#RD3's choice of a filter rather than a transaction. Both
+make the round-1 correction true for inputs its first acceptance set did
+not enumerate.
+
+### 10.1 Batch dependency comparison uses the registry's lexical path form
+
+Section 9.3 correctly required component-aware comparison, but its first
+implementation compared **raw decoded URI strings** after stripping
+only trailing slashes. That is component-aware without being
+path-equivalence-aware: `file:///tree/./x` and
+`file:///tree/x` reach the same filesystem entry while comparing
+unequal. A legal ordered `create /tree/./x → delete /tree/x` was
+therefore refused at plan time with the same fabricated `NotFound`
+§9.3 had just fixed for identical spellings. Reproduced through the
+real server pump.
+
+**Decision:** dependency comparison routes both operands through
+`pmacs.path.canonicalize`, which is
+`editor_core::normalize_buffer_path` itself — absolute, lexically clean,
+redundant-separator and `.` / `..` folding, with no filesystem access
+and no symlink resolution. This reuses the buffer registry's canonical
+form rather than growing a Lua mirror (the COHERENCE §14 / dired Q#DR2
+rule).
+
+Only the **comparison** is normalized. The plan item retains the decoded
+path for execution, so this correction does not silently widen Q#RD10's
+raw phase-4 reconciliation or resolve symlinks. Section 9.7's two raw
+execution-path findings remain exactly as scoped there.
+
+### 10.2 Zero completed items does not prove zero mutation
+
+Section 9.4's `applied_op_count` reports plan items that completed
+before a failure. Its first renderer treated `0` as proof that nothing
+was mutated. That inference is false **inside one failing item**:
+
+- a `TextDocumentEdit` contains multiple buffer edits applied
+  sequentially, so an intercept can accept the first and reject the
+  second after the first edit changed the buffer;
+- a resource primitive can have intermediate filesystem effects before
+  its terminal error — today the rename arm creates destination parents
+  before attempting the rename, so a missing source can leave a new
+  directory behind.
+
+Both cases were reproduced through the real server pump with the failing
+item first in the plan. The response said `aborted, nothing was
+mutated` while the buffer or filesystem visibly disagreed.
+
+**Decision:** the failure result now carries
+`execution_started` independently of `applied_op_count`. Only parse and
+plan-time failures render `nothing was mutated`. Once execution starts,
+the renderer is deliberately conservative:
+
+- with completed items, it says those earlier changes remain applied
+  and the failing item may also have changed state;
+- with zero completed items, it says the first operation may have
+  changed state before failing.
+
+This does not claim that every failing primitive mutates. It refuses to
+make a stronger recovery claim than the applier can prove, and one
+renderer still serves the server response, rename status, and code
+action status.
+
+### 10.3 Acceptance added by this round
+
+21. **Lexically equivalent dependency paths are related** (§10.1).
+    The server sends `create /dir/./x → delete /dir/x → create witness`;
+    the batch succeeds, `x` is gone, and the witness exists.
+    *Bite:* fails against raw-string `paths_related`, which preflights
+    `/dir/x` against the initial filesystem and refuses with `NotFound`.
+
+22a. **A failing multi-edit item is reported conservatively** (§10.2).
+     One `TextDocumentEdit` carries two replacements; a deterministic
+     intercept accepts the higher-offset edit and rejects the second.
+     The first edit remains in the buffer, `applied` is false, and the
+     reason must not say nothing was mutated.
+     *Bite:* fails when `applied_op_count == 0` alone selects the
+     no-mutation message.
+
+22b. **A failing resource item is reported conservatively** (§10.2).
+     A rename with an absent source and a destination under a new parent
+     fails after creating that parent. The directory remains and the
+     reason must acknowledge possible state change.
+     *Bite:* fails against a text-edit-only repair, or any renderer that
+     still equates zero completed resource items with zero mutation.
+
+### 10.4 Coherence and scope
+
+This round still serves **COHERENCE §1.2's silence asymmetry** and
+§23's requirement that background computation not become opaque: it
+makes the already-added server/user failure trace truthful. It touches
+no new golden-journey step, adds no interaction island, adds no setting,
+and creates no background work. No config-registry, ownership, or
+protocol change follows.
