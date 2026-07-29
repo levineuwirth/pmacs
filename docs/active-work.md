@@ -248,15 +248,30 @@ If it does not, stop and repair the remote/fetch configuration.
 ## Generated-buffer immutability lane (Arc: workbench primitives) — STAGE 1 OPEN
 
 **Framing: [PR #188](https://github.com/levineuwirth/pmacs/pull/188),
-revision 5, APPROVED and still open.** Read it as
+approved and still open. #188 owns the acceptance contract; this lane
+adopts it.** Where implementing Stage 1 found a criterion impossible or
+mislabelled, the finding goes to #188 as a revision request and this lane
+waits — it does not restate, narrow or reclassify a criterion locally.
+Read the framing as
 `git show githubsucks/generated-buffer-immutability:docs/generated-buffer-immutability-framing.md`
-until it merges. Stage 1 is branched from **landed `main`**, not stacked
-on the framing branch, so the two merge in either order.
+until it merges.
 
-- **Branch `generated-buffer-immutability-stage1`, based on
-  `githubsucks/main` @ `300cbc4`.** Worktree
-  `../pmacs-gbi-stage1`. Code checkpoint `e1b859f`; this ledger commit
-  rides on top of it.
+- **Branch `generated-buffer-immutability-stage1`**, worktree
+  `../pmacs-gbi-stage1`. `githubsucks/main` is integrated into it.
+  Measured when this line was written:
+
+  ```
+  $ git rev-parse --short githubsucks/main
+  64883eb
+  $ git log --oneline -1 githubsucks/main
+  64883eb Merge pull request #192 from levineuwirth/bite-positive-control
+  $ git merge-base --is-ancestor githubsucks/main HEAD && echo "main IS integrated"
+  main IS integrated
+  ```
+
+  **That is a reading, not a constant.** `main` moved twice while this
+  lane was open (#187 -> #192, with #193 behind it). Re-measure before
+  quoting it; do not copy the SHA forward.
 - **What Stage 1 ships.** `dired.lua`'s `paint` and `listview.lua`'s
   `render` write through `pmacs.buffer.set_generated_contents` (zero
   `bypass_intercept` writes remain in either file); `listview` gains
@@ -271,26 +286,42 @@ on the framing branch, so the two merge in either order.
   seven undo chords to a no-op; `dired.lua` and `listview.lua` rebind
   **nothing**, so a bare `C-/` emptied a listing and a panel. Stage 1
   closes the only two families reachable without `M-x`.
-- **Two framing criteria were wrong and the tests say so rather than
-  working around them.**
-  - Stage 1 criterion 5 ("an ordinary edit is refused by the INTERCEPT,
-    not by the rope") is **unreachable** once this arc's lock exists.
-    `Buffer::apply_edit` (`src/buffer.rs:773`) and `begin_edit`
-    (`:725`) call `ensure_writable` as their FIRST statement, while the
-    intercept chain runs later inside `apply_edit_inner` (`:1072`), so
-    the rope always answers first. Measured: a self-insert on an
-    adopted panel reports ``insert failed: buffer `*test-panel*` (id
-    BufferId(n)) is read-only``. Restated in both suites as "the
-    intercept still refuses with its named error **when the rope is
-    lifted**", which keeps the framing's own bite (delete
-    `add_intercept`) and is the state the intercept genuinely covers.
-  - Criterion 7 ("a refresh reaches the window") **cannot bite at the
-    listview adopter**: `listview.refresh` and `listview.open` both
-    follow `render` with `window.switch_buffer`, which rebuilds the
-    `TextView` from scratch (`src/editor_core.rs:4859-4868`) and masks
-    a dropped fan-out. `dired.revert` and `dired.sort-cycle` paint
-    without a switch, so the dired half carries it and fails the
-    mutation with the reported `assertion failed: end <= self.len()`.
+- **Review round 1 closed three findings.** All three are the same
+  class in the end: *the tree asserting something the record does not
+  support.*
+  - **[P1] The selection anchor.** `notify_buffer_edit` clamped
+    `cursor` and `view_top` but not `win.selection.anchor`, and
+    `rebuild_views_for` had the same gap. `Window::region` orders
+    `(anchor, cursor)`, so a stale anchor above a clamped cursor is
+    still the region's high end: reproduced as
+    `assertion failed: end <= self.len()` (`src/rope.rs:145`) from
+    `EditorCore::clipboard_copy`. Fixed by **dropping** the selection,
+    not clamping it — `window.quit`'s restore already answers this
+    question the same way (`src/editor_core.rs:3259`). Both exits are
+    pinned separately (`acc16h`, `acc16i`) and each mutation fails only
+    its own. **The wording is provisional**: the rule is Q#GB6's, whose
+    approved text does not mention the anchor, and a revision request is
+    with #188.
+  - **[P1] Criteria 5 and 7 were restated locally.** Withdrawn. Both
+    suites now quote the approved criterion, the criterion-5 tests are
+    renamed `*_provisional_*` and say they do not satisfy it, and
+    criterion 7's **"for each adopter"** is restored with the listview
+    half added back. The evidence stays as evidence and is filed with
+    #188.
+  - **[P2] Criterion 12 was labelled a `main` bite.** It is a mutation
+    bite; on `main` it fails at its disambiguation premise and never
+    reaches its assertion. Relabelled.
+- **Sweep for that class across this branch: 7 sites, 4 named by the
+  review and 3 found by the sweep.** Class A, a restated or narrowed
+  contract — the listview criterion-5 doc, **the dired criterion-5 doc**
+  (a second file the review did not cite), criterion 7's narrowing plus
+  its **missing listview half**, and this lane's own "two framing
+  criteria were wrong" bullet. Class B, a bite recorded as a `main`
+  failure that is really a mutation bite — criterion 12, **criterion 11
+  (same defect, not reported)**, and this lane's own revert list, which
+  said "five criteria" over six items and counted criterion 11 among
+  them. All 7 corrected. Every remaining `[main]` label was re-run and
+  fails at its own assertion, not at a premise.
 - **Stage 2 still owes everything with new Rust in it**, per the
   framing's cut: `Buffer::apply_generated_edit` + `GeneratedOutcome` +
   the `{ generated = true }` option + its own `run_buffer_edit` arm;
@@ -299,31 +330,57 @@ on the framing branch, so the two merge in either order.
   for `compile.lua` and the search panel; Q#GB5's `ensure_slot` lock;
   conversion of the remaining 13 write sites; and the three
   `compile_mode_acceptance` intruder tests converted per Q#GB12.
-- **Verification at code checkpoint `e1b859f`.** `cargo fmt --check`;
-  `cargo clippy --workspace --all-targets -- -D warnings`; library
-  **1,863 passed + 3 ignored** default and **2,048 passed + 4 ignored**
-  CRDT; `listview_acceptance` **16**, `dired_acceptance` **31**,
-  `folding_acceptance` **21**, `terminal_copy_mode_acceptance` **16**
-  default and **17** with `--features crdt` (the extra one is
-  `acc16e`, which a default run never compiles — judge that step by the
-  count, not the verdict); M4 **121 passed + 3 ignored + 1 filtered**
-  with `--skip basedpyright`; required GPU **202/202**; isolated-config
-  full workspace sweep **3,511 passed across 103 binaries, exit 0**;
-  `git diff --check` clean.
-- **Bites, all executed.** Five criteria are falsified by revert against
-  `githubsucks/main` (`scripts/bite` on `builtin/runtime/listview.lua`
-  and `builtin/runtime/dired.lua`): the two undo criteria, the
-  no-adoption criterion, the disambiguated-panel criterion, and the
-  fold-refusal pair. Nine more are falsified by a named one-line
-  mutation, each run and each observed to fail: dropping the fan-out in
-  the `set_generated_contents` binding; deleting the cursor clamp;
-  gating the `view_top` clamp on "the buffer shrank"; deleting
-  `self.read_only = false` from `set_generated_contents`; deleting
-  `add_intercept` and `set_round_trip_input` at each adopter; restoring
-  a name-keyed `panel_for_buffer`; adopting at the variant limit; and
-  restoring the old fold status string. **The `view_top` and `cursor`
-  clamps each fail only their own criterion**, which is the
-  discrimination review round 2's P2-4 asked for.
+- **Verification.** Run on the merged tree, at the code checkpoint the
+  next commit records; the ledger commit on top is docs-only and
+  `cargo fmt --check` + `git diff --check` were re-run after it.
+  `cargo fmt --check` clean; `cargo clippy --workspace --all-targets --
+  -D warnings` clean; library **1,863 passed + 3 ignored** default and
+  **2,048 passed + 4 ignored** CRDT; `listview_acceptance` **17**,
+  `dired_acceptance` **31**, `folding_acceptance` **21**,
+  `terminal_copy_mode_acceptance` **18** default and **19** with
+  `--features crdt` — judge that step by the count, because `acc16e` is
+  `#[cfg(feature = "crdt")]` and a default run never compiles it; M4
+  **121 passed + 3 ignored + 1 filtered** with `--skip basedpyright`;
+  required GPU **202/202**; isolated-config full workspace sweep
+  **3,514 passed across 103 binaries, exit 0**; `git diff --check`
+  clean.
+- **The dired 200 ms perf test is load-sensitive, and the conversion
+  costs it nothing.** Review saw `dired_renders_10k_entries_within_200ms`
+  take 241 ms in a combined run and pass alone. Measured here: 0.09 s
+  isolated over five runs, and the whole 31-test suite finishes in
+  0.12 s, so 241 ms was contention rather than a regression. Measured
+  against the pre-image as well, by swapping in `main`'s `dired.lua`
+  (the `bypass_intercept` paint): **0.09 s either way over five runs
+  each**. A whole-buffer `set_generated_contents` costs the same as the
+  bypass replace it replaces, which discharges Q#GB4's measurement
+  obligation for the whole-buffer case only — the streaming case is
+  Stage 2's and is not touched here.
+- **Bites, re-run under `scripts/bite`'s positive control (#192).**
+  A bare `bite: OK` from the pre-#192 script is weaker than it looks, so
+  every result below is from the current script or from a mutation
+  harness carrying the same control (named tests must pass on the
+  working tree and at least one must have run).
+  - **Falsified by revert, all `OK (assertion)` — not `OK (COMPILE)`:**
+    `builtin/runtime/listview.lua` for criteria 1, 2, 9 and 10;
+    `builtin/runtime/dired.lua` for criteria 3 and 13a;
+    `src/lua_bindings/fold.rs` for 13b; `src/editor_core.rs` for 8, 8b
+    and both anchor pins.
+  - **Falsified by a named mutation, each observed to fail:** the
+    fan-out drop in the `set_generated_contents` binding (criterion 7);
+    deleting `self.read_only = false` (criterion 4, both adopters);
+    deleting `add_intercept` and `set_round_trip_input` at each adopter
+    (criteria 5 and 6); the name-keyed `panel_for_buffer` (criteria 11
+    and 12); adopting at the variant limit (criterion 10); the old fold
+    status string (13b); deleting each clamp (8, 8b); and **clamping
+    instead of dropping** the anchor.
+  - **One recorded VACUOUS result, deliberately.** Criterion 7's
+    listview half passes under the criterion's own mutation, because
+    `listview.refresh` and `listview.open` follow `render` with
+    `window.switch_buffer`, which rebuilds the `TextView`
+    (`src/editor_core.rs:4854-4868`). Measured, not inferred: the same
+    mutation run against the listview half alone reports VACUOUS while
+    the dired half reports BITES. Filed with #188; the half is kept and
+    labelled rather than deleted.
 - **Recovery:**
 
   ```sh
