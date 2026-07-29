@@ -1278,11 +1278,56 @@ pub enum GeneratedOutcome {
     /// The rope changed and a later stage failed. The Edit must survive so
     /// windows and replica mirrors observe the mutation before the error.
     AppliedThenFailed { edit: Edit, error: BufferError },
-    /// CRDT only: the CRDT was partially mutated and the rope was not.
-    /// `rope ≡ CRDT projection` no longer holds.
+    /// CRDT only: the CRDT was mutated and the rope was not.
+    /// `rope ≡ CRDT projection` no longer holds. See the staging rule
+    /// below — this is NOT "delete succeeded, insert failed".
     Diverged(BufferError),
 }
 ```
+
+**Revision 6 (round 5, P1-2): `Diverged` is selected by whether the CRDT
+was MUTATED, not by which of two ops failed.** Revision 5 specified a
+"delete→insert classifier", which recognises exactly one failure point.
+The CRDT routing has **three**, and the third is shared by every op
+shape: `export_updates_since` runs after *every* successful CRDT mutation
+and before the rope is touched (`src/buffer.rs:1173`), and it returns
+`Result`. So:
+
+| op | failure point | CRDT state | revision 5 said | correct |
+|---|---|---|---|---|
+| `Replace` | `crdt.delete` fails | untouched | `Rejected` | `Rejected` |
+| `Replace` | `crdt.insert` fails after delete | **mutated** | `Diverged` | `Diverged` |
+| `Replace` | **`export_updates_since` fails** | **mutated** | **`Rejected`** ✗ | `Diverged` |
+| `Insert` | `crdt.insert` fails | untouched | `Rejected` | `Rejected` |
+| `Insert` | **`export_updates_since` fails** | **mutated** | **`Rejected`** ✗ | `Diverged` |
+| `Delete` | `crdt.delete` fails | untouched | `Rejected` | `Rejected` |
+| `Delete` | **`export_updates_since` fails** | **mutated** | **`Rejected`** ✗ | `Diverged` |
+
+Revision 5 got **three of seven** rows wrong, and each wrong row applies
+`Rejected`'s cleanup — which **restores a fresh buffer to writable while
+the CRDT and rope disagree**. That is the same harm P1-3 of round 4
+withdrew the four-variant fallback to prevent, reintroduced through a
+classifier that was too specific.
+
+**The rule, stated so it cannot miss a future failure point.** The
+routing function tracks one `bool`:
+
+```rust
+let mut crdt_mutated = false;
+// ... immediately after EACH successful crdt.insert / crdt.delete:
+crdt_mutated = true;
+// ... and every `?` becomes an explicit map that carries the flag out:
+//     Err(e) => return Err((e, crdt_mutated)),
+```
+
+`apply_to_crdt_then_normalize_bytes` returns
+`Result<CrdtRoutingResult, (BufferError, bool)>`, and the caller maps
+`(e, false) → Rejected(e)` and `(e, true) → Diverged(e)`. **The
+classifier is therefore total by construction**: any failure added later
+anywhere downstream of a successful CRDT op is classified `Diverged`
+without anyone remembering to extend a list of op shapes. That property
+is the point — revision 5's classifier was correct for the cases it
+enumerated and wrong because enumeration was the wrong mechanism.
 
 `run_rope_edit_and_broadcast` returns this richer outcome.
 `apply_edit` and `apply_edit_skip_intercepts` map it back to their
@@ -1300,6 +1345,66 @@ public `Result<Edit, BufferError>` surface cannot carry both the edit and
 the later view error, and changing all of those callers is broader than
 generated-buffer immutability. The pre-existing ordinary path is named
 in §8 rather than hidden by the helper refactor.
+
+**`AppliedThenFailed` must also finish the BUFFER-attached broadcast, not
+only the window and replica fan-out. New in revision 6 (round 5,
+P1-4).** Revision 5 solved the fan-out that happens *after* the registry
+borrow drops — windows and replica mirrors — and left the loop that
+happens *inside* it broken. `on_edit` broadcasting stops at the first
+error:
+
+```rust
+// src/buffer.rs:1286-1288
+for (_, view) in views.iter_mut() {
+    view.on_edit(self, &edit)?;          // <- returns on the FIRST Err
+}
+```
+
+Buffer-attached views run in **attach order**, and the erroring one is
+rarely last: `SyntaxHighlightView`, `ParseView`, `FoldStoreTranslator`,
+`BufferStyleSpanTranslator` and `DiagnosticView` all maintain byte
+offsets in `on_edit`. Any of them sitting *after* the failing view keeps
+**pre-edit offsets over a post-edit rope** — the same stale-index class
+`docs/agent-handoff.md` §4 records for the window `TextView`, one layer
+down. Revision 5's fan-out cannot reach them; they are not windows.
+
+**The decision: continue the broadcast and retain the first error.**
+
+```rust
+let mut first_err = None;
+for (_, view) in views.iter_mut() {
+    if let Err(e) = view.on_edit(self, &edit)
+        && first_err.is_none()
+    {
+        first_err = Some(e);
+    }
+}
+```
+
+**Both broadcast sites, not one — and the review named one.** Sweep F
+found the second:
+
+| site | who reaches it |
+|---|---|
+| `run_rope_edit_and_broadcast` (`src/buffer.rs:1286-1288`) | `apply_edit`, `apply_edit_skip_intercepts`, and therefore every generated write |
+| **`broadcast_on_edit` (`src/buffer.rs:1539-1549`)** | **`undo` and `redo`** — same `for … ?` shape, same defect |
+
+Fixing only the first would leave undo able to strand later views, which
+is the same bug reached by the command this whole arc exists because of.
+Both change.
+
+**Why this changes the shipped path for ordinary edits too, deliberately.**
+The alternative is a generated-only broadcast variant, which would give
+one rope two broadcast semantics depending on who wrote to it. That is
+the *exact* defect class that has now cost this arc four review findings
+across three rounds — a rule derived for one mechanism and applied to a
+second whose ordering differs. Continuing is also strictly better on its
+own terms: no caller benefits from a view being skipped, and a view that
+errors already cannot veto the rope mutation, which happened three stages
+earlier. **Blast radius, named:** `apply_edit`, `apply_edit_skip_intercepts`,
+`undo`, `redo`. The observable change is that a *later* view now sees an
+edit it previously missed; no error is swallowed, because the first is
+retained and returned.
 
 **The cleanup each variant triggers.** `entry` is the `read_only` value
 observed on entry.
@@ -1343,15 +1448,72 @@ that **this arc cannot fix it**:
   delete. Clearing it would discard the one operation a later repair
   lane might use to reconcile the document. So `Diverged` clears
   nothing; this arc does not invoke that undo automatically.
-- Locking is the strongest available *containment*: it stops further ops
-  compounding a divergence that already exists. So `read_only = true`,
-  and this is the one place where locking a buffer on an error path is
-  correct — because the buffer really is no longer safe to write.
+- Locking stops further **local edits** compounding the divergence. So
+  `read_only = true`. But see immediately below: revision 5 called this
+  "the strongest available containment" and that was wrong.
 - It returns a **distinct** `BufferError` variant rather than reusing
   `CrdtRejected`, and the Lua binding surfaces it via
   `pmacs.editor.set_status` rather than swallowing it. A caller must be
   able to tell "your op was refused, nothing happened" from "this
   buffer's CRDT and rope no longer agree."
+
+**`read_only` does NOT contain a divergent CRDT, and revision 5 asserted
+that it did. Corrected in revision 6 (round 5, P1-3).** The outbound
+snapshot paths do not consult `read_only` at all — they read
+`crdt_state()` and export directly:
+
+- **initial attach**, `src/daemon.rs:2563-2578`: `buf.crdt_state()` then
+  `crdt.export_snapshot()`, sent as `InstanceMessage::BufferSnapshot`;
+- **buffer-follow**, `export_buffer_snapshot` at
+  `src/daemon.rs:2693-2708`: `registry.get(buffer_id)` →
+  `buf.crdt_state()?` → `crdt.export_snapshot()`.
+
+Neither reads `read_only`, and neither can — `read_only` means "no local
+edits", which is a statement about *inbound* mutation. A replica
+attaching after the divergence therefore receives **the divergent CRDT**
+as its authoritative document, while every daemon window still paints the
+**old rope**. The lock contains exactly the direction that was already
+safe and none of the direction that was not.
+
+**The fix: a quarantine flag consulted by snapshot export.** `Buffer`
+gains one more private field, set only by the `Diverged` cleanup arm and
+never cleared by this arc:
+
+```rust
+/// Set when a CRDT mutation landed without its rope counterpart.
+/// While true this buffer's CRDT must not be published: it no longer
+/// projects to what any window shows.
+crdt_quarantined: bool,
+```
+
+Three consumers, all of which already have a skip path so the change is
+a guard rather than a new control flow:
+
+1. `src/daemon.rs:2563-2578` — the initial-attach loop already
+   `continue`s on `crdt_state()` returning `None` and on export failure;
+   quarantine takes the same `continue`, with its own log line.
+2. `export_buffer_snapshot` (`src/daemon.rs:2693-2708`) already returns
+   `Option`; quarantine returns `None`, with its own log line.
+3. `queue_daemon_origin_crdt_op` (`src/lua_bindings/mod.rs`) must not
+   queue ops from a quarantined buffer, for the same reason — a delta on
+   top of a divergent document propagates the divergence rather than the
+   edit.
+
+**Why quarantine rather than immediate repair.** Repair means either
+invoking the CRDT's own undo of the landed op or re-deriving the document
+from the rope, and both are decisions about *which side wins* that this
+arc has no standing to make: the rope is what the user is looking at, the
+CRDT is what replicas already hold, and if any replica has already
+received the divergent snapshot the answer changes again. Quarantine is
+the minimal correct action — it stops the divergence spreading and leaves
+every input a repair lane would need intact. **Repair stays deferred
+(§8), and revision 6 does not claim otherwise.**
+
+**What quarantine costs, stated:** a buffer that hits `Diverged` stops
+collaborating. Replicas attaching later see no snapshot for it and
+continue to show whatever they had. That is a visible degradation, and it
+is the correct one — the alternative is silent disagreement between what
+the user sees and what a replica edits.
 
 **Scope, stated plainly: `Diverged` is a PRE-EXISTING hazard this arc
 exposes, not one it creates.** `apply_edit` and
@@ -1505,6 +1667,9 @@ generated success arm from notifying twice:
 
 ```rust
 if generated {
+    // (round 5, P2-7) Refusals decide BEFORE the unfold, so a rejected
+    // attempt cannot leave a visible side effect behind. See below.
+    generated_preflight(lua, id, &op)?;
     unfold_before_interactive_lua_edit(lua, id, edit_start_of(&op));
     let outcome = run_generated_edit(lua, id, op); // no begin_edit; §3.4
     finish_generated_outcome(lua, id, outcome)     // fan-out, then Ok/Err
@@ -1519,6 +1684,44 @@ if generated {
     Ok(edit)
 }
 ```
+
+**The refusal preflight, and why revision 5 needed one. New in revision 6
+(round 5, P2-7).** Revisions 3–5 unfolded *before* calling
+`run_generated_edit`, while all four refusals — path-backed,
+identity-protected, re-entrant, out-of-bounds — are decided **inside**
+`apply_generated_edit`, one registry borrow later. So an **interactive**
+generated attempt on a folded, file-backed buffer would **open the fold**
+and then report that nothing was touched. §3.4's contract says exit 1 is
+"before any state change"; a fold is state, and it is the state the user
+can see.
+
+`generated_preflight` is a **read-only** `with_registry` borrow that
+evaluates §3.4's exits 1–4 against `&Buffer` and returns their errors
+verbatim. All four are decidable without mutation, so nothing is lost by
+asking early.
+
+**`apply_generated_edit` still re-checks all four, and that is not
+redundancy to remove.** The borrow is released between the preflight and
+the apply, so the preflight is an *optimization of the error path*, not
+an authority. `Buffer` remains the only authority — which is the same
+reason §3.4 keeps the whole transaction in one method. The cost is that
+four cheap predicates run twice on the refusal path and once-plus-once on
+the success path; the alternative is an unfold that survives a refusal.
+
+**Considered and rejected: drop the unfold from the generated arm.** That
+would make refusals safe by removing the behaviour entirely, but Q#GB3
+keeps the unfold deliberately — an interactive `M-x compile` into a
+folded `*compilation*` should reveal what it wrote — and removing it
+would be a silent behaviour change to the pinned Q#FD19 seam. Narrowing
+the contract instead ("before any state change *except folds*") was also
+rejected: it makes the contract unfalsifiable exactly where a user can
+see it.
+
+**Note the asymmetry this leaves, deliberately.** The `bypass_intercept`
+arm still unfolds before a write that can fail — but its only refusal is
+`ensure_writable`, which is pre-existing behaviour on a pre-existing
+path, and widening the preflight to it would change a shipped seam this
+lane does not own. Named rather than silently fixed.
 
 `run_generated_edit` mirrors `run_bypass_edit`'s borrow shape but returns
 the single transaction's whole outcome rather than calling `begin_edit`
@@ -1623,10 +1826,92 @@ not measured** — unlike §2.6's cursor case, the `view_top` case needs a
 scrolled window to stage and was not staged. §6 Stage 1 criterion 8b is
 what turns the argument into a pin.
 
+**A THIRD window coordinate, and it crashes rather than dangles. New in
+revision 6 (round 5, P1-5).** Every window also owns an optional
+`Selection`, and `Selection::anchor` is a **byte position**
+(`src/window.rs:120-130`, "Where the selection began"). Revisions 1–5
+listed two coordinates and there are three.
+
+The anchor is worse than the other two because nothing downstream
+tolerates it being out of range. `EditorCore::region_bytes`
+(`src/editor_core.rs:4184-4191`) does:
+
+```rust
+let (lo, hi) = self.active_region()?;              // Window::region(), :472-479
+let mut out = vec![0u8; (hi - lo) as usize];
+buf.snapshot_rope().slice(lo, hi, &mut out);
+```
+
+and `Rope::slice` asserts its bounds — `debug_assert!(end <= self.len())`
+at `src/rope.rs:145`. `Window::region` (`src/window.rs:472-479`) returns
+`(anchor, cursor)` in canonical order with **no clamping of either**. So
+a stale anchor is not a cosmetic dangle: **#191 reproduced the crash** —
+select bytes 0..30 in a generated buffer, let the owner rewrite it to two
+bytes, press copy, panic at `src/rope.rs:145`. A shrinking refresh under
+a live selection is not an exotic sequence; it is `g` on a listview panel
+with a region marked.
+
+**The rule: clamp-or-clear, per window, in BOTH functions.** For every
+window whose `buffer_id` matches — the `windows.values_mut()` loop that
+both functions already run:
+
+1. `win.cursor` → clamp to `len`.
+2. `win.view_top` → clamp to `line_count().saturating_sub(1)`.
+3. `win.selection` → clamp `anchor` to `len`; **then, if the clamp
+   collapsed the selection — `anchor == cursor` afterwards and at least
+   one endpoint actually moved — set `selection = None`.**
+
+**Rule 3 is not invented here; it is the tree's own answer to the same
+question.** `src/terminal/view.rs:715-721` normalizes the terminal's
+selection against a shrinking scrollback and does exactly this:
+
+```rust
+state.selection = state.selection.and_then(|selection| {
+    let anchor = clamp_or_clear(&rows, selection.anchor)?;
+    let head = clamp_or_clear(&rows, selection.head)?;
+    let collapsed_by_clamp =
+        anchor == head && (anchor != selection.anchor || head != selection.head);
+    (!collapsed_by_clamp).then_some(TerminalSelection { anchor, head })
+});
+```
+
+The terminal subsystem solved this for `TerminalSelection` and the window
+`Selection` never got the same treatment. Adopting the same rule rather
+than a fresh one is the point: a bare clamp would leave a zero-width
+"active but empty" selection that `Selection`'s own doc says is legal
+(`src/window.rs:123-126`) but that the user never asked for, and
+`collapsed_by_clamp` is precisely the distinction between "the selection
+survived, shortened" and "the selection's content is gone".
+
+**Both functions, because they have different callers and neither
+subsumes the other:**
+
+- **`notify_buffer_edit`** (`src/editor_core.rs:1836-1850`) clamps
+  **nothing** today — it only forwards `on_edit` to `text_view` and
+  overlays. This is the function a generated write reaches, so this is
+  where the crash is fixed.
+- **`rebuild_views_for`** (`src/editor_core.rs:1865-1882`) already clamps
+  `cursor` and `view_top` and **does not touch `selection`**. It serves
+  the `*help*` and `*buffer-list*` rewrites, which are Class C and shrink
+  wholesale. The same crash is reachable there today, independently of
+  this arc.
+
+**Blast radius of a stale anchor beyond the crash**, so the fix is not
+undersold: `Window::region` also feeds the presence broadcast
+(`src/presence.rs:122-123`, `SelectionSnapshot`), so an out-of-range
+anchor is published to peers as well as sliced locally.
+
 Recommended for **Stage 1**, because Stage 1's adopters refresh shrinking
 panels constantly and because it fixes terminal copy mode retroactively.
-Alternative if the user prefers a narrower Stage 1: its own lane, in
-which case Stage 1 must say so out loud rather than inherit it silently.
+**The selection half is not optional within that**: it is the only one of
+the three that panics, and it is reproducible today. Alternative if the
+user prefers a narrower Stage 1: its own lane, in which case Stage 1 must
+say so out loud rather than inherit it silently.
+
+**Cross-lane note.** Per the boundary in §9b, this rule is #188's to
+specify and #191's to implement, and both must describe the same rule.
+The text above is the specification; #191 adopts it rather than restating
+it.
 
 **Q#GB7 — No unlock ships in this arc. Revision 5 chooses the fallback
 revision 4 named (review round 4, P1-4).**
@@ -2276,14 +2561,58 @@ intercept refuses it either way.
    here; that is the failure mode `src/buffer.rs:521-524` exists to
    prevent. Assert the new content appears, not that the call did not
    raise.
-5. **[fix-shape] An ordinary edit is refused by the INTERCEPT, not by
-   the rope** — assert on the message text, which distinguishes them.
-   Measured, both forms: the intercept produces
-   `intercept rejected the edit: ... listview.lua:102: *probe-panel* is read-only`;
-   the rope produces `` buffer `*probe*` (id BufferId(4)) is read-only ``.
-   *Bite:* an adopter that deletes the intercept and relies on the rope
-   passes 1–4 and fails this. The layering at `terminal.lua:351-366`
-   requires the named error to survive.
+5. **An ordinary edit is refused, and the intercept is still installed
+   and still fires. REWRITTEN in revision 6 (round 5, P1-1) — the old
+   criterion was impossible, and this document is where that gets
+   settled, not #191.**
+
+   **Why the old one could not pass.** It required the *intercept's*
+   message on an ordinary edit after adoption. Both entry points check
+   the lock before any intercept runs: `begin_edit` (`src/buffer.rs:724`)
+   and `apply_edit` (`src/buffer.rs:772`) each call `ensure_writable()`
+   as their **first** statement, and the chain runs later, in
+   `apply_edit_inner`. Once the rope is locked an ordinary edit
+   **necessarily** returns `BufferError::ReadOnly`; the intercept cannot
+   run, so no test can observe its text. #191 reached this independently
+   and measured the actual message.
+
+   **The consequence revisions 1–5 all missed: after adoption the
+   intercept is UNREACHABLE on the ordinary path — including in the
+   shipped precedent.** `terminal.lua`'s `claim_snapshot` keeps its
+   erroring intercept beside the rope lock (`:339-396`), and that
+   intercept has been dead since #178 landed. This document has been
+   telling two more adopters to preserve it *and* to assert its message.
+
+   **So why keep the intercept at all?** Because it is the guard that
+   remains **whenever the lock is lifted**, and this document prescribes
+   lifting it: Q#GB12's intruder-test conversion, criteria 4, 15, 16b and
+   17's Rust-side lifts, and — if dired Stage 3 ever ships a wdired mode
+   swap — the editable window. During any such window the intercept is
+   the only thing refusing an ordinary edit. That is a real role, and it
+   is testable.
+
+   **The criterion, in two halves:**
+
+   - **(a) [`main`] An ordinary edit is refused and the text is
+     byte-identical.** No claim about *which* guard refused. Driven
+     through `dispatch_key`.
+   - **(b) [fix-shape] With the lock lifted Rust-side, an ordinary edit
+     is refused BY THE INTERCEPT**, asserted on the message text:
+     `intercept rejected the edit: … is read-only`, not
+     `` buffer `X` (id BufferId(n)) is read-only ``. Restore the lock
+     afterwards.
+
+   *Bite:* (b) is where the old criterion's bite survives — an adopter
+   that deletes the intercept and relies on the rope alone passes 1–4 and
+   (a), and fails (b). (a) alone is **not** a discriminator, which is
+   exactly why it is split out rather than left to carry the claim. The
+   layering at `terminal.lua:351-366` is preserved by (b); what revisions
+   1–5 got wrong was believing the ordinary path could see it.
+
+   **Recorded consequence, not this arc's to fix:** `terminal.lua`'s
+   intercept is likewise reachable only under a lift. Whether a
+   permanently-unreachable-on-the-ordinary-path guard should stay is a
+   question for whoever owns the layering; §8 carries it.
 6. **[fix-shape] `set_round_trip_input` is still set on both — asserted
    so that only the round-trip mark can make it pass. Rewritten in
    revision 3 (review P2-4), and the cited precedent was wrong.**
@@ -2362,8 +2691,35 @@ intercept refuses it either way.
    *Bite:* a clamp gated on "the buffer shrank" passes 8 and fails 8b,
    which is the whole of P2-4. Unlike 8, this case is argued from the
    types and from `rebuild_views_for`'s existing clamp
-   (`src/editor_core.rs:1853-1857`), **not measured** — staging it needs
+   (`src/editor_core.rs:1865-1882`), **not measured** — staging it needs
    a scrolled window.
+
+   **8c. [`main`] Selection-anchor clamp-or-clear, in BOTH clamp sites.
+   New in revision 6 (round 5, P1-5). This is the only one of the three
+   coordinates that PANICS, and #191 reproduced it.** Select bytes 0..30
+   in a generated buffer, have the owner refresh it to two bytes, then
+   invoke copy (`region_bytes`). Require: no panic; and either a valid
+   region within the new extent, or **no selection at all** where the
+   clamp collapsed it, per Q#GB6 rule 3.
+
+   Assert it **twice**, once per site, because they have different
+   callers and neither subsumes the other: through
+   `notify_buffer_edit` (the generated-write path, which clamps nothing
+   today) and through `rebuild_views_for` (the `*help*` /
+   `*buffer-list*` rewrite path, which clamps `cursor` and `view_top`
+   and **not** `selection`).
+
+   *Bite:* measured by #191 — panic at `src/rope.rs:145`,
+   `debug_assert!(end <= self.len())`, reached from
+   `region_bytes` (`src/editor_core.rs:4184-4191`) via
+   `Window::region` (`src/window.rs:472-479`), which clamps neither
+   endpoint. Falsify the clear half by clamping only: the selection then
+   survives as a zero-width region that the user never asked for, which
+   is what `src/terminal/view.rs:715-721`'s `collapsed_by_clamp` exists
+   to prevent for the terminal's own selection type. **Assert the
+   produced region, not merely that the call returned** — "did not
+   panic" is satisfied by clearing the selection unconditionally, which
+   would be a different bug.
 9. **[`main`] A foreign buffer named `*references*` is never adopted
    (Q#GB13).** Create a plain buffer of that name with user text, then
    open the references panel. Assert **both** halves: the user's bytes
@@ -2599,7 +2955,30 @@ rule this yields: a criterion must name the exit it drives the
 implementation to, and that exit must be inside the mechanism under
 test.** Every criterion below names its exit.
 
-15. **[`main`] `editing_in_progress` is cleared on a failure that
+**Pre-image relabels, revision 6 (round 5, P2-6). Six criteria carried
+`[main]` labels that describe what the FIX changes rather than what the
+BASE does — the classification error this arc has now made twice.** The
+test in every case is: *run this criterion's assertions against
+`300cbc4`; do they fail?*
+
+| criterion | what the base actually does | was | now |
+|---|---|---|---|
+| 15 | `{ generated = true }` is an **unknown option key** on `main` — `parse_bypass_intercept` reads only `bypass_intercept`, so the call is an ordinary managed edit, and `run_managed_edit` clears the flag before phase 3. The follow-up edit lands. **Passes.** | `[main]` | `[mutation]` |
+| 16 | same: no generated path exists to relock or not relock | `[main]` | `[mutation]` |
+| 16b | an empty write on `main` is an ordinary managed no-op; the assertions about lock/clean/history describe the fix | `[main]` | `[mutation]` |
+| 17 | invalid-range rejection **already** preserves history on `main`, because no `clear_history` runs on that path at all. **Passes.** | `[main]` | `[mutation]` |
+| 18 | `begin_edit` **already** rejects same-buffer re-entry (`src/buffer.rs:726-731`). **Passes.** | `[main]` | `[fix-shape]` |
+| 21 | search **already** consults `pmacs.compile` through the optional triple guard (`default.lua:991-994`). **Passes.** | `[main]` | `[fix-shape]` |
+
+None of these criteria is weakened by the relabel — each already stated
+its falsifying mutation, and the mutation is what gives it bite. What
+changes is that the document no longer claims a `main` failure it does
+not have, which is what `scripts/bite` would have contradicted. **The
+rule, restated for the third time and now applied by construction: a
+criterion's pre-image is a fact about the base, established by running it
+there — not an inference from what the fix is for.**
+
+15. **[mutation] `editing_in_progress` is cleared on a failure that
     ENTERS the transaction (Q#GB17; §3.4 `AppliedThenFailed`).** Attach
     a Rust-side `FailingView` — `pmacs::view::View` is `pub`
     (`src/view.rs:221`, `src/lib.rs:141`) and `Buffer::attach_view` is
@@ -2636,7 +3015,20 @@ test.** Every criterion below names its exit.
     ranges and the replica never receives an operation that already
     changed the authoritative CRDT. This criterion fails that mutation
     in both directions.
-16. **[`main`] A generated write relocks on that same failure, and does
+
+    **Revision 6 (round 5, P1-4): the fixture must place a RECORDING
+    view AFTER `FailingView` in attach order.** As written, 15a observes
+    only the window and replica consumers, which are fanned out *after*
+    the borrow drops — so it cannot see the buffer-attached views that
+    `on_edit`'s stop-at-first-error loop skips. Attach order is
+    `FailingView`, then a `RecordingView` whose `on_edit` appends the
+    `Edit` it received; assert the recorder **saw the edit**. *Bite for
+    this half:* on the base, and under any implementation that keeps
+    `view.on_edit(self, &edit)?`, the recorder's log is **empty** while
+    every other assertion in 15a passes — which is precisely why the
+    review could find this gap after 15a had been written and reviewed.
+    Falsify by restoring the `?`.
+16. **[mutation] A generated write relocks on that same failure, and does
     NOT lock on a refusal (Q#GB17). Two halves, because §3.4 gives them
     opposite answers and revision 3 gave them the same one.**
     - *Relock on `AppliedThenFailed`:* after criterion 15's failing
@@ -2653,7 +3045,7 @@ test.** Every criterion below names its exit.
       a locked buffer it never wrote. Falsify by replacing
       `self.read_only = entry_read_only` with `= true`. This half is
       `crdt`-only, so criterion 10's coverage rule names it explicitly.
-16b. **[`main`] A successful no-op still discharges the invariant
+16b. **[mutation] A successful no-op still discharges the invariant
     (Q#GB17; §3.4 `NoOp`). New in revision 4 (P1-1 direction A).** On a
     pathless buffer, insert text and delete it back to empty so the rope
     is empty **and the undo stack is not**; then call
@@ -2680,7 +3072,33 @@ test.** Every criterion below names its exit.
     the error discriminant. `cargo test --lib --features crdt` is the
     explicit gate. No public fault-injection API is added, and there is
     no four-variant fallback.
-17. **[`main`] An invalid-range generated write does NOT destroy undo
+
+    **Revision 6 adds two halves (round 5, P1-2 and P1-3), and the seam
+    changes shape to admit the first.**
+
+    - **The seam is no longer a "delete→insert classifier".** Per §3.4 it
+      is the `crdt_mutated` flag carried out of
+      `apply_to_crdt_then_normalize_bytes`, so the injectable closures
+      are the CRDT primitives *and* `export_updates_since`. **New half:
+      force `export_updates_since` to fail after a successful
+      `crdt.delete`** and require `Diverged`. *Bite:* revision 5's
+      classifier returns `Rejected` here, which restores a fresh buffer
+      to writable while the CRDT and rope disagree — the exact harm round
+      4's P1-3 withdrew the four-variant fallback to prevent. This half
+      fails against revision 5 as written, not merely against a
+      hypothetical implementation.
+    - **New half: the replica path is quarantined.** After forcing
+      `Diverged`, require `export_buffer_snapshot(&editor, buffer_id)`
+      (`src/daemon.rs:2693-2708`) to return **`None`**, and require the
+      initial-attach loop to skip the buffer. *Bite:* **revision 5 fails
+      this** — it asserted `read_only` was containment, and neither
+      export path reads `read_only`, so a replica attaching after the
+      divergence received the divergent CRDT as authoritative while every
+      daemon window still painted the old rope. Falsify by deleting the
+      `crdt_quarantined` guard from either export site. Assert the
+      *absence of a published snapshot*, not the presence of the flag —
+      asserting a value was stored is not asserting anything reads it.
+17. **[mutation] An invalid-range generated write does NOT destroy undo
     history (Q#GB17).** On a pathless buffer with two ordinary edits
     already on the stack, call `b:delete(0, b:len() + 1000,
     { generated = true })`; require the error, then lift `read_only`
@@ -2691,7 +3109,7 @@ test.** Every criterion below names its exit.
     call that changed nothing would wipe the user's history. It is the
     concrete cost review P1-1 asks the ordering to state, and pre-
     validation (§3.4 exit 4) is what pays it.
-18. **[`main`] A re-entrant generated write is refused (Q#GB17).** From
+18. **[fix-shape] A re-entrant generated write is refused (Q#GB17).** From
     inside an `add_intercept` body on buffer X, call
     `X:insert(0, "x", { generated = true })`; require
     `ConcurrentEdit`, and require the outer edit to complete normally
@@ -2715,7 +3133,27 @@ test.** Every criterion below names its exit.
     `pmacs.compile.is_generated_buffer` contains no `d.name ==`, and
     `listview.lua` contains no `panels[d.name]`. Rides alongside 11–19,
     never instead.
-21. **[`main`] Search works with no `pmacs.compile` present (Q#GB18;
+22. **[mutation] A REFUSED generated write leaves the fold closed
+    (Q#GB3; round 5, P2-7). New in revision 6.** Fold a region of a
+    **file-backed** buffer, then, from inside an interactive command so
+    `InteractiveCommandOrigin::current()` is `Some`, attempt
+    `b:replace(s, e, "x", { generated = true })` on it. Q#GB10 refuses
+    it. Require: the error, **and** `#pmacs.fold.folds(b) == 1` with the
+    same range still stored.
+    *Bite:* **revision 5's ordering fails this.** It called
+    `unfold_before_interactive_lua_edit` before `run_generated_edit`,
+    so the fold opened and then the write was refused — a visible side
+    effect from an operation whose contract says "before any state
+    change". Falsify by moving `generated_preflight` back below the
+    unfold. Assert the fold **count and range**, not just that the call
+    errored: the error is identical either way, which is exactly why this
+    needs a state assertion rather than an outcome assertion.
+
+    Repeat once with the **identity-protected** refusal (a terminal
+    identity buffer) so the criterion pins the preflight rather than
+    Q#GB10's path check specifically — a preflight that hoists only the
+    `file_path` test passes the first half and fails this one.
+21. **[fix-shape] Search works with no `pmacs.compile` present (Q#GB18;
     review round 3, P2-4). New in revision 4.** Build a `LuaHost`
     directly, call `attach_editor`, and — with `compile.lua` never
     loaded — run `pmacs.project.search`. It must not raise, and the
