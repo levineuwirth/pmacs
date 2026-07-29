@@ -355,6 +355,30 @@ fn coalesce_kind(event: &FrontendEvent) -> Option<u8> {
             kind: MouseKind::Drag(_),
             ..
         } => Some(3),
+        // Bottom panel Stage 2B-3 (framing §5.2) — four more tail-only
+        // tags, each with its own reason.
+        //
+        // Geometry is latest-wins because epochs need only INCREASE, not
+        // be consecutive: the daemon accepts a jump from 3 to 7 and the
+        // dropped declarations described geometry that no longer exists.
+        FrontendEvent::FrontendCellGeometry { .. } => Some(4),
+        // A resize drag coalesces over the complete event including its
+        // epochs, so a collapsed run cannot mix a new row count with an
+        // old presentation identity.
+        FrontendEvent::PanelResizeRows { .. } => Some(5),
+        // Panel move and drag mirror their terminal twins. Down / Up /
+        // wheel / context stay LOSSLESS and ordered: repeated left Downs
+        // are what the daemon's click state reads as a multi-click, and
+        // Down(Right) is the context-menu gesture, so collapsing either
+        // silently changes the gesture's meaning.
+        FrontendEvent::PanelPointer {
+            kind: MouseKind::Move,
+            ..
+        } => Some(6),
+        FrontendEvent::PanelPointer {
+            kind: MouseKind::Drag(_),
+            ..
+        } => Some(7),
         _ => None,
     }
 }
@@ -997,6 +1021,74 @@ impl AttachClient {
     ) -> Result<(), TransportError> {
         self.send_event(FrontendEvent::TerminalPointer {
             frontend_id: self.frontend_id,
+            buffer_id,
+            coord,
+            kind,
+            mods,
+        })
+    }
+
+    /// Send a `FrontendEvent::FrontendCellGeometry` (Q#BP15a): this
+    /// frontend's authoritative whole-cell layout capacity. Callers gate on
+    /// [`Self::session_protocol_version`] `>= 21`.
+    ///
+    /// Valid **without** a side window on purpose — the daemon needs
+    /// columns before it can paint a first panel frame, so gating this on
+    /// panel presence would deadlock the first open.
+    pub fn send_frontend_cell_geometry(
+        &self,
+        geometry_epoch: u64,
+        total: CellSize,
+    ) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::FrontendCellGeometry {
+            frontend_id: self.frontend_id,
+            geometry_epoch,
+            total,
+        })
+    }
+
+    /// Send a `FrontendEvent::PanelResizeRows` (Q#BP15a): the fixed panel
+    /// rows a divider drag is requesting. Callers gate on
+    /// [`Self::session_protocol_version`] `>= 21`.
+    ///
+    /// Both epochs ride along as identities, not geometry: the daemon
+    /// accepts the request only for the panel it most recently declared,
+    /// under the geometry it most recently accepted.
+    pub fn send_panel_resize_rows(
+        &self,
+        geometry_epoch: u64,
+        panel_epoch: u64,
+        rows: u32,
+    ) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::PanelResizeRows {
+            frontend_id: self.frontend_id,
+            geometry_epoch,
+            panel_epoch,
+            rows,
+        })
+    }
+
+    /// Send a `FrontendEvent::PanelPointer` (Q#BP16): a gesture
+    /// hit-tested locally to a panel CELL. Callers gate on
+    /// [`Self::session_protocol_version`] `>= 21`.
+    ///
+    /// `buffer_id` and `panel_epoch` close different holes and neither
+    /// subsumes the other — the first catches an A→B buffer replacement,
+    /// the second a close/hide/reopen of the *same* buffer — so both are
+    /// carried rather than one being derived from the other.
+    pub fn send_panel_pointer(
+        &self,
+        geometry_epoch: u64,
+        panel_epoch: u64,
+        buffer_id: BufferId,
+        coord: CellCoord,
+        kind: MouseKind,
+        mods: Modifiers,
+    ) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::PanelPointer {
+            frontend_id: self.frontend_id,
+            geometry_epoch,
+            panel_epoch,
             buffer_id,
             coord,
             kind,
