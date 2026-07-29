@@ -655,6 +655,117 @@ has **no branch and no framing yet**.
   `git fetch githubsucks && git worktree add ../pmacs-rd-impl
   -b resource-op-delete-guard-impl githubsucks/resource-op-delete-guard-impl`.
 
+## dired Stage 2a — rename/delete reconciliation — PR OPEN
+
+- Portable branch: `githubsucks/dired-stage2-impl`, worktree
+  `../pmacs-dired-s2`. Implements **Stage 2a only** of the framing merged
+  as #171 (`docs/dired-stage2-framing.md` rev 9, §5/§6/§10 — the
+  substrate transaction, no dired surface). Position against `main`, as
+  pasted command output rather than a remembered constant:
+
+  ```
+  $ git merge-base HEAD githubsucks/main
+  e003b81cdd577140fc77330bd4578d3090696877
+  ```
+
+  That base is the #190 merge, and #190 matters here specifically:
+  Stage 2a **adopts** its `delete_verdict` refusal rather than
+  reinventing one, and lifts its walk query out into
+  `editor_core::buffers_bound_under` so the guard and both
+  reconciliation seams cannot disagree about which buffers an operation
+  touches. **Re-measure the merge-base before relying on it** —
+  `main` has branch protection, all 12 checks must pass on the merging
+  head, and a conflicting PR builds no merge ref at all, so a green run
+  from before a move reads as current when it is not.
+- **What 2b and 2c still owe, stated so the split boundary is auditable.**
+  2a ships **no user-visible surface at all** and no dired code: the
+  `dired_acceptance` count is deliberately unchanged at **25**, and a
+  moved count there would mean it touched something it should not have.
+  2b owes the mark and operation layer (`m u U t d x D R w M`),
+  `pmacs.minibuffer.confirm` plus its `src/editor.rs` load-sequence line,
+  `pmacs.killring.push`, dired's own `resource.renamed` subscriber, and
+  acceptance 1–22, 33, 39–41. 2c owes `mkdir`/`copy`/`remove_dir_all`,
+  `JobKind` 12 → 15, `dired.recursive-deletes`, and acceptance 42–47.
+- **The split boundary has not moved since rev 9.** It was re-checked
+  against this tree: #188 (generated-buffer immutability Stage 1) did not
+  convert dired's `paint`, so §3.1's coordination note is still an
+  obligation of that lane rather than a collision with this one, and
+  nothing in this diff touches `builtin/runtime/dired.lua`.
+- **Two m4 rows were re-pinned, and that is a behaviour change to a
+  landed lane's assertions.** `rd9` and `rd14` pinned #190's deliberate
+  restraint on the `apply_resource_op` delete arm — descendants stay
+  orphaned, only the first of two duplicate path-bound buffers is
+  reconciled — and both doc comments gave the same reason: widening
+  would have routed N buffers through `remove_buffer_and_fire`, phase 2
+  without phase 1, leaving up to N windows on removed ids.
+  `EditorCore::reconcile_delete` composes both phases, so the constraint
+  is discharged and the old assertions became the defect. Each row now
+  asserts BOTH directions — reconciled away **and** no window holding a
+  removed id — and each direction is bite-verified.
+- **One framing claim is wrong and is corrected at the test, not
+  silently worked around.** §5's G1 says a stale captured path
+  "materializes a phantom" by reaching `resolve_target_buffer`'s
+  `NotFound` arm. It does not: `pmacs.buffer.find_or_open` calls
+  `crate::file_io::load_file` directly and maps the error, so a missing
+  path **raises**, and the `NotFound` arm belongs to
+  `resolve_target_buffer`, which serves `pmacs.window.display_file` and
+  the startup/daemon target rather than that binding. The defect is real
+  and smaller: the `pcall` swallows the raise, so the user is stranded
+  wherever the last applied op left them. Acceptance 34 is restructured
+  to bite on that (its plan edits another file first, which is what makes
+  the restore observable at all) and the correction is recorded in the
+  test's own doc comment.
+- **Two bites were vacuous as the framing specified them, and both
+  reasons are worth keeping.** Item 28's *rename* row cannot pin the
+  walk's containment rule: `reconcile_rename` calls
+  `Path::strip_prefix` to rebuild a descendant's tail, and that is
+  component-aware too, so a string-prefix walk is silently corrected a
+  second time. The row moved to the **delete** side, where the walk's
+  verdict IS the kill list. Item 30's composition-order assertion was a
+  tautology: the LSP attach leaves `diagnostic` **last** in the stack, and
+  moving the last element to the end is a no-op, so a remove-and-re-push
+  was indistinguishable from an in-place mutation; the row now pushes one
+  more overlay after it and asserts that precondition explicitly.
+- **23 acceptance criteria are bite-verified by executed mutation**, each
+  labelled `OK (assertion)` — none merely `OK (COMPILE)`, and none
+  vacuous. Items 25, 27, 28, 29 (both directions), 30 (both mutations),
+  31, 31b (both gates), 31d (both halves), 34, 50 (both mutations), 51,
+  52, 53b, 54, 55, plus the two re-pinned m4 rows in three
+  configurations.
+- Verification at this head, each gate run to its own file and its own
+  exit code checked (never through a pipe): `cargo fmt --check` clean;
+  `cargo clippy --workspace --all-targets -- -D warnings` clean;
+  `cargo test --lib` **1,875** passed / 3 ignored; `--lib --features
+  crdt` **2,060** / 4 ignored; the new
+  `resource_reconciliation_acceptance` **24** default and **24** crdt;
+  `dired_acceptance` **25** and **25** crdt, deliberately unmoved; the
+  frozen additivity gate `m8_1` **10** / `m8_2` **15** / `m8_3` **32**,
+  all unchanged; `m4_acceptance -- --skip basedpyright` **149** passed /
+  3 ignored / 1 filtered; `lsp_multi_root_acceptance` **13**;
+  `lsp_dispatch_seams_acceptance` **15**; `journey_acceptance` **24**
+  (the ratchet floor, asserted as a count rather than a colour);
+  `gpu_invocation_acceptance` **15** crdt — **and that number is only
+  real with `pmacs` and `pmacs-gpu` built first**, which is the `a37`
+  trap in §5: the same command reported 12 failures before the build and
+  15 passes after, so a red run there is not evidence of a regression
+  until the binaries exist; `PMACS_REQUIRE_GPU=1 cargo test -p
+  pmacs-gpu` **202**; isolated-`XDG_CONFIG_HOME` workspace sweep with
+  `--no-fail-fast` **3,557** passed across **104** suites, 19 ignored, 0
+  failed; `git diff --check` clean.
+- **Ownership, per the framing's own warning.** §16 says 2a must not run
+  concurrently with **Journey Stage 1b**, because 1b's LSP
+  spawn-failure reporting lands in `builtin/runtime/lsp.lua`'s
+  attachment lifecycle and 1b's compile/binding half touches
+  `src/editor_core.rs` — the same two files 2a rewrites, where the
+  conflicts are semantic rather than textual so a clean `git merge`
+  proves nothing. **1b must not be started while this PR is open.** No
+  other lane in flight touches them: #188 is `dired.lua`/`buffer.rs`
+  generated-buffer writes, and the bottom-panel and CI lanes are
+  elsewhere.
+- Recovery from a clean checkout:
+  `git fetch githubsucks && git worktree add ../pmacs-dired-s2
+  -b dired-stage2-impl githubsucks/dired-stage2-impl`.
+
 ## Generated-buffer immutability framing lane — PR #188 OPEN, PROPOSED
 
 - Portable branch: `githubsucks/generated-buffer-immutability`; worktree
