@@ -248,11 +248,12 @@ If it does not, stop and repair the remote/fetch configuration.
 ## Generated-buffer immutability lane (Arc: workbench primitives) — STAGE 1 OPEN
 
 **Framing: [PR #188](https://github.com/levineuwirth/pmacs/pull/188),
-approved and still open. #188 owns the acceptance contract; this lane
-adopts it.** Where implementing Stage 1 found a criterion impossible or
-mislabelled, the finding goes to #188 as a revision request and this lane
-waits — it does not restate, narrow or reclassify a criterion locally.
-Read the framing as
+revision 7, proposed and still open. #188 owns the acceptance contract;
+this lane adopts it.** On 2026-07-29 the user explicitly directed #191
+to fold its review corrections into this branch; that authorizes the
+Stage 1 implementation delta recorded below, but does not approve or
+merge #188 itself. #191 must not merge ahead of the framing's explicit
+approval. Read the current contract as
 `git show githubsucks/generated-buffer-immutability:docs/generated-buffer-immutability-framing.md`
 until it merges.
 
@@ -282,8 +283,10 @@ until it merges.
   `bypass_intercept` writes remain in either file); `listview` gains
   Q#GB13 ownership-by-handle with `<2>`..`<99>` disambiguation and
   Q#GB18's identity-routed `panels` list in the **same** commit;
-  Q#GB6's per-coordinate window clamp in
-  `EditorCore::notify_buffer_edit`; and Q#GB16(a)'s corrected fold
+  Q#GB6's cursor/view-top clamp plus selection clamp-or-clear in both
+  `EditorCore::notify_buffer_edit` and `rebuild_views_for`;
+  listview refresh reseating through the already-notified view rather
+  than a redundant same-buffer switch; and Q#GB16(a)'s corrected fold
   status string. No protocol change, no new Lua surface, no new
   interaction island.
 - **Why these two families first, and it is not "the cheap half".**
@@ -291,42 +294,27 @@ until it merges.
   seven undo chords to a no-op; `dired.lua` and `listview.lua` rebind
   **nothing**, so a bare `C-/` emptied a listing and a panel. Stage 1
   closes the only two families reachable without `M-x`.
-- **Review round 1 closed three findings.** All three are the same
-  class in the end: *the tree asserting something the record does not
-  support.*
-  - **[P1] The selection anchor.** `notify_buffer_edit` clamped
-    `cursor` and `view_top` but not `win.selection.anchor`, and
-    `rebuild_views_for` had the same gap. `Window::region` orders
-    `(anchor, cursor)`, so a stale anchor above a clamped cursor is
-    still the region's high end: reproduced as
-    `assertion failed: end <= self.len()` (`src/rope.rs:145`) from
-    `EditorCore::clipboard_copy`. Fixed by **dropping** the selection,
-    not clamping it — `window.quit`'s restore already answers this
-    question the same way (`src/editor_core.rs:3259`). Both exits are
-    pinned separately (`acc16h`, `acc16i`) and each mutation fails only
-    its own. **The wording is provisional**: the rule is Q#GB6's, whose
-    approved text does not mention the anchor, and a revision request is
-    with #188.
-  - **[P1] Criteria 5 and 7 were restated locally.** Withdrawn. Both
-    suites now quote the approved criterion, the criterion-5 tests are
-    renamed `*_provisional_*` and say they do not satisfy it, and
-    criterion 7's **"for each adopter"** is restored with the listview
-    half added back. The evidence stays as evidence and is filed with
-    #188.
-  - **[P2] Criterion 12 was labelled a `main` bite.** It is a mutation
-    bite; on `main` it fails at its disambiguation premise and never
-    reaches its assertion. Relabelled.
-- **Sweep for that class across this branch: 7 sites, 4 named by the
-  review and 3 found by the sweep.** Class A, a restated or narrowed
-  contract — the listview criterion-5 doc, **the dired criterion-5 doc**
-  (a second file the review did not cite), criterion 7's narrowing plus
-  its **missing listview half**, and this lane's own "two framing
-  criteria were wrong" bullet. Class B, a bite recorded as a `main`
-  failure that is really a mutation bite — criterion 12, **criterion 11
-  (same defect, not reported)**, and this lane's own revert list, which
-  said "five criteria" over six items and counted criterion 11 among
-  them. All 7 corrected. Every remaining `[main]` label was re-run and
-  fails at its own assertion, not at a premise.
+- **Review round 1 found the stale selection anchor and four acceptance
+  contract mismatches.** Its provisional drop-on-stale fix stopped the
+  crash but intentionally waited on #188 to decide the selection rule;
+  criteria 5 and 7 likewise recorded evidence without claiming to
+  replace the framing. That evidence produced #188 revision 7.
+- **Review round 2 closes both remaining P1 findings against revision
+  7.**
+  - **Q#GB6 now matches at both sites.** Cursor and anchor clamp to the
+    new extent; a selection survives shortened unless an endpoint
+    movement collapses it, in which case it clears. `acc16h` and
+    `acc16i` each drive a real caller and assert both the surviving
+    region and collapsed case. Unconditional drop and bare clamp are
+    separately falsified.
+  - **The Stage 1 criteria are adopted without local substitutes.**
+    Criterion 5 has the exact rope-refusal + byte-identity half and the
+    Rust-lifted named-intercept half for both adopters. Criterion 7 now
+    bites the named fan-out mutation for both adopters: listview refresh
+    no longer rebuilds the view with a redundant same-buffer switch.
+    Criteria 11 and 12 carry the framing's `[main]` classification and
+    also record where its narrower Q#GB13-without-Q#GB18 pre-image
+    fails.
 - **Stage 2 still owes everything with new Rust in it**, per the
   framing's cut: `Buffer::apply_generated_edit` + `GeneratedOutcome` +
   the `{ generated = true }` option + its own `run_buffer_edit` arm;
@@ -335,9 +323,9 @@ until it merges.
   for `compile.lua` and the search panel; Q#GB5's `ensure_slot` lock;
   conversion of the remaining 13 write sites; and the three
   `compile_mode_acceptance` intruder tests converted per Q#GB12.
-- **Verification.** Run on the merged tree, at the code checkpoint the
-  next commit records; the ledger commit on top is docs-only and
-  `cargo fmt --check` + `git diff --check` were re-run after it.
+- **Verification at code checkpoint `5d92348`.** The ledger commit on
+  top is docs-only; `cargo fmt --check` and `git diff --check` are
+  re-run after it.
   `cargo fmt --check` clean; `cargo clippy --workspace --all-targets --
   -D warnings` clean; library **1,863 passed + 3 ignored** default and
   **2,048 passed + 4 ignored** CRDT; `listview_acceptance` **17**,
@@ -346,9 +334,10 @@ until it merges.
   `--features crdt` — judge that step by the count, because `acc16e` is
   `#[cfg(feature = "crdt")]` and a default run never compiles it; M4
   **121 passed + 3 ignored + 1 filtered** with `--skip basedpyright`;
-  required GPU **202/202**; isolated-config full workspace sweep
-  **3,514 passed across 103 binaries, exit 0**; `git diff --check`
-  clean.
+  required GPU **202/202**. The first GPU attempt inside the tool
+  sandbox failed three managed-attach socket tests and left the
+  closed-outbox reader blocked; the authoritative rerun outside that
+  socket sandbox passed all 202. `git diff --check` clean.
 - **The dired 200 ms perf test is load-sensitive, and the conversion
   costs it nothing.** Review saw `dired_renders_10k_entries_within_200ms`
   take 241 ms in a combined run and pass alone. Measured here: 0.09 s
@@ -369,23 +358,18 @@ until it merges.
     `builtin/runtime/listview.lua` for criteria 1, 2, 9 and 10;
     `builtin/runtime/dired.lua` for criteria 3 and 13a;
     `src/lua_bindings/fold.rs` for 13b; `src/editor_core.rs` for 8, 8b
-    and both anchor pins.
+    and both selection-normalization pins.
   - **Falsified by a named mutation, each observed to fail:** the
     fan-out drop in the `set_generated_contents` binding (criterion 7);
     deleting `self.read_only = false` (criterion 4, both adopters);
     deleting `add_intercept` and `set_round_trip_input` at each adopter
     (criteria 5 and 6); the name-keyed `panel_for_buffer` (criteria 11
     and 12); adopting at the variant limit (criterion 10); the old fold
-    status string (13b); deleting each clamp (8, 8b); and **clamping
-    instead of dropping** the anchor.
-  - **One recorded VACUOUS result, deliberately.** Criterion 7's
-    listview half passes under the criterion's own mutation, because
-    `listview.refresh` and `listview.open` follow `render` with
-    `window.switch_buffer`, which rebuilds the `TextView`
-    (`src/editor_core.rs:4854-4868`). Measured, not inferred: the same
-    mutation run against the listview half alone reports VACUOUS while
-    the dired half reports BITES. Filed with #188; the half is kept and
-    labelled rather than deleted.
+    status string (13b); deleting each clamp (8, 8b); deleting the
+    selection helper from either site; unconditionally dropping a stale
+    anchor; and retaining a selection that an endpoint clamp collapsed.
+    Criterion 7's fan-out drop now fails by assertion in **both**
+    listview and dired.
 - **Recovery:**
 
   ```sh
