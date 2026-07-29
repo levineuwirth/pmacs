@@ -1,7 +1,17 @@
 //! Shared test-support helpers.
 //!
 //! Included by `#[path = "support/mod.rs"] mod support;` rather than
-//! copied. Files under `tests/` subdirectories are not compiled as
+//! copied.
+//!
+//! **Why this is separate from `tests/common/`, which also exists.**
+//! `tests/common/mod.rs` re-exports `daemon` and `pty` — real daemon
+//! spawning and PTY plumbing. Including it to reach a six-line
+//! environment check would compile that machinery into three test
+//! binaries that spawn neither, for no benefit. `support` is the
+//! dependency-free half: helpers any test binary can take without
+//! taking a subsystem with them. Two directories is a cost worth
+//! naming rather than leaving to be rediscovered; if a third appears,
+//! consolidate instead of continuing the pattern. Files under `tests/` subdirectories are not compiled as
 //! their own test binaries, so this costs nothing — and
 //! `m6_8_multi_repl_acceptance.rs` previously carried a comment saying
 //! cross-test-binary sharing "would need a fixture crate", which is not

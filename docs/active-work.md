@@ -524,8 +524,24 @@ has **no branch and no framing yet**.
 ## Test-improvement arc, lane 2 — silent-skip arming
 
 - Portable branch: `githubsucks/silent-skip-arming`, worktree
-  `../pmacs-skiparm`. Base measured at write time, pasted below.
-  Implements `TEST_IMPROVEMENT.md` §1.2 and §5.4.
+  `../pmacs-skiparm`. Implements `TEST_IMPROVEMENT.md` §1.2 and §5.4.
+- **Base, measured at write time rather than quoted:**
+
+  ```
+  $ git log --oneline -1 githubsucks/main
+  5e186c7 Merge pull request #193 from levineuwirth/test-improvement-audit
+  ```
+
+  The previous revision of this entry said "base measured at write
+  time, pasted below" and then pasted nothing: the script meant to
+  substitute it reported success and silently matched no text, and the
+  claim was not re-read. Recorded because it is the same defect this
+  ledger keeps catching one level up — **asserting a measurement is not
+  making one, and a tool reporting success is not the measurement
+  either.**
+- Recovery from a clean checkout:
+  `git fetch githubsucks && git worktree add ../pmacs-skiparm
+  -b silent-skip-arming githubsucks/silent-skip-arming`.
 - **The defect:** `let Ok(_) = which_binary(x) else { eprintln!(..);
   return; }` reports GREEN when the tool is absent, and CI installed
   none of the tools. A block of real-language-server and multi-shell
@@ -563,6 +579,32 @@ has **no branch and no framing yet**.
   question, since none of them had. Armed locally: 11 `m6_5` + 8 `m6_8`
   REPL tests green, and all six real-LSP tests (clangd x2, gopls x2,
   rust-analyzer x2) green individually.
+- **rust-analyzer is installed in the Linux-gated step, not via the
+  toolchain action's `components:`.** The first revision put it there,
+  which applies to *every* matrix leg — and **presence, not
+  `PMACS_REQUIRE_LSP`, is what decides whether a gated test body
+  runs**. That would have executed the two rust-analyzer tests on macOS
+  for the first time ever, on the legs that are simultaneously the CI
+  critical path and the documented flake surface, while this entry
+  claimed Linux only. The variables not being set there would only have
+  meant absence was tolerated; it would not have kept the tests
+  skipped. Text and workflow now agree.
+- **Tool versions are pinned** (`gopls@v0.16.2`,
+  `vscode-langservers-extracted@4.10.0`,
+  `yaml-language-server@1.15.0`). `@latest` and bare `npm install -g`
+  make CI drift with upstream releases, so a bad publish breaks CI with
+  no commit here to bisect against. Caching the built `gopls` on the
+  pinned version is a follow-up, not done here.
+- **§1.2 is NOT fully closed by this lane.** The guards arm the
+  *entry* skip only. `tests/m4_acceptance.rs`'s mid-test rust-analyzer
+  bail ("workspace likely still indexing; skipping") survives, so even
+  armed, that test's only assertion can still vanish under load —
+  precisely when a regression would show. Mid-test skips are their own
+  shape and want their own pass.
+- **Follow-up owed after this merges:** delete
+  `githubsucks/handoff-2026-07-20`. Removing the documentation lane
+  removes the only pointer to that branch, so nothing will otherwise
+  remind anyone it still exists on the remote.
 - Linux only for now, deliberately: macOS needs the brew equivalents
   and roughly doubles install cost on the slowest matrix leg. The
   variables stay unset there, so those tests skip cleanly.
@@ -573,7 +615,6 @@ has **no branch and no framing yet**.
   at 42 insertions against 88 deletions — merging it would *revert*
   current documentation. The section said "whoever confirms the branch
   carries nothing unique removes the section"; this is that.
-
 
 ## Parked lane: kill-ring browser + persistence
 

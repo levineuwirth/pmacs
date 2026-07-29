@@ -84,8 +84,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rust-analyzer
       - uses: Swatinem/rust-cache@v2
       # Arm the external-tool-gated tests (see `TEST_IMPROVEMENT.md`
       # §1.2). Before this step nothing installed these tools, so every
@@ -110,9 +108,23 @@ jobs:
           # `locate_lua` looks for `lua` or `luajit` by name; the
           # distro package installs `lua5.4` only.
           sudo ln -sf "$(command -v lua5.4)" /usr/local/bin/lua
-          go install golang.org/x/tools/gopls@latest
+          # rust-analyzer belongs HERE, not on the shared toolchain
+          # step. `components:` there applies to every matrix leg, so it
+          # would install the binary on macOS too — and *presence*, not
+          # PMACS_REQUIRE_LSP, is what decides whether a gated test body
+          # runs. That would have executed the rust-analyzer tests on
+          # macOS for the first time ever, on the legs that are both the
+          # CI critical path and the documented flake surface, while
+          # this lane's text claimed Linux only.
+          rustup component add rust-analyzer
+          # Versions are PINNED. `@latest` and bare `npm install -g`
+          # make CI behaviour drift with upstream releases: a bad gopls
+          # or yaml-language-server publish then breaks CI with no
+          # commit in this repository to bisect against.
+          go install golang.org/x/tools/gopls@v0.16.2
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-          npm install -g vscode-langservers-extracted yaml-language-server
+          npm install -g vscode-langservers-extracted@4.10.0 \
+                         yaml-language-server@1.15.0
       - run: cargo build --all-targets --no-default-features --features ${{ matrix.lua }}
       # Several acceptance binaries spawn real daemon / PTY child
       # processes. Keep the harness serial so macOS runners do not

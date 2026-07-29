@@ -461,7 +461,11 @@ fn m6_5_repl_spawns_fish() {
 #[test]
 fn m6_5_repl_spawns_lua() {
     let Some(lua) = locate_shell("lua").or_else(|| locate_shell("luajit")) else {
-        support::skip_or_fail_overridable("lua/luajit", "PMACS_REQUIRE_LUA", "PMACS_TEST_LUA");
+        support::skip_or_fail_overridable(
+            "lua/luajit",
+            "PMACS_REQUIRE_LUA",
+            "PMACS_TEST_LUA or PMACS_TEST_LUAJIT",
+        );
         return;
     };
     let setup = format!(
