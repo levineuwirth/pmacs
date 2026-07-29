@@ -525,14 +525,15 @@ has **no branch and no framing yet**.
 
 - Portable branch: `githubsucks/generated-buffer-immutability`; worktree
   `../pmacs-generated-immutability`. **PR #188**, base `main`, forked from
-  `githubsucks/main` @ `ad41cf1`, **integrated to `300cbc4`** — #189
-  (clean), then #186 and #171 (`docs/active-work.md` conflict), then
-  #187 (the same file again, after it removed the two landed framing
-  lanes). Framing only —
-  `docs/generated-buffer-immutability-framing.md`, revision 6, plus this
+  `githubsucks/main` @ `ad41cf1`, **integrated to `64883eb` at merge
+  commit `76cfaac`** — #189 (clean), then #186 and #171
+  (`docs/active-work.md` conflict), then #187 (the same file again, after
+  it removed the two landed framing lanes). Revision 6 was reviewed at
+  head `55c3061`; revision 7 closes that round. Framing only —
+  `docs/generated-buffer-immutability-framing.md`, revision 7, plus this
   lane. **No runtime code, no protocol change.**
-- **PROPOSED — five review rounds closed (twenty-seven findings, eighteen
-  P1, nine P2). Not approved. Do not implement, do not merge.**
+- **PROPOSED — six review rounds closed (thirty-two findings,
+  twenty-two P1, ten P2). Not approved. Do not implement, do not merge.**
 - **Stage 1 implementation is PR #191, open. The boundary is explicit
   and has already been needed twice:** #188 owns the **acceptance
   contract**; #191 **adopts** criteria and may not restate, narrow, or
@@ -593,6 +594,15 @@ has **no branch and no framing yet**.
   `AppliedThenFailed { edit, error }`: the borrow-free Lua finisher fans
   it out to window caches and replica mirrors before returning the
   error.** Collapsing to `Result` inside `Buffer` was too early.
+  **Revision 6 replaces the delete→insert enumeration with a
+  `crdt_mutated` flag**, because `export_updates_since` can fail after
+  every successful CRDT op shape, and changes all four `Buffer`
+  broadcast loops to continue-and-retain-first-error.
+  **Revision 7 installs quarantine at common divergence detection
+  before generated or ordinary callers map the outcome.** The monotonic
+  poison blocks all three CRDT snapshot exporters, daemon-origin
+  queueing and every later owner-generated write; criteria 16c and 16d
+  pin the containment boundary. Repair remains deferred.
 - **Two stages, two PRs.** Stage 1 — listview ownership fix **plus its
   identity-routing fix in the same PR**, dired and listview adopting the
   shipped primitive, the window-coordinate clamp, and the fold decision.
@@ -670,11 +680,17 @@ has **no branch and no framing yet**.
     violation." It reaches `apply_edit` and `apply_edit_skip_intercepts`
     today and is reported as an ordinary `CrdtRejected`, so nothing
     distinguishes it. This lane names and contains it; **repair is
-    deferred and unowned.** Revision 5 makes the classifier mandatory:
-    a private delete→insert helper is fault-injected under
-    `cargo test --lib --features crdt`; there is no four-variant fallback
-    that maps divergence to `Rejected` and leaves a fresh buffer
-    writable.
+    deferred and unowned.** Revision 6 makes classification total with a
+    `crdt_mutated` flag: any later error, including
+    `export_updates_since` after `Insert`, `Delete` or `Replace`, is
+    `Diverged`. Revision 7 installs a common monotonic poison before
+    either generated or ordinary API mapping, blocks
+    `initial_target_snapshot`, `send_buffer_snapshots`,
+    `export_buffer_snapshot` and `queue_daemon_origin_crdt_op`, and
+    rejects every later owner-generated write with `CrdtQuarantined`.
+    Criteria 16c and 16d fault-inject the complete boundary under
+    `cargo test --lib --features crdt`; there is no public
+    fault-injection API and no four-variant fallback.
 - **Overlap warning.** Stage 2 touches `src/lua_bindings/mod.rs`'s buffer
   mutator bindings and `src/buffer.rs`. Do not run it concurrently with
   the `apply_resource_op` lane or the bottom-panel 2B work without

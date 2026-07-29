@@ -3,6 +3,53 @@
 **PROPOSED — needs explicit user approval before implementation. DO NOT
 implement, DO NOT merge.**
 
+**Revision 7 — answers review round 6 on `55c3061`, against canonical
+`githubsucks/main` @ `64883eb`, 2026-07-29.** The base has not moved
+since revision 6; this revision changes the quarantine state machine,
+five acceptance classifications and the cross-machine ledger because
+the reviewed design did not contain every route it claimed to contain.
+
+## Revision 7
+
+**Answers review round 6 on `55c3061` — four P1, one P2. All five
+confirmed. Two of revision 6's "total" sweeps were not total: snapshot
+publication had a third path, quarantine was installed only by one
+caller and was not itself a write refusal, and the acceptance audit
+reversed its own definition for two of the six relabels.**
+
+| finding | the decision |
+|---|---|
+| **P1-1** — quarantine misses the explicit-initial-target snapshot | Confirmed. `initial_target_snapshot` (`src/daemon.rs:1873-1897`) is a third production CRDT snapshot exporter, distinct from the legacy no-target `send_buffer_snapshots` loop and `export_buffer_snapshot`. It feeds `InstanceMessage::BufferSnapshot` directly at `:1996-2029`. It becomes the third snapshot guard, and criterion 16c drives an explicit-initial-target attach rather than treating the legacy loop as all attach traffic. |
+| **P1-2** — ordinary edits can construct `Diverged` without installing quarantine | Confirmed. Revision 6 said the flag was set by the generated cleanup arm even though `apply_edit` and `apply_edit_skip_intercepts` reach the same classifier and map its outcome back to `Result`. Quarantine now installs at the **common divergence-detection point**, before any caller maps the outcome. The generated cleanup observes an already-poisoned buffer; it does not own the poison. Criterion 16c gains an ordinary-apply half. |
+| **P1-3** — a quarantined buffer accepts another owner-generated write | Confirmed. `read_only` cannot be the guard because `{ generated = true }` exists to bypass it. `crdt_quarantined` becomes preflight exit 0 and is rechecked by `apply_generated_edit`; a distinct `CrdtQuarantined` refusal prevents the owner from compounding the divergence. New criterion 16d drives the second write. |
+| **P1-4** — `docs/active-work.md` still carries revision 5's classifier and an obsolete integration checkpoint | Confirmed. The lane advances from `300cbc4` to the actual `64883eb` integration (`76cfaac`) and replaces the delete→insert-classifier recovery text with revision 7's common poison, three snapshot guards, queue guard and generated-write refusal. A recovered Stage 2 can no longer implement a decision the framing withdrew. |
+| **P2-5** — sweep G's pre-image audit is still wrong | Confirmed. Criterion 5(a) passed on the base as written; 15a and 22 failed on the base; and the reasons revision 6 gave for moving 16 and 16b to `[mutation]` are precisely why their assertions fail on the base. Criterion 5 now asserts the exact rope error before the lift, making it `[main, and also fix-shape]`; 15a, 16, 16b and 22 carry dual `main` + mutation classifications. Q#GB14 is corrected to distinguish “some refusal” from the full error source. |
+
+**Containment sweep, revision 7.** Start from the state transition rather
+than from its current callers:
+
+1. Any local-edit CRDT mutation followed by an error before the rope
+   mutation calls the common poison helper.
+2. Poison sets `crdt_quarantined = true` and `read_only = true` before
+   `GeneratedOutcome` is mapped by any public API.
+3. Three snapshot exporters refuse publication:
+   `initial_target_snapshot`, `send_buffer_snapshots` and
+   `export_buffer_snapshot`.
+4. `queue_daemon_origin_crdt_op` refuses later deltas.
+5. Both generated preflight and authoritative apply refuse every later
+   owner write.
+
+Criterion 16c pins 1–4 across generated and ordinary entry points;
+criterion 16d pins 5. The flag is monotonic in this arc. Repair remains a
+separate lane.
+
+**Acceptance arithmetic after the new criterion:** revision 6 audited
+41 criteria (Stage 1: 17; Stage 2: 24). Criterion 16d raises Stage 2 to
+25 and the current total to **42**; the five corrected classifications
+change labels, not that count.
+
+## Revision 6
+
 **Revision 6 — scouted against canonical `githubsucks/main` @ `64883eb`,
 merged into this branch at `76cfaac`, 2026-07-29.** Both SHAs were
 measured in this worktree at the moment of writing (`git rev-parse
@@ -17,8 +64,6 @@ document has been open and will move again.
 > so this is **revision 6**. Recorded rather than silently renumbered,
 > because two documents disagreeing about which revision is live is the
 > failure this arc's cross-lane boundary exists to prevent.
-
-## Revision 6
 
 **Answers review round 5 on `cab3404` — five P1, two P2. All seven
 confirmed. It withdraws two of revision 5's decisions, corrects one
@@ -1432,22 +1477,34 @@ crdt_mutated = true;
 
 `apply_to_crdt_then_normalize_bytes` returns
 `Result<CrdtRoutingResult, (BufferError, bool)>`, and the caller maps
-`(e, false) → Rejected(e)` and `(e, true) → Diverged(e)`. **The
-classifier is therefore total by construction**: any failure added later
-anywhere downstream of a successful CRDT op is classified `Diverged`
-without anyone remembering to extend a list of op shapes. That property
-is the point — revision 5's classifier was correct for the cases it
-enumerated and wrong because enumeration was the wrong mechanism.
+`(e, false) → Rejected(e)`. `(e, true)` goes through one common
+`quarantine_divergence(e)` helper, which sets `crdt_quarantined = true`
+and `read_only = true` **before** returning `Diverged(e)`. **The
+classifier and containment are therefore total by construction**: any
+failure added later anywhere downstream of a successful CRDT op is
+classified and poisoned without anyone remembering which public caller
+reaches it. That property is the point — revision 5's classifier was
+correct for the cases it enumerated and wrong because enumeration was
+the wrong mechanism.
+
+```rust
+fn quarantine_divergence(&mut self, error: BufferError) -> GeneratedOutcome {
+    self.crdt_quarantined = true;
+    self.read_only = true;
+    GeneratedOutcome::Diverged(error)
+}
+```
 
 `run_rope_edit_and_broadcast` returns this richer outcome.
 `apply_edit` and `apply_edit_skip_intercepts` map it back to their
 existing `Result<Edit, BufferError>` API, preserving ordinary callers'
-surface; the generated path retains it through cleanup and the
-borrow-free binding finisher. The enum is public because the existing
-public `set_generated_contents` method and the new
-`apply_generated_edit` method return it; their Rust docs state that a
-higher layer that owns window or replica state must fan out every
-edit-bearing variant before handling its success/error.
+surface **after the common helper has installed quarantine**; the
+generated path retains it through cleanup and the borrow-free binding
+finisher. The enum is public because the existing public
+`set_generated_contents` method and the new `apply_generated_edit` method
+return it; their Rust docs state that a higher layer that owns window or
+replica state must fan out every edit-bearing variant before handling its
+success/error.
 
 That mapping deliberately does **not** claim to repair the same
 post-apply notification loss for every ordinary Rust edit API. Their
@@ -1578,9 +1635,10 @@ that **this arc cannot fix it**:
   delete. Clearing it would discard the one operation a later repair
   lane might use to reconcile the document. So `Diverged` clears
   nothing; this arc does not invoke that undo automatically.
-- Locking stops further **local edits** compounding the divergence. So
-  `read_only = true`. But see immediately below: revision 5 called this
-  "the strongest available containment" and that was wrong.
+- The common poison helper sets `read_only = true`, which stops ordinary
+  local edits and remote imports. It does **not** stop an owner-generated
+  write — that path exists to cross the lock — so quarantine is also exit
+  0 of the generated preflight and authoritative apply below.
 - It returns a **distinct** `BufferError` variant rather than reusing
   `CrdtRejected`, and the Lua binding surfaces it via
   `pmacs.editor.set_status` rather than swallowing it. A caller must be
@@ -1588,26 +1646,33 @@ that **this arc cannot fix it**:
   buffer's CRDT and rope no longer agree."
 
 **`read_only` does NOT contain a divergent CRDT, and revision 5 asserted
-that it did. Corrected in revision 6 (round 5, P1-3).** The outbound
-snapshot paths do not consult `read_only` at all — they read
-`crdt_state()` and export directly:
+that it did. Corrected in revisions 6 and 7.** Three outbound snapshot
+paths do not consult `read_only` — they read `crdt_state()` and export
+directly:
 
-- **initial attach**, `src/daemon.rs:2563-2578`: `buf.crdt_state()` then
-  `crdt.export_snapshot()`, sent as `InstanceMessage::BufferSnapshot`;
+- **explicit initial target**, `initial_target_snapshot` at
+  `src/daemon.rs:1873-1897`, whose bytes become the new session's
+  `InstanceMessage::BufferSnapshot` at `:1996-2029`;
+- **legacy no-target attach**, `send_buffer_snapshots` at
+  `src/daemon.rs:2544-2586`: `buf.crdt_state()` then
+  `crdt.export_snapshot()`;
 - **buffer-follow**, `export_buffer_snapshot` at
   `src/daemon.rs:2693-2708`: `registry.get(buffer_id)` →
   `buf.crdt_state()?` → `crdt.export_snapshot()`.
 
-Neither reads `read_only`, and neither can — `read_only` means "no local
-edits", which is a statement about *inbound* mutation. A replica
-attaching after the divergence therefore receives **the divergent CRDT**
-as its authoritative document, while every daemon window still paints the
-**old rope**. The lock contains exactly the direction that was already
-safe and none of the direction that was not.
+None reads `read_only`, and none can — `read_only` means "no ordinary
+local edits or remote imports", which is a statement about *inbound*
+mutation. A replica attaching after the divergence therefore receives
+**the divergent CRDT** as its authoritative document, while every daemon
+window still paints the **old rope**. The explicit-initial-target route
+is the normal modern attach path; the legacy loop is not a proxy for it.
+The lock contains exactly the direction that was already safe and none
+of the direction that was not.
 
-**The fix: a quarantine flag consulted by snapshot export.** `Buffer`
-gains one more private field, set only by the `Diverged` cleanup arm and
-never cleared by this arc:
+**The fix: a quarantine flag installed at common divergence detection.**
+`Buffer` gains one more private field, set by
+`quarantine_divergence` before the outcome reaches either a generated or
+ordinary public API, and never cleared by this arc:
 
 ```rust
 /// Set when a CRDT mutation landed without its rope counterpart.
@@ -1616,18 +1681,22 @@ never cleared by this arc:
 crdt_quarantined: bool,
 ```
 
-Three consumers, all of which already have a skip path so the change is
-a guard rather than a new control flow:
+Five gates:
 
-1. `src/daemon.rs:2563-2578` — the initial-attach loop already
-   `continue`s on `crdt_state()` returning `None` and on export failure;
-   quarantine takes the same `continue`, with its own log line.
-2. `export_buffer_snapshot` (`src/daemon.rs:2693-2708`) already returns
-   `Option`; quarantine returns `None`, with its own log line.
-3. `queue_daemon_origin_crdt_op` (`src/lua_bindings/mod.rs`) must not
-   queue ops from a quarantined buffer, for the same reason — a delta on
-   top of a divergent document propagates the divergence rather than the
-   edit.
+1. `initial_target_snapshot` returns a named `Err` before export. Its
+   caller already sends `InitialTargetFailure`, unregisters the
+   provisional frontend view and returns without publishing a snapshot.
+2. `send_buffer_snapshots` already `continue`s on missing CRDT state and
+   export failure; quarantine takes the same `continue`, with its own log
+   line.
+3. `export_buffer_snapshot` already returns `Option`; quarantine returns
+   `None`, with its own log line.
+4. `queue_daemon_origin_crdt_op` must not queue ops from a quarantined
+   buffer, for the same reason — a delta on top of a divergent document
+   propagates the divergence rather than the edit.
+5. `generated_preflight` and `apply_generated_edit` both return the new
+   `CrdtQuarantined` refusal. The first prevents an interactive unfold;
+   the second is authoritative after the borrow boundary.
 
 **Why quarantine rather than immediate repair.** Repair means either
 invoking the CRDT's own undo of the landed op or re-deriving the document
@@ -1640,10 +1709,13 @@ every input a repair lane would need intact. **Repair stays deferred
 (§8), and revision 6 does not claim otherwise.**
 
 **What quarantine costs, stated:** a buffer that hits `Diverged` stops
-collaborating. Replicas attaching later see no snapshot for it and
-continue to show whatever they had. That is a visible degradation, and it
-is the correct one — the alternative is silent disagreement between what
-the user sees and what a replica edits.
+collaborating **and stops accepting owner refreshes**. Replicas attaching
+later see no snapshot for it and continue to show whatever they had. An
+explicit-initial-target attach fails rather than opening the wrong bytes.
+That is a visible degradation, and it is the correct one — the
+alternative is silent disagreement between what the user sees and what a
+replica edits, or a later owner write compounding a state no longer
+described by one rope.
 
 **Scope, stated plainly: `Diverged` is a PRE-EXISTING hazard this arc
 exposes, not one it creates.** `apply_edit` and
@@ -1661,6 +1733,11 @@ to Lua success/error after performing any required fan-out.
 
 ```rust
 pub fn apply_generated_edit(&mut self, op: EditOp<'_>) -> GeneratedOutcome {
+    // (0) A prior CRDT-only mutation poisoned this buffer. Generated
+    // writes cross read_only, so the quarantine needs its own refusal.
+    if self.crdt_quarantined {
+        return Rejected(CrdtQuarantined { .. });
+    }
     // (1) Q#GB10: path-backed refusal. Before any state change.
     if self.file_path.is_some() {
         return Rejected(GeneratedWriteOnFileBuffer { .. });
@@ -1688,7 +1765,11 @@ pub fn apply_generated_edit(&mut self, op: EditOp<'_>) -> GeneratedOutcome {
             self.read_only = true;
             self.clear_history();
         }
-        Diverged(_)          => { self.read_only = true; }
+        // The common detector installed both lock and quarantine before
+        // this outcome crossed any public API.
+        Diverged(_)          => {
+            debug_assert!(self.read_only && self.crdt_quarantined);
+        }
         Rejected(_)          => { self.read_only = entry_read_only; }
     }
     self.editing_in_progress = false;             // (6) unconditional, all paths
@@ -1698,13 +1779,14 @@ pub fn apply_generated_edit(&mut self, op: EditOp<'_>) -> GeneratedOutcome {
 
 | exit | when | `read_only` after | `editing_in_progress` | history | contents |
 |---|---|---|---|---|---|
+| (0) | CRDT already quarantined | unchanged (`true`) | unchanged | **untouched** | untouched |
 | (1) | `file_path` is `Some` | unchanged | unchanged (`false`) | **untouched** | untouched |
 | (2) | identity-protected (terminal) | unchanged (`true`) | unchanged | **untouched** | untouched |
 | (3) | re-entrant on the same buffer | unchanged | unchanged (`true`, the outer edit's) | **untouched** | untouched |
 | (4) | range out of bounds | unchanged | unchanged (`false`) | **untouched** | untouched |
 | `Rejected` | mid-codepoint position, CRDT | **restored to entry** | `false` | **untouched** | untouched |
 | `AppliedThenFailed` | a view rejected `on_edit` | `true` | `false` | **cleared** | **mutated; carried `Edit` must fan out** |
-| `Diverged` | CRDT delete ok, insert failed | `true` | `false` | **untouched** | rope untouched, **CRDT diverged** |
+| `Diverged` | any error after CRDT mutation | `true`, quarantine set | `false` | **untouched** | rope untouched, **CRDT diverged** |
 | `NoOp` | empty write over an empty rope | `true` | `false` | **cleared** | unchanged |
 | `Applied` | the ordinary case | `true` | `false` | **cleared** | replaced |
 
@@ -1732,10 +1814,11 @@ larger half of it.** `run_rope_edit_and_broadcast` must distinguish
 `Rejected` from `Diverged`, and today it cannot: both surface as
 `Err(CrdtRejected)` because `apply_to_crdt_then_normalize_bytes` uses a
 bare `?` on the second op (`src/buffer.rs:1155-1163`). Distinguishing
-them means that function tracking whether its `delete` succeeded before
-its `insert` failed. That is a real change to a shipped CRDT path, it is
-in Stage 2's scope, and it is the reason `Diverged` is a *named* variant
-rather than a note — a variant nothing can construct is not a design.
+them means that function reporting whether **any** CRDT mutation landed
+before the error, including an error from `export_updates_since`. That
+is a real change to a shipped CRDT path, it is in Stage 2's scope, and it
+is the reason `Diverged` is a *named* variant rather than a note — a
+variant nothing can construct is not a design.
 
 **Revision 5 withdraws revision 4's four-variant fallback.** Folding
 `Diverged` into `Rejected` would apply `Rejected`'s cleanup: on a fresh
@@ -1752,11 +1835,12 @@ cannot construct three of the seven cases in §3.4's table — the three
 where revision 5's classification was itself wrong. The seam is instead
 **the `crdt_mutated` flag** described in §3.4, and the injectable
 closures are the CRDT primitives **and** the export. Production supplies
-the loro calls; a `#[cfg(feature = "crdt")]` unit test supplies
-`delete Ok` + `insert Err`, and separately `delete Ok` + `export Err`.
-The test makes `Diverged` constructible without adding a public
-fault-injection API, and `cargo test --lib --features crdt` is its gate.
-If that extraction proves larger than expected, Stage 2 stops for
+the loro calls; `#[cfg(feature = "crdt")]` unit tests force a successful
+delete followed by insert failure, and separately force export failure after successful
+`Insert`, `Delete` and `Replace` mutations. The tests make every
+post-mutation failure class constructible without adding a public
+fault-injection API, and `cargo test --lib --features crdt` is their
+gate. If that extraction proves larger than expected, Stage 2 stops for
 review; it does not silently weaken the approved cleanup table.
 
 `validate_op_bounds` is a new
@@ -1824,27 +1908,29 @@ if generated {
 }
 ```
 
-**The refusal preflight, and why revision 5 needed one. New in revision 6
-(round 5, P2-7).** Revisions 3–5 unfolded *before* calling
-`run_generated_edit`, while all four refusals — path-backed,
-identity-protected, re-entrant, out-of-bounds — are decided **inside**
-`apply_generated_edit`, one registry borrow later. So an **interactive**
-generated attempt on a folded, file-backed buffer would **open the fold**
-and then report that nothing was touched. §3.4's contract says exit 1 is
-"before any state change"; a fold is state, and it is the state the user
-can see.
+**The refusal preflight, and why revisions 5 and 6 needed one.**
+Revisions 3–5 unfolded *before* calling `run_generated_edit`, while four
+refusals — path-backed, identity-protected, re-entrant, out-of-bounds —
+were decided **inside** `apply_generated_edit`, one registry borrow
+later. So an **interactive** generated attempt on a folded, file-backed
+buffer would **open the fold** and then report that nothing was touched.
+Revision 7 adds a fifth refusal: a prior CRDT divergence. It must run
+before the unfold for the same reason, and it is more important than the
+other four because another generated write can compound the poisoned
+state. §3.4's contract says exits 0–4 are "before any state change"; a
+fold is state, and it is the state the user can see.
 
 `generated_preflight` is a **read-only** `with_registry` borrow that
-evaluates §3.4's exits 1–4 against `&Buffer` and returns their errors
-verbatim. All four are decidable without mutation, so nothing is lost by
+evaluates §3.4's exits 0–4 against `&Buffer` and returns their errors
+verbatim. All five are decidable without mutation, so nothing is lost by
 asking early.
 
-**`apply_generated_edit` still re-checks all four, and that is not
+**`apply_generated_edit` still re-checks all five, and that is not
 redundancy to remove.** The borrow is released between the preflight and
 the apply, so the preflight is an *optimization of the error path*, not
 an authority. `Buffer` remains the only authority — which is the same
 reason §3.4 keeps the whole transaction in one method. The cost is that
-four cheap predicates run twice on the refusal path and once-plus-once on
+five cheap predicates run twice on the refusal path and once-plus-once on
 the success path; the alternative is an unfold that survives a refusal.
 
 **Considered and rejected: drop the unfold from the generated arm.** That
@@ -2264,7 +2350,7 @@ the criterion. Stage 1, because Stage 1 is where the first three
 families get locked.
 
 **Q#GB17 — The transaction shape.** §3.4. One `&mut Buffer` method, its
-own `run_buffer_edit` arm, `begin_edit` untouched, eight named exits, and
+own `run_buffer_edit` arm, `begin_edit` untouched, ten named exits, and
 cleanup driven by an explicit `GeneratedOutcome` — **not** by
 inferring one from `revision`, which revision 3 did and which was wrong
 in three directions (§3.4). New in revision 3 (review
@@ -2667,13 +2753,14 @@ and what this bug already defeats.
 **Revision 2 re-audited every criterion, not only the three the review
 named (sweep A).** Each now carries an explicit pre-image class, because
 an unlabelled always-green criterion is indistinguishable from a vacuous
-one:
+one. Labels may be combined where separate assertions have independent
+pre-images; each label must be justified by the assertion that bites it:
 
 | class | meaning |
 |---|---|
-| **`main`** | fails on `ad41cf1`. A regression pin in the ordinary sense. |
-| **fix-shape** | **passes on `main` by design**; fails against a specific *wrong implementation*, named in the criterion. Legitimate per `docs/agent-handoff.md` §5 ("bite against every pre-image the fix could plausibly have taken"), where `acc 6` deliberately passes on `main`. |
-| **mutation** | passes on `main`; fails against a named one-line mutation of the fix. |
+| **`main`** | fails on canonical base `64883eb` (integration tree `76cfaac`). A regression pin in the ordinary sense. |
+| **fix-shape** | its assertion **passes on `main` by design** and fails against a specific *wrong implementation*, named in the criterion. Legitimate per `docs/agent-handoff.md` §5 ("bite against every pre-image the fix could plausibly have taken"), where `acc 6` deliberately passes on `main`. |
+| **mutation** | its assertion passes on `main` and fails against a named one-line mutation of the fix. In a combined criterion, a different assertion supplies the `main` bite. |
 | **structural** | no behavioural pre-image. Rides **alongside** the others, never instead — a structural comparison of two authorities does not catch a misrouted consumer. |
 
 **Q#GB14: the lock is not observable from Lua.** `describe.buffer`
@@ -2681,7 +2768,11 @@ carries no `read_only` field, so every "is it locked" assertion below
 uses a **`bypass_intercept` write** (lands on `main`, raises
 `` buffer `X` (id BufferId(n)) is read-only `` once locked) or Rust-side
 `Buffer::is_read_only()`. An *ordinary* edit is not a discriminator: the
-intercept refuses it either way.
+fact that it was **refused** passes both before and after adoption. Its
+**full error source is** a discriminator: the base reaches the intercept,
+while an adopted buffer reaches `ensure_writable` first. Criteria that
+need only prove the lock use a bypass write or Rust state; criterion 5
+deliberately asserts both sources on opposite sides of a Rust lift.
 
 ### Stage 1
 
@@ -2700,8 +2791,9 @@ intercept refuses it either way.
    here; that is the failure mode `src/buffer.rs:521-524` exists to
    prevent. Assert the new content appears, not that the call did not
    raise.
-5. **An ordinary edit is refused, and the intercept is still installed
-   and still fires. REWRITTEN in revision 6 (round 5, P1-1) — the old
+5. **[`main`, and also fix-shape] An ordinary edit reaches the rope
+   lock, and the intercept survives behind it. REWRITTEN in revision 6
+   (round 5, P1-1), with the pre-image corrected in revision 7 — the old
    criterion was impossible, and this document is where that gets
    settled, not #191.**
 
@@ -2732,21 +2824,24 @@ intercept refuses it either way.
 
    **The criterion, in two halves:**
 
-   - **(a) [`main`] An ordinary edit is refused and the text is
-     byte-identical.** No claim about *which* guard refused. Driven
-     through `dispatch_key`.
+   - **(a) [`main`] An ordinary edit is refused BY THE ROPE LOCK**,
+     asserted on the exact `BufferError::ReadOnly` text
+     `` buffer `X` (id BufferId(n)) is read-only ``, and the buffer text
+     is byte-identical. Driven through `dispatch_key`. The base fails
+     this assertion because its ordinary path reaches the intercept and
+     reports `intercept rejected the edit: … is read-only`.
    - **(b) [fix-shape] With the lock lifted Rust-side, an ordinary edit
      is refused BY THE INTERCEPT**, asserted on the message text:
      `intercept rejected the edit: … is read-only`, not
      `` buffer `X` (id BufferId(n)) is read-only ``. Restore the lock
      afterwards.
 
-   *Bite:* (b) is where the old criterion's bite survives — an adopter
-   that deletes the intercept and relies on the rope alone passes 1–4 and
-   (a), and fails (b). (a) alone is **not** a discriminator, which is
-   exactly why it is split out rather than left to carry the claim. The
-   layering at `terminal.lua:351-366` is preserved by (b); what revisions
-   1–5 got wrong was believing the ordinary path could see it.
+   *Bite:* (a) pins the new guard's precedence and fails on the base;
+   (b) is where the old criterion's intercept bite survives. An adopter
+   that deletes the intercept and relies on the rope alone passes 1–4
+   and (a), and fails (b). The layering at `terminal.lua:351-366` is
+   preserved by (b); what revisions 1–5 got wrong was believing the
+   ordinary path could see it.
 
    **Recorded consequence, not this arc's to fix:** `terminal.lua`'s
    intercept is likewise reachable only under a lift. Whether a
@@ -3094,26 +3189,33 @@ rule this yields: a criterion must name the exit it drives the
 implementation to, and that exit must be inside the mechanism under
 test.** Every criterion below names its exit.
 
-**Pre-image relabels, revision 6 (round 5, P2-6). Six criteria carried
-`[main]` labels that describe what the FIX changes rather than what the
-BASE does — the classification error this arc has now made twice.** The
-test in every case is: *run this criterion's assertions against
-`300cbc4`; do they fail?*
+**Pre-image relabels, revisions 6 and 7 (rounds 5 and 6, P2-6/P2-5).
+The classification error was larger than revision 6 recorded.** The
+test in every case is: *run this criterion's assertions against the
+canonical base, `64883eb`; do they fail?*
 
 | criterion | what the base actually does | was | now |
 |---|---|---|---|
 | 15 | `{ generated = true }` is an **unknown option key** on `main` — `parse_bypass_intercept` reads only `bypass_intercept`, so the call is an ordinary managed edit, and `run_managed_edit` clears the flag before phase 3. The follow-up edit lands. **Passes.** | `[main]` | `[mutation]` |
-| 16 | same: no generated path exists to relock or not relock | `[main]` | `[mutation]` |
-| 16b | an empty write on `main` is an ordinary managed no-op; the assertions about lock/clean/history describe the fix | `[main]` | `[mutation]` |
+| 16 | the generated option is ignored, so the valid failing edit never installs the generated lock: the first half's `is_read_only() == true` assertion **fails**. The refusal half still describes a mutation after implementation. | `[main]` | [`main` + mutation] |
+| 16b | an empty write on `main` is an ordinary managed no-op: it clears undo history and locks, but never calls `mark_clean`, so `modified == false` **fails**. Revision 3's cleanup predicate remains a separate post-fix mutation bite. | `[main]` | [`main` + mutation] |
 | 17 | invalid-range rejection **already** preserves history on `main`, because no `clear_history` runs on that path at all. **Passes.** | `[main]` | `[mutation]` |
 | 18 | `begin_edit` **already** rejects same-buffer re-entry (`src/buffer.rs:726-731`). **Passes.** | `[main]` | `[fix-shape]` |
 | 21 | search **already** consults `pmacs.compile` through the optional triple guard (`default.lua:991-994`). **Passes.** | `[main]` | `[fix-shape]` |
 
-None of these criteria is weakened by the relabel — each already stated
-its falsifying mutation, and the mutation is what gives it bite. What
-changes is that the document no longer claims a `main` failure it does
-not have, which is what `scripts/bite` would have contradicted. **The
-rule, restated for the third time and now applied by construction: a
+Revision 7 also corrects three classifications outside revision 6's
+six-row list. Criterion 5(a) now asserts the adopted rope error, so it
+really fails on the base. Criterion 15a fails on the base because the
+ordinary managed-edit error prevents the external window and replica
+fanout; restoring stop-at-first-error after implementation is its
+separate mutation bite. Criterion 22 fails on the base because
+`generated` is ignored and the file edit lands; moving preflight below
+the unfold remains its separate mutation bite.
+
+None of the criteria is weakened by the relabel. What changes is that
+the document no longer claims a `main` pass or failure it does not have,
+which is what `scripts/bite` would have contradicted. **The rule,
+restated for the third time and now applied by construction: a
 criterion's pre-image is a fact about the base, established by running it
 there — not an inference from what the fix is for.**
 
@@ -3140,9 +3242,9 @@ there — not an inference from what the fix is for.**
     criterion is about the buffer's state afterwards. Restore
     `read_only` after the probe so criterion 16 begins from the specified
     post-failure state.
-15a. **[mutation; both configurations] `AppliedThenFailed` fans out its
-    carried `Edit` before surfacing the error (Q#GB17; review round 4,
-    P1-1).** Display the test buffer in a real window, attach the same
+15a. **[`main` + mutation; both configurations] `AppliedThenFailed` fans
+    out its carried `Edit` before surfacing the error (Q#GB17; review
+    round 4, P1-1).** Display the test buffer in a real window, attach the same
     `FailingView`, and issue a valid shrinking generated replace through
     the Lua binding. The call returns the view's error, but painting the
     window must show the new shorter contents with no stale-line panic.
@@ -3162,20 +3264,22 @@ there — not an inference from what the fix is for.**
     `on_edit`'s stop-at-first-error loop skips. Attach order is
     `FailingView`, then a `RecordingView` whose `on_edit` appends the
     `Edit` it received; assert the recorder **saw the edit**. *Bite for
-    this half:* on the base, and under any implementation that keeps
-    `view.on_edit(self, &edit)?`, the recorder's log is **empty** while
-    every other assertion in 15a passes — which is precisely why the
-    review could find this gap after 15a had been written and reviewed.
-    Falsify by restoring the `?`.
-16. **[mutation] A generated write relocks on that same failure, and does
-    NOT lock on a refusal (Q#GB17). Two halves, because §3.4 gives them
-    opposite answers and revision 3 gave them the same one.**
+    this half:* on the base, the ordinary managed-edit failure prevents
+    the later window and replica fanout as well as the recorder, which
+    is the `main` bite. Against the completed implementation, restoring
+    `view.on_edit(self, &edit)?` leaves the later window and replica
+    assertions green but the recorder's log **empty**; that is the
+    independent mutation bite. Falsify by restoring the `?`.
+16. **[`main` + mutation] A generated write relocks on that same failure,
+    and does NOT lock on a refusal (Q#GB17). Two halves, because §3.4
+    gives them opposite answers and revision 3 gave them the same one.**
     - *Relock on `AppliedThenFailed`:* after criterion 15's failing
       write, `Buffer::is_read_only()` is `true` and a
-      `bypass_intercept` write raises. *Bite:* an implementation that
-      unlocks and returns without relocking leaves the buffer writable,
-      and every criterion about undo silently stops applying. Falsify by
-      deleting `self.read_only = true` from the `AppliedThenFailed` arm.
+      `bypass_intercept` write raises. *Bite:* the base treats
+      `generated` as an unknown option and never installs the generated
+      lock, so `is_read_only() == true` fails. After implementation,
+      deleting `self.read_only = true` from the `AppliedThenFailed` arm
+      recreates the same visible failure.
     - *No lock on `Rejected`:* on a **fresh, writable** pathless buffer
       under `--features crdt`, a mid-codepoint generated insert is
       refused; afterwards `is_read_only()` must still be **`false`** and
@@ -3184,14 +3288,16 @@ there — not an inference from what the fix is for.**
       a locked buffer it never wrote. Falsify by replacing
       `self.read_only = entry_read_only` with `= true`. This half is
       `crdt`-only, so criterion 10's coverage rule names it explicitly.
-16b. **[mutation] A successful no-op still discharges the invariant
-    (Q#GB17; §3.4 `NoOp`). New in revision 4 (P1-1 direction A).** On a
-    pathless buffer, insert text and delete it back to empty so the rope
+16b. **[`main` + mutation] A successful no-op still discharges the
+    invariant (Q#GB17; §3.4 `NoOp`). New in revision 4 (P1-1 direction
+    A).** On a pathless buffer, insert text and delete it back to empty so the rope
     is empty **and the undo stack is not**; then call
     `set_generated_contents(b, "")`. Afterwards: `is_read_only()` is
     `true`, `describe.buffer(b).modified` is `false`, and — after a
     Rust-side lift — `buffer.undo()` returns `Err(NothingToUndo)`.
-    *Bite:* **revision 3's predicate fails all three.** The no-op arm
+    *Bite:* the shipped whole-buffer wrapper clears history and locks,
+    but does not mark clean, so the base fails `modified == false`.
+    Independently, **revision 3's predicate fails all three.** The no-op arm
     (`src/buffer.rs:1245-1253`) returns `Ok` without bumping `revision`,
     so revision 3 skipped the clear and the `mark_clean` and left a
     locked, modified buffer with poppable history. Falsify by restoring
@@ -3199,44 +3305,66 @@ there — not an inference from what the fix is for.**
     Q#GB5 prescribes exactly this call in `ensure_slot`.
 16c. **[fault-injection, `crdt`-only] A CRDT mid-transaction failure is
     distinguishable and contained (Q#GB17; §3.4 `Diverged`). New in
-    revision 4, made stageable and mandatory in revision 5.** In a
-    `src/buffer.rs` unit test, drive the private delete→insert classifier
-    with a delete closure that succeeds and an insert closure that
-    returns the same error shape as loro. Require `Diverged`, then drive
-    that outcome through generated cleanup and require: a **distinct**
-    error variant, not `CrdtRejected`; the buffer left `read_only`; and
-    undo history **not** cleared. *Bite:* folding the variant into
-    `Rejected` restores a fresh buffer's `entry_read_only = false`; the
-    test must assert the lock post-state so that mutation fails, not only
-    the error discriminant. `cargo test --lib --features crdt` is the
-    explicit gate. No public fault-injection API is added, and there is
-    no four-variant fallback.
+    revision 4, made stageable and mandatory in revision 5, and made
+    total in revisions 6 and 7.** This criterion has four required
+    halves:
 
-    **Revision 6 adds two halves (round 5, P1-2 and P1-3), and the seam
-    changes shape to admit the first.**
+    - **Total classification.** In `src/buffer.rs` unit tests, drive the
+      injectable CRDT-routing seam with (1) delete `Ok` + insert `Err`
+      and (2) delete `Ok` + `export_updates_since` `Err`. Both must
+      return `Diverged`; the seam carries a `crdt_mutated` flag rather
+      than enumerating operation shapes. The export failure must also be
+      exercised after each successful `Insert`, `Delete` and `Replace`
+      shape, because export runs after all three. *Bite:* revision 5
+      classifies three of those seven cases as `Rejected`, restoring a
+      fresh buffer to writable while CRDT and rope disagree.
+    - **Common poison before API mapping.** Drive one injected
+      `Diverged` through `apply_generated_edit`, and a second through an
+      ordinary `apply_edit`/skip-intercepts mapper. In both cases require
+      `crdt_quarantined == true` and `read_only == true` **before** the
+      outer API converts the outcome to its public error. The generated
+      path surfaces a distinct error, not `CrdtRejected`; history is not
+      cleared. *Bite:* setting quarantine only in generated cleanup
+      leaves the pre-existing ordinary CRDT path divergent and
+      publishable.
+    - **All three snapshot routes refuse publication.** After forcing
+      `Diverged`, require: an explicit-initial-target attach calls
+      `initial_target_snapshot`, yields `InitialTargetFailure`, removes
+      its provisional view and publishes no `BufferSnapshot`; a legacy
+      no-target attach skips the buffer in `send_buffer_snapshots`; and
+      `export_buffer_snapshot(&editor, buffer_id)` returns `None`.
+      *Bite:* deleting any one guard still publishes the divergent CRDT
+      through that route. The explicit-target assertion is independent
+      of the legacy loop: it is the ordinary modern attach path.
+    - **No delta is queued.** Call `queue_daemon_origin_crdt_op` for the
+      quarantined buffer and require the pending-op collection to remain
+      unchanged. *Bite:* a snapshot guard without the queue guard still
+      propagates a delta based on a document the owner no longer paints.
 
-    - **The seam is no longer a "delete→insert classifier".** Per §3.4 it
-      is the `crdt_mutated` flag carried out of
-      `apply_to_crdt_then_normalize_bytes`, so the injectable closures
-      are the CRDT primitives *and* `export_updates_since`. **New half:
-      force `export_updates_since` to fail after a successful
-      `crdt.delete`** and require `Diverged`. *Bite:* revision 5's
-      classifier returns `Rejected` here, which restores a fresh buffer
-      to writable while the CRDT and rope disagree — the exact harm round
-      4's P1-3 withdrew the four-variant fallback to prevent. This half
-      fails against revision 5 as written, not merely against a
-      hypothetical implementation.
-    - **New half: the replica path is quarantined.** After forcing
-      `Diverged`, require `export_buffer_snapshot(&editor, buffer_id)`
-      (`src/daemon.rs:2693-2708`) to return **`None`**, and require the
-      initial-attach loop to skip the buffer. *Bite:* **revision 5 fails
-      this** — it asserted `read_only` was containment, and neither
-      export path reads `read_only`, so a replica attaching after the
-      divergence received the divergent CRDT as authoritative while every
-      daemon window still painted the old rope. Falsify by deleting the
-      `crdt_quarantined` guard from either export site. Assert the
-      *absence of a published snapshot*, not the presence of the flag —
-      asserting a value was stored is not asserting anything reads it.
+    Assert the **absence of publication**, not merely that a flag was
+    stored. Folding `Diverged` into `Rejected` must fail on the lock
+    post-state as well as the discriminant. `cargo test --lib --features
+    crdt` is the explicit gate. No public fault-injection API is added,
+    and there is no four-variant fallback.
+16d. **[mutation; `crdt`-only] A quarantined buffer refuses the owner's
+    next generated write before CRDT mutation (Q#GB17; §3.4 exit 0). New
+    in revision 7.** After criterion 16c forces `Diverged`, snapshot the
+    rope, CRDT state, revision and undo history, then issue a
+    bounds-valid generated insert and a bounds-valid generated replace.
+    Both return the distinct `CrdtQuarantined` refusal; all four
+    observations remain unchanged and no daemon-origin op is
+    queued. This is the direct `Buffer::apply_generated_edit` assertion
+    that pins the authoritative re-check.
+
+    Separately, in an `editor_core` unit fixture, mark a folded buffer
+    quarantined through a `#[cfg(test)]` helper and invoke a generated
+    Lua mutator through the real interactive `run_buffer_edit` path.
+    Require `CrdtQuarantined` and the same fold range still present. This
+    pins `generated_preflight` before the unfold; it adds no production
+    fault-injection API. *Bite:* deleting exit 0, or checking quarantine
+    only in the preflight, lets an owner refresh cross `read_only` and
+    compound the divergence. Checking it only in the authoritative apply
+    preserves bytes but opens the fold first.
 17. **[mutation] An invalid-range generated write does NOT destroy undo
     history (Q#GB17).** On a pathless buffer with two ordinary edits
     already on the stack, call `b:delete(0, b:len() + 1000,
@@ -3272,21 +3400,25 @@ there — not an inference from what the fix is for.**
     `pmacs.compile.is_generated_buffer` contains no `d.name ==`, and
     `listview.lua` contains no `panels[d.name]`. Rides alongside 11–19,
     never instead.
-22. **[mutation] A REFUSED generated write leaves the fold closed
-    (Q#GB3; round 5, P2-7). New in revision 6.** Fold a region of a
+22. **[`main` + mutation] A REFUSED generated write leaves the fold
+    closed (Q#GB3; round 5, P2-7). New in revision 6; pre-image corrected
+    in revision 7.** Fold a region of a
     **file-backed** buffer, then, from inside an interactive command so
     `InteractiveCommandOrigin::current()` is `Some`, attempt
     `b:replace(s, e, "x", { generated = true })` on it. Q#GB10 refuses
     it. Require: the error, **and** `#pmacs.fold.folds(b) == 1` with the
     same range still stored.
-    *Bite:* **revision 5's ordering fails this.** It called
-    `unfold_before_interactive_lua_edit` before `run_generated_edit`,
-    so the fold opened and then the write was refused — a visible side
+    *Bite:* the base ignores `generated`, so the file-backed edit lands;
+    that is the `main` bite. After implementation, **revision 5's
+    ordering also fails this:** it called
+    `unfold_before_interactive_lua_edit` before `run_generated_edit`, so
+    the fold opened and then the write was refused — a visible side
     effect from an operation whose contract says "before any state
     change". Falsify by moving `generated_preflight` back below the
     unfold. Assert the fold **count and range**, not just that the call
-    errored: the error is identical either way, which is exactly why this
-    needs a state assertion rather than an outcome assertion.
+    errored: the error is identical on the mutation either way, which is
+    exactly why this needs a state assertion rather than an outcome
+    assertion.
 
     Repeat once with the **identity-protected** refusal (a terminal
     identity buffer) so the criterion pins the preflight rather than
@@ -3585,10 +3717,13 @@ Plus, per stage:
   count includes `acc16e`, not by the verdict alone.
 - **Stage 2 additionally needs a `crdt` run of whatever suite hosts the
   §3.4 transaction criteria**, for criterion 15a's replica half and
-  criterion 16's second half. Criterion 16c lives in
-  `cargo test --lib --features crdt` because its private
-  delete-success/insert-failure classifier is a unit-test fault seam,
-  not a public acceptance input. Same reasoning, same failure mode.
+  criterion 16's second half. Criteria 16c and 16d live principally in
+  `cargo test --lib --features crdt` because the common `crdt_mutated`
+  routing seam and quarantine state are unit-test fault seams, not
+  public acceptance inputs. Their explicit-target, legacy-attach,
+  buffer-follow, queue and interactive-preflight halves may live in the
+  corresponding in-crate modules; no production fault-injection API is
+  added. Same reasoning, same failure mode.
 - **Run `scripts/bite` on every criterion expressible as a test today,
   and read its new exit codes** (`main` @ `64883eb`, PR #192). Exit **0**
   is a real bite; **1** is vacuous; **3 is `NO CONTROL`** — the named
@@ -3601,10 +3736,13 @@ Plus, per stage:
   discriminates. Every "falsify by …" in §6 names a one-file change
   precisely so it can be run through this rather than asserted.
 - **Run `scripts/bite` on every criterion expressible as a test today.**
-  Stage 1 criteria 1–3, 8, 9 and Stage 2 criteria 1, 7, 8, 9, 14 have
-  `main` pre-images and can be falsified by revert; the rest are
-  fix-shape or mutation bites and each names its mutation inline. A
-  criterion whose bite cannot be stated as either is not finished.
+  Stage 1 criteria 1–3, 5(a), 8 and 9 and Stage 2 criteria 1, 7, 8, 9,
+  14, 15a, 16, 16b and 22 have `main` pre-images and can be falsified
+  against the base. Criteria 15a, 16, 16b and 22 also name independent
+  post-fix mutations; do not substitute the base run for those mutation
+  runs. Every remaining criterion is fix-shape, structural or mutation
+  coverage and names that bite inline. A criterion whose bite cannot be
+  stated as one of those is not finished.
 - **Do not gate any new test on `#[cfg(feature = "crdt")]` unless it
   genuinely needs CRDT.** CI never enables the feature — measured at
   `ad41cf1`, **276 tests are dark** as a result:
