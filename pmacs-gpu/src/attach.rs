@@ -34,7 +34,7 @@ use pmacs_protocol::{
     FrontendEvent, FrontendId, Hello, InitialTarget, InitialTargetResult, InstanceMessage, Key,
     KeyEvent, Modifiers, MouseKind, PROTOCOL_VERSION, PointerKind, SUPPORTED_PROTOCOL_VERSIONS,
     SessionBootstrapRequest, TransportError, is_supported_protocol_version, read_message,
-    write_message,
+    requested_protocol_version, write_message,
 };
 use winit::event_loop::EventLoopProxy;
 
@@ -557,8 +557,16 @@ fn connect_stream_with_sink(
     // AttachRequest — declare the capabilities a semantic frontend
     // needs. `multi_frontend` is included because the existing daemon
     // gates `crdt_replica` behind it (M10.x dependency).
+    // Bottom-panel Stage 2B-3: the `Hello` version is a compatibility
+    // BASELINE, and this counter-offer is what activates anything above
+    // it. The handshake is server-first, so the daemon cannot advertise a
+    // version a shipped frontend might reject; the frontend is the only
+    // party that can safely name a higher one, because by this point it
+    // has already accepted the baseline. `requested_protocol_version`
+    // echoes anything older than the current baseline verbatim.
+    let session_protocol_version = requested_protocol_version(hello.protocol_version);
     let req = AttachRequest {
-        protocol_version: hello.protocol_version,
+        protocol_version: session_protocol_version,
         frontend_capabilities: FrontendCapabilities {
             synchronized_output: false,
             unicode_smp: true,
@@ -678,7 +686,8 @@ fn connect_stream_with_sink(
         outbox,
         shutdown_handle,
         frontend_id: hello.assigned_frontend_id,
-        server_protocol_version: hello.protocol_version,
+        session_protocol_version,
+        baseline_protocol_version: hello.protocol_version,
         initial_message,
     })
 }
@@ -859,10 +868,25 @@ pub struct AttachClient {
     /// `FrontendEvent` carries this so the daemon can route input back
     /// to the per-session `SemanticRenderState`.
     frontend_id: FrontendId,
-    /// The daemon's `Hello.protocol_version`. Wire variants newer
-    /// than the daemon (e.g. `Pointer`, v5) must be gated on this —
-    /// an older daemon hard-errors decoding an unknown variant.
-    server_protocol_version: u32,
+    /// The version this session actually speaks: the frontend's
+    /// `AttachRequest` counter-offer, which the daemon adopts. Wire
+    /// variants newer than the session (e.g. `Pointer`, v5) must be gated
+    /// on this — a daemon below the variant's floor hard-errors decoding
+    /// an unknown discriminant.
+    ///
+    /// Bottom-panel Stage 2B-3: this is deliberately NOT
+    /// `Hello.protocol_version` any more. The server-first `Hello` carries
+    /// a compatibility *baseline* that no shipped frontend may be forced
+    /// to reject, so it under-reports what the pair can speak; the offer
+    /// this frontend made is the session's real ceiling.
+    session_protocol_version: u32,
+    /// The baseline the daemon advertised in its server-first `Hello`.
+    ///
+    /// Kept beside the negotiated version because they answer different
+    /// questions, and because "the daemon still advertises 20 while this
+    /// session runs 21" is precisely the compatibility property Stage
+    /// 2B-3 has to be able to demonstrate.
+    baseline_protocol_version: u32,
     /// Target snapshot retained across the pre-window readiness barrier.
     initial_message: Option<InstanceMessage>,
 }
@@ -914,7 +938,7 @@ impl AttachClient {
 
     /// Send a `FrontendEvent::Pointer` (session M-2): a locally
     /// hit-tested gesture in source bytes. Callers gate on
-    /// [`Self::server_protocol_version`] `>= 5`.
+    /// [`Self::session_protocol_version`] `>= 5`.
     pub fn send_pointer(
         &self,
         buffer_id: BufferId,
@@ -944,7 +968,7 @@ impl AttachClient {
 
     /// Send a `FrontendEvent::TerminalResize` (Vterm Stage 3): the
     /// terminal-cell geometry this frontend has on screen. Callers gate
-    /// on [`Self::server_protocol_version`] `>= 19`.
+    /// on [`Self::session_protocol_version`] `>= 19`.
     ///
     /// Cells, never pixels — the frontend divides its own drawable
     /// rectangle by its own metrics, keeping the no-pixels contract the
@@ -963,7 +987,7 @@ impl AttachClient {
 
     /// Send a `FrontendEvent::TerminalPointer` (Vterm Stage 3): a
     /// gesture hit-tested locally to a terminal cell. Callers gate on
-    /// [`Self::server_protocol_version`] `>= 19`.
+    /// [`Self::session_protocol_version`] `>= 19`.
     pub fn send_terminal_pointer(
         &self,
         buffer_id: BufferId,
@@ -996,9 +1020,22 @@ impl AttachClient {
         })
     }
 
-    /// The daemon's negotiated wire version from `Hello`.
-    pub fn server_protocol_version(&self) -> u32 {
-        self.server_protocol_version
+    /// The version this session negotiated — the frontend's
+    /// `AttachRequest` offer, which the daemon adopts.
+    ///
+    /// Every "is this variant on the wire?" gate keys on this, never on
+    /// [`Self::baseline_protocol_version`].
+    pub fn session_protocol_version(&self) -> u32 {
+        self.session_protocol_version
+    }
+
+    /// The compatibility baseline the daemon advertised in `Hello`.
+    ///
+    /// Only the handshake itself needs this. It is *lower* than
+    /// [`Self::session_protocol_version`] whenever an additive family has
+    /// been activated by counter-offer, which is the normal case.
+    pub fn baseline_protocol_version(&self) -> u32 {
+        self.baseline_protocol_version
     }
 
     /// Send a locally-authored CRDT operation to the daemon. The GPU
@@ -1385,7 +1422,8 @@ mod tests {
             outbox: Arc::new((Mutex::new(outbox), Condvar::new())),
             shutdown_handle: b,
             frontend_id: FrontendId::LOCAL,
-            server_protocol_version: PROTOCOL_VERSION,
+            session_protocol_version: PROTOCOL_VERSION,
+            baseline_protocol_version: pmacs_protocol::ADVERTISED_PROTOCOL_VERSION,
             initial_message: None,
         };
         // A send against the closed outbox fails *and* shuts the socket
@@ -1546,7 +1584,16 @@ mod tests {
         .expect("transient sequence must attach");
         assert_eq!(attempts, 4);
         assert!(managed.daemon.spawned_daemon());
-        assert_eq!(managed.client.server_protocol_version(), PROTOCOL_VERSION);
+        assert_eq!(
+            managed.client.session_protocol_version(),
+            PROTOCOL_VERSION,
+            "a managed attach negotiates this binary's wire, not the Hello baseline"
+        );
+        assert_eq!(
+            managed.client.baseline_protocol_version(),
+            pmacs_protocol::ADVERTISED_PROTOCOL_VERSION,
+            "while the daemon's server-first Hello still advertises the baseline"
+        );
         server.join().expect("handshake server");
     }
 

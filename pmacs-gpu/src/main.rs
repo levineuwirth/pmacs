@@ -751,7 +751,8 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
     state.set_frontend_id(client.frontend_id());
 
     let mut facts = ProbeFacts {
-        server_protocol_version: client.server_protocol_version(),
+        session_protocol_version: client.session_protocol_version(),
+        baseline_protocol_version: client.baseline_protocol_version(),
         ..ProbeFacts::default()
     };
 
@@ -889,8 +890,13 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "server_protocol_version={}",
-        facts.server_protocol_version
+        "session_protocol_version={}",
+        facts.session_protocol_version
+    );
+    let _ = writeln!(
+        out,
+        "baseline_protocol_version={}",
+        facts.baseline_protocol_version
     );
     let _ = writeln!(out, "declarations={}", facts.declarations);
     let _ = writeln!(out, "frames={}", facts.frames);
@@ -974,7 +980,8 @@ fn run_headless_managed_probe(
         return 7;
     }
     let daemon = managed.daemon;
-    let protocol = client.server_protocol_version();
+    let protocol = client.session_protocol_version();
+    let baseline = client.baseline_protocol_version();
 
     let (stdin_tx, stdin_rx) = mpsc::channel();
     std::thread::Builder::new()
@@ -998,6 +1005,7 @@ fn run_headless_managed_probe(
             report,
             "ready",
             protocol,
+            baseline,
             &daemon,
             &buffer_facts,
             &disconnect,
@@ -1028,6 +1036,7 @@ fn run_headless_managed_probe(
                         report,
                         "ready",
                         protocol,
+                        baseline,
                         &daemon,
                         &buffer_facts,
                         &disconnect,
@@ -1061,6 +1070,7 @@ fn run_headless_managed_probe(
                 report,
                 "ready",
                 protocol,
+                baseline,
                 &daemon,
                 &buffer_facts,
                 &disconnect,
@@ -1081,6 +1091,7 @@ fn run_headless_managed_probe(
                 report,
                 "complete",
                 protocol,
+                baseline,
                 &daemon,
                 &buffer_facts,
                 &disconnect,
@@ -1138,6 +1149,7 @@ fn write_managed_probe_report(
     report: &Path,
     phase: &str,
     protocol: u32,
+    baseline: u32,
     daemon: &attach::ManagedDaemonFacts,
     buffer_facts: &ManagedProbeBufferFacts,
     disconnect: &str,
@@ -1146,7 +1158,8 @@ fn write_managed_probe_report(
 
     let mut out = String::new();
     let _ = writeln!(out, "phase={phase}");
-    let _ = writeln!(out, "server_protocol_version={protocol}");
+    let _ = writeln!(out, "session_protocol_version={protocol}");
+    let _ = writeln!(out, "baseline_protocol_version={baseline}");
     let _ = writeln!(out, "buffer_snapshot=true");
     let _ = writeln!(out, "buffer_snapshots={}", buffer_facts.snapshots);
     let _ = writeln!(
@@ -1181,7 +1194,16 @@ fn write_probe_report(report: &Path, contents: &str) -> std::io::Result<()> {
 /// Named observations the headless probe reports back to the acceptance.
 #[derive(Default)]
 struct ProbeFacts {
-    server_protocol_version: u32,
+    /// The version the SESSION negotiated (this frontend's counter-offer).
+    session_protocol_version: u32,
+    /// The compatibility baseline the daemon advertised in `Hello`.
+    ///
+    /// Reported beside the negotiated version rather than instead of it:
+    /// Stage 2B-3's whole activation claim is that these two DIFFER — the
+    /// daemon still advertises a version every shipped frontend accepts
+    /// while this session speaks the newer wire — and a report carrying
+    /// only one of them cannot express that.
+    baseline_protocol_version: u32,
     declarations: u32,
     frames: u32,
     rendered_nonuniform_frames: u32,
@@ -1993,14 +2015,14 @@ impl App {
         let Some(client) = self.attach_client.as_ref() else {
             return;
         };
-        if client.server_protocol_version() < 5 {
+        if client.session_protocol_version() < 5 {
             return;
         }
         // TripleDown is a v7 variant; a pre-v7 instance would
         // hard-error decoding it. Downgrade to a plain Down — the
         // exact behavior the third click had before v7 (the chain
         // restarting).
-        let kind = if kind == PointerKind::TripleDown && client.server_protocol_version() < 7 {
+        let kind = if kind == PointerKind::TripleDown && client.session_protocol_version() < 7 {
             PointerKind::Down
         } else {
             kind
@@ -2008,7 +2030,7 @@ impl App {
         // Context (right-click, Q#CM1) is a v11 variant; a pre-v11
         // instance can't open a menu, so drop the gesture rather than
         // sending an undecodable variant.
-        if kind == PointerKind::Context && client.server_protocol_version() < 11 {
+        if kind == PointerKind::Context && client.session_protocol_version() < 11 {
             return;
         }
         if let Err(e) = client.send_pointer(buffer_id, byte, kind, mods) {
@@ -2030,7 +2052,7 @@ impl App {
         let Some(client) = self.attach_client.as_ref() else {
             return;
         };
-        if client.server_protocol_version() < 19 {
+        if client.session_protocol_version() < 19 {
             return;
         }
         if let Err(e) = client.send_terminal_pointer(buffer_id, coord, kind, mods) {
@@ -2047,7 +2069,7 @@ impl App {
         let Some(client) = self.attach_client.as_ref() else {
             return;
         };
-        if client.server_protocol_version() < 19 {
+        if client.session_protocol_version() < 19 {
             return;
         }
         let Some(state) = self.state.as_mut() else {
@@ -2089,7 +2111,7 @@ impl App {
         let Some(client) = self.attach_client.as_ref() else {
             return;
         };
-        if client.server_protocol_version() < 11 {
+        if client.session_protocol_version() < 11 {
             return;
         }
         if let Err(e) = client.send_menu_pointer(index, invoke) {

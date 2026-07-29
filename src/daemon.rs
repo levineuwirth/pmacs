@@ -735,6 +735,15 @@ fn per_attach_thread(
     daemon_debug(format!("received AttachRequest from {frontend_id:?}"));
 
     // T M10.5 version check.
+    //
+    // Bottom-panel Stage 2B-3: this is where a session's version is
+    // actually settled. `Hello` above carried only the compatibility
+    // BASELINE (`ADVERTISED_PROTOCOL_VERSION`) — it has to, because a
+    // server-first handshake reaches a shipped frontend before that
+    // frontend can say anything, and a version it does not recognize is
+    // rejected outright. The frontend's counter-offer is therefore the
+    // upper half of the negotiation, and this membership test is what
+    // bounds it.
     if !crate::protocol::is_supported_protocol_version(req.protocol_version) {
         let _ = write_message(
             &mut stream,
@@ -812,8 +821,16 @@ fn per_attach_thread(
         u8::try_from(frontend_id.0 % (crate::overlay_color::PALETTE_LEN as u64)).unwrap_or(0)
     };
 
-    let session_state =
-        crate::presence::SessionState::new(req.protocol_version, negotiated_caps, color_slot);
+    // The session speaks the lower of the two ceilings. The membership
+    // test above already bounds the offer, so this clamp cannot bind
+    // today; it is applied through the shared rule anyway so a future
+    // ladder widening cannot silently record a version this binary is
+    // unable to produce.
+    let session_state = crate::presence::SessionState::new(
+        crate::protocol::negotiated_session_version(req.protocol_version),
+        negotiated_caps,
+        color_slot,
+    );
 
     // Hand the write-half to the dispatcher; keep a read-half for
     // this thread's reader loop. **Reader loop starts immediately
@@ -899,23 +916,30 @@ fn peer_declared_terminal_support(
 ///
 /// Grid sessions paint the whole cell grid the daemon composes, so a side
 /// window is just another leaf for them. A semantic session needs the GPU
-/// band, which does not exist yet — so this still answers `false` for
-/// every semantic peer, whatever it declares. No client-asserted
+/// band, which Stage 2B-3 lands — so it is panel-capable exactly when it
+/// negotiated a wire that can carry the band. No client-asserted
 /// standalone boolean is trusted: the answer is derived from the daemon's
 /// own negotiated state.
 ///
-/// **Stage 2B-2 deliberately does not turn the version arm on.** The
-/// daemon-side projection and epoch machine below are complete and
-/// exercised through a test-only panel-capable view, but the production
-/// flip (`semantic_render && negotiated_protocol_version >=
-/// PANEL_MIN_VERSION`) belongs to Stage 2B-3, together with the
-/// compatibility-preserving activation the server-first `Hello` requires:
+/// **Stage 2B-3 turns the version arm on** (framing §3.5): `panel_capable`
+/// is true for an authenticated semantic session that negotiated
+/// [`PANEL_MIN_VERSION`] or later, and false for every earlier one. The
+/// gate is on *placement*, not only on transport — denying the events
+/// while still putting a pre-panel peer's window in a side panel it cannot
+/// render would leave that window invisible, so a v6–v20 semantic session
+/// keeps the Stage 1 fallback with every side-specific parameter
+/// discarded (Q#BP2c).
+///
+/// The version reaching this predicate is the *negotiated* one, which is
+/// the frontend's `AttachRequest` counter-offer rather than the
 /// [`ADVERTISED_PROTOCOL_VERSION`](pmacs_protocol::ADVERTISED_PROTOCOL_VERSION)
-/// is still 20, so no session can negotiate 21 yet, and denying only the
-/// events while still *placing* such a peer in a side window would leave
-/// its window invisible.
+/// baseline the daemon put in `Hello`. That distinction is the whole
+/// activation mechanism: the baseline stays where every shipped frontend
+/// can accept it, and only a frontend that named the newer wire itself
+/// becomes panel-capable.
 fn peer_declared_panel_support(session_state: crate::presence::SessionState) -> bool {
     !session_state.negotiated_capabilities.semantic_render
+        || session_state.negotiated_protocol_version >= PANEL_MIN_VERSION
 }
 
 /// The same belt-and-braces write-loop gate for the additive
@@ -1959,10 +1983,11 @@ fn handle_session_established(
     // collapses folds, a semantic one keeps raw-line reckoning until
     // Stage 3.
     // Bottom-panel arc (Q#BP13): panel capability comes from the SAME
-    // negotiated bit in this same transaction. Stage 1 ships the TUI
-    // side windows only, so a semantic session is not panel-capable and
-    // a `side` request falls back to its document target with every
-    // side-specific parameter discarded.
+    // negotiated state in this same transaction. Stage 2B-3 made the
+    // semantic arm live: a semantic session that negotiated
+    // `PANEL_MIN_VERSION` or later can render the GPU band and is
+    // panel-capable, while a v6-v20 semantic session still falls back to
+    // its document target with every side-specific parameter discarded.
     let fresh_view = build_fresh_frontend_view(
         editor,
         !session_state.negotiated_capabilities.semantic_render,
@@ -5570,7 +5595,7 @@ mod tests {
     fn viewport_aligns_the_document_without_taking_focus_from_the_panel() {
         let (mut editor, fid, document, panel) = panel_focused_semantic_fixture();
         let other = {
-            let mut core = editor.core.borrow_mut();
+            let core = editor.core.borrow_mut();
             core.registry.borrow_mut().create("*other*")
         };
 

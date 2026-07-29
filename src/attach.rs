@@ -450,8 +450,15 @@ pub fn run_attach(socket_path: PathBuf) -> Result<(), AttachError> {
     // its AttachRequest (the v0.1 daemon's strict-equality check will
     // accept). The frontend's runtime behavior on the wire is the
     // intersection of features both sides support.
+    //
+    // Bottom-panel Stage 2B-3: that echo is now a *floor*, not the whole
+    // rule. `Hello` is server-first, so the daemon must advertise a
+    // baseline every shipped frontend accepts; the session's real version
+    // is settled here, by this frontend counter-offering its own
+    // `PROTOCOL_VERSION` when the baseline is the current one. Anything
+    // older is still echoed verbatim.
     let req = AttachRequest {
-        protocol_version: hello.protocol_version,
+        protocol_version: crate::protocol::requested_protocol_version(hello.protocol_version),
         frontend_capabilities: build_capabilities(),
         initial_size,
     };
@@ -1914,9 +1921,12 @@ fn run_one_session(
 
     // T M10.5: match the server's protocol version so v1.0 frontends
     // attaching to v0.1 daemons advertise protocol_version=1. Same
-    // pattern as the local-socket path above.
+    // pattern as the local-socket path above, including Stage 2B-3's
+    // counter-offer: this path *spawns* the daemon from the running
+    // executable, so the peer is always this same ladder rung and the
+    // counter-offer is always accepted.
     let req = AttachRequest {
-        protocol_version: hello.protocol_version,
+        protocol_version: crate::protocol::requested_protocol_version(hello.protocol_version),
         frontend_capabilities: build_capabilities(),
         initial_size,
     };
