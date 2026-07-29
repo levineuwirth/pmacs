@@ -5198,6 +5198,15 @@ impl State {
     /// exactly as it was, because `PanelFrame::validate` is pure and runs
     /// before any state is touched.
     fn apply_panel_payload(&mut self, payload: PanelFramePayload) -> bool {
+        if self.panel.exhausted {
+            // A latched session has disowned its geometry for good, so a
+            // payload answering it describes nothing this frontend can
+            // present. Retaining the frame anyway would leave `presented()`
+            // as the only thing standing between a disowned declaration and
+            // a painted band, and would spend a reshape on every arriving
+            // frame for the rest of the session.
+            return false;
+        }
         match payload {
             PanelFramePayload::Absent => {
                 // Authoritative removal, and always safe. Note this does
@@ -9617,9 +9626,21 @@ fn edge_scroll_direction(
     fm: FontMetrics,
     band: PanelBandInset,
 ) -> Option<i64> {
+    let bottom = document_text_bottom(surface_height, fm, band);
     if y < TEXT_TOP + EDGE_SCROLL_BAND {
         Some(-1)
-    } else if y > document_text_bottom(surface_height, fm, band) - EDGE_SCROLL_BAND {
+    } else if band.px() > 0.0 && y >= bottom {
+        // Moving the boundary is necessary but NOT sufficient: this arm has
+        // no upper bound, so a pixel far below the text area still reads as
+        // "further down the document". With a band installed that pixel is
+        // on ANOTHER SURFACE, and letting it arm the document's auto-scroll
+        // is the named symptom of leaving this consumer on the old bottom —
+        // the document scrolls while the pointer is inside the panel.
+        //
+        // Gated on an installed band so a bandless surface keeps its exact
+        // previous behavior, including over the status band.
+        None
+    } else if y > bottom - EDGE_SCROLL_BAND {
         Some(1)
     } else {
         None
@@ -16264,6 +16285,497 @@ mod tests {
     }
 
     // --- Vterm Stage 3: terminal mode -----------------------------------
+
+    // ===================================================================
+    // Bottom panel Stage 2B-3 — the GPU band
+    // ===================================================================
+
+    fn panel_frame_of(rows: u32, cols: u32, geometry_epoch: u64, panel_epoch: u64) -> PanelFrame {
+        let cells = (0..(rows as usize * cols as usize))
+            .map(|_| terminal_cell(pmacs_protocol::Glyph::Char('x'), CellStyle::default()))
+            .collect();
+        PanelFrame {
+            buffer_id: BufferId::from_raw(77),
+            panel_epoch,
+            geometry_epoch,
+            size: CellSize::new(rows, cols),
+            cells,
+            cursor: None,
+            focused: true,
+        }
+    }
+
+    /// Bring a `State` to the point a real v21 session reaches: panel wire
+    /// on, one geometry declaration made, one `Present` frame installed.
+    fn present_panel(state: &mut State, rows: u32) -> PanelFrame {
+        state.set_panel_wire(PANEL_MIN_VERSION);
+        let (epoch, total) = state
+            .next_geometry_declaration(GeometryTrigger::Surface)
+            .expect("a panel-wire session declares its first geometry");
+        let frame = panel_frame_of(rows, total.cols.max(1), epoch, 1);
+        assert!(
+            state.apply_panel_payload(PanelFramePayload::Present(frame.clone())),
+            "installing a first frame changes the band"
+        );
+        frame
+    }
+
+    /// A2B-4 (contrast assertion) — installing a panel moves every
+    /// document-owned boundary by exactly the band's pixel height while
+    /// every status-owned boundary stays pixel-identical.
+    ///
+    /// Both halves in one scenario on purpose: a uniformly wrong
+    /// implementation that subtracted the band from `status_band_top` too
+    /// would pass the "everything moved" half by itself.
+    #[test]
+    fn installing_a_panel_moves_the_document_bottom_and_not_the_status_band() {
+        let Some(mut state) = headless_or_skip(800, 600, "alpha\nbeta\ngamma\n") else {
+            return;
+        };
+        let fm = state.fm;
+        let status_before = status_band_top(state.config.height, fm);
+        let document_before = document_text_bottom(state.config.height, fm, state.band_inset());
+        assert_eq!(
+            state.band_inset(),
+            PanelBandInset::ABSENT,
+            "no panel yet, so the two boundaries coincide"
+        );
+        assert!((status_before - document_before).abs() < f32::EPSILON);
+
+        let rows = 4;
+        present_panel(&mut state, rows);
+
+        let band = state.band_inset();
+        assert_eq!(
+            band,
+            PanelBandInset::installed(rows, fm),
+            "the inset is the panel's rows plus its divider"
+        );
+        assert!(band.px() > 0.0);
+        assert_eq!(
+            status_band_top(state.config.height, fm),
+            status_before,
+            "the status band must stay pixel-identical at the physical window bottom"
+        );
+        assert!(
+            (document_text_bottom(state.config.height, fm, band) - (document_before - band.px()))
+                .abs()
+                < f32::EPSILON,
+            "the document bottom must move by exactly the band height"
+        );
+        // Every document-owned consumer follows the moved boundary, and the
+        // three easiest to misclassify are named because each has its own
+        // visible symptom.
+        assert!(
+            estimated_visible_lines(state.config.height, fm, band)
+                < estimated_visible_lines(state.config.height, fm, PanelBandInset::ABSENT),
+            "the visible-line estimate must shrink with the document area"
+        );
+        assert!(
+            minimap_height(state.config.height, fm, band)
+                < minimap_height(state.config.height, fm, PanelBandInset::ABSENT),
+            "the minimap is document-owned"
+        );
+        // Edge scrolling (the row a plausible implementation leaves on the
+        // old bottom, which then auto-scrolls from INSIDE the panel). The
+        // probe pixel sits near the BOTTOM of the band, inside the unmoved
+        // boundary's own edge strip, so the two answers genuinely differ.
+        let deep_in_band = status_before - 2.0;
+        assert!(
+            deep_in_band > document_text_bottom(state.config.height, fm, band),
+            "fixture must place the probe inside the band"
+        );
+        assert_eq!(
+            edge_scroll_direction(deep_in_band, state.config.height, fm, band),
+            None,
+            "a pixel inside the band must not arm document edge scrolling"
+        );
+        assert_eq!(
+            edge_scroll_direction(
+                deep_in_band,
+                state.config.height,
+                fm,
+                PanelBandInset::ABSENT
+            ),
+            Some(1),
+            "and it WOULD have, on the unmoved boundary — so this pins the move, \
+             not merely the absence of a trigger"
+        );
+        // And the feature is not simply switched off: the moved boundary has
+        // its own edge strip, which still arms.
+        assert_eq!(
+            edge_scroll_direction(
+                document_text_bottom(state.config.height, fm, band) - 2.0,
+                state.config.height,
+                fm,
+                band
+            ),
+            Some(1),
+            "the document's own bottom edge strip still auto-scrolls"
+        );
+    }
+
+    /// The geometry declaration reserves the divider while the panel is
+    /// absent, and the document loses no pixels until a `Present` is
+    /// painted. That asymmetry is what breaks the first-open cycle.
+    #[test]
+    fn geometry_capacity_reserves_the_divider_while_the_document_does_not() {
+        let fm = FontMetrics::default();
+        let height = 600;
+        assert!(fm.divider_height() > 0.0);
+        assert!(
+            (status_band_top(height, fm)
+                - geometry_capacity_bottom(height, fm)
+                - fm.divider_height())
+            .abs()
+                < f32::EPSILON,
+            "capacity always reserves the divider"
+        );
+        assert_eq!(
+            document_text_bottom(height, fm, PanelBandInset::ABSENT),
+            status_band_top(height, fm),
+            "while an absent panel costs the document nothing"
+        );
+    }
+
+    /// All three boundaries clamp at zero on a surface shorter than its own
+    /// chrome, preserving the pre-split `.max(0.0)` behavior.
+    #[test]
+    fn every_boundary_clamps_at_zero_on_a_surface_shorter_than_its_chrome() {
+        let fm = FontMetrics::default();
+        for height in [0, 1, 4, 10] {
+            assert!(status_band_top(height, fm) >= 0.0);
+            assert!(geometry_capacity_bottom(height, fm) >= 0.0);
+            assert!(document_text_bottom(height, fm, PanelBandInset::installed(9, fm)) >= 0.0);
+        }
+    }
+
+    /// A2B-3 — panel columns come from the stable normal-face probe, so two
+    /// frontends with identical metrics and different documents derive
+    /// identical totals.
+    #[test]
+    fn panel_columns_do_not_depend_on_the_document() {
+        let Some(mut one) = headless_or_skip(800, 600, "iiiiiiiiiiiiiiii") else {
+            return;
+        };
+        let Some(mut two) = headless_or_skip(800, 600, "WWWWWWWWWWWWWWWW") else {
+            return;
+        };
+        assert_eq!(
+            one.declared_cell_total(),
+            two.declared_cell_total(),
+            "the declaration must not sample the document's first glyph"
+        );
+    }
+
+    /// The pixel→cell conversion, including the daemon's virtual status row
+    /// and floor rounding (parent 41, GPU half).
+    #[test]
+    fn panel_cell_capacity_floors_and_carries_the_virtual_status_row() {
+        // 100px of usable height at a 22px line height is 4 whole rows, plus
+        // the virtual status row the daemon subtracts back off.
+        let size = crate::terminal::panel_cell_capacity(100.0, 100.0, 10.0, 22.0)
+            .expect("a 100x100 rectangle admits cells");
+        assert_eq!(size.rows, 5, "4 document rows + 1 virtual status row");
+        assert_eq!(size.cols, 10);
+        // Fractional widths floor rather than round.
+        let fractional = crate::terminal::panel_cell_capacity(99.9, 43.9, 10.0, 22.0)
+            .expect("fractional inputs still admit cells");
+        assert_eq!((fractional.rows, fractional.cols), (2, 9));
+        // A panel may legitimately be wider than a PTY: no 512 cap.
+        let wide = crate::terminal::panel_cell_capacity(6000.0, 44.0, 1.0, 22.0)
+            .expect("a wide surface admits a wide panel");
+        assert_eq!(
+            wide.cols, 6000,
+            "the panel does not inherit the terminal's 512-column PTY cap"
+        );
+        assert!(
+            crate::terminal::cell_viewport(6000.0, 44.0, 1.0, 22.0)
+                .expect("terminal viewport")
+                .cols
+                <= u32::from(pmacs_protocol::MAX_TERMINAL_COLS),
+            "while the terminal projection still clamps"
+        );
+    }
+
+    /// Zero, non-finite, and non-positive metric inputs fail closed to zero
+    /// usable geometry rather than an absurd row count (parent 41).
+    #[test]
+    fn degenerate_metrics_declare_zero_usable_geometry() {
+        for (w, h, a, l) in [
+            (0.0, 100.0, 10.0, 22.0),
+            (100.0, 0.0, 10.0, 22.0),
+            (100.0, 100.0, 0.0, 22.0),
+            (100.0, 100.0, 10.0, 0.0),
+            (f32::NAN, 100.0, 10.0, 22.0),
+            (100.0, f32::INFINITY, 10.0, 22.0),
+            (100.0, 100.0, -10.0, 22.0),
+        ] {
+            assert_eq!(
+                crate::terminal::panel_cell_capacity(w, h, a, l),
+                None,
+                "degenerate input ({w}, {h}, {a}, {l}) must fail closed"
+            );
+        }
+    }
+
+    /// A2B-2 — a font or scale change that leaves `CellSize` IDENTICAL still
+    /// produces a new `geometry_epoch`, and the older retained frame neither
+    /// paints nor hit-tests until a matching `Present` arrives.
+    #[test]
+    fn identical_cell_totals_still_advance_the_epoch_on_a_metrics_change() {
+        let Some(mut state) = headless_or_skip(800, 600, "alpha") else {
+            return;
+        };
+        let frame = present_panel(&mut state, 3);
+        let first_epoch = frame.geometry_epoch;
+        assert!(state.band_inset().px() > 0.0);
+
+        // The `Surface` trigger dedups an unchanged total.
+        assert_eq!(
+            state.next_geometry_declaration(GeometryTrigger::Surface),
+            None,
+            "an identical cell total is not re-declared on a resize"
+        );
+        assert_eq!(state.panel.geometry_epoch, first_epoch);
+
+        // The `Metrics` trigger must not.
+        let (second_epoch, second_total) = state
+            .next_geometry_declaration(GeometryTrigger::Metrics)
+            .expect("a metrics change always re-declares");
+        assert_eq!(
+            second_total,
+            state.panel.declared.expect("declared"),
+            "the total is genuinely unchanged — which is the whole point"
+        );
+        assert!(second_epoch > first_epoch);
+        assert!(
+            state.panel.presented().is_none(),
+            "the retained frame answers a superseded declaration, so it must \
+             neither paint nor hit-test"
+        );
+        assert_eq!(state.band_inset(), PanelBandInset::ABSENT);
+        assert!(state.panel_hit_test(TEXT_LEFT + 1.0, 400.0).is_none());
+
+        // Only a matching `Present` brings it back.
+        let matching = panel_frame_of(3, second_total.cols.max(1), second_epoch, 2);
+        assert!(state.apply_panel_payload(PanelFramePayload::Present(matching)));
+        assert!(state.panel.presented().is_some());
+    }
+
+    /// A2B-1's frontend half — exhaustion latches, and the latch survives a
+    /// retained `Present` whose epoch still matches.
+    #[test]
+    fn an_exhausted_frontend_latches_and_no_retained_frame_revives_the_band() {
+        let Some(mut state) = headless_or_skip(800, 600, "alpha") else {
+            return;
+        };
+        state.set_panel_wire(PANEL_MIN_VERSION);
+        state.panel.geometry_epoch = u64::MAX;
+        state.panel.declared = Some(CellSize::new(1, 1));
+        let stale = panel_frame_of(3, 8, u64::MAX, 1);
+        assert!(state.apply_panel_payload(PanelFramePayload::Present(stale.clone())));
+        assert!(
+            state.panel.presented().is_some(),
+            "before exhaustion the matching frame is presentable"
+        );
+
+        assert_eq!(
+            state.next_geometry_declaration(GeometryTrigger::Metrics),
+            None,
+            "checked allocation refuses to wrap"
+        );
+        assert!(state.panel.exhausted, "and latches for the session");
+        assert!(state.panel.frame.is_none());
+        assert_eq!(state.band_inset(), PanelBandInset::ABSENT);
+
+        // An old matching `Present` must not resurrect the band, and no
+        // further declaration is sent however the surface changes.
+        assert!(!state.apply_panel_payload(PanelFramePayload::Present(stale)));
+        assert!(state.panel.presented().is_none());
+        assert_eq!(
+            state.next_geometry_declaration(GeometryTrigger::Surface),
+            None
+        );
+    }
+
+    /// `Absent` is authoritative; silence retains; an invalid frame is
+    /// rejected whole; a duplicate does no work.
+    #[test]
+    fn absent_clears_while_silence_retains_and_a_bad_frame_keeps_the_old_one() {
+        let Some(mut state) = headless_or_skip(800, 600, "alpha") else {
+            return;
+        };
+        let good = present_panel(&mut state, 3);
+        assert!(
+            !state.apply_panel_payload(PanelFramePayload::Present(good.clone())),
+            "a duplicate valid frame does no work"
+        );
+        assert!(state.panel.presented().is_some(), "silence retains");
+
+        // A frame whose cell count disagrees with its declared area.
+        let mut bad = good.clone();
+        bad.cells.pop();
+        assert!(!state.apply_panel_payload(PanelFramePayload::Present(bad)));
+        assert_eq!(
+            state.panel.frame.as_ref(),
+            Some(&good),
+            "rejection is atomic: the previous valid frame is retained"
+        );
+
+        let declared_before = state.panel.declared;
+        assert!(state.apply_panel_payload(PanelFramePayload::Absent));
+        assert!(state.panel.presented().is_none());
+        assert_eq!(state.band_inset(), PanelBandInset::ABSENT);
+        assert_eq!(
+            state.panel.declared, declared_before,
+            "an Absent panel does not invalidate the frame-capacity declaration"
+        );
+        assert!(
+            !state.apply_panel_payload(PanelFramePayload::Absent),
+            "a duplicate Absent does no work either"
+        );
+    }
+
+    /// Criterion 48 / 47 — the band hit-tests to cells, the divider strip is
+    /// the painted rect, and a drag names ROWS.
+    #[test]
+    fn the_band_hit_tests_cells_and_the_divider_strip_drags_rows() {
+        let Some(mut state) = headless_or_skip(800, 600, "alpha") else {
+            return;
+        };
+        let frame = present_panel(&mut state, 4);
+        let (ox, oy, w, h) = state
+            .panel_content_rect()
+            .expect("a presented band has a rect");
+
+        // Cells inside; nothing outside.
+        assert_eq!(
+            state.panel_hit_test(ox + 0.5, oy + 0.5),
+            Some(pmacs_protocol::CellCoord::new(0, 0))
+        );
+        assert!(state.panel_hit_test(ox - 1.0, oy + 0.5).is_none());
+        assert!(
+            state.panel_hit_test(ox + 0.5, oy - 1.0).is_none(),
+            "a pixel above the band belongs to the document"
+        );
+        assert!(state.panel_hit_test(ox + 0.5, oy + h + 1.0).is_none());
+        assert!(state.panel_hit_test(ox + w + 1.0, oy + 0.5).is_none());
+
+        // The divider strip sits directly above the cells, and its painted
+        // rect IS its hit rect.
+        let (dx, dy, dw, dh) = state.panel_divider_rect().expect("divider rect");
+        assert!((dy + dh - oy).abs() < f32::EPSILON, "strip abuts the cells");
+        assert!((dh - state.fm.divider_height()).abs() < f32::EPSILON);
+        assert!(state.panel_divider_contains(dx + dw / 2.0, dy + dh / 2.0));
+        assert!(!state.panel_divider_contains(dx + dw / 2.0, dy - 1.0));
+        assert!(!state.panel_divider_contains(dx + dw / 2.0, dy + dh));
+
+        // A drag UP grows the panel; the request names rows and repeats are
+        // suppressed.
+        assert!(state.begin_panel_drag(dx + 1.0, dy + 1.0));
+        let line = state.fm.code_line_height();
+        let request = state
+            .panel_drag_request(dy + 1.0 - 2.0 * line)
+            .expect("two lines up is a two-row request");
+        assert_eq!(request.rows, frame.size.rows + 2);
+        assert_eq!(request.geometry_epoch, frame.geometry_epoch);
+        assert_eq!(request.panel_epoch, frame.panel_epoch);
+        state.note_panel_drag_sent(request.rows);
+        assert_eq!(
+            state.panel_drag_request(dy + 1.0 - 2.0 * line),
+            None,
+            "re-crossing the same row boundary does not re-send"
+        );
+        assert!(state.end_panel_drag());
+        assert_eq!(state.panel_drag_request(dy + 1.0 - 3.0 * line), None);
+    }
+
+    /// A drag whose presentation has been replaced under it is dropped, not
+    /// applied to the successor.
+    #[test]
+    fn a_drag_that_outlives_its_panel_is_dropped() {
+        let Some(mut state) = headless_or_skip(800, 600, "alpha") else {
+            return;
+        };
+        let frame = present_panel(&mut state, 4);
+        let (dx, dy, _, dh) = state.panel_divider_rect().expect("divider rect");
+        assert!(state.begin_panel_drag(dx + 1.0, dy + dh / 2.0));
+
+        // A new presentation of the SAME buffer under a new panel epoch.
+        let replaced = PanelFrame {
+            panel_epoch: frame.panel_epoch + 1,
+            ..frame.clone()
+        };
+        assert!(state.apply_panel_payload(PanelFramePayload::Present(replaced)));
+        assert_eq!(
+            state.panel_drag_request(dy - 3.0 * state.fm.code_line_height()),
+            None,
+            "the gesture addressed a presentation that is gone"
+        );
+        assert!(
+            state.panel.drag.is_none(),
+            "and the stale drag is discarded rather than left armed"
+        );
+    }
+
+    /// The divider hover bit drives the `RowResize` icon and reports only on
+    /// change, so the cursor is not reset on every pixel of motion.
+    #[test]
+    fn divider_hover_reports_only_on_change() {
+        let Some(mut state) = headless_or_skip(800, 600, "alpha") else {
+            return;
+        };
+        present_panel(&mut state, 3);
+        assert!(state.set_panel_divider_hover(true));
+        assert!(!state.set_panel_divider_hover(true));
+        assert!(state.set_panel_divider_hover(false));
+        assert!(!state.set_panel_divider_hover(false));
+    }
+
+    /// A session that did not negotiate the panel wire declares nothing and
+    /// can never present a band.
+    #[test]
+    fn a_pre_panel_session_declares_no_geometry() {
+        let Some(mut state) = headless_or_skip(800, 600, "alpha") else {
+            return;
+        };
+        state.set_panel_wire(PANEL_MIN_VERSION - 1);
+        assert_eq!(
+            state.next_geometry_declaration(GeometryTrigger::Surface),
+            None
+        );
+        assert_eq!(state.panel.geometry_epoch, 0, "0 means never declared");
+        assert_eq!(state.band_inset(), PanelBandInset::ABSENT);
+    }
+
+    /// Criterion 46 — the band and divider really do take pixels off the
+    /// painted document, and the status band's own pixels are unchanged.
+    #[test]
+    fn the_painted_band_takes_pixels_from_the_document_and_not_the_status_band() {
+        let Some(mut state) = headless_or_skip(400, 300, "alpha\nbeta\ngamma\ndelta\n") else {
+            return;
+        };
+        let before = state.render_offscreen();
+        let fm = state.fm;
+        let status_top = status_band_top(state.config.height, fm).floor() as u32;
+
+        present_panel(&mut state, 3);
+        state.sync_buffer_dimensions();
+        let after = state.render_offscreen();
+
+        let bounds = frame_diff_bounds(&before, &after, state.config.width);
+        let (_, min_y, _, max_y) = bounds.expect("installing a band changes pixels");
+        let band_top = document_text_bottom(state.config.height, fm, state.band_inset()).floor();
+        assert!(
+            min_y >= band_top as u32,
+            "no pixel above the band's own top may change: {min_y} < {band_top}"
+        );
+        assert!(
+            max_y < status_top,
+            "and the status band stays pixel-identical: {max_y} >= {status_top}"
+        );
+    }
 
     fn terminal_cell(glyph: pmacs_protocol::Glyph, style: CellStyle) -> pmacs_protocol::Cell {
         pmacs_protocol::Cell {
