@@ -459,18 +459,63 @@ has **no branch and no framing yet**.
   `FrontendView.fold_projection` to `true` for semantic frontends, which
   Stage 2 deliberately left `false` (Q#FD21).
 
-## dired Stage 2 framing lane — PR #171 AT REVISION 7, AWAITING APPROVAL
+## dired Stage 2 framing lane — PR #171 AT REVISION 8, AWAITING APPROVAL
 
 - Portable branch: `githubsucks/dired-stage2-framing`;
   worktree `../pmacs-dired-stage1`. **PR #171**, base `main`, integrated
   up to `main` @ `ad41cf1`. Framing only —
-  `docs/dired-stage2-framing.md`, now **~2,630 lines**, no runtime code.
-  This lane rides that PR.
+  `docs/dired-stage2-framing.md`, **3,624 lines measured at this
+  revision**, no runtime code. This lane rides that PR — it has since
+  rev 6, when #185 merged; do not open a standalone ledger PR.
 - **Status: PROPOSED, never approved.** Revision 5 was reviewed and NOT
   approved (six findings, four P1); revision 6 answered them; **revision
   7 resolves a cross-lane conflict with PR #186**. The commit history
   embodies six revisions and five rounds of findings; **that is not the
   same as approval**, and it must not be read as one.
+- **Round 7 (rev 8) found five contract defects of ONE family, and the
+  family is the transferable lesson: a guarantee assumed from a
+  mechanism whose implementation was never read.** Reply order assumed
+  to be execution order; a refusal assumed to be inert; `forget_uri`
+  assumed to cover every writer. Three of the five were literally that.
+  The decisions:
+  - **Reply order is NOT execution order.** `AsyncRuntime::tick`
+    (`src/async_runtime.rs:1003`) is `while let Ok(env) =
+    self.main.try_recv()` — a bus drain with **no execution token**, so
+    a worker can finish, be descheduled before sending, and have a later
+    reply arrive first. The ordering guarantee was **withdrawn, not
+    engineered**: reconciliation is order-independent, and `fs.lua:155-165`
+    already instructs callers needing ordering to serialize. A lock was
+    rejected — it would serialize every fs mutation for a hazard with no
+    production reachability.
+  - **`EditorCore::kill_buffer` damages editor state BEFORE it can
+    refuse.** It clears `round_trip_buffers`, closes side windows and
+    redirects ordinary windows, and only then can
+    `BufferRegistry::remove` return `ConcurrentEdit`. So "refused" is
+    not "nothing happened". Fixed by preflighting `editing_in_progress`
+    — sound because phase 1 is pure `EditorCore` and holds no Lua
+    handle, so nothing can re-enter between check and removal.
+  - **Buffer names are set from `path.display()` AS GIVEN** while only
+    `file_path` is normalized (`src/editor_core.rs:917`,
+    `src/lua_bindings/mod.rs:3112`), so a relative open leaves a short
+    name that a string-equality rule mistakes for user-chosen. The rule
+    is now path-equivalence.
+  - **`diag_store` has ZERO correlated writers**, and
+    `DiagnosticStore.by_uri` is keyed by **URI alone** with no server
+    component (`src/diag.rs:198`) — so the store most needing protection
+    is the one a `pending_routes` purge cannot help, and a
+    `(sid, uri)` tombstone would not even match it. Gated by a bounded
+    tombstone, keyed to match the store.
+  - **A first pass of rev 8 checked only `handle_notification` and
+    concluded `publishDiagnostics` was the only uncorrelated writer.
+    Wrong lens boundary** — `pub fn mark_document_stale`
+    (`src/lsp.rs:3108`) takes **no `LspServerId`** and creates URI keys
+    across three stores for every server. Recorded because it is the
+    round's own defect class occurring inside the round.
+- **Both new hooks are `all-must-succeed`, not short-circuit** — a gap
+  the review did not raise and the sweep found. `src/hook.rs` defines
+  three `HookKind`s; registered short-circuit, one `resource.renamed`
+  subscriber returning falsey would silently stop every later
+  subscriber reconciling.
 - **CROSS-LANE SPLIT WITH PR #186 — settled, recorded verbatim so the
   two lanes cannot diverge again:**
 

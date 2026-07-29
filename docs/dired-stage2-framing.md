@@ -1,12 +1,13 @@
 # Dired Stage 2 — marks and operations — framing
 
-**Revision 7 — 2026-07-28. Status: PROPOSED — NOT APPROVED. This
+**Revision 8 — 2026-07-28. Status: PROPOSED — NOT APPROVED. This
 document has never received a formal framing approval, and it needs one
 from the user before any implementation branch is cut.** Its commits
-embody five rounds of findings; that is not the same as approval.
-Revision 6 answered review round 5; **revision 7 resolves a cross-lane
-conflict with PR #186**, which framed the opposite answer to the same
-event. §0's round-6 section says what the reconciliation changed.
+embody six rounds of findings; that is not the same as approval.
+Revision 7 resolved the cross-lane split with PR #186 — accepted, and
+not reopened here. **Revision 8 answers review round 7: five blocking
+contract defects and two documentation fixes**, all of one family. §0's
+round-7 section says what each decided.
 
 **Ground truth: re-scouted 2026-07-28 against canonical `main` @
 `6bee09d`** (`Merge pull request #184 from levineuwirth/bottom-panel-stage2b`).
@@ -43,6 +44,297 @@ numbers drift and this document has now watched them drift twice.
 ---
 
 ## 0. Revision history
+
+### Review round 7 (rev 7 → rev 8) — five contract defects, one family
+
+The split with #186 was accepted and **none of it is reopened**. What
+round 7 found instead is five places where this framing **asserted a
+guarantee it had derived from a mechanism whose implementation it never
+read**. Findings 1, 2 and 4 are literally that: reply order assumed to
+be execution order, a refusal assumed to be inert, `forget_uri` assumed
+to cover every writer. Findings 3 and 5 are the same shape one level
+out — a naming rule assumed from how *some* buffers are named, and a
+callback contract assumed from a helper signature that cannot express
+it.
+
+Every citation was re-verified here before being acted on. **All seven
+hold.** One is understated (F2); nothing in the review was wrong.
+
+#### F1 — "settle order" is not filesystem mutation order → **the ordering guarantee is WITHDRAWN, not engineered**
+
+Verified: `AsyncRuntime::tick` (`src/async_runtime.rs:1003`) is
+`while let Ok(env) = self.main.try_recv()` — it drains the bus and
+records **arrival** order. Mutations run on separate pool workers, so a
+worker can finish, be descheduled before sending, and have a later
+mutation's reply arrive first. `TickOutcome.resources` therefore cannot
+carry execution order, and **rev 7's justification for a single ordered
+vector was false.**
+
+**The cheaper question first, as directed: does reconciliation need to
+be order-dependent?** Working it through:
+
+- For **independent** mutations — disjoint paths, disjoint subtrees —
+  reconciliation commutes. Order is irrelevant.
+- For **interdependent** ones it genuinely is not, and *no static rule
+  rescues it*. Take rename `dir`→`newdir` racing delete `dir/child.txt`.
+  If the delete ran first on disk, correct reconciliation is delete-then-
+  rename. If the rename ran first (so the delete was really of
+  `newdir/child.txt`), correct reconciliation is rename-then-delete. A
+  fixed rule such as "deletes before renames" gets the first case right
+  and the second wrong: the kill misses, the rename then rebinds the
+  buffer onto a path whose file is gone, and it survives pointing at
+  nothing. **So it is a real execution-order token or nothing** — this
+  was worked out rather than assumed, because the review asked which.
+- **But no production path can produce the interdependent case.** dired
+  **serializes** — one coroutine per batch, awaiting each op before
+  dispatching the next (§9). `apply_resource_op` is **synchronous on the
+  main thread** and never enters the drain at all. And §2 verified that
+  `pmacs.fs.rename` and `pmacs.fs.remove` have **zero production
+  callers** besides tests. The hazard requires a third-party package to
+  fire-and-forget two interdependent mutations.
+- **And the substrate already tells it not to.** `fs.lua:155-165` states
+  the contract: *"If a package needs at-most-one-pending semantics for
+  mutations, it should serialize on the package side (await each op
+  before dispatching the next)."* §9 already cites this as the reason
+  dired serializes.
+
+**Decision: the reconciliation contract is order-independent by
+construction, and promises nothing about two mutations in flight
+simultaneously.** Each settled mutation reconciles on its own; the
+framing states explicitly that `resources` is in **bus-arrival order,
+which is not execution order**, and does not build on the sequence.
+Where interdependence exists, the caller owes serialization, and the
+primitive's own documentation already says so.
+
+**Why the token was rejected.** An execution-order token established
+while holding a mutation lock would serialize every filesystem mutation
+through one lock — undoing the concurrency the worker pool exists for —
+to close a hazard with no production reachability and a documented
+caller-side remedy. It is named as a deferral (§11) with its trigger
+stated: **the first production caller that fire-and-forgets two
+interdependent mutations.** That is a condition someone can check, not a
+vague "if it becomes a problem".
+
+Consequences carried through: rev 7's one-vector-because-ordered
+argument is replaced (§5); §6's "via the same ordered sequence" is
+reworded; a new acceptance pins that two **independent** concurrent
+mutations reconcile correctly **regardless of arrival order**, and §13
+states explicitly that there is **no** item for interdependent ordering,
+with the reason — a test cannot pin an order the mechanism does not
+establish. That is the same discipline item 20 already applies to H1's
+open interval.
+
+#### F2 — a refused mid-edit kill is already destructive → **preflight, and the review understates it by one**
+
+Verified in `EditorCore::kill_buffer` (`src/editor_core.rs:4590`), in
+execution order: the last-buffer and unknown-id guards return early
+(safe); then `self.round_trip_buffers.remove(&buffer_id)`; then the
+fallback is computed; then side windows showing the victim are
+**closed** via `remove_side_window`; then every remaining window on the
+victim is redirected, resetting `text_view`, `cursor`, `selection`,
+`overlays`, `view_top`, `goal_col`; and **only then** does
+`BufferRegistry::remove` (`src/buffer_registry.rs:127`) get the chance
+to refuse with `ConcurrentEdit`. So "refused" is not "nothing happened".
+
+**Where rev 7 was worse than the review says:** rev 7 did not merely
+mis-describe the refusal, it wrote *"the reconcile must treat a phase-1
+failure as 'keep the buffer' and not run phase 2"* — which reads as
+though skipping phase 2 restores the buffer. It does not. Skipping
+phase 2 only avoids firing `on_removed` for a buffer that still exists;
+the window and round-trip damage is already done and nothing in the
+described flow undoes it.
+
+**Decision: preflight `editing_in_progress` before phase 1.** Not a
+transactional kill. Three reasons:
+
+- **The preflight is sound, not merely cheap.** Phase 1 is entirely
+  `EditorCore`, which holds **no Lua handle** (the layering fact C1
+  established), so nothing between the check and
+  `BufferRegistry::remove` can re-enter Lua and start an edit. The
+  window that would make a preflight racy does not exist on this path.
+- **It matches #186.** Its Q#RD2 already moves `editing_in_progress`
+  out of discovery and into validation, for the same reason — *"Today a
+  `ConcurrentEdit` refusal from `BufferRegistry::remove` arrives after
+  the file is gone."* Both lanes then check the same predicate in the
+  same phase.
+- **A transactional kill would need a compensation path** that
+  snapshots and restores window layout, side-window collapse and
+  round-trip membership — and compensation can itself fail. A check that
+  makes the failure unreachable is strictly smaller than a rollback that
+  handles it.
+
+Acceptance 53 is split into **three separately-asserted properties with
+individual bites** (§13).
+
+#### F3 — the name-provenance rule is false for relative opens → **path-equivalence, stated**
+
+Verified: `get_or_load_buffer` (`src/editor_core.rs:917`) sets
+`display_name = path.display().to_string()` — **the path as given** —
+and normalizes only the stored `file_path` via `set_buffer_path`.
+`pmacs.buffer.from_file` (`src/lua_bindings/mod.rs:3112`) does the same:
+`create_from_bytes(path.clone(), …)` with the raw string. So opening
+`foo.rs` relatively yields name `foo.rs` and path `/abs/dir/foo.rs`.
+Rev 7's rule — update the name only when it **equals** the normalized
+old path — leaves that buffer's name stale, and it is not user-renamed.
+
+**Decision: the rule is path-equivalence, not string equality.** The
+name is treated as path-derived — and therefore updated — **iff the
+stored name, parsed as a path and normalized by
+`normalize_buffer_path`, equals the buffer's stored normalized old
+path.** In words: *the name still denotes this file.*
+
+- A full-path name (Stage 1's and dired's shape) qualifies.
+- A relative name `foo.rs` qualifies, because it normalizes to the same
+  absolute path.
+- A genuinely custom name — `notes`, `*scratch*`, anything the user
+  chose — does not, and is preserved. That direction is what stops the
+  rule over-correcting, and §13 tests it.
+
+**One consequence stated rather than hidden:** when the rule fires the
+new name is written as the **normalized new path**, so a buffer opened
+by a relative path acquires an absolute name after a rename. Preserving
+the relative rendering would need a record of *what base the name was
+relative to*, which no buffer carries. The effect is confined to the
+statusline and buffer list. If that is judged wrong, the alternative is
+an explicit provenance flag on `Buffer` — real state, every creation
+site audited — and this framing does not think a corner of the
+statusline earns that.
+
+#### F4 — late `publishDiagnostics` can repopulate the old URI
+
+Verified: the manager absorbs `textDocument/publishDiagnostics`
+unconditionally (`src/lsp.rs:2878`); it is a server-initiated
+notification with **no request id**, so `pending_routes` — which is what
+`forget_uri`'s purge and awaiter drain operate on — cannot see it. A
+notification queued before `didClose` can therefore arrive after the
+store is cleared and recreate the entry under the old URI.
+
+This is the five-owner census in a new lens, and the review is right
+that it is the same shape. **The re-run is reported in full in §5**, and
+it changed the design four times over — most sharply: `diag_store` has
+**zero** correlated writers, so the store `forget_uri` most needs to
+protect is the one its route purge cannot help; and
+`DiagnosticStore.by_uri` is keyed by **URI alone**, with no server
+component, so a `(sid, uri)` tombstone would not match it.
+
+**Answering the question as asked: no, `publishDiagnostics` is not the
+only one.** It is the only uncorrelated **notification** writer — 1 of
+1, and `handle_notification` has no default arm — but
+`pub fn mark_document_stale` (`src/lsp.rs:3108`) is a second
+uncorrelated writer that takes **no `LspServerId`** and creates URI keys
+across three stores for every server at once. **A first pass of this
+revision checked only `handle_notification` and concluded it was the
+only one. That was the wrong lens boundary, and it is this round's own
+defect class occurring inside the round** — recorded rather than
+quietly corrected, because "I checked the mechanism" and "I checked the
+right mechanism" are different claims.
+
+**Decision: a bounded per-server tombstone, checked at absorb.**
+`forget_uri(sid, uri)` records `(sid, uri)` as forgotten; an
+uncorrelated absorb whose URI is tombstoned is **dropped**; the
+tombstone is cleared when that URI is next `did_open`ed, and wholesale
+at the existing server-teardown sites (`start_generation`, `forget`).
+
+**Why a tombstone and not the obvious membership gate.** The tempting
+version is "absorb only if `(sid, uri)` is currently in `documents`",
+which needs no new state at all. **It would be a behaviour regression:**
+servers legitimately publish diagnostics for files the editor never
+opened — a crate-wide push naming a dependency — and a membership gate
+drops all of them. The tombstone drops **only what this editor
+explicitly forgot**, which is the narrow claim that is actually true.
+Residue stated: a server that legitimately publishes for the old path
+*after* we renamed away from it is also dropped until the tombstone
+clears. That is the conservative direction, and it is the same
+information-loss trade `forget_uri` already makes for the correlated
+stores.
+
+#### F5 — `confirm { prompt, on_yes }` cannot express decline → **three outcomes, because the substrate already has three**
+
+Verified: the copy contract says a declined overwrite **continues**,
+copying the non-colliding entries, while the helper exposes only
+`on_yes`. There is no negative continuation to hang that on.
+
+And the substrate is richer than the helper: `pmacs.minibuffer.read`
+takes a required `on_accept` and an optional `on_cancel`
+(`src/lua_bindings/mod.rs:13403-13417`), and the session carries both
+(`src/minibuffer.rs:403-405`), with `cancel()` returning the
+on-cancel callback (`:353`). So a prompt has **three** outcomes, not
+two: accept-affirmative, accept-negative, and cancel — and rev 7's
+helper collapsed all three into "call `on_yes` or do nothing".
+
+**Decision: `pmacs.minibuffer.confirm { prompt, on_yes, on_no,
+on_cancel }`**, with decline and cancel **distinguishable**, because the
+copy flow needs exactly that distinction and the substrate already
+draws it:
+
+- **`on_yes`** — `y`/`yes`, case-insensitive.
+- **`on_no`** — any other accepted text, **including an empty `RET`**.
+  The fail-closed default from Q#DR15 is unchanged; it now has somewhere
+  to go.
+- **`on_cancel`** — `C-g`/Escape. **If omitted, cancelling does
+  nothing at all** — it does *not* fall through to `on_no`.
+
+That last point is the decision worth arguing with, so here is why. For
+`x` and `D` the two are equivalent: declining and cancelling both mean
+"delete nothing". For `C` they are not — declining means *copy the
+non-colliding entries* (a partial action), cancelling means *abandon
+the batch*. Defaulting cancel to `on_no` would make `C-g` perform a
+partial copy, which is the one thing a user pressing `C-g` is trying to
+avoid. So cancel is inert unless a caller explicitly opts in.
+
+Acceptance 39 is extended to exercise the negative path and the cancel
+path separately — the current item cannot, because there was nothing to
+observe.
+
+#### P2 fixes
+
+- **The Lua surface for `forget_uri` is now named.** Rev 7 told a Lua
+  subscriber to call a manager-level method with no binding behind it.
+  Lua reaches only explicit bindings; the nearest precedent is
+  `pmacs.lsp.forget` (`src/lua_bindings/mod.rs:10257`), a four-line
+  closure that calls through and maps the error with
+  `mlua::Error::external`. §5 now specifies `pmacs.lsp.forget_uri`, its
+  error contract, and a pin.
+- **The ledger note is rewritten and its numbers re-measured.** It
+  claimed this branch touches only the framing file — false since rev 6,
+  which is when the lane moved onto this PR — and quoted a line count
+  from a previous revision. Counts in §16 and in the ledger are now
+  measured at this revision.
+
+#### The sweep for the same defect class
+
+Findings 1, 2 and 4 share one shape: **a guarantee assumed from a
+mechanism whose implementation was not read.** Swept the rest of the
+framing for it. Three candidates, honestly reported:
+
+- **`run_all_must_succeed` "collects errors and does not abort the
+  fan-out"** (§2). This had been carried from a project lesson rather
+  than read. **Read now** (`src/hook.rs:332-348`): it is a plain
+  `for cb in callbacks` loop pushing into `errors` with no early return,
+  and `proceed` is `errors.is_empty()`. **Claim holds.**
+- **`pmacs.window.commit_to` refuses an `await`** (§2), cited to a test
+  by name. **Verified**: `commit_to_refuses_an_await_and_restores`
+  exists at `tests/journey_acceptance.rs:746`. **Claim holds.**
+- **One genuine new finding, which the review did not raise: the
+  framing never says which `HookKind` the two new hooks register
+  with.** `src/hook.rs` defines **three** — `ShortCircuit`,
+  `AllMustSucceed`, `Accumulate` — and every declared hook picks one in
+  `builtin/hooks/default.lua` (`buffer.after-edit` is
+  `all-must-succeed`; `path.open-directory` and `editor.before-quit`
+  are `short-circuit`). Rev 7's B1b asserted only that the *mechanism*
+  exists. **That gap matters**: registered `short-circuit`, one
+  `resource.renamed` subscriber returning falsey would stop the fan-out
+  and silently prevent every later subscriber from reconciling — the
+  precise trap the typed-edit chain lesson names, arriving through a
+  door this framing left unlabelled. **Decision: both hooks are
+  `all-must-succeed`** (Q#DR28), so a failing subscriber is reported and
+  the rest still run, and no subscriber can claim the event.
+
+Nothing else in the framing rests on an unread mechanism. Recorded as a
+count rather than a shrug: **three candidates, two cleared by reading,
+one real.**
+
+---
 
 ### Round 6 (rev 6 → rev 7) — cross-lane reconciliation with PR #186
 
@@ -1376,10 +1668,43 @@ possible, which is why the hook carries `(old, new)` paths.
 - matches normalized stored paths against normalized `old` by **equality
   or path-component prefix** (`/foo` must not match `/foobar`);
 - sets the new path **and** sets the name, but only when the buffer's
-  name still equals its old path — a path-backed buffer is named by its
-  full path (Stage 1's finding), while a user-renamed buffer keeps the
-  name it was given;
+  name is **path-derived**, by the equivalence rule below;
 - returns every rebind it performed.
+
+**The name-provenance rule (Q#DR30, rewritten in rev 8 — F3).** Rev 7
+updated the name only when it **equalled** the normalized old path,
+assuming path-backed buffers carry full-path names. **They do not.**
+`get_or_load_buffer` (`src/editor_core.rs:917`) sets
+`display_name = path.display().to_string()` — the path **as given** —
+and normalizes only the stored `file_path`; `pmacs.buffer.from_file`
+(`src/lua_bindings/mod.rs:3112`) passes the raw string the same way. So
+`pmacs foo.rs` yields name `foo.rs`, path `/abs/dir/foo.rs`, and rev 7's
+rule would have left that name stale while insisting it was
+user-chosen.
+
+The rule is **path-equivalence**, not string equality:
+
+> A buffer's name is path-derived — and therefore updated — **iff the
+> stored name, parsed as a path and normalized by
+> `normalize_buffer_path`, equals the buffer's stored normalized old
+> path.**
+
+In words: *the name still denotes this file.* A full-path name
+qualifies; a relative name qualifies, because it normalizes to the same
+absolute path; and a name the user chose — `notes`, `*scratch*` — does
+not, and survives. Both directions are load-bearing, and §13 tests
+both: the relative case is what rev 7 got wrong, and the custom case is
+what stops the fix over-correcting into a name-clobberer.
+
+**One consequence, stated rather than hidden:** when the rule fires the
+new name is written as the **normalized new path**, so a buffer opened
+by a relative path acquires an absolute name after a rename. Preserving
+the relative rendering would require knowing *which base the name was
+relative to*, which no buffer records. The effect is confined to the
+statusline and the buffer list. The alternative — an explicit
+provenance flag on `Buffer`, with every creation site audited — is real
+core state for a corner of the statusline, and this framing does not
+think that trade is worth it. Named in §11 in case review disagrees.
 
 **Both rename paths call it**: the async harvest below, and
 `apply_resource_op`'s rename arm (`mod.rs:3234-3255`), whose raw
@@ -1458,6 +1783,25 @@ in-flight routes is a race that reintroduces exactly the state it removed.
 
 **One manager-level method, `forget_uri(sid, uri)`**, doing all of it —
 because fourteen call sites at the Lua layer is how one gets forgotten.
+
+**And it needs a Lua binding, which rev 7 never named** (rev 8, P2).
+The subscriber that calls this lives in `lsp.lua`, and Lua reaches only
+explicit bindings. The surface is **`pmacs.lsp.forget_uri(server_id,
+uri)`**, modelled on `pmacs.lsp.forget` (`src/lua_bindings/mod.rs:10257`)
+— a closure over the shared manager that calls through and maps the
+error with `mlua::Error::external`. Its **error contract**:
+
+- **Raises** on an unknown `server_id`, matching `forget`'s existing
+  behaviour for the same input.
+- **Succeeds silently** when the URI has no state under that server.
+  The subscriber fires for every renamed path, including buffers that
+  never attached to a language server, so "nothing to forget" is the
+  common case and must not be an error.
+- Takes the **old** URI. Calling it after `didOpen` of the new URI is
+  therefore safe and order-independent with respect to step 5.
+
+Pinned by §13 item 31, which asserts both arms — the raise and the
+silent success.
 Its shape is modelled on the **server-scoped** teardowns that already
 exist. **There are two of them, and rev 4 named neither correctly (W2):**
 `LspManager::start_generation` (`src/lsp.rs:1307-1345`, the restart-
@@ -1496,6 +1840,121 @@ three things one axis over:
    must go; `symbol_store` is **scope**-keyed and holds workspace symbols
    too, so only the document-scoped entry is dropped — the same
    asymmetry that makes `WorkspaceSymbol` route-exempt in step 1.
+
+#### The uncorrelated writers, and the tombstone that gates them (rev 8, F4)
+
+`forget_uri`'s three steps all operate on `pending_routes` — the
+**correlated** path, where a response is matched to a request id. There
+are writers that never go near it.
+
+**The census, re-run with "uncorrelated writers" as the lens.** Counted
+over production code only, with `#[cfg(test)]` boundaries read per file
+rather than inferred from filenames. **41 writes total**: 16 correlated,
+19 uncorrelated store writes, 6 `documents` writes.
+
+- **Correlated: 16**, every one inside
+  `LspManager::absorb_routed_response` (`src/lsp.rs:2667`), which has
+  exactly one caller — `handle_response` (`:2523`) behind
+  `pending_routes.remove(&(sid, rid))` at `:2627`. These are
+  purged by construction if the route drain runs first.
+- **Uncorrelated: 19** = **1** server-initiated notification + **3**
+  `mark_document_stale` writes + **15** Lua-callable `clear` bindings.
+
+**Four findings that change the design, not just the prose:**
+
+1. **`diag_store` has ZERO correlated writers.** The 16 correlated
+   writes cover 13 of the 14 stores; diagnostics are populated *only*
+   by the uncorrelated path. So the one store `forget_uri` most needs
+   to protect is the one its route purge cannot help at all.
+2. **`publishDiagnostics` is the only uncorrelated *notification*
+   writer — but not the only uncorrelated writer.** `handle_notification`
+   (`src/lsp.rs:2878`) is 22 lines, matches exactly one method string,
+   and has no default arm; everything else reaches only `push_event`,
+   which writes the event queue and status tracker and no URI-keyed
+   store. So among notifications it is **1 of 1**. But
+   **`pub fn mark_document_stale(&self, uri)` (`src/lsp.rs:3108`)** is a
+   second uncorrelated writer: it takes `&self` and **no
+   `LspServerId`**, marks `stale_uris` in three stores **for every
+   server at once**, *creates* URI keys, and is exposed to Lua as
+   `pmacs.lsp._mark_document_stale` (`src/lua_bindings/mod.rs:9742`).
+   **An earlier pass of this framing checked only `handle_notification`
+   and concluded "publishDiagnostics is the only one in Rust". That was
+   the wrong lens boundary and the answer was wrong** — recorded because
+   it is the round's own defect class caught inside the round.
+3. **`DiagnosticStore.by_uri` is keyed by URI *alone*** (`src/diag.rs:198`),
+   with **no `LspServerId` component**, unlike the other thirteen which
+   key on `(server, uri)`. **So `forget_uri(sid, uri)` cannot be
+   server-scoped for the one store that has the uncorrelated writer.**
+   The tombstone must therefore be keyed to match whatever the store is
+   keyed to, and the framing must not pretend a `(sid, uri)` tombstone
+   protects a URI-only store.
+4. **`epochs` is never pruned.** `DiagnosticStore::clear` *creates* an
+   `epochs` entry (`src/diag.rs:266`, `or_insert(0) += 1`), as does
+   `set` (`:250`), and nothing removes them. A `forget_uri` clearing
+   only `by_uri` leaves a URI-keyed leak behind, so the store's own
+   forget path must drop the epoch too.
+
+**And the lens reproduces owner 6 independently.** `lean.lua` writes
+`M.file_progress[uri]` from
+`pmacs.lsp.on_notification("$/lean/fileProgress", …)`
+(`builtin/runtime/lean.lua:648,651`) through a **second, Lua-side
+notification dispatch table** (`dispatch_notification`,
+`builtin/runtime/lsp.lua:1719`, driven from `:1867`). It is
+uncorrelated by the same mechanism, `forget_uri` cannot reach it, and it
+is exactly §5's sixth path owner. The census arriving at it from a
+different direction is the strongest evidence yet for §5's conclusion:
+**the Rust method handles what it can see, and the hook is the
+mechanism that scales.**
+
+**The gate: a bounded tombstone, keyed to match the store.**
+`forget_uri` records the forgotten URI as tombstoned; an uncorrelated
+absorb for a tombstoned URI is **dropped**; the tombstone clears when
+that URI is next `did_open`ed, and wholesale at the two server-teardown
+sites (`start_generation`, `forget`). Per finding 3 the diagnostics
+tombstone is **URI-keyed, not `(sid, uri)`-keyed**, matching
+`by_uri`; per finding 4 the forget path also drops the URI's `epochs`
+entry.
+
+**Why not the cheaper membership gate.** The tempting version needs no
+new state: absorb only if `(sid, uri)` is in `documents`. **It would be
+a behaviour regression** — servers legitimately publish diagnostics for
+files the editor never opened, a crate-wide push naming a dependency,
+and a membership gate drops every one. The tombstone drops **only what
+this editor explicitly forgot**. There is precedent for exactly this
+shape: `handle_response` already drops late arrivals via
+`client.cancelled_rids.remove(&rid)` (`src/lsp.rs:2549`) — a
+"forget-then-drop-late-arrivals" set. The tombstone is that pattern with
+a URI key instead of a request id.
+
+**Why the existing epoch cannot serve.** `epochs` is bumped
+unconditionally by `set` with no epoch parameter and is read only by
+`epoch_for` for render-cache invalidation (`src/semantic_render.rs:2107`).
+Nothing compares an incoming write's epoch to a stored one, so a late
+notification simply bumps it and looks current. `stale_uris` is likewise
+a one-bit render-suppression flag that gates the **read** path only. And
+`LspClient::attempt` (`:3009`) is a real generation counter but
+**per-server**, useless for a closed URI on a live server. **There is no
+tombstone in the tree today** — zero occurrences — so this is new state,
+and the framing says so rather than implying it reuses something.
+
+**Verified absence of any existing guard**, stated with evidence rather
+than as a claim: `grep -rn "documents.contains_key" src/` returns
+**zero**, and the only `documents` membership test anywhere is
+`inbound_converted` (`src/lsp.rs:1498`), which on a miss returns the
+value **unconverted and proceeds** rather than dropping it.
+`absorb_publish_diagnostics` (`:2900`) guards only that `uri` is a
+string and `diagnostics` is an array, then writes.
+
+**Residue, stated:** a server that legitimately publishes for the old
+path *after* we renamed away from it is dropped until the tombstone
+clears — the conservative direction, and the same trade `forget_uri`
+already makes for the correlated stores. Two further holes are named,
+not closed, because they are wider than this lane (§11): the fourteen
+`pub fn *_store()` accessors hand out `Arc<Mutex<…>>` clones conferring
+unrestricted write access, and the `workspace/*/refresh` handlers
+re-pull by iterating `attachments` with no cross-check against
+`documents`, so a purge can be followed by a fresh, correlated request
+for a URI the editor no longer holds.
 
 **Worth stating because it is surprising, and it is now true twice:**
 *neither* server-scoped teardown clears the fourteen result stores.
@@ -1670,16 +2129,27 @@ pub struct TickOutcome {
 }
 ```
 
-**One ordered vector, not two fields.** A `renames` and a `deletes`
-vector would lose the relative order of operations that settle in the
-same tick, and that order is load-bearing: rename `dir` → `newdir` and
-delete `dir/child.txt` can settle together, and reconciling the delete
-first targets a path that no longer exists while reconciling it second
-targets `newdir/child.txt`. Only one of those is right, and only an
-ordered sequence can express which.
+**One vector, not two fields — but NOT because it is ordered** (rev 8,
+F1). Rev 7 justified the single vector by claiming it preserved the
+relative order of mutations settling in the same tick. **That claim was
+false and is withdrawn**: `tick` (`src/async_runtime.rs:1003`) is
+`while let Ok(env) = self.main.try_recv()`, a drain of the reply bus
+with **no execution token**, so `resources` is in **bus-arrival order,
+which is not filesystem-mutation order** — a worker can complete, be
+descheduled before sending, and have a later mutation's reply arrive
+first.
+
+The vector stays because it is one homogeneous list of settled
+mutations that consumers dispatch on by kind, which keeps
+`PendingJob.resource` and the outcome the same shape. **Nothing in the
+reconciliation may depend on its sequence**, and §6 states the contract
+that makes that safe.
 
 `resources` carries **only** jobs that settled `PendingState::Complete`
 — a failed or cancelled mutation reconciles nothing, and fires no hook.
+Its documentation must say **bus-arrival order, not execution order**,
+in those words: a future consumer that reads "in settle order" and
+infers causality is the exact mistake rev 7 made.
 Settle identity and resource metadata still come out of **one**
 transaction, from the loop at `:1074-1108` that already borrows
 `pending` and reads `job.kind`. The ~17 in-crate `let _ = rt.tick();`
@@ -1794,12 +2264,32 @@ not gain a Lua handle.
   `"cannot kill the last remaining buffer"`. Deleting the file behind
   the only open buffer therefore deletes the file and **keeps** the
   buffer — reported, not silently ignored, and returned in `refused`.
-- **A mid-edit buffer refuses removal.** `BufferRegistry::remove`
-  returns `RegistryError::ConcurrentEdit` when `editing_in_progress()`,
-  leaving the registry untouched. Phase 1 having already redirected
-  windows, a partial kill is possible here; the reconcile must treat a
-  phase-1 failure as "keep the buffer" and not run phase 2, or callbacks
-  fire for a buffer that still exists.
+- **A mid-edit buffer refuses removal — and the refusal is NOT inert
+  (rev 8, F2).** `BufferRegistry::remove` returns
+  `RegistryError::ConcurrentEdit` when `editing_in_progress()` and
+  leaves the *registry* untouched — but by then `kill_buffer` has
+  already, in this order, dropped the id from `round_trip_buffers`,
+  **closed** any side window showing the buffer, and redirected every
+  remaining window onto a fallback with `text_view`, `cursor`,
+  `selection`, `overlays`, `view_top` and `goal_col` all reset. Rev 7
+  said to "treat a phase-1 failure as keep the buffer", which reads as
+  though skipping phase 2 restored something. **It does not** — it only
+  avoids firing `on_removed` for a buffer that still exists.
+
+  **So `reconcile_delete` preflights `editing_in_progress` before phase
+  1** and skips the buffer entirely, returning it in `refused`. The
+  preflight is *sound*, not merely cheap: phase 1 is entirely
+  `EditorCore`, which holds **no Lua handle** (C1), so nothing between
+  the check and `BufferRegistry::remove` can re-enter Lua and begin an
+  edit — the window that would make a preflight racy does not exist on
+  this path. #186's Q#RD2 moves the same predicate into its validation
+  phase for the same reason, so both lanes check it before mutating.
+
+  A transactional kill was rejected: it needs a compensation path
+  snapshotting and restoring window layout, side-window collapse and
+  round-trip membership, and compensation can itself fail. A check that
+  makes the failure unreachable is smaller than a rollback that handles
+  it.
 - **Neither failure aborts the reconciliation of other buffers.** A
   directory delete reaching twelve descendants must not stop at the one
   that is mid-edit.
@@ -1845,7 +2335,7 @@ alone.
 Rev 2 left this ambiguous, and the two options really do produce
 different primitive contracts. Rev 3 chooses the one symmetric with
 rename: **`remove` is harvested in the drain**, through the same
-`TickOutcome.resources` sequence, firing **`resource.deleted(path)`**.
+`TickOutcome.resources` list, firing **`resource.deleted(path)`**.
 `PendingJob` carries the path for `JobKind::FsRemove` in the same
 `Option<ResourceOp>` field it carries a rename's pair in (§5, R3) — one
 field, one enum, so the two cannot both be set.
@@ -1855,6 +2345,48 @@ must reconcile too, and dired firing the hook itself after its own
 `:await()` would protect only dired. The policy (what to delete) is
 dired's preflight; the mechanism (what to reconcile once the syscall
 lands) is the primitive's.
+
+### Reconciliation is order-independent, and says so (Q#DR29, new in rev 8)
+
+**Each settled mutation reconciles on its own. Nothing depends on the
+relative order of two mutations that were in flight simultaneously**, and
+the framing promises nothing about it — because `TickOutcome.resources`
+is bus-arrival order and the runtime establishes no execution order (§5,
+F1).
+
+That is safe rather than merely honest, for three verified reasons:
+
+- **Independent mutations commute.** Disjoint paths and disjoint
+  subtrees reconcile to the same registry state in either order, which
+  is every case the shipped consumers can produce.
+- **Interdependent concurrent mutations cannot arise from any production
+  path.** dired **serializes** — one coroutine per batch, awaiting each
+  op before dispatching the next (§9). `apply_resource_op` is
+  **synchronous on the main thread** and never enters the drain. And §2
+  verified `pmacs.fs.rename` and `pmacs.fs.remove` have **zero
+  production callers** besides tests.
+- **The primitive already instructs callers to serialize.**
+  `fs.lua:155-165`: *"If a package needs at-most-one-pending semantics
+  for mutations, it should serialize on the package side (await each op
+  before dispatching the next)."* §9 already cites this as why dired
+  does. A caller that ignores it owns the result.
+
+**Why no static ordering rule is offered.** It was worked out rather
+than waved away: rename `dir`→`newdir` racing delete `dir/child.txt`
+needs delete-then-rename if the delete ran first on disk, and
+rename-then-delete if the rename did. A fixed "deletes before renames"
+rule gets one right and the other wrong — the kill misses, the rename
+then rebinds the buffer onto a path whose file is gone, and it survives
+pointing at nothing. **There is no rule short of a real execution-order
+token**, which §11 defers with a checkable trigger.
+
+**The residue, stated:** a third-party package that fire-and-forgets two
+interdependent mutations, against the documented instruction, can leave
+a buffer bound to a stale path or kill one that should have been
+rebound. Recoverable, visible, and not data loss — but real. §13 pins
+the **independent** case in both arrival orders and deliberately pins no
+interdependent one, because a test cannot pin an order the mechanism
+does not establish.
 
 ### The four cases
 
@@ -1929,8 +2461,39 @@ Destructive operations confirm: `x`, `D`, and (in 2c) a recursive delete
 and an overwriting copy. There is no helper to do it with (C4).
 
 **Stage 2 adds `builtin/runtime/minibuffer.lua` defining
-`pmacs.minibuffer.confirm { prompt, on_yes }`**, loaded before
-`dired.lua` in `editor.rs`'s explicit sequence.
+`pmacs.minibuffer.confirm { prompt, on_yes, on_no, on_cancel }`**,
+loaded before `dired.lua` in `editor.rs`'s explicit sequence.
+
+**Three outcomes, because the substrate already has three** (rev 8,
+F5). Rev 7 exposed only `on_yes`, which cannot express §8's copy
+contract — where declining an overwrite **continues**, copying the
+non-colliding entries. There was no negative continuation to hang that
+on. And the underlying primitive is richer than the helper was:
+`pmacs.minibuffer.read` takes a required `on_accept` and an optional
+`on_cancel` (`src/lua_bindings/mod.rs:13403-13417`), and the session
+carries both (`src/minibuffer.rs:403-405`), with `cancel()` returning
+the on-cancel callback (`:353`). A prompt therefore has
+accept-affirmative, accept-negative and cancel — and rev 7 collapsed all
+three into "call `on_yes` or do nothing".
+
+| Outcome | Trigger | Runs |
+|---|---|---|
+| **yes** | `y` / `yes`, case-insensitive | `on_yes` |
+| **no** | any other accepted text, **including empty `RET`** | `on_no` |
+| **cancel** | `C-g` / Escape | `on_cancel` — **and nothing if it is absent** |
+
+The fail-closed default from Q#DR15 is unchanged: an empty `RET` is
+still not affirmative. It now has somewhere to go instead of being
+indistinguishable from silence.
+
+**Cancel does NOT fall through to `on_no`, and that is the decision
+worth arguing with.** For `x` and `D` the two are equivalent — decline
+and cancel both mean "delete nothing". For `C` they are not: declining
+means *copy the non-colliding entries*, a partial action, while
+cancelling means *abandon the batch*. Defaulting cancel to `on_no`
+would make `C-g` perform a partial copy, which is precisely what a user
+pressing `C-g` is trying to avoid. So cancel is inert unless a caller
+opts in, and §8's `C` flow is the only caller that does.
 
 **That sequence is a real edit to `src/editor.rs`** — around thirty
 `include_str!` entries at `src/editor.rs:395-660`, each naming its
@@ -2049,9 +2612,13 @@ against `handle.path`. `opts.parents` for `create_dir_all`.
    asked once, not once per file mid-batch.
 3. **Confirm.** With no collisions and one source, no prompt — a copy
    onto free space is not destructive. With collisions, **one** confirm
-   naming the count: `Overwrite 2 existing files? (y/n) `. Declining
-   **skips the colliding entries and copies the rest**, rather than
-   abandoning the batch, which matches §9's per-entry failure rule.
+   naming the count: `Overwrite 2 existing files? (y/n) `. **Declining**
+   (`on_no`, including an empty `RET`) **skips the colliding entries and
+   copies the rest**, rather than abandoning the batch, which matches
+   §9's per-entry failure rule. **Cancelling** (`on_cancel`, `C-g`)
+   **abandons the whole batch and copies nothing** — the distinction §7
+   exists to preserve, and the reason `C` is the one caller that passes
+   all three callbacks.
 4. **Dispatch** with `opts.overwrite` set only for the entries the user
    confirmed. The primitive still refuses an existing target without it,
    so the guard is enforced at both layers.
@@ -2202,6 +2769,20 @@ that deserve an undivided reviewer.
   but puts N blocking syscalls on the main thread for an N-entry batch.
   Note this is the *only* thing left of rev 6's orphaning story; the
   LSP half went away with #186 rather than being solved here.
+- **Two wider LSP-store holes the tombstone does not close** (new in
+  rev 8, F4). The fourteen `pub fn *_store()` accessors
+  (`src/lsp.rs:1031-1114`) each hand out an `Arc<Mutex<…>>` clone,
+  conferring unrestricted `set`/`clear`/`mark_stale` on any holder — the
+  fifteen Lua `clear` bindings already prove the write capability
+  crosses the FFI boundary, and nothing in the type system stops a
+  `set`. Separately, the `workspace/inlayHint/refresh` and
+  `workspace/semanticTokens/refresh` handlers
+  (`builtin/runtime/lsp.lua:1845,1853`) re-pull by iterating
+  `attachments` with **no cross-check against `documents`**, so a purge
+  can be followed by a fresh — and route-correlated, therefore
+  ungated — request for a URI the editor no longer holds. Both are
+  pre-existing, both are wider than a dired stage, and both would be
+  in scope for an LSP-lifecycle lane rather than this one.
 - **`pmacs.fs.remove` itself is guarded by neither lane** (new in rev 7,
   round 6). After both land, the refusal exists at the
   `apply_resource_op` primitive (#186) and in dired's policy layer
@@ -2433,9 +3014,15 @@ that deserve an undivided reviewer.
     implementation; this does.)*
 28. **False prefix**: renaming `/…/foo` does **not** rebind a buffer on
     `/…/foobar`.
-29. **Buffer name** follows the path, so the buffer list and statusline
-    show the new filename — and a buffer the user renamed by hand keeps
-    its own name.
+29. **Buffer name follows the path — tested in BOTH directions** (F3).
+    (a) A buffer opened by a **relative** path (name `foo.rs`, stored
+    path `/abs/dir/foo.rs`) gets its name updated, because the name
+    normalizes to the stored path. *(Rev 7's string-equality rule fails
+    this — it is the case that motivated the rewrite.)* (b) A buffer
+    with a **genuinely custom** name (`notes`) keeps it. *(A rule that
+    updated unconditionally, or matched on basename, fails this — it is
+    what stops the fix becoming a name-clobberer.)* Both arms are
+    required; either alone admits a wrong rule.
 30. **An attached LSP buffer with diagnostics present before the rename,
     shown in at least TWO windows** (H3): afterwards both windows render
     the **new** URI's diagnostics, the old URI's store is empty, and each
@@ -2448,6 +3035,22 @@ that deserve an undivided reviewer.
     gone, and **a response already in flight at rename time does not
     repopulate the old key** — the `pending_routes` purge and awaiter
     drain, without which the clear is undone by arrival.
+31b. **A late `publishDiagnostics` for the OLD URI does not resurrect
+    it** (F4): after the rename completes, feed the manager a
+    `textDocument/publishDiagnostics` notification naming the **old**
+    URI; the old key stays empty and the new URI's diagnostics are
+    unaffected. *(This is uncorrelated — it carries no request id — so
+    the `pending_routes` purge cannot see it, and item 31 passes with
+    the bug present. Fails against a `forget_uri` with no tombstone.)*
+    Its companion asserts the tombstone **does not over-reach**: a
+    `publishDiagnostics` for a **different**, never-opened URI is still
+    absorbed, which is what a membership gate would have broken.
+31c. **`pmacs.lsp.forget_uri`'s error contract** (P2): it **raises** for
+    an unknown server id, and **succeeds** for a URI with no state under
+    a known server. *(The second arm is the one that matters — the
+    subscriber fires for every renamed path, including buffers that
+    never attached, so an over-strict binding would turn the common case
+    into an error inside a hook.)*
 32. A rename **across project roots** re-runs `ensure_server` and the
     buffer ends up attached to a **different** server; a same-root rename
     reuses the existing one (#161's affinity key).
@@ -2466,11 +3069,18 @@ that deserve an undivided reviewer.
 
 **2b — the shared helpers**
 
-39. **`pmacs.minibuffer.confirm`** (Q#DR15, F5): an **empty `RET` does
-    not call `on_yes`**; `y`, `Y`, `yes`, `YES` all do; `n` and arbitrary
-    text do not. *(A typed-`n` test alone would not catch a completion
-    source being reintroduced — the empty-`RET` arm is the one that
-    detects it.)*
+39. **`pmacs.minibuffer.confirm` — all three outcomes** (Q#DR15, F5).
+    (a) An **empty `RET` does not call `on_yes`**; `y`, `Y`, `yes`,
+    `YES` all do; `n` and arbitrary text do not. *(A typed-`n` test
+    alone would not catch a completion source being reintroduced — the
+    empty-`RET` arm is the one that detects it.)* (b) **`on_no` runs**
+    for `n`, for arbitrary text, and for empty `RET` — the negative
+    continuation §8's `C` flow needs, which rev 7's helper could not
+    express and rev 7's acceptance could not observe. (c) **`on_cancel`
+    runs for `C-g`, and `on_no` does NOT**; with `on_cancel` omitted,
+    cancelling runs **nothing**. *(Fails against an implementation that
+    routes cancel through `on_no` — which would make `C-g` perform a
+    partial copy.)*
 40. **Serialization** (Q#DR16, F5): in a batch of N mutations, the second
     is **not dispatched until the first has settled**. Asserted by
     observing at most one in-flight fs job at any pump step — *not* by
@@ -2532,6 +3142,48 @@ that deserve an undivided reviewer.
     (R4): deleting the file behind the **only** open buffer keeps the
     buffer and says so; and a delete reaching a directory of buffers
     where one refuses removal still reconciles the rest.
+53b. **A mid-edit refusal leaves editor state UNCHANGED — three
+    separate assertions** (F2). With the buffer `editing_in_progress`,
+    displayed in an ordinary window, shown in a side window, and present
+    in `round_trip_buffers`, a delete reconciling it must leave **each**
+    of the following provably untouched, asserted individually rather
+    than as one compound check:
+
+    | # | Assertion | Bite — the mutation that must falsify it |
+    |---|---|---|
+    | i | the ordinary window still shows the buffer, with its `cursor`, `selection` and `view_top` intact | drop the preflight, so `kill_buffer` redirects the window to the fallback before `BufferRegistry::remove` refuses |
+    | ii | the **side** window is still open and still shows the buffer | drop the preflight, so `remove_side_window` collapses it first |
+    | iii | the buffer is still in `round_trip_buffers` (a semantic frontend still round-trips its keys) | drop the preflight, so `round_trip_buffers.remove` runs first — this is the **first** thing `kill_buffer` does and the easiest to miss |
+
+    Each bite is the same one-line deletion, but each assertion fails
+    independently, which is the point: a single compound assertion can
+    pass on two of the three and hide the third. *(Rev 7 specified none
+    of this — it said to treat the refusal as "keep the buffer", which
+    reads as though skipping phase 2 restored something. It does not.)*
+54. **Two INDEPENDENT concurrent mutations reconcile correctly in
+    either arrival order** (F1, Q#DR29): dispatch a rename and a delete
+    on **disjoint** paths fire-and-forget, pump, and assert the end
+    state; then repeat with the replies arriving in the opposite order
+    and assert the **same** end state. *(Pins that the contract really
+    is order-independent rather than accidentally order-sensitive.
+    Fails against a reconciliation that, say, resolves delete targets
+    against paths already rebound by a rename in the same drain.)*
+55. **`resource.renamed` and `resource.deleted` are `all-must-succeed`,
+    not short-circuit** (Q#DR28): with **two** subscribers registered
+    and the **first one raising**, the second still runs, and the error
+    is reported rather than swallowed. *(Fails against a `short-circuit`
+    registration, where the first subscriber's return would stop the
+    fan-out and silently prevent every later one from reconciling —
+    which no test asserting only "the hook fired" would catch.)*
+
+**No acceptance pins interdependent ordering, deliberately.** A test
+cannot pin an order the mechanism does not establish (§6, F1): the
+runtime records bus-arrival order and no execution token exists, so an
+"interdependent mutations reconcile in execution order" test would
+either be flaky or would pass by accident on a scheduler that happens to
+cooperate. This is the same discipline item 20 applies to H1's open
+dispatch-to-syscall interval — **state the gap, do not fake a pin for
+it.**
 
 **Bite obligations.** Each of these must fail against a stated mutation:
 
@@ -2658,10 +3310,19 @@ mark, operation and subscriber items.
   swept over `core.windows.values_mut()`, chosen over `set_uri` or
   re-attach because it reaches passive windows and **preserves overlay
   order by mutating in place**.*) (§5)
-- **Q#DR15** Confirmation is `pmacs.minibuffer.confirm` in a new
-  `builtin/runtime/minibuffer.lua`, with **no completion source**;
+- **Q#DR15** *(widened in rev 8, F5)* Confirmation is
+  `pmacs.minibuffer.confirm { prompt, on_yes, on_no, on_cancel }` in a
+  new `builtin/runtime/minibuffer.lua`, with **no completion source**;
   affirmative is `y`/`yes` case-insensitively and everything else —
-  including empty `RET` — is no. (§7)
+  including empty `RET` — is no. **Three outcomes, because
+  `pmacs.minibuffer.read` already has three**: accept-affirmative,
+  accept-negative and cancel. Rev 7 exposed only `on_yes` and so could
+  not express §8's copy contract, where declining **continues**.
+  **Cancel does not fall through to `on_no`** — with `on_cancel`
+  omitted, `C-g` runs nothing — because for `C` declining means *copy
+  the non-colliding entries* while cancelling means *abandon*, and
+  defaulting cancel to decline would make `C-g` perform a partial copy.
+  (§7, §8, §13 item 39)
 - **Q#DR16** Batches **serialize** (await each op), a per-entry failure
   does not abort, successful marks clear while failed marks persist, and
   the listing reverts **once** at the end. (§9)
@@ -2810,7 +3471,74 @@ mark, operation and subscriber items.
   needs `&Lua`, so `reconcile_delete` returns the killed ids and its
   caller runs phase 2; `EditorCore` gains no Lua handle. Both refusals
   (last buffer, mid-edit `ConcurrentEdit`) are reported and neither
-  aborts the rest of the batch. (§6, §13 items 51–53)
+  aborts the rest of the batch. **And the mid-edit case is preflighted,
+  not caught**: `kill_buffer` clears `round_trip_buffers`, closes side
+  windows and redirects ordinary windows **before**
+  `BufferRegistry::remove` can refuse, so a caught `ConcurrentEdit`
+  leaves editor state already damaged. `reconcile_delete` therefore
+  checks `editing_in_progress` **before phase 1** and skips the buffer
+  — sound because phase 1 is pure `EditorCore` and holds no Lua handle,
+  so nothing can re-enter and begin an edit between check and removal.
+  (§6, §13 items 51–53, 53b)
+- **Q#DR28** *(new in rev 8, from the round-7 sweep)* Both new hooks
+  register **`all-must-succeed`**, not `short-circuit`. `src/hook.rs`
+  defines three `HookKind`s and every declared hook picks one in
+  `builtin/hooks/default.lua`; rev 7 asserted only that the mechanism
+  existed and never said which. It matters: registered `short-circuit`,
+  a single `resource.renamed` subscriber returning falsey would stop the
+  fan-out and silently prevent every later subscriber from reconciling
+  — the typed-edit chain's trap arriving through an unlabelled door.
+  `all-must-succeed` reports a failing subscriber and still runs the
+  rest, and lets no subscriber claim the event. (§13 item 55)
+- **Q#DR29** *(new in rev 8, F1)* **Reconciliation is
+  order-independent, and the framing promises nothing about the relative
+  order of two mutations in flight simultaneously.**
+  `TickOutcome.resources` is **bus-arrival order, not execution order**
+  — `tick` is a `try_recv` drain with no execution token — so rev 7's
+  ordered-sequence justification is withdrawn. This is safe because
+  independent mutations commute, no production path can produce
+  interdependent concurrent ones (dired serializes; `apply_resource_op`
+  is synchronous; the fs primitives have zero production callers), and
+  `fs.lua:155-165` already instructs packages needing at-most-one-pending
+  semantics to serialize on their own side. **An execution-order token
+  under a mutation lock was rejected**: it would serialize every fs
+  mutation through one lock to close a hazard with no production
+  reachability and a documented caller-side remedy. Deferred with a
+  checkable trigger (§11). No static ordering rule is offered because
+  none works — the correct order depends on which mutation actually ran
+  first, which is exactly what is unknown. (§5, §6, §13 item 54)
+- **Q#DR30** *(new in rev 8, F3)* A buffer's name is **path-derived —
+  and therefore updated by a rename — iff the stored name, parsed as a
+  path and normalized, equals the buffer's stored normalized old path.**
+  Not string equality against the path, which rev 7 used: names are set
+  from `path.display()` **as given** while only `file_path` is
+  normalized, so a relative open leaves a short name that rev 7 would
+  have mistaken for user-chosen. The new name is written as the
+  normalized new path, so a relatively-opened buffer acquires an
+  absolute name — stated rather than hidden, and confined to the
+  statusline and buffer list. (§5, §13 item 29)
+- **Q#DR31** *(new in rev 8, F4)* Uncorrelated writers are gated by a
+  **bounded per-server tombstone**, not by document membership.
+  `forget_uri` records the forgotten `(sid, uri)`; an uncorrelated
+  absorb for a tombstoned URI is dropped; the tombstone clears on the
+  next `did_open` of that URI and at both server-teardown sites. The
+  census establishes that `publishDiagnostics` is the only uncorrelated
+  **notification** writer, but **not** the only uncorrelated writer —
+  `pub fn mark_document_stale` takes no `LspServerId` and creates URI
+  keys across three stores for every server. Two consequences the
+  tombstone must respect: **`diag_store` has zero correlated writers**,
+  so the route purge protects it not at all; and
+  **`DiagnosticStore.by_uri` is keyed by URI alone**, so the
+  diagnostics tombstone is URI-keyed rather than `(sid, uri)`-keyed, and
+  the forget path must also drop the URI's never-pruned `epochs` entry.
+  A membership gate (`absorb only if in documents`) was rejected because
+  servers legitimately publish for files never opened, and it would drop
+  all of them; the precedent for the chosen shape is
+  `client.cancelled_rids` (`src/lsp.rs:2549`), the same
+  forget-then-drop-late-arrivals set with a request id instead of a URI.
+  `DiagStore`'s existing `epochs` cannot serve: `set()` bumps it on
+  every write with no epoch parameter, so a late notification looks
+  current. (§5, §13 items 31b–31c)
 
 ## 16. Branch and PR plan
 
@@ -2840,29 +3568,28 @@ LSP-authored delete that destroys unsaved work. That is **PR #186's**,
 and 2a's body should say so and cite it rather than appearing to claim
 it.)*
 
-**Ledger note (corrected in rev 5, W6):** this framing branch
-deliberately touches **only** this file. Rev 4 said the durable records
-were held by open PR #169; **#169 merged** as `74301d1`, and its
-successor **#185 merged as `ad41cf1` during this re-scout**, so
-`docs/active-work.md`, `docs/agent-handoff.md`, and `COHERENCE.md` are
-now unheld. This branch still does not touch them — the ops lesson is
-that a standalone docs-refresh PR restarts the contention treadmill, and
-the ledger's own protocol puts the lane refresh with the work.
+**Ledger note (rewritten in rev 8 — P2; the rev 5 text was stale and
+self-contradictory).** Two things it got wrong and this corrects:
 
-**Two things the landed ledger now needs, and this PR is not the place
-for either.** `docs/active-work.md`'s dired Stage 2 lane still records
-this branch at head `ab42a79`, describes the document as *1,570 lines*,
-says *"the re-scout is under way"*, and states the rename census as
-**five** path owners. Rev 5 makes all four stale: the head has moved,
-the document is longer, the re-scout is done, and **the census is six**
-(§5, W5). That is the standing lesson restated — *a census is a reading,
-not a constant* — and it applies to the ledger's copy of this
-framing's numbers exactly as it applied to the framing's copy of the
-tree's. Whoever refreshes the lane should take the six-owner table from
-§5 rather than re-deriving it. Rev 6 removes the other half of what rev
-5 said here: Q#DR25 **left** this lane rather than adding scope to it
-(R1), and the ledger already records that at `docs/active-work.md:507`
-— which is how round 5 caught the framing contradicting it.
+- **This branch no longer touches only the framing file.** It has
+  carried `docs/active-work.md`'s dired Stage 2 lane since **rev 6**,
+  which is when the ledger PR (#185) merged and the lane moved onto this
+  PR. The rev 5 text still claimed single-file scope while the very same
+  revision was editing the ledger. The reason the lane rides this PR
+  rather than a standalone refresh is unchanged: with several PRs open,
+  a separate ledger PR re-conflicts on every merge, and the ledger's own
+  protocol puts a lane refresh with the work.
+- **The line counts were quoted, not measured.** Rev 5 described the
+  document as *1,570 lines* — a figure from two revisions earlier — and
+  the ledger in turn reported *~2,630*. **Measured at this revision:
+  `docs/dired-stage2-framing.md` is 3,624 lines and
+  `docs/active-work.md` is 981.** *A census is a reading, not a
+  constant*, and that applies to a framing's count of its own size
+  exactly as it applies to its count of the tree. Neither number above
+  is copied from anywhere; both were run against the tree being pushed.
+
+`docs/agent-handoff.md` and `COHERENCE.md` remain untouched by this
+branch.
 
 ### Ownership warning: 2a must not run concurrently with Journey Stage 1b
 
