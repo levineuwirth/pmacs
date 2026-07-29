@@ -1124,7 +1124,7 @@ pmacs.hook.add("buffer.after-edit", function()
   -- Stale suppression must stay keystroke-accurate even though the
   -- O(file) didChange send below is coalesced: render families
   -- anchored to pre-edit positions are hidden from this edit on.
-  pcall(pmacs.lsp._mark_document_stale, rec.uri)
+  pcall(pmacs.lsp._mark_document_stale, rec.server, rec.uri)
   -- Arc 1d: was this edit a typed character? The input-origin signal
   -- (see the trigger block below).
   local typed = pmacs.editor.this_command
@@ -1437,19 +1437,33 @@ local function apply_workspace_edit(ops)
     end
   end
   if #plan == 0 then return 0, 0, 0 end
-  local origin = active_buffer_path()
+  -- G1 — capture the origin BUFFER, not its path. A path captured here
+  -- is a plain Lua local, and no amount of reconciliation can reach an
+  -- already-captured local: when the batch renames the active file, the
+  -- old path no longer resolves, `find_or_open` hits
+  -- `resolve_target_buffer`'s NotFound arm, and that arm CREATES an
+  -- empty path-backed buffer and selects it. The user was returned to a
+  -- phantom file that never existed. The handle follows the rename for
+  -- free, because the buffer is what moved.
+  local origin_buf = pmacs.window.buffer()
   local edit_total, files, res_ops = 0, 0, 0
   -- Plan items fully applied before a failure. Q#RD3 permits partial
   -- application, so this is what stops a caller claiming "nothing was
   -- mutated" when something was.
   local applied_ops = 0
-  -- Return the user to where they invoked from — best-effort, since
-  -- that path may have just been renamed or deleted. Runs on the
-  -- FAILURE path too (Q#RD7): previously this ran only after a
-  -- successful loop, so a mid-batch refusal stranded the user in
-  -- whatever buffer the last applied op left active.
+  -- Return the user to where they invoked from. Runs on the FAILURE
+  -- path too (Q#RD7): previously this ran only after a successful loop,
+  -- so a mid-batch refusal stranded the user in whatever buffer the last
+  -- applied op left active.
+  --
+  -- **No path fallback (G1).** If the origin buffer is gone — the batch
+  -- deleted its file and reconciliation killed it — restore NOTHING.
+  -- The old code's path fallback is exactly what fabricated a phantom
+  -- buffer; "return the user somewhere plausible" is not worth inventing
+  -- a file that does not exist.
   local function restore_origin()
-    if origin then pcall(pmacs.buffer.find_or_open, origin) end
+    if not origin_buf then return end
+    pcall(pmacs.window.switch_buffer, origin_buf)
   end
   for _, item in ipairs(plan) do
     local ok, err
@@ -2882,3 +2896,116 @@ pmacs.command.define {
 
 pmacs.keymap.bind { scope = "global", sequence = "M-g n", command = "diag.next" }
 pmacs.keymap.bind { scope = "global", sequence = "M-g p", command = "diag.previous" }
+
+-- Resource reconciliation ---------------------------------------------------
+--
+-- dired Stage 2a, §5. A rename or delete moves or destroys a path that
+-- FOURTEEN URI-keyed store families, the `documents` mirror, the pending
+-- response routes and the attached diagnostic overlays are all keyed by.
+-- `EditorCore` reconciles the buffer's own path and name; these two
+-- subscribers reconcile the LSP layer, which is buffer-keyed here
+-- (`rec.uri` is cached per buffer and read at dozens of sites, so ONE
+-- rebind reaches all of them) and URI-keyed in Rust.
+--
+-- These subscribers are independent of every other `resource.renamed`
+-- consumer by construction: this one touches URI-keyed state, dired's
+-- touches its own handle table, and neither reads what the other wrote.
+-- That matters because `all-must-succeed` does NOT abort the fan-out —
+-- `run_all_must_succeed` collects each callback's error and continues —
+-- so a subscriber may not rely on a raising peer to stop the sequence,
+-- and the ordered teardown below is ordered INTERNALLY rather than by
+-- registration.
+
+-- Every attachment whose document is `path` or lies beneath it, as
+-- `{ key, rec, path }`. Resolved through `path_for_uri` and compared
+-- with `paths_related`, so the comparison is component-aware and runs on
+-- the same canonical form the buffer registry keys on.
+local function attachments_under(path)
+  local out = {}
+  for key, rec in pairs(attachments) do
+    local rec_path = rec.uri and pmacs.lsp.path_for_uri(rec.uri)
+    if rec_path and paths_related(rec_path, path) then
+      out[#out + 1] = { key = key, rec = rec, path = rec_path }
+    end
+  end
+  return out
+end
+
+pmacs.hook.add("resource.renamed", function(old_path, new_path)
+  if type(old_path) ~= "string" or type(new_path) ~= "string" then return end
+  for _, hit in ipairs(attachments_under(old_path)) do
+    local key, rec, old_uri = hit.key, hit.rec, hit.rec.uri
+    -- The buffer's own path was rebound before this hook fired, so ask
+    -- it rather than reconstructing the tail ourselves. A buffer that
+    -- somehow lost its path (killed, unbound) cannot be re-opened, and
+    -- falls through to the teardown-only path below.
+    local ok_path, new_buf_path = pcall(function() return rec.buffer:path() end)
+    local new_uri = (ok_path and new_buf_path) and file_uri_for(new_buf_path) or nil
+
+    -- 1. Flush any pending didChange for the OLD uri, so the server is
+    --    not left holding an edit it can no longer attribute.
+    flush_did_change_for(rec)
+    pending_did_change[key] = nil
+
+    -- 2. didClose the old uri — this removes the open-document
+    --    registration and nothing else.
+    pcall(pmacs.lsp.did_close, rec.server, old_uri)
+
+    -- 3. Purge the routes, drain their awaiters, and clear all fourteen
+    --    stores plus `documents` for the old key. Runs against the OLD
+    --    server, which matters when step 4 picks a different one.
+    pcall(pmacs.lsp.forget_uri, rec.server, old_uri)
+
+    if not new_uri then
+      attachments[key] = nil
+      styled_buffers[key] = nil
+      diag_viewed_buffers[key] = nil
+    else
+      -- 4. Re-run ensure_server. Server affinity keys on the detected
+      --    project root, so a rename ACROSS roots needs a different
+      --    server; a same-root rename reuses the existing one.
+      local sid = ensure_server(rec.language, new_buf_path)
+      if not sid then
+        attachments[key] = nil
+        styled_buffers[key] = nil
+        diag_viewed_buffers[key] = nil
+      else
+        -- 5. didOpen the new uri with the buffer's current text and a
+        --    fresh version. This also reclaims the tombstone for
+        --    exactly (server, new uri).
+        rec.server = sid
+        rec.uri = new_uri
+        rec.version = 1
+        local ok_text, text = pcall(buffer_text, rec.buffer)
+        pcall(pmacs.lsp.did_open, sid, new_uri, rec.version,
+          ok_text and text or "")
+        -- 6. Re-root the diagnostic overlays. `DiagnosticView.uri` is
+        --    set once at construction and is private, so this is the
+        --    only way to move it — and the sweep reaches PASSIVE
+        --    windows, which the attach path cannot, while preserving
+        --    each overlay's position in the composition order.
+        pcall(pmacs.diag._rename_resource, old_uri, new_uri)
+      end
+    end
+  end
+end)
+
+pmacs.hook.add("resource.deleted", function(path)
+  if type(path) ~= "string" then return end
+  for _, hit in ipairs(attachments_under(path)) do
+    local key, rec = hit.key, hit.rec
+    -- No flush: the document is gone, and shipping a didChange for a
+    -- file the server can no longer read buys nothing.
+    pending_did_change[key] = nil
+    pcall(pmacs.lsp.did_close, rec.server, rec.uri)
+    pcall(pmacs.lsp.forget_uri, rec.server, rec.uri)
+    -- Drop the record unconditionally. The buffer may be gone entirely
+    -- (an unmodified visited file is killed), in which case a retained
+    -- record is a dangling handle that `repull_for_attachments` would
+    -- iterate; and a modified buffer kept alive has no file to analyze
+    -- until it is saved, which re-attaches through the ordinary path.
+    attachments[key] = nil
+    styled_buffers[key] = nil
+    diag_viewed_buffers[key] = nil
+  end
+end)

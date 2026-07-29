@@ -163,6 +163,30 @@ end
 -- If a package needs at-most-one-pending semantics for mutations,
 -- it should serialize on the package side (await each op before
 -- dispatching the next). The fs primitive can't enforce that.
+--
+-- **And that is a CORRECTNESS precondition, not only a cancellation
+-- one (dired Stage 2a, Q#DR29).** A successful `rename` or `remove`
+-- reconciles the editor's path owners in the main-thread drain — buffer
+-- paths and names, the URI-keyed LSP state, the `resource.renamed` /
+-- `resource.deleted` hooks. That reconciliation is deliberately
+-- order-INDEPENDENT: the runtime drains the reply bus with `try_recv`
+-- and establishes no execution token, so a worker can finish first and
+-- be descheduled before sending, and reply order therefore does not
+-- recover filesystem execution order.
+--
+-- Independent mutations commute, so nothing is owed for them. But
+-- **mutations whose source/target paths overlap must be serialized by
+-- dispatching the next only after the previous handle settles.** There
+-- is no static ordering rule that would substitute: rename `dir` ->
+-- `newdir` racing delete `dir/child.txt` needs delete-then-rename if
+-- the delete ran first on disk and rename-then-delete if the rename
+-- did, and a fixed "deletes before renames" rule gets one of the two
+-- wrong — the kill misses, the rename then rebinds the buffer onto a
+-- path whose file is gone, and it survives pointing at nothing.
+--
+-- A caller that ignores this owns the residue: a buffer left bound to a
+-- stale path, or killed when it should have been rebound. Recoverable
+-- and visible, not data loss — but real.
 
 function fs.rename(from, to)
   if type(from) ~= "string" then
