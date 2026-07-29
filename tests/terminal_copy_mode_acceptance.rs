@@ -1109,17 +1109,9 @@ fn acc16g_a_line_collapsing_generated_write_clamps_view_top() {
     assert_eq!(top, 0, "the collapsed buffer has exactly one line");
 }
 
-/// Generated-buffer immutability Stage 1 — the **selection anchor** is a
-/// third window coordinate a generated rewrite invalidates, and clamping
-/// the cursor alone does not make the region safe.
-///
-/// **PROVISIONAL, and named as such.** This pins a defect found in
-/// review of PR #191; the rule belongs to Q#GB6, whose approved text
-/// (PR #188 revision 5) does not mention the anchor. A revision request
-/// carrying this defect is with that lane. This test stands in for the
-/// anchor clause of a revised Q#GB6 and must be reconciled with it —
-/// including its verdict of *drop* rather than *clamp* — when the
-/// revision lands. It is not an independent contract.
+/// Generated-buffer immutability Stage 1 criterion 8c [`main`] — the
+/// selection anchor is a third window coordinate normalized by Q#GB6's
+/// clamp-or-clear rule.
 ///
 /// `Window::region` orders `(anchor, cursor)`, so a stale anchor above a
 /// clamped cursor is still the high end of the region, and
@@ -1127,13 +1119,16 @@ fn acc16g_a_line_collapsing_generated_write_clamps_view_top() {
 /// before the fix: `assertion failed: end <= self.len()` at
 /// `src/rope.rs:145`, reached from `EditorCore::clipboard_copy`.
 ///
-/// *Bite:* delete the `drop_stale_selection` call from
-/// `notify_buffer_edit` and this panics rather than failing an
-/// assertion. Note the anchor must be the **high** end: with the anchor
-/// low and the cursor high the cursor clamp already covers it, so a
-/// forward selection passes with the bug live.
+/// Both outcomes matter: clamping a backward selection from 0..30 into
+/// 0..2 preserves the shortened region, while clamping a forward
+/// selection from 2..30 collapses both endpoints at 2 and clears it.
+/// Clearing every stale anchor passes the crash check but fails the
+/// first half; clamping without the collapsed check fails the second.
+///
+/// *Bite:* delete `clamp_cursor_and_selection` from
+/// `notify_buffer_edit`; the first copy reaches the stale-anchor panic.
 #[test]
-fn acc16h_a_shrinking_generated_write_drops_a_stale_selection_anchor() {
+fn acc16h_a_shrinking_generated_write_clamps_or_clears_the_selection() {
     let state = EditorState::new();
     exec(
         &state,
@@ -1165,21 +1160,54 @@ fn acc16h_a_shrinking_generated_write_drops_a_stale_selection_anchor() {
         "precondition: the buffer shrank"
     );
     assert_eq!(
+        core.active_window()
+            .selection
+            .map(|selection| selection.anchor),
+        Some(2),
+        "the stale anchor is clamped into the new extent"
+    );
+    assert_eq!(
+        core.active_region(),
+        Some((0, 2)),
+        "a non-collapsed selection survives as the shortened region"
+    );
+    assert!(
+        core.clipboard_copy(),
+        "the production consumer copies the valid shortened region"
+    );
+    drop(core);
+
+    // The other result: cursor clamping moves 30 to the anchor at 2, so
+    // the selected content is gone and no empty active selection remains.
+    exec(
+        &state,
+        r"pmacs.buffer.set_generated_contents(GEN, 'alpha\nbeta\ngamma\ndelta\nepsilon\n')",
+    );
+    {
+        let mut core = state.core.borrow_mut();
+        core.begin_selection(2);
+        core.set_cursor_byte(30);
+        assert_eq!(
+            core.active_region(),
+            Some((2, 30)),
+            "precondition: a forward 28-byte region"
+        );
+    }
+    exec(&state, r"pmacs.buffer.set_generated_contents(GEN, 'xy')");
+    let mut core = state.core.borrow_mut();
+    assert_eq!(
         core.active_window().selection,
         None,
-        "an anchor that no longer fits is dropped, not clamped"
+        "a cursor clamp that collapses the region clears the selection"
     );
-    assert_eq!(core.active_region(), None, "so there is no region left");
-    // The production consumer, not just the field: this is the call that
-    // panicked before the fix.
     assert!(
         !core.clipboard_copy(),
-        "copy must report 'no region' rather than slice past the rope"
+        "there is no collapsed region to copy"
     );
 }
 
-/// The same anchor gap in the **other** function, driven through its own
-/// real Lua path.
+/// Criterion 8c's second clamp site, driven through its own real Lua
+/// path.
 ///
 /// `EditorCore::rebuild_views_for` had the identical defect and is a
 /// separate exit: the `*help*` renderer rewrites end to end and calls it
@@ -1189,15 +1217,13 @@ fn acc16h_a_shrinking_generated_write_drops_a_stale_selection_anchor() {
 /// second exit rather than trusting that one call site implies the
 /// other.
 ///
-/// Same PROVISIONAL status as `acc16h`: the rule is Q#GB6's and its
-/// approved text does not yet carry the anchor.
-///
-/// *Bite:* delete the `drop_stale_selection` call from
-/// `rebuild_views_for` and this panics at `src/rope.rs:145`. `acc16h`
-/// stays green under that mutation, which is why this test exists
-/// separately.
+/// This site also asserts both halves: a clamp can preserve the
+/// shortened region, and an anchor that clamps exactly onto the cursor
+/// clears it. *Bite:* delete `clamp_cursor_and_selection` from
+/// `rebuild_views_for`; the first copy panics at `src/rope.rs:145` while
+/// `acc16h` stays green.
 #[test]
-fn acc16i_a_shrinking_view_rebuild_drops_a_stale_selection_anchor() {
+fn acc16i_a_shrinking_view_rebuild_clamps_or_clears_the_selection() {
     let state = EditorState::new();
     // 286 bytes, then 154: a real shrink through the help renderer.
     exec(
@@ -1227,14 +1253,50 @@ fn acc16i_a_shrinking_view_rebuild_drops_a_stale_selection_anchor() {
         short_len < long_len,
         "precondition: the help buffer shrank ({long_len} -> {short_len})"
     );
+    let short = u64::try_from(short_len).expect("non-negative");
+    let mut core = state.core.borrow_mut();
+    assert_eq!(
+        core.active_window()
+            .selection
+            .map(|selection| selection.anchor),
+        Some(short),
+        "the anchor is clamped to the shorter help buffer"
+    );
+    assert_eq!(
+        core.active_region(),
+        Some((0, short)),
+        "the non-collapsed region survives the rebuild"
+    );
+    assert!(
+        core.clipboard_copy(),
+        "copy consumes the clamped region without slicing past the rope"
+    );
+    drop(core);
+
+    // Grow the same help buffer, then choose an anchor that the next
+    // short render will clamp exactly onto the cursor.
+    exec(&state, "pmacs.help.show_command('cursor.down')");
+    {
+        let mut core = state.core.borrow_mut();
+        let long = u64::try_from(long_len).expect("non-negative");
+        core.begin_selection(long);
+        core.set_cursor_byte(short);
+        assert_eq!(
+            core.active_region(),
+            Some((short, long)),
+            "precondition: a region whose anchor exceeds the next extent"
+        );
+    }
+    exec(&state, "pmacs.help.show_command('editor.quit')");
+
     let mut core = state.core.borrow_mut();
     assert_eq!(
         core.active_window().selection,
         None,
-        "rebuild_views_for must drop an anchor that no longer fits"
+        "an anchor clamp that collapses the region clears the selection"
     );
     assert!(
         !core.clipboard_copy(),
-        "copy must report 'no region' rather than slice past the rope"
+        "the collapsed region is not retained as active-but-empty"
     );
 }

@@ -260,9 +260,13 @@ pmacs.command.define {
     local saved = pmacs.editor.cursor_line()
     local rows = p.on_refresh() or {}
     render(p, rows)
-    -- The wholesale rewrite leaves the window cursor at a stale byte
-    -- offset; re-enter the buffer to reset, then re-seat.
-    pmacs.window.switch_buffer(p.buffer)
+    -- `set_generated_contents` has already refreshed this window's
+    -- TextView. Re-seat through the editor primitives instead of
+    -- switching to the buffer it already shows: that redundant switch
+    -- rebuilt the TextView and hid a missing edit notification.
+    pmacs.editor.clear_selection()
+    pmacs.editor.set_view_top(0)
+    pmacs.editor.move_to_line(0)
     seat_cursor(p, saved)
   end,
 }

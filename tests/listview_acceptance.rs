@@ -377,46 +377,32 @@ fn s1_4_the_owners_refresh_still_works_after_the_lock() {
     );
 }
 
-/// **Stage 1 criterion 5 [fix-shape]**, as the framing states it: *an
-/// ordinary edit is refused by the INTERCEPT, not by the rope --- assert
-/// on the message text, which distinguishes them.* Bite: *an adopter
-/// that deletes the intercept and relies on the rope passes 1-4 and
-/// fails this.*
+/// Stage 1 criterion 5 [`main`, and also fix-shape] — the rope lock
+/// refuses an ordinary edit first, and the named intercept survives
+/// behind it.
 ///
-/// **PROVISIONAL --- this test does not currently satisfy that
-/// criterion, and does not claim to.** Implementing Stage 1 found the
-/// criterion's state unreachable, with the evidence below; a revision
-/// request is with PR #188, which owns this acceptance contract. Until
-/// that revision lands and is re-approved, this test stands in for
-/// criterion 5 by driving the same distinction at the only point where
-/// the tree can express it, and its wording follows #188 rather than
-/// replacing it. **The framing's own bite is preserved unchanged**:
-/// deleting `add_intercept` fails this test.
-///
-/// The evidence handed to #188: `Buffer::apply_edit`
-/// (`src/buffer.rs:773`) and `Buffer::begin_edit` (`:725`) call
-/// `ensure_writable()` as their FIRST statement, while the intercept
-/// chain runs later inside `apply_edit_inner` (`:1072`), so once the
-/// arc's lock is installed the rope always answers first. Measured on
-/// this branch, a self-insert on an adopted panel reports
-/// ``insert failed: buffer `*test-panel*` (id BufferId(n)) is read-only``
-/// and can never report the intercept's message. The stand-in lifts the
-/// lock Rust-side first --- the state the intercept still covers,
-/// including the window between `pmacs.buffer.create` and the first
-/// render.
+/// Both halves are required. The first asserts the exact
+/// `BufferError::ReadOnly` rendering and byte identity. The second lifts
+/// the lock Rust-side and distinguishes the intercept by its
+/// `intercept rejected the edit` message. Deleting `add_intercept`
+/// therefore passes the rope half and fails the lifted half.
 #[test]
-fn s1_5_provisional_an_ordinary_edit_is_refused_by_the_named_intercept() {
+fn s1_5_the_rope_lock_and_named_intercept_refuse_in_order() {
     let mut s = EditorState::new();
     open_test_panel(&mut s);
     let panel = id_of(&s, "*test-panel*");
+    let before = active_text(&s);
 
-    // The measurement reported to #188, pinned so it cannot rot while
-    // the revision is outstanding: with the lock on, the ROPE answers.
     press(&mut s, KeyCode::Char('z'));
-    assert!(
-        status(&s).contains("(id BufferId("),
-        "with the lock on, the ROPE refuses first; got {:?}",
-        status(&s)
+    assert_eq!(
+        status(&s),
+        format!("insert failed: buffer `*test-panel*` (id {panel:?}) is read-only"),
+        "with the lock on, the rope must provide the exact refusal"
+    );
+    assert_eq!(
+        active_text(&s),
+        before,
+        "the rope refusal leaves every byte unchanged"
     );
 
     set_read_only(&s, panel, false);
@@ -430,8 +416,16 @@ fn s1_5_provisional_an_ordinary_edit_is_refused_by_the_named_intercept() {
     );
     let st = status(&s);
     assert!(
-        st.contains("listview.lua") && st.contains("*test-panel* is read-only"),
-        "and refuse it by NAME, not with the rope's message; got {st:?}"
+        st.starts_with("insert failed: intercept rejected the edit:")
+            && st.contains("listview.lua")
+            && st.contains("*test-panel* is read-only"),
+        "the lifted path must carry the named intercept refusal; got {st:?}"
+    );
+    assert!(
+        !st.contains(&format!(
+            "buffer `*test-panel*` (id {panel:?}) is read-only"
+        )),
+        "the lifted path must not masquerade as the rope refusal: {st:?}"
     );
 }
 
@@ -498,17 +492,10 @@ fn s1_6_round_trip_input_survives_the_adoption() {
 /// The criterion says **for each adopter**, so both halves exist; the
 /// dired half is `dired_acceptance::dired_a_shrinking_repaint_reaches_the_window`.
 ///
-/// **This half asserts the content produced but does NOT carry the
-/// framing's mutation bite, and says so rather than being quietly
-/// dropped.** `listview.refresh` and `listview.open` both follow
-/// `render` with `pmacs.window.switch_buffer`, which rebuilds the
-/// window's `TextView` from scratch (`src/editor_core.rs:4854-4868`) and
-/// so repaints correctly even with the fan-out deleted --- on `main`
-/// with its `bypass_intercept` writes just as much as here. Verified by
-/// applying the mutation: this test stays green, while the dired half
-/// fails with `assertion failed: end <= self.len()`. That observation is
-/// filed with PR #188, which owns the criterion; it is recorded here,
-/// not resolved here.
+/// `listview.refresh` re-seats through the already-notified `TextView`;
+/// it deliberately does not rebuild the view by switching to the buffer
+/// it already shows. Deleting the notification fan-out therefore leaves
+/// the old line index live and this paint assertion bites.
 #[test]
 fn s1_7_a_shrinking_refresh_reaches_the_window() {
     let mut s = EditorState::new();
@@ -621,20 +608,14 @@ fn s1_10_the_disambiguation_limit_raises_rather_than_adopting() {
     assert_eq!(mine, "mine", "and touch nothing");
 }
 
-/// **Stage 1 criterion 11** --- a **disambiguated** panel still answers
+/// Stage 1 criterion 11 [`main`] — a **disambiguated** panel still answers
 /// `RET`, `g` and `q` (Q#GB18). The framing labels it `[main]` and names
 /// its bite as *Q#GB13 landed without Q#GB18*.
 ///
-/// **Recorded here as a MUTATION bite, because that is what it is.** On
-/// `main` this test fails at its disambiguation *premise* --- `main`
-/// adopts the foreign buffer, so the panel is never called
-/// `*test-panel*<2>` and the `RET`/`g`/`q` assertions are never reached.
-/// A revert therefore proves nothing about what the criterion asserts.
-/// The bite the framing actually names is a mutation of this branch:
-/// keep the disambiguation, restore a name-keyed `panel_for_buffer`.
-/// Verified --- under that mutation the test fails at the `g` assertion.
-/// The `[main]` label belongs to #188 and is reported to it; what the
-/// tree claims is corrected here either way.
+/// On `main` the test first fails at the disambiguation premise because
+/// ownership is absent. The framing's narrower pre-image is also pinned:
+/// keep disambiguation but restore a name-keyed `panel_for_buffer`, and
+/// the test reaches the consumer checks and fails at `g`.
 ///
 /// Disambiguation alone leaves the old lookup reading
 /// `panels["*test-panel*<2>"]` for a record stored under
@@ -676,17 +657,13 @@ fn s1_11_a_disambiguated_panel_still_answers_ret_g_and_q() {
     );
 }
 
-/// **Stage 1 criterion 12** --- the `q`-target capture is not inverted
+/// Stage 1 criterion 12 [`main`] — the `q`-target capture is not inverted
 /// (Q#GB18), which needs its own criterion because it fails **open**
 /// rather than closed. The framing labels it `[main]`.
 ///
-/// **Recorded here as a MUTATION bite**, for the same reason as
-/// criterion 11: on `main` this test fails at its disambiguation
-/// premise and never reaches the `q`-target assertion, so a revert is
-/// not evidence for what it asserts. Under the mutation the framing
-/// actually names --- a name-keyed `panel_for_buffer` beside the
-/// disambiguation --- it fails at the assertion it exists for,
-/// `q must never return into another panel`. Verified.
+/// On `main` the ownership premise fails first. With disambiguation kept
+/// and only `panel_for_buffer` restored to name-keyed lookup, the test
+/// reaches and fails the `q`-target assertion the criterion exists for.
 ///
 /// `listview.open`'s guard reads "capture the current buffer as the `q`
 /// target, but never another panel (chained panels would trap `q` in a

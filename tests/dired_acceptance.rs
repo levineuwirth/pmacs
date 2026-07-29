@@ -1812,45 +1812,33 @@ fn dired_revert_still_repaints_after_the_lock() {
     );
 }
 
-/// **Stage 1 criterion 5 [fix-shape]**, as the framing states it: *an
-/// ordinary edit is refused by the INTERCEPT, not by the rope --- assert
-/// on the message text, which distinguishes them.* Bite: *an adopter
-/// that deletes the intercept and relies on the rope passes 1-4 and
-/// fails this.*
+/// Stage 1 criterion 5 [`main`, and also fix-shape] — the rope lock
+/// refuses an ordinary edit first, and the named dired intercept
+/// survives behind it.
 ///
-/// **PROVISIONAL --- this test does not currently satisfy that
-/// criterion, and does not claim to.** The criterion's state proved
-/// unreachable during Stage 1; a revision request carrying the evidence
-/// is with PR #188, which owns this acceptance contract. Until that
-/// revision lands and is re-approved this test stands in for criterion 5
-/// at the only point where the tree can express the distinction, and its
-/// wording follows #188 rather than replacing it. **The framing's own
-/// bite is preserved unchanged**: deleting `add_intercept` fails this
-/// test.
-///
-/// The evidence handed to #188: `Buffer::apply_edit`
-/// (`src/buffer.rs:773`) and `Buffer::begin_edit` (`:725`) call
-/// `ensure_writable()` as their FIRST statement, while the intercept
-/// chain runs later inside `apply_edit_inner` (`:1072`), so once the
-/// arc's lock is installed the rope always answers first. The stand-in
-/// lifts the lock Rust-side, which is the state the intercept still
-/// covers, including the window between `pmacs.buffer.create` and the
-/// first paint.
+/// The rope half asserts the exact `BufferError::ReadOnly` rendering and
+/// byte identity. The lifted half distinguishes the intercept by its
+/// `intercept rejected the edit` message, so deleting `add_intercept`
+/// still fails with the rope guard intact.
 #[test]
-fn dired_provisional_keeps_the_named_intercept_beside_the_rope_lock() {
+fn dired_rope_lock_and_named_intercept_refuse_in_order() {
     let td = fixture_dir();
     let mut s = editor();
     open_ok(&mut s, td.path(), "nil");
     let listing = active_buffer_id(&s);
+    let name = active_name(&s);
     let before = active_text(&s);
 
-    // The measurement reported to #188, pinned so it cannot rot while
-    // the revision is outstanding: with the lock on, the ROPE answers.
     type_char(&mut s, 'z');
-    assert!(
-        status(&s).contains("(id BufferId("),
-        "with the lock on the rope refuses first; got {:?}",
-        status(&s)
+    assert_eq!(
+        status(&s),
+        format!("insert failed: buffer `{name}` (id {listing:?}) is read-only"),
+        "with the lock on, the rope must provide the exact refusal"
+    );
+    assert_eq!(
+        active_text(&s),
+        before,
+        "the rope refusal leaves every byte unchanged"
     );
 
     set_read_only(&s, listing, false);
@@ -1864,8 +1852,14 @@ fn dired_provisional_keeps_the_named_intercept_beside_the_rope_lock() {
     );
     let st = status(&s);
     assert!(
-        st.contains("dired.lua") && st.contains("is read-only"),
-        "and refuse it by NAME, not with the rope's message; got {st:?}"
+        st.starts_with("insert failed: intercept rejected the edit:")
+            && st.contains("dired.lua")
+            && st.contains("is read-only"),
+        "the lifted path must carry the named intercept refusal; got {st:?}"
+    );
+    assert!(
+        !st.contains(&format!("buffer `{name}` (id {listing:?}) is read-only")),
+        "the lifted path must not masquerade as the rope refusal: {st:?}"
     );
 }
 
