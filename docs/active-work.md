@@ -953,6 +953,63 @@ has **no branch and no framing yet**.
   at 42 insertions against 88 deletions — merging it would *revert*
   current documentation. The section said "whoever confirms the branch
   carries nothing unique removes the section"; this is that.
+
+## Test-improvement arc, lane 4 — process teardown stdin deadlock
+
+- Portable branch: `githubsucks/process-teardown-stdin-deadlock`,
+  worktree `../pmacs-hang`. Implements
+  `docs/process-teardown-stdin-deadlock-framing.md` (rev 2, one review
+  round).
+- **Base, measured rather than quoted:**
+
+  ```
+  $ git log --oneline -1 githubsucks/main
+  e003b81 Merge pull request #190 from levineuwirth/resource-op-delete-guard-impl
+  ```
+
+- Recovery from a clean checkout:
+  `git fetch githubsucks && git worktree add ../pmacs-hang
+  -b process-teardown-stdin-deadlock
+  githubsucks/process-teardown-stdin-deadlock`.
+- **The defect:** `RuntimeHandles::drop` joined its reader threads in
+  the `Drop` **body**, which runs before any field drops. The
+  `ChildStdin` sink lives in the `stdin` **field**, so it could only be
+  released after the join returned — and the join waited on readers
+  blocked in `read()` on pipes whose write ends the child still held,
+  because the child never got the stdin EOF that would have made it
+  exit. A closed cycle inside one function; teardown hung forever.
+- **This is the root cause of the `m4_5_basedpyright` hang** that has
+  parked `--workspace` sweeps (once for 2h26m) and forced
+  `-- --skip basedpyright` into every gate recipe. The handoff's §3
+  claim that the desktop's binary was broken is **retired by this PR**:
+  the binary was fine. `basedpyright-langserver` is a uv console script
+  that spawns bundled `node` and exits, so the real server is an
+  orphaned grandchild (`PPid: 1`) holding the pipes; a direct binary
+  like `clangd` is a genuine child whose pipes close on reap. That is
+  the whole of the "intermittent" story.
+- **Diagnosis method, because reproduce-first was the instruction:**
+  gdb thread stacks plus `/proc` fd forensics on a live wedged process,
+  both pipe ends identified in both processes, reproduced 5/5. Three
+  earlier reproductions were vacuous — see the handoff §5 lesson; the
+  shipped test carries two positive controls because of it.
+- Verification (each gate its own step, real exit status, no
+  `cmd | tail`): fmt 0; `git diff --check` 0; clippy 0; `--lib` 1864
+  passed; `--lib --features crdt` 2049 passed; **`m4_acceptance`
+  without the skip 150 passed in 2.60s with the basedpyright test
+  `ok`**; the ten PTY/REPL/worker suites of the framing's Bet 2 all 0
+  (98 tests); `PMACS_REQUIRE_GPU=1 -p pmacs-gpu` 202 passed. Bite
+  verified by revert: `ok` in 2.03s with the fix, FAILED on timeout at
+  10.00s without it, both controls passing first.
+- **Not fixed here, parked in the framing §5:** cancellable non-group
+  `read` (covers a child that ignores EOF, and one that stops draining
+  while `write_all` is blocked); the orphaned-server **leak** — post-fix
+  the server exits by cooperation, not enforcement.
+- `CLAUDE.md`'s `--skip basedpyright` entry is deliberately untouched.
+  Dropping it is a separate proposal owed evidence of repeated green,
+  and it must not precede the per-test timeout lane —
+  `PMACS_REQUIRE_PYRIGHT` stays unarmed in CI until then, or CI inherits
+  the unbounded hang this PR removes locally.
+
 ## Parked lane: kill-ring browser + persistence
 
 - Portable branch: `githubsucks/kill-ring-browser`
