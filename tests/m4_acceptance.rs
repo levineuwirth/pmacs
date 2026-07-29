@@ -1298,7 +1298,7 @@ fn fake_spec(label: &str) -> LspServerSpec {
 #[test]
 fn m4_5_rust_analyzer_initializes() {
     let Ok(_) = which_binary("rust-analyzer") else {
-        eprintln!("rust-analyzer not on PATH; skipping");
+        support::skip_or_fail("rust-analyzer", "PMACS_REQUIRE_LSP");
         return;
     };
     let (sup, mgr) = make_lsp_test_manager();
@@ -1338,7 +1338,7 @@ fn m4_5_rust_analyzer_initializes() {
 #[test]
 fn m4_5_basedpyright_initializes_and_negotiates_encoding() {
     let Ok(_) = which_binary("basedpyright-langserver") else {
-        eprintln!("basedpyright-langserver not on PATH; skipping");
+        support::skip_or_fail("basedpyright-langserver", "PMACS_REQUIRE_PYRIGHT");
         return;
     };
     let (sup, mgr) = make_lsp_test_manager();
@@ -1419,7 +1419,7 @@ fn assert_lsp_initializes_and_negotiates(
 #[test]
 fn m4_5_clangd_initializes_and_negotiates_encoding() {
     let Ok(_) = which_binary("clangd") else {
-        eprintln!("clangd not on PATH; skipping");
+        support::skip_or_fail("clangd", "PMACS_REQUIRE_LSP");
         return;
     };
     assert_lsp_initializes_and_negotiates("clangd", "cpp", "clangd", &["--background-index"]);
@@ -1431,7 +1431,7 @@ fn m4_5_clangd_initializes_and_negotiates_encoding() {
 #[test]
 fn m4_5_gopls_initializes_and_negotiates_encoding() {
     let Ok(_) = which_binary("gopls") else {
-        eprintln!("gopls not on PATH; skipping");
+        support::skip_or_fail("gopls", "PMACS_REQUIRE_LSP");
         return;
     };
     assert_lsp_initializes_and_negotiates("gopls", "go", "gopls", &[]);
@@ -3427,6 +3427,9 @@ fn m4_11_snippets_surface_through_completion() {
 
 use pmacs::definition::DefinitionKey;
 use pmacs::formatting::FormattingKey;
+
+#[path = "support/mod.rs"]
+mod support;
 
 /// Acceptance (1/3): a `textDocument/definition` request round-trips
 /// through the manager and lands in the definition store as a parsed
@@ -5536,7 +5539,7 @@ fn m4_27_real_gopls_analyzes_module_via_auto_attach() {
     use pmacs::editor::EditorState;
 
     let Ok(gopls) = which_binary("gopls") else {
-        eprintln!("gopls not on PATH; skipping");
+        support::skip_or_fail("gopls", "PMACS_REQUIRE_LSP");
         return;
     };
     let gopls = gopls.display().to_string();
@@ -5633,7 +5636,7 @@ fn m4_28_real_clangd_diagnostics_and_semantic_tokens_via_auto_attach() {
     use pmacs::editor::EditorState;
 
     let Ok(clangd) = which_binary("clangd") else {
-        eprintln!("clangd not on PATH; skipping");
+        support::skip_or_fail("clangd", "PMACS_REQUIRE_LSP");
         return;
     };
     let clangd = clangd.display().to_string();
@@ -5731,7 +5734,7 @@ fn m4_29_real_rust_analyzer_inlay_hints_via_auto_attach() {
     use pmacs::editor::EditorState;
 
     let Ok(rust_analyzer) = which_binary("rust-analyzer") else {
-        eprintln!("rust-analyzer not on PATH; skipping");
+        support::skip_or_fail("rust-analyzer", "PMACS_REQUIRE_LSP");
         return;
     };
     let rust_analyzer = rust_analyzer.display().to_string();
@@ -6880,7 +6883,7 @@ fn m4_real_json_provider_receives_config_and_reports_diagnostics() {
     use pmacs::editor::EditorState;
 
     let Ok(command) = which_binary("vscode-json-language-server") else {
-        eprintln!("vscode-json-language-server not on PATH; skipping");
+        support::skip_or_fail("vscode-json-language-server", "PMACS_REQUIRE_LSP");
         return;
     };
     let command = command.display().to_string();
@@ -6949,7 +6952,7 @@ fn m4_real_yaml_provider_pulls_config_and_reports_diagnostics() {
     use pmacs::editor::EditorState;
 
     let Ok(command) = which_binary("yaml-language-server") else {
-        eprintln!("yaml-language-server not on PATH; skipping");
+        support::skip_or_fail("yaml-language-server", "PMACS_REQUIRE_LSP");
         return;
     };
     let command = command.display().to_string();

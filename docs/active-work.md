@@ -13,10 +13,10 @@ precondition, satisfied deliberately rather than deferred. The
 bottom-panel lane is not removed: 2B-2 landing leaves 2B-3 and Stage 3
 ahead of it, so the lane is rewritten to the remaining plan.
 
-**One open PR has no lane here: #188**, the generated-buffer
-immutability framing. Its lane lives on its own branch and arrives with
-it, which is deliberate — with several PRs open, a lane written here for
-work that lands elsewhere re-conflicts on every merge.
+**#188's lane arrived with #188**, which is the point: with several PRs
+open, a lane written on `main` for work that lands elsewhere
+re-conflicts on every merge. Written on its own branch it costs one
+conflict, at the merge that would have happened anyway.
 
 The PTY terminate
 diagnostic (#176) was the last lane retained past its merge — retained
@@ -532,7 +532,7 @@ has **no branch and no framing yet**.
 
   ```
   $ git merge-base HEAD githubsucks/main
-  5e186c798236e244a0a6f68d5df79458b4856106
+  b7bf2c664475c36b60cf7c0361ea75cd3c3b2315
   ```
 
   That is the whole durable fact, and it is deliberately the ONLY
@@ -545,11 +545,12 @@ has **no branch and no framing yet**.
   still meaningful.
 
   **Re-measure the merge-base too before relying on it.** `main` moved
-  TWICE while this lane's round-1 fixes were being written — #192 and
-  then #193. `main` has branch protection now, so a stale base is not
-  merely untidy: all 12 checks must pass on the merging head, and a
-  conflicting PR builds no merge ref at all, so a green run from before
-  the move reads as current when it is not.
+  twice while this lane's round-1 fixes were being written (#192 and
+  #193), then twice more during round 2 (#188 and #194). This branch
+  integrates through #194. `main` has branch protection now, so a stale
+  base is not merely untidy: all 12 checks must pass on the merging head,
+  and a conflicting PR builds no merge ref at all, so a green run from
+  before the move reads as current when it is not.
 - **The framing's §8 branch plan is superseded and cannot be followed.**
   It says "one PR — #186, which becomes the implementation PR", written
   when #186 was still open. #186 merged as framing-only, so the
@@ -654,7 +655,304 @@ has **no branch and no framing yet**.
   `git fetch githubsucks && git worktree add ../pmacs-rd-impl
   -b resource-op-delete-guard-impl githubsucks/resource-op-delete-guard-impl`.
 
+## Generated-buffer immutability framing lane — PR #188 OPEN, PROPOSED
 
+- Portable branch: `githubsucks/generated-buffer-immutability`; worktree
+  `../pmacs-generated-immutability`. **PR #188**, base `main`, forked from
+  `githubsucks/main` @ `ad41cf1`, **integrated through `5e186c7`** —
+  #189 (clean), then #186 and #171 (`docs/active-work.md` conflict),
+  then #187 (the same file again, after it removed the two landed
+  framing lanes), #192 at merge commit `76cfaac`, and #193
+  (`docs/active-work.md` conflict again) after revision 7's first push.
+  Revision 6 was reviewed at head `55c3061`; revision 7 closes that
+  round. Framing only —
+  `docs/generated-buffer-immutability-framing.md`, revision 7, plus this
+  lane. **No runtime code, no protocol change.**
+- **PROPOSED — six review rounds closed (thirty-two findings,
+  twenty-two P1, ten P2). Not approved. Do not implement, do not merge.**
+- **Stage 1 implementation is PR #191, open. The boundary is explicit
+  and has already been needed twice:** #188 owns the **acceptance
+  contract**; #191 **adopts** criteria and may not restate, narrow, or
+  reclassify them. Where an implementation finds a criterion impossible,
+  the framing is revised and re-approved first. The **selection-anchor
+  clamp** is Q#GB6's to specify and #191's to implement, and both must
+  describe the same rule. Round 5 found #191 had locally restated Stage 1
+  criteria 5 and 7 while #188 still carried the originals — a divergence
+  neither lane's gates can catch, because each is green against its own
+  description.
+- **Round 5's two corrections that other lanes need:**
+  - **`Window::Selection::anchor` is an unclamped byte position and it
+    PANICS**, not merely dangles. `Window::region` (`src/window.rs:472-479`)
+    clamps neither endpoint; `region_bytes` (`src/editor_core.rs:4184-4191`)
+    hands the result to `Rope::slice`, which asserts at `src/rope.rs:145`.
+    Reproduced by #191: select 0..30, shrink the buffer to two bytes,
+    copy. The fix is **clamp-or-clear** in **both** `notify_buffer_edit`
+    (`src/editor_core.rs:1836-1850`, clamps nothing today) and
+    `rebuild_views_for` (`:1865-1882`, clamps cursor and view_top but not
+    selection) — and the rule is already in the tree for the terminal's
+    own selection type at `src/terminal/view.rs:715-721`. A stale anchor
+    also reaches the presence broadcast (`src/presence.rs:122-123`).
+  - **`Buffer`'s `on_edit` broadcast stops at the first error in FOUR
+    places**, so a view later in attach order keeps pre-edit offsets:
+    `src/buffer.rs:1288` (`apply_edit` / `apply_edit_skip_intercepts`),
+    `:1250` (the no-op early-return arm), `:1033`
+    (`apply_remote_crdt_op` — the replica import path), and `:1543`
+    (`broadcast_on_edit`, i.e. **undo and redo**). Any lane relying on a
+    buffer-attached view staying in step with the rope is affected.
+- **What it frames.** The class-wide half of the `set_generated_contents`
+  invariant that `docs/agent-handoff.md` §4 and `COHERENCE.md` §14 both
+  record as unfinished: `Buffer::undo` gates on `ensure_writable()`
+  (`src/buffer.rs:1302`) and never consults the intercept chain, so the
+  `add_intercept`-plus-`bypass_intercept` idiom leaves the rope writable
+  and every affected buffer emptiable. All five families were reproduced
+  by execution at `ad41cf1`, not inferred; the transcripts are in the
+  document's §0 and §2.
+- **Recommended primitive:** `Buffer::apply_generated_edit(op)`, exposed
+  as a `{ generated = true }` option on the existing Lua mutators, with
+  `set_generated_contents` reimplemented as its whole-buffer wrapper. It
+  is the only candidate in which the buffer is never observably unlocked.
+  **Revision 3 pins the transaction** (framing §3.4): its **own**
+  `run_buffer_edit` arm — **not** the bypass arm, which calls
+  `begin_edit`, which calls `ensure_writable` first (`src/buffer.rs:725`)
+  and would refuse every generated write to a locked buffer — one
+  `&mut Buffer` method with every exit named.
+  **Revision 4 replaces revision 3's cleanup predicate.** Cleanup is
+  driven by an explicit five-variant `GeneratedOutcome` reported by the
+  apply, **not** inferred from `revision`. Inferring it was wrong three
+  ways: a successful no-op (`src/buffer.rs:1245-1253` returns `Ok`
+  without bumping `revision`) kept history the contract forbids; a CRDT
+  mid-transaction failure happens **upstream of `revision` entirely**
+  (`:1140-1163`), so it was neither cleaned nor detected; and the
+  unconditional relock **locked a fresh buffer that was never
+  successfully written**. `NoOp` clears, `Rejected` restores the entry
+  lock state, `Diverged` clears nothing and surfaces. **Revision 5 keeps
+  the five outcomes but preserves the `Edit` in
+  `AppliedThenFailed { edit, error }`: the borrow-free Lua finisher fans
+  it out to window caches and replica mirrors before returning the
+  error.** Collapsing to `Result` inside `Buffer` was too early.
+  **Revision 6 replaces the delete→insert enumeration with a
+  `crdt_mutated` flag**, because `export_updates_since` can fail after
+  every successful CRDT op shape, and changes all four `Buffer`
+  broadcast loops to continue-and-retain-first-error.
+  **Revision 7 installs quarantine at common divergence detection
+  before generated or ordinary callers map the outcome.** The monotonic
+  poison blocks all three CRDT snapshot exporters, daemon-origin
+  queueing and every later owner-generated write; criteria 16c and 16d
+  pin the containment boundary. Repair remains deferred.
+- **Two stages, two PRs.** Stage 1 — listview ownership fix **plus its
+  identity-routing fix in the same PR**, dired and listview adopting the
+  shipped primitive, the window-coordinate clamp, and the fold decision.
+  Stage 2 — the new primitive, compile's nine write sites, the search
+  panel's four, compile/search ownership + routing, the path-backed
+  refusal plus `mark_clean`, and the terminal-only
+  `identity_protected` guard. **No Lua unlock ships.**
+- **Nine facts from this lane that other lanes need before it merges:**
+  - **`bypass_intercept` is the wrong inventory key.** It misses
+    `*buffer-list*`, `*help*` and `*workers*`, which are generated with
+    plain writes and no intercept at all. `docs/agent-handoff.md` §4's
+    four-row table inherits that blind spot — **and undercounts by one**:
+    `src/help.rs:354` `replace_help_buffer` is a fifth writer mechanism
+    (own find-or-create, `Buffer::apply_edit`, own `mark_clean`) writing
+    the **same** `*help*` buffer as `default.lua:1239`, which does not
+    mark clean. Two owners, one buffer, two copies of the name constant
+    across the FFI boundary.
+  - **`COHERENCE.md` §14's listview consumer list was wrong and is now
+    FIXED** — PR #189 (`main` @ `7586905`) landed exactly the correction
+    this lane measured. Nothing owed. Recorded so it is not re-asserted.
+  - **Three writers adopt any buffer sharing their name** —
+    `listview.lua:95`, `compile.lua:263`, `default.lua:861-868` — against
+    a rule the tree already states at `terminal.lua:300-305` and
+    implements at `dired.lua:476-504`. Measured: a foreign
+    `*references*` is clobbered and left permanently un-editable, and a
+    `pmacs.compile.run` that **raises on validation** still leaves a
+    foreign `*compilation*` un-editable. Today `M-x buffer.undo` — this
+    arc's bug — is the only recovery, so the arc must not lock these
+    buffers before fixing ownership.
+  - **Disambiguating a name breaks the sites that read one.** Census in
+    framing §2.10: 19 units across 14 grep lines, two genuinely broken.
+    `listview.lua:44`'s `panels[d.name]` (written under the *requested*
+    name at `:97`, read under the *actual* name) has **four** consumers,
+    and the fourth — `listview.open:118-123`'s never-capture-a-panel
+    guard — fails **inverted and silently**, capturing a panel as its own
+    `q` target. `compile.lua:216`'s `is_generated_buffer` has two.
+    `compile.lua`'s `slots` is **not** affected: keyed by a module
+    constant at both ends, with `slot_for_buffer` id-based.
+  - **`read_only` is one boolean serving THREE policies** (framing
+    §2.11): the generated lock; terminal identity
+    (`src/terminal/session.rs:305`); and, as a *reader*,
+    `src/lua_bindings/fold.rs:313`'s "is this a document buffer" test,
+    pinned by `tests/folding_acceptance.rs:570`. Consequence for any
+    lane: **locking a buffer silently disables `pmacs.fold.fold` on it**,
+    with the status `fold rejected: not a document buffer`.
+  - **The SHIPPED `set_generated_contents` can overwrite a live terminal
+    identity buffer.** It does `self.read_only = false` unconditionally
+    (`src/buffer.rs:546`), so it lifts a lock it did not install, writes,
+    and re-locks. Present on `main`, untested, unframed anywhere before
+    revision 4. Refused in Stage 2 by the `identity_protected` field —
+    an **intrinsic** flag marked once by a crate-private monotonic
+    `mark_identity_protected()` in `TerminalSession::open`, never written
+    by `set_read_only`. Revision 3 tried to infer this from the lock's
+    provenance instead; that broke the lift-and-restore idiom at
+    `tests/terminal_copy_mode_acceptance.rs:578-584`, and the general
+    lesson is that a **derived** fact must be maintained by every
+    mutation of what it derives from — and `set_read_only` is `pub`.
+  - **`acc16e` is `crdt`-gated and is the only shipped consumer of the
+    lift-and-restore idiom.** `cargo test --test
+    terminal_copy_mode_acceptance` **without** `--features crdt` never
+    compiles it, so a green run of that suite proves nothing about the
+    seam. Any lane touching `read_only` semantics must run it with the
+    feature and confirm `acc16e` is in the count.
+  - **`identity_protected` is not generated-lock provenance.** Revision
+    4 tried to use “not a terminal identity buffer” as proof that the
+    generated primitive installed the lock; it is not. Revision 5
+    therefore removes `pmacs.buffer.unlock_generated` from the arc
+    entirely. Wdired's future generated→editable transition remains
+    dired Stage 3 work and must be owner-specific or use the eventual
+    lock-policy enum.
+  - **The CRDT `Replace` mid-transaction divergence is real and
+    unowned.** `crdt.delete` then `crdt.insert` (`src/buffer.rs:1140-1163`);
+    if the first succeeds and the second fails, the code's own comment
+    says "the CRDT is mid-transaction ... This is an invariant
+    violation." It reaches `apply_edit` and `apply_edit_skip_intercepts`
+    today and is reported as an ordinary `CrdtRejected`, so nothing
+    distinguishes it. This lane names and contains it; **repair is
+    deferred and unowned.** Revision 6 makes classification total with a
+    `crdt_mutated` flag: any later error, including
+    `export_updates_since` after `Insert`, `Delete` or `Replace`, is
+    `Diverged`. Revision 7 installs a common monotonic poison before
+    either generated or ordinary API mapping, blocks
+    `initial_target_snapshot`, `send_buffer_snapshots`,
+    `export_buffer_snapshot` and `queue_daemon_origin_crdt_op`, and
+    rejects every later owner-generated write with `CrdtQuarantined`.
+    Criteria 16c and 16d fault-inject the complete boundary under
+    `cargo test --lib --features crdt`; there is no public
+    fault-injection API and no four-variant fallback.
+- **Overlap warning.** Stage 2 touches `src/lua_bindings/mod.rs`'s buffer
+  mutator bindings and `src/buffer.rs`. Do not run it concurrently with
+  the `apply_resource_op` lane or the bottom-panel 2B work without
+  assigning those files to one lane first. The framing itself touches
+  neither.
+- **Cross-lane, settled, not re-decided here.** #186 owns the urgent
+  pre-filesystem refusal for synchronous `apply_resource_op`; #171 later
+  owns full post-delete lifecycle reconciliation, including the async
+  race where a buffer becomes modified after dired dispatch. **#171's
+  Q#DR25 is deferred INTO this lane** — confirmed against #171 revision 7
+  (`fd7ae37`), which states that dired's listing becoming immutable is
+  "owned by the `generated-buffer-immutability` lane" and that "Stage 2
+  does not implement it, does not gate on it, and carries no acceptance
+  for it." This lane's Stage 1 claims that work. **Neither ordering
+  conflicts**: #171 Stage 2b changes `paint`'s callers, this lane changes
+  `paint` itself. Revisions 1 and 2 of this framing never mentioned
+  Q#DR25 at all; revision 3 §9b records it.
+- **Re-measured at `ad41cf1` while scouting: 276 CRDT-dark tests**
+  (3,251 vs 3,527), by
+  `cargo test --all-targets --no-default-features --features lua54[,crdt] -- --list | grep -c ': test$'`.
+  Recorded here because the section above asks for exactly that and
+  warns against quoting a stale figure; it does not replace that
+  section's per-target census, which was not re-derived.
+
+## Test-improvement arc, lane 2 — silent-skip arming
+
+- Portable branch: `githubsucks/silent-skip-arming`, worktree
+  `../pmacs-skiparm`. Implements `TEST_IMPROVEMENT.md` §1.2 and §5.4.
+- **Base, measured at write time rather than quoted:**
+
+  ```
+  $ git log --oneline -1 githubsucks/main
+  5e186c7 Merge pull request #193 from levineuwirth/test-improvement-audit
+  ```
+
+  The previous revision of this entry said "base measured at write
+  time, pasted below" and then pasted nothing: the script meant to
+  substitute it reported success and silently matched no text, and the
+  claim was not re-read. Recorded because it is the same defect this
+  ledger keeps catching one level up — **asserting a measurement is not
+  making one, and a tool reporting success is not the measurement
+  either.**
+- Recovery from a clean checkout:
+  `git fetch githubsucks && git worktree add ../pmacs-skiparm
+  -b silent-skip-arming githubsucks/silent-skip-arming`.
+- **The defect:** `let Ok(_) = which_binary(x) else { eprintln!(..);
+  return; }` reports GREEN when the tool is absent, and CI installed
+  none of the tools. A block of real-language-server and multi-shell
+  tests had therefore **never once executed their bodies** in CI while
+  reporting success. A suite that cannot distinguish "passed" from
+  "never ran" is worse than a missing one, because it reads as
+  coverage.
+- **The fix is the project's own pattern.** `PMACS_REQUIRE_*` already
+  makes a missing GPU fatal for `vterm_stage3_acceptance`; this adds
+  `PMACS_REQUIRE_LSP`, `PMACS_REQUIRE_SHELLS` and `PMACS_REQUIRE_LUA`,
+  plus the CI step that installs the tools. Per-tool variables, not one
+  blanket flag, so a tool that must stay unarmed keeps its decision
+  visible at the call site.
+- **`basedpyright` is deliberately NOT installed and NOT armed.** Its
+  test has no timeout and hangs forever — root cause is the
+  non-interruptible reader-thread join in `RuntimeHandles::drop`,
+  already a named deferral in `src/process.rs`. The `test` job has no
+  `timeout-minutes` either. Arming it today would trade a vacuous green
+  for a six-hour hang across four legs. `PMACS_REQUIRE_PYRIGHT` exists
+  and is never set, so the flip is one line once lane 4 (the hang) and
+  lane 3 (timeouts) land. **Do not arm it before both.**
+- **A trap found while writing the workflow, not after:** the natural
+  Actions idiom `${{ runner.os == 'Linux' && '1' || '' }}` sets the
+  variable to the EMPTY STRING elsewhere, and `var_os().is_some()` is
+  true for `Some("")`. That would have armed the guard on exactly the
+  runners with no tools installed. The helper therefore treats empty as
+  unset. `PMACS_REQUIRE_GPU` has the same latent shape and is safe only
+  because it is set literally.
+- **Verified by execution in all three states**, on a tool genuinely
+  absent from this machine (`vscode-json-language-server`): unset ->
+  skips green; armed -> hard failure naming the CI step; empty string
+  -> skips green. The armed failure is the bite, and on `main` it
+  cannot occur because no guard exists.
+- **The tests pass when they actually run** — which was the open
+  question, since none of them had. Armed locally: 11 `m6_5` + 8 `m6_8`
+  REPL tests green, and all six real-LSP tests (clangd x2, gopls x2,
+  rust-analyzer x2) green individually.
+- **rust-analyzer is installed in the Linux-gated step, not via the
+  toolchain action's `components:`.** The first revision put it there,
+  which applies to *every* matrix leg — and **presence, not
+  `PMACS_REQUIRE_LSP`, is what decides whether a gated test body
+  runs**. That would have executed the two rust-analyzer tests on macOS
+  for the first time ever, on the legs that are simultaneously the CI
+  critical path and the documented flake surface, while this entry
+  claimed Linux only. The variables not being set there would only have
+  meant absence was tolerated; it would not have kept the tests
+  skipped. Text and workflow now agree.
+- **Tool versions are pinned** (`gopls@v0.16.2`,
+  `vscode-langservers-extracted@4.10.0`,
+  `yaml-language-server@1.15.0`). `@latest` and bare `npm install -g`
+  make CI drift with upstream releases, so a bad publish breaks CI with
+  no commit here to bisect against. Caching the built `gopls` on the
+  pinned version is a follow-up, not done here.
+- **§1.2 is NOT fully closed by this lane.** The guards arm the
+  *entry* skip only. `tests/m4_acceptance.rs`'s mid-test rust-analyzer
+  bail ("workspace likely still indexing; skipping") survives, so even
+  armed, that test's only assertion can still vanish under load —
+  precisely when a regression would show. Mid-test skips are their own
+  shape and want their own pass.
+- **Not this lane's to fix, recorded so it is not mistaken for
+  oversight:** the generated-buffer immutability lane above still reads
+  "PR #188 OPEN, PROPOSED" and #188 has merged. Rule 4 forbids
+  relabelling it and permits removal only once its durable facts reach
+  `docs/agent-handoff.md`, which #188 did not touch — it changed the
+  framing and this ledger only. So the absorption is genuinely owed,
+  and the natural carrier is the arc's own next PR (#191, Stage 1),
+  not a testing lane reaching across into someone else's arc.
+- **Follow-up owed after this merges:** delete
+  `githubsucks/handoff-2026-07-20`. Removing the documentation lane
+  removes the only pointer to that branch, so nothing will otherwise
+  remind anyone it still exists on the remote.
+- Linux only for now, deliberately: macOS needs the brew equivalents
+  and roughly doubles install cost on the slowest matrix leg. The
+  variables stay unset there, so those tests skip cleanly.
+- Also removes the **documentation lane**, whose disposition the ledger
+  left undecided pending confirmation that its branch carried nothing
+  unique. Confirmed by measurement: `githubsucks/handoff-2026-07-20` is
+  **1 ahead, 365 behind**, and its entire unique diff is four doc files
+  at 42 insertions against 88 deletions — merging it would *revert*
+  current documentation. The section said "whoever confirms the branch
+  carries nothing unique removes the section"; this is that.
 ## Parked lane: kill-ring browser + persistence
 
 - Portable branch: `githubsucks/kill-ring-browser`
@@ -676,32 +974,6 @@ git worktree add --track \
   ../pmacs-kill-ring-browser \
   githubsucks/kill-ring-browser
 ```
-
-## Documentation lane — STALE, AND ITS DISPOSITION IS UNDECIDED
-
-> **Measured 2026-07-28, not inferred:** `githubsucks/handoff-2026-07-20`
-> is at `c11d7e7`, **1 commit ahead of `main` and 320 behind**. Its
-> whole diff against `main` is four documentation files
-> (`docs/active-work.md`, `docs/agent-handoff.md`,
-> `docs/roadmap-2026-07.md`, `docs/vterm-framing.md`), every one of
-> which has been rewritten repeatedly since by the landed-doc PRs
-> #156/#168/#169/#172/#180. Rule 4 removes a lane on merge *or
-> abandonment*, and this one looks abandoned in substance — but "looks
-> abandoned" is not the same as a decision, and no PR was ever opened
-> for it. **This snapshot deliberately annotates rather than deletes:
-> whoever confirms the branch carries nothing unique removes the
-> section.** The bullets below are its original claims, preserved as
-> written and now unverified.
-
-- Portable branch: `githubsucks/handoff-2026-07-20`
-- Carries synchronized `AGENTS.md` / `CLAUDE.md`, this ledger, the
-  durable handoff refresh, and the keybinding reference correction.
-- It changes no runtime code.
-- Review and merge this documentation branch separately; it must not be
-  folded into a feature framing branch.
-- Now also absorbs both landed arcs: Vterm Stage 1 (#126) and the config
-  registry (#127). Canonical `main` is merged into it up to `2e37c04`,
-  so its diff against `main` is documentation only.
 
 ## Closed since the last snapshot
 

@@ -68,6 +68,9 @@ use pmacs::editor::EditorState;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+#[path = "support/mod.rs"]
+mod support;
+
 // ---------------------------------------------------------------------------
 // Test harness
 // ---------------------------------------------------------------------------
@@ -94,8 +97,10 @@ fn locate_lua() -> Option<PathBuf> {
             }
         }
     }
-    eprintln!(
-        "skipping: lua/luajit not on PATH (set PMACS_TEST_LUA or PMACS_TEST_LUAJIT to override)"
+    support::skip_or_fail_overridable(
+        "lua/luajit",
+        "PMACS_REQUIRE_LUA",
+        "PMACS_TEST_LUA or PMACS_TEST_LUAJIT",
     );
     None
 }
