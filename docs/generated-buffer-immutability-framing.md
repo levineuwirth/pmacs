@@ -3,6 +3,94 @@
 **PROPOSED — needs explicit user approval before implementation. DO NOT
 implement, DO NOT merge.**
 
+**Revision 4 — scouted against canonical `githubsucks/main` @ `7586905`,
+2026-07-28.** Every count in this document was re-measured at this
+revision; the command output is in the revision-4 block below.
+
+## Revision 4
+
+**Answers review round 3 on `8e032d7` — three P1, two P2 — and two sweeps
+the review asked for by class. It withdraws three of revision 3's own
+decisions. All five findings are confirmed; none is re-litigated.**
+
+| finding | the decision |
+|---|---|
+| **P1-1** — the revision predicate is wrong in two directions | Confirmed, **and it is wrong in three.** §3.4 is rewritten around an **explicit `GeneratedOutcome`** reported by the apply instead of a predicate inferred from `revision`: five variants, each with its own cleanup, tabulated. Direction A (successful no-op) is fixed by restating the invariant as a property of the **buffer** — *a generated-locked buffer carries no history* — so `NoOp` clears, which needs no reference to `revision` and is therefore mode-independent. Direction B (CRDT mid-transaction) gets its own `Diverged` variant that **clears nothing and surfaces**, because clearing would destroy the last local record of the pre-edit rope. **Third direction, found while fixing the other two and not reported by the review:** revision 3's unconditional relock **locked a fresh buffer that was never successfully written** — a mid-codepoint generated insert on a writable `*scratch*` returned `Err` *and* left it read-only. `Rejected` now restores the entry value. |
+| **P1-2** — criteria 15-16 never enter the transaction | Confirmed, and the contradiction was internal: revision 3 argued in §3.4 that pre-validation makes an invalid range cost nothing, then used an invalid range to test the post-apply cleanup. Both criteria are rewritten around a **valid** write that fails at the `on_edit` broadcast, staged with a Rust-side `FailingView` (`pmacs::view::View` is `pub`, `src/view.rs:221`; `Buffer::attach_view` is `pub`). Criterion 16 splits into relock-on-failure **and** no-lock-on-refusal, which §3.4 now answers differently. New 16b and 16c cover the two P1-1 directions. **Rule adopted: every criterion names the exit it drives the implementation to, and that exit must be inside the mechanism under test.** |
+| **P1-3** — provenance invalidates the lift-and-restore seam | Confirmed. **Q#GB15's `generated_lock` is withdrawn.** The defect is not the rule's details but that a *derived* fact must be maintained by every mutation of what it derives from, and `set_read_only` is `pub`. Replaced by **`identity_protected`** — a property of what the buffer *is*, set once by `TerminalSession::open`, **never written by `set_read_only`**. `tests/terminal_copy_mode_acceptance.rs:578-584`'s lift/upgrade/restore cycle is transparent to it, so Q#GB12 and Stage 2 criterion 4 need no change. The `crdt`-gated terminal suite is now named explicitly in §10. |
+| **P2-4** — search registration adds a hard dependency on `compile.lua` | Confirmed. Revision 3 replaced an existing *guarded, optional* dependency (`default.lua:991-994`'s triple check) with an unguarded call. Q#GB18 is rewritten to **symmetric guarded optionality**: each module answers for its own buffers and consults the other through the guard shape already in the tree. That also removes the teardown obligation revision 3's registry introduced. New Stage 2 criterion 21 pins the minimal harness. |
+| **P2-5** — fold criterion 13 contradicts its classification | Confirmed. If dired folds successfully on `main`, asserting `false` **fails** on `main`, so `[fix-shape]` was the wrong label. Split into **13a `[main]`** (the behaviour change, falsifiable by revert) and **13b `[mutation]`** (the status string, whose pre-image cannot be `main` because on `main` the call succeeds and sets no status). |
+
+**Sweep D — rules spanning the v0.1/CRDT boundary or the
+fresh-lock/existing-lock boundary (obligation 1).** The review is right
+that P1-1 and P1-3 are one class: *a rule derived from one mechanism and
+applied to a second that does not share its ordering.* **13 rules
+examined, 3 broken, 1 verified that looked at risk.**
+
+| # | rule | boundary | verdict |
+|---|---|---|---|
+| 1 | cleanup keyed on `revision` | v0.1 / CRDT | **BROKEN** — P1-1 |
+| 2 | `clear_history` clears whichever history exists | v0.1 / CRDT | clean — reads both, `src/buffer.rs:558-566` |
+| 3 | Q#GB4's O(1) clear argument | v0.1 / CRDT | clean — in CRDT mode `self.undo` is bypassed entirely (`:1268-1272`), so the "at most one entry" premise is vacuously true rather than wrong |
+| 4 | Stage 2 criterion 4 asserts `Err(NothingToUndo)` | v0.1 / CRDT | **verified, not assumed** — `undo_crdt_mode` returns `BufferError::NothingToUndo` when the manager reports nothing undone (`src/buffer.rs:1374-1376`), so the same assertion is correct in both modes |
+| 5 | §3.3 "CRDT behaviour: nothing new" | v0.1 / CRDT | corrected — true except for `Diverged`; §3.4 now says so |
+| 6 | Q#GB10's `mark_clean` | neither | clean — `is_modified` is mode-independent |
+| 7 | Q#GB6's coordinate clamp | neither | clean |
+| 8 | criterion 10's coverage rule | v0.1 / CRDT | tightened — it now names which criteria are irreducibly single-configuration |
+| 9 | refuse "someone else's lock" by provenance | fresh / existing lock | **BROKEN** — P1-3 |
+| 10 | relock unconditionally | fresh / existing lock | **BROKEN** — found here, not reported; a refusal locked a buffer nobody wrote |
+| 11 | Q#GB5's empty `set_generated_contents` in `ensure_slot` | fresh / existing lock | clean **only because** Q#GB13 makes the buffer fresh by construction — and it is also the concrete caller that made P1-1 direction A load-bearing rather than theoretical; the dependency now runs both ways and is stated in Q#GB5 |
+| 12 | `unlock_generated`'s refusal | fresh / existing lock | follows 9; fixed with it |
+| 13 | Q#GB2's `generated` implies bypass | neither | clean |
+
+**Sweep E — every criterion added in revisions 3 and 4, audited for
+whether the state it asserts is reachable by the operation it performs
+(obligation 2).** This is the vacuous-criterion class, which this arc has
+now shipped **twice** — revision 2's Stage 2 criteria 3-5, then revision
+3's 15-16. **19 criteria audited, 3 defects, all fixed here.**
+
+| criterion | reachable by its own operation? |
+|---|---|
+| S1-6 (round-trip, 3 halves) | yes — and (c) is what makes (b) non-vacuous |
+| S1-11 (disambiguated panel keys) | yes — foreign buffer first, panel opens as `<2>` |
+| S1-12 (`q`-target not inverted) | yes — needs the two-panel sequence, which is why it is separate from 11 |
+| S1-13 (fold) | **MISCLASSIFIED** — P2-5; split into 13a/13b |
+| S1-14 (structural) | n/a |
+| S2-6 (four surfaces) | yes |
+| S2-13 (unlock, 3 halves) | yes — the terminal half needs a real terminal, which the copy-mode suite already opens |
+| S2-14 (refuse a foreign lock) | yes — fails on `main` |
+| S2-15 (flag cleared on error) | **VACUOUS** — P1-2; rewritten around `FailingView` |
+| S2-16 (relock on error) | **VACUOUS** — P1-2; rewritten and split |
+| S2-17 (invalid range keeps history) | yes — and it is the one criterion for which exit 4 *is* the mechanism under test, so it stays as written |
+| S2-18 (re-entrant refused) | yes — phase 2 of `run_managed_edit` releases the borrow (`src/lua_bindings/mod.rs:1477-1487`), so the inner call reaches the buffer and finds the flag set |
+| S2-19 (`is_generated_buffer` disambiguated) | yes |
+| S2-20 (structural) | n/a |
+| **new in rev 4:** 13a, 13b, 16 (2nd half), 16b, 16c, 21 | each names its exit; 16c carries an explicit caveat that its staging recipe is **not** verified here, with the four-variant fallback rather than a criterion that passes by never reaching its path |
+
+**Re-measured at `7586905` (obligation: paste the output).** Every count
+in this document, re-run in this worktree:
+
+```
+$ grep -rn 'describe\.buffer' builtin/ --include='*.lua' | wc -l
+14
+$ grep -rn bypass_intercept builtin | wc -l
+21
+$ grep -rn --include='*.lua' add_intercept . --exclude-dir=target | wc -l
+17
+$ grep -rn "is_modified()" src/ pmacs-gpu/ | wc -l
+26
+$ grep -rn "mark_clean()" src/ | wc -l
+6
+$ grep -c "dispatch_idle_for" tests/terminal_copy_mode_acceptance.rs
+0
+```
+
+All unchanged from revision 3's readings, which were taken at `ad41cf1`;
+#189 adds no Lua and no tests. The **276 CRDT-dark** figure is
+deliberately still not re-quoted — see §10.
+
+---
+
 **Revision 3 — scouted against canonical `githubsucks/main` @ `7586905`,
 2026-07-28. Every claim below about pmacs was executed or read at a named
 line, not recalled.** The reproductions in §0 and §2 are transcripts of
@@ -1055,91 +1143,212 @@ and the contract is still needed. Two directions:
   `editing_in_progress` exactly as `begin_edit`/`end_edit` do, and this
   case surfaces `BufferError::ConcurrentEdit` unchanged.
 
-**The ordering, with every exit path named.** `n` marks the numbered
-exits; each row states the buffer state a caller observes afterwards.
+**Cleanup is driven by an explicit outcome, NOT by inferring one from
+`revision`. Rewritten in revision 4 (review round 3, P1-1); revision 3's
+predicate was wrong in three directions and this section says so before
+it says anything else.**
+
+Revision 3 wrote `if self.revision() != rev_before { clear_history(); … }`
+and argued the predicate was *exact* because `revision` bumps after the
+undo push and before the `on_edit` broadcast. **That argument is sound
+for the v0.1 undo stack and does not extend past it.** Three failures:
+
+1. **A successful no-op keeps history that the contract says cannot
+   exist.** An empty buffer can carry substantial undo history — insert,
+   then delete back to empty. `set_generated_contents("")` then takes
+   the no-op arm (`src/buffer.rs:1245-1253`), returns `Ok`, never bumps
+   `revision`, so revision 3 skipped **both** the clear and
+   `mark_clean`: the buffer ends locked, **modified**, and carrying
+   poppable history that `unlock_generated` re-exposes. Shipped
+   `set_generated_contents` clears unconditionally (`:551-553`), so
+   revision 3's predicate was a **regression of an existing contract**,
+   not a refinement of one. And it lands on a path this document
+   *prescribes*: Q#GB5's `ensure_slot` lock is exactly
+   `set_generated_contents(slot.buf, "")`.
+2. **CRDT mutation happens upstream of `revision` entirely.**
+   `apply_to_crdt_then_normalize_bytes` runs **before** the rope edit
+   (`src/buffer.rs:1194-1201`), and for `EditOp::Replace` it is two ops —
+   `crdt.delete`, then `crdt.insert` (`:1140-1163`). The code's own
+   comment states the hazard: if the delete succeeds and the insert
+   fails, "the CRDT is mid-transaction (range deleted but replacement
+   not inserted) and the rope is unchanged. This is an invariant
+   violation." In that state `revision` has **not** advanced, so revision
+   3's predicate neither clears the CRDT's history nor notices the
+   `rope ≡ CRDT projection` divergence — in precisely the case that most
+   needs both.
+3. **Found while fixing the other two: revision 3's unconditional relock
+   locks a buffer nobody wrote to.** `b:insert(mid_codepoint, "x",
+   { generated = true })` on a *fresh, writable* `*scratch*` is rejected
+   by the CRDT after the unlock, and revision 3 then set
+   `read_only = true` on the way out. The caller gets an error **and** a
+   locked buffer it never successfully wrote. Not reported by the review;
+   same class as the other two (a rule derived for one case applied to a
+   case whose ordering differs).
+
+**The outcome value.** `run_rope_edit_and_broadcast` reports what it
+actually did instead of leaving its caller to guess. This is a real
+signature change and not a free one — see the cost note below.
+
+```rust
+/// What a generated write did, reported by the apply rather than
+/// inferred by its caller. The variant, not `revision`, selects cleanup.
+enum GeneratedOutcome {
+    /// The rope changed and an undo entry exists.
+    Applied(Edit),
+    /// A semantic no-op: rope unchanged, no undo entry pushed. The call
+    /// SUCCEEDED, so the buffer is now a generated buffer.
+    NoOp(Edit),
+    /// Refused before anything mutated: rope, CRDT and history are all
+    /// exactly as they were.
+    Rejected(BufferError),
+    /// The rope changed and a later stage failed. An undo entry exists
+    /// over contents no caller can see.
+    AppliedThenFailed(BufferError),
+    /// CRDT only: the CRDT was partially mutated and the rope was not.
+    /// `rope ≡ CRDT projection` no longer holds.
+    Diverged(BufferError),
+}
+```
+
+**The cleanup each variant triggers.** `entry` is the `read_only` value
+observed on entry.
+
+| outcome | history | `mark_clean` | `read_only` after | returns |
+|---|---|---|---|---|
+| `Applied` | **cleared** | yes | `true` | `Ok(Edit)` |
+| `NoOp` | **cleared** | yes | `true` | `Ok(Edit)` |
+| `Rejected` | untouched | no | **restored to `entry`** | `Err` |
+| `AppliedThenFailed` | **cleared** | **no** | `true` | `Err` |
+| `Diverged` | **untouched** | no | `true` | `Err`, and it must **surface** |
+
+`editing_in_progress` is cleared on **all five**, unconditionally.
+
+**Why `NoOp` clears — the rule that replaces revision 3's.** The
+invariant is a property of the **buffer**, not of the write: *a buffer
+that is generated-locked carries no history.* Every outcome that leaves
+the buffer generated-locked therefore clears, and `NoOp` leaves it
+locked because the call succeeded. `Rejected` is the only success-shaped
+exception and it is not one — the buffer is not newly generated, so
+there is nothing for the invariant to apply to. Stated this way the rule
+needs no reference to `revision` at all, which is what makes it
+mode-independent.
+
+**Why `Rejected` restores rather than relocks.** Revision 3's "relock
+unconditionally" was justified by "the contract is *leave it genuinely
+immutable*" — true of a write that **happened**. A refusal is not a
+write. Restoring the entry value keeps the refusal total: a fresh buffer
+stays writable, an already-generated buffer stays locked, and no caller
+can lock a buffer by failing to write to it.
+
+**Why `Diverged` must surface rather than be cleaned.** This is the
+variant the review specifically asks about, and the honest answer is
+that **this arc cannot fix it**:
+
+- The rope is intact and the CRDT is not. Nothing local reconstructs the
+  deleted range — loro exposes no rollback at this seam, and the
+  `export_updates_since` that would name the delta runs after both ops.
+- **Clearing history would destroy the last local record of the
+  pre-edit rope**, which is the only material anything could later
+  reconcile from. So `Diverged` clears nothing.
+- Locking is the strongest available *containment*: it stops further ops
+  compounding a divergence that already exists. So `read_only = true`,
+  and this is the one place where locking a buffer on an error path is
+  correct — because the buffer really is no longer safe to write.
+- It returns a **distinct** `BufferError` variant rather than reusing
+  `CrdtRejected`, and the Lua binding surfaces it via
+  `pmacs.editor.set_status` rather than swallowing it. A caller must be
+  able to tell "your op was refused, nothing happened" from "this
+  buffer's CRDT and rope no longer agree."
+
+**Scope, stated plainly: `Diverged` is a PRE-EXISTING hazard this arc
+exposes, not one it creates.** `apply_edit` and
+`apply_edit_skip_intercepts` reach the same two-op replace today and
+report it as an ordinary `CrdtRejected`; nothing in the tree
+distinguishes it. Making it a named variant is this arc's contribution;
+**repairing the divergence is not, and is recorded in §8 as its own
+lane.** Splitting a CRDT `Replace` into a single transactional op, or
+reconciling the two, is loro-level work with no bearing on generated
+buffers specifically.
+
+**The ordering, with every exit path named.**
 
 ```rust
 pub fn apply_generated_edit(&mut self, op: EditOp<'_>) -> Result<Edit, BufferError> {
     // (1) Q#GB10: path-backed refusal. Before any state change.
     if self.file_path.is_some() { return Err(GeneratedWriteOnFileBuffer { .. }); }
-    // (2) Q#GB15: refuse a lock this primitive did not install.
-    if self.read_only && !self.generated_lock { return Err(ReadOnly { .. }); }
+    // (2) Q#GB15: this buffer's read_only is an identity protection.
+    if self.identity_protected { return Err(ReadOnly { .. }); }
     // (3) re-entrancy gate — begin_edit's SECOND check, not its first.
     if self.editing_in_progress { return Err(ConcurrentEdit { .. }); }
     // (4) bounds pre-validation, so an invalid range costs nothing.
     self.validate_op_bounds(&op)?;
 
+    let entry_read_only = self.read_only;
     self.editing_in_progress = true;
-    let rev_before = self.revision();
     self.read_only = false;                       // the ONLY unlocked interval
-    let result = self.apply_edit_skip_intercepts(op);
-    self.read_only = true;                        // (5) relock, unconditional
-    self.generated_lock = true;
-    if self.revision() != rev_before {            // (6) history, iff an edit landed
-        self.clear_history();
-        if result.is_ok() { self.mark_clean(); }  // (7) Q#GB10's flag
+    let outcome = self.apply_generated_inner(op); // -> GeneratedOutcome
+    match &outcome {                              // (5) per-variant cleanup
+        Applied(_) | NoOp(_) => {
+            self.read_only = true;
+            self.clear_history();
+            self.mark_clean();
+        }
+        AppliedThenFailed(_) => { self.read_only = true; self.clear_history(); }
+        Diverged(_)          => { self.read_only = true; }
+        Rejected(_)          => { self.read_only = entry_read_only; }
     }
-    self.editing_in_progress = false;             // (8) unconditional
-    result
+    self.editing_in_progress = false;             // (6) unconditional, all paths
+    outcome.into_result()
 }
 ```
 
-| exit | when | `read_only` after | `editing_in_progress` after | history | contents |
+| exit | when | `read_only` after | `editing_in_progress` | history | contents |
 |---|---|---|---|---|---|
 | (1) | `file_path` is `Some` | unchanged | unchanged (`false`) | **untouched** | untouched |
-| (2) | someone else's lock (terminal identity) | unchanged (`true`) | unchanged | **untouched** | untouched |
-| (3) | re-entrant on the same buffer | unchanged | unchanged (`true`, owned by the outer edit) | **untouched** | untouched |
+| (2) | identity-protected (terminal) | unchanged (`true`) | unchanged | **untouched** | untouched |
+| (3) | re-entrant on the same buffer | unchanged | unchanged (`true`, the outer edit's) | **untouched** | untouched |
 | (4) | range out of bounds | unchanged | unchanged (`false`) | **untouched** | untouched |
-| Err from CRDT | mid-codepoint position, CRDT mode | **`true`** | `false` | **untouched** | untouched (`src/buffer.rs:1843-1844`: "the CRDT op is attempted before the rope mutation, so this error leaves the rope unchanged") |
-| Err from `on_edit` | a view rejected the broadcast | **`true`** | `false` | **cleared** | **mutated** |
-| Ok, no-op | empty insert / empty range | **`true`** | `false` | **untouched** | unchanged |
-| Ok | the ordinary case | **`true`** | `false` | **cleared** | replaced |
+| `Rejected` | mid-codepoint position, CRDT | **restored to entry** | `false` | **untouched** | untouched |
+| `AppliedThenFailed` | a view rejected `on_edit` | `true` | `false` | **cleared** | **mutated** |
+| `Diverged` | CRDT delete ok, insert failed | `true` | `false` | **untouched** | rope untouched, **CRDT diverged** |
+| `NoOp` | empty write over an empty rope | `true` | `false` | **cleared** | unchanged |
+| `Applied` | the ordinary case | `true` | `false` | **cleared** | replaced |
 
-**Why the relock is unconditional and not "restore what it was."** The
-primitive's contract is *leave it genuinely immutable*, so the post-state
-is `true` on every path past (4), exactly as shipped
-`set_generated_contents` already does (`src/buffer.rs:554`). Restoring a
-saved prior value would let a first write on a fresh buffer leave it
-writable.
+**Why `end_edit` cannot be skipped.** It is line (6), unconditional and
+outside the `match`, in the same function as line (3) that set it — there
+is no caller who could return early past it, which is the whole reason
+the transaction is one `Buffer` method rather than a binding-level pair.
+Review round 2's P1-1 is right that a leaked `editing_in_progress` wedges
+the buffer for **every** later edit (`begin_edit` `:726-731` and
+`apply_edit` `:774-779` both refuse), and shipped
+`set_generated_contents` avoids that hazard today only by never setting
+the flag at all — which is also why it has no re-entrancy gate today, a
+gap this closes.
 
-**Why `end_edit` cannot be skipped.** It is line (8), unconditional, and
-it is in the same function as line (3) that set it — there is no caller
-who could return early past it, which is the whole reason the transaction
-is one `Buffer` method rather than a binding-level pair. Review P1-1 is
-right that a leaked `editing_in_progress` wedges the buffer for **every**
-later edit (`begin_edit` `:726-731` and `apply_edit` `:774-779` both
-refuse), and shipped `set_generated_contents` avoids that hazard today
-only by never setting the flag at all — which is also why it has no
-re-entrancy gate today, a gap this closes.
+**What bounds pre-validation is still for.** It is no longer load-bearing
+for history (the `Rejected` variant covers that) but it is kept, for one
+reason: it moves the most common caller error out of the unlocked
+interval entirely, so an out-of-range op cannot even transiently unlock a
+buffer. **It is not a substitute for the criteria** — review round 3's
+P1-2 is exactly the trap of pinning the transaction through the one path
+that never enters it (§6, Stage 2 criteria 15-16).
 
-**History: the exact rule, and why it is not the shipped one.** Shipped
-`set_generated_contents` calls `clear_history()` **unconditionally**,
-including on failure (`src/buffer.rs:551-553`, with a comment defending
-it). That is defensible for a whole-buffer replace of a buffer whose
-history the primitive owns. It stops being defensible once
-`{ generated = true }` is public on **any** pathless buffer: a caller who
-passes a bad range to `*scratch*` would destroy a user's undo history via
-a call that changed nothing. Review P1-1 asks for the ordering; it is:
+**Cost, stated rather than buried — and revision 4's outcome enum is the
+larger half of it.** `run_rope_edit_and_broadcast` must distinguish
+`Rejected` from `Diverged`, and today it cannot: both surface as
+`Err(CrdtRejected)` because `apply_to_crdt_then_normalize_bytes` uses a
+bare `?` on the second op (`src/buffer.rs:1155-1163`). Distinguishing
+them means that function tracking whether its `delete` succeeded before
+its `insert` failed. That is a real change to a shipped CRDT path, it is
+in Stage 2's scope, and it is the reason `Diverged` is a *named* variant
+rather than a note — a variant nothing can construct is not a design.
+**If the user prefers a smaller Stage 2**, the fallback is to ship four
+variants, fold `Diverged` into `Rejected`, and accept that a
+CRDT-mid-transaction failure is indistinguishable from a clean refusal —
+which is the status quo, and should be a stated trade rather than a
+silent one.
 
-- **Pre-validate bounds (4)**, so the common failure — an out-of-range
-  op — is a pure refusal that touches neither the lock, the history, nor
-  the flag. This is what makes the destructive-clear concern moot for
-  every reachable caller error.
-- **Clear iff the revision advanced (6)**, which is exact rather than
-  approximate. `self.revision` is bumped in the state-update stage
-  (`src/buffer.rs:1284`) **after** the rope swap and the undo push and
-  **before** the `on_edit` broadcast (`:1286-1289`), and the no-op arm
-  returns early without bumping it (`:1245-1253`). So "revision advanced"
-  is true exactly when an undo entry was pushed — including on the one
-  failure mode that mutates before erroring (a view rejecting the
-  broadcast), which is the case shipped code's unconditional clear exists
-  for, and false on every refusal.
-- **`mark_clean` only on `Ok` (7).** A half-applied write is not a clean
-  buffer, and Q#GB10's safety argument (both load-bearing consumers gate
-  on `file_path`) is about *whether the flag may be cleared at all*, not
-  about clearing it over a failure.
-
-**Cost, stated rather than buried.** `validate_op_bounds` is a new
+`validate_op_bounds` is a new
 private helper duplicating the bounds arithmetic `Rope::insert` /
 `delete` / `replace` already perform (`RopeError::OutOfBounds`,
 `src/rope.rs:371-383`). It is O(1) and it is duplication; the alternative
@@ -1241,6 +1450,20 @@ and lock the rope**, unrecoverably. So the lock may only be installed
 once **Q#GB13's ownership rule guarantees `slot.buf` is a buffer compile
 created**. With ownership in place the buffer is provably fresh and the
 placement in `ensure_slot` is correct; without it, no placement is.
+
+**Revision 4: this recommendation is also the concrete caller that made
+P1-1 direction A load-bearing, and the dependency runs both ways.**
+`set_generated_contents(slot.buf, "")` on a buffer that is already empty
+is a **semantic no-op** — it takes `src/buffer.rs:1245-1253`'s early
+return. Under revision 3's `revision`-keyed cleanup that call would have
+locked the slot while leaving any pre-existing history intact and the
+buffer marked modified, which is the opposite of what "lock it at
+creation" is for. §3.4's `NoOp` variant clears unconditionally, so the
+recommendation is sound again. Stated here rather than only in §3.4
+because a reader reaching Q#GB5 first should not have to derive it: **the
+correctness of this placement depends on two decisions in other
+sections** — Q#GB13's freshness guarantee and §3.4's `NoOp` cleanup —
+and criterion 16b is what pins the second.
 
 **Q#GB6 — Clamp each window coordinate against its OWN post-edit bound.**
 §2.6 measures a shipped defect: a shrinking generated write leaves
@@ -1354,25 +1577,76 @@ pre-existing hazard this arc neither creates nor closes.
 **Q#GB15 — `read_only` gains a provenance companion. New in revision 3
 (review P1-3, sweep C).**
 
-`Buffer` gains one private field beside `read_only`:
+**Revision 4 replaces revision 3's `generated_lock` with an intrinsic
+`identity_protected`, because review round 3's P1-3 showed provenance
+cannot be inferred from the flag's history.**
+
+Revision 3 proposed `generated_lock: bool`, meaning "this buffer's
+`read_only` was set by a generated write", maintained by a third rule:
+*every* `set_read_only` call clears it. That rule breaks a seam this very
+document prescribes. `tests/terminal_copy_mode_acceptance.rs:578-584`
+does exactly this cycle, with a comment explaining why:
 
 ```rust
-/// Whether this buffer's `read_only` flag was set by a generated write.
-/// Invariant: `generated_lock` implies `read_only`.
-generated_lock: bool,
+// `read_only` refuses the upgrade's own bookkeeping path the same
+// way it refuses everything else, so lift it around the upgrade.
+buffer.set_read_only(false);
+buffer.upgrade_to_crdt(2).expect("upgrade");
+buffer.set_read_only(true);
 ```
 
-Three rules maintain it, and all three are in `Buffer`:
+Under revision 3's rule the final `true` yields
+`read_only && !generated_lock`, so the **next owner refresh** of that
+snapshot is refused as someone else's lock. Q#GB12 and Stage 2
+criterion 4 prescribe the same lift-and-restore idiom, so revision 3
+invalidated its own test strategy. The defect is not the rule's details;
+it is that a *derived* fact has to be maintained correctly by every
+mutation of the thing it is derived from, and `set_read_only` is `pub`
+with callers this document does not control.
 
-1. `apply_generated_edit` sets both on success (§3.4 line 5) and
-   **refuses** a buffer that is `read_only` with `generated_lock == false`
-   (§3.4 exit 2).
-2. `unlock_generated` refuses unless `generated_lock`, then clears both.
-3. `Buffer::set_read_only(v)` — the existing Rust setter, whose callers
-   are `terminal/session.rs:305` and test code — clears `generated_lock`
-   whenever it is called, in either direction. That is what keeps the
-   invariant true without asking six existing call sites to think about
-   it.
+**The fix is to stop deriving it.** `Buffer` gains one private field that
+is a property of **what the buffer is**, not of who last locked it:
+
+```rust
+/// Whether this buffer's read-only state is an intrinsic identity
+/// protection rather than an ordinary lock. Set once, at construction,
+/// by an owner that means "the host may not edit this at all"; never
+/// derived from `read_only` and never changed by `set_read_only`.
+identity_protected: bool,
+```
+
+Two rules maintain it, and `set_read_only` is not one of them:
+
+1. `Buffer::set_identity_protected(true)` — a new `pub` method, called
+   **once** by `TerminalSession::open` beside its existing
+   `set_read_only(true)` (`src/terminal/session.rs:305`). That is the
+   only production caller.
+2. `apply_generated_edit` refuses iff `identity_protected` (§3.4 exit 2);
+   `unlock_generated` refuses iff `identity_protected`. Neither ever
+   writes the field.
+
+**The lift-and-restore seam is now unaffected**, because
+`identity_protected` is `false` for a snapshot buffer and stays `false`
+through any number of `set_read_only` cycles. Q#GB12's prescription and
+Stage 2 criterion 4 need no change, which is the test that the rule is
+right.
+
+**Why declaration beats inference, stated as a rule rather than as a
+patch.** Inference required every mutation of `read_only` to maintain a
+derived fact; P1-3 is the proof that it does not. Declaration puts the
+burden on the locker: *if you lock a buffer and Lua must not unlock it,
+mark it identity-protected.* One flag, one meaning, one writer, and a
+future Rust owner that wants the same protection opts in with one line
+instead of relying on an inference chain staying intact.
+
+**What this costs relative to revision 3.** It is strictly narrower in
+one respect and that is worth naming: `unlock_generated` can now release
+**any** non-identity-protected `read_only` buffer, including one a future
+Rust owner locked without declaring itself. Revision 3's version would
+have refused that by inference. The trade is deliberate — an inference
+that is wrong on a shipped seam is worse than a contract that has to be
+opted into — and the contract is documented on `set_read_only` so the
+next locker reads it at the point of use.
 
 **Rule 1's refusal is the half revision 2 did not have, and it closes a
 hole in the SHIPPED primitive** (sweep C item 1).
@@ -1398,11 +1672,11 @@ directions rather than existing only to make Q#GB7 safe.
   `set_read_only` signature — a refactor this arc would be smuggling.
   Named as the right eventual shape in §8, not adopted.
 
-**Cost, stated:** one bool per buffer; one invariant
-(`generated_lock ⇒ read_only`) that rule 3 exists to maintain; and one
-new refusal that changes shipped `set_generated_contents` behaviour, so
-it lands in Stage 2 with the rest of Q#GB10's changes to that function,
-not in Stage 1.
+**Cost, stated:** one bool per buffer; one new `pub` method with exactly
+one production caller; **no invariant to maintain**, because the field is
+never derived from `read_only`; and one new refusal that changes shipped
+`set_generated_contents` behaviour, so it lands in Stage 2 with the rest
+of Q#GB10's changes to that function, not in Stage 1.
 
 **Q#GB16 — The lock silently disables fold creation on every buffer it
 touches. New in revision 3 (sweep C item 2).**
@@ -1436,7 +1710,7 @@ here.** Three options, with the recommendation being (a):
   document buffer". Cheap, honest, and it converts a silent behaviour
   change into a stated one.
 - **(b) Preserve foldability** by changing the guard to
-  `read_only && !generated_lock`. Available once Q#GB15 lands, but it
+  `read_only && !identity_protected`. Available once Q#GB15 lands, but it
   edits a pinned Q#FD11 seam for a use case nobody has asked for.
 - **(c) Do nothing and say nothing.** Rejected: this is exactly the
   defect class the review's findings 1 and 3 are instances of.
@@ -1447,7 +1721,9 @@ families get locked.
 
 **Q#GB17 — The transaction shape.** §3.4. One `&mut Buffer` method, its
 own `run_buffer_edit` arm, `begin_edit` untouched, eight named exits, and
-history cleared iff the revision advanced. New in revision 3 (review
+and cleanup driven by an explicit `GeneratedOutcome` — **not** by
+inferring one from `revision`, which revision 3 did and which was wrong
+in three directions (§3.4). New in revision 3 (review
 P1-1).
 
 **Q#GB18 — Route the two broken identity consumers by owned `BufferId`.
@@ -1490,21 +1766,78 @@ scan, exactly as `dired.lua:132-140`'s `live_handles()` does. Naming it
 here because "swap a map for a list" reads like a one-line change and is
 not.
 
-**`compile.lua` (Stage 2, with Q#GB13's ownership fix).**
-`is_generated_buffer` stops comparing names. Its two owners are in
-different files (`compile.lua`'s `slots`, `default.lua`'s `search_panel`),
-so the predicate needs a seam:
+**`compile.lua` and the search panel (Stage 2, with Q#GB13's ownership
+fix). Rewritten in revision 4 (review round 3, P2-4).**
 
-- compile keeps an **owner-registered id list**; `ensure_slot` adds
-  `slot.buf`, and `ensure_search_panel` calls
-  `pmacs.compile._register_generated_buffer(p.buf)`;
-- `is_generated_buffer(buf)` becomes a `==` scan of that list;
-- **teardown is an obligation, not an afterthought**: all three owners
-  already register `pmacs.buffer.on_removed` (`compile.lua:277-279`,
-  `default.lua:876-883`), so the same callbacks unregister. A registry
-  that only grows is the defect the terminal-config lane records as
-  "`prune` **reacts** to buffer removal"; naming it here is what keeps it
-  from being rediscovered in review.
+`is_generated_buffer` stops comparing names. Its two owners are in
+different files (`compile.lua`'s `slots`, `default.lua`'s
+`search_panel`), so the predicate needs a seam — and **revision 3 chose
+the wrong one.**
+
+Revision 3 had `ensure_search_panel` call
+`pmacs.compile._register_generated_buffer(p.buf)`. That converts an
+existing *guarded, optional* dependency into a hard one.
+`default.lua:991-994` currently reads:
+
+```lua
+if cur
+  and not (pmacs.compile
+    and pmacs.compile.is_generated_buffer
+    and pmacs.compile.is_generated_buffer(cur))
+then
+```
+
+— a triple check, and it exists for a reason. `default.lua` is loaded by
+`LuaHost::attach_editor` (`src/lua.rs:250-251`), while `compile.lua` is
+loaded much later in `EditorState::new`'s runtime sequence
+(`src/editor.rs:704`). `LuaHost` is `pub` and **nine existing test files
+build one directly**, so a harness that has `pmacs.project.search` and no
+`pmacs.compile` is not hypothetical — it is reachable with the pattern
+those nine already use. A hard call to `pmacs.compile._register_…` inside
+`ensure_search_panel` raises there.
+
+**The decision: symmetric guarded optionality, not a shared registry.**
+Each module answers for **its own** buffers, and each capture site ORs
+the two through the guard shape that already exists:
+
+- `compile.lua` — `is_generated_buffer(buf)` becomes
+  `slot_for_buffer(buf) ~= nil`, which is already id-based (`:200-206`).
+  It answers for `*compilation*` and `*shell-command*` **only**, which is
+  the truthful scope and matches §1.4's warning not to read `ensure_slot`
+  as covering the grep panel.
+- `default.lua` — a local `search_panel_owns(buf)`, i.e.
+  `search_panel ~= nil and search_panel.buf == buf`, exposed as
+  `pmacs.project._is_search_panel` for the other direction.
+- Each capture site checks its own predicate directly and the other
+  module's **through the existing optional guard**:
+  - `default.lua:991-994` keeps its triple check verbatim and gains
+    `and not search_panel_owns(cur)`;
+  - `compile.lua:762` gains the mirror-image guard,
+    `and not (pmacs.project and pmacs.project._is_search_panel and
+    pmacs.project._is_search_panel(cur))`.
+
+**Three things this buys over revision 3's registry**, all of them
+consequences of nobody owning a list of somebody else's buffers:
+
+1. **No load-order constraint in either direction**, and no new one to
+   document beside the three `src/editor.rs` already carries.
+2. **No teardown obligation.** Revision 3's registry needed
+   `on_removed`-driven unregistration, and a registry that only grows is
+   the defect the terminal-config lane records as "`prune` **reacts** to
+   buffer removal". Each owner's own table already tracks its own
+   liveness (`slot_for_buffer` scans `slots`, `search_panel_owns` reads
+   one field), so there is nothing to prune.
+3. **Each predicate is answerable by the module that knows the answer**,
+   so neither can go stale relative to the other.
+
+**Cost:** the guard shape is written twice rather than once. That is the
+existing pattern, and duplicating a four-line guard is cheaper than a
+cross-module registry with a lifetime.
+
+**This needs its own pin, because no ordinary test reaches it** — every
+`EditorState::new` loads both modules. §6 Stage 2 criterion 21 builds a
+`LuaHost`, calls `attach_editor`, and drives search with no
+`pmacs.compile` present.
 
 Alternative considered and rejected: leave `is_generated_buffer`
 name-based and simply never disambiguate compile's buffers. Rejected
@@ -1582,6 +1915,19 @@ refused** after conversion; they must lift `read_only` Rust-side first,
 exactly as `tests/terminal_copy_mode_acceptance.rs:582-584` already does.
 That is a concrete, verified integration cost of Stage 2, not a surprise
 to discover during implementation.
+
+**Revision 4: the lift-and-restore idiom this prescribes was briefly
+invalidated by revision 3's own Q#GB15, and is now safe again.** Revision
+3's `generated_lock` was cleared by every `set_read_only` call, so the
+restoring `set_read_only(true)` would have left the buffer looking like
+someone else's lock and the next owner refresh would have been refused
+(review round 3, P1-3). Q#GB15's `identity_protected` is never written by
+`set_read_only`, so the cycle is transparent and **this prescription,
+Stage 2 criterion 4 and `acc16e` all need no change**. The seam is
+`crdt`-gated, so §10 now names
+`--test terminal_copy_mode_acceptance --features crdt` explicitly: a
+default-feature sweep never compiles `acc16e` and proves nothing about
+it.
 
 **Q#GB13 — Ownership by handle is a prerequisite, not a follow-up.** New
 in revision 2 (review P1-2). `listview.ensure_panel` (`listview.lua:95`),
@@ -1721,7 +2067,7 @@ diff at `dired.lua:371` and `listview.lua:60-61` is written once.
   reimplemented over it (Q#GB17, Q#GB3).
 - Q#GB10's path-backed refusal **and** `mark_clean` — one rule, both
   halves, since the refusal is what makes the flag change safe.
-- **Q#GB15's `generated_lock` field**, its write-direction refusal, and
+- **Q#GB15's `identity_protected` field**, its write-direction refusal, and
   `pmacs.buffer.unlock_generated` bounded by it (Q#GB7). All three edit
   `set_generated_contents` or the flag it sets, so they belong with the
   reimplementation.
@@ -1931,19 +2277,30 @@ intercept refuses it either way.
     exists to prevent. Criterion 11 passes with this bug live, because
     each command works in isolation; only the two-panel sequence shows
     it.
-13. **[fix-shape] A locked generated buffer is not foldable, and says
-    so accurately (Q#GB16).** On a locked dired listing:
-    `pmacs.fold.fold(buf, range)` returns `false` **and** the status
-    names the read-only lock rather than `not a document buffer`.
-    *Bite:* the first half **passes on `main` for the wrong reason**
-    before the lock — a dired buffer is a perfectly ordinary document
-    buffer today and folds fine, so the pre-image for the first half is
-    *after* Stage 1's lock; that is precisely the silent behaviour change
-    sweep C found, and the criterion's job is to make it stated. The
-    second half is the discriminator: it fails against a Stage 1 that
-    locks the buffer and leaves `fold.rs:68`'s message alone, which is
-    the shape that would ship without this criterion. Falsify by
-    reverting the status string.
+13. **Q#GB16's fold change — SPLIT into two criteria in revision 4
+    (review round 3, P2-5), because revision 3's single criterion
+    contradicted its own classification.** Revision 3 labelled it
+    `[fix-shape]` and then wrote that the first half "passes on `main`
+    ... a dired buffer ... folds fine". If folding succeeds on `main`,
+    an assertion that it returns `false` **fails** on `main` — which is
+    a `main` pre-image, the opposite label. The two halves have different
+    pre-images and belong apart.
+
+    **13a. [`main`] A locked generated buffer is not foldable.** On a
+    Stage 1 dired listing, `pmacs.fold.fold(buf, range)` returns
+    `false`. *Bite:* this **fails on `main`**, where the same call
+    returns `true` — verifiable by revert, and `scripts/bite` reports it.
+    It is a regression pin *for the intended change*: the point is to
+    make sweep C's silent behaviour change into a stated one, so the
+    criterion asserts the new behaviour and the bite is that the old
+    behaviour is different.
+
+    **13b. [mutation] …and the refusal says why.** The status after 13a's
+    call names the read-only lock, not `not a document buffer`. *Bite:*
+    the falsifying mutation is reverting `fold.rs:68`'s string; that is
+    the shape that ships if 13a is written alone — correct behaviour,
+    false explanation. It cannot share 13a's `main` pre-image because on
+    `main` the call succeeds and sets no status at all.
 14. **[structural] No `bypass_intercept` write remains in `dired.lua` or
     `listview.lua`**; `listview.ensure_panel` contains no find-by-name
     adoption; and **no `panels[` subscript remains keyed by a name
@@ -2052,14 +2409,23 @@ capability to Stage 2, so the criterion moves with it (Stage 2 criterion
    This is the criterion that pins the ordering constraint, and it fails
    on `main` today for the intercept half alone.
 10. **Coverage, not a criterion: both configurations** — default and
-    `--features crdt` — for criteria 1–5 **and for 15–18**, the §3.4
-    transaction criteria. CRDT must not be the only home of any of them;
-    CI never enables the feature. Two of the transaction's error paths
-    are CRDT-only in origin (the mid-codepoint `CrdtRejected` row of
-    §3.4's table has no default-feature analogue), so the *default*
-    configuration is the one at risk of leaving them unexercised, not
-    the CRDT one — the usual asymmetry runs the other way and this is
-    the exception.
+    `--features crdt` — for criteria 1–5 and for the §3.4 transaction
+    criteria 15, 16 (first half), 16b and 18. CI never enables the
+    feature, so CRDT must not be the only home of any of them.
+
+    **Three are irreducibly `crdt`-only and must say so rather than be
+    quietly written once** (revision 4): criterion 16's *second* half
+    (the `Rejected` refusal needs a mid-codepoint position, which only
+    loro rejects), **16c** (`Diverged` has no default-feature analogue at
+    all), and Stage 2 criterion 4's `can_undo() == false` half. Each is
+    paired with a default-configuration sibling that exercises the same
+    cleanup arm through a non-CRDT failure — criterion 15's `FailingView`
+    is the default-feature route into `AppliedThenFailed`, and 16b's
+    empty write is the default-feature route into `NoOp` — so **no
+    cleanup arm of §3.4 is reachable only under `crdt`** except
+    `Diverged`, which by construction cannot be. That pairing is the
+    point of the rule; naming which criteria are single-configuration is
+    what keeps it checkable.
 11. **[structural] Zero `bypass_intercept` writes remain** in
     `compile.lua` and in `default.lua`'s search panel (comments
     excepted; §1.1's arithmetic is the reference), and neither
@@ -2094,7 +2460,7 @@ unlock.**
     tears down the intercept — "unprotect" rather than "unlock" — fails
     the second; and **revision 2's `unlock_generated` as written passes
     the first two and fails the third**, which is the whole finding.
-    Falsify the third by deleting the `generated_lock` check.
+    Falsify the third by deleting the `identity_protected` check.
 14. **[`main`] A generated write REFUSES a buffer someone else locked
     (Q#GB15; sweep C item 1).** Open a real terminal; call
     `pmacs.buffer.set_generated_contents(term_buf, "junk")` and each of
@@ -2106,26 +2472,85 @@ unlock.**
     re-locks it, and nothing in the tree refuses it. It is the pin for a
     hole that predates this arc, which is why it is a `main` pre-image
     rather than a mutation bite. Falsify by deleting §3.4's exit 2.
-15. **[`main`] `editing_in_progress` is cleared on the ERROR path
-    (Q#GB17; review P1-1).** Drive a generated write to a failure —
-    the cheapest reachable one is §3.4 exit 4, an out-of-bounds range —
-    then require that an **ordinary** edit on the same buffer afterwards
-    reports the intercept's message, **not** `is already being edited`.
-    *Bite:* an implementation that sets the flag and returns early on the
-    invalid-range path leaves it set, and `begin_edit` (`:726-731`) and
-    `apply_edit` (`:774-779`) then refuse **every** later edit to that
-    buffer for the rest of the session. Falsify by moving the flag clear
-    above the error return. Assert the *next* edit's outcome, not the
-    failing call's — the failing call reports the same error either way,
-    which is why this criterion is about the buffer's state afterwards.
-16. **[`main`] A generated write RELOCKS on the error path (Q#GB17).**
-    After the same failure, `Buffer::is_read_only()` must be `true` and a
-    `bypass_intercept` write must raise. *Bite:* an implementation that
-    unlocks before validating and returns without relocking leaves the
-    buffer writable and every criterion about undo silently stops
-    applying. §3.4 orders validation **before** the unlock so this
-    particular path cannot arise, and the criterion is what pins that
-    ordering rather than trusting it.
+**Criteria 15-16 were VACUOUS in revision 3 and are rewritten. Review
+round 3, P1-2, is right and the diagnosis is worth stating because it is
+the second time this arc has shipped a criterion that passes with the bug
+restored.** Both used an out-of-bounds op. Bounds validation is §3.4 exit
+4 — **before** `editing_in_progress` is set and **before** the unlock —
+so the operation never enters the transaction the criteria claim to test,
+and an implementation that omits *both* the flag clear and the error-path
+relock passes both. Worse, revision 3 argued *in the same document* that
+pre-validation makes an invalid range cost nothing; the design decision
+and the test strategy contradicted each other in adjacent sections. **The
+rule this yields: a criterion must name the exit it drives the
+implementation to, and that exit must be inside the mechanism under
+test.** Every criterion below names its exit.
+
+15. **[`main`] `editing_in_progress` is cleared on a failure that
+    ENTERS the transaction (Q#GB17; §3.4 `AppliedThenFailed`).** Attach
+    a Rust-side `FailingView` — `pmacs::view::View` is `pub`
+    (`src/view.rs:221`, `src/lib.rs:141`) and `Buffer::attach_view` is
+    `pub`, so a test crate can implement one whose `on_edit` returns
+    `Err(BufferError::Intercepted { .. })` — then perform a **valid**
+    generated write. It fails at the broadcast, *after* the rope swap.
+    Then require an **ordinary** edit on the same buffer to report the
+    intercept's message, **not** `is already being edited`.
+    *Bite:* an implementation that returns from the `match` without
+    reaching §3.4's line (6) leaves the flag set, and `begin_edit`
+    (`:726-731`) and `apply_edit` (`:774-779`) then refuse **every**
+    later edit to that buffer for the rest of the session. Falsify by
+    moving the flag clear inside the `Applied | NoOp` arm. Assert the
+    *next* edit's outcome, not the failing call's — the failing call
+    reports the same error either way, which is the whole reason this
+    criterion is about the buffer's state afterwards.
+16. **[`main`] A generated write relocks on that same failure, and does
+    NOT lock on a refusal (Q#GB17). Two halves, because §3.4 gives them
+    opposite answers and revision 3 gave them the same one.**
+    - *Relock on `AppliedThenFailed`:* after criterion 15's failing
+      write, `Buffer::is_read_only()` is `true` and a
+      `bypass_intercept` write raises. *Bite:* an implementation that
+      unlocks and returns without relocking leaves the buffer writable,
+      and every criterion about undo silently stops applying. Falsify by
+      deleting `self.read_only = true` from the `AppliedThenFailed` arm.
+    - *No lock on `Rejected`:* on a **fresh, writable** pathless buffer
+      under `--features crdt`, a mid-codepoint generated insert is
+      refused; afterwards `is_read_only()` must still be **`false`** and
+      an ordinary edit must land. *Bite:* **revision 3's own design fails
+      this** — it relocked unconditionally, so a caller got an error and
+      a locked buffer it never wrote. Falsify by replacing
+      `self.read_only = entry_read_only` with `= true`. This half is
+      `crdt`-only, so criterion 10's coverage rule names it explicitly.
+16b. **[`main`] A successful no-op still discharges the invariant
+    (Q#GB17; §3.4 `NoOp`). New in revision 4 (P1-1 direction A).** On a
+    pathless buffer, insert text and delete it back to empty so the rope
+    is empty **and the undo stack is not**; then call
+    `set_generated_contents(b, "")`. Afterwards: `is_read_only()` is
+    `true`, `describe.buffer(b).modified` is `false`, and — after a
+    Rust-side lift — `buffer.undo()` returns `Err(NothingToUndo)`.
+    *Bite:* **revision 3's predicate fails all three.** The no-op arm
+    (`src/buffer.rs:1245-1253`) returns `Ok` without bumping `revision`,
+    so revision 3 skipped the clear and the `mark_clean` and left a
+    locked, modified buffer with poppable history. Falsify by restoring
+    `if self.revision() != rev_before`. This is not a hypothetical path:
+    Q#GB5 prescribes exactly this call in `ensure_slot`.
+16c. **[`main`, `crdt`-only] A CRDT mid-transaction failure is
+    distinguishable and surfaces (Q#GB17; §3.4 `Diverged`). New in
+    revision 4 (P1-1 direction B).** Drive an `EditOp::Replace` whose
+    CRDT `delete` succeeds and whose `insert` fails
+    (`src/buffer.rs:1140-1163`), and require: a **distinct** error
+    variant, not `CrdtRejected`; the buffer left `read_only`; and undo
+    history **not** cleared. *Bite:* revision 3's predicate did nothing
+    at all here — `revision` never advanced — so it neither cleaned nor
+    reported, in the one case the code's own comment calls "an invariant
+    violation". Falsify by folding the variant back into `Rejected`.
+    **Honest caveat on stageability:** unlike 15, 16 and 16b, this
+    criterion has **no staging recipe verified in this document** —
+    loro's `insert` is expected to succeed when the position is valid,
+    which it is by construction here, so provoking the failure may need a
+    fault-injection seam rather than an input. If Stage 2 cannot stage
+    it, the correct outcome is the four-variant fallback named at the end
+    of §3.4 — **not** a criterion that passes by never reaching its
+    path, which is precisely what P1-2 caught.
 17. **[`main`] An invalid-range generated write does NOT destroy undo
     history (Q#GB17).** On a pathless buffer with two ordinary edits
     already on the stack, call `b:delete(0, b:len() + 1000,
@@ -2161,6 +2586,23 @@ unlock.**
     `pmacs.compile.is_generated_buffer` contains no `d.name ==`, and
     `listview.lua` contains no `panels[d.name]`. Rides alongside 11–19,
     never instead.
+21. **[`main`] Search works with no `pmacs.compile` present (Q#GB18;
+    review round 3, P2-4). New in revision 4.** Build a `LuaHost`
+    directly, call `attach_editor`, and — with `compile.lua` never
+    loaded — run `pmacs.project.search`. It must not raise, and the
+    `q` target must be the buffer that was current before the search.
+    Then assert the harness premise explicitly: `pmacs.compile == nil`,
+    so a fixture that later gains the runtime sequence fails loudly
+    rather than passing as an ordinary editor test.
+    *Bite:* **revision 3's design fails this at the first search** —
+    `ensure_search_panel` called `pmacs.compile._register_generated_buffer`
+    unguarded, and `pmacs.compile` is nil here. Falsify by replacing the
+    symmetric guard with a direct call. This configuration is reachable
+    with the pattern nine existing test files already use (`LuaHost` is
+    `pub`; `default.lua` loads at `src/lua.rs:250-251`, `compile.lua` at
+    `src/editor.rs:704`), and **no ordinary acceptance test reaches it**,
+    because every `EditorState::new` loads both — which is exactly why
+    the guard it defends was invisible enough for revision 3 to remove.
 
 ---
 
@@ -2200,6 +2642,19 @@ unlock.**
   disagreeing on `mark_clean`, each with its own copy of the name
   constant. Whoever takes Class C decides who owns `*help*` before they
   decide what it writes with.
+- **The CRDT `Replace` mid-transaction divergence** (§3.4's `Diverged`).
+  `EditOp::Replace` is two loro ops — `crdt.delete` then `crdt.insert`
+  (`src/buffer.rs:1140-1163`) — and if the first succeeds and the second
+  fails, "the CRDT is mid-transaction ... and the rope is unchanged.
+  This is an invariant violation", in the code's own words. **This arc
+  names the state and contains it; it does not repair it.** Repair means
+  either a single transactional splice or a reconciliation pass, both
+  loro-level work with no bearing on generated buffers specifically. It
+  reaches `apply_edit` and `apply_edit_skip_intercepts` today and is
+  reported as an ordinary `CrdtRejected`, so nothing in the tree
+  currently distinguishes it — which is the smaller half this arc does
+  fix. Named here so the next lane starts from the citation rather than
+  the symptom.
 - **Suppress-rather-than-clear history recording**, if Stage 2's
   measurement says the per-op clear costs anything.
 - **`read_only` in `describe.buffer`** (Q#GB14) — separable, no new
@@ -2364,6 +2819,24 @@ Plus, per stage:
   `compile_mode_acceptance.rs` and `m4_acceptance.rs`, so Stage 2's
   search-panel criteria need a new home rather than an existing one to
   extend.
+- **Run the `crdt`-gated terminal suite explicitly, as its own step.
+  Added in revision 4 (review round 3, P1-3).**
+
+  ```
+  cargo test --test terminal_copy_mode_acceptance --features crdt
+  ```
+
+  This is **not** covered by any other line in the gate list.
+  `acc16e_a_refresh_queues_the_owners_write_for_replica_mirrors` is
+  `#[cfg(feature = "crdt")]` (`tests/terminal_copy_mode_acceptance.rs:567`),
+  and it is the shipped consumer of the lift-and-restore idiom that
+  revision 3's `generated_lock` would have broken. A default-feature run
+  of the same suite **never compiles it**, so a green sweep proves
+  nothing about the seam P1-3 is about. Judge it by whether the test
+  count includes `acc16e`, not by the verdict alone.
+- **Stage 2 additionally needs a `crdt` run of whatever suite hosts the
+  §3.4 transaction criteria**, for criterion 16's second half and 16c.
+  Same reasoning, same failure mode.
 - **Run `scripts/bite` on every criterion expressible as a test today.**
   Stage 1 criteria 1–3, 8, 9 and Stage 2 criteria 1, 7, 8, 9, 14 have
   `main` pre-images and can be falsified by revert; the rest are

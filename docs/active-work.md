@@ -465,10 +465,10 @@ has **no branch and no framing yet**.
   `../pmacs-generated-immutability`. **PR #188**, base `main`, forked from
   `githubsucks/main` @ `ad41cf1`, **integrated to `7586905`** (#189,
   `COHERENCE.md` only; clean merge, no conflict). Framing only —
-  `docs/generated-buffer-immutability-framing.md`, revision 3, plus this
+  `docs/generated-buffer-immutability-framing.md`, revision 4, plus this
   lane. **No runtime code, no protocol change.**
-- **PROPOSED — two review rounds closed (ten findings, six P1, four P2).
-  Not approved. Do not implement, do not merge.**
+- **PROPOSED — three review rounds closed (fifteen findings, nine P1, six
+  P2). Not approved. Do not implement, do not merge.**
 - **What it frames.** The class-wide half of the `set_generated_contents`
   invariant that `docs/agent-handoff.md` §4 and `COHERENCE.md` §14 both
   record as unfinished: `Buffer::undo` gates on `ensure_writable()`
@@ -485,14 +485,23 @@ has **no branch and no framing yet**.
   `run_buffer_edit` arm — **not** the bypass arm, which calls
   `begin_edit`, which calls `ensure_writable` first (`src/buffer.rs:725`)
   and would refuse every generated write to a locked buffer — one
-  `&mut Buffer` method, eight named exits, relock and flag-clear
-  unconditional, and history cleared **iff the revision advanced**.
+  `&mut Buffer` method with every exit named.
+  **Revision 4 replaces revision 3's cleanup predicate.** Cleanup is
+  driven by an explicit five-variant `GeneratedOutcome` reported by the
+  apply, **not** inferred from `revision`. Inferring it was wrong three
+  ways: a successful no-op (`src/buffer.rs:1245-1253` returns `Ok`
+  without bumping `revision`) kept history the contract forbids; a CRDT
+  mid-transaction failure happens **upstream of `revision` entirely**
+  (`:1140-1163`), so it was neither cleaned nor detected; and the
+  unconditional relock **locked a fresh buffer that was never
+  successfully written**. `NoOp` clears, `Rejected` restores the entry
+  lock state, `Diverged` clears nothing and surfaces.
 - **Two stages, two PRs.** Stage 1 — listview ownership fix **plus its
   identity-routing fix in the same PR**, dired and listview adopting the
   shipped primitive, the window-coordinate clamp, and the fold decision.
   Stage 2 — the new primitive, compile's nine write sites, the search
   panel's four, compile/search ownership + routing, the path-backed
-  refusal plus `mark_clean`, the `generated_lock` provenance field, and
+  refusal plus `mark_clean`, the `identity_protected` field, and
   the bounded `unlock_generated`.
 - **Six facts from this lane that other lanes need before it merges:**
   - **`bypass_intercept` is the wrong inventory key.** It misses
@@ -536,7 +545,27 @@ has **no branch and no framing yet**.
     identity buffer.** It does `self.read_only = false` unconditionally
     (`src/buffer.rs:546`), so it lifts a lock it did not install, writes,
     and re-locks. Present on `main`, untested, unframed anywhere before
-    this revision. Bounded in Stage 2 by the `generated_lock` field.
+    this revision. Bounded in Stage 2 by the `identity_protected` field —
+    an **intrinsic** flag set once by `TerminalSession::open`, never
+    written by `set_read_only`. Revision 3 tried to infer this from the
+    lock's provenance instead; that broke the lift-and-restore idiom at
+    `tests/terminal_copy_mode_acceptance.rs:578-584`, and the general
+    lesson is that a **derived** fact must be maintained by every
+    mutation of what it derives from — and `set_read_only` is `pub`.
+  - **`acc16e` is `crdt`-gated and is the only shipped consumer of the
+    lift-and-restore idiom.** `cargo test --test
+    terminal_copy_mode_acceptance` **without** `--features crdt` never
+    compiles it, so a green run of that suite proves nothing about the
+    seam. Any lane touching `read_only` semantics must run it with the
+    feature and confirm `acc16e` is in the count.
+  - **The CRDT `Replace` mid-transaction divergence is real and
+    unowned.** `crdt.delete` then `crdt.insert` (`src/buffer.rs:1140-1163`);
+    if the first succeeds and the second fails, the code's own comment
+    says "the CRDT is mid-transaction ... This is an invariant
+    violation." It reaches `apply_edit` and `apply_edit_skip_intercepts`
+    today and is reported as an ordinary `CrdtRejected`, so nothing
+    distinguishes it. This lane names and contains it; **repair is
+    deferred and unowned.**
 - **Overlap warning.** Stage 2 touches `src/lua_bindings/mod.rs`'s buffer
   mutator bindings and `src/buffer.rs`. Do not run it concurrently with
   the `apply_resource_op` lane or the bottom-panel 2B work without
