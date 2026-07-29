@@ -276,26 +276,36 @@ fn one_daemon_serves_a_v21_panel_session_and_a_shipped_v20_client() {
         }),
     )
     .expect("write panel-open key");
-    let document_still_driven = drain_until(&mut pre_panel.stream, "fallback", |message| {
+    // Two claims in one drain, and the SECOND is the load-bearing one.
+    //
+    // "No panel frame arrives" is defence in depth, not the placement gate:
+    // the producer's peer flag and the write-loop filter both suppress
+    // `PanelFrame` for a peer below the panel version independently of
+    // `panel_capable`, so that claim passes even with the capability gate
+    // removed entirely. The placement claim is what only `panel_capable`
+    // can decide — the buffer the adopter asked for must land in this
+    // session's DOCUMENT window, not in a side window it cannot render,
+    // because a side window here would simply be invisible.
+    let mut placed_in_document = None;
+    let _ = drain_until(&mut pre_panel.stream, "fallback", |message| {
         assert!(
             !matches!(message, InstanceMessage::PanelFrame(_)),
             "a v20 semantic session must never be sent a panel frame: {message:?}"
         );
-        match message {
-            InstanceMessage::StyleSpans { buffer_id, .. }
-            | InstanceMessage::Decorations { buffer_id, .. }
-                if *buffer_id == document =>
-            {
-                Some(())
-            }
-            _ => None,
+        if let InstanceMessage::CursorByte { buffer_id, .. } = message
+            && *buffer_id != document
+        {
+            placed_in_document = Some(*buffer_id);
+            return Some(());
         }
+        None
     });
     assert!(
-        document_still_driven.is_some(),
-        "the pre-panel session must keep being driven as a DOCUMENT — a \
-         frontend placed in a side window it cannot render would have an \
-         invisible window, so the daemon must take the Stage 1 fallback"
+        placed_in_document.is_some(),
+        "the adopter's buffer must be placed in this session's own document \
+         window (Q#BP2c fallback, every side parameter discarded) — a \
+         panel-capable session would have put it in a side window and left \
+         this session's document buffer unchanged"
     );
 }
 

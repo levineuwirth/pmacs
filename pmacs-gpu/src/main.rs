@@ -16334,6 +16334,17 @@ mod tests {
         };
         let fm = state.fm;
         let status_before = status_band_top(state.config.height, fm);
+        // Anchored to an INDEPENDENT formula, not to the helper's own earlier
+        // value. Comparing `status_band_top` before and after is a fixed
+        // point: a blanket rewrite that subtracted the band from it too would
+        // move both readings together and pass. (It did — this assertion
+        // exists because the first version of this test was vacuous under
+        // exactly that mutation.)
+        assert!(
+            (status_before - (state.config.height as f32 - fm.status_band_height())).abs()
+                < f32::EPSILON,
+            "the status band top is the physical window bottom minus the band height"
+        );
         let document_before = document_text_bottom(state.config.height, fm, state.band_inset());
         assert_eq!(
             state.band_inset(),
@@ -16454,17 +16465,60 @@ mod tests {
     /// frontends with identical metrics and different documents derive
     /// identical totals.
     #[test]
-    fn panel_columns_do_not_depend_on_the_document() {
-        let Some(mut one) = headless_or_skip(800, 600, "iiiiiiiiiiiiiiii") else {
+    fn panel_columns_come_from_the_probe_not_the_document_advance() {
+        let Some(mut state) = headless_or_skip(800, 600, "abcdefgh") else {
             return;
         };
-        let Some(mut two) = headless_or_skip(800, 600, "WWWWWWWWWWWWWWWW") else {
-            return;
-        };
+        let probe = state
+            .panel_probe_advance()
+            .expect("the default family shapes a width");
+
+        // The fixture forces the two derivations APART, because that is the
+        // only way to pin WHICH one the declaration uses. In production they
+        // diverge through `mono_advance`'s document-glyph fallback — a file
+        // opening with a double-width or bold glyph — which is
+        // document-dependent and therefore makes the panel's column count
+        // depend on what happens to be open. Here they are separated
+        // directly, so the assertion does not rest on font internals.
+        state.measured_mono_advance = Some(probe * 2.0);
+        assert_ne!(
+            state.mono_advance(),
+            probe,
+            "fixture must separate the two derivations"
+        );
+
+        let expected = crate::terminal::panel_cell_capacity(
+            (state.config.width as f32 - TEXT_LEFT).max(0.0),
+            (geometry_capacity_bottom(state.config.height, state.fm) - TEXT_TOP).max(0.0),
+            probe,
+            state.fm.code_line_height(),
+        )
+        .expect("a 800x600 surface admits panel cells");
         assert_eq!(
-            one.declared_cell_total(),
-            two.declared_cell_total(),
-            "the declaration must not sample the document's first glyph"
+            state.declared_cell_total(),
+            expected,
+            "the declaration resolves its advance from the stable normal-face \
+             probe, never from the document-dependent advance"
+        );
+        assert_ne!(
+            expected.cols,
+            crate::terminal::panel_cell_capacity(
+                (state.config.width as f32 - TEXT_LEFT).max(0.0),
+                (geometry_capacity_bottom(state.config.height, state.fm) - TEXT_TOP).max(0.0),
+                state.mono_advance(),
+                state.fm.code_line_height(),
+            )
+            .expect("the wider advance still admits cells")
+            .cols,
+            "and the two genuinely produce different column counts here, so \
+             the assertion above is discriminating"
+        );
+
+        // A probe that shapes no width declares zero usable geometry rather
+        // than reaching for a document sample.
+        assert_eq!(
+            crate::terminal::panel_cell_capacity(800.0, 600.0, 0.0, 22.0),
+            None
         );
     }
 
@@ -16749,8 +16803,15 @@ mod tests {
         assert_eq!(state.band_inset(), PanelBandInset::ABSENT);
     }
 
-    /// Criterion 46 — the band and divider really do take pixels off the
-    /// painted document, and the status band's own pixels are unchanged.
+    /// Criterion 46 — the band and divider really do paint, they take their
+    /// pixels from the document, and the status band is untouched.
+    ///
+    /// Asserts CONTENT PRODUCED, not merely an invariant preserved. The
+    /// first version of this test only checked that no pixel above the band
+    /// changed and none below it did — and it passed with the band painting
+    /// nothing at all, because installing a panel reshapes the document to
+    /// the smaller height and *that* produced the whole diff. So the band's
+    /// own rows and the divider row are now counted directly.
     #[test]
     fn the_painted_band_takes_pixels_from_the_document_and_not_the_status_band() {
         let Some(mut state) = headless_or_skip(400, 300, "alpha\nbeta\ngamma\ndelta\n") else {
@@ -16758,22 +16819,62 @@ mod tests {
         };
         let before = state.render_offscreen();
         let fm = state.fm;
-        let status_top = status_band_top(state.config.height, fm).floor() as u32;
+        let width = state.config.width;
+        let height = state.config.height;
+        // Anchored independently of the boundary helpers, so a blanket
+        // rewrite of them cannot move this reference frame with them.
+        let status_top = (height as f32 - fm.status_band_height()).floor() as u32;
 
         present_panel(&mut state, 3);
         state.sync_buffer_dimensions();
         let after = state.render_offscreen();
+        assert_eq!(before.len(), after.len());
 
-        let bounds = frame_diff_bounds(&before, &after, state.config.width);
-        let (_, min_y, _, max_y) = bounds.expect("installing a band changes pixels");
-        let band_top = document_text_bottom(state.config.height, fm, state.band_inset()).floor();
+        let differing_rows = |y0: u32, y1: u32| -> usize {
+            let mut count = 0;
+            for y in y0..y1.min(height) {
+                for x in 0..width {
+                    let i = ((y * width + x) * 4) as usize;
+                    if before[i..i + 4] != after[i..i + 4] {
+                        count += 1;
+                    }
+                }
+            }
+            count
+        };
+
+        let band = state.band_inset();
+        let (_, cells_top, _, cells_h) = state
+            .panel_content_rect()
+            .expect("a presented band has a rect");
+        let (_, divider_top, _, divider_h) = state
+            .panel_divider_rect()
+            .expect("a presented band has a divider");
+
         assert!(
-            min_y >= band_top as u32,
-            "no pixel above the band's own top may change: {min_y} < {band_top}"
+            differing_rows(
+                divider_top.floor() as u32,
+                (divider_top + divider_h).ceil() as u32
+            ) > 0,
+            "the divider strip must actually paint"
         );
         assert!(
-            max_y < status_top,
-            "and the status band stays pixel-identical: {max_y} >= {status_top}"
+            differing_rows(
+                cells_top.floor() as u32,
+                (cells_top + cells_h).ceil() as u32
+            ) > 0,
+            "the band's cells must actually paint"
+        );
+        assert_eq!(
+            differing_rows(status_top, height),
+            0,
+            "and the status band stays pixel-identical at the physical window bottom"
+        );
+        assert_eq!(
+            differing_rows(0, document_text_bottom(height, fm, band).floor() as u32),
+            0,
+            "no pixel above the band's own top may change: the document keeps \
+             the area it still has"
         );
     }
 
