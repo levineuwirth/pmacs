@@ -85,12 +85,69 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Arm the external-tool-gated tests (see `TEST_IMPROVEMENT.md`
+      # §1.2). Before this step nothing installed these tools, so every
+      # test guarded on them returned early and reported GREEN without
+      # executing its body — a whole block of real-language-server and
+      # multi-shell coverage that had never once run in CI. Installing
+      # them is only half the fix; the `PMACS_REQUIRE_*` variables below
+      # are what turn a future missing tool back into a failure instead
+      # of silently restoring the vacuum.
+      #
+      # Linux only for now, deliberately. macOS would need the brew
+      # equivalents and roughly doubles the install cost on the slowest
+      # leg of the matrix; arming one platform already converts these
+      # from never-executed to executed, and the second is incremental.
+      # The tests still skip cleanly on macOS because the variables are
+      # unset there.
+      - name: Install external tools that gate acceptance tests (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clangd zsh fish lua5.4
+          # `locate_lua` looks for `lua` or `luajit` by name; the
+          # distro package installs `lua5.4` only.
+          sudo ln -sf "$(command -v lua5.4)" /usr/local/bin/lua
+          # rust-analyzer belongs HERE, not on the shared toolchain
+          # step. `components:` there applies to every matrix leg, so it
+          # would install the binary on macOS too — and *presence*, not
+          # PMACS_REQUIRE_LSP, is what decides whether a gated test body
+          # runs. That would have executed the rust-analyzer tests on
+          # macOS for the first time ever, on the legs that are both the
+          # CI critical path and the documented flake surface, while
+          # this lane's text claimed Linux only.
+          rustup component add rust-analyzer
+          # Versions are PINNED. `@latest` and bare `npm install -g`
+          # make CI behaviour drift with upstream releases: a bad gopls
+          # or yaml-language-server publish then breaks CI with no
+          # commit in this repository to bisect against.
+          go install golang.org/x/tools/gopls@v0.16.2
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          npm install -g vscode-langservers-extracted@4.10.0 \
+                         yaml-language-server@1.15.0
       - run: cargo build --all-targets --no-default-features --features ${{ matrix.lua }}
       # Several acceptance binaries spawn real daemon / PTY child
       # processes. Keep the harness serial so macOS runners do not
       # expose cross-test process lifecycle races that are unrelated
       # to the behavior under test.
+      #
+      # PMACS_REQUIRE_* make a missing tool fatal rather than a silent
+      # skip, exactly as PMACS_REQUIRE_GPU already does for the headless
+      # render job. Set only where the install step ran.
+      #
+      # PMACS_REQUIRE_PYRIGHT is deliberately NOT set and basedpyright
+      # is deliberately NOT installed: that test has no timeout and
+      # hangs forever (root cause is the non-interruptible reader-thread
+      # join in `RuntimeHandles::drop`, already a named deferral in
+      # `src/process.rs`). This job has no `timeout-minutes`, so arming
+      # it today would trade a vacuous green for a six-hour hang on four
+      # legs. It gets armed after the hang fix and the CI timeouts land,
+      # and its own variable exists so that flip is one line.
       - run: cargo test --all-targets --no-default-features --features ${{ matrix.lua }} -- --test-threads=1
+        env:
+          PMACS_REQUIRE_LSP: ${{ runner.os == 'Linux' && '1' || '' }}
+          PMACS_REQUIRE_SHELLS: ${{ runner.os == 'Linux' && '1' || '' }}
+          PMACS_REQUIRE_LUA: ${{ runner.os == 'Linux' && '1' || '' }}
       - run: cargo test --doc --no-default-features --features ${{ matrix.lua }}
       # The workspace default member is only the root `pmacs` package, so
       # the runs above never execute pmacs-protocol's own tests — the

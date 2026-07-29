@@ -1443,6 +1443,22 @@ round-trip cannot detect a discriminant shift.
 
 ## 5. Hard-won ops lessons
 
+- **A gate summary assembled through a pipe can report success over a
+  failure.** `cmd | tail -2` returns **`tail`'s** exit status, not
+  `cmd`'s — in `fish` and `bash` alike — so a chain of
+  `cargo test ... | tail -2 && cargo test ... | tail -2 && echo "ALL
+  GATES CLEAN"` prints the clean line even when a suite failed. This
+  is not carelessness that closer reading would catch: the failure is
+  **structurally invisible** in the summary the PR then cites. It
+  happened while gating the silent-skip lane, and a `pmacs-gpu`
+  failure was reported as clean.
+
+  Either check `$pipestatus[1]` in fish (`${PIPESTATUS[0]}` in bash),
+  or — better — redirect each gate to a file and read the file
+  afterwards, which also preserves the full log this section already
+  asks you to keep. Same family as the skip-reports-`ok` lesson below
+  and the double-invocation traps: **the thing that summarizes a gate
+  must not be able to lose the gate's verdict.**
 - **A test that skips on a missing precondition reports `ok`, and a gate log
   cannot tell that apart from a pass.** `vterm_stage3_acceptance::a37` — the
   only acceptance driving a real daemon, a real PTY and a real wgpu render
