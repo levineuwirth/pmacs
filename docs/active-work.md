@@ -820,6 +820,45 @@ has **no branch and no framing yet**.
   current documentation. The section said "whoever confirms the branch
   carries nothing unique removes the section"; this is that.
 
+## Test-improvement arc, lane 3a — CI timeouts and concurrency
+
+- Portable branch: `githubsucks/ci-timeouts-concurrency`, worktree
+  `../pmacs-ci3`. Workflow only — **no product code, no tests changed.**
+- **Base, measured at write time:**
+
+  ```
+  $ git log --oneline -1 githubsucks/main
+  b7bf2c6 Merge pull request #194 from levineuwirth/silent-skip-arming
+  ```
+
+- Ships the three cheap, deterministic items of `TEST_IMPROVEMENT.md`
+  §5-6. The larger ones — nextest (§6.3), the serial/parallel split
+  (§6.2), the parallel canary leg (§5.6), the nightly cron (§5.5), and
+  the macOS matrix trim (§6.4) — are **deliberately not here**: each
+  changes what CI certifies or how it runs, and each wants its own
+  decision rather than riding a timeout patch.
+- **`timeout-minutes` on every job (§5.2).** Measured before changing:
+  **7 of 8 jobs had none** and inherited GitHub's 360-minute default;
+  only `m6-perf-gates` had one (15). A single hung test therefore burnt
+  six hours, times four on the test matrix. Set to 25 against a
+  measured ~14.6 min critical path (macOS/luajit).
+  **This is the gate that must land before `PMACS_REQUIRE_PYRIGHT` can
+  ever be set** — lane 2 left basedpyright unarmed precisely because
+  this did not exist.
+- **`concurrency` with `cancel-in-progress` (§6.1)**, scoped to pull
+  requests. `github.event.pull_request.number` is empty on a push to
+  `main`, so the fallback keys those by SHA and no `main` run can
+  cancel another — cancelling one would leave the branch-protection
+  record ambiguous about a commit that already landed.
+- **`-p pmacs-protocol` clippy (§5.7).** Verified passing locally
+  *before* proposing it, so adding it cannot turn CI red on arrival.
+  The root-package clippy never covered it: the workspace default
+  member is only `pmacs`.
+- Recovery from a clean checkout:
+  `git fetch githubsucks && git worktree add ../pmacs-ci3
+  -b ci-timeouts-concurrency githubsucks/ci-timeouts-concurrency`.
+
+
 ## Parked lane: kill-ring browser + persistence
 
 - Portable branch: `githubsucks/kill-ring-browser`

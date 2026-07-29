@@ -9,10 +9,39 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
+# Cancel a pull request's superseded runs instead of letting them burn
+# to completion. This project rebases heavily — the ledger re-conflicts
+# on nearly every merge — so a branch routinely takes several pushes
+# while an earlier run is still going, and each of those runs is
+# obsolete the moment the next push lands. macOS minutes are the
+# expensive ones and the macOS leg is the critical path, so superseded
+# runs are exactly where the waste concentrates.
+#
+# Scoped to pull requests deliberately. `github.event.pull_request.number`
+# is empty for a push to `main`, so the fallback keys those runs by SHA:
+# every `main` commit gets its own group and none can cancel another.
+# Cancelling a `main` run would leave the branch-protection record
+# ambiguous about a commit that has already landed — the one place this
+# saving is not worth having.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Every job carries `timeout-minutes`. Without one a job inherits
+# GitHub's 360-minute default, so a single hung test burns six hours —
+# times four on the test matrix — and reports nothing useful at the end
+# of it. The measured critical path is ~14.6 min (macOS/luajit), so 25
+# leaves ample headroom for a slow runner while catching a hang in
+# under half an hour. `m6-perf-gates` keeps its tighter 15.
+#
+# This is also the gate that has to exist before the basedpyright-class
+# hang can ever be armed — see `PMACS_REQUIRE_PYRIGHT`, deliberately
+# never set, in the test job below.
 jobs:
   fmt:
     name: Format
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -23,6 +52,7 @@ jobs:
   clippy:
     name: Lint (${{ matrix.lua }})
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -40,10 +70,17 @@ jobs:
       # not pmacs), so the root-package clippy above never lints it. Lint
       # it explicitly or its warnings slip through CI (audit F-001).
       - run: cargo clippy -p pmacs-gpu --all-targets -- -D warnings
+      # pmacs-protocol is likewise never linted by the root-package
+      # clippy above: the workspace default member is only `pmacs`. The
+      # local `--workspace` gate covers it, so it passes today — CI has
+      # simply never checked, and a warning introduced through a
+      # protocol-only PR would reach `main` unseen.
+      - run: cargo clippy -p pmacs-protocol --all-targets -- -D warnings
 
   gpu-render:
     name: GPU Render (headless)
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -76,6 +113,7 @@ jobs:
   test:
     name: Test (${{ matrix.os }} / ${{ matrix.lua }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -160,6 +198,7 @@ jobs:
   acceptance:
     name: M1 Acceptance Gates
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -170,6 +209,7 @@ jobs:
   m4-perf-gates:
     name: M4 Perf Gates
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -188,6 +228,7 @@ jobs:
   m5-perf-gates:
     name: M5 Perf Gates
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
