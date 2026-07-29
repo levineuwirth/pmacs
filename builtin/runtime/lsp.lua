@@ -1298,40 +1298,93 @@ end
 -- (best-effort: it may itself have been renamed/deleted), on the
 -- failure path as well as the success path. Returns
 -- `edit_count, file_count, resource_op_count` on success, or
--- `nil, message` if the preflight rejected the edit OR any op failed
--- while executing. No exception escapes this function (Q#RD7) — the
--- three callers all handle `nil, message` already, and a raise
--- reaching them meant an unattended server request went unanswered.
+-- `nil, message, applied_op_count` if the preflight rejected the edit
+-- OR any op failed while executing. No exception escapes this function
+-- (Q#RD7) — the three callers all handle `nil, message` already, and a
+-- raise reaching them meant an unattended server request went
+-- unanswered.
+--
+-- The third failure value is load-bearing, not decoration: Q#RD3
+-- permits partial application, so `applied_op_count > 0` means earlier
+-- plan items ARE still applied and no caller may say otherwise.
+
+-- Strip trailing separators so a path compares by components.
+local function strip_trailing_slash(p)
+  while #p > 1 and p:sub(-1) == "/" do p = p:sub(1, #p - 1) end
+  return p
+end
+
+-- True when `a` and `b` name the same path, or one lies beneath the
+-- other. Component-aware, like the Rust side's `Path::starts_with`: a
+-- raw string prefix would make `/tree` an ancestor of `/tree-sibling`.
+local function paths_related(a, b)
+  a, b = strip_trailing_slash(a), strip_trailing_slash(b)
+  if a == b then return true end
+  if #a < #b then a, b = b, a end
+  return a:sub(1, #b) == b and (b == "/" or a:sub(#b + 1, #b + 1) == "/")
+end
+
 local function apply_workspace_edit(ops)
   local plan = {}
+  -- Paths an EARLIER op in this same batch creates, renames onto,
+  -- renames away from, or removes. A delete whose target is related to
+  -- one of them cannot be judged from the filesystem's *initial*
+  -- state, which is the only state the plan loop can see.
+  --
+  -- Why defer rather than simulate. Q#RD3 already calls this check a
+  -- FILTER, not a transaction, so declining to judge an op is within
+  -- its contract; refusing a legal batch is not. Simulating instead
+  -- would mean modelling filesystem presence AND the buffer registry's
+  -- path bindings across create/rename/edit — the transaction Q#RD3
+  -- declines to build — and a simulation that got it wrong would
+  -- produce false `clear` verdicts, which is the dangerous direction.
+  -- Deferring only forgoes the early, cheap report; the primitive's
+  -- own four-phase guard is untouched and is what actually stands
+  -- between a server and unsaved work.
+  --
+  -- `edit` ops are deliberately NOT in this set. An edit changes no
+  -- path's existence; it can only dirty a buffer, i.e. only turn a
+  -- plan-time `clear` into a primitive-time refusal. That is the
+  -- under-refusal Q#RD3 documents and accepts, and adding edits here
+  -- would merely delay a refusal that is already certain.
+  local batch_changes = {}
+  local function batch_will_change(path)
+    for _, other in ipairs(batch_changes) do
+      if paths_related(path, other) then return true end
+    end
+    return false
+  end
   for _, op in ipairs(ops or {}) do
     if op.op == "edit" then
       if op.edits and #op.edits > 0 then
         local path = pmacs.lsp.path_for_uri(op.uri)
-        if not path then return nil, "cannot resolve " .. tostring(op.uri) end
+        if not path then return nil, "cannot resolve " .. tostring(op.uri), 0 end
         plan[#plan + 1] = { kind = "edit", path = path, edits = op.edits }
       end
     elseif op.op == "create" then
       local path = pmacs.lsp.path_for_uri(op.uri)
-      if not path then return nil, "cannot resolve " .. tostring(op.uri) end
+      if not path then return nil, "cannot resolve " .. tostring(op.uri), 0 end
       plan[#plan + 1] = {
         kind = "create", path = path,
         overwrite = op.overwrite, ignore_if_exists = op.ignore_if_exists,
       }
+      batch_changes[#batch_changes + 1] = path
     elseif op.op == "rename" then
       local from = pmacs.lsp.path_for_uri(op.old_uri)
       local to = pmacs.lsp.path_for_uri(op.new_uri)
       if not from or not to then
         return nil, "cannot resolve rename " ..
-          tostring(op.old_uri) .. " -> " .. tostring(op.new_uri)
+          tostring(op.old_uri) .. " -> " .. tostring(op.new_uri), 0
       end
       plan[#plan + 1] = {
         kind = "rename", old_path = from, new_path = to,
         overwrite = op.overwrite, ignore_if_exists = op.ignore_if_exists,
       }
+      batch_changes[#batch_changes + 1] = from
+      batch_changes[#batch_changes + 1] = to
     elseif op.op == "delete" then
       local path = pmacs.lsp.path_for_uri(op.uri)
-      if not path then return nil, "cannot resolve " .. tostring(op.uri) end
+      if not path then return nil, "cannot resolve " .. tostring(op.uri), 0 end
       -- Delete precondition check (Q#RD3). This is a FILTER, not a
       -- transaction. It catches, before anything in the batch is
       -- mutated: a plan-time modified or mid-edit buffer, a known
@@ -1349,21 +1402,34 @@ local function apply_workspace_edit(ops)
       -- uses, so the two layers cannot disagree. `no-op` and `clear`
       -- both pass: rejecting `no-op` would refuse an op the primitive
       -- treats as doing nothing.
-      local verdict = pmacs.buffer._delete_verdict {
-        path = path,
-        recursive = op.recursive,
-        ignore_if_not_exists = op.ignore_if_not_exists,
-      }
-      if verdict.kind == "refuse" then return nil, verdict.message end
+      --
+      -- Skipped entirely when an earlier op in this batch can change
+      -- this target (see `batch_changes`). Judging `delete X` against
+      -- the initial filesystem when an earlier `create X` or
+      -- `rename A -> X` has not run yet reports a NotFound that the
+      -- batch itself was about to fix, and refuses a legal edit.
+      if not batch_will_change(path) then
+        local verdict = pmacs.buffer._delete_verdict {
+          path = path,
+          recursive = op.recursive,
+          ignore_if_not_exists = op.ignore_if_not_exists,
+        }
+        if verdict.kind == "refuse" then return nil, verdict.message, 0 end
+      end
       plan[#plan + 1] = {
         kind = "delete", path = path,
         recursive = op.recursive, ignore_if_not_exists = op.ignore_if_not_exists,
       }
+      batch_changes[#batch_changes + 1] = path
     end
   end
   if #plan == 0 then return 0, 0, 0 end
   local origin = active_buffer_path()
   local edit_total, files, res_ops = 0, 0, 0
+  -- Plan items fully applied before a failure. Q#RD3 permits partial
+  -- application, so this is what stops a caller claiming "nothing was
+  -- mutated" when something was.
+  local applied_ops = 0
   -- Return the user to where they invoked from — best-effort, since
   -- that path may have just been renamed or deleted. Runs on the
   -- FAILURE path too (Q#RD7): previously this ran only after a
@@ -1390,11 +1456,31 @@ local function apply_workspace_edit(ops)
     end
     if not ok then
       restore_origin()
-      return nil, tostring(err)
+      return nil, tostring(err), applied_ops
     end
+    applied_ops = applied_ops + 1
   end
   restore_origin()
   return edit_total, files, res_ops
+end
+
+-- Render an `apply_workspace_edit` failure for a human or for a
+-- server's `failureReason`. One renderer for both, so the two cannot
+-- disagree about what happened.
+--
+-- Q#RD3 explicitly permits partial application: an earlier text edit
+-- can apply and dirty a buffer before a later delete refuses. So
+-- "nothing was mutated" is a claim about `applied`, not a constant —
+-- asserting it unconditionally is a false statement about the user's
+-- files in precisely the case the framing predicted.
+local function workspace_edit_failure(message, applied)
+  applied = applied or 0
+  if applied > 0 then
+    return string.format(
+      "failed after %d operation%s — those earlier changes remain applied: %s",
+      applied, (applied == 1 and "" or "s"), tostring(message))
+  end
+  return "aborted, nothing was mutated: " .. tostring(message)
 end
 
 -- Re-pull a per-`(server, uri)` store for every buffer attached to
@@ -1885,16 +1971,21 @@ local function handle_server_requests()
             -- being fixed, one line out of scope. The wrap costs
             -- nothing and makes the boundary uniform regardless of
             -- which call fails.
-            local ok, a, b = pcall(function()
+            local ok, a, b, c = pcall(function()
               local parsed = pmacs.lsp._parse_workspace_edit(edit)
               return apply_workspace_edit(parsed.ops)
             end)
             if not ok then
-              reason = a
+              -- A raise from the parse: nothing in the batch ran.
+              reason = workspace_edit_failure(a, 0)
             elseif a then
               applied = true
             else
-              reason = b
+              -- `c` is the count of plan items already applied. The
+              -- server is told so, because `applied = false` alone
+              -- reads as "the workspace is unchanged" and Q#RD3 says
+              -- it need not be.
+              reason = workspace_edit_failure(b, c)
             end
           else
             reason = "missing edit"
@@ -2384,8 +2475,13 @@ function pmacs.lsp.rename()
           end
           local n, files, res = apply_workspace_edit(ops)
           if not n then
-            -- Preflight rejected it; nothing was mutated.
-            pmacs.editor.set_status("LSP: rename aborted: " .. tostring(files))
+            -- On failure the second value is the message and the third
+            -- is how many plan items already applied. It is NOT always
+            -- zero (Q#RD3), so this must not say "nothing was mutated"
+            -- unconditionally — that was false in exactly the
+            -- edit-then-delete case the framing predicted.
+            pmacs.editor.set_status(
+              "LSP: rename " .. workspace_edit_failure(files, res))
             return
           end
           local msg = string.format(
@@ -2446,7 +2542,11 @@ local function apply_code_action(rec, act)
   if act.has_edit then
     local n, files, res = apply_workspace_edit(act.edit)
     if not n then
-      pmacs.editor.set_status("LSP: code action aborted: " .. tostring(files))
+      -- Same failure shape as the rename caller: `files` is the
+      -- message, `res` the applied-op count (Q#RD3 permits partial
+      -- application, so it can be non-zero).
+      pmacs.editor.set_status(
+        "LSP: code action " .. workspace_edit_failure(files, res))
       return
     end
     local b = string.format("%d edit(s) / %d file(s)", n, files)

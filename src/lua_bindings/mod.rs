@@ -1627,18 +1627,30 @@ enum DeleteVerdict {
 /// one as absent, which is the single input on which the two disagree
 /// and exactly the input `ignore_if_not_exists` turns on.
 ///
-/// `recursive` is deliberately not a parameter. Inspection is
-/// prefix-aware whenever the target is a directory, because a
-/// non-recursive delete of a non-empty directory fails at the
-/// filesystem anyway — so widening inspection there costs nothing and
-/// narrowing it would leave the recursive arm's bypass reachable.
+/// **Descendant matching is reserved for `recursive` deletes.** The
+/// affected set is what the op can actually destroy: a non-recursive
+/// delete removes the target entry and nothing beneath it, so a buffer
+/// under the target is not at risk and must not refuse the op. The
+/// earlier revision of this helper ignored `recursive` and scanned
+/// descendants for every directory, on the reasoning that a
+/// non-recursive delete of a *non-empty* directory fails at the
+/// filesystem anyway. That reasoning was wrong, and the counterexample
+/// is an orphan: a modified buffer at `tree/gone.rs` whose file is
+/// already deleted blocks a non-recursive delete of the now-**empty**
+/// `tree/`, which would have succeeded and would have removed none of
+/// that buffer's contents.
 fn delete_verdict(
     reg: &BufferRegistry,
     path: &std::path::Path,
+    recursive: bool,
     ignore_if_not_exists: bool,
 ) -> DeleteVerdict {
-    let is_dir = match std::fs::symlink_metadata(path) {
-        Ok(md) => md.is_dir(),
+    let scan_descendants = match std::fs::symlink_metadata(path) {
+        // A symlink to a directory reports `is_dir() == false` here, and
+        // that is correct: the primitive `remove_file`s the link and
+        // never walks through it, so nothing beneath the link's target
+        // is at risk either.
+        Ok(md) => md.is_dir() && recursive,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return if ignore_if_not_exists {
                 DeleteVerdict::NoOp
@@ -1666,7 +1678,7 @@ fn delete_verdict(
             continue;
         };
         let bound = crate::editor_core::normalize_buffer_path(bound.to_path_buf());
-        if bound != target && !(is_dir && bound.starts_with(&target)) {
+        if bound != target && !(scan_descendants && bound.starts_with(&target)) {
             continue;
         }
         // "Modified" is `Buffer::is_modified()`. No new notion of
@@ -3442,7 +3454,8 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
 
                         // Phases 1 and 2, as one shared query.
                         let md = {
-                            let verdict = delete_verdict(&reg.borrow(), &pb, ignore_if_not_exists);
+                            let verdict =
+                                delete_verdict(&reg.borrow(), &pb, recursive, ignore_if_not_exists);
                             match verdict {
                                 // Absent plus ignore is a no-op: return
                                 // without touching the registry, which
@@ -3518,10 +3531,16 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
             "_delete_verdict",
             lua.create_function(move |lua, spec: Table| -> mlua::Result<Table> {
                 let path: String = spec.get("path")?;
+                // `recursive` is read here for the same reason the
+                // primitive reads it: it decides whether descendants are
+                // part of the affected set at all. Dropping it would put
+                // the preflight and the primitive back into disagreement
+                // on every non-recursive directory delete.
+                let recursive: bool = spec.get("recursive").unwrap_or(false);
                 let ignore_if_not_exists: bool = spec.get("ignore_if_not_exists").unwrap_or(false);
                 let pb = std::path::PathBuf::from(&path);
                 let out = lua.create_table()?;
-                match delete_verdict(&reg.borrow(), &pb, ignore_if_not_exists) {
+                match delete_verdict(&reg.borrow(), &pb, recursive, ignore_if_not_exists) {
                     DeleteVerdict::NoOp => out.set("kind", "no-op")?,
                     DeleteVerdict::Clear => out.set("kind", "clear")?,
                     DeleteVerdict::Refuse {

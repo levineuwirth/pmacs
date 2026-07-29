@@ -521,54 +521,104 @@ has **no branch and no framing yet**.
   `FrontendView.fold_projection` to `true` for semantic frontends, which
   Stage 2 deliberately left `false` (Q#FD21).
 
-## Resource-op delete guard implementation — PR OPEN, PARTIAL
+## Resource-op delete guard implementation — PR #190 OPEN, review round 1 closed
 
 - Portable branch: `githubsucks/resource-op-delete-guard-impl`, worktree
-  `../pmacs-rd-impl`, based on `main` @ `300cbc4`. Implements the
-  framing merged as #186 (`docs/resource-op-delete-guard-framing.md`,
-  revision 5).
+  `../pmacs-rd-impl`. Implements the framing merged as #186
+  (`docs/resource-op-delete-guard-framing.md`, revision 5 plus its new
+  §9). Position against `main`, as pasted command output rather than a
+  remembered constant — **`main` moved while this lane was being
+  written**:
+
+  ```
+  $ git merge-base HEAD githubsucks/main
+  64883ebe0c1785b8188d2dee7c8e6f8ea4518512
+  $ git rev-list --left-right --count HEAD...githubsucks/main
+  2       0
+  ```
+
+  Re-measure before quoting this anywhere: `main` has branch protection
+  now, and #193 was open behind #192 when this was written.
 - **The framing's §8 branch plan is superseded and cannot be followed.**
   It says "one PR — #186, which becomes the implementation PR", written
   when #186 was still open. #186 merged as framing-only, so the
-  implementation necessarily gets its own branch and PR. Nothing about
-  the decisions changes; only the branch plan.
-- **Layer 1 (the primitive) is complete and tested.** The delete arm is
-  four ordered phases; `delete_verdict` is the single shared query, used
-  by the primitive and exposed to Lua as `pmacs.buffer._delete_verdict`
-  so the two layers cannot drift.
-- **Layer 2 (the applier + server-request boundary) is implemented but
-  NOT yet covered.** `builtin/runtime/lsp.lua` has the plan-time
-  preflight, the parse-plus-apply wrap, origin restore on the failure
-  path, and the `*errors*` trace. Criteria 11-15 exercise those through
-  a real server pump and need new `pmacs_fake_lsp` modes that do not
-  exist yet. **Criterion 13 explicitly rejects a direct-call test as
-  insufficient**, so this is a real gap, not a formality: today the
-  Layer 2 code has no production-path pin.
-- Acceptance status: criteria **1-10, 14 and 16 land here** (11 tests in
-  `tests/m4_acceptance.rs`, prefixed `rd`). Criteria **11, 11a-11d, 12,
-  13, 15 do not** — they are the fake-LSP modes above.
-- **Criterion 3's stated bite in the framing is wrong**, found by
-  checking rather than trusting it. The framing says it fails against
-  buffer-first ordering; it does not, because the deleted path is a
-  directory no buffer is bound to, so reconciliation never fires on
-  that input. It *does* fail against validation that removes rather
-  than inspects — verified by mutation. The test comment carries the
-  correction; the framing wants amending on its next revision.
-- Bite verification: the five refusal criteria (1, 5, 6, 8, 10) fail
-  against `githubsucks/main` via `scripts/bite`. Criteria 3 and 4 pin
-  phase *ordering* against designs never committed, so `main` cannot
-  falsify them; both were verified by hand mutation instead (4 catches
-  buffer-first ordering, 3 catches removing-validation). Criteria 2, 7,
-  9 and 14 assert preserved or deliberately-unchanged behaviour and are
-  expected to pass against `main` — that is what they are for.
-- Gates green at this tree: fmt; clippy `-D warnings`; `--lib` **1863**;
-  `--lib --features crdt` **2048**; `m4_acceptance` **132**;
-  `lsp_dispatch_seams_acceptance` **15**; `dired_acceptance` **25** and
-  `autosave_acceptance` **29** (framing watch items); required GPU
-  **202**; `git diff --check`.
+  implementation got its own branch and PR. Nothing about the decisions
+  changes; only the branch plan. Both the framing's header and its §8 now
+  say so on their own pages.
+- **Layer 1 (the primitive) and Layer 2 (the applier + server-request
+  boundary) are both complete and both pinned through their production
+  paths.** The Layer 2 gap the first commit named — criteria 11, 11a-11d,
+  12, 13, 15 having no production-path pin — is closed.
+- **Review round 1 found four defects; all four are fixed and all four
+  are recorded in the framing's new §9**, because two of them were
+  corrections *to that document*, and a correction living only in a test
+  comment is invisible to the next reader of the framing:
+  - **P1 §9.3 — the preflight broke ordered resource ops.** Every delete
+    was judged against the filesystem's *initial* state, so a valid
+    `create X -> delete X` (or `rename A -> B -> delete B`) was refused
+    with a fabricated `NotFound` about a path the batch was about to
+    create. A regression this lane introduced. **Decision: defer, do not
+    simulate** — a delete whose target is related by component-aware path
+    containment to a path an *earlier* op creates, renames, or removes is
+    left to the primitive. Q#RD3 already calls the check a filter, not a
+    transaction. `edit` ops are deliberately excluded, so the
+    buffer-and-filesystem half still fires early for untouched targets
+    (criterion 11c depends on exactly that).
+  - **P1 §9.5 — the required production-boundary acceptances were
+    missing.** Landed: 11, 11a-11d, 12 (both directions), 13, 15.
+  - **P1 §9.4 — mid-batch failures were misreported as complete aborts.**
+    `apply_workspace_edit` now returns `nil, message, applied_op_count`,
+    and ONE renderer serves both the status line and the server's
+    `failureReason`. All three callers updated.
+  - **P2 §9.2 — non-recursive deletes inspected descendants.** `recursive`
+    is now a parameter of the shared query. The counterexample is an
+    orphan: a modified buffer at `tree/gone.rs` whose file is already gone
+    blocked a non-recursive delete of the now-*empty* `tree/`.
+- **`delete_verdict` is narrowed, and #171 inherits the narrowed
+  version.** Q#RD6's shared query is this lane's to own; descendant
+  matching is now reserved for recursive deletes. Q#RD5's "inspect widely,
+  mutate narrowly" is unchanged in substance — "widely" means the set the
+  op can actually destroy.
+- **Criterion 3's stated bite: fixed by fixing the SETUP, not the doc.**
+  The framing says it fails against buffer-first ordering. Against the
+  first shipped setup it did not (a directory target with no buffer bound
+  to it), and §9.2's narrowing would then have left that setup with no
+  bite at all. The buffer is now bound to the *exact* deleted path — a
+  file opened, then replaced on disk by a non-empty directory, so a
+  non-recursive `remove_dir` fails with `ENOTEMPTY` deterministically and
+  under any uid. Both stated pre-images now bite, so the framing's wording
+  needed no amendment after all.
+- **The fake is one parameterized mode, not eight.**
+  `PMACS_FAKE_LSP_MODE=applyeditplan` reads its whole `WorkspaceEdit` from
+  `PMACS_FAKE_LSP_EDIT_PLAN` and publishes the client's response to
+  `PMACS_FAKE_LSP_APPLYEDIT_SINK` (written `.part`-then-rename, so a
+  polling reader never sees a partial record). Fail-closed: an unreadable
+  plan sends no `applyEdit` and reports itself through the sink.
+  `pmacs_fake_lsp` is a cargo BIN resolved through
+  `env!("CARGO_BIN_EXE_...")`, so every CI leg builds it and a missing
+  binary is a build failure — there is deliberately no
+  skip-and-return-ok arm.
+- **Criterion 15's stub is hosted in `m4_acceptance`, and the gate list
+  moved with it.** `lsp_dispatch_seams_acceptance` is struck from the
+  framing's §7 gate list AND its §8 touch table in the same edit, under
+  §8's permitted simplification. It is still *run* as a gate, because
+  `builtin/runtime/lsp.lua` changed.
+- Acceptance: criteria 1-16 plus §9's 18, 19a-19c and 20, all in
+  `tests/m4_acceptance.rs` and prefixed `rd`. 28 tests.
+- Bite verification uses `scripts/bite` **with the positive control** it
+  gained in #192, merged into this lane. The pre-image for the round-1
+  fixes is this lane's own first commit `1873be6`, not `main` — those
+  defects were introduced by it. Per-criterion results are in the commit
+  message.
+- Gates green at the pushed tree: fmt; clippy `-D warnings`; `--lib`
+  **1863**; `--lib --features crdt` **2048**; `m4_acceptance` **146**
+  (was 132); `lsp_dispatch_seams_acceptance` **15**; `dired_acceptance`
+  **25** and `autosave_acceptance` **29** (the framing's watch items);
+  required GPU **202**; `git diff --check` clean.
 - Recovery from a clean checkout:
   `git fetch githubsucks && git worktree add ../pmacs-rd-impl
   -b resource-op-delete-guard-impl githubsucks/resource-op-delete-guard-impl`.
+
 
 ## Test-improvement arc, lane 6 — `scripts/bite` positive control
 

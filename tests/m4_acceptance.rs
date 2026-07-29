@@ -8166,9 +8166,11 @@ fn hover_doc_panel_shows_full_contents_via_binding() {
 
 // ---------------------------------------------------------------
 // Resource-op delete guard (framing `docs/resource-op-delete-guard-
-// framing.md`, revision 5). Criteria 1-10 and 14 drive the primitive
-// directly; criteria 11-15 drive the applier and the server-request
-// boundary and live below these.
+// framing.md`, revision 5 plus its §9 implementation-review
+// corrections). Criteria 1-10, 14 and 18 drive the primitive
+// directly; criteria 11, 11a-11d, 12, 13, 15, 19 and 20 drive the
+// applier and the server-request boundary through a real
+// `pmacs_fake_lsp` child, and live in the second block below.
 //
 // Every criterion names the pre-image it must fail against. A test
 // that passes against its pre-image has no bite and is worthless
@@ -8278,34 +8280,45 @@ fn rd2_delete_still_succeeds_for_a_clean_open_buffer() {
 
 /// Criterion 3 — a filesystem failure preserves the clean buffer.
 ///
-/// Bite — **corrected against the framing, which states this wrongly.**
-/// The framing says this criterion "fails against revision 1's
-/// buffer-first ordering". It does not, and the claim was checked
-/// rather than trusted: moving reconciliation ahead of the filesystem
-/// mutation leaves this test PASSING, because the deleted path here is
-/// a *directory* and no buffer is bound to it — `find_by_path` matches
-/// nothing, so the reordering never fires on this input.
+/// **The setup is deliberate and the framing's bite is restored by it.**
+/// The first version of this test bound the buffer to a file *beneath*
+/// the deleted directory, and against that setup the framing's stated
+/// bite ("fails against revision 1's buffer-first ordering") was simply
+/// false: no buffer was bound to the deleted path, so reconciliation —
+/// wherever it sat in the order — matched nothing and the reordering
+/// never fired. Round 1 of review then narrowed the affected set to
+/// recursive deletes only, which would have left that setup with no
+/// bite at all.
 ///
-/// What does falsify it is the shape revision 1 actually proposed:
-/// validation that **removes** the affected set instead of inspecting
-/// it. Verified by mutation — with validation removing every buffer at
-/// or beneath the target, this test fails on exactly its stated
-/// assertion. That is the pre-image; the framing's wording is the one
-/// that needs amending, not this setup.
+/// So the buffer is bound to the **exact** deleted path here: a file is
+/// opened, and the path is then replaced on disk by a non-empty
+/// directory. The buffer is clean and exact-path-bound, the delete is
+/// non-recursive, and `remove_dir` fails deterministically with
+/// `ENOTEMPTY` — no permission trickery, nothing that behaves
+/// differently under a root CI.
+///
+/// Bite: fails against **both** pre-images, as the framing intended.
+/// Buffer-first ordering removes B and then fails at the filesystem;
+/// validation that *removes* the affected set rather than inspecting it
+/// removes B as well. Both verified by mutation.
 #[test]
 fn rd3_filesystem_failure_leaves_the_clean_buffer_intact() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let sub = dir.path().join("subdir");
-    std::fs::create_dir(&sub).expect("mkdir");
-    let inner = sub.join("inner.rs");
-    std::fs::write(&inner, b"inner\n").expect("write");
+    let target = dir.path().join("target");
+    std::fs::write(&target, b"was a file\n").expect("write");
 
     let mut state = pmacs::editor::EditorState::new();
-    rd_open(&mut state, "B", &inner);
+    rd_open(&mut state, "B", &target);
 
-    // Non-empty directory without `recursive` — the fs mutation fails
-    // after validation has already cleared the (clean) buffer.
-    let (ok, err) = rd_delete(&mut state, &sub, "");
+    // The path changes type behind pmacs's back — the same class of
+    // drift mode (b) exposes, and the buffer keeps its binding.
+    std::fs::remove_file(&target).expect("unlink");
+    std::fs::create_dir(&target).expect("mkdir");
+    std::fs::write(target.join("occupant.rs"), b"occupant\n").expect("write occupant");
+
+    // Non-empty directory without `recursive`: validation clears the
+    // (clean, exact-path-bound) buffer, and the fs mutation then fails.
+    let (ok, err) = rd_delete(&mut state, &target, "");
     assert!(!ok, "removing a non-empty dir without recursive must fail");
     assert!(
         err.to_lowercase().contains("delete"),
@@ -8322,7 +8335,7 @@ fn rd3_filesystem_failure_leaves_the_clean_buffer_intact() {
         still,
         "THE BITE: nothing is removed before the filesystem mutation succeeds"
     );
-    assert!(inner.exists(), "and the file is untouched");
+    assert!(target.is_dir(), "and the directory is untouched");
 }
 
 /// Criterion 4 — `on_removed` observes the path already absent.
@@ -8656,4 +8669,1003 @@ fn rd14_clean_duplicates_reconcile_exactly_one() {
         "THE BITE: exactly one duplicate is reconciled away, not both \
          and not neither (first={first}, second={second})"
     );
+}
+
+// ---------------------------------------------------------------
+// Layer 2 — the applier and the server-request boundary, driven
+// through the REAL server pump. Criteria 11, 11a-11d, 12, 13 and 15,
+// plus 18 and 19, which review round 1 added.
+//
+// Criterion 13 rejects a direct-call test on `apply_resource_op` as
+// insufficient: the guard has to be pinned at the outermost
+// user-reachable seam, which is a server-initiated
+// `workspace/applyEdit`. These therefore all run a real
+// `pmacs_fake_lsp` child over a real transport.
+//
+// `pmacs_fake_lsp` is a cargo BIN, so every CI leg builds it and
+// `fake_lsp_path` resolves it through `env!("CARGO_BIN_EXE_...")` — a
+// compile-time constant, not a runtime probe. There is deliberately
+// no "binary missing, skip and return ok" arm anywhere in this file:
+// that shape is how a suite reports green without running (the a37
+// precedent). A missing binary is a build failure here.
+// ---------------------------------------------------------------
+
+/// `file://` URI for a path, as a server would send it.
+fn rd_uri(path: &std::path::Path) -> String {
+    format!("file://{}", path.display())
+}
+
+/// One `documentChanges` text-edit entry replacing `line`'s columns
+/// `[from, to)` with `new_text`.
+fn rd_edit_op(
+    path: &std::path::Path,
+    line: u64,
+    from: u64,
+    to: u64,
+    new_text: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "textDocument": { "uri": rd_uri(path), "version": 1 },
+        "edits": [{
+            "range": {
+                "start": { "line": line, "character": from },
+                "end":   { "line": line, "character": to }
+            },
+            "newText": new_text
+        }]
+    })
+}
+
+/// Point the `rust` server at the `applyeditplan` fake carrying
+/// `plan`, and hand back the sink path the client's response to the
+/// server-initiated `workspace/applyEdit` will land in.
+///
+/// Must run before the first `.rs` file is opened — that open is what
+/// launches the server.
+fn rd_plan_server(
+    state: &mut pmacs::editor::EditorState,
+    dir: &std::path::Path,
+    plan: &serde_json::Value,
+) -> std::path::PathBuf {
+    let plan_path = dir.join("plan.json");
+    std::fs::write(
+        &plan_path,
+        serde_json::to_vec(plan).expect("serialize the plan"),
+    )
+    .expect("write the plan");
+    let sink = dir.join("applyedit-response.json");
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{
+               command = '{fake}',
+               env = {{
+                 PMACS_FAKE_LSP_MODE = 'applyeditplan',
+                 PMACS_FAKE_LSP_EDIT_PLAN = '{plan_disp}',
+                 PMACS_FAKE_LSP_APPLYEDIT_SINK = '{sink_disp}',
+               }},
+             }}",
+            plan_disp = plan_path.display(),
+            sink_disp = sink.display(),
+        ))
+        .exec()
+        .expect("override rust config");
+    sink
+}
+
+/// Block until the fake has answered `initialize`.
+fn rd_wait_initialized(state: &mut pmacs::editor::EditorState) {
+    assert!(
+        pump_lua_flag(
+            state,
+            "(function() for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.state and r.state.kind=='initialized' then return true end \
+             end return false end)()",
+            10,
+        ),
+        "fake never initialized"
+    );
+}
+
+/// Ask the fake to deliver its planned `workspace/applyEdit`.
+///
+/// Driven by an `executeCommand` rather than fired at `initialized`
+/// so the test controls *when* the batch arrives: every one of these
+/// fixtures depends on buffers being open and dirty first, and a
+/// server-timed request would race that setup.
+fn rd_trigger_apply_edit(state: &mut pmacs::editor::EditorState) {
+    state
+        .lua_host
+        .lua()
+        .load(
+            "local sid \
+             for _, row in ipairs(pmacs.lsp.list()) do \
+               if row.state and row.state.kind == 'initialized' then sid = row.id end \
+             end \
+             assert(sid, 'no initialized server') \
+             pmacs.lsp.request_execute_command(sid, 'pmacs.fake.applyEdit', {})",
+        )
+        .exec()
+        .expect("dispatch the executeCommand that drives applyEdit");
+}
+
+/// Pump the real frame order until the fake has published the
+/// client's whole response, and return it parsed.
+///
+/// The fake writes a `.part` and renames, so observing the file at
+/// all means observing a complete record — the wait predicate cannot
+/// be weaker than the assertions that follow it.
+fn rd_wait_response(
+    state: &mut pmacs::editor::EditorState,
+    sink: &std::path::Path,
+    secs: u64,
+) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        if let Ok(raw) = std::fs::read(sink)
+            && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&raw)
+        {
+            assert!(
+                v.get("fakeError").is_none(),
+                "the fixture itself failed: {v:?}"
+            );
+            return v;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the client never answered the server's workspace/applyEdit \
+             (no record at {})",
+            sink.display()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// `applied` out of an `ApplyWorkspaceEditResult`.
+fn rd_applied(response: &serde_json::Value) -> bool {
+    response
+        .get("result")
+        .and_then(|r| r.get("applied"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or_else(|| panic!("response carried no boolean `applied`: {response:?}"))
+}
+
+/// `failureReason`, which must be present and non-empty whenever
+/// `applied` is false.
+fn rd_reason(response: &serde_json::Value) -> String {
+    let reason = response
+        .get("result")
+        .and_then(|r| r.get("failureReason"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| panic!("response carried no `failureReason`: {response:?}"))
+        .to_owned();
+    assert!(!reason.is_empty(), "failureReason must not be empty");
+    reason
+}
+
+/// The whole `*errors*` buffer, or `""` when it was never created.
+fn rd_errors_text(state: &mut pmacs::editor::EditorState) -> String {
+    state
+        .lua_host
+        .lua()
+        .load(
+            "for _, id in ipairs(pmacs.buffer.list()) do \
+               local ok, d = pcall(pmacs.describe.buffer, id) \
+               if ok and d and d.name == '*errors*' then \
+                 return id:slice(0, id:len()) \
+               end \
+             end \
+             return ''",
+        )
+        .eval()
+        .expect("read *errors*")
+}
+
+/// Criterion 11 — absent-plus-ignore succeeds through the real server
+/// pump, and the modified buffer bound to that absent path survives.
+///
+/// Bite: fails against a preflight that rejects on the presence of a
+/// modified buffer without consulting `ignore_if_not_exists`, and
+/// against `main`, where the primitive's `NotFound` + ignore branch
+/// falls through and destroys the buffer.
+#[test]
+fn rd11_absent_plus_ignore_succeeds_through_the_server_pump() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let victim = dir.path().join("victim.rs");
+    std::fs::write(&victim, b"content\n").expect("write");
+
+    let mut state = pmacs::editor::EditorState::new();
+    let plan = serde_json::json!({
+        "documentChanges": [
+            { "kind": "delete", "uri": rd_uri(&victim),
+              "options": { "ignoreIfNotExists": true } }
+        ]
+    });
+    let sink = rd_plan_server(&mut state, dir.path(), &plan);
+    rd_open(&mut state, "B", &victim);
+    state
+        .lua_host
+        .lua()
+        .load("B:insert(0, 'unsaved')")
+        .exec()
+        .expect("dirty the buffer");
+    rd_wait_initialized(&mut state);
+
+    // The file goes behind pmacs's back, so the op is a genuine
+    // absent-plus-ignore no-op with a modified buffer still naming it.
+    std::fs::remove_file(&victim).expect("unlink behind pmacs's back");
+
+    rd_trigger_apply_edit(&mut state);
+    let response = rd_wait_response(&mut state, &sink, 10);
+    assert!(
+        rd_applied(&response),
+        "a no-op delete must not be refused: {response:?}"
+    );
+
+    let (valid, text): (bool, String) = state
+        .lua_host
+        .lua()
+        .load("return B:is_valid(), B:slice(0, B:len())")
+        .eval()
+        .expect("buffer probe");
+    assert!(valid, "THE BITE: the buffer must survive a no-op delete");
+    assert_eq!(text, "unsavedcontent\n", "and keep its unsaved text");
+}
+
+/// Criterion 11a — present-plus-ignore with a modified buffer is still
+/// REFUSED. The opposite direction of criterion 11, and the pair is
+/// the point: one-direction coverage on a two-direction rule is how
+/// the gap survived a framing round.
+///
+/// Bite: fails against a preflight that treats `ignore_if_not_exists`
+/// as an unconditional bypass rather than consulting the filesystem.
+#[test]
+fn rd11a_present_plus_ignore_with_a_modified_buffer_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let victim = dir.path().join("victim.rs");
+    std::fs::write(&victim, b"content\n").expect("write");
+
+    let mut state = pmacs::editor::EditorState::new();
+    let plan = serde_json::json!({
+        "documentChanges": [
+            { "kind": "delete", "uri": rd_uri(&victim),
+              "options": { "ignoreIfNotExists": true } }
+        ]
+    });
+    let sink = rd_plan_server(&mut state, dir.path(), &plan);
+    rd_open(&mut state, "B", &victim);
+    state
+        .lua_host
+        .lua()
+        .load("B:insert(0, 'unsaved')")
+        .exec()
+        .expect("dirty the buffer");
+    rd_wait_initialized(&mut state);
+
+    rd_trigger_apply_edit(&mut state);
+    let response = rd_wait_response(&mut state, &sink, 10);
+    assert!(
+        !rd_applied(&response),
+        "the target EXISTS, so ignoreIfNotExists is irrelevant: {response:?}"
+    );
+    let reason = rd_reason(&response);
+    assert!(
+        reason.contains("unsaved changes"),
+        "the reason must name the conflict, got {reason:?}"
+    );
+    assert!(
+        victim.exists(),
+        "THE BITE: the file survives a refused delete"
+    );
+    let text: String = state
+        .lua_host
+        .lua()
+        .load("return B:slice(0, B:len())")
+        .eval()
+        .expect("read back");
+    assert_eq!(text, "unsavedcontent\n", "and so does the unsaved text");
+}
+
+/// Criterion 11b — a dangling symlink counts as PRESENT.
+///
+/// Bite: fails against a preflight built on `canonicalize`, which
+/// resolves symlinks and returns `nil` for a broken one — it would
+/// classify this as absent, take the `ignoreIfNotExists` no-op path,
+/// and let the batch through. This is the single input on which
+/// realpath and `symlink_metadata` disagree, and the reason Q#RD12
+/// specifies the latter.
+#[cfg(unix)]
+#[test]
+fn rd11b_a_dangling_symlink_counts_as_present() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let real = dir.path().join("real.rs");
+    let link = dir.path().join("link.rs");
+    std::fs::write(&real, b"content\n").expect("write");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+    let mut state = pmacs::editor::EditorState::new();
+    let plan = serde_json::json!({
+        "documentChanges": [
+            { "kind": "delete", "uri": rd_uri(&link),
+              "options": { "ignoreIfNotExists": true } }
+        ]
+    });
+    let sink = rd_plan_server(&mut state, dir.path(), &plan);
+    // Opened through the LINK path, so the buffer binds to the link —
+    // `normalize_buffer_path` is lexical and resolves no symlinks.
+    rd_open(&mut state, "B", &link);
+    state
+        .lua_host
+        .lua()
+        .load("B:insert(0, 'unsaved')")
+        .exec()
+        .expect("dirty the buffer");
+    rd_wait_initialized(&mut state);
+
+    // Break the link. `canonicalize` now says absent; the primitive's
+    // `symlink_metadata` still says present.
+    std::fs::remove_file(&real).expect("unlink the destination");
+    assert!(
+        std::fs::symlink_metadata(&link).is_ok(),
+        "fixture: the link itself must still exist"
+    );
+    assert!(
+        std::fs::canonicalize(&link).is_err(),
+        "fixture: the link must be dangling, or this test proves nothing"
+    );
+
+    rd_trigger_apply_edit(&mut state);
+    let response = rd_wait_response(&mut state, &sink, 10);
+    assert!(
+        !rd_applied(&response),
+        "a dangling symlink is present, so the modified buffer refuses: {response:?}"
+    );
+    assert!(
+        rd_reason(&response).contains("unsaved changes"),
+        "and refuses for the buffer, not for a missing path"
+    );
+    assert!(
+        std::fs::symlink_metadata(&link).is_ok(),
+        "THE BITE: the link survives the refusal"
+    );
+}
+
+/// Criterion 11c — absent without `ignoreIfNotExists` refuses in the
+/// PLAN, before the earlier op in the batch runs.
+///
+/// This is also the half of the preflight that review round 1
+/// required to keep firing: the delete's target is touched by no
+/// earlier op, so the deferral must not apply to it.
+///
+/// Bite: fails if the verdict maps this state to `clear` and leaves
+/// the primitive to discover it mid-batch — that implementation
+/// applies the text edit first.
+#[test]
+fn rd11c_absent_without_ignore_refuses_before_the_earlier_op_runs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a = dir.path().join("a.rs");
+    let missing = dir.path().join("never-existed.rs");
+    std::fs::write(&a, b"abcfooxyz\n").expect("write a");
+
+    let mut state = pmacs::editor::EditorState::new();
+    let plan = serde_json::json!({
+        "documentChanges": [
+            rd_edit_op(&a, 0, 3, 6, "EDITED"),
+            { "kind": "delete", "uri": rd_uri(&missing),
+              "options": { "ignoreIfNotExists": false } }
+        ]
+    });
+    let sink = rd_plan_server(&mut state, dir.path(), &plan);
+    rd_open(&mut state, "B", &a);
+    rd_wait_initialized(&mut state);
+
+    rd_trigger_apply_edit(&mut state);
+    let response = rd_wait_response(&mut state, &sink, 10);
+    assert!(!rd_applied(&response), "a known-missing target refuses");
+    let reason = rd_reason(&response);
+    assert!(
+        reason.contains("os error 2") || reason.to_lowercase().contains("no such file"),
+        "the reason must carry the NotFound cause, got {reason:?}"
+    );
+    assert!(
+        reason.contains("nothing was mutated"),
+        "a plan-time refusal applied nothing and must say so, got {reason:?}"
+    );
+
+    let text: String = state
+        .lua_host
+        .lua()
+        .load("return B:slice(0, B:len())")
+        .eval()
+        .expect("read back");
+    assert_eq!(
+        text, "abcfooxyz\n",
+        "THE BITE: the earlier text edit must NOT have applied"
+    );
+}
+
+/// Criterion 11d — an unanswerable stat fails closed in the plan.
+///
+/// A regular file stands in as the target's parent, so
+/// `symlink_metadata` yields `NotADirectory` rather than `NotFound` on
+/// every supported platform.
+///
+/// Bite: fails if a non-`NotFound` stat error is collapsed to `clear`,
+/// or if the binding raises past the value-returning boundary.
+#[test]
+fn rd11d_an_unanswerable_stat_fails_closed_in_the_plan() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a = dir.path().join("a.rs");
+    let not_a_dir = dir.path().join("regular.txt");
+    std::fs::write(&a, b"abcfooxyz\n").expect("write a");
+    std::fs::write(&not_a_dir, b"I am a file\n").expect("write the would-be parent");
+    let target = not_a_dir.join("child.rs");
+
+    let mut state = pmacs::editor::EditorState::new();
+    let plan = serde_json::json!({
+        "documentChanges": [
+            rd_edit_op(&a, 0, 3, 6, "EDITED"),
+            { "kind": "delete", "uri": rd_uri(&target),
+              "options": { "ignoreIfNotExists": true } }
+        ]
+    });
+    let sink = rd_plan_server(&mut state, dir.path(), &plan);
+    rd_open(&mut state, "B", &a);
+    rd_wait_initialized(&mut state);
+
+    rd_trigger_apply_edit(&mut state);
+    let response = rd_wait_response(&mut state, &sink, 10);
+    assert!(
+        !rd_applied(&response),
+        "the preflight never reports safe on a question it could not answer"
+    );
+    let reason = rd_reason(&response);
+    assert!(
+        reason.contains("stat"),
+        "the reason must say the stat failed, got {reason:?}"
+    );
+    assert!(
+        reason.contains("os error 20") || reason.to_lowercase().contains("not a directory"),
+        "and must carry the filesystem cause, got {reason:?}"
+    );
+
+    let text: String = state
+        .lua_host
+        .lua()
+        .load("return B:slice(0, B:len())")
+        .eval()
+        .expect("read back");
+    assert_eq!(
+        text, "abcfooxyz\n",
+        "THE BITE: `ignoreIfNotExists` must not swallow a non-NotFound error, \
+         and the earlier edit must not have applied"
+    );
+}
+
+/// Criterion 12, direction 1 — an earlier text edit dirties the buffer
+/// a later delete targets. The preflight cannot see it (the snapshot
+/// predates the edit), the primitive refuses mid-batch, and the server
+/// is told **and told that earlier work stayed applied**.
+///
+/// Bite: fails against `main`, where the raise is swallowed at the
+/// pump's `pcall(handle_server_requests)` and no response is sent at
+/// all; and fails against a reporter that says "nothing was mutated"
+/// on every failure, which is the round-1 defect.
+#[test]
+fn rd12a_edit_then_delete_answers_the_server_and_reports_partial_work() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a = dir.path().join("a.rs");
+    std::fs::write(&a, b"abcfooxyz\n").expect("write a");
+
+    let mut state = pmacs::editor::EditorState::new();
+    let plan = serde_json::json!({
+        "documentChanges": [
+            rd_edit_op(&a, 0, 3, 6, "EDITED"),
+            { "kind": "delete", "uri": rd_uri(&a) }
+        ]
+    });
+    let sink = rd_plan_server(&mut state, dir.path(), &plan);
+    rd_open(&mut state, "B", &a);
+    rd_wait_initialized(&mut state);
+
+    rd_trigger_apply_edit(&mut state);
+    let response = rd_wait_response(&mut state, &sink, 10);
+    assert!(!rd_applied(&response), "the delete refuses mid-batch");
+    let reason = rd_reason(&response);
+    assert!(
+        reason.contains("unsaved changes"),
+        "the reason names the conflict the edit created, got {reason:?}"
+    );
+    assert!(
+        reason.contains("1 operation") && reason.contains("remain applied"),
+        "THE BITE: the earlier edit IS still applied and the server must be \
+         told so — Q#RD3 permits exactly this. got {reason:?}"
+    );
+
+    assert!(a.exists(), "the file survives the refusal");
+    let text: String = state
+        .lua_host
+        .lua()
+        .load("return B:slice(0, B:len())")
+        .eval()
+        .expect("read back");
+    assert_eq!(
+        text, "abcEDITEDxyz\n",
+        "and the earlier edit really is still there, so the message is true"
+    );
+}
+
+/// Criterion 12, direction 2 — an earlier rename moves a MODIFIED
+/// buffer into a later delete's subtree, after the snapshot.
+///
+/// Bite: as for direction 1. The rename-into shape additionally proves
+/// the primitive's prefix-aware validation is what catches it, since
+/// no plan-time verdict could have.
+#[test]
+fn rd12b_rename_into_delete_answers_the_server_and_reports_partial_work() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let tree = dir.path().join("tree");
+    std::fs::create_dir(&tree).expect("mkdir tree");
+    let outside = dir.path().join("m.rs");
+    let inside = tree.join("m.rs");
+    std::fs::write(&outside, b"content\n").expect("write");
+
+    let mut state = pmacs::editor::EditorState::new();
+    let plan = serde_json::json!({
+        "documentChanges": [
+            { "kind": "rename", "oldUri": rd_uri(&outside), "newUri": rd_uri(&inside) },
+            { "kind": "delete", "uri": rd_uri(&tree),
+              "options": { "recursive": true } }
+        ]
+    });
+    let sink = rd_plan_server(&mut state, dir.path(), &plan);
+    rd_open(&mut state, "B", &outside);
+    state
+        .lua_host
+        .lua()
+        .load("B:insert(0, 'unsaved')")
+        .exec()
+        .expect("dirty the buffer");
+    rd_wait_initialized(&mut state);
+
+    rd_trigger_apply_edit(&mut state);
+    let response = rd_wait_response(&mut state, &sink, 10);
+    assert!(
+        !rd_applied(&response),
+        "the recursive delete must refuse over the just-moved modified buffer"
+    );
+    let reason = rd_reason(&response);
+    assert!(
+        reason.contains("unsaved changes"),
+        "the reason names the conflict, got {reason:?}"
+    );
+    assert!(
+        reason.contains("1 operation") && reason.contains("remain applied"),
+        "THE BITE: the rename IS still applied and the server must be told. \
+         got {reason:?}"
+    );
+
+    assert!(inside.exists(), "the rename really did happen");
+    assert!(!outside.exists(), "and is not undone by the later refusal");
+    assert!(tree.is_dir(), "the tree survives the refusal");
+    let text: String = state
+        .lua_host
+        .lua()
+        .load("return B:slice(0, B:len())")
+        .eval()
+        .expect("read back");
+    assert_eq!(text, "unsavedcontent\n", "and the unsaved text survives");
+}
+
+/// Criterion 13 — the refusal reaches the server on the unattended
+/// path AND leaves the durable `*errors*` trace.
+///
+/// A direct-call test on `apply_resource_op` does not satisfy this and
+/// the framing rejects it: on `main` the raise is swallowed by
+/// `pcall(handle_server_requests)`, so the whole defect lives between
+/// the primitive and this seam.
+///
+/// Bite: fails against a fix that refuses by raising, and the
+/// `*errors*` half fails against a fix that answers the server but
+/// writes no trace — which is exactly what an earlier framing revision
+/// promised and did not test.
+#[test]
+fn rd13_the_refusal_answers_the_server_and_leaves_a_durable_trace() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let victim = dir.path().join("victim.rs");
+    std::fs::write(&victim, b"content\n").expect("write");
+
+    let mut state = pmacs::editor::EditorState::new();
+    let plan = serde_json::json!({
+        "documentChanges": [ { "kind": "delete", "uri": rd_uri(&victim) } ]
+    });
+    let sink = rd_plan_server(&mut state, dir.path(), &plan);
+    rd_open(&mut state, "B", &victim);
+    state
+        .lua_host
+        .lua()
+        .load("B:insert(0, 'unsaved')")
+        .exec()
+        .expect("dirty the buffer");
+    rd_wait_initialized(&mut state);
+    // Asserted as a DELTA, not against an empty buffer: `*errors*` is a
+    // shared append-only surface and the user's own `init.lua` can have
+    // written to it before this test ran. Emptiness is an ambient fact;
+    // "this run appended the record" is the claim.
+    let errors_before = rd_errors_text(&mut state);
+    assert!(
+        !errors_before.contains("lsp:workspace/applyEdit"),
+        "fixture: the label must not already be present, or the trace \
+         assertion is vacuous; *errors* was {errors_before:?}"
+    );
+
+    rd_trigger_apply_edit(&mut state);
+    let response = rd_wait_response(&mut state, &sink, 10);
+    assert!(!rd_applied(&response), "the delete is refused");
+    let reason = rd_reason(&response);
+    assert!(
+        reason.contains("victim.rs"),
+        "the server is told which buffer blocked it, got {reason:?}"
+    );
+
+    let errors = rd_errors_text(&mut state);
+    let added = errors
+        .strip_prefix(errors_before.as_str())
+        .unwrap_or(errors.as_str());
+    assert!(
+        added.contains("lsp:workspace/applyEdit"),
+        "THE BITE (durable half): the trace must carry the boundary's label; \
+         this run appended {added:?}"
+    );
+    assert!(
+        added.contains("unsaved changes"),
+        "and the reason, not just the label; this run appended {added:?}"
+    );
+    assert!(victim.exists(), "and the file survives");
+}
+
+/// Criterion 15 — DEFENSIVE. A parse failure still attempts a
+/// response.
+///
+/// Substituted with an explicit throwing stub, per Q#RD11, and
+/// labelled defensive because no server payload can reach the failure:
+/// `WorkspaceEditResponse::from_lsp_value` returns `Self`, and the
+/// binding's only `?` is `lua_to_json` over a value that arrived
+/// through `json_to_lua`. The criterion claims only what a stub can
+/// establish — that the boundary reports — not that a server can
+/// provoke it.
+///
+/// Bite: fails against a wrap that covers `apply_workspace_edit` only,
+/// leaving `_parse_workspace_edit` one line outside it. That is the
+/// shape on `main`, where the raise escapes to
+/// `pcall(handle_server_requests)` and the server is never answered.
+#[test]
+fn rd15_defensive_a_parse_failure_still_attempts_a_response() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a = dir.path().join("a.rs");
+    std::fs::write(&a, b"abcfooxyz\n").expect("write a");
+
+    let mut state = pmacs::editor::EditorState::new();
+    // A plan that would otherwise succeed, so a response saying
+    // `applied = false` can only have come from the parse stub.
+    let plan = serde_json::json!({
+        "documentChanges": [ rd_edit_op(&a, 0, 3, 6, "EDITED") ]
+    });
+    let sink = rd_plan_server(&mut state, dir.path(), &plan);
+    rd_open(&mut state, "B", &a);
+    rd_wait_initialized(&mut state);
+
+    state
+        .lua_host
+        .lua()
+        .load(
+            "pmacs.lsp._parse_workspace_edit = \
+             function() error('synthetic parse failure') end",
+        )
+        .exec()
+        .expect("substitute the throwing parse stub");
+
+    rd_trigger_apply_edit(&mut state);
+    let response = rd_wait_response(&mut state, &sink, 10);
+    assert!(
+        !rd_applied(&response),
+        "a parse failure cannot report success"
+    );
+    let reason = rd_reason(&response);
+    assert!(
+        reason.contains("synthetic parse failure"),
+        "THE BITE: the parse raise must become the failureReason, not escape \
+         the boundary unanswered. got {reason:?}"
+    );
+
+    let text: String = state
+        .lua_host
+        .lua()
+        .load("return B:slice(0, B:len())")
+        .eval()
+        .expect("read back");
+    assert_eq!(
+        text, "abcfooxyz\n",
+        "and nothing was applied, since the parse never produced ops"
+    );
+}
+
+/// Criterion 18 (review round 1) — a NON-recursive delete inspects
+/// only its exact path.
+///
+/// The counterexample that falsified the original reasoning. A
+/// modified buffer at `tree/gone.rs` whose file has already been
+/// deleted blocks a non-recursive delete of the now-EMPTY `tree/` —
+/// an op that would have succeeded and that removes none of that
+/// buffer's contents, because a non-recursive delete removes the
+/// directory entry and nothing beneath it.
+///
+/// Bite: fails against a `delete_verdict` that ignores `recursive` and
+/// scans descendants for every directory.
+#[test]
+fn rd18_non_recursive_delete_is_not_blocked_by_an_orphan_beneath_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let tree = dir.path().join("tree");
+    std::fs::create_dir(&tree).expect("mkdir");
+    let gone = tree.join("gone.rs");
+    std::fs::write(&gone, b"content\n").expect("write");
+
+    let mut state = pmacs::editor::EditorState::new();
+    rd_open(&mut state, "B", &gone);
+    state
+        .lua_host
+        .lua()
+        .load("B:insert(0, 'unsaved')")
+        .exec()
+        .expect("dirty the buffer");
+    // The file goes; the modified buffer is now an orphan under an
+    // empty directory.
+    std::fs::remove_file(&gone).expect("unlink");
+
+    let (ok, err) = rd_delete(&mut state, &tree, "");
+    assert!(
+        ok,
+        "THE BITE: a non-recursive delete cannot destroy anything beneath \
+         the target, so a buffer beneath it must not refuse the op. got {err}"
+    );
+    assert!(!tree.exists(), "and the empty directory really is removed");
+
+    let (valid, text): (bool, String) = state
+        .lua_host
+        .lua()
+        .load("return B:is_valid(), B:slice(0, B:len())")
+        .eval()
+        .expect("buffer probe");
+    assert!(valid, "the orphaned buffer is untouched");
+    assert_eq!(text, "unsavedcontent\n", "and keeps its unsaved text");
+}
+
+/// Criterion 19a (review round 1) — a delete whose target an EARLIER
+/// op in the same batch creates is not refused at plan time.
+///
+/// Bite: fails against a preflight that judges every delete against
+/// the filesystem's initial state. There it reports a `NotFound` the
+/// batch itself was about to fix, and the whole legal batch is
+/// rejected before anything runs.
+#[test]
+fn rd19a_create_then_delete_is_not_refused_by_the_plan_time_preflight() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a = dir.path().join("a.rs");
+    std::fs::write(&a, b"abcfooxyz\n").expect("write a");
+    let transient = dir.path().join("transient.rs");
+    let witness = dir.path().join("witness.rs");
+
+    let mut state = pmacs::editor::EditorState::new();
+    let plan = serde_json::json!({
+        "documentChanges": [
+            { "kind": "create", "uri": rd_uri(&transient) },
+            { "kind": "delete", "uri": rd_uri(&transient) },
+            { "kind": "create", "uri": rd_uri(&witness) }
+        ]
+    });
+    let sink = rd_plan_server(&mut state, dir.path(), &plan);
+    rd_open(&mut state, "B", &a);
+    rd_wait_initialized(&mut state);
+
+    rd_trigger_apply_edit(&mut state);
+    let response = rd_wait_response(&mut state, &sink, 10);
+    assert!(
+        rd_applied(&response),
+        "THE BITE: `create X` then `delete X` is a legal ordered batch and \
+         must not be refused because X is absent when the plan is built. \
+         got {response:?}"
+    );
+    assert!(
+        witness.exists(),
+        "the batch really ran to the end, so `applied = true` is not vacuous"
+    );
+    assert!(!transient.exists(), "and the delete really deleted");
+}
+
+/// Criterion 19b (review round 1) — the same for a target an earlier
+/// RENAME produces.
+///
+/// Bite: fails against the initial-state preflight, which reports
+/// `NotFound` for the rename's destination and rejects the batch —
+/// leaving the source file in place, which is what this asserts.
+#[test]
+fn rd19b_rename_then_delete_is_not_refused_by_the_plan_time_preflight() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a = dir.path().join("a.rs");
+    std::fs::write(&a, b"abcfooxyz\n").expect("write a");
+    let source = dir.path().join("source.rs");
+    let destination = dir.path().join("destination.rs");
+    std::fs::write(&source, b"moving\n").expect("write source");
+
+    let mut state = pmacs::editor::EditorState::new();
+    let plan = serde_json::json!({
+        "documentChanges": [
+            { "kind": "rename", "oldUri": rd_uri(&source), "newUri": rd_uri(&destination) },
+            { "kind": "delete", "uri": rd_uri(&destination) }
+        ]
+    });
+    let sink = rd_plan_server(&mut state, dir.path(), &plan);
+    rd_open(&mut state, "B", &a);
+    rd_wait_initialized(&mut state);
+
+    rd_trigger_apply_edit(&mut state);
+    let response = rd_wait_response(&mut state, &sink, 10);
+    assert!(
+        rd_applied(&response),
+        "`rename A -> B` then `delete B` is legal and ordered: {response:?}"
+    );
+    assert!(
+        !source.exists(),
+        "THE BITE: the rename ran, so the batch was not rejected at plan time"
+    );
+    assert!(!destination.exists(), "and the delete then removed it");
+}
+
+/// Criterion 19c (review round 1) — the deferral does not weaken the
+/// guard. `create X -> edit X -> delete X` gets past the plan, and
+/// then refuses at the primitive for the RIGHT reason: the edit
+/// dirtied the just-created buffer.
+///
+/// This is the pin that stops "defer the check" turning into "skip the
+/// check". The distinction it draws is between a fabricated plan-time
+/// `NotFound` about a path the batch creates, and a real refusal about
+/// unsaved work.
+///
+/// Bite: fails against the initial-state preflight (which reports
+/// `NotFound` instead), and against dropping the primitive's guard for
+/// deferred targets (which would report `applied = true`).
+#[test]
+fn rd19c_deferring_the_check_does_not_skip_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a = dir.path().join("a.rs");
+    std::fs::write(&a, b"abcfooxyz\n").expect("write a");
+    let fresh = dir.path().join("fresh.rs");
+
+    let mut state = pmacs::editor::EditorState::new();
+    let plan = serde_json::json!({
+        "documentChanges": [
+            { "kind": "create", "uri": rd_uri(&fresh) },
+            {
+                "textDocument": { "uri": rd_uri(&fresh), "version": 1 },
+                "edits": [{
+                    "range": {
+                        "start": { "line": 0, "character": 0 },
+                        "end":   { "line": 0, "character": 0 }
+                    },
+                    "newText": "NEW"
+                }]
+            },
+            { "kind": "delete", "uri": rd_uri(&fresh) }
+        ]
+    });
+    let sink = rd_plan_server(&mut state, dir.path(), &plan);
+    rd_open(&mut state, "B", &a);
+    rd_wait_initialized(&mut state);
+
+    rd_trigger_apply_edit(&mut state);
+    let response = rd_wait_response(&mut state, &sink, 10);
+    assert!(
+        !rd_applied(&response),
+        "the edit dirtied the buffer, so the delete must still refuse"
+    );
+    let reason = rd_reason(&response);
+    assert!(
+        reason.contains("unsaved changes"),
+        "THE BITE: refused for the real reason, not a plan-time NotFound \
+         about a path this batch created. got {reason:?}"
+    );
+    assert!(
+        !reason.contains("os error 2)"),
+        "and specifically NOT a NotFound, got {reason:?}"
+    );
+    assert!(
+        reason.contains("2 operations") && reason.contains("remain applied"),
+        "the create and the edit stayed applied, and the server is told: \
+         got {reason:?}"
+    );
+    assert!(fresh.exists(), "the created file survives the refusal");
+}
+
+/// Criterion 20 (review round 1) — the USER-facing message reports
+/// partial application too.
+///
+/// The rename caller is the one that was wrong: it said "rename
+/// aborted" under a comment reading "Preflight rejected it; nothing
+/// was mutated", which is false in exactly the case Q#RD3 predicts.
+/// Driven through `M-x lsp.rename` because that is where a user reads
+/// it; the applier's return value alone would not pin the caller.
+///
+/// Bite: fails against any caller that renders the failure without
+/// consulting the applied-op count.
+#[test]
+fn rd20_the_user_facing_message_reports_partial_application() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a = dir.path().join("a.rs");
+    std::fs::write(&a, b"abcfooxyz\n").expect("write a");
+
+    let mut state = EditorState::new();
+    let plan = serde_json::json!({
+        "documentChanges": [
+            rd_edit_op(&a, 0, 3, 6, "EDITED"),
+            { "kind": "delete", "uri": rd_uri(&a) }
+        ]
+    });
+    let _sink = rd_plan_server(&mut state, dir.path(), &plan);
+    rd_open(&mut state, "B", &a);
+    rd_wait_initialized(&mut state);
+
+    state
+        .lua_host
+        .lua()
+        .load("pmacs.lsp.rename()")
+        .exec()
+        .expect("invoke rename");
+    assert!(
+        state
+            .lua_host
+            .lua()
+            .load("return pmacs.minibuffer.is_active()")
+            .eval::<bool>()
+            .unwrap(),
+        "rename should have opened a minibuffer prompt"
+    );
+    state
+        .lua_host
+        .lua()
+        .load("pmacs.minibuffer.set_contents('BAR'); pmacs.minibuffer.accept()")
+        .exec()
+        .expect("accept the rename name");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        let s = state.core.borrow().status.clone();
+        if s.contains("LSP: rename") {
+            break s;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the rename never reported; status was {s:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        status.contains("remain applied"),
+        "THE BITE: the earlier edit IS applied, so the user must not be told \
+         the rename simply aborted. got {status:?}"
+    );
+    assert!(
+        !status.contains("nothing was mutated"),
+        "and must not be told the opposite of what happened. got {status:?}"
+    );
+    assert!(a.exists(), "the file survives the refused delete");
 }
