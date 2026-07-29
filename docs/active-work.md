@@ -525,11 +525,13 @@ has **no branch and no framing yet**.
 
 - Portable branch: `githubsucks/generated-buffer-immutability`; worktree
   `../pmacs-generated-immutability`. **PR #188**, base `main`, forked from
-  `githubsucks/main` @ `ad41cf1`, **integrated to `64883eb` at merge
-  commit `76cfaac`** — #189 (clean), then #186 and #171
-  (`docs/active-work.md` conflict), then #187 (the same file again, after
-  it removed the two landed framing lanes). Revision 6 was reviewed at
-  head `55c3061`; revision 7 closes that round. Framing only —
+  `githubsucks/main` @ `ad41cf1`, **integrated through `5e186c7`** —
+  #189 (clean), then #186 and #171 (`docs/active-work.md` conflict),
+  then #187 (the same file again, after it removed the two landed
+  framing lanes), #192 at merge commit `76cfaac`, and #193
+  (`docs/active-work.md` conflict again) after revision 7's first push.
+  Revision 6 was reviewed at head `55c3061`; revision 7 closes that
+  round. Framing only —
   `docs/generated-buffer-immutability-framing.md`, revision 7, plus this
   lane. **No runtime code, no protocol change.**
 - **PROPOSED — six review rounds closed (thirty-two findings,
@@ -714,61 +716,6 @@ has **no branch and no framing yet**.
   Recorded here because the section above asks for exactly that and
   warns against quoting a stale figure; it does not replace that
   section's per-target census, which was not re-derived.
-
-## Test-improvement arc, lane 6 — `scripts/bite` positive control
-
-- Portable branch: `githubsucks/bite-positive-control`, worktree
-  `../pmacs-bite`, based on `main` @ `300cbc4`. Tooling and
-  documentation only — **no product code, no tests changed.**
-- **Self-contained deliberately.** An earlier draft of this entry
-  scoped the lane by citing a `TEST_IMPROVEMENT.md` at the repo root.
-  That file is **untracked and machine-local** — not on `main`, not in
-  this PR's tree — so the citation was a dangling reference for any
-  other machine, which is exactly what this ledger exists to prevent.
-  The lane is described here on its own terms instead. If that audit
-  is to scope later lanes it needs committing first, in its own PR.
-- Sequenced ahead of the rest of the testing work because every later
-  lane's evidence is bite-shaped. A verifier that cannot fail is not
-  worth more than the claims it certifies.
-- **The defect:** the script ran only the swapped tree, so a failing
-  swapped run was the only thing it checked. A test that fails
-  everywhere — a typo, an unrelated compile break — therefore printed
-  `bite: OK`. Now it asserts the named tests pass against the working
-  tree **and** that at least one ran (a filter matching nothing exits
-  0, so passing alone is insufficient), exiting 3 as `NO CONTROL`
-  otherwise, and it labels `OK (assertion)` versus `OK (COMPILE)`.
-- **Validated by execution, not by reading**, and the results are
-  listed with the one arm that was NOT reproduced:
-  - zero-match filter -> `NO CONTROL`, exit 3;
-  - genuine bite -> `control OK` then `OK (assertion)`, exit 0;
-  - test broken so it fails on BOTH trees -> `NO CONTROL`, exit 3.
-    **The old script printed `bite: OK` here**, which is the whole
-    point of the lane;
-  - assertion failure whose own output prints `error[E0308]` and
-    `error: could not compile` at column 0 -> still `OK (assertion)`,
-    which is why classification reads libtest's summary rather than
-    compiler text;
-  - swapped file that will not build -> `OK (COMPILE)`;
-  - **`INCONCLUSIVE (MIXED)` was not reproduced.** Its assumed trigger
-    — `--test A --test B` where B's swapped file fails to build — was
-    tested and **does not reach it**: cargo builds every named target
-    before running any, so B's failure stops A from running and the
-    run yields no summary at all (the COMPILE arm). The arm stays as
-    defence for the genuinely reachable causes (doc-tests failing to
-    compile after lib tests pass; a harness dying after its summary),
-    and the script says it was not manufactured.
-- **Handoff correction, verified rather than inherited.**
-  `docs/agent-handoff.md` §5 claimed the script "restores by `git
-  checkout --`, which reverts the file to HEAD", destroying
-  uncommitted work. False: it copies to a `mktemp` path before the
-  swap and restores from that copy under an `EXIT INT TERM` trap. The
-  commit-before-gating rule stands on other grounds and is kept; the
-  false mechanism is removed, because it would push the next reader
-  toward `git stash` — the repo-global trap the script exists to
-  avoid.
-- Recovery from a clean checkout:
-  `git fetch githubsucks && git worktree add ../pmacs-bite
-  -b bite-positive-control githubsucks/bite-positive-control`.
 
 ## Parked lane: kill-ring browser + persistence
 

@@ -3,11 +3,14 @@
 **PROPOSED — needs explicit user approval before implementation. DO NOT
 implement, DO NOT merge.**
 
-**Revision 7 — answers review round 6 on `55c3061`, against canonical
-`githubsucks/main` @ `64883eb`, 2026-07-29.** The base has not moved
-since revision 6; this revision changes the quarantine state machine,
-five acceptance classifications and the cross-machine ledger because
-the reviewed design did not contain every route it claimed to contain.
+**Revision 7 — answers review round 6 on `55c3061`, authored against
+canonical `githubsucks/main` @ `64883eb` and integrated through
+`5e186c7`, 2026-07-29.** #193 landed after revision 7's first push at
+`34041a4`; `64883eb..5e186c7` changes only `TEST_IMPROVEMENT.md` and
+`docs/active-work.md`, so the source readings and citations below
+survive. This revision changes the quarantine state machine, five
+acceptance classifications and the cross-machine ledger because the
+reviewed design did not contain every route it claimed to contain.
 
 ## Revision 7
 
