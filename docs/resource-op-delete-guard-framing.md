@@ -1,10 +1,15 @@
 # Framing — `apply_resource_op` delete destroys unsaved work
 
-**Revision 3.** Status: **PROPOSED — needs explicit user approval before
+**Revision 4.** Status: **PROPOSED — needs explicit user approval before
 implementation. DO NOT implement, DO NOT merge.** Lane:
 `resource-op-delete-guard`, worktree `../pmacs-resource-op-delete`,
-rebased at revision 3 onto `githubsucks/main` @ `7586905` (PR #189,
-COHERENCE.md only — no bearing on any decision here).
+based on `githubsucks/main` @ `7586905`.
+
+Every count in this document was produced by a command run at revision
+4, with its output pasted at the point of use. That is a reaction to
+this lane's own record: it shipped a stale line count, then a stale
+commit count, then a stale ledger citation, in three consecutive
+revisions — each by carrying a measurement across a base change.
 
 This is a live data-loss bug, reproduced four ways against `ad41cf1`
 (§1.1). A language server can destroy a buffer's unsaved edits *and*
@@ -19,6 +24,84 @@ this same PR (§8).
 
 ## Revision history
 
+### Revision 3 → 4, after review round 3
+
+Round 3 accepted the core — pre-filesystem refusal, four-phase ordering,
+the #171 split, Q#RD10 — and raised four P1s and a P2. All accepted.
+
+**P1 — the lane state and ledger were still false.** Re-measured:
+
+```
+$ git rev-list --left-right --count fd7ae37...7586905
+13      2
+```
+
+#171 is **two commits behind**, not zero. Revision 3's "0 behind" was
+measured against `ad41cf1` and reported in present tense after `main`
+had moved. The ledger additionally still described #186 as revision 2 on
+`ad41cf1` and retained the superseded `ab42a79` / 153-behind entry for
+#171. **Both lane entries are now corrected in place** rather than
+having a correction layered above stale ground truth, which is what
+produced a self-contradicting ledger. §1.12 carries its count as pasted
+command output.
+
+**P1 — the withdrawn LSP claim survived in the normative decision.**
+Q#RD3 still called partial application "`FailureHandlingKind.Abort`, the
+strategy the spec itself assigns to any edit containing resource
+changes", and §1.11 called `Abort` the default "by omission". Both are
+withdrawn. Both sites now say only that **verified pmacs behaviour
+resembles abort-style application**, with the justification resting on
+§1.6's reproduction. This mattered more than an ordinary error because
+§1.15's audit had certified the document clean while the claim was still
+load-bearing three sections away.
+
+**P1 — acceptance 15 had no reachable payload.**
+`WorkspaceEditResponse::from_lsp_value` (`src/rename.rs:95`) returns
+`Self`, its doc says "A `null` / shapeless result yields an empty
+response", and the binding's only `?` is `lua_to_json` over a value that
+arrived through `json_to_lua`. **No server payload can make the parse
+fail**, so the criterion could not fail either. **Decision (Q#RD11):
+keep the wrap, drive the test with an explicit throwing stub, and label
+it defensive.** Q#RD7's promise is correspondingly narrowed to **"always
+attempts a response while the response channel remains live"** —
+`send_response` is itself under an ignored `pcall`
+(`builtin/runtime/lsp.lua:1843`).
+
+**P1 — absent-plus-ignore had no synchronous seam.** `pmacs.fs.stat`
+(`builtin/runtime/fs.lua:133`) dispatches async; the only synchronous
+filesystem binding is `canonicalize`
+(`src/lua_bindings/mod.rs:6743`), which resolves symlinks and returns
+`nil` for a dangling one — so it disagrees with the primitive's
+`symlink_metadata` on precisely the input this query turns on. **New
+Q#RD12** specifies a structured Rust-backed verdict (`no-op` / `clear` /
+`conflict`) evaluated with the same `symlink_metadata` call, with an
+error contract that fails toward refusal. New criteria **11a**
+(present + ignore + modified ⇒ still refused) and **11b** (dangling
+symlink counts as present) supply the missing opposite direction.
+
+**P2 — acceptance and file-scope bookkeeping.** Criterion 14's
+"fails in both directions" was **false**: with both duplicate buffers
+clean, the setup cannot distinguish first-match validation from full
+validation. **The claim is fixed, not the setup** — criterion 6 already
+pins validation breadth, and duplicating it would add no bite; the two
+are now labelled by which half of Q#RD10 each covers. §8's touch table
+and §7's gate list are reconciled: `lsp_dispatch_seams_acceptance` was
+named in one and omitted from the other, and the parse-stub work was
+missing from both.
+
+**Sweep — corrections applied at one site while a dependent site kept
+the old claim.** Whole-document pass over every claim withdrawn or
+revised in revisions 2 and 3, checked at each consuming site rather than
+only where defined. **Count: 4.** Two were the P1-2 sites above (Q#RD3,
+§1.11). Two were the stale #171 count, which had propagated into both
+the revision-history entry and §1.12. Claims checked and found clean at
+every consuming site: rev 1's buffer-first ordering; "whole-batch
+atomicity"; `find_buffer_for_path` as the lookup; primitive-only
+`ignore_if_not_exists`; the three withdrawn impossibility claims about
+prompting; "no `*Messages*`/`*warnings*` buffer"; "only path 1 is
+unattended"; mode (d) as unowned; and Q#RD9. Each of those appears only
+in withdrawal text or in correctly-scoped ground truth.
+
 ### Revision 2 → 3, after review round 2
 
 Round 2 confirmed everything central from round 1 as fixed and raised
@@ -27,8 +110,9 @@ four P1s. All four accepted; two sweeps run.
 **P1-1 — the ownership boundary was stale.** Revision 2 described PR
 #171 as "OPEN, STALE, 153 commits behind, under re-scout" and said it
 claimed the **rename** side only. Re-checked directly: #171 is at
-**revision 7, `fd7ae37`, merge-base `ad41cf1`, 0 commits behind** — not
-stale. Revision 6 had assigned **both** rename and delete to Stage 2a,
+**revision 7, `fd7ae37`, merge-base `ad41cf1`** — not stale. *(That
+sentence originally read "0 commits behind"; it was measured before
+`main` moved and is corrected in the rev 3 → 4 section above.)* Revision 6 had assigned **both** rename and delete to Stage 2a,
 with the **opposite** policy: its `reconcile_delete` "kills unmodified
 buffers and keeps modified ones alive", i.e. the file is deleted and the
 modified buffer orphaned, and its §11 named that orphaning as accepted
@@ -528,8 +612,13 @@ strategy of a client if applying the workspace edit fails") —
 
 Two consequences worth stating plainly. pmacs applies resource
 operations it never declared support for; and it declares no failure
-strategy, so §1.7's `Abort` semantics are the de facto behaviour by
-omission rather than by choice. **Neither is fixed by this lane** —
+strategy at all — **which is not the same as defaulting to one.** The
+spec establishes no default for a client that advertises nothing, so
+pmacs's actual behaviour is simply whatever its code does, which §1.6
+verified **resembles** abort-style application without being licensed as
+it. *(Revision 3 wrote "`Abort` semantics are the de facto behaviour by
+omission"; that smuggled the withdrawn claim back as a default and is
+itself withdrawn at revision 4.)* **Neither is fixed by this lane** —
 declaring capabilities changes what servers send, which is a behavioural
 change needing its own evidence (§6). It is recorded because a framing
 about batch failure semantics that did not notice pmacs declares none
@@ -545,9 +634,19 @@ treats the buffer as a cache of the file.
 
 Both arms share the §1.4 lookup defects.
 
-**Cross-lane state, re-checked directly at revision 3 rather than
-inherited.** PR #171 (dired Stage 2) is at **revision 7, `fd7ae37`,
-merge-base `ad41cf1`, 0 commits behind `main`**. Revision 2 of this
+**Cross-lane state, re-measured at revision 4.** PR #171 (dired
+Stage 2) is at **revision 7, `fd7ae37`, merge-base `ad41cf1`**:
+
+```
+$ git rev-list --left-right --count fd7ae37...7586905
+13      2
+```
+
+Thirteen ahead, **two behind** — and those two are exactly PR #189's
+COHERENCE change, so no cross-lane conclusion turns on them. Revision 3
+of this document said "0 commits behind"; that was measured against
+`ad41cf1` and reported after `main` had moved to `7586905`, which is the
+third instance in this lane of quoting a census as a constant. Revision 2 of this
 document described it as "OPEN, STALE, 153 commits behind, under
 re-scout" and said it claimed the rename side only; **both halves of
 that were out of date**. Its revision 6 assigned rename *and* delete
@@ -686,9 +785,23 @@ That suite and that fake are where §5's pins belong.
 
 Two external-spec overclaims in two revisions is a pattern, not an
 accident, so every claim in this document that is **not** about this
-repository is listed here with its evidence. The standing rule for
-revision 4 onward: an external claim carries a direct quote or it is
-marked not established.
+repository is listed here with its evidence. The standing rule: an
+external claim carries a direct quote or it is marked not established.
+
+**This audit itself failed at revision 3, and the failure mode is
+recorded because the table is now something readers trust.** Revision 3
+marked the `Abort` claim WITHDRAWN in row 4 while Q#RD3 — the normative
+decision — still asserted it, and §1.11 still called it a default. The
+audit checked each claim **where it was defined**, not at every site
+that **consumed** it, so it certified a document that was internally
+contradictory. A withdrawal recorded in an audit while the claim stays
+load-bearing elsewhere is worse than no withdrawal, because the audit
+converts an error into a false assurance.
+
+**So the audit procedure is, from revision 4:** for each row, grep the
+whole document for the claim's terms and check every hit, not the
+defining section. Revision 4 ran that and found two surviving
+consumers (§1.15 is the audit; the fix is in Q#RD3 and §1.11).
 
 | # | Claim | Source | Status |
 |---|---|---|---|
@@ -850,9 +963,13 @@ described in the code comment and here as a **filter**:
   sequential (§1.7). An earlier text edit can dirty a clean buffer, and
   an earlier rename can move a modified buffer *into* a later delete's
   subtree, after the snapshot. Then the preflight passes and the
-  primitive refuses mid-batch, leaving earlier operations applied —
-  which is `FailureHandlingKind.Abort`, the strategy the spec itself
-  assigns to any edit containing resource changes.
+  primitive refuses mid-batch, leaving earlier operations applied.
+  That outcome **resembles abort-style application**, and it is what
+  pmacs already does today on an I/O error (§1.6, verified). It is
+  **not** licensed by the specification: the spec assigns no strategy
+  to a client that advertises none (§1.7), so the justification is
+  observed pmacs behaviour plus the judgement that a visible partial
+  refactor beats unrecoverable unsaved work — nothing more.
 - Revision 1 called this "whole-batch atomicity" and said "nothing in
   the batch is mutated". **That was false and is withdrawn.**
 
@@ -969,15 +1086,27 @@ single point.
   exact defect being fixed, one line out of scope.
 
   **Of the two options offered in review, this revision picks wrapping
-  parse-plus-apply** rather than narrowing "always answers" to applier
-  execution failures. Reason: the narrow option documents a hole instead
-  of closing one, and the wrap already exists — it moves up one line.
-  With it, **"always answers" is true without qualification**.
+  parse-plus-apply** rather than narrowing the wrap to applier execution
+  failures. Reason: the wrap moves up exactly one line and costs
+  nothing, so the boundary is uniform regardless of which call fails.
+
+  **Revision 4 correction to the strength of the claim.** Revision 3
+  said this made "always answers" true *without qualification*. It does
+  not, for two independent reasons, and the honest wording is **"always
+  attempts a response while the response channel remains live"**:
+  - `send_response` is itself called under an ignored `pcall`
+    (`builtin/runtime/lsp.lua:1843`), so its failure is unobservable to
+    the applier. A dead or wedged transport cannot be answered by any
+    amount of wrapping upstream.
+  - The parse call is, on the evidence, **not reachably fallible** —
+    see acceptance 15 and Q#RD11.
 - **Every failure becomes a value.** Refusal, I/O error, and parse
   failure all converge on the existing `nil, message` shape, which all
   three callers already handle. No exception escapes the applier.
-- **The unattended caller always answers**: `{ applied = false,
-  failureReason = ... }` in every failure case, including parse failure.
+- **The unattended caller always *attempts* a response**: `{ applied =
+  false, failureReason = ... }` is constructed and sent in every failure
+  case the applier can observe. Whether it lands is the transport's
+  business, and the applier cannot tell (see above).
 - **The durable trace is written at this boundary, not in the
   primitive.** Revision 2 promised logging through
   `LuaHost::append_to_errors_buffer` (`src/lua.rs:401`). Two problems,
@@ -1062,6 +1191,79 @@ safely because it composes both phases. This lane's contract is that no
 Acceptance 14 pins both directions, so neither widening nor narrowing
 can happen silently.
 
+### Q#RD11 — The parse wrap is a defensive boundary, tested with a stub — **NEW at rev 4**
+
+Revision 3 justified wrapping `_parse_workspace_edit` by asserting it
+was reachably fallible. **On the evidence it is not**, and acceptance 15
+as written could not fail:
+
+- `WorkspaceEditResponse::from_lsp_value` (`src/rename.rs:95`) returns
+  `Self`, not a `Result`. Its own doc comment says "A `null` /
+  shapeless result yields an empty response."
+- The binding's only `?` is `lua_to_json(edit)?`
+  (`src/lua_bindings/mod.rs:10161`), and its input arrived as JSON
+  through `json_to_lua`. Every value that round-trip produces is
+  accepted going back.
+
+So no fake server can send a payload that makes the parse fail.
+**Decision — the first of the two options offered: keep the wrap, and
+label it a defensive boundary test driven by an explicit throwing test
+stub for `pmacs.lsp._parse_workspace_edit`.** Reasons: the wrap costs
+one line and makes the boundary uniform, so a future parse that *does*
+become fallible is covered by construction rather than by remembering;
+and the promise in Q#RD7 is narrowed to match reality rather than
+propped up by an unfalsifiable criterion.
+
+**What this explicitly is not:** a claim that a server can trigger it.
+Acceptance 15 is labelled defensive, and it substitutes the stub rather
+than dressing up a reachable payload — a criterion that cannot fail is
+not a pin, and pretending otherwise is the defect this decision exists
+to avoid.
+
+### Q#RD12 — The preflight needs a structured Rust-backed seam, not a registry walk alone — **NEW at rev 4**
+
+Q#RD4 requires the Lua preflight to distinguish **absent + ignore** (a
+no-op the preflight must let through) from **present + ignore** (a real
+delete the preflight must judge). Q#RD6 specifies only a registry walk,
+which answers a question about *buffers*, not about *the filesystem*.
+Nothing in Lua closes that gap today:
+
+- `pmacs.fs.stat` (`builtin/runtime/fs.lua:133`) dispatches through
+  `async_mod._dispatch_fs_stat` and returns a handle — asynchronous, and
+  the applier is synchronous.
+- The only synchronous filesystem binding is `canonicalize`
+  (`src/lua_bindings/mod.rs:6743`), which is realpath-like and **not**
+  equivalent to the primitive's `symlink_metadata`: it resolves symlinks
+  and returns `nil` for a dangling one, so it reports "absent" for a
+  broken symlink that `symlink_metadata` reports as **present**. That is
+  exactly the case this query turns on, so using it would produce a
+  preflight that disagrees with the primitive on the one input that
+  matters.
+
+**The seam: one synchronous Rust binding returning a structured verdict**,
+evaluated with the *same* `symlink_metadata` call the primitive uses, so
+the two layers cannot disagree by construction:
+
+| Verdict | Meaning |
+|---|---|
+| `no-op` | path absent **and** `ignore_if_not_exists` set — the op will do nothing; the preflight must not reject it |
+| `clear` | the delete may proceed: no matching buffer is modified |
+| `conflict` | at least one matching buffer (at the path, or beneath it for a recursive delete) is modified — refuse, with the buffer named |
+
+**Error contract.** The binding is total over its inputs and does not
+raise for ordinary filesystem conditions — absence is a verdict, not an
+error. It raises only on argument-type violations, matching the rest of
+the `pmacs.buffer` surface. A stat error that is neither success nor
+`NotFound` (e.g. `EACCES` on a parent directory) yields `conflict`, not
+`clear`: the preflight must never report "safe to delete" on the
+strength of a question it could not answer. That asymmetry is
+deliberate — the failure direction is toward refusing.
+
+This binding **is** the single shared query of Q#RD6: the walk is its
+buffer half, the `symlink_metadata` call its filesystem half, and the
+primitive's validation phase calls the same function so drift is
+impossible rather than merely discouraged.
+
 ## 4. Bets (falsifiable)
 
 - **B1 — Refusing breaks no legitimate server workflow.** A server
@@ -1130,7 +1332,9 @@ that passes against its pre-image has no bite and is rejected.
    the first clean and modify the second, then delete.
    *Bite:* fails against any first-match lookup, including
    `EditorCore::find_buffer_for_path` — which is exactly what revision 1
-   specified.
+   specified. **This is the criterion that pins validation breadth**;
+   criterion 14 pins the reconciliation half and cannot see breadth
+   (Q#RD10).
 
 7. **Component-prefix false positives are rejected** (Q#RD6). A modified
    buffer under `/tree-sibling` must **not** block a recursive delete of
@@ -1165,6 +1369,28 @@ that passes against its pre-image has no bite and is rejected.
     modified buffer without consulting `ignore_if_not_exists` — the
     false-positive Q#RD4 exists to prevent.
 
+11a. **Present-plus-ignore with a modified buffer is still REFUSED in
+    the preflight** (Q#RD4, Q#RD12) — the opposite direction of 11. The
+    target **exists** on disk, `ignore_if_not_exists = true`, and a
+    modified buffer is bound to it. Assert the batch is refused, the
+    file still exists, and the buffer keeps its text.
+    *Bite:* fails against a preflight that treats
+    `ignore_if_not_exists` as an unconditional bypass rather than
+    consulting the filesystem — i.e. against any implementation that
+    reads the flag without the `symlink_metadata` verdict Q#RD12
+    specifies. **Revision 3 shipped only direction 11**, and
+    one-direction coverage on a two-direction rule is exactly how that
+    gap survived a round; the pair is now explicit, as with 7/8.
+
+11b. **A dangling symlink counts as present** (Q#RD12). Target is a
+    symlink whose destination does not exist, `ignore_if_not_exists =
+    true`, modified buffer bound to the link path. Assert refusal.
+    *Bite:* fails against a preflight built on `canonicalize`
+    (`src/lua_bindings/mod.rs:6743`), which returns `nil` for a broken
+    symlink and would therefore mis-classify this as absent — the one
+    input on which realpath and `symlink_metadata` disagree, and the
+    reason Q#RD12 specifies the latter.
+
 12. **Edit-then-delete and rename-into-delete still answer the server**
     (Q#RD3, Q#RD7). Two batches that defeat the snapshot preflight: one
     where an earlier text edit dirties the buffer a later op deletes,
@@ -1189,23 +1415,36 @@ that passes against its pre-image has no bite and is rejected.
     revision 2**, which promised the trace and tested only the response;
     asserting the response alone is what let that gap survive a round.
 
-14. **Clean duplicates: every match validated, one match reconciled**
-    (Q#RD10). Two clean buffers bound to one path; delete succeeds.
-    Assert exactly one is removed and one remains.
-    *Bite:* fails in **both** directions — against an implementation
-    that removes all matches (widening the parked defect) and against
-    one whose validation only consulted the first match. Pair with
-    criterion 6, which covers the modified-second case; this one covers
-    the all-clean case that criterion 6 cannot see.
+14. **Clean duplicates: one match reconciled** (Q#RD10). Two clean
+    buffers bound to one path; delete succeeds. Assert exactly one is
+    removed and one remains.
+    *Bite:* fails against an implementation that removes **all** matches
+    — i.e. it pins the reconciliation half of Q#RD10, and only that.
+    *Correction at rev 4:* revision 3 claimed this criterion "fails in
+    both directions", including against first-match-only *validation*.
+    **That was false.** With both buffers clean there is no verdict
+    difference between consulting one match and consulting all, so the
+    setup cannot see validation breadth. **Criterion 6 is the one that
+    detects incomplete validation** (clean first, modified second), and
+    the two are now labelled by which half of Q#RD10 each pins. The
+    claim is fixed rather than the setup, because criterion 6 already
+    covers the other half and duplicating it here would add no bite.
 
-15. **A parse failure still answers the server** (Q#RD7). Feed the
-    `workspace/applyEdit` arm an edit payload that makes
-    `_parse_workspace_edit` fail, and assert the server still receives
-    `applied = false` with a `failureReason`.
-    *Bite:* fails against `ad41cf1` **and** against revision 2's
-    proposed wrap, which covered `apply_workspace_edit` only and left
-    the parse one line outside — the concrete reason "always answers"
-    was untrue as written.
+15. **Defensive: a parse failure still attempts a response** (Q#RD7,
+    Q#RD11). Substitute an explicit **throwing test stub** for
+    `pmacs.lsp._parse_workspace_edit`, then assert the server still
+    receives `applied = false` with a `failureReason`.
+    *Bite:* fails against a wrap that covers `apply_workspace_edit`
+    only, leaving the parse one line outside.
+    **Labelled defensive, and here is why the label is load-bearing:**
+    revision 3 specified this as a *payload* test, which **could not
+    fail** — `from_lsp_value` (`src/rename.rs:95`) returns `Self` and
+    its doc says a shapeless result yields an empty response, and the
+    binding's only `?` is `lua_to_json` over a value that arrived
+    through `json_to_lua`. No server payload reaches the failure. The
+    stub is therefore substituted deliberately, and the criterion claims
+    only what a stub can establish: that the boundary reports rather
+    than that a server can provoke it.
 
 16. **`m4_15_workspace_edit_resource_ops_apply_in_order` stays green
     unmodified**, pinning no-regression from outside. Its `c.rs` is
@@ -1265,11 +1504,16 @@ Full suite per `CLAUDE.md`: `cargo fmt --check`; `cargo clippy
 suites; `cargo test --test m4_acceptance -- --skip basedpyright`;
 `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`; `git diff --check`.
 
-Touched suites: **`m4_acceptance`** (the resource-op home, §1.14) and
-`lsp_dispatch_seams_acceptance`. `dired_acceptance` and
-`autosave_acceptance` are watch items — the former for Q#RD6's shared
-lookup, the latter because `on_removed` ordering (acceptance 4) is where
-autosave's `discard_buffer` hangs.
+Touched suites: **`m4_acceptance`** (the resource-op home, §1.14, and
+the home of criteria 1–14 and 16) and **`lsp_dispatch_seams_acceptance`**
+(criterion 15's throwing parse stub, Q#RD11). Both appear in §8's touch
+table; revision 3 named the second here but omitted it there, and the
+two lists are now maintained together.
+
+`dired_acceptance` and `autosave_acceptance` are watch items, not
+touched files — the former for Q#RD6's shared lookup, the latter because
+`on_removed` ordering (criterion 4) is where autosave's
+`discard_buffer` hangs.
 
 Gate the pushed tree, not the worktree — commit first, then gate.
 
@@ -1288,15 +1532,25 @@ approved the implementation commits land on this same branch.
 
 **Implementation does not begin until the user approves this revision.**
 
-Files the implementation will touch: `src/lua_bindings/mod.rs` (the
-delete arm's four phases and the shared all-buffers query),
-`builtin/runtime/lsp.lua` (the conflict check, per-op wrapping, origin
-restore, always-answer), `tests/m4_acceptance.rs` and
-`src/bin/pmacs_fake_lsp.rs` (fake modes for the blocked delete, the
-edit-then-delete and rename-into-delete batches, and absent-plus-ignore).
+**Files the implementation will touch** — reconciled at rev 4 against
+the gate list below and §5, which revision 3 left disagreeing:
+
+| File | Why |
+|---|---|
+| `src/lua_bindings/mod.rs` | the delete arm's four phases (Q#RD2); the shared query binding and its structured verdict (Q#RD6, Q#RD12); the narrow `*errors*` append surface (Q#RD7) |
+| `builtin/runtime/lsp.lua` | the preflight conflict check (Q#RD3); the parse-plus-apply wrap, origin restore, and boundary logging (Q#RD7) |
+| `tests/m4_acceptance.rs` | criteria 1–14, 16 |
+| `tests/lsp_dispatch_seams_acceptance.rs` | criterion 15's throwing parse stub (Q#RD11) — this file was named in the gate list but omitted from revision 3's touch list |
+| `src/bin/pmacs_fake_lsp.rs` | fake modes: blocked delete; edit-then-delete; rename-into-delete; absent-plus-ignore; present-plus-ignore (11a); dangling-symlink (11b) |
+
 It will **not** touch `src/daemon.rs`, `pmacs-protocol/`,
 `builtin/runtime/dired.lua`, `docs/agent-handoff.md` or `COHERENCE.md`.
 No protocol change.
+
+If criterion 15's stub proves cleaner to host in `m4_acceptance`
+alongside the rest, that is a permitted simplification — but then
+`lsp_dispatch_seams_acceptance` drops out of the gate list too, and the
+two lists move together. Revision 3's defect was that they did not.
 
 **Ownership note — restated at rev 3 against #171 revision 7.** The
 settled split is quoted in §1.12 and Q#RD5 and is carried identically by

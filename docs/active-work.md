@@ -462,10 +462,19 @@ has **no branch and no framing yet**.
 ## Resource-op delete guard lane — PR #186 OPEN, PROPOSED, DO NOT MERGE
 
 - Portable branch: `githubsucks/resource-op-delete-guard`; worktree
-  `../pmacs-resource-op-delete`. **PR #186**, base `main`, forked from
-  `ad41cf1` with **no drift** (`main` is still `ad41cf1`). Currently
-  framing only — `docs/resource-op-delete-guard-framing.md`, revision 2
-  — plus this lane entry. No runtime code yet.
+  `../pmacs-resource-op-delete`. **PR #186**, base `main`. Currently
+  framing only — `docs/resource-op-delete-guard-framing.md`, **revision
+  4** — plus this lane entry. No runtime code yet.
+- **Measured 2026-07-28, `main` @ `7586905`:**
+
+  ```
+  $ git rev-list --left-right --count HEAD...githubsucks/main
+  3       0
+  ```
+
+  Three commits ahead, **0 behind**. Re-measure before quoting; the
+  count below for #171 was wrong in three consecutive revisions of this
+  lane because it was carried forward instead of re-run.
 - **This PR becomes the implementation PR.** Revision 2 dropped rev 1's
   framing-PR-then-implementation-PR plan as a one-feature/one-branch/
   one-PR violation. The framing is revised in place; implementation
@@ -507,13 +516,20 @@ has **no branch and no framing yet**.
   adopts it and extends it to `reconcile_rename`. **Neither lane guards
   `pmacs.fs.remove`** — zero production callers today, named out of
   scope by both.
-- **#171's real state, re-checked 2026-07-28:** revision 7, head
-  `fd7ae37`, merge-base `ad41cf1`, **0 commits behind**. It is **not**
-  the "153 commits behind, under re-scout" lane described further down
-  this file and in #186's revision 2 — that re-scout has finished.
-  **This cross-lane fact rotted twice in one arc** because the two lanes
-  were briefed hours apart; re-read the other lane's head before citing
-  its state, never a summary of it.
+- **#171's real state — measured, not summarised.** Its own lane entry
+  below carries the numbers; do not duplicate them here, because two
+  copies is how they diverged. The one fact this lane depends on is the
+  policy split above, which is independent of #171's commit count.
+- **Standing rule this lane learned the expensive way.** A census is a
+  reading, not a constant. **Do not write an ahead/behind count, a line
+  count, or a call-site count into this file that you have not just
+  produced with a command whose output you can paste.** #186 shipped a
+  stale line count, then a stale commit count, then a stale ledger
+  citation, in three consecutive revisions — each time by carrying a
+  measurement across a base change instead of re-running it. The
+  specific trap: a count taken against `ad41cf1` was reported in
+  present tense after `main` had moved to `7586905`, which silently
+  converted "0 behind" into a falsehood.
 - **Four facts a re-scout should not have to rediscover**, all verified
   at `ad41cf1`:
   - **No caller reliably surfaces a raise.** The server pump runs under
@@ -568,24 +584,46 @@ has **no branch and no framing yet**.
   `git fetch githubsucks && git worktree add ../pmacs-resource-op-delete
   -b resource-op-delete-guard githubsucks/resource-op-delete-guard`.
 
-## dired Stage 2 framing lane — PR #171 OPEN, STALE, DO NOT MERGE AS-IS
+## dired Stage 2 framing lane — PR #171 OPEN, PROPOSED, DO NOT MERGE
 
-- Portable branch: `githubsucks/dired-stage2-framing` (head `ab42a79`,
-  four framing commits); worktree `../pmacs-dired-stage1`. **PR #171**,
-  base `main`. Framing only — `docs/dired-stage2-framing.md`, 1,570
-  lines, no runtime code.
-- **Measured 2026-07-28: 4 commits ahead of `main`, 153 behind**, merge
-  base `c8ec8f3`. GitHub reports it mergeable, and its old CI run is
-  green — **both facts are about a tree nobody has looked at in 153
-  commits**, and the document still says PROPOSED.
-- **The commit history embodies three review rounds. That is not the
-  same as approval**, and GitHub records no formal review or comment on
-  it. Do not read the round count as a green light.
-- **Its dependencies moved materially underneath it**, which is the real
-  reason not to merge. Note that dired Stage 1 (#165) and find-file
-  (#162) are its *base*, not new arrivals — the merge base `c8ec8f3`
-  **is** #165's merge commit. Eighteen PRs landed after it, and at least
-  three change ground the framing stands on:
+*Ground-truth lines below refreshed by the #186 lane on 2026-07-28
+because they had gone stale and were contradicting the #186 entry; the
+lane's own narrative and plan remain #171's to write.*
+
+- Portable branch: `githubsucks/dired-stage2-framing` (head `fd7ae37`);
+  worktree `../pmacs-dired-stage1`. **PR #171**, base `main`. Framing
+  only — `docs/dired-stage2-framing.md`, **revision 7**, no runtime code.
+- **Measured 2026-07-28, `main` @ `7586905`:**
+
+  ```
+  $ git rev-list --left-right --count fd7ae37...7586905
+  13      2
+  $ git merge-base fd7ae37 7586905
+  ad41cf15c2f3905bd8b6e177af824f846b66b085
+  $ git show fd7ae37:docs/dired-stage2-framing.md | wc -l
+  2897
+  ```
+
+  Thirteen commits ahead, **2 behind** — and those two are exactly the
+  COHERENCE change (`0dd0bf2`, `7586905`, PR #189), so no framing
+  conclusion turns on them. The re-scout that the previous entry
+  described as pending has **finished**: this is no longer the
+  "`ab42a79`, 4 ahead, 153 behind, merge base `c8ec8f3`" tree, and it is
+  no longer stale.
+- **The commit history embodies five review rounds plus a cross-lane
+  reconciliation. That is not the same as approval**, and the document
+  still says PROPOSED — NOT APPROVED. Do not read the round count as a
+  green light.
+- **Revision 7 reconciles with #186.** It adopts #186's pre-filesystem
+  refusal rather than its own rev-6 policy (which deleted the file and
+  kept the modified buffer orphaned), and it adopts #186's shared walk
+  query. See the #186 lane above for the split, quoted verbatim in both
+  places.
+- **Its dependencies had moved materially underneath it** — the reason
+  the re-scout was needed. This list is **historical**: revisions 5–7
+  answered it, and the merge base is now `ad41cf1`, not `c8ec8f3`.
+  Retained because the three items name substrate any future revision
+  still stands on:
   - **#178 gave generated buffers a write invariant**
     (`Buffer::set_generated_contents`). Dired's listing is a generated
     buffer, and dired is named in the handoff as one of the writer
@@ -599,12 +637,11 @@ has **no branch and no framing yet**.
   - **#179/#181 landed the typed-edit consumer chain**, which is the
     fan-out a rename transaction has to survive.
 
-  Re-scout against `6bee09d`, publish a new revision, and get explicit
-  framing approval before any implementation. **The re-scout is under
-  way** on the existing branch, so PR #171 keeps its three-round
-  history; the product is a revision 5, not a new document. (`main` has
-  since advanced to `0442d78`, but the only difference is the test-only
-  #174, so no re-scout conclusion turns on it.)
+  **That re-scout is done** — revision 5 answered it, and revisions 6
+  and 7 followed, all on the existing branch so PR #171 keeps its
+  history. What remains outstanding is **explicit framing approval
+  before any implementation**, which the document itself still says it
+  has never received.
 - **The rename problem the framing must still answer**, restated because
   it is the hard part: a rename is a transaction across **five** path
   owners — the buffer path, the buffer name, the URI-keyed LSP stores
