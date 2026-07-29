@@ -3,10 +3,120 @@
 **PROPOSED — needs explicit user approval before implementation. DO NOT
 implement, DO NOT merge.**
 
-**Revision 5 — scouted against canonical `githubsucks/main` @ `7586905`,
-2026-07-28.** Every count in this document was re-measured at this
-base in revision 4; revision 5 changes only the framed design and
-acceptance, not a counted tree surface.
+**Revision 6 — scouted against canonical `githubsucks/main` @ `64883eb`,
+merged into this branch at `76cfaac`, 2026-07-29.** Both SHAs were
+measured in this worktree at the moment of writing (`git rev-parse
+githubsucks/main`, `git rev-parse HEAD`), not carried forward from a
+briefing. Every count and every pre-image below is **a reading at
+`76cfaac`, not a constant**; the base has moved four times while this
+document has been open and will move again.
+
+> **Numbering note.** The review that this revision answers asked for
+> "revision 5". The document at the reviewed commit `cab3404` was
+> **already** revision 5 (written by `238fd04`, closing review round 4),
+> so this is **revision 6**. Recorded rather than silently renumbered,
+> because two documents disagreeing about which revision is live is the
+> failure this arc's cross-lane boundary exists to prevent.
+
+## Revision 6
+
+**Answers review round 5 on `cab3404` — five P1, two P2. All seven
+confirmed. It withdraws two of revision 5's decisions, corrects one
+assertion revision 5 made about containment, and reclassifies six
+criteria.**
+
+| finding | the decision |
+|---|---|
+| **P1-1** — Stage 1 criterion 5 is impossible | Confirmed. `begin_edit` (`src/buffer.rs:724`) and `apply_edit` (`:772`) each call `ensure_writable()` as their **first** statement, so once the rope is locked an ordinary edit *necessarily* returns `ReadOnly` and no intercept runs. **The named-error requirement is dropped from the ordinary path and moved behind a Rust-side lift**, where the intercept genuinely is the guard. The wider error-precedence change is considered and rejected. **Consequence revisions 1–5 all missed:** after adoption the intercept is unreachable on the ordinary path **including in the shipped precedent** — `terminal.lua`'s intercept has been dead since #178. Criterion 5 splits into (a) refused-and-unchanged and (b) refused-by-the-intercept-under-a-lift, which is where the original bite survives. |
+| **P1-2** — `Diverged` misses another post-mutation failure | Confirmed, **and revision 5 got three of seven cases wrong, not one.** `export_updates_since` (`src/buffer.rs:1173`) runs after *every* successful CRDT mutation, for all three op shapes. Revision 5's "delete→insert classifier" maps all three of those to `Rejected`, whose cleanup **restores a fresh buffer to writable while the CRDT and rope disagree** — reintroducing the exact harm round 4's P1-3 withdrew the four-variant fallback to prevent. Replaced by a `crdt_mutated` flag carried out of the routing function, which is **total by construction** rather than an enumeration that a future failure point can escape. |
+| **P1-3** — `read_only` does not contain a divergent CRDT | Confirmed; revision 5's "strongest available containment" was simply wrong. Neither outbound snapshot path reads `read_only` (`src/daemon.rs:2563-2578`, `:2693-2708`) — and neither can, since `read_only` is a statement about *inbound* mutation. New **`crdt_quarantined`** flag with **three** consumers: both export sites and `queue_daemon_origin_crdt_op`, the third of which the review did not name. Repair stays deferred, and the cost of quarantine (the buffer stops collaborating) is stated rather than buried. |
+| **P1-4** — `AppliedThenFailed` leaves later views stale | Confirmed. Revision 5 fixed the fan-out *after* the borrow drops and left the loop *inside* it broken. **The review named one broadcast site; sweep F found four**, and two of the three it did not name are load-bearing for this arc specifically: `src/buffer.rs:1250` is the arm every `NoOp` takes — including Q#GB5's `ensure_slot` lock — and `:1033` is how a locked buffer's write reaches a replica at all. All four adopt continue-and-retain-first-error. Criterion 15a gains a `RecordingView` **after** `FailingView`. |
+| **P1-5** — Q#GB6 omits the selection anchor | Confirmed, and it is the only one of the three coordinates that **panics**: `Window::region` (`src/window.rs:472-479`) clamps neither endpoint, and `region_bytes` (`src/editor_core.rs:4184-4191`) hands the result to `Rope::slice`, which asserts at `src/rope.rs:145`. #191 reproduced it. The rule is **clamp-or-clear**, in **both** clamp sites, for every affected window — and it is not invented here: `src/terminal/view.rs:715-721` already solved the identical problem for `TerminalSelection`, `collapsed_by_clamp` and all. New criterion 8c. Also found: a stale anchor reaches the **presence broadcast** (`src/presence.rs:122-123`), not only the local slice. |
+| **P2-6** — four criteria have incorrect `main` pre-images | Confirmed, **and there are six.** 15, 16, 16b, 17, 18 and 21 all pass at the base. Relabelled to `[mutation]` / `[fix-shape]` with a table stating, per criterion, what the base actually does. None is weakened — each already carried its falsifying mutation. |
+| **P2-7** — a rejected generated edit can still unfold | Confirmed. A `generated_preflight` runs §3.4's exits 1–4 under a read-only borrow **before** the unfold; `apply_generated_edit` still re-checks all four, because the borrow is released between and `Buffer` stays the only authority. Dropping the unfold and narrowing the contract were both considered and rejected. New criterion 22, with a second half on the identity-protected refusal so it pins the preflight rather than one hoisted check. |
+
+**Sweep F — every recovery or containment mechanism in the document,
+audited for failure points it does not enumerate (obligation 1).** The
+review is right that P1-2, P1-3 and P1-4 are one class. **10 mechanisms
+examined, 4 broken — all four are the review's — and within them three
+exits the review did not name.**
+
+| # | mechanism | verdict |
+|---|---|---|
+| 1 | `Diverged` classifier | **BROKEN** — enumerated 1 of 3 failure points; now flag-based and total |
+| 2 | `Diverged` containment via `read_only` | **BROKEN** — 2 export paths, **plus `queue_daemon_origin_crdt_op` (not named by the review)** |
+| 3 | `AppliedThenFailed` view notification | **BROKEN** — **4 broadcast sites, review named 1** |
+| 4 | Q#GB6's coordinate clamp | **BROKEN** — 3rd coordinate; **and it also reaches presence, not named by the review** |
+| 5 | `Rejected` restore-entry-state | clean — exits 1–4 plus CRDT-untouched, and total once `crdt_mutated` is the discriminator |
+| 6 | `NoOp` cleanup | clean — one exit (`src/buffer.rs:1245`) |
+| 7 | `generated_preflight` (new) | clean by construction — evaluates the same four predicates `apply_generated_edit` does |
+| 8 | `clear_history` across modes | clean — `if let Some(crdt)` guard covers both |
+| 9 | `identity_protected` write refusal | clean — single exit |
+| 10 | Q#GB12's revision guard going near-dead | clean — names its residual writer (a future Rust-side one) |
+
+**Sweep G — every criterion's pre-image re-derived by asking what the
+BASE does (obligation 2).** Re-derived at `76cfaac`; see the table above
+criterion 15. **41 criteria audited across both stages, 6 mislabelled,
+all relabelled.** The arithmetic, since a count asserted without one is
+what this sweep exists to catch: Stage 1 has **14** top-level entries of
+which `13` is a split header carrying no assertions, plus **4** lettered
+sub-criteria (`8b`, `8c`, `13a`, `13b`) — 14 − 1 + 4 = **17**. Stage 2
+has **25** entries of which `10` is "Coverage, not a criterion" —
+25 − 1 = **24**. 17 + 24 = **41**. The rule, now stated for the third
+time and applied by
+construction rather than by inspection: *a criterion's pre-image is a
+fact about the base, established by running it there.* Because the base
+moves, §6's labels carry the commit they were derived at.
+
+**Re-measured at `76cfaac` (obligation: paste the output).**
+
+```
+$ git rev-parse --short HEAD; git rev-parse --short githubsucks/main
+76cfaac
+64883eb
+$ grep -rn 'describe\.buffer' builtin/ --include='*.lua' | wc -l
+14
+$ grep -rn bypass_intercept builtin | wc -l
+21
+$ grep -rn --include='*.lua' add_intercept . --exclude-dir=target | wc -l
+17
+$ grep -rn "is_modified()" src/ pmacs-gpu/ | wc -l
+26
+$ grep -rn "mark_clean()" src/ | wc -l
+6
+$ grep -c "dispatch_idle_for" tests/terminal_copy_mode_acceptance.rs
+0
+```
+
+All unchanged. **Verified rather than assumed:** `git diff --stat
+300cbc4..64883eb` touches only `docs/` and `scripts/bite` — **no product
+code** — which is why the source citations below survive the base move.
+
+**Citation audit, revision 6.** PR #187 moved four source files, and a
+sweep of every citation in this document into them found **15 stale
+instances across 9 distinct citations**, all corrected here:
+`editor_core.rs` `:1814`→`1836`, `:1843`→`1865`, `:1841-1842`→`1863-1864`,
+`:1853-1857`→`1875-1879` (×3), `:2575`→`2597`, `:1945`→`1967`;
+`editor.rs` `:1436,1984,2128,2163`→`1472,2356,2500,2535`, `:3704`→`4129`
+(×2); `daemon.rs` `:2976`→`3167`; `semantic_render.rs` `:1347`→`1716`
+(×2). The tell was internal: revision 6's new text cited
+`editor_core.rs:1836` and `:1865` for the same two functions that older
+text still cited as `:1814` and `:1843`. **A citation is a reading too**,
+and this document had not been re-reading them.
+
+**`scripts/bite` now has a positive control** (`main` @ `64883eb`), so
+every "falsify by …" below can be executed rather than asserted: exit 0
+is a real bite, **exit 3 is `NO CONTROL`** — the named tests did not pass
+on the working tree, or none ran — exit 1 is vacuous, exit 4 is
+`INCONCLUSIVE (MIXED)`, and the swapped run is labelled
+`OK (assertion)` or `OK (COMPILE)`. **Prefer `OK (assertion)`**; treat
+`OK (COMPILE)` as a prompt to narrow the swap. Criteria whose bite is a
+one-line mutation of a Rust file are directly `bite`-able; the Lua-side
+ones swap the `builtin/` file.
+
+Revision 5's decisions and its answers to review round 4 remain below as
+history. Where its live design said "delete→insert classifier" or called
+`read_only` containment, revision 6 supersedes it explicitly.
 
 ## Revision 5
 
@@ -201,7 +311,7 @@ item. Nothing was silently rewritten; each change is attributed below.**
 | **P1-1** — three Stage 2 criteria are non-discriminating | Stage 2 criteria 3, 4 and 5 rewritten (§6). All three **passed on the pre-image**: ordinary edits are already refused by the existing intercept, and `Buffer::undo` checks `read_only` *before* it looks at history (`src/buffer.rs:1302`), so "undo returns false" passes against an implementation that locks and never clears. The new wording uses a **bypass write** or Rust-side `Buffer::is_read_only()` to prove locking, and **lifts the lock inside a Rust test** before asserting `NothingToUndo` / `can_undo() == false` to prove clearing. Confirmed against the tree. |
 | **P1-2** — staging omits the ownership prerequisite | New §2.8 (measured), new **Q#GB13**, amended **Q#GB5**, and staging changes in §5: ownership-by-handle is now a **prerequisite of the stage that locks each writer**, not a follow-up. Confirmed and materially worse than the review stated — §2.8 measures that a *failed* `pmacs.compile.run` already leaves a foreign buffer permanently un-editable today, and that `M-x buffer.undo` is currently the **only** way to recover a clobbered one. This arc removes that accidental safety net, which is exactly why it cannot ship without ownership. |
 | **P1-3** — `mark_clean` can suppress recovery | New §2.9 and a rewritten **Q#GB10**. **Revision 1 was wrong**: it claimed `is_modified` "drives only the mode-line indicator and the buffer-list column". It is also read by `src/autosave.rs:363` — the skip that decides whether a crash-recovery slot is written — and `src/desktop.rs:302`. The rule chosen and framed: **a generated write refuses a buffer that has a `file_path`**, which bounds the contents clobber and the lock as well as the flag. |
-| **P2-4** — Q#GB6 conflates byte extent with line extent | **Q#GB6** rewritten. `win.view_top` is a **line index** (`src/window.rs:373-374`) bounded by `TextView::line_count`; `win.cursor` is a byte position bounded by `Buffer::len`. The clamp is now per-coordinate and ungated, matching `rebuild_views_for`'s own shape (`src/editor_core.rs:1853-1857`), and §6 gains a longer-in-bytes / fewer-in-lines pin. |
+| **P2-4** — Q#GB6 conflates byte extent with line extent | **Q#GB6** rewritten. `win.view_top` is a **line index** (`src/window.rs:373-374`) bounded by `TextView::line_count`; `win.cursor` is a byte position bounded by `Buffer::len`. The clamp is now per-coordinate and ungated, matching `rebuild_views_for`'s own shape (`src/editor_core.rs:1875-1879`), and §6 gains a longer-in-bytes / fewer-in-lines pin. |
 | **P2-5** — the CRDT-dark count was knowingly stale | **Re-measured at `ad41cf1`: 276 dark** (3,251 vs 3,527), with the command shown in §10. Revision 1 quoted **264**, which `docs/active-work.md:107-115` explicitly labels historical with "the number moves with every merge and must be re-measured, not quoted". |
 
 **Sweep A — every criterion re-audited against its pre-image, not only
@@ -299,7 +409,7 @@ The user-reachable chain, verified end to end:
 
 `M-x buffer.undo` → `cmd { name = "buffer.undo" }`
 (`builtin/commands/default.lua:179`) → `ed.undo()` → `EditorCore::undo`
-(`src/editor_core.rs:2575`) → `Buffer::undo` → `ensure_writable`. The
+(`src/editor_core.rs:2597`) → `Buffer::undo` → `ensure_writable`. The
 chords `C-/ C-_ C-4 C-x u` are bound globally
 (`builtin/keymaps/default.lua:126-136`) and the menu carries it too
 (`builtin/menus/default.lua:141`). **No buffer-local rebinding removes
@@ -664,10 +774,10 @@ not have to rediscover it.**
 
 ### 2.6 A pre-existing defect in the shipped primitive — measured
 
-`notify_buffer_edit` (`src/editor_core.rs:1814`) updates each window's
+`notify_buffer_edit` (`src/editor_core.rs:1836`) updates each window's
 `TextView` and overlays. It does **not** clamp `win.cursor` or
-`win.view_top`. Only `rebuild_views_for` (`:1843`) does, and its doc
-comment says so explicitly (`:1841-1842`). `set_generated_contents`'s
+`win.view_top`. Only `rebuild_views_for` (`:1865`) does, and its doc
+comment says so explicitly (`:1863-1864`). `set_generated_contents`'s
 binding calls the former.
 
 ```
@@ -691,14 +801,14 @@ The transcript above is the byte case. The line case is **not measured**
 alone: a write that grows in bytes while collapsing lines invalidates
 `view_top` on a write no byte-length comparison calls a shrink.
 `rebuild_views_for` already clamps each against its own bound
-(`src/editor_core.rs:1853-1857`); the clamp added to
+(`src/editor_core.rs:1875-1879`); the clamp added to
 `notify_buffer_edit` must do the same. Q#GB6.
 
 ### 2.7 What `buffer.after-edit` does and does not do
 
 `buf:insert` / `buf:delete` / `buf:replace` do **not** fire
 `buffer.after-edit`; the dispatcher and daemon do
-(`src/editor.rs:1436,1984,2128,2163`, `src/daemon.rs:2976`).
+(`src/editor.rs:1472,2356,2500,2535`, `src/daemon.rs:3167`).
 `compile.lua:714` already relies on this ("hook edits don't re-fire the
 hook"). Consequence for §3: a generated write does not run arbitrary Lua,
 so the *fan-out* is not a re-entrancy hazard — but a scoped primitive's
@@ -806,15 +916,15 @@ consumers**:
 |---|---|
 | `src/autosave.rs:363` | **yes** — the crash-recovery skip (§2.9 above) |
 | `src/desktop.rs:302` | **yes** — the persisted `SavedBuffer.modified` |
-| `src/editor.rs:3704` | no — the TUI mode-line `*` |
-| `src/semantic_render.rs:1347` | no — the **semantic frontend's** statusline payload |
+| `src/editor.rs:4129` | no — the TUI mode-line `*` |
+| `src/semantic_render.rs:1716` | no — the **semantic frontend's** statusline payload |
 | `src/help.rs:131` | no — the `Modified:` line of describe-buffer text |
 | `src/instance_buffer.rs:401` | no — an assertion, not a read |
 | `src/lua_bindings/mod.rs:1262`, `:6359` | no — `buf:is_modified()` and `describe.buffer().modified`, which `default.lua:395` renders |
 
 Revision 1 said two consumers; revision 2 said four; the true figure is
 **seven, of which two are load-bearing**. Both new ones
-(`semantic_render.rs:1347`, `help.rs:131`) are display, so **Q#GB10's
+(`semantic_render.rs:1716`, `help.rs:131`) are display, so **Q#GB10's
 conclusion is unchanged** — but the conclusion was reached twice from an
 incomplete count, and only the arithmetic makes that visible.
 
@@ -822,7 +932,7 @@ Also found in the same sweep, and reused below: `mark_clean()` has six
 callers (`grep -rn 'mark_clean()' src/`, minus the definition).
 `src/instance_buffer.rs:95,114`, `src/workers_buffer.rs:76,95` and
 `src/help.rs:381` are all **generated-buffer writers that already mark
-clean**; `src/editor_core.rs:1945` is the save path. So the convention
+clean**; `src/editor_core.rs:1967` is the save path. So the convention
 Q#GB10 adopts is established by **three** Rust writers, not the one
 revision 1 cited.
 
@@ -1381,17 +1491,37 @@ for (_, view) in views.iter_mut() {
 }
 ```
 
-**Both broadcast sites, not one — and the review named one.** Sweep F
-found the second:
+**FOUR broadcast sites, not one. The review named one; sweep F found the
+other three, and every one of them is reached by this arc.** Measured:
 
-| site | who reaches it |
-|---|---|
-| `run_rope_edit_and_broadcast` (`src/buffer.rs:1286-1288`) | `apply_edit`, `apply_edit_skip_intercepts`, and therefore every generated write |
-| **`broadcast_on_edit` (`src/buffer.rs:1539-1549`)** | **`undo` and `redo`** — same `for … ?` shape, same defect |
+```
+$ grep -n "view.on_edit(self, &edit)?" src/buffer.rs
+1033:            view.on_edit(self, &edit)?;
+1250:                view.on_edit(self, &edit)?;
+1288:            view.on_edit(self, &edit)?;
+$ grep -n "view.on_edit(self, edit)?" src/buffer.rs
+1543:                view.on_edit(self, edit)?;
+```
 
-Fixing only the first would leave undo able to strand later views, which
-is the same bug reached by the command this whole arc exists because of.
-Both change.
+| site | enclosing fn | who reaches it |
+|---|---|---|
+| `:1288` | `run_rope_edit_and_broadcast` | `apply_edit`, `apply_edit_skip_intercepts` — **the one the review named** |
+| `:1250` | `run_rope_edit_and_broadcast`, **the no-op early-return arm** | every `NoOp` outcome — including **Q#GB5's `ensure_slot` lock**, which is exactly `set_generated_contents(buf, "")` |
+| `:1033` | `run_remote_rope_stages` | `apply_remote_crdt_op` — a **replica importing the owner's write** |
+| `:1543` | `broadcast_on_edit` | **`undo` and `redo`** — the command this whole arc exists because of |
+
+Two of the three the review did not name are load-bearing for this arc
+specifically. `:1250` is the path `NoOp` takes, and §3.4 treats `NoOp` as
+a **success** that leaves the buffer generated-locked — but a view
+erroring there today both strands the later views *and* converts the
+success into an `Err`. `:1033` is how a locked generated buffer's write
+reaches a replica at all, so a strand there is a mirror that paints from
+stale offsets on the frontend the round-trip mark exists to protect.
+
+**All four change**, to the same continue-and-retain-first-error shape. A
+fix applied to one, or to two, would leave the same rope with different
+broadcast semantics depending on which entry point wrote to it — the
+defect class that has now produced five findings across four rounds.
 
 **Why this changes the shipped path for ordinary edits too, deliberately.**
 The alternative is a generated-only broadcast variant, which would give
@@ -1611,13 +1741,22 @@ rather than a note — a variant nothing can construct is not a design.
 `Diverged` into `Rejected` would apply `Rejected`'s cleanup: on a fresh
 writable buffer it restores `entry_read_only = false`, leaving a buffer
 whose CRDT and rope already disagree open to further writes. That
-directly contradicts the containment argument above. Stage 2 therefore
-extracts a private delete→insert classifier that accepts the two
-operations as closures: production supplies the loro calls; a
-`#[cfg(feature = "crdt")]` unit test supplies delete `Ok` followed by
-insert `Err`. The test makes `Diverged` constructible without adding a
-public fault-injection API, and `cargo test --lib --features crdt` is its
-gate. If that extraction proves larger than expected, Stage 2 stops for
+directly contradicts the containment argument above.
+
+**Revision 6 keeps that withdrawal and widens the seam it rests on
+(round 5, P1-2).** Revision 5 specified "a private delete→insert
+classifier that accepts the two operations as closures". Two operations
+is one too few: `export_updates_since` is a third fallible stage that
+runs after *every* successful CRDT mutation, so a two-closure seam
+cannot construct three of the seven cases in §3.4's table — the three
+where revision 5's classification was itself wrong. The seam is instead
+**the `crdt_mutated` flag** described in §3.4, and the injectable
+closures are the CRDT primitives **and** the export. Production supplies
+the loro calls; a `#[cfg(feature = "crdt")]` unit test supplies
+`delete Ok` + `insert Err`, and separately `delete Ok` + `export Err`.
+The test makes `Diverged` constructible without adding a public
+fault-injection API, and `cargo test --lib --features crdt` is its gate.
+If that extraction proves larger than expected, Stage 2 stops for
 review; it does not silently weaken the approved cleanup table.
 
 `validate_op_bounds` is a new
@@ -1818,7 +1957,7 @@ A replacement can **grow in bytes while collapsing many lines into one**
 comparison calls a *growth*. So the trigger cannot be "the buffer
 shrank": the clamp runs **unconditionally**, each coordinate against its
 own bound, exactly as `rebuild_views_for` already does
-(`src/editor_core.rs:1853-1857`, which clamps `cursor` against `len` and
+(`src/editor_core.rs:1875-1879`, which clamps `cursor` against `len` and
 `view_top` against `line_count().saturating_sub(1)`).
 
 **Argued from the types and from `rebuild_views_for`'s existing shape,
@@ -2266,7 +2405,7 @@ additionally writes from Rust with its own fan-out pair and already
 only then, mark clean.** Rewritten in revision 2 (review P1-3).
 
 `set_generated_contents` leaves `is_modified = true` (measured), so every
-adopter shows `*` in the mode line (`src/editor.rs:3704`) and in
+adopter shows `*` in the mode line (`src/editor.rs:4129`) and in
 `*buffer-list*` (`default.lua:395`). `workers_buffer::render` calls
 `Buffer::mark_clean()` (`src/workers_buffer.rs:95`) and
 `instance_buffer.rs:401` asserts the same for its own rendered buffer,
@@ -3309,8 +3448,42 @@ emptiable by one keystroke.
 
 ## 9b. Cross-lane boundaries
 
-**Three lanes touch adjacent ground. The boundaries below are settled
+**Four lanes touch adjacent ground. The boundaries below are settled
 elsewhere and are recorded verbatim rather than re-decided here.**
+
+**#188 → #191 — the acceptance-contract boundary. Added in revision 6:**
+
+> #188 (framing) owns the **acceptance contract**. #191 (Stage 1
+> implementation) may not restate, narrow, or reclassify a criterion —
+> it adopts what the framing says. Where an implementation found a
+> criterion impossible, the framing is revised and re-approved first;
+> the implementation then follows. The **selection-anchor clamp** is
+> Q#GB6's to specify and #191's to implement, and both must describe the
+> same rule.
+
+**What that boundary has already had to settle, twice, in this
+revision.** Both are cases where #191 was right about the tree and wrong
+about who decides:
+
+1. **Stage 1 criterion 5 was impossible** (round 5, P1-1). #191 reached
+   that independently and **restated the criterion locally** — which is
+   exactly what the boundary forbids, and which left #191's tests and
+   ledger describing a contract this document did not carry. Criterion 5
+   is settled *here*, in revision 6; #191 adopts the (a)/(b) split rather
+   than its local restatement. The same applies to the criterion 7
+   divergence #191's review found.
+2. **The selection anchor** (round 5, P1-5). #191 reproduced the panic;
+   Q#GB6 in this revision is the specification, including the
+   clamp-or-clear rule and the two clamp sites. #191 implements that
+   text. If implementation finds it wrong, the correction lands here
+   first.
+
+**Why this boundary is worth its overhead.** A framing and its
+implementation disagreeing about a criterion is not caught by either
+lane's gates — both are green against their own description. It is
+caught only by a reviewer holding the two documents side by side, which
+is what happened, and only after the divergence had reached #191's tests
+*and* its ledger entry.
 
 **#186 / #171 — recorded, not this lane's:**
 
@@ -3416,6 +3589,17 @@ Plus, per stage:
   `cargo test --lib --features crdt` because its private
   delete-success/insert-failure classifier is a unit-test fault seam,
   not a public acceptance input. Same reasoning, same failure mode.
+- **Run `scripts/bite` on every criterion expressible as a test today,
+  and read its new exit codes** (`main` @ `64883eb`, PR #192). Exit **0**
+  is a real bite; **1** is vacuous; **3 is `NO CONTROL`** — the named
+  tests did not pass on the working tree, or **none ran**, which is the
+  filter-matches-nothing case that used to read as success; **4** is
+  `INCONCLUSIVE (MIXED)`. The swapped run is labelled `OK (assertion)` or
+  `OK (COMPILE)`. **Prefer `OK (assertion)`** and treat `OK (COMPILE)` as
+  a prompt to narrow the swap to a file that builds both ways — a
+  compile break proves the swap changed something, not that the test
+  discriminates. Every "falsify by …" in §6 names a one-file change
+  precisely so it can be run through this rather than asserted.
 - **Run `scripts/bite` on every criterion expressible as a test today.**
   Stage 1 criteria 1–3, 8, 9 and Stage 2 criteria 1, 7, 8, 9, 14 have
   `main` pre-images and can be falsified by revert; the rest are

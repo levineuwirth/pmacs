@@ -529,10 +529,39 @@ has **no branch and no framing yet**.
   (clean), then #186 and #171 (`docs/active-work.md` conflict), then
   #187 (the same file again, after it removed the two landed framing
   lanes). Framing only —
-  `docs/generated-buffer-immutability-framing.md`, revision 5, plus this
+  `docs/generated-buffer-immutability-framing.md`, revision 6, plus this
   lane. **No runtime code, no protocol change.**
-- **PROPOSED — four review rounds closed (twenty findings, thirteen P1,
-  seven P2). Not approved. Do not implement, do not merge.**
+- **PROPOSED — five review rounds closed (twenty-seven findings, eighteen
+  P1, nine P2). Not approved. Do not implement, do not merge.**
+- **Stage 1 implementation is PR #191, open. The boundary is explicit
+  and has already been needed twice:** #188 owns the **acceptance
+  contract**; #191 **adopts** criteria and may not restate, narrow, or
+  reclassify them. Where an implementation finds a criterion impossible,
+  the framing is revised and re-approved first. The **selection-anchor
+  clamp** is Q#GB6's to specify and #191's to implement, and both must
+  describe the same rule. Round 5 found #191 had locally restated Stage 1
+  criteria 5 and 7 while #188 still carried the originals — a divergence
+  neither lane's gates can catch, because each is green against its own
+  description.
+- **Round 5's two corrections that other lanes need:**
+  - **`Window::Selection::anchor` is an unclamped byte position and it
+    PANICS**, not merely dangles. `Window::region` (`src/window.rs:472-479`)
+    clamps neither endpoint; `region_bytes` (`src/editor_core.rs:4184-4191`)
+    hands the result to `Rope::slice`, which asserts at `src/rope.rs:145`.
+    Reproduced by #191: select 0..30, shrink the buffer to two bytes,
+    copy. The fix is **clamp-or-clear** in **both** `notify_buffer_edit`
+    (`src/editor_core.rs:1836-1850`, clamps nothing today) and
+    `rebuild_views_for` (`:1865-1882`, clamps cursor and view_top but not
+    selection) — and the rule is already in the tree for the terminal's
+    own selection type at `src/terminal/view.rs:715-721`. A stale anchor
+    also reaches the presence broadcast (`src/presence.rs:122-123`).
+  - **`Buffer`'s `on_edit` broadcast stops at the first error in FOUR
+    places**, so a view later in attach order keeps pre-edit offsets:
+    `src/buffer.rs:1288` (`apply_edit` / `apply_edit_skip_intercepts`),
+    `:1250` (the no-op early-return arm), `:1033`
+    (`apply_remote_crdt_op` — the replica import path), and `:1543`
+    (`broadcast_on_edit`, i.e. **undo and redo**). Any lane relying on a
+    buffer-attached view staying in step with the rope is affected.
 - **What it frames.** The class-wide half of the `set_generated_contents`
   invariant that `docs/agent-handoff.md` §4 and `COHERENCE.md` §14 both
   record as unfinished: `Buffer::undo` gates on `ensure_writable()`
@@ -669,6 +698,7 @@ has **no branch and no framing yet**.
   Recorded here because the section above asks for exactly that and
   warns against quoting a stale figure; it does not replace that
   section's per-target census, which was not re-derived.
+
 ## Test-improvement arc, lane 6 — `scripts/bite` positive control
 
 - Portable branch: `githubsucks/bite-positive-control`, worktree
