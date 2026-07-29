@@ -1569,16 +1569,43 @@ round-trip cannot detect a discriminant shift.
   your tree (happened during #111: a failed `stash push` chained
   into `stash pop`, which grabbed the user's PR-#17-era entry). For
   run-tests-against-an-old-version swaps, use `scripts/bite` — a
-  trap-guarded one-file swap over read-only `git show`, with an
-  inverted verdict (exit 0 iff the tests FAIL against the old
+  trap-guarded one-file swap over read-only `git show`, with a
+  two-sided verdict (the tests must PASS now and FAIL against the old
   version), making bite-verification machine-checkable.
-- **A fix must be COMMITTED before it is bitten.** `scripts/bite`
-  restores by `git checkout --`, which reverts the file to **HEAD**, not
-  to the state it found — so any uncommitted work in a bitten file is
-  destroyed. A whole review round's fixes were wiped this way during
-  #165. Corollary for a NEW file: the swap-over-`git show` mode does not
-  apply at all, so its claims must be bitten by hand-editing, which makes
-  the commit-first rule load-bearing rather than hygienic.
+- **`scripts/bite` is only as good as its positive control, and it
+  had none until it was given one.** Before that it ran *only* the
+  swapped tree, so it could not tell "my fix is load-bearing" from
+  "my test is broken": a test that fails everywhere made the swapped
+  run fail, and a failing swapped run was the only thing checked, so
+  it printed `bite: OK` and certified nothing. It now asserts the
+  named tests pass **and** that at least one actually ran (a filter
+  matching nothing exits 0, so passing alone is not enough), exiting
+  3 as `NO CONTROL` otherwise. It also distinguishes `OK (assertion)`
+  from `OK (COMPILE)` — an old file that does not build against the
+  current tree is a much weaker result, because the tests may never
+  have run at all. **Read which one it printed.**
+- **A fix must be COMMITTED before it is bitten** — but *not* for the
+  reason previously recorded here. This file used to say `scripts/bite`
+  "restores by `git checkout --`, which reverts the file to HEAD", and
+  that a review round's fixes were wiped that way during #165. **That
+  mechanism description is false and was verified false:** the script
+  copies the file to a `mktemp` path before the swap and restores from
+  that copy, under an `EXIT INT TERM` trap, so uncommitted work in the
+  bitten file survives. It has never touched git state beyond a
+  read-only `git show`. The rule still stands on its own merits —
+  gate results must describe the pushed tree, and a `cargo fmt` after
+  a commit splits worktree from branch — but do not repeat the
+  destroys-your-work claim, which will push the next reader toward
+  `git stash` to protect themselves, straight into the repo-global
+  trap above. **The #165 incident itself is now unexplained**, and
+  that is recorded rather than papered over: work really was lost, but
+  not by the mechanism this file blamed. A `SIGKILL` bypasses the trap
+  and would leave the swapped file in place, which is one candidate;
+  so is a stash collision, given the same round. Do not invent a
+  mechanism to close the gap — an unexplained incident is safer than a
+  confident wrong cause, which is what produced this correction.
+  Corollary for a NEW file: the swap-over-`git show` mode
+  does not apply at all, so its claims must be bitten by hand-editing.
 - **A CONFLICTING PR silently runs no CI at all.** GitHub builds
   `pull_request` workflow runs against the PR's **merge ref**, which it
   does not create while the branch conflicts with its base. So pushes
