@@ -107,7 +107,7 @@ remain open to them.
 | 11 | Config layering + provenance | **Partial (foundation only)** | Typed registry is right; 5 settings live in it; no value provenance |
 | 12 | Profiles | **Missing** | One hardcoded default keymap; not a named concept |
 | 13 | Package lifecycle UX | **Resolution without lifecycle** | Mature resolver/lockfile; init-only install; no uninstall/disable/search |
-| 14 | Workbench primitives | **Partial (best trajectory)** | Listview is a real primitive but only 3 call sites, all LSP panels; buffer-list and search re-implement it; bottom panel landed (#155) |
+| 14 | Workbench primitives | **Partial (best trajectory)** | Listview is a real primitive but only 3 call sites, all LSP panels; buffer-list and search re-implement it; bottom panel complete on BOTH frontends (#155 + Stage 2) |
 | 15 | Contextual affordances | **Weak** | Right-click menu only; code actions apply first-blindly; no git integration at all |
 | 16 | Semantic frontend | **Strong** | v6..=v21 schema support; production attach remains v20 during the dark panel slice; degradation practiced |
 | 17 | Distribution | **Missing** | CI is test-only; no binaries, channels, checksums, or update path |
@@ -1280,10 +1280,17 @@ Primitive-by-primitive against the list above:
   vocabulary is fixed Rust-side).
 - **Contextual popup** ✓ — completion popup, context menu (each a
   shadow, §6).
-- **Bottom/side panel** ✓ — landed as bottom-panel Stage 1 (#155):
+- **Bottom/side panel** ✓ — Stage 1 (#155) gave the substrate:
   `WindowParams` side/fixed_rows/dedicated, `display = "current" |
   "panel"` adopted by listview/compile/terminal, quit-action, divider
-  drag. Stage 2 (GPU band) pending its own framing.
+  drag. **Stage 2 completed it on the second frontend** (2A #177, 2B-1
+  #184, 2B-2 #187, 2B-3): the GPU frontend now renders a real panel
+  band with its own divider, pointer routing, and resize drag, and a
+  semantic session that negotiates the panel wire is panel-capable.
+  Both frontends therefore share one placement primitive rather than
+  the GPU silently taking the Stage 1 non-side fallback. Stage 3 — the
+  adopter default flip, so omitting `display` resolves to the panel
+  policy — is the remaining step.
 - **Task/progress view** △ — `*workers*` exists but joins nothing
   (§9).
 - **Help view** △ — exists twice (§5); needs unification, not
@@ -1366,10 +1373,15 @@ its asks are already practiced.**
 - Versioned protocol schema `SUPPORTED=[6..=21]` with deliberate
   encoding-breaking bumps, both-frontends support required per bump,
   and byte-pin discipline for appended variants (handoff §4). The v21
-  bottom-panel family landed with Stage 2B-1 (#184) and is reserved but
-  dark: because `Hello` is server-first, the production daemon still
-  advertises v20 so shipped v20 clients remain attachable; compatible
-  v21 activation belongs to Stage 2B-3.
+  bottom-panel family landed with Stage 2B-1 (#184) and is **live in
+  production since Stage 2B-3** — activated without an incompatible
+  handshake change. Because `Hello` is server-first, the daemon's
+  advertised version is now a permanent compatibility **baseline**
+  (still 20) and the session's real version is settled one message
+  later by the frontend's `AttachRequest` counter-offer. That split —
+  advertise the floor, negotiate up — is the reusable pattern for every
+  future additive family, and it means bumping the advertised version is
+  reserved for a change that cannot be expressed additively at all.
 - Two genuine frontends share the conceptual model; CRDT concurrent
   editing with presence across them; remote attach + reconnect.
 - **Graceful per-frontend degradation is practiced, not aspirational**:
@@ -1569,10 +1581,12 @@ and §18's floor ride on this.
 
 ### Priority 5: Finish the workbench convergence
 
-**State: partial and moving (§14) — bottom panel Stage 1 landed, GPU
-band pending; listview proven.** Remaining: the tree primitive (build
-it before dired and the worker tree invent two), table/inspector/diff,
-help unification. Wiring plus one modest model piece (the tree model).
+**State: partial and moving (§14) — the bottom panel is now complete on
+both frontends (Stage 1 #155 through Stage 2B-3), and listview is
+proven.** Only the adopter default flip (Stage 3) remains on the panel
+itself. Remaining elsewhere: the tree primitive (build it before dired
+and the worker tree invent two), table/inspector/diff, help unification.
+Wiring plus one modest model piece (the tree model).
 
 ### Priority 6: Productize configuration
 

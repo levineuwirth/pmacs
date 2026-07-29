@@ -1,6 +1,6 @@
 # Active work — cross-machine resume ledger
 
-**Snapshot: 2026-07-28.** This file records volatile work that has not
+**Snapshot: 2026-07-29.** This file records volatile work that has not
 landed on `main`. Read it after `docs/agent-handoff.md`. Remove completed
 entries when their PR merges; do not let this become a second permanent
 backlog.
@@ -245,24 +245,84 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
-## Bottom-panel lane (Arc 7) — 2B-2 MERGED; 2B-3 IS NEXT
+## Bottom-panel lane (Arc 7) — 2B-3 OPEN; Stage 2 is COMPLETE with it
 
-Stage 1, the Stage 2 framing, Stage 2A, Stage 2B-1, and **Stage 2B-2 are
-all on `main`**. Framing revision 5's three-way split of 2B was
-explicitly approved on 2026-07-27; revision 6 records PR #184's review
-correction. **2B-2 — the daemon panel projection and epoch machine —
-landed as [PR #187](https://github.com/levineuwirth/pmacs/pull/187)**,
-one review round of five findings on top of the implementation, 12/12
-green, 22/22 mutations biting. Its durable lessons are in
-`docs/agent-handoff.md` §1; what remains below is the 2B-3 plan.
+Stage 1, the Stage 2 framing, Stage 2A, Stage 2B-1, and Stage 2B-2 are
+all on `main`. **Stage 2B-3 — the GPU panel band, compatible protocol-v21
+activation, and the negotiated `panel_capable` flip — is this lane's open
+work**, and it completes Stage 2. Framing revision 5's three-way split of
+2B was explicitly approved on 2026-07-27; revision 6 records PR #184's
+review correction.
 
-**2B-2's boundaries, restated because they are easy to overrun:** the
-production `Hello` stays at v20 and `panel_capable` stays `false`. The
-slice is dark/test-only capability exactly as 2B-1 was. Compatible v21
-activation, the GPU band, and the negotiated capability flip are all
-2B-3's, and 2B-3 may **not** simply change the unsolicited `Hello` to
-21.
+- **Branch `bottom-panel-stage2b3`, worktree `../pmacs-bp-2b3`, cut fresh
+  from landed `main` @ `e003b81`** (`Merge pull request #190 from
+  levineuwirth/resource-op-delete-guard-impl`) — measured with
+  `git log --oneline -1 githubsucks/main`, not carried over from a
+  briefing. Not stacked on `../pmacs-bp-stage2b2`: each slice starts from
+  landed main, which is the house pattern and what 2B-2 did.
+- **The activation mechanism, and why the alternatives fail.** The
+  constraint inherited from 2B-1's review is that the unsolicited `Hello`
+  may not become 21: it is server-first, so a shipped v20 frontend rejects
+  an unknown version *before* it can send `AttachRequest`. What 2B-3 ships
+  instead is a **frontend counter-offer**:
+  `ADVERTISED_PROTOCOL_VERSION` becomes a permanent compatibility
+  *baseline* (20), the frontend answers
+  `requested_protocol_version(baseline)` — its own `PROTOCOL_VERSION` when
+  the baseline is current, a verbatim echo of anything older — and the
+  daemon records `negotiated_session_version(offer)`. The daemon needed
+  **no change** to accept it; it already recorded `req.protocol_version`.
+  Rejected alternatives, each for a reason the server-first shape forces:
+  growing `Hello`/`InstanceCapabilities` (postcard structs are positional,
+  so it breaks the *other* direction symmetrically and cannot be verified
+  against shipped binaries); a client-first hint (an old client writes
+  nothing until it has read `Hello`, so any probe is a timeout);
+  sniffing `instance_identity.pmacs_version` (version-string branching on
+  a field documented as display-only); and a second post-`Hello` daemon
+  message (an old client reads it as an `InstanceMessage` and dies on the
+  unknown discriminant).
+- **The window this leaves open is named, not hidden.** A daemon whose own
+  `PROTOCOL_VERSION` equals the baseline rejects an offer above its
+  supported range. A single `AttachRequest` cannot mean both "I want 21"
+  and "≤ 20", so compatibility is preserved for old *frontends* — the
+  direction that matters, since the daemon is what a user leaves running —
+  and the window closes on the next daemon restart. It surfaces as an
+  explicit `GoodbyeReason::VersionMismatch` naming both versions, pinned by
+  `an_unsupported_offer_is_refused_by_name`.
+- **Five commits:** the activation mechanism, the three-boundary split plus
+  the band's machinery, the paint/input wiring, the acceptance suites, and
+  the bite fixes plus these docs.
+- **Verification on the reviewed head** (all redirected to files and
+  checked by their own exit codes, never through a pipe): recorded in the
+  PR body and reproduced by the commands in `CLAUDE.md`.
+- **23 falsifying mutations, all executed, all biting**, using an in-place
+  mutation runner rather than `scripts/bite` because several claims live in
+  the *same file* as their test and a whole-file swap would not compile.
+  **Three assertions were VACUOUS on the first pass and the mutation runs
+  are what found them** — a fixed-point contrast check, a pixel test that
+  passed with the band painting nothing, and a monospace fixture that could
+  not tell two glyph-advance derivations apart. A fourth finding was about
+  the code, not the tests: "no panel frame reaches a v20 session" is
+  defence in depth, not the placement gate, and passes with the capability
+  gate removed entirely.
+- **Two real defects the new tests caught in the implementation**, both
+  recorded in `docs/agent-handoff.md` §1: `edge_scroll_direction` has no
+  upper bound, so reclassifying its boundary was necessary but not
+  sufficient; and `apply_panel_payload` ignored the exhaustion latch.
+- **Cross-machine recovery (fresh clone):**
 
+  ```sh
+  git fetch githubsucks --prune
+  git switch --track -c bottom-panel-stage2b3 githubsucks/bottom-panel-stage2b3
+  git rev-parse HEAD
+  ```
+
+- **Stage 3 (the adopter default flip) is the arc's last step** and is not
+  started. This lane is not removed at 2B-3's merge: Stage 3 remains ahead
+  of it.
+
+- **Stage 2B-2 MERGED as #187.** One review round of five findings on top
+  of the implementation, 12/12 green, 22/22 mutations biting. Its durable
+  lessons are in `docs/agent-handoff.md` §1.
 - **What PR #187 shipped, dark by construction:** the semantic daemon's
   `FrontendCellGeometry` epoch machine; one reconciled panel grid
   derivation; `PanelFrame::{Present, Absent}` projection on both document
@@ -308,7 +368,7 @@ activation, the GPU band, and the negotiated capability flip are all
   ```
 
   #187 has landed, so `githubsucks/main` already contains this work and
-  the branch is retained only for provenance. Start 2B-3 from `main`.
+  the branch is retained only for provenance. 2B-3 was cut from `main`.
 - **Stage 2B-1 MERGED as #184** (`main` @ `6bee09d`, 2026-07-28; all
   twelve checks green on the reviewed head `5539b6e`; two review rounds
   plus a gate-found follow-up). Branch
@@ -322,11 +382,11 @@ activation, the GPU band, and the negotiated capability flip are all
   `panel_capable` is still `false` for every semantic session, so the
   journey grade is unchanged and every shipped v20 client remains
   attachable.
-- **2B-3 inherits a hard constraint from 2B-1's review**: it owns a
-  *compatibility-preserving* v21 activation mechanism and may **not**
-  simply change the unsolicited `Hello` to 21. The handshake is
-  server-first, so that one-line change locks out every shipped v20
-  frontend before it can even send an `AttachRequest`.
+- **2B-3 discharged the hard constraint 2B-1's review set**: the
+  *compatibility-preserving* activation is the frontend counter-offer
+  described at the top of this lane, and the unsolicited `Hello` is
+  unchanged. 2B-1's real-daemon acceptance for the v20 rejection point
+  still passes untouched.
 - **Two review rounds, and what each cost.** Round 1: `PanelFrame`
   needed an explicit `buffer_id`, the transport ratchet had to drive the
   real attach path rather than a detached codec assertion, and shared
