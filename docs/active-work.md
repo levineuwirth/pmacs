@@ -532,13 +532,18 @@ has **no branch and no framing yet**.
 
   ```
   $ git merge-base HEAD githubsucks/main
-  64883ebe0c1785b8188d2dee7c8e6f8ea4518512
+  5e186c798236e244a0a6f68d5df79458b4856106
   $ git rev-list --left-right --count HEAD...githubsucks/main
-  2       0
+  4       0
   ```
 
-  Re-measure before quoting this anywhere: `main` has branch protection
-  now, and #193 was open behind #192 when this was written.
+  **Re-measure before quoting this anywhere.** `main` moved TWICE while
+  this lane's round-1 fixes were being written — #192 and then #193 —
+  and each move invalidated the count above. `main` has branch
+  protection, so a stale base is not merely untidy: all 12 checks must
+  pass on the merging head, and a conflicting PR builds no merge ref at
+  all, so a green run from before the move reads as current when it is
+  not.
 - **The framing's §8 branch plan is superseded and cannot be followed.**
   It says "one PR — #186, which becomes the implementation PR", written
   when #186 was still open. #186 merged as framing-only, so the
