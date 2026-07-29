@@ -424,14 +424,6 @@ impl TerminalPaintPlan {
     }
 }
 
-/// The terminal cell viewport a drawable rectangle admits.
-///
-/// Rows and columns are `floor(extent / metric)`, clamped through the
-/// shared protocol limits so an enormous window cannot declare a grid
-/// the daemon would reject. A rectangle too small for one whole cell
-/// yields `None`: a zero-area declaration is not sent at all, and the
-/// next geometry change that produces a valid size sends one.
-#[must_use]
 /// The whole-cell capacity of a frontend frame, for the bottom panel's
 /// geometry declaration (Q#BP15a).
 ///
@@ -487,6 +479,14 @@ pub fn panel_cell_capacity(
     Some(CellSize::new(rows.saturating_add(1), cols))
 }
 
+/// The terminal cell viewport a drawable rectangle admits.
+///
+/// Rows and columns are `floor(extent / metric)`, clamped through the
+/// shared protocol limits so an enormous window cannot declare a grid
+/// the daemon would reject. A rectangle too small for one whole cell
+/// yields `None`: a zero-area declaration is not sent at all, and the
+/// next geometry change that produces a valid size sends one.
+#[must_use]
 pub fn cell_viewport(
     width_px: f32,
     height_px: f32,

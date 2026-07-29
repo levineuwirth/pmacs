@@ -1636,8 +1636,12 @@ mod tests {
         let socket = temp.path().join("managed.sock");
         let (client_stream, mut server_stream) = UnixStream::pair().expect("socket pair");
         let server = thread::spawn(move || {
+            // Advertises the BASELINE, like a real daemon: the session
+            // version is settled by the client's counter-offer below, and a
+            // fixture that advertised the current wire could not tell the
+            // two apart.
             let hello = Hello {
-                protocol_version: PROTOCOL_VERSION,
+                protocol_version: pmacs_protocol::ADVERTISED_PROTOCOL_VERSION,
                 assigned_frontend_id: FrontendId::LOCAL,
                 instance_identity: InstanceIdentity {
                     pmacs_version: "managed-retry-test".to_owned(),
