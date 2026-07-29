@@ -3244,6 +3244,11 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
                     ))
                 })?;
                 let id = reg.borrow_mut().create_from_bytes(path.clone(), &bytes);
+                // Path-backed creation site (Q#DR30): this name is the
+                // path as given, so rename reconciliation may move it.
+                if let Ok(b) = reg.borrow_mut().get_mut(id) {
+                    b.set_path_derived_name(path.clone());
+                }
                 if let Some(core) = lua.app_data_ref::<SharedCore>() {
                     let mut core = core.borrow_mut();
                     core.switch_active_buffer(id)
@@ -3307,6 +3312,10 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
                     ))
                 })?;
                 let id = reg.borrow_mut().create_from_bytes(path.clone(), &bytes);
+                // Path-backed creation site (Q#DR30), as in `from_file`.
+                if let Ok(b) = reg.borrow_mut().get_mut(id) {
+                    b.set_path_derived_name(path.clone());
+                }
                 if let Some(core) = lua.app_data_ref::<SharedCore>() {
                     let mut core = core.borrow_mut();
                     core.switch_active_buffer(id)

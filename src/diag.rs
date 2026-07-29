@@ -489,6 +489,17 @@ impl DiagnosticView {
 }
 
 impl View for DiagnosticView {
+    /// Re-root this view when the buffer's file was renamed (dired
+    /// Stage 2a, §5). The URI field is private and `View` has no
+    /// downcast, so this hook is the only way an outside sweep can
+    /// reach it — and mutating in place preserves this overlay's
+    /// position in the window's composition order.
+    fn rename_resource(&mut self, old_uri: &str, new_uri: &str) {
+        if self.uri == old_uri {
+            self.uri = new_uri.to_owned();
+        }
+    }
+
     fn kind(&self) -> &'static str {
         "diagnostic"
     }

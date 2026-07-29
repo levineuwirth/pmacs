@@ -310,6 +310,20 @@ pub trait View {
     fn clone_for_split(&self) -> Option<Box<dyn View>> {
         None
     }
+
+    /// Retarget this overlay from `old_uri` to `new_uri` after a
+    /// resource rename (dired Stage 2a, §5). Default: no-op — a view
+    /// that renders nothing URI-keyed is unaffected.
+    ///
+    /// Mutates **in place**, so the overlay keeps its position in the
+    /// window's composition order. That is the reason this is a trait
+    /// hook rather than a remove-and-re-push at the call site: overlays
+    /// are an ordered `Vec` merged in sequence, and re-pushing would
+    /// move a diagnostic underline to the end of the stack. It is also
+    /// how *passive* windows are reached at all — the Lua attach path
+    /// (`pmacs.diag._attach_view`) can only touch the active window,
+    /// while the sweep that drives this walks every window.
+    fn rename_resource(&mut self, _old_uri: &str, _new_uri: &str) {}
 }
 
 // ---------------------------------------------------------------------------

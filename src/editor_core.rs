@@ -938,11 +938,18 @@ impl EditorCore {
         }
         let normalized = normalize_buffer_path(path.to_path_buf());
         let (bytes, meta) = crate::file_io::load_file(path)?;
+        // The name is the path **as given** — a relative open is named
+        // `foo.rs` while `file_path` below is absolute. Recording the
+        // provenance (Q#DR30) is what lets rename reconciliation move
+        // this name without having to guess from the string.
         let display_name = path.display().to_string();
         let id = self
             .registry
             .borrow_mut()
-            .create_from_bytes(display_name, &bytes);
+            .create_from_bytes(display_name.clone(), &bytes);
+        if let Ok(b) = self.registry.borrow_mut().get_mut(id) {
+            b.set_path_derived_name(display_name);
+        }
         self.set_buffer_path(id, Some(normalized));
         self.set_buffer_meta(id, Some(meta));
         Ok((id, true))
@@ -1001,7 +1008,12 @@ impl EditorCore {
             }),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let display_path = path.display().to_string();
-                let buffer_id = self.registry.borrow_mut().create(display_path);
+                let buffer_id = self.registry.borrow_mut().create(display_path.clone());
+                // Path-backed creation site (Q#DR30): the name is the
+                // path, so a later rename may move it.
+                if let Ok(b) = self.registry.borrow_mut().get_mut(buffer_id) {
+                    b.set_path_derived_name(display_path);
+                }
                 self.set_buffer_path(buffer_id, Some(path.to_path_buf()));
                 "[new file]".clone_into(&mut self.status);
                 Ok(ResolvedTarget::Buffer {
