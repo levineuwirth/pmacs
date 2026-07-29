@@ -521,6 +521,42 @@ has **no branch and no framing yet**.
   `FrontendView.fold_projection` to `true` for semantic frontends, which
   Stage 2 deliberately left `false` (Q#FD21).
 
+## Test-improvement arc, lane 6 — `scripts/bite` positive control
+
+- Portable branch: `githubsucks/bite-positive-control`, worktree
+  `../pmacs-bite`, based on `main` @ `300cbc4`. First lane of the
+  test-improvement arc scoped by `TEST_IMPROVEMENT.md` §8. Tooling and
+  documentation only — **no product code, no tests changed.**
+- Sequenced **first**, ahead of the arc's own priority list, because
+  every later lane's evidence is bite-shaped. A verifier that cannot
+  fail is not worth more than the claims it certifies.
+- **The defect:** the script ran only the swapped tree, so a failing
+  swapped run was the only thing it checked. A test that fails
+  everywhere — a typo, an unrelated compile break — therefore printed
+  `bite: OK`. Now it asserts the named tests pass against the working
+  tree **and** that at least one ran (a filter matching nothing exits
+  0, so passing alone is insufficient), exiting 3 as `NO CONTROL`
+  otherwise, and it labels `OK (assertion)` versus `OK (COMPILE)`.
+- **Validated on all three paths, not just the happy one:** a
+  zero-match filter reports `NO CONTROL`; a genuine bite reports
+  `control OK` then `OK (assertion)`; and a deliberately broken test
+  that fails on both trees reports `NO CONTROL` at exit 3 — **the old
+  script printed `bite: OK` for that last case**, which is the whole
+  point.
+- **Handoff correction, verified rather than inherited.**
+  `docs/agent-handoff.md` §5 claimed the script "restores by `git
+  checkout --`, which reverts the file to HEAD", destroying
+  uncommitted work. False: it copies to a `mktemp` path before the
+  swap and restores from that copy under an `EXIT INT TERM` trap. The
+  commit-before-gating rule stands on other grounds and is kept; the
+  false mechanism is removed, because it would push the next reader
+  toward `git stash` — the repo-global trap the script exists to
+  avoid.
+- Recovery from a clean checkout:
+  `git fetch githubsucks && git worktree add ../pmacs-bite
+  -b bite-positive-control githubsucks/bite-positive-control`.
+
+
 ## Parked lane: kill-ring browser + persistence
 
 - Portable branch: `githubsucks/kill-ring-browser`
