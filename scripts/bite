@@ -1,6 +1,7 @@
 #!/bin/sh
-# scripts/bite --- prove a fix's tests BITE: run them against an older
-# version of ONE file and succeed only if they FAIL there.
+# scripts/bite --- prove a fix's tests BITE: run them against the
+# working tree (they must PASS), then against an older version of ONE
+# file (they must FAIL).
 #
 #   scripts/bite <ref> <path> [cargo-test-args...]
 #
@@ -8,21 +9,52 @@
 #   scripts/bite HEAD~1 builtin/runtime/editops.lua \
 #       --test editops_acceptance -- capitalize trim_on_save_unexpected
 #
-# Exit status: 0 when the named tests fail against <ref>'s version of
-# <path> (the fix bites), 1 when they still pass (vacuous), 2 on
-# usage/setup errors. The working-tree file is restored on every exit
-# path, including interrupts.
+# Exit status: 0 when the named tests pass now and fail against
+# <ref>'s version of <path> (the fix bites), 1 when they still pass
+# there (vacuous), 2 on usage/setup errors, 3 when the POSITIVE
+# CONTROL fails, 4 when the swapped run is INCONCLUSIVE (see the MIXED
+# arm below --- non-zero because its likeliest cause is vacuity, not
+# success). The working-tree file is restored on every exit path,
+# including interrupts.
 #
-# Caveat: a COMPILE error of the old tree also counts as "fails" —
-# correct, but weaker evidence than a clean assertion failure; eyeball
-# the output when the swapped file is Rust rather than Lua.
+# THE POSITIVE CONTROL, and why it is not optional. Before this
+# existed the script ran only the swapped tree, so it could not
+# distinguish "my fix is load-bearing" from "my test is broken": a
+# typo, an unrelated compile break, or a filter that matches nothing
+# all made the swapped run fail, and a failing swapped run was the
+# only thing it checked. It printed `bite: OK` and certified nothing.
+# So the control asserts two things, because passing alone is not
+# enough — `cargo test` with a filter matching zero tests exits 0, and
+# then a compile error in the old tree would still read as OK:
+#
+#   * the named tests PASS against the working tree, and
+#   * at least one test actually RAN.
+#
+# COMPILE errors of the old tree still count as "fails", and that is
+# correct but weaker than a clean assertion failure --- the swapped
+# file may simply not build against the current tree. The script now
+# says which kind it saw instead of leaving it to be eyeballed. Prefer
+# an assertion failure; treat a compile failure as a prompt to narrow
+# the swap to a file that compiles both ways.
+#
+# That classification reads libtest's own `test result:` summary and
+# deliberately does NOT grep for compiler text. A test may PRINT
+# compiler output on failure --- `compile_mode_acceptance` has a
+# fixture that emits `error[E0308]: mismatched types` at column 0, and
+# the compile-mode and editops suites are this script's primary
+# consumers --- so a `^error[E...]` grep would stamp "weaker evidence"
+# on exactly the strong result it was meant to identify. `test result:`
+# is emitted whenever the harness ran, is absent when the swapped file
+# did not build, and stays uncolored when piped.
 #
 # Why this exists: bite-verification is step 4 of the working method,
-# and the obvious shortcut — git stash — is a trap here. The stash
+# and the obvious shortcut --- git stash --- is a trap here. The stash
 # namespace is REPO-GLOBAL: shared across every worktree and with
 # humans, so a scripted push/pop can collide with (or pop!) someone
 # else's stashed work. This helper never touches git state beyond a
-# read-only `git show`.
+# read-only `git show`, and it restores the working file from a
+# mktemp copy --- NOT from git, so uncommitted work in <path> is
+# preserved.
 
 set -eu
 
@@ -40,6 +72,48 @@ if [ ! -f "$path" ]; then
     exit 2
 fi
 
+# Both cargo runs are CAPTURED rather than streamed, because their
+# output is parsed (passed-counts for the control, `test result:` for
+# the classification). A long acceptance suite therefore prints
+# nothing until it finishes --- that is the trade, not a bug. Do not
+# "fix" it back to streaming without giving the parser another source.
+#
+# Colour is pinned off on both runs, so an ambient CARGO_TERM_COLOR
+# cannot wrap the summary lines in escape codes and silently stop every
+# anchored match here from matching. Note the limit: an explicit
+# `--color always` in the passed-through args still beats the
+# environment. That is self-inflicted, and the failure is fail-closed
+# (a zeroed count reads as NO CONTROL), but do not pass it.
+export CARGO_TERM_COLOR=never
+
+# Sum the `N passed` figures across every `test result:` line, so a
+# multi-target invocation is counted correctly rather than only its
+# last binary.
+count_passed() {
+    sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' \
+        | awk '{ total += $1 } END { print total + 0 }'
+}
+
+# --- Positive control: the tests must pass, and must exist, NOW. ---
+echo "bite: positive control --- running against the working tree" >&2
+control_status=0
+control_out=$(cargo test "$@" 2>&1) || control_status=$?
+printf '%s\n' "$control_out"
+
+if [ "$control_status" -ne 0 ]; then
+    echo "bite: NO CONTROL --- tests do not pass against the working tree." >&2
+    echo "bite: fix the tests first; a failure here makes the swapped run meaningless." >&2
+    exit 3
+fi
+
+control_ran=$(printf '%s\n' "$control_out" | count_passed)
+if [ "$control_ran" -eq 0 ]; then
+    echo "bite: NO CONTROL --- the filter matched no tests (0 passed)." >&2
+    echo "bite: check the test names; an empty filter passes everywhere and proves nothing." >&2
+    exit 3
+fi
+echo "bite: control OK --- $control_ran test(s) pass against the working tree" >&2
+
 saved=$(mktemp "${TMPDIR:-/tmp}/bite.XXXXXX")
 cp -- "$path" "$saved"
 restore() {
@@ -52,9 +126,52 @@ trap restore EXIT INT TERM
 # script works from any directory inside the repo.
 git show "$ref:./$path" > "$path"
 
-if cargo test "$@"; then
+echo "bite: swapping in $ref:$path" >&2
+swapped_status=0
+swapped_out=$(cargo test "$@" 2>&1) || swapped_status=$?
+printf '%s\n' "$swapped_out"
+
+if [ "$swapped_status" -eq 0 ]; then
     echo "bite: VACUOUS --- tests still pass against $ref:$path" >&2
     exit 1
 fi
 
-echo "bite: OK --- tests fail against $ref:$path (the fix bites)"
+# Distinguish the ways the swapped run can fail. An assertion failure
+# is the evidence we want; a build failure only says the old file does
+# not compile here, and the tests may never have run at all.
+#
+# Classified from libtest's summary line, NOT from compiler text --- a
+# failing test can print `error[E0308]: ...` at column 0 itself (see
+# the header). `test result: FAILED` means the harness ran and tests
+# failed; no `test result:` line at all means nothing ran.
+if printf '%s\n' "$swapped_out" | grep -q '^test result: FAILED'; then
+    echo "bite: OK (assertion) --- tests fail against $ref:$path (the fix bites)"
+elif printf '%s\n' "$swapped_out" | grep -q '^test result:'; then
+    # Some target ran to completion with no failure, yet cargo still
+    # exited non-zero.
+    #
+    # NOT reachable the obvious way, which was checked rather than
+    # assumed: `--test A --test B` where B's swapped file will not
+    # build does NOT land here. Cargo builds every named target before
+    # running any, so B's build failure stops A from running too and
+    # there is no summary at all --- that is the COMPILE arm below.
+    # What does reach here is a run that prints summaries and *then*
+    # fails: doc-tests failing to compile after the lib tests pass, or
+    # a harness dying after its summary line. This arm is therefore
+    # defensive, and its trigger was not manufactured for validation.
+    #
+    # It exits NON-ZERO on purpose. The likeliest reading is not
+    # success but VACUITY: the named tests ran clean against the old
+    # tree (exactly the vacuous outcome) while an unrelated failure
+    # supplied the exit status. Reporting "OK" and exiting 0 here would
+    # let a scripted caller --- or a framing doc quoting "bite exited
+    # 0" --- record a certified bite for a run that certified nothing.
+    echo "bite: INCONCLUSIVE (MIXED) --- some tests ran, none failed, yet the run failed." >&2
+    echo "bite: the named tests may have PASSED against $ref:$path with an unrelated" >&2
+    echo "bite: build error supplying the exit status. Narrow to one target and re-run." >&2
+    exit 4
+else
+    echo "bite: OK (COMPILE) --- $ref:$path produced no test summary" >&2
+    echo "bite: (build failure, or a harness that died before printing one)." >&2
+    echo "bite: weaker evidence than an assertion failure --- the tests may never have run." >&2
+fi
