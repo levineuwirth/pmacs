@@ -364,11 +364,23 @@ local function render_text(handle)
   return table.concat(lines, "\n")
 end
 
--- Dired's own writes are the only ones that reach the buffer: the
--- read-only intercept rejects everything else, and this bypasses it.
+-- Dired's own writes are the only ones that reach the buffer, and this
+-- is the one authorized door (Q#GB1,
+-- docs/generated-buffer-immutability-framing.md).
+--
+-- `set_generated_contents` lifts the rope's `read_only`, replaces the
+-- whole buffer skipping intercepts, discards the resulting history and
+-- re-asserts the lock --- all inside one registry borrow, so the buffer
+-- is never observably unlocked. The erroring intercept this replaces a
+-- bypass write beside is KEPT: it guards the edit path with a named
+-- error, but `Buffer::undo` reaches the rope through `ensure_writable`
+-- and never consults the intercept chain, so a listing protected by an
+-- intercept alone was emptied by a bare `C-/` --- dired rebinds no undo
+-- chord --- and by `M-x buffer.undo`, which no rebinding can remove.
+-- Only rope-level `read_only` closes that, and only the pairing keeps
+-- this repaint working after it.
 local function paint(handle)
-  local text = render_text(handle)
-  handle.buf:replace(0, handle.buf:len(), text, { bypass_intercept = true })
+  pmacs.buffer.set_generated_contents(handle.buf, render_text(handle))
 end
 
 -- ---------------------------------------------------------------------------

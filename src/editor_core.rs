@@ -1833,17 +1833,38 @@ impl EditorCore {
     /// and translate the live origin — otherwise accepted-match
     /// highlights and the session origin survive at pre-edit offsets
     /// for every Lua mutator edit and applied CRDT op.
+    ///
+    /// Q#GB6: each window coordinate is also clamped against **its own**
+    /// post-edit bound, which [`Self::rebuild_views_for`] already does
+    /// (`:1853-1857`) and this path did not. A generated refresh that
+    /// shrinks its buffer otherwise leaves `cursor` past the end of the
+    /// rope indefinitely — neither paint nor a motion command recovers
+    /// it, because motion is computed from the stale value. The two
+    /// coordinates fail on different axes and are therefore clamped
+    /// separately and **unconditionally**: `cursor` is a byte position
+    /// bounded by [`Buffer::len`], while `view_top` is a line index
+    /// bounded by [`TextView::line_count`]. A replace can grow in bytes
+    /// while collapsing many lines into one, so "the buffer shrank" is
+    /// not a usable trigger for the second.
     pub fn notify_buffer_edit(&mut self, buffer_id: BufferId, edit: &Edit) {
         self.search_invalidate_for_edit(buffer_id, edit);
         let reg = self.registry.borrow();
         let Ok(buffer) = reg.get(buffer_id) else {
             return;
         };
+        let len = buffer.len();
         for win in self.windows.values_mut() {
             if win.buffer_id == buffer_id {
                 let _ = win.text_view.on_edit(buffer, edit);
                 for overlay in &mut win.overlays {
                     let _ = overlay.on_edit(buffer, edit);
+                }
+                if win.cursor > len {
+                    win.cursor = len;
+                }
+                let max_top = win.text_view.line_count().saturating_sub(1);
+                if win.view_top > max_top {
+                    win.view_top = max_top;
                 }
             }
         }

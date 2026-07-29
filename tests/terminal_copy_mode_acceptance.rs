@@ -992,3 +992,119 @@ fn copy_mode_refuses_a_non_terminal_buffer() {
         "the refusal must say why: {err}"
     );
 }
+
+/// Generated-buffer immutability Stage 1, criterion 8 [`main`] — Q#GB6's
+/// cursor clamp.
+///
+/// `EditorCore::notify_buffer_edit` — the fan-out every generated write
+/// goes through — updated each window's `TextView` and overlays but
+/// clamped neither window coordinate; only `rebuild_views_for` did, and
+/// its doc comment said so. So a shrinking generated refresh left
+/// `win.cursor` past the end of the rope **indefinitely**: paint does not
+/// crash, and a motion command does not recover it, because motion is
+/// computed from the stale value.
+///
+/// *Bite:* measured on the pre-image — cursor 29, len 2, and `C-p` leaves
+/// it at 29. This ships today for terminal copy mode: refresh a snapshot
+/// to a shorter one with the point low in the buffer and this is the
+/// state. Falsify by deleting the `win.cursor > len` clamp.
+#[test]
+fn acc16f_a_shrinking_generated_write_clamps_the_window_cursor() {
+    let state = EditorState::new();
+    exec(
+        &state,
+        r"
+        GEN = pmacs.buffer.create('*generated-probe*')
+        pmacs.buffer.set_generated_contents(GEN, 'alpha\nbeta\ngamma\ndelta\nepsilon\n')
+        pmacs.window.switch_buffer(GEN)
+        pmacs.editor.goto_byte(30)
+        ",
+    );
+    let (cursor, len): (i64, i64) = eval(
+        &state,
+        "return pmacs.editor.cursor(), pmacs.window.buffer():len()",
+    );
+    assert_eq!(
+        (cursor, len),
+        (30, 31),
+        "precondition: point low in a 31-byte buffer"
+    );
+
+    exec(&state, r"pmacs.buffer.set_generated_contents(GEN, 'x\n')");
+
+    let (cursor, len): (i64, i64) = eval(
+        &state,
+        "return pmacs.editor.cursor(), pmacs.window.buffer():len()",
+    );
+    assert_eq!(len, 2, "precondition: the buffer shrank");
+    assert!(
+        cursor <= len,
+        "the cursor must be clamped into the new rope; got {cursor} for len {len}"
+    );
+
+    // And motion works from there: `C-p` reaches line 0, which it cannot
+    // do from a dangling offset.
+    exec(&state, "pmacs.editor.move_up()");
+    let cursor: i64 = eval(&state, "return pmacs.editor.cursor()");
+    assert_eq!(cursor, 0, "C-p must move to the first line");
+}
+
+/// Generated-buffer immutability Stage 1, criterion 8b [`main`] — Q#GB6's
+/// `view_top` clamp, on a buffer that GREW.
+///
+/// The two coordinates fail on different axes: `cursor` is a byte
+/// position bounded by `Buffer::len`, while `view_top` is a **line
+/// index** bounded by `TextView::line_count`. A replace can grow in bytes
+/// while collapsing many lines into one, so a clamp gated on "the buffer
+/// shrank" passes criterion 8 and fails here — which is why the clamp
+/// runs unconditionally, each coordinate against its own bound, exactly
+/// as `rebuild_views_for` already does.
+///
+/// *Bite:* falsify by gating the clamp on a byte-length comparison, or by
+/// deleting the `view_top` half. Unlike criterion 8 this case is argued
+/// from the types rather than measured on `main`; the assertion below is
+/// the measurement.
+#[test]
+fn acc16g_a_line_collapsing_generated_write_clamps_view_top() {
+    let state = EditorState::new();
+    exec(
+        &state,
+        r"
+        GEN = pmacs.buffer.create('*viewtop-probe*')
+        pmacs.buffer.set_generated_contents(GEN, 'a\nb\nc\nd\ne\nf\n')
+        pmacs.window.switch_buffer(GEN)
+        pmacs.editor.set_view_top(5)
+        ",
+    );
+    let (top, len): (i64, i64) = eval(
+        &state,
+        "return pmacs.editor.view_top(), pmacs.window.buffer():len()",
+    );
+    assert_eq!(
+        (top, len),
+        (5, 12),
+        "precondition: scrolled to line 5 of a 12-byte, 7-line buffer"
+    );
+
+    // 20 bytes on ONE line: longer than what it replaces, so any
+    // "the buffer shrank" trigger is false here.
+    exec(
+        &state,
+        r"pmacs.buffer.set_generated_contents(GEN, '0123456789abcdefghij')",
+    );
+
+    let len: i64 = eval(&state, "return pmacs.window.buffer():len()");
+    assert_eq!(len, 20, "precondition: the buffer GREW in bytes");
+
+    let (top, lines) = {
+        let core = state.core.borrow();
+        let active = core.active_window_id();
+        let win = core.windows.get(&active).expect("active window");
+        (win.view_top, win.text_view.line_count())
+    };
+    assert!(
+        top < lines,
+        "view_top must be clamped into the new line count; got {top} of {lines}"
+    );
+    assert_eq!(top, 0, "the collapsed buffer has exactly one line");
+}

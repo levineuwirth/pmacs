@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+use pmacs::buffer::BufferId;
 use pmacs::cell::{CellGrid, CellSize, Glyph};
 use pmacs::editor::EditorState;
 use pmacs::editor_core::normalize_buffer_path;
@@ -68,6 +69,39 @@ fn type_str(s: &mut EditorState, text: &str) {
     for ch in text.chars() {
         type_char(s, ch);
     }
+}
+
+fn alt(s: &mut EditorState, c: char) {
+    s.dispatch_key(FrontendId::LOCAL, key(KeyCode::Char(c), KeyModifiers::ALT));
+}
+
+/// `M-x <name> RET` through the real minibuffer. `buffer.undo` is
+/// reachable this way on every buffer in the tree and no buffer-local
+/// rebinding can remove it (generated-buffer immutability, §0).
+fn m_x(s: &mut EditorState, name: &str) {
+    alt(s, 'x');
+    type_str(s, name);
+    press(s, KeyCode::Enter);
+}
+
+fn active_buffer_id(s: &EditorState) -> BufferId {
+    s.core.borrow().active_buffer_id()
+}
+
+/// Q#GB14: the rope lock has no Lua surface, so every "is it locked"
+/// assertion goes through Rust.
+fn is_read_only(s: &EditorState, id: BufferId) -> bool {
+    let core = s.core.borrow();
+    let reg = core.registry.borrow();
+    reg.get(id).expect("buffer in registry").is_read_only()
+}
+
+fn set_read_only(s: &EditorState, id: BufferId, value: bool) {
+    let core = s.core.borrow();
+    let mut reg = core.registry.borrow_mut();
+    reg.get_mut(id)
+        .expect("buffer in registry")
+        .set_read_only(value);
 }
 
 fn exec(s: &EditorState, src: &str) {
@@ -958,13 +992,21 @@ fn dired_does_not_adopt_a_foreign_buffer_with_its_name() {
 // 5 --- read-only discipline
 // ---------------------------------------------------------------------------
 
-/// An ordinary self-insert is rejected by the intercept and leaves the
-/// text byte-identical, while dired's own repaint succeeds through
-/// `bypass_intercept`. `set_round_trip_input` is pinned through the
+/// An ordinary self-insert is rejected and leaves the text
+/// byte-identical, while dired's own repaint still succeeds through the
+/// owner-authorized write. `set_round_trip_input` is pinned through the
 /// **production** seam a semantic frontend reads (`dispatch_idle_for`,
 /// published as `DispatchIdle`) rather than by a direct-call assertion:
 /// without it, a GPU session would optimistically apply `g` as an
 /// insert instead of letting it reach the revert binding.
+///
+/// **This test is NOT coverage of the generated-buffer adoption**, and
+/// the `contains("read-only")` assertion below is the reason to say so:
+/// `BufferError::ReadOnly` renders as ``buffer `{name}` (id {id:?}) is
+/// read-only`` and the intercept's own message ends in `is read-only`
+/// too, so that substring passes on both sides of the change. What the
+/// adoption adds here is the explicit `is_read_only` assertion and
+/// criterion 6(c); the undo criteria are separate tests below.
 #[test]
 fn dired_buffer_is_read_only_and_round_trips_input() {
     let td = fixture_dir();
@@ -986,6 +1028,33 @@ fn dired_buffer_is_read_only_and_round_trips_input() {
     assert!(
         !s.dispatch_idle_for(FrontendId::LOCAL),
         "a round-trip buffer must turn optimistic apply OFF"
+    );
+
+    // Generated-buffer immutability Stage 1 criterion 6(c), the positive
+    // control: `dispatch_idle_for` has SIX ways to return false, so the
+    // assertion above is satisfied by any of them. Switching the same
+    // window to a plain buffer must flip the gate back ON --- a stuck
+    // minibuffer, a pending chord, an open menu or a live search would
+    // keep it off across the switch, so this failing is the signal that
+    // the assertion above passed for the wrong reason.
+    let listing = active_buffer_id(&s);
+    exec(
+        &s,
+        "DIRED_LISTING = pmacs.window.buffer()\n\
+         pmacs.window.switch_buffer(pmacs.buffer.create('*plain*'))",
+    );
+    assert!(
+        s.dispatch_idle_for(FrontendId::LOCAL),
+        "and back ON for a plain buffer"
+    );
+    exec(&s, "pmacs.window.switch_buffer(DIRED_LISTING)");
+
+    // The listing's rope is genuinely locked, not merely intercepted
+    // (generated-buffer immutability Stage 1). Asserted Rust-side
+    // because `describe.buffer` carries no `read_only` field.
+    assert!(
+        is_read_only(&s, listing),
+        "the first paint must leave the listing's rope read-only"
     );
 
     // `z` is bound nowhere in dired mode, so it reaches self-insert.
@@ -1652,5 +1721,276 @@ fn dired_renders_10k_entries_within_200ms() {
     assert!(
         elapsed < Duration::from_millis(200),
         "10K entries must render within 200ms; took {elapsed:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Generated-buffer immutability, Stage 1
+// (docs/generated-buffer-immutability-framing.md §6, Stage 1)
+// ---------------------------------------------------------------------------
+
+/// Criterion 3 [`main`] --- neither `C-/` nor `M-x buffer.undo` can empty
+/// a dired listing.
+///
+/// Both halves in one test because they are one claim about one buffer,
+/// and both are needed: dired rebinds **no** undo chord, so `C-/` is the
+/// whole distance from a keystroke to an empty listing, while
+/// `M-x buffer.undo` is the half that no rebinding could ever close.
+/// The assertion is on the listing's own content --- the header line and
+/// a real entry --- not on `!is_empty()`.
+///
+/// *Bite:* measured on the pre-image --- one undo takes the listing to
+/// `""`. `scripts/bite githubsucks/main builtin/runtime/dired.lua`
+/// falsifies it: `paint`'s `bypass_intercept` replace pushed a poppable
+/// undo entry over a writable rope, and `Buffer::undo` reaches that rope
+/// through `ensure_writable` without ever consulting the intercept chain.
+#[test]
+fn dired_undo_cannot_empty_the_listing() {
+    let td = fixture_dir();
+    let mut s = editor();
+    open_ok(&mut s, td.path(), "nil");
+    let before = active_text(&s);
+    let name = active_name(&s);
+    assert!(
+        before.contains("a.txt") && before.contains(&canon(td.path())),
+        "precondition: a real listing, got {before:?}"
+    );
+
+    ctrl(&mut s, '/');
+    assert_eq!(
+        active_text(&s),
+        before,
+        "C-/ must leave the listing's content intact"
+    );
+
+    m_x(&mut s, "buffer.undo");
+    assert_eq!(
+        active_name(&s),
+        name,
+        "the minibuffer round trip lands back in the listing"
+    );
+    assert_eq!(
+        active_text(&s),
+        before,
+        "M-x buffer.undo must leave the listing's content intact"
+    );
+}
+
+/// Criterion 4 [fix-shape] --- the owner's own repaint still works after
+/// the lock, and the listing is still locked afterwards.
+///
+/// *Bite:* a bare `set_read_only(true)` would pass criterion 3 and fail
+/// here, because it refuses the refresh the buffer exists for; the
+/// falsifying one-line mutation on the shipped primitive is deleting
+/// `self.read_only = false` from `Buffer::set_generated_contents`
+/// (`src/buffer.rs:546`), after which `g` raises. Asserted on the content
+/// the repaint produced, never on the absence of an error.
+#[test]
+fn dired_revert_still_repaints_after_the_lock() {
+    let td = fixture_dir();
+    let mut s = editor();
+    open_ok(&mut s, td.path(), "nil");
+    let listing = active_buffer_id(&s);
+    assert!(
+        is_read_only(&s, listing),
+        "precondition: the first paint locked the rope"
+    );
+    assert!(!active_text(&s).contains("c.txt"));
+
+    std::fs::write(td.path().join("c.txt"), b"new\n").expect("write c");
+    type_char(&mut s, 'g');
+    pump(&mut s);
+
+    assert!(
+        active_text(&s).contains("c.txt"),
+        "the owner's repaint must land through the lock: {:?}",
+        active_text(&s)
+    );
+    assert!(
+        is_read_only(&s, listing),
+        "and leave the listing locked afterwards"
+    );
+}
+
+/// Criterion 5 [fix-shape] --- the named intercept survives adoption and
+/// is still what refuses an edit whenever the rope does not.
+///
+/// **Restated against the framing**, which asked for an ordinary edit
+/// "refused by the INTERCEPT, not by the rope" and asserted on the
+/// message text. That state is unreachable once the arc's lock is
+/// installed: `Buffer::apply_edit` (`src/buffer.rs:773`) and
+/// `Buffer::begin_edit` (`:725`) call `ensure_writable()` as their FIRST
+/// statement, while the intercept chain runs later inside
+/// `apply_edit_inner` (`:1072`), so the rope always answers first. The
+/// criterion is therefore driven with the lock lifted --- the state the
+/// intercept genuinely still covers, including the window between
+/// `pmacs.buffer.create` and the first paint.
+///
+/// *Bite:* unchanged --- an adopter that drops `add_intercept` and relies
+/// on the rope alone passes criteria 3 and 4 and fails here.
+#[test]
+fn dired_keeps_the_named_intercept_beside_the_rope_lock() {
+    let td = fixture_dir();
+    let mut s = editor();
+    open_ok(&mut s, td.path(), "nil");
+    let listing = active_buffer_id(&s);
+    let before = active_text(&s);
+
+    // With the lock on, the ROPE answers first, and its message is the
+    // one with the buffer id in it. Pinned so the restatement above
+    // cannot rot silently.
+    type_char(&mut s, 'z');
+    assert!(
+        status(&s).contains("(id BufferId("),
+        "with the lock on the rope refuses first; got {:?}",
+        status(&s)
+    );
+
+    set_read_only(&s, listing, false);
+    type_char(&mut s, 'z');
+    set_read_only(&s, listing, true);
+
+    assert_eq!(
+        active_text(&s),
+        before,
+        "the intercept must refuse the edit even with the rope writable"
+    );
+    let st = status(&s);
+    assert!(
+        st.contains("dired.lua") && st.contains("is read-only"),
+        "and refuse it by NAME, not with the rope's message; got {st:?}"
+    );
+}
+
+/// Criterion 7 [mutation] --- a repaint reaches the **window**, not just
+/// the rope, pinned by painting a shrinking listing.
+///
+/// A rope write is only half of an edit: the window holds a `TextView`
+/// line index that only `on_edit` maintains, so a write that reaches the
+/// rope without the fan-out leaves the two disagreeing, and the next
+/// paint indexes the new rope with the old offsets. `dired.revert` is
+/// the right driver because it paints and does **not** follow the paint
+/// with a `window.switch_buffer` --- which rebuilds the `TextView` from
+/// scratch and would mask the mutation. (`listview.refresh` and
+/// `listview.open` both do switch, so the listview half of this
+/// criterion cannot bite; the primitive's own pin is
+/// `terminal_copy_mode_acceptance::acc16d`.)
+///
+/// *Bite:* delete the `notify_buffer_edit_to_windows` call in the
+/// `set_generated_contents` binding (`src/lua_bindings/mod.rs:3092`) and
+/// the painted frame keeps rows the listing no longer has.
+#[test]
+fn dired_a_shrinking_repaint_reaches_the_window() {
+    let td = tempfile::tempdir().expect("tempdir");
+    for name in ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"] {
+        std::fs::write(td.path().join(name), b"x").expect("write");
+    }
+    let mut s = editor();
+    open_ok(&mut s, td.path(), "nil");
+    let rows = painted_rows(&s);
+    assert!(
+        rows[5].contains("e.txt"),
+        "precondition: five entries paint on rows 1-5, got {:?}",
+        &rows[..7]
+    );
+
+    for name in ["b.txt", "c.txt", "d.txt", "e.txt"] {
+        std::fs::remove_file(td.path().join(name)).expect("remove");
+    }
+    type_char(&mut s, 'g');
+    pump(&mut s);
+
+    let rows = painted_rows(&s);
+    assert!(
+        rows[1].contains("a.txt"),
+        "the one surviving entry paints: {:?}",
+        &rows[..7]
+    );
+    assert_eq!(
+        rows[2],
+        "",
+        "and nothing of the four rows it replaced: {:?}",
+        &rows[..7]
+    );
+}
+
+/// Criterion 13a [`main`] --- a locked generated buffer is not foldable
+/// (Q#GB16, option (a)).
+///
+/// This is a regression pin **for the intended change**: sweep C found
+/// that `document_bytes` (`src/lua_bindings/fold.rs`) is spelled
+/// `if buffer.is_read_only() { return Ok(None) }`, so locking dired
+/// listings silently disables fold *creation* on them. The decision is to
+/// accept that --- a generated buffer's contents are replaced wholesale
+/// on every refresh, which invalidates any stored range --- and to state
+/// it rather than let it ship silently.
+///
+/// *Bite:* this **fails on `main`**, where the same call returns `true`.
+/// `scripts/bite githubsucks/main builtin/runtime/dired.lua` falsifies
+/// it.
+#[test]
+fn dired_a_locked_listing_is_not_foldable() {
+    let td = fixture_dir();
+    let mut s = editor();
+    open_ok(&mut s, td.path(), "nil");
+    let text = active_text(&s);
+    let first_nl = text.find('\n').expect("header line");
+    let second_nl = text[first_nl + 1..]
+        .find('\n')
+        .map(|i| first_nl + 1 + i)
+        .expect("at least two entry lines");
+
+    let folded: bool = eval(
+        &s,
+        &format!(
+            "return pmacs.fold.fold(pmacs.window.buffer(), \
+             {{ start = {first_nl}, ['end'] = {second_nl} }})"
+        ),
+    );
+
+    assert!(!folded, "a locked generated buffer is not foldable");
+    let n: i64 = eval(&s, "return #pmacs.fold.folds(pmacs.window.buffer())");
+    assert_eq!(n, 0, "and no fold is stored");
+}
+
+/// Criterion 13b [mutation] --- ...and the refusal says why.
+///
+/// Separate from 13a because the two halves have different pre-images:
+/// on `main` the call *succeeds* and sets no status at all, so this
+/// cannot share 13a's `main` pre-image. The shape that ships if 13a is
+/// written alone is correct behaviour with a false explanation --- the
+/// guard's author meant "terminal", and "not a document buffer" is not
+/// true of a dired listing.
+///
+/// *Bite:* revert `src/lua_bindings/fold.rs`'s status string to
+/// `"fold rejected: not a document buffer"`.
+#[test]
+fn dired_the_fold_refusal_names_the_read_only_lock() {
+    let td = fixture_dir();
+    let mut s = editor();
+    open_ok(&mut s, td.path(), "nil");
+    let text = active_text(&s);
+    let first_nl = text.find('\n').expect("header line");
+    let second_nl = text[first_nl + 1..]
+        .find('\n')
+        .map(|i| first_nl + 1 + i)
+        .expect("at least two entry lines");
+
+    let _: bool = eval(
+        &s,
+        &format!(
+            "return pmacs.fold.fold(pmacs.window.buffer(), \
+             {{ start = {first_nl}, ['end'] = {second_nl} }})"
+        ),
+    );
+
+    let st = status(&s);
+    assert!(
+        st.contains("read-only"),
+        "the refusal must name the lock; got {st:?}"
+    );
+    assert!(
+        !st.contains("not a document buffer"),
+        "and not the sentence that is no longer true; got {st:?}"
     );
 }
