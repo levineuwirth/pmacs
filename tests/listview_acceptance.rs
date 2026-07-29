@@ -123,6 +123,51 @@ fn set_read_only(s: &EditorState, id: BufferId, value: bool) {
         .set_read_only(value);
 }
 
+/// Render the active window's text view into a cell grid. Criterion 7 is
+/// pinned by PAINTING, because that is where a rope/window disagreement
+/// bites: the rope is right and the screen is not.
+fn paint_active_window(s: &EditorState, rows: u32, cols: u32) -> Vec<pmacs::cell::Cell> {
+    use pmacs::cell::{Cell, CellGrid, CellSize};
+    use pmacs::view::{View, Viewport};
+    use pmacs::window::Rect;
+
+    let mut core = s.core.borrow_mut();
+    let active = core.active_window_id();
+    let registry = core.registry.clone();
+    let win = core.windows.get_mut(&active).expect("active window");
+    let rect = Rect::new(0, 0, rows, cols);
+    let mut backing = vec![Cell::default(); (rows * cols) as usize];
+    let reg = registry.borrow();
+    let buf = reg.get(win.buffer_id).expect("buffer in registry");
+    let viewport = Viewport {
+        buffer_start: 0,
+        buffer_end: buf.len(),
+        cell_origin: rect.origin,
+        cell_size: CellSize::new(rows, cols),
+        gutter_w: 0,
+        folds: None,
+    };
+    let mut grid = CellGrid {
+        cells: &mut backing,
+        stride: cols,
+        size: CellSize::new(rows, cols),
+    };
+    win.text_view.render(buf, viewport, &mut grid);
+    backing
+}
+
+fn grid_row(cells: &[pmacs::cell::Cell], row: u32, cols: u32) -> String {
+    use pmacs::cell::Glyph;
+    (0..cols)
+        .map(|c| match cells[(row * cols + c) as usize].glyph {
+            Glyph::Char(ch) => ch,
+            _ => ' ',
+        })
+        .collect::<String>()
+        .trim_end()
+        .to_owned()
+}
+
 /// Open a three-row test panel whose visits record into `_G.VISITED`.
 fn open_test_panel(s: &mut EditorState) {
     s.lua_host
@@ -332,38 +377,41 @@ fn s1_4_the_owners_refresh_still_works_after_the_lock() {
     );
 }
 
-/// Criterion 5 [fix-shape] --- the named intercept survives adoption and
-/// is still the thing that refuses an edit whenever the rope does not.
+/// **Stage 1 criterion 5 [fix-shape]**, as the framing states it: *an
+/// ordinary edit is refused by the INTERCEPT, not by the rope --- assert
+/// on the message text, which distinguishes them.* Bite: *an adopter
+/// that deletes the intercept and relies on the rope passes 1-4 and
+/// fails this.*
 ///
-/// **Restated against the framing, which specified this criterion in a
-/// form the tree cannot reach.** §6 Stage 1 criterion 5 asks for an
-/// ordinary edit refused "by the INTERCEPT, not by the rope", asserted on
-/// the message text. Once the arc's own lock is installed that state is
-/// unreachable: `Buffer::apply_edit` (`src/buffer.rs:773`) and
-/// `Buffer::begin_edit` (`:725`) both call `ensure_writable()` as their
-/// FIRST statement, while the intercept chain runs later, inside
-/// `apply_edit_inner` (`:1072`). Measured here: a self-insert on an
-/// adopted panel now reports
+/// **PROVISIONAL --- this test does not currently satisfy that
+/// criterion, and does not claim to.** Implementing Stage 1 found the
+/// criterion's state unreachable, with the evidence below; a revision
+/// request is with PR #188, which owns this acceptance contract. Until
+/// that revision lands and is re-approved, this test stands in for
+/// criterion 5 by driving the same distinction at the only point where
+/// the tree can express it, and its wording follows #188 rather than
+/// replacing it. **The framing's own bite is preserved unchanged**:
+/// deleting `add_intercept` fails this test.
+///
+/// The evidence handed to #188: `Buffer::apply_edit`
+/// (`src/buffer.rs:773`) and `Buffer::begin_edit` (`:725`) call
+/// `ensure_writable()` as their FIRST statement, while the intercept
+/// chain runs later inside `apply_edit_inner` (`:1072`), so once the
+/// arc's lock is installed the rope always answers first. Measured on
+/// this branch, a self-insert on an adopted panel reports
 /// ``insert failed: buffer `*test-panel*` (id BufferId(n)) is read-only``
-/// --- the rope's message --- and can never report the intercept's.
-///
-/// So the criterion is driven at the one point where the two are
-/// distinguishable, which is also the state it is actually protecting:
-/// the rope lock lifted. That covers the real window between
-/// `pmacs.buffer.create` and the first render, and any future Rust-side
-/// lift.
-///
-/// *Bite:* unchanged from the framing's --- an adopter that deletes the
-/// `add_intercept` call and relies on the rope alone passes criteria 1-4
-/// and fails here, because with the lock lifted the `z` lands.
+/// and can never report the intercept's message. The stand-in lifts the
+/// lock Rust-side first --- the state the intercept still covers,
+/// including the window between `pmacs.buffer.create` and the first
+/// render.
 #[test]
-fn s1_5_an_ordinary_edit_is_refused_by_the_named_intercept_not_only_the_rope() {
+fn s1_5_provisional_an_ordinary_edit_is_refused_by_the_named_intercept() {
     let mut s = EditorState::new();
     open_test_panel(&mut s);
     let panel = id_of(&s, "*test-panel*");
 
-    // With the lock ON, the rope answers first and the message is its
-    // own. Pinned so the restatement above cannot rot silently.
+    // The measurement reported to #188, pinned so it cannot rot while
+    // the revision is outstanding: with the lock on, the ROPE answers.
     press(&mut s, KeyCode::Char('z'));
     assert!(
         status(&s).contains("(id BufferId("),
@@ -437,6 +485,55 @@ fn s1_6_round_trip_input_survives_the_adoption() {
         s.dispatch_idle_for(FrontendId::LOCAL),
         "and back ON for a plain buffer --- otherwise (b) passed for one \
          of the other five reasons"
+    );
+}
+
+/// **Stage 1 criterion 7 [mutation]**, the listview half: *a refresh
+/// reaches the window, not just the rope --- pinned by painting a
+/// shrinking render (many rows -> one) and asserting row 1 is empty, for
+/// each adopter.* Bite: *delete the `notify_buffer_edit_to_windows` call
+/// in the `set_generated_contents` binding
+/// (`src/lua_bindings/mod.rs:3092`).*
+///
+/// The criterion says **for each adopter**, so both halves exist; the
+/// dired half is `dired_acceptance::dired_a_shrinking_repaint_reaches_the_window`.
+///
+/// **This half asserts the content produced but does NOT carry the
+/// framing's mutation bite, and says so rather than being quietly
+/// dropped.** `listview.refresh` and `listview.open` both follow
+/// `render` with `pmacs.window.switch_buffer`, which rebuilds the
+/// window's `TextView` from scratch (`src/editor_core.rs:4854-4868`) and
+/// so repaints correctly even with the fan-out deleted --- on `main`
+/// with its `bypass_intercept` writes just as much as here. Verified by
+/// applying the mutation: this test stays green, while the dired half
+/// fails with `assertion failed: end <= self.len()`. That observation is
+/// filed with PR #188, which owns the criterion; it is recorded here,
+/// not resolved here.
+#[test]
+fn s1_7_a_shrinking_refresh_reaches_the_window() {
+    let mut s = EditorState::new();
+    open_test_panel(&mut s);
+    let painted = paint_active_window(&s, 6, 24);
+    assert_eq!(
+        grid_row(&painted, 1, 24),
+        "alpha",
+        "precondition: three data rows paint"
+    );
+    assert_eq!(grid_row(&painted, 3, 24), "gamma");
+
+    // `g` re-renders from three rows to one.
+    press(&mut s, KeyCode::Char('g'));
+
+    let painted = paint_active_window(&s, 6, 24);
+    assert_eq!(
+        grid_row(&painted, 1, 24),
+        "delta",
+        "the refreshed row must paint"
+    );
+    assert_eq!(
+        grid_row(&painted, 2, 24),
+        "",
+        "and nothing of the rows it replaced"
     );
 }
 
@@ -524,11 +621,22 @@ fn s1_10_the_disambiguation_limit_raises_rather_than_adopting() {
     assert_eq!(mine, "mine", "and touch nothing");
 }
 
-/// Criterion 11 [`main`] --- a **disambiguated** panel still answers
-/// `RET`, `g` and `q` (Q#GB18).
+/// **Stage 1 criterion 11** --- a **disambiguated** panel still answers
+/// `RET`, `g` and `q` (Q#GB18). The framing labels it `[main]` and names
+/// its bite as *Q#GB13 landed without Q#GB18*.
 ///
-/// This is the criterion that fails against Q#GB13 landed without
-/// Q#GB18: disambiguation alone leaves the old lookup reading
+/// **Recorded here as a MUTATION bite, because that is what it is.** On
+/// `main` this test fails at its disambiguation *premise* --- `main`
+/// adopts the foreign buffer, so the panel is never called
+/// `*test-panel*<2>` and the `RET`/`g`/`q` assertions are never reached.
+/// A revert therefore proves nothing about what the criterion asserts.
+/// The bite the framing actually names is a mutation of this branch:
+/// keep the disambiguation, restore a name-keyed `panel_for_buffer`.
+/// Verified --- under that mutation the test fails at the `g` assertion.
+/// The `[main]` label belongs to #188 and is reported to it; what the
+/// tree claims is corrected here either way.
+///
+/// Disambiguation alone leaves the old lookup reading
 /// `panels["*test-panel*<2>"]` for a record stored under
 /// `"*test-panel*"`, so all three commands return early. Every one of
 /// them fails **silently**, so the assertion is on the content each
@@ -568,9 +676,17 @@ fn s1_11_a_disambiguated_panel_still_answers_ret_g_and_q() {
     );
 }
 
-/// Criterion 12 [`main`] --- the `q`-target capture is not inverted
+/// **Stage 1 criterion 12** --- the `q`-target capture is not inverted
 /// (Q#GB18), which needs its own criterion because it fails **open**
-/// rather than closed.
+/// rather than closed. The framing labels it `[main]`.
+///
+/// **Recorded here as a MUTATION bite**, for the same reason as
+/// criterion 11: on `main` this test fails at its disambiguation
+/// premise and never reaches the `q`-target assertion, so a revert is
+/// not evidence for what it asserts. Under the mutation the framing
+/// actually names --- a name-keyed `panel_for_buffer` beside the
+/// disambiguation --- it fails at the assertion it exists for,
+/// `q must never return into another panel`. Verified.
 ///
 /// `listview.open`'s guard reads "capture the current buffer as the `q`
 /// target, but never another panel (chained panels would trap `q` in a

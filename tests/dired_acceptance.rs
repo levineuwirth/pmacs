@@ -1812,33 +1812,40 @@ fn dired_revert_still_repaints_after_the_lock() {
     );
 }
 
-/// Criterion 5 [fix-shape] --- the named intercept survives adoption and
-/// is still what refuses an edit whenever the rope does not.
+/// **Stage 1 criterion 5 [fix-shape]**, as the framing states it: *an
+/// ordinary edit is refused by the INTERCEPT, not by the rope --- assert
+/// on the message text, which distinguishes them.* Bite: *an adopter
+/// that deletes the intercept and relies on the rope passes 1-4 and
+/// fails this.*
 ///
-/// **Restated against the framing**, which asked for an ordinary edit
-/// "refused by the INTERCEPT, not by the rope" and asserted on the
-/// message text. That state is unreachable once the arc's lock is
-/// installed: `Buffer::apply_edit` (`src/buffer.rs:773`) and
-/// `Buffer::begin_edit` (`:725`) call `ensure_writable()` as their FIRST
-/// statement, while the intercept chain runs later inside
-/// `apply_edit_inner` (`:1072`), so the rope always answers first. The
-/// criterion is therefore driven with the lock lifted --- the state the
-/// intercept genuinely still covers, including the window between
-/// `pmacs.buffer.create` and the first paint.
+/// **PROVISIONAL --- this test does not currently satisfy that
+/// criterion, and does not claim to.** The criterion's state proved
+/// unreachable during Stage 1; a revision request carrying the evidence
+/// is with PR #188, which owns this acceptance contract. Until that
+/// revision lands and is re-approved this test stands in for criterion 5
+/// at the only point where the tree can express the distinction, and its
+/// wording follows #188 rather than replacing it. **The framing's own
+/// bite is preserved unchanged**: deleting `add_intercept` fails this
+/// test.
 ///
-/// *Bite:* unchanged --- an adopter that drops `add_intercept` and relies
-/// on the rope alone passes criteria 3 and 4 and fails here.
+/// The evidence handed to #188: `Buffer::apply_edit`
+/// (`src/buffer.rs:773`) and `Buffer::begin_edit` (`:725`) call
+/// `ensure_writable()` as their FIRST statement, while the intercept
+/// chain runs later inside `apply_edit_inner` (`:1072`), so once the
+/// arc's lock is installed the rope always answers first. The stand-in
+/// lifts the lock Rust-side, which is the state the intercept still
+/// covers, including the window between `pmacs.buffer.create` and the
+/// first paint.
 #[test]
-fn dired_keeps_the_named_intercept_beside_the_rope_lock() {
+fn dired_provisional_keeps_the_named_intercept_beside_the_rope_lock() {
     let td = fixture_dir();
     let mut s = editor();
     open_ok(&mut s, td.path(), "nil");
     let listing = active_buffer_id(&s);
     let before = active_text(&s);
 
-    // With the lock on, the ROPE answers first, and its message is the
-    // one with the buffer id in it. Pinned so the restatement above
-    // cannot rot silently.
+    // The measurement reported to #188, pinned so it cannot rot while
+    // the revision is outstanding: with the lock on, the ROPE answers.
     type_char(&mut s, 'z');
     assert!(
         status(&s).contains("(id BufferId("),
@@ -1862,23 +1869,25 @@ fn dired_keeps_the_named_intercept_beside_the_rope_lock() {
     );
 }
 
-/// Criterion 7 [mutation] --- a repaint reaches the **window**, not just
-/// the rope, pinned by painting a shrinking listing.
+/// **Stage 1 criterion 7 [mutation]**, the dired half: *a refresh
+/// reaches the window, not just the rope --- pinned by painting a
+/// shrinking render (many rows -> one) and asserting row 1 is empty, for
+/// each adopter.* Bite: *delete the `notify_buffer_edit_to_windows` call
+/// in the `set_generated_contents` binding
+/// (`src/lua_bindings/mod.rs:3092`).*
+///
+/// The criterion says **for each adopter**, so the listview half is
+/// `listview_acceptance::s1_7_a_shrinking_refresh_reaches_the_window`.
+/// This half is the one that carries the framing's bite; the note on the
+/// listview half records why, and that observation is with PR #188 as a
+/// revision request rather than being settled here.
 ///
 /// A rope write is only half of an edit: the window holds a `TextView`
 /// line index that only `on_edit` maintains, so a write that reaches the
 /// rope without the fan-out leaves the two disagreeing, and the next
-/// paint indexes the new rope with the old offsets. `dired.revert` is
-/// the right driver because it paints and does **not** follow the paint
-/// with a `window.switch_buffer` --- which rebuilds the `TextView` from
-/// scratch and would mask the mutation. (`listview.refresh` and
-/// `listview.open` both do switch, so the listview half of this
-/// criterion cannot bite; the primitive's own pin is
-/// `terminal_copy_mode_acceptance::acc16d`.)
-///
-/// *Bite:* delete the `notify_buffer_edit_to_windows` call in the
-/// `set_generated_contents` binding (`src/lua_bindings/mod.rs:3092`) and
-/// the painted frame keeps rows the listing no longer has.
+/// paint indexes the new rope with the old offsets. `dired.revert`
+/// paints and does **not** follow the paint with a
+/// `window.switch_buffer`.
 #[test]
 fn dired_a_shrinking_repaint_reaches_the_window() {
     let td = tempfile::tempdir().expect("tempdir");

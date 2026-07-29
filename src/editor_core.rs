@@ -1846,6 +1846,10 @@ impl EditorCore {
     /// bounded by [`TextView::line_count`]. A replace can grow in bytes
     /// while collapsing many lines into one, so "the buffer shrank" is
     /// not a usable trigger for the second.
+    ///
+    /// The selection anchor is a **third** coordinate and it is dropped,
+    /// not clamped, when it no longer fits — see
+    /// [`Self::drop_stale_selection`] for why.
     pub fn notify_buffer_edit(&mut self, buffer_id: BufferId, edit: &Edit) {
         self.search_invalidate_for_edit(buffer_id, edit);
         let reg = self.registry.borrow();
@@ -1866,7 +1870,44 @@ impl EditorCore {
                 if win.view_top > max_top {
                     win.view_top = max_top;
                 }
+                Self::drop_stale_selection(win, len);
             }
+        }
+    }
+
+    /// Drop `win`'s selection when its anchor no longer fits a buffer of
+    /// `len` bytes.
+    ///
+    /// **The anchor is dropped rather than clamped, and that asymmetry
+    /// with `cursor` is the point.** A window must always have a cursor,
+    /// so clamping one into range is the only available answer. A window
+    /// need not have a selection, and a *clamped* anchor asserts a region
+    /// boundary the user never placed — after a wholesale generated
+    /// rewrite the surviving offsets address unrelated bytes, so the
+    /// clamped region would be a selection of text nobody selected.
+    ///
+    /// This is not a new rule: `window.quit`'s restore already answers
+    /// exactly this question the same way, with
+    /// `selection.filter(|sel| sel.anchor <= len)` and a comment giving
+    /// this reason (`:3259`). Two call sites, one rule.
+    ///
+    /// Without it, `cursor`'s clamp is not enough to make the region
+    /// safe. `Window::region` orders `(anchor, cursor)`, so a stale
+    /// anchor above a clamped cursor still yields `hi > len`, and
+    /// `region_bytes` slices with it: reproduced as
+    /// `assertion failed: end <= self.len()` at `src/rope.rs:145` from
+    /// `EditorCore::clipboard_copy`.
+    ///
+    /// **PROVISIONAL WORDING.** The rule this implements belongs to
+    /// Q#GB6, and PR #188's revision 5 — the approved text at the time of
+    /// writing — does not mention the anchor at all. A revision request
+    /// carrying this defect is with that lane. If the landed revision
+    /// specifies clamping or translation instead, this function and its
+    /// pin change to match it; it must not be left as a third,
+    /// independently-worded description of the same rule.
+    fn drop_stale_selection(win: &mut Window, len: Position) {
+        if win.selection.is_some_and(|sel| sel.anchor > len) {
+            win.selection = None;
         }
     }
 
@@ -1882,7 +1923,13 @@ impl EditorCore {
     /// what an end-to-end rewrite cost anyway.
     ///
     /// Cursor and `view_top` are clamped to the new buffer extent so
-    /// they don't dangle past the end after a shrinking rewrite.
+    /// they don't dangle past the end after a shrinking rewrite, and a
+    /// selection whose anchor no longer fits is dropped
+    /// ([`Self::drop_stale_selection`]). This function had the same
+    /// anchor gap [`Self::notify_buffer_edit`] did, and for the same
+    /// reason: clamping the cursor is not enough to make
+    /// [`Self::region_bytes`] safe, because `Window::region` orders the
+    /// pair and a stale anchor can still be the high end.
     pub fn rebuild_views_for(&mut self, buffer_id: BufferId) {
         let reg = self.registry.borrow();
         let Ok(buffer) = reg.get(buffer_id) else {
@@ -1899,6 +1946,7 @@ impl EditorCore {
                 if win.view_top > max_top {
                     win.view_top = max_top;
                 }
+                Self::drop_stale_selection(win, len);
             }
         }
     }

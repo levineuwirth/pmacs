@@ -1108,3 +1108,133 @@ fn acc16g_a_line_collapsing_generated_write_clamps_view_top() {
     );
     assert_eq!(top, 0, "the collapsed buffer has exactly one line");
 }
+
+/// Generated-buffer immutability Stage 1 — the **selection anchor** is a
+/// third window coordinate a generated rewrite invalidates, and clamping
+/// the cursor alone does not make the region safe.
+///
+/// **PROVISIONAL, and named as such.** This pins a defect found in
+/// review of PR #191; the rule belongs to Q#GB6, whose approved text
+/// (PR #188 revision 5) does not mention the anchor. A revision request
+/// carrying this defect is with that lane. This test stands in for the
+/// anchor clause of a revised Q#GB6 and must be reconciled with it —
+/// including its verdict of *drop* rather than *clamp* — when the
+/// revision lands. It is not an independent contract.
+///
+/// `Window::region` orders `(anchor, cursor)`, so a stale anchor above a
+/// clamped cursor is still the high end of the region, and
+/// `region_bytes` slices the rope with it. Reproduced on this branch
+/// before the fix: `assertion failed: end <= self.len()` at
+/// `src/rope.rs:145`, reached from `EditorCore::clipboard_copy`.
+///
+/// *Bite:* delete the `drop_stale_selection` call from
+/// `notify_buffer_edit` and this panics rather than failing an
+/// assertion. Note the anchor must be the **high** end: with the anchor
+/// low and the cursor high the cursor clamp already covers it, so a
+/// forward selection passes with the bug live.
+#[test]
+fn acc16h_a_shrinking_generated_write_drops_a_stale_selection_anchor() {
+    let state = EditorState::new();
+    exec(
+        &state,
+        r"
+        GEN = pmacs.buffer.create('*anchor-probe*')
+        pmacs.buffer.set_generated_contents(GEN, 'alpha\nbeta\ngamma\ndelta\nepsilon\n')
+        pmacs.window.switch_buffer(GEN)
+        ",
+    );
+    {
+        // A BACKWARD selection: anchor at the far end, point at the
+        // start. The forward one is not a discriminator.
+        let mut core = state.core.borrow_mut();
+        core.begin_selection(30);
+        core.set_cursor_byte(0);
+        assert_eq!(
+            core.active_region(),
+            Some((0, 30)),
+            "precondition: a live 30-byte region"
+        );
+    }
+
+    exec(&state, r"pmacs.buffer.set_generated_contents(GEN, 'xy')");
+
+    let mut core = state.core.borrow_mut();
+    assert_eq!(
+        core.active_buffer_len(),
+        2,
+        "precondition: the buffer shrank"
+    );
+    assert_eq!(
+        core.active_window().selection,
+        None,
+        "an anchor that no longer fits is dropped, not clamped"
+    );
+    assert_eq!(core.active_region(), None, "so there is no region left");
+    // The production consumer, not just the field: this is the call that
+    // panicked before the fix.
+    assert!(
+        !core.clipboard_copy(),
+        "copy must report 'no region' rather than slice past the rope"
+    );
+}
+
+/// The same anchor gap in the **other** function, driven through its own
+/// real Lua path.
+///
+/// `EditorCore::rebuild_views_for` had the identical defect and is a
+/// separate exit: the `*help*` renderer rewrites end to end and calls it
+/// rather than `notify_buffer_edit` (`src/lua_bindings/mod.rs:1650`, via
+/// `pmacs.help.show_command`). Fixing one function and not the other
+/// would leave a live panic reachable from `M-x` help, so this pins the
+/// second exit rather than trusting that one call site implies the
+/// other.
+///
+/// Same PROVISIONAL status as `acc16h`: the rule is Q#GB6's and its
+/// approved text does not yet carry the anchor.
+///
+/// *Bite:* delete the `drop_stale_selection` call from
+/// `rebuild_views_for` and this panics at `src/rope.rs:145`. `acc16h`
+/// stays green under that mutation, which is why this test exists
+/// separately.
+#[test]
+fn acc16i_a_shrinking_view_rebuild_drops_a_stale_selection_anchor() {
+    let state = EditorState::new();
+    // 286 bytes, then 154: a real shrink through the help renderer.
+    exec(
+        &state,
+        r"
+        HELP = pmacs.help.show_command('cursor.down')
+        pmacs.window.switch_buffer(HELP)
+        ",
+    );
+    let long_len: i64 = eval(&state, "return HELP:len()");
+    {
+        let mut core = state.core.borrow_mut();
+        let anchor = u64::try_from(long_len).expect("non-negative");
+        core.begin_selection(anchor);
+        core.set_cursor_byte(0);
+        assert_eq!(
+            core.active_region(),
+            Some((0, anchor)),
+            "precondition: a live region anchored at the end"
+        );
+    }
+
+    exec(&state, "pmacs.help.show_command('editor.quit')");
+
+    let short_len: i64 = eval(&state, "return HELP:len()");
+    assert!(
+        short_len < long_len,
+        "precondition: the help buffer shrank ({long_len} -> {short_len})"
+    );
+    let mut core = state.core.borrow_mut();
+    assert_eq!(
+        core.active_window().selection,
+        None,
+        "rebuild_views_for must drop an anchor that no longer fits"
+    );
+    assert!(
+        !core.clipboard_copy(),
+        "copy must report 'no region' rather than slice past the rope"
+    );
+}
