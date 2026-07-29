@@ -352,15 +352,16 @@ pub struct SemanticRenderState {
     /// Whether an invalid panel frame was already reported since the last
     /// valid one. Bounds the log exactly like `terminal_error_latched`.
     panel_error_latched: bool,
-    /// The band's last PUBLISHED statusline segments and the side window
-    /// they belong to (review round 1, R2-4).
+    /// The band's last PUBLISHED statusline segments and the side-window
+    /// presentation they belong to (review rounds 1 and 2, R2-4).
     ///
     /// The band repaints its whole mode line every frame, so
     /// "publish nothing" has to be expressed as "paint what was published
     /// last" — there is no wire-level suppression to fall back on the way
-    /// `StatuslineSegments` has. Keyed by window id so a replaced panel
-    /// never inherits its predecessor's provider text.
-    last_panel_statusline: Option<(WindowId, StatuslineWindowSegments)>,
+    /// `StatuslineSegments` has. Side affinity can replace a buffer in the
+    /// same window, so both identities are required to prevent one panel
+    /// presentation from inheriting its predecessor's provider text.
+    last_panel_statusline: Option<((WindowId, BufferId), StatuslineWindowSegments)>,
 }
 
 /// The presentation identity a shipped [`PanelFrame`] carries.
@@ -956,8 +957,9 @@ impl SemanticRenderState {
         // primary-document wire segments and the panel mode line, so the
         // side half is taken from this same evaluation before it is
         // consumed.
-        let side_window = state.core.borrow().side_window_for(self.frontend_id);
-        let panel_statusline = self.panel_statusline(statusline_evaluation.as_ref(), side_window);
+        let panel_presentation = self.panel_statusline_presentation(state);
+        let panel_statusline =
+            self.panel_statusline(statusline_evaluation.as_ref(), panel_presentation);
         if let Some(evaluation) = statusline_evaluation {
             self.emit_statusline_segments(evaluation, statusline_document_window, &mut out);
         }
@@ -1103,8 +1105,9 @@ impl SemanticRenderState {
         // surface is a full-window terminal can still hold a side window,
         // and suppressing the panel here would leave the peer's retained
         // band on screen with no way to clear it.
-        let side_window = state.core.borrow().side_window_for(self.frontend_id);
-        let panel_statusline = self.panel_statusline(statusline_evaluation.as_ref(), side_window);
+        let panel_presentation = self.panel_statusline_presentation(state);
+        let panel_statusline =
+            self.panel_statusline(statusline_evaluation.as_ref(), panel_presentation);
         if let Some(evaluation) = statusline_evaluation {
             self.emit_statusline_segments(evaluation, statusline_document_window, &mut out);
         }
@@ -1198,14 +1201,23 @@ impl SemanticRenderState {
     ///   like `Invalidated` *removes* provider text on a transient
     ///   condition that said nothing about it.
     ///
-    /// The baseline is keyed by window id so it can never leak across a
-    /// panel replacement: a new side window starts with no retained text.
+    /// The baseline is keyed by both window and buffer identity. Side
+    /// affinity deliberately replaces the buffer in an existing side
+    /// window, and that replacement is a new presentation even though the
+    /// `WindowId` is stable.
+    fn panel_statusline_presentation(&self, state: &EditorState) -> Option<(WindowId, BufferId)> {
+        let core = state.core.borrow();
+        let window_id = core.side_window_for(self.frontend_id)?;
+        let buffer_id = core.windows.get(&window_id)?.buffer_id;
+        Some((window_id, buffer_id))
+    }
+
     fn panel_statusline(
         &mut self,
         evaluation: Option<&StatuslineEvaluation>,
-        side_window: Option<WindowId>,
+        panel_presentation: Option<(WindowId, BufferId)>,
     ) -> Option<StatuslineWindowSegments> {
-        let Some(side_window) = side_window else {
+        let Some((side_window, side_buffer)) = panel_presentation else {
             // No band to publish for; drop any baseline so a later panel
             // cannot inherit a dead window's text.
             self.last_panel_statusline = None;
@@ -1215,7 +1227,7 @@ impl SemanticRenderState {
             state
                 .last_panel_statusline
                 .as_ref()
-                .filter(|(window_id, _)| *window_id == side_window)
+                .filter(|(presentation, _)| *presentation == (side_window, side_buffer))
                 .map(|(_, segments)| segments.clone())
         };
         let Some(evaluation) = evaluation else {
@@ -1231,9 +1243,12 @@ impl SemanticRenderState {
                     .find(|window| {
                         window.context.frontend_id == self.frontend_id
                             && window.context.window_id == side_window
+                            && window.context.buffer_id == side_buffer
                     })
                     .cloned();
-                self.last_panel_statusline = found.clone().map(|segments| (side_window, segments));
+                self.last_panel_statusline = found
+                    .clone()
+                    .map(|segments| ((side_window, side_buffer), segments));
                 found
             }
             StatuslineEvaluationOutcome::Invalidated { .. } => {
@@ -1372,9 +1387,13 @@ impl SemanticRenderState {
     /// panel's presence.
     fn publish_absent_panel(&mut self, out: &mut Vec<InstanceMessage>) {
         self.panel_presentation = None;
+        // `Absent` also clears the peer's retained mode line. A later
+        // `Present` under `NoMessage` therefore has nothing it can
+        // legitimately retain, even if the same window and buffer reopen.
+        self.last_panel_statusline = None;
         if self.last_panel_payload.as_ref() == Some(&PanelFramePayload::Absent) {
-            // A duplicate `Absent` does no work — but the clear above
-            // still runs, so the state stays idempotent rather than
+            // A duplicate `Absent` does no wire work — but both clears
+            // above still run, so the state stays idempotent rather than
             // depending on which duplicate arrived first.
             return;
         }

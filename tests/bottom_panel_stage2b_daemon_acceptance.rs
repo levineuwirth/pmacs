@@ -1157,6 +1157,122 @@ fn r2_4_nomessage_retains_the_bands_published_segments() {
     );
 }
 
+/// R2-4's retained baseline follows one window-and-buffer presentation,
+/// not merely the side `WindowId`. Side affinity reuses the window when it
+/// replaces the buffer, so `NoMessage` must not carry provider text from
+/// the predecessor into the replacement.
+#[test]
+fn r2_4_nomessage_does_not_cross_a_same_window_buffer_replacement() {
+    let mut session = Session::new();
+    session.declare(1, ROWS, COLS);
+    open_panel(&session, "*first-panel*", 4);
+    let panel = session.side_window().expect("side window");
+    let document_buffer = session.state.core.borrow().windows[&session.document].buffer_id;
+    session.render.set_viewport(
+        document_buffer,
+        pmacs::protocol::ByteRange { start: 0, end: 0 },
+        0,
+    );
+    exec(
+        &session.state,
+        "pmacs.statusline.register {
+           name = 'buffer-probe', side = 'left',
+           fn = function(ctx) return 'CTX:' .. ctx.buffer:name() end,
+         }",
+    );
+
+    let first = rows_of(&session.present())
+        .last()
+        .expect("mode line")
+        .clone();
+    assert!(
+        first.contains("CTX:*first-panel*"),
+        "fixture precondition: the first panel publishes its buffer-scoped \
+         segment; got {first:?}"
+    );
+
+    // Replace the buffer in the existing side WindowId, then move the
+    // document off its declared viewport in the same transaction so phase
+    // 1 returns NoMessage before it can publish the replacement context.
+    exec(
+        &session.state,
+        "SECOND = pmacs.buffer.create('*second-panel*')
+         pmacs.window.display(SECOND, { side = 'bottom' })
+         pmacs.window.switch_buffer(pmacs.buffer.create('*elsewhere*'))",
+    );
+    assert_eq!(
+        session.side_window(),
+        Some(panel),
+        "fixture precondition: side-buffer replacement reuses the WindowId"
+    );
+
+    let replaced = rows_of(&session.present())
+        .last()
+        .expect("mode line")
+        .clone();
+    assert!(
+        replaced.contains("*second-panel*"),
+        "fixture precondition: the replacement panel was painted; got {replaced:?}"
+    );
+    assert!(
+        !replaced.contains("CTX:*first-panel*"),
+        "NoMessage must not carry buffer-scoped segments across a new panel \
+         presentation; got {replaced:?}"
+    );
+}
+
+/// An authoritative `Absent` clears the peer's retained band, including
+/// its mode line. Reopening the same panel under `NoMessage` therefore
+/// starts with no provider segments to retain.
+#[test]
+fn r2_4_nomessage_does_not_resurrect_segments_after_absent() {
+    let mut session = Session::new();
+    session.declare(1, ROWS, COLS);
+    open_panel(&session, "*panel*", 4);
+    let document_buffer = session.state.core.borrow().windows[&session.document].buffer_id;
+    session.render.set_viewport(
+        document_buffer,
+        pmacs::protocol::ByteRange { start: 0, end: 0 },
+        0,
+    );
+    exec(
+        &session.state,
+        "pmacs.statusline.register {
+           name = 'absence-probe', side = 'left',
+           fn = function() return 'BEFORE-ABSENT' end,
+         }",
+    );
+    assert!(
+        rows_of(&session.present())
+            .last()
+            .expect("mode line")
+            .contains("BEFORE-ABSENT"),
+        "fixture precondition: the segment was published"
+    );
+
+    exec(
+        &session.state,
+        "pmacs.window.switch_buffer(pmacs.buffer.create('*elsewhere*'))",
+    );
+    session.declare(2, 3, COLS);
+    assert_eq!(
+        session.frame(),
+        Some(PanelFramePayload::Absent),
+        "fixture precondition: the peer's panel state was cleared"
+    );
+
+    session.declare(3, ROWS, COLS);
+    let reappeared = rows_of(&session.present())
+        .last()
+        .expect("mode line")
+        .clone();
+    assert!(
+        !reappeared.contains("BEFORE-ABSENT"),
+        "NoMessage cannot retain across Absent because the peer has no panel \
+         statusline state left to retain; got {reappeared:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Review round 1 sweep — the same defect shape, found elsewhere
 // ---------------------------------------------------------------------------
