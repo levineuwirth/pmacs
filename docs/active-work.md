@@ -524,12 +524,18 @@ has **no branch and no framing yet**.
 ## Test-improvement arc, lane 6 — `scripts/bite` positive control
 
 - Portable branch: `githubsucks/bite-positive-control`, worktree
-  `../pmacs-bite`, based on `main` @ `300cbc4`. First lane of the
-  test-improvement arc scoped by `TEST_IMPROVEMENT.md` §8. Tooling and
+  `../pmacs-bite`, based on `main` @ `300cbc4`. Tooling and
   documentation only — **no product code, no tests changed.**
-- Sequenced **first**, ahead of the arc's own priority list, because
-  every later lane's evidence is bite-shaped. A verifier that cannot
-  fail is not worth more than the claims it certifies.
+- **Self-contained deliberately.** An earlier draft of this entry
+  scoped the lane by citing a `TEST_IMPROVEMENT.md` at the repo root.
+  That file is **untracked and machine-local** — not on `main`, not in
+  this PR's tree — so the citation was a dangling reference for any
+  other machine, which is exactly what this ledger exists to prevent.
+  The lane is described here on its own terms instead. If that audit
+  is to scope later lanes it needs committing first, in its own PR.
+- Sequenced ahead of the rest of the testing work because every later
+  lane's evidence is bite-shaped. A verifier that cannot fail is not
+  worth more than the claims it certifies.
 - **The defect:** the script ran only the swapped tree, so a failing
   swapped run was the only thing it checked. A test that fails
   everywhere — a typo, an unrelated compile break — therefore printed
@@ -555,7 +561,6 @@ has **no branch and no framing yet**.
 - Recovery from a clean checkout:
   `git fetch githubsucks && git worktree add ../pmacs-bite
   -b bite-positive-control githubsucks/bite-positive-control`.
-
 
 ## Parked lane: kill-ring browser + persistence
 

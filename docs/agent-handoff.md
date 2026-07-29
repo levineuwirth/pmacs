@@ -1597,7 +1597,14 @@ round-trip cannot detect a discriminant shift.
   a commit splits worktree from branch — but do not repeat the
   destroys-your-work claim, which will push the next reader toward
   `git stash` to protect themselves, straight into the repo-global
-  trap above. Corollary for a NEW file: the swap-over-`git show` mode
+  trap above. **The #165 incident itself is now unexplained**, and
+  that is recorded rather than papered over: work really was lost, but
+  not by the mechanism this file blamed. A `SIGKILL` bypasses the trap
+  and would leave the swapped file in place, which is one candidate;
+  so is a stash collision, given the same round. Do not invent a
+  mechanism to close the gap — an unexplained incident is safer than a
+  confident wrong cause, which is what produced this correction.
+  Corollary for a NEW file: the swap-over-`git show` mode
   does not apply at all, so its claims must be bitten by hand-editing.
 - **A CONFLICTING PR silently runs no CI at all.** GitHub builds
   `pull_request` workflow runs against the PR's **merge ref**, which it

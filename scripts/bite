@@ -35,6 +35,16 @@
 # an assertion failure; treat a compile failure as a prompt to narrow
 # the swap to a file that compiles both ways.
 #
+# That classification reads libtest's own `test result:` summary and
+# deliberately does NOT grep for compiler text. A test may PRINT
+# compiler output on failure --- `compile_mode_acceptance` has a
+# fixture that emits `error[E0308]: mismatched types` at column 0, and
+# the compile-mode and editops suites are this script's primary
+# consumers --- so a `^error[E...]` grep would stamp "weaker evidence"
+# on exactly the strong result it was meant to identify. `test result:`
+# is emitted whenever the harness ran, is absent when the swapped file
+# did not build, and stays uncolored when piped.
+#
 # Why this exists: bite-verification is step 4 of the working method,
 # and the obvious shortcut --- git stash --- is a trap here. The stash
 # namespace is REPO-GLOBAL: shared across every worktree and with
@@ -59,6 +69,17 @@ if [ ! -f "$path" ]; then
     echo "bite: no such file: $path" >&2
     exit 2
 fi
+
+# Both cargo runs are CAPTURED rather than streamed, because their
+# output is parsed (passed-counts for the control, `test result:` for
+# the classification). A long acceptance suite therefore prints
+# nothing until it finishes --- that is the trade, not a bug. Do not
+# "fix" it back to streaming without giving the parser another source.
+#
+# Colour is pinned off on both runs: `--color always` in the
+# passed-through args would otherwise wrap the summary lines in escape
+# codes, and every anchored match here would silently stop matching.
+export CARGO_TERM_COLOR=never
 
 # Sum the `N passed` figures across every `test result:` line, so a
 # multi-target invocation is counted correctly rather than only its
@@ -110,12 +131,23 @@ if [ "$swapped_status" -eq 0 ]; then
     exit 1
 fi
 
-# Distinguish the two ways the swapped run can fail. An assertion
-# failure is the evidence we want; a compile failure only says the old
-# file does not build here.
-if printf '%s\n' "$swapped_out" | grep -q '^error\[E[0-9]*\]\|^error: could not compile'; then
+# Distinguish the ways the swapped run can fail. An assertion failure
+# is the evidence we want; a build failure only says the old file does
+# not compile here, and the tests may never have run at all.
+#
+# Classified from libtest's summary line, NOT from compiler text --- a
+# failing test can print `error[E0308]: ...` at column 0 itself (see
+# the header). `test result: FAILED` means the harness ran and tests
+# failed; no `test result:` line at all means nothing ran.
+if printf '%s\n' "$swapped_out" | grep -q '^test result: FAILED'; then
+    echo "bite: OK (assertion) --- tests fail against $ref:$path (the fix bites)"
+elif printf '%s\n' "$swapped_out" | grep -q '^test result:'; then
+    # Some target ran to completion without a failure, yet cargo still
+    # exited non-zero --- typically a *different* target in the same
+    # invocation failed to build. Neither clean result applies.
+    echo "bite: OK (MIXED) --- some tests ran and none failed, but the run still failed." >&2
+    echo "bite: narrow the invocation to one target before trusting this." >&2
+else
     echo "bite: OK (COMPILE) --- $ref:$path does not build against the current tree." >&2
     echo "bite: weaker evidence than an assertion failure --- the tests may never have run." >&2
-else
-    echo "bite: OK (assertion) --- tests fail against $ref:$path (the fix bites)"
 fi
