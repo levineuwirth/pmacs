@@ -463,10 +463,11 @@ has **no branch and no framing yet**.
 
 - Portable branch: `githubsucks/generated-buffer-immutability`; worktree
   `../pmacs-generated-immutability`. **PR #188**, base `main`, forked from
-  `githubsucks/main` @ `ad41cf1`. Framing only —
-  `docs/generated-buffer-immutability-framing.md`, revision 2, plus this
+  `githubsucks/main` @ `ad41cf1`, **integrated to `7586905`** (#189,
+  `COHERENCE.md` only; clean merge, no conflict). Framing only —
+  `docs/generated-buffer-immutability-framing.md`, revision 3, plus this
   lane. **No runtime code, no protocol change.**
-- **PROPOSED — one review round closed (five findings, three P1, two P2).
+- **PROPOSED — two review rounds closed (ten findings, six P1, four P2).
   Not approved. Do not implement, do not merge.**
 - **What it frames.** The class-wide half of the `set_generated_contents`
   invariant that `docs/agent-handoff.md` §4 and `COHERENCE.md` §14 both
@@ -480,22 +481,32 @@ has **no branch and no framing yet**.
   as a `{ generated = true }` option on the existing Lua mutators, with
   `set_generated_contents` reimplemented as its whole-buffer wrapper. It
   is the only candidate in which the buffer is never observably unlocked.
-- **Two stages, two PRs.** Stage 1 — listview ownership fix, a one-way
-  `unlock_generated` binding, dired and listview adopting the shipped
-  primitive, and the window-coordinate clamp. Stage 2 — the new
-  primitive, compile's nine write sites, the search panel's four,
-  compile/search ownership, and the path-backed refusal plus
-  `mark_clean`.
-- **Three facts from this lane that other lanes need before it merges:**
+  **Revision 3 pins the transaction** (framing §3.4): its **own**
+  `run_buffer_edit` arm — **not** the bypass arm, which calls
+  `begin_edit`, which calls `ensure_writable` first (`src/buffer.rs:725`)
+  and would refuse every generated write to a locked buffer — one
+  `&mut Buffer` method, eight named exits, relock and flag-clear
+  unconditional, and history cleared **iff the revision advanced**.
+- **Two stages, two PRs.** Stage 1 — listview ownership fix **plus its
+  identity-routing fix in the same PR**, dired and listview adopting the
+  shipped primitive, the window-coordinate clamp, and the fold decision.
+  Stage 2 — the new primitive, compile's nine write sites, the search
+  panel's four, compile/search ownership + routing, the path-backed
+  refusal plus `mark_clean`, the `generated_lock` provenance field, and
+  the bounded `unlock_generated`.
+- **Six facts from this lane that other lanes need before it merges:**
   - **`bypass_intercept` is the wrong inventory key.** It misses
     `*buffer-list*`, `*help*` and `*workers*`, which are generated with
     plain writes and no intercept at all. `docs/agent-handoff.md` §4's
-    four-row table inherits that blind spot.
-  - **`COHERENCE.md` §14's listview consumer list is wrong.**
-    `pmacs.listview.open` has three production callers, all in
-    `lsp.lua` — `*references*` (`:2056`), `*outline*` (`:2102`),
-    `*lsp-help*` (`:2513`). `*buffer-list*` is hand-rolled
-    (`default.lua:387`) and `*search-results*` is independent.
+    four-row table inherits that blind spot — **and undercounts by one**:
+    `src/help.rs:354` `replace_help_buffer` is a fifth writer mechanism
+    (own find-or-create, `Buffer::apply_edit`, own `mark_clean`) writing
+    the **same** `*help*` buffer as `default.lua:1239`, which does not
+    mark clean. Two owners, one buffer, two copies of the name constant
+    across the FFI boundary.
+  - **`COHERENCE.md` §14's listview consumer list was wrong and is now
+    FIXED** — PR #189 (`main` @ `7586905`) landed exactly the correction
+    this lane measured. Nothing owed. Recorded so it is not re-asserted.
   - **Three writers adopt any buffer sharing their name** —
     `listview.lua:95`, `compile.lua:263`, `default.lua:861-868` — against
     a rule the tree already states at `terminal.lua:300-305` and
@@ -505,11 +516,44 @@ has **no branch and no framing yet**.
     foreign `*compilation*` un-editable. Today `M-x buffer.undo` — this
     arc's bug — is the only recovery, so the arc must not lock these
     buffers before fixing ownership.
+  - **Disambiguating a name breaks the sites that read one.** Census in
+    framing §2.10: 19 units across 14 grep lines, two genuinely broken.
+    `listview.lua:44`'s `panels[d.name]` (written under the *requested*
+    name at `:97`, read under the *actual* name) has **four** consumers,
+    and the fourth — `listview.open:118-123`'s never-capture-a-panel
+    guard — fails **inverted and silently**, capturing a panel as its own
+    `q` target. `compile.lua:216`'s `is_generated_buffer` has two.
+    `compile.lua`'s `slots` is **not** affected: keyed by a module
+    constant at both ends, with `slot_for_buffer` id-based.
+  - **`read_only` is one boolean serving THREE policies** (framing
+    §2.11): the generated lock; terminal identity
+    (`src/terminal/session.rs:305`); and, as a *reader*,
+    `src/lua_bindings/fold.rs:313`'s "is this a document buffer" test,
+    pinned by `tests/folding_acceptance.rs:570`. Consequence for any
+    lane: **locking a buffer silently disables `pmacs.fold.fold` on it**,
+    with the status `fold rejected: not a document buffer`.
+  - **The SHIPPED `set_generated_contents` can overwrite a live terminal
+    identity buffer.** It does `self.read_only = false` unconditionally
+    (`src/buffer.rs:546`), so it lifts a lock it did not install, writes,
+    and re-locks. Present on `main`, untested, unframed anywhere before
+    this revision. Bounded in Stage 2 by the `generated_lock` field.
 - **Overlap warning.** Stage 2 touches `src/lua_bindings/mod.rs`'s buffer
   mutator bindings and `src/buffer.rs`. Do not run it concurrently with
   the `apply_resource_op` lane or the bottom-panel 2B work without
   assigning those files to one lane first. The framing itself touches
   neither.
+- **Cross-lane, settled, not re-decided here.** #186 owns the urgent
+  pre-filesystem refusal for synchronous `apply_resource_op`; #171 later
+  owns full post-delete lifecycle reconciliation, including the async
+  race where a buffer becomes modified after dired dispatch. **#171's
+  Q#DR25 is deferred INTO this lane** — confirmed against #171 revision 7
+  (`fd7ae37`), which states that dired's listing becoming immutable is
+  "owned by the `generated-buffer-immutability` lane" and that "Stage 2
+  does not implement it, does not gate on it, and carries no acceptance
+  for it." This lane's Stage 1 claims that work. **Neither ordering
+  conflicts**: #171 Stage 2b changes `paint`'s callers, this lane changes
+  `paint` itself. Revisions 1 and 2 of this framing never mentioned
+  Q#DR25 at all; revision 3 §9b records it.
 - **Re-measured at `ad41cf1` while scouting: 276 CRDT-dark tests**
   (3,251 vs 3,527), by
   `cargo test --all-targets --no-default-features --features lua54[,crdt] -- --list | grep -c ': test$'`.
