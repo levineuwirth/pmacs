@@ -262,16 +262,21 @@ until it merges.
 
   ```
   $ git rev-parse --short githubsucks/main
-  64883eb
+  5e186c7
   $ git log --oneline -1 githubsucks/main
-  64883eb Merge pull request #192 from levineuwirth/bite-positive-control
+  5e186c7 Merge pull request #193 from levineuwirth/test-improvement-audit
   $ git merge-base --is-ancestor githubsucks/main HEAD && echo "main IS integrated"
   main IS integrated
   ```
 
-  **That is a reading, not a constant.** `main` moved twice while this
-  lane was open (#187 -> #192, with #193 behind it). Re-measure before
-  quoting it; do not copy the SHA forward.
+  **That is a reading, not a constant, and it went stale inside this
+  lane's own review round.** `main` moved three times while the lane was
+  open: #187 -> #192 -> #193. An earlier revision of this bullet pasted
+  the same three commands with `64883eb` and the same `main IS
+  integrated` line, and #193 merged between writing it and pushing it ---
+  so the pasted output was false in the tree that carried it. Pasting
+  command output is necessary and **not sufficient**: re-measure at push
+  time, and treat any base SHA in this file as expired on sight.
 - **What Stage 1 ships.** `dired.lua`'s `paint` and `listview.lua`'s
   `render` write through `pmacs.buffer.set_generated_contents` (zero
   `bypass_intercept` writes remain in either file); `listview` gains
