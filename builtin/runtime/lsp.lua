@@ -1295,9 +1295,13 @@ end
 -- `find_or_open` makes the target active. Resource ops go through
 -- `pmacs.buffer.apply_resource_op` (filesystem + buffer-registry
 -- reconciliation). The buffer the user invoked from is restored last
--- (best-effort: it may itself have been renamed/deleted). Returns
+-- (best-effort: it may itself have been renamed/deleted), on the
+-- failure path as well as the success path. Returns
 -- `edit_count, file_count, resource_op_count` on success, or
--- `nil, message` if the preflight rejected the edit.
+-- `nil, message` if the preflight rejected the edit OR any op failed
+-- while executing. No exception escapes this function (Q#RD7) — the
+-- three callers all handle `nil, message` already, and a raise
+-- reaching them meant an unattended server request went unanswered.
 local function apply_workspace_edit(ops)
   local plan = {}
   for _, op in ipairs(ops or {}) do
@@ -1328,6 +1332,29 @@ local function apply_workspace_edit(ops)
     elseif op.op == "delete" then
       local path = pmacs.lsp.path_for_uri(op.uri)
       if not path then return nil, "cannot resolve " .. tostring(op.uri) end
+      -- Delete precondition check (Q#RD3). This is a FILTER, not a
+      -- transaction. It catches, before anything in the batch is
+      -- mutated: a plan-time modified or mid-edit buffer, a known
+      -- missing target without `ignore_if_not_exists`, and a stat we
+      -- could not answer.
+      --
+      -- What it deliberately does not catch: `documentChanges` are
+      -- sequential, so an earlier text edit can dirty a clean buffer
+      -- and an earlier rename can move a modified buffer into a later
+      -- delete's subtree, both after this snapshot. The primitive then
+      -- refuses mid-batch, leaving earlier ops applied. Reporting that
+      -- honestly is Q#RD7's job, not this check's to prevent.
+      --
+      -- The verdict comes from the same Rust helper the primitive
+      -- uses, so the two layers cannot disagree. `no-op` and `clear`
+      -- both pass: rejecting `no-op` would refuse an op the primitive
+      -- treats as doing nothing.
+      local verdict = pmacs.buffer._delete_verdict {
+        path = path,
+        recursive = op.recursive,
+        ignore_if_not_exists = op.ignore_if_not_exists,
+      }
+      if verdict.kind == "refuse" then return nil, verdict.message end
       plan[#plan + 1] = {
         kind = "delete", path = path,
         recursive = op.recursive, ignore_if_not_exists = op.ignore_if_not_exists,
@@ -1337,19 +1364,36 @@ local function apply_workspace_edit(ops)
   if #plan == 0 then return 0, 0, 0 end
   local origin = active_buffer_path()
   local edit_total, files, res_ops = 0, 0, 0
+  -- Return the user to where they invoked from — best-effort, since
+  -- that path may have just been renamed or deleted. Runs on the
+  -- FAILURE path too (Q#RD7): previously this ran only after a
+  -- successful loop, so a mid-batch refusal stranded the user in
+  -- whatever buffer the last applied op left active.
+  local function restore_origin()
+    if origin then pcall(pmacs.buffer.find_or_open, origin) end
+  end
   for _, item in ipairs(plan) do
+    local ok, err
     if item.kind == "edit" then
-      pmacs.buffer.find_or_open(item.path)
-      edit_total = edit_total + apply_text_edits(item.edits)
-      files = files + 1
+      ok, err = pcall(function()
+        pmacs.buffer.find_or_open(item.path)
+        edit_total = edit_total + apply_text_edits(item.edits)
+        files = files + 1
+      end)
     else
-      pmacs.buffer.apply_resource_op(item)
-      res_ops = res_ops + 1
+      -- Every failure becomes a value. The primitive raises for a
+      -- refusal or an I/O error; converting here is what lets all
+      -- three callers keep using the existing `nil, message` shape
+      -- instead of each growing its own pcall.
+      ok, err = pcall(pmacs.buffer.apply_resource_op, item)
+      if ok then res_ops = res_ops + 1 end
+    end
+    if not ok then
+      restore_origin()
+      return nil, tostring(err)
     end
   end
-  -- Return the user to where they invoked from — best-effort, since
-  -- that path may have just been renamed or deleted.
-  if origin then pcall(pmacs.buffer.find_or_open, origin) end
+  restore_origin()
   return edit_total, files, res_ops
 end
 
@@ -1832,14 +1876,44 @@ local function handle_server_requests()
           local edit = ev.params and ev.params.edit
           local applied, reason = false, nil
           if edit then
-            local parsed = pmacs.lsp._parse_workspace_edit(edit)
-            local n, info = apply_workspace_edit(parsed.ops)
-            if n then applied = true else reason = info end
+            -- Wrap parse AND apply, not apply alone (Q#RD7).
+            -- `_parse_workspace_edit` sits one line above the applier
+            -- and is itself fallible, so a parse failure escaped the
+            -- old wrap entirely, was swallowed by the
+            -- `pcall(handle_server_requests)` at the bottom of this
+            -- file, and left the server unanswered — the exact defect
+            -- being fixed, one line out of scope. The wrap costs
+            -- nothing and makes the boundary uniform regardless of
+            -- which call fails.
+            local ok, a, b = pcall(function()
+              local parsed = pmacs.lsp._parse_workspace_edit(edit)
+              return apply_workspace_edit(parsed.ops)
+            end)
+            if not ok then
+              reason = a
+            elseif a then
+              applied = true
+            else
+              reason = b
+            end
           else
             reason = "missing edit"
           end
           local result = { applied = applied }
-          if not applied then result.failureReason = tostring(reason) end
+          if not applied then
+            result.failureReason = tostring(reason)
+            -- The durable trace (Q#RD7): one call site, one label,
+            -- written at the layer that actually knows the outcome. A
+            -- Lua preflight rejection never reaches the Rust
+            -- primitive, so logging there would miss the common
+            -- unattended case entirely.
+            pcall(pmacs.buffer._append_error_record,
+              "lsp:workspace/applyEdit", tostring(reason))
+          end
+          -- Always ATTEMPT a response while the response channel
+          -- remains live. `send_response` is itself under an ignored
+          -- pcall, so whether it lands is the transport's business and
+          -- is not observable from here.
           pcall(pmacs.lsp.send_response, sid, ev.request_id, result)
         elseif ev.kind == "request"
             and ev.method == "workspace/inlayHint/refresh" then

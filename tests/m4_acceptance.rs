@@ -8163,3 +8163,497 @@ fn hover_doc_panel_shows_full_contents_via_binding() {
         .expect("post-q probe");
     assert!(name.ends_with("h.rs"), "q restores the source buffer");
 }
+
+// ---------------------------------------------------------------
+// Resource-op delete guard (framing `docs/resource-op-delete-guard-
+// framing.md`, revision 5). Criteria 1-10 and 14 drive the primitive
+// directly; criteria 11-15 drive the applier and the server-request
+// boundary and live below these.
+//
+// Every criterion names the pre-image it must fail against. A test
+// that passes against its pre-image has no bite and is worthless
+// here: the whole lane exists because the unguarded arm looks fine
+// from the buffer's side.
+// ---------------------------------------------------------------
+
+/// Open `path`, returning the Lua global name the buffer is bound to.
+fn rd_open(state: &mut pmacs::editor::EditorState, global: &str, path: &std::path::Path) {
+    let p = path.display().to_string();
+    state
+        .lua_host
+        .lua()
+        .load(format!("{global} = pmacs.buffer.find_or_open('{p}')"))
+        .exec()
+        .unwrap_or_else(|e| panic!("open {p}: {e}"));
+}
+
+/// `pcall` a delete resource op, returning `(ok, message)`.
+fn rd_delete(
+    state: &mut pmacs::editor::EditorState,
+    path: &std::path::Path,
+    extra: &str,
+) -> (bool, String) {
+    let p = path.display().to_string();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "local ok, err = pcall(pmacs.buffer.apply_resource_op, \
+               {{ kind = 'delete', path = '{p}'{extra} }}) \
+             return ok, tostring(err)"
+        ))
+        .eval()
+        .expect("delete pcall")
+}
+
+/// Criterion 1 — a delete targeting a modified buffer refuses, and the
+/// file survives.
+///
+/// Bite: fails against `main` before this lane. Asserting only that
+/// the buffer survived would be VACUOUS — that is already mode (c)'s
+/// behaviour today. **The `exists()` assertion carries the bite.**
+#[test]
+fn rd1_delete_refuses_when_a_bound_buffer_is_modified() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("a.rs");
+    std::fs::write(&f, b"original\n").expect("write");
+
+    let mut state = pmacs::editor::EditorState::new();
+    rd_open(&mut state, "B", &f);
+    state
+        .lua_host
+        .lua()
+        .load("B:insert(0, 'X')")
+        .exec()
+        .expect("dirty the buffer");
+
+    let (ok, err) = rd_delete(&mut state, &f, "");
+    assert!(!ok, "delete must refuse; it returned success: {err}");
+    assert!(
+        err.contains("unsaved changes"),
+        "the message must name the reason, got {err:?}"
+    );
+    assert!(err.contains("a.rs"), "and name the buffer, got {err:?}");
+    assert!(
+        f.exists(),
+        "THE BITE: the file must still be on disk after a refusal"
+    );
+
+    let text: String = state
+        .lua_host
+        .lua()
+        .load("return B:slice(0, B:len())")
+        .eval()
+        .expect("read back");
+    assert_eq!(text, "Xoriginal\n", "the unsaved edit must be intact");
+}
+
+/// Criterion 2 — a delete targeting a *clean* open buffer still
+/// succeeds: file removed, buffer removed.
+///
+/// Bite: fails against an over-broad guard that refuses whenever any
+/// buffer is open. Criterion 1 and this one are the two directions of
+/// the same rule and neither is sufficient alone.
+#[test]
+fn rd2_delete_still_succeeds_for_a_clean_open_buffer() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("clean.rs");
+    std::fs::write(&f, b"untouched\n").expect("write");
+
+    let mut state = pmacs::editor::EditorState::new();
+    rd_open(&mut state, "B", &f);
+
+    let (ok, err) = rd_delete(&mut state, &f, "");
+    assert!(ok, "a clean open buffer must not block the delete: {err}");
+    assert!(!f.exists(), "the file must be gone");
+
+    let still: bool = state
+        .lua_host
+        .lua()
+        .load("return B:is_valid()")
+        .eval()
+        .expect("validity probe");
+    assert!(!still, "the buffer must have been reconciled away");
+}
+
+/// Criterion 3 — a filesystem failure preserves the clean buffer.
+///
+/// Bite — **corrected against the framing, which states this wrongly.**
+/// The framing says this criterion "fails against revision 1's
+/// buffer-first ordering". It does not, and the claim was checked
+/// rather than trusted: moving reconciliation ahead of the filesystem
+/// mutation leaves this test PASSING, because the deleted path here is
+/// a *directory* and no buffer is bound to it — `find_by_path` matches
+/// nothing, so the reordering never fires on this input.
+///
+/// What does falsify it is the shape revision 1 actually proposed:
+/// validation that **removes** the affected set instead of inspecting
+/// it. Verified by mutation — with validation removing every buffer at
+/// or beneath the target, this test fails on exactly its stated
+/// assertion. That is the pre-image; the framing's wording is the one
+/// that needs amending, not this setup.
+#[test]
+fn rd3_filesystem_failure_leaves_the_clean_buffer_intact() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sub = dir.path().join("subdir");
+    std::fs::create_dir(&sub).expect("mkdir");
+    let inner = sub.join("inner.rs");
+    std::fs::write(&inner, b"inner\n").expect("write");
+
+    let mut state = pmacs::editor::EditorState::new();
+    rd_open(&mut state, "B", &inner);
+
+    // Non-empty directory without `recursive` — the fs mutation fails
+    // after validation has already cleared the (clean) buffer.
+    let (ok, err) = rd_delete(&mut state, &sub, "");
+    assert!(!ok, "removing a non-empty dir without recursive must fail");
+    assert!(
+        err.to_lowercase().contains("delete"),
+        "the failure should be the delete's own, got {err:?}"
+    );
+
+    let still: bool = state
+        .lua_host
+        .lua()
+        .load("return B:is_valid()")
+        .eval()
+        .expect("validity probe");
+    assert!(
+        still,
+        "THE BITE: nothing is removed before the filesystem mutation succeeds"
+    );
+    assert!(inner.exists(), "and the file is untouched");
+}
+
+/// Criterion 4 — `on_removed` observes the path already absent.
+///
+/// Bite: fails against buffer-first ordering, under which the callback
+/// would see the file still present. This is the pin that stops the
+/// phase order from silently regressing, so it asserts what the
+/// callback *saw*, not merely that it ran.
+#[test]
+fn rd4_on_removed_observes_the_path_already_gone() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("watched.rs");
+    std::fs::write(&f, b"bye\n").expect("write");
+    let p = f.display().to_string();
+
+    let mut state = pmacs::editor::EditorState::new();
+    rd_open(&mut state, "B", &f);
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "SAW = 'callback never ran' \
+             pmacs.buffer.on_removed(B, function() \
+               SAW = pmacs.fs.exists and 'unexpected' or nil \
+               local fh = io and io.open and io.open('{p}', 'r') \
+               if fh then fh:close(); SAW = 'present' else SAW = 'absent' end \
+             end)"
+        ))
+        .exec()
+        .expect("register on_removed");
+
+    let (ok, err) = rd_delete(&mut state, &f, "");
+    assert!(ok, "clean delete should succeed: {err}");
+
+    let saw: String = state
+        .lua_host
+        .lua()
+        .load("return tostring(SAW)")
+        .eval()
+        .expect("read observation");
+    assert_eq!(
+        saw, "absent",
+        "THE BITE: reconciliation is the last phase, so the callback \
+         must observe the path already gone"
+    );
+}
+
+/// Criterion 5 — a delete invoked from inside the target buffer's own
+/// edit intercept refuses *before* touching disk.
+///
+/// Bite: fails against `main`, where `ConcurrentEdit` is discovered
+/// only at `BufferRegistry::remove` — i.e. after `remove_file` has
+/// already run. The `exists()` assertion is what separates the two.
+#[test]
+fn rd5_delete_from_inside_the_targets_own_intercept_refuses_before_disk() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("busy.rs");
+    std::fs::write(&f, b"busy\n").expect("write");
+    let p = f.display().to_string();
+
+    let mut state = pmacs::editor::EditorState::new();
+    rd_open(&mut state, "B", &f);
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "DELETE_OK, DELETE_ERR = nil, nil \
+             pmacs.buffer.add_intercept(B, function(ev) \
+               if not DELETE_OK then \
+                 DELETE_OK, DELETE_ERR = pcall(pmacs.buffer.apply_resource_op, \
+                   {{ kind = 'delete', path = '{p}' }}) \
+               end \
+               return ev \
+             end)"
+        ))
+        .exec()
+        .expect("register intercept");
+
+    state
+        .lua_host
+        .lua()
+        .load("pcall(function() B:insert(0, 'z') end)")
+        .exec()
+        .expect("drive an edit through the intercept");
+
+    let (ran, err): (bool, String) = state
+        .lua_host
+        .lua()
+        .load("return DELETE_OK ~= nil, tostring(DELETE_ERR)")
+        .eval()
+        .expect("intercept observation");
+    assert!(ran, "the intercept must have attempted the delete");
+    assert!(
+        err.contains("mid-edit"),
+        "the refusal must name the mid-edit reason, got {err:?}"
+    );
+    assert!(
+        f.exists(),
+        "THE BITE: the file must survive a mid-edit refusal"
+    );
+}
+
+/// Criterion 6 — duplicate path-bound buffers cannot hide a modified
+/// copy. **This is the criterion that pins validation breadth**;
+/// criterion 14 pins the reconciliation half and cannot see breadth.
+///
+/// Bite: fails against any first-match lookup, including
+/// `EditorCore::find_buffer_for_path`, which is exactly what revision 1
+/// specified. The first match here is deliberately clean.
+#[test]
+fn rd6_a_clean_first_match_cannot_hide_a_modified_duplicate() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("dup.rs");
+    std::fs::write(&f, b"shared\n").expect("write");
+    let p = f.display().to_string();
+
+    let mut state = pmacs::editor::EditorState::new();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "FIRST = pmacs.buffer.from_file('{p}') \
+             SECOND = pmacs.buffer.from_file('{p}') \
+             SECOND:insert(0, 'dirty')"
+        ))
+        .exec()
+        .expect("two buffers on one path, second dirtied");
+
+    let (ok, err) = rd_delete(&mut state, &f, "");
+    assert!(
+        !ok,
+        "a modified SECOND match must refuse even though the first is clean"
+    );
+    assert!(err.contains("unsaved changes"), "got {err:?}");
+    assert!(f.exists(), "THE BITE: the file must survive");
+}
+
+/// Criterion 7 — component-prefix false positives are rejected. A
+/// modified buffer under `/tree-sibling` must not block a recursive
+/// delete of `/tree`.
+///
+/// Bite: fails against a string-prefix implementation. Pairs with
+/// criterion 8 so both directions of the prefix rule are pinned.
+#[test]
+fn rd7_a_sibling_directory_sharing_a_name_prefix_does_not_block() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let tree = dir.path().join("tree");
+    let sibling = dir.path().join("tree-sibling");
+    std::fs::create_dir(&tree).expect("mkdir tree");
+    std::fs::create_dir(&sibling).expect("mkdir sibling");
+    std::fs::write(tree.join("in.rs"), b"in\n").expect("write in");
+    let outside = sibling.join("out.rs");
+    std::fs::write(&outside, b"out\n").expect("write out");
+
+    let mut state = pmacs::editor::EditorState::new();
+    rd_open(&mut state, "B", &outside);
+    state
+        .lua_host
+        .lua()
+        .load("B:insert(0, 'dirty')")
+        .exec()
+        .expect("dirty the sibling's buffer");
+
+    let (ok, err) = rd_delete(&mut state, &tree, ", recursive = true");
+    assert!(
+        ok,
+        "THE BITE: `tree-sibling` is not beneath `tree`; a string-prefix \
+         implementation would wrongly refuse here. got {err}"
+    );
+    assert!(!tree.exists(), "the tree must be gone");
+    assert!(outside.exists(), "and the sibling untouched");
+}
+
+/// Criterion 8 — `recursive = true` over a directory containing a
+/// modified buffer's file refuses, and the whole tree survives.
+///
+/// Bite: fails against exact-path-equality validation. Asserting the
+/// *inner file* still exists is what carries it — the buffer surviving
+/// is already true today (mode (c)).
+#[test]
+fn rd8_recursive_delete_refuses_for_a_modified_descendant() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let tree = dir.path().join("tree");
+    let nested = tree.join("nested");
+    std::fs::create_dir_all(&nested).expect("mkdir -p");
+    let inner = nested.join("deep.rs");
+    std::fs::write(&inner, b"deep\n").expect("write");
+
+    let mut state = pmacs::editor::EditorState::new();
+    rd_open(&mut state, "B", &inner);
+    state
+        .lua_host
+        .lua()
+        .load("B:insert(0, 'dirty')")
+        .exec()
+        .expect("dirty the descendant");
+
+    let (ok, err) = rd_delete(&mut state, &tree, ", recursive = true");
+    assert!(
+        !ok,
+        "a modified descendant must refuse the recursive delete"
+    );
+    assert!(err.contains("unsaved changes"), "got {err:?}");
+    assert!(
+        inner.exists(),
+        "THE BITE: the whole tree survives, not just the buffer"
+    );
+    assert!(tree.exists(), "including the directory itself");
+}
+
+/// Criterion 9 — a *clean* recursive delete leaves descendant buffers
+/// orphaned, not removed.
+///
+/// This pin deliberately asserts today's imperfect behaviour. Widening
+/// reconciliation to the tree would route N buffers through
+/// `remove_buffer_and_fire` — phase 2 without phase 1 — promoting the
+/// parked dangling-window defect from exact-path to tree-wide.
+///
+/// Bite: fails against an implementation that widens reconciliation.
+#[test]
+fn rd9_clean_recursive_delete_leaves_descendants_orphaned() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let tree = dir.path().join("tree");
+    std::fs::create_dir(&tree).expect("mkdir");
+    let inner = tree.join("kept.rs");
+    std::fs::write(&inner, b"kept\n").expect("write");
+
+    let mut state = pmacs::editor::EditorState::new();
+    rd_open(&mut state, "B", &inner);
+
+    let (ok, err) = rd_delete(&mut state, &tree, ", recursive = true");
+    assert!(ok, "a clean tree deletes: {err}");
+    assert!(!tree.exists(), "the tree is gone");
+
+    let still: bool = state
+        .lua_host
+        .lua()
+        .load("return B:is_valid()")
+        .eval()
+        .expect("validity probe");
+    assert!(
+        still,
+        "THE BITE: reconciliation stays exact-path, so the descendant \
+         buffer is orphaned rather than removed"
+    );
+}
+
+/// Criterion 10 — `ignore_if_not_exists = true` on an absent path
+/// leaves a modified buffer intact, reproducing mode (b): the file is
+/// removed behind pmacs's back first, then the op runs.
+///
+/// Bite: fails against `main`, where the `NotFound` + ignore branch
+/// does **not** return and falls through to buffer removal — destroying
+/// unsaved work with zero filesystem work done.
+#[test]
+fn rd10_absent_plus_ignore_does_not_destroy_a_modified_buffer() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("vanished.rs");
+    std::fs::write(&f, b"content\n").expect("write");
+
+    let mut state = pmacs::editor::EditorState::new();
+    rd_open(&mut state, "B", &f);
+    state
+        .lua_host
+        .lua()
+        .load("B:insert(0, 'unsaved')")
+        .exec()
+        .expect("dirty the buffer");
+
+    // The file disappears behind pmacs's back.
+    std::fs::remove_file(&f).expect("remove behind our back");
+
+    let (ok, err) = rd_delete(&mut state, &f, ", ignore_if_not_exists = true");
+    assert!(ok, "absent + ignore is a no-op, not an error: {err}");
+
+    let still: bool = state
+        .lua_host
+        .lua()
+        .load("return B:is_valid()")
+        .eval()
+        .expect("validity probe");
+    assert!(
+        still,
+        "THE BITE: the no-op must return before touching the registry"
+    );
+    let text: String = state
+        .lua_host
+        .lua()
+        .load("return B:slice(0, B:len())")
+        .eval()
+        .expect("read back");
+    assert_eq!(text, "unsavedcontent\n", "the unsaved edit survives");
+}
+
+/// Criterion 14 — clean duplicates: exactly one match reconciled.
+///
+/// Bite: fails against an implementation that removes **all** matches.
+/// It pins the reconciliation half of Q#RD10 and *only* that: with both
+/// buffers clean there is no verdict difference between consulting one
+/// match and consulting all, so this setup cannot see validation
+/// breadth. Criterion 6 is what detects incomplete validation.
+#[test]
+fn rd14_clean_duplicates_reconcile_exactly_one() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("twin.rs");
+    std::fs::write(&f, b"twin\n").expect("write");
+    let p = f.display().to_string();
+
+    let mut state = pmacs::editor::EditorState::new();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "FIRST = pmacs.buffer.from_file('{p}') \
+             SECOND = pmacs.buffer.from_file('{p}')"
+        ))
+        .exec()
+        .expect("two clean buffers on one path");
+
+    let (ok, err) = rd_delete(&mut state, &f, "");
+    assert!(ok, "two clean duplicates must not block: {err}");
+
+    let (first, second): (bool, bool) = state
+        .lua_host
+        .lua()
+        .load("return FIRST:is_valid(), SECOND:is_valid()")
+        .eval()
+        .expect("validity probe");
+    assert!(
+        first != second,
+        "THE BITE: exactly one duplicate is reconciled away, not both \
+         and not neither (first={first}, second={second})"
+    );
+}

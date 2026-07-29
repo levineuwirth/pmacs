@@ -1589,6 +1589,119 @@ fn remove_buffer_removed_callback(lua: &Lua, handle: &BufferRemoveCallbackHandle
     callbacks.remove(handle.buffer, handle.callback_id)
 }
 
+/// Verdict for a pending `delete` resource op (resource-op delete
+/// guard, Q#RD12).
+///
+/// Computed once and consumed by two callers in different forms — the
+/// `apply_resource_op` delete arm and the Lua applier's plan-time
+/// preflight — so the two layers cannot disagree about the same path.
+enum DeleteVerdict {
+    /// Path absent **and** `ignore_if_not_exists` set: the op will do
+    /// nothing, and the preflight must not reject it (Q#RD4).
+    NoOp,
+    /// Path present, and every affected buffer is clean and not
+    /// mid-edit. The delete may proceed.
+    Clear,
+    /// The delete must not proceed. `message` always states why;
+    /// `buffer_name` is set only when a buffer caused the refusal.
+    Refuse {
+        message: String,
+        buffer_name: Option<String>,
+    },
+}
+
+/// The single shared query behind both delete layers (Q#RD6, Q#RD12).
+///
+/// Scans **every** path-bound buffer rather than the first match.
+/// [`BufferRegistry::find_by_path`] is first-match-only, and duplicate
+/// path-bound buffers are reachable from public Lua via
+/// `pmacs.buffer.from_file`, so a clean first match could otherwise
+/// hide a modified second — a silent guard bypass. Paths are
+/// normalized on both sides before comparison, so a raw-path lookup
+/// cannot miss a stored normalized path, and directory containment
+/// uses component-aware [`std::path::Path::starts_with`] so `/tree`
+/// does not match `/tree-sibling`.
+///
+/// Uses the same `symlink_metadata` call the primitive uses, **not**
+/// `canonicalize`: the latter resolves symlinks and reports a dangling
+/// one as absent, which is the single input on which the two disagree
+/// and exactly the input `ignore_if_not_exists` turns on.
+///
+/// `recursive` is deliberately not a parameter. Inspection is
+/// prefix-aware whenever the target is a directory, because a
+/// non-recursive delete of a non-empty directory fails at the
+/// filesystem anyway — so widening inspection there costs nothing and
+/// narrowing it would leave the recursive arm's bypass reachable.
+fn delete_verdict(
+    reg: &BufferRegistry,
+    path: &std::path::Path,
+    ignore_if_not_exists: bool,
+) -> DeleteVerdict {
+    let is_dir = match std::fs::symlink_metadata(path) {
+        Ok(md) => md.is_dir(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return if ignore_if_not_exists {
+                DeleteVerdict::NoOp
+            } else {
+                DeleteVerdict::Refuse {
+                    message: format!("apply_resource_op delete: {e}"),
+                    buffer_name: None,
+                }
+            };
+        }
+        // Never report safe on the strength of a question we could not
+        // answer: an unanswerable stat refuses rather than proceeding.
+        Err(e) => {
+            return DeleteVerdict::Refuse {
+                message: format!("apply_resource_op delete (stat): {e}"),
+                buffer_name: None,
+            };
+        }
+    };
+
+    let target = crate::editor_core::normalize_buffer_path(path.to_path_buf());
+    for id in reg.ids() {
+        let Ok(buf) = reg.get(*id) else { continue };
+        let Some(bound) = buf.file_path() else {
+            continue;
+        };
+        let bound = crate::editor_core::normalize_buffer_path(bound.to_path_buf());
+        if bound != target && !(is_dir && bound.starts_with(&target)) {
+            continue;
+        }
+        // "Modified" is `Buffer::is_modified()`. No new notion of
+        // dirtiness, and a *clean* open buffer is deliberately not
+        // guarded — refusing there would fail legitimate deletes for
+        // anyone who merely has the file open.
+        if buf.is_modified() {
+            return DeleteVerdict::Refuse {
+                message: format!(
+                    "apply_resource_op delete: refusing to delete {} — \
+                     buffer {:?} has unsaved changes; save or revert it first",
+                    path.display(),
+                    buf.name()
+                ),
+                buffer_name: Some(buf.name().to_string()),
+            };
+        }
+        // Checked here rather than at removal time: today a
+        // `ConcurrentEdit` refusal from `BufferRegistry::remove`
+        // arrives *after* the file is already gone.
+        if buf.editing_in_progress() {
+            return DeleteVerdict::Refuse {
+                message: format!(
+                    "apply_resource_op delete: refusing to delete {} — \
+                     buffer {:?} is mid-edit; finish the edit first",
+                    path.display(),
+                    buf.name()
+                ),
+                buffer_name: Some(buf.name().to_string()),
+            };
+        }
+    }
+    DeleteVerdict::Clear
+}
+
 fn remove_buffer_and_fire(lua: &Lua, registry: &SharedRegistry, id: BufferId) -> mlua::Result<()> {
     registry
         .borrow_mut()
@@ -3311,31 +3424,67 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
                         }
                     }
                     "delete" => {
+                        // Four ordered phases (Q#RD2): stat/no-op
+                        // decision -> enumerate and validate affected
+                        // buffers -> mutate the filesystem -> reconcile
+                        // the registry.
+                        //
+                        // Validation inspects and removes nothing, so a
+                        // filesystem failure leaves every buffer intact
+                        // automatically rather than by compensation, and
+                        // `on_removed` still observes the path already
+                        // gone because reconciliation is last.
                         let path: String = spec.get("path")?;
                         let pb = std::path::PathBuf::from(&path);
                         let recursive: bool = spec.get("recursive").unwrap_or(false);
                         let ignore_if_not_exists: bool =
                             spec.get("ignore_if_not_exists").unwrap_or(false);
-                        match std::fs::symlink_metadata(&pb) {
-                            Ok(md) => {
-                                let r = if md.is_dir() {
-                                    if recursive {
-                                        std::fs::remove_dir_all(&pb)
-                                    } else {
-                                        std::fs::remove_dir(&pb)
-                                    }
-                                } else {
-                                    std::fs::remove_file(&pb)
-                                };
-                                r.map_err(|e| io_err("delete", e))?;
-                            }
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                                if !ignore_if_not_exists {
-                                    return Err(io_err("delete", e));
+
+                        // Phases 1 and 2, as one shared query.
+                        let md = {
+                            let verdict = delete_verdict(&reg.borrow(), &pb, ignore_if_not_exists);
+                            match verdict {
+                                // Absent plus ignore is a no-op: return
+                                // without touching the registry, which
+                                // is the `create` arm's existing idiom.
+                                // Falling through here is the bug that
+                                // let mode (b) destroy a modified buffer
+                                // with zero filesystem work.
+                                DeleteVerdict::NoOp => return Ok(()),
+                                DeleteVerdict::Refuse { message, .. } => {
+                                    return Err(mlua::Error::external(message));
                                 }
+                                DeleteVerdict::Clear => {}
                             }
-                            Err(e) => return Err(io_err("delete (stat)", e)),
-                        }
+                            // `Clear` implies the path is present; re-stat
+                            // for the dir/file decision. A race between
+                            // the two calls degrades to an ordinary
+                            // filesystem error below, never to data loss.
+                            std::fs::symlink_metadata(&pb)
+                                .map_err(|e| io_err("delete (stat)", e))?
+                        };
+
+                        // Phase 3 — the irreversible step, reached only
+                        // after validation cleared it.
+                        let r = if md.is_dir() {
+                            if recursive {
+                                std::fs::remove_dir_all(&pb)
+                            } else {
+                                std::fs::remove_dir(&pb)
+                            }
+                        } else {
+                            std::fs::remove_file(&pb)
+                        };
+                        r.map_err(|e| io_err("delete", e))?;
+
+                        // Phase 4 — reconcile exactly as before
+                        // (Q#RD10): the single first exact-path match is
+                        // removed and additional clean duplicates are
+                        // left in place. Removing them all would route N
+                        // buffers through `remove_buffer_and_fire`,
+                        // which is phase 2 without phase 1, creating up
+                        // to N dangling windows — the parked lifecycle
+                        // defect this lane must not enlarge.
                         let bid = reg.borrow().find_by_path(&pb);
                         if let Some(id) = bid {
                             remove_buffer_and_fire(lua, &reg, id)?;
@@ -3346,6 +3495,93 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
                             "apply_resource_op: unknown kind {other:?}"
                         )));
                     }
+                }
+                Ok(())
+            })?,
+        )?;
+    }
+
+    {
+        // Q#RD12 — the synchronous, structured verdict the Lua
+        // preflight needs and cannot otherwise get. `pmacs.fs.stat` is
+        // asynchronous and the applier is synchronous; the only
+        // synchronous filesystem binding is `canonicalize`, which is
+        // realpath-like and disagrees with `symlink_metadata` on
+        // exactly the dangling-symlink input this query turns on.
+        //
+        // Delegates to the same helper the primitive uses, so the two
+        // layers cannot drift apart. Raises only on argument-type
+        // violations, matching the rest of the `pmacs.buffer` surface;
+        // ordinary filesystem conditions and buffer refusals are values.
+        let reg = registry.clone();
+        buffer.set(
+            "_delete_verdict",
+            lua.create_function(move |lua, spec: Table| -> mlua::Result<Table> {
+                let path: String = spec.get("path")?;
+                let ignore_if_not_exists: bool = spec.get("ignore_if_not_exists").unwrap_or(false);
+                let pb = std::path::PathBuf::from(&path);
+                let out = lua.create_table()?;
+                match delete_verdict(&reg.borrow(), &pb, ignore_if_not_exists) {
+                    DeleteVerdict::NoOp => out.set("kind", "no-op")?,
+                    DeleteVerdict::Clear => out.set("kind", "clear")?,
+                    DeleteVerdict::Refuse {
+                        message,
+                        buffer_name,
+                    } => {
+                        out.set("kind", "refuse")?;
+                        out.set("message", message)?;
+                        if let Some(name) = buffer_name {
+                            out.set("buffer_name", name)?;
+                        }
+                    }
+                }
+                Ok(out)
+            })?,
+        )?;
+    }
+
+    {
+        // Q#RD7 — the durable trace, written at the server-request
+        // boundary rather than in the primitive. `LuaHost::
+        // append_to_errors_buffer` is private, so it is not callable
+        // from where the promise was made; and a *Lua preflight*
+        // rejection never reaches the Rust primitive at all, so
+        // primitive-side logging would miss the common unattended case
+        // entirely. Hence a narrow surface reachable from the layer
+        // that actually knows the outcome.
+        let reg = registry.clone();
+        buffer.set(
+            "_append_error_record",
+            lua.create_function(move |lua, (label, message): (String, String)| {
+                let line = format!("[{label}] {message}\n");
+                let (id, edit) = {
+                    let mut r = reg.borrow_mut();
+                    let id = match r.find_by_name(crate::lua::ERRORS_BUFFER_NAME) {
+                        Some(id) => id,
+                        None => r.create(crate::lua::ERRORS_BUFFER_NAME),
+                    };
+                    let Ok(buf) = r.get_mut(id) else {
+                        return Ok(());
+                    };
+                    let pos = buf.len();
+                    let Ok(edit) = buf.apply_edit(EditOp::Insert {
+                        pos,
+                        bytes: line.as_bytes(),
+                    }) else {
+                        return Ok(());
+                    };
+                    (id, edit)
+                };
+                // Window TextViews are not attached views, so they miss
+                // `Buffer::apply_edit`'s broadcast; a window displaying
+                // `*errors*` would paint a stale line cache without
+                // this. The CRDT queue matters for the same reason it
+                // does on the host path: `*errors*` is upgraded at every
+                // replica attach.
+                if let Some(core) = lua.app_data_ref::<SharedCore>() {
+                    let mut core = core.borrow_mut();
+                    core.notify_buffer_edit(id, &edit);
+                    core.queue_daemon_origin_crdt_op(id, &edit);
                 }
                 Ok(())
             })?,

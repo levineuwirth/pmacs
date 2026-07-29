@@ -521,6 +521,56 @@ has **no branch and no framing yet**.
   `FrontendView.fold_projection` to `true` for semantic frontends, which
   Stage 2 deliberately left `false` (Q#FD21).
 
+## Resource-op delete guard implementation — PR OPEN, PARTIAL
+
+- Portable branch: `githubsucks/resource-op-delete-guard-impl`, worktree
+  `../pmacs-rd-impl`, based on `main` @ `300cbc4`. Implements the
+  framing merged as #186 (`docs/resource-op-delete-guard-framing.md`,
+  revision 5).
+- **The framing's §8 branch plan is superseded and cannot be followed.**
+  It says "one PR — #186, which becomes the implementation PR", written
+  when #186 was still open. #186 merged as framing-only, so the
+  implementation necessarily gets its own branch and PR. Nothing about
+  the decisions changes; only the branch plan.
+- **Layer 1 (the primitive) is complete and tested.** The delete arm is
+  four ordered phases; `delete_verdict` is the single shared query, used
+  by the primitive and exposed to Lua as `pmacs.buffer._delete_verdict`
+  so the two layers cannot drift.
+- **Layer 2 (the applier + server-request boundary) is implemented but
+  NOT yet covered.** `builtin/runtime/lsp.lua` has the plan-time
+  preflight, the parse-plus-apply wrap, origin restore on the failure
+  path, and the `*errors*` trace. Criteria 11-15 exercise those through
+  a real server pump and need new `pmacs_fake_lsp` modes that do not
+  exist yet. **Criterion 13 explicitly rejects a direct-call test as
+  insufficient**, so this is a real gap, not a formality: today the
+  Layer 2 code has no production-path pin.
+- Acceptance status: criteria **1-10, 14 and 16 land here** (11 tests in
+  `tests/m4_acceptance.rs`, prefixed `rd`). Criteria **11, 11a-11d, 12,
+  13, 15 do not** — they are the fake-LSP modes above.
+- **Criterion 3's stated bite in the framing is wrong**, found by
+  checking rather than trusting it. The framing says it fails against
+  buffer-first ordering; it does not, because the deleted path is a
+  directory no buffer is bound to, so reconciliation never fires on
+  that input. It *does* fail against validation that removes rather
+  than inspects — verified by mutation. The test comment carries the
+  correction; the framing wants amending on its next revision.
+- Bite verification: the five refusal criteria (1, 5, 6, 8, 10) fail
+  against `githubsucks/main` via `scripts/bite`. Criteria 3 and 4 pin
+  phase *ordering* against designs never committed, so `main` cannot
+  falsify them; both were verified by hand mutation instead (4 catches
+  buffer-first ordering, 3 catches removing-validation). Criteria 2, 7,
+  9 and 14 assert preserved or deliberately-unchanged behaviour and are
+  expected to pass against `main` — that is what they are for.
+- Gates green at this tree: fmt; clippy `-D warnings`; `--lib` **1863**;
+  `--lib --features crdt` **2048**; `m4_acceptance` **132**;
+  `lsp_dispatch_seams_acceptance` **15**; `dired_acceptance` **25** and
+  `autosave_acceptance` **29** (framing watch items); required GPU
+  **202**; `git diff --check`.
+- Recovery from a clean checkout:
+  `git fetch githubsucks && git worktree add ../pmacs-rd-impl
+  -b resource-op-delete-guard-impl githubsucks/resource-op-delete-guard-impl`.
+
+
 ## Parked lane: kill-ring browser + persistence
 
 - Portable branch: `githubsucks/kill-ring-browser`
