@@ -266,6 +266,22 @@ impl DiagnosticStore {
         *self.epochs.entry(uri.to_owned()).or_insert(0) += 1;
     }
 
+    /// Drop **every** trace of `uri`, epoch included (dired Stage 2a,
+    /// §5 finding 4).
+    ///
+    /// Distinct from [`Self::clear`] on purpose: `clear` *creates* an
+    /// `epochs` entry (`or_insert(0) += 1`) because a consumer caching
+    /// against the epoch must observe that the diagnostics went away.
+    /// Forgetting is the opposite intent — the editor no longer holds
+    /// this URI at all — so leaving the counter behind would be a
+    /// URI-keyed leak in the one map nothing else prunes.
+    pub fn forget(&mut self, uri: &str) {
+        self.by_uri.remove(uri);
+        self.severity_counts.remove(uri);
+        self.stale_uris.remove(uri);
+        self.epochs.remove(uri);
+    }
+
     /// Monotonic per-URI change counter: how many times `set` /
     /// `clear` ran for this URI. `0` for a URI never written.
     /// Consumers cache against this to detect republishes that no
