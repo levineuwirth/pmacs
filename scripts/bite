@@ -12,7 +12,9 @@
 # Exit status: 0 when the named tests pass now and fail against
 # <ref>'s version of <path> (the fix bites), 1 when they still pass
 # there (vacuous), 2 on usage/setup errors, 3 when the POSITIVE
-# CONTROL fails. The working-tree file is restored on every exit path,
+# CONTROL fails, 4 when the swapped run is INCONCLUSIVE (see the MIXED
+# arm below --- non-zero because its likeliest cause is vacuity, not
+# success). The working-tree file is restored on every exit path,
 # including interrupts.
 #
 # THE POSITIVE CONTROL, and why it is not optional. Before this
@@ -76,9 +78,12 @@ fi
 # nothing until it finishes --- that is the trade, not a bug. Do not
 # "fix" it back to streaming without giving the parser another source.
 #
-# Colour is pinned off on both runs: `--color always` in the
-# passed-through args would otherwise wrap the summary lines in escape
-# codes, and every anchored match here would silently stop matching.
+# Colour is pinned off on both runs, so an ambient CARGO_TERM_COLOR
+# cannot wrap the summary lines in escape codes and silently stop every
+# anchored match here from matching. Note the limit: an explicit
+# `--color always` in the passed-through args still beats the
+# environment. That is self-inflicted, and the failure is fail-closed
+# (a zeroed count reads as NO CONTROL), but do not pass it.
 export CARGO_TERM_COLOR=never
 
 # Sum the `N passed` figures across every `test result:` line, so a
@@ -142,12 +147,31 @@ fi
 if printf '%s\n' "$swapped_out" | grep -q '^test result: FAILED'; then
     echo "bite: OK (assertion) --- tests fail against $ref:$path (the fix bites)"
 elif printf '%s\n' "$swapped_out" | grep -q '^test result:'; then
-    # Some target ran to completion without a failure, yet cargo still
-    # exited non-zero --- typically a *different* target in the same
-    # invocation failed to build. Neither clean result applies.
-    echo "bite: OK (MIXED) --- some tests ran and none failed, but the run still failed." >&2
-    echo "bite: narrow the invocation to one target before trusting this." >&2
+    # Some target ran to completion with no failure, yet cargo still
+    # exited non-zero.
+    #
+    # NOT reachable the obvious way, which was checked rather than
+    # assumed: `--test A --test B` where B's swapped file will not
+    # build does NOT land here. Cargo builds every named target before
+    # running any, so B's build failure stops A from running too and
+    # there is no summary at all --- that is the COMPILE arm below.
+    # What does reach here is a run that prints summaries and *then*
+    # fails: doc-tests failing to compile after the lib tests pass, or
+    # a harness dying after its summary line. This arm is therefore
+    # defensive, and its trigger was not manufactured for validation.
+    #
+    # It exits NON-ZERO on purpose. The likeliest reading is not
+    # success but VACUITY: the named tests ran clean against the old
+    # tree (exactly the vacuous outcome) while an unrelated failure
+    # supplied the exit status. Reporting "OK" and exiting 0 here would
+    # let a scripted caller --- or a framing doc quoting "bite exited
+    # 0" --- record a certified bite for a run that certified nothing.
+    echo "bite: INCONCLUSIVE (MIXED) --- some tests ran, none failed, yet the run failed." >&2
+    echo "bite: the named tests may have PASSED against $ref:$path with an unrelated" >&2
+    echo "bite: build error supplying the exit status. Narrow to one target and re-run." >&2
+    exit 4
 else
-    echo "bite: OK (COMPILE) --- $ref:$path does not build against the current tree." >&2
+    echo "bite: OK (COMPILE) --- $ref:$path produced no test summary" >&2
+    echo "bite: (build failure, or a harness that died before printing one)." >&2
     echo "bite: weaker evidence than an assertion failure --- the tests may never have run." >&2
 fi

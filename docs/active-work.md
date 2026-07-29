@@ -543,12 +543,26 @@ has **no branch and no framing yet**.
   tree **and** that at least one ran (a filter matching nothing exits
   0, so passing alone is insufficient), exiting 3 as `NO CONTROL`
   otherwise, and it labels `OK (assertion)` versus `OK (COMPILE)`.
-- **Validated on all three paths, not just the happy one:** a
-  zero-match filter reports `NO CONTROL`; a genuine bite reports
-  `control OK` then `OK (assertion)`; and a deliberately broken test
-  that fails on both trees reports `NO CONTROL` at exit 3 — **the old
-  script printed `bite: OK` for that last case**, which is the whole
-  point.
+- **Validated by execution, not by reading**, and the results are
+  listed with the one arm that was NOT reproduced:
+  - zero-match filter -> `NO CONTROL`, exit 3;
+  - genuine bite -> `control OK` then `OK (assertion)`, exit 0;
+  - test broken so it fails on BOTH trees -> `NO CONTROL`, exit 3.
+    **The old script printed `bite: OK` here**, which is the whole
+    point of the lane;
+  - assertion failure whose own output prints `error[E0308]` and
+    `error: could not compile` at column 0 -> still `OK (assertion)`,
+    which is why classification reads libtest's summary rather than
+    compiler text;
+  - swapped file that will not build -> `OK (COMPILE)`;
+  - **`INCONCLUSIVE (MIXED)` was not reproduced.** Its assumed trigger
+    — `--test A --test B` where B's swapped file fails to build — was
+    tested and **does not reach it**: cargo builds every named target
+    before running any, so B's failure stops A from running and the
+    run yields no summary at all (the COMPILE arm). The arm stays as
+    defence for the genuinely reachable causes (doc-tests failing to
+    compile after lib tests pass; a harness dying after its summary),
+    and the script says it was not manufactured.
 - **Handoff correction, verified rather than inherited.**
   `docs/agent-handoff.md` §5 claimed the script "restores by `git
   checkout --`, which reverts the file to HEAD", destroying
