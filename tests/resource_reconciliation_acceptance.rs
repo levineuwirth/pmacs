@@ -312,6 +312,55 @@ fn acc28_a_false_string_prefix_is_not_a_path_prefix() {
     );
 }
 
+/// Acceptance 28, delete side — **and this is the row that bites.**
+///
+/// The rename row above cannot falsify a string-prefix walk on its own:
+/// `reconcile_rename` calls `Path::strip_prefix` to rebuild the
+/// descendant's tail, and that is component-aware too, so a false
+/// prefix match is silently dropped a second time and the buffer stays
+/// put. Deletion has no such second guard — the walk's verdict IS the
+/// kill list — so the containment rule has to be pinned here.
+///
+/// Bite: a string `starts_with` instead of `Path::starts_with` kills a
+/// buffer on `foobar.txt` when `foo/` is deleted.
+#[test]
+fn acc28_delete_a_false_string_prefix_does_not_widen_the_kill_list() {
+    let fx = Fixture::new();
+    fx.dir("foo");
+    let inside = fx.write("foo/a.txt", "in\n");
+    let sibling = fx.write("foobar.txt", "out\n");
+    let mut state = editor();
+    open_as(&state, "KEEP", &fx.write("keep.txt", "k\n"));
+    open_as(&state, "IN", &inside);
+    open_as(&state, "OUT", &sibling);
+
+    exec(
+        &state,
+        &format!(
+            "pmacs.buffer.apply_resource_op {{ kind = \"delete\", \
+               path = \"{}\", recursive = true }}",
+            lua_str(&fx.at("foo"))
+        ),
+    );
+
+    assert!(!fx.at("foo").exists(), "the directory is gone");
+    assert!(
+        !buffer_is_valid(&state, "IN"),
+        "the real descendant is reconciled away"
+    );
+    assert!(
+        buffer_is_valid(&state, "OUT"),
+        "`foobar.txt` shares a string prefix with `foo` and is not under \
+         it — killing it destroys an unrelated buffer whose file still \
+         exists"
+    );
+    assert!(
+        sibling.exists(),
+        "and that file is indeed still on disk, which is what makes the \
+         kill wrong rather than merely early"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 29 — name provenance, both directions
 // ---------------------------------------------------------------------------
@@ -1320,7 +1369,32 @@ fn acc30_diagnostics_re_root_in_every_window_and_keep_their_stack_position() {
     exec(&state, "pmacs.window.switch_buffer(_G.B)");
     settle_a_while(&mut state);
 
+    // Push one more overlay AFTER the diagnostic in each window.
+    // Without this the composition-order assertion below cannot bite:
+    // the LSP attach leaves `diagnostic` LAST in the stack, and moving
+    // the last element to the end is a no-op, so a remove-and-re-push
+    // would be indistinguishable from an in-place mutation.
+    // `_attach_highlight` uses `push_overlay` (no dedup), so a second
+    // call appends.
+    exec(
+        &state,
+        "pmacs.parse._attach_highlight(_G.B, pmacs.parse.buffer_language(_G.B))",
+    );
+    exec(&state, "pmacs.window.focus_next()");
+    exec(
+        &state,
+        "pmacs.parse._attach_highlight(_G.B, pmacs.parse.buffer_language(_G.B))",
+    );
+
     let before_kinds = overlay_kinds_per_window(&state);
+    assert!(
+        before_kinds
+            .iter()
+            .all(|(_, kinds)| kinds.iter().position(|k| *k == "diagnostic")
+                < Some(kinds.len() - 1)),
+        "precondition: the diagnostic overlay must NOT be last, or \
+         \"keeps its stack position\" is unfalsifiable; got {before_kinds:?}"
+    );
     let before_paint = error_underlines_per_window(&state);
     assert_eq!(
         before_paint.len(),
@@ -1586,20 +1660,40 @@ fn wait_for_apply_response(state: &mut EditorState, sink: &Path) -> serde_json::
 }
 
 /// Acceptance 34. Renaming the **active** file through the full
-/// `apply_workspace_edit` path leaves **no phantom empty buffer** at the
-/// obsolete path, and the user is returned to the **same buffer** (now
-/// under its new path).
+/// `apply_workspace_edit` path returns the user to the **same buffer**
+/// (now under its new path), and leaves no buffer bound to the obsolete
+/// path.
+///
+/// The plan deliberately edits *another* file first. Without that the
+/// row cannot bite at all: the applier only has to restore the origin if
+/// something moved the active buffer away, and a lone rename op does not.
 ///
 /// Bite: the applier restoring by path instead of by buffer handle. A
 /// captured path no longer resolves after its own batch renamed it, so
-/// `find_or_open` reaches `resolve_target_buffer`'s `NotFound` arm,
-/// which *creates* an empty path-backed buffer and selects it. No
-/// reconciliation can reach the string a Lua local already captured.
+/// `find_or_open` raises, the `pcall` swallows it, and the user is
+/// stranded in whatever buffer the last applied op left active. No
+/// reconciliation can reach a string a Lua local already captured.
+///
+/// **One framing claim corrected here.** §5's G1 says the stale path
+/// "materializes a phantom": that `find_or_open(origin)` reaches
+/// `resolve_target_buffer`'s `NotFound` arm, which creates an empty
+/// path-backed buffer and selects it. It does not.
+/// `pmacs.buffer.find_or_open` (`src/lua_bindings/mod.rs`) calls
+/// `crate::file_io::load_file` directly and maps the error, so a missing
+/// path **raises**; the `NotFound` arm belongs to
+/// `EditorCore::resolve_target_buffer`, which serves
+/// `pmacs.window.display_file` and the startup/daemon target, not this
+/// binding. The defect is real but smaller than G1 states — a silently
+/// swallowed restore, not a fabricated file — and this row asserts the
+/// half that is true. The no-buffer-at-the-old-path assertion is kept as
+/// a cheap guard against a future fallback that *would* create one, and
+/// is not the biting half.
 #[test]
-fn acc34_renaming_the_active_file_through_the_applier_leaves_no_phantom() {
+fn acc34_renaming_the_active_file_through_the_applier_returns_the_same_buffer() {
     let fx = Fixture::new();
     fx.write("proj/Cargo.toml", "[package]\nname = \"p\"\n");
     let old = fx.write("proj/src/main.rs", "fn main() {}\n");
+    let other = fx.write("proj/src/other.rs", "fn other() {}\n");
     let new = fx.at("proj/src/renamed.rs");
     let mut state = editor();
     configure_fake(&state, &fx.root, "rust");
@@ -1607,11 +1701,25 @@ fn acc34_renaming_the_active_file_through_the_applier_leaves_no_phantom() {
         &state,
         &fx.root,
         &serde_json::json!({
-            "documentChanges": [{
-                "kind": "rename",
-                "oldUri": file_uri(&old),
-                "newUri": file_uri(&new),
-            }],
+            "documentChanges": [
+                {
+                    // Moves the active buffer away, so the restore has
+                    // something to undo.
+                    "textDocument": { "uri": file_uri(&other), "version": 1 },
+                    "edits": [{
+                        "range": {
+                            "start": { "line": 0, "character": 0 },
+                            "end":   { "line": 0, "character": 0 },
+                        },
+                        "newText": "// touched\n",
+                    }],
+                },
+                {
+                    "kind": "rename",
+                    "oldUri": file_uri(&old),
+                    "newUri": file_uri(&new),
+                },
+            ],
         }),
     );
     open_as(&state, "B", &old);
@@ -1637,7 +1745,9 @@ fn acc34_renaming_the_active_file_through_the_applier_leaves_no_phantom() {
         state.core.borrow().active_buffer_id(),
         active_before,
         "the user must be returned to the SAME buffer, now under its new \
-         path — not to a freshly created one"
+         path — a path-based restore raises on the renamed-away path, the \
+         pcall swallows it, and the user is left wherever the last applied \
+         op put them"
     );
     assert_eq!(
         buffer_path(&state, "B").as_deref(),
@@ -1645,7 +1755,7 @@ fn acc34_renaming_the_active_file_through_the_applier_leaves_no_phantom() {
         "and that buffer's path followed the rename"
     );
 
-    let phantom: bool = eval(
+    let stale: bool = eval(
         &state,
         &format!(
             "for _, b in ipairs(pmacs.buffer.list()) do
@@ -1655,11 +1765,7 @@ fn acc34_renaming_the_active_file_through_the_applier_leaves_no_phantom() {
             lua_str(&old)
         ),
     );
-    assert!(
-        !phantom,
-        "no buffer may remain bound to the obsolete path — that buffer is \
-         the phantom the old path fallback materialized"
-    );
+    assert!(!stale, "no buffer may remain bound to the obsolete path");
 }
 
 /// Acceptance 35. When the origin buffer is **gone** after the edit, the

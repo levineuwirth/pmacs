@@ -251,7 +251,8 @@ pub fn install_diag(
                 let Some(core) = lua.app_data_ref::<SharedCore>() else {
                     return Ok(false);
                 };
-                core.borrow_mut().rename_resource_in_views(&old_uri, &new_uri);
+                core.borrow_mut()
+                    .rename_resource_in_views(&old_uri, &new_uri);
                 Ok(true)
             })?,
         )?;

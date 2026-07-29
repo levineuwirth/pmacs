@@ -5317,7 +5317,9 @@ pub fn buffers_bound_under(
     let mut out = Vec::new();
     for id in reg.ids() {
         let Ok(buf) = reg.get(*id) else { continue };
-        let Some(bound) = buf.file_path() else { continue };
+        let Some(bound) = buf.file_path() else {
+            continue;
+        };
         let bound = normalize_buffer_path(bound.to_path_buf());
         if bound == target || (include_descendants && bound.starts_with(&target)) {
             out.push((*id, bound));
