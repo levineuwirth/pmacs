@@ -30,13 +30,36 @@ concurrency:
 # Every job carries `timeout-minutes`. Without one a job inherits
 # GitHub's 360-minute default, so a single hung test burns six hours —
 # times four on the test matrix — and reports nothing useful at the end
-# of it. The measured critical path is ~14.6 min (macOS/luajit), so 25
-# leaves ample headroom for a slow runner while catching a hang in
-# under half an hour. `m6-perf-gates` keeps its tighter 15.
+# of it.
+#
+# The ceilings are justified against OBSERVED EXECUTION, and the
+# numbers are a reading rather than a constant, so re-measure before
+# trusting them:
+#
+#   * observed max, 25-run window: 17 min (macOS/luajit)
+#   * observed max, 12-run window: 15.8 min (same job)
+#   * every other job: under 4 min
+#
+# `timeout-minutes` counts EXECUTION, not queue time — a 33-minute
+# wall-clock run in that window executed its longest job in 17 — so no
+# run in the observed history would have been killed by these values.
+#
+# The exposure is the case the window does NOT contain: a COLD CACHE.
+# A stable-toolchain bump invalidates Swatinem's key on every leg at
+# once, and a cold macOS debug build of this workspace plus the suite is
+# the plausible way a HEALTHY run exceeds its ceiling. The test job
+# therefore gets 35 rather than 25 — roughly 2x its observed max — while
+# everything else keeps 25 against a sub-4-minute observed max.
+#
+# DIAGNOSIS, WRITTEN BEFORE IT HAPPENS: four test legs timing out
+# simultaneously, shortly after a Rust release, is a cold cache and not
+# a hang. Rerun, or raise this number. A single leg timing out while its
+# siblings pass is the hang case these ceilings exist to catch.
 #
 # This is also the gate that has to exist before the basedpyright-class
 # hang can ever be armed — see `PMACS_REQUIRE_PYRIGHT`, deliberately
-# never set, in the test job below.
+# never set, in the test job below. 35 still beats the 360-minute
+# default by an order of magnitude.
 jobs:
   fmt:
     name: Format
@@ -113,7 +136,12 @@ jobs:
   test:
     name: Test (${{ matrix.os }} / ${{ matrix.lua }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    # 35, not 25: this is the only job whose observed max is minutes
+    # rather than seconds, and the only one a cold cache can plausibly
+    # push past a 25-minute ceiling on all four legs at once. See the
+    # note above `jobs:` for the measurements and the cold-cache
+    # diagnosis.
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:

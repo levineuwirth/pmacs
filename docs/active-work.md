@@ -840,11 +840,30 @@ has **no branch and no framing yet**.
 - **`timeout-minutes` on every job (§5.2).** Measured before changing:
   **7 of 8 jobs had none** and inherited GitHub's 360-minute default;
   only `m6-perf-gates` had one (15). A single hung test therefore burnt
-  six hours, times four on the test matrix. Set to 25 against a
-  measured ~14.6 min critical path (macOS/luajit).
+  six hours, times four on the test matrix.
   **This is the gate that must land before `PMACS_REQUIRE_PYRIGHT` can
   ever be set** — lane 2 left basedpyright unarmed precisely because
   this did not exist.
+- **The ceilings are 25, and 35 for the test job — anchored on observed
+  execution, corrected in review.** Revision 1 cited "~14.6 min, ample
+  headroom", which was one reading quoted as a property. Re-measured
+  over two windows: **17 min** max over 25 runs and **15.8 min** over
+  12, both macOS/luajit; every other job under 4 min. Against 17, a
+  flat 25 is ~1.5x, not "ample".
+  - `timeout-minutes` counts **execution, not queue** — a 33-minute
+    wall-clock run in that window executed its longest job in 17 — so
+    **no run in observed history would have been killed** by either
+    value.
+  - The real exposure is what the window does *not* contain: a **cold
+    cache**. A stable-toolchain bump invalidates Swatinem's key on
+    every leg simultaneously, and a cold macOS debug build plus suite
+    is the plausible way a *healthy* run overruns. It would present as
+    four legs timing out at once, the day after a Rust release.
+  - So the test job takes 35 (~2x its observed max) and the rest keep
+    25 (~6x theirs), and **the diagnosis is written into the workflow
+    before the event**: simultaneous four-leg timeouts after a
+    toolchain release are a cold cache, not a hang; a single leg
+    timing out beside passing siblings is the hang case.
 - **`concurrency` with `cancel-in-progress` (§6.1)**, scoped to pull
   requests. `github.event.pull_request.number` is empty on a push to
   `main`, so the fallback keys those by SHA and no `main` run can
@@ -854,10 +873,26 @@ has **no branch and no framing yet**.
   *before* proposing it, so adding it cannot turn CI red on arrival.
   The root-package clippy never covered it: the workspace default
   member is only `pmacs`.
+- **§5.1 branch protection is DONE, not deferred** — it belongs in
+  neither this lane's shipped list nor its deferrals, and review was
+  right that its absence from both was an omission. It was enabled
+  earlier in this session; verified against the API at review time:
+
+  ```
+  $ gh api repos/levineuwirth/pmacs/branches/main/protection
+  {"enforce_admins":false,"force_push":false,"required_checks":12,"strict":false}
+  ```
+
+  All 12 checks required; `strict` off deliberately, so a PR need not
+  rebase every time `main` moves (this repository's ledger contention
+  makes strict expensive); `enforce_admins` off so the user retains an
+  override. **This matters to the concurrency comment**, which
+  justifies exempting `main` pushes by appeal to "the
+  branch-protection record" — that record now exists, so the
+  justification is real rather than aspirational.
 - Recovery from a clean checkout:
   `git fetch githubsucks && git worktree add ../pmacs-ci3
   -b ci-timeouts-concurrency githubsucks/ci-timeouts-concurrency`.
-
 
 ## Parked lane: kill-ring browser + persistence
 
@@ -1166,4 +1201,10 @@ Whenever a listed lane changes materially:
 3. keep durable architecture in `docs/agent-handoff.md`, not here;
 4. remove the lane after merge or abandonment;
 5. verify every recovery command from a clean worktree before calling
-   the transfer complete.
+   the transfer complete;
+6. **read the seam back after inserting or removing a lane.** A block
+   that ends in a blank line, inserted above a heading already preceded
+   by one, leaves a double blank — three consecutive PRs shipped that
+   and each was caught in review rather than before it. It survives by
+   being beneath the level anyone reads at. `grep -n -B2 '^## '` over
+   the file, or just look at the two lines above the next heading.
