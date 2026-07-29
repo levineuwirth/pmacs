@@ -245,6 +245,95 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
+## Generated-buffer immutability lane (Arc: workbench primitives) — STAGE 1 OPEN
+
+**Framing: [PR #188](https://github.com/levineuwirth/pmacs/pull/188),
+revision 5, APPROVED and still open.** Read it as
+`git show githubsucks/generated-buffer-immutability:docs/generated-buffer-immutability-framing.md`
+until it merges. Stage 1 is branched from **landed `main`**, not stacked
+on the framing branch, so the two merge in either order.
+
+- **Branch `generated-buffer-immutability-stage1`, based on
+  `githubsucks/main` @ `300cbc4`.** Worktree
+  `../pmacs-gbi-stage1`. Code checkpoint `e1b859f`; this ledger commit
+  rides on top of it.
+- **What Stage 1 ships.** `dired.lua`'s `paint` and `listview.lua`'s
+  `render` write through `pmacs.buffer.set_generated_contents` (zero
+  `bypass_intercept` writes remain in either file); `listview` gains
+  Q#GB13 ownership-by-handle with `<2>`..`<99>` disambiguation and
+  Q#GB18's identity-routed `panels` list in the **same** commit;
+  Q#GB6's per-coordinate window clamp in
+  `EditorCore::notify_buffer_edit`; and Q#GB16(a)'s corrected fold
+  status string. No protocol change, no new Lua surface, no new
+  interaction island.
+- **Why these two families first, and it is not "the cheap half".**
+  `compile.lua:219` and `builtin/commands/default.lua:855` rebind all
+  seven undo chords to a no-op; `dired.lua` and `listview.lua` rebind
+  **nothing**, so a bare `C-/` emptied a listing and a panel. Stage 1
+  closes the only two families reachable without `M-x`.
+- **Two framing criteria were wrong and the tests say so rather than
+  working around them.**
+  - Stage 1 criterion 5 ("an ordinary edit is refused by the INTERCEPT,
+    not by the rope") is **unreachable** once this arc's lock exists.
+    `Buffer::apply_edit` (`src/buffer.rs:773`) and `begin_edit`
+    (`:725`) call `ensure_writable` as their FIRST statement, while the
+    intercept chain runs later inside `apply_edit_inner` (`:1072`), so
+    the rope always answers first. Measured: a self-insert on an
+    adopted panel reports ``insert failed: buffer `*test-panel*` (id
+    BufferId(n)) is read-only``. Restated in both suites as "the
+    intercept still refuses with its named error **when the rope is
+    lifted**", which keeps the framing's own bite (delete
+    `add_intercept`) and is the state the intercept genuinely covers.
+  - Criterion 7 ("a refresh reaches the window") **cannot bite at the
+    listview adopter**: `listview.refresh` and `listview.open` both
+    follow `render` with `window.switch_buffer`, which rebuilds the
+    `TextView` from scratch (`src/editor_core.rs:4859-4868`) and masks
+    a dropped fan-out. `dired.revert` and `dired.sort-cycle` paint
+    without a switch, so the dired half carries it and fails the
+    mutation with the reported `assertion failed: end <= self.len()`.
+- **Stage 2 still owes everything with new Rust in it**, per the
+  framing's cut: `Buffer::apply_generated_edit` + `GeneratedOutcome` +
+  the `{ generated = true }` option + its own `run_buffer_edit` arm;
+  `set_generated_contents` reimplemented over it; Q#GB10's path-backed
+  refusal and `mark_clean`; Q#GB15's `identity_protected`; Q#GB13/GB18
+  for `compile.lua` and the search panel; Q#GB5's `ensure_slot` lock;
+  conversion of the remaining 13 write sites; and the three
+  `compile_mode_acceptance` intruder tests converted per Q#GB12.
+- **Verification at code checkpoint `e1b859f`.** `cargo fmt --check`;
+  `cargo clippy --workspace --all-targets -- -D warnings`; library
+  **1,863 passed + 3 ignored** default and **2,048 passed + 4 ignored**
+  CRDT; `listview_acceptance` **16**, `dired_acceptance` **31**,
+  `folding_acceptance` **21**, `terminal_copy_mode_acceptance` **16**
+  default and **17** with `--features crdt` (the extra one is
+  `acc16e`, which a default run never compiles — judge that step by the
+  count, not the verdict); M4 **121 passed + 3 ignored + 1 filtered**
+  with `--skip basedpyright`; required GPU **202/202**; isolated-config
+  full workspace sweep **3,511 passed across 103 binaries, exit 0**;
+  `git diff --check` clean.
+- **Bites, all executed.** Five criteria are falsified by revert against
+  `githubsucks/main` (`scripts/bite` on `builtin/runtime/listview.lua`
+  and `builtin/runtime/dired.lua`): the two undo criteria, the
+  no-adoption criterion, the disambiguated-panel criterion, and the
+  fold-refusal pair. Nine more are falsified by a named one-line
+  mutation, each run and each observed to fail: dropping the fan-out in
+  the `set_generated_contents` binding; deleting the cursor clamp;
+  gating the `view_top` clamp on "the buffer shrank"; deleting
+  `self.read_only = false` from `set_generated_contents`; deleting
+  `add_intercept` and `set_round_trip_input` at each adopter; restoring
+  a name-keyed `panel_for_buffer`; adopting at the variant limit; and
+  restoring the old fold status string. **The `view_top` and `cursor`
+  clamps each fail only their own criterion**, which is the
+  discrimination review round 2's P2-4 asked for.
+- **Recovery:**
+
+  ```sh
+  git fetch githubsucks
+  git worktree add ../pmacs-gbi-stage1 generated-buffer-immutability-stage1
+  cd ../pmacs-gbi-stage1
+  cargo test --test listview_acceptance --test dired_acceptance
+  cargo test --test terminal_copy_mode_acceptance --features crdt
+  ```
+
 ## Bottom-panel lane (Arc 7) — 2B-2 MERGED; 2B-3 IS NEXT
 
 Stage 1, the Stage 2 framing, Stage 2A, Stage 2B-1, and **Stage 2B-2 are
