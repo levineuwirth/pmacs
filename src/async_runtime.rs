@@ -1860,6 +1860,126 @@ mod tests {
         }
     }
 
+    /// dired Stage 2a, acceptance 54 (controlled-bus layer). Allocate
+    /// two resource jobs **without dispatching workers**, inject their
+    /// successful replies in a chosen order, and assert
+    /// `TickOutcome.resources` reports exactly that order.
+    ///
+    /// This is the honest statement of what the runtime guarantees:
+    /// `tick` drains the reply bus with `try_recv` and establishes no
+    /// execution token, so what a consumer sees is bus-arrival order.
+    /// The test fails against sorting by job id or kind, and against any
+    /// claim that the order recovers dispatch or filesystem-execution
+    /// order — because the injection order here is *deliberately* the
+    /// reverse of the allocation order in the first case.
+    #[test]
+    fn tick_reports_resources_in_bus_arrival_order_not_allocation_order() {
+        fn run(reverse: bool) -> Vec<ResourceOp> {
+            let rt = AsyncRuntime::with_pool_size(1);
+            let (a, _) = rt.allocate_with_resource(
+                JobKind::FsRename,
+                None,
+                None,
+                Some(ResourceOp::Rename {
+                    from: PathBuf::from("/tmp/a-from"),
+                    to: PathBuf::from("/tmp/a-to"),
+                }),
+            );
+            let (b, _) = rt.allocate_with_resource(
+                JobKind::FsRemove,
+                None,
+                None,
+                Some(ResourceOp::Remove {
+                    path: PathBuf::from("/tmp/b-gone"),
+                }),
+            );
+            let order = if reverse { [b, a] } else { [a, b] };
+            for id in order {
+                rt.workers
+                    .send(
+                        ASYNC_REPLY_TOPIC,
+                        &WorkerReply {
+                            job_id: id,
+                            kind: ReplyKind::FsUnit,
+                        },
+                    )
+                    .expect("inject reply");
+            }
+            let outcome = rt.tick();
+            assert_eq!(outcome.settled.len(), 2, "both jobs settled");
+            outcome.resources
+        }
+
+        let a_first = ResourceOp::Rename {
+            from: PathBuf::from("/tmp/a-from"),
+            to: PathBuf::from("/tmp/a-to"),
+        };
+        let b_first = ResourceOp::Remove {
+            path: PathBuf::from("/tmp/b-gone"),
+        };
+
+        assert_eq!(
+            run(true),
+            vec![b_first.clone(), a_first.clone()],
+            "B injected first must be reported first, even though A was \
+             allocated first"
+        );
+        assert_eq!(
+            run(false),
+            vec![a_first, b_first],
+            "and the reverse arrival order reverses the report"
+        );
+    }
+
+    /// A failed or cancelled mutation reconciles nothing, so it must not
+    /// appear in `resources` at all (acceptance 37's runtime half).
+    #[test]
+    fn a_failed_or_cancelled_resource_job_is_not_harvested() {
+        let rt = AsyncRuntime::with_pool_size(1);
+        let (failed, _) = rt.allocate_with_resource(
+            JobKind::FsRename,
+            None,
+            None,
+            Some(ResourceOp::Rename {
+                from: PathBuf::from("/tmp/nope"),
+                to: PathBuf::from("/tmp/also-nope"),
+            }),
+        );
+        let (cancelled, _) = rt.allocate_with_resource(
+            JobKind::FsRemove,
+            None,
+            None,
+            Some(ResourceOp::Remove {
+                path: PathBuf::from("/tmp/never"),
+            }),
+        );
+        rt.workers
+            .send(
+                ASYNC_REPLY_TOPIC,
+                &WorkerReply {
+                    job_id: failed,
+                    kind: ReplyKind::Error("ENOENT".to_owned()),
+                },
+            )
+            .expect("inject");
+        rt.workers
+            .send(
+                ASYNC_REPLY_TOPIC,
+                &WorkerReply {
+                    job_id: cancelled,
+                    kind: ReplyKind::Cancelled,
+                },
+            )
+            .expect("inject");
+        let outcome = rt.tick();
+        assert_eq!(outcome.settled.len(), 2, "both settled");
+        assert!(
+            outcome.resources.is_empty(),
+            "only Complete mutations are harvested; got {:?}",
+            outcome.resources
+        );
+    }
+
     #[test]
     fn dispatch_sum_completes_with_correct_value() {
         let rt = AsyncRuntime::with_pool_size(2);

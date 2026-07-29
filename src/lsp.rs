@@ -4074,3 +4074,657 @@ mod tests {
         assert_eq!(resolve_config_section(&s, Some("")), s);
     }
 }
+
+// ---------------------------------------------------------------------------
+// dired Stage 2a — `forget_uri`, and the tombstone that gates the
+// uncorrelated resurrection paths (§5, acceptance 31 / 31b / 31c / 31d).
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod resource_reconciliation_tests {
+    use super::*;
+    use crate::async_runtime::JobOutcome;
+
+    /// A manager plus two live-enough clients. `/bin/cat` blocks on
+    /// stdin, so both stay in `Starting` for the whole test and every
+    /// notification is deferred rather than written — which is exactly
+    /// what these tests want: they assert on manager-owned state, not on
+    /// wire traffic.
+    fn manager_with_two_servers() -> (LspManager, LspServerId, LspServerId) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let sup = Rc::new(RefCell::new(crate::process::ProcessSupervisor::new()));
+        let runtime = Rc::new(crate::async_runtime::AsyncRuntime::with_pool_size(1));
+        let mut mgr = LspManager::new(sup, runtime);
+        let mut spec_a = LspServerSpec::new("a", "rust", "/bin/cat");
+        spec_a.restart = LspRestartPolicy::Never;
+        let mut spec_b = LspServerSpec::new("b", "rust", "/bin/cat");
+        spec_b.restart = LspRestartPolicy::Never;
+        let a = mgr.spawn(spec_a).expect("spawn a");
+        let b = mgr.spawn(spec_b).expect("spawn b");
+        (mgr, a, b)
+    }
+
+    fn publish(mgr: &mut LspManager, sid: LspServerId, uri: &str, message: &str) {
+        mgr.handle_notification(
+            sid,
+            "textDocument/publishDiagnostics".to_owned(),
+            json!({
+                "uri": uri,
+                "diagnostics": [{
+                    "range": {
+                        "start": { "line": 0, "character": 0 },
+                        "end": { "line": 0, "character": 1 },
+                    },
+                    "severity": 1,
+                    "message": message,
+                }],
+            }),
+            Instant::now(),
+        );
+    }
+
+    fn diag_messages(mgr: &LspManager, uri: &str) -> Vec<String> {
+        mgr.diag_store
+            .lock()
+            .expect("diag store")
+            .for_uri(uri)
+            .iter()
+            .map(|d| d.message.clone())
+            .collect()
+    }
+
+    /// Populate every one of the fourteen URI-keyed store families plus
+    /// the `documents` mirror for `(sid, uri)`.
+    fn populate_all_stores(mgr: &mut LspManager, sid: LspServerId, uri: &str) {
+        let server = sid.raw().to_string();
+        publish(mgr, sid, uri, "a diagnostic");
+        mgr.completion_store.lock().unwrap().set(
+            crate::completion::CompletionKey::new(server.clone(), uri),
+            crate::completion::CompletionResponse::from_lsp_value(&json!([{ "label": "x" }])),
+        );
+        mgr.hover_store.lock().unwrap().set(
+            crate::hover::HoverKey::new(server.clone(), uri),
+            crate::hover::Hover::from_lsp_value(&json!({ "contents": "doc" }))
+                .expect("a hover payload with contents parses"),
+        );
+        mgr.signature_store.lock().unwrap().set(
+            crate::signature::SignatureKey::new(server.clone(), uri),
+            crate::signature::SignatureHelp::from_lsp_value(
+                &json!({ "signatures": [{ "label": "f()" }] }),
+            ),
+        );
+        mgr.definition_store.lock().unwrap().set(
+            crate::definition::DefinitionKey::new(server.clone(), uri),
+            crate::definition::DefinitionResponse::from_lsp_value(&json!({
+                "uri": uri,
+                "range": { "start": { "line": 0, "character": 0 },
+                           "end": { "line": 0, "character": 0 } },
+            })),
+        );
+        for kind in [
+            crate::locations::LocationKind::References,
+            crate::locations::LocationKind::Declaration,
+            crate::locations::LocationKind::TypeDefinition,
+            crate::locations::LocationKind::Implementation,
+        ] {
+            mgr.locations_store.lock().unwrap().set(
+                crate::locations::LocationsKey::new(server.clone(), uri, kind),
+                crate::definition::DefinitionResponse::from_lsp_value(&json!({
+                    "uri": uri,
+                    "range": { "start": { "line": 0, "character": 0 },
+                               "end": { "line": 0, "character": 0 } },
+                })),
+            );
+        }
+        mgr.symbol_store.lock().unwrap().set(
+            crate::symbol::SymbolKey::document(server.clone(), uri),
+            crate::symbol::SymbolResponse::from_lsp_value(
+                &json!([{
+                    "name": "S", "kind": 5,
+                    "range": { "start": { "line": 0, "character": 0 },
+                               "end": { "line": 0, "character": 0 } },
+                    "selectionRange": { "start": { "line": 0, "character": 0 },
+                                        "end": { "line": 0, "character": 0 } },
+                }]),
+                uri,
+            ),
+        );
+        mgr.document_highlight_store.lock().unwrap().set(
+            crate::document_highlight::DocumentHighlightKey::new(server.clone(), uri),
+            crate::document_highlight::DocumentHighlightResponse::from_lsp_value(&json!([{
+                "range": { "start": { "line": 0, "character": 0 },
+                           "end": { "line": 0, "character": 1 } },
+            }])),
+        );
+        mgr.formatting_store.lock().unwrap().set(
+            crate::formatting::FormattingKey::new(server.clone(), uri),
+            crate::formatting::FormattingResponse::from_lsp_value(&json!([{
+                "range": { "start": { "line": 0, "character": 0 },
+                           "end": { "line": 0, "character": 0 } },
+                "newText": "x",
+            }])),
+        );
+        mgr.rename_store.lock().unwrap().set(
+            crate::rename::RenameKey::new(server.clone(), uri),
+            crate::rename::WorkspaceEditResponse::from_lsp_value(&json!({ "changes": {} })),
+        );
+        mgr.prepare_rename_store.lock().unwrap().set(
+            crate::prepare_rename::PrepareRenameKey::new(server.clone(), uri),
+            crate::prepare_rename::PrepareRenameResponse::from_lsp_value(&json!({
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 1 },
+            })),
+        );
+        mgr.code_action_store.lock().unwrap().set(
+            crate::code_action::CodeActionKey::new(server.clone(), uri),
+            crate::code_action::CodeActionResponse::from_lsp_value(&json!([{ "title": "fix" }])),
+        );
+        mgr.inlay_hint_store.lock().unwrap().set(
+            crate::inlay_hint::InlayHintKey::new(server.clone(), uri),
+            crate::inlay_hint::InlayHintResponse::from_lsp_value(&json!([{
+                "position": { "line": 0, "character": 0 },
+                "label": ": i32",
+            }])),
+        );
+        mgr.semantic_token_store.lock().unwrap().set(
+            crate::semantic_tokens::SemanticTokenKey::new(server, uri),
+            crate::semantic_tokens::SemanticTokensResponse::from_lsp_value(&json!({
+                "data": [0, 0, 1, 0, 0],
+            })),
+        );
+        mgr.documents.insert((sid, uri.to_owned()), "text".to_owned());
+    }
+
+    /// Which of the fourteen families still hold an entry for
+    /// `(sid, uri)`, by name. An empty vector is the post-forget
+    /// expectation; naming the survivors is what makes a failure
+    /// actionable instead of "assert!(false)".
+    fn populated_families(mgr: &LspManager, sid: LspServerId, uri: &str) -> Vec<&'static str> {
+        let server = sid.raw().to_string();
+        let mut out = Vec::new();
+        if !diag_messages(mgr, uri).is_empty() {
+            out.push("diag");
+        }
+        if mgr
+            .completion_store
+            .lock()
+            .unwrap()
+            .get(&crate::completion::CompletionKey::new(server.clone(), uri))
+            .is_some()
+        {
+            out.push("completion");
+        }
+        if mgr
+            .hover_store
+            .lock()
+            .unwrap()
+            .get(&crate::hover::HoverKey::new(server.clone(), uri))
+            .is_some()
+        {
+            out.push("hover");
+        }
+        if mgr
+            .signature_store
+            .lock()
+            .unwrap()
+            .get(&crate::signature::SignatureKey::new(server.clone(), uri))
+            .is_some()
+        {
+            out.push("signature");
+        }
+        if mgr
+            .definition_store
+            .lock()
+            .unwrap()
+            .get(&crate::definition::DefinitionKey::new(server.clone(), uri))
+            .is_some()
+        {
+            out.push("definition");
+        }
+        for (kind, label) in [
+            (crate::locations::LocationKind::References, "references"),
+            (crate::locations::LocationKind::Declaration, "declaration"),
+            (
+                crate::locations::LocationKind::TypeDefinition,
+                "typeDefinition",
+            ),
+            (
+                crate::locations::LocationKind::Implementation,
+                "implementation",
+            ),
+        ] {
+            if mgr
+                .locations_store
+                .lock()
+                .unwrap()
+                .get(&crate::locations::LocationsKey::new(
+                    server.clone(),
+                    uri,
+                    kind,
+                ))
+                .is_some()
+            {
+                out.push(label);
+            }
+        }
+        if mgr
+            .symbol_store
+            .lock()
+            .unwrap()
+            .get(&crate::symbol::SymbolKey::document(server.clone(), uri))
+            .is_some()
+        {
+            out.push("symbol");
+        }
+        if mgr
+            .document_highlight_store
+            .lock()
+            .unwrap()
+            .get(&crate::document_highlight::DocumentHighlightKey::new(
+                server.clone(),
+                uri,
+            ))
+            .is_some()
+        {
+            out.push("documentHighlight");
+        }
+        if mgr
+            .formatting_store
+            .lock()
+            .unwrap()
+            .get(&crate::formatting::FormattingKey::new(server.clone(), uri))
+            .is_some()
+        {
+            out.push("formatting");
+        }
+        if mgr
+            .rename_store
+            .lock()
+            .unwrap()
+            .get(&crate::rename::RenameKey::new(server.clone(), uri))
+            .is_some()
+        {
+            out.push("rename");
+        }
+        if mgr
+            .prepare_rename_store
+            .lock()
+            .unwrap()
+            .get(&crate::prepare_rename::PrepareRenameKey::new(
+                server.clone(),
+                uri,
+            ))
+            .is_some()
+        {
+            out.push("prepareRename");
+        }
+        if mgr
+            .code_action_store
+            .lock()
+            .unwrap()
+            .get(&crate::code_action::CodeActionKey::new(server.clone(), uri))
+            .is_some()
+        {
+            out.push("codeAction");
+        }
+        if mgr
+            .inlay_hint_store
+            .lock()
+            .unwrap()
+            .get(&crate::inlay_hint::InlayHintKey::new(server.clone(), uri))
+            .is_some()
+        {
+            out.push("inlayHint");
+        }
+        if mgr
+            .semantic_token_store
+            .lock()
+            .unwrap()
+            .get(&crate::semantic_tokens::SemanticTokenKey::new(server, uri))
+            .is_some()
+        {
+            out.push("semanticTokens");
+        }
+        out
+    }
+
+    /// Acceptance 31, store half — every one of the fourteen families
+    /// plus `documents` loses its entry. The `populated_families`
+    /// precondition is what makes this bite: an assertion that the
+    /// stores are empty afterwards passes vacuously if nothing filled
+    /// them.
+    #[test]
+    fn forget_uri_clears_all_fourteen_store_families_and_the_document_mirror() {
+        let (mut mgr, a, _b) = manager_with_two_servers();
+        let uri = "file:///tmp/old.rs";
+        populate_all_stores(&mut mgr, a, uri);
+        let before = populated_families(&mgr, a, uri);
+        assert_eq!(
+            before.len(),
+            17,
+            "precondition: every family must hold an entry before the forget \
+             (14 families, of which `locations` counts four kinds); got {before:?}"
+        );
+        assert!(mgr.documents.contains_key(&(a, uri.to_owned())));
+
+        mgr.forget_uri(a, uri).expect("forget a known server");
+
+        let after = populated_families(&mgr, a, uri);
+        assert!(
+            after.is_empty(),
+            "these families survived the forget: {after:?}"
+        );
+        assert!(
+            !mgr.documents.contains_key(&(a, uri.to_owned())),
+            "the `documents` mirror is what didChange diffs against, so a \
+             stale entry under the old URI is a correctness problem"
+        );
+    }
+
+    /// Acceptance 31, route half, plus W3's exemption. A response
+    /// already in flight at rename time must not repopulate the old key
+    /// after the clear — and a `workspace/symbol` route, which carries a
+    /// query and no URI at all, must survive.
+    #[test]
+    fn forget_uri_purges_routes_for_the_uri_and_retains_workspace_symbol() {
+        let (mut mgr, a, b) = manager_with_two_servers();
+        let old = "file:///tmp/old.rs";
+        let other = "file:///tmp/other.rs";
+        mgr.pending_routes.insert(
+            (a, 1),
+            ResponseRoute::Hover {
+                uri: old.to_owned(),
+            },
+        );
+        mgr.pending_routes.insert(
+            (a, 2),
+            ResponseRoute::Locations {
+                uri: old.to_owned(),
+                kind: crate::locations::LocationKind::References,
+            },
+        );
+        mgr.pending_routes.insert(
+            (a, 3),
+            ResponseRoute::WorkspaceSymbol {
+                query: "Widget".to_owned(),
+            },
+        );
+        mgr.pending_routes.insert(
+            (a, 4),
+            ResponseRoute::Hover {
+                uri: other.to_owned(),
+            },
+        );
+        // Same URI, different server: another server's in-flight work is
+        // not ours to cancel.
+        mgr.pending_routes.insert(
+            (b, 5),
+            ResponseRoute::Hover {
+                uri: old.to_owned(),
+            },
+        );
+
+        mgr.forget_uri(a, old).expect("forget");
+
+        assert!(!mgr.pending_routes.contains_key(&(a, 1)), "hover for old");
+        assert!(
+            !mgr.pending_routes.contains_key(&(a, 2)),
+            "locations for old"
+        );
+        assert!(
+            mgr.pending_routes.contains_key(&(a, 3)),
+            "workspace/symbol carries no URI and is not scoped to any \
+             document, so a rename does not invalidate it"
+        );
+        assert!(
+            mgr.pending_routes.contains_key(&(a, 4)),
+            "an unrelated document's route must survive"
+        );
+        assert!(
+            mgr.pending_routes.contains_key(&(b, 5)),
+            "another server's route for the same URI must survive"
+        );
+    }
+
+    /// Acceptance 31, drain half. `pending_external` holds the
+    /// `Handle:await()` side, and its own contract says it is
+    /// drained-cancelled wherever `pending_routes` is purged. Neither
+    /// existing sweep is URI-scoped, and the one with the similar name
+    /// (`drain_cancelled_externals`) removes only awaiters whose token
+    /// was flipped or which timed out — **a rename flips no token**, so
+    /// modelling on it would drain nothing and park the coroutine
+    /// forever.
+    #[test]
+    fn forget_uri_settles_the_awaiters_joined_to_the_purged_routes() {
+        let (mut mgr, a, _b) = manager_with_two_servers();
+        let old = "file:///tmp/old.rs";
+        let other = "file:///tmp/other.rs";
+        let runtime = mgr.runtime.clone();
+
+        let mut register = |rid: u64, uri: &str| {
+            let (job_id, token) = runtime.register_external(JobKind::LspRequest, None);
+            mgr.pending_routes.insert(
+                (a, rid),
+                ResponseRoute::Hover {
+                    uri: uri.to_owned(),
+                },
+            );
+            mgr.pending_external.insert(
+                (a, rid),
+                PendingExternal {
+                    method: "textDocument/hover".to_owned(),
+                    awaiters: vec![Awaiter { job_id, token }],
+                    dispatched_at: Instant::now(),
+                },
+            );
+            job_id
+        };
+        let doomed = register(1, old);
+        let survivor = register(2, other);
+
+        // Nothing has settled yet: the drain, not the registration, is
+        // what must produce the outcome.
+        let _ = runtime.tick();
+        assert!(!runtime.is_complete(doomed));
+        assert!(!runtime.is_complete(survivor));
+
+        mgr.forget_uri(a, old).expect("forget");
+        let _ = runtime.tick();
+
+        assert!(
+            matches!(runtime.take_result(doomed), Some(JobOutcome::Cancelled)),
+            "an awaiter parked on a route we just purged must wake cancelled"
+        );
+        assert!(
+            !mgr.pending_external.contains_key(&(a, 1)),
+            "and its entry must be gone, not merely settled"
+        );
+        assert!(
+            runtime.take_result(survivor).is_none(),
+            "an unrelated document's awaiter keeps waiting"
+        );
+        assert!(mgr.pending_external.contains_key(&(a, 2)));
+    }
+
+    /// Acceptance 31c — the error contract, both arms. The second is the
+    /// one that matters: the subscriber runs per attachment, an
+    /// attachment need not have any pending route or populated result,
+    /// and repeated cleanup after a partial teardown must stay safe.
+    #[test]
+    fn forget_uri_raises_for_an_unknown_server_and_succeeds_with_no_state() {
+        let (mut mgr, a, _b) = manager_with_two_servers();
+        let unknown = LspServerId::next();
+        let err = mgr
+            .forget_uri(unknown, "file:///tmp/x.rs")
+            .expect_err("unknown server must raise, matching `forget`");
+        assert!(err.contains("unknown server"), "{err}");
+
+        mgr.forget_uri(a, "file:///tmp/never-touched.rs")
+            .expect("a URI with no state under a known server is an \
+                     idempotent success, not an error");
+        mgr.forget_uri(a, "file:///tmp/never-touched.rs")
+            .expect("and repeating it stays safe");
+    }
+
+    /// Acceptance 31b — the uncorrelated write. This notification
+    /// carries no request id, so the route purge cannot see it, and
+    /// `diag_store` has no correlated writers at all. The companion
+    /// assertion is that the tombstone does **not** over-reach: a
+    /// publish for a different, never-opened URI is still absorbed,
+    /// which is exactly what a `documents` membership gate would have
+    /// broken.
+    #[test]
+    fn a_late_publish_for_a_forgotten_uri_is_dropped_and_an_unopened_uri_is_not() {
+        let (mut mgr, a, _b) = manager_with_two_servers();
+        let old = "file:///tmp/old.rs";
+        publish(&mut mgr, a, old, "before");
+        assert_eq!(diag_messages(&mgr, old), vec!["before".to_owned()]);
+
+        mgr.forget_uri(a, old).expect("forget");
+        assert!(diag_messages(&mgr, old).is_empty(), "cleared by the forget");
+
+        publish(&mut mgr, a, old, "late arrival");
+        assert!(
+            diag_messages(&mgr, old).is_empty(),
+            "a publish naming a URI we explicitly forgot must be dropped"
+        );
+
+        // Servers legitimately publish for files the editor never
+        // opened — a crate-wide push naming a dependency.
+        let never_opened = "file:///tmp/dependency.rs";
+        publish(&mut mgr, a, never_opened, "third-party");
+        assert_eq!(
+            diag_messages(&mgr, never_opened),
+            vec!["third-party".to_owned()],
+            "the tombstone drops only what we forgot, never everything \
+             outside `documents`"
+        );
+    }
+
+    /// Acceptance 31b, second gate. `mark_document_stale` creates URI
+    /// keys in three stores, so without its own check a forgotten URI
+    /// regains a stale flag in all three.
+    #[test]
+    fn mark_document_stale_cannot_flag_a_forgotten_pair_in_any_of_the_three_stores() {
+        let (mut mgr, a, _b) = manager_with_two_servers();
+        let old = "file:///tmp/old.rs";
+        mgr.forget_uri(a, old).expect("forget");
+
+        mgr.mark_document_stale(a, old);
+
+        assert!(
+            !mgr.diag_store.lock().unwrap().is_stale(old),
+            "diagnostics"
+        );
+        assert!(
+            !mgr.semantic_token_store.lock().unwrap().is_stale(old),
+            "semantic tokens"
+        );
+        assert!(
+            !mgr.inlay_hint_store.lock().unwrap().is_stale(old),
+            "inlay hints"
+        );
+
+        // And it still works for a URI we did not forget, so the gate is
+        // the tombstone and not a blanket disable.
+        let live = "file:///tmp/live.rs";
+        mgr.mark_document_stale(a, live);
+        assert!(mgr.diag_store.lock().unwrap().is_stale(live));
+    }
+
+    /// Acceptance 31d — identity and reclamation are exact. Tombstone
+    /// one URI under two servers; `did_open(A, uri)` clears only A's
+    /// pair, so an A write is admitted while a later B write is dropped.
+    #[test]
+    fn the_tombstone_is_keyed_by_the_exact_server_uri_pair() {
+        let (mut mgr, a, b) = manager_with_two_servers();
+        let uri = "file:///tmp/shared.rs";
+        mgr.forget_uri(a, uri).expect("forget under a");
+        mgr.forget_uri(b, uri).expect("forget under b");
+        assert!(mgr.is_forgotten(a, uri));
+        assert!(mgr.is_forgotten(b, uri));
+
+        mgr.did_open(a, uri, 1, "text").expect("reopen under a");
+        assert!(
+            !mgr.is_forgotten(a, uri),
+            "reopening is the editor saying it holds the URI again"
+        );
+        assert!(
+            mgr.is_forgotten(b, uri),
+            "and it says nothing about another server's tombstone"
+        );
+
+        publish(&mut mgr, a, uri, "from A");
+        assert_eq!(
+            diag_messages(&mgr, uri),
+            vec!["from A".to_owned()],
+            "A's write is admitted after A reopened"
+        );
+        publish(&mut mgr, b, uri, "from B");
+        assert_eq!(
+            diag_messages(&mgr, uri),
+            vec!["from A".to_owned()],
+            "B is still tombstoned for this URI, so its later write is \
+             dropped and A's payload survives untouched"
+        );
+    }
+
+    /// Acceptance 31d — a restart generation flip drops every pair for
+    /// its own server and retains every other server's.
+    #[test]
+    fn start_generation_reclaims_only_the_flipped_servers_tombstones() {
+        let (mut mgr, a, b) = manager_with_two_servers();
+        mgr.forget_uri(a, "file:///tmp/a1.rs").expect("forget");
+        mgr.forget_uri(a, "file:///tmp/a2.rs").expect("forget");
+        mgr.forget_uri(b, "file:///tmp/b1.rs").expect("forget");
+        assert_eq!(mgr.forgotten_document_count(), 3);
+
+        let mut client = mgr.clients.remove(&b).expect("client b");
+        mgr.start_generation(b, &mut client).expect("restart b");
+        mgr.clients.insert(b, client);
+
+        assert!(mgr.is_forgotten(a, "file:///tmp/a1.rs"));
+        assert!(mgr.is_forgotten(a, "file:///tmp/a2.rs"));
+        assert!(
+            !mgr.is_forgotten(b, "file:///tmp/b1.rs"),
+            "B's generation is gone, so B's tombstones go with it"
+        );
+        assert_eq!(mgr.forgotten_document_count(), 2);
+    }
+
+    /// Acceptance 31d — terminal `forget` likewise, and the set is empty
+    /// once the only owning generation is torn down. This is what makes
+    /// the set reclaimed rather than a leak; it deliberately is **not**
+    /// size-bounded, because a capacity or LRU eviction would let an
+    /// arbitrarily late notification resurrect an evicted key.
+    #[test]
+    fn terminal_forget_reclaims_only_its_own_servers_tombstones() {
+        let (mut mgr, a, b) = manager_with_two_servers();
+        mgr.forget_uri(a, "file:///tmp/a1.rs").expect("forget");
+        mgr.forget_uri(b, "file:///tmp/b1.rs").expect("forget");
+        assert_eq!(mgr.forgotten_document_count(), 2);
+
+        if let Some(client) = mgr.clients.get_mut(&b) {
+            client.state = LspClientState::Stopped {
+                ended: Instant::now(),
+            };
+        }
+        mgr.forget(b).expect("forget b");
+        assert!(mgr.is_forgotten(a, "file:///tmp/a1.rs"));
+        assert!(!mgr.is_forgotten(b, "file:///tmp/b1.rs"));
+        assert_eq!(mgr.forgotten_document_count(), 1);
+
+        if let Some(client) = mgr.clients.get_mut(&a) {
+            client.state = LspClientState::Stopped {
+                ended: Instant::now(),
+            };
+        }
+        mgr.forget(a).expect("forget a");
+        assert_eq!(
+            mgr.forgotten_document_count(),
+            0,
+            "the set is empty once the owning generations are gone"
+        );
+    }
+}

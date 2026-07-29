@@ -772,6 +772,43 @@ mod tests {
         }
     }
 
+    /// dired Stage 2a §5, finding 4. `clear` *creates* an `epochs`
+    /// entry, because a consumer caching against the epoch has to see
+    /// that the diagnostics went away; nothing ever removes one. So a
+    /// `forget_uri` that called `clear` would leave a URI-keyed leak
+    /// behind in the one map nothing prunes — which is why the forget
+    /// path is its own store method.
+    #[test]
+    fn forget_drops_the_epoch_while_clear_deliberately_bumps_it() {
+        let mut store = DiagnosticStore::new();
+        store.set("file:///a.rs", vec![diag(0, DiagnosticSeverity::Error, "boom")]);
+        store.mark_stale("file:///a.rs");
+        assert_eq!(store.epoch_for("file:///a.rs"), 1);
+
+        store.clear("file:///a.rs");
+        assert_eq!(
+            store.epoch_for("file:///a.rs"),
+            2,
+            "clear announces the removal to epoch-keyed caches"
+        );
+
+        store.set("file:///a.rs", vec![diag(0, DiagnosticSeverity::Error, "boom")]);
+        store.mark_stale("file:///a.rs");
+        store.forget("file:///a.rs");
+        assert!(store.for_uri("file:///a.rs").is_empty(), "diagnostics");
+        assert!(!store.is_stale("file:///a.rs"), "stale flag");
+        assert_eq!(
+            store.severity_counts_for("file:///a.rs"),
+            (0, 0, 0, 0),
+            "severity counts"
+        );
+        assert_eq!(
+            store.epoch_for("file:///a.rs"),
+            0,
+            "forget leaves no trace at all, epoch included"
+        );
+    }
+
     #[test]
     fn from_lsp_value_parses_minimal_diagnostic() {
         let v = json!({
