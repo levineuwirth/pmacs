@@ -60,6 +60,21 @@ use std::path::PathBuf;
 // directly.
 pub use pmacs_protocol::*;
 
+/// Lowest negotiated protocol version that carries the bottom-panel wire
+/// family (Q#BP9): [`InstanceMessage::PanelFrame`] daemon→frontend, and
+/// `FrontendEvent::{FrontendCellGeometry, PanelResizeRows, PanelPointer}`
+/// frontend→daemon.
+///
+/// One constant rather than a literal at each gate, because the panel
+/// bump gates in **both** directions: the send filter, the producer's
+/// peer flag, and the three inbound event gates must move together or one
+/// side starts trusting a wire the other never negotiated.
+///
+/// Distinct from [`ADVERTISED_PROTOCOL_VERSION`], which the production
+/// daemon still holds at 20: the v21 schema is reserved, and the
+/// compatibility-preserving activation is bottom-panel Stage 2B-3's.
+pub const PANEL_MIN_VERSION: u32 = 21;
+
 // ---------------------------------------------------------------------------
 // Attachment
 // ---------------------------------------------------------------------------

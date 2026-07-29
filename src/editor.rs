@@ -25,7 +25,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::async_runtime::SharedAsyncRuntime;
 use crate::cell::{CellCoord, CellSize};
-use crate::editor_core::EditorCore;
+use crate::editor_core::{EditorCore, GeometryUpdate};
 use crate::frontend::{Event, Frontend, KeyEvent, KeyEventKind, MouseEvent, install_panic_hook};
 use crate::key::{Chord, display_sequence};
 use crate::keymap_stack::{Action, KeyDispatcher};
@@ -1196,13 +1196,49 @@ impl EditorState {
     /// (Q#BP2b / Q#BP15a).
     ///
     /// The single seam for grid and `LOCAL` views, whose real attach and
-    /// resize sizes ARE the declaration. A semantic view never calls this
-    /// in Stage 1; its geometry stays **unknown**.
-    pub fn sync_frame_geometry(&self, frontend_id: FrontendId, total: CellSize) {
-        self.core
+    /// resize sizes ARE the declaration. A semantic view never calls this;
+    /// its geometry arrives through
+    /// [`Self::accept_semantic_frame_geometry`].
+    ///
+    /// Reconciliation runs on every call, not only on
+    /// [`GeometryUpdate::Advanced`]: panel presentability depends on the
+    /// layout as well as on the geometry, and this is also the defensive
+    /// pre-paint reconciliation point. The exhaustion arm is exactly why
+    /// it must still run after a `Rejected` — `declare_frame_geometry`
+    /// cleared the declaration to unknown, and the panel has to hide.
+    pub fn sync_frame_geometry(&self, frontend_id: FrontendId, total: CellSize) -> GeometryUpdate {
+        let update = self
+            .core
             .borrow_mut()
             .declare_frame_geometry(frontend_id, total);
         self.reconcile_panel_layout(frontend_id);
+        update
+    }
+
+    /// Accept an authenticated semantic frontend's
+    /// `FrontendEvent::FrontendCellGeometry` declaration (Q#BP15a).
+    ///
+    /// The three outcomes are acted on differently, and that is the whole
+    /// point of the three-valued result: `Advanced` reconciles panel
+    /// layout, `Duplicate` returns without touching panel state, and
+    /// `Rejected` drops the event before any reconciliation. A
+    /// `Duplicate` that reconciled would do redundant work on every
+    /// repeated declaration; a `Rejected` that reconciled would let a
+    /// stale or conflicting declaration move the panel.
+    pub fn accept_semantic_frame_geometry(
+        &self,
+        frontend_id: FrontendId,
+        geometry_epoch: u64,
+        total: CellSize,
+    ) -> GeometryUpdate {
+        let update =
+            self.core
+                .borrow_mut()
+                .accept_frame_geometry(frontend_id, geometry_epoch, total);
+        if update == GeometryUpdate::Advanced {
+            self.reconcile_panel_layout(frontend_id);
+        }
+        update
     }
 
     /// Local-frontend compatibility wrapper.
@@ -1834,6 +1870,91 @@ impl EditorState {
         }
     }
 
+    /// Sync a semantic frontend's **panel** terminal to the
+    /// daemon-derived content grid (Q#BP7 / Q#BP15a).
+    ///
+    /// The sibling of [`Self::sync_semantic_terminal_layout`], and the
+    /// case review round 1 (R1-3) found missing. The two arms are
+    /// disjoint by construction rather than by discipline:
+    /// `sync_semantic_terminal_layout` resolves its window through
+    /// `primary_document_window`, so it can never reach a side window,
+    /// and this one resolves through `side_window_for`, so it can never
+    /// reach the document. Nothing is ever resized twice per tick — the
+    /// failure mode the extraction of `sync_terminal_layouts_for_tick`
+    /// exists to prevent.
+    ///
+    /// A panel terminal has **no** `FrontendEvent::TerminalResize`
+    /// declaration to consult: the daemon derives its geometry, the
+    /// frontend never asserts it (Q#BP15a). So the size comes from
+    /// `panel_grid_size` minus the panel's one mode line, and it must be
+    /// applied at the tick's layout step — before `tick_processes`
+    /// drains the child — or the program formats its output against a
+    /// geometry the band is not showing.
+    ///
+    /// Recording the view size is unconditional for a resolvable panel
+    /// (that is what gives a passive view its own clipped projection);
+    /// only the durable controller resizes the shared PTY.
+    ///
+    /// Returns whether the shared screen geometry actually changed.
+    pub fn sync_semantic_panel_terminal_layout(&mut self, frontend_id: FrontendId) -> bool {
+        let Some((window_id, buffer_id, content)) = ({
+            let core = self.core.borrow();
+            core.panel_grid_size(frontend_id).and_then(|size| {
+                let window_id = core.side_window_for(frontend_id)?;
+                let buffer_id = core.windows.get(&window_id)?.buffer_id;
+                Some((
+                    window_id,
+                    buffer_id,
+                    CellSize::new(size.rows.saturating_sub(1), size.cols),
+                ))
+            })
+        }) else {
+            return false;
+        };
+        if content.rows == 0 || content.cols == 0 {
+            return false;
+        }
+        if !self.terminal_manager.borrow().is_terminal(buffer_id) {
+            return false;
+        }
+        let key = TerminalViewKey::new(frontend_id, window_id, buffer_id);
+        let content = terminal_projection_size(content);
+        if !self
+            .terminal_manager
+            .borrow_mut()
+            .record_view_size(key, content)
+        {
+            return false;
+        }
+        let controls = self
+            .terminal_manager
+            .borrow()
+            .controller(buffer_id)
+            .is_some_and(|controller| controller.matches(key));
+        if !controls {
+            return false;
+        }
+        if self.terminal_manager.borrow().screen_size(buffer_id) == Some(content) {
+            return false;
+        }
+        let (Ok(rows), Ok(cols)) = (u16::try_from(content.rows), u16::try_from(content.cols))
+        else {
+            return false;
+        };
+        let result = self.terminal_manager.borrow_mut().resize(
+            buffer_id,
+            rows,
+            cols,
+            &mut self.process_supervisor.borrow_mut(),
+        );
+        if let Err(error) = result {
+            self.core.borrow_mut().status = error.to_string();
+            false
+        } else {
+            true
+        }
+    }
+
     /// Apply a semantic frontend's terminal-cell pointer gesture.
     ///
     /// The gesture must name the authenticated frontend's active
@@ -1872,6 +1993,257 @@ impl EditorState {
         }
         self.core.borrow_mut().active_frontend = frontend_id;
         self.apply_terminal_gesture(key, size, coord, kind, mods, (coord.row, coord.col));
+        true
+    }
+
+    /// Paint one semantic frontend's side window into a panel-sized grid
+    /// (Q#BP8, Q#BP15, Q#BP15a, Q#BP17).
+    ///
+    /// Returns `None` for every non-presentable state — no side window,
+    /// a hidden panel, unknown geometry, a zero-column frame, or a grid
+    /// too small for the structural floor. The caller turns that into an
+    /// **authoritative**
+    /// [`pmacs_protocol::panel::PanelFramePayload::Absent`]: silence
+    /// would leave the receiver's retained band on screen forever.
+    ///
+    /// `statusline` is the side window's evaluated segments, supplied by
+    /// the caller from the *same* provider invocation that produced the
+    /// document's wire segments (parent acceptance 45). Evaluating again
+    /// here would run every provider twice per frame.
+    ///
+    /// **Folds are gated on the OWNING frontend (Q#BP17).** The panel is
+    /// painted for `frontend_id`, which is not necessarily the acting
+    /// frontend, so `EditorCore::fold_map_for_window` — which gates on
+    /// the *active* frontend — is the wrong source and is deliberately
+    /// not called.
+    #[must_use]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one panel paint transaction: derive the grid, paint the window, resolve the caret"
+    )]
+    pub fn prepare_panel_projection(
+        &self,
+        frontend_id: FrontendId,
+        statusline: Option<&crate::statusline::StatuslineWindowSegments>,
+    ) -> Option<PanelProjection> {
+        let (size, window_id, buffer_id, focused, fold_projection) = {
+            let core = self.core.borrow();
+            let size = core.panel_grid_size(frontend_id)?;
+            let window_id = core.side_window_for(frontend_id)?;
+            let buffer_id = core.windows.get(&window_id)?.buffer_id;
+            let view = core.views.get(&frontend_id)?;
+            (
+                size,
+                window_id,
+                buffer_id,
+                view.active == window_id,
+                view.fold_projection,
+            )
+        };
+        let outer = Rect::new(0, 0, size.rows, size.cols);
+        let content = Rect::new(0, 0, size.rows.saturating_sub(1), size.cols);
+        let placement = WindowPlacement { outer, content };
+        let theme = {
+            let handle = self.syntax_registry.theme();
+            let t = handle.lock().expect("theme mutex poisoned");
+            t.clone()
+        };
+        let mut cells = vec![crate::cell::Cell::default(); (size.rows * size.cols) as usize];
+        let mut grid = crate::cell::CellGrid {
+            cells: &mut cells,
+            stride: size.cols,
+            size,
+        };
+
+        // Q#BP7 / Q#BP15a: a terminal panel's grid excludes its one mode
+        // line, and its geometry reaches the shared screen through the
+        // same view-size path the grid frontends use — never the 24×80
+        // attach placeholder and never the full-window declaration.
+        let terminal = self.terminal_manager.borrow().is_terminal(buffer_id);
+        let cursor = if terminal {
+            let key = TerminalViewKey::new(frontend_id, window_id, buffer_id);
+            let snapshot = self
+                .terminal_manager
+                .borrow_mut()
+                .snapshot_for_view(key, terminal_projection_size(content.size))?;
+            paint_terminal_snapshot(&mut grid, content, &snapshot, &theme);
+            let registry = self.core.borrow().registry.clone();
+            let reg = registry.borrow();
+            if let Ok(buf) = reg.get(buffer_id) {
+                let coord = snapshot.cursor.unwrap_or_default();
+                let scroll = if snapshot.scroll_offset == 0 {
+                    String::new()
+                } else {
+                    format!("↑{}", snapshot.scroll_offset)
+                };
+                paint_mode_line(
+                    &mut grid,
+                    &outer,
+                    buf.name(),
+                    false,
+                    focused,
+                    coord.row,
+                    coord.col,
+                    &scroll,
+                    "",
+                    mode_line_style(&theme),
+                    statusline.map_or(&[], |segments| segments.left.as_slice()),
+                    statusline.map_or(&[], |segments| segments.right.as_slice()),
+                    &theme,
+                );
+            }
+            snapshot
+                .cursor
+                .filter(|coord| coord.row < content.size.rows && coord.col < content.size.cols)
+        } else {
+            let registry = self.core.borrow().registry.clone();
+            let reg = registry.borrow();
+            let diag_store = self.lsp_manager.borrow().diag_store();
+            let mut core = self.core.borrow_mut();
+            let window = core.windows.get_mut(&window_id)?;
+            let buf = reg.get(buffer_id).ok()?;
+            let folds = if fold_projection {
+                crate::fold_view::map_for_window(&self.fold_registry, window)
+            } else {
+                None
+            };
+            window.last_visible_rows = content.size.rows;
+            // A2A-3 / parent 48: the auto-scroll clamp belongs to the
+            // FOCUSED window only. Running it for a passive panel would
+            // move a `view_top` the user is not driving.
+            if focused {
+                prepare_window_cursor_visible(window, buf, content.size.rows, folds.as_ref());
+            }
+            paint_window_content(
+                &mut grid,
+                window,
+                buf,
+                placement,
+                folds.as_ref(),
+                focused,
+                &theme,
+                statusline,
+                &diag_store,
+            );
+            window_cursor_cell(window, buf, folds.as_ref(), outer)
+        };
+
+        Some(PanelProjection {
+            window_id,
+            buffer_id,
+            size,
+            cells,
+            cursor,
+            focused,
+        })
+    }
+
+    /// Apply an accepted `FrontendEvent::PanelResizeRows` (Q#BP15a).
+    ///
+    /// The request is expressed as a boundary move rather than a direct
+    /// `fixed_rows` write, so it lands on the same Q#BP5b clamp path a
+    /// TUI divider drag takes — including the interactive
+    /// `window.min-height` preference resolved per leaf. A request the
+    /// clamp cannot satisfy is a no-op, not an error.
+    ///
+    /// Returns whether the effective allocation actually moved.
+    pub fn apply_panel_resize_rows(&self, frontend_id: FrontendId, rows: u32) -> bool {
+        let (side, area_rows, current) = {
+            let core = self.core.borrow();
+            match (
+                core.side_window_for(frontend_id),
+                core.frontend_area_rows(frontend_id),
+            ) {
+                (Some(side), Some(area_rows)) => (
+                    side,
+                    area_rows,
+                    core.panel_allocation(frontend_id, area_rows),
+                ),
+                _ => return false,
+            }
+        };
+        let Some(current) = current else {
+            return false;
+        };
+        let Ok(rows) = EditorCore::clamp_panel_rows(rows) else {
+            return false;
+        };
+        let Ok(delta) = i32::try_from(i64::from(rows) - i64::from(current)) else {
+            return false;
+        };
+        if delta == 0 {
+            return false;
+        }
+        let _ = self.resize_window_boundary(frontend_id, side, delta, area_rows);
+        self.reconcile_panel_layout(frontend_id);
+        self.core
+            .borrow()
+            .panel_allocation(frontend_id, area_rows)
+            .is_some_and(|now| now != current)
+    }
+
+    /// Apply an accepted `FrontendEvent::PanelPointer` gesture (Q#BP16).
+    ///
+    /// Steps 2, 5, and 6 of Q#BP16's ladder are re-derived here from the
+    /// daemon's own state — a live, non-hidden side window whose current
+    /// buffer matches the payload, and a coordinate inside the grid the
+    /// daemon derived. Steps 1, 3, and 4 (source authentication and both
+    /// epochs) belong to the caller, because only the session holds the
+    /// declaration the frontend was actually looking at.
+    ///
+    /// **Activation is not uniform, and Q#BP16 says so explicitly.** A
+    /// **press** focuses any panel — that is click-to-focus, and
+    /// `Down(Right)` is the context-menu gesture, so both buttons count.
+    /// Everything else depends on what the panel holds:
+    ///
+    /// * a **terminal** panel activates on *every* non-`Move` gesture,
+    ///   because the shared terminal adapter claims the controller for
+    ///   wheel, press, drag, and release alike — leaving a wheel step
+    ///   unactivated would hand the child to a window that does not own
+    ///   focus;
+    /// * a **document** panel keeps today's **scroll-without-focus**
+    ///   behaviour, matching `dispatch_mouse`, where a wheel notch moves
+    ///   a viewport without selecting the window (and preserves a kill
+    ///   chain for the same reason).
+    ///
+    /// Review round 1 (R2-5) found the terminal clause applied to both.
+    /// Bare hover neither focuses nor claims, on either kind.
+    ///
+    /// **Replay is out of scope in Stage 2B-2.** Driving selection,
+    /// listview rows, or child SGR reporting is parent acceptance 48,
+    /// which needs the GPU band and lands in Stage 2B-3.
+    ///
+    /// Returns whether the gesture was accepted.
+    pub fn dispatch_semantic_panel_pointer(
+        &self,
+        frontend_id: FrontendId,
+        buffer_id: crate::buffer::BufferId,
+        coord: CellCoord,
+        kind: pmacs_protocol::MouseKind,
+    ) -> bool {
+        let Some(size) = self.core.borrow().panel_grid_size(frontend_id) else {
+            return false;
+        };
+        if coord.row >= size.rows || coord.col >= size.cols {
+            return false;
+        }
+        let is_terminal = self.terminal_manager.borrow().is_terminal(buffer_id);
+        let mut core = self.core.borrow_mut();
+        let Some(side) = core.side_window_for(frontend_id) else {
+            return false;
+        };
+        if core.windows.get(&side).map(|window| window.buffer_id) != Some(buffer_id) {
+            return false;
+        }
+        let activates = if is_terminal {
+            !matches!(kind, pmacs_protocol::MouseKind::Move)
+        } else {
+            matches!(kind, pmacs_protocol::MouseKind::Down(_))
+        };
+        if activates {
+            core.focus_window(frontend_id, side);
+            core.active_frontend = frontend_id;
+        }
         true
     }
 
@@ -3085,6 +3457,59 @@ const SCROLL_LINES: i32 = 3;
 /// therefore only appears when a line-number mode reserves a gutter.
 const FOLD_GUTTER_GLYPH: char = '▸';
 
+/// The largest viewport the terminal subsystem will actually project,
+/// for a window content rect that may legitimately be larger.
+///
+/// A panel deliberately does **not** inherit the terminal's per-axis PTY
+/// caps (Bet B5'): a 4K surface at a small font is legitimately wider
+/// than 512 columns, and `PanelFrame` answers only to the shared area
+/// bound. The terminal *screen* keeps its own policy, so without this
+/// clamp `snapshot_for_view` refused the panel's content rect, the whole
+/// projection collapsed to `None`, and the band went per-frame `Absent`
+/// while `panel_hidden` still said "visible" — review round 1's R1-1
+/// shape, found again by its own sweep.
+///
+/// Clamping rather than hiding is the right answer because the band is
+/// legitimately that wide: the child occupies the columns a PTY can
+/// have, and the remainder paints as band background exactly as a
+/// snapshot narrower than its window already does. Rows are shed for the
+/// area bound rather than columns, so a wide band keeps its full width.
+fn terminal_projection_size(content: CellSize) -> CellSize {
+    let cols = content
+        .cols
+        .min(u32::from(crate::terminal::MAX_TERMINAL_COLS));
+    let rows = content
+        .rows
+        .min(u32::from(crate::terminal::MAX_TERMINAL_ROWS));
+    let rows_within_area =
+        u32::try_from(crate::terminal::MAX_TERMINAL_VISIBLE_CELLS / (cols as usize).max(1))
+            .unwrap_or(u32::MAX);
+    CellSize::new(rows.min(rows_within_area), cols)
+}
+
+/// One painted side window, ready to become a
+/// [`pmacs_protocol::panel::PanelFrame`] (bottom-panel Stage 2B-2).
+///
+/// The producer carries the identity fields as well as the cells because
+/// the presentation epoch is allocated from them: `window_id` changes on
+/// a new side window and `buffer_id` on a replacement, and either one
+/// moving is what makes a stale `PanelPointer` unaddressable (Q#BP16).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PanelProjection {
+    /// The side window this frame projects.
+    pub window_id: WindowId,
+    /// Buffer that window is currently showing.
+    pub buffer_id: crate::buffer::BufferId,
+    /// Panel grid dimensions, mode line included.
+    pub size: CellSize,
+    /// Row-major cells; exactly `size.area()` entries.
+    pub cells: Vec<crate::cell::Cell>,
+    /// Panel caret, or `None` when it is scrolled out of the band.
+    pub cursor: Option<CellCoord>,
+    /// Whether the panel currently owns this frontend's focus.
+    pub focused: bool,
+}
+
 /// Shared outer/content geometry consumed by terminal paint and PTY resize.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct WindowPlacement {
@@ -3943,44 +4368,65 @@ pub fn paint_frame(
     let registry = core.registry.clone();
     let reg = registry.borrow();
     let aw = &core.windows[&active];
-    let inner_rows = inner_rows(&active_rect);
     let buf = reg.get(aw.buffer_id).ok()?;
-    // Arc 6 Stage 2 (Q#FD16, round-2 F3): a logical cursor on a hidden
-    // line renders at its hidden component's head POSITION — the visible
-    // head row *and* that head's end-of-content column, i.e. exactly
-    // where Stage 1 moves point on a fold-at-cursor. Row-only clamping
-    // would leave the column unspecified; resolving through the merged
-    // component (rather than the innermost containing fold) also keeps a
-    // crossing overlap from landing on another hidden position.
     let folds = crate::fold_view::map_for_window(&state.fold_registry, aw);
-    let cursor = match folds.as_ref() {
-        Some(map) => map.visible_position(aw.text_view.line_at_offset(aw.cursor), aw.cursor),
-        None => aw.cursor,
+    window_cursor_cell(aw, buf, folds.as_ref(), active_rect)
+}
+
+/// Where one window's caret lands in the cell grid, or `None` when it is
+/// scrolled out of that window's text area.
+///
+/// Extracted from `paint_frame`'s tail for bottom-panel Stage 2B-2: the
+/// panel band ships its own caret in
+/// [`pmacs_protocol::panel::PanelFrame::cursor`], and a second derivation
+/// would be the exact shape of Stage 1's `Layout::compute` two-caller
+/// defect — one consumer silently reckoning against different geometry.
+///
+/// Arc 6 Stage 2 (Q#FD16, round-2 F3): a logical cursor on a hidden line
+/// renders at its hidden component's head POSITION — the visible head row
+/// *and* that head's end-of-content column, i.e. exactly where Stage 1
+/// moves point on a fold-at-cursor. Row-only clamping would leave the
+/// column unspecified; resolving through the merged component (rather
+/// than the innermost containing fold) also keeps a crossing overlap from
+/// landing on another hidden position.
+fn window_cursor_cell(
+    window: &crate::window::Window,
+    buf: &crate::buffer::Buffer,
+    folds: Option<&crate::fold_view::VisibleLineMap>,
+    rect: Rect,
+) -> Option<CellCoord> {
+    let inner_rows = inner_rows(&rect);
+    let cursor = match folds {
+        Some(map) => map.visible_position(
+            window.text_view.line_at_offset(window.cursor),
+            window.cursor,
+        ),
+        None => window.cursor,
     };
-    let disp = aw.text_view.pos_to_display(buf, cursor)?;
-    let row_offset = match folds.as_ref() {
+    let disp = window.text_view.pos_to_display(buf, cursor)?;
+    let row_offset = match folds {
         Some(map) => {
-            let top = map.clamp_view_top(aw.view_top);
+            let top = map.clamp_view_top(window.view_top);
             let row = disp.row as usize;
             if row < top {
                 return None;
             }
             map.visible_rows_between(top, row)
         }
-        None => (disp.row as usize).checked_sub(aw.view_top)?,
+        None => (disp.row as usize).checked_sub(window.view_top)?,
     };
     if row_offset >= inner_rows as usize {
         return None;
     }
-    // UX gutter: the terminal caret sits in the text area, past the
-    // reserved gutter strip (mirrors the viewport shift above).
+    // UX gutter: the caret sits in the text area, past the reserved
+    // gutter strip (mirrors the viewport shift in `paint_window_content`).
     let gutter_w = {
-        let w = aw.gutter_width();
-        if w >= active_rect.size.cols { 0 } else { w }
+        let w = window.gutter_width();
+        if w >= rect.size.cols { 0 } else { w }
     };
-    let grid_row = active_rect.origin.row + u32::try_from(row_offset).ok()?;
-    let max_col = active_rect.origin.col + active_rect.size.cols.saturating_sub(1);
-    let grid_col = (active_rect.origin.col + gutter_w + disp.col).min(max_col);
+    let grid_row = rect.origin.row + u32::try_from(row_offset).ok()?;
+    let max_col = rect.origin.col + rect.size.cols.saturating_sub(1);
+    let grid_col = (rect.origin.col + gutter_w + disp.col).min(max_col);
     Some(CellCoord::new(grid_row, grid_col))
 }
 

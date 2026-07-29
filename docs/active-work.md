@@ -5,11 +5,26 @@ landed on `main`. Read it after `docs/agent-handoff.md`. Remove completed
 entries when their PR merges; do not let this become a second permanent
 backlog.
 
-**No lane below is retained past its merge.** The PTY terminate
-diagnostic (#176) was the last one — retained because rule 4 removes a
+**No lane below is retained past its merge.** This snapshot removes the
+resource-op delete guard (#186) and dired Stage 2 framing (#171) lanes
+the moment their PRs merged, because the same commit put their
+load-bearing decisions into `docs/agent-handoff.md` §1 — rule 4's
+precondition, satisfied deliberately rather than deferred. The
+bottom-panel lane is not removed: 2B-2 landing leaves 2B-3 and Stage 3
+ahead of it, so the lane is rewritten to the remaining plan.
+
+**#188's lane arrived with #188**, which is the point: with several PRs
+open, a lane written on `main` for work that lands elsewhere
+re-conflicts on every merge. Written on its own branch it costs one
+conflict, at the merge that would have happened anyway.
+
+The PTY terminate
+diagnostic (#176) was the last lane retained past its merge — retained
+because rule 4 removes a
 merged lane only *after* its durable facts reach
-`docs/agent-handoff.md`, and that absorption was unowned. This snapshot
-owns it: #176's facts are now in the handoff (§1's arc bullet and §5's
+`docs/agent-handoff.md`, and that absorption was unowned. The
+2026-07-28 snapshot
+owned it: #176's facts are now in the handoff (§1's arc bullet and §5's
 two ops lessons about ticking observers and proving child exit), so its
 lane is gone. The Lean 4, GPU-terminal-input, inline-math (#172), dired
 (#169), and terminal config + copy mode lanes were removed the same way
@@ -20,14 +35,15 @@ would stop re-conflicting in this file.
 number appears in `git log --first-parent githubsucks/main`, it has
 landed regardless of what a lane says.
 
-**Two open PRs had no lane here at all before this snapshot** — #174 and
-#171. An open PR is exactly the volatile work this file exists to
-record, so its absence is a ledger defect rather than a tidy omission:
-#171 drifted **153 commits** while invisible here, and its still-green
-old CI run describes a tree nobody has looked at since. **When a PR is
-opened, give it a lane.** #174 has since merged, so per rule 4 its lane
-is gone again and its durable lesson is in `docs/agent-handoff.md` §5;
-#171's lane is below.
+**Two open PRs had no lane here at all before the 2026-07-28
+snapshot** — #174 and #171. An open PR is exactly the volatile work this
+file exists to record, so its absence is a ledger defect rather than a
+tidy omission: #171 drifted **153 commits** while invisible here, and
+its still-green old CI run described a tree nobody had looked at since.
+**When a PR is opened, give it a lane.** All three have since merged —
+#174, #171 and #186 — so per rule 4 their lanes are gone again and
+their durable facts are in `docs/agent-handoff.md` (§5 for #174's
+lesson, §1 for the two framings).
 
 ## Repository authority
 
@@ -38,16 +54,17 @@ is gone again and its durable lesson is in `docs/agent-handoff.md` §5;
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `0442d78` (the M4 config-sink race fix #174, atop
-  bottom-panel Stage 2B-1 #184, the Journey/GPU directory-target ratchet
-  #183, Journey Stage 1a #182 and the previously recorded landed work).
+  `githubsucks/main` @ `7586905` (the docs-only coherence listview
+  correction #189, atop the docs-only landed-state refresh #185, the M4
+  config-sink race fix #174, bottom-panel Stage 2B-1 #184, the
+  Journey/GPU directory-target ratchet #183, Journey Stage 1a #182 and
+  the previously recorded landed work).
   **Protocol schema support is
   `v6..=v21`; the production server-first `Hello` still advertises
   v20** — two different facts, and #184 landed only the first. The
-  previous snapshot named `7fd646d`, and **the
+  previous snapshot named `0442d78`, and **the
   recovery floor advances with it**: the check below now requires
-  `0442d78` or newer, so a tree at `7fd646d` — or at `6bee09d` — no
-  longer passes. That is
+  `7586905` or newer, so a tree at `0442d78` no longer passes. That is
   deliberate — the floor moves with the base, because a check that
   accepts an older commit than the declared base passes on a tree the
   rest of this file does not describe.
@@ -86,7 +103,7 @@ git worktree list
 git status --short --branch
 ```
 
-The `git log` command must expose `0442d78` — the base named above — or a
+The `git log` command must expose `7586905` — the base named above — or a
 newer intentional main. Keep this threshold and the canonical-base line in
 step: a recovery check that accepts an older commit than the base it
 declares canonical will pass on a tree the rest of this file does not
@@ -228,17 +245,16 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
-## Bottom-panel lane (Arc 7) — 2B-1 MERGED; 2B-2 IN FLIGHT
+## Bottom-panel lane (Arc 7) — 2B-2 MERGED; 2B-3 IS NEXT
 
-Stage 1, the Stage 2 framing, Stage 2A, and **Stage 2B-1 are all on
-`main`**. Framing revision 5's three-way split of 2B was explicitly
-approved on 2026-07-27; revision 6 records PR #184's review correction.
-**2B-2 — the daemon panel projection and epoch machine — is under way**
-on branch `bottom-panel-stage2b2`, worktree `../pmacs-bp-stage2b2`,
-branched fresh from `githubsucks/main` @ `6bee09d`. It is *not* stacked
-on the 2B-1 branch, which is the rule for every slice in this arc. Note
-that `main` has since advanced to `0442d78`; the only difference is the
-test-only #174, so the slice's integration surface is unchanged.
+Stage 1, the Stage 2 framing, Stage 2A, Stage 2B-1, and **Stage 2B-2 are
+all on `main`**. Framing revision 5's three-way split of 2B was
+explicitly approved on 2026-07-27; revision 6 records PR #184's review
+correction. **2B-2 — the daemon panel projection and epoch machine —
+landed as [PR #187](https://github.com/levineuwirth/pmacs/pull/187)**,
+one review round of five findings on top of the implementation, 12/12
+green, 22/22 mutations biting. Its durable lessons are in
+`docs/agent-handoff.md` §1; what remains below is the 2B-3 plan.
 
 **2B-2's boundaries, restated because they are easy to overrun:** the
 production `Hello` stays at v20 and `panel_capable` stays `false`. The
@@ -247,6 +263,52 @@ activation, the GPU band, and the negotiated capability flip are all
 2B-3's, and 2B-3 may **not** simply change the unsolicited `Hello` to
 21.
 
+- **What PR #187 shipped, dark by construction:** the semantic daemon's
+  `FrontendCellGeometry` epoch machine; one reconciled panel grid
+  derivation; `PanelFrame::{Present, Absent}` projection on both document
+  and terminal semantic paths; stable presentation epochs; resize and
+  pointer validation against the live window/buffer/epochs; the panel's
+  own statusline context; and pre-drain semantic panel-terminal resize.
+  It does not add the GPU consumer or enable the capability.
+- **Review round 1 closed five findings plus one sweep result at
+  `3ecb03d`.** The wire-area clamp became durable hide state; a stale
+  same-buffer reopen can no longer retain input authority; semantic panel
+  terminals resize before child drain; `NoMessage` retains a published
+  band baseline while `Invalidated` clears it; wheel activation follows
+  the terminal-only focus rule; and legally wide panels clamp their PTY
+  content without disappearing.
+- **Review round 2 closed two findings at `bfaaf2b` plus this ledger
+  commit.** Side affinity can replace the buffer while preserving the
+  `WindowId`, so retained panel statusline segments are now keyed by the
+  full `(WindowId, BufferId)` presentation. Every authoritative `Absent`
+  also clears that baseline, including duplicate-suppressed `Absent`, so
+  a later `Present` under `NoMessage` cannot resurrect peer state that
+  was already cleared. Two acceptance tests bite those exact transitions.
+  This lane and `docs/agent-handoff.md` now name the open PR, current
+  landed base, checkpoint, and 2B-3 ordering instead of calling 2B-2
+  merely “next.”
+- **Round-2 verification at code checkpoint `bfaaf2b`:** formatting and
+  strict workspace Clippy; library **1,863 passed + 3 ignored** default
+  and **2,048 passed + 4 ignored** CRDT; bottom-panel Stage 1 / 2A /
+  2B-1 / 2B-2 **46 / 17 / 16 / 28**; statusline **8 CRDT**; semantic
+  routing **2 CRDT**; M4 **121 passed + 3 ignored + 1 filtered**;
+  required GPU **202/202**; isolated-config full workspace sweep; and
+  `git diff --check`. The first workspace sweep had one GPU rendering
+  failure in `failures_and_display_math_render_as_source`; that test had
+  passed in the immediately preceding required-GPU run, passed alone,
+  and the complete workspace rerun passed. Real-daemon and managed-attach
+  cases were rerun outside the tool sandbox after its local-socket policy
+  produced `Operation not permitted`; the authoritative reruns passed.
+- **Cross-machine recovery (fresh clone):**
+
+  ```sh
+  git fetch githubsucks --prune
+  git switch --track -c bottom-panel-stage2b2 githubsucks/bottom-panel-stage2b2
+  git rev-parse HEAD
+  ```
+
+  #187 has landed, so `githubsucks/main` already contains this work and
+  the branch is retained only for provenance. Start 2B-3 from `main`.
 - **Stage 2B-1 MERGED as #184** (`main` @ `6bee09d`, 2026-07-28; all
   twelve checks green on the reviewed head `5539b6e`; two review rounds
   plus a gate-found follow-up). Branch
@@ -463,8 +525,10 @@ has **no branch and no framing yet**.
 
 - Portable branch: `githubsucks/generated-buffer-immutability`; worktree
   `../pmacs-generated-immutability`. **PR #188**, base `main`, forked from
-  `githubsucks/main` @ `ad41cf1`, **integrated to `7586905`** (#189,
-  `COHERENCE.md` only; clean merge, no conflict). Framing only —
+  `githubsucks/main` @ `ad41cf1`, **integrated to `300cbc4`** — #189
+  (clean), then #186 and #171 (`docs/active-work.md` conflict), then
+  #187 (the same file again, after it removed the two landed framing
+  lanes). Framing only —
   `docs/generated-buffer-immutability-framing.md`, revision 5, plus this
   lane. **No runtime code, no protocol change.**
 - **PROPOSED — four review rounds closed (twenty findings, thirteen P1,
@@ -605,341 +669,6 @@ has **no branch and no framing yet**.
   Recorded here because the section above asks for exactly that and
   warns against quoting a stale figure; it does not replace that
   section's per-target census, which was not re-derived.
-
-## Resource-op delete guard lane — PR #186 OPEN, PROPOSED, DO NOT MERGE
-
-- Portable branch: `githubsucks/resource-op-delete-guard`; worktree
-  `../pmacs-resource-op-delete`. **PR #186**, base `main`. Currently
-  framing only — `docs/resource-op-delete-guard-framing.md`, **revision
-  5** — plus this lane entry. No runtime code yet.
-- **Measured 2026-07-28, `main` @ `7586905`:**
-
-  ```
-  $ git rev-list --left-right --count HEAD...githubsucks/main
-  5       0
-  ```
-
-  Five commits ahead, **0 behind** at the pushed revision-5 head. This
-  count includes the revision commit itself; revision 4 recorded the
-  pre-commit count and was therefore one short.
-- **This PR becomes the implementation PR.** Revision 2 dropped rev 1's
-  framing-PR-then-implementation-PR plan as a one-feature/one-branch/
-  one-PR violation. The framing is revised in place; implementation
-  commits land on this same branch **only after explicit user
-  approval**.
-- **Live data-loss bug, reproduced four ways against `ad41cf1`.**
-  `pmacs.buffer.apply_resource_op`'s delete arm removes the path from
-  disk and *then* drops any buffer bound to it, with no dirty check at
-  any link — not the arm, not `remove_buffer_and_fire`, and not
-  `BufferRegistry::remove`, whose only guard is `editing_in_progress`.
-  Reachable through any language server's `WorkspaceEdit`. The four
-  modes: (a) the plain case returns `Ok(())` with file and buffer both
-  gone; (b) `ignore_if_not_exists = true` does **zero** filesystem work
-  and still destroys the buffer; (c) `recursive = true` reconciles
-  **nothing**, so a whole tree leaves orphaned buffers — the most
-  destructive arm does the least reconciliation, and it bypasses any
-  exact-path guard; (d) removal is not `kill_buffer`, so windows are
-  left bound to a removed `BufferId` and the registry can be driven to
-  **empty**.
-- **Approved in principle after review round 1; revision 5 closes round
-  4's two contract P1s and the ledger-ownership P1. Still PROPOSED,
-  still not approved for implementation.** Settled: refuse
-  unconditionally; take the delete side now. Withdrawn: rev 1's
-  buffer-first ordering. The design is `stat/no-op/refuse → enumerate
-  and validate → mutate filesystem → reconcile`, which keeps
-  `on_removed`'s "path already gone" invariant and makes a failed
-  deletion leave buffers intact automatically.
-- **The stable cross-lane ownership split with #171:**
-
-  > #186 owns the urgent **pre-filesystem refusal** for synchronous
-  > `apply_resource_op`. #171 later owns **full post-delete lifecycle
-  > reconciliation**, including the **async race where a buffer becomes
-  > modified after dired dispatch**.
-
-  #186 additionally **owns the shared walk query** (scan every
-  path-bound buffer, normalize once, component-aware `Path::starts_with`)
-  under the boundary's "whichever lands first owns the query"; #171
-  adopts it and extends it to `reconcile_rename`. **Neither lane guards
-  `pmacs.fs.remove`** — zero production callers today, named out of
-  scope by both.
-- **#171 owns its own lane entry.** Revision 4 rewrote that sibling
-  block and was stale before push when #171 revision 8 landed 67 seconds
-  earlier. Revision 5 restores the block to `main`'s tree, so #186's
-  diff no longer changes it. The one fact this lane depends on is the
-  policy split above, which is stable through #171's pushed revision 8
-  and independent of its commit count.
-- **Standing rule this lane learned the expensive way.** A census is a
-  reading, not a constant. **Do not write an ahead/behind count, a line
-  count, or a call-site count into this file that you have not just
-  produced with a command whose output you can paste.** #186 shipped a
-  stale line count, then a stale commit count, then a stale ledger
-  citation, in three consecutive revisions — each time by carrying a
-  measurement across a base change instead of re-running it. The
-  specific trap: a count taken against `ad41cf1` was reported in
-  present tense after `main` had moved to `7586905`, which silently
-  converted "0 behind" into a falsehood.
-- **Four facts a re-scout should not have to rediscover**, all verified
-  at `ad41cf1`:
-  - **No caller reliably surfaces a raise.** The server pump runs under
-    `pcall(handle_server_requests)` (`builtin/runtime/lsp.lua:1892`), so
-    a raise unwinds past the `send_response` and the server is never
-    answered; and the two user-initiated paths route uncaught coroutine
-    errors through `pmacs.error`, which is **undefined** (11 call sites
-    in `builtin/`, zero definitions). Refusals must travel as values.
-  - **A partial batch is already the status quo** — verified in-repo:
-    two delete ops, the second raises, the first stayed applied. Any
-    framing claiming batch atomicity here is wrong. **Do not justify
-    this from the LSP spec.** Revision 2 of #186 wrote that LSP 3.18
-    "assigns `FailureHandlingKind.Abort` to resource-op-bearing edits";
-    **it does not** — recovery is described by the client's advertised
-    `workspace.workspaceEdit.failureHandling`, `Abort` is one of four
-    strategies, only `TextOnlyTransactional` degrades to abort for
-    resource changes, and **pmacs advertises none of them**. The
-    justification is repository evidence plus the judgement that a
-    visible partial refactor beats unrecoverable unsaved work.
-  - **`find_by_path` is singular and duplicates are reachable.**
-    `BufferRegistry::find_by_path` returns the first match in insertion
-    order, `EditorCore::find_buffer_for_path` inherits that, and
-    `pmacs.buffer.from_file` creates path-bound buffers with **no
-    dedup** — so a clean first match can hide a modified second. The
-    guard needs a full scan with component-aware `Path::starts_with`.
-  - **pmacs advertises no `workspace.workspaceEdit` capability at all** —
-    `"applyEdit": true` but no `documentChanges`, no
-    `resourceOperations`, no `failureHandling`; `grep -rn
-    failureHandling` returns 0. Parked, not fixed here.
-- **Ownership claim, concretely.** For this lane's duration #186 owns:
-  the pre-filesystem refusal inside synchronous `apply_resource_op`; the
-  **shared walk query**; and `builtin/runtime/lsp.lua`'s
-  `apply_workspace_edit` plus the `workspace/applyEdit` server-request
-  boundary. It does **not** own: full post-delete lifecycle
-  reconciliation, the dired async race between dispatch and
-  `remove_blocking`, the rename side of the walk, or `pmacs.fs.remove`.
-  Do not run the two lanes concurrently over `builtin/runtime/lsp.lua`
-  without re-splitting that claim.
-- **Two residues #186 deliberately leaves for #171**, both named rather
-  than silent: after a successful *clean* recursive delete, descendant
-  buffers stay orphaned-and-clean (widening removal would promote the
-  dangling-window/empty-registry defect from exact-path to tree-wide);
-  and after a successful delete with several clean duplicates on one
-  path, only the first is reconciled. #186 validates **every** match but
-  reconciles **one**, which is today's behaviour preserved on purpose.
-- Files the implementation will touch: `src/lua_bindings/mod.rs`,
-  `builtin/runtime/lsp.lua`, `tests/m4_acceptance.rs`,
-  `tests/lsp_dispatch_seams_acceptance.rs`,
-  `src/bin/pmacs_fake_lsp.rs`. **Not** `src/daemon.rs`,
-  `pmacs-protocol/`, `builtin/runtime/dired.lua`,
-  `docs/agent-handoff.md` or `COHERENCE.md`. No protocol change.
-- Recovery from a clean checkout:
-  `git fetch githubsucks && git worktree add ../pmacs-resource-op-delete
-  -b resource-op-delete-guard githubsucks/resource-op-delete-guard`.
-
-## dired Stage 2 framing lane — PR #171 AT REVISION 9, AWAITING APPROVAL
-
-- Portable branch: `githubsucks/dired-stage2-framing`;
-  worktree `../pmacs-dired-stage1`. **PR #171**, base `main`, integrated
-  up to canonical `main` @ `7586905`. Framing only —
-  `docs/dired-stage2-framing.md`, **3,844 lines measured at this
-  revision**, no runtime code. This lane rides that PR — it has since
-  rev 6, when #185 merged; do not open a standalone ledger PR.
-- **Status: PROPOSED, never approved.** Revision 5 was reviewed and NOT
-  approved (six findings, four P1); revision 6 answered them; **revision
-  7 resolved a cross-lane conflict with PR #186**; revision 8 was
-  reviewed and NOT approved (six findings, four P1); revision 9 answers
-  them. The framing is at revision 9 after seven review rounds; **that
-  is not the same as approval**, and it must not be read as one.
-- **Round 8 (rev 9) made every rev-8 correction singular and
-  executable:**
-  - Q#DR26 no longer retains the withdrawn execution-order claim; it
-    owns only the homogeneous enum/vector shape and delegates sequence
-    semantics to Q#DR29: **bus arrival, not filesystem execution**.
-  - 2a owns acceptance **23–38 and 50–55, including every suffixed
-    item**, so rev 8's new tests cannot fall between implementation PRs.
-  - The LSP gate is one manager-owned, generation-scoped
-    `HashSet<(LspServerId, String)>`. Both
-    `absorb_publish_diagnostics` and the now-server-aware
-    `mark_document_stale` check the exact pair; `did_open` clears one
-    pair, and server teardown clears all and only that server's pairs.
-    It is reclaimed, not falsely called size-bounded. Acceptance covers
-    both writers and both reclamation paths.
-  - Buffer-name following now uses explicit
-    `BufferNameOrigin::{Explicit, PathDerived}` state. The acceptance
-    collision is a file `${cwd}/notes` explicitly named `notes`, which
-    defeats rev 8's path-equivalence heuristic.
-- **Round 7 (rev 8) found five contract defects of ONE family, and the
-  family is the transferable lesson: a guarantee assumed from a
-  mechanism whose implementation was never read.** Reply order assumed
-  to be execution order; a refusal assumed to be inert; `forget_uri`
-  assumed to cover every writer. Three of the five were literally that.
-  The decisions:
-  - **Reply order is NOT execution order.** `AsyncRuntime::tick`
-    (`src/async_runtime.rs:1003`) is `while let Ok(env) =
-    self.main.try_recv()` — a bus drain with **no execution token**, so
-    a worker can finish, be descheduled before sending, and have a later
-    reply arrive first. The ordering guarantee was **withdrawn, not
-    engineered**: reconciliation is order-independent, and `fs.lua:155-165`
-    already recommends serialization. Rev 9 makes the public contract
-    exact: overlapping mutations dispatch serially, awaiting one before
-    the next. A lock was rejected — it would serialize every fs mutation
-    for a hazard absent from shipped in-tree callers.
-  - **`EditorCore::kill_buffer` damages editor state BEFORE it can
-    refuse.** It clears `round_trip_buffers`, closes side windows and
-    redirects ordinary windows, and only then can
-    `BufferRegistry::remove` return `ConcurrentEdit`. So "refused" is
-    not "nothing happened". Fixed by preflighting `editing_in_progress`
-    — sound because phase 1 is pure `EditorCore` and holds no Lua
-    handle, so nothing can re-enter between check and removal.
-  - **Buffer names are set from `path.display()` AS GIVEN** while only
-    `file_path` is normalized (`src/editor_core.rs:917`,
-    `src/lua_bindings/mod.rs:3112`), so a relative open leaves a short
-    name that a string-equality rule mistakes for user-chosen. Rev 8
-    moved to path-equivalence; rev 9 replaces that inference with
-    explicit provenance because a custom name can equal the path.
-  - **`diag_store` has ZERO correlated writers**, and
-    `DiagnosticStore.by_uri` is keyed by **URI alone** with no server
-    component (`src/diag.rs:198`) — so the store most needing protection
-    is the one a `pending_routes` purge cannot help. Rev 8 incorrectly
-    inferred that the tombstone must share the store's URI-only key;
-    rev 9 gates in `LspManager`, where `sid` is still available.
-  - **A first pass of rev 8 checked only `handle_notification` and
-    concluded `publishDiagnostics` was the only uncorrelated writer.
-    Wrong lens boundary** — `pub fn mark_document_stale`
-    (`src/lsp.rs:3108`) takes **no `LspServerId`** and creates URI keys
-    across three stores for every server. Rev 9 changes that surface and
-    its private Lua binding to `(sid, uri)` and pins it independently.
-- **Both new hooks are `all-must-succeed`, not short-circuit** — a gap
-  the review did not raise and the sweep found. `src/hook.rs` defines
-  three `HookKind`s; registered short-circuit, one `resource.renamed`
-  subscriber returning falsey would silently stop every later
-  subscriber reconciling.
-- **CROSS-LANE SPLIT WITH PR #186 — settled, recorded verbatim so the
-  two lanes cannot diverge again:**
-
-  > #186 owns the urgent **pre-filesystem refusal** for synchronous
-  > `apply_resource_op`. #171 later owns **full post-delete lifecycle
-  > reconciliation**, including the **async race where a buffer becomes
-  > modified after dired dispatch**. #171's revision 7 adopts the
-  > refusal and stops saying LSP intentionally deletes modified files.
-
-  **PR #186 (`resource-op-delete-guard`) owns the pre-filesystem
-  refusal.** Do not implement a competing dirty check from #171. Rev 7
-  adopts #186's Q#RD1 (refuse, do not prompt, do not save, do not back
-  up) and its Q#RD6 shared query (scan every path-bound buffer, not
-  first-match; normalize once; component-aware `Path::starts_with`);
-  whichever lane lands first owns that query and the other adopts it.
-  The two fit deliberately: #186's Q#RD5 keeps reconciliation
-  **exact-path** so it does not promote the dangling-window and
-  last-buffer defects tree-wide, and #171's Q#DR27 is the lane that
-  makes widening safe.
-- **What rev 7 removed.** Rev 6 said an LSP-authored delete removes the
-  file and orphans the modified buffer as accepted residue. That is
-  withdrawn — **20 matched lines across 13 passages** were censused and
-  reclassified: 4 ownership claims reassigned to #186, 4 policy claims
-  deleted, 3 ground-truth statements kept but attributed, 2 async-race
-  claims kept and narrowed.
-- **What rev 7 kept, and it is now one path not two.** The async race —
-  a buffer modified between dired's pre-dispatch check and
-  `remove_blocking`'s syscall — survives #186's refusal, because **dired
-  never goes through `apply_resource_op`**: it calls `pmacs.fs.remove`,
-  which dispatches a worker no in-applier guard can see. Rev 6 carried
-  this as "two paths, LSP and dired"; after #186 the LSP path has no
-  residue at all.
-- **A gap neither lane closes, named in rev 7 §11:** `pmacs.fs.remove`
-  is public Lua API with **no dirty check of its own**. After both lanes
-  land the guards sit one layer above it on each side — at
-  `apply_resource_op` (#186) and in dired's policy layer (#171) — so a
-  third caller inherits neither. Latent, not live: it has zero
-  production callers today.
-- **LSP failure-handling, verified against the 3.18 spec** because #186
-  got it wrong and this lane was checked for the same error. **This lane
-  never made the claim** — it asserts nothing about `WorkspaceEdit`
-  recovery. For the record: only `textOnlyTransactional` degrades to
-  abort for resource operations; `transactional` covers them; and the
-  specification states **no default** for a client that does not
-  advertise `failureHandling` (pmacs advertises none). So "Abort applies
-  by omission" does not follow.
-- **Round 5's single theme, worth carrying because it will recur:** rev
-  5 changed the slice split and the ownership of a decision, and the
-  prose did not follow. Four of the six findings were that same defect
-  in different places — stale slice labels, an acceptance allocation
-  that contradicted the code split, and a PR body still describing
-  revision *1*'s two-slice plan. **When a cut changes, sweep for the
-  label, do not patch the instance.** Rev 6's own sweep found four more
-  the review had not cited, one of which was wrong in both halves
-  (`x`'s report tagged 2a, `remove_dir_all` tagged 2b).
-- **Rev 4 was scouted at `c8ec8f3`, which is dired Stage 1's own merge
-  commit (#165)** — so dired Stage 1 and find-file (#162) were always
-  its base, not new arrivals. Eighteen PRs landed on top before the
-  re-scout. Rev 5 is that re-scout, against `6bee09d` and then
-  integrated forward.
-- **Seven of rev 4's own claims about pmacs were wrong**, which is the
-  lane's most transferable lesson: a framing can verify all its external
-  facts and still be wrong about the codebase it is for. The load-bearing
-  one: §5 named `drain_external_cancelled` but cited `lsp.rs:1596`.
-  **Those are two different functions 35 lines apart** —
-  `drain_external_cancelled` (`:1561`) is the unconditional
-  server-scoped drain and is the right precedent;
-  `drain_cancelled_externals` (`:1596`) is a per-tick token/timeout
-  sweep. A rename flips no token, so following the line number yields a
-  `forget_uri` whose drain half is a silent no-op and the awaiting
-  coroutine hangs forever — exactly the failure that step exists to
-  prevent.
-- **The rename path-owner census is SIX, not five.** The sixth is
-  `lean.lua`'s `M.file_progress`, a URI-keyed Lua module table living in
-  no Rust store, so `forget_uri` structurally cannot reach it. That is
-  the first case outside dired proving the **hook**, not the Rust
-  method, is the mechanism that scales. The other five: buffer path,
-  buffer name, the URI-keyed LSP stores plus `DiagnosticView` (URI set
-  once at construction), dired's pathless handles, and a captured Lua
-  local no transaction can reach.
-- **The journey ratchet is split across two files**, and both are gates:
-  `tests/journey_acceptance.rs` (24 tests, "stages add rows, none
-  removes them", seven rows asserting on dired) and
-  `gpu_invocation_acceptance.rs`, where #183 actually put the GPU row.
-  A scout that checks only the first will think #183 added nothing.
-- **`open_directory` now commits under `pmacs.window.commit_to`, whose
-  scope REFUSES an `await`** (#182). That directly constrains the
-  serialize-and-await batch contract the framing proposes.
-- **The typed-edit chain does not reach dired** — verified rather than
-  assumed. Its lessons bind the framing's two *new* hooks instead.
-- **Scope MOVED OUT of this lane, and rev 6 records the handoff.**
-  Rev 5 added Q#DR25 to adopt `set_generated_contents` at the head of
-  2b, because dired's listing is a generated buffer whose paint bypasses
-  an intercept over a still writable rope. That turned out to be a
-  **class bug, not dired's** — the same idiom is in listview, compile
-  and search/grep, and **no Lua caller anywhere sets `read_only`**
-  because there is no Lua `set_read_only` to call — so it is owned by
-  the generated-buffer immutability lane. **Done: rev 6 withdraws
-  Q#DR25**, and §3.1 hands that lane what this one's re-scout found,
-  including the trap that
-  `dired_buffer_is_read_only_and_round_trips_input` passes **either
-  way** and is therefore not coverage of the adoption. Do not implement
-  Q#DR25 from this document.
-- **Two substrate facts rev 6 added that outlive this lane.** (1) Buffer
-  removal is **two phases** and **no existing Rust path composes them**:
-  `EditorCore::kill_buffer` (`src/editor_core.rs:4590`) does windows and
-  registry, `after_buffer_removed` (`src/lua_bindings/mod.rs:1602`) does
-  keymaps/config/folds/`on_removed`, and only the Lua binding
-  `pmacs.buffer.kill` (`mod.rs:5476-5491`) runs both — while
-  `apply_resource_op`'s delete uses `remove_buffer_and_fire`, which
-  skips phase 1, **so a window displaying the deleted buffer keeps a
-  removed id**. That is a third defect on that arm beside the missing
-  dirty check and the first-match lookup. (2) The drain outcome must
-  carry deletions as well as renames in one `Vec<ResourceOp>` so every
-  kind is expressible, but its sequence is **bus-arrival order, not
-  filesystem execution order**; Q#DR29 requires callers with
-  interdependent mutations to serialize.
-- Intended serial implementation once approved: **2a** rename/delete
-  reconciliation substrate with no dired UI, **2b** marks and
-  operations, **2c** mkdir/copy/recursive-delete primitives, then Stage
-  3 wdired. The re-scout re-examined this cut and it holds unchanged.
-- **Ownership warning:** dired 2a overlaps `src/editor_core.rs`,
-  `builtin/runtime/lsp.lua`, and the URI-keyed LSP state with other
-  coherence work. Do not run it concurrently with Journey Stage 1b
-  without assigning those files to one lane first.
-- **Two live bugs on `main` this lane confirmed but does NOT fix**, both
-  now owned elsewhere: `apply_resource_op`'s delete arm destroys unsaved
-  work (no dirty check anywhere on the path), and `View` still lacks
-  `rename_resource`.
 
 ## Parked lane: kill-ring browser + persistence
 
