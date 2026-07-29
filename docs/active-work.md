@@ -465,10 +465,10 @@ has **no branch and no framing yet**.
   `../pmacs-generated-immutability`. **PR #188**, base `main`, forked from
   `githubsucks/main` @ `ad41cf1`, **integrated to `7586905`** (#189,
   `COHERENCE.md` only; clean merge, no conflict). Framing only —
-  `docs/generated-buffer-immutability-framing.md`, revision 4, plus this
+  `docs/generated-buffer-immutability-framing.md`, revision 5, plus this
   lane. **No runtime code, no protocol change.**
-- **PROPOSED — three review rounds closed (fifteen findings, nine P1, six
-  P2). Not approved. Do not implement, do not merge.**
+- **PROPOSED — four review rounds closed (twenty findings, thirteen P1,
+  seven P2). Not approved. Do not implement, do not merge.**
 - **What it frames.** The class-wide half of the `set_generated_contents`
   invariant that `docs/agent-handoff.md` §4 and `COHERENCE.md` §14 both
   record as unfinished: `Buffer::undo` gates on `ensure_writable()`
@@ -495,15 +495,19 @@ has **no branch and no framing yet**.
   (`:1140-1163`), so it was neither cleaned nor detected; and the
   unconditional relock **locked a fresh buffer that was never
   successfully written**. `NoOp` clears, `Rejected` restores the entry
-  lock state, `Diverged` clears nothing and surfaces.
+  lock state, `Diverged` clears nothing and surfaces. **Revision 5 keeps
+  the five outcomes but preserves the `Edit` in
+  `AppliedThenFailed { edit, error }`: the borrow-free Lua finisher fans
+  it out to window caches and replica mirrors before returning the
+  error.** Collapsing to `Result` inside `Buffer` was too early.
 - **Two stages, two PRs.** Stage 1 — listview ownership fix **plus its
   identity-routing fix in the same PR**, dired and listview adopting the
   shipped primitive, the window-coordinate clamp, and the fold decision.
   Stage 2 — the new primitive, compile's nine write sites, the search
   panel's four, compile/search ownership + routing, the path-backed
-  refusal plus `mark_clean`, the `identity_protected` field, and
-  the bounded `unlock_generated`.
-- **Six facts from this lane that other lanes need before it merges:**
+  refusal plus `mark_clean`, and the terminal-only
+  `identity_protected` guard. **No Lua unlock ships.**
+- **Nine facts from this lane that other lanes need before it merges:**
   - **`bypass_intercept` is the wrong inventory key.** It misses
     `*buffer-list*`, `*help*` and `*workers*`, which are generated with
     plain writes and no intercept at all. `docs/agent-handoff.md` §4's
@@ -545,10 +549,11 @@ has **no branch and no framing yet**.
     identity buffer.** It does `self.read_only = false` unconditionally
     (`src/buffer.rs:546`), so it lifts a lock it did not install, writes,
     and re-locks. Present on `main`, untested, unframed anywhere before
-    this revision. Bounded in Stage 2 by the `identity_protected` field —
-    an **intrinsic** flag set once by `TerminalSession::open`, never
-    written by `set_read_only`. Revision 3 tried to infer this from the
-    lock's provenance instead; that broke the lift-and-restore idiom at
+    revision 4. Refused in Stage 2 by the `identity_protected` field —
+    an **intrinsic** flag marked once by a crate-private monotonic
+    `mark_identity_protected()` in `TerminalSession::open`, never written
+    by `set_read_only`. Revision 3 tried to infer this from the lock's
+    provenance instead; that broke the lift-and-restore idiom at
     `tests/terminal_copy_mode_acceptance.rs:578-584`, and the general
     lesson is that a **derived** fact must be maintained by every
     mutation of what it derives from — and `set_read_only` is `pub`.
@@ -558,6 +563,13 @@ has **no branch and no framing yet**.
     compiles it, so a green run of that suite proves nothing about the
     seam. Any lane touching `read_only` semantics must run it with the
     feature and confirm `acc16e` is in the count.
+  - **`identity_protected` is not generated-lock provenance.** Revision
+    4 tried to use “not a terminal identity buffer” as proof that the
+    generated primitive installed the lock; it is not. Revision 5
+    therefore removes `pmacs.buffer.unlock_generated` from the arc
+    entirely. Wdired's future generated→editable transition remains
+    dired Stage 3 work and must be owner-specific or use the eventual
+    lock-policy enum.
   - **The CRDT `Replace` mid-transaction divergence is real and
     unowned.** `crdt.delete` then `crdt.insert` (`src/buffer.rs:1140-1163`);
     if the first succeeds and the second fails, the code's own comment
@@ -565,7 +577,11 @@ has **no branch and no framing yet**.
     violation." It reaches `apply_edit` and `apply_edit_skip_intercepts`
     today and is reported as an ordinary `CrdtRejected`, so nothing
     distinguishes it. This lane names and contains it; **repair is
-    deferred and unowned.**
+    deferred and unowned.** Revision 5 makes the classifier mandatory:
+    a private delete→insert helper is fault-injected under
+    `cargo test --lib --features crdt`; there is no four-variant fallback
+    that maps divergence to `Rejected` and leaves a fresh buffer
+    writable.
 - **Overlap warning.** Stage 2 touches `src/lua_bindings/mod.rs`'s buffer
   mutator bindings and `src/buffer.rs`. Do not run it concurrently with
   the `apply_resource_op` lane or the bottom-panel 2B work without
