@@ -512,7 +512,7 @@ impl View for DiagnosticView {
     /// position in the window's composition order.
     fn rename_resource(&mut self, old_uri: &str, new_uri: &str) {
         if self.uri == old_uri {
-            self.uri = new_uri.to_owned();
+            new_uri.clone_into(&mut self.uri);
         }
     }
 
@@ -781,7 +781,10 @@ mod tests {
     #[test]
     fn forget_drops_the_epoch_while_clear_deliberately_bumps_it() {
         let mut store = DiagnosticStore::new();
-        store.set("file:///a.rs", vec![diag(0, DiagnosticSeverity::Error, "boom")]);
+        store.set(
+            "file:///a.rs",
+            vec![diag(0, DiagnosticSeverity::Error, "boom")],
+        );
         store.mark_stale("file:///a.rs");
         assert_eq!(store.epoch_for("file:///a.rs"), 1);
 
@@ -792,7 +795,10 @@ mod tests {
             "clear announces the removal to epoch-keyed caches"
         );
 
-        store.set("file:///a.rs", vec![diag(0, DiagnosticSeverity::Error, "boom")]);
+        store.set(
+            "file:///a.rs",
+            vec![diag(0, DiagnosticSeverity::Error, "boom")],
+        );
         store.mark_stale("file:///a.rs");
         store.forget("file:///a.rs");
         assert!(store.for_uri("file:///a.rs").is_empty(), "diagnostics");

@@ -3171,6 +3171,10 @@ impl LspManager {
     /// attachment need not have any pending route or populated result
     /// store, and cleanup can be repeated after an earlier partial
     /// teardown.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the fourteen store families are a flat inventory; splitting                   it is how one of them gets forgotten, which is the defect                   this method exists to prevent"
+    )]
     pub fn forget_uri(&mut self, sid: LspServerId, uri: &str) -> Result<(), String> {
         if !self.clients.contains_key(&sid) {
             return Err(format!("unknown server: {sid}"));
@@ -4233,13 +4237,18 @@ mod resource_reconciliation_tests {
                 "data": [0, 0, 1, 0, 0],
             })),
         );
-        mgr.documents.insert((sid, uri.to_owned()), "text".to_owned());
+        mgr.documents
+            .insert((sid, uri.to_owned()), "text".to_owned());
     }
 
     /// Which of the fourteen families still hold an entry for
     /// `(sid, uri)`, by name. An empty vector is the post-forget
     /// expectation; naming the survivors is what makes a failure
     /// actionable instead of "assert!(false)".
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one probe per store family, mirroring the inventory under test"
+    )]
     fn populated_families(mgr: &LspManager, sid: LspServerId, uri: &str) -> Vec<&'static str> {
         let server = sid.raw().to_string();
         let mut out = Vec::new();
@@ -4560,9 +4569,10 @@ mod resource_reconciliation_tests {
             .expect_err("unknown server must raise, matching `forget`");
         assert!(err.contains("unknown server"), "{err}");
 
-        mgr.forget_uri(a, "file:///tmp/never-touched.rs")
-            .expect("a URI with no state under a known server is an \
-                     idempotent success, not an error");
+        mgr.forget_uri(a, "file:///tmp/never-touched.rs").expect(
+            "a URI with no state under a known server is an \
+                     idempotent success, not an error",
+        );
         mgr.forget_uri(a, "file:///tmp/never-touched.rs")
             .expect("and repeating it stays safe");
     }
@@ -4613,10 +4623,7 @@ mod resource_reconciliation_tests {
 
         mgr.mark_document_stale(a, old);
 
-        assert!(
-            !mgr.diag_store.lock().unwrap().is_stale(old),
-            "diagnostics"
-        );
+        assert!(!mgr.diag_store.lock().unwrap().is_stale(old), "diagnostics");
         assert!(
             !mgr.semantic_token_store.lock().unwrap().is_stale(old),
             "semantic tokens"
