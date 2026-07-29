@@ -459,19 +459,38 @@ has **no branch and no framing yet**.
   `FrontendView.fold_projection` to `true` for semantic frontends, which
   Stage 2 deliberately left `false` (Q#FD21).
 
-## dired Stage 2 framing lane — PR #171 AT REVISION 8, AWAITING APPROVAL
+## dired Stage 2 framing lane — PR #171 AT REVISION 9, AWAITING APPROVAL
 
 - Portable branch: `githubsucks/dired-stage2-framing`;
   worktree `../pmacs-dired-stage1`. **PR #171**, base `main`, integrated
-  up to `main` @ `ad41cf1`. Framing only —
-  `docs/dired-stage2-framing.md`, **3,624 lines measured at this
+  up to canonical `main` @ `7586905`. Framing only —
+  `docs/dired-stage2-framing.md`, **3,844 lines measured at this
   revision**, no runtime code. This lane rides that PR — it has since
   rev 6, when #185 merged; do not open a standalone ledger PR.
 - **Status: PROPOSED, never approved.** Revision 5 was reviewed and NOT
   approved (six findings, four P1); revision 6 answered them; **revision
-  7 resolves a cross-lane conflict with PR #186**. The commit history
-  embodies six revisions and five rounds of findings; **that is not the
-  same as approval**, and it must not be read as one.
+  7 resolved a cross-lane conflict with PR #186**; revision 8 was
+  reviewed and NOT approved (six findings, four P1); revision 9 answers
+  them. The framing is at revision 9 after seven review rounds; **that
+  is not the same as approval**, and it must not be read as one.
+- **Round 8 (rev 9) made every rev-8 correction singular and
+  executable:**
+  - Q#DR26 no longer retains the withdrawn execution-order claim; it
+    owns only the homogeneous enum/vector shape and delegates sequence
+    semantics to Q#DR29: **bus arrival, not filesystem execution**.
+  - 2a owns acceptance **23–38 and 50–55, including every suffixed
+    item**, so rev 8's new tests cannot fall between implementation PRs.
+  - The LSP gate is one manager-owned, generation-scoped
+    `HashSet<(LspServerId, String)>`. Both
+    `absorb_publish_diagnostics` and the now-server-aware
+    `mark_document_stale` check the exact pair; `did_open` clears one
+    pair, and server teardown clears all and only that server's pairs.
+    It is reclaimed, not falsely called size-bounded. Acceptance covers
+    both writers and both reclamation paths.
+  - Buffer-name following now uses explicit
+    `BufferNameOrigin::{Explicit, PathDerived}` state. The acceptance
+    collision is a file `${cwd}/notes` explicitly named `notes`, which
+    defeats rev 8's path-equivalence heuristic.
 - **Round 7 (rev 8) found five contract defects of ONE family, and the
   family is the transferable lesson: a guarantee assumed from a
   mechanism whose implementation was never read.** Reply order assumed
@@ -484,9 +503,10 @@ has **no branch and no framing yet**.
     a worker can finish, be descheduled before sending, and have a later
     reply arrive first. The ordering guarantee was **withdrawn, not
     engineered**: reconciliation is order-independent, and `fs.lua:155-165`
-    already instructs callers needing ordering to serialize. A lock was
-    rejected — it would serialize every fs mutation for a hazard with no
-    production reachability.
+    already recommends serialization. Rev 9 makes the public contract
+    exact: overlapping mutations dispatch serially, awaiting one before
+    the next. A lock was rejected — it would serialize every fs mutation
+    for a hazard absent from shipped in-tree callers.
   - **`EditorCore::kill_buffer` damages editor state BEFORE it can
     refuse.** It clears `round_trip_buffers`, closes side windows and
     redirects ordinary windows, and only then can
@@ -497,20 +517,21 @@ has **no branch and no framing yet**.
   - **Buffer names are set from `path.display()` AS GIVEN** while only
     `file_path` is normalized (`src/editor_core.rs:917`,
     `src/lua_bindings/mod.rs:3112`), so a relative open leaves a short
-    name that a string-equality rule mistakes for user-chosen. The rule
-    is now path-equivalence.
+    name that a string-equality rule mistakes for user-chosen. Rev 8
+    moved to path-equivalence; rev 9 replaces that inference with
+    explicit provenance because a custom name can equal the path.
   - **`diag_store` has ZERO correlated writers**, and
     `DiagnosticStore.by_uri` is keyed by **URI alone** with no server
     component (`src/diag.rs:198`) — so the store most needing protection
-    is the one a `pending_routes` purge cannot help, and a
-    `(sid, uri)` tombstone would not even match it. Gated by a bounded
-    tombstone, keyed to match the store.
+    is the one a `pending_routes` purge cannot help. Rev 8 incorrectly
+    inferred that the tombstone must share the store's URI-only key;
+    rev 9 gates in `LspManager`, where `sid` is still available.
   - **A first pass of rev 8 checked only `handle_notification` and
     concluded `publishDiagnostics` was the only uncorrelated writer.
     Wrong lens boundary** — `pub fn mark_document_stale`
     (`src/lsp.rs:3108`) takes **no `LspServerId`** and creates URI keys
-    across three stores for every server. Recorded because it is the
-    round's own defect class occurring inside the round.
+    across three stores for every server. Rev 9 changes that surface and
+    its private Lua binding to `(sid, uri)` and pins it independently.
 - **Both new hooks are `all-must-succeed`, not short-circuit** — a gap
   the review did not raise and the sweep found. `src/hook.rs` defines
   three `HookKind`s; registered short-circuit, one `resource.renamed`
@@ -629,9 +650,10 @@ has **no branch and no framing yet**.
   skips phase 1, **so a window displaying the deleted buffer keeps a
   removed id**. That is a third defect on that arm beside the missing
   dirty check and the first-match lookup. (2) The drain outcome must
-  carry deletions as well as renames, **in settle order**, because a
-  directory rename and a delete beneath it can settle in the same tick
-  and reconciling them out of order targets the wrong path.
+  carry deletions as well as renames in one `Vec<ResourceOp>` so every
+  kind is expressible, but its sequence is **bus-arrival order, not
+  filesystem execution order**; Q#DR29 requires callers with
+  interdependent mutations to serialize.
 - Intended serial implementation once approved: **2a** rename/delete
   reconciliation substrate with no dired UI, **2b** marks and
   operations, **2c** mkdir/copy/recursive-delete primitives, then Stage

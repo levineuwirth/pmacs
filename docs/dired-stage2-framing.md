@@ -1,13 +1,14 @@
 # Dired Stage 2 — marks and operations — framing
 
-**Revision 8 — 2026-07-28. Status: PROPOSED — NOT APPROVED. This
+**Revision 9 — 2026-07-28. Status: PROPOSED — NOT APPROVED. This
 document has never received a formal framing approval, and it needs one
 from the user before any implementation branch is cut.** Its commits
-embody six rounds of findings; that is not the same as approval.
+embody seven rounds of findings; that is not the same as approval.
 Revision 7 resolved the cross-lane split with PR #186 — accepted, and
-not reopened here. **Revision 8 answers review round 7: five blocking
-contract defects and two documentation fixes**, all of one family. §0's
-round-7 section says what each decided.
+not reopened here. Revision 8 answered review round 7's five contract
+defects and two documentation fixes. **Revision 9 answers review round
+8: four blocking contract/acceptance defects and two accuracy defects.**
+§0's round-8 section says what each decided.
 
 **Ground truth: re-scouted 2026-07-28 against canonical `main` @
 `6bee09d`** (`Merge pull request #184 from levineuwirth/bottom-panel-stage2b`).
@@ -17,12 +18,19 @@ re-scout: §0's round-4 section states exactly what moved, what it
 invalidated, and what survived unchanged.
 
 **`main` then moved again mid-re-scout, to `0442d78`** (#174,
-`fix-m4-sink-races`), and this branch is merged up to it. #174 touches
+`fix-m4-sink-races`), and this branch was merged up to it. #174 touches
 `tests/m4_acceptance.rs` only, changes no source, and intersects this
 document at exactly one point — a §11 deferral, which it **confirms**
 rather than invalidates. Every scouting claim below therefore holds at
 `0442d78` as well as at `6bee09d`; the `6bee09d` anchor is kept as the
 one the census was actually read against.
+
+**The branch is now integrated through canonical `main` at `7586905`.**
+The intervening first-parent changes are #185 and #189, both
+documentation-only ledger/coherence updates; neither changes the
+runtime substrate scouted here. The current PR base and merge parent are
+therefore `7586905`, while `6bee09d` remains the explicit code-census
+anchor.
 
 Continues `docs/dired-framing.md` (rev 7, approved; Stage 0 merged as
 #162, Stage 1 as #165). That document's §6 and §7 carry the *approved*
@@ -44,6 +52,104 @@ numbers drift and this document has now watched them drift twice.
 ---
 
 ## 0. Revision history
+
+### Review round 8 (rev 8 → rev 9) — make the revised contracts singular and executable
+
+Round 8 accepted the substance of rev 8's mid-edit preflight,
+three-outcome confirmation, Lua binding, and hook-kind decisions. It
+found six places where the document had not carried its new decisions
+through to one implementable contract.
+
+#### F1 — the withdrawn ordering guarantee remained authoritative → **supersede it everywhere**
+
+Verified: Q#DR26 still called `TickOutcome.resources` an ordered
+execution sequence, the proposed Rust doc still said "settle order",
+and `docs/active-work.md` repeated the same claim, while Q#DR29 and §6
+said the opposite. Rev 9 rewrites Q#DR26 to retain only the decisions
+that survived — one homogeneous `Vec<ResourceOp>` and one
+`Option<ResourceOp>` — and explicitly delegates sequence semantics to
+Q#DR29. The proposed Rust doc and volatile ledger now both say
+**bus-arrival order, not filesystem execution order**.
+Because the async primitives are public, rev 9 also corrects "no
+production path" to "no shipped in-tree path" and assigns 2a an explicit
+`fs.lua` contract requiring overlapping mutations to serialize.
+
+#### F2 — rev 8's acceptance additions were not assigned to 2a → **the cut owns 23–38 and 50–55**
+
+Verified: §13 added 31b, 31c, 53b, 54 and 55, but §10 and the PR body
+still assigned 2a only `23–38, 50–53`. The numeric ranges include the
+31 suffixes, but not 54–55, and leave 53b needlessly ambiguous. Rev 9
+assigns **23–38 and 50–55, including every suffixed item**, to 2a. The
+PR body carries the same allocation.
+
+#### F3 — the tombstone had two keys and no implementable teardown → **one manager-owned `(sid, uri)` set**
+
+Verified: rev 8 called the tombstone both "per-server `(sid, uri)`" and
+"URI-keyed to match `DiagnosticStore`". The latter inference was wrong:
+the gate sits in `LspManager::absorb_publish_diagnostics`, which
+receives `sid`, **before** the URI-only store write. A URI-only
+tombstone also cannot clear one server's entries at teardown without
+retaining the server provenance it discarded.
+
+Rev 9 chooses one state shape:
+
+```rust
+forgotten_documents: HashSet<(LspServerId, String)>
+```
+
+`forget_uri(sid, uri)` inserts the exact pair.
+`absorb_publish_diagnostics(sid, …)` checks that pair before touching
+`DiagnosticStore`. `mark_document_stale` becomes
+`mark_document_stale(sid, uri)`, and the private Lua binding becomes
+`pmacs.lsp._mark_document_stale(server_id, uri)`, so the second
+state-creating writer checks the same pair instead of requiring a
+global URI projection. `did_open(sid, uri)` removes only that pair;
+`start_generation(sid, …)` and `forget(sid)` retain entries for every
+other server and remove all entries for `sid`.
+
+The set is **generation-scoped and reclaimed, not size-bounded**. A live
+server can accumulate distinct forgotten URIs until reopen or teardown;
+rev 8's word "bounded" promised a cap that does not exist. An arbitrary
+capacity/LRU eviction would reopen the late-notification race, so rev 9
+states the honest lifetime instead.
+
+Acceptance now covers both state-creating writers, exact-pair reopen,
+and server-selective teardown. The fifteen synchronous Lua `clear`
+bindings are not late arrivals and cannot repopulate result data; the
+diagnostic forget primitive itself removes `epochs` rather than calling
+the existing `clear`, which increments it.
+
+#### F4 — `mark_document_stale` had no bite → **test the writer and both reclamation paths**
+
+Item 31b now calls both late paths: `publishDiagnostics(sid, old_uri)`
+must not recreate diagnostics, and
+`_mark_document_stale(sid, old_uri)` must not recreate any of the three
+stale flags. New item 31d proves that `did_open` clears only the exact
+pair and that each teardown clears all and only that server's pairs.
+The binding error/idempotence contract remains item 31c.
+
+#### F5 — path equivalence is not provenance → **record provenance**
+
+Verified with the review's collision: for a file `${cwd}/notes`, a user
+who explicitly chooses the buffer name `notes` produces the same
+normalized path as the file. Rev 8 would overwrite it while claiming
+custom names survive.
+
+Rev 9 adds explicit private buffer state:
+`BufferNameOrigin::{Explicit, PathDerived}`. Generic constructors and
+`set_name` produce `Explicit`; every audited file-load/save-as site uses
+a dedicated path-derived setter; reconciliation updates only
+`PathDerived` names and keeps that origin for later renames.
+`pmacs.buffer.set_name` is explicitly user naming and therefore sets
+`Explicit`. Acceptance uses the collision case itself, so replacing
+provenance with the rev-8 normalization heuristic fails.
+
+#### F6 — the volatile ledger was not volatile enough
+
+`docs/active-work.md` now records revision 9, seven review rounds, and
+integration through canonical `main` at `7586905`; its old
+`ad41cf1` anchor and rev-6 ordering residue are removed. The measured
+line count is refreshed after this revision's final edit.
 
 ### Review round 7 (rev 7 → rev 8) — five contract defects, one family
 
@@ -166,7 +272,7 @@ transactional kill. Three reasons:
 Acceptance 53 is split into **three separately-asserted properties with
 individual bites** (§13).
 
-#### F3 — the name-provenance rule is false for relative opens → **path-equivalence, stated**
+#### F3 — the name-provenance rule is false for relative opens → **path-equivalence, stated** *(superseded by rev 9 F5)*
 
 Verified: `get_or_load_buffer` (`src/editor_core.rs:917`) sets
 `display_name = path.display().to_string()` — **the path as given** —
@@ -177,7 +283,8 @@ and normalizes only the stored `file_path` via `set_buffer_path`.
 Rev 7's rule — update the name only when it **equals** the normalized
 old path — leaves that buffer's name stale, and it is not user-renamed.
 
-**Decision: the rule is path-equivalence, not string equality.** The
+**Rev-8 decision, superseded in rev 9: the rule is path-equivalence, not
+string equality.** The
 name is treated as path-derived — and therefore updated — **iff the
 stored name, parsed as a path and normalized by
 `normalize_buffer_path`, equals the buffer's stored normalized old
@@ -229,7 +336,8 @@ defect class occurring inside the round** — recorded rather than
 quietly corrected, because "I checked the mechanism" and "I checked the
 right mechanism" are different claims.
 
-**Decision: a bounded per-server tombstone, checked at absorb.**
+**Rev-8 decision, superseded in rev 9 F3: a bounded per-server
+tombstone, checked at absorb.**
 `forget_uri(sid, uri)` records `(sid, uri)` as forgotten; an
 uncorrelated absorb whose URI is tombstoned is **dropped**; the
 tombstone is cleared when that URI is next `did_open`ed, and wholesale
@@ -559,6 +667,8 @@ hold**, and two of them are *understated* — see R2 and R4.
   tick, and reconciling them out of order reconciles the wrong path.
   A single enum field also refuses the impossible both-`Some` state, the
   argument `ResolvedTarget`'s own doc makes at `src/editor_core.rs:100-102`.
+  *(The ordering rationale is historical here and is superseded by rev
+  9 F1/Q#DR29; the enum-shape rationale survives.)*
 - **R4 (P1) — `reconcile_delete` stopped short of the real removal
   lifecycle, and the substrate is worse than the review says.** The
   review is right that removal is two phases — `EditorCore::kill_buffer`
@@ -1668,10 +1778,11 @@ possible, which is why the hook carries `(old, new)` paths.
 - matches normalized stored paths against normalized `old` by **equality
   or path-component prefix** (`/foo` must not match `/foobar`);
 - sets the new path **and** sets the name, but only when the buffer's
-  name is **path-derived**, by the equivalence rule below;
+  explicit name-origin state is **path-derived**, by the provenance
+  rule below;
 - returns every rebind it performed.
 
-**The name-provenance rule (Q#DR30, rewritten in rev 8 — F3).** Rev 7
+**The name-provenance rule (Q#DR30, rewritten in rev 9 — F5).** Rev 7
 updated the name only when it **equalled** the normalized old path,
 assuming path-backed buffers carry full-path names. **They do not.**
 `get_or_load_buffer` (`src/editor_core.rs:917`) sets
@@ -1682,29 +1793,49 @@ and normalizes only the stored `file_path`; `pmacs.buffer.from_file`
 rule would have left that name stale while insisting it was
 user-chosen.
 
-The rule is **path-equivalence**, not string equality:
+Rev 8 replaced string equality with normalized path-equivalence. That
+fixed relative opens but still was not provenance: for a file
+`${cwd}/notes`, a user-chosen name `notes` normalizes to the file's path
+and would be overwritten. **Rev 9 records the fact instead of inferring
+it from the string:**
 
-> A buffer's name is path-derived — and therefore updated — **iff the
-> stored name, parsed as a path and normalized by
-> `normalize_buffer_path`, equals the buffer's stored normalized old
-> path.**
+```rust
+enum BufferNameOrigin {
+    Explicit,
+    PathDerived,
+}
+```
 
-In words: *the name still denotes this file.* A full-path name
-qualifies; a relative name qualifies, because it normalizes to the same
-absolute path; and a name the user chose — `notes`, `*scratch*` — does
-not, and survives. Both directions are load-bearing, and §13 tests
-both: the relative case is what rev 7 got wrong, and the custom case is
-what stops the fix over-correcting into a name-clobberer.
+The field is private buffer state and is set only through two explicit
+doors:
+
+- `Buffer::new`, `Buffer::from_bytes`, and ordinary `Buffer::set_name`
+  create/set an **`Explicit`** name. The new
+  `pmacs.buffer.set_name` binding goes through this door: it is a user
+  naming operation even when its string happens to denote the file.
+- A dedicated `set_path_derived_name` writes the name and marks it
+  **`PathDerived`**. Every path-backed creation site is audited to use
+  it: `EditorCore::get_or_load_buffer`, the `NotFound` arm of
+  `resolve_target_buffer`, `pmacs.buffer.from_file`, and
+  `pmacs.buffer.find_or_open`. Save-as/visit sites that establish a path
+  must use the same door. Reconciliation uses it again after a rename,
+  so a second rename still follows.
+
+`reconcile_rename` tests only `BufferNameOrigin`; it does not parse or
+normalize the display name. A relative open therefore follows because
+its creator recorded path provenance, while a user who explicitly names
+`${cwd}/notes` as `notes` keeps that name. §13 item 29 uses exactly that
+collision rather than a custom string that happens not to resemble the
+path.
 
 **One consequence, stated rather than hidden:** when the rule fires the
 new name is written as the **normalized new path**, so a buffer opened
 by a relative path acquires an absolute name after a rename. Preserving
 the relative rendering would require knowing *which base the name was
 relative to*, which no buffer records. The effect is confined to the
-statusline and the buffer list. The alternative — an explicit
-provenance flag on `Buffer`, with every creation site audited — is real
-core state for a corner of the statusline, and this framing does not
-think that trade is worth it. Named in §11 in case review disagrees.
+statusline and the buffer list. The origin bit records only whether the
+name may follow; it deliberately does not attempt to preserve the
+relative spelling or its base.
 
 **Both rename paths call it**: the async harvest below, and
 `apply_resource_op`'s rename arm (`mod.rs:3234-3255`), whose raw
@@ -1794,26 +1925,33 @@ error with `mlua::Error::external`. Its **error contract**:
 - **Raises** on an unknown `server_id`, matching `forget`'s existing
   behaviour for the same input.
 - **Succeeds silently** when the URI has no state under that server.
-  The subscriber fires for every renamed path, including buffers that
-  never attached to a language server, so "nothing to forget" is the
-  common case and must not be an error.
+  The subscriber runs per attachment, but an attachment need not have
+  any pending route or populated result store, and cleanup can be
+  repeated after an earlier partial teardown. "Nothing to forget" is
+  therefore an idempotent success, not an error.
 - Takes the **old** URI. Calling it after `didOpen` of the new URI is
   therefore safe and order-independent with respect to step 5.
 
-Pinned by §13 item 31, which asserts both arms — the raise and the
+Pinned by §13 item 31c, which asserts both arms — the raise and the
 silent success.
 Its shape is modelled on the **server-scoped** teardowns that already
 exist. **There are two of them, and rev 4 named neither correctly (W2):**
 `LspManager::start_generation` (`src/lsp.rs:1307-1345`, the restart-
 generation flip) and `LspManager::forget` (`src/lsp.rs:3015-3042`, the
 terminal-state removal). There is no `fn restart`. Both do the same
-three things one axis over:
+teardown work one axis over; `forget_uri` does four things in this
+order:
 
-1. **Purge `pending_routes`** whose route carries this URI —
+1. **Record `(sid, uri)` in `forgotten_documents` before clearing
+   anything.** Main-thread execution makes the following steps atomic
+   with respect to another manager tick, but putting the gate first
+   means every later call observes the forgotten state even if a future
+   refactor introduces an early return.
+2. **Purge `pending_routes`** whose route carries this URI —
    `retain`, mirroring `start_generation`'s `:1324`
    `retain(|(sid, _), _| *sid != id)` and `forget`'s `:3028`.
    Per W3, the predicate must retain `WorkspaceSymbol` explicitly.
-2. **Drain-cancel their awaiters — and this is where rev 4 pointed at
+3. **Drain-cancel their awaiters — and this is where rev 4 pointed at
    the wrong function (W1).** `pending_external` (`:804`) holds the
    `Handle:await()` side, and the contract at `:801-803` is explicit
    that it is *"drained-cancelled wherever `pending_routes` is purged"*.
@@ -1833,7 +1971,7 @@ three things one axis over:
    `runtime.complete_external_cancelled`, exactly as
    `drain_external_cancelled` does per key. The route→awaiter join is
    the `rid`; there is no other index.
-3. **Clear all fourteen stores plus `documents`** for the old key. Each
+4. **Clear all fourteen stores plus `documents`** for the old key. Each
    store already has a keyed `clear` (`diag.rs:262`, `hover.rs:160`,
    `completion.rs:331`, `semantic_tokens.rs:263`, …). Note the two
    irregular keys: `locations_store` is **kind**-keyed, so all four kinds
@@ -1841,11 +1979,13 @@ three things one axis over:
    too, so only the document-scoped entry is dropped — the same
    asymmetry that makes `WorkspaceSymbol` route-exempt in step 1.
 
-#### The uncorrelated writers, and the tombstone that gates them (rev 8, F4)
+#### The uncorrelated resurrection paths, and the tombstone that gates them (rev 9, F3/F4)
 
-`forget_uri`'s three steps all operate on `pending_routes` — the
-**correlated** path, where a response is matched to a request id. There
-are writers that never go near it.
+`forget_uri`'s route purge and awaiter drain operate on
+`pending_routes` — the **correlated** path, where a response is matched
+to a request id — and its store clear handles only state already
+present. Neither guards a later writer that never goes near a request
+route.
 
 **The census, re-run with "uncorrelated writers" as the lens.** Counted
 over production code only, with `#[cfg(test)]` boundaries read per file
@@ -1857,8 +1997,11 @@ rather than inferred from filenames. **41 writes total**: 16 correlated,
   exactly one caller — `handle_response` (`:2523`) behind
   `pending_routes.remove(&(sid, rid))` at `:2627`. These are
   purged by construction if the route drain runs first.
-- **Uncorrelated: 19** = **1** server-initiated notification + **3**
-  `mark_document_stale` writes + **15** Lua-callable `clear` bindings.
+- **Uncorrelated to a request id: 19** = **1** server-initiated
+  notification + **3** `mark_document_stale` writes + **15**
+  Lua-callable `clear` bindings. Only the first four create result/stale
+  state and can resurrect a forgotten URI; the synchronous `clear`
+  bindings remove result data.
 
 **Four findings that change the design, not just the prose:**
 
@@ -1873,21 +2016,25 @@ rather than inferred from filenames. **41 writes total**: 16 correlated,
    which writes the event queue and status tracker and no URI-keyed
    store. So among notifications it is **1 of 1**. But
    **`pub fn mark_document_stale(&self, uri)` (`src/lsp.rs:3108`)** is a
-   second uncorrelated writer: it takes `&self` and **no
+   second uncorrelated writer: today it takes `&self` and **no
    `LspServerId`**, marks `stale_uris` in three stores **for every
    server at once**, *creates* URI keys, and is exposed to Lua as
    `pmacs.lsp._mark_document_stale` (`src/lua_bindings/mod.rs:9742`).
+   Rev 9 changes both surfaces to `(sid, uri)`, because every caller
+   already owns the attachment/server id and the tombstone cannot be
+   exact without it.
    **An earlier pass of this framing checked only `handle_notification`
    and concluded "publishDiagnostics is the only one in Rust". That was
    the wrong lens boundary and the answer was wrong** — recorded because
    it is the round's own defect class caught inside the round.
 3. **`DiagnosticStore.by_uri` is keyed by URI *alone*** (`src/diag.rs:198`),
    with **no `LspServerId` component**, unlike the other thirteen which
-   key on `(server, uri)`. **So `forget_uri(sid, uri)` cannot be
-   server-scoped for the one store that has the uncorrelated writer.**
-   The tombstone must therefore be keyed to match whatever the store is
-   keyed to, and the framing must not pretend a `(sid, uri)` tombstone
-   protects a URI-only store.
+   key on `(server, uri)`. Rev 8 drew the wrong conclusion from that
+   fact: the tombstone does **not** live in `DiagnosticStore` and need
+   not share its key. `absorb_publish_diagnostics(sid, params)` has the
+   server id before it calls `guard.set(uri, parsed)`, so a manager-owned
+   `(sid, uri)` gate protects the URI-only write while retaining the
+   provenance needed for selective teardown.
 4. **`epochs` is never pruned.** `DiagnosticStore::clear` *creates* an
    `epochs` entry (`src/diag.rs:266`, `or_insert(0) += 1`), as does
    `set` (`:250`), and nothing removes them. A `forget_uri` clearing
@@ -1906,14 +2053,27 @@ different direction is the strongest evidence yet for §5's conclusion:
 **the Rust method handles what it can see, and the hook is the
 mechanism that scales.**
 
-**The gate: a bounded tombstone, keyed to match the store.**
-`forget_uri` records the forgotten URI as tombstoned; an uncorrelated
-absorb for a tombstoned URI is **dropped**; the tombstone clears when
-that URI is next `did_open`ed, and wholesale at the two server-teardown
-sites (`start_generation`, `forget`). Per finding 3 the diagnostics
-tombstone is **URI-keyed, not `(sid, uri)`-keyed**, matching
-`by_uri`; per finding 4 the forget path also drops the URI's `epochs`
-entry.
+**The gate: one manager-owned, generation-scoped exact-pair tombstone.**
+`LspManager` gains
+`forgotten_documents: HashSet<(LspServerId, String)>`.
+`forget_uri(sid, uri)` inserts the exact pair;
+`absorb_publish_diagnostics(sid, params)` drops a matching pair before
+touching the URI-only diagnostic store; and
+`mark_document_stale(sid, uri)` returns before touching any of its three
+stores when the same pair is present. The private Lua surface changes
+to `pmacs.lsp._mark_document_stale(server_id, uri)`, and its sole
+production call in `lsp.lua` passes `rec.server, rec.uri`.
+
+The tombstone clears **for that exact pair** when
+`did_open(sid, uri)` reopens it. `start_generation(sid, …)` and
+`forget(sid)` remove all pairs for `sid` and retain every other server's
+pairs. This is **reclaimed and generation-scoped, not size-bounded**: a
+live generation can accumulate distinct forgotten URIs, and imposing a
+capacity/LRU eviction would allow an arbitrarily late notification to
+resurrect an evicted key. Per finding 4, the diagnostic forget path is
+a distinct store method that removes `by_uri`, `severity_counts`,
+`stale_uris`, **and `epochs`**; it does not call today's `clear`, which
+increments the epoch it is meant to forget.
 
 **Why not the cheaper membership gate.** The tempting version needs no
 new state: absorb only if `(sid, uri)` is in `documents`. **It would be
@@ -1924,7 +2084,7 @@ this editor explicitly forgot**. There is precedent for exactly this
 shape: `handle_response` already drops late arrivals via
 `client.cancelled_rids.remove(&rid)` (`src/lsp.rs:2549`) — a
 "forget-then-drop-late-arrivals" set. The tombstone is that pattern with
-a URI key instead of a request id.
+a `(server, URI)` key instead of a request id.
 
 **Why the existing epoch cannot serve.** `epochs` is bumped
 unconditionally by `set` with no epoch parameter and is read only by
@@ -2124,7 +2284,8 @@ pub enum ResourceOp {
 
 pub struct TickOutcome {
     pub settled: Vec<JobId>,
-    /// Successful resource mutations, in settle order.
+    /// Successful resource mutations, in bus-arrival order.
+    /// This is not filesystem execution order.
     pub resources: Vec<ResourceOp>,
 }
 ```
@@ -2359,17 +2520,24 @@ That is safe rather than merely honest, for three verified reasons:
 - **Independent mutations commute.** Disjoint paths and disjoint
   subtrees reconcile to the same registry state in either order, which
   is every case the shipped consumers can produce.
-- **Interdependent concurrent mutations cannot arise from any production
-  path.** dired **serializes** — one coroutine per batch, awaiting each
-  op before dispatching the next (§9). `apply_resource_op` is
+- **No shipped in-tree path produces interdependent concurrent
+  mutations.** dired **serializes** — one coroutine per batch, awaiting
+  each op before dispatching the next (§9). `apply_resource_op` is
   **synchronous on the main thread** and never enters the drain. And §2
-  verified `pmacs.fs.rename` and `pmacs.fs.remove` have **zero
-  production callers** besides tests.
-- **The primitive already instructs callers to serialize.**
+  verified `pmacs.fs.rename` and `pmacs.fs.remove` have **zero in-tree
+  production callers** besides tests. They remain public package APIs,
+  so this is not a claim that third-party reachability is zero.
+- **The primitive currently recommends serialization, and 2a makes the
+  correctness precondition explicit.**
   `fs.lua:155-165`: *"If a package needs at-most-one-pending semantics
   for mutations, it should serialize on the package side (await each op
-  before dispatching the next)."* §9 already cites this as why dired
-  does. A caller that ignores it owns the result.
+  before dispatching the next)."* That comment today explains
+  cancellation/supersede, not reconciliation. 2a extends it in the same
+  block: **mutations whose source/target paths overlap must be
+  serialized by dispatching the next only after the previous handle
+  settles**, because reply order does not recover filesystem execution
+  order. §9 already follows this rule. A caller that ignores the
+  explicit contract owns the visible stale-binding residue below.
 
 **Why no static ordering rule is offered.** It was worked out rather
 than waved away: rename `dir`→`newdir` racing delete `dir/child.txt`
@@ -2381,7 +2549,7 @@ pointing at nothing. **There is no rule short of a real execution-order
 token**, which §11 defers with a checkable trigger.
 
 **The residue, stated:** a third-party package that fire-and-forgets two
-interdependent mutations, against the documented instruction, can leave
+interdependent mutations, against the explicit 2a contract, can leave
 a buffer bound to a stale path or kill one that should have been
 rebound. Recoverable, visible, and not data loss — but real. §13 pins
 the **independent** case in both arrival orders and deliberately pins no
@@ -2692,11 +2860,11 @@ substrate items in 2b and one dired item in 2a.
 | | **2a — reconciliation** | **2b — marks and operations** | **2c — new primitives** |
 |---|---|---|---|
 | User-visible surface | **none** | `m u U t d x D R w M` | `+ C`, recursive delete |
-| Rust | `reconcile_rename`, `reconcile_delete` (both kill phases), `ResourceOp` + `TickOutcome`, `PendingJob.resource`, `forget_uri` (14 stores + `documents` + route purge + URI-scoped drain), `View::rename_resource` + the window sweep, `apply_resource_op` (rename **and** delete arms), `apply_workspace_edit` origin, `pmacs.buffer.set_name` | `pmacs.killring.push` | `mkdir`, `copy`, `remove_dir_all`; `JobKind` 12 → 15 |
-| Lua | the two hook subscribers in `lsp.lua` | all of `dired.lua`'s mark/op layer, **including its `resource.renamed` subscriber**, plus `minibuffer.lua` | two ops |
+| Rust | `reconcile_rename`, `reconcile_delete` (both kill phases), `BufferNameOrigin`, `ResourceOp` + `TickOutcome`, `PendingJob.resource`, `forget_uri` (14 stores + `documents` + route purge + URI-scoped drain + exact-pair tombstone), server-aware `mark_document_stale`, `View::rename_resource` + the window sweep, `apply_resource_op` (rename **and** delete arms), `apply_workspace_edit` origin, `pmacs.buffer.set_name` | `pmacs.killring.push` | `mkdir`, `copy`, `remove_dir_all`; `JobKind` 12 → 15 |
+| Lua | the two hook subscribers in `lsp.lua`, the server-aware `_mark_document_stale` call, and `fs.lua`'s explicit overlapping-mutation serialization contract | all of `dired.lua`'s mark/op layer, **including its `resource.renamed` subscriber**, plus `minibuffer.lua` | two ops |
 | Other files | — | **`src/editor.rs`**, to add `minibuffer.lua` to the explicit load sequence (R6) | — |
 | Config keys | none | none | `dired.recursive-deletes` |
-| Acceptance | 23–38, **50–53** | 1–22, 39–41 | 42–47 |
+| Acceptance | **23–38 and 50–55, including every suffixed item** | 1–22, 39–41 | 42–47 |
 
 **Why 2a first, with no dired surface at all.** It is a self-contained
 substrate correctness fix that stands on its own merits: it closes the
@@ -2743,6 +2911,12 @@ that deserve an undivided reviewer.
   decision about handle lifetime, not a patch.
 - **A general `purpose`/`owner` field on `PendingJob`**, per
   `COHERENCE.md` §9, which should subsume §5's `resource` field.
+- **An execution-order token for overlapping fire-and-forget filesystem
+  mutations** (Q#DR29). 2a documents the public caller precondition:
+  overlapping mutations serialize by awaiting one before dispatching
+  the next. The implementation trigger is the first shipped in-tree
+  caller that cannot satisfy that rule; at that point the runtime needs
+  a real execution token rather than a static reorder of bus replies.
 - **Migrating `autosave.lua` to `pmacs.minibuffer.confirm`** (§7).
 - **Multi-file `R` into a target directory**, and `%`-regexp marking —
   both need a target/pattern concept Stage 2 does not build. This is why
@@ -3014,15 +3188,17 @@ that deserve an undivided reviewer.
     implementation; this does.)*
 28. **False prefix**: renaming `/…/foo` does **not** rebind a buffer on
     `/…/foobar`.
-29. **Buffer name follows the path — tested in BOTH directions** (F3).
+29. **Buffer name follows explicit provenance — tested in BOTH
+    directions** (rev-9 F5).
     (a) A buffer opened by a **relative** path (name `foo.rs`, stored
-    path `/abs/dir/foo.rs`) gets its name updated, because the name
-    normalizes to the stored path. *(Rev 7's string-equality rule fails
-    this — it is the case that motivated the rewrite.)* (b) A buffer
-    with a **genuinely custom** name (`notes`) keeps it. *(A rule that
-    updated unconditionally, or matched on basename, fails this — it is
-    what stops the fix becoming a name-clobberer.)* Both arms are
-    required; either alone admits a wrong rule.
+    path `/abs/dir/foo.rs`) gets its name updated because its load site
+    records `BufferNameOrigin::PathDerived`. *(Rev 7's string-equality
+    rule fails this.)* (b) Open the file **`${cwd}/notes`**, then
+    explicitly set its name to **`notes`** through
+    `pmacs.buffer.set_name`; a rename keeps `notes` because that call
+    records `Explicit`. *(Rev 8's path-equivalence heuristic fails this:
+    the custom string normalizes to the exact stored path.)* Both arms
+    are required; together they bite against both superseded heuristics.
 30. **An attached LSP buffer with diagnostics present before the rename,
     shown in at least TWO windows** (H3): afterwards both windows render
     the **new** URI's diagnostics, the old URI's store is empty, and each
@@ -3045,12 +3221,30 @@ that deserve an undivided reviewer.
     Its companion asserts the tombstone **does not over-reach**: a
     `publishDiagnostics` for a **different**, never-opened URI is still
     absorbed, which is what a membership gate would have broken.
+    **The second state-creating writer is in the same acceptance:** call
+    `pmacs.lsp._mark_document_stale(server_id, old_uri)` after the
+    forget and assert that **none** of diagnostic, semantic-token, or
+    inlay-hint `stale_uris` regains the old URI. Removing either gate
+    must fail its own assertion.
 31c. **`pmacs.lsp.forget_uri`'s error contract** (P2): it **raises** for
     an unknown server id, and **succeeds** for a URI with no state under
-    a known server. *(The second arm is the one that matters — the
-    subscriber fires for every renamed path, including buffers that
-    never attached, so an over-strict binding would turn the common case
+    a known server. *(The second arm is the one that matters: the
+    subscriber runs per attachment, but a valid attachment can have no
+    pending route or populated result, and repeated cleanup must remain
+    safe. An over-strict binding would turn that ordinary idempotent case
     into an error inside a hook.)*
+31d. **Tombstone identity and reclamation are exact** (rev-9 F3/F4).
+    Tombstone the same URI under servers A and B. `did_open(A, uri)`
+    clears only A, asserted directly against the manager-owned set in an
+    `lsp.rs` unit test. Diagnostics with distinct payloads then prove an
+    A write is admitted while a later B write is dropped; a second URI
+    tombstoned only under B proves B's `mark_document_stale` cannot set
+    any of the three global stale flags. Exercise
+    `start_generation(B, …)` and terminal `forget(B)` in separate cases:
+    direct set assertions prove each removes every pair for B while
+    preserving A's. The set is empty after the owning generation is
+    torn down. *(Fails against rev 8's URI-only gate, against a global
+    clear on any teardown, and against never reclaiming the set.)*
 32. A rename **across project roots** re-runs `ensure_server` and the
     buffer ends up attached to a **different** server; a same-root rename
     reuses the existing one (#161's affinity key).
@@ -3160,14 +3354,25 @@ that deserve an undivided reviewer.
     pass on two of the three and hide the third. *(Rev 7 specified none
     of this — it said to treat the refusal as "keep the buffer", which
     reads as though skipping phase 2 restored something. It does not.)*
-54. **Two INDEPENDENT concurrent mutations reconcile correctly in
-    either arrival order** (F1, Q#DR29): dispatch a rename and a delete
-    on **disjoint** paths fire-and-forget, pump, and assert the end
-    state; then repeat with the replies arriving in the opposite order
-    and assert the **same** end state. *(Pins that the contract really
-    is order-independent rather than accidentally order-sensitive.
-    Fails against a reconciliation that, say, resolves delete targets
-    against paths already rebound by a rename in the same drain.)*
+54. **Bus order is reported honestly, and independent mutations both
+    reconcile** (F1, Q#DR29), in two layers:
+
+    - An `async_runtime.rs` unit test allocates two pending resource jobs
+      without dispatching workers, injects their successful
+      `WorkerReply`s B-then-A, and asserts `TickOutcome.resources` is
+      B-then-A; repeat A-then-B. This uses the module test's access to the
+      private bus and fails against sorting by job id/kind or claiming
+      dispatch/execution order.
+    - An integration test dispatches a rename and delete on **disjoint**
+      paths, waits for both, and asserts both registry effects occurred.
+      It fails against dropping/deduplicating one resource kind.
+
+    The disjoint end state is confidence coverage, **not a claimed bite
+    against interdependent sequencing**: disjoint paths necessarily
+    commute. Rev 8's text said resolving a delete after an independent
+    rename would falsify the test, but the rename cannot change that
+    delete target. The unsupported overlapping-path case remains the
+    explicit residue below; no test pretends to solve it.
 55. **`resource.renamed` and `resource.deleted` are `all-must-succeed`,
     not short-circuit** (Q#DR28): with **two** subscribers registered
     and the **first one raising**, the second still runs, and the error
@@ -3195,8 +3400,11 @@ it.**
 | 25 | the reconciliation moved to `_take_result` |
 | 27 | `find_by_path`'s first match instead of every match |
 | 28 | a string `starts_with` instead of a path-component prefix |
+| 29 | explicit `BufferNameOrigin` replaced by rev 8's normalized-path heuristic |
 | 30 | `rec.uri` updated without re-rooting the diagnostic view — and a remove-and-re-push, which passes a one-window test |
 | 31 | the store clear without the `pending_routes` purge, so an in-flight response repopulates the old key |
+| 31b | either late-write gate removed: diagnostics repopulate or one of the three stale flags returns |
+| 31d | the exact-pair set replaced by a URI-only set, or teardown clears every server's tombstones |
 | 33 | `handle.path` updated without the buffer name |
 | 34 | the applier restoring by path instead of by buffer handle |
 | 39 | a completion source added to `confirm` |
@@ -3204,6 +3412,9 @@ it.**
 | 50 | the hook fired for a **failed** rename, or fired with the un-normalized path |
 | 51 | `reconcile_delete` calling only `EditorCore::kill_buffer`, so phase 2 never runs |
 | 52 | `reconcile_delete` calling only `remove_buffer_and_fire`, so windows keep a removed id (this is `apply_resource_op` today) |
+| 53b | the `editing_in_progress` preflight removed, exposing each of the three pre-refusal mutations |
+| 54 | resources sorted by job id/kind instead of preserving injected bus order, or one resource kind dropped |
+| 55 | either hook registered `short-circuit` |
 
 *(Rev 5's items 48–49 and their bites left with Q#DR25 — R1. They belong
 to the `generated-buffer-immutability` lane, and §3.1 hands over the one
@@ -3218,17 +3429,19 @@ other, which is exactly why the framing had to name both phases (R4).
 `dired.lua` is an existing file now, so `scripts/bite`'s
 swap-over-`git show` mode applies — but per #165's lesson, **commit
 before biting**. Items 30, 33, and 34 came from round 2, item 31 from
-round 3, and items 50–53 from round 5; each is a case where the previous
-revision's design would have passed a weaker test. Note that **item 20
-has no bite for the interval it cannot close** (H1) — only for the check
-it does make.
+round 3, items 50–53 from round 5, items 53b–55 from round 7, and item
+31d plus 54's controlled-bus layer from round 8; each is a case where a
+previous revision's design would have passed a weaker test. Note that
+**item 20 has no bite for the interval it cannot close** (H1) — only for
+the check it does make.
 
 ## 14. Gates (per PR)
 
 The standard suite from `CLAUDE.md`, plus what this work touches. **2a's
-  gates are the widest of the three** — it changes `lsp.rs`, `view.rs`,
-  `window.rs`, `editor_core.rs`, and `lua_bindings`, so every LSP suite is
-  in its blast radius, not just the dired one:
+  gates are the widest of the three** — it changes `buffer.rs`,
+  `async_runtime.rs`, `lsp.rs`, the LSP stores, `view.rs`, `window.rs`,
+  `editor_core.rs`, and `lua_bindings`, so every LSP suite is in its
+  blast radius, not just the dired one:
 `cargo fmt --check`; `cargo clippy --workspace --all-targets -- -D
 warnings` as its own step; `cargo test --lib` and `--lib --features
 crdt`; `dired_acceptance` (default **and** `crdt`); **`m8_1`, `m8_2`,
@@ -3444,17 +3657,18 @@ mark, operation and subscriber items.
   records what that lane inherits from this document's re-scout, and why
   the two lanes can land in either order without conflicting. (§3.1,
   §11)
-- **Q#DR26** *(new in rev 6, R3)* The drain outcome is **one ordered
-  sequence of settled resource mutations**, not a field per mutation
-  kind: `TickOutcome { settled, resources: Vec<ResourceOp> }` with
+- **Q#DR26** *(new in rev 6, R3; ordering half superseded in rev 9,
+  F1)* The drain outcome is **one homogeneous sequence of settled
+  resource mutations**, not a field per mutation kind:
+  `TickOutcome { settled, resources: Vec<ResourceOp> }` with
   `ResourceOp::{Rename { from, to }, Remove { path }}`, and `PendingJob`
-  carrying a single `Option<ResourceOp>`. Ordered because a directory
-  rename and a delete beneath it can settle in the same tick and
-  reconciling them out of order targets the wrong path; one enum rather
-  than two `Option`s because two would admit a both-`Some` state that
-  cannot occur — `ResolvedTarget`'s own doc makes that argument at
+  carrying a single `Option<ResourceOp>`. One enum rather than two
+  `Option`s because two would admit a both-`Some` state that cannot
+  occur — `ResolvedTarget`'s own doc makes that argument at
   `src/editor_core.rs:100-102`. Rev 5's `renames`-only shape could not
-  express deletion at all, though §6 required it to. (§5, §6)
+  express deletion at all, though §6 required it to. **This decision
+  makes no ordering promise; Q#DR29 exclusively defines sequence
+  semantics as bus-arrival, not filesystem execution order.** (§5, §6)
 - **Q#DR27** *(new in rev 6, R4)* "Kill a buffer" means **both** removal
   phases, and `reconcile_delete` composes them for every id it kills:
   `EditorCore::kill_buffer` (`src/editor_core.rs:4590` — last-buffer and
@@ -3496,41 +3710,45 @@ mark, operation and subscriber items.
   `TickOutcome.resources` is **bus-arrival order, not execution order**
   — `tick` is a `try_recv` drain with no execution token — so rev 7's
   ordered-sequence justification is withdrawn. This is safe because
-  independent mutations commute, no production path can produce
+  independent mutations commute and no shipped in-tree path produces
   interdependent concurrent ones (dired serializes; `apply_resource_op`
-  is synchronous; the fs primitives have zero production callers), and
-  `fs.lua:155-165` already instructs packages needing at-most-one-pending
-  semantics to serialize on their own side. **An execution-order token
+  is synchronous; the fs primitives have zero in-tree production
+  callers). Because the primitives are public, 2a extends
+  `fs.lua:155-165` with the explicit rule that overlapping mutations
+  must be serialized by awaiting before the next dispatch.
+  **An execution-order token
   under a mutation lock was rejected**: it would serialize every fs
-  mutation through one lock to close a hazard with no production
-  reachability and a documented caller-side remedy. Deferred with a
-  checkable trigger (§11). No static ordering rule is offered because
-  none works — the correct order depends on which mutation actually ran
-  first, which is exactly what is unknown. (§5, §6, §13 item 54)
-- **Q#DR30** *(new in rev 8, F3)* A buffer's name is **path-derived —
-  and therefore updated by a rename — iff the stored name, parsed as a
-  path and normalized, equals the buffer's stored normalized old path.**
-  Not string equality against the path, which rev 7 used: names are set
-  from `path.display()` **as given** while only `file_path` is
-  normalized, so a relative open leaves a short name that rev 7 would
-  have mistaken for user-chosen. The new name is written as the
-  normalized new path, so a relatively-opened buffer acquires an
-  absolute name — stated rather than hidden, and confined to the
+  mutation through one lock to close a hazard absent from shipped
+  callers and covered by a public caller-side precondition. Deferred
+  with a checkable trigger (§11). No static ordering rule is offered
+  because none works — the correct order depends on which mutation
+  actually ran first, which is exactly what is unknown. (§5, §6, §13
+  item 54)
+- **Q#DR30** *(new in rev 8, F3; rewritten in rev 9, F5)* A buffer's
+  name is path-derived only when its private
+  `BufferNameOrigin::{Explicit, PathDerived}` state says so; no string
+  or normalized-path heuristic infers provenance. Generic constructors,
+  `Buffer::set_name`, and `pmacs.buffer.set_name` set `Explicit`.
+  Audited path-backed load/new-file/save-as sites use
+  `set_path_derived_name`; reconciliation updates only that origin and
+  preserves it for later renames. This handles relative opens without
+  clobbering the collision `${cwd}/notes` explicitly named `notes`.
+  A path-derived relative name becomes the normalized absolute new path
+  after rename — stated rather than hidden, and confined to the
   statusline and buffer list. (§5, §13 item 29)
-- **Q#DR31** *(new in rev 8, F4)* Uncorrelated writers are gated by a
-  **bounded per-server tombstone**, not by document membership.
-  `forget_uri` records the forgotten `(sid, uri)`; an uncorrelated
-  absorb for a tombstoned URI is dropped; the tombstone clears on the
-  next `did_open` of that URI and at both server-teardown sites. The
-  census establishes that `publishDiagnostics` is the only uncorrelated
-  **notification** writer, but **not** the only uncorrelated writer —
-  `pub fn mark_document_stale` takes no `LspServerId` and creates URI
-  keys across three stores for every server. Two consequences the
-  tombstone must respect: **`diag_store` has zero correlated writers**,
-  so the route purge protects it not at all; and
-  **`DiagnosticStore.by_uri` is keyed by URI alone**, so the
-  diagnostics tombstone is URI-keyed rather than `(sid, uri)`-keyed, and
-  the forget path must also drop the URI's never-pruned `epochs` entry.
+- **Q#DR31** *(new in rev 8, F4; corrected in rev 9, F3/F4)*
+  State-creating writers uncorrelated to a request id are gated by one
+  **manager-owned, generation-scoped
+  `HashSet<(LspServerId, String)>`**, not by document membership.
+  `forget_uri` records the exact pair;
+  `absorb_publish_diagnostics(sid, …)` and
+  `mark_document_stale(sid, uri)` drop a matching late write;
+  `did_open` clears only that pair; and `start_generation`/`forget`
+  remove all and only the owning server's pairs. The private Lua stale
+  binding also takes `(sid, uri)`. `DiagnosticStore.by_uri` remains
+  URI-only, but that does not determine the tombstone key: the manager
+  has `sid` and gates **before** the store write. The diagnostic forget
+  path also drops the URI's never-pruned `epochs` entry.
   A membership gate (`absorb only if in documents`) was rejected because
   servers legitimately publish for files never opened, and it would drop
   all of them; the precedent for the chosen shape is
@@ -3538,7 +3756,9 @@ mark, operation and subscriber items.
   forget-then-drop-late-arrivals set with a request id instead of a URI.
   `DiagStore`'s existing `epochs` cannot serve: `set()` bumps it on
   every write with no epoch parameter, so a late notification looks
-  current. (§5, §13 items 31b–31c)
+  current. The set is reclaimed at reopen/generation teardown but has no
+  arbitrary size cap; calling it "bounded" would be false and eviction
+  would reopen the race. (§5, §13 items 31b–31d)
 
 ## 16. Branch and PR plan
 
@@ -3582,8 +3802,8 @@ self-contradictory).** Two things it got wrong and this corrects:
 - **The line counts were quoted, not measured.** Rev 5 described the
   document as *1,570 lines* — a figure from two revisions earlier — and
   the ledger in turn reported *~2,630*. **Measured at this revision:
-  `docs/dired-stage2-framing.md` is 3,624 lines and
-  `docs/active-work.md` is 981.** *A census is a reading, not a
+  `docs/dired-stage2-framing.md` is 3,844 lines and
+  `docs/active-work.md` is 1,003.** *A census is a reading, not a
   constant*, and that applies to a framing's count of its own size
   exactly as it applies to its count of the tree. Neither number above
   is copied from anywhere; both were run against the tree being pushed.
