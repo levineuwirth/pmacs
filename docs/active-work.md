@@ -654,6 +654,140 @@ has **no branch and no framing yet**.
   `FrontendView.fold_projection` to `true` for semantic frontends, which
   Stage 2 deliberately left `false` (Q#FD21).
 
+## Resource-op delete guard implementation — PR #190 OPEN, review round 2 closed
+
+- Portable branch: `githubsucks/resource-op-delete-guard-impl`, worktree
+  `../pmacs-rd-impl`. Implements the framing merged as #186
+  (`docs/resource-op-delete-guard-framing.md`, revision 5 plus its new
+  §§9-10). Position against `main`, as pasted command output rather than a
+  remembered constant — **`main` moved while this lane was being
+  written**:
+
+  ```
+  $ git merge-base HEAD githubsucks/main
+  b7bf2c664475c36b60cf7c0361ea75cd3c3b2315
+  ```
+
+  That is the whole durable fact, and it is deliberately the ONLY
+  number pasted here. **An ahead-count cannot be recorded in the file
+  it counts**: writing it is a commit, so the value is stale by one the
+  instant it is written, and the previous attempt at this entry proved
+  it — a pasted `4 0` read `5 0` at the pushed head. Run
+  `git rev-list --left-right --count HEAD...githubsucks/main` when you
+  need it; the merge-base above is what tells you whether the answer is
+  still meaningful.
+
+  **Re-measure the merge-base too before relying on it.** `main` moved
+  twice while this lane's round-1 fixes were being written (#192 and
+  #193), then twice more during round 2 (#188 and #194). This branch
+  integrates through #194. `main` has branch protection now, so a stale
+  base is not merely untidy: all 12 checks must pass on the merging head,
+  and a conflicting PR builds no merge ref at all, so a green run from
+  before the move reads as current when it is not.
+- **The framing's §8 branch plan is superseded and cannot be followed.**
+  It says "one PR — #186, which becomes the implementation PR", written
+  when #186 was still open. #186 merged as framing-only, so the
+  implementation got its own branch and PR. Nothing about the decisions
+  changes; only the branch plan. Both the framing's header and its §8 now
+  say so on their own pages.
+- **Layer 1 (the primitive) and Layer 2 (the applier + server-request
+  boundary) are both complete and both pinned through their production
+  paths.** The Layer 2 gap the first commit named — criteria 11, 11a-11d,
+  12, 13, 15 having no production-path pin — is closed.
+- **Review round 1 found four defects; all four are fixed and all four
+  are recorded in the framing's new §9**, because two of them were
+  corrections *to that document*, and a correction living only in a test
+  comment is invisible to the next reader of the framing:
+  - **P1 §9.3 — the preflight broke ordered resource ops.** Every delete
+    was judged against the filesystem's *initial* state, so a valid
+    `create X -> delete X` (or `rename A -> B -> delete B`) was refused
+    with a fabricated `NotFound` about a path the batch was about to
+    create. A regression this lane introduced. **Decision: defer, do not
+    simulate** — a delete whose target is related by component-aware path
+    containment to a path an *earlier* op creates, renames, or removes is
+    left to the primitive. Q#RD3 already calls the check a filter, not a
+    transaction. `edit` ops are deliberately excluded, so the
+    buffer-and-filesystem half still fires early for untouched targets
+    (criterion 11c depends on exactly that).
+  - **P1 §9.5 — the required production-boundary acceptances were
+    missing.** Landed: 11, 11a-11d, 12 (both directions), 13, 15.
+  - **P1 §9.4 — mid-batch failures were misreported as complete aborts.**
+    `apply_workspace_edit` now returns `nil, message, applied_op_count`,
+    and ONE renderer serves both the status line and the server's
+    `failureReason`. All three callers updated.
+  - **P2 §9.2 — non-recursive deletes inspected descendants.** `recursive`
+    is now a parameter of the shared query. The counterexample is an
+    orphan: a modified buffer at `tree/gone.rs` whose file is already gone
+    blocked a non-recursive delete of the now-*empty* `tree/`.
+- **Review round 2 found two more defects; both are fixed and recorded in
+  the framing's new §10:**
+  - **P1 §10.1 — dependency filtering compared raw path spellings.**
+    `create dir/./x -> delete dir/x` was wrongly preflight-refused even
+    though both operations name the same lexical path. The comparison
+    now runs both sides through the registry's existing lexical
+    `pmacs.path.canonicalize` normalizer before component-aware
+    containment. This is deliberately comparison-only: operation
+    execution still receives the server's original path, and no
+    filesystem/symlink canonicalization was added.
+  - **P1 §10.2 — a failing first plan item could mutate while reporting
+    “nothing was mutated.”** `apply_workspace_edit` now returns an
+    `execution_started` fact in addition to the completed-item count.
+    Only parse/plan/preflight failures claim that nothing changed. Once
+    execution starts, the shared renderer conservatively says the
+    failing operation may have changed state. Criteria 22a and 22b pin
+    both forms: a multi-edit text item whose first edit lands before its
+    second edit fails, and a resource rename that creates destination
+    parents before the filesystem rename fails.
+- **`delete_verdict` is narrowed, and #171 inherits the narrowed
+  version.** Q#RD6's shared query is this lane's to own; descendant
+  matching is now reserved for recursive deletes. Q#RD5's "inspect widely,
+  mutate narrowly" is unchanged in substance — "widely" means the set the
+  op can actually destroy.
+- **Criterion 3's stated bite: fixed by fixing the SETUP, not the doc.**
+  The framing says it fails against buffer-first ordering. Against the
+  first shipped setup it did not (a directory target with no buffer bound
+  to it), and §9.2's narrowing would then have left that setup with no
+  bite at all. The buffer is now bound to the *exact* deleted path — a
+  file opened, then replaced on disk by a non-empty directory, so a
+  non-recursive `remove_dir` fails with `ENOTEMPTY` deterministically and
+  under any uid. Both stated pre-images now bite, so the framing's wording
+  needed no amendment after all.
+- **The fake is one parameterized mode, not eight.**
+  `PMACS_FAKE_LSP_MODE=applyeditplan` reads its whole `WorkspaceEdit` from
+  `PMACS_FAKE_LSP_EDIT_PLAN` and publishes the client's response to
+  `PMACS_FAKE_LSP_APPLYEDIT_SINK` (written `.part`-then-rename, so a
+  polling reader never sees a partial record). Fail-closed: an unreadable
+  plan sends no `applyEdit` and reports itself through the sink.
+  `pmacs_fake_lsp` is a cargo BIN resolved through
+  `env!("CARGO_BIN_EXE_...")`, so every CI leg builds it and a missing
+  binary is a build failure — there is deliberately no
+  skip-and-return-ok arm.
+- **Criterion 15's stub is hosted in `m4_acceptance`, and the gate list
+  moved with it.** `lsp_dispatch_seams_acceptance` is struck from the
+  framing's §7 gate list AND its §8 touch table in the same edit, under
+  §8's permitted simplification. It is still *run* as a gate, because
+  `builtin/runtime/lsp.lua` changed.
+- Acceptance: criteria 1-16, §9's 18, 19a-19c and 20, plus §10's 21 and
+  22a-22b, all in `tests/m4_acceptance.rs` and prefixed `rd`. 28 tests.
+- Bite verification uses `scripts/bite` **with the positive control** it
+  gained in #192, merged into this lane. The pre-image for the round-1
+  fixes is this lane's own first commit `1873be6`, not `main` — those
+  defects were introduced by it. Per-criterion results are in the commit
+  message. The round-2 criteria 21, 22a, and 22b each pass on the
+  round-2 code checkpoint `cb7fe81` and produce a clean assertion
+  failure against its pre-image `c804dd5`.
+- Gates green at the round-2 tree: fmt; clippy `-D warnings`; `--lib`
+  **1863**; `--lib --features crdt` **2048**; `m4_acceptance` **149**
+  passed, **3** ignored, **1** filtered; `lsp_dispatch_seams_acceptance`
+  **15**; `dired_acceptance`
+  **25** and `autosave_acceptance` **29** (the framing's watch items);
+  required GPU **202**; full isolated-config workspace sweep; `git diff
+  --check` clean. The only warning in the non-Clippy CRDT build is the
+  pre-existing `unused_mut` in `src/daemon.rs`; strict Clippy is clean.
+- Recovery from a clean checkout:
+  `git fetch githubsucks && git worktree add ../pmacs-rd-impl
+  -b resource-op-delete-guard-impl githubsucks/resource-op-delete-guard-impl`.
+
 ## Generated-buffer immutability framing lane — MERGED AS PR #188
 
 - Portable branch: `githubsucks/generated-buffer-immutability`; worktree
@@ -851,6 +985,108 @@ has **no branch and no framing yet**.
   warns against quoting a stale figure; it does not replace that
   section's per-target census, which was not re-derived.
 
+## Test-improvement arc, lane 2 — silent-skip arming
+
+- Portable branch: `githubsucks/silent-skip-arming`, worktree
+  `../pmacs-skiparm`. Implements `TEST_IMPROVEMENT.md` §1.2 and §5.4.
+- **Base, measured at write time rather than quoted:**
+
+  ```
+  $ git log --oneline -1 githubsucks/main
+  5e186c7 Merge pull request #193 from levineuwirth/test-improvement-audit
+  ```
+
+  The previous revision of this entry said "base measured at write
+  time, pasted below" and then pasted nothing: the script meant to
+  substitute it reported success and silently matched no text, and the
+  claim was not re-read. Recorded because it is the same defect this
+  ledger keeps catching one level up — **asserting a measurement is not
+  making one, and a tool reporting success is not the measurement
+  either.**
+- Recovery from a clean checkout:
+  `git fetch githubsucks && git worktree add ../pmacs-skiparm
+  -b silent-skip-arming githubsucks/silent-skip-arming`.
+- **The defect:** `let Ok(_) = which_binary(x) else { eprintln!(..);
+  return; }` reports GREEN when the tool is absent, and CI installed
+  none of the tools. A block of real-language-server and multi-shell
+  tests had therefore **never once executed their bodies** in CI while
+  reporting success. A suite that cannot distinguish "passed" from
+  "never ran" is worse than a missing one, because it reads as
+  coverage.
+- **The fix is the project's own pattern.** `PMACS_REQUIRE_*` already
+  makes a missing GPU fatal for `vterm_stage3_acceptance`; this adds
+  `PMACS_REQUIRE_LSP`, `PMACS_REQUIRE_SHELLS` and `PMACS_REQUIRE_LUA`,
+  plus the CI step that installs the tools. Per-tool variables, not one
+  blanket flag, so a tool that must stay unarmed keeps its decision
+  visible at the call site.
+- **`basedpyright` is deliberately NOT installed and NOT armed.** Its
+  test has no timeout and hangs forever — root cause is the
+  non-interruptible reader-thread join in `RuntimeHandles::drop`,
+  already a named deferral in `src/process.rs`. The `test` job has no
+  `timeout-minutes` either. Arming it today would trade a vacuous green
+  for a six-hour hang across four legs. `PMACS_REQUIRE_PYRIGHT` exists
+  and is never set, so the flip is one line once lane 4 (the hang) and
+  lane 3 (timeouts) land. **Do not arm it before both.**
+- **A trap found while writing the workflow, not after:** the natural
+  Actions idiom `${{ runner.os == 'Linux' && '1' || '' }}` sets the
+  variable to the EMPTY STRING elsewhere, and `var_os().is_some()` is
+  true for `Some("")`. That would have armed the guard on exactly the
+  runners with no tools installed. The helper therefore treats empty as
+  unset. `PMACS_REQUIRE_GPU` has the same latent shape and is safe only
+  because it is set literally.
+- **Verified by execution in all three states**, on a tool genuinely
+  absent from this machine (`vscode-json-language-server`): unset ->
+  skips green; armed -> hard failure naming the CI step; empty string
+  -> skips green. The armed failure is the bite, and on `main` it
+  cannot occur because no guard exists.
+- **The tests pass when they actually run** — which was the open
+  question, since none of them had. Armed locally: 11 `m6_5` + 8 `m6_8`
+  REPL tests green, and all six real-LSP tests (clangd x2, gopls x2,
+  rust-analyzer x2) green individually.
+- **rust-analyzer is installed in the Linux-gated step, not via the
+  toolchain action's `components:`.** The first revision put it there,
+  which applies to *every* matrix leg — and **presence, not
+  `PMACS_REQUIRE_LSP`, is what decides whether a gated test body
+  runs**. That would have executed the two rust-analyzer tests on macOS
+  for the first time ever, on the legs that are simultaneously the CI
+  critical path and the documented flake surface, while this entry
+  claimed Linux only. The variables not being set there would only have
+  meant absence was tolerated; it would not have kept the tests
+  skipped. Text and workflow now agree.
+- **Tool versions are pinned** (`gopls@v0.16.2`,
+  `vscode-langservers-extracted@4.10.0`,
+  `yaml-language-server@1.15.0`). `@latest` and bare `npm install -g`
+  make CI drift with upstream releases, so a bad publish breaks CI with
+  no commit here to bisect against. Caching the built `gopls` on the
+  pinned version is a follow-up, not done here.
+- **§1.2 is NOT fully closed by this lane.** The guards arm the
+  *entry* skip only. `tests/m4_acceptance.rs`'s mid-test rust-analyzer
+  bail ("workspace likely still indexing; skipping") survives, so even
+  armed, that test's only assertion can still vanish under load —
+  precisely when a regression would show. Mid-test skips are their own
+  shape and want their own pass.
+- **Not this lane's to fix, recorded so it is not mistaken for
+  oversight:** the generated-buffer immutability lane above still reads
+  "PR #188 OPEN, PROPOSED" and #188 has merged. Rule 4 forbids
+  relabelling it and permits removal only once its durable facts reach
+  `docs/agent-handoff.md`, which #188 did not touch — it changed the
+  framing and this ledger only. So the absorption is genuinely owed,
+  and the natural carrier is the arc's own next PR (#191, Stage 1),
+  not a testing lane reaching across into someone else's arc.
+- **Follow-up owed after this merges:** delete
+  `githubsucks/handoff-2026-07-20`. Removing the documentation lane
+  removes the only pointer to that branch, so nothing will otherwise
+  remind anyone it still exists on the remote.
+- Linux only for now, deliberately: macOS needs the brew equivalents
+  and roughly doubles install cost on the slowest matrix leg. The
+  variables stay unset there, so those tests skip cleanly.
+- Also removes the **documentation lane**, whose disposition the ledger
+  left undecided pending confirmation that its branch carried nothing
+  unique. Confirmed by measurement: `githubsucks/handoff-2026-07-20` is
+  **1 ahead, 365 behind**, and its entire unique diff is four doc files
+  at 42 insertions against 88 deletions — merging it would *revert*
+  current documentation. The section said "whoever confirms the branch
+  carries nothing unique removes the section"; this is that.
 ## Parked lane: kill-ring browser + persistence
 
 - Portable branch: `githubsucks/kill-ring-browser`
@@ -872,32 +1108,6 @@ git worktree add --track \
   ../pmacs-kill-ring-browser \
   githubsucks/kill-ring-browser
 ```
-
-## Documentation lane — STALE, AND ITS DISPOSITION IS UNDECIDED
-
-> **Measured 2026-07-28, not inferred:** `githubsucks/handoff-2026-07-20`
-> is at `c11d7e7`, **1 commit ahead of `main` and 320 behind**. Its
-> whole diff against `main` is four documentation files
-> (`docs/active-work.md`, `docs/agent-handoff.md`,
-> `docs/roadmap-2026-07.md`, `docs/vterm-framing.md`), every one of
-> which has been rewritten repeatedly since by the landed-doc PRs
-> #156/#168/#169/#172/#180. Rule 4 removes a lane on merge *or
-> abandonment*, and this one looks abandoned in substance — but "looks
-> abandoned" is not the same as a decision, and no PR was ever opened
-> for it. **This snapshot deliberately annotates rather than deletes:
-> whoever confirms the branch carries nothing unique removes the
-> section.** The bullets below are its original claims, preserved as
-> written and now unverified.
-
-- Portable branch: `githubsucks/handoff-2026-07-20`
-- Carries synchronized `AGENTS.md` / `CLAUDE.md`, this ledger, the
-  durable handoff refresh, and the keybinding reference correction.
-- It changes no runtime code.
-- Review and merge this documentation branch separately; it must not be
-  folded into a feature framing branch.
-- Now also absorbs both landed arcs: Vterm Stage 1 (#126) and the config
-  registry (#127). Canonical `main` is merged into it up to `2e37c04`,
-  so its diff against `main` is documentation only.
 
 ## Closed since the last snapshot
 

@@ -49,6 +49,22 @@
 //!   advertises `signatureHelpProvider` with `(` / `,` triggers, so a
 //!   test can drive the Arc 1d auto-trigger. Every other mode omits the
 //!   capability and therefore never auto-triggers.
+//! * If launched with `PMACS_FAKE_LSP_MODE=applyeditplan`: the
+//!   `WorkspaceEdit` this server hands the client is read verbatim from
+//!   the JSON file named by `PMACS_FAKE_LSP_EDIT_PLAN`, both for the
+//!   `executeCommand`-driven server→client `workspace/applyEdit` (id
+//!   9100) and for `textDocument/rename`. The client's **response** to
+//!   9100 is then written, whole, to the file named by
+//!   `PMACS_FAKE_LSP_APPLYEDIT_SINK` (written to a sibling `.part` and
+//!   renamed, so a reader never sees half a record).
+//!
+//!   One parameterized mode rather than one mode per fixture: the eight
+//!   delete-guard cases differ only in their payload, and a payload the
+//!   *test* writes sits next to the assertions that depend on it
+//!   instead of being mirrored across two files. Fail-closed — an
+//!   unreadable or unparsable plan sends no `applyEdit` at all and
+//!   reports itself through the sink, so a broken fixture cannot read
+//!   as a pass.
 //! * If `PMACS_FAKE_LSP_CHANGE_SINK` names a file (any mode): appends
 //!   one `{"method", "text"}` JSON line per received didOpen /
 //!   didChange, so a test can replay the exact document-sync sequence
@@ -116,6 +132,18 @@ fn main() {
                 "params": { "answer": msg.get("result").cloned() }
             });
             write_frame(&mut stdout, &echo);
+            continue;
+        }
+        // `applyeditplan`: the client's reply to the server→client
+        // `workspace/applyEdit` (id 9100) is the whole observable —
+        // `applied` plus `failureReason`. Capture it for the test and
+        // stop, so the generic echo arm below does not answer a
+        // response as though it were a request.
+        if mode == "applyeditplan"
+            && method.is_empty()
+            && id.as_ref().and_then(serde_json::Value::as_u64) == Some(9100)
+        {
+            write_sink(&msg);
             continue;
         }
         // T M4.5 async-bridge failure-path test modes:
@@ -730,7 +758,19 @@ fn main() {
                     },
                     "newText": new_name
                 }]);
-                let workspace_edit = if mode == "rename" {
+                let workspace_edit = if mode == "applyeditplan" {
+                    // The user-initiated caller of the same applier.
+                    // Whatever plan the test wrote drives `M-x
+                    // lsp.rename`, so the status-line half of the
+                    // failure contract is reachable from a test.
+                    match edit_plan() {
+                        Ok(plan) => plan,
+                        Err(message) => {
+                            write_sink(&serde_json::json!({ "fakeError": message }));
+                            serde_json::json!({})
+                        }
+                    }
+                } else if mode == "rename" {
                     let second = std::env::var("PMACS_FAKE_LSP_RENAME_URI").unwrap_or_default();
                     serde_json::json!({
                         "documentChanges": [
@@ -831,6 +871,36 @@ fn main() {
                     // sibling, and deletes another — paths derived
                     // from the request URI's directory so the test
                     // doesn't have to thread them through env.
+                    if mode == "applyeditplan" {
+                        // Fail-closed: with no readable plan there is
+                        // nothing meaningful to apply, so send no
+                        // `applyEdit` at all and report through the
+                        // sink. Sending an empty edit instead would
+                        // make the client answer `applied = false` for
+                        // a fixture reason, which is indistinguishable
+                        // from the refusal these tests are asserting.
+                        match edit_plan() {
+                            Ok(plan) => {
+                                let apply = serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "id": 9100,
+                                    "method": "workspace/applyEdit",
+                                    "params": { "label": "fake plan", "edit": plan }
+                                });
+                                write_frame(&mut stdout, &apply);
+                            }
+                            Err(message) => {
+                                write_sink(&serde_json::json!({ "fakeError": message }));
+                            }
+                        }
+                        let resp = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": idv,
+                            "result": serde_json::Value::Null
+                        });
+                        write_frame(&mut stdout, &resp);
+                        continue;
+                    }
                     let we = if mode == "resourceops" {
                         let s = target.as_str().unwrap_or("");
                         let base = match s.rfind('/') {
@@ -1185,6 +1255,33 @@ fn write_frame<W: Write>(w: &mut W, body: &serde_json::Value) {
     let _ = write!(w, "Content-Length: {}\r\n\r\n", bytes.len());
     let _ = w.write_all(&bytes);
     let _ = w.flush();
+}
+
+/// Read the `applyeditplan` payload — a whole `WorkspaceEdit` object,
+/// written by the test. Every failure is a message rather than a panic,
+/// so it can reach the test through the sink instead of dying as an
+/// unexplained transport EOF.
+fn edit_plan() -> Result<serde_json::Value, String> {
+    let path = std::env::var("PMACS_FAKE_LSP_EDIT_PLAN")
+        .map_err(|_| "PMACS_FAKE_LSP_EDIT_PLAN is unset".to_owned())?;
+    let raw = std::fs::read(&path).map_err(|e| format!("reading {path}: {e}"))?;
+    serde_json::from_slice(&raw).map_err(|e| format!("parsing {path}: {e}"))
+}
+
+/// Publish one JSON record to `PMACS_FAKE_LSP_APPLYEDIT_SINK`.
+///
+/// Written to a sibling `.part` and renamed. A reader polling for the
+/// file therefore never observes a partial record, so a test's wait
+/// predicate cannot be weaker than its assertion — the `m4_5` config-sink
+/// race in reverse.
+fn write_sink(value: &serde_json::Value) {
+    let Ok(path) = std::env::var("PMACS_FAKE_LSP_APPLYEDIT_SINK") else {
+        return;
+    };
+    let part = format!("{path}.part");
+    if std::fs::write(&part, serde_json::to_vec(value).unwrap_or_default()).is_ok() {
+        let _ = std::fs::rename(&part, &path);
+    }
 }
 
 fn write_garbage() {

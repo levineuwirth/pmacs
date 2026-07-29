@@ -1,9 +1,19 @@
 # Framing — `apply_resource_op` delete destroys unsaved work
 
-**Revision 5.** Status: **PROPOSED — needs explicit user approval before
-implementation. DO NOT implement, DO NOT merge.** Lane:
-`resource-op-delete-guard`, worktree `../pmacs-resource-op-delete`,
-based on `githubsucks/main` @ `7586905`.
+**Revision 5, plus §§9–10.** Status: **APPROVED and MERGED as #186
+(framing only); the implementation is PR #190** on branch
+`resource-op-delete-guard-impl`, worktree `../pmacs-rd-impl`. The
+revision-5 body below is unchanged except for the two bookkeeping
+edits §9.6 names and makes in place; **§§9–10 record the corrections
+implementation review rounds 1–2 found**, including corrections to this
+document. The "DO NOT implement, DO NOT merge" banner this line replaces
+was true when revision 5 was written and is not now.
+
+Revision 5's lane header — `resource-op-delete-guard`, worktree
+`../pmacs-resource-op-delete`, based on `githubsucks/main` @
+`7586905` — describes the framing branch, which merged. §8's
+one-PR-for-both branch plan is superseded for the same reason and is
+annotated there.
 
 Revision 5 removes volatile sibling-branch counts from the normative
 contract. A count is a reading, not a dependency; where history retains
@@ -1533,6 +1543,11 @@ that passes against its pre-image has no bite and is rejected.
 17. **Every new test is checked with `scripts/bite`** and none reports
     VACUOUS.
 
+**Criteria 18, 19a–19c and 20 are added by §9; criteria 21 and
+22a–22b by §10**, after implementation review rounds 1 and 2. They are
+listed there, with their pre-images, rather than interleaved here, so
+this section stays readable as the record of what revision 5 asked for.
+
 
 ## 6. Parked — not deferred-and-forgotten
 
@@ -1583,12 +1598,18 @@ Full suite per `CLAUDE.md`: `cargo fmt --check`; `cargo clippy
 suites; `cargo test --test m4_acceptance -- --skip basedpyright`;
 `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`; `git diff --check`.
 
-Touched suites: **`m4_acceptance`** (the resource-op home, §1.14, and
-the home of criteria 1–14 including 11a–11d, and 16) and
-**`lsp_dispatch_seams_acceptance`**
-(criterion 15's throwing parse stub, Q#RD11). Both appear in §8's touch
-table; revision 3 named the second here but omitted it there, and the
-two lists are now maintained together.
+Touched suite: **`m4_acceptance`** — the resource-op home (§1.14) and
+the home of every criterion, 1–16 including 11a–11d, plus §9's 18,
+19a–19c and 20, and §10's 21 and 22a–22b.
+
+*Amended at implementation (§9.6).* Revision 5 also named
+**`lsp_dispatch_seams_acceptance`**, for criterion 15's throwing parse
+stub. §8 permits hosting that stub in `m4_acceptance` instead
+**provided the gate list moves with it**, and it does: criterion 15
+drives the same server pump as 11–13, so splitting it across two
+suites would have duplicated the whole fixture. The suite is therefore
+struck from this list **and** from §8's touch table, in the same edit.
+The lists are maintained together, which is what revision 3 got wrong.
 
 `dired_acceptance` and `autosave_acceptance` are watch items, not
 touched files — the former for Q#RD6's shared lookup, the latter because
@@ -1612,6 +1633,13 @@ approved the implementation commits land on this same branch.
 
 **Implementation does not begin until the user approves this revision.**
 
+**Superseded in fact, not by decision.** #186 merged as framing-only,
+so the implementation necessarily got its own branch
+(`resource-op-delete-guard-impl`, worktree `../pmacs-rd-impl`) and its
+own PR, #190. No decision in this document changes; only the branch
+plan, which described a PR that no longer existed by the time
+implementation started.
+
 **Files the implementation will touch** — reconciled at rev 5 against
 the gate list below and §5, which revision 3 left disagreeing:
 
@@ -1619,9 +1647,18 @@ the gate list below and §5, which revision 3 left disagreeing:
 |---|---|
 | `src/lua_bindings/mod.rs` | the delete arm's four phases (Q#RD2); the shared query binding and its structured verdict (Q#RD6, Q#RD12); the narrow `*errors*` append surface (Q#RD7) |
 | `builtin/runtime/lsp.lua` | the preflight conflict check (Q#RD3); the parse-plus-apply wrap, origin restore, and boundary logging (Q#RD7) |
-| `tests/m4_acceptance.rs` | criteria 1–14 including 11a–11d, and 16 |
-| `tests/lsp_dispatch_seams_acceptance.rs` | criterion 15's throwing parse stub (Q#RD11) — this file was named in the gate list but omitted from revision 3's touch list |
-| `src/bin/pmacs_fake_lsp.rs` | fake modes: blocked delete; edit-then-delete; rename-into-delete; absent-plus-ignore; present-plus-ignore (11a); dangling-symlink (11b); absent-without-ignore (11c); unanswerable-stat (11d) |
+| `tests/m4_acceptance.rs` | criteria 1–16 including 11a–11d, plus §9's 18, 19a–19c and 20 and §10's 21 and 22a–22b — **including criterion 15's throwing parse stub**, per the permitted simplification below (§9.6) |
+| `src/bin/pmacs_fake_lsp.rs` | **one parameterized mode, `applyeditplan`**, whose `WorkspaceEdit` is read from a test-written file, plus a sink for the client's response — see §9.6 for why one mode replaced the eight named below |
+
+~~`tests/lsp_dispatch_seams_acceptance.rs`~~ — struck at implementation
+(§9.6), together with its entry in §7's gate list.
+
+The eight fake modes revision 5 named — blocked delete;
+edit-then-delete; rename-into-delete; absent-plus-ignore;
+present-plus-ignore (11a); dangling-symlink (11b);
+absent-without-ignore (11c); unanswerable-stat (11d) — are the eight
+*fixtures*, and they all still exist. They are payloads now, not modes
+(§9.6).
 
 It will **not** touch `src/daemon.rs`, `pmacs-protocol/`,
 `builtin/runtime/dired.lua`, `docs/agent-handoff.md` or `COHERENCE.md`.
@@ -1647,3 +1684,293 @@ reconciliation, the dired async race between dispatch and
 `remove_blocking`, the rename side of the walk, or `pmacs.fs.remove`
 (§6). Revision 2's version of this note was written against a stale
 reading of #171 and is superseded.
+
+
+## 9. Corrections found during implementation — review round 1
+
+This section is written **after** revision 5 was approved and
+implemented, and it changes no design decision. It records four
+corrections review round 1 found in the implementation, the acceptance
+criteria they added, and two bookkeeping edits made in place above.
+It lives here because two of the four are corrections *to this
+document*, and a correction that lives only in a test comment is
+invisible to the next reader of the framing.
+
+### 9.1 Criterion 3's stated bite was wrong — fixed by fixing the setup
+
+Criterion 3 says it "fails against revision 1's buffer-first
+ordering". Against the first shipped setup it did **not**, and the
+claim was found by checking rather than trusting it: that setup bound
+the clean buffer to a file *beneath* the deleted directory, so no
+buffer was bound to the deleted path, `find_by_path` matched nothing,
+and reordering reconciliation ahead of the filesystem mutation left
+the test passing.
+
+The first fix considered was to amend the criterion's wording.
+**That is not what was done.** §9.2 then narrowed the affected set to
+recursive deletes only, which would have left that setup with *no*
+bite at all — the pre-image it did catch (validation that removes
+rather than inspects) stops touching a descendant buffer on a
+non-recursive delete. So the **setup** is what changed: the buffer is
+now bound to the **exact** deleted path. A file is opened, the path is
+then replaced on disk by a non-empty directory, and a non-recursive
+`remove_dir` fails deterministically with `ENOTEMPTY` — no permission
+trickery and nothing that behaves differently under a root CI.
+
+Against that setup the criterion fails against **both** pre-images,
+which is what revision 5 claimed all along. **The framing's wording
+needed no amendment; the test did.** Both directions verified by
+mutation.
+
+### 9.2 The affected set is scoped by `recursive` (Q#RD12, Q#RD6)
+
+The shipped `delete_verdict` ignored `recursive` and scanned
+descendants for **every** directory target, justified in a doc comment
+on the grounds that a non-recursive delete of a non-empty directory
+fails at the filesystem anyway, so widening inspection cost nothing.
+
+**That reasoning is wrong**, and the counterexample is an orphan: a
+modified buffer at `tree/gone.rs` whose file is already deleted blocks
+a non-recursive delete of the now-**empty** `tree/` — an op that would
+have succeeded and that removes none of that buffer's contents.
+Reproduced in review.
+
+`recursive` is therefore a parameter of the shared query, and
+descendant matching is reserved for recursive deletes. This
+**narrows** the query Q#RD6 hands to #171, which adopts the narrowed
+version. Q#RD5's "inspect widely, mutate narrowly" is unchanged in
+substance: "widely" means *the set the op can actually destroy*, which
+for a non-recursive delete is the target entry alone.
+
+A symlink to a directory is correctly excluded by the same rule:
+`symlink_metadata` reports it as not-a-directory, and the primitive
+`remove_file`s the link without walking through it.
+
+### 9.3 The preflight defers for targets the batch itself changes (Q#RD3)
+
+The shipped preflight judged **every** delete against the filesystem's
+**initial** state, at plan-construction time. A valid `create X →
+delete X` batch was therefore rejected because X was absent when the
+plan was built, with a fabricated `NotFound` about a path the batch
+was about to create; likewise `rename A → B → delete B`. This was a
+regression introduced by the implementation, not a pre-existing
+defect.
+
+**Decision — defer, do not simulate.** A delete whose target is
+related by path containment to a path an **earlier** op in the same
+plan creates, renames onto, renames away from, or removes is not
+judged at plan time; the primitive judges it when it runs. Comparison
+is component-aware, like the Rust side's `Path::starts_with`.
+
+Why this is the right half of the choice Q#RD3 already made:
+
+- Q#RD3 calls this check a **filter, not a transaction**. Declining to
+  judge an op the snapshot cannot see is inside that contract;
+  refusing a legal batch is not.
+- Simulating instead would mean modelling filesystem presence **and**
+  the buffer registry's path bindings across create / rename / edit —
+  the transaction Q#RD3 declines to build — and a simulation that got
+  it wrong would emit false `clear` verdicts, which is the dangerous
+  direction. Deferral only forgoes the early, cheap report.
+- The primitive's four-phase guard is untouched and is the thing that
+  actually stands between a server and unsaved work. Criterion 19c
+  pins that deferring is not skipping.
+
+**`edit` ops are deliberately not in the deferral set.** An edit
+changes no path's existence; it can only dirty a buffer, i.e. only
+turn a plan-time `clear` into a primitive-time refusal. That is the
+under-refusal Q#RD3 documents and accepts, and adding edits would
+merely delay a refusal that is already certain. Criterion 11c depends
+on this: its delete target is touched by no earlier op, so the
+buffer-and-filesystem half of the check still fires before anything is
+mutated.
+
+### 9.4 Failure reporting must not deny partial application (Q#RD3, Q#RD7)
+
+`apply_workspace_edit` discarded, on failure, whether earlier ops had
+succeeded, and returned a bare `nil, message`. The rename caller then
+said "rename aborted" under a comment reading "nothing was mutated" —
+false in exactly the case Q#RD3 predicts, where an earlier text edit
+applies and dirties the buffer a later delete refuses.
+
+The applier now returns `nil, message, applied_op_count`, and **one
+renderer** serves both the user-facing status line and the server's
+`failureReason`, so the two cannot disagree about what happened. All
+three callers are updated: the server-request boundary, the rename
+caller, and the code-action caller.
+
+### 9.5 Acceptance added by this round
+
+18. **A non-recursive delete is not blocked by a buffer beneath its
+    target** (§9.2). Modified buffer at `tree/gone.rs` whose file is
+    already gone; non-recursive delete of the now-empty `tree/`
+    succeeds and the buffer is untouched.
+    *Bite:* fails against a `delete_verdict` that ignores `recursive`.
+
+19a. **`create X → delete X` is not refused at plan time** (§9.3).
+    Assert `applied = true`, and that a later `create` in the same
+    batch produced its file, so the success is not vacuous.
+    *Bite:* fails against the initial-state preflight, which reports
+    `NotFound` for X and rejects the batch before anything runs.
+
+19b. **`rename A → B → delete B` is not refused at plan time** (§9.3).
+    *Bite:* as 19a; the source file surviving is what carries it,
+    because a plan-time rejection leaves the rename unapplied.
+
+19c. **Deferring the check is not skipping it** (§9.3).
+    `create X → edit X → delete X` gets past the plan and then refuses
+    at the primitive, naming the unsaved changes the edit created —
+    and reports that two operations remain applied.
+    *Bite:* fails against the initial-state preflight (which reports
+    `NotFound` instead) **and** against dropping the primitive's guard
+    for deferred targets (which would report `applied = true`).
+
+20. **The user-facing message reports partial application** (§9.4).
+    Driven through `M-x lsp.rename`, because a status line is where a
+    user reads it and the applier's return value alone would not pin
+    the caller.
+    *Bite:* fails against any caller that renders the failure without
+    consulting the applied-op count — i.e. against the shipped
+    "rename aborted".
+
+All of 11, 11a–11d, 12, 13 and 15 also land in this round; they were
+specified by revision 5 and were the named gap in the first
+implementation commit.
+
+### 9.6 Bookkeeping edits made in place
+
+- **§7's gate list and §8's touch table both lose
+  `lsp_dispatch_seams_acceptance`**, in the same edit, under §8's
+  permitted simplification. Criterion 15 drives the same server pump
+  as 11–13, so hosting it anywhere else would duplicate the fixture.
+- **§8's fake-mode row is one parameterized mode, not eight.**
+  `PMACS_FAKE_LSP_MODE=applyeditplan` reads its whole `WorkspaceEdit`
+  from the file named by `PMACS_FAKE_LSP_EDIT_PLAN` and publishes the
+  client's response to `PMACS_FAKE_LSP_APPLYEDIT_SINK`. The eight
+  fixtures revision 5 named all exist; they are payloads the test
+  writes rather than modes the fake hardcodes, which keeps each
+  payload next to the assertions that depend on it instead of mirrored
+  across two files. The mode is **fail-closed**: an unreadable or
+  unparsable plan sends no `applyEdit` and reports itself through the
+  sink, so a broken fixture cannot read as a pass. The sink is written
+  to a `.part` and renamed, so a polling reader never sees a partial
+  record — the wait predicate cannot be weaker than the assertion.
+
+### 9.7 Sweep — every place the guard decides something is "affected"
+
+§9.2 and §9.3 are one defect class: **a guard whose scope was reasoned
+about rather than enumerated**, over-refusing on inputs the reasoning
+never considered. The rest of the guard was swept for that shape.
+
+| Site | Decision | Verdict |
+|---|---|---|
+| `delete_verdict` filesystem classification | is the target a directory whose descendants are at risk? | **Fixed** (§9.2). Now `is_dir() && recursive`. A symlink-to-directory is excluded, matching the primitive's `remove_file`. |
+| `delete_verdict` buffer matching | which buffers are in the affected set? | **Fixed** (§9.2), exact path always plus descendants only when recursive. |
+| Lua plan-time preflight | which deletes can be judged from the initial snapshot? | **Fixed** (§9.3). |
+| `delete_verdict` path normalization | the stat uses the **raw** path; the buffer comparison uses the **normalized** one | **Latent inconsistency, fails safe, not fixed here.** A `~`-prefixed argument stats as a literal `~` directory (absent) while matching buffers bound under `$HOME`. Every branch of that disagreement is safe: without `ignore_if_not_exists` it refuses, and with it the primitive returns early having touched nothing. It matches the primitive's own `remove_file`, which also takes the raw path, so the two layers still agree with each other. |
+| Phase 4 reconciliation | which buffer is removed after a successful delete? | **Unchanged by design** (Q#RD10). `BufferRegistry::find_by_path` compares paths **raw**, with no normalization, so a buffer stored under a differently-spelled path is not reconciled. This is `main`'s behaviour, Q#RD10 pins "exactly today's", and correcting it would *widen* reconciliation — the one thing Q#RD5 and Q#RD10 forbid. Named so it is not mistaken for an oversight; it belongs to #171. |
+| `_delete_verdict` argument handling | `recursive` / `ignore_if_not_exists` defaults | **Consistent.** Both default to `false` on the binding and on the primitive, so an omitted `options` object means the same thing at both layers. |
+| Preflight `batch_changes` membership | which prior ops can change a delete's target? | **Enumerated, not reasoned:** create (1 path), rename (both paths), delete (1 path); edit excluded with the argument in §9.3. |
+
+**Nothing else in this lane decides an affected set.** The reporting
+path names a buffer only inside a refusal it already computed, and
+`restore_origin` is best-effort by construction.
+
+
+## 10. Corrections found during implementation — review round 2
+
+This section records the two remaining findings on the round-1 repair.
+Neither changes the feature boundary, Q#RD1's refusal, Q#RD2's phase
+order, or Q#RD3's choice of a filter rather than a transaction. Both
+make the round-1 correction true for inputs its first acceptance set did
+not enumerate.
+
+### 10.1 Batch dependency comparison uses the registry's lexical path form
+
+Section 9.3 correctly required component-aware comparison, but its first
+implementation compared **raw decoded URI strings** after stripping
+only trailing slashes. That is component-aware without being
+path-equivalence-aware: `file:///tree/./x` and
+`file:///tree/x` reach the same filesystem entry while comparing
+unequal. A legal ordered `create /tree/./x → delete /tree/x` was
+therefore refused at plan time with the same fabricated `NotFound`
+§9.3 had just fixed for identical spellings. Reproduced through the
+real server pump.
+
+**Decision:** dependency comparison routes both operands through
+`pmacs.path.canonicalize`, which is
+`editor_core::normalize_buffer_path` itself — absolute, lexically clean,
+redundant-separator and `.` / `..` folding, with no filesystem access
+and no symlink resolution. This reuses the buffer registry's canonical
+form rather than growing a Lua mirror (the COHERENCE §14 / dired Q#DR2
+rule).
+
+Only the **comparison** is normalized. The plan item retains the decoded
+path for execution, so this correction does not silently widen Q#RD10's
+raw phase-4 reconciliation or resolve symlinks. Section 9.7's two raw
+execution-path findings remain exactly as scoped there.
+
+### 10.2 Zero completed items does not prove zero mutation
+
+Section 9.4's `applied_op_count` reports plan items that completed
+before a failure. Its first renderer treated `0` as proof that nothing
+was mutated. That inference is false **inside one failing item**:
+
+- a `TextDocumentEdit` contains multiple buffer edits applied
+  sequentially, so an intercept can accept the first and reject the
+  second after the first edit changed the buffer;
+- a resource primitive can have intermediate filesystem effects before
+  its terminal error — today the rename arm creates destination parents
+  before attempting the rename, so a missing source can leave a new
+  directory behind.
+
+Both cases were reproduced through the real server pump with the failing
+item first in the plan. The response said `aborted, nothing was
+mutated` while the buffer or filesystem visibly disagreed.
+
+**Decision:** the failure result now carries
+`execution_started` independently of `applied_op_count`. Only parse and
+plan-time failures render `nothing was mutated`. Once execution starts,
+the renderer is deliberately conservative:
+
+- with completed items, it says those earlier changes remain applied
+  and the failing item may also have changed state;
+- with zero completed items, it says the first operation may have
+  changed state before failing.
+
+This does not claim that every failing primitive mutates. It refuses to
+make a stronger recovery claim than the applier can prove, and one
+renderer still serves the server response, rename status, and code
+action status.
+
+### 10.3 Acceptance added by this round
+
+21. **Lexically equivalent dependency paths are related** (§10.1).
+    The server sends `create /dir/./x → delete /dir/x → create witness`;
+    the batch succeeds, `x` is gone, and the witness exists.
+    *Bite:* fails against raw-string `paths_related`, which preflights
+    `/dir/x` against the initial filesystem and refuses with `NotFound`.
+
+22a. **A failing multi-edit item is reported conservatively** (§10.2).
+     One `TextDocumentEdit` carries two replacements; a deterministic
+     intercept accepts the higher-offset edit and rejects the second.
+     The first edit remains in the buffer, `applied` is false, and the
+     reason must not say nothing was mutated.
+     *Bite:* fails when `applied_op_count == 0` alone selects the
+     no-mutation message.
+
+22b. **A failing resource item is reported conservatively** (§10.2).
+     A rename with an absent source and a destination under a new parent
+     fails after creating that parent. The directory remains and the
+     reason must acknowledge possible state change.
+     *Bite:* fails against a text-edit-only repair, or any renderer that
+     still equates zero completed resource items with zero mutation.
+
+### 10.4 Coherence and scope
+
+This round still serves **COHERENCE §1.2's silence asymmetry** and
+§23's requirement that background computation not become opaque: it
+makes the already-added server/user failure trace truthful. It touches
+no new golden-journey step, adds no interaction island, adds no setting,
+and creates no background work. No config-registry, ownership, or
+protocol change follows.

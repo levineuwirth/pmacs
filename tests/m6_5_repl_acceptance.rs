@@ -35,6 +35,9 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+#[path = "support/mod.rs"]
+mod support;
+
 static PUMP_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn pump_test_guard() -> MutexGuard<'static, ()> {
@@ -196,7 +199,7 @@ fn m6_5_ret_submits_input_to_process() {
 #[test]
 fn m6_5_ctrl_d_on_empty_prompt_closes_stdin() {
     let Some(bash) = locate_shell("bash") else {
-        eprintln!("skipping: bash not on PATH (set PMACS_TEST_BASH to override)");
+        support::skip_or_fail_overridable("bash", "PMACS_REQUIRE_SHELLS", "PMACS_TEST_BASH");
         return;
     };
     let setup = format!(
@@ -290,7 +293,7 @@ fn m6_5_ctrl_d_on_nonempty_input_deletes_char_forward() {
 )]
 fn m6_5_ctrl_c_sends_sigint() {
     let Some(sleep) = locate_shell("sleep") else {
-        eprintln!("skipping: sleep not on PATH (set PMACS_TEST_SLEEP to override)");
+        support::skip_or_fail_overridable("sleep", "PMACS_REQUIRE_SHELLS", "PMACS_TEST_SLEEP");
         return;
     };
     let setup = format!(
@@ -344,7 +347,7 @@ fn m6_5_ctrl_c_sends_sigint() {
 )]
 fn m6_5_exit_marker_uses_basename_with_leading_newline() {
     let Some(false_bin) = locate_shell("false") else {
-        eprintln!("skipping: false not on PATH (set PMACS_TEST_FALSE to override)");
+        support::skip_or_fail_overridable("false", "PMACS_REQUIRE_SHELLS", "PMACS_TEST_FALSE");
         return;
     };
     let setup = format!(
@@ -425,7 +428,7 @@ fn run_shell_smoke_test(shell_path: &std::path::Path, argv_extra: &[&str]) {
 #[test]
 fn m6_5_repl_spawns_bash() {
     let Some(bash) = locate_shell("bash") else {
-        eprintln!("skipping: bash not on PATH (set PMACS_TEST_BASH to override)");
+        support::skip_or_fail_overridable("bash", "PMACS_REQUIRE_SHELLS", "PMACS_TEST_BASH");
         return;
     };
     run_shell_smoke_test(&bash, &["-i"]);
@@ -435,7 +438,7 @@ fn m6_5_repl_spawns_bash() {
 #[test]
 fn m6_5_repl_spawns_zsh() {
     let Some(zsh) = locate_shell("zsh") else {
-        eprintln!("skipping: zsh not on PATH (set PMACS_TEST_ZSH to override)");
+        support::skip_or_fail_overridable("zsh", "PMACS_REQUIRE_SHELLS", "PMACS_TEST_ZSH");
         return;
     };
     run_shell_smoke_test(&zsh, &["-i"]);
@@ -446,7 +449,7 @@ fn m6_5_repl_spawns_zsh() {
 #[test]
 fn m6_5_repl_spawns_fish() {
     let Some(fish) = locate_shell("fish") else {
-        eprintln!("skipping: fish not on PATH (set PMACS_TEST_FISH to override)");
+        support::skip_or_fail_overridable("fish", "PMACS_REQUIRE_SHELLS", "PMACS_TEST_FISH");
         return;
     };
     run_shell_smoke_test(&fish, &["-i"]);
@@ -458,8 +461,10 @@ fn m6_5_repl_spawns_fish() {
 #[test]
 fn m6_5_repl_spawns_lua() {
     let Some(lua) = locate_shell("lua").or_else(|| locate_shell("luajit")) else {
-        eprintln!(
-            "skipping: lua/luajit not on PATH (set PMACS_TEST_LUA or PMACS_TEST_LUAJIT to override)"
+        support::skip_or_fail_overridable(
+            "lua/luajit",
+            "PMACS_REQUIRE_LUA",
+            "PMACS_TEST_LUA or PMACS_TEST_LUAJIT",
         );
         return;
     };
