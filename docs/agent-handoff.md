@@ -1,9 +1,10 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-28, after the M4 config-sink race fix (#174) and
-bottom-panel Stage 2B-1 (#184) merged; the canonical landed base is
-`0442d78`. #174 is test-only. #184 is the substantive one — the reserved
-protocol-v21
+**Last updated: 2026-07-28, after the docs-only coherence listview
+correction (#189) and landed-state refresh (#185) merged; the canonical
+landed base is `7586905`. The runtime anchor beneath them is the M4
+config-sink race fix (#174) and bottom-panel Stage 2B-1 (#184). #174 is
+test-only. #184 is the substantive one — the reserved protocol-v21
 bottom-panel wire family, dark by construction, with the production
 handshake deliberately still advertising v20 — following the Journey/GPU
 directory-target ratchet (#183), following Journey Stage 1a (#182),
@@ -51,9 +52,11 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-28)
 
-- `main` @ `0442d78` (the M4 config-sink race fix #174 — test-only —
-  atop bottom-panel Stage 2B-1 #184, the Journey/GPU
-  directory-target ratchet #183, Journey Stage 1a #182, incorporating
+- `main` @ `7586905` (the docs-only coherence listview correction #189,
+  atop the docs-only landed-state refresh #185, the M4 config-sink race
+  fix #174 — test-only — atop bottom-panel Stage 2B-1 #184, the
+  Journey/GPU directory-target ratchet #183, Journey Stage 1a #182,
+  incorporating
   terminal configuration + copy
   mode landed docs #180, Lean 4 Stage 4b #181, the dired Stage 1 landed
   docs #169 and the PTY-terminate diagnostic #176, terminal copy mode
@@ -518,20 +521,23 @@ commands, read `docs/active-work.md` immediately after this file.
     `bottom_panel_stage1_acceptance` 46; kill ring 30; compile 67; M4 121;
     required GPU 152; initial-target 14 CRDT; all three vterm suites; folding
     Stage 2 48. All 12 CI checks green at merge.
-  - **Stage 2 (the GPU panel band) is FRAMED, and its first two slices
-    have LANDED** — `docs/bottom-panel-stage2-framing.md` rev 6, four
+  - **Stage 2 (the GPU panel band) is FRAMED; its first two slices have
+    LANDED and its third is open as PR #187** —
+    `docs/bottom-panel-stage2-framing.md` rev 6, four
     framing review rounds, no open framing items; the rev-5
     implementation split was explicitly approved 2026-07-27 and rev 6
     records PR #184's server-first compatibility and gate correction.
     It reserves protocol **v21** and ships as four serial
     implementation slices: **2A** classified census routing +
     per-window painter extraction (no wire change, #177), **2B-1** the
-    wire (#184), **2B-2** the daemon projection and epoch machine,
-    then **2B-3** the GPU band, compatible v21 activation, and the
+    wire (#184), **2B-2** the daemon projection and epoch machine
+    (implemented but not landed in PR #187), then **2B-3** the GPU band,
+    compatible v21 activation, and the
     negotiated `panel_capable` flip. Production attachment remains v20
     through 2B-2. Parent acceptance 37–55 remains authoritative.
-    Stage 3 is the adopter default flip. **2B-2 is the next slice, and
-    it branches from `0442d78` or newer.**
+    Stage 3 is the adopter default flip. **Do not start 2B-3 until PR
+    #187 lands.** Its branch, checkpoints, two review rounds, verification,
+    and exact recovery commands live in `docs/active-work.md`.
   - **The §1.3 census is CLASSIFIED, not uniformly redirected.** Only the
     Projection class (#1–#12, #21–#22) routes through
     `primary_document_window`; focus/input (#13–#15, #23), focus chrome

@@ -38,16 +38,17 @@ is gone again and its durable lesson is in `docs/agent-handoff.md` §5;
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `0442d78` (the M4 config-sink race fix #174, atop
-  bottom-panel Stage 2B-1 #184, the Journey/GPU directory-target ratchet
-  #183, Journey Stage 1a #182 and the previously recorded landed work).
+  `githubsucks/main` @ `7586905` (the docs-only coherence listview
+  correction #189, atop the docs-only landed-state refresh #185, the M4
+  config-sink race fix #174, bottom-panel Stage 2B-1 #184, the
+  Journey/GPU directory-target ratchet #183, Journey Stage 1a #182 and
+  the previously recorded landed work).
   **Protocol schema support is
   `v6..=v21`; the production server-first `Hello` still advertises
   v20** — two different facts, and #184 landed only the first. The
-  previous snapshot named `7fd646d`, and **the
+  previous snapshot named `0442d78`, and **the
   recovery floor advances with it**: the check below now requires
-  `0442d78` or newer, so a tree at `7fd646d` — or at `6bee09d` — no
-  longer passes. That is
+  `7586905` or newer, so a tree at `0442d78` no longer passes. That is
   deliberate — the floor moves with the base, because a check that
   accepts an older commit than the declared base passes on a tree the
   rest of this file does not describe.
@@ -86,7 +87,7 @@ git worktree list
 git status --short --branch
 ```
 
-The `git log` command must expose `0442d78` — the base named above — or a
+The `git log` command must expose `7586905` — the base named above — or a
 newer intentional main. Keep this threshold and the canonical-base line in
 step: a recovery check that accepts an older commit than the base it
 declares canonical will pass on a tree the rest of this file does not
@@ -228,17 +229,18 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
-## Bottom-panel lane (Arc 7) — 2B-1 MERGED; 2B-2 IN FLIGHT
+## Bottom-panel lane (Arc 7) — 2B-1 MERGED; 2B-2 PR #187 OPEN
 
 Stage 1, the Stage 2 framing, Stage 2A, and **Stage 2B-1 are all on
 `main`**. Framing revision 5's three-way split of 2B was explicitly
 approved on 2026-07-27; revision 6 records PR #184's review correction.
-**2B-2 — the daemon panel projection and epoch machine — is under way**
-on branch `bottom-panel-stage2b2`, worktree `../pmacs-bp-stage2b2`,
-branched fresh from `githubsucks/main` @ `6bee09d`. It is *not* stacked
-on the 2B-1 branch, which is the rule for every slice in this arc. Note
-that `main` has since advanced to `0442d78`; the only difference is the
-test-only #174, so the slice's integration surface is unchanged.
+**2B-2 — the daemon panel projection and epoch machine — is open as
+[PR #187](https://github.com/levineuwirth/pmacs/pull/187)** on branch
+`bottom-panel-stage2b2`, worktree `../pmacs-bp-stage2b2`. It branched
+fresh from landed 2B-1 rather than stacking on its feature branch, and
+has since integrated landed main through `7586905` (#174, #185, and
+#189). The exact pre-round-2 reviewed head was merge checkpoint
+`0dba358`; the round-2 code-and-test checkpoint is `bfaaf2b`.
 
 **2B-2's boundaries, restated because they are easy to overrun:** the
 production `Hello` stays at v20 and `panel_capable` stays `false`. The
@@ -247,6 +249,53 @@ activation, the GPU band, and the negotiated capability flip are all
 2B-3's, and 2B-3 may **not** simply change the unsolicited `Hello` to
 21.
 
+- **What PR #187 ships, dark by construction:** the semantic daemon's
+  `FrontendCellGeometry` epoch machine; one reconciled panel grid
+  derivation; `PanelFrame::{Present, Absent}` projection on both document
+  and terminal semantic paths; stable presentation epochs; resize and
+  pointer validation against the live window/buffer/epochs; the panel's
+  own statusline context; and pre-drain semantic panel-terminal resize.
+  It does not add the GPU consumer or enable the capability.
+- **Review round 1 closed five findings plus one sweep result at
+  `3ecb03d`.** The wire-area clamp became durable hide state; a stale
+  same-buffer reopen can no longer retain input authority; semantic panel
+  terminals resize before child drain; `NoMessage` retains a published
+  band baseline while `Invalidated` clears it; wheel activation follows
+  the terminal-only focus rule; and legally wide panels clamp their PTY
+  content without disappearing.
+- **Review round 2 closed two findings at `bfaaf2b` plus this ledger
+  commit.** Side affinity can replace the buffer while preserving the
+  `WindowId`, so retained panel statusline segments are now keyed by the
+  full `(WindowId, BufferId)` presentation. Every authoritative `Absent`
+  also clears that baseline, including duplicate-suppressed `Absent`, so
+  a later `Present` under `NoMessage` cannot resurrect peer state that
+  was already cleared. Two acceptance tests bite those exact transitions.
+  This lane and `docs/agent-handoff.md` now name the open PR, current
+  landed base, checkpoint, and 2B-3 ordering instead of calling 2B-2
+  merely “next.”
+- **Round-2 verification at code checkpoint `bfaaf2b`:** formatting and
+  strict workspace Clippy; library **1,863 passed + 3 ignored** default
+  and **2,048 passed + 4 ignored** CRDT; bottom-panel Stage 1 / 2A /
+  2B-1 / 2B-2 **46 / 17 / 16 / 28**; statusline **8 CRDT**; semantic
+  routing **2 CRDT**; M4 **121 passed + 3 ignored + 1 filtered**;
+  required GPU **202/202**; isolated-config full workspace sweep; and
+  `git diff --check`. The first workspace sweep had one GPU rendering
+  failure in `failures_and_display_math_render_as_source`; that test had
+  passed in the immediately preceding required-GPU run, passed alone,
+  and the complete workspace rerun passed. Real-daemon and managed-attach
+  cases were rerun outside the tool sandbox after its local-socket policy
+  produced `Operation not permitted`; the authoritative reruns passed.
+- **Cross-machine recovery (fresh clone):**
+
+  ```sh
+  git fetch githubsucks --prune
+  git switch --track -c bottom-panel-stage2b2 githubsucks/bottom-panel-stage2b2
+  git rev-parse HEAD
+  ```
+
+  Require the remote branch to contain `bfaaf2b` or newer and confirm
+  PR #187's exact-head checks before resuming. Do not start 2B-3 until
+  #187 lands.
 - **Stage 2B-1 MERGED as #184** (`main` @ `6bee09d`, 2026-07-28; all
   twelve checks green on the reviewed head `5539b6e`; two review rounds
   plus a gate-found follow-up). Branch
