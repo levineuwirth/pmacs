@@ -521,12 +521,12 @@ has **no branch and no framing yet**.
   `FrontendView.fold_projection` to `true` for semantic frontends, which
   Stage 2 deliberately left `false` (Q#FD21).
 
-## Resource-op delete guard implementation — PR #190 OPEN, review round 1 closed
+## Resource-op delete guard implementation — PR #190 OPEN, review round 2 closed
 
 - Portable branch: `githubsucks/resource-op-delete-guard-impl`, worktree
   `../pmacs-rd-impl`. Implements the framing merged as #186
   (`docs/resource-op-delete-guard-framing.md`, revision 5 plus its new
-  §9). Position against `main`, as pasted command output rather than a
+  §§9-10). Position against `main`, as pasted command output rather than a
   remembered constant — **`main` moved while this lane was being
   written**:
 
@@ -585,6 +585,25 @@ has **no branch and no framing yet**.
     is now a parameter of the shared query. The counterexample is an
     orphan: a modified buffer at `tree/gone.rs` whose file is already gone
     blocked a non-recursive delete of the now-*empty* `tree/`.
+- **Review round 2 found two more defects; both are fixed and recorded in
+  the framing's new §10:**
+  - **P1 §10.1 — dependency filtering compared raw path spellings.**
+    `create dir/./x -> delete dir/x` was wrongly preflight-refused even
+    though both operations name the same lexical path. The comparison
+    now runs both sides through the registry's existing lexical
+    `pmacs.path.canonicalize` normalizer before component-aware
+    containment. This is deliberately comparison-only: operation
+    execution still receives the server's original path, and no
+    filesystem/symlink canonicalization was added.
+  - **P1 §10.2 — a failing first plan item could mutate while reporting
+    “nothing was mutated.”** `apply_workspace_edit` now returns an
+    `execution_started` fact in addition to the completed-item count.
+    Only parse/plan/preflight failures claim that nothing changed. Once
+    execution starts, the shared renderer conservatively says the
+    failing operation may have changed state. Criteria 22a and 22b pin
+    both forms: a multi-edit text item whose first edit lands before its
+    second edit fails, and a resource rename that creates destination
+    parents before the filesystem rename fails.
 - **`delete_verdict` is narrowed, and #171 inherits the narrowed
   version.** Q#RD6's shared query is this lane's to own; descendant
   matching is now reserved for recursive deletes. Q#RD5's "inspect widely,
@@ -614,18 +633,23 @@ has **no branch and no framing yet**.
   framing's §7 gate list AND its §8 touch table in the same edit, under
   §8's permitted simplification. It is still *run* as a gate, because
   `builtin/runtime/lsp.lua` changed.
-- Acceptance: criteria 1-16 plus §9's 18, 19a-19c and 20, all in
-  `tests/m4_acceptance.rs` and prefixed `rd`. 28 tests.
+- Acceptance: criteria 1-16, §9's 18, 19a-19c and 20, plus §10's 21 and
+  22a-22b, all in `tests/m4_acceptance.rs` and prefixed `rd`. 28 tests.
 - Bite verification uses `scripts/bite` **with the positive control** it
   gained in #192, merged into this lane. The pre-image for the round-1
   fixes is this lane's own first commit `1873be6`, not `main` — those
   defects were introduced by it. Per-criterion results are in the commit
-  message.
-- Gates green at the pushed tree: fmt; clippy `-D warnings`; `--lib`
-  **1863**; `--lib --features crdt` **2048**; `m4_acceptance` **146**
-  (was 132); `lsp_dispatch_seams_acceptance` **15**; `dired_acceptance`
+  message. The round-2 criteria 21, 22a, and 22b each pass on the
+  round-2 code checkpoint `cb7fe81` and produce a clean assertion
+  failure against its pre-image `c804dd5`.
+- Gates green at the round-2 tree: fmt; clippy `-D warnings`; `--lib`
+  **1863**; `--lib --features crdt` **2048**; `m4_acceptance` **149**
+  passed, **3** ignored, **1** filtered; `lsp_dispatch_seams_acceptance`
+  **15**; `dired_acceptance`
   **25** and `autosave_acceptance` **29** (the framing's watch items);
-  required GPU **202**; `git diff --check` clean.
+  required GPU **202**; full isolated-config workspace sweep; `git diff
+  --check` clean. The only warning in the non-Clippy CRDT build is the
+  pre-existing `unused_mut` in `src/daemon.rs`; strict Clippy is clean.
 - Recovery from a clean checkout:
   `git fetch githubsucks && git worktree add ../pmacs-rd-impl
   -b resource-op-delete-guard-impl githubsucks/resource-op-delete-guard-impl`.
