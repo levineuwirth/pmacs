@@ -329,7 +329,7 @@ fn acc28_delete_a_false_string_prefix_does_not_widen_the_kill_list() {
     fx.dir("foo");
     let inside = fx.write("foo/a.txt", "in\n");
     let sibling = fx.write("foobar.txt", "out\n");
-    let mut state = editor();
+    let state = editor();
     open_as(&state, "KEEP", &fx.write("keep.txt", "k\n"));
     open_as(&state, "IN", &inside);
     open_as(&state, "OUT", &sibling);
