@@ -1,8 +1,13 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-28, after the docs-only coherence listview
-correction (#189) and landed-state refresh (#185) merged; the canonical
-landed base is `7586905`. The runtime anchor beneath them is the M4
+**Last updated: 2026-07-28, as bottom-panel Stage 2B-2 (#187) — the
+daemon panel projection and the epoch machine — lands on `6c9e765`,
+which is the dired Stage 2 framing (#171) atop the resource-op delete
+guard framing (#186). Those two are framing-only: both are approved
+documents with no runtime code, and neither has begun implementation.
+Beneath them, the docs-only coherence listview
+correction (#189) and landed-state refresh (#185); the canonical
+landed base beneath those is `7586905`. The runtime anchor beneath them is the M4
 config-sink race fix (#174) and bottom-panel Stage 2B-1 (#184). #174 is
 test-only. #184 is the substantive one — the reserved protocol-v21
 bottom-panel wire family, dark by construction, with the production
@@ -52,7 +57,10 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-28)
 
-- `main` @ `7586905` (the docs-only coherence listview correction #189,
+- `main` @ `6c9e765` (the dired Stage 2 framing #171 and the resource-op
+  delete guard framing #186 — both framing-only, no runtime code, no
+  implementation started — atop
+  the docs-only coherence listview correction #189,
   atop the docs-only landed-state refresh #185, the M4 config-sink race
   fix #174 — test-only — atop bottom-panel Stage 2B-1 #184, the
   Journey/GPU directory-target ratchet #183, Journey Stage 1a #182,
@@ -603,6 +611,97 @@ commands, read `docs/active-work.md` immediately after this file.
     statusline and Vterm Stage 3 ladders still pinned v20 and rejected
     v21, in both structural and real-headless-probe form. Grep for the
     outgoing version across `tests/` before calling a bump complete.
+- **Bottom panel Stage 2B-2 (daemon projection + epoch machine) LANDED
+  — #187** (one review round of five findings on top of the
+  implementation; 12/12 green; 22/22 mutations bite). What it
+  establishes, beyond the feature:
+  - **A durable transition implemented as a per-frame effect is a bug
+    shape, not a style.** Four of the five review findings were one
+    defect: a renderer-side conditional with a durable twin that
+    disagreed with it. Wire-area exhaustion hid the rendered frame but
+    left panel state live; a stale `panel_epoch` could address a
+    reopened same-buffer panel; `NoMessage` cleared statusline segments
+    it should have retained. The fix that generalizes is
+    `presentable_panel_grid` — **one** private derivation behind both
+    the renderer and `reconcile_panel_layout_core`, because two
+    derivations of one predicate is *how* they drift. When touching
+    panel rendering, ask of every conditional: is there a durable twin,
+    and does it agree?
+  - **Ask what the other frontend kind's equivalent does.** The
+    semantic panel terminal missed the pre-child-drain resize its
+    document sibling had; the repro is a 4×20 panel reporting 3×120.
+    The new `sync_semantic_panel_terminal_layout` is disjoint from that
+    sibling *by construction* — one resolves through
+    `primary_document_window`, the other through `side_window_for` — so
+    the SIGWINCH storm the original extraction prevented cannot recur
+    through the new path.
+  - **A panel may legitimately be wider than a PTY.** `>512` columns
+    are legal on the wire (2B-1's `WireGridLimits` parameter), but
+    `snapshot_for_view` refused the band's content rect and the band
+    went `Absent` with `panel_hidden` false. Clamp the *terminal
+    projection*, not the band: the child takes the columns a PTY can
+    have and the remainder is band background.
+  - **Mutation testing cannot reach behaviour never modelled.** All 16
+    original mutations passed while five real defects stood; one of
+    them even fired, removing an `Absent` the test asserted. Mutations
+    prove assertions bite the code that exists. They say nothing about
+    the assertion never written.
+  - **One durability hole is accepted deliberately:** epoch exhaustion
+    stays a per-frame `Absent`, flagged rather than hidden, because
+    making it durable needs a new "presentation permanently
+    unavailable" reason in `FrontendView` for a state requiring 2^64
+    presentations in one session.
+- **dired Stage 2 framing LANDED (document only) — #171**
+  (`docs/dired-stage2-framing.md`, revision 9; seven review rounds).
+  **Approved as a framing; no runtime code and no implementation
+  started.** Load-bearing decisions a reader must not re-derive:
+  - **Reconciliation is order-independent, deliberately.** Reply order
+    is *not* execution order — `AsyncRuntime::tick` drains the bus with
+    `try_recv`, so a worker can finish first and be descheduled before
+    sending. An ordering token was rejected rather than built: no
+    static rule rescues the hazard anyway (rename `dir`→`newdir` racing
+    delete `dir/child.txt` needs opposite orders depending on which ran
+    first), and no production path can produce it. The trigger to
+    revisit is named: the first production caller that fire-and-forgets
+    two interdependent mutations.
+  - **A refused mid-edit kill is already destructive.**
+    `kill_buffer` clears round-trip state and moves windows *before*
+    `BufferRegistry::remove` can return `ConcurrentEdit`, so
+    `editing_in_progress` must be preflighted rather than relied on to
+    refuse cleanly.
+  - **Path-backed buffer names are not full paths.**
+    `get_or_load_buffer` takes the name from the path *as given* and
+    normalizes only the stored path, so a relative open is named
+    `foo.rs`. Rename provenance is path-*equivalence*, not equality.
+  - **URI-keyed stores have uncorrelated writers.**
+    `textDocument/publishDiagnostics` is absorbed unconditionally, and
+    `mark_document_stale` takes no `LspServerId` at all while creating
+    URI keys across three stores. A route purge keyed on request
+    responses cannot cover either.
+- **Resource-op delete guard framing LANDED (document only) — #186**
+  (`docs/resource-op-delete-guard-framing.md`, revision 5; five review
+  rounds). **Approved as a framing; no runtime code.** It owns the
+  urgent **pre-filesystem refusal** for synchronous `apply_resource_op`
+  — which on `main` today destroys unsaved work — while #171 owns full
+  post-delete lifecycle reconciliation. Carried facts:
+  - The sequence is `stat/no-op -> enumerate and validate -> mutate
+    filesystem -> reconcile`. Validation inspects without removing, so
+    a failed deletion leaves buffers intact and `on_removed` still
+    observes the path already gone.
+  - **`EditorCore::find_buffer_for_path` is the wrong lookup** — it
+    delegates to first-match-only `find_by_path`, and
+    `pmacs.buffer.from_file` creates path-bound buffers with no dedup,
+    so a clean first match can hide a modified second.
+  - **LSP does not promise batch atomicity, and pmacs advertises no
+    `workspace.workspaceEdit` capability at all** — no
+    `documentChanges`, no `resourceOperations`, no `failureHandling`.
+    Recovery is the client's declared choice, and there is no spec
+    default for a client that declares none. Say only that observed
+    pmacs behaviour *resembles* abort-style application.
+  - **`pmacs.fs.remove` has no dirty check of its own** and neither
+    lane adds one. After both land the guards sit one layer above it.
+    Latent — zero production callers — but "both lanes guard deletion"
+    reads as the primitive being guarded, and it is not.
 - **GPU initial target LANDED — #148**
   (`docs/gpu-initial-target-framing.md` rev 3; merge `0dd16a5`; two review
   rounds). `pmacs --gpu [--socket NAME|PATH] FILE` transports exact Unix path

@@ -5,11 +5,26 @@ landed on `main`. Read it after `docs/agent-handoff.md`. Remove completed
 entries when their PR merges; do not let this become a second permanent
 backlog.
 
-**No lane below is retained past its merge.** The PTY terminate
-diagnostic (#176) was the last one — retained because rule 4 removes a
+**No lane below is retained past its merge.** This snapshot removes the
+resource-op delete guard (#186) and dired Stage 2 framing (#171) lanes
+the moment their PRs merged, because the same commit put their
+load-bearing decisions into `docs/agent-handoff.md` §1 — rule 4's
+precondition, satisfied deliberately rather than deferred. The
+bottom-panel lane is not removed: 2B-2 landing leaves 2B-3 and Stage 3
+ahead of it, so the lane is rewritten to the remaining plan.
+
+**One open PR has no lane here: #188**, the generated-buffer
+immutability framing. Its lane lives on its own branch and arrives with
+it, which is deliberate — with several PRs open, a lane written here for
+work that lands elsewhere re-conflicts on every merge.
+
+The PTY terminate
+diagnostic (#176) was the last lane retained past its merge — retained
+because rule 4 removes a
 merged lane only *after* its durable facts reach
-`docs/agent-handoff.md`, and that absorption was unowned. This snapshot
-owns it: #176's facts are now in the handoff (§1's arc bullet and §5's
+`docs/agent-handoff.md`, and that absorption was unowned. The
+2026-07-28 snapshot
+owned it: #176's facts are now in the handoff (§1's arc bullet and §5's
 two ops lessons about ticking observers and proving child exit), so its
 lane is gone. The Lean 4, GPU-terminal-input, inline-math (#172), dired
 (#169), and terminal config + copy mode lanes were removed the same way
@@ -20,14 +35,15 @@ would stop re-conflicting in this file.
 number appears in `git log --first-parent githubsucks/main`, it has
 landed regardless of what a lane says.
 
-**Two open PRs had no lane here at all before this snapshot** — #174 and
-#171. An open PR is exactly the volatile work this file exists to
-record, so its absence is a ledger defect rather than a tidy omission:
-#171 drifted **153 commits** while invisible here, and its still-green
-old CI run describes a tree nobody has looked at since. **When a PR is
-opened, give it a lane.** #174 has since merged, so per rule 4 its lane
-is gone again and its durable lesson is in `docs/agent-handoff.md` §5;
-#171's lane is below.
+**Two open PRs had no lane here at all before the 2026-07-28
+snapshot** — #174 and #171. An open PR is exactly the volatile work this
+file exists to record, so its absence is a ledger defect rather than a
+tidy omission: #171 drifted **153 commits** while invisible here, and
+its still-green old CI run described a tree nobody had looked at since.
+**When a PR is opened, give it a lane.** All three have since merged —
+#174, #171 and #186 — so per rule 4 their lanes are gone again and
+their durable facts are in `docs/agent-handoff.md` (§5 for #174's
+lesson, §1 for the two framings).
 
 ## Repository authority
 
@@ -229,18 +245,16 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
-## Bottom-panel lane (Arc 7) — 2B-1 MERGED; 2B-2 PR #187 OPEN
+## Bottom-panel lane (Arc 7) — 2B-2 MERGED; 2B-3 IS NEXT
 
-Stage 1, the Stage 2 framing, Stage 2A, and **Stage 2B-1 are all on
-`main`**. Framing revision 5's three-way split of 2B was explicitly
-approved on 2026-07-27; revision 6 records PR #184's review correction.
-**2B-2 — the daemon panel projection and epoch machine — is open as
-[PR #187](https://github.com/levineuwirth/pmacs/pull/187)** on branch
-`bottom-panel-stage2b2`, worktree `../pmacs-bp-stage2b2`. It branched
-fresh from landed 2B-1 rather than stacking on its feature branch, and
-has since integrated landed main through `7586905` (#174, #185, and
-#189). The exact pre-round-2 reviewed head was merge checkpoint
-`0dba358`; the round-2 code-and-test checkpoint is `bfaaf2b`.
+Stage 1, the Stage 2 framing, Stage 2A, Stage 2B-1, and **Stage 2B-2 are
+all on `main`**. Framing revision 5's three-way split of 2B was
+explicitly approved on 2026-07-27; revision 6 records PR #184's review
+correction. **2B-2 — the daemon panel projection and epoch machine —
+landed as [PR #187](https://github.com/levineuwirth/pmacs/pull/187)**,
+one review round of five findings on top of the implementation, 12/12
+green, 22/22 mutations biting. Its durable lessons are in
+`docs/agent-handoff.md` §1; what remains below is the 2B-3 plan.
 
 **2B-2's boundaries, restated because they are easy to overrun:** the
 production `Hello` stays at v20 and `panel_capable` stays `false`. The
@@ -249,7 +263,7 @@ activation, the GPU band, and the negotiated capability flip are all
 2B-3's, and 2B-3 may **not** simply change the unsolicited `Hello` to
 21.
 
-- **What PR #187 ships, dark by construction:** the semantic daemon's
+- **What PR #187 shipped, dark by construction:** the semantic daemon's
   `FrontendCellGeometry` epoch machine; one reconciled panel grid
   derivation; `PanelFrame::{Present, Absent}` projection on both document
   and terminal semantic paths; stable presentation epochs; resize and
@@ -293,9 +307,8 @@ activation, the GPU band, and the negotiated capability flip are all
   git rev-parse HEAD
   ```
 
-  Require the remote branch to contain `bfaaf2b` or newer and confirm
-  PR #187's exact-head checks before resuming. Do not start 2B-3 until
-  #187 lands.
+  #187 has landed, so `githubsucks/main` already contains this work and
+  the branch is retained only for provenance. Start 2B-3 from `main`.
 - **Stage 2B-1 MERGED as #184** (`main` @ `6bee09d`, 2026-07-28; all
   twelve checks green on the reviewed head `5539b6e`; two review rounds
   plus a gate-found follow-up). Branch
@@ -507,58 +520,6 @@ has **no branch and no framing yet**.
   GPU-optimistic interactive unfold (parent R2-3); and flipping
   `FrontendView.fold_projection` to `true` for semantic frontends, which
   Stage 2 deliberately left `false` (Q#FD21).
-
-## dired Stage 2 framing lane — PR #171 OPEN, STALE, DO NOT MERGE AS-IS
-
-- Portable branch: `githubsucks/dired-stage2-framing` (head `ab42a79`,
-  four framing commits); worktree `../pmacs-dired-stage1`. **PR #171**,
-  base `main`. Framing only — `docs/dired-stage2-framing.md`, 1,570
-  lines, no runtime code.
-- **Measured 2026-07-28: 4 commits ahead of `main`, 153 behind**, merge
-  base `c8ec8f3`. GitHub reports it mergeable, and its old CI run is
-  green — **both facts are about a tree nobody has looked at in 153
-  commits**, and the document still says PROPOSED.
-- **The commit history embodies three review rounds. That is not the
-  same as approval**, and GitHub records no formal review or comment on
-  it. Do not read the round count as a green light.
-- **Its dependencies moved materially underneath it**, which is the real
-  reason not to merge. Note that dired Stage 1 (#165) and find-file
-  (#162) are its *base*, not new arrivals — the merge base `c8ec8f3`
-  **is** #165's merge commit. Eighteen PRs landed after it, and at least
-  three change ground the framing stands on:
-  - **#178 gave generated buffers a write invariant**
-    (`Buffer::set_generated_contents`). Dired's listing is a generated
-    buffer, and dired is named in the handoff as one of the writer
-    mechanisms that has **not** adopted it. Stage 2's marks and
-    operations write that buffer constantly.
-  - **#182 (Journey Stage 1a) made `resolve_target_buffer` the single
-    directory-open path**, with dired demoted to a *replaceable slot*
-    (`pmacs.path.directory_handler`) rather than a hook subscriber. Any
-    Stage 2 claim about how a directory reaches dired is now describing
-    a mechanism that no longer exists in that form.
-  - **#179/#181 landed the typed-edit consumer chain**, which is the
-    fan-out a rename transaction has to survive.
-
-  Re-scout against `6bee09d`, publish a new revision, and get explicit
-  framing approval before any implementation. **The re-scout is under
-  way** on the existing branch, so PR #171 keeps its three-round
-  history; the product is a revision 5, not a new document. (`main` has
-  since advanced to `0442d78`, but the only difference is the test-only
-  #174, so no re-scout conclusion turns on it.)
-- **The rename problem the framing must still answer**, restated because
-  it is the hard part: a rename is a transaction across **five** path
-  owners — the buffer path, the buffer name, the URI-keyed LSP stores
-  plus `DiagnosticView` (whose URI is set once at construction), dired's
-  pathless handles, and a captured Lua local that no transaction can
-  reach.
-- Intended serial implementation once approved: **2a** rename/delete
-  reconciliation substrate with no dired UI, **2b** marks and
-  operations, **2c** mkdir/copy/recursive-delete primitives, then Stage
-  3 wdired.
-- **Ownership warning:** dired 2a overlaps `src/editor_core.rs`,
-  `builtin/runtime/lsp.lua`, and the URI-keyed LSP state with other
-  coherence work. Do not run it concurrently with Journey Stage 1b
-  without assigning those files to one lane first.
 
 ## Parked lane: kill-ring browser + persistence
 
