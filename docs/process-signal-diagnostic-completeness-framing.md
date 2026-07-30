@@ -492,8 +492,15 @@ assertion (`:2517`) is one of the four sites acceptance 5 must update.
    field distinct from the assumed one, renderable as unobservable, with
    a test asserting a case where they **differ** (§3 Bet 4). **It is
    sampled before the `kill`**, not during report construction, so it
-   describes the target that was attempted rather than the state left
-   behind by the failure.
+   records pre-kill evidence about the target that was attempted rather
+   than state left behind by the failure.
+
+   **It does not describe the group at the moment the `kill` executed.**
+   `getpgid` and `kill` remain separated by the read-then-act window
+   §1.5 describes, so the sample can be stale by the time the signal is
+   delivered. Moving it earlier removes a *post-hoc* reading; it does
+   not make the reading contemporaneous, and no acceptance may claim it
+   does.
 5. All four exact-string sites — `:2408`, `:2435`, `:2485`, `:2517` —
    updated **individually**, each listed in the PR body with before and
    after. No blanket rewrite: that is how a format regression hides.

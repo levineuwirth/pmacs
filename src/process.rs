@@ -2617,18 +2617,6 @@ mod tests {
         }
     }
 
-    /// Q#PD1 acceptance 1 — a group-directed failure names the target,
-    /// the branch that chose it, the expected group, the errno, and the
-    /// leader's own state, as five separate facts.
-    ///
-    /// Asserted as an exact message against the pid the kernel actually
-    /// assigned, so a hardcoded target could not satisfy it. The leader
-    /// field is the one that matters: for a PTY the signal goes to the
-    /// terminal's foreground group, a different entity from the spawned
-    /// child whenever job control has moved the terminal. Three rejected
-    /// designs for this code collapsed the two; the report keeps them
-    /// apart, and here they are asserted to agree only because nothing
-    /// has moved the terminal.
     /// The job-control shell the divergence fixture drives. Named once so
     /// the availability guard and the spawn cannot drift apart.
     const BASH: &str = "/bin/bash";
