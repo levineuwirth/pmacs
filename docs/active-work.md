@@ -995,11 +995,28 @@ has **no branch and no framing yet**.
 - Verification (each gate its own step, real exit status, no
   `cmd | tail`): fmt 0; `git diff --check` 0; clippy 0; `--lib` 1864
   passed; `--lib --features crdt` 2049 passed; **`m4_acceptance`
-  without the skip 150 passed in 2.60s with the basedpyright test
-  `ok`**; the ten PTY/REPL/worker suites of the framing's Bet 2 all 0
-  (98 tests); `PMACS_REQUIRE_GPU=1 -p pmacs-gpu` 202 passed. Bite
-  verified by revert: `ok` in 2.03s with the fix, FAILED on timeout at
-  10.00s without it, both controls passing first.
+  without the skip 150 passed in 2.66s with the basedpyright test
+  `ok`**; the **eleven** PTY/REPL/worker/panel suites of the framing's
+  Bet 2 all 0 (144 tests); `PMACS_REQUIRE_GPU=1 -p pmacs-gpu` 202
+  passed. Bite verified by revert: `ok` in 2.03s with the fix, FAILED on
+  timeout at 10.00s without it, both controls passing first.
+- **CI round 1 falsified the reproduction, and the control is what
+  caught it.** Three Test legs failed on `9b1cf3d`'s predecessor: the
+  synthetic child used `sh -c 'cat <&0 & exit 0'`, and `<&0` does not
+  defeat the `/dev/null` rule it was chosen for — the rule applies
+  *before explicit redirections*, so fd 0 is already `/dev/null` and the
+  redirect duplicates it onto itself. `bash` skips the default when a
+  stdin redirect is present; **`dash`, which is Ubuntu's and CI's
+  `/bin/sh`, does not.** Local probing through `/bin/sh` could not see
+  it. Now `setsid --fork cat`, with no shell at all. **Lesson recorded in
+  the handoff §5: never probe shell behaviour through `/bin/sh` — name
+  the implementation.**
+- **`acc28` on macos/lua54 was a flake, established not assumed.**
+  `bottom_panel_stage1_acceptance::acc28` failed once on that leg;
+  rerunning the same job on the *identical* head passed, and the suite is
+  46/46 locally. It is now in Bet 2's falsifier list — its absence from
+  rev 1 was a real gap, since it drives real child input through a PTY in
+  a panel and this PR changes PTY-mode teardown ordering.
 - **Not fixed here, parked in the framing §5:** cancellable non-group
   `read` (covers a child that ignores EOF, and one that stops draining
   while `write_all` is blocked); the orphaned-server **leak** — post-fix
