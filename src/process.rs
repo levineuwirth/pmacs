@@ -636,6 +636,26 @@ impl Drop for RuntimeHandles {
         // channel because the consumer fell behind. Cancel flag
         // unwedges that case before we join. T M6.2.
         self.cancel.store(true, Ordering::Relaxed);
+        // Close the child's stdin BEFORE joining. `cancel` covers a
+        // reader stuck in `send`; it does NOT cover one stuck in
+        // `read`, which is only consulted between reads. What actually
+        // unblocks that reader is the child exiting and closing its
+        // output pipe --- and a stdio child exits on stdin EOF.
+        //
+        // The premise in the comment above ("dropping the master
+        // closes the kernel pipe") holds for a PTY master but NOT for
+        // pipe mode, where `read` unblocks only once *every* write end
+        // closes. An escaped descendant holding one (a shim-launched
+        // language server that orphans its real process) keeps the
+        // reader blocked indefinitely.
+        //
+        // The sink lives in the `stdin` FIELD, and a type's `Drop::drop`
+        // body runs before *all* of its fields regardless of their
+        // declaration order --- so reordering the struct cannot fix
+        // this. Joining first deadlocks against the very EOF that would
+        // have ended the join. `take()` is idempotent, matching
+        // `close_stdin`.
+        let _ = self.stdin.take();
         for h in std::mem::take(&mut self.readers) {
             let _ = h.join();
         }
@@ -3200,6 +3220,177 @@ mod tests {
             "supervisor drop should complete within 5s --- if hung, \
                  cancellation is not propagating to a reader blocked in \
                  send (per-generation cancel flag is required)",
+        );
+        handle.join().expect("test thread should exit cleanly");
+    }
+
+    /// The stdin sink lives in a *field* of [`RuntimeHandles`], so it
+    /// cannot drop until `Drop::drop`'s body returns --- and a type's
+    /// drop body runs before *all* of its fields, whatever their
+    /// declaration order (so reordering the struct cannot fix this).
+    /// Joining readers inside that body therefore deadlocks against any
+    /// child that exits on stdin EOF while still holding the output
+    /// pipe: no EOF, so no exit, so no pipe close, so a blocking
+    /// `spawn_reader` never returns.
+    ///
+    /// This is the root cause of
+    /// `m4_5_basedpyright_initializes_and_negotiates_encoding` hanging
+    /// forever. Modelled with an orphaned grandchild, which is exactly
+    /// what a shim-launched language server is: the basedpyright
+    /// console script spawns bundled `node` and exits, leaving the real
+    /// server at `PPid 1` holding the inherited pipes.
+    ///
+    /// `setsid --fork` is used rather than a shell background job, and
+    /// that choice is LOAD-BEARING. POSIX XCU 2.9.3 assigns `/dev/null`
+    /// to an asynchronous list's stdin when job control is off --- i.e.
+    /// in every non-interactive `sh` --- so `sh -c 'cat & exit 0'` reads
+    /// EOF immediately and exits *against the unfixed tree*, giving a
+    /// test that passes either way and proves nothing. The obvious
+    /// repair does not work either: the rule applies **before explicit
+    /// redirections**, so by the time `<&0` runs, fd 0 already *is*
+    /// `/dev/null` and the redirect faithfully duplicates it onto
+    /// itself. `bash` happens to skip the default when a stdin redirect
+    /// is present; `dash` --- Ubuntu's `/bin/sh`, and CI's --- does not,
+    /// so `<&0` passed locally and failed in CI.
+    ///
+    /// `setsid --fork` sidesteps all of it: it forks, the parent exits,
+    /// and the child inherits stdin/stdout/stderr untouched by any shell.
+    /// No async list, no `/dev/null` rule, no implementation variance.
+    ///
+    /// Linux-gated deliberately rather than incidentally: the controls
+    /// read `/proc`, and `setsid(1)` is util-linux (absent on macOS).
+    ///
+    /// On the failure path this leaks a wedged worker thread, and `cat`
+    /// survives until the harness's fds close at process exit. Bounded
+    /// and intentional --- a test that *hung* on regression would
+    /// reproduce the very hazard it exists to catch.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn teardown_closes_stdin_before_joining_readers() {
+        use std::sync::mpsc;
+
+        /// `sh` becomes a zombie when it exits, because this test
+        /// deliberately never ticks (a tick runs `poll_one`, which is
+        /// the teardown path under test). `kill(pid, None)` succeeds on
+        /// a zombie, so liveness has to come from the process state
+        /// rather than from signal 0.
+        fn reaped_or_zombie(pid: u32) -> bool {
+            match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                Err(_) => true,
+                Ok(s) => s
+                    .rsplit_once(')')
+                    .and_then(|(_, rest)| rest.split_whitespace().next())
+                    .is_some_and(|state| state == "Z"),
+            }
+        }
+
+        // setsid(1) is util-linux, not coreutils, and the standard
+        // `cargo test --lib` gate must not hard-fail on a tool the
+        // README does not require --- a minimal or BusyBox container
+        // would fail without ever testing pmacs. So: skip when absent,
+        // but FAIL when `PMACS_REQUIRE_SETSID` is set, which CI sets on
+        // Linux. That is the arming pattern from the silent-skip lane,
+        // and it is what keeps this from becoming a test that reports
+        // `ok` having never run. Presence decides, so an empty value
+        // counts as unset (a `${{ cond && '1' || '' }}` expression sets
+        // the empty string, not nothing).
+        let armed = std::env::var_os("PMACS_REQUIRE_SETSID").is_some_and(|v| !v.is_empty());
+        if !binary_available("setsid") {
+            assert!(
+                !armed,
+                "PMACS_REQUIRE_SETSID is set but setsid(1) is not on PATH: \
+                 install util-linux, or unset the variable to allow the skip"
+            );
+            eprintln!(
+                "setsid(1) not on PATH; skipping \
+                 teardown_closes_stdin_before_joining_readers"
+            );
+            return;
+        }
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let mut sup = ProcessSupervisor::new();
+            sup.set_grace_period(Duration::from_millis(300));
+            let mut spec = ProcessSpec::new("orphan-holds-pipe", "setsid");
+            // `setsid --fork` forks and the parent exits, so the
+            // *recorded* pid terminates promptly (letting `poll_one`
+            // reach the teardown path) while `cat` survives holding the
+            // inherited pipes. `cat` reads stdin and exits on EOF,
+            // exactly as a stdio language server does.
+            spec.args = vec!["--fork".into(), "cat".into()];
+            // The default, restated because it is the whole point: with
+            // `StdinMode::Null` there is no sink to drop and no EOF to
+            // deliver.
+            spec.stdin = StdinMode::Piped;
+            let id = sup.spawn(spec).expect("spawn");
+
+            let sh_pid = sup
+                .processes
+                .get(&id)
+                .and_then(|p| p.runtime.as_ref())
+                .map(|rt| rt.pid)
+                .expect("runtime records the spawned pid");
+
+            // CONTROL 1: the recorded child must actually exit. Until it
+            // does, *it* holds the output pipe, and control 2 would pass
+            // for the wrong reason. (`setsid` without `--fork` may exec
+            // directly instead of forking, in which case there is no
+            // grandchild and this is the control that notices.)
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline && !reaped_or_zombie(sh_pid) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                reaped_or_zombie(sh_pid),
+                "control 1 failed: the recorded child (`sh`) should exit \
+                 promptly, leaving the grandchild orphaned. While `sh` is \
+                 alive it holds the output pipe itself, so control 2 would \
+                 pass without the grandchild modelling anything"
+            );
+
+            // CONTROL 2: both readers must still be blocked in `read`,
+            // which is only true while something still holds the output
+            // pipe's write ends. If the grandchild never inherited the
+            // real stdin, it has already read EOF and exited, the write
+            // ends are closed, the readers have finished --- and the
+            // deadlock is not being modelled at all. This control is
+            // what caught the shell form failing on dash after it
+            // passed on bash.
+            let readers = sup
+                .processes
+                .get(&id)
+                .and_then(|p| p.runtime.as_ref())
+                .map(|rt| {
+                    (
+                        rt.readers.len(),
+                        rt.readers.iter().filter(|h| !h.is_finished()).count(),
+                    )
+                })
+                .expect("runtime still present before teardown");
+            assert_eq!(
+                readers,
+                (2, 2),
+                "control 2 failed: both readers must still be blocked in \
+                 `read`, i.e. an escaped grandchild still holds the output \
+                 pipe. Finished readers mean `cat` read EOF and exited \
+                 already, so it never inherited the real stdin --- check \
+                 that `setsid --fork` still forks and passes fds 0/1/2 \
+                 through untouched on this runner"
+            );
+
+            // The deadlock, if present, is here:
+            // shutdown -> tick -> poll_one -> RuntimeHandles::drop -> join.
+            drop(sup);
+            let _ = done_tx.send(());
+        });
+
+        done_rx.recv_timeout(Duration::from_secs(10)).expect(
+            "supervisor drop should complete within 10s --- if hung, \
+             `RuntimeHandles::drop` is joining its readers before dropping \
+             the `stdin` field, so the child never receives EOF, never \
+             exits, and never closes the output pipe the readers are \
+             blocked on",
         );
         handle.join().expect("test thread should exit cleanly");
     }

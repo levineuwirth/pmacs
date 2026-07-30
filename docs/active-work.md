@@ -953,6 +953,7 @@ has **no branch and no framing yet**.
   at 42 insertions against 88 deletions — merging it would *revert*
   current documentation. The section said "whoever confirms the branch
   carries nothing unique removes the section"; this is that.
+
 ## Test-improvement arc, lane 3a — CI timeouts and concurrency
 
 - Portable branch: `githubsucks/ci-timeouts-concurrency`, worktree
@@ -1038,6 +1039,96 @@ has **no branch and no framing yet**.
 - Recovery from a clean checkout:
   `git fetch githubsucks && git worktree add ../pmacs-ci3
   -b ci-timeouts-concurrency githubsucks/ci-timeouts-concurrency`.
+
+## Test-improvement arc, lane 4 — process teardown stdin deadlock
+
+- Portable branch: `githubsucks/process-teardown-stdin-deadlock`,
+  worktree `../pmacs-hang`. Implements
+  `docs/process-teardown-stdin-deadlock-framing.md` (rev 3: one review
+  round, then a CI round that falsified the reproduction).
+- **Base, measured rather than quoted:**
+
+  ```
+  $ git log --oneline -1 githubsucks/main
+  e003b81 Merge pull request #190 from levineuwirth/resource-op-delete-guard-impl
+  ```
+
+- Recovery from a clean checkout:
+  `git fetch githubsucks && git worktree add ../pmacs-hang
+  -b process-teardown-stdin-deadlock
+  githubsucks/process-teardown-stdin-deadlock`.
+- **The defect:** `RuntimeHandles::drop` joined its reader threads in
+  the `Drop` **body**, which runs before any field drops. The
+  `ChildStdin` sink lives in the `stdin` **field**, so it could only be
+  released after the join returned — and the join waited on readers
+  blocked in `read()` on pipes whose write ends the child still held,
+  because the child never got the stdin EOF that would have made it
+  exit. A closed cycle inside one function; teardown hung forever.
+- **This is the root cause of the `m4_5_basedpyright` hang** that has
+  parked `--workspace` sweeps (once for 2h26m) and forced
+  `-- --skip basedpyright` into every gate recipe. The handoff's §3
+  claim that the desktop's binary was broken is **retired by this PR**:
+  the binary was fine. `basedpyright-langserver` is a uv console script
+  that runs bundled `node` via `subprocess.run` and **waits**; at
+  teardown `shutdown()` SIGTERMs the recorded pid (the wrapper), which
+  dies without forwarding, and **that** orphans node to `PPid: 1`
+  holding the pipes. A direct binary like `clangd` is a genuine child
+  whose pipes close on reap. That is the whole of the "intermittent"
+  story.
+- **Corrected in review round 2:** rev 1–3 said the wrapper "spawns node
+  and exits". Wrong — and refutable from evidence already in hand, since
+  the initialize handshake succeeds, which a wrapper that exited at spawn
+  could not have done. The `PPid: 1` observation was taken *after*
+  `shutdown()` had killed the wrapper. **We create the orphan.** The fix
+  is unaffected; the parked follow-up changes from "tolerate
+  self-orphaning servers" to "stop orphaning them" (signal the group).
+- **Diagnosis method, because reproduce-first was the instruction:**
+  gdb thread stacks plus `/proc` fd forensics on a live wedged process,
+  both pipe ends identified in both processes, reproduced 5/5. Three
+  earlier reproductions were vacuous — see the handoff §5 lesson; the
+  shipped test carries two positive controls because of it.
+- Verification (each gate its own step, real exit status, no
+  `cmd | tail`): fmt 0; `git diff --check` 0; clippy 0; `--lib` 1864
+  passed; `--lib --features crdt` 2049 passed; **`m4_acceptance`
+  without the skip 150 passed in 2.66s with the basedpyright test
+  `ok`**; the **eleven** PTY/REPL/worker/panel suites of the framing's
+  Bet 2 all 0 (144 tests); `PMACS_REQUIRE_GPU=1 -p pmacs-gpu` 202
+  passed. Bite verified by revert: `ok` in 2.03s with the fix, FAILED on
+  timeout at 10.00s without it, both controls passing first.
+- **CI round 1 falsified the reproduction, and the control is what
+  caught it.** Three Test legs failed on `9b1cf3d`'s predecessor: the
+  synthetic child used `sh -c 'cat <&0 & exit 0'`, and `<&0` does not
+  defeat the `/dev/null` rule it was chosen for — the rule applies
+  *before explicit redirections*, so fd 0 is already `/dev/null` and the
+  redirect duplicates it onto itself. `bash` skips the default when a
+  stdin redirect is present; **`dash`, which is Ubuntu's and CI's
+  `/bin/sh`, does not.** Local probing through `/bin/sh` could not see
+  it. Now `setsid --fork cat`, with no shell at all. **Lesson recorded in
+  the handoff §5: never probe shell behaviour through `/bin/sh` — name
+  the implementation.**
+- **`acc28` on macos/lua54 was a flake, established not assumed.**
+  `bottom_panel_stage1_acceptance::acc28` failed once on that leg;
+  rerunning the same job on the *identical* head passed, and the suite is
+  46/46 locally. It is now in Bet 2's falsifier list — its absence from
+  rev 1 was a real gap, since it drives real child input through a PTY in
+  a panel and this PR changes PTY-mode teardown ordering.
+- **Not fixed here, parked in the framing §5:** cancellable non-group
+  `read` (covers a child that ignores EOF, and one that stops draining
+  while `write_all` is blocked); the orphaned-server **leak** — post-fix
+  the server exits by cooperation, not enforcement.
+- `CLAUDE.md`'s `--skip basedpyright` entry is deliberately untouched.
+  Dropping it is a separate proposal owed evidence of repeated green.
+  The timeout precondition is **already satisfied** — #195 (this PR's
+  base) gave every job a `timeout-minutes` — so the only remaining reason
+  `PMACS_REQUIRE_PYRIGHT` stays unarmed is that CI does not install
+  basedpyright at all; arming it would fail rather than test anything.
+- Adds `PMACS_REQUIRE_SETSID`, armed on Linux. The teardown test's
+  fixture needs `setsid --fork`, which is util-linux rather than
+  coreutils, so it **skips** when absent (the standard `--lib` gate must
+  not hard-fail a minimal container on an undeclared tool) and the
+  variable makes that skip fatal where the tool is guaranteed. Both arms
+  verified against a PATH with `setsid` genuinely removed: unarmed skips,
+  armed FAILS. README's test-dependency list declares it.
 
 ## Parked lane: kill-ring browser + persistence
 

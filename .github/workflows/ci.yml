@@ -203,18 +203,27 @@ jobs:
       # render job. Set only where the install step ran.
       #
       # PMACS_REQUIRE_PYRIGHT is deliberately NOT set and basedpyright
-      # is deliberately NOT installed: that test has no timeout and
-      # hangs forever (root cause is the non-interruptible reader-thread
-      # join in `RuntimeHandles::drop`, already a named deferral in
-      # `src/process.rs`). This job has no `timeout-minutes`, so arming
-      # it today would trade a vacuous green for a six-hour hang on four
-      # legs. It gets armed after the hang fix and the CI timeouts land,
-      # and its own variable exists so that flip is one line.
+      # is deliberately NOT installed. Both original reasons are now
+      # gone: the hang's root cause was the stdin-field drop ordering in
+      # `RuntimeHandles::drop` and is fixed, and this job now carries
+      # `timeout-minutes`, so a hang could no longer burn six hours.
+      # The ONE remaining reason is the plain one --- basedpyright is not
+      # installed here, so arming the variable would fail rather than
+      # test anything. Installing it (a uv + bundled-node download on
+      # every leg) is its own decision, not a rider on the hang fix.
+      #
+      # PMACS_REQUIRE_SETSID arms the teardown-deadlock unit test. Its
+      # fixture orphans a grandchild with `setsid --fork`, which is
+      # util-linux rather than coreutils, so the test skips when the
+      # binary is absent (a minimal container must not fail `--lib`
+      # without ever testing pmacs) and this variable is what makes the
+      # skip fatal where the tool is guaranteed.
       - run: cargo test --all-targets --no-default-features --features ${{ matrix.lua }} -- --test-threads=1
         env:
           PMACS_REQUIRE_LSP: ${{ runner.os == 'Linux' && '1' || '' }}
           PMACS_REQUIRE_SHELLS: ${{ runner.os == 'Linux' && '1' || '' }}
           PMACS_REQUIRE_LUA: ${{ runner.os == 'Linux' && '1' || '' }}
+          PMACS_REQUIRE_SETSID: ${{ runner.os == 'Linux' && '1' || '' }}
       - run: cargo test --doc --no-default-features --features ${{ matrix.lua }}
       # The workspace default member is only the root `pmacs` package, so
       # the runs above never execute pmacs-protocol's own tests — the
