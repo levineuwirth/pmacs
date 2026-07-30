@@ -16,6 +16,12 @@
 --                             format-on-save subscribe here.
 --   * editor.before-quit  --- short-circuit. A callback may veto quit
 --                             (e.g. "buffer modified --- save first?").
+--   * resource.renamed    --- all-must-succeed (dired Stage 2a). Fired
+--                             after a successful rename, with (old, new)
+--                             canonical absolute paths.
+--   * resource.deleted    --- all-must-succeed (dired Stage 2a). Fired
+--                             after a successful delete, with the
+--                             canonical absolute path.
 --
 -- These are *defined* here so user config can attach callbacks via
 -- pmacs.hook.add. Run sites are in Rust (after-load, after-edit) and in
@@ -74,6 +80,32 @@ define {
                 "falls back to. A callback that RAISES stops the chain and " ..
                 "suppresses that fallback.",
   kind = "short-circuit",
+}
+
+define {
+  name = "resource.renamed",
+  description = "Fired once per SUCCESSFUL filesystem rename, with the old " ..
+                "and new paths as canonical absolute strings. The core " ..
+                "reconciles what it can reach -- buffer paths and names, the " ..
+                "URI-keyed LSP stores, attached diagnostic overlays -- but a " ..
+                "package that keys its own state by path or URI is invisible " ..
+                "to that, so this hook is the mechanism that scales. It " ..
+                "carries PATHS rather than a rebind list precisely because " ..
+                "dired's listing buffers are pathless: a path-keyed consumer " ..
+                "must be able to reconcile from (old, new) alone. Does not " ..
+                "fire for a rename that failed or was cancelled.",
+  kind = "all-must-succeed",
+}
+
+define {
+  name = "resource.deleted",
+  description = "Fired once per SUCCESSFUL filesystem delete, with the " ..
+                "canonical absolute path. Buffers on the path and beneath it " ..
+                "have already been reconciled: unmodified ones killed " ..
+                "through both removal phases, modified ones kept alive. " ..
+                "Subscribers drop their own path-keyed state. Does not fire " ..
+                "for a delete that failed or was cancelled.",
+  kind = "all-must-succeed",
 }
 
 define {

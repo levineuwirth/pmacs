@@ -1,7 +1,7 @@
 # Generated-buffer immutability
 
-**PROPOSED — needs explicit user approval before implementation. DO NOT
-implement, DO NOT merge.**
+**APPROVED and MERGED as PR #188** (`main` @ `27b1185`, 2026-07-29).
+Stage 1 implementation is PR #191.
 
 **Revision 7 — answers review round 6 on `55c3061`, authored against
 canonical `githubsucks/main` @ `64883eb` and integrated through

@@ -938,11 +938,18 @@ impl EditorCore {
         }
         let normalized = normalize_buffer_path(path.to_path_buf());
         let (bytes, meta) = crate::file_io::load_file(path)?;
+        // The name is the path **as given** — a relative open is named
+        // `foo.rs` while `file_path` below is absolute. Recording the
+        // provenance (Q#DR30) is what lets rename reconciliation move
+        // this name without having to guess from the string.
         let display_name = path.display().to_string();
         let id = self
             .registry
             .borrow_mut()
-            .create_from_bytes(display_name, &bytes);
+            .create_from_bytes(display_name.clone(), &bytes);
+        if let Ok(b) = self.registry.borrow_mut().get_mut(id) {
+            b.set_path_derived_name(display_name);
+        }
         self.set_buffer_path(id, Some(normalized));
         self.set_buffer_meta(id, Some(meta));
         Ok((id, true))
@@ -1001,7 +1008,12 @@ impl EditorCore {
             }),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let display_path = path.display().to_string();
-                let buffer_id = self.registry.borrow_mut().create(display_path);
+                let buffer_id = self.registry.borrow_mut().create(display_path.clone());
+                // Path-backed creation site (Q#DR30): the name is the
+                // path, so a later rename may move it.
+                if let Ok(b) = self.registry.borrow_mut().get_mut(buffer_id) {
+                    b.set_path_derived_name(display_path);
+                }
                 self.set_buffer_path(buffer_id, Some(path.to_path_buf()));
                 "[new file]".clone_into(&mut self.status);
                 Ok(ResolvedTarget::Buffer {
@@ -1833,20 +1845,64 @@ impl EditorCore {
     /// and translate the live origin — otherwise accepted-match
     /// highlights and the session origin survive at pre-edit offsets
     /// for every Lua mutator edit and applied CRDT op.
+    ///
+    /// Q#GB6: each window coordinate is also clamped against **its own**
+    /// post-edit bound, which [`Self::rebuild_views_for`] already does
+    /// (`:1853-1857`) and this path did not. A generated refresh that
+    /// shrinks its buffer otherwise leaves `cursor` past the end of the
+    /// rope indefinitely — neither paint nor a motion command recovers
+    /// it, because motion is computed from the stale value. The two
+    /// coordinates fail on different axes and are therefore clamped
+    /// separately and **unconditionally**: `cursor` is a byte position
+    /// bounded by [`Buffer::len`], while `view_top` is a line index
+    /// bounded by [`TextView::line_count`]. A replace can grow in bytes
+    /// while collapsing many lines into one, so "the buffer shrank" is
+    /// not a usable trigger for the second.
+    ///
+    /// The selection anchor is a **third** coordinate. It is clamped to
+    /// the buffer extent, and the selection is cleared only when moving
+    /// an endpoint collapses it — see
+    /// [`Self::clamp_cursor_and_selection`].
     pub fn notify_buffer_edit(&mut self, buffer_id: BufferId, edit: &Edit) {
         self.search_invalidate_for_edit(buffer_id, edit);
         let reg = self.registry.borrow();
         let Ok(buffer) = reg.get(buffer_id) else {
             return;
         };
+        let len = buffer.len();
         for win in self.windows.values_mut() {
             if win.buffer_id == buffer_id {
                 let _ = win.text_view.on_edit(buffer, edit);
                 for overlay in &mut win.overlays {
                     let _ = overlay.on_edit(buffer, edit);
                 }
+                Self::clamp_cursor_and_selection(win, len);
+                let max_top = win.text_view.line_count().saturating_sub(1);
+                if win.view_top > max_top {
+                    win.view_top = max_top;
+                }
             }
         }
+    }
+
+    /// Clamp `win`'s cursor and selection anchor to `len`, clearing the
+    /// selection only when the clamp collapses it.
+    ///
+    /// This mirrors terminal selection normalization: a surviving,
+    /// shortened region remains selected, while a region whose content
+    /// disappeared does not become an accidental active-but-empty
+    /// selection. Looking at whether either endpoint moved distinguishes
+    /// that case from a zero-width selection the user created.
+    fn clamp_cursor_and_selection(win: &mut Window, len: Position) {
+        let old_cursor = win.cursor;
+        win.cursor = win.cursor.min(len);
+        win.selection = win.selection.and_then(|mut selection| {
+            let old_anchor = selection.anchor;
+            selection.anchor = selection.anchor.min(len);
+            let collapsed_by_clamp = selection.anchor == win.cursor
+                && (selection.anchor != old_anchor || win.cursor != old_cursor);
+            (!collapsed_by_clamp).then_some(selection)
+        });
     }
 
     /// Force every window currently showing `buffer_id` to rebuild
@@ -1862,6 +1918,8 @@ impl EditorCore {
     ///
     /// Cursor and `view_top` are clamped to the new buffer extent so
     /// they don't dangle past the end after a shrinking rewrite.
+    /// Selection normalization uses the same clamp-or-clear rule as
+    /// [`Self::notify_buffer_edit`].
     pub fn rebuild_views_for(&mut self, buffer_id: BufferId) {
         let reg = self.registry.borrow();
         let Ok(buffer) = reg.get(buffer_id) else {
@@ -1871,9 +1929,7 @@ impl EditorCore {
         for win in self.windows.values_mut() {
             if win.buffer_id == buffer_id {
                 win.text_view = TextView::new(buffer);
-                if win.cursor > len {
-                    win.cursor = len;
-                }
+                Self::clamp_cursor_and_selection(win, len);
                 let max_top = win.text_view.line_count().saturating_sub(1);
                 if win.view_top > max_top {
                     win.view_top = max_top;
@@ -4828,6 +4884,205 @@ impl EditorCore {
             .map_err(|e| e.to_string())
     }
 
+    /// Rebind every buffer affected by a successful rename of `old` to
+    /// `new` (dired Stage 2a, Q#DR14). Returns one
+    /// [`RenameRebind`] per buffer moved.
+    ///
+    /// A rename is a **transaction across path owners**, not a field
+    /// update. This method owns the two owners that live in the buffer:
+    /// the stored path and — subject to the provenance rule below — the
+    /// name. Everything else keyed by the path (URI-keyed LSP stores,
+    /// diagnostic overlays, dired's pathless handles, a package's own
+    /// URI table) reconciles off the `resource.renamed` hook that the
+    /// caller fires, because no buffer-keyed rebind can reach them.
+    ///
+    /// Both rename paths call this — the drain harvest for
+    /// `pmacs.fs.rename` and `apply_resource_op`'s rename arm — so the
+    /// two cannot drift apart.
+    ///
+    /// # The name
+    ///
+    /// The name is rewritten only for a buffer whose name is
+    /// [`crate::buffer::BufferNameOrigin::PathDerived`]. String
+    /// inspection cannot substitute for that bit in either direction: a
+    /// relative open is named `foo.rs` (so an equality test leaves it
+    /// stale), and a user may name a buffer with a string that
+    /// normalizes to its own path (so a path-equivalence test
+    /// overwrites a chosen name). When it does fire, the new name is
+    /// the **normalized** new path — a buffer opened relatively
+    /// therefore acquires an absolute name, because no buffer records
+    /// which base its name was relative to. Reconciliation re-records
+    /// `PathDerived`, so a second rename still follows.
+    pub fn reconcile_rename(&mut self, old: &Path, new: &Path) -> Vec<RenameRebind> {
+        let old_n = normalize_buffer_path(old.to_path_buf());
+        let new_n = normalize_buffer_path(new.to_path_buf());
+        // A directory rename moves its whole subtree by construction,
+        // so descendants are always in scope here.
+        let affected = {
+            let reg = self.registry.borrow();
+            buffers_bound_under(&reg, &old_n, true)
+        };
+        let mut rebinds = Vec::with_capacity(affected.len());
+        for (id, bound) in affected {
+            // Rebuild the path under the new root. An exact match maps
+            // to `new` itself; a descendant keeps its relative tail.
+            let target = if bound == old_n {
+                new_n.clone()
+            } else {
+                match bound.strip_prefix(&old_n) {
+                    Ok(tail) => new_n.join(tail),
+                    // Unreachable: `buffers_bound_under` matched on
+                    // exactly this prefix. Skip rather than guess.
+                    Err(_) => continue,
+                }
+            };
+            let name_followed = {
+                let mut reg = self.registry.borrow_mut();
+                let Ok(buf) = reg.get_mut(id) else { continue };
+                buf.set_file_path(Some(target.clone()));
+                // The file behind this buffer moved, so metadata
+                // captured against the old path no longer describes
+                // it. Clearing is what `set_buffer_path`'s callers do
+                // via `set_buffer_meta`; leaving it would make
+                // external-change detection compare against a stat of
+                // a path that is gone.
+                buf.set_file_meta(None);
+                if buf.name_origin() == crate::buffer::BufferNameOrigin::PathDerived {
+                    buf.set_path_derived_name(target.display().to_string());
+                    true
+                } else {
+                    false
+                }
+            };
+            rebinds.push(RenameRebind {
+                buffer_id: id,
+                old_path: bound,
+                new_path: target,
+                name_followed,
+            });
+        }
+        rebinds
+    }
+
+    /// Reconcile the buffers a successful delete of `path` orphaned
+    /// (dired Stage 2a, Q#DR18).
+    ///
+    /// Walks the whole registry by normalized equality **or**
+    /// component-aware prefix, so descendants of a deleted directory
+    /// are included and a second buffer on one path is not missed.
+    /// Descendants are unconditionally in scope here, unlike in
+    /// `delete_verdict`: a recursive delete destroyed them, and a
+    /// non-recursive one only succeeds on an *empty* directory, so a
+    /// buffer still bound underneath it was already an orphan.
+    ///
+    /// Policy, per buffer:
+    ///
+    /// * **modified** — kept alive and reported. The buffer keeps its
+    ///   contents; only the file is gone. This is the half of the
+    ///   promise that is robust, because it runs at drain time against
+    ///   whatever state exists then.
+    /// * **mid-edit** — skipped entirely and reported in `refused`,
+    ///   **preflighted** rather than discovered. A refusal from
+    ///   `BufferRegistry::remove` is *not* inert: by the time it
+    ///   returns `ConcurrentEdit`, [`Self::kill_buffer`] has already
+    ///   dropped the id from `round_trip_buffers`, closed any side
+    ///   window showing the buffer, and redirected every remaining
+    ///   window onto a fallback with cursor, selection, overlays and
+    ///   scroll position reset. The preflight is *sound*, not merely
+    ///   cheap: phase 1 is entirely `EditorCore`, which holds no Lua
+    ///   handle, so nothing between the check and the removal can
+    ///   re-enter Lua and begin an edit.
+    /// * otherwise — killed through the full phase 1 above.
+    ///
+    /// Neither refusal aborts the rest: a directory delete reaching
+    /// twelve descendants must not stop at the one that is mid-edit.
+    ///
+    /// # Phase 2 is the caller's
+    ///
+    /// Buffer removal is two phases and the only place they are
+    /// composed today is a Lua binding (`pmacs.buffer.kill`). Phase 2 —
+    /// buffer-scoped keymaps, buffer-local config, folds, and the
+    /// registered `on_removed` callbacks — lives in `lua_bindings` and
+    /// needs `&Lua`, so this returns [`DeleteReconcile::killed`] and
+    /// its caller runs phase 2 over those ids. `EditorCore` does not
+    /// gain a Lua handle.
+    pub fn reconcile_delete(&mut self, path: &Path) -> DeleteReconcile {
+        let affected = {
+            let reg = self.registry.borrow();
+            buffers_bound_under(&reg, path, true)
+        };
+        let mut out = DeleteReconcile::default();
+        for (id, _bound) in affected {
+            let preflight = {
+                let reg = self.registry.borrow();
+                let Ok(buf) = reg.get(id) else { continue };
+                let name = buf.name().to_owned();
+                if buf.is_modified() {
+                    Some(Err((true, name)))
+                } else if buf.editing_in_progress() {
+                    Some(Err((false, name)))
+                } else {
+                    Some(Ok(()))
+                }
+            };
+            match preflight {
+                Some(Ok(())) => {}
+                Some(Err((true, name))) => {
+                    out.kept_modified.push((id, name));
+                    continue;
+                }
+                Some(Err((false, name))) => {
+                    out.refused.push((
+                        id,
+                        format!("buffer {name:?} is mid-edit; finish the edit first"),
+                    ));
+                    continue;
+                }
+                None => continue,
+            }
+            match self.kill_buffer(id) {
+                Ok(()) => out.killed.push(id),
+                // Named, because the reason alone is not actionable:
+                // `kill_buffer`'s "cannot kill the last remaining
+                // buffer" says nothing about *which* buffer is now
+                // bound to a path whose file is gone, and that buffer's
+                // name is what the user needs in order to save it
+                // somewhere else.
+                Err(message) => {
+                    let name = self
+                        .registry
+                        .borrow()
+                        .get(id)
+                        .map_or_else(|_| format!("{id:?}"), |b| b.name().to_owned());
+                    out.refused
+                        .push((id, format!("buffer {name:?}: {message}")));
+                }
+            }
+        }
+        out
+    }
+
+    /// Re-root every URI-keyed overlay in **every** window from
+    /// `old_uri` to `new_uri` (dired Stage 2a, §5).
+    ///
+    /// The traversal mirrors overlay disposal's
+    /// (`lua_bindings`'s `retain` over `overlay_identity`), with the
+    /// `retain` replaced by [`View::rename_resource`]. That reaches
+    /// passive windows as well as the active one — which the Lua attach
+    /// path cannot, since `pmacs.diag._attach_view` takes the active
+    /// window and errors otherwise — and preserves composition order,
+    /// because nothing is removed or re-pushed.
+    ///
+    /// A window that never received the overlay still has none;
+    /// renaming cannot re-root an overlay that was never attached.
+    pub fn rename_resource_in_views(&mut self, old_uri: &str, new_uri: &str) {
+        for win in self.windows.values_mut() {
+            for overlay in &mut win.overlays {
+                overlay.rename_resource(old_uri, new_uri);
+            }
+        }
+    }
+
     /// Switch one frontend's active window to a different buffer, allocating
     /// a fresh [`TextView`] for it without changing global active state.
     pub fn switch_active_buffer_for(
@@ -5083,6 +5338,85 @@ fn backward_word(buf: &Buffer, mut pos: Position) -> Position {
         pos = prev;
     }
     pos
+}
+
+/// Every path-bound buffer an operation on `target` affects, paired
+/// with its **normalized** stored path (dired Stage 2a; the shared walk
+/// query #190 introduced for `delete_verdict`, lifted so rename
+/// reconciliation and delete reconciliation cannot drift from it).
+///
+/// Three properties, each of which a naive lookup gets wrong:
+///
+/// * It scans **every** buffer.
+///   [`crate::buffer_registry::BufferRegistry::find_by_path`] is
+///   first-match-only, and duplicate path-bound buffers are reachable
+///   from public Lua via `pmacs.buffer.from_file` — so a first match
+///   can hide a second buffer on the same path, which then survives
+///   pointing at a path that no longer exists.
+/// * Both sides are normalized. Stored paths are normalized on write
+///   (`set_buffer_path`) while an op names its target however the
+///   caller spelled it, so a raw comparison misses the match entirely.
+/// * Containment is **component-aware** ([`Path::starts_with`]), never
+///   a string prefix: `/foo` is not an ancestor of `/foobar`.
+///
+/// `include_descendants` is the caller's decision because the two
+/// consumers legitimately differ. A delete *guard* scopes descendants
+/// to `recursive` (#190: a non-recursive delete destroys nothing
+/// beneath the target, so a buffer under it must not refuse the op),
+/// whereas a **rename** always moves its whole subtree and a
+/// post-delete reconciliation is looking at a directory that is
+/// already gone.
+pub fn buffers_bound_under(
+    reg: &crate::buffer_registry::BufferRegistry,
+    target: &Path,
+    include_descendants: bool,
+) -> Vec<(BufferId, PathBuf)> {
+    let target = normalize_buffer_path(target.to_path_buf());
+    let mut out = Vec::new();
+    for id in reg.ids() {
+        let Ok(buf) = reg.get(*id) else { continue };
+        let Some(bound) = buf.file_path() else {
+            continue;
+        };
+        let bound = normalize_buffer_path(bound.to_path_buf());
+        if bound == target || (include_descendants && bound.starts_with(&target)) {
+            out.push((*id, bound));
+        }
+    }
+    out
+}
+
+/// One buffer moved by [`EditorCore::reconcile_rename`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenameRebind {
+    /// The buffer that moved.
+    pub buffer_id: BufferId,
+    /// Its normalized path before the rename.
+    pub old_path: PathBuf,
+    /// Its normalized path after the rename.
+    pub new_path: PathBuf,
+    /// Whether the buffer's **name** followed the path, per
+    /// [`crate::buffer::BufferNameOrigin`]. Reported rather than
+    /// inferred so a consumer does not have to re-derive the
+    /// provenance rule.
+    pub name_followed: bool,
+}
+
+/// Outcome of [`EditorCore::reconcile_delete`].
+///
+/// Three lists rather than two, because "kept on purpose" and "could
+/// not be removed" are different events: collapsing them makes a
+/// failure look like a policy decision.
+#[derive(Clone, Debug, Default)]
+pub struct DeleteReconcile {
+    /// Buffers whose phase 1 (core-side removal) completed. The
+    /// caller **must** run phase 2 (`after_buffer_removed`) over
+    /// these — `EditorCore` holds no Lua handle.
+    pub killed: Vec<BufferId>,
+    /// Modified buffers kept alive deliberately, with their names.
+    pub kept_modified: Vec<(BufferId, String)>,
+    /// Buffers that could not be removed, with the reason.
+    pub refused: Vec<(BufferId, String)>,
 }
 
 /// Normalize a buffer path to an absolute, lexically-clean form:

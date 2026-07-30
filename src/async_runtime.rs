@@ -391,6 +391,70 @@ struct PendingJob {
     /// When the job was registered. Used to compute "age" in the
     /// `*workers*` buffer.
     dispatched_at: Instant,
+    /// The filesystem mutation this job performs, retained so the
+    /// main-thread drain can reconcile the editor's path owners once
+    /// the syscall lands (dired Stage 2a, §5).
+    ///
+    /// The paths have to live here because the dispatchers **move**
+    /// them into the worker closure and nothing else retains them, and
+    /// because the reply is undifferentiated — rename and remove both
+    /// settle as `ReplyKind::FsUnit`, so a drain cannot key on the
+    /// reply and must key on the pending job.
+    ///
+    /// One enum field rather than a pair of `Option`s: two would admit
+    /// a both-`Some` state that cannot occur, which every consumer
+    /// would then have to rule out by hand. `COHERENCE.md` §9 is why
+    /// this is a field on the job and not a side map — the parse
+    /// job→buffer link already lives in a side map and §9 names that as
+    /// the defect.
+    resource: Option<ResourceOp>,
+}
+
+/// A settled filesystem mutation, with the paths the worker consumed
+/// (dired Stage 2a, §5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResourceOp {
+    /// A successful `rename(from, to)`.
+    Rename {
+        /// Source path, as the caller spelled it.
+        from: PathBuf,
+        /// Destination path, as the caller spelled it.
+        to: PathBuf,
+    },
+    /// A successful `remove(path)`.
+    Remove {
+        /// The path that was removed.
+        path: PathBuf,
+    },
+}
+
+/// What one [`AsyncRuntime::tick`] observed.
+///
+/// Settle identity and resource metadata come out of **one**
+/// transaction — the post-drain loop already borrows `pending` to
+/// record completions — so a consumer cannot see a settle without its
+/// resource, or the reverse.
+#[derive(Clone, Debug, Default)]
+pub struct TickOutcome {
+    /// Ids that transitioned from `Running` to a terminal state during
+    /// this tick. The Lua runtime resumes coroutines parked on these.
+    pub settled: Vec<JobId>,
+    /// Successful resource mutations, **in bus-arrival order. This is
+    /// not filesystem execution order.**
+    ///
+    /// [`AsyncRuntime::tick`] drains the reply bus with `try_recv` and
+    /// the runtime establishes no execution token, so a worker can
+    /// complete, be descheduled before sending, and have a later
+    /// mutation's reply arrive first. A consumer that reads "in settle
+    /// order" and infers causality is wrong; reconciliation is
+    /// deliberately order-independent (Q#DR29), and the primitive's
+    /// contract is that a caller with overlapping source/target paths
+    /// serializes by awaiting each op before dispatching the next.
+    ///
+    /// Carries **only** jobs that settled
+    /// [`PendingState::Complete`] — a failed or cancelled mutation
+    /// reconciles nothing and fires no hook.
+    pub resources: Vec<ResourceOp>,
 }
 
 /// Snapshot of a job's terminal state, returned by
@@ -685,6 +749,18 @@ impl AsyncRuntime {
         supersede_key: Option<&str>,
         stream: Option<usize>,
     ) -> (JobId, CancellationToken) {
+        self.allocate_with_resource(kind, supersede_key, stream, None)
+    }
+
+    /// [`Self::allocate`], plus the filesystem mutation this job
+    /// performs. Only the two mutating fs dispatchers pass `resource`.
+    fn allocate_with_resource(
+        &self,
+        kind: JobKind,
+        supersede_key: Option<&str>,
+        stream: Option<usize>,
+        resource: Option<ResourceOp>,
+    ) -> (JobId, CancellationToken) {
         let id = self.next_job_id.fetch_add(1, Ordering::Relaxed);
         let cancel = CancellationToken::new();
         if let Some(key) = supersede_key {
@@ -711,6 +787,7 @@ impl AsyncRuntime {
                 max_batch: stream.unwrap_or(0),
                 kind,
                 dispatched_at: Instant::now(),
+                resource,
             },
         );
         (id, cancel)
@@ -869,7 +946,17 @@ impl AsyncRuntime {
     /// Dispatch a `rename(from, to)` job. Settles to
     /// [`JobResult::Unit`] on success. T M8.1.
     pub fn dispatch_fs_rename(&self, from: PathBuf, to: PathBuf, supersede: Option<&str>) -> JobId {
-        let (id, cancel) = self.allocate(JobKind::FsRename, supersede, None);
+        // The closure below MOVES both paths; the pending entry is the
+        // only thing that still knows them when the reply lands.
+        let (id, cancel) = self.allocate_with_resource(
+            JobKind::FsRename,
+            supersede,
+            None,
+            Some(ResourceOp::Rename {
+                from: from.clone(),
+                to: to.clone(),
+            }),
+        );
         let bus = self.workers.clone();
         self.pool.dispatch(move |_pool| {
             let kind = run_fs_rename(&cancel, &from, &to);
@@ -891,7 +978,12 @@ impl AsyncRuntime {
 
     /// Dispatch a `remove(path)` job. T M8.1.
     pub fn dispatch_fs_remove(&self, path: PathBuf, supersede: Option<&str>) -> JobId {
-        let (id, cancel) = self.allocate(JobKind::FsRemove, supersede, None);
+        let (id, cancel) = self.allocate_with_resource(
+            JobKind::FsRemove,
+            supersede,
+            None,
+            Some(ResourceOp::Remove { path: path.clone() }),
+        );
         let bus = self.workers.clone();
         self.pool.dispatch(move |_pool| {
             let kind = run_fs_remove(&cancel, &path);
@@ -996,11 +1088,16 @@ impl AsyncRuntime {
         }
     }
 
-    /// Drain every queued reply on the main-thread bus, update
-    /// pending entries, and return the list of ids that *transitioned
-    /// from Running to a terminal state* during this tick. The Lua
-    /// runtime resumes coroutines parked on these ids.
-    pub fn tick(&self) -> Vec<JobId> {
+    /// Drain every queued reply on the main-thread bus, update pending
+    /// entries, and report what settled.
+    ///
+    /// [`TickOutcome::settled`] is the ids that transitioned from
+    /// `Running` to a terminal state during this tick — the Lua runtime
+    /// resumes coroutines parked on these.
+    /// [`TickOutcome::resources`] is the filesystem mutations among them
+    /// that **succeeded**, in **bus-arrival order** (see the field's
+    /// own documentation: that is not execution order).
+    pub fn tick(&self) -> TickOutcome {
         let mut newly_settled = Vec::new();
         while let Ok(env) = self.main.try_recv() {
             let Ok(reply): Result<WorkerReply, _> = self.main.decode(&env) else {
@@ -1071,6 +1168,7 @@ impl AsyncRuntime {
         // a successor that came in mid-flight will have overwritten
         // the entry already, and that successor's pending lifetime
         // is what owns the slot now.
+        let mut resources = Vec::new();
         if !newly_settled.is_empty() {
             let pending = self.pending.borrow();
             let mut sup = self.supersede.borrow_mut();
@@ -1078,6 +1176,16 @@ impl AsyncRuntime {
             let now = Instant::now();
             for id in &newly_settled {
                 if let Some(job) = pending.get(id) {
+                    // The harvest (§5): one more read in a loop that
+                    // already borrows `pending` and reads `job.kind`,
+                    // so settle identity and resource metadata come out
+                    // of one transaction. Gated on `Complete` — a
+                    // failed or cancelled mutation reconciles nothing.
+                    if let Some(resource) = &job.resource
+                        && matches!(job.state, PendingState::Complete(_))
+                    {
+                        resources.push(resource.clone());
+                    }
                     if let Some(key) = &job.supersede_key
                         && sup.get(key) == Some(id)
                     {
@@ -1106,7 +1214,10 @@ impl AsyncRuntime {
                 completed.pop_back();
             }
         }
-        newly_settled
+        TickOutcome {
+            settled: newly_settled,
+            resources,
+        }
     }
 
     /// Snapshot the runtime's job tables for the `*workers*`
@@ -1747,6 +1858,126 @@ mod tests {
             let _ = rt.tick();
             thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    /// dired Stage 2a, acceptance 54 (controlled-bus layer). Allocate
+    /// two resource jobs **without dispatching workers**, inject their
+    /// successful replies in a chosen order, and assert
+    /// `TickOutcome.resources` reports exactly that order.
+    ///
+    /// This is the honest statement of what the runtime guarantees:
+    /// `tick` drains the reply bus with `try_recv` and establishes no
+    /// execution token, so what a consumer sees is bus-arrival order.
+    /// The test fails against sorting by job id or kind, and against any
+    /// claim that the order recovers dispatch or filesystem-execution
+    /// order — because the injection order here is *deliberately* the
+    /// reverse of the allocation order in the first case.
+    #[test]
+    fn tick_reports_resources_in_bus_arrival_order_not_allocation_order() {
+        fn run(reverse: bool) -> Vec<ResourceOp> {
+            let rt = AsyncRuntime::with_pool_size(1);
+            let (a, _) = rt.allocate_with_resource(
+                JobKind::FsRename,
+                None,
+                None,
+                Some(ResourceOp::Rename {
+                    from: PathBuf::from("/tmp/a-from"),
+                    to: PathBuf::from("/tmp/a-to"),
+                }),
+            );
+            let (b, _) = rt.allocate_with_resource(
+                JobKind::FsRemove,
+                None,
+                None,
+                Some(ResourceOp::Remove {
+                    path: PathBuf::from("/tmp/b-gone"),
+                }),
+            );
+            let order = if reverse { [b, a] } else { [a, b] };
+            for id in order {
+                rt.workers
+                    .send(
+                        ASYNC_REPLY_TOPIC,
+                        &WorkerReply {
+                            job_id: id,
+                            kind: ReplyKind::FsUnit,
+                        },
+                    )
+                    .expect("inject reply");
+            }
+            let outcome = rt.tick();
+            assert_eq!(outcome.settled.len(), 2, "both jobs settled");
+            outcome.resources
+        }
+
+        let a_first = ResourceOp::Rename {
+            from: PathBuf::from("/tmp/a-from"),
+            to: PathBuf::from("/tmp/a-to"),
+        };
+        let b_first = ResourceOp::Remove {
+            path: PathBuf::from("/tmp/b-gone"),
+        };
+
+        assert_eq!(
+            run(true),
+            vec![b_first.clone(), a_first.clone()],
+            "B injected first must be reported first, even though A was \
+             allocated first"
+        );
+        assert_eq!(
+            run(false),
+            vec![a_first, b_first],
+            "and the reverse arrival order reverses the report"
+        );
+    }
+
+    /// A failed or cancelled mutation reconciles nothing, so it must not
+    /// appear in `resources` at all (acceptance 37's runtime half).
+    #[test]
+    fn a_failed_or_cancelled_resource_job_is_not_harvested() {
+        let rt = AsyncRuntime::with_pool_size(1);
+        let (failed, _) = rt.allocate_with_resource(
+            JobKind::FsRename,
+            None,
+            None,
+            Some(ResourceOp::Rename {
+                from: PathBuf::from("/tmp/nope"),
+                to: PathBuf::from("/tmp/also-nope"),
+            }),
+        );
+        let (cancelled, _) = rt.allocate_with_resource(
+            JobKind::FsRemove,
+            None,
+            None,
+            Some(ResourceOp::Remove {
+                path: PathBuf::from("/tmp/never"),
+            }),
+        );
+        rt.workers
+            .send(
+                ASYNC_REPLY_TOPIC,
+                &WorkerReply {
+                    job_id: failed,
+                    kind: ReplyKind::Error("ENOENT".to_owned()),
+                },
+            )
+            .expect("inject");
+        rt.workers
+            .send(
+                ASYNC_REPLY_TOPIC,
+                &WorkerReply {
+                    job_id: cancelled,
+                    kind: ReplyKind::Cancelled,
+                },
+            )
+            .expect("inject");
+        let outcome = rt.tick();
+        assert_eq!(outcome.settled.len(), 2, "both settled");
+        assert!(
+            outcome.resources.is_empty(),
+            "only Complete mutations are harvested; got {:?}",
+            outcome.resources
+        );
     }
 
     #[test]

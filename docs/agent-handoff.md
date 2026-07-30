@@ -1377,10 +1377,32 @@ git diff --check
 Machine-specific caveats — re-verify on a machine you haven't used
 before trusting them:
 
-- **basedpyright**: the DESKTOP's local binary is broken and HANGS the
-  `m4_5_basedpyright` tests — hence the `--skip` there. The LAPTOP has
-  a working basedpyright 1.39.9 (verified 2026-07-10: the m4_5 test
-  passes in 0.18s), so the skip is droppable on the laptop.
+- **basedpyright**: the desktop binary was **never broken** — this was a
+  real code defect, diagnosed and fixed 2026-07-29 (see §5, "A `Drop`
+  body runs before its fields"). `RuntimeHandles::drop` joined its reader
+  threads before the `stdin` field dropped, so the server never got stdin
+  EOF, never exited, and kept the output pipe the readers were blocked
+  on. Deterministic on the desktop, invisible on the laptop and in CI,
+  which is why it read as a broken local binary for weeks.
+  **How the orphan is actually made — WE make it.** basedpyright's
+  console script runs bundled `node` through `subprocess.run` and
+  **waits** (`nodejs_wheel/executable.py:50`, verified in 1.39.6). At
+  teardown `shutdown()` SIGTERMs the *recorded* pid — the Python wrapper
+  — which dies without forwarding the signal, orphaning node to `PPid 1`
+  holding the pipes. An earlier revision of this entry said the wrapper
+  "spawns node and exits"; that was wrong, and the refutation was already
+  in hand, since the initialize handshake succeeds, which a
+  wrapper that exited at spawn could not have done. The consequence is
+  for the follow-up, not the fix: the orphan-management work is **stop
+  orphaning them** (signal the group), not tolerate self-orphaning.
+  The `--skip` above stays for now: it is still correct on any tree
+  predating the fix, and — the one live reason — **CI never installs
+  basedpyright at all**, so arming `PMACS_REQUIRE_PYRIGHT` would fail
+  rather than test anything. The two original reasons are both gone: the
+  hang is fixed, and #195 gave every job a `timeout-minutes`, so a hang
+  can no longer burn six hours. Installing basedpyright in CI (a uv plus
+  bundled-node download per leg) and dropping the local skip are two
+  separate proposals, each owed its own evidence.
 - **GPU on the laptop**: AMD Radeon 780M (RADV) — native Vulkan,
   `PMACS_REQUIRE_GPU=1` works without lavapipe.
 - **Flaky-under-load tests — rerun isolated before treating a sweep
@@ -1547,6 +1569,47 @@ round-trip cannot detect a discriminant shift.
   asks you to keep. Same family as the skip-reports-`ok` lesson below
   and the double-invocation traps: **the thing that summarizes a gate
   must not be able to lose the gate's verdict.**
+- **A reproduction is a measurement, and needs its own positive control.**
+  The basedpyright-hang lane wrote **four** reproductions that passed
+  against the *unfixed* tree, each vacuous for a different reason: the
+  child exited before the join; the child never read stdin at all; the
+  child's stdin was silently rebound to `/dev/null` (POSIX XCU §2.9.3
+  assigns `/dev/null` to an asynchronous list's stdin when job control is
+  off, so `sh -c 'cat & exit 0'` EOFs instantly); and then **the repair
+  for that was also wrong** — the rule applies *before explicit
+  redirections*, so `<&0` duplicates `/dev/null` onto itself. `bash`
+  skips the default when a stdin redirect is present, `dash` does not, so
+  `<&0` passed locally and failed in CI. The shipped test uses
+  `setsid --fork`, removing the shell from the reproduction entirely.
+  Every one of the four looked obviously right when written, and the
+  fourth was verified locally before it failed. Note what a narrower rule
+  would have missed: "check the child is still alive" catches only the
+  first. Only the general form catches all four — **and the ones nobody
+  has invented yet.** Note also which mechanism caught the fourth: not a
+  reviewer, but the control itself, failing loudly in CI and naming its
+  own cause. So: assert the precondition your reproduction
+  depends on, in the test, before exercising the thing under test. In
+  `teardown_closes_stdin_before_joining_readers` that is two controls
+  (the recorded child has exited; both readers are still blocked in
+  `read`), each with a failure message naming what its absence means —
+  and a `/bin/sh` that is `bash` locally and `dash` in CI is exactly the
+  sort of divergence no amount of local verification reaches.
+  This is the same rule that produced #192's bite positive control and
+  #194's re-read-the-artifact lesson, stated at full generality: **a
+  measurement you have not controlled is a claim, not evidence.**
+- **A `Drop` body runs before its fields, whatever the declaration
+  order.** Cost a multi-week misattribution: `RuntimeHandles::drop`
+  joined its reader threads in the drop *body*, while the `stdin` sink it
+  needed to close first sat in a *field* — reachable only after that body
+  returned. The child never got EOF, never exited, and kept the output
+  pipe the readers were blocked on, so teardown hung forever. Reordering
+  the struct's fields cannot fix this shape; the operation has to move
+  into the body. Generally: **if a `Drop` body waits on anything, check
+  what the waited-on party needs that only a field drop will release.**
+  Corollary from the same investigation — `cancel`-flag style wake-outs
+  only work where the thread actually polls them; a thread blocked in a
+  raw `read` never sees one, so a flag next to a blocking syscall is
+  documentation, not a mechanism.
 - **A test that skips on a missing precondition reports `ok`, and a gate log
   cannot tell that apart from a pass.** `vterm_stage3_acceptance::a37` — the
   only acceptance driving a real daemon, a real PTY and a real wgpu render
