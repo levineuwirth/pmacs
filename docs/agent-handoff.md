@@ -1,6 +1,9 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-28, as bottom-panel Stage 2B-2 (#187) — the
+**Last updated: 2026-07-29, as bottom-panel Stage 2B-3 — the GPU panel
+band, compatible protocol-v21 activation, and the negotiated
+`panel_capable` flip, completing Arc 7 Stage 2 — opens atop `e003b81`.
+Beneath it, bottom-panel Stage 2B-2 (#187) — the
 daemon panel projection and the epoch machine — lands on `6c9e765`,
 which is the dired Stage 2 framing (#171) atop the resource-op delete
 guard framing (#186). Those two are framing-only: both are approved
@@ -77,14 +80,13 @@ commands, read `docs/active-work.md` immediately after this file.
   #165, the GPU terminal input fix #166, Lean 4 Stage 2 #161, the dired
   framing #164, COHERENCE.md #163, find-file #162, Lean 4 Stage 1 #160,
   minimap blank-slab #159, bottom-panel Stage 1 #155).
-  **Protocol schema support is now `v6..=v21`, while the production
-  server-first `Hello` still advertises v20.** Those are two different
-  facts and #184 landed only the first: the v21 bottom-panel wire family
-  exists, is gated in both directions, and has no producer, no consumer,
-  and no capability behind it. Compatible v21 activation and the
-  production advertisement move belong to Stage 2B-3. The bullets below
-  describe the arcs in their own terms; this line is the head-of-`main`
-  anchor.
+  **Protocol schema support is `v6..=v21`, the production server-first
+  `Hello` advertises v20, and a current session nevertheless negotiates
+  v21.** All three are true at once, and Stage 2B-3 is what made them
+  compatible: the advertised version is a permanent **baseline** and the
+  session's real version is settled one message later by the frontend's
+  `AttachRequest` counter-offer. The bullets below describe the arcs in
+  their own terms; this line is the head-of-`main` anchor.
 - **`COHERENCE.md` is now required reading and a required framing input
   — #163.** It carries the product-coherence thesis, an audited
   scorecard, per-concern gaps, and §20's priority order, and it is the
@@ -457,14 +459,17 @@ commands, read `docs/active-work.md` immediately after this file.
     unchanged, which is the additivity gate for the `read_dir` change; M4
     121; required GPU 155; isolated-`XDG_CONFIG_HOME` workspace sweep
     3,205 across 93 suites. 15 claims bite-verified.
-- Canonical `main` is protocol **v20** (`SUPPORTED=[6..=20]`; v16 =
+- Canonical `main` is protocol **v21** (`SUPPORTED=[6..=21]`; v16 =
   `ThemeFacts`, v17 = `FontFacts`, v18 = `StatuslineSegments`, v19 =
   terminal frames/events, v20 = the GPU initial-target semantic
-  bootstrap family). Bottom-panel Stage 2B-1's in-review schema is v21
-  (`SUPPORTED=[6..=21]`), but its production daemon deliberately
-  advertises v20: the handshake is server-first, so advertising 21
-  would make shipped v20 GPU/TUI clients reject before
-  `AttachRequest`. Stage 2B-3 owns compatible production activation.
+  bootstrap family, v21 = the bottom-panel band family).
+  **`ADVERTISED_PROTOCOL_VERSION` stays 20, permanently, and that is the
+  activation mechanism rather than a hedge** — see the Stage 2B-3 bullet.
+  The rule for every future additive family: advertise the baseline,
+  negotiate up from the frontend's `AttachRequest`. Moving the advertised
+  version is reserved for a change that cannot be expressed additively at
+  all, because a server-first `Hello` reaches a shipped frontend before it
+  can identify itself.
 - **Bottom panel Stage 1 (window placement + TUI side windows) LANDED —
   #155** (`docs/bottom-panel-framing.md` rev 4; merge `e745068`; two review
   rounds). **No protocol change (still v20).** Arc 7's substrate: pmacs now
@@ -529,23 +534,21 @@ commands, read `docs/active-work.md` immediately after this file.
     `bottom_panel_stage1_acceptance` 46; kill ring 30; compile 67; M4 121;
     required GPU 152; initial-target 14 CRDT; all three vterm suites; folding
     Stage 2 48. All 12 CI checks green at merge.
-  - **Stage 2 (the GPU panel band) is FRAMED; its first two slices have
-    LANDED and its third is open as PR #187** —
+  - **Stage 2 (the GPU panel band) is COMPLETE: 2A #177, 2B-1 #184,
+    2B-2 #187, and 2B-3 (this lane)** —
     `docs/bottom-panel-stage2-framing.md` rev 6, four
     framing review rounds, no open framing items; the rev-5
     implementation split was explicitly approved 2026-07-27 and rev 6
     records PR #184's server-first compatibility and gate correction.
-    It reserves protocol **v21** and ships as four serial
+    It reserved protocol **v21** and shipped as four serial
     implementation slices: **2A** classified census routing +
     per-window painter extraction (no wire change, #177), **2B-1** the
     wire (#184), **2B-2** the daemon projection and epoch machine
-    (implemented but not landed in PR #187), then **2B-3** the GPU band,
-    compatible v21 activation, and the
-    negotiated `panel_capable` flip. Production attachment remains v20
-    through 2B-2. Parent acceptance 37–55 remains authoritative.
-    Stage 3 is the adopter default flip. **Do not start 2B-3 until PR
-    #187 lands.** Its branch, checkpoints, two review rounds, verification,
-    and exact recovery commands live in `docs/active-work.md`.
+    (#187), then **2B-3** the GPU band, compatible v21 activation, and
+    the negotiated `panel_capable` flip. Production attachment stayed
+    v20 through 2B-2 and negotiates v21 from 2B-3 on. Parent acceptance
+    37–55 remains authoritative. **Stage 3, the adopter default flip, is
+    the arc's remaining step.**
   - **The §1.3 census is CLASSIFIED, not uniformly redirected.** Only the
     Projection class (#1–#12, #21–#22) routes through
     `primary_document_window`; focus/input (#13–#15, #23), focus chrome
@@ -567,9 +570,10 @@ commands, read `docs/active-work.md` immediately after this file.
     version is therefore an incompatible act on its own, independent of
     whether any new message is ever sent. A real-daemon acceptance
     emulates that exact rejection point and then requires the
-    attachment to reach its initial grid. **2B-3 must ship a
-    compatibility-preserving activation mechanism; it may not simply
-    change the unsolicited `Hello` to 21.**
+    attachment to reach its initial grid. **Stage 2B-3 discharged this
+    without touching the unsolicited `Hello`** — the advertisement is a
+    permanent baseline and the frontend counter-offers; see its bullet
+    below. That acceptance still passes unchanged, which is the point.
   - **One shared grid validator, split along a stated boundary**
     (`pmacs-protocol/src/wire_grid.rs`). Shared: checked area, the
     visible-cell bound (262,144), cell count, cursor bounds, glyph
@@ -650,7 +654,91 @@ commands, read `docs/active-work.md` immediately after this file.
     stays a per-frame `Absent`, flagged rather than hidden, because
     making it durable needs a new "presentation permanently
     unavailable" reason in `FrontendView` for a state requiring 2^64
-    presentations in one session.
+    presentations in one session. **Stage 2B-3 did not make it cheap** —
+    the frontend half latches instead, which is a different remedy, so
+    the daemon-side hole stays open as recorded.
+- **Bottom panel Stage 2B-3 (the GPU band, compatible v21 activation,
+  and the negotiated capability flip) — the arc's Stage 2 is COMPLETE.**
+  This is the slice a user can see: a semantic GPU session now renders a
+  real panel band instead of taking the Stage 1 non-side fallback, which
+  is what closes the journey-steps-7–10 divergence §6 of the Stage 2
+  framing names. Durable facts:
+  - **A server-first handshake is negotiated from the CLIENT side, not by
+    moving the advertisement.** `ADVERTISED_PROTOCOL_VERSION` is now a
+    permanent compatibility *baseline*; the frontend answers
+    `requested_protocol_version(baseline)` — its own `PROTOCOL_VERSION`
+    when the baseline is the current one, a verbatim echo of anything
+    older — and the daemon records
+    `negotiated_session_version(offer)`. A shipped baseline frontend
+    echoes and gets a baseline session, byte-for-byte as before; a
+    current frontend offers up and gets the current wire. The `Hello`
+    encoding and value never change, which is why the old frontend never
+    sees a version it must reject. **The daemon needed no change to
+    accept the offer** — it already recorded `req.protocol_version` as
+    the negotiated version, so the whole mechanism is one value the
+    frontend chooses plus a documented clamp.
+  - **The window this leaves open, named rather than hidden:** a daemon
+    whose own `PROTOCOL_VERSION` equals the baseline rejects an offer
+    above its supported range. Compatibility can be preserved for old
+    *frontends* or old *daemons* — a single `AttachRequest` cannot mean
+    both "I want 21" and "≤ 20" — and the frontend direction is the one
+    that matters, because the daemon is what a user leaves running. It
+    closes on the next daemon restart and surfaces as an explicit
+    `GoodbyeReason::VersionMismatch` naming both versions.
+  - **`server_protocol_version` split into two facts on the GPU client**:
+    `session_protocol_version` (what the session speaks — every wire gate
+    keys on this) and `baseline_protocol_version` (what `Hello` said).
+    They now DIFFER in the normal case, and that difference *is* the
+    compatibility property, so both headless probe reports emit both and
+    the two ratchets that read them assert both directions. Asserting
+    only the session version would pass if the baseline had been bumped
+    too, which is the exact incompatible change the mechanism avoids.
+  - **The GPU document bottom is three boundaries and each call site was
+    classified individually** — 20 production sites (8 status-owned, 12
+    document-owned), 1 definition, 8 test sites, 29 matches, arithmetic
+    stated. `geometry_capacity_bottom` reserves the divider *while the
+    panel is absent* (that asymmetry is what breaks the first-open cycle)
+    while `document_text_bottom` costs the document nothing until a
+    `Present` frame paints.
+  - **Moving a boundary is not always sufficient.** `edge_scroll_direction`
+    has no upper bound, so a pixel *inside* the band still read as
+    "further down the document" and armed the document's auto-scroll —
+    the exact named symptom, surviving a correct reclassification. Any
+    consumer that treats "past the bottom" as unbounded needs the band as
+    an explicit exclusion, not just a moved boundary.
+  - **Three of the first-pass assertions were VACUOUS, and the mutation
+    runs are what found them.** (a) The contrast assertion compared
+    `status_band_top` before and after — a *fixed point* — so the blanket
+    rewrite it exists to prevent moved both readings together and passed;
+    it is now anchored to an independent formula. (b) The criterion-46
+    pixel test passed with the band painting *nothing*, because
+    installing a panel reshapes the document and that produced the whole
+    diff; it now counts differing pixels in the divider and cell rows.
+    (c) The probe-versus-document-advance fixture compared two ASCII
+    documents, which in a monospace family have identical advances.
+  - **"No panel frame reaches a v20 session" is defence in depth, not the
+    placement gate.** The producer's peer flag and the write-loop filter
+    both suppress `PanelFrame` below the panel version independently of
+    `panel_capable`, so that assertion passes with the capability gate
+    removed entirely. The load-bearing claim is *placement*: the adopter's
+    buffer must land in the pre-panel session's own document window,
+    because a side window it cannot render is simply invisible.
+  - `PanelBand::presented()` is the ONE frontend-side derivation of "is a
+    band on screen" — retained valid frame, matching `geometry_epoch`,
+    latch clear — behind the band inset, the painter, the hit-tester, and
+    the drag. A latched frontend also stops absorbing payloads, so
+    `presented()` is not the only thing between a disowned declaration and
+    a painted band.
+  - Panel columns come from the **stable normal-face probe**, never
+    `mono_advance`'s document-glyph fallback, and `panel_cell_capacity`
+    carries the daemon's **virtual status row** (`frontend_area_rows` is
+    `total.rows - 1`) with **no per-axis cap**, because a panel may
+    legitimately be wider than a PTY.
+  - `PANEL_MIN_VERSION` moved into `pmacs-protocol` so the GPU frontend
+    aliases one definition instead of restating 21.
+  - **Stage 3 (the adopter default flip) is the arc's last step**, and it
+    is the only thing between today's state and omitting `display`
+    resolving to the panel policy.
 - **dired Stage 2 framing LANDED (document only) — #171**
   (`docs/dired-stage2-framing.md`, revision 9; seven review rounds).
   **Approved as a framing; no runtime code and no implementation

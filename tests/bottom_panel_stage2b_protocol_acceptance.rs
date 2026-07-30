@@ -109,9 +109,13 @@ fn terminal_frame(rows: u32, cols: u32) -> TerminalFrame {
 fn the_panel_stage_takes_protocol_v21() {
     assert_eq!(PROTOCOL_VERSION, 21);
     assert!(SUPPORTED_PROTOCOL_VERSIONS.contains(&21));
-    // The wire family is reserved before it is activated: the production
-    // server-first Hello must remain acceptable to already-shipped v20
-    // clients throughout the dark protocol and daemon slices.
+    // The advertised version is a compatibility BASELINE, and Stage 2B-3
+    // made that permanent rather than temporary: the server-first Hello
+    // reaches an already-shipped frontend before that frontend can send
+    // anything, so it must stay at a version none of them has to reject.
+    // v21 is activated by the frontend's AttachRequest counter-offer
+    // instead, which is why this stays 20 even though the panel wire is
+    // now live in production.
     assert_eq!(ADVERTISED_PROTOCOL_VERSION, 20);
     assert!(SUPPORTED_PROTOCOL_VERSIONS.contains(&20));
 }

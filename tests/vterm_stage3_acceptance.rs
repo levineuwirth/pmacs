@@ -717,10 +717,25 @@ fn a37_real_daemon_real_pty_and_headless_gpu_render_one_terminal_session() {
         .filter_map(|line| line.split_once('='))
         .collect();
 
+    // Bottom-panel Stage 2B-3 activated v21 by frontend counter-offer, so
+    // the two halves of the handshake now report DIFFERENT numbers and both
+    // are load-bearing: the daemon still advertises the v20 compatibility
+    // baseline in its server-first `Hello` (so a shipped v20 frontend is
+    // never handed a version it must reject), while this real client
+    // negotiated v21 and is therefore panel-capable. Asserting only the
+    // session version would pass if the baseline had been bumped too —
+    // which is exactly the incompatible change this mechanism exists to
+    // avoid — and asserting only the baseline would pass with the whole
+    // activation missing.
     assert_eq!(
-        facts.get("server_protocol_version").copied(),
+        facts.get("session_protocol_version").copied(),
+        Some("21"),
+        "the real client must negotiate the v21 panel wire: {text}"
+    );
+    assert_eq!(
+        facts.get("baseline_protocol_version").copied(),
         Some("20"),
-        "the dark v21 wire slice must keep the real client on v20: {text}"
+        "while the daemon's server-first Hello still advertises v20: {text}"
     );
     assert_eq!(
         facts.get("entered_terminal_mode").copied(),

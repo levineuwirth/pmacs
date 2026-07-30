@@ -18,6 +18,25 @@ use crate::wire_grid::{
     MAX_WIRE_GRID_GLYPH_BYTES, WireGridError, WireGridLimits, validate_wire_grid,
 };
 
+/// Lowest negotiated protocol version that carries the bottom-panel wire
+/// family (Q#BP9): [`crate::InstanceMessage::PanelFrame`] daemon→frontend,
+/// and `FrontendEvent::{FrontendCellGeometry, PanelResizeRows,
+/// PanelPointer}` frontend→daemon.
+///
+/// One constant rather than a literal at each gate, because the panel bump
+/// gates in **both** directions: the daemon's send filter, the producer's
+/// peer flag, the three inbound event gates, and — since Stage 2B-3 — the
+/// GPU frontend's own declaration and paint gates must move together, or
+/// one side starts trusting a wire the other never negotiated. It lives in
+/// the protocol crate precisely so the frontend aliases this definition
+/// rather than restating the number.
+///
+/// Distinct from [`crate::ADVERTISED_PROTOCOL_VERSION`], which stays at the
+/// compatibility baseline permanently: a session reaches this version by
+/// the frontend's `AttachRequest` counter-offer, never by the daemon
+/// advertising it.
+pub const PANEL_MIN_VERSION: u32 = 21;
+
 /// Shared visible-cell ceiling for a panel grid.
 ///
 /// Identical to the terminal bound: it is the transport-safety limit,

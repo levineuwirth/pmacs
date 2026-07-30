@@ -34,7 +34,7 @@ use pmacs_protocol::{
     FrontendEvent, FrontendId, Hello, InitialTarget, InitialTargetResult, InstanceMessage, Key,
     KeyEvent, Modifiers, MouseKind, PROTOCOL_VERSION, PointerKind, SUPPORTED_PROTOCOL_VERSIONS,
     SessionBootstrapRequest, TransportError, is_supported_protocol_version, read_message,
-    write_message,
+    requested_protocol_version, write_message,
 };
 use winit::event_loop::EventLoopProxy;
 
@@ -355,6 +355,30 @@ fn coalesce_kind(event: &FrontendEvent) -> Option<u8> {
             kind: MouseKind::Drag(_),
             ..
         } => Some(3),
+        // Bottom panel Stage 2B-3 (framing §5.2) — four more tail-only
+        // tags, each with its own reason.
+        //
+        // Geometry is latest-wins because epochs need only INCREASE, not
+        // be consecutive: the daemon accepts a jump from 3 to 7 and the
+        // dropped declarations described geometry that no longer exists.
+        FrontendEvent::FrontendCellGeometry { .. } => Some(4),
+        // A resize drag coalesces over the complete event including its
+        // epochs, so a collapsed run cannot mix a new row count with an
+        // old presentation identity.
+        FrontendEvent::PanelResizeRows { .. } => Some(5),
+        // Panel move and drag mirror their terminal twins. Down / Up /
+        // wheel / context stay LOSSLESS and ordered: repeated left Downs
+        // are what the daemon's click state reads as a multi-click, and
+        // Down(Right) is the context-menu gesture, so collapsing either
+        // silently changes the gesture's meaning.
+        FrontendEvent::PanelPointer {
+            kind: MouseKind::Move,
+            ..
+        } => Some(6),
+        FrontendEvent::PanelPointer {
+            kind: MouseKind::Drag(_),
+            ..
+        } => Some(7),
         _ => None,
     }
 }
@@ -557,8 +581,16 @@ fn connect_stream_with_sink(
     // AttachRequest — declare the capabilities a semantic frontend
     // needs. `multi_frontend` is included because the existing daemon
     // gates `crdt_replica` behind it (M10.x dependency).
+    // Bottom-panel Stage 2B-3: the `Hello` version is a compatibility
+    // BASELINE, and this counter-offer is what activates anything above
+    // it. The handshake is server-first, so the daemon cannot advertise a
+    // version a shipped frontend might reject; the frontend is the only
+    // party that can safely name a higher one, because by this point it
+    // has already accepted the baseline. `requested_protocol_version`
+    // echoes anything older than the current baseline verbatim.
+    let session_protocol_version = requested_protocol_version(hello.protocol_version);
     let req = AttachRequest {
-        protocol_version: hello.protocol_version,
+        protocol_version: session_protocol_version,
         frontend_capabilities: FrontendCapabilities {
             synchronized_output: false,
             unicode_smp: true,
@@ -678,7 +710,8 @@ fn connect_stream_with_sink(
         outbox,
         shutdown_handle,
         frontend_id: hello.assigned_frontend_id,
-        server_protocol_version: hello.protocol_version,
+        session_protocol_version,
+        baseline_protocol_version: hello.protocol_version,
         initial_message,
     })
 }
@@ -859,10 +892,25 @@ pub struct AttachClient {
     /// `FrontendEvent` carries this so the daemon can route input back
     /// to the per-session `SemanticRenderState`.
     frontend_id: FrontendId,
-    /// The daemon's `Hello.protocol_version`. Wire variants newer
-    /// than the daemon (e.g. `Pointer`, v5) must be gated on this —
-    /// an older daemon hard-errors decoding an unknown variant.
-    server_protocol_version: u32,
+    /// The version this session actually speaks: the frontend's
+    /// `AttachRequest` counter-offer, which the daemon adopts. Wire
+    /// variants newer than the session (e.g. `Pointer`, v5) must be gated
+    /// on this — a daemon below the variant's floor hard-errors decoding
+    /// an unknown discriminant.
+    ///
+    /// Bottom-panel Stage 2B-3: this is deliberately NOT
+    /// `Hello.protocol_version` any more. The server-first `Hello` carries
+    /// a compatibility *baseline* that no shipped frontend may be forced
+    /// to reject, so it under-reports what the pair can speak; the offer
+    /// this frontend made is the session's real ceiling.
+    session_protocol_version: u32,
+    /// The baseline the daemon advertised in its server-first `Hello`.
+    ///
+    /// Kept beside the negotiated version because they answer different
+    /// questions, and because "the daemon still advertises 20 while this
+    /// session runs 21" is precisely the compatibility property Stage
+    /// 2B-3 has to be able to demonstrate.
+    baseline_protocol_version: u32,
     /// Target snapshot retained across the pre-window readiness barrier.
     initial_message: Option<InstanceMessage>,
 }
@@ -914,7 +962,7 @@ impl AttachClient {
 
     /// Send a `FrontendEvent::Pointer` (session M-2): a locally
     /// hit-tested gesture in source bytes. Callers gate on
-    /// [`Self::server_protocol_version`] `>= 5`.
+    /// [`Self::session_protocol_version`] `>= 5`.
     pub fn send_pointer(
         &self,
         buffer_id: BufferId,
@@ -944,7 +992,7 @@ impl AttachClient {
 
     /// Send a `FrontendEvent::TerminalResize` (Vterm Stage 3): the
     /// terminal-cell geometry this frontend has on screen. Callers gate
-    /// on [`Self::server_protocol_version`] `>= 19`.
+    /// on [`Self::session_protocol_version`] `>= 19`.
     ///
     /// Cells, never pixels — the frontend divides its own drawable
     /// rectangle by its own metrics, keeping the no-pixels contract the
@@ -963,7 +1011,7 @@ impl AttachClient {
 
     /// Send a `FrontendEvent::TerminalPointer` (Vterm Stage 3): a
     /// gesture hit-tested locally to a terminal cell. Callers gate on
-    /// [`Self::server_protocol_version`] `>= 19`.
+    /// [`Self::session_protocol_version`] `>= 19`.
     pub fn send_terminal_pointer(
         &self,
         buffer_id: BufferId,
@@ -973,6 +1021,74 @@ impl AttachClient {
     ) -> Result<(), TransportError> {
         self.send_event(FrontendEvent::TerminalPointer {
             frontend_id: self.frontend_id,
+            buffer_id,
+            coord,
+            kind,
+            mods,
+        })
+    }
+
+    /// Send a `FrontendEvent::FrontendCellGeometry` (Q#BP15a): this
+    /// frontend's authoritative whole-cell layout capacity. Callers gate on
+    /// [`Self::session_protocol_version`] `>= 21`.
+    ///
+    /// Valid **without** a side window on purpose — the daemon needs
+    /// columns before it can paint a first panel frame, so gating this on
+    /// panel presence would deadlock the first open.
+    pub fn send_frontend_cell_geometry(
+        &self,
+        geometry_epoch: u64,
+        total: CellSize,
+    ) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::FrontendCellGeometry {
+            frontend_id: self.frontend_id,
+            geometry_epoch,
+            total,
+        })
+    }
+
+    /// Send a `FrontendEvent::PanelResizeRows` (Q#BP15a): the fixed panel
+    /// rows a divider drag is requesting. Callers gate on
+    /// [`Self::session_protocol_version`] `>= 21`.
+    ///
+    /// Both epochs ride along as identities, not geometry: the daemon
+    /// accepts the request only for the panel it most recently declared,
+    /// under the geometry it most recently accepted.
+    pub fn send_panel_resize_rows(
+        &self,
+        geometry_epoch: u64,
+        panel_epoch: u64,
+        rows: u32,
+    ) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::PanelResizeRows {
+            frontend_id: self.frontend_id,
+            geometry_epoch,
+            panel_epoch,
+            rows,
+        })
+    }
+
+    /// Send a `FrontendEvent::PanelPointer` (Q#BP16): a gesture
+    /// hit-tested locally to a panel CELL. Callers gate on
+    /// [`Self::session_protocol_version`] `>= 21`.
+    ///
+    /// `buffer_id` and `panel_epoch` close different holes and neither
+    /// subsumes the other — the first catches an A→B buffer replacement,
+    /// the second a close/hide/reopen of the *same* buffer — so both are
+    /// carried rather than one being derived from the other.
+    pub fn send_panel_pointer(
+        &self,
+        geometry_epoch: u64,
+        panel_epoch: u64,
+        buffer_id: BufferId,
+        coord: CellCoord,
+        kind: MouseKind,
+        mods: Modifiers,
+    ) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::PanelPointer {
+            frontend_id: self.frontend_id,
+            geometry_epoch,
+            panel_epoch,
             buffer_id,
             coord,
             kind,
@@ -996,9 +1112,22 @@ impl AttachClient {
         })
     }
 
-    /// The daemon's negotiated wire version from `Hello`.
-    pub fn server_protocol_version(&self) -> u32 {
-        self.server_protocol_version
+    /// The version this session negotiated — the frontend's
+    /// `AttachRequest` offer, which the daemon adopts.
+    ///
+    /// Every "is this variant on the wire?" gate keys on this, never on
+    /// [`Self::baseline_protocol_version`].
+    pub fn session_protocol_version(&self) -> u32 {
+        self.session_protocol_version
+    }
+
+    /// The compatibility baseline the daemon advertised in `Hello`.
+    ///
+    /// Only the handshake itself needs this. It is *lower* than
+    /// [`Self::session_protocol_version`] whenever an additive family has
+    /// been activated by counter-offer, which is the normal case.
+    pub fn baseline_protocol_version(&self) -> u32 {
+        self.baseline_protocol_version
     }
 
     /// Send a locally-authored CRDT operation to the daemon. The GPU
@@ -1385,7 +1514,8 @@ mod tests {
             outbox: Arc::new((Mutex::new(outbox), Condvar::new())),
             shutdown_handle: b,
             frontend_id: FrontendId::LOCAL,
-            server_protocol_version: PROTOCOL_VERSION,
+            session_protocol_version: PROTOCOL_VERSION,
+            baseline_protocol_version: pmacs_protocol::ADVERTISED_PROTOCOL_VERSION,
             initial_message: None,
         };
         // A send against the closed outbox fails *and* shuts the socket
@@ -1506,8 +1636,12 @@ mod tests {
         let socket = temp.path().join("managed.sock");
         let (client_stream, mut server_stream) = UnixStream::pair().expect("socket pair");
         let server = thread::spawn(move || {
+            // Advertises the BASELINE, like a real daemon: the session
+            // version is settled by the client's counter-offer below, and a
+            // fixture that advertised the current wire could not tell the
+            // two apart.
             let hello = Hello {
-                protocol_version: PROTOCOL_VERSION,
+                protocol_version: pmacs_protocol::ADVERTISED_PROTOCOL_VERSION,
                 assigned_frontend_id: FrontendId::LOCAL,
                 instance_identity: InstanceIdentity {
                     pmacs_version: "managed-retry-test".to_owned(),
@@ -1546,7 +1680,16 @@ mod tests {
         .expect("transient sequence must attach");
         assert_eq!(attempts, 4);
         assert!(managed.daemon.spawned_daemon());
-        assert_eq!(managed.client.server_protocol_version(), PROTOCOL_VERSION);
+        assert_eq!(
+            managed.client.session_protocol_version(),
+            PROTOCOL_VERSION,
+            "a managed attach negotiates this binary's wire, not the Hello baseline"
+        );
+        assert_eq!(
+            managed.client.baseline_protocol_version(),
+            pmacs_protocol::ADVERTISED_PROTOCOL_VERSION,
+            "while the daemon's server-first Hello still advertises the baseline"
+        );
         server.join().expect("handshake server");
     }
 

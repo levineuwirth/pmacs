@@ -212,21 +212,10 @@ impl TerminalPaintPlan {
     /// wide-continuation topology, and the selection spans are sound.
     #[must_use]
     pub fn build(frame: &TerminalFrame, palette: TerminalPalette) -> Self {
-        let cols = frame.size.cols as usize;
-        let mut plan = Self {
-            size: frame.size,
-            ..Self::default()
-        };
-        if cols == 0 {
-            return plan;
-        }
-
-        for row in 0..frame.size.rows {
-            let row_start = row as usize * cols;
-            let row_cells = &frame.cells[row_start..row_start + cols];
-            plan.plan_row(row, row_cells, palette);
-        }
-
+        let mut plan = Self::build_grid(frame.size, &frame.cells, frame.cursor, palette);
+        // Selection is the one piece a panel grid does not have: it is a
+        // terminal-only span list on the wire, so it stays out of the
+        // shared derivation rather than being faked as empty inside it.
         plan.selection = frame
             .selection
             .iter()
@@ -236,13 +225,46 @@ impl TerminalPaintPlan {
                 end_col: span.end_col,
             })
             .collect();
+        plan
+    }
 
-        plan.cursor = frame.cursor.map(|cursor| CellRun {
+    /// The shared half: resolve any validated wire cell grid into
+    /// cell-space paint data.
+    ///
+    /// Extracted for the bottom panel band, which paints the same cell
+    /// vocabulary from [`pmacs_protocol::panel::PanelFrame`]. Both callers
+    /// go through one row planner, so a panel and a terminal cannot come
+    /// to disagree about how a wide-continuation pair or an attribute
+    /// break is drawn.
+    ///
+    /// The grid must already have passed its own message's `validate`;
+    /// this assumes the cell count, the wide-continuation topology, and
+    /// the cursor bounds are sound.
+    #[must_use]
+    pub fn build_grid(
+        size: CellSize,
+        cells: &[Cell],
+        cursor: Option<pmacs_protocol::CellCoord>,
+        palette: TerminalPalette,
+    ) -> Self {
+        let cols = size.cols as usize;
+        let mut plan = Self {
+            size,
+            ..Self::default()
+        };
+        if cols == 0 {
+            return plan;
+        }
+        for row in 0..size.rows {
+            let row_start = row as usize * cols;
+            let row_cells = &cells[row_start..row_start + cols];
+            plan.plan_row(row, row_cells, palette);
+        }
+        plan.cursor = cursor.map(|cursor| CellRun {
             row: cursor.row,
             start_col: cursor.col,
             end_col: cursor.col + 1,
         });
-
         plan
     }
 
@@ -400,6 +422,61 @@ impl TerminalPaintPlan {
             italic,
         });
     }
+}
+
+/// The whole-cell capacity of a frontend frame, for the bottom panel's
+/// geometry declaration (Q#BP15a).
+///
+/// Two deliberate differences from [`cell_viewport`], the terminal
+/// projection:
+///
+/// * **No per-axis cap.** A panel does not inherit the 512-column PTY
+///   limit — a 4K surface at a small font is legitimately wider than that,
+///   and the wire's *area* bound is what keeps the encoding inside the
+///   transport budget. Clamping here would silently narrow a legal panel.
+/// * **The virtual status row.** The daemon's layout area is
+///   `total.rows - 1`, because its grid model reserves one row for the mode
+///   line that this frontend paints as its own status band. Declaring only
+///   the document rows would lose one row of layout on every frame.
+///
+/// `None` on any degenerate input — zero, negative, or non-finite metrics,
+/// or a surface too small for one whole cell — so the caller fails closed
+/// to zero usable geometry instead of computing an absurd row count.
+#[must_use]
+pub fn panel_cell_capacity(
+    width_px: f32,
+    height_px: f32,
+    advance_px: f32,
+    line_px: f32,
+) -> Option<CellSize> {
+    if !(advance_px.is_finite() && line_px.is_finite()) || advance_px <= 0.0 || line_px <= 0.0 {
+        return None;
+    }
+    if !(width_px.is_finite() && height_px.is_finite()) || width_px <= 0.0 || height_px <= 0.0 {
+        return None;
+    }
+    let cols = (width_px / advance_px).floor();
+    let rows = (height_px / line_px).floor();
+    if cols < 1.0 || rows < 1.0 {
+        return None;
+    }
+    // `as u32` saturates at u32::MAX for an absurd finite ratio, which is
+    // bounded rather than wrapping; the area check below then rejects it.
+    let cols = cols as u32;
+    let rows = rows as u32;
+    // Shed rows rather than emit an area the wire must reject. The bound
+    // is on the PANEL grid the daemon will derive, and the daemon's own
+    // clamp repeats it — two independent clamps because neither side may
+    // depend on the other having applied it.
+    let max_rows =
+        u32::try_from(pmacs_protocol::panel::MAX_PANEL_VISIBLE_CELLS / (cols as usize).max(1))
+            .unwrap_or(u32::MAX);
+    let rows = rows.min(max_rows);
+    if rows == 0 {
+        return None;
+    }
+    // The virtual status row rides on top of the document rows.
+    Some(CellSize::new(rows.saturating_add(1), cols))
 }
 
 /// The terminal cell viewport a drawable rectangle admits.

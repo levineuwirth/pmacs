@@ -68,9 +68,11 @@ pub use message::{
     PROTOCOL_VERSION, PointerKind, ResourceBody, SUPPORTED_PROTOCOL_VERSIONS, SelectionSnapshot,
     SessionBootstrapRequest, StatuslineSegment, StyleSegment, StyleSpan, ThemeFace,
     is_builtin_pair_char, is_modeline_face_name, is_supported_protocol_version, is_ui_face_name,
-    negotiate_capabilities,
+    negotiate_capabilities, negotiated_session_version, requested_protocol_version,
 };
-pub use panel::{MAX_PANEL_VISIBLE_CELLS, PanelFrame, PanelFrameError, PanelFramePayload};
+pub use panel::{
+    MAX_PANEL_VISIBLE_CELLS, PANEL_MIN_VERSION, PanelFrame, PanelFrameError, PanelFramePayload,
+};
 pub use terminal::{
     MAX_TERMINAL_COLS, MAX_TERMINAL_FRAME_GLYPH_BYTES, MAX_TERMINAL_GRAPHEME_BYTES,
     MAX_TERMINAL_METADATA_BYTES, MAX_TERMINAL_ROWS, MAX_TERMINAL_VISIBLE_CELLS, TerminalFrame,

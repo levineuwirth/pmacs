@@ -604,7 +604,14 @@ pub enum GoodbyeReason {
     /// Frontend's `protocol_version` does not match the instance's.
     /// The handshake fails before any further messages.
     VersionMismatch {
-        /// The instance's `PROTOCOL_VERSION`.
+        /// The instance's [`PROTOCOL_VERSION`] — the highest wire it can
+        /// speak, **not** the [`ADVERTISED_PROTOCOL_VERSION`] baseline it put
+        /// in [`Hello`]. Since those diverged (the baseline is a permanent
+        /// compatibility floor), reporting the baseline here would understate
+        /// the daemon's ceiling and invert the upgrade advice.
+        ///
+        /// A *frontend* raising this locally can only report the baseline it
+        /// was handed, because that is all the daemon told it.
         server: u32,
         /// The version the frontend announced in its `AttachRequest`.
         client: u32,
@@ -1667,13 +1674,86 @@ pub const PROTOCOL_VERSION: u32 = 21;
 
 /// Protocol version placed in the daemon's server-first [`Hello`].
 ///
-/// Bottom-panel Stage 2B-1 reserves the additive v21 wire family, but
-/// production attachment remains on v20 until the Stage 2B-3 capability
-/// activation can preserve compatibility with existing v20 frontends.
-/// Those frontends reject an unknown server-first version before they can
-/// send [`AttachRequest`], so advertising [`PROTOCOL_VERSION`] here would
-/// make the otherwise-dark protocol slice user-visible.
+/// **This is a compatibility *baseline*, not a ceiling, and Stage 2B-3
+/// makes that permanent.** The handshake is server-first: the daemon
+/// writes [`Hello`] before the frontend has said anything at all, and a
+/// frontend rejects an unrecognized `protocol_version` *before* it can
+/// send [`AttachRequest`]. Advertising [`PROTOCOL_VERSION`] here would
+/// therefore lock out every already-shipped frontend whose supported
+/// range ends lower — an incompatible act on its own, independent of
+/// whether a single new message is ever exchanged.
+///
+/// So the baseline stays at the highest version every shipped frontend
+/// is known to accept, and the session's actual version is settled by
+/// the frontend's [`AttachRequest`] instead:
+///
+/// 1. the daemon advertises this baseline;
+/// 2. the frontend answers with [`requested_protocol_version`] — its own
+///    [`PROTOCOL_VERSION`] when the baseline is this constant, and a
+///    verbatim echo of anything older;
+/// 3. the daemon negotiates [`negotiated_session_version`] of that offer.
+///
+/// A shipped baseline-version frontend echoes the baseline and gets a
+/// baseline session, exactly as before. A current frontend offers up and
+/// gets the current wire. Nothing about the `Hello` encoding or its
+/// value changes, which is why the old frontend never sees a version it
+/// must reject.
+///
+/// Moving this constant is therefore a **deliberately incompatible**
+/// act, reserved for a wire change that cannot be expressed additively.
+/// An additive family — like the bottom panel's v21 shapes — never needs
+/// it.
 pub const ADVERTISED_PROTOCOL_VERSION: u32 = 20;
+
+/// The version a frontend puts in its [`AttachRequest`], given the
+/// server-first [`Hello`] baseline it just read.
+///
+/// The counter-offer is confined to the *current* baseline on purpose. A
+/// daemon advertising anything other than [`ADVERTISED_PROTOCOL_VERSION`]
+/// is genuinely older than this ladder rung, so its baseline is echoed
+/// verbatim and that attachment takes byte-for-byte the pre-Stage-2B-3
+/// path. Only the current baseline — the one every daemon built from
+/// this ladder sends — is answered with this binary's own
+/// [`PROTOCOL_VERSION`].
+///
+/// The offer is never *lower* than the baseline: a frontend that
+/// supported less than the daemon advertised would already have rejected
+/// the `Hello` via [`is_supported_protocol_version`].
+///
+/// # The one-way window this leaves open
+///
+/// A daemon whose own `PROTOCOL_VERSION` *equals* the baseline also
+/// advertises the baseline, and rejects an offer above its supported
+/// range with [`GoodbyeReason::VersionMismatch`]. That is the price of a
+/// server-first handshake with no client-first hint: compatibility can
+/// be preserved for old *frontends* (the direction that matters, since
+/// the daemon is what a user leaves running) or for old *daemons*, but a
+/// single `AttachRequest` cannot mean both "I want 21" and "≤ 20" at
+/// once. The window closes as soon as the running daemon is restarted on
+/// a binary from this ladder rung or later, and it is one-connection
+/// visible — [`GoodbyeReason::VersionMismatch`] names both versions.
+#[must_use]
+pub fn requested_protocol_version(server_baseline: u32) -> u32 {
+    if server_baseline == ADVERTISED_PROTOCOL_VERSION {
+        PROTOCOL_VERSION
+    } else {
+        server_baseline
+    }
+}
+
+/// The version a daemon records for a session, given the frontend's
+/// [`AttachRequest`] offer.
+///
+/// The offer has already passed [`is_supported_protocol_version`], so
+/// this clamp cannot bind today; it is here because "the session speaks
+/// the lower of the two ceilings" is the *rule*, and leaving it implicit
+/// in a membership test is how a future ladder widening (accepting a
+/// version this binary cannot itself produce) would silently ship an
+/// over-negotiated session.
+#[must_use]
+pub fn negotiated_session_version(frontend_offer: u32) -> u32 {
+    frontend_offer.min(PROTOCOL_VERSION)
+}
 
 /// T M10.5: the set of protocol versions a v1.0 binary accepts on
 /// the wire. v0.1 binaries only accepted `[1]`; v1.0 binaries accept
