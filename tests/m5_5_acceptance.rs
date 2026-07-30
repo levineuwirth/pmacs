@@ -429,9 +429,32 @@ fn version_mismatch_clean_disconnect() {
     write_message(&mut stream, &req).expect("write");
 
     // Expect Goodbye(VersionMismatch).
+    //
+    // `server` is the wire this instance can SPEAK, which since
+    // bottom-panel Stage 2B-3 is no longer the baseline it advertised in
+    // `Hello` above: the baseline is a compatibility floor and
+    // `PROTOCOL_VERSION` is the ceiling a frontend may counter-offer up
+    // to. Reporting the floor here would tell a rejected frontend the
+    // daemon tops out at v20 when it in fact speaks v21 — the opposite of
+    // the upgrade diagnostic this reason exists to give.
+    //
+    // Until Stage 2B-3 the two constants were equal, so this assertion
+    // could not distinguish them and silently pinned the wrong one. Both
+    // directions are asserted now so neither can drift back: line 421
+    // holds the advertised floor, and the `assert_ne!` holds the
+    // divergence itself. That matters here specifically because the
+    // Stage 2B-3 pin for this same rule is `#[cfg(feature = "crdt")]`
+    // and therefore dark in CI — this test is the one CI actually runs.
     match read_message::<InstanceMessage>(&mut stream) {
         Ok(InstanceMessage::Goodbye(GoodbyeReason::VersionMismatch { server, client })) => {
-            assert_eq!(server, ADVERTISED_PROTOCOL_VERSION);
+            assert_eq!(
+                server, PROTOCOL_VERSION,
+                "the instance must report the version it can speak"
+            );
+            assert_ne!(
+                server, ADVERTISED_PROTOCOL_VERSION,
+                "and deliberately not the advertised compatibility floor"
+            );
             assert_eq!(client, 999);
         }
         other => panic!("expected VersionMismatch Goodbye, got {other:?}"),
