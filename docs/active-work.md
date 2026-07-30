@@ -1,9 +1,9 @@
 # Active work — cross-machine resume ledger
 
-**Snapshot: 2026-07-29.** This file records volatile work that has not
-landed on `main`. Read it after `docs/agent-handoff.md`. Remove completed
-entries when their PR merges; do not let this become a second permanent
-backlog.
+**Snapshot: 2026-07-29; process-signal lane updated 2026-07-30.** This
+file records volatile work that has not landed on `main`. Read it after
+`docs/agent-handoff.md`. Remove completed entries when their PR merges;
+do not let this become a second permanent backlog.
 
 **No lane below is retained past its merge.** This snapshot removes the
 resource-op delete guard (#186) and dired Stage 2 framing (#171) lanes
@@ -109,6 +109,39 @@ step: a recovery check that accepts an older commit than the base it
 declares canonical will pass on a tree the rest of this file does not
 describe.
 If it does not, stop and repair the remote/fetch configuration.
+
+## Process-signal diagnostic completeness — REVISION 4 AWAITING REVIEW
+
+- **Portable branch:** `githubsucks/process-signal-diagnostic-completeness`;
+  worktree `../pmacs-signal-identity`. Framing only, no runtime changes
+  and no PR. The governing document is
+  `docs/process-signal-diagnostic-completeness-framing.md`, revision 4.
+- **State:** canonical `githubsucks/main` @ `4cd4a7b` is integrated.
+  Revision 4 is awaiting review round 4. The branch corrects revision
+  3's claimed base, its overstatement of what the macOS group-target
+  EPERM established, its foreground/background job-control fixture, and
+  its missed safe PTY-fd bridge. `filedescriptor::OwnedHandle::dup`
+  preserves the `tcgetpgrp` errno without `unsafe` in pmacs.
+- **Boundary:** evidence collection only. No signal retargeting,
+  tolerance, disposition change, or reap-ledger repair is authorized.
+  Group identity remains unprovable; the ledger's silent cancellation is
+  parked as its own lane.
+- **Verification:** exact `portable-pty 0.9.0`, `filedescriptor 0.8.3`,
+  nix 0.29.0, `src/process.rs`, and branch-ancestry surfaces were read.
+  Documentation-only verification is `git diff --check` plus the
+  canonical-main ancestry check; no runtime gate is claimed for a
+  framing-only revision.
+- **Recovery from a clean checkout:**
+
+  ```sh
+  git fetch githubsucks --prune
+  git worktree add ../pmacs-signal-identity \
+    -b process-signal-diagnostic-completeness \
+    githubsucks/process-signal-diagnostic-completeness
+  cd ../pmacs-signal-identity
+  git merge-base --is-ancestor 4cd4a7b HEAD
+  git status --short --branch
+  ```
 
 ## The CRDT half of the test corpus is dark in CI — NEEDS A LANE
 

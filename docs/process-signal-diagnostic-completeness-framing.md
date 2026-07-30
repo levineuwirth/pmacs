@@ -1,6 +1,6 @@
 # Framing — make the signal diagnostic discriminating (evidence collection)
 
-**Revision 3.** Status: awaiting review round 3. Lane:
+**Revision 4.** Status: awaiting review round 4. Lane:
 `process-signal-diagnostic-completeness`, worktree
 `../pmacs-signal-identity`, based on `githubsucks/main` @ `4cd4a7b`
 (re-measure at branch time; this is a reading, not a constant).
@@ -17,12 +17,38 @@ gets signalled, no disposition change.** Everything behavioural is in §5.
 
 ## Revision history
 
+**Revision 3 → 4**, after review round 3 (three blocking, one major).
+All four accepted and checked against the exact APIs, process model, and
+branch ancestry before revision.
+
+- **Rev 3's "no safe fd bridge" conclusion was still too absolute**
+  (§1.6). `filedescriptor::OwnedHandle::dup` accepts an `AsRawFd` through
+  its safe `AsRawFileDescriptor` blanket implementation and returns an
+  owned value implementing `AsFd`. A lifetime-tied wrapper around
+  `MasterPty::as_raw_fd` therefore bridges to
+  `nix::unistd::tcgetpgrp` with no `unsafe` in pmacs. The crate is
+  already resolved through `portable-pty`; this lane declares it
+  directly and restores errno capture.
+- **The occurrence did not prove "our own child, alive, EPERM"** (§1.3).
+  The failed target was a *group* and `try_wait` observed the leader
+  process. No measurement established that the leader still belonged to
+  that group. What is invalidated is using ownership of the spawned
+  child to dismiss an arbitrary group-target error.
+- **Bet 1 called a terminal-owning job "background"** (§3). A background
+  group is, by definition, not the terminal's foreground group. The
+  fixture now names `/bin/bash`, launches a foreground job in its own
+  group, and waits for the actual terminal handoff before measuring.
+- **The branch-base line described the scout, not the ancestry.** Rev 3's
+  merge-base with `4cd4a7b` was still `391d38a`. Canonical main is now
+  integrated, and the lane is recorded in `docs/active-work.md`.
+
 **Revision 2 → 3**, after review round 2 (three blocking, three major).
 All six accepted; all six verified in the code before acceptance.
 
-- **The PTY errno proposal had no safe fd bridge.** Withdrawn and reduced
-  (§1.6). This was rev 2's central new proposal and it does not survive
-  `#![forbid(unsafe_code)]`.
+- **Rev 3 concluded that the PTY errno proposal had no safe fd bridge.**
+  It therefore withdrew and reduced rev 2's central new proposal (§1.6).
+  Revision 4 supersedes that conclusion after checking
+  `filedescriptor`'s safe duplication API.
 - **Rev 2 said `getpgid` was "ungated". It is not** (§1.5a). The claim
   came from reading the four lines above the function; the gate is a
   block-level `feature!` opened 168 lines earlier. Same error shape as
@@ -32,9 +58,9 @@ All six accepted; all six verified in the code before acceptance.
   child is already a process-group leader, and a group leader's `setsid`
   fails with EPERM.
 - **"Recoverable" was unsupported** (§1.8). The ledger drops its entry on
-  *any* probe error — including the EPERM this occurrence proves can
-  happen — and discards the `SIGKILL` result while marking the entry
-  killed.
+  *any* probe error — including an EPERM that ownership of the recorded
+  child cannot rule out for a group target — and discards the `SIGKILL`
+  result while marking the entry killed.
 - **Rev 2 falsified the wrong Stage A sentence** (§1.3). Stage A's
   disjointness claim was about the **PTY** path and remains true.
 - **Rev 2's signal-disposition argument was wrong** (§1.7). Failed
@@ -97,12 +123,21 @@ Established: the target source is `group` — the `spec.group` pipe path
 path; and `leader=live`, from a real `try_wait` against the real child,
 so the leader had neither exited nor been reaped.
 
-### 1.3 What is actually falsified
+### 1.3 What the occurrence actually invalidates
 
-- **`src/process.rs:1246-1247` is falsified.** `tick_reap_ledger`
-  justifies treating any probe error as "nothing left we can reach" with
-  the comment "**EPERM cannot happen for our own children**". §1.2 is a
-  counterexample: our own child, alive, EPERM.
+- **`src/process.rs:1246-1247` uses an invalid premise.**
+  `tick_reap_ledger` justifies treating any probe error as "nothing left
+  we can reach" with the comment "**EPERM cannot happen for our own
+  children**". But the operation is group-directed: ownership of the
+  spawned child says nothing unless that child is still a member of the
+  targeted group.
+- **§1.2 does not prove EPERM was "for our own child".** The failed
+  target was group `-8619`; `leader=live` observed process `8619`.
+  Nothing measured `getpgid(8619)`, so the occurrence establishes only
+  that a group target computed from the spawn-time assumption returned
+  EPERM while the leader process was alive. That is enough to invalidate
+  the comment as a reason to discard arbitrary group errors, but not to
+  attribute the errno to the child.
 - **Stage A §1.3 is *not* falsified.** It said the ledger is disjoint
   from **the PTY path**, because the ledger arms only for
   `proc.spec.group` and PTY mode cannot set it. That remains true. §1.2
@@ -180,7 +215,7 @@ one-line change that makes a real requirement visible.
 above it. The gate was 168 lines up. Recorded because it is the same
 defect class this document exists to fix.*
 
-### 1.6 The PTY fallback is invisible, and the errno cannot be recovered
+### 1.6 The PTY fallback is invisible; a safe owned-dup bridge preserves errno
 
 `signal_target` (`:757-785`): when the PTY branch's
 `master.process_group_leader()` returns `None`, control falls through —
@@ -199,20 +234,38 @@ fn process_group_leader(&self) -> Option<libc::pid_t> {
 }
 ```
 
-**Rev 2 proposed calling `nix::unistd::tcgetpgrp` ourselves to keep the
-errno. That is withdrawn.** `tcgetpgrp` requires `F: AsFd`, and
+`nix::unistd::tcgetpgrp` requires `F: AsFd`, while
 `MasterPty` exposes only `fn as_raw_fd(&self) -> Option<RawFd>`
-(`portable-pty-0.9.0/src/lib.rs:114`). Every route from a `RawFd` to
-something implementing `AsFd` — `BorrowedFd::borrow_raw`,
-`OwnedFd::from_raw_fd`, `File::from_raw_fd` — is `unsafe`, and the crate
-is `#![forbid(unsafe_code)]`. There is no safe bridge, and duplicating
-the fd does not create one because the duplication itself needs the same
-unsafe conversion.
+(`portable-pty-0.9.0/src/lib.rs:114`). Rev 3 inspected only the standard
+library's raw-to-owned constructors and concluded every bridge required
+`unsafe`. That missed the safe duplication abstraction already in the
+dependency graph:
 
-**Reduced claim:** the fallback is distinguished **without** the errno.
-`None` is all pmacs can observe, and the report says exactly that. The
-errno is recorded here as unavailable-by-construction so a later lane
-does not re-propose it.
+- `filedescriptor::OwnedHandle::dup<F: AsRawFileDescriptor>(&F)` is safe
+  (`filedescriptor-0.8.3/src/lib.rs:230`);
+- on Unix, `filedescriptor` implements `AsRawFileDescriptor` for every
+  `T: AsRawFd` (`src/unix.rs:20`);
+- `OwnedHandle` implements `AsFd` (`src/unix.rs:64`).
+
+A small wrapper holds a borrow of `MasterPty` for its lifetime and
+implements the safe `AsRawFd` trait by returning the master's reported
+fd. `OwnedHandle::dup` consumes that borrowed view immediately and
+returns an independently owned duplicate; `tcgetpgrp(&owned)` then
+preserves the `Errno`. **No raw-to-owned constructor and no `unsafe`
+appears in pmacs.** `filedescriptor 0.8.3` is already in `Cargo.lock`
+through `portable-pty`; this lane adds it as a direct dependency because
+pmacs now calls its API.
+
+`OwnedHandle::dup` is itself fallible and preserves its Unix
+`std::io::Error` source. That failure must not be collapsed into the
+terminal query. The PTY result is therefore four-way and discriminating:
+
+- a positive pgid selects the foreground group, as today;
+- a duplicate failure falls back to the leader and reports the
+  `duplicate-master-fd` stage plus its OS errno;
+- a `tcgetpgrp` error falls back to the leader and reports the errno;
+- absence of a master fd is a distinct unavailable source, not forged
+  into an errno.
 
 ### 1.7 The report omits which signal failed
 
@@ -253,10 +306,13 @@ if now >= entry.deadline && !entry.killed {
 }
 ```
 
-Since §1.3 falsifies the premise that EPERM cannot occur here, an EPERM
-probe **drops the entry and cancels escalation silently**, and a failed
-`SIGKILL` is recorded as if it succeeded. So the honest statement is that
-escalation remains *scheduled*, not that it happens.
+If a ledger probe returns EPERM, it **drops the entry and cancels
+escalation silently**; if its `SIGKILL` fails, the result is recorded as
+if it succeeded. §1.2 did not observe either ledger call — it observed a
+later explicit `SIGTERM` to the same assumed group number — so the
+ledger failure is an exposed, still-unmeasured hazard rather than an
+observed occurrence. The honest statement remains that escalation is
+*scheduled*, not that it happens.
 
 **This still-silent path is parked, explicitly** (§5) rather than
 absorbed: it is a second site with its own disposition questions, and
@@ -284,11 +340,12 @@ assertion (`:2517`) is one of the four sites acceptance 5 must update.
 ## 2. Questions
 
 - **Q#DC1** — Can the two entities be made to diverge in a test? *Yes:
-  under a PTY with job control on, a shell places a background job in its
-  own process group and gives it the terminal, so `tcgetpgrp` != leader
-  pid.*
+  under a PTY, `/bin/bash` with job control enabled launches a
+  **foreground** job in its own process group and hands it the terminal,
+  so `tcgetpgrp` != leader pid.*
 - **Q#DC2** — Should the PTY fallback get its own `TargetSource`?
-  *Proposed: yes, reporting only that the lookup yielded `None` (§1.6).*
+  *Proposed: yes. A failed duplicate or terminal lookup reports its stage
+  and errno; a missing master fd reports unavailable (§1.6).*
 - **Q#DC3** — Should the report name the signal? *Proposed: yes, on the
   reporting argument alone (§1.7).*
 - **Q#DC4** — Should the measured pgid be reported for `spec.group`
@@ -300,9 +357,12 @@ assertion (`:2517`) is one of the four sites acceptance 5 must update.
 ## 3. Bets
 
 - **Bet 1 — the divergence is constructible.** A PTY fixture where the
-  foreground group is not the leader: job control on, a background job
-  given the terminal. The rewritten acceptance asserts both exact values
-  **and that they differ**.
+  foreground group is not the leader: `/bin/bash --noprofile --norc -m`
+  launches a foreground child in a fresh process group. The fixture
+  performs a bounded wait until `tcgetpgrp` itself reports the non-leader
+  group, asserts that group still has a live member as the positive
+  control, and only then injects the failing `kill`. The rewritten
+  acceptance asserts both exact values **and that they differ**.
   - *Falsified if* the fixture cannot be made deterministic in CI. Then
     the lane falls back to pinning divergence at the `signal_target` unit
     level with an injected foreground group, and labels that as weaker.
@@ -310,8 +370,9 @@ assertion (`:2517`) is one of the four sites acceptance 5 must update.
     exists for.
 
 - **Bet 2 — the PTY fallback is reachable and distinguishable.** A test
-  drives the branch where the lookup returns `None` and asserts a source
-  string distinct from a pipe child's.
+  drives all three non-success arms: a duplicate errno, a `tcgetpgrp`
+  errno, and a missing master fd. Each source is distinct from a pipe
+  child's and from the others.
   - *Falsified if* the branch cannot be reached without faking the
     lookup — in which case the seam is made injectable exactly as Stage A
     made the kill injectable (Q#PD4), stated rather than hidden.
@@ -339,8 +400,12 @@ assertion (`:2517`) is one of the four sites acceptance 5 must update.
    **rewritten**, not supplemented — it currently pins a substitution as
    acceptable.
 2. The PTY foreground-lookup fallback reports a source distinct from a
-   pipe child's, with a test driving the real branch. **No errno claim**
-   (§1.6).
+   pipe child's. Separate tests drive the duplicate-error and
+   `tcgetpgrp`-error arms and assert the exact stage and errno; a third
+   drives the unavailable-fd arm. If one cannot be produced reliably
+   through a real PTY, the lookup result is injected while the branch,
+   target choice, real child observation, and report construction remain
+   production code (§3 Bet 2).
 3. The report names the signal, split into two independent checks:
    (a) a **failure-format** comparison showing `SIGUSR1` and `SIGTERM`
    failures differ *in text only*, both leaving state and ledger
@@ -355,10 +420,13 @@ assertion (`:2517`) is one of the four sites acceptance 5 must update.
    after. No blanket rewrite: that is how a format regression hides.
 6. `:2501`'s existing first-call pin is **retained and cited**, updated
    only for the new format.
-7. `process` added to pmacs' declared `nix` features (§1.5a).
-8. `docs/agent-handoff.md` records that "EPERM cannot happen for our own
-   children" is false, with the run link; the comment at `:1246` is
-   corrected in the same PR.
+7. `process` added to pmacs' declared `nix` features, and
+   `filedescriptor 0.8` declared directly for the safe PTY-fd duplicate
+   (§1.5a, §1.6).
+8. `docs/agent-handoff.md` records that ownership of the recorded child
+   cannot justify dismissing an error from a group target, with the run
+   link and §1.2's measurement limit; the comment at `:1246` is corrected
+   in the same PR without claiming that the child itself received EPERM.
 9. **No acceptance claims the telemetry establishes group identity**
    (§1.5), and none claims escalation is guaranteed (§1.8). The PR body
    repeats both.
@@ -366,9 +434,11 @@ assertion (`:2517`) is one of the four sites acceptance 5 must update.
 
 ## 5. Parked
 
-- **The reap ledger's silent cancellation** (§1.8): an EPERM probe drops
-  the entry and a failed `SIGKILL` is marked as killed. Now known
-  reachable. **Its own lane** — disposition questions, second site.
+- **The reap ledger's silent cancellation** (§1.8): if a probe returns
+  EPERM the entry is dropped, and a failed `SIGKILL` is marked as killed.
+  The explicit-signal occurrence exposes the premise but did not observe
+  either ledger call. **Its own lane** — disposition questions, second
+  site.
 - **Retargeting to the measured pgid.** Behavioural; unsupported by §1.5.
 - **Any tolerance rule for EPERM or ESRCH.** Unmotivated across Stage A's
   three revisions and still unmotivated.
