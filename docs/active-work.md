@@ -288,9 +288,58 @@ review correction.
   and the window closes on the next daemon restart. It surfaces as an
   explicit `GoodbyeReason::VersionMismatch` naming both versions, pinned by
   `an_unsupported_offer_is_refused_by_name`.
-- **Five commits:** the activation mechanism, the three-boundary split plus
-  the band's machinery, the paint/input wiring, the acceptance suites, and
-  the bite fixes plus these docs.
+- **Review round 1 closed six findings at `PR #198`, four of them one
+  shape.** The panel layer was a *partial port* of the document/terminal
+  layer and the new tests asserted the declaration side only, so each
+  omission was invisible. Audited as a port rather than patched as a list,
+  which found two more gaps of the same shape that review had not named:
+  the headless probe never armed the panel wire at all (so nothing could
+  ever exercise a band), and a disconnect left the band on screen.
+  - **Geometry agreed in one place instead of three.** The declaration used
+    the stable probe while painting and hit-testing used the
+    document-dependent `mono_advance`, and the declaration inset its width
+    by `TEXT_LEFT` against the parent framing's explicit x=0 full-width
+    contract. The advance is now cached **behind the declaration**
+    (`PanelBand::declared_advance`), so the three cannot drift: there is one
+    value. Framing rev 7 R7-1/R7-2 records the widened contracts.
+  - **One classifier owns "does the band claim this pixel".** Four pointer
+    handlers each decided for themselves and three simply did not ask, so
+    right-click and wheel were applied to the document underneath and a held
+    left button was reported as a hover. `PointerSurface` /
+    `classify_pointer_surface` makes forgetting the band impossible to do
+    quietly, and makes the routing testable without a window or a daemon.
+  - **`focused` decides the caret.** The producer ships `cursor` for a
+    passive panel too, so painting it unconditionally put a second insertion
+    caret on screen.
+  - **Planned underlines were never consumed.** Straight forms now ride the
+    quad batch, curly the squiggle pipeline — the terminal path's split.
+  - **`VersionMismatch { server }` is the instance's `PROTOCOL_VERSION`.**
+    Reporting the advertised baseline told a frontend the daemon topped out
+    at 20 while it spoke 21. **The acceptance had pinned the wrong value**,
+    so the test was holding the bug in place; fixed and re-pinned.
+  - **Criterion 54 is satisfied, not caveated.** The panel-hosted probe is
+    `a54_real_daemon_real_pty_and_headless_gpu_render_one_panel_hosted_terminal`
+    — one real daemon, one real PTY child, real wgpu, through
+    `display = "panel"`. Opening a terminal and *moving* it was the first
+    attempt and is subtly wrong: the buffer ends up displayed twice and the
+    document window keeps projecting it, so the acceptance cannot tell a
+    panel-hosted child from a document one.
+- **Round 1 verification: 41 bites, 41 OK.** The original 23 re-run after the
+  round-1 changes (none went vacuous) plus 18 new ones covering every changed
+  pin. The forbidden act is bited twice: mutating the constant trips a
+  const-block assertion at *build* time (stronger outcome, weaker evidence),
+  so a narrowed swap that compiles both ways mutates the daemon's `Hello`
+  value directly. **A probe bite must rebuild `pmacs-gpu`** — `cargo test`
+  does not rebuild the sibling binary the acceptance runs as a process, and
+  without that the mutation never reaches it and the bite reads as vacuous
+  for the wrong reason.
+- **What 12/12 green did not catch.** The reviewer confirmed all twelve
+  checks, `bottom_panel_stage2b_gpu_acceptance` 4/4, and required GPU 216/216
+  on the head that carried all six defects. The gate suite is not the check
+  on a slice like this; the assertions are.
+- **Six commits:** the activation mechanism, the three-boundary split plus
+  the band's machinery, the paint/input wiring, the acceptance suites, the
+  bite fixes, and the round-1 port completion — plus docs.
 - **Verification on the reviewed head** (all redirected to files and
   checked by their own exit codes, never through a pipe): recorded in the
   PR body and reproduced by the commands in `CLAUDE.md`.
