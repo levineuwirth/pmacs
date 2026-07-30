@@ -65,7 +65,13 @@ pub fn install_fold(lua: &Lua, fold_registry: &SharedFoldRegistry) -> mlua::Resu
                     let id = buf.id();
                     let requested = range_from_table(&range)?;
                     let Some(bytes) = document_bytes(lua, id)? else {
-                        set_status(lua, "fold rejected: not a document buffer");
+                        // Q#GB16(a): the guard is spelled `is_read_only()`,
+                        // so this is the message it can actually justify.
+                        // Its author meant "terminal"; generated-buffer
+                        // immutability makes dired listings and listview
+                        // panels read-only too, and "not a document buffer"
+                        // would be a false explanation for those.
+                        set_status(lua, "fold rejected: buffer is read-only");
                         return Ok(false);
                     };
                     if requested.start > bytes.len() as u64
@@ -307,6 +313,16 @@ fn range_to_table(lua: &Lua, r: ByteRange) -> mlua::Result<Table> {
 /// The buffer's bytes if it is a normal document buffer, or `None` if it is
 /// read-only (a terminal identity buffer or other non-document buffer —
 /// the Q#FD11 "normal document buffer" guard).
+///
+/// Q#GB16: the guard's author meant "terminal", and `read_only` is what
+/// they had. Generated-buffer immutability widens the flag's population
+/// — a dired listing and a listview panel are read-only from their first
+/// paint — so fold **creation** is now refused on those families too.
+/// That is accepted rather than worked around (option (a)): a generated
+/// buffer's contents are replaced wholesale on every refresh, which
+/// invalidates any stored range anyway. What is *not* accepted is
+/// explaining the refusal with a sentence that is no longer true, hence
+/// the status text at the `fold` call site.
 fn document_bytes(lua: &Lua, buf: BufferId) -> mlua::Result<Option<Vec<u8>>> {
     with_registry(lua, |r| {
         let buffer = resolve(r, buf)?;

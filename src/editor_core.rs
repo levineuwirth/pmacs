@@ -1845,20 +1845,64 @@ impl EditorCore {
     /// and translate the live origin — otherwise accepted-match
     /// highlights and the session origin survive at pre-edit offsets
     /// for every Lua mutator edit and applied CRDT op.
+    ///
+    /// Q#GB6: each window coordinate is also clamped against **its own**
+    /// post-edit bound, which [`Self::rebuild_views_for`] already does
+    /// (`:1853-1857`) and this path did not. A generated refresh that
+    /// shrinks its buffer otherwise leaves `cursor` past the end of the
+    /// rope indefinitely — neither paint nor a motion command recovers
+    /// it, because motion is computed from the stale value. The two
+    /// coordinates fail on different axes and are therefore clamped
+    /// separately and **unconditionally**: `cursor` is a byte position
+    /// bounded by [`Buffer::len`], while `view_top` is a line index
+    /// bounded by [`TextView::line_count`]. A replace can grow in bytes
+    /// while collapsing many lines into one, so "the buffer shrank" is
+    /// not a usable trigger for the second.
+    ///
+    /// The selection anchor is a **third** coordinate. It is clamped to
+    /// the buffer extent, and the selection is cleared only when moving
+    /// an endpoint collapses it — see
+    /// [`Self::clamp_cursor_and_selection`].
     pub fn notify_buffer_edit(&mut self, buffer_id: BufferId, edit: &Edit) {
         self.search_invalidate_for_edit(buffer_id, edit);
         let reg = self.registry.borrow();
         let Ok(buffer) = reg.get(buffer_id) else {
             return;
         };
+        let len = buffer.len();
         for win in self.windows.values_mut() {
             if win.buffer_id == buffer_id {
                 let _ = win.text_view.on_edit(buffer, edit);
                 for overlay in &mut win.overlays {
                     let _ = overlay.on_edit(buffer, edit);
                 }
+                Self::clamp_cursor_and_selection(win, len);
+                let max_top = win.text_view.line_count().saturating_sub(1);
+                if win.view_top > max_top {
+                    win.view_top = max_top;
+                }
             }
         }
+    }
+
+    /// Clamp `win`'s cursor and selection anchor to `len`, clearing the
+    /// selection only when the clamp collapses it.
+    ///
+    /// This mirrors terminal selection normalization: a surviving,
+    /// shortened region remains selected, while a region whose content
+    /// disappeared does not become an accidental active-but-empty
+    /// selection. Looking at whether either endpoint moved distinguishes
+    /// that case from a zero-width selection the user created.
+    fn clamp_cursor_and_selection(win: &mut Window, len: Position) {
+        let old_cursor = win.cursor;
+        win.cursor = win.cursor.min(len);
+        win.selection = win.selection.and_then(|mut selection| {
+            let old_anchor = selection.anchor;
+            selection.anchor = selection.anchor.min(len);
+            let collapsed_by_clamp = selection.anchor == win.cursor
+                && (selection.anchor != old_anchor || win.cursor != old_cursor);
+            (!collapsed_by_clamp).then_some(selection)
+        });
     }
 
     /// Force every window currently showing `buffer_id` to rebuild
@@ -1874,6 +1918,8 @@ impl EditorCore {
     ///
     /// Cursor and `view_top` are clamped to the new buffer extent so
     /// they don't dangle past the end after a shrinking rewrite.
+    /// Selection normalization uses the same clamp-or-clear rule as
+    /// [`Self::notify_buffer_edit`].
     pub fn rebuild_views_for(&mut self, buffer_id: BufferId) {
         let reg = self.registry.borrow();
         let Ok(buffer) = reg.get(buffer_id) else {
@@ -1883,9 +1929,7 @@ impl EditorCore {
         for win in self.windows.values_mut() {
             if win.buffer_id == buffer_id {
                 win.text_view = TextView::new(buffer);
-                if win.cursor > len {
-                    win.cursor = len;
-                }
+                Self::clamp_cursor_and_selection(win, len);
                 let max_top = win.text_view.line_count().saturating_sub(1);
                 if win.view_top > max_top {
                     win.view_top = max_top;

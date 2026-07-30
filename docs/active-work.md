@@ -245,6 +245,139 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
+## Generated-buffer immutability lane (Arc: workbench primitives) — STAGE 1 OPEN
+
+**Framing: [PR #188](https://github.com/levineuwirth/pmacs/pull/188),
+revision 7, approved and merged to `main` as `27b1185`. #188 owns the
+acceptance contract; this lane adopts it.** On 2026-07-29 the user
+directed #191 to fold its review corrections into this branch and then
+merged #188, settling the implementation authority and merge ordering.
+The contract is now
+`docs/generated-buffer-immutability-framing.md` on canonical `main`.
+
+- **Branch `generated-buffer-immutability-stage1`**, worktree
+  `../pmacs-gbi-stage1`. `githubsucks/main` is integrated into it.
+  Measured when this line was written:
+
+  ```
+  $ git rev-parse --short githubsucks/main
+  27b1185
+  $ git log --oneline -1 githubsucks/main
+  27b1185 Merge pull request #188 from levineuwirth/generated-buffer-immutability
+  $ git merge-base --is-ancestor githubsucks/main HEAD && echo "main IS integrated"
+  main IS integrated
+  ```
+
+  **That is a reading, not a constant, and it went stale inside this
+  lane's own review round.** `main` moved four times while the lane was
+  open: #187 -> #192 -> #193 -> #188. An earlier revision of this bullet pasted
+  the same three commands with `64883eb` and the same `main IS
+  integrated` line, and #193 merged between writing it and pushing it ---
+  so the pasted output was false in the tree that carried it. Pasting
+  command output is necessary and **not sufficient**: re-measure at push
+  time, and treat any base SHA in this file as expired on sight.
+- **What Stage 1 ships.** `dired.lua`'s `paint` and `listview.lua`'s
+  `render` write through `pmacs.buffer.set_generated_contents` (zero
+  `bypass_intercept` writes remain in either file); `listview` gains
+  Q#GB13 ownership-by-handle with `<2>`..`<99>` disambiguation and
+  Q#GB18's identity-routed `panels` list in the **same** commit;
+  Q#GB6's cursor/view-top clamp plus selection clamp-or-clear in both
+  `EditorCore::notify_buffer_edit` and `rebuild_views_for`;
+  listview refresh reseating through the already-notified view rather
+  than a redundant same-buffer switch; and Q#GB16(a)'s corrected fold
+  status string. No protocol change, no new Lua surface, no new
+  interaction island.
+- **Why these two families first, and it is not "the cheap half".**
+  `compile.lua:219` and `builtin/commands/default.lua:855` rebind all
+  seven undo chords to a no-op; `dired.lua` and `listview.lua` rebind
+  **nothing**, so a bare `C-/` emptied a listing and a panel. Stage 1
+  closes the only two families reachable without `M-x`.
+- **Review round 1 found the stale selection anchor and four acceptance
+  contract mismatches.** Its provisional drop-on-stale fix stopped the
+  crash but intentionally waited on #188 to decide the selection rule;
+  criteria 5 and 7 likewise recorded evidence without claiming to
+  replace the framing. That evidence produced #188 revision 7.
+- **Review round 2 closes both remaining P1 findings against revision
+  7.**
+  - **Q#GB6 now matches at both sites.** Cursor and anchor clamp to the
+    new extent; a selection survives shortened unless an endpoint
+    movement collapses it, in which case it clears. `acc16h` and
+    `acc16i` each drive a real caller and assert both the surviving
+    region and collapsed case. Unconditional drop and bare clamp are
+    separately falsified.
+  - **The Stage 1 criteria are adopted without local substitutes.**
+    Criterion 5 has the exact rope-refusal + byte-identity half and the
+    Rust-lifted named-intercept half for both adopters. Criterion 7 now
+    bites the named fan-out mutation for both adopters: listview refresh
+    no longer rebuilds the view with a redundant same-buffer switch.
+    Criteria 11 and 12 carry the framing's `[main]` classification and
+    also record where its narrower Q#GB13-without-Q#GB18 pre-image
+    fails.
+- **Stage 2 still owes everything with new Rust in it**, per the
+  framing's cut: `Buffer::apply_generated_edit` + `GeneratedOutcome` +
+  the `{ generated = true }` option + its own `run_buffer_edit` arm;
+  `set_generated_contents` reimplemented over it; Q#GB10's path-backed
+  refusal and `mark_clean`; Q#GB15's `identity_protected`; Q#GB13/GB18
+  for `compile.lua` and the search panel; Q#GB5's `ensure_slot` lock;
+  conversion of the remaining 13 write sites; and the three
+  `compile_mode_acceptance` intruder tests converted per Q#GB12.
+- **Verification at code checkpoint `5d92348`.** The ledger commit on
+  top is docs-only; `cargo fmt --check` and `git diff --check` are
+  re-run after it.
+  `cargo fmt --check` clean; `cargo clippy --workspace --all-targets --
+  -D warnings` clean; library **1,863 passed + 3 ignored** default and
+  **2,048 passed + 4 ignored** CRDT; `listview_acceptance` **17**,
+  `dired_acceptance` **31**, `folding_acceptance` **21**,
+  `terminal_copy_mode_acceptance` **18** default and **19** with
+  `--features crdt` — judge that step by the count, because `acc16e` is
+  `#[cfg(feature = "crdt")]` and a default run never compiles it; M4
+  **121 passed + 3 ignored + 1 filtered** with `--skip basedpyright`;
+  required GPU **202/202**. The first GPU attempt inside the tool
+  sandbox failed three managed-attach socket tests and left the
+  closed-outbox reader blocked; the authoritative rerun outside that
+  socket sandbox passed all 202. `git diff --check` clean.
+- **The dired 200 ms perf test is load-sensitive, and the conversion
+  costs it nothing.** Review saw `dired_renders_10k_entries_within_200ms`
+  take 241 ms in a combined run and pass alone. Measured here: 0.09 s
+  isolated over five runs, and the whole 31-test suite finishes in
+  0.12 s, so 241 ms was contention rather than a regression. Measured
+  against the pre-image as well, by swapping in `main`'s `dired.lua`
+  (the `bypass_intercept` paint): **0.09 s either way over five runs
+  each**. A whole-buffer `set_generated_contents` costs the same as the
+  bypass replace it replaces, which discharges Q#GB4's measurement
+  obligation for the whole-buffer case only — the streaming case is
+  Stage 2's and is not touched here.
+- **Bites, re-run under `scripts/bite`'s positive control (#192).**
+  A bare `bite: OK` from the pre-#192 script is weaker than it looks, so
+  every result below is from the current script or from a mutation
+  harness carrying the same control (named tests must pass on the
+  working tree and at least one must have run).
+  - **Falsified by revert, all `OK (assertion)` — not `OK (COMPILE)`:**
+    `builtin/runtime/listview.lua` for criteria 1, 2, 9 and 10;
+    `builtin/runtime/dired.lua` for criteria 3 and 13a;
+    `src/lua_bindings/fold.rs` for 13b; `src/editor_core.rs` for 8, 8b
+    and both selection-normalization pins.
+  - **Falsified by a named mutation, each observed to fail:** the
+    fan-out drop in the `set_generated_contents` binding (criterion 7);
+    deleting `self.read_only = false` (criterion 4, both adopters);
+    deleting `add_intercept` and `set_round_trip_input` at each adopter
+    (criteria 5 and 6); the name-keyed `panel_for_buffer` (criteria 11
+    and 12); adopting at the variant limit (criterion 10); the old fold
+    status string (13b); deleting each clamp (8, 8b); deleting the
+    selection helper from either site; unconditionally dropping a stale
+    anchor; and retaining a selection that an endpoint clamp collapsed.
+    Criterion 7's fan-out drop now fails by assertion in **both**
+    listview and dired.
+- **Recovery:**
+
+  ```sh
+  git fetch githubsucks
+  git worktree add ../pmacs-gbi-stage1 generated-buffer-immutability-stage1
+  cd ../pmacs-gbi-stage1
+  cargo test --test listview_acceptance --test dired_acceptance
+  cargo test --test terminal_copy_mode_acceptance --features crdt
+  ```
+
 ## Bottom-panel lane (Arc 7) — 2B-2 MERGED; 2B-3 IS NEXT
 
 Stage 1, the Stage 2 framing, Stage 2A, Stage 2B-1, and **Stage 2B-2 are
@@ -826,21 +959,22 @@ has **no branch and no framing yet**.
   `git fetch githubsucks && git worktree add ../pmacs-dired-s2
   -b dired-stage2-impl githubsucks/dired-stage2-impl`.
 
-## Generated-buffer immutability framing lane — PR #188 OPEN, PROPOSED
+## Generated-buffer immutability framing lane — MERGED AS PR #188
 
 - Portable branch: `githubsucks/generated-buffer-immutability`; worktree
-  `../pmacs-generated-immutability`. **PR #188**, base `main`, forked from
-  `githubsucks/main` @ `ad41cf1`, **integrated through `5e186c7`** —
+  `../pmacs-generated-immutability`. **PR #188 landed on `main` as
+  `27b1185` on 2026-07-29**, after forking from
+  `githubsucks/main` @ `ad41cf1` and integrating through `5e186c7` —
   #189 (clean), then #186 and #171 (`docs/active-work.md` conflict),
   then #187 (the same file again, after it removed the two landed
   framing lanes), #192 at merge commit `76cfaac`, and #193
   (`docs/active-work.md` conflict again) after revision 7's first push.
   Revision 6 was reviewed at head `55c3061`; revision 7 closes that
-  round. Framing only —
+  round. The retained branch is provenance only. Framing only —
   `docs/generated-buffer-immutability-framing.md`, revision 7, plus this
   lane. **No runtime code, no protocol change.**
-- **PROPOSED — six review rounds closed (thirty-two findings,
-  twenty-two P1, ten P2). Not approved. Do not implement, do not merge.**
+- **APPROVED and merged after six review rounds** (thirty-two findings,
+  twenty-two P1, ten P2). Revision 7 is the governing contract.
 - **Stage 1 implementation is PR #191, open. The boundary is explicit
   and has already been needed twice:** #188 owns the **acceptance
   contract**; #191 **adopts** criteria and may not restate, narrow, or
@@ -917,7 +1051,7 @@ has **no branch and no framing yet**.
   panel's four, compile/search ownership + routing, the path-backed
   refusal plus `mark_clean`, and the terminal-only
   `identity_protected` guard. **No Lua unlock ships.**
-- **Nine facts from this lane that other lanes need before it merges:**
+- **Nine facts this lane landed for other lanes:**
   - **`bypass_intercept` is the wrong inventory key.** It misses
     `*buffer-list*`, `*help*` and `*workers*`, which are generated with
     plain writes and no intercept at all. `docs/agent-handoff.md` §4's

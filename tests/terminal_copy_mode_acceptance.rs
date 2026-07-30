@@ -992,3 +992,311 @@ fn copy_mode_refuses_a_non_terminal_buffer() {
         "the refusal must say why: {err}"
     );
 }
+
+/// Generated-buffer immutability Stage 1, criterion 8 [`main`] — Q#GB6's
+/// cursor clamp.
+///
+/// `EditorCore::notify_buffer_edit` — the fan-out every generated write
+/// goes through — updated each window's `TextView` and overlays but
+/// clamped neither window coordinate; only `rebuild_views_for` did, and
+/// its doc comment said so. So a shrinking generated refresh left
+/// `win.cursor` past the end of the rope **indefinitely**: paint does not
+/// crash, and a motion command does not recover it, because motion is
+/// computed from the stale value.
+///
+/// *Bite:* measured on the pre-image — cursor 29, len 2, and `C-p` leaves
+/// it at 29. This ships today for terminal copy mode: refresh a snapshot
+/// to a shorter one with the point low in the buffer and this is the
+/// state. Falsify by deleting the `win.cursor > len` clamp.
+#[test]
+fn acc16f_a_shrinking_generated_write_clamps_the_window_cursor() {
+    let state = EditorState::new();
+    exec(
+        &state,
+        r"
+        GEN = pmacs.buffer.create('*generated-probe*')
+        pmacs.buffer.set_generated_contents(GEN, 'alpha\nbeta\ngamma\ndelta\nepsilon\n')
+        pmacs.window.switch_buffer(GEN)
+        pmacs.editor.goto_byte(30)
+        ",
+    );
+    let (cursor, len): (i64, i64) = eval(
+        &state,
+        "return pmacs.editor.cursor(), pmacs.window.buffer():len()",
+    );
+    assert_eq!(
+        (cursor, len),
+        (30, 31),
+        "precondition: point low in a 31-byte buffer"
+    );
+
+    exec(&state, r"pmacs.buffer.set_generated_contents(GEN, 'x\n')");
+
+    let (cursor, len): (i64, i64) = eval(
+        &state,
+        "return pmacs.editor.cursor(), pmacs.window.buffer():len()",
+    );
+    assert_eq!(len, 2, "precondition: the buffer shrank");
+    assert!(
+        cursor <= len,
+        "the cursor must be clamped into the new rope; got {cursor} for len {len}"
+    );
+
+    // And motion works from there: `C-p` reaches line 0, which it cannot
+    // do from a dangling offset.
+    exec(&state, "pmacs.editor.move_up()");
+    let cursor: i64 = eval(&state, "return pmacs.editor.cursor()");
+    assert_eq!(cursor, 0, "C-p must move to the first line");
+}
+
+/// Generated-buffer immutability Stage 1, criterion 8b [`main`] — Q#GB6's
+/// `view_top` clamp, on a buffer that GREW.
+///
+/// The two coordinates fail on different axes: `cursor` is a byte
+/// position bounded by `Buffer::len`, while `view_top` is a **line
+/// index** bounded by `TextView::line_count`. A replace can grow in bytes
+/// while collapsing many lines into one, so a clamp gated on "the buffer
+/// shrank" passes criterion 8 and fails here — which is why the clamp
+/// runs unconditionally, each coordinate against its own bound, exactly
+/// as `rebuild_views_for` already does.
+///
+/// *Bite:* falsify by gating the clamp on a byte-length comparison, or by
+/// deleting the `view_top` half. Unlike criterion 8 this case is argued
+/// from the types rather than measured on `main`; the assertion below is
+/// the measurement.
+#[test]
+fn acc16g_a_line_collapsing_generated_write_clamps_view_top() {
+    let state = EditorState::new();
+    exec(
+        &state,
+        r"
+        GEN = pmacs.buffer.create('*viewtop-probe*')
+        pmacs.buffer.set_generated_contents(GEN, 'a\nb\nc\nd\ne\nf\n')
+        pmacs.window.switch_buffer(GEN)
+        pmacs.editor.set_view_top(5)
+        ",
+    );
+    let (top, len): (i64, i64) = eval(
+        &state,
+        "return pmacs.editor.view_top(), pmacs.window.buffer():len()",
+    );
+    assert_eq!(
+        (top, len),
+        (5, 12),
+        "precondition: scrolled to line 5 of a 12-byte, 7-line buffer"
+    );
+
+    // 20 bytes on ONE line: longer than what it replaces, so any
+    // "the buffer shrank" trigger is false here.
+    exec(
+        &state,
+        r"pmacs.buffer.set_generated_contents(GEN, '0123456789abcdefghij')",
+    );
+
+    let len: i64 = eval(&state, "return pmacs.window.buffer():len()");
+    assert_eq!(len, 20, "precondition: the buffer GREW in bytes");
+
+    let (top, lines) = {
+        let core = state.core.borrow();
+        let active = core.active_window_id();
+        let win = core.windows.get(&active).expect("active window");
+        (win.view_top, win.text_view.line_count())
+    };
+    assert!(
+        top < lines,
+        "view_top must be clamped into the new line count; got {top} of {lines}"
+    );
+    assert_eq!(top, 0, "the collapsed buffer has exactly one line");
+}
+
+/// Generated-buffer immutability Stage 1 criterion 8c [`main`] — the
+/// selection anchor is a third window coordinate normalized by Q#GB6's
+/// clamp-or-clear rule.
+///
+/// `Window::region` orders `(anchor, cursor)`, so a stale anchor above a
+/// clamped cursor is still the high end of the region, and
+/// `region_bytes` slices the rope with it. Reproduced on this branch
+/// before the fix: `assertion failed: end <= self.len()` at
+/// `src/rope.rs:145`, reached from `EditorCore::clipboard_copy`.
+///
+/// Both outcomes matter: clamping a backward selection from 0..30 into
+/// 0..2 preserves the shortened region, while clamping a forward
+/// selection from 2..30 collapses both endpoints at 2 and clears it.
+/// Clearing every stale anchor passes the crash check but fails the
+/// first half; clamping without the collapsed check fails the second.
+///
+/// *Bite:* delete `clamp_cursor_and_selection` from
+/// `notify_buffer_edit`; the first copy reaches the stale-anchor panic.
+#[test]
+fn acc16h_a_shrinking_generated_write_clamps_or_clears_the_selection() {
+    let state = EditorState::new();
+    exec(
+        &state,
+        r"
+        GEN = pmacs.buffer.create('*anchor-probe*')
+        pmacs.buffer.set_generated_contents(GEN, 'alpha\nbeta\ngamma\ndelta\nepsilon\n')
+        pmacs.window.switch_buffer(GEN)
+        ",
+    );
+    {
+        // A BACKWARD selection: anchor at the far end, point at the
+        // start. The forward one is not a discriminator.
+        let mut core = state.core.borrow_mut();
+        core.begin_selection(30);
+        core.set_cursor_byte(0);
+        assert_eq!(
+            core.active_region(),
+            Some((0, 30)),
+            "precondition: a live 30-byte region"
+        );
+    }
+
+    exec(&state, r"pmacs.buffer.set_generated_contents(GEN, 'xy')");
+
+    let mut core = state.core.borrow_mut();
+    assert_eq!(
+        core.active_buffer_len(),
+        2,
+        "precondition: the buffer shrank"
+    );
+    assert_eq!(
+        core.active_window()
+            .selection
+            .map(|selection| selection.anchor),
+        Some(2),
+        "the stale anchor is clamped into the new extent"
+    );
+    assert_eq!(
+        core.active_region(),
+        Some((0, 2)),
+        "a non-collapsed selection survives as the shortened region"
+    );
+    assert!(
+        core.clipboard_copy(),
+        "the production consumer copies the valid shortened region"
+    );
+    drop(core);
+
+    // The other result: cursor clamping moves 30 to the anchor at 2, so
+    // the selected content is gone and no empty active selection remains.
+    exec(
+        &state,
+        r"pmacs.buffer.set_generated_contents(GEN, 'alpha\nbeta\ngamma\ndelta\nepsilon\n')",
+    );
+    {
+        let mut core = state.core.borrow_mut();
+        core.begin_selection(2);
+        core.set_cursor_byte(30);
+        assert_eq!(
+            core.active_region(),
+            Some((2, 30)),
+            "precondition: a forward 28-byte region"
+        );
+    }
+    exec(&state, r"pmacs.buffer.set_generated_contents(GEN, 'xy')");
+    let mut core = state.core.borrow_mut();
+    assert_eq!(
+        core.active_window().selection,
+        None,
+        "a cursor clamp that collapses the region clears the selection"
+    );
+    assert!(
+        !core.clipboard_copy(),
+        "there is no collapsed region to copy"
+    );
+}
+
+/// Criterion 8c's second clamp site, driven through its own real Lua
+/// path.
+///
+/// `EditorCore::rebuild_views_for` had the identical defect and is a
+/// separate exit: the `*help*` renderer rewrites end to end and calls it
+/// rather than `notify_buffer_edit` (`src/lua_bindings/mod.rs:1650`, via
+/// `pmacs.help.show_command`). Fixing one function and not the other
+/// would leave a live panic reachable from `M-x` help, so this pins the
+/// second exit rather than trusting that one call site implies the
+/// other.
+///
+/// This site also asserts both halves: a clamp can preserve the
+/// shortened region, and an anchor that clamps exactly onto the cursor
+/// clears it. *Bite:* delete `clamp_cursor_and_selection` from
+/// `rebuild_views_for`; the first copy panics at `src/rope.rs:145` while
+/// `acc16h` stays green.
+#[test]
+fn acc16i_a_shrinking_view_rebuild_clamps_or_clears_the_selection() {
+    let state = EditorState::new();
+    // 286 bytes, then 154: a real shrink through the help renderer.
+    exec(
+        &state,
+        r"
+        HELP = pmacs.help.show_command('cursor.down')
+        pmacs.window.switch_buffer(HELP)
+        ",
+    );
+    let long_len: i64 = eval(&state, "return HELP:len()");
+    {
+        let mut core = state.core.borrow_mut();
+        let anchor = u64::try_from(long_len).expect("non-negative");
+        core.begin_selection(anchor);
+        core.set_cursor_byte(0);
+        assert_eq!(
+            core.active_region(),
+            Some((0, anchor)),
+            "precondition: a live region anchored at the end"
+        );
+    }
+
+    exec(&state, "pmacs.help.show_command('editor.quit')");
+
+    let short_len: i64 = eval(&state, "return HELP:len()");
+    assert!(
+        short_len < long_len,
+        "precondition: the help buffer shrank ({long_len} -> {short_len})"
+    );
+    let short = u64::try_from(short_len).expect("non-negative");
+    let mut core = state.core.borrow_mut();
+    assert_eq!(
+        core.active_window()
+            .selection
+            .map(|selection| selection.anchor),
+        Some(short),
+        "the anchor is clamped to the shorter help buffer"
+    );
+    assert_eq!(
+        core.active_region(),
+        Some((0, short)),
+        "the non-collapsed region survives the rebuild"
+    );
+    assert!(
+        core.clipboard_copy(),
+        "copy consumes the clamped region without slicing past the rope"
+    );
+    drop(core);
+
+    // Grow the same help buffer, then choose an anchor that the next
+    // short render will clamp exactly onto the cursor.
+    exec(&state, "pmacs.help.show_command('cursor.down')");
+    {
+        let mut core = state.core.borrow_mut();
+        let long = u64::try_from(long_len).expect("non-negative");
+        core.begin_selection(long);
+        core.set_cursor_byte(short);
+        assert_eq!(
+            core.active_region(),
+            Some((short, long)),
+            "precondition: a region whose anchor exceeds the next extent"
+        );
+    }
+    exec(&state, "pmacs.help.show_command('editor.quit')");
+
+    let mut core = state.core.borrow_mut();
+    assert_eq!(
+        core.active_window().selection,
+        None,
+        "an anchor clamp that collapses the region clears the selection"
+    );
+    assert!(
+        !core.clipboard_copy(),
+        "the collapsed region is not retained as active-but-empty"
+    );
+}
