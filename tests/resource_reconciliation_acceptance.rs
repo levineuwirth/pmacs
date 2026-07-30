@@ -916,11 +916,18 @@ fn acc53_the_last_buffer_refusal_keeps_the_buffer_and_the_rest_proceeds() {
         said.contains("could not be closed"),
         "the refusal must reach the status channel; status was {said:?}"
     );
+    // Asserted as the buffer's OWN name, not as the basename. The
+    // message opens with `deleted only.txt:` — the *path* — so a
+    // `contains("only.txt")` check passes with the attribution stripped,
+    // which is exactly how this assertion was vacuous when first
+    // written. A path-backed buffer's name is the full path, and only
+    // the `buffer "…"` prefix can produce it.
+    let expect_named = format!("buffer {:?}", only.display().to_string());
     assert!(
-        said.contains("only.txt"),
-        "and must name the buffer, because `cannot kill the last \
+        said.contains(&expect_named),
+        "the refusal must name the buffer, because `cannot kill the last \
          remaining buffer` alone does not say WHICH buffer is now bound \
-         to a deleted path; status was {said:?}"
+         to a deleted path; wanted {expect_named:?} in {said:?}"
     );
 
     // Half two: a directory of buffers where one refuses removal. The
@@ -968,9 +975,12 @@ fn acc53_the_last_buffer_refusal_keeps_the_buffer_and_the_rest_proceeds() {
         "and the report must state the consequence — saving it puts the \
          deleted file back; status was {said2:?}"
     );
+    // Same discipline: the full path is the buffer's name, while the
+    // message's `deleted b.txt:` prefix is only the basename.
     assert!(
-        said2.contains("b.txt"),
-        "naming the buffer; status was {said2:?}"
+        said2.contains(&b.display().to_string()),
+        "the kept buffer must be named, and by its own name rather than \
+         the deleted path's basename; status was {said2:?}"
     );
 }
 
