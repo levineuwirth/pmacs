@@ -333,14 +333,32 @@ compatible.
     githubsucks/test-ambient-config-isolation
   ```
 
-## Reap-ledger silent failures — FRAMING OPEN, revision 3
+## Reap-ledger silent failures — IMPLEMENTED, PR OPEN
 
 - **Branch `reap-ledger-silent-failures`**, worktree
   `../pmacs-reap-ledger`, based on `githubsucks/main` @ `22df6ab`.
-  **Framing only; no code, no PR yet.**
-  `docs/reap-ledger-silent-failures-framing.md`, revision 3; two review
-  rounds closed (round 1: three blocking, two major; round 2: two
-  blocking, two major; all accepted).
+  `docs/reap-ledger-silent-failures-framing.md`, **revision 4**;
+  approved at revision 3 after two review rounds (round 1: three
+  blocking, two major; round 2: two blocking, two major; all accepted).
+  Revision 4 records implementation findings, not a new design round.
+- **All four bets resolved.** Bet 1 (every site takes a directed
+  outcome) and Bet 2 (every consequence is reachable) hold. **Bet 3
+  resolves the shutdown coupling as real and measured** — under 500ms
+  with a failed force-kill plus an errored probe, versus the full 2s
+  bound with only the force-kill failing. **Bet 4 is falsified: no
+  reporting channel exists**, so reporting becomes its own lane.
+- **The in-drain pin's first fixture was vacuous, and the bite caught
+  it.** `poll_one` TERMs the group on leader exit, so an untrapped
+  descendant died before writing its late marker — absent on *both*
+  paths. With the seam reverted the pin failed only the consumed-plan
+  check, never the content assertion. Fixed with `trap '' TERM` behind
+  the readiness gate.
+- **Gates: 10/10 green** on the pushed tree, all five bootstrap-storage
+  variables controlled — fmt, diff-check, clippy, `--lib` (1888),
+  `--lib --features crdt` (2073), compile-mode (67), copy-mode in both
+  feature configurations (18/19), M4 with the basedpyright skip (149),
+  required GPU (221). The five new process pins ran **15/15** as a
+  repetition set, since supervisor tests are load-sensitive.
 - **Unparked from PR #200's §5.** #200 retired the premise that
   justified the ledger's leniency and deliberately changed no
   disposition; this lane owns what it refused.

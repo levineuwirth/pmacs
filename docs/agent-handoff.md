@@ -257,6 +257,61 @@ commands, read `docs/active-work.md` immediately after this file.
     disagree — and it still establishes no identity, because it is read
     inside the same read-then-act window and no portable mechanism closes
     that for a *group* (`pidfd` covers a process; macOS has neither).
+- **Reap-ledger silent failures — DIAGNOSTIC, in flight**
+  (`docs/reap-ledger-silent-failures-framing.md`). The lane #200's
+  framing §5 parked and its evidence unparked. **Four `kill(2)` results
+  are discarded in the group reap ledger**, and each discard has its own
+  consequence — three in the persistent ledger, one in the in-drain
+  twin:
+  - `tick_reap_ledger`'s probe cannot tell `ESRCH` (the group is gone —
+    correct) from any other errno (we could not ask — not correct), and
+    `retain` deletes the entry either way, cancelling escalation.
+  - The deadline escalation sets `killed = true` whether or not the
+    `SIGKILL` landed, so a failed one is **never retried by anything**.
+  - `shutdown()`'s force-kill does the same, on the path written
+    specifically to stop a leak at editor exit.
+  - `final_drain_runtime`'s twin collapses every errno into "dead",
+    which quiesces the drain and **cancels the readers** — truncated
+    output rather than a leaked process, and terminal for that drain
+    where a later tick could revisit the ledger.
+  - **None of the four has been observed to fire.** #200's evidence is an
+    explicit `SIGTERM` failing in `signal()`, not any ledger call. What
+    it retires is the *reason* ("EPERM cannot happen for our own
+    children"), not the behaviour.
+  - **`shutdown()`'s loop exit depends on the silent drop, and this is
+    now measured.** It runs while `any_running() || !reap_ledger.is_empty()`,
+    so an early exit needs the ledger empty **and** no live managed
+    record — the leader-exited-survivor case the ledger exists to serve.
+    With a failed force-kill followed by an errored probe it exits in
+    under 500ms instead of holding its 2s bound, having concluded
+    cleanup finished because the probe failed. Making the probe strict
+    without touching the loop converts that silent early exit into a
+    guaranteed 2s stall at every editor exit that hits it: **the two
+    cannot be changed independently.**
+  - **There is no channel for a background tick to report on.**
+    `ProcessEvent` is keyed by `ProcessId`, while the ledger is keyed by
+    pgid and is deliberately independent of managed records, so in the
+    case that matters there is no id to attribute to. Every production
+    consumer polls `take_events(id)` per known id; `take_all_events`
+    would sidestep the keying but **has no production consumer at all**
+    (two test call sites only). `pmacs.error` is dead. Reporting is
+    therefore its own lane, as the framing's Bet 4 anticipated.
+  - **A test seam for a background loop has to be directed.**
+    `shutdown()` signals every managed process before it reaches its
+    ledger force-kill, so one undirected "next kill fails" slot is eaten
+    by the wrong call and the test passes while proving nothing. The
+    persistent sites take a FIFO each (the coupling pin needs two
+    outcomes pending at once); the in-drain site needs one outcome that
+    **repeats for a whole drain**, because a one-shot is consumed by the
+    next 1ms probe and can never survive the 50ms window `quiesced`
+    requires.
+  - **An absence assertion needs a fixture that could have produced the
+    thing.** The in-drain pin's first fixture had no `trap '' TERM`, so
+    `poll_one`'s leader-exit group TERM killed the descendant before it
+    wrote its late marker: the marker was absent on *both* paths and the
+    pin would have stayed green with the collapse fixed. The bite caught
+    it — the reverted seam failed only the consumed-plan check, not the
+    content assertion. That is what the consumed-plan check is for.
 - **Lean 4 arc (Arc 8) — stages 1, 2, 3a, 3b, 4a, 4b ALL LANDED**
   (`docs/lean4-mode-framing.md`; #160, #161, #167, #170, #179, #181). pmacs edits Lean 4: `arborium-lean` highlighting, a
   `lean4` major mode, `⟨⟩ ⦃⦄ ⟮⟯` pairs, and a `lake serve` language

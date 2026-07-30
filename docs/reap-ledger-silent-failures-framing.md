@@ -1,14 +1,62 @@
 # Framing — group cleanup fails silently at four sites
 
-**Revision 3.** Status: awaiting review round 3. Proposed lane:
+**Revision 4.** Status: **APPROVED at revision 3; implemented.** Lane
 `reap-ledger-silent-failures`, worktree `../pmacs-reap-ledger`, based on
-`githubsucks/main` @ `22df6ab` (a reading; re-measure at branch time).
+`githubsucks/main` @ `22df6ab`. Revision 4 records what implementation
+found; it is not a new design round.
 
 **Parked by PR #200's framing §5 and unparked by its evidence.** #200
 retired the premise that justified the ledger's leniency; it deliberately
 changed no disposition, and said so. This lane owns what it refused.
 
 ## Revision history
+
+**Revision 3 → 4**, found **while implementing**, not a new design
+round. Every bet resolved; one acceptance turned out to be satisfiable
+vacuously.
+
+- **Acceptance 2's in-drain clause could be met by a vacuous fixture,
+  and was.** "The live descendant's named late output absent" says
+  nothing about how the descendant stays live — and `poll_one` sends
+  `SIGTERM` to the whole group on leader exit, so an untrapped
+  descendant dies before it can write. The marker was then absent on
+  *both* paths and the pin would have stayed green with the collapse
+  fixed. The bite is what caught it: with the seam reverted, the pin
+  failed only the consumed-plan check, never the content assertion. The
+  fixture now uses `trap '' TERM` behind `survivor_script`'s readiness
+  gate. **The lesson generalises past this pin: an absence assertion is
+  only as good as the fixture's ability to produce the thing.**
+- **Bet 1 holds.** All four sites took a directed outcome with no
+  restructuring. `final_drain_runtime` — the one §3 named as at risk,
+  being a free function — needed only a shared handle on the context it
+  already receives.
+- **Bet 2 holds, in the direction that keeps the lane.** All four
+  consequences are reachable; none was already foreclosed by an earlier
+  guard. The lane does not shrink.
+- **Bet 3 resolves: the coupling is real and measured.** With a failed
+  force-kill and an errored probe, `shutdown()` returns in **under
+  500ms** instead of holding its 2s bound, with the survivor alive. With
+  only the failed force-kill it burns the full bound. §1.3's warning
+  stands: making the probe strict without touching the loop converts a
+  silent early exit into a guaranteed 2s stall.
+- **Bet 4 is falsified, exactly as its own clause anticipated: no
+  channel exists.** `ProcessEvent` is keyed by `ProcessId` while the
+  ledger is keyed by pgid and is deliberately independent of managed
+  records, so in the leader-exited-survivor case there is no id to
+  attribute to. Every production consumer polls `take_events(id)` per
+  known id (`lua_bindings/mod.rs:8933`, `:10731`, `mcp.rs:361`).
+  `take_all_events` would sidestep the keying but **has no production
+  consumer at all** — its only two call sites are tests, despite a doc
+  comment naming a `*processes*` buffer. `pmacs.error` was already
+  known dead. **Reporting becomes its own lane** (§5), and this PR ships
+  instrumentation plus tests without it, which is what §7 said it would
+  do in this case.
+- **The in-drain `SIGKILL` is still unpinned**, as §1.2a promised. Its
+  `group_killed` flag stays local and the persistent ledger retries in
+  the same outer tick, so pinning the local non-retry still needs a
+  call-count assertion or a direct free-function test. Unchanged, and
+  restated here so a later reader does not mistake the shipped seam for
+  covering it.
 
 **Revision 2 → 3**, after review round 2 (two blocking, two major).
 All four accepted; all four verified in the code first.
@@ -271,10 +319,17 @@ noted so a red run on it is not mistaken for this lane's doing.*
   *Unknown. `killed = true` on a failed `SIGKILL` is clearly wrong as
   bookkeeping; what should replace it is a policy question, not an
   obvious fix.*
-- **Q#RL3** — How does a background tick report anything? *The ledger
-  emits no events and has no status channel. `pmacs.error` is defined
-  only by a test stub and is dead at 15 call sites, so it is not the
-  answer. This is the lane's real design question.*
+- **Q#RL3** — How does a background tick report anything? **ANSWERED at
+  revision 4: it cannot, today.** `ProcessEvent` is keyed by
+  `ProcessId`; the ledger is keyed by pgid and is deliberately
+  independent of managed records, so in the leader-exited-survivor case
+  — the one the mechanism exists for — there is no id to attribute to.
+  All three production consumers poll `take_events(id)` per known id
+  (`lua_bindings/mod.rs:8933`, `:10731`, `mcp.rs:361`).
+  `take_all_events` would sidestep the keying but has **no production
+  consumer**; its only call sites are two tests, notwithstanding a doc
+  comment naming a `*processes*` buffer. `pmacs.error` was already dead
+  at 15 sites. Reporting is therefore parked as its own lane (§5).
 - **Q#RL4** — Does the `shutdown()` loop need its own termination
   condition if (a) becomes strict? *Almost certainly (§1.3), and that
   coupling is why the two cannot be changed independently.*
