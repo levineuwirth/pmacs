@@ -478,8 +478,8 @@ pub struct ProcessSupervisor {
     /// observation would bypass the code path under test.
     forced_kill_errno: Option<nix::errno::Errno>,
     /// Test seam for the PTY foreground-group lookup (see
-    /// `force_next_pty_lookup_failure`). Always `None` outside tests.
-    forced_pty_lookup: Option<PtyLookupFailure>,
+    /// `force_next_pty_lookup`). Always `None` outside tests.
+    forced_pty_lookup: Option<Result<i32, PtyLookupFailure>>,
 }
 
 /// One armed group in the reap ledger.
@@ -881,7 +881,7 @@ struct SignalTarget {
 fn signal_target(
     proc: &ManagedProcess,
     pid: u32,
-    forced_lookup: Option<PtyLookupFailure>,
+    forced_lookup: Option<Result<i32, PtyLookupFailure>>,
 ) -> Result<SignalTarget, String> {
     if let Some(runtime) = proc.runtime.as_ref()
         && let ChildHandle::Pty {
@@ -895,7 +895,7 @@ fn signal_target(
         // produced a bare `LeaderPid`, identical to a pipe child that
         // never had a terminal at all.
         let lookup = match forced_lookup {
-            Some(failure) => Err(failure),
+            Some(outcome) => outcome,
             None => pty_foreground_group(master.as_ref()),
         };
         return match lookup {
@@ -1151,16 +1151,26 @@ impl ProcessSupervisor {
     /// Test seam for the PTY foreground-group lookup, on the same terms
     /// as [`Self::force_next_kill_errno`] and for the same reason.
     ///
-    /// The three non-success arms — no master fd, a failed duplicate, a
-    /// failed `tcgetpgrp` — cannot be produced on demand from a healthy
-    /// PTY: they need an exhausted descriptor table or a master that has
-    /// stopped being a terminal. Injecting only the *lookup result*
-    /// leaves the branch itself, the fallback target choice, the leader
-    /// observation against the real child, and the report construction
-    /// all running as production code. Consumed by one call.
+    /// Injects either outcome. The failure arms — no master fd, a failed
+    /// duplicate, a failed `tcgetpgrp` — cannot be produced on demand
+    /// from a healthy PTY: they need an exhausted descriptor table or a
+    /// master that has stopped being a terminal.
+    ///
+    /// The **success** arm exists because a genuinely divergent
+    /// foreground group is not portable. `bash -m` produces one on
+    /// Linux and **does not on macOS**, where the terminal stays with
+    /// the leader for the whole wait (observed in CI on both macOS
+    /// legs). Injecting the group keeps the divergent case pinned
+    /// everywhere; `job_control_really_diverges_the_foreground_group`
+    /// corroborates it against a real shell where the platform allows.
+    ///
+    /// Either way the injection covers only the *lookup result*: the
+    /// branch, the target choice, the leader observation against the
+    /// real child, and the report construction all run as production
+    /// code. Consumed by one call.
     #[cfg(test)]
-    fn force_next_pty_lookup_failure(&mut self, failure: PtyLookupFailure) {
-        self.forced_pty_lookup = Some(failure);
+    fn force_next_pty_lookup(&mut self, outcome: Result<i32, PtyLookupFailure>) {
+        self.forced_pty_lookup = Some(outcome);
     }
 
     /// Override the SIGTERM-to-SIGKILL grace window. Test helper.
@@ -2706,50 +2716,46 @@ mod tests {
 
     /// Q#DC1 / acceptance 1 — a group-directed failure names the target,
     /// the branch that chose it, the expected group, the errno, and the
-    /// leader's own state, as five separate facts **that are not the same
-    /// fact repeated**.
+    /// leader's own state, as facts **that are not the same fact
+    /// repeated**.
     ///
-    /// The pre-Stage-B version of this test spawned `/bin/sleep` on a PTY
-    /// and asserted the same pid three times, conceding in its own
-    /// comment that the values "are asserted to agree only because
-    /// nothing has moved the terminal". An implementation that ignored
-    /// `tcgetpgrp` entirely and substituted `leader_pid` passed it. Since
-    /// the whole premise of the diagnostic is that these two entities can
-    /// diverge, that test pinned the substitution as acceptable.
+    /// The pre-Stage-B version spawned `/bin/sleep` on a PTY and asserted
+    /// the same pid three times, conceding in its own comment that the
+    /// values "are asserted to agree only because nothing has moved the
+    /// terminal". An implementation that ignored `tcgetpgrp` and
+    /// substituted `leader_pid` passed it — so it pinned the substitution
+    /// as acceptable.
     ///
-    /// This version drives job control so the terminal genuinely belongs
-    /// to a different process group, and asserts the two values **differ**
-    /// as well as asserting each exactly.
+    /// **The foreground group is injected, not produced by a shell.**
+    /// Framing Bet 1 wagered that a real job-control fixture would be
+    /// deterministic in CI; it is not. `bash -m` diverges reliably on
+    /// Linux and never on macOS, where CI observed the terminal stay with
+    /// the leader for a full 10s wait on both legs. The framing's stated
+    /// fallback is this: pin the divergence at the `signal_target` level
+    /// with an injected foreground group, and **say plainly that it is
+    /// weaker** than a real one.
+    ///
+    /// What it still proves: the target is read from the *lookup* rather
+    /// than substituted from the leader, because the two values differ
+    /// here and the assertion names both. What it no longer proves on its
+    /// own: that a real shell ever produces that divergence —
+    /// `job_control_really_diverges_the_foreground_group` carries that,
+    /// on the platforms where it is real.
     #[test]
     fn a_group_directed_kill_failure_reports_target_and_leader_separately() {
-        // Guard on the exact path the fixture spawns, not on `which bash`.
-        // The two can disagree — a system with bash on PATH but not at
-        // `/bin/bash` would pass a `which` guard and then fail the spawn,
-        // which is the guard failing to guard the thing it names.
-        if !std::path::Path::new(BASH).exists() {
-            let armed = std::env::var_os("PMACS_REQUIRE_BASH").is_some_and(|v| !v.is_empty());
-            assert!(
-                !armed,
-                "PMACS_REQUIRE_BASH is set but {BASH} does not exist: the \
-                 job-control divergence fixture cannot run"
-            );
-            eprintln!(
-                "{BASH} not present; skipping \
-                 a_group_directed_kill_failure_reports_target_and_leader_separately"
-            );
-            return;
-        }
-
         let mut sup = ProcessSupervisor::new();
-        let (id, pid, fg) = spawn_pty_with_diverged_foreground_group(&mut sup, "diag-group");
+        let (id, pid) = spawn_live_pty(&mut sup, "diag-group");
 
+        // A foreground group that is deliberately NOT the leader.
         let leader_i32 = i32::try_from(pid).expect("pid fits i32");
+        let fg = leader_i32 + 1;
         assert_ne!(
             fg, leader_i32,
-            "the fixture must make the foreground group differ from the leader; \
-             equal values would let a leader_pid substitution pass"
+            "the injected group must differ from the leader or this test \
+             cannot distinguish a substitution"
         );
 
+        sup.force_next_pty_lookup(Ok(fg));
         sup.force_next_kill_errno(nix::errno::Errno::EPERM);
         let err = sup.terminate(id).expect_err("injected EPERM must fail");
 
@@ -2759,21 +2765,71 @@ mod tests {
         );
         assert_eq!(
             err, expected,
-            "the report names the exact group the tty reported, the exact \
+            "the report names the exact group the lookup returned, the exact \
              leader pid, and observes the leader as live"
         );
 
-        // The target came from the terminal, not from the leader. Stated
-        // as its own assertion so a regression that reintroduces the
-        // substitution fails here by name rather than inside a long
-        // string comparison.
+        // Stated separately so a regression that reintroduces the
+        // substitution fails by name rather than inside a long string
+        // comparison.
         assert!(
             err.contains(&format!("target=-{fg} via tcgetpgrp")),
-            "the target must be the terminal's foreground group: {err}"
+            "the target must be the group the lookup returned: {err}"
         );
         assert!(
             !err.contains(&format!("target=-{pid} via tcgetpgrp")),
             "the target must NOT be the leader pid: {err}"
+        );
+
+        let _ = sup.signal(id, Signal::SIGKILL);
+    }
+
+    /// Corroboration for the injected divergence above: a **real** shell
+    /// under job control does hand the terminal to a different process
+    /// group, and the production lookup reads it.
+    ///
+    /// Linux-only by arming. macOS is not a skip-because-untested: CI
+    /// observed `bash -m` there keep the terminal on the leader for the
+    /// entire bounded wait, on both legs, so the precondition this test
+    /// needs genuinely does not hold on that platform. Running it there
+    /// would assert a false claim about macOS rather than find a bug.
+    #[test]
+    fn job_control_really_diverges_the_foreground_group() {
+        if !std::path::Path::new(BASH).exists() {
+            let armed = std::env::var_os("PMACS_REQUIRE_BASH").is_some_and(|v| !v.is_empty());
+            assert!(
+                !armed,
+                "PMACS_REQUIRE_BASH is set but {BASH} does not exist: the \
+                 job-control divergence fixture cannot run"
+            );
+            eprintln!(
+                "{BASH} not present; skipping job_control_really_diverges_the_foreground_group"
+            );
+            return;
+        }
+        if !cfg!(target_os = "linux") {
+            eprintln!(
+                "job control does not hand over the terminal for a \
+                 non-interactive `bash -m` on this platform; skipping"
+            );
+            return;
+        }
+
+        let mut sup = ProcessSupervisor::new();
+        let (id, pid, fg) = spawn_pty_with_diverged_foreground_group(&mut sup, "diag-jobctl");
+
+        let leader_i32 = i32::try_from(pid).expect("pid fits i32");
+        assert_ne!(
+            fg, leader_i32,
+            "a real job-control shell must move the terminal off the leader"
+        );
+
+        // And the production lookup — not the fixture's own polling —
+        // reports that same group.
+        let observed = foreground_pgid(&sup, id).expect("PTY reports a foreground group");
+        assert_eq!(
+            observed, fg,
+            "the production accessor must see what the fixture waited for"
         );
 
         let _ = sup.signal(id, Signal::SIGKILL);
@@ -2811,7 +2867,7 @@ mod tests {
             let mut sup = ProcessSupervisor::new();
             let (id, pid) = spawn_live_pty(&mut sup, "diag-pty-fallback");
 
-            sup.force_next_pty_lookup_failure(failure);
+            sup.force_next_pty_lookup(Err(failure));
             sup.force_next_kill_errno(nix::errno::Errno::EPERM);
             let err = sup.terminate(id).expect_err("injected EPERM must fail");
 

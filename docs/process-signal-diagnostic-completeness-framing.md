@@ -1,6 +1,6 @@
 # Framing — make the signal diagnostic discriminating (evidence collection)
 
-**Revision 4.** Status: awaiting review round 4. Lane:
+**Revision 5.** Status: implemented; PR open. Lane:
 `process-signal-diagnostic-completeness`, worktree
 `../pmacs-signal-identity`, based on `githubsucks/main` @ `4cd4a7b`
 (re-measure at branch time; this is a reading, not a constant).
@@ -16,6 +16,33 @@ escalation path is safe.
 gets signalled, no disposition change.** Everything behavioural is in §5.
 
 ## Revision history
+
+**Revision 4 → 5**, after implementation. **Bet 1 was falsified by CI**,
+and the framing's own fallback is what shipped.
+
+- **`bash -m` does not diverge on macOS.** Both macOS legs reported
+  `job control never moved the terminal off the leader (leader=8542,
+  foreground groups observed: [8542])` — the terminal stayed with the
+  leader for the entire 10s bounded wait. It diverges reliably on Linux
+  (20/20 locally, green on both ubuntu legs), so this is a platform
+  difference, not a flake, and rerunning would have been wrong.
+- **The stated fallback was taken**: the divergent case is now pinned by
+  **injecting** the foreground group at the `signal_target` seam, and
+  §3 Bet 1 records it as *weaker* than a real shell rather than
+  quietly equivalent. Verified still discriminating — the
+  `leader_pid`-substitution mutation fails it (`target=-1707909` against
+  an expected `-1707910`).
+- **The real fixture is retained as corroboration**, Linux-only, under
+  `job_control_really_diverges_the_foreground_group`. It is skipped on
+  macOS by platform check rather than by arming, because the
+  precondition genuinely does not hold there; running it would assert a
+  false claim about macOS instead of finding a bug.
+- **`PMACS_REQUIRE_BASH` moves to Linux-only.** Rev 4's reasoning for
+  arming it on both platforms — "macOS is where the failures happen, so
+  arming it Linux-only leaves it dark where it matters" — was correct
+  about the *diagnostic* and wrong about *this test*, which cannot
+  produce its precondition on macOS at all. The diagnostic's macOS
+  coverage comes from the injected pin, which runs everywhere.
 
 **Revision 3 → 4**, after review round 3 (three blocking, one major).
 All four accepted and checked against the exact APIs, process model, and
@@ -366,8 +393,17 @@ assertion (`:2517`) is one of the four sites acceptance 5 must update.
   - *Falsified if* the fixture cannot be made deterministic in CI. Then
     the lane falls back to pinning divergence at the `signal_target` unit
     level with an injected foreground group, and labels that as weaker.
-  - Without this the diagnostic remains unverified in the only case it
-    exists for.
+  - **OUTCOME: falsified on macOS.** Both macOS legs observed the
+    terminal stay with the leader for the full bounded wait; Linux
+    diverges reliably. The fallback shipped: the divergent case is
+    pinned by injection everywhere, and the real shell corroborates it
+    on Linux only.
+  - **The injected pin is weaker, and here is exactly how.** It proves
+    the target is read from the *lookup* rather than substituted from
+    the leader — the substitution mutation still fails it. It does
+    **not**, by itself, prove any real shell produces that divergence;
+    `job_control_really_diverges_the_foreground_group` carries that, on
+    one platform.
 
 - **Bet 2 — the PTY fallback is reachable and distinguishable.** A test
   drives all three non-success arms: a duplicate errno, a `tcgetpgrp`
