@@ -477,6 +477,9 @@ pub struct ProcessSupervisor {
     /// observation still runs against the real child handle; a stubbed
     /// observation would bypass the code path under test.
     forced_kill_errno: Option<nix::errno::Errno>,
+    /// Test seam for the PTY foreground-group lookup (see
+    /// `force_next_pty_lookup`). Always `None` outside tests.
+    forced_pty_lookup: Option<Result<i32, PtyLookupFailure>>,
 }
 
 /// One armed group in the reap ledger.
@@ -714,10 +717,18 @@ impl ChildHandle {
 /// Which branch of [`signal_target`] chose the target (Q#PD1).
 ///
 /// Recorded on failure because the branches differ in what a failing
-/// `kill` can possibly mean: only [`Self::LeaderPid`] aims at the
-/// spawned child itself. The other two aim at a *group*, which for a
-/// PTY is read from the terminal and can belong to something the
-/// supervisor never spawned.
+/// `kill` can possibly mean. Two of the four aim at the spawned child
+/// itself — [`Self::LeaderPid`] for a pipe child with no group, and
+/// [`Self::PtyForegroundFallback`] for a PTY whose terminal named no
+/// group. The other two aim at a *group*:
+/// [`Self::SpawnGroup`] at one computed from the spawn-time `pgid ==
+/// pid` assumption, and [`Self::ForegroundGroup`] at one read from the
+/// terminal, which can belong to something the supervisor never spawned.
+///
+/// The pid-versus-group split is the classification that matters here,
+/// and it does **not** line up with the PTY-versus-pipe split — which is
+/// exactly why the fallback needed its own variant instead of reusing
+/// `LeaderPid`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TargetSource {
     /// The tty's current foreground process group, read at signal
@@ -726,22 +737,143 @@ enum TargetSource {
     ForegroundGroup,
     /// A `group = true` pipe child leading its own process group.
     SpawnGroup,
-    /// The child's own pid.
+    /// The child's own pid, for a pipe child that leads no group.
     LeaderPid,
+    /// A **PTY** child whose foreground-group lookup did not yield a
+    /// group, so the target fell back to the leader pid.
+    ///
+    /// Distinct from [`Self::LeaderPid`] on purpose. Before this
+    /// variant existed both rendered "leader-pid", so a PTY whose
+    /// terminal query failed was indistinguishable in the report from
+    /// an ordinary pipe child that never had a terminal — two very
+    /// different situations reading as one.
+    PtyForegroundFallback(PtyLookupFailure),
+}
+
+/// Why a PTY's foreground-group lookup produced no group.
+///
+/// Each arm is a different fact and none is forged into another: a
+/// missing fd is not an errno, and a failure to *duplicate* the master
+/// is not a failure to *query* the terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PtyLookupFailure {
+    /// The master reported no file descriptor to query.
+    NoMasterFd,
+    /// Duplicating the master fd failed, so the terminal was never
+    /// queried at all.
+    Duplicate(nix::errno::Errno),
+    /// `tcgetpgrp` itself failed on a successfully duplicated fd.
+    Query(nix::errno::Errno),
+    /// The terminal answered, but with a non-positive group id, which
+    /// names no group.
+    NonPositive(i32),
+}
+
+impl PtyLookupFailure {
+    fn render(self) -> String {
+        match self {
+            Self::NoMasterFd => "no-master-fd".to_owned(),
+            Self::Duplicate(e) => format!("duplicate-master-fd: {e}"),
+            Self::Query(e) => format!("tcgetpgrp: {e}"),
+            Self::NonPositive(v) => format!("tcgetpgrp-non-positive: {v}"),
+        }
+    }
 }
 
 impl TargetSource {
-    fn as_str(self) -> &'static str {
+    fn render(self) -> String {
         match self {
-            Self::ForegroundGroup => "tcgetpgrp",
-            Self::SpawnGroup => "group",
-            Self::LeaderPid => "leader-pid",
+            Self::ForegroundGroup => "tcgetpgrp".to_owned(),
+            Self::SpawnGroup => "group".to_owned(),
+            Self::LeaderPid => "leader-pid".to_owned(),
+            Self::PtyForegroundFallback(why) => {
+                format!("pty-leader-fallback({})", why.render())
+            }
         }
     }
 
     /// Whether the target is a process group rather than one process.
     fn is_group(self) -> bool {
         matches!(self, Self::ForegroundGroup | Self::SpawnGroup)
+    }
+}
+
+/// A lifetime-tied view of a `MasterPty`'s file descriptor.
+///
+/// `MasterPty` exposes only `Option<RawFd>`, and every std route from a
+/// raw fd to something implementing `AsFd` — `BorrowedFd::borrow_raw`,
+/// `OwnedFd::from_raw_fd`, `File::from_raw_fd` — is `unsafe`, which this
+/// crate forbids. `filedescriptor::OwnedHandle::dup` accepts any
+/// `AsRawFd` through a safe blanket impl and hands back an owned handle
+/// that *is* `AsFd`, so implementing this one safe trait is the whole
+/// bridge.
+///
+/// The borrow is what makes it sound: the view cannot outlive the master
+/// it read the descriptor from, so the fd cannot have been closed
+/// underneath it.
+struct MasterFdView<'a> {
+    fd: std::os::fd::RawFd,
+    _master: &'a (dyn portable_pty::MasterPty + Send),
+}
+
+impl std::os::fd::AsRawFd for MasterFdView<'_> {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.fd
+    }
+}
+
+/// Recover the OS errno from a `filedescriptor` error.
+///
+/// Its error type is an enum of thiserror variants, each carrying a
+/// `std::io::Error` as a `#[source]` rather than exposing
+/// `raw_os_error` itself. Walking the source chain and downcasting keeps
+/// every variant working, including ones added later, instead of
+/// matching the one arm that exists today.
+///
+/// Returns `UnknownErrno` when the chain carries no OS error, rather
+/// than inventing a plausible one — a forged errno in a diagnostic is
+/// worse than an honest absence.
+fn os_errno_of(err: &filedescriptor::Error) -> nix::errno::Errno {
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(e) = current {
+        if let Some(io) = e.downcast_ref::<std::io::Error>()
+            && let Some(code) = io.raw_os_error()
+        {
+            return nix::errno::Errno::from_raw(code);
+        }
+        current = e.source();
+    }
+    nix::errno::Errno::UnknownErrno
+}
+
+/// Read the terminal's foreground process group, keeping the errno.
+///
+/// `portable_pty::MasterPty::process_group_leader` collapses every
+/// failure into `None`, so pmacs could not tell "this tty has no
+/// foreground group" from "the query failed and here is why". This does
+/// the query itself and returns the reason on every non-success path.
+fn pty_foreground_group(
+    master: &(dyn portable_pty::MasterPty + Send),
+) -> Result<i32, PtyLookupFailure> {
+    let Some(fd) = master.as_raw_fd() else {
+        return Err(PtyLookupFailure::NoMasterFd);
+    };
+    let view = MasterFdView {
+        fd,
+        _master: master,
+    };
+    let owned = filedescriptor::OwnedHandle::dup(&view)
+        .map_err(|e| PtyLookupFailure::Duplicate(os_errno_of(&e)))?;
+    match nix::unistd::tcgetpgrp(&owned) {
+        Ok(pgrp) => {
+            let raw = pgrp.as_raw();
+            if raw > 0 {
+                Ok(raw)
+            } else {
+                Err(PtyLookupFailure::NonPositive(raw))
+            }
+        }
+        Err(e) => Err(PtyLookupFailure::Query(e)),
     }
 }
 
@@ -754,18 +886,36 @@ struct SignalTarget {
     source: TargetSource,
 }
 
-fn signal_target(proc: &ManagedProcess, pid: u32) -> Result<SignalTarget, String> {
+fn signal_target(
+    proc: &ManagedProcess,
+    pid: u32,
+    forced_lookup: Option<Result<i32, PtyLookupFailure>>,
+) -> Result<SignalTarget, String> {
     if let Some(runtime) = proc.runtime.as_ref()
         && let ChildHandle::Pty {
             _master: master, ..
         } = &runtime.child
-        && let Some(pgrp) = master.process_group_leader()
-        && pgrp > 0
     {
-        return Ok(SignalTarget {
-            pid: Pid::from_raw(-pgrp),
-            source: TargetSource::ForegroundGroup,
-        });
+        // A PTY child is always group-directed when the terminal names a
+        // foreground group. When it does not, the target falls back to
+        // the leader — and *why* it fell back is carried into the source
+        // so the report can say it. Previously every one of these paths
+        // produced a bare `LeaderPid`, identical to a pipe child that
+        // never had a terminal at all.
+        let lookup = match forced_lookup {
+            Some(outcome) => outcome,
+            None => pty_foreground_group(master.as_ref()),
+        };
+        return match lookup {
+            Ok(pgrp) => Ok(SignalTarget {
+                pid: Pid::from_raw(-pgrp),
+                source: TargetSource::ForegroundGroup,
+            }),
+            Err(why) => Ok(SignalTarget {
+                pid: Pid::from_raw(i32::try_from(pid).map_err(|e| e.to_string())?),
+                source: TargetSource::PtyForegroundFallback(why),
+            }),
+        };
     }
     // `group = true` pipe children lead a fresh process group
     // (`process_group(0)` at spawn ⇒ pgid == pid), so fatal signals
@@ -824,14 +974,48 @@ fn observe_leader(proc: &mut ManagedProcess) -> LeaderObservation {
     }
 }
 
-/// Render a failing `kill` as the five facts of Q#PD1. The disposition
-/// is unchanged (Q#PD2) — this only replaces a message that said
-/// nothing but the errno.
+/// The leader's process group as the kernel reports it, for a target
+/// that was *computed* from the spawn-time assumption `pgid == pid`.
+///
+/// `expected_group` is that assumption restated — it is `-leader_pid`,
+/// and on the `SpawnGroup` path the target is `-leader_pid` too, so the
+/// two agreeing is arithmetic rather than evidence. This is the only
+/// field in the report that can disagree with the input, which is what
+/// makes it worth printing.
+///
+/// **It does not establish identity** (framing §1.5). It is read before
+/// the `kill`, in the same read-then-act window, and a number cannot
+/// distinguish the original group from a recycled one. No portable
+/// mechanism can: `pidfd` closes pid reuse for a process, not a group,
+/// and macOS has none at all. This records an observation; it settles
+/// nothing.
+fn measured_group_of(leader_pid: u32) -> String {
+    let Ok(raw) = i32::try_from(leader_pid) else {
+        return ", measured_group=unobservable(pid out of range)".to_owned();
+    };
+    match nix::unistd::getpgid(Some(Pid::from_raw(raw))) {
+        Ok(pgid) => format!(", measured_group=-{}", pgid.as_raw()),
+        Err(e) => format!(", measured_group=unobservable({e})"),
+    }
+}
+
+/// Render a failing `kill` as the facts of Q#PD1. The disposition is
+/// unchanged (Q#PD2) — this only replaces a message that said nothing
+/// but the errno.
+///
+/// The signal is named because it could not be recovered otherwise: a
+/// failed `SIGUSR1` and a failed `SIGTERM` were previously identical
+/// text. Note this is a *reporting* gap only — every failed `kill`
+/// returns before the fatal-signal branch, so failed signals are
+/// disposition-identical whatever they are. The disposition difference
+/// is real only for calls that succeed.
 fn signal_failure_report(
     target: SignalTarget,
     leader_pid: u32,
+    signal: Signal,
     errno: nix::errno::Errno,
     leader: &LeaderObservation,
+    measured: Option<&str>,
 ) -> String {
     let expected = if target.source.is_group() {
         match i32::try_from(leader_pid) {
@@ -841,10 +1025,15 @@ fn signal_failure_report(
     } else {
         String::new()
     };
+    // Supplied by the caller, which samples it BEFORE the `kill`. Doing
+    // it here would describe the group as it stands *after* the failure
+    // and after `observe_leader`, which is post-hoc state presented as
+    // evidence about the attempted target.
+    let measured = measured.unwrap_or("");
     format!(
-        "kill: {errno} (target={} via {}, leader_pid={leader_pid}{expected}, leader={})",
+        "kill: {errno} (signal={signal:?}, target={} via {}, leader_pid={leader_pid}{expected}{measured}, leader={})",
         target.pid.as_raw(),
-        target.source.as_str(),
+        target.source.render(),
         leader.render(),
     )
 }
@@ -950,6 +1139,7 @@ impl ProcessSupervisor {
             reap_ledger: HashMap::new(),
             group_term_grace: GROUP_TERM_GRACE,
             forced_kill_errno: None,
+            forced_pty_lookup: None,
         }
     }
 
@@ -961,6 +1151,31 @@ impl ProcessSupervisor {
     #[cfg(test)]
     fn force_next_kill_errno(&mut self, errno: nix::errno::Errno) {
         self.forced_kill_errno = Some(errno);
+    }
+
+    /// Test seam for the PTY foreground-group lookup, on the same terms
+    /// as [`Self::force_next_kill_errno`] and for the same reason.
+    ///
+    /// Injects either outcome. The failure arms — no master fd, a failed
+    /// duplicate, a failed `tcgetpgrp` — cannot be produced on demand
+    /// from a healthy PTY: they need an exhausted descriptor table or a
+    /// master that has stopped being a terminal.
+    ///
+    /// The **success** arm exists because a genuinely divergent
+    /// foreground group is not portable. `bash -m` produces one on
+    /// Linux and **does not on macOS**, where the terminal stays with
+    /// the leader for the whole wait (observed in CI on both macOS
+    /// legs). Injecting the group keeps the divergent case pinned
+    /// everywhere; `job_control_really_diverges_the_foreground_group`
+    /// corroborates it against a real shell where the platform allows.
+    ///
+    /// Either way the injection covers only the *lookup result*: the
+    /// branch, the target choice, the leader observation against the
+    /// real child, and the report construction all run as production
+    /// code. Consumed by one call.
+    #[cfg(test)]
+    fn force_next_pty_lookup(&mut self, outcome: Result<i32, PtyLookupFailure>) {
+        self.forced_pty_lookup = Some(outcome);
     }
 
     /// Override the SIGTERM-to-SIGKILL grace window. Test helper.
@@ -1080,7 +1295,15 @@ impl ProcessSupervisor {
         else {
             return Err(format!("process {id} is not running"));
         };
-        let target = signal_target(proc, pid)?;
+        let forced_lookup = self.forced_pty_lookup.take();
+        let target = signal_target(proc, pid, forced_lookup)?;
+        // Sample the real group BEFORE signalling. Only the spawn-group
+        // path computes its target from the `pgid == pid` assumption, so
+        // it is the only one a measurement can contradict; a PTY target
+        // came from the terminal and a leader-directed target is not a
+        // group at all.
+        let measured =
+            matches!(target.source, TargetSource::SpawnGroup).then(|| measured_group_of(pid));
         // Q#PD4: the seam injects the KILL attempt's result only —
         // never the observation below — so target selection, the real
         // `ChildHandle::try_wait` against the real child, and the error
@@ -1094,7 +1317,14 @@ impl ProcessSupervisor {
             // disposition is unchanged — this still returns `Err`,
             // with no state transition and no ledger arming.
             let leader = observe_leader(proc);
-            return Err(signal_failure_report(target, pid, errno, &leader));
+            return Err(signal_failure_report(
+                target,
+                pid,
+                signal,
+                errno,
+                &leader,
+                measured.as_deref(),
+            ));
         }
         if matches!(signal, Signal::SIGTERM | Signal::SIGKILL | Signal::SIGHUP) {
             proc.state = ProcessState::Exiting {
@@ -1243,9 +1473,24 @@ impl ProcessSupervisor {
         let now = Instant::now();
         self.reap_ledger.retain(|pgid, entry| {
             // ESRCH: no such group — done. Any other probe error is
-            // also treated as "nothing left we can reach" (EPERM
-            // cannot happen for our own children) so the ledger
-            // cannot grow without bound.
+            // also treated as "nothing left we can reach", so the
+            // ledger cannot grow without bound.
+            //
+            // **That is a bounded-growth policy, not a claim that the
+            // group is gone.** This comment previously justified it with
+            // "EPERM cannot happen for our own children". That reasoning
+            // does not hold: the probe targets a *group*, and owning the
+            // spawned child says nothing about a group unless the child
+            // is still a member of it — which nothing here measures. A
+            // group-directed EPERM against a live leader has since been
+            // observed in CI (macOS, PR #191, run 30553376486), via an
+            // explicit signal rather than this probe.
+            //
+            // So this arm can silently cancel an escalation, and the
+            // `SIGKILL` below can fail while the entry is marked killed.
+            // Both are known and deliberately unchanged here: the
+            // diagnostic lane that found them does not alter
+            // disposition. Fixing it is its own lane.
             if nix::sys::signal::kill(Pid::from_raw(-*pgid), None).is_err() {
                 return false;
             }
@@ -2304,18 +2549,6 @@ mod tests {
     /// `/bin/sleep` directly rather than through a shell: a shell may
     /// place the command in a different foreground process group, and
     /// these tests assert the exact target the tty reports.
-    fn spawn_live_pty(sup: &mut ProcessSupervisor, name: &str) -> (ProcessId, u32) {
-        let mut spec = ProcessSpec::new(name, "/bin/sleep");
-        spec.args = vec!["30".into()];
-        spec.mode = ProcessMode::Pty {
-            rows: 24,
-            cols: 80,
-            mode: TerminalMode::Canonical,
-        };
-        let id = sup.spawn(spec).expect("spawn");
-        (id, spawn_started_pid(sup, id))
-    }
-
     /// The OS pid straight from the supervisor's own record, WITHOUT
     /// ticking.
     ///
@@ -2384,37 +2617,490 @@ mod tests {
         }
     }
 
-    /// Q#PD1 acceptance 1 — a group-directed failure names the target,
-    /// the branch that chose it, the expected group, the errno, and the
-    /// leader's own state, as five separate facts.
+    /// The job-control shell the divergence fixture drives. Named once so
+    /// the availability guard and the spawn cannot drift apart.
+    const BASH: &str = "/bin/bash";
+
+    /// A plain PTY child, for tests that care about the PTY *branch*
+    /// rather than about job control.
+    fn spawn_live_pty(sup: &mut ProcessSupervisor, name: &str) -> (ProcessId, u32) {
+        let mut spec = ProcessSpec::new(name, "/bin/sleep");
+        spec.args = vec!["30".into()];
+        spec.mode = ProcessMode::Pty {
+            rows: 24,
+            cols: 80,
+            mode: TerminalMode::Canonical,
+        };
+        let id = sup.spawn(spec).expect("spawn");
+        (id, spawn_started_pid(sup, id))
+    }
+
+    /// The tty's current foreground process group, read through the
+    /// **production** lookup — not `portable_pty`'s
+    /// `process_group_leader`, which this crate no longer uses on the
+    /// signal path. Reading it any other way would let
+    /// `pty_foreground_group` fall back on every call while every test
+    /// that depends on it stayed green. `None` for a pipe
+    /// generation, or when the terminal reports no foreground group.
+    fn foreground_pgid(sup: &ProcessSupervisor, id: ProcessId) -> Option<i32> {
+        let runtime = sup.processes.get(&id)?.runtime.as_ref()?;
+        match &runtime.child {
+            ChildHandle::Pty {
+                _master: master, ..
+            } => pty_foreground_group(master.as_ref()).ok(),
+            ChildHandle::Pipes(_) => None,
+        }
+    }
+
+    /// Fixture for Q#DC1: a PTY child whose terminal foreground group is
+    /// genuinely **not** the spawned leader.
     ///
-    /// Asserted as an exact message against the pid the kernel actually
-    /// assigned, so a hardcoded target could not satisfy it. The leader
-    /// field is the one that matters: for a PTY the signal goes to the
-    /// terminal's foreground group, a different entity from the spawned
-    /// child whenever job control has moved the terminal. Three rejected
-    /// designs for this code collapsed the two; the report keeps them
-    /// apart, and here they are asserted to agree only because nothing
-    /// has moved the terminal.
+    /// `bash -m` enables job control, so it runs the script's command in
+    /// a fresh process group and hands that group the terminal. The
+    /// trailing `; :` matters — with a single simple command `bash -c`
+    /// execs in place, which would leave the leader owning the terminal
+    /// and silently restore the very agreement this fixture exists to
+    /// break.
+    ///
+    /// **The wait is load-bearing, not defensive.** The handoff is not
+    /// instantaneous: a probe of this exact fixture observed the
+    /// foreground group as the leader first and only then as the job's
+    /// group. Measuring immediately would pin the non-divergent case and
+    /// the test would assert the opposite of its purpose.
+    ///
+    /// Returns `(id, leader_pid, foreground_pgid)` with the two pids
+    /// known to differ and the foreground group known to hold a live
+    /// member.
+    fn spawn_pty_with_diverged_foreground_group(
+        sup: &mut ProcessSupervisor,
+        name: &str,
+    ) -> (ProcessId, u32, i32) {
+        let mut spec = ProcessSpec::new(name, BASH);
+        spec.args = vec![
+            "--noprofile".into(),
+            "--norc".into(),
+            "-m".into(),
+            "-c".into(),
+            "sleep 30; :".into(),
+        ];
+        spec.mode = ProcessMode::Pty {
+            rows: 24,
+            cols: 80,
+            mode: TerminalMode::Canonical,
+        };
+        let id = sup.spawn(spec).expect("spawn");
+        let leader = spawn_started_pid(sup, id);
+
+        let leader_i32 = i32::try_from(leader).expect("pid fits i32");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut observed: Vec<i32> = Vec::new();
+        let mut diverged = None;
+        while Instant::now() < deadline {
+            if let Some(fg) = foreground_pgid(sup, id) {
+                if observed.last() != Some(&fg) {
+                    observed.push(fg);
+                }
+                if fg > 0 && fg != leader_i32 {
+                    diverged = Some(fg);
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        let fg = diverged.unwrap_or_else(|| {
+            panic!(
+                "job control never moved the terminal off the leader \
+                 (leader={leader}, foreground groups observed: {observed:?})"
+            )
+        });
+
+        // Positive control: a divergent number proves nothing if the
+        // group is already dead. The signal target must be a group that
+        // could actually receive a signal.
+        nix::sys::signal::kill(Pid::from_raw(-fg), None).unwrap_or_else(|e| {
+            panic!("foreground group {fg} has no live member ({e}); divergence is vacuous")
+        });
+
+        (id, leader, fg)
+    }
+
+    /// Q#DC1 / acceptance 1 — a group-directed failure names the target,
+    /// the branch that chose it, the expected group, the errno, and the
+    /// leader's own state, as facts **that are not the same fact
+    /// repeated**.
+    ///
+    /// The pre-Stage-B version spawned `/bin/sleep` on a PTY and asserted
+    /// the same pid three times, conceding in its own comment that the
+    /// values "are asserted to agree only because nothing has moved the
+    /// terminal". An implementation that ignored `tcgetpgrp` and
+    /// substituted `leader_pid` passed it — so it pinned the substitution
+    /// as acceptable.
+    ///
+    /// **The foreground group is injected, not produced by a shell.**
+    /// Framing Bet 1 wagered that a real job-control fixture would be
+    /// deterministic in CI; it is not. `bash -m` diverges reliably on
+    /// Linux and never on macOS, where CI observed the terminal stay with
+    /// the leader for a full 10s wait on both legs. The framing's stated
+    /// fallback is this: pin the divergence at the `signal_target` level
+    /// with an injected foreground group, and **say plainly that it is
+    /// weaker** than a real one.
+    ///
+    /// What it still proves: the target is read from the *lookup* rather
+    /// than substituted from the leader, because the two values differ
+    /// here and the assertion names both. What it no longer proves on its
+    /// own: that a real shell ever produces that divergence —
+    /// `job_control_really_diverges_the_foreground_group` carries that,
+    /// on the platforms where it is real.
     #[test]
     fn a_group_directed_kill_failure_reports_target_and_leader_separately() {
         let mut sup = ProcessSupervisor::new();
         let (id, pid) = spawn_live_pty(&mut sup, "diag-group");
 
+        // A foreground group that is deliberately NOT the leader.
+        let leader_i32 = i32::try_from(pid).expect("pid fits i32");
+        let fg = leader_i32 + 1;
+        assert_ne!(
+            fg, leader_i32,
+            "the injected group must differ from the leader or this test \
+             cannot distinguish a substitution"
+        );
+
+        sup.force_next_pty_lookup(Ok(fg));
         sup.force_next_kill_errno(nix::errno::Errno::EPERM);
         let err = sup.terminate(id).expect_err("injected EPERM must fail");
 
         let expected = format!(
-            "kill: {} (target=-{pid} via tcgetpgrp, leader_pid={pid}, expected_group=-{pid}, leader=live)",
+            "kill: {} (signal=SIGTERM, target=-{fg} via tcgetpgrp, leader_pid={pid}, expected_group=-{pid}, leader=live)",
             nix::errno::Errno::EPERM
         );
         assert_eq!(
             err, expected,
-            "the report names the exact target the tty reported, the exact \
+            "the report names the exact group the lookup returned, the exact \
              leader pid, and observes the leader as live"
         );
 
+        // Stated separately so a regression that reintroduces the
+        // substitution fails by name rather than inside a long string
+        // comparison.
+        assert!(
+            err.contains(&format!("target=-{fg} via tcgetpgrp")),
+            "the target must be the group the lookup returned: {err}"
+        );
+        assert!(
+            !err.contains(&format!("target=-{pid} via tcgetpgrp")),
+            "the target must NOT be the leader pid: {err}"
+        );
+
         let _ = sup.signal(id, Signal::SIGKILL);
+    }
+
+    /// Corroboration for the injected divergence above: a **real** shell
+    /// under job control does hand the terminal to a different process
+    /// group, and the production lookup reads it.
+    ///
+    /// Linux-only by arming. macOS is not a skip-because-untested: CI
+    /// observed `bash -m` there keep the terminal on the leader for the
+    /// entire bounded wait, on both legs, so the precondition this test
+    /// needs genuinely does not hold on that platform. Running it there
+    /// would assert a false claim about macOS rather than find a bug.
+    #[test]
+    fn job_control_really_diverges_the_foreground_group() {
+        if !std::path::Path::new(BASH).exists() {
+            let armed = std::env::var_os("PMACS_REQUIRE_BASH").is_some_and(|v| !v.is_empty());
+            assert!(
+                !armed,
+                "PMACS_REQUIRE_BASH is set but {BASH} does not exist: the \
+                 job-control divergence fixture cannot run"
+            );
+            eprintln!(
+                "{BASH} not present; skipping job_control_really_diverges_the_foreground_group"
+            );
+            return;
+        }
+        if !cfg!(target_os = "linux") {
+            eprintln!(
+                "job control does not hand over the terminal for a \
+                 non-interactive `bash -m` on this platform; skipping"
+            );
+            return;
+        }
+
+        let mut sup = ProcessSupervisor::new();
+        let (id, pid, fg) = spawn_pty_with_diverged_foreground_group(&mut sup, "diag-jobctl");
+
+        let leader_i32 = i32::try_from(pid).expect("pid fits i32");
+        assert_ne!(
+            fg, leader_i32,
+            "a real job-control shell must move the terminal off the leader"
+        );
+
+        // Force ONLY the kill failure. The lookup is left alone, so
+        // `pty_foreground_group` runs for real against a real terminal
+        // and the report below is built from what it returned.
+        //
+        // This is the assertion that makes the injected pin meaningful:
+        // without it, `pty_foreground_group` could fall back on every
+        // call and every other test here would still pass, because they
+        // all supply the group themselves.
+        sup.force_next_kill_errno(nix::errno::Errno::EPERM);
+        let err = sup.terminate(id).expect_err("injected EPERM must fail");
+
+        let expected = format!(
+            "kill: {} (signal=SIGTERM, target=-{fg} via tcgetpgrp, leader_pid={pid}, expected_group=-{pid}, leader=live)",
+            nix::errno::Errno::EPERM
+        );
+        assert_eq!(
+            err, expected,
+            "the production lookup must report the real foreground group"
+        );
+        assert!(
+            !err.contains("pty-leader-fallback"),
+            "a healthy terminal must not take the fallback branch: {err}"
+        );
+
+        let _ = sup.signal(id, Signal::SIGKILL);
+    }
+
+    /// Q#DC2 / acceptance 2 — a PTY whose foreground-group lookup fails
+    /// is distinguishable from a pipe child that never had a terminal.
+    ///
+    /// Before this, both rendered "leader-pid". The PTY fallback was
+    /// therefore invisible: a terminal query that failed, and a process
+    /// with no terminal at all, produced the same word. Each arm now
+    /// names its own stage, and `portable-pty`'s
+    /// `process_group_leader` — which collapses every failure into
+    /// `None` before pmacs can see it — is bypassed so the errno
+    /// survives.
+    #[test]
+    fn a_pty_foreground_lookup_failure_names_its_stage() {
+        let arms = [
+            (PtyLookupFailure::NoMasterFd, "no-master-fd".to_owned()),
+            (
+                PtyLookupFailure::Duplicate(nix::errno::Errno::EMFILE),
+                format!("duplicate-master-fd: {}", nix::errno::Errno::EMFILE),
+            ),
+            (
+                PtyLookupFailure::Query(nix::errno::Errno::ENOTTY),
+                format!("tcgetpgrp: {}", nix::errno::Errno::ENOTTY),
+            ),
+            (
+                PtyLookupFailure::NonPositive(0),
+                "tcgetpgrp-non-positive: 0".to_owned(),
+            ),
+        ];
+
+        for (failure, rendered) in arms {
+            let mut sup = ProcessSupervisor::new();
+            let (id, pid) = spawn_live_pty(&mut sup, "diag-pty-fallback");
+
+            sup.force_next_pty_lookup(Err(failure));
+            sup.force_next_kill_errno(nix::errno::Errno::EPERM);
+            let err = sup.terminate(id).expect_err("injected EPERM must fail");
+
+            // The target falls back to the leader — positive, not a
+            // negated group — and the source says why.
+            let expected = format!(
+                "kill: {} (signal=SIGTERM, target={pid} via pty-leader-fallback({rendered}), leader_pid={pid}, leader=live)",
+                nix::errno::Errno::EPERM
+            );
+            assert_eq!(err, expected, "arm {failure:?} must name its own stage");
+
+            // And it must NOT read like a pipe child.
+            assert!(
+                !err.contains("via leader-pid,"),
+                "a PTY fallback must not render as a bare pipe leader target: {err}"
+            );
+
+            let _ = sup.signal(id, Signal::SIGKILL);
+        }
+    }
+
+    /// The companion half of acceptance 2: a genuine pipe child still
+    /// renders "leader-pid", so the two really are distinct strings
+    /// rather than both having moved.
+    ///
+    /// Asserted here as well as in the leader-directed test because a
+    /// rename of one side would otherwise pass every test — the pair is
+    /// the point, not either string alone.
+    #[test]
+    fn a_pipe_child_still_renders_a_bare_leader_target() {
+        let mut sup = ProcessSupervisor::new();
+        let mut spec = ProcessSpec::new("diag-pipe-leader", "/bin/sleep");
+        spec.args = vec!["30".into()];
+        let id = sup.spawn(spec).expect("spawn");
+        let pid = spawn_started_pid(&mut sup, id);
+
+        sup.force_next_kill_errno(nix::errno::Errno::EPERM);
+        let err = sup.terminate(id).expect_err("injected EPERM must fail");
+
+        assert!(
+            err.contains(&format!("target={pid} via leader-pid,")),
+            "a pipe child with no group renders the bare leader source: {err}"
+        );
+        assert!(
+            !err.contains("pty-leader-fallback"),
+            "a pipe child never took the PTY branch: {err}"
+        );
+
+        let _ = sup.signal(id, Signal::SIGKILL);
+    }
+
+    /// Q#DC3 / acceptance 3(a) — the report names the signal, so two
+    /// failures that differ only in which signal was sent are no longer
+    /// the same text.
+    ///
+    /// **They differ in text only.** Every failed `kill` returns before
+    /// the fatal-signal branch, so both leave the state and the ledger
+    /// exactly as they were. That is asserted here rather than assumed,
+    /// because revision 2 of the framing claimed the opposite.
+    #[test]
+    fn a_failed_signal_names_which_signal_and_changes_nothing() {
+        let mut reports = Vec::new();
+        for signal in [Signal::SIGTERM, Signal::SIGUSR1] {
+            let mut sup = ProcessSupervisor::new();
+            let mut spec = ProcessSpec::new("diag-signal-name", "/bin/sh");
+            spec.args = vec!["-c".into(), "sleep 30".into()];
+            spec.group = true;
+            let id = sup.spawn(spec).expect("spawn");
+            let pid = spawn_started_pid(&mut sup, id);
+
+            sup.force_next_kill_errno(nix::errno::Errno::EPERM);
+            let err = sup
+                .signal(id, signal)
+                .expect_err("injected EPERM must fail");
+
+            assert!(
+                err.contains(&format!("signal={signal:?},")),
+                "the report must name {signal:?}: {err}"
+            );
+            assert!(
+                matches!(
+                    sup.processes.get(&id).expect("record").state,
+                    ProcessState::Running { .. }
+                ),
+                "a failed {signal:?} must not transition the record"
+            );
+            assert!(
+                sup.reap_ledger.is_empty(),
+                "a failed {signal:?} must not arm the ledger"
+            );
+
+            reports.push(err.replace(&format!("{pid}"), "<pid>"));
+            let _ = nix::sys::signal::kill(
+                Pid::from_raw(-i32::try_from(pid).unwrap()),
+                Signal::SIGKILL,
+            );
+        }
+
+        assert_ne!(
+            reports[0], reports[1],
+            "SIGTERM and SIGUSR1 failures must no longer be identical text"
+        );
+    }
+
+    /// Q#DC3 / acceptance 3(b) — the disposition control. A *successful*
+    /// non-fatal signal changes nothing, while a *successful* fatal one
+    /// transitions the record and arms the ledger.
+    ///
+    /// This is the check that gives the previous test its meaning: it
+    /// shows the fatal/non-fatal distinction is real, and therefore that
+    /// "failed signals are disposition-identical" is a statement about
+    /// the failure path rather than about signals generally.
+    #[test]
+    fn a_successful_signal_disposition_depends_on_whether_it_is_fatal() {
+        let mut sup = ProcessSupervisor::new();
+        let mut spec = ProcessSpec::new("diag-disposition-live", "/bin/sh");
+        // Ignore USR1 so the successful non-fatal signal cannot end the
+        // child and confuse the state assertion with a real exit.
+        spec.args = vec!["-c".into(), "trap '' USR1; sleep 30".into()];
+        spec.group = true;
+        let id = sup.spawn(spec).expect("spawn");
+        let pid = spawn_started_pid(&mut sup, id);
+
+        sup.signal(id, Signal::SIGUSR1).expect("USR1 delivers");
+        assert!(
+            matches!(
+                sup.processes.get(&id).expect("record").state,
+                ProcessState::Running { .. }
+            ),
+            "a successful non-fatal signal leaves the record Running"
+        );
+        assert!(
+            sup.reap_ledger.is_empty(),
+            "a successful non-fatal signal arms no ledger entry"
+        );
+
+        sup.terminate(id).expect("TERM delivers");
+        assert!(
+            matches!(
+                sup.processes.get(&id).expect("record").state,
+                ProcessState::Exiting { .. }
+            ),
+            "a successful fatal signal transitions the record to Exiting"
+        );
+        assert!(
+            !sup.reap_ledger.is_empty(),
+            "a successful fatal signal arms the group reap ledger"
+        );
+
+        let _ =
+            nix::sys::signal::kill(Pid::from_raw(-i32::try_from(pid).unwrap()), Signal::SIGKILL);
+    }
+
+    /// Q#DC4 / acceptance 4 — the measured group is a real observation,
+    /// not a restatement of the input.
+    ///
+    /// `expected_group` is `-leader_pid` by construction, so on the
+    /// spawn-group path it can never disagree with the target. The
+    /// measured field is the only one that can, and this proves it does:
+    /// a child placed into an *anchor* group reports that group, not its
+    /// own pid.
+    ///
+    /// Without this the field would be exactly the vacuous readout the
+    /// framing was written to eliminate — an implementation returning
+    /// `-pid` unconditionally would satisfy every other test.
+    #[test]
+    fn the_measured_group_reports_the_real_group_not_the_pid() {
+        use std::os::unix::process::CommandExt as _;
+
+        // An anchor process leading its own group.
+        let mut anchor = std::process::Command::new("/bin/sleep");
+        anchor.arg("30");
+        anchor.process_group(0);
+        let mut anchor = anchor.spawn().expect("spawn anchor");
+        let anchor_pgid = i32::try_from(anchor.id()).expect("pid fits i32");
+
+        // A second process placed INTO the anchor's group, so its pgid
+        // is genuinely not its own pid.
+        let mut joiner = std::process::Command::new("/bin/sleep");
+        joiner.arg("30");
+        joiner.process_group(anchor_pgid);
+        let mut joiner = joiner.spawn().expect("spawn joiner");
+        let joiner_pid = joiner.id();
+
+        assert_ne!(
+            i32::try_from(joiner_pid).unwrap(),
+            anchor_pgid,
+            "precondition: the joiner must not be the anchor itself"
+        );
+
+        let rendered = measured_group_of(joiner_pid);
+        assert_eq!(
+            rendered,
+            format!(", measured_group=-{anchor_pgid}"),
+            "the measurement must report the group the kernel actually has"
+        );
+        assert_ne!(
+            rendered,
+            format!(", measured_group=-{joiner_pid}"),
+            "and must NOT restate the pid it was given"
+        );
+
+        let _ = joiner.kill();
+        let _ = joiner.wait();
+        let _ = anchor.kill();
+        let _ = anchor.wait();
     }
 
     /// Q#PD1 acceptance 2 — a leader-directed failure records the
@@ -2432,7 +3118,7 @@ mod tests {
         let err = sup.terminate(id).expect_err("injected ESRCH must fail");
 
         let expected = format!(
-            "kill: {} (target={pid} via leader-pid, leader_pid={pid}, leader=live)",
+            "kill: {} (signal=SIGTERM, target={pid} via leader-pid, leader_pid={pid}, leader=live)",
             nix::errno::Errno::ESRCH
         );
         assert_eq!(
@@ -2482,7 +3168,7 @@ mod tests {
         let err = terminate_until_leader_exited(&mut sup, id, Duration::from_secs(10));
 
         let expected = format!(
-            "kill: {} (target={pid} via leader-pid, leader_pid={pid}, leader=exited(code 3))",
+            "kill: {} (signal=SIGTERM, target={pid} via leader-pid, leader_pid={pid}, leader=exited(code 3))",
             nix::errno::Errno::EPERM
         );
         assert_eq!(
@@ -2514,7 +3200,7 @@ mod tests {
         let err = sup.terminate(id).expect_err("injected EPERM must fail");
 
         let expected = format!(
-            "kill: {} (target=-{pid} via group, leader_pid={pid}, expected_group=-{pid}, leader=live)",
+            "kill: {} (signal=SIGTERM, target=-{pid} via group, leader_pid={pid}, expected_group=-{pid}, measured_group=-{pid}, leader=live)",
             nix::errno::Errno::EPERM
         );
         assert_eq!(err, expected, "a group=true pipe child reports via group");

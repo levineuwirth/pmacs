@@ -262,12 +262,28 @@ arborium-lean = "2.18"
 # T M4.4 process supervisor: signal sending without `unsafe`. Keep
 # the feature surface tight to keep build time low. `poll` feeds the
 # compile-mode group readers (cancellable poll-based reads, Q#CM3).
-nix = { version = "0.29", default-features = false, features = ["signal", "user", "fs", "term", "socket", "poll"] }
+#
+# `process` is listed explicitly even though it already arrives
+# transitively: nix's own `signal` feature depends on it, so `getpgid`
+# and `tcgetpgrp` compile today without being asked for. That is
+# stable but invisible, and a real requirement that depends on another
+# feature's internals is one refactor away from vanishing. The signal
+# diagnostic calls both directly.
+nix = { version = "0.29", default-features = false, features = ["signal", "user", "fs", "term", "socket", "poll", "process"] }
 # T M4.4 PTY mode: portable abstraction over openpty / fork+exec
 # with controlling-tty wiring. The crate uses internal `unsafe`
 # but exposes a fully safe API; pmacs's own `unsafe_code = "forbid"`
 # rule still holds.
 portable-pty = "0.9"
+# Safe file-descriptor duplication, already in the tree through
+# `portable-pty`. Declared directly because the signal diagnostic calls
+# `OwnedHandle::dup` itself: `MasterPty` exposes only a `RawFd`, and
+# every std route from a raw fd to something implementing `AsFd` is
+# `unsafe`. `dup` takes any `AsRawFd` through a safe blanket impl and
+# returns an owned handle that IS `AsFd`, which is what lets pmacs call
+# `nix::unistd::tcgetpgrp` — and keep the errno portable-pty discards —
+# without a single `unsafe` block of its own.
+filedescriptor = "0.8"
 # T M4.5 LSP wire format: JSON-RPC 2.0 bodies inside Content-Length
 # framing. Used only on LSP and similar protocols that require JSON
 # specifically; in-process workers continue to use MessagePack

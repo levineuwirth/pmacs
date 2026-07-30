@@ -218,12 +218,28 @@ jobs:
       # binary is absent (a minimal container must not fail `--lib`
       # without ever testing pmacs) and this variable is what makes the
       # skip fatal where the tool is guaranteed.
+      #
+      # PMACS_REQUIRE_BASH arms the signal diagnostic's job-control
+      # corroboration test, which needs `/bin/bash` and `-m` putting a
+      # foreground job in its own process group with the terminal.
+      #
+      # Linux only, and NOT because macOS lacks bash — it ships 3.2. CI
+      # measured the difference: on both macOS legs a non-interactive
+      # `bash -m` kept the terminal on the leader for a full 10s wait, so
+      # the divergence the test needs does not occur there. The test skips
+      # on non-Linux by platform check; arming it on macOS would only make
+      # a missing binary fatal for a test that cannot run anyway.
+      #
+      # The divergent case itself is pinned on every platform by
+      # injecting the foreground group instead (framing Bet 1's stated
+      # fallback, after the real fixture failed its own falsifier).
       - run: cargo test --all-targets --no-default-features --features ${{ matrix.lua }} -- --test-threads=1
         env:
           PMACS_REQUIRE_LSP: ${{ runner.os == 'Linux' && '1' || '' }}
           PMACS_REQUIRE_SHELLS: ${{ runner.os == 'Linux' && '1' || '' }}
           PMACS_REQUIRE_LUA: ${{ runner.os == 'Linux' && '1' || '' }}
           PMACS_REQUIRE_SETSID: ${{ runner.os == 'Linux' && '1' || '' }}
+          PMACS_REQUIRE_BASH: ${{ runner.os == 'Linux' && '1' || '' }}
       - run: cargo test --doc --no-default-features --features ${{ matrix.lua }}
       # The workspace default member is only the root `pmacs` package, so
       # the runs above never execute pmacs-protocol's own tests — the
