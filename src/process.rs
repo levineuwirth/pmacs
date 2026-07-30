@@ -4799,8 +4799,24 @@ mod tests {
         // The descendant keeps fd1, so the readers stay open after the
         // leader exits. EARLY is written before the leader exits, so it
         // is in the pipe before the drain begins.
+        //
+        // **`trap '' TERM` is load-bearing, and its absence made the
+        // first draft of this pin vacuous.** `poll_one` TERMs the whole
+        // group on leader exit, so an untrapped descendant dies before
+        // its 0.5s sleep ends — the late marker then never arrives on
+        // *either* path, and "LATE-MARKER is absent" holds for a reason
+        // that has nothing to do with the probe. The bite caught it:
+        // with the seam reverted the pin still passed both content
+        // assertions and failed only the consumed-plan check.
+        //
+        // The readiness gate is `survivor_script`'s, for its reason: a
+        // slow scheduler can otherwise deliver the group TERM before
+        // the subshell's `trap` runs.
+        let ready = dir.path().join("ready");
         let script = format!(
-            "echo EARLY; ( sleep 0.5; echo LATE-MARKER; sleep 5 ) & echo $! > {pid}",
+            "echo EARLY; ( trap '' TERM; : > {ready}; sleep 0.5; echo LATE-MARKER; sleep 5 ) & \
+             echo $! > {pid}; while [ ! -e {ready} ]; do sleep 0.01; done",
+            ready = ready.display(),
             pid = pidfile.display(),
         );
         sup.plan_in_drain_probe_failure(nix::errno::Errno::EPERM);
