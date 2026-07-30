@@ -3240,18 +3240,25 @@ mod tests {
     /// console script spawns bundled `node` and exits, leaving the real
     /// server at `PPid 1` holding the inherited pipes.
     ///
-    /// `<&0` is LOAD-BEARING, not decoration. POSIX XCU 2.9.3 assigns
-    /// `/dev/null` to an asynchronous list's stdin when job control is
-    /// off --- i.e. in every non-interactive `sh` --- so a bare `cat &`
-    /// reads EOF immediately and exits *against the unfixed tree*,
-    /// giving a test that passes either way and proves nothing. Measured
-    /// on `bash`: bare `&` leaves no grandchild, `<&0` leaves one
-    /// holding the real pipe. Both controls below exist to catch that
-    /// silently regressing on another `/bin/sh`.
+    /// `setsid --fork` is used rather than a shell background job, and
+    /// that choice is LOAD-BEARING. POSIX XCU 2.9.3 assigns `/dev/null`
+    /// to an asynchronous list's stdin when job control is off --- i.e.
+    /// in every non-interactive `sh` --- so `sh -c 'cat & exit 0'` reads
+    /// EOF immediately and exits *against the unfixed tree*, giving a
+    /// test that passes either way and proves nothing. The obvious
+    /// repair does not work either: the rule applies **before explicit
+    /// redirections**, so by the time `<&0` runs, fd 0 already *is*
+    /// `/dev/null` and the redirect faithfully duplicates it onto
+    /// itself. `bash` happens to skip the default when a stdin redirect
+    /// is present; `dash` --- Ubuntu's `/bin/sh`, and CI's --- does not,
+    /// so `<&0` passed locally and failed in CI.
+    ///
+    /// `setsid --fork` sidesteps all of it: it forks, the parent exits,
+    /// and the child inherits stdin/stdout/stderr untouched by any shell.
+    /// No async list, no `/dev/null` rule, no implementation variance.
     ///
     /// Linux-gated deliberately rather than incidentally: the controls
-    /// read `/proc`, and the reproduction depends on `sh` async-list
-    /// semantics.
+    /// read `/proc`, and `setsid(1)` is util-linux (absent on macOS).
     ///
     /// On the failure path this leaks a wedged worker thread, and `cat`
     /// survives until the harness's fds close at process exit. Bounded
@@ -3277,16 +3284,27 @@ mod tests {
             }
         }
 
+        // Asserted, not skipped: this test is already Linux-gated, and
+        // setsid(1) is core util-linux. A skip here would reintroduce
+        // exactly the silent-green shape the arming lane removed.
+        assert!(
+            binary_available("setsid"),
+            "setsid(1) is required to orphan the grandchild without a \
+             shell; it is core util-linux and should be present on any \
+             Linux runner"
+        );
+
         let (done_tx, done_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
             let mut sup = ProcessSupervisor::new();
             sup.set_grace_period(Duration::from_millis(300));
-            let mut spec = ProcessSpec::new("orphan-holds-pipe", "/bin/sh");
-            // `cat` reads stdin and exits on EOF, exactly as a stdio
-            // language server does. `exit 0` makes the *recorded* pid
-            // terminate promptly, so `poll_one` reaches the teardown
-            // path while the grandchild still holds the output pipe.
-            spec.args = vec!["-c".into(), "cat <&0 & exit 0".into()];
+            let mut spec = ProcessSpec::new("orphan-holds-pipe", "setsid");
+            // `setsid --fork` forks and the parent exits, so the
+            // *recorded* pid terminates promptly (letting `poll_one`
+            // reach the teardown path) while `cat` survives holding the
+            // inherited pipes. `cat` reads stdin and exits on EOF,
+            // exactly as a stdio language server does.
+            spec.args = vec!["--fork".into(), "cat".into()];
             // The default, restated because it is the whole point: with
             // `StdinMode::Null` there is no sink to drop and no EOF to
             // deliver.
@@ -3302,7 +3320,9 @@ mod tests {
 
             // CONTROL 1: the recorded child must actually exit. Until it
             // does, *it* holds the output pipe, and control 2 would pass
-            // for the wrong reason.
+            // for the wrong reason. (`setsid` without `--fork` may exec
+            // directly instead of forking, in which case there is no
+            // grandchild and this is the control that notices.)
             let deadline = Instant::now() + Duration::from_secs(5);
             while Instant::now() < deadline && !reaped_or_zombie(sh_pid) {
                 std::thread::sleep(Duration::from_millis(10));
@@ -3317,10 +3337,12 @@ mod tests {
 
             // CONTROL 2: both readers must still be blocked in `read`,
             // which is only true while something still holds the output
-            // pipe's write ends. If the grandchild never inherited
-            // stdin (the /dev/null rule above), it has already exited,
-            // the write ends are closed, the readers have finished ---
-            // and the deadlock is not being modelled at all.
+            // pipe's write ends. If the grandchild never inherited the
+            // real stdin, it has already read EOF and exited, the write
+            // ends are closed, the readers have finished --- and the
+            // deadlock is not being modelled at all. This control is
+            // what caught the shell form failing on dash after it
+            // passed on bash.
             let readers = sup
                 .processes
                 .get(&id)
@@ -3337,10 +3359,10 @@ mod tests {
                 (2, 2),
                 "control 2 failed: both readers must still be blocked in \
                  `read`, i.e. an escaped grandchild still holds the output \
-                 pipe. Finished readers mean `cat` never inherited stdin \
-                 (POSIX assigns /dev/null to a background job's stdin when \
-                 job control is off) and the `<&0` redirect has stopped \
-                 working on this `/bin/sh`"
+                 pipe. Finished readers mean `cat` read EOF and exited \
+                 already, so it never inherited the real stdin --- check \
+                 that `setsid --fork` still forks and passes fds 0/1/2 \
+                 through untouched on this runner"
             );
 
             // The deadlock, if present, is here:

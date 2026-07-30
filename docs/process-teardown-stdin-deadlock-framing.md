@@ -32,6 +32,15 @@ new primitive.**
   stdin writer (a child that read stdin but stopped draining it),
   criterion 5 extended to `docs/agent-handoff.md` §3, Bet 4 marked as
   lane-stopping.
+- **rev 3** — CI falsified rev 2's repair. `<&0` is defeated on `dash`
+  (the rule applies *before* explicit redirections, so `<&0` duplicates
+  `/dev/null` onto itself); it passed locally only because `/bin/sh` here
+  is `bash`. **Control 2 caught it in CI and named its own cause** — the
+  fourth vacuity in this lane, and the first one a control found instead
+  of a reviewer. The reproduction now uses `setsid --fork cat`, removing
+  the shell entirely. Bet 2's falsifier list also gained
+  `bottom_panel_stage1_acceptance`, which holds PTY-in-panel tests and
+  was a genuine gap in rev 1's list.
 
 ---
 
@@ -336,20 +345,38 @@ held-open fifo, checking the orphan's `/proc/<pid>/fd/0`:
 | `sh -c 'cat & exit 0'` | **gone** | — (EOF'd from `/dev/null`) |
 | `sh -c 'cat <&0 & exit 0'` | alive | the real pipe |
 
-**The faithful model is therefore `sh -c 'cat <&0 & exit 0'`.** The
-explicit redirect is what defeats the `/dev/null` assignment; it is
-load-bearing, not incidental, and must not be "simplified" away.
+**Trap 3 — `<&0` does not repair it, and the obvious fix is wrong.** rev 2
+proposed `sh -c 'cat <&0 & exit 0'`, verified on this machine. **CI
+falsified it.** Re-read the rule: `/dev/null` is assigned *before any
+explicit redirections*, so by the time `<&0` runs, fd 0 already **is**
+`/dev/null`, and the redirect faithfully duplicates it onto itself.
+`bash` happens to skip the default when a stdin redirect is present;
+`dash` — Ubuntu's `/bin/sh`, and CI's — does not. Measured:
 
-`sh` exits immediately (so `poll_one` observes termination), `cat` is
-orphaned holding the real stdin read end plus both write ends, and it
-exits on EOF exactly as a stdio language server does. Unfixed, this
-deadlocks; fixed, teardown completes.
+| shell | form | grandchild | fd 0 |
+| --- | --- | --- | --- |
+| bash | `cat & exit 0` | gone | — |
+| bash | `cat <&0 & exit 0` | alive | real pipe |
+| dash | `cat <&0 & exit 0` | **gone** | — (CI: control 2 failed) |
 
-Which `/bin/sh` applies the rule how varies by machine, so the redirect
-alone is not enough of a guarantee — criterion 2 carries a positive
-control (§4) so the test cannot silently degrade back into modelling the
-wrong thing on someone else's box. This is #192's lesson one level down:
-the bite needs a control, and so does the reproduction.
+The local probe could not have caught this: `/bin/sh` here is `bash`.
+
+**The model is therefore `setsid --fork cat`, with no shell at all.**
+`setsid --fork` forks, the parent exits, and the child inherits
+stdin/stdout/stderr untouched — no asynchronous list, no `/dev/null`
+rule, no implementation variance. The recorded pid (`setsid`) terminates
+promptly so `poll_one` reaches the teardown path, while `cat` survives
+holding the inherited pipes and exits on EOF exactly as a stdio language
+server does. Unfixed, this deadlocks; fixed, teardown completes.
+
+`setsid(1)` is util-linux, which the Linux gate already assumes.
+Presence is **asserted, not skipped** — a skip would reintroduce the
+silent-green shape lane 2 removed.
+
+The controls are what make this recoverable rather than a silent
+regression: control 2 failed loudly in CI and named its own cause. That
+is #192's lesson one level down — the bite needs a control, and so does
+the reproduction.
 
 ---
 
@@ -361,8 +388,11 @@ the bite needs a control, and so does the reproduction.
 2. **The reorder is safe for PTY mode.** Falsified by any regression in
    `vterm_stage1/2/3_acceptance`, `terminal_config_acceptance`,
    `terminal_copy_mode_acceptance`, `m6_4/m6_5_repl_acceptance`,
-   `m6_7_scrollback_acceptance`, `m6_8_multi_repl_acceptance`, or
-   `worker_shutdown_acceptance`.
+   `m6_7_scrollback_acceptance`, `m6_8_multi_repl_acceptance`,
+   `worker_shutdown_acceptance`, or **`bottom_panel_stage1_acceptance`**
+   — added in rev 3: it holds PTY-in-panel tests (`acc28` drives real
+   child input and the `C-c` escape) and its absence from rev 1's list
+   was a real gap, not a judgement call.
 3. **The synthetic test bites.** Falsified if the new test passes with
    `let _ = self.stdin.take();` removed. This must be checked by actual
    revert, per the standing rule that a new pin needs its own bite.
@@ -383,18 +413,22 @@ the bite needs a control, and so does the reproduction.
 2. New unit test in `src/process.rs` (so it runs under the standard
    `cargo test --lib` gate, not only an acceptance suite):
    `teardown_closes_stdin_before_joining_readers`.
-   - Spawns `sh -c 'cat <&0 & exit 0'` as a **non-group pipe** process.
-     The `<&0` is load-bearing (Q#TD6) and gets a comment saying so.
-   - **Positive control, before teardown starts:** assert the orphaned
-     grandchild is alive *and* that its `/proc/<pid>/fd/0` is not
-     `/dev/null`. Without this the test silently degrades into modelling
-     the wrong thing wherever `/bin/sh` behaves differently, and reports
-     green while doing it.
-   - `#[cfg(target_os = "linux")]`: the control reads `/proc`, and the
-     reproduction depends on `sh` async-list semantics. Gate it
-     explicitly and say why, rather than letting it be incidentally
-     Linux-only. (Same reasoning as the APFS gate — `cfg(unix)` would be
-     wrong here.)
+   - Spawns `setsid --fork cat` as a **non-group pipe** process. The
+     choice of `setsid` over a shell background job is load-bearing
+     (Q#TD6) and gets a comment saying so. `setsid` presence is
+     **asserted, not skipped.**
+   - **Two positive controls, before teardown starts:** (1) the recorded
+     child has actually exited — while it lives it holds the output pipe
+     itself, so control 2 would pass for the wrong reason; (2) both
+     readers are still blocked in `read`, which is only true while
+     something still holds the write ends. Without these the test
+     silently degrades into modelling the wrong thing and reports green
+     while doing it — which is exactly what happened on `dash`, and
+     control 2 is what caught it.
+   - `#[cfg(target_os = "linux")]`: the controls read `/proc`, and
+     `setsid(1)` is util-linux (absent on macOS). Gate it explicitly and
+     say why, rather than letting it be incidentally Linux-only. (Same
+     reasoning as the APFS gate — `cfg(unix)` would be wrong here.)
    - Performs the full reap-and-drop sequence on a helper thread and
      asserts completion via `recv_timeout`, so a regression **fails**
      within a bounded window instead of hanging. A test that hangs on
