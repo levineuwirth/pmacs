@@ -2304,18 +2304,6 @@ mod tests {
     /// `/bin/sleep` directly rather than through a shell: a shell may
     /// place the command in a different foreground process group, and
     /// these tests assert the exact target the tty reports.
-    fn spawn_live_pty(sup: &mut ProcessSupervisor, name: &str) -> (ProcessId, u32) {
-        let mut spec = ProcessSpec::new(name, "/bin/sleep");
-        spec.args = vec!["30".into()];
-        spec.mode = ProcessMode::Pty {
-            rows: 24,
-            cols: 80,
-            mode: TerminalMode::Canonical,
-        };
-        let id = sup.spawn(spec).expect("spawn");
-        (id, spawn_started_pid(sup, id))
-    }
-
     /// The OS pid straight from the supervisor's own record, WITHOUT
     /// ticking.
     ///
@@ -2396,22 +2384,166 @@ mod tests {
     /// designs for this code collapsed the two; the report keeps them
     /// apart, and here they are asserted to agree only because nothing
     /// has moved the terminal.
+    /// The job-control shell the divergence fixture drives. Named once so
+    /// the availability guard and the spawn cannot drift apart.
+    const BASH: &str = "/bin/bash";
+
+    /// The tty's current foreground process group, read through the same
+    /// `MasterPty` accessor production uses. `None` for a pipe
+    /// generation, or when the terminal reports no foreground group.
+    fn foreground_pgid(sup: &ProcessSupervisor, id: ProcessId) -> Option<i32> {
+        let runtime = sup.processes.get(&id)?.runtime.as_ref()?;
+        match &runtime.child {
+            ChildHandle::Pty {
+                _master: master, ..
+            } => master.process_group_leader(),
+            ChildHandle::Pipes(_) => None,
+        }
+    }
+
+    /// Fixture for Q#DC1: a PTY child whose terminal foreground group is
+    /// genuinely **not** the spawned leader.
+    ///
+    /// `bash -m` enables job control, so it runs the script's command in
+    /// a fresh process group and hands that group the terminal. The
+    /// trailing `; :` matters — with a single simple command `bash -c`
+    /// execs in place, which would leave the leader owning the terminal
+    /// and silently restore the very agreement this fixture exists to
+    /// break.
+    ///
+    /// **The wait is load-bearing, not defensive.** The handoff is not
+    /// instantaneous: a probe of this exact fixture observed the
+    /// foreground group as the leader first and only then as the job's
+    /// group. Measuring immediately would pin the non-divergent case and
+    /// the test would assert the opposite of its purpose.
+    ///
+    /// Returns `(id, leader_pid, foreground_pgid)` with the two pids
+    /// known to differ and the foreground group known to hold a live
+    /// member.
+    fn spawn_pty_with_diverged_foreground_group(
+        sup: &mut ProcessSupervisor,
+        name: &str,
+    ) -> (ProcessId, u32, i32) {
+        let mut spec = ProcessSpec::new(name, BASH);
+        spec.args = vec![
+            "--noprofile".into(),
+            "--norc".into(),
+            "-m".into(),
+            "-c".into(),
+            "sleep 30; :".into(),
+        ];
+        spec.mode = ProcessMode::Pty {
+            rows: 24,
+            cols: 80,
+            mode: TerminalMode::Canonical,
+        };
+        let id = sup.spawn(spec).expect("spawn");
+        let leader = spawn_started_pid(sup, id);
+
+        let leader_i32 = i32::try_from(leader).expect("pid fits i32");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut observed: Vec<i32> = Vec::new();
+        let mut diverged = None;
+        while Instant::now() < deadline {
+            if let Some(fg) = foreground_pgid(sup, id) {
+                if observed.last() != Some(&fg) {
+                    observed.push(fg);
+                }
+                if fg > 0 && fg != leader_i32 {
+                    diverged = Some(fg);
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        let fg = diverged.unwrap_or_else(|| {
+            panic!(
+                "job control never moved the terminal off the leader \
+                 (leader={leader}, foreground groups observed: {observed:?})"
+            )
+        });
+
+        // Positive control: a divergent number proves nothing if the
+        // group is already dead. The signal target must be a group that
+        // could actually receive a signal.
+        nix::sys::signal::kill(Pid::from_raw(-fg), None).unwrap_or_else(|e| {
+            panic!("foreground group {fg} has no live member ({e}); divergence is vacuous")
+        });
+
+        (id, leader, fg)
+    }
+
+    /// Q#DC1 / acceptance 1 — a group-directed failure names the target,
+    /// the branch that chose it, the expected group, the errno, and the
+    /// leader's own state, as five separate facts **that are not the same
+    /// fact repeated**.
+    ///
+    /// The pre-Stage-B version of this test spawned `/bin/sleep` on a PTY
+    /// and asserted the same pid three times, conceding in its own
+    /// comment that the values "are asserted to agree only because
+    /// nothing has moved the terminal". An implementation that ignored
+    /// `tcgetpgrp` entirely and substituted `leader_pid` passed it. Since
+    /// the whole premise of the diagnostic is that these two entities can
+    /// diverge, that test pinned the substitution as acceptable.
+    ///
+    /// This version drives job control so the terminal genuinely belongs
+    /// to a different process group, and asserts the two values **differ**
+    /// as well as asserting each exactly.
     #[test]
     fn a_group_directed_kill_failure_reports_target_and_leader_separately() {
+        // Guard on the exact path the fixture spawns, not on `which bash`.
+        // The two can disagree — a system with bash on PATH but not at
+        // `/bin/bash` would pass a `which` guard and then fail the spawn,
+        // which is the guard failing to guard the thing it names.
+        if !std::path::Path::new(BASH).exists() {
+            let armed = std::env::var_os("PMACS_REQUIRE_BASH").is_some_and(|v| !v.is_empty());
+            assert!(
+                !armed,
+                "PMACS_REQUIRE_BASH is set but {BASH} does not exist: the \
+                 job-control divergence fixture cannot run"
+            );
+            eprintln!(
+                "{BASH} not present; skipping \
+                 a_group_directed_kill_failure_reports_target_and_leader_separately"
+            );
+            return;
+        }
+
         let mut sup = ProcessSupervisor::new();
-        let (id, pid) = spawn_live_pty(&mut sup, "diag-group");
+        let (id, pid, fg) = spawn_pty_with_diverged_foreground_group(&mut sup, "diag-group");
+
+        let leader_i32 = i32::try_from(pid).expect("pid fits i32");
+        assert_ne!(
+            fg, leader_i32,
+            "the fixture must make the foreground group differ from the leader; \
+             equal values would let a leader_pid substitution pass"
+        );
 
         sup.force_next_kill_errno(nix::errno::Errno::EPERM);
         let err = sup.terminate(id).expect_err("injected EPERM must fail");
 
         let expected = format!(
-            "kill: {} (target=-{pid} via tcgetpgrp, leader_pid={pid}, expected_group=-{pid}, leader=live)",
+            "kill: {} (target=-{fg} via tcgetpgrp, leader_pid={pid}, expected_group=-{pid}, leader=live)",
             nix::errno::Errno::EPERM
         );
         assert_eq!(
             err, expected,
-            "the report names the exact target the tty reported, the exact \
+            "the report names the exact group the tty reported, the exact \
              leader pid, and observes the leader as live"
+        );
+
+        // The target came from the terminal, not from the leader. Stated
+        // as its own assertion so a regression that reintroduces the
+        // substitution fails here by name rather than inside a long
+        // string comparison.
+        assert!(
+            err.contains(&format!("target=-{fg} via tcgetpgrp")),
+            "the target must be the terminal's foreground group: {err}"
+        );
+        assert!(
+            !err.contains(&format!("target=-{pid} via tcgetpgrp")),
+            "the target must NOT be the leader pid: {err}"
         );
 
         let _ = sup.signal(id, Signal::SIGKILL);

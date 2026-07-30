@@ -218,12 +218,24 @@ jobs:
       # binary is absent (a minimal container must not fail `--lib`
       # without ever testing pmacs) and this variable is what makes the
       # skip fatal where the tool is guaranteed.
+      #
+      # PMACS_REQUIRE_BASH arms the signal diagnostic's job-control
+      # divergence fixture, which needs `/bin/bash` specifically: it
+      # relies on `-m` putting a foreground job in its own process group
+      # and handing it the terminal, so that `tcgetpgrp` differs from the
+      # spawned leader. Without that divergence the group-directed
+      # acceptance cannot tell a real foreground-group read from a
+      # `leader_pid` substitution. Armed on BOTH platforms, unlike the
+      # variables above — macOS ships `/bin/bash`, and the macOS legs are
+      # exactly where the signal failures this diagnostic exists for have
+      # actually occurred.
       - run: cargo test --all-targets --no-default-features --features ${{ matrix.lua }} -- --test-threads=1
         env:
           PMACS_REQUIRE_LSP: ${{ runner.os == 'Linux' && '1' || '' }}
           PMACS_REQUIRE_SHELLS: ${{ runner.os == 'Linux' && '1' || '' }}
           PMACS_REQUIRE_LUA: ${{ runner.os == 'Linux' && '1' || '' }}
           PMACS_REQUIRE_SETSID: ${{ runner.os == 'Linux' && '1' || '' }}
+          PMACS_REQUIRE_BASH: '1'
       - run: cargo test --doc --no-default-features --features ${{ matrix.lua }}
       # The workspace default member is only the root `pmacs` package, so
       # the runs above never execute pmacs-protocol's own tests — the
