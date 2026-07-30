@@ -1,12 +1,40 @@
-# Framing — the reap ledger fails silently in three places
+# Framing — group cleanup fails silently at four sites
 
-**Revision 1.** Status: awaiting review round 1. Proposed lane:
+**Revision 2.** Status: awaiting review round 2. Proposed lane:
 `reap-ledger-silent-failures`, worktree `../pmacs-reap-ledger`, based on
 `githubsucks/main` @ `22df6ab` (a reading; re-measure at branch time).
 
 **Parked by PR #200's framing §5 and unparked by its evidence.** #200
 retired the premise that justified the ledger's leniency; it deliberately
 changed no disposition, and said so. This lane owns what it refused.
+
+## Revision history
+
+**Revision 1 → 2**, after review round 1 (three blocking, two major).
+All five accepted; all five verified in the code first.
+
+- **§0 named the wrong journey step.** It claimed step 8, "Open a
+  terminal", while Q#RL5 in the same document says the ledger is
+  unreachable for PTY children. Both cannot be true. The only production
+  `group = true` caller is compile mode
+  (`builtin/runtime/compile.lua:820`), so this is **step 9, build/test**,
+  plus general pipe-process cleanup.
+- **A fourth site was missed.** `final_drain_runtime` (`:2331`) probes
+  `kill(-pgid, None)`, treats every error as dead, discards its `SIGKILL`
+  result and sets its own `group_killed` flag — and it enforces the
+  ledger deadline *while no tick runs*. It is now in scope (§1.2a).
+- **The staging contradicted itself.** "Bet 1 ships alone" against an
+  acceptance requiring three failure-path tests, under one-branch /
+  one-PR. A seam with no tests does not even prove it reaches the
+  production calls. §7 now scopes the first PR as seam **plus**
+  behaviour-preserving tests, which is still diagnosis-only.
+- **A generic seam is the wrong shape.** `shutdown()` calls
+  `self.signal(*id, SIGKILL)` *before* its ledger force-kill, so a single
+  "next kill errno" would be eaten by the wrong call. The seam is now
+  site-directed (§3 Bet 1).
+- **§1.3 overstated the loop coupling.** Early exit needs the ledger
+  empty **and** `any_running()` already false; a live managed record
+  keeps the loop going regardless. The precondition is now stated.
 
 **Diagnosis first. No disposition change is proposed in this revision.**
 §2 asks whether one is warranted; §5 parks every candidate until the
@@ -18,8 +46,12 @@ same shape of problem on the same data structure.
 
 ## 0. Coherence impact (COHERENCE §20)
 
-- **Journey step 8, "Open a terminal"**, teardown half, and every
-  compile/grep run through `spec.group`. **No grade change proposed.**
+- **Journey step 9, "Build and test"** — every compile and grep run,
+  plus general pipe-process cleanup. **Not step 8:** the ledger arms
+  only for `proc.spec.group`, which spawn *rejects* for PTY mode, so no
+  terminal ever reaches it (Q#RL5). The only production `group = true`
+  caller is compile mode (`builtin/runtime/compile.lua:820`).
+  **No grade change proposed.**
 - **Serves §9 (worker model), failure attribution.** The ledger is the
   one mechanism that can see a survivor nothing else can, and today it
   cannot report that it failed to.
@@ -43,7 +75,7 @@ That is the blast radius. A silent failure here leaks *precisely* the
 process the mechanism exists to catch, and nothing else in the
 supervisor is looking.
 
-### 1.2 Three silent failures, not two
+### 1.2 Three silent failures in the persistent ledger
 
 ```rust
 // (a) any probe error drops the entry
@@ -81,6 +113,36 @@ Its own comment says it is there because "a pre-deadline ledger ... would
 be silently discarded at Drop and leak the member". The fix for one
 silent leak was written with a discarded result of its own.
 
+### 1.2a A fourth site: the in-drain twin
+
+`final_drain_runtime` (`:2331`, called once from `:1573`) runs the same
+pattern on the same pgid, while **no tick is running**:
+
+```rust
+let group_alive = nix::sys::signal::kill(Pid::from_raw(-ctx.pgid), None).is_ok();
+if group_alive && now >= ctx.deadline && !group_killed {
+    let _ = nix::sys::signal::kill(Pid::from_raw(-ctx.pgid), Some(Signal::SIGKILL));
+    group_killed = true;
+}
+```
+
+`is_ok()` collapses every errno into "dead", exactly as the persistent
+ledger's `is_err()` does — and the consequence differs. A false "dead"
+here makes `quiesced` true, which sets `rt.cancel` and **cancels the
+readers**, so the failure mode is truncated output rather than a leaked
+process.
+
+**It is not identical to the persistent ledger and the framing does not
+claim it is.** A later `tick` can retry the ledger entry; this decision
+is terminal for that drain. It is in scope because it is the same
+collapse on the same data with its own consequence, not because it is
+the same bug.
+
+**It constrains the seam.** `final_drain_runtime` is a free function
+taking `&RuntimeHandles` and `Option<GroupDrainCtx>` — there is no
+`&mut self` to hang a supervisor field on, so the injected outcome has
+to arrive through `GroupDrainCtx`, populated at the `:1573` call site.
+
 ### 1.3 The shutdown loop's exit condition depends on the silent drop
 
 `shutdown()`'s final loop (`:1773-1775`) runs while
@@ -90,8 +152,15 @@ calls `tick()` — which calls `tick_reap_ledger`.
 So the loop terminates when the ledger empties, and **the ledger empties
 via (a)**. On `ESRCH` that is correct: the group is gone. On any other
 errno the loop exits *early*, having concluded cleanup finished because
-the probe failed. The mechanism added to prevent a leak at exit can be
-ended by the same error that hides one.
+the probe failed.
+
+**The precondition matters and revision 1 omitted it.** The condition is
+a disjunction: `any_running() || !reap_ledger.is_empty()`. An early exit
+therefore needs the ledger empty **and** `any_running()` already false —
+a live managed record keeps the loop running whatever the ledger does.
+The coupling is real for the case the ledger exists to serve, the
+leader-exited survivor, and Bet 3 must build exactly that fixture rather
+than any group.
 
 This coupling is the reason (a) cannot be changed casually: making the
 probe strict without touching the loop converts a silent early exit into
@@ -178,18 +247,35 @@ noted so a red run on it is not mistaken for this lane's doing.*
 
 ## 3. Bets
 
-- **Bet 1 — the three failure paths can be made injectable without
-  changing behaviour.** A seam on the same terms as `forced_kill_errno`:
-  it injects the *result* only, leaving the probe target, the deadline
-  arithmetic, the `retain` decision, and the real ledger state as
-  production code.
-  - *Falsified if* injecting cannot reach all three sites — (a) and (b)
-    are in one closure, (c) is in `shutdown()` — without restructuring
-    the code under test, which would make the test a test of the
-    restructuring.
-  - **This bet ships alone and first.** It is worth landing even if
-    every later bet is abandoned, because §1.6's coverage is
-    success-only and will stay that way otherwise.
+- **Bet 1 — the four sites can be made injectable, site by site,
+  without changing behaviour.** Not a generic "next kill errno":
+  `shutdown()` calls `self.signal(*id, SIGKILL)` *before* its ledger
+  force-kill, so a single shared one-shot would be consumed by the wrong
+  call and the test would pass while proving nothing.
+
+  The seam is **directed and one-shot per site**, with four independently
+  addressable outcomes:
+
+  | Site | What is injected |
+  |---|---|
+  | `tick_reap_ledger` probe | the `kill(-pgid, None)` result |
+  | `tick_reap_ledger` escalation | the `SIGKILL` result |
+  | `shutdown()` force-kill | the `SIGKILL` result |
+  | `final_drain_runtime` probe / kill | both, via `GroupDrainCtx` (§1.2a) |
+
+  Bet 3's coupling test needs **two at once** — a failed shutdown
+  force-kill *and* a failed subsequent probe — so the seam must express
+  more than one pending outcome. A typed queue per site, or a per-site
+  slot, either is acceptable; a single global slot is not.
+
+  **Fixture cleanup is part of the seam, not an afterthought.** An
+  uninjected outcome left armed leaks into the next test in the same
+  binary, and these tests run single-threaded in CI. Each seam is
+  consumed on use and asserted empty at fixture teardown.
+  - *Falsified if* a site cannot take a directed outcome without
+    restructuring the code under test — which would make the test a test
+    of the restructuring. `final_drain_runtime` is the one at risk,
+    being a free function.
 
 - **Bet 2 — each silent failure is demonstrable once injectable.** With
   the seam: an `EPERM` probe drops an entry whose group is still alive;
@@ -203,9 +289,13 @@ noted so a red run on it is not mistaken for this lane's doing.*
 - **Bet 3 — the shutdown coupling is real and measurable.** A test shows
   the final loop exiting early when the probe errors, rather than
   running to its 2s bound.
-  - *Falsified if* the loop's other condition (`any_running()`) holds it
-    anyway, in which case §1.3 overstates the coupling and the two
-    changes can be separated after all.
+  - **The fixture must have `any_running()` already false** (§1.3): a
+    leader that has exited leaving a group survivor. Any other shape
+    tests the disjunction's other arm and proves nothing about the
+    coupling.
+  - *Falsified if* the loop still runs to its bound with the ledger
+    emptied and no managed record live — in which case §1.3 overstates
+    the coupling and the two changes can be separated after all.
 
 - **Bet 4 — a failure here is reportable at all.** Q#RL3 has no answer
   yet. This bet is a scouting obligation, not a design: find every
@@ -217,11 +307,13 @@ noted so a red run on it is not mistaken for this lane's doing.*
 
 ## 4. Acceptance
 
-1. An injection seam covering all three sites, on Q#PD4's terms: result
-   only, everything else production code.
+1. A **directed, multi-outcome** injection seam covering all four sites
+   of §3 Bet 1, on Q#PD4's terms: result only, everything else
+   production code. Consumed on use, asserted empty at teardown.
 2. A test per silent failure, each asserting the observable consequence
-   (entry dropped while the group lives; `killed` set after a failed
-   kill; the same at shutdown) rather than that a function was called.
+   — entry dropped while the group lives; `killed` set after a failed
+   kill; the same at shutdown; readers cancelled after a false "dead" in
+   the drain — rather than that a function was called.
 3. Each new test falsified by an actual revert, both directions
    recorded in the PR body.
 4. The `shutdown()` coupling of §1.3 pinned by a test, whichever way
@@ -267,7 +359,17 @@ repetition counts rather than a single green.
 
 ## 7. Branch plan
 
-One branch, one PR. **Bet 1 first and alone**: the seam is the
-prerequisite for everything else and is worth landing on its own. If
-Bet 2 then finds a path unreachable, the lane shrinks and says so rather
-than manufacturing a failure to justify itself.
+One branch, one PR: **the seam together with the tests that exercise
+it.** Revision 1 said "Bet 1 ships alone", which contradicted an
+acceptance requiring failure-path tests under one-branch/one-PR — and
+was wrong on its own terms, because a seam with no tests does not even
+demonstrate that it reaches the intended production calls.
+
+This is still diagnosis-only: every test pins **current** behaviour,
+including the behaviour that is wrong. Nothing in this PR changes what
+the supervisor does.
+
+If Bet 2 finds a path unreachable, the lane shrinks and says so rather
+than manufacturing a failure to justify itself. If Q#RL3 finds no
+reporting channel, reporting becomes its own lane and this PR ships
+instrumentation plus tests without it.
