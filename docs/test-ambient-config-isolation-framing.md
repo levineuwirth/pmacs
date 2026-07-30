@@ -1,6 +1,6 @@
-# Framing — integration tests read the developer's real config
+# Framing — integration tests use the developer's real ambient roots
 
-**Revision 1.** Status: awaiting review round 1. Proposed lane:
+**Revision 2.** Status: awaiting review round 2. Proposed lane:
 `test-ambient-config-isolation`, worktree `../pmacs-test-isolation`,
 based on `githubsucks/main` @ `4cd4a7b` (a reading; re-measure at branch
 time).
@@ -8,6 +8,41 @@ time).
 **The suite is green in CI and red on a developer machine that has a
 real `~/.config/pmacs/init.lua`.** Not flaky — deterministic, and
 attributed to whatever branch happens to be checked out.
+
+**And it is not only reads.** Review round 1 falsified revision 1's
+central assumption: integration tests **write into the real user data
+directory**. The lane is therefore about *ambient roots*, not about
+`init.lua`. See §1.6.
+
+## Revision history
+
+**Revision 1 → 2**, after review round 1 (four blocking, two major). All
+six accepted; all six verified in the code before acceptance.
+
+- **Rev 1's "the exposure is read-only" was already false** (§1.6).
+  `EditorState::new` materializes bundled packages *before* config
+  loading and unconditionally, and `materialize_all` creates
+  directories. Confirmed on the development machine:
+  `~/.local/share/pmacs/builtin-packages/v1.0.0` exists. A
+  non-config-loading constructor does not fix this.
+- **Rev 1's population count was wrong, and its stated method did not
+  match the command that produced it** (§1.5). It reported 18 candidate
+  files from a grep for `Editor::new`, while its prose described a
+  broader pattern — and the real constructor is `EditorState::new`,
+  which `Editor::new` does not match. **66 of 96** test files construct
+  an editor directly.
+- **File-level classification cannot work** (§1.5). At least **5** files
+  are both in-process and spawned.
+- **The seam must cover `EditorState::open`, not only `new`** (§1.7).
+  `open` calls `Self::new()` directly, and `journey_acceptance` requires
+  that exact public entry point on purpose.
+- **Isolated construction must still finish initialization** (§1.8).
+  Config loading and `set_init_complete()` share one conditional block,
+  and `m8_2_acceptance` *documents* its dependence on integration-test
+  construction being init-complete.
+- **Rev 1 contradicted itself on the regression guard** (§2 Q#TI3 vs §5)
+  and **never added its lane to `docs/active-work.md`**, which the
+  repository's volatile-work protocol requires.
 
 ## 0. Coherence impact (COHERENCE §20)
 
@@ -107,118 +142,229 @@ So an in-process test can only be isolated by (a) the environment it is
 launched with, or (b) an injection point in the code under test. There
 is precedent for (b) in the same repository.
 
-### 1.5 Scale
+### 1.5 Scale, measured
 
-96 files in `tests/`. **18** reference `EditorState`, `Editor::new`,
-`load_user_config`, or `TestDaemon` and are therefore candidates. Only a
-handful set any isolating variable today.
+96 files in `tests/`. **66** construct an editor directly
+(`EditorState::new` or `EditorState::open`). **5** are *both*
+in-process and spawned — `vterm_stage3_acceptance` constructs an editor
+at `:159` and spawns a daemon at `:665`.
 
-**The 18 is a candidate count from a name-based grep, not a census.**
-It is an upper bound on nothing and a lower bound on nothing; §3 Bet 1
-replaces it with a real classification. Recorded this way deliberately —
-a previous lane in this repo built a classification from a truncated
-grep and misclassified five rows.
+**Revision 1 said 18, and its stated method did not match the command
+that produced it.** The prose named a broad pattern; the command grepped
+`Editor::new`, which does not match `EditorState::new` — the actual
+constructor. So the number was ~4x low *and* described a different
+search than the one run. Rev 1 hedged the number as "a candidate count,
+not a census" while leaving both the figure and the description wrong;
+a disclaimer on a bad measurement does not make it a good one.
 
-### 1.6 What is NOT established
+**Consequence for the design:** classification must be per *construction
+site* or per *test case*, never per file. A mutually exclusive file
+partition cannot represent the 5 mixed files, and acceptance 1 of
+revision 1 required exactly that partition.
 
-- **Whether any test *writes* into the developer's real directories.**
-  `XDG_DATA_HOME` and `XDG_STATE_HOME` back autosave
-  (`src/autosave.rs`), minibuffer history (`src/minibuffer.rs:724`),
-  builtin packages (`src/builtin_packages.rs:142`) and the package
-  installer (`src/packages/installer.rs:96`) — all with `HOME`
-  fallbacks. Read-only pollution is a failed gate; *write* pollution
-  would touch real user data. **No such write has been observed**, and
-  this lane does not claim one. Bet 2 goes looking, because the cost of
-  being wrong is asymmetric.
+### 1.6 The exposure is NOT read-only — this is established
+
+`EditorState::new` materializes bundled packages **before** config
+loading and **unconditionally** — outside any `cfg` guard
+(`src/editor.rs:730`):
+
+```rust
+let bundled_root = crate::builtin_packages::bundled_runtime_dir();
+let bundled_packages = crate::builtin_packages::materialize_all(&bundled_root)
+    .expect("materialize bundled packages");
+```
+
+`bundled_runtime_dir()` resolves `XDG_DATA_HOME`, else `$HOME/.local/share`
+(`src/builtin_packages.rs:142,148`), and `materialize_all` **creates
+directories and writes package files** (`:174`).
+
+**Confirmed on the development machine:**
+`~/.local/share/pmacs/builtin-packages/` exists containing `v0.1.0` and
+`v1.0.0`. Whatever produced those, the write path is live and reachable
+from every in-process test, none of which override `HOME` or
+`XDG_DATA_HOME` at all.
+
+So revision 1's Bet 2 was not a question to investigate — it was already
+answered, in the direction that matters. This upgrades the lane from
+"local gates lie" to **"tests write into real user data"**.
+
+### 1.6a Six ambient roots, and the harness covers two
+
+`src/` reads: `HOME` (9 sites), `XDG_DATA_HOME`, `XDG_CONFIG_HOME`,
+`XDG_STATE_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR`, and
+`PMACS_STATE_HOME`.
+
+The shared harness `spawn_daemon_process_with_env`
+(`tests/common/daemon.rs:154`) sets **`HOME` and `XDG_CONFIG_HOME`
+only**. A spawned daemon therefore inherits the developer's real
+`XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME` and
+`PMACS_STATE_HOME`.
+
+**Setting `HOME` isolates a root only when the corresponding `XDG_*`
+variable is unset**, because `HOME` is the *fallback*. On this machine
+`XDG_DATA_HOME` happens to be unset, so `HOME` does cover it — which
+means the harness's apparent adequacy is a property of one developer's
+environment, not of the harness. On a machine that exports
+`XDG_DATA_HOME`, spawned daemons write to the real one.
+
+### 1.7 The seam must cover `open`, not only `new`
+
+`EditorState::open` calls `Self::new()` directly (`src/editor.rs:944`),
+so a non-loading *constructor* leaves every open-path test unisolated.
+
+It cannot simply be bypassed. `tests/journey_acceptance.rs:16` requires
+that exact public entry point, and says why: *"A directory arm with no
+production caller passes every direct-call test, so step 3 goes through
+`EditorState::open` — the same function `pmacs FILE` calls."* The
+golden-journey ratchet and the isolation seam pull in opposite
+directions, and the framing must resolve it rather than pick one.
+
+### 1.8 Isolated construction must still finish initialization
+
+Config loading and `set_init_complete()` share **one** conditional block
+(`src/editor.rs:769-773`). Factoring by skipping the block would leave
+every integration test permanently in the init phase, changing package
+APIs and startup-only config behaviour.
+
+**This is not hypothetical — it is already depended upon.**
+`tests/m8_2_acceptance.rs:75` documents it:
+
+> `EditorState::new()` sets the init-complete flag during startup (the
+> integration-test build doesn't get the `cfg(test)` guard that lib
+> tests do), so we reopen the init phase before `install_local`.
+
+So the `cfg(test)` gap §1.2 calls a defect is, in this one respect,
+load-bearing behaviour another suite was written against. Any fix must
+skip **ambient reads** while still returning `is_init_complete() == true`.
+
+### 1.9 What is still NOT established
+
 - **Whether CI is genuinely unaffected**, as opposed to merely having no
-  config today. A CI image that ever grows a `$HOME/.config/pmacs` would
+  config and no prior data dir today. A CI image that grows either would
   break the same way, silently.
 - **Whether the 11 failures are the whole blast radius.** The run
   aborted at the first failing binary, so every suite ordered after
   `compile_mode_acceptance` never executed.
+- **What wrote `v0.1.0` and `v1.0.0`** on the development machine — a
+  test run, or ordinary use of pmacs. The write *path* is proven; the
+  provenance of those two directories is not, and this lane does not
+  claim it.
 
 
 ## 2. Questions
 
-- **Q#TI1** — Should the `cfg(test)` guard be widened, or should
-  isolation be the test harness's job? *Proposed: the harness's.
-  Widening the guard means production code deciding it is under test,
-  which is exactly the shape that lets a test pass against behaviour
-  production never runs.*
-- **Q#TI2** — For in-process tests, injection point or launched
-  environment? *Proposed: an explicit constructor that does not load
-  user config, following `Installer::root_override`'s precedent. A
-  wrapper script that sets the variable fixes the symptom for whoever
-  remembers to use it.*
-- **Q#TI3** — Should CI arm a check that the isolation is real?
-  *Proposed: yes — otherwise this recurs the moment a CI image grows a
-  config file, and recurs invisibly.*
-- **Q#TI4** — Does anything write outside its temp dir? *Unknown; Bet 2.*
+- **Q#TI1** — Widen the `cfg(test)` guard, or make isolation the
+  harness's job? *Proposed: neither alone. The guard must not widen
+  (production deciding it is under test is how a test passes against
+  behaviour production never runs), and §1.4 shows the harness cannot
+  set env in-process. The answer is an explicit **bootstrap-roots
+  parameter** threaded through construction.*
+- **Q#TI2** — What is the seam, exactly? *Proposed: a
+  `BootstrapRoots` value naming the config root and the data/state/cache
+  roots, with a `BootstrapRoots::ambient()` used by production and a
+  test constructor taking an explicit one. It must cover **both**
+  `EditorState::new` and `EditorState::open` (§1.7), following
+  `Installer::root_override`'s precedent (§1.4).*
+- **Q#TI3** — How does `open`-path isolation coexist with the
+  golden-journey ratchet? *Proposed: `open` gains a roots-taking sibling
+  and `journey_acceptance` keeps calling the ambient `open`, because its
+  purpose is to prove the production entry point is wired. Journey is
+  then isolated by the **environment its binary is launched with**, not
+  by a different call — which is the only option that preserves what the
+  ratchet exists to prove.*
+- **Q#TI4** — Must isolated construction remain init-complete? **Yes**
+  (§1.8), and it is a criterion rather than an assumption.
+- **Q#TI5** — What is the durable regression guard? *Proposed: a
+  **test-binary self-spawn under a controlled environment**, not a CI
+  leg. Revision 1 proposed a hostile-config CI leg in Q#TI3 and parked
+  that same mechanism in §5 — a contradiction. A CI leg also proves only
+  the branch that adds it. A self-spawning test carries its own hostile
+  environment and fails wherever it runs.*
 
 
 ## 3. Bets
 
-- **Bet 1 — the population is classifiable.** Every file in `tests/`
-  is classified as spawned, in-process, or neither, by reading each
-  candidate's construction site rather than by grepping for a name.
-  - *Falsified if* a file is both, or constructs the editor indirectly
-    through a helper that hides which it is. Then the classification is
-    reported with that ambiguity rather than forced.
+- **Bet 1 — the population is classifiable by construction site.**
+  Every `EditorState::new`/`open` call site in `tests/`, and every
+  daemon spawn, is classified. Files are not the unit: 5 are both
+  (§1.5).
+  - *Falsified if* sites are reached through helpers that obscure which
+    kind they are. Then the helper is the unit and that is stated.
 
-- **Bet 2 — the exposure is read-only.** A test run under an
-  instrumented `HOME`/`XDG_*` pointing at a fresh directory leaves no
-  writes behind.
-  - *Falsified if* anything appears there — which upgrades this lane's
-    priority sharply, from "gates lie locally" to "tests touch real user
-    data".
-  - **A clean result is evidence about the suites that ran**, not a
-    guarantee; the run must be recorded with which binaries executed.
+- **Bet 2 — every ambient root can be redirected without `unsafe`.**
+  A `BootstrapRoots` parameter covers config, data, state and cache; the
+  spawned harness sets all six variables of §1.6a.
+  - *Falsified if* any root is resolved somewhere that cannot accept the
+    parameter — e.g. behind a `OnceLock` initialised before construction.
+    **That is a real risk and is checked first**, because it decides
+    whether this design is possible at all.
 
-- **Bet 3 — isolation is verifiable by a test that fails without it.**
-  A positive control: a fixture writes an `init.lua` that would break a
-  known assertion, and the suite stays green because the isolation holds.
-  - *Falsified if* no such fixture can be built without the very env
-    mutation §1.4 rules out. Then isolation is asserted structurally
-    (no candidate constructs an editor without the non-loading path) and
-    labelled as the weaker check it is.
+- **Bet 3 — isolation is provable by a hostile-environment test.** A
+  test spawns the test binary itself with `HOME`/`XDG_*` pointing at a
+  directory containing an `init.lua` that would break a known assertion,
+  and a pre-seeded data dir. The suite stays green, and the hostile
+  directory is **unmodified afterwards**.
+  - *Falsified if* the child cannot be given a controlled environment
+    without the in-process `set_var` §1.4 rules out. (It can: `Command`
+    takes `.env`. This bet is cheap and its failure would be
+    informative.)
+  - **The unmodified-afterwards half is the write half of the
+    check** — a green suite that still wrote into the hostile root has
+    not demonstrated isolation.
 
-- **Bet 4 — the fix does not change production behaviour.** The
-  non-loading constructor is additive; the existing one is untouched.
-  - *Falsified if* any production call site has to change.
+- **Bet 4 — the fix does not change production behaviour.** Ambient
+  resolution stays the default; isolated construction still returns
+  `is_init_complete() == true` (§1.8).
+  - *Falsified if* any production call site changes, or if
+    `m8_2_acceptance`'s `reopen_init_phase_for_testing` dance stops
+    working.
 
 
 ## 4. Acceptance
 
-1. A classification of every `tests/*.rs` file into spawned /
-   in-process / neither, with counts stated and the method named
-   (read, not grepped).
-2. In-process tests construct the editor through a path that does not
-   load user config, by explicit choice at the call site rather than by
-   a `cfg` the caller cannot see.
-3. Spawned tests set **both** `HOME` and `XDG_CONFIG_HOME`, following
-   `m5_7_acceptance.rs:132`. Any that set only one are fixed.
-4. `compile_mode_acceptance` passes with a real
-   `~/.config/pmacs/init.lua` present that defines `find-file` — the
-   exact condition that produced §1.1.
-5. Bet 2's write-probe result recorded, listing which binaries ran.
-6. `cfg(test)`-only guards are not widened into a
-   production-decides-it-is-under-test shape (Q#TI1).
-7. The `src/editor.rs:770` comment is corrected: it claims a protection
-   it does not provide for integration tests.
-8. README or the handoff records that a local full-suite run needs an
-   isolated `XDG_CONFIG_HOME` until this lands, so the next person does
-   not spend the afternoon I did attributing 11 failures to their branch.
+1. A classification of every editor-construction site and daemon spawn
+   in `tests/`, by **site**, with mixed files represented explicitly and
+   counts stated. Method named (read, not grepped) — §1.5 is what a
+   grep-shaped answer costs.
+2. A `BootstrapRoots`-style parameter covering config, data, state and
+   cache roots, reachable from **both** `EditorState::new` and
+   `EditorState::open` (§1.7).
+3. Isolated construction returns `is_init_complete() == true`, pinned by
+   a test that fails if the init flip is skipped along with the ambient
+   reads (§1.8).
+4. `journey_acceptance` still drives the ambient `EditorState::open`;
+   its isolation comes from the launched environment. The ratchet's
+   production-entry-point discipline is unweakened, and this is asserted
+   rather than asserted-to-be-obvious.
+5. The shared harness `spawn_daemon_process_with_env` sets **all six**
+   roots of §1.6a, not two.
+6. `compile_mode_acceptance` passes with a real
+   `~/.config/pmacs/init.lua` defining `find-file` present — the exact
+   condition of §1.1.
+7. A hostile-environment self-spawn test (Bet 3) that asserts both
+   green **and** an unmodified hostile root.
+8. `cfg(test)`-only guards are not widened (Q#TI1).
+9. The `src/editor.rs:770` comment is corrected: it claims a protection
+   it does not provide for integration tests, and says nothing about the
+   unconditional package materialization above it.
+10. This lane is recorded in `docs/active-work.md` with its branch and
+    worktree, per the volatile-work protocol — revision 1 omitted it.
+11. README or handoff records that a local full-suite run needs isolated
+    roots until this lands.
 
 
 ## 5. Parked
 
-- **Any change to how production resolves config paths.** Out of scope;
-  the defect is in the tests.
-- **The `crdt` half of the corpus being dark in CI** — a different
-  coverage hole with its own lane in `docs/active-work.md`.
-- **Whether CI should install a hostile `init.lua` deliberately** to
-  keep this honest. Attractive, but it is a CI-policy decision and this
-  lane is already load-bearing enough.
+- **Any change to how production resolves ambient roots.** The default
+  stays ambient; only construction gains a parameter.
+- **A hostile-config CI leg.** Superseded by Q#TI5's self-spawn, which
+  is strictly stronger — it travels with the test rather than with the
+  workflow file. Recorded because revision 1 both proposed and parked
+  it.
+- **Cleaning up whatever already wrote into
+  `~/.local/share/pmacs/builtin-packages/`.** Out of scope; this lane
+  stops the writes, it does not audit the past.
+- **The `crdt` half of the corpus being dark in CI** — separate lane.
 
 
 ## 6. Gates

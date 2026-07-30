@@ -743,6 +743,42 @@ review correction.
   projection.** Whichever is framed second re-scouts the other's landed
   state.
 
+## Test ambient-root isolation — FRAMING OPEN, revision 2
+
+- **Branch `test-ambient-config-isolation`**, worktree
+  `../pmacs-test-isolation`, based on `githubsucks/main` @ `4cd4a7b`.
+  **Framing only; no code, no PR yet.**
+  `docs/test-ambient-config-isolation-framing.md` revision 2, one review
+  round closed (four blocking, two major, all accepted).
+- **What it is.** Integration tests use the developer's real ambient
+  roots. `#[cfg(not(test))]` guards config loading against the crate's
+  own unit tests only, so all 96 files in `tests/` load the real
+  `init.lua` — and, separately, `EditorState::new` materializes bundled
+  packages unconditionally into the real `XDG_DATA_HOME`/`$HOME`.
+  **It is not read-only**: `~/.local/share/pmacs/builtin-packages/`
+  exists on the development machine.
+- **Why it matters now.** `cargo test` is red on any machine with a real
+  `~/.config/pmacs/init.lua` (11 of 67 in `compile_mode_acceptance`) and
+  green in CI, so the failure is attributed to whatever branch is
+  checked out. Every local gate run in this repo currently needs an
+  isolated `XDG_CONFIG_HOME` as a workaround.
+- **Round 1's four blocking findings, all confirmed in code:** the
+  read-only assumption was already false; the population count was 18
+  when 66 of 96 files construct an editor, from a grep that did not
+  match `EditorState::new`; 5 files are both in-process and spawned, so
+  a file-level partition cannot work; and `EditorState::open` calls
+  `Self::new()` while `journey_acceptance` requires that exact entry
+  point.
+- **Two constraints any fix must respect.** `std::env::set_var` is
+  `unsafe` and the crate forbids it, so in-process tests cannot isolate
+  themselves (precedent: `Installer::root_override`). And config loading
+  shares one block with `set_init_complete()`, which
+  `m8_2_acceptance.rs:75` explicitly depends on — skipping the block
+  would leave integration tests permanently in the init phase.
+- Recovery from a clean checkout:
+  `git fetch githubsucks && git worktree add ../pmacs-test-isolation
+  test-ambient-config-isolation`.
+
 ## Folding lane (Arc 6) — Stages 1 and 2 MERGED; Stage 3 (GPU) is next
 
 Both shipped stages are on `main`; nothing in this arc is in flight. Stage 3
