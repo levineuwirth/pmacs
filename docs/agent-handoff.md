@@ -58,9 +58,18 @@ reads it the way you just did.
 For volatile branches, checkpoints, verification, and recovery
 commands, read `docs/active-work.md` immediately after this file.
 
-## 1. Where the project stands (2026-07-28)
+## 1. Where the project stands (2026-07-30)
 
-- `main` @ `6c9e765` (the dired Stage 2 framing #171 and the resource-op
+- **`main` @ `4cd4a7b`.** Eight PRs landed since the previous anchor, in
+  this order: the generated-buffer immutability **framing** #188, the
+  resource-op delete-guard **implementation** #190, silent-skip arming
+  #192/#193/#194, CI timeouts and concurrency #195, the process teardown
+  stdin-deadlock fix #197, dired Stage 2a #196, generated-buffer
+  immutability **Stage 1** #191, and bottom-panel **Stage 2B-3** #198.
+  Each has its own bullet below; this line is the head-of-`main` anchor
+  and nothing else.
+- **Previous anchor, retained for provenance:** `6c9e765` (the dired
+  Stage 2 framing #171 and the resource-op
   delete guard framing #186 — both framing-only, no runtime code, no
   implementation started — atop
   the docs-only coherence listview correction #189,
@@ -791,6 +800,56 @@ commands, read `docs/active-work.md` immediately after this file.
     `mark_document_stale` takes no `LspServerId` at all while creating
     URI keys across three stores. A route purge keyed on request
     responses cannot cover either.
+- **Resource-op delete-guard implementation LANDED — #190**, atop the
+  framing #186 below. The pre-filesystem refusal now exists: a
+  synchronous `apply_resource_op` delete that would destroy unsaved work
+  is refused before the filesystem is touched, rather than after.
+  - **A refusal that no production path can reach passes every
+    direct-call test.** The guard is asserted through the outermost
+    user-reachable seam and falsified by revert, not by calling the
+    check directly. This is the general rule now recorded in §5.
+  - **Delete refusals must be visible.** Review round 2 found them
+    silent — the operation declined and the user learned nothing.
+    Reporting goes through `pmacs.editor.set_status`; `pmacs.error` is
+    still a channel defined only by a test stub (§5).
+  - **A URI-keyed store is not one store.** Purging a route keyed on
+    request responses covers neither `mark_document_stale` (which takes
+    no `LspServerId` while creating URI keys across three stores) nor
+    `DiagnosticView`, whose URI is fixed at construction.
+- **dired Stage 2a LANDED — #196** (`docs/dired-stage2-framing.md`
+  rev 9, §5/§6/§10 — the substrate transaction only, **no dired
+  surface**). Rename and delete reconciliation across the path owners a
+  rename actually crosses.
+  - **A rename is a transaction across five owners**, and this is the
+    fact that forced the 2a/2b split: the buffer path, the buffer name,
+    the URI-keyed LSP stores plus `DiagnosticView`, dired's pathless
+    handles, and a captured Lua local that no transaction can reach.
+    Stage 2b owns everything needing new Rust primitives.
+  - **New LSP resource subscribers must not swallow reconciliation
+    failures**, and `forget_uri` must not leave purged requests live in
+    `LspClient.pending` — both were review findings, both now pinned.
+- **Generated-buffer immutability Stage 1 LANDED — #191**, adopting the
+  contract framed in #188. `dired.lua`'s `paint` and `listview.lua`'s
+  `render` write through `pmacs.buffer.set_generated_contents`; zero
+  `bypass_intercept` writes remain in either file.
+  - **Why these two families first, and it is not the cheap half.**
+    `compile.lua` and `builtin/commands/default.lua` rebind all seven
+    undo chords to a no-op; `dired.lua` and `listview.lua` rebind
+    **nothing**, so a bare `C-/` emptied a listing and a panel. Stage 1
+    closes the only two families reachable without `M-x`.
+  - **The framing owns the acceptance contract; the implementation
+    adopts it.** Review round 5 found #191 had locally restated Stage 1
+    criteria while #188 still carried the originals. Where an
+    implementation finds a criterion impossible, the framing is revised
+    and re-approved first — it is not narrowed in place.
+  - **Stage 2 still owes everything with new Rust in it:**
+    `Buffer::apply_generated_edit`, the `{ generated = true }` option,
+    Q#GB10's path-backed refusal, Q#GB15's `identity_protected`,
+    Q#GB5's `ensure_slot` lock, and the remaining 13 write sites.
+- **Generated-buffer immutability framing LANDED — #188**
+  (`docs/generated-buffer-immutability-framing.md`, revision 7; six
+  review rounds, thirty-two findings). Revision 7 is the governing
+  contract for the whole arc.
 - **Resource-op delete guard framing LANDED (document only) — #186**
   (`docs/resource-op-delete-guard-framing.md`, revision 5; five review
   rounds). **Approved as a framing; no runtime code.** It owns the
