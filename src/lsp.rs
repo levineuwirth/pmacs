@@ -1699,13 +1699,33 @@ impl LspManager {
             );
         }
         for rid in abandoned_rids {
-            self.pending_routes.remove(&(sid, rid));
-            if let Some(client) = self.clients.get_mut(&sid) {
-                client.pending.remove(&rid);
-                client.cancelled_rids.insert(rid);
-            }
-            self.send_cancel_request(sid, rid);
+            self.abandon_request(sid, rid);
         }
+    }
+
+    /// Abandon one in-flight request: drop its response route, drop the
+    /// client's `pending` entry, record the rid so a late reply is
+    /// dropped silently rather than surfacing as an unmatched response,
+    /// and ask the server to stop working on it.
+    ///
+    /// Extracted from [`Self::drain_cancelled_externals`] by dired Stage
+    /// 2a so [`Self::forget_uri`] reuses it instead of being a second,
+    /// incomplete copy. **All four steps are load-bearing together.**
+    /// Removing only the route and the awaiter — which is what
+    /// `forget_uri` originally did — leaves `client.pending` holding the
+    /// rid forever when the server never replies, and leaves
+    /// `cancelled_rids` without it, so a late reply arrives as a generic
+    /// unrouted response instead of being discarded. On a cross-root
+    /// rename that is worse than a leak: the old server keeps the entry
+    /// and no attachment drains it afterwards, so the entries
+    /// accumulate.
+    fn abandon_request(&mut self, sid: LspServerId, rid: u64) {
+        self.pending_routes.remove(&(sid, rid));
+        if let Some(client) = self.clients.get_mut(&sid) {
+            client.pending.remove(&rid);
+            client.cancelled_rids.insert(rid);
+        }
+        self.send_cancel_request(sid, rid);
     }
 
     /// Send `$/cancelRequest { id }` to `sid`, best-effort. A server
@@ -3123,7 +3143,11 @@ impl LspManager {
     ///    respect to another manager tick, but putting the gate first
     ///    means every later call observes the forgotten state even if a
     ///    future refactor introduces an early return.
-    /// 2. **Purge `pending_routes`** whose route carries this URI.
+    /// 2. **Abandon every in-flight request scoped to this URI**, through
+    ///    [`Self::abandon_request`] — the same path the per-tick
+    ///    cancellation sweep uses, so the route, the client's `pending`
+    ///    entry, the `cancelled_rids` record and `$/cancelRequest` all
+    ///    happen together rather than only the first of the four.
     ///    `WorkspaceSymbol` is retained unconditionally: it carries no
     ///    URI at all — its query stands in for the doc URI in the
     ///    supersede key — and a workspace-symbol query is not scoped to
@@ -3182,7 +3206,13 @@ impl LspManager {
         // Step 1 — the gate, first.
         self.forgotten_documents.insert((sid, uri.to_owned()));
 
-        // Step 2 — collect the rids this URI owns, then purge.
+        // Steps 2 and 3 — collect the rids this URI owns, settle their
+        // awaiters cancelled, then abandon each request through the
+        // SAME path the per-tick sweep uses
+        // ([`Self::abandon_request`]): route, `client.pending`,
+        // `cancelled_rids`, `$/cancelRequest`. Purging the route alone
+        // would leave the request live in the client and a late reply
+        // unrecognised.
         let doomed_rids: Vec<u64> = self
             .pending_routes
             .iter()
@@ -3190,16 +3220,12 @@ impl LspManager {
             .map(|((_, rid), _)| *rid)
             .collect();
         for rid in &doomed_rids {
-            self.pending_routes.remove(&(sid, *rid));
-        }
-
-        // Step 3 — settle the awaiters joined to those rids cancelled.
-        for rid in &doomed_rids {
             if let Some(p) = self.pending_external.remove(&(sid, *rid)) {
                 for a in &p.awaiters {
                     self.runtime.complete_external_cancelled(a.job_id);
                 }
             }
+            self.abandon_request(sid, *rid);
         }
 
         // Step 4 — the fourteen stores plus `documents`.
@@ -4554,6 +4580,67 @@ mod resource_reconciliation_tests {
             "an unrelated document's awaiter keeps waiting"
         );
         assert!(mgr.pending_external.contains_key(&(a, 2)));
+    }
+
+    /// Review round 1 — `forget_uri` must abandon the request in the
+    /// **client**, not only in the route table.
+    ///
+    /// `pending_routes` and `pending_external` are two of four places an
+    /// in-flight request lives. `LspClient.pending` (written by
+    /// `send_request`) and `cancelled_rids` are the other two, and
+    /// dropping only the first two leaves the entry live forever when the
+    /// server never replies, while a late reply arrives as a generic
+    /// unrouted response instead of being discarded. On a cross-root
+    /// rename the old server keeps those entries and no attachment
+    /// drains it afterwards, so they accumulate.
+    ///
+    /// Bite: fails against a `forget_uri` that purges routes and
+    /// awaiters without going through `abandon_request`.
+    #[test]
+    fn forget_uri_abandons_the_request_in_the_client_too() {
+        let (mut mgr, a, _b) = manager_with_two_servers();
+        let old = "file:///tmp/old.rs";
+        let other = "file:///tmp/other.rs";
+
+        for (rid, uri) in [(11u64, old), (12u64, other)] {
+            mgr.pending_routes.insert(
+                (a, rid),
+                ResponseRoute::Hover {
+                    uri: uri.to_owned(),
+                },
+            );
+            let client = mgr.clients.get_mut(&a).expect("client a");
+            client.pending.insert(rid, "textDocument/hover".to_owned());
+        }
+        let client = mgr.clients.get(&a).expect("client a");
+        assert!(client.pending.contains_key(&11), "precondition");
+        assert!(client.pending.contains_key(&12), "precondition");
+        assert!(
+            client.cancelled_rids.is_empty(),
+            "precondition: nothing abandoned yet"
+        );
+
+        mgr.forget_uri(a, old).expect("forget");
+
+        let client = mgr.clients.get(&a).expect("client a");
+        assert!(
+            !client.pending.contains_key(&11),
+            "the purged request must leave `client.pending`, or it leaks \
+             for the lifetime of a server that never replies"
+        );
+        assert!(
+            client.cancelled_rids.contains(&11),
+            "and must be recorded, or a late reply surfaces as a generic \
+             unrouted response instead of being dropped"
+        );
+        assert!(
+            client.pending.contains_key(&12),
+            "an unrelated document's request must survive"
+        );
+        assert!(
+            !client.cancelled_rids.contains(&12),
+            "and must not be marked abandoned"
+        );
     }
 
     /// Acceptance 31c — the error contract, both arms. The second is the

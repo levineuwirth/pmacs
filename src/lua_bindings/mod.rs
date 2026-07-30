@@ -1797,15 +1797,107 @@ fn reconcile_delete_and_fire(
     for id in &outcome.killed {
         after_buffer_removed(lua, *id);
     }
-    let mut args = mlua::MultiValue::new();
-    args.push_back(mlua::Value::String(
-        match lua.create_string(normalized.as_os_str().as_encoded_bytes()) {
-            Ok(s) => s,
-            Err(_) => return outcome,
-        },
-    ));
-    run_hook_if_defined(lua, "resource.deleted", args);
+    if let Ok(path_arg) = lua.create_string(normalized.as_os_str().as_encoded_bytes()) {
+        let mut args = mlua::MultiValue::new();
+        args.push_back(mlua::Value::String(path_arg));
+        run_hook_if_defined(lua, "resource.deleted", args);
+    }
+    // Reported AFTER the fan-out, deliberately: a subscriber may set its
+    // own status, and this message must be the last word because it is
+    // the data-loss-adjacent one. Unconditional, so a path that cannot
+    // cross into Lua still gets its refusal reported rather than losing
+    // both the hook and the report.
+    report_delete_reconcile(lua, &normalized, &outcome);
     outcome
+}
+
+/// Cap on how many buffer names one status line spells out before
+/// collapsing the rest into a count. A directory delete can reach
+/// dozens; a status line that scrolls off is a message nobody reads.
+const DELETE_REPORT_NAMED_LIMIT: usize = 3;
+
+/// Render the buffers a delete could not reconcile, and put it on the
+/// status channel.
+///
+/// **Silence here is the defect this exists to close.** Both outcomes
+/// leave a buffer alive and still bound to a path whose file is gone, so
+/// the next `C-x C-s` recreates the file the user just deleted. That is
+/// recoverable only if the user knows it happened:
+///
+/// * `kept_modified` — a modified buffer, kept on purpose. On the
+///   synchronous path #190 refuses before disk so this cannot arise, but
+///   `pmacs.fs.remove` dispatches a worker, and a buffer modified in the
+///   interval between the caller's check and the syscall reaches here.
+/// * `refused` — could not be removed at all: the last remaining buffer
+///   (`kill_buffer` refuses to empty the registry), or a buffer that was
+///   mid-edit when the reconciliation ran.
+///
+/// The channel is `EditorCore::status`, which is what
+/// `pmacs.editor.set_status` writes. **Not `pmacs.error`** — that
+/// channel is defined only by a test stub, so all fifteen of its guarded
+/// call sites are dead, and a report written there would be exactly the
+/// silence being fixed.
+///
+/// Lives inside the shared seam rather than at its two call sites, for
+/// the same reason the reconciliation does: a caller that has to
+/// remember to report is a caller that will forget. The first version of
+/// this function's callers both discarded the outcome.
+fn report_delete_reconcile(
+    lua: &Lua,
+    path: &std::path::Path,
+    outcome: &crate::editor_core::DeleteReconcile,
+) {
+    if outcome.kept_modified.is_empty() && outcome.refused.is_empty() {
+        return;
+    }
+    let name_of = |p: &std::path::Path| {
+        p.file_name()
+            .map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into())
+    };
+    let mut parts: Vec<String> = Vec::new();
+    if !outcome.kept_modified.is_empty() {
+        let n = outcome.kept_modified.len();
+        let named: Vec<&str> = outcome
+            .kept_modified
+            .iter()
+            .take(DELETE_REPORT_NAMED_LIMIT)
+            .map(|(_, name)| name.as_str())
+            .collect();
+        parts.push(format!(
+            "{n} buffer{} with unsaved changes kept ({}{}) — saving {} will              RECREATE the deleted file",
+            if n == 1 { "" } else { "s" },
+            named.join(", "),
+            if n > named.len() {
+                format!(", and {} more", n - named.len())
+            } else {
+                String::new()
+            },
+            if n == 1 { "it" } else { "them" },
+        ));
+    }
+    if !outcome.refused.is_empty() {
+        let n = outcome.refused.len();
+        let named: Vec<String> = outcome
+            .refused
+            .iter()
+            .take(DELETE_REPORT_NAMED_LIMIT)
+            .map(|(_, why)| why.clone())
+            .collect();
+        parts.push(format!(
+            "{n} buffer{} could not be closed ({}{})",
+            if n == 1 { "" } else { "s" },
+            named.join("; "),
+            if n > named.len() {
+                format!("; and {} more", n - named.len())
+            } else {
+                String::new()
+            },
+        ));
+    }
+    let message = format!("deleted {}: {}", name_of(path), parts.join("; "));
+    if let Some(core) = lua.app_data_ref::<SharedCore>() {
+        core.borrow_mut().status = message;
+    }
 }
 
 /// Drive [`crate::async_runtime::TickOutcome::resources`] through

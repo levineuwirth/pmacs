@@ -4998,7 +4998,21 @@ impl EditorCore {
             }
             match self.kill_buffer(id) {
                 Ok(()) => out.killed.push(id),
-                Err(message) => out.refused.push((id, message)),
+                // Named, because the reason alone is not actionable:
+                // `kill_buffer`'s "cannot kill the last remaining
+                // buffer" says nothing about *which* buffer is now
+                // bound to a path whose file is gone, and that buffer's
+                // name is what the user needs in order to save it
+                // somewhere else.
+                Err(message) => {
+                    let name = self
+                        .registry
+                        .borrow()
+                        .get(id)
+                        .map_or_else(|_| format!("{id:?}"), |b| b.name().to_owned());
+                    out.refused
+                        .push((id, format!("buffer {name:?}: {message}")));
+                }
             }
         }
         out

@@ -1439,12 +1439,23 @@ local function apply_workspace_edit(ops)
   if #plan == 0 then return 0, 0, 0 end
   -- G1 — capture the origin BUFFER, not its path. A path captured here
   -- is a plain Lua local, and no amount of reconciliation can reach an
-  -- already-captured local: when the batch renames the active file, the
-  -- old path no longer resolves, `find_or_open` hits
-  -- `resolve_target_buffer`'s NotFound arm, and that arm CREATES an
-  -- empty path-backed buffer and selects it. The user was returned to a
-  -- phantom file that never existed. The handle follows the rename for
-  -- free, because the buffer is what moved.
+  -- already-captured local: once the batch renames or deletes the active
+  -- file, that string names something that is no longer there. The
+  -- handle follows a rename for free, because the buffer is what moved.
+  --
+  -- The framing's G1 described the failure as a "phantom buffer" created
+  -- by `resolve_target_buffer`'s NotFound arm. **That is not what
+  -- happens on this path, and the wrong explanation is recorded here
+  -- rather than left to be rediscovered.** `pmacs.buffer.find_or_open`
+  -- calls `crate::file_io::load_file` directly and maps the error, so a
+  -- missing path RAISES; the NotFound arm belongs to
+  -- `EditorCore::resolve_target_buffer`, which serves
+  -- `pmacs.window.display_file` and the startup/daemon target, not this
+  -- binding. The real defect is quieter: `restore_origin` runs under a
+  -- `pcall`, so the raise is swallowed and the user is left in whatever
+  -- buffer the last applied op made active. And when the old path DOES
+  -- still resolve -- a batch that deletes and then recreates it -- the
+  -- fallback silently opens a file the user asked to delete.
   local origin_buf = pmacs.window.buffer()
   local edit_total, files, res_ops = 0, 0, 0
   -- Plan items fully applied before a failure. Q#RD3 permits partial
@@ -1458,9 +1469,9 @@ local function apply_workspace_edit(ops)
   --
   -- **No path fallback (G1).** If the origin buffer is gone — the batch
   -- deleted its file and reconciliation killed it — restore NOTHING.
-  -- The old code's path fallback is exactly what fabricated a phantom
-  -- buffer; "return the user somewhere plausible" is not worth inventing
-  -- a file that does not exist.
+  -- "Return the user somewhere plausible" is not worth re-opening a path
+  -- the batch just destroyed, and when that path has been recreated the
+  -- fallback would drop the user into a file they asked to delete.
   local function restore_origin()
     if not origin_buf then return end
     pcall(pmacs.window.switch_buffer, origin_buf)
@@ -2931,30 +2942,95 @@ local function attachments_under(path)
   return out
 end
 
+-- How many attributed failures one status line spells out before
+-- collapsing the rest into a count.
+local RESOURCE_REPORT_LIMIT = 2
+
+-- A failure collector for a reconciliation fan-out.
+--
+-- **Why this exists rather than a bare `pcall` per step.** Every step
+-- below is fallible for reasons outside this file's control -- a stale
+-- server id makes `forget_uri` raise, a stopped server makes `did_close`
+-- raise -- and an IGNORED `pcall` makes the hook callback RETURN
+-- SUCCESSFULLY. `resource.renamed` and `resource.deleted` are
+-- `all-must-succeed`, so the registry's error logger is the mechanism
+-- that surfaces a failing subscriber; a callback that swallows its own
+-- failures gives that logger nothing to log, and the concrete outcome is
+-- silent: `forget_uri` fails, the callback carries on, and the old
+-- stores, routes and `documents` entry stay live under a URI the editor
+-- no longer holds.
+--
+-- It must NOT abort the loop. One unreachable server must not leave
+-- every other attachment unreconciled, so failures accumulate and are
+-- raised once, after every attachment has been processed.
+local function failure_sink(hook_name)
+  local sink = { hook = hook_name, items = {} }
+
+  -- Run `fn(...)`, and on a raise record it attributed to `what`.
+  -- Returns `ok, value` like `pcall`, so a caller can branch.
+  function sink:step(what, fn, ...)
+    local ok, value = pcall(fn, ...)
+    if not ok then
+      self.items[#self.items + 1] = string.format("%s: %s", what, tostring(value))
+    end
+    return ok, value
+  end
+
+  -- Report everything collected, on BOTH channels, and raise.
+  --
+  -- The raise is what the `all-must-succeed` logger needs in order to
+  -- write an attributed record to *errors*; the status line is what the
+  -- user actually sees, because stale LSP state looks like the editor
+  -- quietly breaking. `pmacs.error` is deliberately not used: it is
+  -- defined only by a test stub, so writing there would reproduce the
+  -- silence this replaces.
+  function sink:finish()
+    if #self.items == 0 then return end
+    local shown, n = {}, #self.items
+    for i = 1, math.min(n, RESOURCE_REPORT_LIMIT) do shown[i] = self.items[i] end
+    local summary = table.concat(shown, "; ")
+    if n > #shown then
+      summary = summary .. string.format("; and %d more", n - #shown)
+    end
+    pcall(pmacs.editor.set_status,
+      string.format("LSP %s: %d reconciliation failure%s -- %s",
+        self.hook, n, (n == 1 and "" or "s"), summary))
+    error(string.format("%s: %s", self.hook, table.concat(self.items, "; ")), 0)
+  end
+
+  return sink
+end
+
 pmacs.hook.add("resource.renamed", function(old_path, new_path)
   if type(old_path) ~= "string" or type(new_path) ~= "string" then return end
+  local sink = failure_sink("resource.renamed")
   for _, hit in ipairs(attachments_under(old_path)) do
     local key, rec, old_uri = hit.key, hit.rec, hit.rec.uri
     -- The buffer's own path was rebound before this hook fired, so ask
     -- it rather than reconstructing the tail ourselves. A buffer that
     -- somehow lost its path (killed, unbound) cannot be re-opened, and
-    -- falls through to the teardown-only path below.
+    -- falls through to the teardown-only path below. Not routed through
+    -- the sink: a pathless buffer is a legitimate state here, not a
+    -- reconciliation failure.
     local ok_path, new_buf_path = pcall(function() return rec.buffer:path() end)
     local new_uri = (ok_path and new_buf_path) and file_uri_for(new_buf_path) or nil
 
     -- 1. Flush any pending didChange for the OLD uri, so the server is
     --    not left holding an edit it can no longer attribute.
-    flush_did_change_for(rec)
+    sink:step("flush didChange for " .. old_uri, flush_did_change_for, rec)
     pending_did_change[key] = nil
 
     -- 2. didClose the old uri — this removes the open-document
     --    registration and nothing else.
-    pcall(pmacs.lsp.did_close, rec.server, old_uri)
+    sink:step("didClose " .. old_uri, pmacs.lsp.did_close, rec.server, old_uri)
 
     -- 3. Purge the routes, drain their awaiters, and clear all fourteen
     --    stores plus `documents` for the old key. Runs against the OLD
     --    server, which matters when step 4 picks a different one.
-    pcall(pmacs.lsp.forget_uri, rec.server, old_uri)
+    --    A failure here is the one that most needs reporting: the
+    --    callback would otherwise continue with the old stores, routes
+    --    and `documents` entry all still live.
+    sink:step("forget_uri " .. old_uri, pmacs.lsp.forget_uri, rec.server, old_uri)
 
     if not new_uri then
       attachments[key] = nil
@@ -2964,8 +3040,9 @@ pmacs.hook.add("resource.renamed", function(old_path, new_path)
       -- 4. Re-run ensure_server. Server affinity keys on the detected
       --    project root, so a rename ACROSS roots needs a different
       --    server; a same-root rename reuses the existing one.
-      local sid = ensure_server(rec.language, new_buf_path)
-      if not sid then
+      local ok_sid, sid = sink:step("ensure_server for " .. new_buf_path,
+        ensure_server, rec.language, new_buf_path)
+      if not (ok_sid and sid) then
         attachments[key] = nil
         styled_buffers[key] = nil
         diag_viewed_buffers[key] = nil
@@ -2976,36 +3053,45 @@ pmacs.hook.add("resource.renamed", function(old_path, new_path)
         rec.server = sid
         rec.uri = new_uri
         rec.version = 1
-        local ok_text, text = pcall(buffer_text, rec.buffer)
-        pcall(pmacs.lsp.did_open, sid, new_uri, rec.version,
-          ok_text and text or "")
+        local ok_text, text = sink:step("read " .. new_uri, buffer_text, rec.buffer)
+        sink:step("didOpen " .. new_uri, pmacs.lsp.did_open,
+          sid, new_uri, rec.version, ok_text and text or "")
         -- 6. Re-root the diagnostic overlays. `DiagnosticView.uri` is
         --    set once at construction and is private, so this is the
         --    only way to move it — and the sweep reaches PASSIVE
         --    windows, which the attach path cannot, while preserving
         --    each overlay's position in the composition order.
-        pcall(pmacs.diag._rename_resource, old_uri, new_uri)
+        sink:step("re-root diagnostics to " .. new_uri,
+          pmacs.diag._rename_resource, old_uri, new_uri)
       end
     end
   end
+  -- Raised only after EVERY attachment has been processed: one
+  -- unreachable server must not leave the rest unreconciled.
+  sink:finish()
 end)
 
 pmacs.hook.add("resource.deleted", function(path)
   if type(path) ~= "string" then return end
+  local sink = failure_sink("resource.deleted")
   for _, hit in ipairs(attachments_under(path)) do
     local key, rec = hit.key, hit.rec
     -- No flush: the document is gone, and shipping a didChange for a
     -- file the server can no longer read buys nothing.
     pending_did_change[key] = nil
-    pcall(pmacs.lsp.did_close, rec.server, rec.uri)
-    pcall(pmacs.lsp.forget_uri, rec.server, rec.uri)
-    -- Drop the record unconditionally. The buffer may be gone entirely
-    -- (an unmodified visited file is killed), in which case a retained
-    -- record is a dangling handle that `repull_for_attachments` would
-    -- iterate; and a modified buffer kept alive has no file to analyze
-    -- until it is saved, which re-attaches through the ordinary path.
+    sink:step("didClose " .. rec.uri, pmacs.lsp.did_close, rec.server, rec.uri)
+    sink:step("forget_uri " .. rec.uri, pmacs.lsp.forget_uri, rec.server, rec.uri)
+    -- Drop the record unconditionally, INCLUDING after a failure above.
+    -- The buffer may be gone entirely (an unmodified visited file is
+    -- killed), in which case a retained record is a dangling handle that
+    -- `repull_for_attachments` would iterate; and a modified buffer kept
+    -- alive has no file to analyze until it is saved, which re-attaches
+    -- through the ordinary path. Keeping a record whose teardown failed
+    -- would be strictly worse than dropping it: the failure is reported
+    -- either way, and a retained one is re-swept every refresh.
     attachments[key] = nil
     styled_buffers[key] = nil
     diag_viewed_buffers[key] = nil
   end
+  sink:finish()
 end)

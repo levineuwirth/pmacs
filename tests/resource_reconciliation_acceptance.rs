@@ -147,6 +147,10 @@ fn buffer_name(state: &EditorState, global: &str) -> Option<String> {
     )
 }
 
+fn status(state: &EditorState) -> String {
+    state.core.borrow().status.clone()
+}
+
 fn buffer_is_valid(state: &EditorState, global: &str) -> bool {
     eval(
         state,
@@ -903,6 +907,21 @@ fn acc53_the_last_buffer_refusal_keeps_the_buffer_and_the_rest_proceeds() {
         "the last remaining buffer cannot be killed, so it survives the \
          deletion of its file"
     );
+    // **Reported, not silent.** Survival alone is not the criterion: the
+    // buffer is still bound to a path whose file is gone, so the next
+    // `C-x C-s` recreates the file the user deleted. That is recoverable
+    // only if the user is told.
+    let said = status(&state);
+    assert!(
+        said.contains("could not be closed"),
+        "the refusal must reach the status channel; status was {said:?}"
+    );
+    assert!(
+        said.contains("only.txt"),
+        "and must name the buffer, because `cannot kill the last \
+         remaining buffer` alone does not say WHICH buffer is now bound \
+         to a deleted path; status was {said:?}"
+    );
 
     // Half two: a directory of buffers where one refuses removal. The
     // rest must still reconcile.
@@ -932,6 +951,26 @@ fn acc53_the_last_buffer_refusal_keeps_the_buffer_and_the_rest_proceeds() {
         !buffer_is_valid(&state2, "C"),
         "and C still reconciled afterwards — one refusal must not abort \
          the rest"
+    );
+    // The kept-modified case reports too, and says what the consequence
+    // is. This is the asynchronous race the framing's H1 leaves open:
+    // #190 refuses before disk on the synchronous path, but
+    // `pmacs.fs.remove` dispatches a worker, so a buffer modified in the
+    // interval reaches the drain with its file already gone.
+    let said2 = status(&state2);
+    assert!(
+        said2.contains("unsaved changes kept"),
+        "a modified buffer kept alive over a deleted file must be \
+         reported; status was {said2:?}"
+    );
+    assert!(
+        said2.contains("RECREATE"),
+        "and the report must state the consequence — saving it puts the \
+         deleted file back; status was {said2:?}"
+    );
+    assert!(
+        said2.contains("b.txt"),
+        "naming the buffer; status was {said2:?}"
     );
 }
 
@@ -1081,6 +1120,16 @@ fn acc53b_a_mid_edit_refusal_leaves_window_side_and_round_trip_state_untouched()
     assert!(
         core.registry.borrow().contains(doomed_id),
         "and the buffer itself is still in the registry"
+    );
+    drop(core);
+    // And the refusal is REPORTED. Leaving state untouched is only half
+    // the contract: the file is gone, so a user who is not told keeps a
+    // buffer bound to a path that no longer exists.
+    let said = status(&state);
+    assert!(
+        said.contains("mid-edit") && said.contains("could not be closed"),
+        "a mid-edit refusal must reach the status channel; status was \
+         {said:?}"
     );
 }
 
@@ -1771,6 +1820,22 @@ fn acc34_renaming_the_active_file_through_the_applier_returns_the_same_buffer() 
 /// Acceptance 35. When the origin buffer is **gone** after the edit, the
 /// applier restores **nothing** rather than falling back to the old
 /// path.
+///
+/// **The plan deletes the origin's file and then RECREATES it, and that
+/// is what makes the row bite at all.** With a plain delete the forbidden
+/// fallback is unobservable: `find_or_open` on a path that no longer
+/// exists raises straight out of `file_io::load_file`, the surrounding
+/// `pcall` swallows it, and nothing happens — so "no buffer at the old
+/// path" and "the active buffer is live" both hold with the fallback
+/// present. Recreating the path gives the fallback something to open, and
+/// it is not a contrived shape: a `documentChanges` batch that deletes
+/// and recreates a file is ordinary LSP refactoring output.
+///
+/// Bite: the applier restoring by path instead of by buffer handle. The
+/// handle is invalid (reconciliation killed the buffer) so a
+/// handle-based restore does nothing; a path-based one loads the
+/// recreated file into a NEW buffer and switches the user into it —
+/// dropping them, silently, into a file they asked to delete.
 #[test]
 fn acc35_when_the_origin_buffer_is_gone_the_applier_restores_nothing() {
     let fx = Fixture::new();
@@ -1783,10 +1848,18 @@ fn acc35_when_the_origin_buffer_is_gone_the_applier_restores_nothing() {
         &state,
         &fx.root,
         &serde_json::json!({
-            "documentChanges": [{
-                "kind": "delete",
-                "uri": file_uri(&doomed),
-            }],
+            "documentChanges": [
+                {
+                    "kind": "delete",
+                    "uri": file_uri(&doomed),
+                },
+                {
+                    // Recreates the path, so a path-based restore has a
+                    // file to open and the fallback becomes observable.
+                    "kind": "create",
+                    "uri": file_uri(&doomed),
+                },
+            ],
         }),
     );
     // `other` keeps the registry non-empty so the delete's kill is not
@@ -1806,12 +1879,17 @@ fn acc35_when_the_origin_buffer_is_gone_the_applier_restores_nothing() {
     );
     settle_a_while(&mut state);
 
-    assert!(!doomed.exists(), "the file is gone");
+    assert!(
+        doomed.exists(),
+        "precondition for the bite: the batch recreated the path, so a \
+         path-based restore CAN open it"
+    );
     assert!(
         !buffer_is_valid(&state, "B"),
-        "and its clean buffer was reconciled away"
+        "the origin buffer was reconciled away by the delete"
     );
-    let phantom: bool = eval(
+
+    let reopened: bool = eval(
         &state,
         &format!(
             "for _, b in ipairs(pmacs.buffer.list()) do
@@ -1822,10 +1900,20 @@ fn acc35_when_the_origin_buffer_is_gone_the_applier_restores_nothing() {
         ),
     );
     assert!(
-        !phantom,
-        "the applier must restore NOTHING rather than re-opening the path \
-         it just deleted — a path fallback would recreate it as an empty \
-         buffer, and the next C-x C-s would resurrect the file"
+        !reopened,
+        "the applier must restore NOTHING. A path-based restore loads the \
+         recreated file into a fresh buffer, which is the editor silently \
+         re-opening a file the user asked to delete"
+    );
+
+    let active_path: Option<String> = eval(
+        &state,
+        "local b = pmacs.window.buffer(); return b and b:path() or nil",
+    );
+    assert_ne!(
+        active_path.as_deref(),
+        Some(doomed.to_str().unwrap()),
+        "and the user must not be sitting in it either"
     );
     let active_valid = {
         let core = state.core.borrow();
@@ -1834,6 +1922,114 @@ fn acc35_when_the_origin_buffer_is_gone_the_applier_restores_nothing() {
     };
     assert!(
         active_valid,
-        "and the window it left behind must sit on a live buffer"
+        "the window it left behind must still sit on a live buffer"
+    );
+}
+
+/// Review round 1 — a reconciliation failure inside the LSP subscriber
+/// must be **reported and attributed**, and must not stop the remaining
+/// attachments from reconciling.
+///
+/// The scenario is the reviewer's: a **stale server id**. The attachment
+/// record still names a server the manager has forgotten, so
+/// `did_close` and `forget_uri` both raise. With ignored `pcall`s the
+/// callback returned successfully, so the `all-must-succeed` hook logger
+/// had nothing to log, and the old stores, routes and `documents` entry
+/// stayed live under a URI the editor no longer held — silently.
+///
+/// Two packages under one parent directory give two servers, and only
+/// one is staled out, so the row can assert both halves at once: the
+/// failure is surfaced, **and** the healthy attachment still moves.
+///
+/// Bite: fails against ignored `pcall`s (nothing on either channel), and
+/// against a fix that lets the first failure `error()` out of the loop
+/// (the healthy attachment would never reconcile).
+#[test]
+fn a_subscriber_reconciliation_failure_is_reported_and_the_rest_still_reconcile() {
+    let fx = Fixture::new();
+    fx.write("w/a/Cargo.toml", "[package]\nname = \"a\"\n");
+    fx.write("w/b/Cargo.toml", "[package]\nname = \"b\"\n");
+    let file_a = fx.write("w/a/src/main.rs", "fn main() {}\n");
+    let file_b = fx.write("w/b/src/main.rs", "fn main() {}\n");
+    let mut state = editor();
+    configure_fake(&state, &fx.root, "rust");
+    open_as(&state, "A", &file_a);
+    settle_until(&mut state, "server for package a", |s| server_count(s) == 1);
+    open_as(&state, "B", &file_b);
+    settle_until(&mut state, "server for package b", |s| server_count(s) == 2);
+
+    // Stale out the server serving package `a` only: stop it, then forget
+    // it, leaving `attachments[a].server` naming a server the manager no
+    // longer holds. `forget_uri` raises for an unknown server id, which
+    // is exactly the failure mode under test.
+    let root_a = file_uri(&fx.at("w/a"));
+    exec(
+        &state,
+        &format!(
+            "local victim
+             for _, row in ipairs(pmacs.lsp.list()) do
+               if row.root_uri == \"{root_a}\" then victim = row.id end
+             end
+             assert(victim, 'no server rooted at package a')
+             pcall(pmacs.lsp.stop, victim)
+             _G.VICTIM = victim"
+        ),
+    );
+    settle_until(&mut state, "the victim is forgotten", |s| {
+        let gone: bool = eval(
+            s,
+            "pcall(pmacs.lsp.forget, _G.VICTIM)
+             for _, row in ipairs(pmacs.lsp.list()) do
+               if row.id == _G.VICTIM then return false end
+             end
+             return true",
+        );
+        gone
+    });
+    exec(&state, "pmacs.editor.set_status('')");
+
+    // Rename the parent, so BOTH attachments are in the fan-out.
+    let new_uri_b = file_uri(&fx.at("w2/b/src/main.rs"));
+    rename_fire_and_forget(&mut state, &fx.at("w"), &fx.at("w2"));
+    settle_a_while(&mut state);
+
+    // Half one: the failure is surfaced, on both channels, attributed to
+    // the operation that failed.
+    let said = status(&state);
+    assert!(
+        said.contains("resource.renamed") && said.contains("reconciliation failure"),
+        "the failure must reach the status channel; status was {said:?}"
+    );
+    assert!(
+        said.contains("forget_uri"),
+        "and must name WHICH step failed — an unattributed count does not \
+         tell anyone that the URI-keyed stores were left live; status was \
+         {said:?}"
+    );
+
+    let errors: String = eval(
+        &state,
+        "for _, b in ipairs(pmacs.buffer.list()) do
+           if b:name() == '*errors*' then return b:slice(0, b:len()) end
+         end
+         return ''",
+    );
+    assert!(
+        errors.contains("resource.renamed") && errors.contains("forget_uri"),
+        "the callback must RAISE, so the all-must-succeed hook logger has \
+         something to record; *errors* held {errors:?}"
+    );
+
+    // Half two: the healthy attachment still reconciled. The fake
+    // republishes diagnostics on every `didOpen`, so diagnostics under
+    // the NEW uri prove the whole ordered teardown ran for package b
+    // after package a's failed.
+    settle_until(&mut state, "package b reattached at its new uri", |s| {
+        diag_count(s, &new_uri_b) > 0
+    });
+    assert!(
+        diag_count(&state, &new_uri_b) > 0,
+        "one unreachable server must not leave every other attachment \
+         unreconciled — the raise has to come after the loop, not inside it"
     );
 }
