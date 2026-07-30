@@ -20,22 +20,35 @@
 
 mod common;
 
+// Most of this suite needs a real daemon and therefore the `crdt` feature:
+// a semantic session is necessarily a text replica, so a non-CRDT build
+// cannot host one at all. The negotiation-rule tests are the exception and
+// run in both configurations, which is why the imports split here.
+#[cfg(feature = "crdt")]
 use std::io::Read;
+#[cfg(feature = "crdt")]
 use std::os::unix::net::UnixStream;
+#[cfg(feature = "crdt")]
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "crdt")]
 use pmacs_protocol::cell::CellSize;
+#[cfg(feature = "crdt")]
 use pmacs_protocol::message::{
     AttachRequest, FrontendCapabilities, FrontendEvent, GoodbyeReason, Hello, InstanceMessage, Key,
     KeyEvent, Modifiers, SessionBootstrapRequest,
 };
-use pmacs_protocol::panel::{PANEL_MIN_VERSION, PanelFramePayload};
+use pmacs_protocol::panel::PANEL_MIN_VERSION;
+#[cfg(feature = "crdt")]
+use pmacs_protocol::panel::PanelFramePayload;
+#[cfg(feature = "crdt")]
 use pmacs_protocol::transport::{read_message, write_message};
 use pmacs_protocol::{
     ADVERTISED_PROTOCOL_VERSION, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
     is_supported_protocol_version, negotiated_session_version, requested_protocol_version,
 };
 
+#[cfg(feature = "crdt")]
 use common::daemon::{TestDaemon, build_default_caps};
 
 /// Opens a bottom panel in whichever frontend pressed the key.
@@ -44,6 +57,7 @@ use common::daemon::{TestDaemon, build_default_caps};
 /// with an explicit `side` is exactly what a Stage 1 adopter does, and the
 /// acting frontend is the one that sent the key — so whether this produces
 /// a side window is precisely the `panel_capable` question.
+#[cfg(feature = "crdt")]
 const PANEL_ON_KEY: &str = r#"
 pmacs.command.define {
   name = "bp-probe.panel",
@@ -55,6 +69,7 @@ pmacs.command.define {
 pmacs.keymap.bind { scope = "global", sequence = "C-M-p", command = "bp-probe.panel" }
 "#;
 
+#[cfg(feature = "crdt")]
 fn semantic_caps() -> FrontendCapabilities {
     FrontendCapabilities {
         multi_frontend: true,
@@ -65,6 +80,7 @@ fn semantic_caps() -> FrontendCapabilities {
 }
 
 /// One attached session, with the version it actually offered.
+#[cfg(feature = "crdt")]
 struct Session {
     stream: UnixStream,
     offered: u32,
@@ -77,6 +93,7 @@ struct Session {
 /// ever advertised something above the baseline, a shipped frontend would
 /// reject before reaching any of these code paths, and the tests below
 /// would still pass while the product was broken.
+#[cfg(feature = "crdt")]
 fn attach_semantic(daemon: &TestDaemon, offer: u32) -> Session {
     let mut stream = daemon.connect();
     stream
@@ -115,6 +132,7 @@ fn attach_semantic(daemon: &TestDaemon, offer: u32) -> Session {
 }
 
 /// Read messages until `want` returns `Some`, or the deadline passes.
+#[cfg(feature = "crdt")]
 fn drain_until<T>(
     stream: &mut UnixStream,
     label: &str,
@@ -138,6 +156,7 @@ fn drain_until<T>(
 }
 
 /// Press `C-M-p`, then report whether a `Present` panel frame arrived.
+#[cfg(feature = "crdt")]
 fn press_and_await_panel(session: &mut Session) -> bool {
     // The declaration first: the daemon needs columns before it can paint
     // a first panel frame, and it is valid without a side window for
@@ -322,7 +341,7 @@ fn the_baseline_stays_and_the_counter_offer_activates() {
         ADVERTISED_PROTOCOL_VERSION, 20,
         "moving this is the incompatible act the mechanism exists to avoid"
     );
-    assert!(PROTOCOL_VERSION > ADVERTISED_PROTOCOL_VERSION);
+    const { assert!(PROTOCOL_VERSION > ADVERTISED_PROTOCOL_VERSION) };
     assert_eq!(PANEL_MIN_VERSION, PROTOCOL_VERSION);
 
     // The current baseline is answered with this binary's own version.

@@ -16363,9 +16363,8 @@ mod tests {
             "the inset is the panel's rows plus its divider"
         );
         assert!(band.px() > 0.0);
-        assert_eq!(
-            status_band_top(state.config.height, fm),
-            status_before,
+        assert!(
+            (status_band_top(state.config.height, fm) - status_before).abs() < f32::EPSILON,
             "the status band must stay pixel-identical at the physical window bottom"
         );
         assert!(
@@ -16442,9 +16441,11 @@ mod tests {
                 < f32::EPSILON,
             "capacity always reserves the divider"
         );
-        assert_eq!(
-            document_text_bottom(height, fm, PanelBandInset::ABSENT),
-            status_band_top(height, fm),
+        assert!(
+            (document_text_bottom(height, fm, PanelBandInset::ABSENT)
+                - status_band_top(height, fm))
+            .abs()
+                < f32::EPSILON,
             "while an absent panel costs the document nothing"
         );
     }
@@ -16481,9 +16482,8 @@ mod tests {
         // depend on what happens to be open. Here they are separated
         // directly, so the assertion does not rest on font internals.
         state.measured_mono_advance = Some(probe * 2.0);
-        assert_ne!(
-            state.mono_advance(),
-            probe,
+        assert!(
+            (state.mono_advance() - probe).abs() > f32::EPSILON,
             "fixture must separate the two derivations"
         );
 
