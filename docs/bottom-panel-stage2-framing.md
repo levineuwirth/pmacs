@@ -1,7 +1,7 @@
 # Bottom panel Stage 2 — the GPU panel band (framing)
 
-**Revision 6 — PR #184 review correction; the underlying Stage 2
-framing remains APPROVED 2026-07-27. 2A (#177) and 2B-1 (#184) are both
+**Revision 7 — Stage 2B-3 review round 1 corrections; the underlying
+Stage 2 framing remains APPROVED 2026-07-27. 2A (#177) and 2B-1 (#184) are both
 merged, and 2B-2 is the next slice. Ground truth: canonical `main` @
 `6bee09d`, where protocol schema support is `v6..=v21` while the
 production server-first handshake still deliberately advertises v20.**
@@ -34,6 +34,52 @@ geometries), Q#BP16 (pointer transport), Q#BP17 (fold projection), and
 **parent acceptance criteria 37–55**.
 
 ## 0. Revision history
+
+### 0.-1 Rev 6 → rev 7 — Stage 2B-3 review round 1, three stated
+contracts corrected
+
+- **R7-1 (P1) — the stable-probe decision covers all THREE cell
+  computations, not only the declaration.** §5.3 decided that the panel
+  geometry *declaration* resolves its advance from
+  `probe_mono_advance` rather than `State::mono_advance`. That wording
+  let an implementation declare with the probe while *painting* and
+  *hit-testing* with the document-dependent advance — which is what
+  happened, and which means the daemon's column count, the painted
+  column positions, and the cell a click resolves to are three
+  different grids. The decision now reads: **the panel's advance is
+  resolved once, cached behind the declaration, and used by the
+  declaration, the painter, and the hit test.** They agree by
+  construction rather than by three call sites choosing correctly.
+  A test that asserts only the declaration cannot see this, so §7.2.3
+  A2B-3 gains the painting and hit-testing halves explicitly.
+- **R7-2 (P1) — the x = 0 full-width contract governs the band RECT,
+  not only `total.cols`.** Parent Q#BP15a already states that
+  `total.cols` describes "the full-width panel grid beginning at x=0;
+  document `TEXT_LEFT`/gutter padding is unrelated". Rev 6 left that
+  as a statement about the *declaration*, and an implementation
+  inset both the declared width and the painted rect by `TEXT_LEFT`.
+  The contract is restated here as covering the band's content
+  rectangle: **origin x = 0, full surface width**, with the fractional
+  right-edge remainder painted as band background that maps to no cell
+  and emits no `PanelPointer`.
+- **R7-3 (P2) — `GoodbyeReason::VersionMismatch { server }` is the
+  instance's `PROTOCOL_VERSION`, never the advertised baseline.** Once
+  §3.5's activation split the two, a daemon reporting its baseline told
+  a frontend it topped out at 20 while it in fact spoke 21 — the
+  inverse of the upgrade advice the reason exists to give. The wire
+  field's own documentation already said "the instance's
+  `PROTOCOL_VERSION`"; this records that the split makes it load-bearing
+  rather than incidental. A *frontend* raising the same reason locally
+  can only report the baseline it was handed.
+- **R7-4 — criterion 54's gate is named.** The panel-hosted
+  `--headless-probe` run lives in
+  `bottom_panel_stage2b_gpu_acceptance` as
+  `a54_real_daemon_real_pty_and_headless_gpu_render_one_panel_hosted_terminal`,
+  and it drives the real `display = "panel"` adopter opt-in rather than
+  opening a terminal and moving it. Opening first and moving after
+  leaves the buffer displayed twice, the document window still
+  projecting it as a full-window terminal, and the acceptance unable to
+  tell a panel-hosted child from a document one.
 
 ### 0.0 Rev 5 → rev 6 — PR #184 review round 2, four findings closed
 
@@ -843,7 +889,21 @@ attach.
   driving selection, terminal mouse reporting, and click-to-focus
   without disturbing the document mirror), **54** (the
   `--headless-probe` run: one real daemon, real PTY, real wgpu, through
-  a panel-hosted terminal), **55**.
+  a panel-hosted terminal — see rev 7 R7-4 for the exact fixture),
+  **55**.
+  **48 is the whole gesture set, and a partial port of it is invisible**
+  (rev 7): `Move` alone satisfies nothing. A left press must ARM the
+  gesture so motion becomes `Drag(Left)`; a release outside the band
+  must still end the gesture the press began, at the last reported cell,
+  or the daemon holds a button down forever; right-click and wheel must
+  consult the band before the document, or they are applied to the
+  surface underneath. Every handler resolves the band through **one**
+  classifier, because four handlers each deciding for themselves is how
+  three of them came to skip the question. A **passive** panel's caret is
+  not painted: the producer ships `cursor` for it too, so `focused` is
+  what decides. Planned underlines must actually render — straight forms
+  on the quad batch, curly on the squiggle pipeline, as in the terminal
+  path.
 - **41, the GPU half:** the pixel→cell conversion pinned at fractional
   widths and heights, and geometry refresh on window resize, font
   change, and scale change.
@@ -858,11 +918,18 @@ attach.
   neither paints nor hit-tests until a matching `Present` arrives. This
   is the case daemon value dedup cannot see and is why option 1 was
   chosen.
-- **A2B-3.** Panel columns are derived from the **stable normal-face
+- **A2B-3.** Panel cells are derived from the **stable normal-face
   probe**, not `State::mono_advance`'s document-glyph fallback: two GPU
   frontends with identical metrics and different documents derive
   identical `total.cols`, and a probe returning `None` declares zero
   usable geometry rather than falling back to a document sample.
+  **All three consumers are asserted, not just the declaration** (rev 7
+  R7-1): the declared total, the pixel a run is painted at, and the cell
+  a click hit-tests to must all follow the same advance, and the fixture
+  must make the two candidate advances differ so each assertion
+  discriminates. The band's rect is asserted at **x = 0 across the full
+  surface width**, with the right-edge remainder resolving to no cell
+  (R7-2).
 - **A2B-4 (contrast assertion).** Installing a panel moves **all twelve
   document-owned consumers** of §5.3 by exactly
   `installed_panel_height + divider_height`, **while all eight
