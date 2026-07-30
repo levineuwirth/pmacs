@@ -743,13 +743,13 @@ review correction.
   projection.** Whichever is framed second re-scouts the other's landed
   state.
 
-## Test ambient-root isolation — FRAMING OPEN, revision 2
+## Test ambient-root isolation — FRAMING OPEN, revision 4
 
 - **Branch `test-ambient-config-isolation`**, worktree
   `../pmacs-test-isolation`, based on `githubsucks/main` @ `4cd4a7b`.
   **Framing only; no code, no PR yet.**
-  `docs/test-ambient-config-isolation-framing.md` revision 3, two review
-  rounds closed (seven blocking, four major, all accepted).
+  `docs/test-ambient-config-isolation-framing.md` revision 4, three review
+  rounds closed (eight blocking, six major, all accepted).
 - **What it is.** Integration tests use the developer's real ambient
   roots. `#[cfg(not(test))]` guards config loading against the crate's
   own unit tests only, so the **65** files in `tests/` that construct an
@@ -760,8 +760,10 @@ review correction.
 - **Why it matters now.** `cargo test` is red on any machine with a real
   `~/.config/pmacs/init.lua` (11 of 67 in `compile_mode_acceptance`) and
   green in CI, so the failure is attributed to whatever branch is
-  checked out. Every local gate run in this repo currently needs an
-  isolated `XDG_CONFIG_HOME` as a workaround.
+  checked out. Every local gate run in this repo currently needs all
+  five bootstrap-storage variables controlled as a workaround:
+  `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`,
+  `XDG_CACHE_HOME`, and `PMACS_STATE_HOME`.
 - **Round 1's four blocking findings, all confirmed in code:** the
   read-only assumption was already false; the population count was 18
   when 65 of 96 files construct an editor, from a grep that did not
@@ -1746,11 +1748,13 @@ git worktree add --track \
     acting frontend made a total function partial, and six runtime modules
     silently dropped operations (`kill_ring_acceptance` 30/30 → 25/5).
     Fixed in `9110f9f` before merge.
-  - Gating fact found on the way: **the workspace sweep must run with an
-    isolated `XDG_CONFIG_HOME`**, because the real user `init.lua`
-    installs a local package and the losing race leaks a status message
-    into painted-frame comparisons. There is also a latent pre-existing
-    `main` bug in the buffer CRDT undo path, unrelated to this arc.
+  - Gating fact found on the way: an isolated `XDG_CONFIG_HOME` prevents
+    the real user `init.lua` from installing a local package and leaking
+    a status message into painted-frame comparisons. **That isolates the
+    observed config symptom only, not the gate:** the ambient-root lane
+    above establishes that data/state/cache must be controlled too.
+    There is also a latent pre-existing `main` bug in the buffer CRDT
+    undo path, unrelated to this arc.
   - `compile_mode_acceptance` is load-sensitive under default
     parallelism (~1 run in 3, a different test each time); verified
     pre-existing by swapping in `main`'s `compile.lua`. It is 67/67 at

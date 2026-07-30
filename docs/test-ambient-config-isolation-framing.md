@@ -1,6 +1,6 @@
 # Framing — integration tests use the developer's real ambient roots
 
-**Revision 3.** Status: awaiting review round 3. Proposed lane:
+**Revision 4.** Status: awaiting review round 4. Proposed lane:
 `test-ambient-config-isolation`, worktree `../pmacs-test-isolation`,
 based on `githubsucks/main` @ `4cd4a7b` (a reading; re-measure at branch
 time).
@@ -15,6 +15,21 @@ directory**. The lane is therefore about *ambient roots*, not about
 `init.lua`. See §1.6.
 
 ## Revision history
+
+**Revision 3 → 4**, after review round 3 (one blocking, two major). All
+three accepted.
+
+- **The isolated gate still inherited `PMACS_STATE_HOME`** (§1.6a,
+  §6). That override wins over `XDG_STATE_HOME`, so setting the four XDG
+  storage variables did not isolate state on a machine that exports it.
+  The contract now names the exact five variables rather than counting
+  roots.
+- **Q#TI5 still called self-spawn the durable regression guard** after
+  revision 3 had accepted that it proves behaviour, not continued
+  adoption. Q#TI5 now names both guards and their different jobs.
+- **The active-work lane still said revision 2 and still prescribed
+  isolated `XDG_CONFIG_HOME` alone.** Both are synchronized with this
+  revision.
 
 **Revision 2 → 3**, after review round 2 (three blocking, two major).
 All five accepted; all five verified before acceptance, two of them by
@@ -223,11 +238,18 @@ So revision 1's Bet 2 was not a question to investigate — it was already
 answered, in the direction that matters. This upgrades the lane from
 "local gates lie" to **"tests write into real user data"**.
 
-### 1.6a Six ambient roots, and the harness covers two
+### 1.6a Ambient variables, and the harness's incomplete storage coverage
 
 `src/` reads: `HOME` (9 sites), `XDG_DATA_HOME`, `XDG_CONFIG_HOME`,
 `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR`, and
 `PMACS_STATE_HOME`.
+
+The four bootstrap storage roots resolve through **five variables**:
+`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`,
+`XDG_CACHE_HOME`, and `PMACS_STATE_HOME`. The fifth is not redundant:
+`PMACS_STATE_HOME` wins over `XDG_STATE_HOME`
+(`src/state.rs:47-68`), so redirecting the latter while inheriting the
+former leaves the real state root live.
 
 The shared harness `spawn_daemon_process_with_env`
 (`tests/common/daemon.rs:154`) sets **`HOME` and `XDG_CONFIG_HOME`
@@ -354,12 +376,15 @@ skip **ambient reads** while still returning `is_init_complete() == true`.
   ratchet exists to prove.*
 - **Q#TI4** — Must isolated construction remain init-complete? **Yes**
   (§1.8), and it is a criterion rather than an assumption.
-- **Q#TI5** — What is the durable regression guard? *Proposed: a
-  **test-binary self-spawn under a controlled environment**, not a CI
-  leg. Revision 1 proposed a hostile-config CI leg in Q#TI3 and parked
-  that same mechanism in §5 — a contradiction. A CI leg also proves only
-  the branch that adds it. A self-spawning test carries its own hostile
-  environment and fails wherever it runs.*
+- **Q#TI5** — What are the durable regression guards? *Proposed: two
+  guards with different jobs. A **test-binary self-spawn under a
+  controlled environment** is the behavioural proof: the isolated seam
+  ignores hostile ambient roots and leaves them unmodified. A **checked
+  source inventory** is the adoption proof: a raw ambient constructor
+  added to another test binary fails the suite. Revision 1 proposed a
+  hostile-config CI leg in Q#TI3 and parked that same mechanism in §5 —
+  a contradiction; self-spawn replaces that workflow leg, while the
+  inventory prevents migration drift.*
 
 
 ## 3. Bets
@@ -371,9 +396,10 @@ skip **ambient reads** while still returning `is_init_complete() == true`.
   - *Falsified if* sites are reached through helpers that obscure which
     kind they are. Then the helper is the unit and that is stated.
 
-- **Bet 2 — every ambient root can be redirected without `unsafe`.**
+- **Bet 2 — every bootstrap storage root can be redirected without
+  `unsafe`.**
   A `BootstrapRoots` parameter covers config, data, state and cache; the
-  spawned harness sets all six variables of §1.6a.
+  spawned harness controls all five storage variables of §1.6a.
   - *Falsified if* any root is resolved somewhere that cannot accept the
     parameter — e.g. behind a `OnceLock` initialised before construction.
     **That is a real risk and is checked first**, because it decides
@@ -416,8 +442,10 @@ skip **ambient reads** while still returning `is_init_complete() == true`.
    its isolation comes from the launched environment. The ratchet's
    production-entry-point discipline is unweakened, and this is asserted
    rather than asserted-to-be-obvious.
-5. The shared harness `spawn_daemon_process_with_env` sets **all six**
-   roots of §1.6a, not two.
+5. The shared harness `spawn_daemon_process_with_env` controls all
+   **five storage variables** of §1.6a:
+   `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`,
+   `XDG_CACHE_HOME`, and `PMACS_STATE_HOME`.
 6. `compile_mode_acceptance` passes with a real
    `~/.config/pmacs/init.lua` defining `find-file` present — the exact
    condition of §1.1.
@@ -429,9 +457,11 @@ skip **ambient reads** while still returning `is_init_complete() == true`.
    unconditional package materialization above it.
 10. This lane is recorded in `docs/active-work.md` with its branch and
     worktree, per the volatile-work protocol — revision 1 omitted it.
-11. README or handoff records that a local full-suite run needs **all
-    four storage roots** isolated until this lands — naming them, since
-    isolating only `XDG_CONFIG_HOME` leaves the write path open.
+11. README or handoff records that a local full-suite run needs all
+    **five storage variables** controlled until this lands:
+    `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`,
+    `XDG_CACHE_HOME`, and `PMACS_STATE_HOME`. Naming only the four XDG
+    variables leaves a higher-precedence state override live.
 12. **A durable adoption ratchet**, not a one-time census: a checked
     source inventory that fails when a new ambient
     `EditorState::new()`/`open(` appears in `tests/` outside a narrow,
@@ -471,9 +501,12 @@ had that hole.** The correct invocation sets, to a fresh directory:
 
 ```
 XDG_CONFIG_HOME  XDG_DATA_HOME  XDG_STATE_HOME  XDG_CACHE_HOME
+PMACS_STATE_HOME
 ```
 
-`HOME` is deliberately left alone (§1.6b).
+`PMACS_STATE_HOME` must be redirected or explicitly removed; it takes
+precedence over `XDG_STATE_HOME`. `HOME` is deliberately left alone
+(§1.6b).
 
 **Run the suite twice: once isolated, once with a hostile environment**
 — an `init.lua` that would break a known assertion, plus a pre-seeded
