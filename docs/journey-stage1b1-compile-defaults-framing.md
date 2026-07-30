@@ -1,11 +1,42 @@
 # Journey Stage 1b-1 — make building discoverable
 
-**Status: framing, rev 1 — awaiting approval.**
+**Status: framing, rev 2 — awaiting review round 2.**
 **Serves `COHERENCE.md` §2 (the golden product journey, step 9), §19
 (coherence acceptance tests), §20 Priority 1.**
 
 ## 0. Revision history
 
+- rev 2 (2026-07-30) — review round 1. Two blocking, two major; all four
+  accepted, all four verified in the code first.
+  - **§3.1 did not actually prevent the drift it claimed to.**
+    `pmacs.minibuffer.read` is asynchronous: `on_accept` runs later, and
+    the active window can change while the prompt is open. `run` then
+    re-resolved the cwd from whatever was active *at accept time*, so the
+    prompt could say `cargo build` for A and execute in B. **Sharing one
+    resolver is not enough — the resolution has to be captured.** The
+    interactive `fn` now captures `context()` and passes its `cwd`
+    through to `run`. This is the Stage 1a lesson repeating: the
+    destination is captured at request time, not re-derived at commit
+    time (`commit_to`, §4.4 of that framing).
+  - **No pin accepted the prompt or observed a spawned run.** N1–N5 all
+    compared values that the prompt and the resolver had already agreed
+    on; a wrong cwd inside `on_accept` — exactly the defect above —
+    passed every one of them. Two pins now cross the accept boundary:
+    N3 (the captured directory survives a window switch) and N4 (accept
+    `cargo build` in a real Cargo fixture, assert the `Directory:` header
+    and a clean exit).
+  - **N3's named falsifier was not discriminating.**
+    `project_root_of_active()` already detects from the active file and
+    returns the *innermost* root, so re-detecting from that root yields
+    `node` again in `mixed_fixture/sub`. The mutation rev 1 named would
+    have left the pin green. N3 is repurposed to the prompt-to-run
+    handoff, and the mixed-fixture pin (now N5) states a falsifier it
+    actually catches.
+  - **§6.1 contradicted §3.1.** A Cargo *workspace subdirectory*
+    contains no `Cargo.toml` and correctly receives `cargo build`, so
+    "never offered `cargo build` for a directory with no `Cargo.toml`"
+    was false on the design's own terms. Reworded to *no detected Cargo
+    project*.
 - rev 1 (2026-07-30) — first framing. Scouted against `githubsucks/main`
   @ `22df6ab` (test-ambient isolation framing #201).
 
@@ -210,8 +241,54 @@ function pmacs.compile.context(explicit_cwd)
 ```
 
 `run` calls `resolve_cwd(opts.cwd)`; the interactive `fn` calls
-`pmacs.compile.context()`. **The suggestion is therefore a function of
-the directory the command will execute in**, and the two cannot drift.
+`pmacs.compile.context()`.
+
+**Sharing the resolver is necessary and not sufficient.**
+`pmacs.minibuffer.read` is asynchronous — `on_accept` runs an arbitrary
+time later, and nothing freezes the active window while a prompt is
+open. A mouse click, a second frontend, or a background open can change
+what `project_root_of_active()` answers between the prompt and the RET.
+Two calls to the same resolver at two different moments are still two
+different answers, and the user is then shown a suggestion for A and
+given a run in B.
+
+So the interactive command **captures** the resolution and hands it
+through:
+
+```lua
+fn = function()
+  local last = pmacs.compile._last
+  local ctx  = pmacs.compile.context()          -- captured once, here
+  pmacs.minibuffer.read {
+    prompt  = "Compile command: ",
+    history = "compile",
+    initial = last and last.cmdline or default_for(ctx.kind) or "",
+    on_accept = function(cmdline)
+      if cmdline == nil or cmdline == "" then return end
+      pmacs.compile.run(cmdline, { cwd = ctx.cwd })   -- the same ctx
+    end,
+  }
+end
+```
+
+This is Journey Stage 1a's `commit_to` lesson on a smaller seam: the
+destination is captured when the request is made and revalidated at
+commit, never re-derived from whatever happens to be ambient when the
+async work lands. The mechanism differs — compile needs no scope
+override, only the value — but the failure it prevents is the same one.
+
+`ctx.cwd` is passed through verbatim, **including `nil`**. A `nil` cwd
+means every resolution step failed, and `run`'s header renders
+`(unknown)` exactly as it does today; substituting a re-resolution there
+would reintroduce the drift for the one case least able to tolerate it.
+
+**Only the interactive command captures.** `pmacs.compile.run(cmdline)`
+called programmatically still resolves at call time, which is what a
+caller with no prompt in between means by "here".
+
+With both halves in place: **the suggestion is a function of the
+directory the command will execute in**, and the two cannot drift —
+neither across the two resolutions nor across the wait for input.
 
 `kind` is `pmacs.project.detect(cwd).kind` — detection *from* the cwd,
 which is not the same as "the cwd is the root": `opts.cwd = /proj/src`
@@ -351,7 +428,7 @@ mixed_fixture/           Cargo.toml, main.rs
   sub/                   package.json, index.js
 ```
 
-`mixed_fixture` is what makes N4 discriminating: the file opened is
+`mixed_fixture` is what makes N5 discriminating: the file opened is
 `sub/index.js`, the nearest marker is `package.json` (kind `node`, no
 default), and the *outer* marker is Cargo. A suggestion computed from
 anything other than the resolved cwd — the outermost marker, the launch
@@ -381,23 +458,67 @@ Same walk; assert `pmacs.minibuffer.contents() == "cargo build"`.
 *Falsifier:* drop the `defaults[kind]` term from the precedence chain —
 contents become `""`.
 
-**N3 — the prefill is executable as offered.**
-Same walk; assert the prompt contents are exactly
-`pmacs.compile.defaults[pmacs.compile.context().kind]`, and that
-`context().cwd` is the fixture root.
-*Falsifier:* compute the prefill from `project_root_of_active()` instead
-of from `context()`. In the plain fixture the two agree, so this pin
-alone is **not** sufficient — which is exactly why N4 exists.
+**N3 — the prompt's directory survives a window switch.**
+Launch on `rust_fixture`, `RET` on `main.rs`, dispatch `C-c c` — the
+prompt is now open and has captured A. **Then open a file in a second,
+unrelated directory B**, so the active buffer's project is no longer A.
+Replace the minibuffer contents with `pwd` and dispatch `RET`.
+Assert `*compilation*` contains `Directory: <A>` **and** that `pwd`'s own
+output is `<A>` — two independent readings of the same claim, one from
+the header pmacs writes and one from the shell that actually ran.
+*Falsifier:* drop `{ cwd = ctx.cwd }` from `on_accept`, i.e. rev 1's
+design. `run` re-resolves at accept time, finds B, and both readings say
+B.
+*Why `pwd` and not `cargo build`:* the subject here is the directory, and
+a cheap command keeps the pin's failure message about the directory. N4
+is the pin that runs the real thing.
+*Why the contents are set rather than typed:* the prompt is opened
+through the real chord; only the editing of an already-open prompt is
+short-circuited, which is the same split `find_file_acceptance` documents
+at its head.
 
-**N4 — the suggestion follows the directory the run will use.**
+**N4 — the offered command runs, in the offered directory.**
+A real Cargo fixture: `Cargo.toml`, `src/main.rs` with an empty `main`.
+Launch on it, `RET` on `main.rs`, dispatch `C-c c`, dispatch `RET`
+**without editing** — accepting exactly what was offered. Assert
+`*compilation*` contains `Directory: <fixture>` and the clean-exit marker
+`[compilation exited with code 0]`.
+*Falsifier:* the same `{ cwd = ... }` removal as N3, and independently
+any prefill that is not a runnable command.
+*Why this pin has to exist:* every other pin in this stage compares
+values that the prompt and the resolver already agree on. A wrong
+directory inside `on_accept` — the exact defect rev 1 shipped — passes
+all of them. This one crosses the accept boundary and observes a real
+process.
+*Operational detail:* the fixture builds into its own tempdir `target/`,
+so it takes no lock the enclosing `cargo test` holds and leaves nothing
+behind. The pin runs when `cargo` resolves on PATH and skips with a
+message otherwise; **`PMACS_REQUIRE_CARGO_BUILD` only tolerates
+absence** — presence of the binary decides execution, and the variable
+makes a missing binary fatal in CI. That is the `PMACS_REQUIRE_BASH`
+arming shape from #200, and it is stated here because getting the
+polarity backwards is how a required pin becomes a silent skip.
+*Named risk:* this is the only pin that depends on a working toolchain in
+the fixture directory. If it proves flaky in CI, the fallback is to keep
+the accept-and-observe shape and substitute a command with no toolchain
+dependency — the prompt-to-run handoff is the claim, and `cargo build` is
+the most faithful witness of it, not the only possible one.
+
+**N5 — the suggestion follows the directory the run will use.**
 Launch on `mixed_fixture`, `RET` into `sub/index.js`, dispatch `C-c c`;
 assert contents are `""` and `context().kind == "node"`.
-*Falsifier:* any rule that is not "detect from the resolved cwd" — take
-the outermost marker, or the launch directory, or the process cwd — all
-yield `cargo build`.
-This is the pin that carries §3.1's whole claim.
+*Falsifier:* a rule that derives the kind from anything other than the
+resolved cwd. The plausible one is the **launch directory** — Stage 1a
+made it prominent, and `mixed_fixture` was launched on the Cargo root, so
+that rule yields `cargo build` here. So does deriving it from the process
+cwd.
+*What it does not catch, stated because rev 1 claimed otherwise:*
+re-detecting from `project_root_of_active()`'s answer. That helper
+already returns the **innermost** root, so detecting from it yields
+`node` again and this pin stays green. Rev 1 named that mutation as the
+falsifier; it is not one.
 
-**N5 — `context()` is total in a launched session.**
+**N6 — `context()` is total in a launched session.**
 Property, not a constant, because the value is environment-dependent
 (§2.7): after a launch, `context().cwd` is non-nil, and `context().kind`
 equals `pmacs.project.detect(context().cwd)`'s kind (both nil, or both
@@ -461,9 +582,16 @@ interaction island §6 of COHERENCE is about.
 What this stage does guarantee is that the failure is **coherent**: the
 suggestion describes the directory the command will run in, whatever
 that directory turns out to be. The user is never offered `cargo build`
-for a directory with no `Cargo.toml`.
+for a directory with **no detected Cargo project**.
 
-N5 pins the property; it deliberately does not pin the value.
+That wording is load-bearing and rev 1 got it wrong. "No `Cargo.toml`"
+would have been false on this design's own terms: a Cargo *workspace
+subdirectory* contains no `Cargo.toml`, is correctly detected as `rust`
+by the ancestor walk, and correctly receives `cargo build` — which cargo
+itself runs happily from a subdirectory. The predicate is detection, not
+the presence of a file in that one directory (§3.1).
+
+N6 pins the property; it deliberately does not pin the value.
 
 ### 6.2 The default is per-kind, not configurable through the registry
 
