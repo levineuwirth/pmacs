@@ -748,12 +748,12 @@ review correction.
 - **Branch `test-ambient-config-isolation`**, worktree
   `../pmacs-test-isolation`, based on `githubsucks/main` @ `4cd4a7b`.
   **Framing only; no code, no PR yet.**
-  `docs/test-ambient-config-isolation-framing.md` revision 2, one review
-  round closed (four blocking, two major, all accepted).
+  `docs/test-ambient-config-isolation-framing.md` revision 3, two review
+  rounds closed (seven blocking, four major, all accepted).
 - **What it is.** Integration tests use the developer's real ambient
   roots. `#[cfg(not(test))]` guards config loading against the crate's
-  own unit tests only, so all 96 files in `tests/` load the real
-  `init.lua` — and, separately, `EditorState::new` materializes bundled
+  own unit tests only, so the **65** files in `tests/` that construct an
+  editor load the real `init.lua` — and, separately, `EditorState::new` materializes bundled
   packages unconditionally into the real `XDG_DATA_HOME`/`$HOME`.
   **It is not read-only**: `~/.local/share/pmacs/builtin-packages/`
   exists on the development machine.
@@ -764,7 +764,7 @@ review correction.
   isolated `XDG_CONFIG_HOME` as a workaround.
 - **Round 1's four blocking findings, all confirmed in code:** the
   read-only assumption was already false; the population count was 18
-  when 66 of 96 files construct an editor, from a grep that did not
+  when 65 of 96 files construct an editor, from a grep that did not
   match `EditorState::new`; 5 files are both in-process and spawned, so
   a file-level partition cannot work; and `EditorState::open` calls
   `Self::new()` while `journey_acceptance` requires that exact entry
@@ -775,9 +775,17 @@ review correction.
   shares one block with `set_init_complete()`, which
   `m8_2_acceptance.rs:75` explicitly depends on — skipping the block
   would leave integration tests permanently in the init phase.
-- Recovery from a clean checkout:
-  `git fetch githubsucks && git worktree add ../pmacs-test-isolation
-  test-ambient-config-isolation`.
+- Recovery from a clean checkout — **the two-argument form does not
+  work**, verified by running it (`git worktree add <path>
+  <remote-only-branch>` fails with `fatal: invalid reference`, because
+  after a bare fetch no local branch exists):
+
+  ```sh
+  git fetch githubsucks
+  git worktree add ../pmacs-test-isolation \
+    -b test-ambient-config-isolation \
+    githubsucks/test-ambient-config-isolation
+  ```
 
 ## Folding lane (Arc 6) — Stages 1 and 2 MERGED; Stage 3 (GPU) is next
 

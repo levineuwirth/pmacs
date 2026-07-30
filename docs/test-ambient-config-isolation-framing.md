@@ -1,6 +1,6 @@
 # Framing — integration tests use the developer's real ambient roots
 
-**Revision 2.** Status: awaiting review round 2. Proposed lane:
+**Revision 3.** Status: awaiting review round 3. Proposed lane:
 `test-ambient-config-isolation`, worktree `../pmacs-test-isolation`,
 based on `githubsucks/main` @ `4cd4a7b` (a reading; re-measure at branch
 time).
@@ -15,6 +15,32 @@ directory**. The lane is therefore about *ambient roots*, not about
 `init.lua`. See §1.6.
 
 ## Revision history
+
+**Revision 2 → 3**, after review round 2 (three blocking, two major).
+All five accepted; all five verified before acceptance, two of them by
+running the thing rather than reading it.
+
+- **Journey isolation had no executable mechanism** (§1.10). `cargo test
+  --test journey_acceptance` launches with the caller's environment and
+  the binary cannot isolate itself before its own tests run. Rev 2 said
+  journey "is isolated by its launched environment" and nothing arranged
+  that — which quietly assumed the external wrapper this lane exists to
+  delete. Now named and pinned: per-test parent/child re-exec.
+- **One self-spawning test is not a ratchet** (§4.7). It proves the seam
+  works; it cannot notice a raw `EditorState::new()` added to a
+  different binary next month. A checked source inventory is now an
+  acceptance criterion.
+- **The root list and the gates disagreed with the audit** (§1.6a, §6).
+  `BootstrapRoots` covered four roots while §1.6a named six, and the
+  revised gate still isolated only `XDG_CONFIG_HOME` — so the
+  "isolated" gate could still write through the real data root. **Every
+  local gate run in this repo today had exactly that hole.**
+- **The count was one high and the ledger overstated it further**
+  (§1.5). 65 files, not 66; and "all 96 test files load the real config"
+  was false.
+- **The recovery command did not work.** Verified by running it:
+  `git worktree add <path> <remote-only-branch>` fails with `fatal:
+  invalid reference`.
 
 **Revision 1 → 2**, after review round 1 (four blocking, two major). All
 six accepted; all six verified in the code before acceptance.
@@ -144,10 +170,19 @@ is precedent for (b) in the same repository.
 
 ### 1.5 Scale, measured
 
-96 files in `tests/`. **66** construct an editor directly
-(`EditorState::new` or `EditorState::open`). **5** are *both*
-in-process and spawned — `vterm_stage3_acceptance` constructs an editor
-at `:159` and spawns a daemon at `:665`.
+96 files in `tests/`. **65** contain an actual `EditorState::new()` or
+`EditorState::open(` **call**. **5** are *both* in-process and spawned —
+`vterm_stage3_acceptance` constructs an editor at `:159` and spawns a
+daemon at `:665`.
+
+**66 files match the bare name; 65 call it.** The 66th is
+`tests/m5_6_acceptance.rs`, which mentions `EditorState::new` only to
+say it deliberately does *not* use it (`:94`): *"Tests can't go through
+`EditorState::new` here because the integration-test build doesn't have
+`cfg(test)` set on the lib."* That makes it the **third** place in the
+suite documenting the §1.2 gap — after `m8_2_acceptance` and the
+`src/editor.rs` comment itself. A grep for a name counts mentions; only
+reading counts calls.
 
 **Revision 1 said 18, and its stated method did not match the command
 that produced it.** The prose named a broad pattern; the command grepped
@@ -206,6 +241,51 @@ variable is unset**, because `HOME` is the *fallback*. On this machine
 means the harness's apparent adequacy is a property of one developer's
 environment, not of the harness. On a machine that exports
 `XDG_DATA_HOME`, spawned daemons write to the real one.
+
+### 1.6b Scope: bootstrap STORAGE roots only
+
+`BootstrapRoots` covers **config, data, state and cache** — the roots
+that decide *where pmacs stores things at startup*. It does **not**
+cover:
+
+- **`HOME`'s non-storage semantics.** `expand_tilde`
+  (`src/editor_core.rs:5457`) resolves a leading `~` for ordinary path
+  entry, and `find_file_acceptance.rs:344` consumes `HOME` on purpose to
+  pin that expansion (skipping when unset). Blanket-overriding `HOME`
+  would silently retarget a user-facing path feature and its test.
+- **`XDG_RUNTIME_DIR`**, which addresses sockets rather than stored
+  data.
+
+**Rev 2 listed six roots and proposed covering four without saying so.**
+The two exclusions are deliberate and named here so the gap is a
+decision rather than an oversight. A later lane may take `HOME`
+semantics; this one must not, because the fix for a storage root
+(redirect it) is the wrong fix for a path-expansion root (leave it and
+isolate the *file* instead).
+
+### 1.10 Journey needs a mechanism, not an intention
+
+Rev 2 said `journey_acceptance` keeps the ambient `EditorState::open`
+and "is isolated by the environment its binary is launched with". That
+is not a mechanism. **Cargo launches each integration-test binary with
+the caller's environment**, and a binary cannot re-point its own roots
+before its ordinary tests run — §1.4's `set_var` prohibition applies to
+itself. So under a plain `cargo test --test journey_acceptance` the
+suite is ambient, and the only thing that made rev 2's sentence true was
+an external environment wrapper — the very workaround this lane exists
+to delete.
+
+**The mechanism, named:** each journey test becomes a thin parent that
+re-execs `std::env::current_exe()` with `--exact <test name>`, a marker
+variable, and controlled roots; the child, seeing the marker, runs the
+real body and calls the **ambient** `EditorState::open`.
+
+That is the only shape found that satisfies both constraints at once:
+the child drives the true production entry point, so
+`journey_acceptance`'s ratchet discipline is untouched, while the
+child's roots are controlled, so nothing reaches the developer's. The
+same shape serves Bet 3's hostile-environment check, so it is one
+helper, not two.
 
 ### 1.7 The seam must cover `open`, not only `new`
 
@@ -349,8 +429,19 @@ skip **ambient reads** while still returning `is_init_complete() == true`.
    unconditional package materialization above it.
 10. This lane is recorded in `docs/active-work.md` with its branch and
     worktree, per the volatile-work protocol — revision 1 omitted it.
-11. README or handoff records that a local full-suite run needs isolated
-    roots until this lands.
+11. README or handoff records that a local full-suite run needs **all
+    four storage roots** isolated until this lands — naming them, since
+    isolating only `XDG_CONFIG_HOME` leaves the write path open.
+12. **A durable adoption ratchet**, not a one-time census: a checked
+    source inventory that fails when a new ambient
+    `EditorState::new()`/`open(` appears in `tests/` outside a narrow,
+    named allowlist. Acceptance 1 proves today's state; this keeps it.
+    Falsified by adding an ambient constructor to any suite and
+    observing the inventory test fail.
+13. The journey mechanism of §1.10 is implemented and pinned: a plain
+    `cargo test --test journey_acceptance`, with a hostile `init.lua`
+    present and no external wrapper, is green and leaves the hostile
+    root unmodified.
 
 
 ## 5. Parked
@@ -370,11 +461,25 @@ skip **ambient reads** while still returning `is_init_complete() == true`.
 ## 6. Gates
 
 Standard suite, each its own step with a real exit status and nothing
-after the command that could mask it. **Run twice: once with an isolated
-`XDG_CONFIG_HOME`, and once with a deliberately hostile `init.lua` in
-place.** A lane about ambient state that is only ever verified in a clean
-environment has not been verified at all.
+after the command that could mask it.
 
+**Isolate every storage root, not just the config one.** Rev 2's gate
+set only `XDG_CONFIG_HOME`, which stops the `init.lua` reads and leaves
+the data root live — so an "isolated" run could still write to
+`~/.local/share/pmacs`. **Every local gate run in this repository today
+had that hole.** The correct invocation sets, to a fresh directory:
+
+```
+XDG_CONFIG_HOME  XDG_DATA_HOME  XDG_STATE_HOME  XDG_CACHE_HOME
+```
+
+`HOME` is deliberately left alone (§1.6b).
+
+**Run the suite twice: once isolated, once with a hostile environment**
+— an `init.lua` that would break a known assertion, plus a pre-seeded
+data root — and assert the hostile root is **byte-identical
+afterwards**. A lane about ambient state verified only in a clean
+environment has not been verified.
 
 ## 7. Branch plan
 
