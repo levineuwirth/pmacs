@@ -333,6 +333,50 @@ compatible.
     githubsucks/test-ambient-config-isolation
   ```
 
+## Reap-ledger silent failures — FRAMING OPEN, revision 1
+
+- **Branch `reap-ledger-silent-failures`**, worktree
+  `../pmacs-reap-ledger`, based on `githubsucks/main` @ `22df6ab`.
+  **Framing only; no code, no PR yet.**
+  `docs/reap-ledger-silent-failures-framing.md`, revision 1.
+- **Unparked from PR #200's §5.** #200 retired the premise that
+  justified the ledger's leniency and deliberately changed no
+  disposition; this lane owns what it refused.
+- **Three silent failures, not the two #200 named.** A probe error of
+  any errno drops the entry and cancels escalation; a failed escalating
+  `SIGKILL` is marked as succeeded and never retried; and `shutdown()`
+  discards its own force-kill result the same way — on the path that
+  exists specifically to stop a leak at editor exit.
+- **The blast radius is exactly what the ledger exists for:** a
+  TERM-ignoring descendant that outlived its leader with output
+  redirected. Neither leader state nor reader state can see it; only
+  group liveness can. A silent drop leaks the one process nothing else
+  is watching.
+- **`shutdown()`'s final loop terminates when the ledger empties**,
+  which happens via the same silent drop — so the probe error that hides
+  a leak can also end the cleanup loop early. That coupling is why the
+  probe cannot be made strict on its own.
+- **None of the three has been observed.** #200 saw an explicit
+  `SIGTERM` fail in `signal()`, not a ledger call. The premise is
+  falsified and the path exposed; the occurrence is not evidence these
+  fire.
+- **They are also untestable today**: `tick_reap_ledger` and
+  `shutdown()` call `nix` directly and consult no injection seam, unlike
+  `signal()`'s `forced_kill_errno`. All five existing ledger tests
+  exercise the success path only. **Bet 1 ships the seam alone and
+  first** and is worth landing even if the rest is abandoned.
+- **Diagnosis first, no disposition change proposed.** Stage A of the
+  signal lane had three tolerance rules rejected across three revisions
+  for the same shape of error on the same data structure.
+- Recovery from a clean checkout:
+
+  ```sh
+  git fetch githubsucks
+  git worktree add ../pmacs-reap-ledger \
+    -b reap-ledger-silent-failures \
+    githubsucks/reap-ledger-silent-failures
+  ```
+
 ## Folding lane (Arc 6) — Stages 1 and 2 MERGED; Stage 3 (GPU) is next
 
 Both shipped stages are on `main`; nothing in this arc is in flight. Stage 3
