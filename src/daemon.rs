@@ -748,7 +748,13 @@ fn per_attach_thread(
         let _ = write_message(
             &mut stream,
             &InstanceMessage::Goodbye(GoodbyeReason::VersionMismatch {
-                server: ADVERTISED_PROTOCOL_VERSION,
+                // The wire field is "the instance's `PROTOCOL_VERSION`", not
+                // the version it advertised. Since Stage 2B-3 those differ:
+                // the `Hello` baseline is a compatibility floor, and reporting
+                // it here would tell a frontend the daemon tops out at 20 when
+                // it in fact speaks 21 — the exact opposite of the upgrade
+                // diagnostic this reason exists to give.
+                server: pmacs_protocol::PROTOCOL_VERSION,
                 client: req.protocol_version,
             }),
         );

@@ -604,7 +604,14 @@ pub enum GoodbyeReason {
     /// Frontend's `protocol_version` does not match the instance's.
     /// The handshake fails before any further messages.
     VersionMismatch {
-        /// The instance's `PROTOCOL_VERSION`.
+        /// The instance's [`PROTOCOL_VERSION`] — the highest wire it can
+        /// speak, **not** the [`ADVERTISED_PROTOCOL_VERSION`] baseline it put
+        /// in [`Hello`]. Since those diverged (the baseline is a permanent
+        /// compatibility floor), reporting the baseline here would understate
+        /// the daemon's ceiling and invert the upgrade advice.
+        ///
+        /// A *frontend* raising this locally can only report the baseline it
+        /// was handed, because that is all the daemon told it.
         server: u32,
         /// The version the frontend announced in its `AttachRequest`.
         client: u32,

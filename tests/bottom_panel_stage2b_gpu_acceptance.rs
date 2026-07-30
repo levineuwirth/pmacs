@@ -410,7 +410,18 @@ fn an_unsupported_offer_is_refused_by_name() {
     let message: InstanceMessage = read_message(&mut stream).expect("read refusal");
     match message {
         InstanceMessage::Goodbye(GoodbyeReason::VersionMismatch { server, client }) => {
-            assert_eq!(server, ADVERTISED_PROTOCOL_VERSION);
+            // The daemon reports the wire it can SPEAK, not the baseline it
+            // advertised. Those differ now, and pinning the baseline here
+            // would hold in place a diagnostic telling the operator to
+            // downgrade to a version the daemon has already moved past.
+            assert_eq!(
+                server, PROTOCOL_VERSION,
+                "the instance must report its own PROTOCOL_VERSION"
+            );
+            assert_ne!(
+                server, ADVERTISED_PROTOCOL_VERSION,
+                "and that is deliberately not the advertised baseline"
+            );
             assert_eq!(client, PROTOCOL_VERSION + 7);
         }
         other => panic!("expected a named VersionMismatch, got {other:?}"),
@@ -421,5 +432,201 @@ fn an_unsupported_offer_is_refused_by_name() {
     assert!(
         matches!(stream.read(&mut sink), Ok(0) | Err(_)),
         "a refused attach must close"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Parent acceptance 54 — one real daemon + real PTY + real wgpu, through a
+// PANEL-HOSTED terminal
+// ---------------------------------------------------------------------------
+
+/// The daemon config for the panel-hosted probe: a command that opens a
+/// controlled terminal child **and then displays it in a bottom panel**,
+/// bound to a key the probe presses.
+///
+/// The distinction from the Vterm Stage 3 fixture is the whole point. There,
+/// `terminal.open` leaves the child in the frontend's own full-window buffer,
+/// so the GPU enters terminal mode and the band is never involved. Here the
+/// adopter passes `display = "panel"` — the real Stage 1 opt-in that Stage 3
+/// will make the default — so the child is projected as a `PanelFrame` while
+/// the frontend's document window stays a document.
+///
+/// Opening the terminal and *then* moving it with `window.display` was the
+/// first attempt and it is subtly wrong: the buffer ends up displayed twice,
+/// the document window keeps projecting it as a full-window terminal, and the
+/// acceptance can no longer tell a panel-hosted child from a document one.
+#[cfg(feature = "crdt")]
+const PANEL_TERMINAL_INIT_LUA: &str = r#"
+pmacs.command.define {
+  name = "bp-probe.panel-terminal",
+  description = "Open the Stage 2B-3 acceptance terminal inside a bottom panel.",
+  fn = function()
+    return pmacs.terminal.open {
+      command = "/bin/sh",
+      args = { "-c",
+        "i=0; while [ $i -lt 400 ]; do printf 'PANELROW%02d\n' \"$i\"; i=$((i+1)); sleep 0.05; done" },
+      display = "panel",
+    }
+  end,
+}
+-- C-M-p is deliberately an unbound chord: `bind` is strict and refuses to
+-- shadow an existing binding, so a bound one would fail init and leave the
+-- probe pressing nothing.
+pmacs.keymap.bind { scope = "global", sequence = "C-M-p", command = "bp-probe.panel-terminal" }
+"#;
+
+#[cfg(feature = "crdt")]
+fn decode_hex(encoded: &str) -> String {
+    let bytes: Vec<u8> = encoded
+        .as_bytes()
+        .chunks(2)
+        .filter_map(|pair| {
+            std::str::from_utf8(pair)
+                .ok()
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+        })
+        .collect();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Parent acceptance 54: a `--headless-probe` run drives one real daemon, one
+/// real PTY child, and real wgpu **through a panel-hosted terminal**.
+///
+/// The probe is the real attach client — same handshake, same reader, same
+/// outbox — driven as a process, because `pmacs-gpu` deliberately depends only
+/// on `pmacs-protocol`. Nothing here is emulated: the daemon opens a `/bin/sh`
+/// child, moves it into a side window, projects it as a `PanelFrame`, and the
+/// probe composites real frames from the band.
+///
+/// **This test's green is worth nothing unless it actually ran**, which is the
+/// standing trap for every probe acceptance in this repo: without the binary
+/// built it returns early, and it is `crdt`-gated so CI never reaches it. The
+/// skip is therefore an assertion failure under `PMACS_REQUIRE_GPU`, and the
+/// report's own `completion_observed` is asserted so a run that merely waited
+/// out its safety deadline cannot read as a pass.
+#[cfg(feature = "crdt")]
+#[test]
+fn a54_real_daemon_real_pty_and_headless_gpu_render_one_panel_hosted_terminal() {
+    use std::path::{Path, PathBuf};
+
+    fn gpu_binary() -> PathBuf {
+        Path::new(env!("CARGO_BIN_EXE_pmacs"))
+            .parent()
+            .expect("test binary directory")
+            .join("pmacs-gpu")
+    }
+
+    let required = std::env::var_os("PMACS_REQUIRE_GPU").is_some();
+    let binary = gpu_binary();
+    if !binary.exists() {
+        assert!(
+            !required,
+            "PMACS_REQUIRE_GPU is set but {} is not built; build the workspace first",
+            binary.display()
+        );
+        eprintln!("skipping a54: {} is not built", binary.display());
+        return;
+    }
+
+    let daemon = common::daemon::TestDaemon::spawn_with_env_and_init(
+        &[
+            ("PMACS_INSTANCE_SEMANTIC_RENDER", "1"),
+            ("PMACS_INSTANCE_MULTI_FRONTEND", "1"),
+        ],
+        PANEL_TERMINAL_INIT_LUA,
+    );
+
+    let report = daemon
+        .socket_path()
+        .parent()
+        .expect("socket parent")
+        .join("gpu-panel-probe.txt");
+    let output = std::process::Command::new(&binary)
+        .arg("--headless-probe")
+        .arg(daemon.socket_path())
+        .arg(&report)
+        .env("PMACS_GPU_PROBE_OPEN_KEY", "p")
+        // The BAND's own breadcrumb. Naming it separately from the terminal
+        // fixture's is what keeps one fixture's evidence from satisfying the
+        // other's loop exit.
+        .env("PMACS_GPU_PROBE_EXPECT_PANEL_TEXT", "PANELROW")
+        .output()
+        .expect("run the headless GPU panel probe");
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let no_adapter = output.status.code() == Some(3);
+        assert!(
+            no_adapter && !required,
+            "headless GPU panel probe failed (status {:?}):\n{stderr}",
+            output.status.code()
+        );
+        eprintln!("skipping a54: no wgpu adapter available");
+        return;
+    }
+
+    let text = std::fs::read_to_string(&report).expect("probe report");
+    let facts: std::collections::HashMap<&str, &str> = text
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .collect();
+    let fact = |key: &str| facts.get(key).copied().unwrap_or_default();
+    let number = |key: &str| fact(key).parse::<u32>().unwrap_or_default();
+
+    // The probe reached its own stated evidence rather than its deadline.
+    assert_eq!(
+        fact("completion_observed"),
+        "true",
+        "a deadline-driven pass must not read as success: {text}"
+    );
+    // The activation, end to end on a real socket.
+    assert_eq!(fact("session_protocol_version"), "21", "{text}");
+    assert_eq!(fact("baseline_protocol_version"), "20", "{text}");
+
+    // The band is real: declared, projected, focused, and carrying the child.
+    assert!(
+        number("panel_declarations") >= 2,
+        "the probe declares geometry at attach and again after its resize: {text}"
+    );
+    assert!(
+        number("panel_frames") >= 2,
+        "the daemon must project the panel-hosted terminal: {text}"
+    );
+    assert!(
+        number("panel_rows") >= 2 && number("panel_cols") > 0,
+        "the projected band must have a real grid: {text}"
+    );
+    assert_eq!(
+        fact("panel_focused"),
+        "true",
+        "the adopter selected the panel, so the projection must say so: {text}"
+    );
+    assert_eq!(
+        fact("panel_text_observed"),
+        "true",
+        "the PTY child's output must arrive IN THE BAND: {text}"
+    );
+    assert!(
+        decode_hex(fact("panel_frame_text_hex")).contains("PANELROW")
+            || fact("panel_text_observed") == "true",
+        "and the band's own text is reported for diagnosis: {text}"
+    );
+    assert_eq!(
+        fact("panel_observed_resized_frame"),
+        "true",
+        "a surface resize must round-trip: new declaration, new band width: {text}"
+    );
+    assert!(
+        number("rendered_nonuniform_frames") >= 2,
+        "real wgpu must have composited the band more than once: {text}"
+    );
+
+    // And the terminal did NOT take over the frontend's own window: that is
+    // the difference between this acceptance and the Vterm Stage 3 one, and
+    // without it a full-window terminal would satisfy every assertion above.
+    assert_eq!(
+        fact("entered_terminal_mode"),
+        "false",
+        "the child belongs to the panel, not to the document window: {text}"
     );
 }

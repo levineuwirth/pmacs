@@ -766,12 +766,24 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
         }
     };
     state.set_frontend_id(client.frontend_id());
+    // The panel wire is part of the real client, so the probe arms it exactly
+    // as the winit path does. Leaving it out is why nothing could exercise a
+    // panel-hosted terminal: with no declaration the daemon has no columns,
+    // and with no columns no panel is ever presentable.
+    state.set_panel_wire(client.session_protocol_version());
 
     let mut facts = ProbeFacts {
         session_protocol_version: client.session_protocol_version(),
         baseline_protocol_version: client.baseline_protocol_version(),
         ..ProbeFacts::default()
     };
+    if let Some((geometry_epoch, total)) = state.next_geometry_declaration(GeometryTrigger::Surface)
+        && client
+            .send_frontend_cell_geometry(geometry_epoch, total)
+            .is_ok()
+    {
+        facts.panel_declarations += 1;
+    }
 
     // Ask the daemon to open the acceptance terminal in THIS frontend's
     // window. Going through a real key press is the point: the daemon's
@@ -805,6 +817,13 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
     let expected_frame_text = std::env::var("PMACS_GPU_PROBE_EXPECT_TEXT")
         .ok()
         .filter(|value| !value.is_empty());
+    // A panel fixture's evidence is text in the BAND, not in a full-window
+    // terminal. Naming it separately keeps one fixture's breadcrumb from
+    // satisfying another's loop exit — the leak that made a Vterm probe pass
+    // on its safety deadline.
+    let expected_panel_text = std::env::var("PMACS_GPU_PROBE_EXPECT_PANEL_TEXT")
+        .ok()
+        .filter(|value| !value.is_empty());
     let quiet = observe_window.is_some();
     let deadline = std::time::Instant::now()
         + observe_window.unwrap_or_else(|| std::time::Duration::from_secs(20));
@@ -828,6 +847,26 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
                     facts.last_frame_rows = frame.size.rows;
                     facts.last_frame_text = frame_probe_text(frame);
                     facts.last_title.clone_from(&frame.title);
+                }
+                match msg.as_ref() {
+                    InstanceMessage::PanelFrame(
+                        pmacs_protocol::panel::PanelFramePayload::Present(frame),
+                    ) => {
+                        facts.panel_frames += 1;
+                        facts.panel_rows = frame.size.rows;
+                        facts.panel_cols = frame.size.cols;
+                        facts.panel_focused = frame.focused;
+                        facts.panel_frame_text = grid_probe_text(&frame.cells);
+                        if let Some(expected) = expected_panel_text.as_deref()
+                            && facts.panel_frame_text.contains(expected)
+                        {
+                            facts.panel_text_observed = true;
+                        }
+                    }
+                    InstanceMessage::PanelFrame(
+                        pmacs_protocol::panel::PanelFramePayload::Absent,
+                    ) => facts.panel_absent_observed = true,
+                    _ => {}
                 }
                 state.apply_attach_message(*msg);
                 if is_snapshot {
@@ -884,6 +923,40 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
                         facts.observed_resized_frame = true;
                     }
                 }
+                // A panel fixture's document window is NOT a terminal — the
+                // terminal lives in the band — so the arm above never fires
+                // and its resize/composite evidence never arrives. The band
+                // gets the same treatment against its own observations.
+                if state.panel.presented().is_some() {
+                    let pixels = state.render_offscreen();
+                    let first = pixels.first().copied().unwrap_or_default();
+                    if pixels.iter().any(|&b| b != first) {
+                        facts.rendered_nonuniform_frames += 1;
+                    }
+                    if !quiet && !sent_input && facts.panel_frames >= 1 {
+                        sent_input = true;
+                        let _ =
+                            client.send_key(ProtocolKey::Char(PROBE_INPUT_CHAR), Modifiers::NONE);
+                        let _ = client.send_key(ProtocolKey::Enter, Modifiers::NONE);
+                    }
+                    if !quiet && !sent_resize && facts.panel_frames >= 2 {
+                        sent_resize = true;
+                        state.resize(700, 500);
+                        if let Some((geometry_epoch, total)) =
+                            state.next_geometry_declaration(GeometryTrigger::Surface)
+                            && client
+                                .send_frontend_cell_geometry(geometry_epoch, total)
+                                .is_ok()
+                        {
+                            facts.panel_declarations += 1;
+                            facts.panel_resized_cols = total.cols;
+                        }
+                    }
+                    if facts.panel_resized_cols > 0 && facts.panel_cols == facts.panel_resized_cols
+                    {
+                        facts.panel_observed_resized_frame = true;
+                    }
+                }
                 let fixture_evidence_observed = expected_frame_text.as_deref().map_or_else(
                     || facts.input_echo_observed,
                     |expected| facts.last_frame_text.contains(expected),
@@ -892,7 +965,21 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
                 // first: that races the fixture's required PTY evidence and
                 // produces a self-contradictory "successful" probe report
                 // whose later acceptance assertion must reject it.
-                if !quiet
+                if expected_panel_text.is_some() {
+                    // The panel fixture's completion, stated in its own terms.
+                    // `panel_text_observed` alone is not enough: it would let a
+                    // pass happen before the band ever composited or the resize
+                    // round-tripped, and this acceptance is exactly about the
+                    // band being real.
+                    if !quiet
+                        && facts.panel_text_observed
+                        && facts.panel_observed_resized_frame
+                        && facts.rendered_nonuniform_frames >= 2
+                    {
+                        completion_observed = true;
+                        break;
+                    }
+                } else if !quiet
                     && facts.observed_resized_frame
                     && facts.rendered_nonuniform_frames >= 2
                     && fixture_evidence_observed
@@ -914,6 +1001,24 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
         out,
         "baseline_protocol_version={}",
         facts.baseline_protocol_version
+    );
+    let _ = writeln!(out, "panel_declarations={}", facts.panel_declarations);
+    let _ = writeln!(out, "panel_frames={}", facts.panel_frames);
+    let _ = writeln!(out, "panel_resized_cols={}", facts.panel_resized_cols);
+    let _ = writeln!(
+        out,
+        "panel_observed_resized_frame={}",
+        facts.panel_observed_resized_frame
+    );
+    let _ = writeln!(out, "panel_rows={}", facts.panel_rows);
+    let _ = writeln!(out, "panel_cols={}", facts.panel_cols);
+    let _ = writeln!(out, "panel_focused={}", facts.panel_focused);
+    let _ = writeln!(out, "panel_text_observed={}", facts.panel_text_observed);
+    let _ = writeln!(out, "panel_absent_observed={}", facts.panel_absent_observed);
+    let _ = writeln!(
+        out,
+        "panel_frame_text_hex={}",
+        hex_bytes(facts.panel_frame_text.as_bytes())
     );
     let _ = writeln!(out, "declarations={}", facts.declarations);
     let _ = writeln!(out, "frames={}", facts.frames);
@@ -1209,6 +1314,10 @@ fn write_probe_report(report: &Path, contents: &str) -> std::io::Result<()> {
 }
 
 /// Named observations the headless probe reports back to the acceptance.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "a flat report of independently-latched observations, not a state machine"
+)]
 #[derive(Default)]
 struct ProbeFacts {
     /// The version the SESSION negotiated (this frontend's counter-offer).
@@ -1221,6 +1330,27 @@ struct ProbeFacts {
     /// while this session speaks the newer wire — and a report carrying
     /// only one of them cannot express that.
     baseline_protocol_version: u32,
+    /// How many `Present` panel frames the daemon shipped.
+    panel_frames: u32,
+    /// The last `Present` band's grid, and whether it owned focus.
+    panel_rows: u32,
+    panel_cols: u32,
+    panel_focused: bool,
+    /// The band's own text, so an acceptance can prove the PTY child's output
+    /// landed IN THE PANEL rather than in a full-window document terminal.
+    panel_frame_text: String,
+    /// Latched across frames: a reflow can push the breadcrumb off the last
+    /// band, so "it arrived" and "it is still on the final band" are
+    /// different questions and only the first is what the fixture means.
+    panel_text_observed: bool,
+    /// Whether an authoritative `Absent` was seen.
+    panel_absent_observed: bool,
+    /// The panel geometry declarations this probe sent.
+    panel_declarations: u32,
+    /// The band's grid after the probe's resize, and whether a band at that
+    /// exact width was actually observed afterwards.
+    panel_resized_cols: u32,
+    panel_observed_resized_frame: bool,
     declarations: u32,
     frames: u32,
     rendered_nonuniform_frames: u32,
@@ -1248,8 +1378,14 @@ const PROBE_INPUT_CHAR: char = 'x';
 
 /// One-line printable text of a terminal frame, for probe reporting.
 fn frame_probe_text(frame: &TerminalFrame) -> String {
+    grid_probe_text(&frame.cells)
+}
+
+/// The same flattening for any wire cell grid, so a panel frame and a
+/// terminal frame are read the same way rather than by two near-copies.
+fn grid_probe_text(cells: &[pmacs_protocol::Cell]) -> String {
     let mut text = String::new();
-    for cell in &frame.cells {
+    for cell in cells {
         match &cell.glyph {
             pmacs_protocol::Glyph::Char(ch) => text.push(*ch),
             pmacs_protocol::Glyph::Cluster(bytes) => {
@@ -1884,6 +2020,30 @@ struct PanelResizeRequest {
     rows: u32,
 }
 
+/// Which surface a pointer pixel belongs to (Q#BP16).
+///
+/// **One authority for "does the band claim this pixel", consulted by every
+/// pointer handler.** Four handlers route gestures — motion, left
+/// press/release, right press, and wheel — and the band has to be consulted
+/// first in all four. When each handler decided for itself, three of them
+/// simply did not ask, so right-click and wheel fell through to the document
+/// underneath and a held left button was reported as a hover. A single
+/// classifier makes forgetting the band impossible to do quietly, and makes
+/// the routing testable without a window or a daemon.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PointerSurface {
+    /// The divider strip: a drag handle, never a cell gesture.
+    PanelDivider,
+    /// A cell inside the band.
+    PanelCell(CellCoord),
+    /// The band's fractional right-edge remainder, or anywhere else in the
+    /// band that maps to no cell. Distinct from `Elsewhere` because the band
+    /// still owns the pixel — it just emits no `PanelPointer`.
+    PanelBackground,
+    /// Not the band: the document, the terminal, the minimap, or the chrome.
+    Elsewhere,
+}
+
 /// A live divider drag (Q#BP15a, parent acceptance 47).
 #[derive(Clone, Copy, Debug)]
 struct PanelDrag {
@@ -1916,6 +2076,18 @@ struct PanelBand {
     geometry_epoch: u64,
     /// The cell total behind `geometry_epoch`, for the `Surface` dedup.
     declared: Option<CellSize>,
+    /// The advance the declaration was computed with, retained so painting
+    /// and hit-testing resolve cells with the **same** number the daemon's
+    /// column count was derived from.
+    ///
+    /// Caching it is not an optimization. The declaration needs
+    /// `&mut FontSystem` to shape its probe, so a `&self` painter cannot
+    /// re-derive it and would reach for `mono_advance` — which is
+    /// document-dependent. The declared grid, the painted grid, and the
+    /// hit-tested grid would then be three different grids, and a test that
+    /// asserted only the declaration would not see it. One value behind the
+    /// declaration makes all three agree *by construction*.
+    declared_advance: Option<f32>,
     /// Terminal exhaustion latch (framing §3.1).
     ///
     /// Once set: no further declaration is sent, and no retained frame
@@ -1926,6 +2098,16 @@ struct PanelBand {
     exhausted: bool,
     /// Live divider drag. One pointer, one gesture.
     drag: Option<PanelDrag>,
+    /// Whether a left-button gesture that started INSIDE the band is still
+    /// held. Mirrors `pointer_drag_active` for the document: without it a
+    /// motion event cannot tell a hover from a drag, so `Drag(Left)` is never
+    /// emitted and panel selection cannot work at all.
+    pointer_held: bool,
+    /// Last cell a panel pointer gesture reported, so sub-cell motion does
+    /// not become pixel-rate wire traffic. Reset on every press and release,
+    /// because the first drag after a press must reach the daemon even at the
+    /// cell the press landed on.
+    last_pointer_cell: Option<CellCoord>,
     /// Whether the pointer is currently over the divider strip, which
     /// decides the `RowResize` cursor icon.
     hover_divider: bool,
@@ -2250,14 +2432,57 @@ impl App {
         }
     }
 
-    /// Ship a `PanelPointer` for a gesture hit-tested to a panel cell.
-    ///
-    /// Returns `true` when the gesture belonged to the panel, so the
-    /// caller stops before treating it as a document gesture.
+    /// The panel cell a pixel is over, if the band can take a gesture at all.
+    fn panel_pointer_hit(&self, x: f64, y: f64) -> Option<(u64, u64, BufferId, CellCoord)> {
+        let client = self.attach_client.as_ref()?;
+        if client.session_protocol_version() < PANEL_MIN_VERSION {
+            return None;
+        }
+        let state = self.state.as_ref()?;
+        let frame = state.panel.presented()?;
+        let coord = state.panel_hit_test(x as f32, y as f32)?;
+        Some((
+            frame.geometry_epoch,
+            frame.panel_epoch,
+            frame.buffer_id,
+            coord,
+        ))
+    }
+
+    /// Ship one panel gesture at `(x, y)`, reporting whether the band claimed
+    /// it.
     fn send_panel_pointer_at(
         &mut self,
         x: f64,
         y: f64,
+        kind: ProtocolMouseKind,
+        mods: Modifiers,
+    ) -> bool {
+        let Some((geometry_epoch, panel_epoch, buffer_id, coord)) = self.panel_pointer_hit(x, y)
+        else {
+            return false;
+        };
+        let Some(client) = self.attach_client.as_ref() else {
+            return false;
+        };
+        if let Err(e) =
+            client.send_panel_pointer(geometry_epoch, panel_epoch, buffer_id, coord, kind, mods)
+        {
+            eprintln!("pmacs-gpu: send_panel_pointer failed: {e}");
+        }
+        true
+    }
+
+    /// Ship a panel gesture at an explicitly chosen cell.
+    ///
+    /// Used for a release, whose cell may be the last one reported rather than
+    /// the one under the pointer: a panel selection drag routinely ends past
+    /// the band's edge, and dropping that release leaves the daemon holding a
+    /// button down forever. The terminal path drops such a release; the panel
+    /// must not.
+    fn send_panel_pointer_at_cell(
+        &mut self,
+        coord: Option<CellCoord>,
         kind: ProtocolMouseKind,
         mods: Modifiers,
     ) -> bool {
@@ -2273,7 +2498,7 @@ impl App {
         let Some(frame) = state.panel.presented() else {
             return false;
         };
-        let Some(coord) = state.panel_hit_test(x as f32, y as f32) else {
+        let Some(coord) = coord else {
             return false;
         };
         if let Err(e) = client.send_panel_pointer(
@@ -2726,29 +2951,33 @@ impl ApplicationHandler<AppEvent> for App {
                     self.advance_panel_drag(position.y);
                     return;
                 }
-                let on_divider = state.panel_divider_contains(position.x as f32, position.y as f32);
-                if state.set_panel_divider_hover(on_divider) {
+                let surface = state.classify_pointer_surface(position.x as f32, position.y as f32);
+                if state.set_panel_divider_hover(surface == PointerSurface::PanelDivider) {
                     state.apply_panel_cursor_icon();
                 }
-                if on_divider {
-                    return;
-                }
-                if state.panel.presented().is_some()
-                    && state
-                        .panel_hit_test(position.x as f32, position.y as f32)
-                        .is_some()
-                {
-                    // Hover inside the band is a `Move`; it neither focuses
-                    // the panel nor claims a controller, matching the
-                    // terminal-only rule for bare motion.
-                    let mods = translate_mods(self.modifiers);
-                    self.send_panel_pointer_at(
-                        position.x,
-                        position.y,
-                        ProtocolMouseKind::Move,
-                        mods,
-                    );
-                    return;
+                match surface {
+                    PointerSurface::PanelDivider | PointerSurface::PanelBackground => return,
+                    PointerSurface::PanelCell(coord) => {
+                        // A held left button makes this a `Drag(Left)`, not a
+                        // `Move`. That distinction is the whole of panel
+                        // selection: `Move` never focuses or claims, while
+                        // every non-`Move` gesture activates the panel first,
+                        // so reporting a drag as a hover makes a selection
+                        // drag silently do nothing.
+                        let kind = state.panel_motion_kind();
+                        if state.panel_motion_is_new(coord) {
+                            let mods = translate_mods(self.modifiers);
+                            self.send_panel_pointer_at(position.x, position.y, kind, mods);
+                        }
+                        return;
+                    }
+                    PointerSurface::Elsewhere => {
+                        if state.panel.pointer_held {
+                            // A drag that wandered out of the band keeps
+                            // belonging to the band until the button comes up.
+                            return;
+                        }
+                    }
                 }
                 // Vterm Stage 3 — inside the terminal clip, motion is a
                 // terminal gesture. Consumed before minimap scrubbing
@@ -2852,34 +3081,50 @@ impl ApplicationHandler<AppEvent> for App {
                 let mods = translate_mods(self.modifiers);
                 // Bottom panel Stage 2B-3 — the divider strip and the band
                 // claim the gesture before either document path sees it.
+                let panel_surface = state.classify_pointer_surface(x as f32, y as f32);
                 match button_state {
                     ElementState::Pressed => {
-                        if state.begin_panel_drag(x as f32, y as f32) {
+                        if panel_surface == PointerSurface::PanelDivider
+                            && state.begin_panel_drag(x as f32, y as f32)
+                        {
                             return;
                         }
-                        if state.panel.presented().is_some()
-                            && self.send_panel_pointer_at(
+                        // Arm the gesture BEFORE sending, and only when the
+                        // press actually landed on a cell: arming on a miss
+                        // would make a later in-band motion send a `Drag` with
+                        // no preceding `Down`, and not arming at all means
+                        // `Drag(Left)` is never emitted and panel selection
+                        // cannot work at all.
+                        if let PointerSurface::PanelCell(_) = panel_surface {
+                            let state = self.state.as_mut().expect("checked above");
+                            state.set_panel_pointer_held(true);
+                            self.send_panel_pointer_at(
                                 x,
                                 y,
                                 ProtocolMouseKind::Down(ProtocolMouseButton::Left),
                                 mods,
-                            )
-                        {
+                            );
                             return;
+                        }
+                        if state.panel.pointer_held {
+                            let state = self.state.as_mut().expect("checked above");
+                            state.set_panel_pointer_held(false);
                         }
                     }
                     ElementState::Released => {
                         if state.end_panel_drag() {
                             return;
                         }
-                        if state.panel.presented().is_some()
-                            && self.send_panel_pointer_at(
-                                x,
-                                y,
+                        if state.panel.pointer_held {
+                            let cell = state.panel_release_cell(x as f32, y as f32);
+                            self.send_panel_pointer_at_cell(
+                                cell,
                                 ProtocolMouseKind::Up(ProtocolMouseButton::Left),
                                 mods,
-                            )
-                        {
+                            );
+                            if let Some(state) = self.state.as_mut() {
+                                state.set_panel_pointer_held(false);
+                            }
                             return;
                         }
                     }
@@ -2987,6 +3232,31 @@ impl ApplicationHandler<AppEvent> for App {
                     self.send_menu_pointer(None, true);
                     return;
                 }
+                // Bottom panel Stage 2B-3 — a right-click in the band is a
+                // panel gesture, claimed before the terminal and document
+                // paths. The daemon decides between child mouse reporting and
+                // the editor context menu, so the anchor is remembered here
+                // exactly as for a document click; without this the band's
+                // context actions are unreachable and the click is applied to
+                // the document underneath instead.
+                if let PointerSurface::PanelCell(_) =
+                    state.classify_pointer_surface(x as f32, y as f32)
+                {
+                    if let Some(state) = self.state.as_mut() {
+                        state.menu_anchor_px = (x, y);
+                    }
+                    let mods = translate_mods(self.modifiers);
+                    self.send_panel_pointer_at(
+                        x,
+                        y,
+                        ProtocolMouseKind::Down(ProtocolMouseButton::Right),
+                        mods,
+                    );
+                    return;
+                }
+                let Some(state) = self.state.as_mut() else {
+                    return;
+                };
                 // Vterm Stage 3 — a right-click in the terminal clip is
                 // a terminal gesture; the daemon decides between child
                 // reporting and the editor context menu, so the anchor
@@ -3032,6 +3302,29 @@ impl ApplicationHandler<AppEvent> for App {
                 if lines == 0 {
                     return;
                 }
+                // Bottom panel Stage 2B-3 — a wheel tick over the band scrolls
+                // the PANEL's window, which is daemon-side state, so it
+                // crosses the wire instead of moving this frontend's local
+                // document `scroll_top`. Falling through would scroll the
+                // document while the pointer is inside the panel.
+                if let Some((x, y)) = state.pointer_pos
+                    && matches!(
+                        state.classify_pointer_surface(x as f32, y as f32),
+                        PointerSurface::PanelCell(_)
+                    )
+                {
+                    let mods = translate_mods(self.modifiers);
+                    let kind = if lines < 0 {
+                        ProtocolMouseKind::ScrollUp
+                    } else {
+                        ProtocolMouseKind::ScrollDown
+                    };
+                    self.send_panel_pointer_at(x, y, kind, mods);
+                    return;
+                }
+                let Some(state) = self.state.as_mut() else {
+                    return;
+                };
                 // Vterm Stage 3 — the terminal's scrollback belongs to
                 // the daemon-side view, not to this frontend's local
                 // scroll, so a wheel tick crosses the wire as a
@@ -4942,6 +5235,11 @@ impl State {
     /// too.
     fn on_daemon_disconnected(&mut self, notice: &str) {
         self.exit_terminal_mode();
+        // A retained band is the daemon's projection of a window that is no
+        // longer being updated. Leaving it on screen beside a disconnect
+        // notice is the same "frozen, live-looking surface" the terminal arm
+        // above exists to prevent.
+        self.exit_panel_band();
         if !self.set_text(notice) {
             // Byte-identical text still needs a repaint: the frame that
             // is on screen is the terminal's, not this notice.
@@ -4957,6 +5255,16 @@ impl State {
         self.terminal_frame_error_latched = false;
         self.last_terminal_size_sent = None;
         self.last_terminal_pointer_cell = None;
+    }
+
+    /// Drop the band and every cache behind it.
+    ///
+    /// The geometry declaration goes too: the next session is a new session,
+    /// its epochs start from scratch, and a retained declaration would
+    /// describe a peer that is gone.
+    fn exit_panel_band(&mut self) {
+        self.panel = PanelBand::default();
+        self.panel_text_buffers.clear();
     }
 
     /// Drop shaping and geometry caches without leaving terminal mode.
@@ -5093,12 +5401,11 @@ impl State {
         }
         let top =
             document_text_bottom(self.config.height, self.fm, band) + self.fm.divider_height();
-        Some((
-            TEXT_LEFT,
-            top,
-            (self.config.width as f32 - TEXT_LEFT).max(0.0),
-            cells_px,
-        ))
+        // Origin x = 0 and the FULL surface width, matching the declaration.
+        // Any fractional right-edge remainder past the last whole column is
+        // band background: it maps to no cell and emits no `PanelPointer`,
+        // which `hit_test_cell`'s column bound already enforces.
+        Some((0.0, top, self.config.width as f32, cells_px))
     }
 
     /// The divider strip: paint geometry AND hit geometry, one rect.
@@ -5143,14 +5450,39 @@ impl State {
     /// parent 41 requires: the daemon treats zero columns as
     /// non-presentable and the panel hides, rather than a non-finite
     /// metric producing an absurd row count and an oversized allocation.
-    fn declared_cell_total(&mut self) -> CellSize {
+    fn declared_cell_total(&mut self) -> (CellSize, Option<f32>) {
         let Some(advance) = self.panel_probe_advance() else {
-            return CellSize::new(0, 0);
+            return (CellSize::new(0, 0), None);
         };
         let height = (geometry_capacity_bottom(self.config.height, self.fm) - TEXT_TOP).max(0.0);
-        let width = (self.config.width as f32 - TEXT_LEFT).max(0.0);
-        crate::terminal::panel_cell_capacity(width, height, advance, self.fm.code_line_height())
-            .unwrap_or_else(|| CellSize::new(0, 0))
+        // **Full surface width from x = 0.** The panel grid is not inset by
+        // the document's `TEXT_LEFT` or gutter — those are document padding,
+        // and the band is a separate surface spanning the frame (parent
+        // framing Q#BP15a: "`total.cols` describes the full-width panel grid
+        // beginning at x=0; document `TEXT_LEFT`/gutter padding is
+        // unrelated"). Deducting `TEXT_LEFT` here under-declares columns and
+        // leaves a strip the daemon never fills.
+        let width = self.config.width as f32;
+        let total = crate::terminal::panel_cell_capacity(
+            width,
+            height,
+            advance,
+            self.fm.code_line_height(),
+        )
+        .unwrap_or_else(|| CellSize::new(0, 0));
+        (total, Some(advance))
+    }
+
+    /// The advance every panel cell computation must use: the one behind the
+    /// current declaration.
+    ///
+    /// `None` before a declaration exists — which is also when
+    /// [`PanelBand::presented`] is `None`, so no painter or hit test can be
+    /// reached without it.
+    fn panel_cell_advance(&self) -> Option<f32> {
+        self.panel
+            .declared_advance
+            .filter(|advance| advance.is_finite() && *advance > 0.0)
     }
 
     /// Advance the geometry declaration if this trigger calls for one, and
@@ -5163,7 +5495,7 @@ impl State {
         if !self.panel_wire || self.panel.exhausted {
             return None;
         }
-        let total = self.declared_cell_total();
+        let (total, advance) = self.declared_cell_total();
         if trigger == GeometryTrigger::Surface
             && self.panel.geometry_epoch != 0
             && self.panel.declared == Some(total)
@@ -5182,10 +5514,12 @@ impl State {
             self.panel.plan = None;
             self.panel.drag = None;
             self.panel.hover_divider = false;
+            self.panel.declared_advance = None;
             return None;
         };
         self.panel.geometry_epoch = next;
         self.panel.declared = Some(total);
+        self.panel.declared_advance = advance;
         Some((next, total))
     }
 
@@ -5219,6 +5553,8 @@ impl State {
                 self.panel.plan = None;
                 self.panel.drag = None;
                 self.panel.hover_divider = false;
+                self.panel.pointer_held = false;
+                self.panel.last_pointer_cell = None;
                 had
             }
             PanelFramePayload::Present(frame) => {
@@ -5256,7 +5592,13 @@ impl State {
             return;
         };
         let metrics = Metrics::new(self.fm.code_font_size(), self.fm.code_line_height());
-        let advance = self.mono_advance();
+        // The declaration's advance, never the document's: a run shaped to a
+        // different cell width than the daemon counted columns with drifts
+        // one column further off across the row.
+        let Some(advance) = self.panel_cell_advance() else {
+            self.panel_text_buffers.clear();
+            return;
+        };
         let family = self.resolved_family.clone();
         let runs: Vec<(String, f32, bool, bool)> = plan
             .runs
@@ -5307,7 +5649,7 @@ impl State {
     /// Pixel rectangle of a cell run inside the panel band.
     fn panel_run_rect(&self, run: crate::terminal::CellRun) -> Option<(f32, f32, f32, f32)> {
         let (ox, oy, _, _) = self.panel_content_rect()?;
-        let advance = self.mono_advance();
+        let advance = self.panel_cell_advance()?;
         let line = self.fm.code_line_height();
         Some((
             ox + run.start_col as f32 * advance,
@@ -5319,6 +5661,10 @@ impl State {
 
     /// The band's quad batch: the divider strip, cell backgrounds, and the
     /// panel caret, drawn under the band's glyphs.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one band's complete quad batch: divider, cell backgrounds, every straight underline form, caret"
+    )]
     fn panel_quad_vertex_bytes(&self) -> Vec<u8> {
         let mut rects = Vec::new();
         if let Some((x, y, w, h)) = self.panel_divider_rect() {
@@ -5348,7 +5694,79 @@ impl State {
                     });
                 }
             }
+            // Only a FOCUSED panel paints its caret. The producer includes
+            // `cursor` for a passive panel too — it is the window's real
+            // point, and the daemon does not suppress it — so painting it
+            // unconditionally puts a second insertion caret on screen and
+            // makes focus ownership visually ambiguous. `focused` is exactly
+            // the presentation bit Q#BP14b reserves for this.
+            // Straight underline forms as fixed-cell quads, exactly as the
+            // terminal path does; curly rides the squiggle pipeline below,
+            // which owns the sine wave. Dropping these silently loses every
+            // diagnostic and styled-terminal underline inside the band.
+            for underline in &plan.underlines {
+                if underline.style == UnderlineStyle::Curly {
+                    continue;
+                }
+                let Some((x, y, w, h)) = self.panel_run_rect(underline.run) else {
+                    continue;
+                };
+                let color = rgb_to_quad(underline.color, 1.0);
+                let thickness = TERMINAL_UNDERLINE_PX;
+                let baseline = y + h - thickness * 2.0;
+                match underline.style {
+                    UnderlineStyle::Double => {
+                        rects.push(MinimapRect {
+                            x,
+                            y: baseline,
+                            w,
+                            h: thickness,
+                            color,
+                        });
+                        rects.push(MinimapRect {
+                            x,
+                            y: baseline + thickness * 2.0,
+                            w,
+                            h: thickness,
+                            color,
+                        });
+                    }
+                    UnderlineStyle::Dotted | UnderlineStyle::Dashed => {
+                        let period = if underline.style == UnderlineStyle::Dotted {
+                            TERMINAL_UNDERLINE_PX * 3.0
+                        } else {
+                            TERMINAL_UNDERLINE_PX * 8.0
+                        };
+                        let duty = if underline.style == UnderlineStyle::Dotted {
+                            0.5
+                        } else {
+                            0.625
+                        };
+                        let mut dash_x = x;
+                        while dash_x < x + w {
+                            let dash_w = (period * duty).min(x + w - dash_x);
+                            rects.push(MinimapRect {
+                                x: dash_x,
+                                y: baseline,
+                                w: dash_w,
+                                h: thickness,
+                                color,
+                            });
+                            dash_x += period;
+                        }
+                    }
+                    UnderlineStyle::Single => rects.push(MinimapRect {
+                        x,
+                        y: baseline,
+                        w,
+                        h: thickness,
+                        color,
+                    }),
+                    UnderlineStyle::Curly | UnderlineStyle::None => {}
+                }
+            }
             if let Some(cursor) = plan.cursor
+                && self.panel.presented().is_some_and(|frame| frame.focused)
                 && let Some((x, y, w, h)) = self.panel_run_rect(cursor)
             {
                 rects.push(MinimapRect {
@@ -5366,6 +5784,34 @@ impl State {
         rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
     }
 
+    /// Curly underlines inside the band, on the squiggle pipeline — the same
+    /// split the terminal path makes, because the sine wave belongs to that
+    /// pipeline and a quad cannot express it.
+    fn panel_squiggle_vertex_bytes(&self) -> Vec<u8> {
+        let Some(plan) = self.panel.plan.as_ref() else {
+            return Vec::new();
+        };
+        if self.panel.presented().is_none() {
+            return Vec::new();
+        }
+        let rects: Vec<MinimapRect> = plan
+            .underlines
+            .iter()
+            .filter(|underline| underline.style == UnderlineStyle::Curly)
+            .filter_map(|underline| {
+                let (x, y, w, h) = self.panel_run_rect(underline.run)?;
+                Some(MinimapRect {
+                    x,
+                    y: y + h - DIAG_SQUIGGLE_PX,
+                    w,
+                    h: DIAG_SQUIGGLE_PX,
+                    color: rgb_to_quad(underline.color, 1.0),
+                })
+            })
+            .collect();
+        squiggles_to_vertex_bytes(&rects, self.config.width, self.config.height)
+    }
+
     /// Which panel cell a surface pixel is over, if any (Q#BP16).
     ///
     /// Returns `None` outside the band's content rect, which is what keeps
@@ -5380,10 +5826,75 @@ impl State {
             x,
             y,
             (ox, oy),
-            self.mono_advance(),
+            self.panel_cell_advance()?,
             self.fm.code_line_height(),
             frame.size,
         )
+    }
+
+    /// Classify a pointer pixel against the band.
+    ///
+    /// The divider is tested before the cells because it sits directly above
+    /// them and a gesture on the strip is a resize, not a selection.
+    fn classify_pointer_surface(&self, x: f32, y: f32) -> PointerSurface {
+        if self.panel_divider_contains(x, y) {
+            return PointerSurface::PanelDivider;
+        }
+        let Some((ox, oy, w, h)) = self.panel_content_rect() else {
+            return PointerSurface::Elsewhere;
+        };
+        if x < ox || x >= ox + w || y < oy || y >= oy + h {
+            return PointerSurface::Elsewhere;
+        }
+        match self.panel_hit_test(x, y) {
+            Some(coord) => PointerSurface::PanelCell(coord),
+            None => PointerSurface::PanelBackground,
+        }
+    }
+
+    /// The gesture kind a panel motion carries: a held left button makes it a
+    /// drag, and that distinction is the whole of panel selection — `Move`
+    /// never focuses or claims, while every non-`Move` gesture activates the
+    /// panel first.
+    fn panel_motion_kind(&self) -> ProtocolMouseKind {
+        if self.panel.pointer_held {
+            ProtocolMouseKind::Drag(ProtocolMouseButton::Left)
+        } else {
+            ProtocolMouseKind::Move
+        }
+    }
+
+    /// The cell a release belongs to: the one under the pointer while it is
+    /// still in the band, else the last cell the gesture reported.
+    ///
+    /// A panel selection drag routinely ends past the band's edge, and
+    /// dropping that release leaves the daemon holding a button down forever.
+    fn panel_release_cell(&self, x: f32, y: f32) -> Option<CellCoord> {
+        match self.classify_pointer_surface(x, y) {
+            PointerSurface::PanelCell(coord) => Some(coord),
+            _ => self.panel.last_pointer_cell,
+        }
+    }
+
+    /// Whether a panel motion at `coord` carries anything new, and latch it.
+    ///
+    /// Sub-cell motion resolves to the same cell and says nothing the daemon
+    /// can act on. Without this, pixel-rate motion becomes pixel-rate wire
+    /// traffic and every one of those is a daemon-side gesture — the same
+    /// reason the terminal path dedupes.
+    fn panel_motion_is_new(&mut self, coord: CellCoord) -> bool {
+        if self.panel.last_pointer_cell == Some(coord) {
+            return false;
+        }
+        self.panel.last_pointer_cell = Some(coord);
+        true
+    }
+
+    /// Arm or disarm the panel's left-button gesture, re-arming the motion
+    /// dedupe either way.
+    fn set_panel_pointer_held(&mut self, held: bool) {
+        self.panel.pointer_held = held;
+        self.panel.last_pointer_cell = None;
     }
 
     /// Begin a divider drag at surface pixel `y`, if the pointer is on the
@@ -7987,11 +8498,15 @@ impl State {
         // Diagnostic squiggles (Q#W1): own pipeline + buffer, drawn
         // between the wash quads and the text (under the glyphs, the
         // z-slot the straight bar held).
-        let squiggle_vertices = if terminal_mode {
+        let mut squiggle_vertices = if terminal_mode {
             self.terminal_squiggle_vertex_bytes()
         } else {
             self.squiggle_vertex_bytes()
         };
+        // The band's curly underlines, in BOTH modes for the same reason its
+        // quads are: the document may itself be a terminal while a panel is
+        // open.
+        squiggle_vertices.extend(self.panel_squiggle_vertex_bytes());
         let squiggle_vertex_count =
             (squiggle_vertices.len() / SQUIGGLE_VERTEX_STRIDE as usize) as u32;
         let squiggle_buffer = self
@@ -8405,8 +8920,12 @@ impl State {
         // `document_text_bottom`, which is the boundary directly above it.
         let panel_areas: Vec<TextArea> = match (self.panel_content_rect(), self.panel.plan.as_ref())
         {
-            (Some((ox, oy, bw, bh)), Some(plan)) if self.panel.presented().is_some() => {
-                let advance = mono_advance;
+            (Some((ox, oy, bw, bh)), Some(plan))
+                if self.panel.presented().is_some() && self.panel_cell_advance().is_some() =>
+            {
+                let advance = self
+                    .panel_cell_advance()
+                    .expect("checked by the match guard");
                 let line = self.fm.code_line_height();
                 let clip_top = oy.round() as i32;
                 let clip_right = (ox + bw).round() as i32;
@@ -16462,11 +16981,17 @@ mod tests {
         }
     }
 
-    /// A2B-3 — panel columns come from the stable normal-face probe, so two
-    /// frontends with identical metrics and different documents derive
-    /// identical totals.
+    /// A2B-3 — the declaration, the painter, and the hit test all resolve
+    /// cells with the SAME advance, and it is the stable normal-face probe.
+    ///
+    /// Asserting the declaration alone is what the first version of this test
+    /// did, and it was not enough: painting and hit-testing were still using
+    /// the document-dependent advance, so the daemon's column count, the
+    /// painted column positions, and the cell a click resolved to were three
+    /// different grids while this test passed. All three directions are
+    /// asserted here.
     #[test]
-    fn panel_columns_come_from_the_probe_not_the_document_advance() {
+    fn declared_painted_and_hit_tested_cells_share_the_probe_advance() {
         let Some(mut state) = headless_or_skip(800, 600, "abcdefgh") else {
             return;
         };
@@ -16474,44 +16999,100 @@ mod tests {
             .panel_probe_advance()
             .expect("the default family shapes a width");
 
-        // The fixture forces the two derivations APART, because that is the
-        // only way to pin WHICH one the declaration uses. In production they
-        // diverge through `mono_advance`'s document-glyph fallback — a file
-        // opening with a double-width or bold glyph — which is
-        // document-dependent and therefore makes the panel's column count
-        // depend on what happens to be open. Here they are separated
-        // directly, so the assertion does not rest on font internals.
+        // Force the two derivations apart, because that is the only way to
+        // pin WHICH one each consumer uses. In production they diverge
+        // through `mono_advance`'s document-glyph fallback — a file opening
+        // with a double-width or bold glyph — which is document-dependent and
+        // would therefore make the panel's geometry depend on what happens to
+        // be open. Separating them directly keeps the assertion off font
+        // internals.
         state.measured_mono_advance = Some(probe * 2.0);
+        let document_advance = state.mono_advance();
         assert!(
-            (state.mono_advance() - probe).abs() > f32::EPSILON,
+            (document_advance - probe).abs() > f32::EPSILON,
             "fixture must separate the two derivations"
         );
 
+        // 1. The declaration. Full surface width from x = 0, NOT
+        //    `width - TEXT_LEFT`: the band is not inset by document padding.
         let expected = crate::terminal::panel_cell_capacity(
-            (state.config.width as f32 - TEXT_LEFT).max(0.0),
+            state.config.width as f32,
             (geometry_capacity_bottom(state.config.height, state.fm) - TEXT_TOP).max(0.0),
             probe,
             state.fm.code_line_height(),
         )
-        .expect("a 800x600 surface admits panel cells");
+        .expect("an 800x600 surface admits panel cells");
+        let (declared, declared_advance) = state.declared_cell_total();
         assert_eq!(
-            state.declared_cell_total(),
-            expected,
+            declared, expected,
             "the declaration resolves its advance from the stable normal-face \
-             probe, never from the document-dependent advance"
+             probe and its width from the whole surface"
         );
+        assert_eq!(declared_advance, Some(probe));
         assert_ne!(
             expected.cols,
             crate::terminal::panel_cell_capacity(
-                (state.config.width as f32 - TEXT_LEFT).max(0.0),
+                state.config.width as f32,
                 (geometry_capacity_bottom(state.config.height, state.fm) - TEXT_TOP).max(0.0),
-                state.mono_advance(),
+                document_advance,
                 state.fm.code_line_height(),
             )
             .expect("the wider advance still admits cells")
             .cols,
             "and the two genuinely produce different column counts here, so \
-             the assertion above is discriminating"
+             every assertion below is discriminating"
+        );
+
+        // 2. The painter. A run at column N lands at N * the SAME advance,
+        //    measured from x = 0.
+        present_panel(&mut state, 3);
+        let (ox, oy, bw, _) = state
+            .panel_content_rect()
+            .expect("a presented band has a rect");
+        assert!(
+            ox.abs() < f32::EPSILON,
+            "the band starts at x = 0, not at the document's TEXT_LEFT"
+        );
+        assert!(
+            (bw - state.config.width as f32).abs() < f32::EPSILON,
+            "and spans the full surface width"
+        );
+        let (rx, _, rw, _) = state
+            .panel_run_rect(crate::terminal::CellRun {
+                row: 0,
+                start_col: 5,
+                end_col: 6,
+            })
+            .expect("a presented band places its runs");
+        assert!(
+            (rx - 5.0 * probe).abs() < 0.01,
+            "the painter must place column 5 at 5 probe advances, got {rx}"
+        );
+        assert!(
+            (rw - probe).abs() < 0.01,
+            "and a one-cell run must be one probe advance wide, got {rw}"
+        );
+
+        // 3. The hit test. The pixel the painter puts column 5 at must
+        //    resolve back to column 5.
+        assert_eq!(
+            state.panel_hit_test(rx + probe / 2.0, oy + 0.5),
+            Some(pmacs_protocol::CellCoord::new(0, 5)),
+            "a click on the painted cell must resolve to that cell"
+        );
+        // The last declared column is reachable, and the fractional remainder
+        // past it maps to no cell and therefore emits no `PanelPointer`.
+        let frame = state.panel.presented().expect("presented").clone();
+        let last = frame.size.cols - 1;
+        assert_eq!(
+            state.panel_hit_test(last as f32 * probe + probe / 2.0, oy + 0.5),
+            Some(pmacs_protocol::CellCoord::new(0, last))
+        );
+        assert!(
+            state
+                .panel_hit_test(frame.size.cols as f32 * probe + 0.5, oy + 0.5)
+                .is_none(),
+            "the right-edge remainder is band background, not a cell"
         );
 
         // A probe that shapes no width declares zero usable geometry rather
@@ -16801,6 +17382,235 @@ mod tests {
         );
         assert_eq!(state.panel.geometry_epoch, 0, "0 means never declared");
         assert_eq!(state.band_inset(), PanelBandInset::ABSENT);
+    }
+
+    /// F1 — every pointer handler routes through ONE classifier, and the band
+    /// claims the pixels it owns.
+    ///
+    /// This is the pin that makes the partial port visible: three of the four
+    /// handlers used to decide for themselves and simply did not ask about the
+    /// band, so a right-click and a wheel tick fell through to the document
+    /// underneath. Pinning the classifier pins all four, because all four now
+    /// have no other way to ask.
+    #[test]
+    fn one_classifier_decides_which_surface_a_pointer_pixel_belongs_to() {
+        let Some(mut state) = headless_or_skip(800, 600, "alpha") else {
+            return;
+        };
+        assert_eq!(
+            state.classify_pointer_surface(10.0, 10.0),
+            PointerSurface::Elsewhere,
+            "with no band, nothing is the band's"
+        );
+        let frame = present_panel(&mut state, 4);
+        let (ox, oy, _, h) = state
+            .panel_content_rect()
+            .expect("a presented band has a rect");
+        let (dx, dy, _, dh) = state.panel_divider_rect().expect("divider rect");
+
+        assert_eq!(
+            state.classify_pointer_surface(dx + 1.0, dy + dh / 2.0),
+            PointerSurface::PanelDivider,
+            "the strip is a drag handle, tested before the cells it sits above"
+        );
+        assert_eq!(
+            state.classify_pointer_surface(ox + 0.5, oy + 0.5),
+            PointerSurface::PanelCell(pmacs_protocol::CellCoord::new(0, 0))
+        );
+        // One pixel above the CELLS is still the divider; the document starts
+        // above the strip. Getting that boundary wrong in either direction is
+        // how a resize gesture and a selection gesture steal each other.
+        assert_eq!(
+            state.classify_pointer_surface(ox + 0.5, oy - 1.0),
+            PointerSurface::PanelDivider
+        );
+        assert_eq!(
+            state.classify_pointer_surface(ox + 0.5, dy - 1.0),
+            PointerSurface::Elsewhere,
+            "a pixel above the divider strip belongs to the document"
+        );
+        assert_eq!(
+            state.classify_pointer_surface(ox + 0.5, oy + h + 1.0),
+            PointerSurface::Elsewhere,
+            "and one below it belongs to the status band"
+        );
+        // The fractional right-edge remainder is the band's, but maps to no
+        // cell — so it emits no `PanelPointer` while still not falling through
+        // to the document.
+        let advance = state.panel_cell_advance().expect("declared advance");
+        let past_last_column = frame.size.cols as f32 * advance + 0.5;
+        if past_last_column < state.config.width as f32 {
+            assert_eq!(
+                state.classify_pointer_surface(past_last_column, oy + 0.5),
+                PointerSurface::PanelBackground,
+                "the remainder is band background, not a cell and not the document"
+            );
+        }
+    }
+
+    /// F1 — a held left button makes motion a `Drag(Left)`, and the dedupe
+    /// re-arms on every press and release.
+    #[test]
+    fn a_held_button_makes_panel_motion_a_drag_and_a_release_lands_outside() {
+        let Some(mut state) = headless_or_skip(800, 600, "alpha") else {
+            return;
+        };
+        present_panel(&mut state, 4);
+        let (ox, oy, _, _) = state
+            .panel_content_rect()
+            .expect("a presented band has a rect");
+
+        assert_eq!(
+            state.panel_motion_kind(),
+            ProtocolMouseKind::Move,
+            "bare motion neither focuses the panel nor claims a controller"
+        );
+        state.set_panel_pointer_held(true);
+        assert_eq!(
+            state.panel_motion_kind(),
+            ProtocolMouseKind::Drag(ProtocolMouseButton::Left),
+            "a held button is a drag — without this, panel selection is silent"
+        );
+
+        // Sub-cell motion says nothing new; a new cell does.
+        let first = pmacs_protocol::CellCoord::new(0, 0);
+        assert!(state.panel_motion_is_new(first));
+        assert!(!state.panel_motion_is_new(first));
+        assert!(state.panel_motion_is_new(pmacs_protocol::CellCoord::new(0, 1)));
+        // A press or release re-arms it: the first drag after a press must
+        // reach the daemon even at the cell the press landed on.
+        state.set_panel_pointer_held(true);
+        assert!(state.panel_motion_is_new(pmacs_protocol::CellCoord::new(0, 1)));
+
+        // A release inside the band lands on the cell under the pointer; one
+        // outside still ends the gesture, at the last cell reported.
+        assert_eq!(
+            state.panel_release_cell(ox + 0.5, oy + 0.5),
+            Some(pmacs_protocol::CellCoord::new(0, 0))
+        );
+        state.panel_motion_is_new(pmacs_protocol::CellCoord::new(1, 7));
+        assert_eq!(
+            state.panel_release_cell(ox + 0.5, 0.0),
+            Some(pmacs_protocol::CellCoord::new(1, 7)),
+            "a selection drag routinely ends past the band's edge, and dropping \
+             that release leaves the daemon holding a button down forever"
+        );
+    }
+
+    /// F3 — only a FOCUSED panel paints its caret.
+    ///
+    /// The producer ships `cursor` for a passive panel too (it is the window's
+    /// real point and the daemon does not suppress it), so painting it
+    /// unconditionally puts a second insertion caret on screen.
+    #[test]
+    fn a_passive_panel_paints_no_caret() {
+        let Some(mut state) = headless_or_skip(800, 600, "alpha") else {
+            return;
+        };
+        let mut frame = present_panel(&mut state, 3);
+        frame.cursor = Some(pmacs_protocol::CellCoord::new(1, 2));
+
+        frame.focused = true;
+        frame.panel_epoch += 1;
+        assert!(state.apply_panel_payload(PanelFramePayload::Present(frame.clone())));
+        let focused_quads = state.panel_quad_vertex_bytes();
+
+        frame.focused = false;
+        frame.panel_epoch += 1;
+        assert!(state.apply_panel_payload(PanelFramePayload::Present(frame.clone())));
+        let passive_quads = state.panel_quad_vertex_bytes();
+
+        assert!(
+            focused_quads.len() > passive_quads.len(),
+            "the focused band must paint one more quad — its caret — than the \
+             passive one: {} vs {}",
+            focused_quads.len(),
+            passive_quads.len()
+        );
+        // And the difference is exactly the caret: a cursor-free focused frame
+        // matches the passive one.
+        frame.focused = true;
+        frame.cursor = None;
+        frame.panel_epoch += 1;
+        assert!(state.apply_panel_payload(PanelFramePayload::Present(frame)));
+        assert_eq!(
+            state.panel_quad_vertex_bytes().len(),
+            passive_quads.len(),
+            "with no cursor at all, focused and passive paint the same quads"
+        );
+    }
+
+    /// F5 — the band's underlines are rendered, split across the two pipelines
+    /// exactly as the terminal path splits them.
+    #[test]
+    fn panel_underlines_reach_both_the_quad_and_squiggle_pipelines() {
+        let Some(mut state) = headless_or_skip(800, 600, "alpha") else {
+            return;
+        };
+        let plain = present_panel(&mut state, 3);
+        let plain_quads = state.panel_quad_vertex_bytes().len();
+        assert!(
+            state.panel_squiggle_vertex_bytes().is_empty(),
+            "a plain band has no curly underlines"
+        );
+
+        let underlined = |style: UnderlineStyle, epoch: u64| {
+            let mut frame = plain.clone();
+            frame.panel_epoch = epoch;
+            for cell in &mut frame.cells {
+                cell.style.underline = style;
+                cell.style.underline_color = CellColor::Rgb(200, 40, 40);
+            }
+            frame
+        };
+
+        // A straight form rides the quad batch.
+        assert!(
+            state.apply_panel_payload(PanelFramePayload::Present(underlined(
+                UnderlineStyle::Single,
+                plain.panel_epoch + 1
+            )))
+        );
+        assert!(
+            state.panel_quad_vertex_bytes().len() > plain_quads,
+            "straight underlines must reach the quad batch"
+        );
+        assert!(
+            state.panel_squiggle_vertex_bytes().is_empty(),
+            "and not the squiggle one"
+        );
+
+        // Curly rides the squiggle pipeline, which owns the sine wave.
+        assert!(
+            state.apply_panel_payload(PanelFramePayload::Present(underlined(
+                UnderlineStyle::Curly,
+                plain.panel_epoch + 2
+            )))
+        );
+        assert!(
+            !state.panel_squiggle_vertex_bytes().is_empty(),
+            "curly underlines must reach the squiggle pipeline"
+        );
+    }
+
+    /// A disconnect tears the band down, declaration and all.
+    ///
+    /// A retained band is the daemon's projection of a window nobody is
+    /// updating; leaving it beside a disconnect notice is the same frozen,
+    /// live-looking surface the terminal arm already refuses.
+    #[test]
+    fn a_disconnect_clears_the_band_and_its_declaration() {
+        let Some(mut state) = headless_or_skip(800, 600, "alpha") else {
+            return;
+        };
+        present_panel(&mut state, 3);
+        assert!(state.panel.presented().is_some());
+        state.on_daemon_disconnected("(daemon disconnected)");
+        assert!(state.panel.presented().is_none());
+        assert_eq!(state.panel.geometry_epoch, 0, "0 means never declared");
+        assert_eq!(state.panel.declared_advance, None);
+        assert_eq!(state.band_inset(), PanelBandInset::ABSENT);
+        assert!(state.panel_text_buffers.is_empty());
     }
 
     /// Criterion 46 — the band and divider really do paint, they take their
