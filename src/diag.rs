@@ -266,6 +266,22 @@ impl DiagnosticStore {
         *self.epochs.entry(uri.to_owned()).or_insert(0) += 1;
     }
 
+    /// Drop **every** trace of `uri`, epoch included (dired Stage 2a,
+    /// §5 finding 4).
+    ///
+    /// Distinct from [`Self::clear`] on purpose: `clear` *creates* an
+    /// `epochs` entry (`or_insert(0) += 1`) because a consumer caching
+    /// against the epoch must observe that the diagnostics went away.
+    /// Forgetting is the opposite intent — the editor no longer holds
+    /// this URI at all — so leaving the counter behind would be a
+    /// URI-keyed leak in the one map nothing else prunes.
+    pub fn forget(&mut self, uri: &str) {
+        self.by_uri.remove(uri);
+        self.severity_counts.remove(uri);
+        self.stale_uris.remove(uri);
+        self.epochs.remove(uri);
+    }
+
     /// Monotonic per-URI change counter: how many times `set` /
     /// `clear` ran for this URI. `0` for a URI never written.
     /// Consumers cache against this to detect republishes that no
@@ -489,6 +505,17 @@ impl DiagnosticView {
 }
 
 impl View for DiagnosticView {
+    /// Re-root this view when the buffer's file was renamed (dired
+    /// Stage 2a, §5). The URI field is private and `View` has no
+    /// downcast, so this hook is the only way an outside sweep can
+    /// reach it — and mutating in place preserves this overlay's
+    /// position in the window's composition order.
+    fn rename_resource(&mut self, old_uri: &str, new_uri: &str) {
+        if self.uri == old_uri {
+            new_uri.clone_into(&mut self.uri);
+        }
+    }
+
     fn kind(&self) -> &'static str {
         "diagnostic"
     }
@@ -743,6 +770,49 @@ mod tests {
             source: Some("test".to_owned()),
             code: None,
         }
+    }
+
+    /// dired Stage 2a §5, finding 4. `clear` *creates* an `epochs`
+    /// entry, because a consumer caching against the epoch has to see
+    /// that the diagnostics went away; nothing ever removes one. So a
+    /// `forget_uri` that called `clear` would leave a URI-keyed leak
+    /// behind in the one map nothing prunes — which is why the forget
+    /// path is its own store method.
+    #[test]
+    fn forget_drops_the_epoch_while_clear_deliberately_bumps_it() {
+        let mut store = DiagnosticStore::new();
+        store.set(
+            "file:///a.rs",
+            vec![diag(0, DiagnosticSeverity::Error, "boom")],
+        );
+        store.mark_stale("file:///a.rs");
+        assert_eq!(store.epoch_for("file:///a.rs"), 1);
+
+        store.clear("file:///a.rs");
+        assert_eq!(
+            store.epoch_for("file:///a.rs"),
+            2,
+            "clear announces the removal to epoch-keyed caches"
+        );
+
+        store.set(
+            "file:///a.rs",
+            vec![diag(0, DiagnosticSeverity::Error, "boom")],
+        );
+        store.mark_stale("file:///a.rs");
+        store.forget("file:///a.rs");
+        assert!(store.for_uri("file:///a.rs").is_empty(), "diagnostics");
+        assert!(!store.is_stale("file:///a.rs"), "stale flag");
+        assert_eq!(
+            store.severity_counts_for("file:///a.rs"),
+            (0, 0, 0, 0),
+            "severity counts"
+        );
+        assert_eq!(
+            store.epoch_for("file:///a.rs"),
+            0,
+            "forget leaves no trace at all, epoch included"
+        );
     }
 
     #[test]

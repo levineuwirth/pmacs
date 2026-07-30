@@ -232,6 +232,32 @@ pub fn install_diag(
         )?;
     }
 
+    // dired Stage 2a §5 step 6 — re-root every attached
+    // `DiagnosticView` from `old_uri` to `new_uri` after a rename.
+    //
+    // `DiagnosticView.uri` is set once at construction and is private,
+    // and `View` has no downcast, so nothing outside `diag.rs` can
+    // reach it; the `View::rename_resource` hook is the seam. The sweep
+    // walks EVERY window, which is what `_attach_view` above cannot do
+    // — it takes the active window and errors otherwise — so a passive
+    // split that already holds the overlay is re-rooted too. It mutates
+    // in place, so each overlay keeps its position in the window's
+    // composition order; a remove-and-re-push would move the underline
+    // to the end of the stack and pass a one-window test anyway.
+    {
+        diag_mod.set(
+            "_rename_resource",
+            lua.create_function(move |lua, (old_uri, new_uri): (String, String)| {
+                let Some(core) = lua.app_data_ref::<SharedCore>() else {
+                    return Ok(false);
+                };
+                core.borrow_mut()
+                    .rename_resource_in_views(&old_uri, &new_uri);
+                Ok(true)
+            })?,
+        )?;
+    }
+
     pmacs.set("diag", diag_mod)?;
     Ok(())
 }
