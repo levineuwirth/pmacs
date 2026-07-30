@@ -2574,6 +2574,7 @@ dependencies = [
  "codebook-tree-sitter-latex",
  "crossbeam",
  "crossterm",
+ "filedescriptor",
  "loro",
  "mlua",
  "nix 0.29.0",

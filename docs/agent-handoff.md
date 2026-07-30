@@ -223,6 +223,31 @@ commands, read `docs/active-work.md` immediately after this file.
     remain parked pending the evidence this diagnostic produces, as does
     `terminate` idempotence for an already-reaped process (a different
     failure, so a different PR).
+  - **The diagnostic fired, and what it showed.** macOS CI, PR #191,
+    [run 30553376486](https://github.com/levineuwirth/pmacs/actions/runs/30553376486/job/90907461258):
+    `target=-8619 via group, leader_pid=8619, expected_group=-8619,
+    leader=live` — the `spec.group` pipe path, not the PTY path, with the
+    leader observed alive by a real `try_wait`. A rerun of the identical
+    head passed 12/12, so it is intermittent.
+  - **Owning the child does not license dismissing a group error, and
+    the occurrence does not prove the child received EPERM.** The failed
+    target was the *group* `-8619`; `try_wait` observed the *process*
+    `8619`. Nothing measured `getpgid(8619)`, so the two are not known to
+    refer to the same thing. What is settled is narrower and still
+    enough: a group target computed from the spawn-time `pgid == pid`
+    assumption returned EPERM while the leader was alive, which retires
+    "EPERM cannot happen for our own children" as a reason to discard an
+    arbitrary group-directed error. Attributing the errno to the child
+    would repeat the exact error that killed three tolerance rules —
+    concluding something about one entity from something about another.
+  - **A field named like an observation can be a restatement of its
+    input.** `expected_group` is `-leader_pid`, and on the spawn-group
+    path the target is `-leader_pid` too, so the report printed the same
+    number three times and their agreement was arithmetic. Stage B adds a
+    `measured_group` from `getpgid`, which is the only field able to
+    disagree — and it still establishes no identity, because it is read
+    inside the same read-then-act window and no portable mechanism closes
+    that for a *group* (`pidfd` covers a process; macOS has neither).
 - **Lean 4 arc (Arc 8) — stages 1, 2, 3a, 3b, 4a, 4b ALL LANDED**
   (`docs/lean4-mode-framing.md`; #160, #161, #167, #170, #179, #181). pmacs edits Lean 4: `arborium-lean` highlighting, a
   `lean4` major mode, `⟨⟩ ⦃⦄ ⟮⟯` pairs, and a `lake serve` language
