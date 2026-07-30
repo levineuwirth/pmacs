@@ -9,10 +9,63 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
+# Cancel a pull request's superseded runs instead of letting them burn
+# to completion. This project rebases heavily — the ledger re-conflicts
+# on nearly every merge — so a branch routinely takes several pushes
+# while an earlier run is still going, and each of those runs is
+# obsolete the moment the next push lands. macOS minutes are the
+# expensive ones and the macOS leg is the critical path, so superseded
+# runs are exactly where the waste concentrates.
+#
+# Scoped to pull requests deliberately. `github.event.pull_request.number`
+# is empty for a push to `main`, so the fallback keys those runs by SHA:
+# every `main` commit gets its own group and none can cancel another.
+# Cancelling a `main` run would leave the branch-protection record
+# ambiguous about a commit that has already landed — the one place this
+# saving is not worth having.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Every job carries `timeout-minutes`. Without one a job inherits
+# GitHub's 360-minute default, so a single hung test burns six hours —
+# times four on the test matrix — and reports nothing useful at the end
+# of it.
+#
+# The ceilings are justified against OBSERVED EXECUTION, and the
+# numbers are a reading rather than a constant, so re-measure before
+# trusting them:
+#
+#   * observed max, 25-run window: 17 min (macOS/luajit)
+#   * observed max, 12-run window: 15.8 min (same job)
+#   * every other job: under 4 min
+#
+# `timeout-minutes` counts EXECUTION, not queue time — a 33-minute
+# wall-clock run in that window executed its longest job in 17 — so no
+# run in the observed history would have been killed by these values.
+#
+# The exposure is the case the window does NOT contain: a COLD CACHE.
+# A stable-toolchain bump invalidates Swatinem's key on every leg at
+# once, and a cold macOS debug build of this workspace plus the suite is
+# the plausible way a HEALTHY run exceeds its ceiling. The test job
+# therefore gets 35 rather than 25 — roughly 2x its observed max — while
+# everything else keeps 25 against a sub-4-minute observed max, except
+# `m6-perf-gates`, which keeps its own tighter 15.
+#
+# DIAGNOSIS, WRITTEN BEFORE IT HAPPENS: four test legs timing out
+# simultaneously, shortly after a Rust release, is a cold cache and not
+# a hang. Rerun, or raise this number. A single leg timing out while its
+# siblings pass is the hang case these ceilings exist to catch.
+#
+# This is also the gate that has to exist before the basedpyright-class
+# hang can ever be armed — see `PMACS_REQUIRE_PYRIGHT`, deliberately
+# never set, in the test job below. 35 still beats the 360-minute
+# default by an order of magnitude.
 jobs:
   fmt:
     name: Format
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -23,6 +76,7 @@ jobs:
   clippy:
     name: Lint (${{ matrix.lua }})
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -40,10 +94,17 @@ jobs:
       # not pmacs), so the root-package clippy above never lints it. Lint
       # it explicitly or its warnings slip through CI (audit F-001).
       - run: cargo clippy -p pmacs-gpu --all-targets -- -D warnings
+      # pmacs-protocol is likewise never linted by the root-package
+      # clippy above: the workspace default member is only `pmacs`. The
+      # local `--workspace` gate covers it, so it passes today — CI has
+      # simply never checked, and a warning introduced through a
+      # protocol-only PR would reach `main` unseen.
+      - run: cargo clippy -p pmacs-protocol --all-targets -- -D warnings
 
   gpu-render:
     name: GPU Render (headless)
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -76,6 +137,12 @@ jobs:
   test:
     name: Test (${{ matrix.os }} / ${{ matrix.lua }})
     runs-on: ${{ matrix.os }}
+    # 35, not 25: this is the only job whose observed max is minutes
+    # rather than seconds, and the only one a cold cache can plausibly
+    # push past a 25-minute ceiling on all four legs at once. See the
+    # note above `jobs:` for the measurements and the cold-cache
+    # diagnosis.
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -160,6 +227,7 @@ jobs:
   acceptance:
     name: M1 Acceptance Gates
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -170,6 +238,7 @@ jobs:
   m4-perf-gates:
     name: M4 Perf Gates
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -188,6 +257,7 @@ jobs:
   m5-perf-gates:
     name: M5 Perf Gates
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

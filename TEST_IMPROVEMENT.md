@@ -42,6 +42,9 @@ hand before inclusion.
   on `push:main` + `pull_request` only. No coverage measurement, no
   scheduled runs, no branch protection on `main` (verified via API:
   404, so every job is advisory).
+  **~~No branch protection~~ — CLOSED. Protection was enabled during
+  the arc; the API now reports 12 required contexts, `strict` off,
+  `enforce_admins` off. The 404 above was a reading at audit time.**
 
 The suite is unusually thoughtful in places — the daemon harness's
 connect-based readiness probe, the `PMACS_REQUIRE_GPU` hard-fail
@@ -358,9 +361,12 @@ test) pass in CI and flake for whoever runs the documented local gate.
 
 (Findings that change what CI *certifies*; speedups are §6.)
 
-1. **Branch protection is off** — every job is advisory; a red run
-   merges as easily as a green one. Turn on required checks for the
-   cheap deterministic jobs at minimum (fmt, clippy, ubuntu test legs).
+1. ~~**Branch protection is off**~~ — **DONE.** Every job was
+   advisory; a red run merged as easily as a green one. All 12 contexts
+   are now required, rather than the cheap-jobs-only starter suggested
+   here. `strict` is off (a PR need not rebase every time `main` moves,
+   which this repository's ledger contention makes expensive) and
+   `enforce_admins` is off (the maintainer retains an override).
 2. **No job timeouts except m6** (15 min). Everything else inherits
    360 min. The day a runner image ships any of the PATH-gated tools
    (§1.2), the basedpyright-class hang burns 6 h × 4 matrix legs with

@@ -954,12 +954,98 @@ has **no branch and no framing yet**.
   current documentation. The section said "whoever confirms the branch
   carries nothing unique removes the section"; this is that.
 
+## Test-improvement arc, lane 3a — CI timeouts and concurrency
+
+- Portable branch: `githubsucks/ci-timeouts-concurrency`, worktree
+  `../pmacs-ci3`. Workflow only — **no product code, no tests changed.**
+- **Base, measured at write time:**
+
+  ```
+  $ git log --oneline -1 githubsucks/main
+  b7bf2c6 Merge pull request #194 from levineuwirth/silent-skip-arming
+  ```
+
+- Ships the three cheap, deterministic items of `TEST_IMPROVEMENT.md`
+  §5-6. The larger ones — nextest (§6.3), the serial/parallel split
+  (§6.2), the parallel canary leg (§5.6), the nightly cron (§5.5), and
+  the macOS matrix trim (§6.4) — are **deliberately not here**: each
+  changes what CI certifies or how it runs, and each wants its own
+  decision rather than riding a timeout patch.
+- **`timeout-minutes` on every job (§5.2).** Measured before changing:
+  **7 of 8 jobs had none** and inherited GitHub's 360-minute default;
+  only `m6-perf-gates` had one (15). A single hung test therefore burnt
+  six hours, times four on the test matrix.
+  **This is the gate that must land before `PMACS_REQUIRE_PYRIGHT` can
+  ever be set** — lane 2 left basedpyright unarmed precisely because
+  this did not exist.
+- **The ceilings are 25, and 35 for the test job — anchored on observed
+  execution, corrected in review.** Revision 1 cited "~14.6 min, ample
+  headroom", which was one reading quoted as a property. Re-measured
+  over two windows: **17 min** max over 25 runs and **15.8 min** over
+  12, both macOS/luajit; every other job under 4 min. Against 17, a
+  flat 25 is ~1.5x, not "ample".
+  - `timeout-minutes` counts **execution, not queue** — a 33-minute
+    wall-clock run in that window executed its longest job in 17 — so
+    **no run in observed history would have been killed** by either
+    value.
+  - The real exposure is what the window does *not* contain: a **cold
+    cache**. A stable-toolchain bump invalidates Swatinem's key on
+    every leg simultaneously, and a cold macOS debug build plus suite
+    is the plausible way a *healthy* run overruns. It would present as
+    four legs timing out at once, the day after a Rust release.
+  - So the test job takes 35 (~2x its observed max) and the rest keep
+    25 (~6x theirs), and **the diagnosis is written into the workflow
+    before the event**: simultaneous four-leg timeouts after a
+    toolchain release are a cold cache, not a hang; a single leg
+    timing out beside passing siblings is the hang case.
+- **`concurrency` with `cancel-in-progress` (§6.1)**, scoped to pull
+  requests. `github.event.pull_request.number` is empty on a push to
+  `main`, so the fallback keys those by SHA and no `main` run can
+  cancel another — cancelling one would leave the branch-protection
+  record ambiguous about a commit that already landed.
+- **`-p pmacs-protocol` clippy (§5.7).** Verified passing locally
+  *before* proposing it, so adding it cannot turn CI red on arrival.
+  The root-package clippy never covered it: the workspace default
+  member is only `pmacs`.
+- **§5.1 branch protection is DONE, not deferred** — it belongs in
+  neither this lane's shipped list nor its deferrals, and review was
+  right that its absence from both was an omission. It was enabled
+  earlier in this session; verified against the API at review time:
+
+  ```
+  $ gh api repos/levineuwirth/pmacs/branches/main/protection
+  {"enforce_admins":false,"force_push":false,"required_checks":12,"strict":false}
+  ```
+
+  All 12 checks required; `strict` off deliberately, so a PR need not
+  rebase every time `main` moves (this repository's ledger contention
+  makes strict expensive); `enforce_admins` off so the user retains an
+  override. **This matters to the concurrency comment**, which
+  justifies exempting `main` pushes by appeal to "the
+  branch-protection record" — that record now exists, so the
+  justification is real rather than aspirational.
+- **Required status checks are NAME-COUPLED to job names, and this
+  lane's own deferrals will break them.** A required context that no
+  longer exists does not fail — it leaves every PR pinned on
+  "Expected — waiting for status", indefinitely, which is
+  `main` becoming unmergeable by policy rather than by a red run.
+  Three deferrals above change job names or the matrix: the macOS trim
+  (§6.4) removes two contexts outright, and nextest (§6.3) or the
+  serial/parallel split (§6.2) rename or add them.
+  **Rule: any job rename, removal, or matrix change updates the
+  branch-protection required-checks list in the same motion.** Recorded
+  here because this is the entry that both enabled protection and named
+  the lanes that will invalidate it.
+- Recovery from a clean checkout:
+  `git fetch githubsucks && git worktree add ../pmacs-ci3
+  -b ci-timeouts-concurrency githubsucks/ci-timeouts-concurrency`.
+
 ## Test-improvement arc, lane 4 — process teardown stdin deadlock
 
 - Portable branch: `githubsucks/process-teardown-stdin-deadlock`,
   worktree `../pmacs-hang`. Implements
-  `docs/process-teardown-stdin-deadlock-framing.md` (rev 2, one review
-  round).
+  `docs/process-teardown-stdin-deadlock-framing.md` (rev 3: one review
+  round, then a CI round that falsified the reproduction).
 - **Base, measured rather than quoted:**
 
   ```
