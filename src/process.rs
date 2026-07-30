@@ -717,10 +717,18 @@ impl ChildHandle {
 /// Which branch of [`signal_target`] chose the target (Q#PD1).
 ///
 /// Recorded on failure because the branches differ in what a failing
-/// `kill` can possibly mean: only [`Self::LeaderPid`] aims at the
-/// spawned child itself. The other two aim at a *group*, which for a
-/// PTY is read from the terminal and can belong to something the
-/// supervisor never spawned.
+/// `kill` can possibly mean. Two of the four aim at the spawned child
+/// itself — [`Self::LeaderPid`] for a pipe child with no group, and
+/// [`Self::PtyForegroundFallback`] for a PTY whose terminal named no
+/// group. The other two aim at a *group*:
+/// [`Self::SpawnGroup`] at one computed from the spawn-time `pgid ==
+/// pid` assumption, and [`Self::ForegroundGroup`] at one read from the
+/// terminal, which can belong to something the supervisor never spawned.
+///
+/// The pid-versus-group split is the classification that matters here,
+/// and it does **not** line up with the PTY-versus-pipe split — which is
+/// exactly why the fallback needed its own variant instead of reusing
+/// `LeaderPid`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TargetSource {
     /// The tty's current foreground process group, read at signal
@@ -976,7 +984,7 @@ fn observe_leader(proc: &mut ManagedProcess) -> LeaderObservation {
 /// makes it worth printing.
 ///
 /// **It does not establish identity** (framing §1.5). It is read before
-/// the `kill` in the same read-then-act window, and a number cannot
+/// the `kill`, in the same read-then-act window, and a number cannot
 /// distinguish the original group from a recycled one. No portable
 /// mechanism can: `pidfd` closes pid reuse for a process, not a group,
 /// and macOS has none at all. This records an observation; it settles
@@ -1007,6 +1015,7 @@ fn signal_failure_report(
     signal: Signal,
     errno: nix::errno::Errno,
     leader: &LeaderObservation,
+    measured: Option<&str>,
 ) -> String {
     let expected = if target.source.is_group() {
         match i32::try_from(leader_pid) {
@@ -1016,15 +1025,11 @@ fn signal_failure_report(
     } else {
         String::new()
     };
-    // Only the spawn-group path computes its target from the assumption,
-    // so it is the only one where a measurement can contradict anything.
-    // A PTY target came from the terminal and a leader-directed target is
-    // not a group at all.
-    let measured = if matches!(target.source, TargetSource::SpawnGroup) {
-        measured_group_of(leader_pid)
-    } else {
-        String::new()
-    };
+    // Supplied by the caller, which samples it BEFORE the `kill`. Doing
+    // it here would describe the group as it stands *after* the failure
+    // and after `observe_leader`, which is post-hoc state presented as
+    // evidence about the attempted target.
+    let measured = measured.unwrap_or("");
     format!(
         "kill: {errno} (signal={signal:?}, target={} via {}, leader_pid={leader_pid}{expected}{measured}, leader={})",
         target.pid.as_raw(),
@@ -1292,6 +1297,13 @@ impl ProcessSupervisor {
         };
         let forced_lookup = self.forced_pty_lookup.take();
         let target = signal_target(proc, pid, forced_lookup)?;
+        // Sample the real group BEFORE signalling. Only the spawn-group
+        // path computes its target from the `pgid == pid` assumption, so
+        // it is the only one a measurement can contradict; a PTY target
+        // came from the terminal and a leader-directed target is not a
+        // group at all.
+        let measured =
+            matches!(target.source, TargetSource::SpawnGroup).then(|| measured_group_of(pid));
         // Q#PD4: the seam injects the KILL attempt's result only —
         // never the observation below — so target selection, the real
         // `ChildHandle::try_wait` against the real child, and the error
@@ -1305,7 +1317,14 @@ impl ProcessSupervisor {
             // disposition is unchanged — this still returns `Err`,
             // with no state transition and no ledger arming.
             let leader = observe_leader(proc);
-            return Err(signal_failure_report(target, pid, signal, errno, &leader));
+            return Err(signal_failure_report(
+                target,
+                pid,
+                signal,
+                errno,
+                &leader,
+                measured.as_deref(),
+            ));
         }
         if matches!(signal, Signal::SIGTERM | Signal::SIGKILL | Signal::SIGHUP) {
             proc.state = ProcessState::Exiting {
@@ -2628,15 +2647,19 @@ mod tests {
         (id, spawn_started_pid(sup, id))
     }
 
-    /// The tty's current foreground process group, read through the same
-    /// `MasterPty` accessor production uses. `None` for a pipe
+    /// The tty's current foreground process group, read through the
+    /// **production** lookup — not `portable_pty`'s
+    /// `process_group_leader`, which this crate no longer uses on the
+    /// signal path. Reading it any other way would let
+    /// `pty_foreground_group` fall back on every call while every test
+    /// that depends on it stayed green. `None` for a pipe
     /// generation, or when the terminal reports no foreground group.
     fn foreground_pgid(sup: &ProcessSupervisor, id: ProcessId) -> Option<i32> {
         let runtime = sup.processes.get(&id)?.runtime.as_ref()?;
         match &runtime.child {
             ChildHandle::Pty {
                 _master: master, ..
-            } => master.process_group_leader(),
+            } => pty_foreground_group(master.as_ref()).ok(),
             ChildHandle::Pipes(_) => None,
         }
     }
@@ -2824,12 +2847,28 @@ mod tests {
             "a real job-control shell must move the terminal off the leader"
         );
 
-        // And the production lookup — not the fixture's own polling —
-        // reports that same group.
-        let observed = foreground_pgid(&sup, id).expect("PTY reports a foreground group");
+        // Force ONLY the kill failure. The lookup is left alone, so
+        // `pty_foreground_group` runs for real against a real terminal
+        // and the report below is built from what it returned.
+        //
+        // This is the assertion that makes the injected pin meaningful:
+        // without it, `pty_foreground_group` could fall back on every
+        // call and every other test here would still pass, because they
+        // all supply the group themselves.
+        sup.force_next_kill_errno(nix::errno::Errno::EPERM);
+        let err = sup.terminate(id).expect_err("injected EPERM must fail");
+
+        let expected = format!(
+            "kill: {} (signal=SIGTERM, target=-{fg} via tcgetpgrp, leader_pid={pid}, expected_group=-{pid}, leader=live)",
+            nix::errno::Errno::EPERM
+        );
         assert_eq!(
-            observed, fg,
-            "the production accessor must see what the fixture waited for"
+            err, expected,
+            "the production lookup must report the real foreground group"
+        );
+        assert!(
+            !err.contains("pty-leader-fallback"),
+            "a healthy terminal must not take the fallback branch: {err}"
         );
 
         let _ = sup.signal(id, Signal::SIGKILL);

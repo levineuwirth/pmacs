@@ -122,11 +122,13 @@ If it does not, stop and repair the remote/fetch configuration.
 
 - **Portable branch:** `githubsucks/process-signal-diagnostic-completeness`;
   worktree `../pmacs-signal-identity`. Governing document:
-  `docs/process-signal-diagnostic-completeness-framing.md`, **revision 4,
-  approved** after three review rounds.
-- **State:** implemented and gated; canonical `githubsucks/main` @
-  `b8e18f6` (the ledger absorption #199) is integrated. Two commits —
-  Bet 1 alone, then Bets 2–4 — per the framing's branch plan.
+  `docs/process-signal-diagnostic-completeness-framing.md`, **revision 6**;
+  the contract was approved at revision 4 and has been revised twice
+  since to match what shipped.
+- **State:** **PR #200 open**, four review rounds closed, held for
+  review. Canonical `githubsucks/main` @ `b8e18f6` (the ledger
+  absorption #199) is integrated. Four commits: Bet 1 alone, Bets 2–4,
+  Bet 1's fallback after CI falsified it, then round 4's corrections.
 - **Boundary, unchanged:** evidence collection only. No signal
   retargeting, tolerance, disposition change, or reap-ledger repair.
   **Group identity remains unprovable** (framing §1.5): the measured
@@ -143,7 +145,7 @@ If it does not, stop and repair the remote/fetch configuration.
   claiming "EPERM cannot happen for our own children" is corrected
   **without** claiming the child itself received EPERM.
 - **Verification at the merged tree** (not inherited from the pre-merge
-  head): 11 gates, **4469 tests, zero failures** — fmt, diff-check,
+  head): 11 gates, **4471 tests, zero failures** — fmt, diff-check,
   clippy, `--lib`, `--lib --features crdt`, compile-mode, copy-mode in
   both feature configurations, bottom-panel Stage 1, M4 with the
   basedpyright skip, and required GPU. The job-control divergence
@@ -157,11 +159,16 @@ If it does not, stop and repair the remote/fetch configuration.
   Separately, the **pre-Stage-B test was restored verbatim under the
   substitution mutation and PASSED**, which is the finding that
   justified rewriting it rather than adding to it.
-- **`/bin/bash` is a declared optional test dependency**, armed by
-  `PMACS_REQUIRE_BASH` on **both** CI platforms rather than Linux only:
-  the failures this diagnostic exists to explain have so far occurred
-  only on macOS, so arming it Linux-only would leave it dark exactly
-  where it matters.
+- **Bet 1 was falsified by CI and the framing's fallback shipped.**
+  `bash -m` diverges on Linux and **never on macOS**, where both legs
+  observed the terminal stay with the leader for a full 10s wait. The
+  divergent case is now pinned by **injecting** the foreground group
+  (runs everywhere, weaker); a Linux-only corroboration drives a real
+  shell and is the **only** test exercising `pty_foreground_group`
+  end-to-end. `/bin/bash` is a declared optional test dependency armed
+  by `PMACS_REQUIRE_BASH` on **Linux only** — macOS ships bash but
+  cannot produce the precondition, so arming it there would make a
+  missing binary fatal for a test that can never run.
 - **Recovery from a clean checkout:**
 
   ```sh

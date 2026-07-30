@@ -1,6 +1,6 @@
 # Framing — make the signal diagnostic discriminating (evidence collection)
 
-**Revision 5.** Status: implemented; PR open. Lane:
+**Revision 6.** Status: implemented; PR open, review round 4 closed. Lane:
 `process-signal-diagnostic-completeness`, worktree
 `../pmacs-signal-identity`, based on `githubsucks/main` @ `4cd4a7b`
 (re-measure at branch time; this is a reading, not a constant).
@@ -16,6 +16,32 @@ escalation path is safe.
 gets signalled, no disposition change.** Everything behavioural is in §5.
 
 ## Revision history
+
+**Revision 5 → 6**, after review round 4 (three blocking, one major).
+All four accepted.
+
+- **`measured_group` was sampled AFTER the failed `kill`** and after
+  `observe_leader`, while both the framing and the function's own doc
+  said before. A concurrent group change would have made the diagnostic
+  report post-failure state as evidence about the attempted target. It
+  is now sampled in `signal` before the kill and passed into the report.
+- **The Linux corroboration did not exercise the production lookup.**
+  Its helper read `portable_pty::process_group_leader` — the accessor
+  this lane stopped using — so `pty_foreground_group` could have fallen
+  back on every call with every test still green. Demonstrated: forcing
+  it to always fall back leaves the injected pin **passing** and only
+  the corroboration failing. The helper now calls the production lookup,
+  and the corroboration forces *only* the kill so the report is built
+  from a real terminal read.
+- **This document did not update its own acceptance contract** (§4.1).
+  Revision 5 recorded the falsification in the revision history and Bet
+  1 but left the normative criterion demanding the real-shell rewrite —
+  the exact "implementation quietly diverges from the contract" shape
+  this project recorded as a lesson on #191/#188.
+- **`TargetSource`'s doc had the wrong classification.** Two of four
+  variants now target the leader pid, not one, and the pid-versus-group
+  split does not line up with PTY-versus-pipe — which is *why*
+  `PtyForegroundFallback` needed its own variant.
 
 **Revision 4 → 5**, after implementation. **Bet 1 was falsified by CI**,
 and the framing's own fallback is what shipped.
@@ -431,10 +457,24 @@ assertion (`:2517`) is one of the four sites acceptance 5 must update.
 
 ## 4. Acceptance
 
-1. A PTY job-control fixture where `tcgetpgrp` != leader pid, both exact
-   values asserted and asserted to differ. The test at `:2400` is
-   **rewritten**, not supplemented — it currently pins a substitution as
+1. The divergent case is pinned on **every** platform: a group-directed
+   failure whose target differs from the leader pid, with both exact
+   values asserted and asserted to differ. The pre-Stage-B test is
+   **rewritten**, not supplemented — it pinned a substitution as
    acceptable.
+
+   **The divergence is injected at the `signal_target` seam**, per Bet
+   1's falsification: a real `bash -m` fixture diverges on Linux and
+   never on macOS. The injected form is weaker and §3 Bet 1 says how.
+
+1a. **A Linux-only corroboration** drives a real job-control shell,
+   forces *only* the kill failure, and asserts the production report
+   names the real foreground group. This is the sole test that exercises
+   `pty_foreground_group` end-to-end — every other test supplies the
+   group itself and therefore cannot detect a lookup that always falls
+   back. **Residual limitation, stated rather than buried: on macOS the
+   production lookup has no end-to-end coverage**, because the platform
+   cannot produce the precondition.
 2. The PTY foreground-lookup fallback reports a source distinct from a
    pipe child's. Separate tests drive the duplicate-error and
    `tcgetpgrp`-error arms and assert the exact stage and errno; a third
@@ -450,7 +490,10 @@ assertion (`:2517`) is one of the four sites acceptance 5 must update.
    while a successful `SIGTERM` does.
 4. For `spec.group` children the report carries the measured pgid as a
    field distinct from the assumed one, renderable as unobservable, with
-   a test asserting a case where they **differ** (§3 Bet 4).
+   a test asserting a case where they **differ** (§3 Bet 4). **It is
+   sampled before the `kill`**, not during report construction, so it
+   describes the target that was attempted rather than the state left
+   behind by the failure.
 5. All four exact-string sites — `:2408`, `:2435`, `:2485`, `:2517` —
    updated **individually**, each listed in the PR body with before and
    after. No blanket rewrite: that is how a format regression hides.
