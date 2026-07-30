@@ -227,6 +227,19 @@ translation) are routed through trampolines that exec these tools.
   **skips** when `setsid` is absent, so a minimal or BusyBox environment
   still runs `cargo test --lib`; set `PMACS_REQUIRE_SETSID=1` to make
   that skip a failure, as CI does on Linux.
+- **`/bin/bash`** (**optional**, Linux only). The signal diagnostic's
+  job-control corroboration test needs a terminal whose foreground
+  process group is not the spawned leader, which `bash -m` produces by
+  running a foreground job in its own process group. The path matters:
+  the test spawns `/bin/bash` directly rather than resolving `bash` on
+  `PATH`, and skips when that path is absent. Set `PMACS_REQUIRE_BASH=1`
+  to make the skip a failure, as CI does on Linux.
+
+  **It is deliberately not armed on macOS**, which ships bash 3.2 but
+  where a non-interactive `bash -m` was measured in CI to keep the
+  terminal on the leader — so the divergence the test needs never
+  happens there. The divergent case is pinned on every platform by
+  injecting the foreground group instead.
 - **`git`** (added in M7.2). Required for any package operation:
   the package fetcher shells out to `git` to clone, fetch, and
   resolve refs, with a deterministic environment

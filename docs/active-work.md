@@ -118,6 +118,69 @@ declares canonical will pass on a tree the rest of this file does not
 describe.
 If it does not, stop and repair the remote/fetch configuration.
 
+## Process-signal diagnostic completeness — IMPLEMENTED, PR OPEN
+
+- **Portable branch:** `githubsucks/process-signal-diagnostic-completeness`;
+  worktree `../pmacs-signal-identity`. Governing document:
+  `docs/process-signal-diagnostic-completeness-framing.md`, **revision 6**;
+  the contract was approved at revision 4 and has been revised twice
+  since to match what shipped.
+- **State:** **PR #200 open**, four review rounds closed, held for
+  review. Canonical `githubsucks/main` @ `b8e18f6` (the ledger
+  absorption #199) is integrated. Four commits: Bet 1 alone, Bets 2–4,
+  Bet 1's fallback after CI falsified it, then round 4's corrections.
+- **Boundary, unchanged:** evidence collection only. No signal
+  retargeting, tolerance, disposition change, or reap-ledger repair.
+  **Group identity remains unprovable** (framing §1.5): the measured
+  group is read in the same read-then-act window, and no portable
+  mechanism closes that for a *group* — `pidfd` covers a process, and
+  macOS has neither. The ledger's silent cancellation is parked as its
+  own lane.
+- **What shipped.** The PTY foreground-group lookup now reports four
+  distinct outcomes instead of one string, through a safe
+  `filedescriptor::OwnedHandle::dup` bridge that keeps the errno
+  `portable-pty` discards — with no `unsafe` in pmacs. The report names
+  the signal. A `measured_group` field from `getpgid` is the only field
+  in the report able to disagree with its input. The reap-ledger comment
+  claiming "EPERM cannot happen for our own children" is corrected
+  **without** claiming the child itself received EPERM.
+- **Verification at the merged tree** (not inherited from the pre-merge
+  head): 11 gates, **4471 tests, zero failures** — fmt, diff-check,
+  clippy, `--lib`, `--lib --features crdt`, compile-mode, copy-mode in
+  both feature configurations, bottom-panel Stage 1, M4 with the
+  basedpyright skip, and required GPU. The job-control divergence
+  fixture was run 20/20. All local runs used an isolated
+  `XDG_CONFIG_HOME`.
+- **Four bites, each by an actual revert, all observed to fail:**
+  collapsing the PTY fallback back into a bare `leader-pid`; dropping
+  `signal=` from the report; making the measured group restate the pid
+  it was handed; and — as a positive control on the fixture itself —
+  replacing the `bash -m` job-control child with a plain `sleep`.
+  Separately, the **pre-Stage-B test was restored verbatim under the
+  substitution mutation and PASSED**, which is the finding that
+  justified rewriting it rather than adding to it.
+- **Bet 1 was falsified by CI and the framing's fallback shipped.**
+  `bash -m` diverges on Linux and **never on macOS**, where both legs
+  observed the terminal stay with the leader for a full 10s wait. The
+  divergent case is now pinned by **injecting** the foreground group
+  (runs everywhere, weaker); a Linux-only corroboration drives a real
+  shell and is the **only** test exercising `pty_foreground_group`
+  end-to-end. `/bin/bash` is a declared optional test dependency armed
+  by `PMACS_REQUIRE_BASH` on **Linux only** — macOS ships bash but
+  cannot produce the precondition, so arming it there would make a
+  missing binary fatal for a test that can never run.
+- **Recovery from a clean checkout:**
+
+  ```sh
+  git fetch githubsucks --prune
+  git worktree add ../pmacs-signal-identity \
+    -b process-signal-diagnostic-completeness \
+    githubsucks/process-signal-diagnostic-completeness
+  cd ../pmacs-signal-identity
+  git merge-base --is-ancestor b8e18f6 HEAD
+  git status --short --branch
+  ```
+
 ## The CRDT half of the test corpus is dark in CI — NEEDS A LANE
 
 - **No branch, no framing yet.** Found while gating #166, then measured
