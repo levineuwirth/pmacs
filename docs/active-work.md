@@ -655,7 +655,7 @@ has **no branch and no framing yet**.
   `git fetch githubsucks && git worktree add ../pmacs-rd-impl
   -b resource-op-delete-guard-impl githubsucks/resource-op-delete-guard-impl`.
 
-## dired Stage 2a — rename/delete reconciliation — PR OPEN
+## dired Stage 2a — rename/delete reconciliation — PR #196 OPEN, review round 1 closed
 
 - Portable branch: `githubsucks/dired-stage2-impl`, worktree
   `../pmacs-dired-s2`. Implements **Stage 2a only** of the framing merged
@@ -676,7 +676,9 @@ has **no branch and no framing yet**.
   touches. **Re-measure the merge-base before relying on it** —
   `main` has branch protection, all 12 checks must pass on the merging
   head, and a conflicting PR builds no merge ref at all, so a green run
-  from before a move reads as current when it is not.
+  from before a move reads as current when it is not. **Re-measured after
+  round 1: `main` had not moved, so no integration was needed** — that is
+  a reading of the tree, not a standing fact.
 - **What 2b and 2c still owe, stated so the split boundary is auditable.**
   2a ships **no user-visible surface at all** and no dired code: the
   `dired_acceptance` count is deliberately unchanged at **25**, and a
@@ -732,17 +734,72 @@ has **no branch and no framing yet**.
   31, 31b (both gates), 31d (both halves), 34, 50 (both mutations), 51,
   52, 53b, 54, 55, plus the two re-pinned m4 rows in three
   configurations.
+- **Review round 1 found four defects; all four are fixed, and all four
+  were the same shape — a failure that left state wrong and told nobody.**
+  Worth keeping as one lesson rather than four bugs: every one of them
+  was a `pcall` or a discarded return value, and each *looked* like
+  defensive coding.
+  - **P1 — delete refusals were silent.** `reconcile_delete_and_fire`
+    returned `kept_modified` and `refused` and both production callers
+    discarded them, so a last-buffer refusal or the asynchronous
+    modified-buffer race left the file gone and the buffer still bound to
+    it — and the next `C-x C-s` recreates the deleted file. Reporting
+    moved **inside the shared seam**, for the same reason the
+    reconciliation lives there: a caller that has to remember to report
+    is a caller that will forget. Channel is `EditorCore::status`;
+    **not `pmacs.error`**, which is defined only by a test stub, so a
+    report there would have been the same silence.
+  - **P2 — the LSP subscribers swallowed their own reconciliation
+    failures.** Ignored `pcall`s made the callback return successfully,
+    so the `all-must-succeed` logger had nothing to log. A shared
+    failure sink now attributes each step and raises **after** the loop,
+    because a fix that aborts on the first failure would leave every
+    other attachment unreconciled — that wrong fix is itself a
+    bite-verified mutation.
+  - **P2 — `forget_uri` left purged requests live in the client.** It
+    dropped `pending_routes` and `pending_external` but not the ids
+    `send_request` puts in `LspClient.pending`, and recorded nothing in
+    `cancelled_rids`, so a server that never replies leaked the entry and
+    a late reply surfaced as a generic unrouted response. The per-rid
+    work is now extracted from `drain_cancelled_externals` as
+    `abandon_request` and **reused** rather than copied.
+  - **P2 — acceptance 35 was unpinned even after the G1 correction.**
+    With a plain delete the forbidden path fallback is unobservable:
+    `find_or_open` raises out of `load_file` and the `pcall` swallows it,
+    so both assertions passed with the fallback present. The plan now
+    deletes the origin's file **and recreates it**, which gives the
+    fallback something to open. The corrected G1 explanation also reached
+    the production comments, which still repeated the false
+    `resolve_target_buffer::NotFound` story — *a correction that stops at
+    the test comment has only half landed.*
+- **One round-1 pin passed with its own bug restored, and the reason is
+  reusable.** Acceptance 53 asserted `contains("only.txt")` for the
+  buffer-name attribution — but the status line opens with
+  `deleted only.txt:`, the deleted path's **basename**, so stripping the
+  attribution changed nothing the assertion could see. Both halves now
+  assert the buffer's *own* name, which for a path-backed buffer is the
+  full path and which only the attribution can produce. **A pin written
+  to close a review finding is exactly the kind that passes with the bug
+  restored**, and the detector was running the bite rather than reading
+  the assertion.
+- **31 bites now, all executed, every one labelled `OK (assertion)`** —
+  the original 23 plus 8 for round 1 (report call removed; refusal reason
+  unattributed; kept-modified name dropped; subscriber failures
+  swallowed; the wrong fix that aborts the loop; `forget_uri` skipping
+  `abandon_request`; and the forbidden path fallback restored, which must
+  fail acceptance 34 **and** 35 independently).
 - Verification at this head, each gate run to its own file and its own
   exit code checked (never through a pipe): `cargo fmt --check` clean;
   `cargo clippy --workspace --all-targets -- -D warnings` clean;
-  `cargo test --lib` **1,875** passed / 3 ignored; `--lib --features
-  crdt` **2,060** / 4 ignored; the new
-  `resource_reconciliation_acceptance` **24** default and **24** crdt;
+  `cargo test --lib` **1,876** passed / 3 ignored; `--lib --features
+  crdt` **2,061** / 4 ignored; the new
+  `resource_reconciliation_acceptance` **25** default and **25** crdt;
   `dired_acceptance` **25** and **25** crdt, deliberately unmoved; the
   frozen additivity gate `m8_1` **10** / `m8_2` **15** / `m8_3` **32**,
   all unchanged; `m4_acceptance -- --skip basedpyright` **149** passed /
   3 ignored / 1 filtered; `lsp_multi_root_acceptance` **13**;
-  `lsp_dispatch_seams_acceptance` **15**; `journey_acceptance` **24**
+  `lsp_dispatch_seams_acceptance` **15**;
+  `typed_edit_chain_acceptance` **13**; `journey_acceptance` **24**
   (the ratchet floor, asserted as a count rather than a colour);
   `gpu_invocation_acceptance` **15** crdt — **and that number is only
   real with `pmacs` and `pmacs-gpu` built first**, which is the `a37`
@@ -750,8 +807,11 @@ has **no branch and no framing yet**.
   15 passes after, so a red run there is not evidence of a regression
   until the binaries exist; `PMACS_REQUIRE_GPU=1 cargo test -p
   pmacs-gpu` **202**; isolated-`XDG_CONFIG_HOME` workspace sweep with
-  `--no-fail-fast` **3,557** passed across **104** suites, 19 ignored, 0
-  failed; `git diff --check` clean.
+  `--no-fail-fast` **3,559** passed across **104** suites, 19 ignored, 0
+  failed; `git diff --check` clean. Every one of those was run as its own
+  step with its own exit status checked — never `cmd | tail` inside an
+  `&&` chain, which returns *tail's* status and has masked a real failure
+  in this repo before.
 - **Ownership, per the framing's own warning.** §16 says 2a must not run
   concurrently with **Journey Stage 1b**, because 1b's LSP
   spawn-failure reporting lands in `builtin/runtime/lsp.lua`'s
