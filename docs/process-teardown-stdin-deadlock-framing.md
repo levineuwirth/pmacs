@@ -32,6 +32,14 @@ new primitive.**
   stdin writer (a child that read stdin but stopped draining it),
   criterion 5 extended to `docs/agent-handoff.md` §3, Bet 4 marked as
   lane-stopping.
+- **rev 4** — review round 2. §1.7's causal account was **wrong**: the
+  basedpyright wrapper uses `subprocess.run` and *waits*; the orphan is
+  created by pmacs SIGTERMing the wrapper at shutdown, not by the wrapper
+  exiting at spawn. Corrected here, in the handoff and in the ledger, and
+  §5's P2 restated — the follow-up is "stop orphaning them", not "tolerate
+  self-orphaning". Also: the `setsid` dependency is now skip-unless-armed
+  rather than a hard assert, since it is util-linux and the standard
+  `--lib` gate must not fail on an undeclared tool.
 - **rev 3** — CI falsified rev 2's repair. `<&0` is defeated on `dash`
   (the rule applies *before* explicit redirections, so `<&0` duplicates
   `/dev/null` onto itself); it passed locally only because `/bin/sh` here
@@ -198,12 +206,34 @@ from basedpyright.langserver import main
 sys.exit(main())
 ```
 
-`main()` spawns the bundled `node …/langserver.index.js --stdio` and the
-Python process exits, so the real server is an **orphaned grandchild**
-(observed `PPid: 1`, reparented to systemd) holding the inherited pipe
-fds. The supervisor recorded the shim's pid, which has already exited and
-been reaped, so `poll_one` sees a terminated process on its very first
-tick and proceeds straight into the deadlock.
+`main()` reaches `run_node.run`, which calls `nodejs_wheel`'s `node(...)`
+— and that is **`subprocess.run`** (`nodejs_wheel/executable.py:50`). It
+**waits**. Verified in the installed 1.39.6 source, not assumed.
+
+So the wrapper does *not* exit at spawn time, and **pmacs creates the
+orphan itself**:
+
+1. The wrapper runs `node …/langserver.index.js --stdio` and blocks. Node
+   is a genuine grandchild; the initialize handshake completes normally.
+2. At teardown, `shutdown()` sends **SIGTERM to the recorded pid** — the
+   Python wrapper — before entering its grace loop.
+3. The wrapper dies on the default disposition and **does not forward the
+   signal**. Node is reparented to `PPid: 1`, still holding the inherited
+   pipes, idle in `ep_poll`.
+4. `poll_one` then observes the recorded pid terminated, drops
+   `RuntimeHandles`, and enters the deadlock.
+
+**rev 1–3 of this doc said the wrapper "spawns node and exits".** That was
+wrong, and the evidence against it was already in hand: the test's
+assertions all pass *before* teardown, so the handshake succeeded — which
+is impossible if the wrapper had exited at spawn. The observation that
+generated the claim (`PPid: 1`, wrapper gone) was taken **after**
+`shutdown()` had already killed it.
+
+This matters for the parked work, not for the fix. The follow-up is not
+"tolerate servers that self-orphan" — it is **stop orphaning them**:
+signal the process group rather than a wrapper pid that swallows the
+signal. P2 in §5 is restated accordingly.
 
 `clangd` and `gopls` are real binaries: genuine children, reaped
 normally, write ends closed, blocking `read` returns `Ok(0)` cleanly. The
@@ -481,10 +511,16 @@ CI the same unbounded hang this PR removes locally.
   named as a deferral by `spawn_reader`'s own doc comment. Tests: the
   `sleep 300` shape from Q#TD6 (child never reads stdin), plus a
   fill-the-pipe-then-stop-reading shape for the writer case.
-- **P2 — orphaned-grandchild lifecycle (Q#TD5).** Spawn stdio servers in
-  their own process group and signal the group, reusing the machinery the
-  group path and `reap_ledger` already have. Fixes a real leak: every
+- **P2 — stop orphaning wrapper-launched servers (Q#TD5).** Restated in
+  rev 4, because the corrected §1.7 changes the target: the orphan is not
+  self-inflicted by the server, it is created by **us** SIGTERMing a
+  wrapper that does not forward the signal. Spawn stdio servers in their
+  own process group and signal the group, reusing the machinery the group
+  path and `reap_ledger` already have. Fixes a real leak: every
   basedpyright-backed session currently leaves a `node` process behind.
+  Note the ordering consequence — a group-directed SIGTERM would reach
+  node directly, so this also removes the condition the present fix works
+  around, rather than merely tolerating it.
 - **P3 — join the stdin writer thread** so the final flush is ordered
   against child termination (Q#TD4).
 - **P4 — re-audit the "intermittent" label** in `docs/agent-handoff.md`

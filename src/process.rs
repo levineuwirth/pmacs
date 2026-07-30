@@ -3284,15 +3284,29 @@ mod tests {
             }
         }
 
-        // Asserted, not skipped: this test is already Linux-gated, and
-        // setsid(1) is core util-linux. A skip here would reintroduce
-        // exactly the silent-green shape the arming lane removed.
-        assert!(
-            binary_available("setsid"),
-            "setsid(1) is required to orphan the grandchild without a \
-             shell; it is core util-linux and should be present on any \
-             Linux runner"
-        );
+        // setsid(1) is util-linux, not coreutils, and the standard
+        // `cargo test --lib` gate must not hard-fail on a tool the
+        // README does not require --- a minimal or BusyBox container
+        // would fail without ever testing pmacs. So: skip when absent,
+        // but FAIL when `PMACS_REQUIRE_SETSID` is set, which CI sets on
+        // Linux. That is the arming pattern from the silent-skip lane,
+        // and it is what keeps this from becoming a test that reports
+        // `ok` having never run. Presence decides, so an empty value
+        // counts as unset (a `${{ cond && '1' || '' }}` expression sets
+        // the empty string, not nothing).
+        let armed = std::env::var_os("PMACS_REQUIRE_SETSID").is_some_and(|v| !v.is_empty());
+        if !binary_available("setsid") {
+            assert!(
+                !armed,
+                "PMACS_REQUIRE_SETSID is set but setsid(1) is not on PATH: \
+                 install util-linux, or unset the variable to allow the skip"
+            );
+            eprintln!(
+                "setsid(1) not on PATH; skipping \
+                 teardown_closes_stdin_before_joining_readers"
+            );
+            return;
+        }
 
         let (done_tx, done_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {

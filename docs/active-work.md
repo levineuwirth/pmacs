@@ -1069,10 +1069,19 @@ has **no branch and no framing yet**.
   `-- --skip basedpyright` into every gate recipe. The handoff's §3
   claim that the desktop's binary was broken is **retired by this PR**:
   the binary was fine. `basedpyright-langserver` is a uv console script
-  that spawns bundled `node` and exits, so the real server is an
-  orphaned grandchild (`PPid: 1`) holding the pipes; a direct binary
-  like `clangd` is a genuine child whose pipes close on reap. That is
-  the whole of the "intermittent" story.
+  that runs bundled `node` via `subprocess.run` and **waits**; at
+  teardown `shutdown()` SIGTERMs the recorded pid (the wrapper), which
+  dies without forwarding, and **that** orphans node to `PPid: 1`
+  holding the pipes. A direct binary like `clangd` is a genuine child
+  whose pipes close on reap. That is the whole of the "intermittent"
+  story.
+- **Corrected in review round 2:** rev 1–3 said the wrapper "spawns node
+  and exits". Wrong — and refutable from evidence already in hand, since
+  the initialize handshake succeeds, which a wrapper that exited at spawn
+  could not have done. The `PPid: 1` observation was taken *after*
+  `shutdown()` had killed the wrapper. **We create the orphan.** The fix
+  is unaffected; the parked follow-up changes from "tolerate
+  self-orphaning servers" to "stop orphaning them" (signal the group).
 - **Diagnosis method, because reproduce-first was the instruction:**
   gdb thread stacks plus `/proc` fd forensics on a live wedged process,
   both pipe ends identified in both processes, reproduced 5/5. Three
@@ -1108,10 +1117,18 @@ has **no branch and no framing yet**.
   while `write_all` is blocked); the orphaned-server **leak** — post-fix
   the server exits by cooperation, not enforcement.
 - `CLAUDE.md`'s `--skip basedpyright` entry is deliberately untouched.
-  Dropping it is a separate proposal owed evidence of repeated green,
-  and it must not precede the per-test timeout lane —
-  `PMACS_REQUIRE_PYRIGHT` stays unarmed in CI until then, or CI inherits
-  the unbounded hang this PR removes locally.
+  Dropping it is a separate proposal owed evidence of repeated green.
+  The timeout precondition is **already satisfied** — #195 (this PR's
+  base) gave every job a `timeout-minutes` — so the only remaining reason
+  `PMACS_REQUIRE_PYRIGHT` stays unarmed is that CI does not install
+  basedpyright at all; arming it would fail rather than test anything.
+- Adds `PMACS_REQUIRE_SETSID`, armed on Linux. The teardown test's
+  fixture needs `setsid --fork`, which is util-linux rather than
+  coreutils, so it **skips** when absent (the standard `--lib` gate must
+  not hard-fail a minimal container on an undeclared tool) and the
+  variable makes that skip fatal where the tool is guaranteed. Both arms
+  verified against a PATH with `setsid` genuinely removed: unarmed skips,
+  armed FAILS. README's test-dependency list declares it.
 
 ## Parked lane: kill-ring browser + persistence
 

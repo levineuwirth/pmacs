@@ -220,6 +220,13 @@ translation) are routed through trampolines that exec these tools.
   shell-locator helper to find `bash` / `zsh` / `fish` for
   per-shell integration tests. The M7.2 fetcher's timeout test
   uses `sleep`.
+- **`setsid`** (util-linux, Linux only, **optional**). The process
+  teardown-deadlock test uses `setsid --fork` to orphan a grandchild,
+  which is the only way to reproduce that deadlock without depending on
+  shell `&` semantics (they differ between `bash` and `dash`). The test
+  **skips** when `setsid` is absent, so a minimal or BusyBox environment
+  still runs `cargo test --lib`; set `PMACS_REQUIRE_SETSID=1` to make
+  that skip a failure, as CI does on Linux.
 - **`git`** (added in M7.2). Required for any package operation:
   the package fetcher shells out to `git` to clone, fetch, and
   resolve refs, with a deterministic environment

@@ -1292,18 +1292,29 @@ before trusting them:
 - **basedpyright**: the desktop binary was **never broken** — this was a
   real code defect, diagnosed and fixed 2026-07-29 (see §5, "A `Drop`
   body runs before its fields"). `RuntimeHandles::drop` joined its reader
-  threads before the `stdin` field dropped, so a shim-launched server
-  (basedpyright's console script spawns bundled `node` and exits, leaving
-  the real server at `PPid 1`) never got stdin EOF, never exited, and
-  kept the output pipe the readers were blocked on. Deterministic on the
-  desktop, invisible on the laptop and in CI, which is why it read as a
-  broken local binary for weeks.
+  threads before the `stdin` field dropped, so the server never got stdin
+  EOF, never exited, and kept the output pipe the readers were blocked
+  on. Deterministic on the desktop, invisible on the laptop and in CI,
+  which is why it read as a broken local binary for weeks.
+  **How the orphan is actually made — WE make it.** basedpyright's
+  console script runs bundled `node` through `subprocess.run` and
+  **waits** (`nodejs_wheel/executable.py:50`, verified in 1.39.6). At
+  teardown `shutdown()` SIGTERMs the *recorded* pid — the Python wrapper
+  — which dies without forwarding the signal, orphaning node to `PPid 1`
+  holding the pipes. An earlier revision of this entry said the wrapper
+  "spawns node and exits"; that was wrong, and the refutation was already
+  in hand, since the initialize handshake succeeds, which a
+  wrapper that exited at spawn could not have done. The consequence is
+  for the follow-up, not the fix: the orphan-management work is **stop
+  orphaning them** (signal the group), not tolerate self-orphaning.
   The `--skip` above stays for now: it is still correct on any tree
-  predating the fix, and CI never installs basedpyright at all
-  (`PMACS_REQUIRE_PYRIGHT` is deliberately unarmed, #194, and stays that
-  way until the per-test timeout lane lands — arming it without a timeout
-  would hand CI an unbounded hang). Dropping the skip is a separate
-  proposal, owed evidence of repeated green runs.
+  predating the fix, and — the one live reason — **CI never installs
+  basedpyright at all**, so arming `PMACS_REQUIRE_PYRIGHT` would fail
+  rather than test anything. The two original reasons are both gone: the
+  hang is fixed, and #195 gave every job a `timeout-minutes`, so a hang
+  can no longer burn six hours. Installing basedpyright in CI (a uv plus
+  bundled-node download per leg) and dropping the local skip are two
+  separate proposals, each owed its own evidence.
 - **GPU on the laptop**: AMD Radeon 780M (RADV) — native Vulkan,
   `PMACS_REQUIRE_GPU=1` works without lavapipe.
 - **Flaky-under-load tests — rerun isolated before treating a sweep
