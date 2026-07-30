@@ -118,69 +118,6 @@ declares canonical will pass on a tree the rest of this file does not
 describe.
 If it does not, stop and repair the remote/fetch configuration.
 
-## Process-signal diagnostic completeness — IMPLEMENTED, PR OPEN
-
-- **Portable branch:** `githubsucks/process-signal-diagnostic-completeness`;
-  worktree `../pmacs-signal-identity`. Governing document:
-  `docs/process-signal-diagnostic-completeness-framing.md`, **revision 6**;
-  the contract was approved at revision 4 and has been revised twice
-  since to match what shipped.
-- **State:** **PR #200 open**, four review rounds closed, held for
-  review. Canonical `githubsucks/main` @ `b8e18f6` (the ledger
-  absorption #199) is integrated. Four commits: Bet 1 alone, Bets 2–4,
-  Bet 1's fallback after CI falsified it, then round 4's corrections.
-- **Boundary, unchanged:** evidence collection only. No signal
-  retargeting, tolerance, disposition change, or reap-ledger repair.
-  **Group identity remains unprovable** (framing §1.5): the measured
-  group is read in the same read-then-act window, and no portable
-  mechanism closes that for a *group* — `pidfd` covers a process, and
-  macOS has neither. The ledger's silent cancellation is parked as its
-  own lane.
-- **What shipped.** The PTY foreground-group lookup now reports four
-  distinct outcomes instead of one string, through a safe
-  `filedescriptor::OwnedHandle::dup` bridge that keeps the errno
-  `portable-pty` discards — with no `unsafe` in pmacs. The report names
-  the signal. A `measured_group` field from `getpgid` is the only field
-  in the report able to disagree with its input. The reap-ledger comment
-  claiming "EPERM cannot happen for our own children" is corrected
-  **without** claiming the child itself received EPERM.
-- **Verification at the merged tree** (not inherited from the pre-merge
-  head): 11 gates, **4471 tests, zero failures** — fmt, diff-check,
-  clippy, `--lib`, `--lib --features crdt`, compile-mode, copy-mode in
-  both feature configurations, bottom-panel Stage 1, M4 with the
-  basedpyright skip, and required GPU. The job-control divergence
-  fixture was run 20/20. All local runs used an isolated
-  `XDG_CONFIG_HOME`.
-- **Four bites, each by an actual revert, all observed to fail:**
-  collapsing the PTY fallback back into a bare `leader-pid`; dropping
-  `signal=` from the report; making the measured group restate the pid
-  it was handed; and — as a positive control on the fixture itself —
-  replacing the `bash -m` job-control child with a plain `sleep`.
-  Separately, the **pre-Stage-B test was restored verbatim under the
-  substitution mutation and PASSED**, which is the finding that
-  justified rewriting it rather than adding to it.
-- **Bet 1 was falsified by CI and the framing's fallback shipped.**
-  `bash -m` diverges on Linux and **never on macOS**, where both legs
-  observed the terminal stay with the leader for a full 10s wait. The
-  divergent case is now pinned by **injecting** the foreground group
-  (runs everywhere, weaker); a Linux-only corroboration drives a real
-  shell and is the **only** test exercising `pty_foreground_group`
-  end-to-end. `/bin/bash` is a declared optional test dependency armed
-  by `PMACS_REQUIRE_BASH` on **Linux only** — macOS ships bash but
-  cannot produce the precondition, so arming it there would make a
-  missing binary fatal for a test that can never run.
-- **Recovery from a clean checkout:**
-
-  ```sh
-  git fetch githubsucks --prune
-  git worktree add ../pmacs-signal-identity \
-    -b process-signal-diagnostic-completeness \
-    githubsucks/process-signal-diagnostic-completeness
-  cd ../pmacs-signal-identity
-  git merge-base --is-ancestor b8e18f6 HEAD
-  git status --short --branch
-  ```
-
 ## The CRDT half of the test corpus is dark in CI — NEEDS A LANE
 
 - **No branch, no framing yet.** Found while gating #166, then measured
@@ -350,6 +287,52 @@ compatible.
 - **DAP waits for Stage 2, not Stage 1** — that dependency is now
   satisfied.
 
+## Test ambient-root isolation — FRAMING OPEN, revision 4
+
+- **Branch `test-ambient-config-isolation`**, worktree
+  `../pmacs-test-isolation`, based on `githubsucks/main` @ `4cd4a7b`.
+  **Framing only; no code, no PR yet.**
+  `docs/test-ambient-config-isolation-framing.md` revision 4, three review
+  rounds closed (eight blocking, six major, all accepted).
+- **What it is.** Integration tests use the developer's real ambient
+  roots. `#[cfg(not(test))]` guards config loading against the crate's
+  own unit tests only, so the **65** files in `tests/` that construct an
+  editor load the real `init.lua` — and, separately, `EditorState::new` materializes bundled
+  packages unconditionally into the real `XDG_DATA_HOME`/`$HOME`.
+  **It is not read-only**: `~/.local/share/pmacs/builtin-packages/`
+  exists on the development machine.
+- **Why it matters now.** `cargo test` is red on any machine with a real
+  `~/.config/pmacs/init.lua` (11 of 67 in `compile_mode_acceptance`) and
+  green in CI, so the failure is attributed to whatever branch is
+  checked out. Every local gate run in this repo currently needs all
+  five bootstrap-storage variables controlled as a workaround:
+  `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`,
+  `XDG_CACHE_HOME`, and `PMACS_STATE_HOME`.
+- **Round 1's four blocking findings, all confirmed in code:** the
+  read-only assumption was already false; the population count was 18
+  when 65 of 96 files construct an editor, from a grep that did not
+  match `EditorState::new`; 5 files are both in-process and spawned, so
+  a file-level partition cannot work; and `EditorState::open` calls
+  `Self::new()` while `journey_acceptance` requires that exact entry
+  point.
+- **Two constraints any fix must respect.** `std::env::set_var` is
+  `unsafe` and the crate forbids it, so in-process tests cannot isolate
+  themselves (precedent: `Installer::root_override`). And config loading
+  shares one block with `set_init_complete()`, which
+  `m8_2_acceptance.rs:75` explicitly depends on — skipping the block
+  would leave integration tests permanently in the init phase.
+- Recovery from a clean checkout — **the two-argument form does not
+  work**, verified by running it (`git worktree add <path>
+  <remote-only-branch>` fails with `fatal: invalid reference`, because
+  after a bare fetch no local branch exists):
+
+  ```sh
+  git fetch githubsucks
+  git worktree add ../pmacs-test-isolation \
+    -b test-ambient-config-isolation \
+    githubsucks/test-ambient-config-isolation
+  ```
+
 ## Folding lane (Arc 6) — Stages 1 and 2 MERGED; Stage 3 (GPU) is next
 
 Both shipped stages are on `main`; nothing in this arc is in flight. Stage 3
@@ -393,6 +376,27 @@ git worktree add --track \
 ```
 
 ## Closed since the last snapshot
+
+- **Process-signal diagnostic completeness — MERGED as #200**
+  (`main` @ `a2a92bb`), atop Stage A #176. `docs/process-signal-diagnostic-completeness-framing.md`
+  revision 6; framing approved at revision 4 after three rounds, then
+  five review rounds on the implementation. Durable facts are in
+  `docs/agent-handoff.md` §1. **Evidence collection only** — no
+  tolerance rule, no retargeting, no disposition change.
+  - **Bet 1 was falsified by CI and the framing's own fallback shipped.**
+    `bash -m` diverges the terminal's foreground group on Linux and
+    never on macOS. The divergent case is pinned by injection
+    everywhere; a Linux-only corroboration drives a real shell and is
+    the **only** test exercising `pty_foreground_group` end-to-end, so
+    **on macOS that lookup has no end-to-end coverage**.
+  - **Group identity remains unprovable**, and the pre-kill sample does
+    not change that: moving `getpgid` before the `kill` removed a
+    post-hoc reading, it did not make the reading contemporaneous.
+  - **Still parked, each needing its own lane:** the reap ledger's
+    silent cancellation (an EPERM probe drops the entry; a failed
+    `SIGKILL` is marked killed) — **being scoped next**; retargeting to
+    the measured pgid; any EPERM/ESRCH tolerance rule; Q#PS6; and
+    `signal_target`'s read-then-kill of `tcgetpgrp` on the PTY path.
 
 - **Six lanes removed by the 2026-07-30 absorption pass**, all merged,
   all with their durable facts in `docs/agent-handoff.md` §1:
@@ -547,11 +551,13 @@ git worktree add --track \
     acting frontend made a total function partial, and six runtime modules
     silently dropped operations (`kill_ring_acceptance` 30/30 → 25/5).
     Fixed in `9110f9f` before merge.
-  - Gating fact found on the way: **the workspace sweep must run with an
-    isolated `XDG_CONFIG_HOME`**, because the real user `init.lua`
-    installs a local package and the losing race leaks a status message
-    into painted-frame comparisons. There is also a latent pre-existing
-    `main` bug in the buffer CRDT undo path, unrelated to this arc.
+  - Gating fact found on the way: an isolated `XDG_CONFIG_HOME` prevents
+    the real user `init.lua` from installing a local package and leaking
+    a status message into painted-frame comparisons. **That isolates the
+    observed config symptom only, not the gate:** the ambient-root lane
+    above establishes that data/state/cache must be controlled too.
+    There is also a latent pre-existing `main` bug in the buffer CRDT
+    undo path, unrelated to this arc.
   - `compile_mode_acceptance` is load-sensitive under default
     parallelism (~1 run in 3, a different test each time); verified
     pre-existing by swapping in `main`'s `compile.lua`. It is 67/67 at
