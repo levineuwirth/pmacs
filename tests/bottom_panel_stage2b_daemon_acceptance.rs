@@ -4,10 +4,16 @@
 
 //! The daemon panel projection and the epoch machine.
 //!
-//! Everything here runs through a **test-only** panel-capable semantic
-//! view: production negotiation still sets `panel_capable = false` for
-//! every semantic session, and the compatibility-preserving v21
-//! activation is Stage 2B-3's. Nothing in this slice is user-reachable.
+//! Everything here runs through an explicitly panel-capable semantic
+//! view constructed by the fixture. When this suite was written that was
+//! a *test-only* configuration — production negotiation set
+//! `panel_capable = false` for every semantic session. **Stage 2B-3 made
+//! it production-reachable**: a semantic session that negotiates
+//! `PANEL_MIN_VERSION` is panel-capable, activated by the frontend's
+//! `AttachRequest` counter-offer rather than by moving the advertised
+//! `Hello` version. These assertions did not change, and that is the
+//! point — the projection they pin is the one production now drives.
+//! `bottom_panel_stage2b_gpu_acceptance` covers the negotiation itself.
 //!
 //! Two disciplines the framing is explicit about:
 //!

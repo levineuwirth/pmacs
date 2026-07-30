@@ -579,9 +579,19 @@ mod crdt {
         );
         let facts = parse_report(&report);
         assert_eq!(facts.get("phase").map(String::as_str), Some("complete"));
+        // Stage 2B-3: the negotiated session version and the advertised
+        // baseline are different facts, and this managed spawn pins both.
+        // The daemon it spawned advertises the baseline; the client it
+        // handed back counter-offered this binary's own wire.
         assert_eq!(
             facts
-                .get("server_protocol_version")
+                .get("session_protocol_version")
+                .and_then(|value| value.parse::<u32>().ok()),
+            Some(PROTOCOL_VERSION)
+        );
+        assert_eq!(
+            facts
+                .get("baseline_protocol_version")
                 .and_then(|value| value.parse::<u32>().ok()),
             Some(ADVERTISED_PROTOCOL_VERSION)
         );

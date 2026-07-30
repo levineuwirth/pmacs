@@ -1,6 +1,6 @@
 # Active work — cross-machine resume ledger
 
-**Snapshot: 2026-07-28.** This file records volatile work that has not
+**Snapshot: 2026-07-29.** This file records volatile work that has not
 landed on `main`. Read it after `docs/agent-handoff.md`. Remove completed
 entries when their PR merges; do not let this become a second permanent
 backlog.
@@ -378,24 +378,133 @@ The contract is now
   cargo test --test terminal_copy_mode_acceptance --features crdt
   ```
 
-## Bottom-panel lane (Arc 7) — 2B-2 MERGED; 2B-3 IS NEXT
+## Bottom-panel lane (Arc 7) — 2B-3 OPEN; Stage 2 is COMPLETE with it
 
-Stage 1, the Stage 2 framing, Stage 2A, Stage 2B-1, and **Stage 2B-2 are
-all on `main`**. Framing revision 5's three-way split of 2B was
-explicitly approved on 2026-07-27; revision 6 records PR #184's review
-correction. **2B-2 — the daemon panel projection and epoch machine —
-landed as [PR #187](https://github.com/levineuwirth/pmacs/pull/187)**,
-one review round of five findings on top of the implementation, 12/12
-green, 22/22 mutations biting. Its durable lessons are in
-`docs/agent-handoff.md` §1; what remains below is the 2B-3 plan.
+Stage 1, the Stage 2 framing, Stage 2A, Stage 2B-1, and Stage 2B-2 are
+all on `main`. **Stage 2B-3 — the GPU panel band, compatible protocol-v21
+activation, and the negotiated `panel_capable` flip — is this lane's open
+work**, and it completes Stage 2. Framing revision 5's three-way split of
+2B was explicitly approved on 2026-07-27; revision 6 records PR #184's
+review correction.
 
-**2B-2's boundaries, restated because they are easy to overrun:** the
-production `Hello` stays at v20 and `panel_capable` stays `false`. The
-slice is dark/test-only capability exactly as 2B-1 was. Compatible v21
-activation, the GPU band, and the negotiated capability flip are all
-2B-3's, and 2B-3 may **not** simply change the unsolicited `Hello` to
-21.
+- **Branch `bottom-panel-stage2b3`, worktree `../pmacs-bp-2b3`, cut fresh
+  from landed `main` @ `e003b81`** (`Merge pull request #190 from
+  levineuwirth/resource-op-delete-guard-impl`) — measured with
+  `git log --oneline -1 githubsucks/main`, not carried over from a
+  briefing. Not stacked on `../pmacs-bp-stage2b2`: each slice starts from
+  landed main, which is the house pattern and what 2B-2 did.
+- **The activation mechanism, and why the alternatives fail.** The
+  constraint inherited from 2B-1's review is that the unsolicited `Hello`
+  may not become 21: it is server-first, so a shipped v20 frontend rejects
+  an unknown version *before* it can send `AttachRequest`. What 2B-3 ships
+  instead is a **frontend counter-offer**:
+  `ADVERTISED_PROTOCOL_VERSION` becomes a permanent compatibility
+  *baseline* (20), the frontend answers
+  `requested_protocol_version(baseline)` — its own `PROTOCOL_VERSION` when
+  the baseline is current, a verbatim echo of anything older — and the
+  daemon records `negotiated_session_version(offer)`. The daemon needed
+  **no change** to accept it; it already recorded `req.protocol_version`.
+  Rejected alternatives, each for a reason the server-first shape forces:
+  growing `Hello`/`InstanceCapabilities` (postcard structs are positional,
+  so it breaks the *other* direction symmetrically and cannot be verified
+  against shipped binaries); a client-first hint (an old client writes
+  nothing until it has read `Hello`, so any probe is a timeout);
+  sniffing `instance_identity.pmacs_version` (version-string branching on
+  a field documented as display-only); and a second post-`Hello` daemon
+  message (an old client reads it as an `InstanceMessage` and dies on the
+  unknown discriminant).
+- **The window this leaves open is named, not hidden.** A daemon whose own
+  `PROTOCOL_VERSION` equals the baseline rejects an offer above its
+  supported range. A single `AttachRequest` cannot mean both "I want 21"
+  and "≤ 20", so compatibility is preserved for old *frontends* — the
+  direction that matters, since the daemon is what a user leaves running —
+  and the window closes on the next daemon restart. It surfaces as an
+  explicit `GoodbyeReason::VersionMismatch` naming both versions, pinned by
+  `an_unsupported_offer_is_refused_by_name`.
+- **Review round 1 closed six findings at `PR #198`, four of them one
+  shape.** The panel layer was a *partial port* of the document/terminal
+  layer and the new tests asserted the declaration side only, so each
+  omission was invisible. Audited as a port rather than patched as a list,
+  which found two more gaps of the same shape that review had not named:
+  the headless probe never armed the panel wire at all (so nothing could
+  ever exercise a band), and a disconnect left the band on screen.
+  - **Geometry agreed in one place instead of three.** The declaration used
+    the stable probe while painting and hit-testing used the
+    document-dependent `mono_advance`, and the declaration inset its width
+    by `TEXT_LEFT` against the parent framing's explicit x=0 full-width
+    contract. The advance is now cached **behind the declaration**
+    (`PanelBand::declared_advance`), so the three cannot drift: there is one
+    value. Framing rev 7 R7-1/R7-2 records the widened contracts.
+  - **One classifier owns "does the band claim this pixel".** Four pointer
+    handlers each decided for themselves and three simply did not ask, so
+    right-click and wheel were applied to the document underneath and a held
+    left button was reported as a hover. `PointerSurface` /
+    `classify_pointer_surface` makes forgetting the band impossible to do
+    quietly, and makes the routing testable without a window or a daemon.
+  - **`focused` decides the caret.** The producer ships `cursor` for a
+    passive panel too, so painting it unconditionally put a second insertion
+    caret on screen.
+  - **Planned underlines were never consumed.** Straight forms now ride the
+    quad batch, curly the squiggle pipeline — the terminal path's split.
+  - **`VersionMismatch { server }` is the instance's `PROTOCOL_VERSION`.**
+    Reporting the advertised baseline told a frontend the daemon topped out
+    at 20 while it spoke 21. **The acceptance had pinned the wrong value**,
+    so the test was holding the bug in place; fixed and re-pinned.
+  - **Criterion 54 is satisfied, not caveated.** The panel-hosted probe is
+    `a54_real_daemon_real_pty_and_headless_gpu_render_one_panel_hosted_terminal`
+    — one real daemon, one real PTY child, real wgpu, through
+    `display = "panel"`. Opening a terminal and *moving* it was the first
+    attempt and is subtly wrong: the buffer ends up displayed twice and the
+    document window keeps projecting it, so the acceptance cannot tell a
+    panel-hosted child from a document one.
+- **Round 1 verification: 41 bites, 41 OK.** The original 23 re-run after the
+  round-1 changes (none went vacuous) plus 18 new ones covering every changed
+  pin. The forbidden act is bited twice: mutating the constant trips a
+  const-block assertion at *build* time (stronger outcome, weaker evidence),
+  so a narrowed swap that compiles both ways mutates the daemon's `Hello`
+  value directly. **A probe bite must rebuild `pmacs-gpu`** — `cargo test`
+  does not rebuild the sibling binary the acceptance runs as a process, and
+  without that the mutation never reaches it and the bite reads as vacuous
+  for the wrong reason.
+- **What 12/12 green did not catch.** The reviewer confirmed all twelve
+  checks, `bottom_panel_stage2b_gpu_acceptance` 4/4, and required GPU 216/216
+  on the head that carried all six defects. The gate suite is not the check
+  on a slice like this; the assertions are.
+- **Six commits:** the activation mechanism, the three-boundary split plus
+  the band's machinery, the paint/input wiring, the acceptance suites, the
+  bite fixes, and the round-1 port completion — plus docs.
+- **Verification on the reviewed head** (all redirected to files and
+  checked by their own exit codes, never through a pipe): recorded in the
+  PR body and reproduced by the commands in `CLAUDE.md`.
+- **23 falsifying mutations, all executed, all biting**, using an in-place
+  mutation runner rather than `scripts/bite` because several claims live in
+  the *same file* as their test and a whole-file swap would not compile.
+  **Three assertions were VACUOUS on the first pass and the mutation runs
+  are what found them** — a fixed-point contrast check, a pixel test that
+  passed with the band painting nothing, and a monospace fixture that could
+  not tell two glyph-advance derivations apart. A fourth finding was about
+  the code, not the tests: "no panel frame reaches a v20 session" is
+  defence in depth, not the placement gate, and passes with the capability
+  gate removed entirely.
+- **Two real defects the new tests caught in the implementation**, both
+  recorded in `docs/agent-handoff.md` §1: `edge_scroll_direction` has no
+  upper bound, so reclassifying its boundary was necessary but not
+  sufficient; and `apply_panel_payload` ignored the exhaustion latch.
+- **Cross-machine recovery (fresh clone):**
 
+  ```sh
+  git fetch githubsucks --prune
+  git switch --track -c bottom-panel-stage2b3 githubsucks/bottom-panel-stage2b3
+  git rev-parse HEAD
+  ```
+
+- **Stage 3 (the adopter default flip) is the arc's last step** and is not
+  started. This lane is not removed at 2B-3's merge: Stage 3 remains ahead
+  of it.
+
+- **Stage 2B-2 MERGED as #187.** One review round of five findings on top
+  of the implementation, 12/12 green, 22/22 mutations biting. Its durable
+  lessons are in `docs/agent-handoff.md` §1.
 - **What PR #187 shipped, dark by construction:** the semantic daemon's
   `FrontendCellGeometry` epoch machine; one reconciled panel grid
   derivation; `PanelFrame::{Present, Absent}` projection on both document
@@ -441,7 +550,7 @@ activation, the GPU band, and the negotiated capability flip are all
   ```
 
   #187 has landed, so `githubsucks/main` already contains this work and
-  the branch is retained only for provenance. Start 2B-3 from `main`.
+  the branch is retained only for provenance. 2B-3 was cut from `main`.
 - **Stage 2B-1 MERGED as #184** (`main` @ `6bee09d`, 2026-07-28; all
   twelve checks green on the reviewed head `5539b6e`; two review rounds
   plus a gate-found follow-up). Branch
@@ -455,11 +564,11 @@ activation, the GPU band, and the negotiated capability flip are all
   `panel_capable` is still `false` for every semantic session, so the
   journey grade is unchanged and every shipped v20 client remains
   attachable.
-- **2B-3 inherits a hard constraint from 2B-1's review**: it owns a
-  *compatibility-preserving* v21 activation mechanism and may **not**
-  simply change the unsolicited `Hello` to 21. The handshake is
-  server-first, so that one-line change locks out every shipped v20
-  frontend before it can even send an `AttachRequest`.
+- **2B-3 discharged the hard constraint 2B-1's review set**: the
+  *compatibility-preserving* activation is the frontend counter-offer
+  described at the top of this lane, and the unsolicited `Hello` is
+  unchanged. 2B-1's real-daemon acceptance for the v20 rejection point
+  still passes untouched.
 - **Two review rounds, and what each cost.** Round 1: `PanelFrame`
   needed an explicit `buffer_id`, the transport ratchet had to drive the
   real attach path rather than a detached codec assertion, and shared
