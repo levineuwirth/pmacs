@@ -1671,16 +1671,11 @@ fn delete_verdict(
         }
     };
 
-    let target = crate::editor_core::normalize_buffer_path(path.to_path_buf());
-    for id in reg.ids() {
-        let Ok(buf) = reg.get(*id) else { continue };
-        let Some(bound) = buf.file_path() else {
-            continue;
-        };
-        let bound = crate::editor_core::normalize_buffer_path(bound.to_path_buf());
-        if bound != target && !(scan_descendants && bound.starts_with(&target)) {
-            continue;
-        }
+    // The shared walk (dired Stage 2a): one enumeration, so this guard
+    // and the two reconciliation seams cannot disagree about which
+    // buffers an operation on `path` touches.
+    for (id, _bound) in crate::editor_core::buffers_bound_under(reg, path, scan_descendants) {
+        let Ok(buf) = reg.get(id) else { continue };
         // "Modified" is `Buffer::is_modified()`. No new notion of
         // dirtiness, and a *clean* open buffer is deliberately not
         // guarded — refusing there would fail legitimate deletes for
@@ -1712,6 +1707,223 @@ fn delete_verdict(
         }
     }
     DeleteVerdict::Clear
+}
+
+/// Reconcile a successful rename and fire `resource.renamed` (dired
+/// Stage 2a, §5).
+///
+/// Both rename paths land here — the drain harvest for
+/// `pmacs.fs.rename` and `apply_resource_op`'s rename arm — so the two
+/// can no longer drift, which is how the raw-lookup trap survived being
+/// "fixed" once already.
+///
+/// The hook carries the **paths**, normalized absolute, not the rebind
+/// list: dired's buffers are pathless, so a path-keyed consumer must be
+/// able to reconcile from `(old, new)` alone. And the Rust side is
+/// structurally incapable of being complete — any package may key state
+/// by URI in its own module table and the LSP manager will never know —
+/// so the hook is the mechanism that scales, not a convenience.
+///
+/// Returns the rebinds, for a caller that wants to report.
+fn reconcile_rename_and_fire(
+    lua: &Lua,
+    from: &std::path::Path,
+    to: &std::path::Path,
+) -> Vec<crate::editor_core::RenameRebind> {
+    let (rebinds, old_n, new_n) = {
+        let Some(core) = lua.app_data_ref::<SharedCore>() else {
+            return Vec::new();
+        };
+        let mut core = core.borrow_mut();
+        let rebinds = core.reconcile_rename(from, to);
+        (
+            rebinds,
+            crate::editor_core::normalize_buffer_path(from.to_path_buf()),
+            crate::editor_core::normalize_buffer_path(to.to_path_buf()),
+        )
+    };
+    // The borrow is released before re-entering Lua: subscribers call
+    // back into the core (dired reverts a listing, the LSP subscriber
+    // re-attaches), and a live borrow would panic.
+    let mut args = mlua::MultiValue::new();
+    args.push_back(mlua::Value::String(
+        match lua.create_string(old_n.as_os_str().as_encoded_bytes()) {
+            Ok(s) => s,
+            Err(_) => return rebinds,
+        },
+    ));
+    args.push_back(mlua::Value::String(
+        match lua.create_string(new_n.as_os_str().as_encoded_bytes()) {
+            Ok(s) => s,
+            Err(_) => return rebinds,
+        },
+    ));
+    run_hook_if_defined(lua, "resource.renamed", args);
+    rebinds
+}
+
+/// Reconcile a successful delete and fire `resource.deleted` (dired
+/// Stage 2a, §6).
+///
+/// Composes the **same two removal phases** `pmacs.buffer.kill`
+/// composes. Phase 1 (`EditorCore::reconcile_delete`) closes side
+/// windows showing a doomed buffer, redirects every other window to a
+/// fallback, and removes the id from the registry; phase 2 —
+/// buffer-scoped keymaps, buffer-local config, folds, and the
+/// registered `on_removed` callbacks — runs here, because it needs
+/// `&Lua` and `EditorCore` has no Lua handle.
+///
+/// `apply_resource_op`'s delete arm previously ran
+/// `remove_buffer_and_fire`, i.e. phase 2 **without** phase 1, leaving
+/// any window displaying that buffer pointing at a removed id. Routing
+/// both paths through here is what makes that go away as a property of
+/// the seam rather than as a separate patch.
+fn reconcile_delete_and_fire(
+    lua: &Lua,
+    path: &std::path::Path,
+) -> crate::editor_core::DeleteReconcile {
+    let (outcome, normalized) = {
+        let Some(core) = lua.app_data_ref::<SharedCore>() else {
+            return crate::editor_core::DeleteReconcile::default();
+        };
+        let mut core = core.borrow_mut();
+        let outcome = core.reconcile_delete(path);
+        (
+            outcome,
+            crate::editor_core::normalize_buffer_path(path.to_path_buf()),
+        )
+    };
+    // Phase 2, over exactly the ids phase 1 removed.
+    for id in &outcome.killed {
+        after_buffer_removed(lua, *id);
+    }
+    if let Ok(path_arg) = lua.create_string(normalized.as_os_str().as_encoded_bytes()) {
+        let mut args = mlua::MultiValue::new();
+        args.push_back(mlua::Value::String(path_arg));
+        run_hook_if_defined(lua, "resource.deleted", args);
+    }
+    // Reported AFTER the fan-out, deliberately: a subscriber may set its
+    // own status, and this message must be the last word because it is
+    // the data-loss-adjacent one. Unconditional, so a path that cannot
+    // cross into Lua still gets its refusal reported rather than losing
+    // both the hook and the report.
+    report_delete_reconcile(lua, &normalized, &outcome);
+    outcome
+}
+
+/// Cap on how many buffer names one status line spells out before
+/// collapsing the rest into a count. A directory delete can reach
+/// dozens; a status line that scrolls off is a message nobody reads.
+const DELETE_REPORT_NAMED_LIMIT: usize = 3;
+
+/// Render the buffers a delete could not reconcile, and put it on the
+/// status channel.
+///
+/// **Silence here is the defect this exists to close.** Both outcomes
+/// leave a buffer alive and still bound to a path whose file is gone, so
+/// the next `C-x C-s` recreates the file the user just deleted. That is
+/// recoverable only if the user knows it happened:
+///
+/// * `kept_modified` — a modified buffer, kept on purpose. On the
+///   synchronous path #190 refuses before disk so this cannot arise, but
+///   `pmacs.fs.remove` dispatches a worker, and a buffer modified in the
+///   interval between the caller's check and the syscall reaches here.
+/// * `refused` — could not be removed at all: the last remaining buffer
+///   (`kill_buffer` refuses to empty the registry), or a buffer that was
+///   mid-edit when the reconciliation ran.
+///
+/// The channel is `EditorCore::status`, which is what
+/// `pmacs.editor.set_status` writes. **Not `pmacs.error`** — that
+/// channel is defined only by a test stub, so all fifteen of its guarded
+/// call sites are dead, and a report written there would be exactly the
+/// silence being fixed.
+///
+/// Lives inside the shared seam rather than at its two call sites, for
+/// the same reason the reconciliation does: a caller that has to
+/// remember to report is a caller that will forget. The first version of
+/// this function's callers both discarded the outcome.
+fn report_delete_reconcile(
+    lua: &Lua,
+    path: &std::path::Path,
+    outcome: &crate::editor_core::DeleteReconcile,
+) {
+    if outcome.kept_modified.is_empty() && outcome.refused.is_empty() {
+        return;
+    }
+    let name_of = |p: &std::path::Path| {
+        p.file_name()
+            .map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into())
+    };
+    let mut parts: Vec<String> = Vec::new();
+    if !outcome.kept_modified.is_empty() {
+        let n = outcome.kept_modified.len();
+        let named: Vec<&str> = outcome
+            .kept_modified
+            .iter()
+            .take(DELETE_REPORT_NAMED_LIMIT)
+            .map(|(_, name)| name.as_str())
+            .collect();
+        parts.push(format!(
+            "{n} buffer{} with unsaved changes kept ({}{}) — saving {} will              RECREATE the deleted file",
+            if n == 1 { "" } else { "s" },
+            named.join(", "),
+            if n > named.len() {
+                format!(", and {} more", n - named.len())
+            } else {
+                String::new()
+            },
+            if n == 1 { "it" } else { "them" },
+        ));
+    }
+    if !outcome.refused.is_empty() {
+        let n = outcome.refused.len();
+        let named: Vec<String> = outcome
+            .refused
+            .iter()
+            .take(DELETE_REPORT_NAMED_LIMIT)
+            .map(|(_, why)| why.clone())
+            .collect();
+        parts.push(format!(
+            "{n} buffer{} could not be closed ({}{})",
+            if n == 1 { "" } else { "s" },
+            named.join("; "),
+            if n > named.len() {
+                format!("; and {} more", n - named.len())
+            } else {
+                String::new()
+            },
+        ));
+    }
+    let message = format!("deleted {}: {}", name_of(path), parts.join("; "));
+    if let Some(core) = lua.app_data_ref::<SharedCore>() {
+        core.borrow_mut().status = message;
+    }
+}
+
+/// Drive [`crate::async_runtime::TickOutcome::resources`] through
+/// reconciliation, one settled mutation at a time (dired Stage 2a,
+/// Q#DR29).
+///
+/// **Each settled mutation reconciles on its own, and nothing here
+/// depends on the relative order of two mutations that were in flight
+/// simultaneously** — `resources` is bus-arrival order and the runtime
+/// establishes no execution token. That is safe rather than merely
+/// honest: independent mutations commute, and the primitive's contract
+/// (`builtin/runtime/fs.lua`) requires a caller with overlapping
+/// source/target paths to serialize by awaiting each op before
+/// dispatching the next.
+fn reconcile_settled_resources(lua: &Lua, resources: &[crate::async_runtime::ResourceOp]) {
+    use crate::async_runtime::ResourceOp;
+    for op in resources {
+        match op {
+            ResourceOp::Rename { from, to } => {
+                reconcile_rename_and_fire(lua, from, to);
+            }
+            ResourceOp::Remove { path } => {
+                reconcile_delete_and_fire(lua, path);
+            }
+        }
+    }
 }
 
 fn remove_buffer_and_fire(lua: &Lua, registry: &SharedRegistry, id: BufferId) -> mlua::Result<()> {
@@ -3221,6 +3433,37 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
     }
 
     {
+        // dired Stage 2a Q#DR21 — expose the existing Rust setter,
+        // which already documents itself as for "save-as and rename
+        // operations". Dired needs it because its listing buffers are
+        // **pathless**: no buffer-keyed rebind can find them, so the
+        // only way a `*dired:<path>*` buffer can follow a renamed
+        // directory is for dired's own `resource.renamed` subscriber to
+        // rename it. The alternative — kill and recreate under the new
+        // name — loses window placement, the cursor, the read-only
+        // intercept, round-trip input and the major mode, each of which
+        // would have to be re-established in the right order.
+        //
+        // Uniqueness stays the CALLER's job, matching the Rust setter;
+        // dired reuses its existing `<2>`-variant uniquifier.
+        //
+        // This records `BufferNameOrigin::Explicit` (Q#DR30): it is a
+        // naming operation even when the string happens to denote the
+        // file, so a later rename must not overwrite it.
+        let reg = registry.clone();
+        buffer.set(
+            "set_name",
+            lua.create_function(move |_, (id, name): (BufferIdLua, String)| {
+                reg.borrow_mut()
+                    .get_mut(id.0)
+                    .map_err(mlua::Error::external)?
+                    .set_name(name);
+                Ok(())
+            })?,
+        )?;
+    }
+
+    {
         let reg = registry.clone();
         buffer.set(
             "from_bytes",
@@ -3244,6 +3487,11 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
                     ))
                 })?;
                 let id = reg.borrow_mut().create_from_bytes(path.clone(), &bytes);
+                // Path-backed creation site (Q#DR30): this name is the
+                // path as given, so rename reconciliation may move it.
+                if let Ok(b) = reg.borrow_mut().get_mut(id) {
+                    b.set_path_derived_name(path.clone());
+                }
                 if let Some(core) = lua.app_data_ref::<SharedCore>() {
                     let mut core = core.borrow_mut();
                     core.switch_active_buffer(id)
@@ -3307,6 +3555,10 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
                     ))
                 })?;
                 let id = reg.borrow_mut().create_from_bytes(path.clone(), &bytes);
+                // Path-backed creation site (Q#DR30), as in `from_file`.
+                if let Ok(b) = reg.borrow_mut().get_mut(id) {
+                    b.set_path_derived_name(path.clone());
+                }
                 if let Some(core) = lua.app_data_ref::<SharedCore>() {
                     let mut core = core.borrow_mut();
                     core.switch_active_buffer(id)
@@ -3428,12 +3680,18 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
                                 .map_err(|e| io_err("rename (parents)", e))?;
                         }
                         std::fs::rename(&from, &to).map_err(|e| io_err("rename", e))?;
-                        let bid = reg.borrow().find_by_path(&from);
-                        if let Some(id) = bid
-                            && let Some(core) = lua.app_data_ref::<SharedCore>()
-                        {
-                            core.borrow_mut().set_buffer_path(id, Some(to.clone()));
-                        }
+                        // dired Stage 2a: the raw, first-match,
+                        // un-normalized `find_by_path` lookup this arm
+                        // used is replaced by the shared transaction.
+                        // Three defects went with it — stored paths are
+                        // normalized on write while the op names its
+                        // target raw, so the lookup could miss the
+                        // buffer entirely; a directory rename has many
+                        // affected buffers by construction and only the
+                        // first moved; and the buffer's *name* stayed
+                        // stale, so the statusline and buffer list kept
+                        // the old filename.
+                        reconcile_rename_and_fire(lua, &from, &to);
                     }
                     "delete" => {
                         // Four ordered phases (Q#RD2): stat/no-op
@@ -3490,18 +3748,19 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
                         };
                         r.map_err(|e| io_err("delete", e))?;
 
-                        // Phase 4 — reconcile exactly as before
-                        // (Q#RD10): the single first exact-path match is
-                        // removed and additional clean duplicates are
-                        // left in place. Removing them all would route N
+                        // Phase 4 — reconcile through the shared seam
+                        // (dired Stage 2a, Q#DR27). #190 deliberately
+                        // left this as the single first exact-path match
+                        // because removing them all would have routed N
                         // buffers through `remove_buffer_and_fire`,
-                        // which is phase 2 without phase 1, creating up
-                        // to N dangling windows — the parked lifecycle
-                        // defect this lane must not enlarge.
-                        let bid = reg.borrow().find_by_path(&pb);
-                        if let Some(id) = bid {
-                            remove_buffer_and_fire(lua, &reg, id)?;
-                        }
+                        // which is phase 2 *without* phase 1 and would
+                        // have created up to N dangling windows. That
+                        // constraint is now gone: `reconcile_delete`
+                        // composes both phases, so descendants and
+                        // duplicate path-bound buffers can all be
+                        // reconciled, and no window is left holding a
+                        // removed id.
+                        reconcile_delete_and_fire(lua, &pb);
                     }
                     other => {
                         return Err(mlua::Error::external(format!(
@@ -7358,9 +7617,15 @@ pub fn install_async(
         async_mod.set(
             "_tick",
             lua.create_function(move |lua, ()| {
-                let ids = rt.tick();
-                let t = lua.create_table_with_capacity(ids.len(), 0)?;
-                for (i, id) in ids.into_iter().enumerate() {
+                let outcome = rt.tick();
+                // Reconcile BEFORE the settled ids reach Lua. The Lua
+                // runtime resumes parked coroutines from the table this
+                // returns, so a coroutine that renamed and then
+                // inspects a buffer would otherwise see pre-rename
+                // state. Ordering here is by construction, not by luck.
+                reconcile_settled_resources(lua, &outcome.resources);
+                let t = lua.create_table_with_capacity(outcome.settled.len(), 0)?;
+                for (i, id) in outcome.settled.into_iter().enumerate() {
                     t.set(i + 1, id)?;
                 }
                 Ok(t)
@@ -9992,11 +10257,18 @@ pub fn install_lsp(
         // `builtin/runtime/lsp.lua` calls this per edit so stale
         // suppression stays keystroke-accurate while the O(file)
         // full-document notification is coalesced.
+        //
+        // **Takes the server id since dired Stage 2a.** It previously
+        // took the URI alone while creating URI keys in three stores
+        // for every server at once, which made it the second
+        // uncorrelated writer able to resurrect a URI `forget_uri` had
+        // just cleared. The sole production caller already holds
+        // `rec.server`.
         let m = manager.clone();
         lsp_mod.set(
             "_mark_document_stale",
-            lua.create_function(move |_, uri: String| {
-                m.borrow().mark_document_stale(&uri);
+            lua.create_function(move |_, (id, uri): (LspServerIdLua, String)| {
+                m.borrow().mark_document_stale(id.0, &uri);
                 Ok(())
             })?,
         )?;
@@ -10515,6 +10787,35 @@ pub fn install_lsp(
             "forget",
             lua.create_function(move |_, id: LspServerIdLua| {
                 m.borrow_mut().forget(id.0).map_err(mlua::Error::external)?;
+                Ok(())
+            })?,
+        )?;
+    }
+
+    {
+        // dired Stage 2a §5 — the per-document teardown the
+        // `resource.renamed` subscriber needs. Modelled on `forget`
+        // above: a closure over the shared manager that calls through
+        // and maps the error with `mlua::Error::external`.
+        //
+        // Error contract: **raises** for an unknown server id, matching
+        // `forget`'s behaviour for the same input, and **succeeds
+        // silently** when the URI has no state under a known server.
+        // The second arm is the one that matters — the subscriber runs
+        // per attachment, an attachment need not have any pending route
+        // or populated result store, and cleanup can be repeated after
+        // an earlier partial teardown. An over-strict binding would turn
+        // that ordinary idempotent case into an error inside a hook.
+        //
+        // Takes the **old** URI, so calling it after `did_open` of the
+        // new one is safe and order-independent.
+        let m = manager.clone();
+        lsp_mod.set(
+            "forget_uri",
+            lua.create_function(move |_, (id, uri): (LspServerIdLua, String)| {
+                m.borrow_mut()
+                    .forget_uri(id.0, &uri)
+                    .map_err(mlua::Error::external)?;
                 Ok(())
             })?,
         )?;

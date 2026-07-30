@@ -8549,17 +8549,26 @@ fn rd8_recursive_delete_refuses_for_a_modified_descendant() {
     assert!(tree.exists(), "including the directory itself");
 }
 
-/// Criterion 9 — a *clean* recursive delete leaves descendant buffers
-/// orphaned, not removed.
+/// Criterion 9 — a *clean* recursive delete reconciles descendant
+/// buffers, through both removal phases.
 ///
-/// This pin deliberately asserts today's imperfect behaviour. Widening
-/// reconciliation to the tree would route N buffers through
-/// `remove_buffer_and_fire` — phase 2 without phase 1 — promoting the
-/// parked dangling-window defect from exact-path to tree-wide.
+/// **Rewritten by dired Stage 2a** (`docs/dired-stage2-framing.md` §6,
+/// Q#RD27 / acceptance 23). This row previously pinned the opposite —
+/// that the descendant buffer stayed orphaned — and gave the reason:
+/// widening reconciliation would have routed N buffers through
+/// `remove_buffer_and_fire`, which is phase 2 *without* phase 1, so a
+/// tree delete would have left up to N windows pointing at removed ids.
+/// That constraint is discharged: `EditorCore::reconcile_delete`
+/// composes the same two phases `pmacs.buffer.kill` composes, and the
+/// delete arm routes through it. The old assertion is not merely
+/// obsolete, it is now the defect — an orphaned buffer whose next
+/// `C-x C-s` recreates a file the user deleted.
 ///
-/// Bite: fails against an implementation that widens reconciliation.
+/// Bite, both directions: fails against an exact-path reconciliation
+/// (the descendant survives) **and** against a widening that skips
+/// phase 1 (a window keeps a removed id).
 #[test]
-fn rd9_clean_recursive_delete_leaves_descendants_orphaned() {
+fn rd9_clean_recursive_delete_reconciles_descendants_through_both_phases() {
     let dir = tempfile::tempdir().expect("tempdir");
     let tree = dir.path().join("tree");
     std::fs::create_dir(&tree).expect("mkdir");
@@ -8568,6 +8577,13 @@ fn rd9_clean_recursive_delete_leaves_descendants_orphaned() {
 
     let mut state = pmacs::editor::EditorState::new();
     rd_open(&mut state, "B", &inner);
+    // Display it, so the phase-1 window redirect has something to do.
+    state
+        .lua_host
+        .lua()
+        .load("pmacs.window.switch_buffer(B)")
+        .exec()
+        .expect("show the descendant");
 
     let (ok, err) = rd_delete(&mut state, &tree, ", recursive = true");
     assert!(ok, "a clean tree deletes: {err}");
@@ -8580,9 +8596,23 @@ fn rd9_clean_recursive_delete_leaves_descendants_orphaned() {
         .eval()
         .expect("validity probe");
     assert!(
-        still,
-        "THE BITE: reconciliation stays exact-path, so the descendant \
-         buffer is orphaned rather than removed"
+        !still,
+        "THE BITE: a buffer under a recursively deleted directory must be \
+         reconciled away, not left bound to a path whose file is gone"
+    );
+
+    let core = state.core.borrow();
+    let dangling: Vec<_> = core
+        .windows
+        .iter()
+        .filter(|(_, w)| !core.registry.borrow().contains(w.buffer_id))
+        .map(|(id, w)| (*id, w.buffer_id))
+        .collect();
+    assert!(
+        dangling.is_empty(),
+        "THE OTHER HALF: widening the reconciliation must not promote the \
+         dangling-window defect from exact-path to tree-wide; dangling: \
+         {dangling:?}"
     );
 }
 
@@ -8633,15 +8663,22 @@ fn rd10_absent_plus_ignore_does_not_destroy_a_modified_buffer() {
     assert_eq!(text, "unsavedcontent\n", "the unsaved edit survives");
 }
 
-/// Criterion 14 — clean duplicates: exactly one match reconciled.
+/// Criterion 14 — clean duplicates: **every** match reconciled.
 ///
-/// Bite: fails against an implementation that removes **all** matches.
-/// It pins the reconciliation half of Q#RD10 and *only* that: with both
-/// buffers clean there is no verdict difference between consulting one
-/// match and consulting all, so this setup cannot see validation
-/// breadth. Criterion 6 is what detects incomplete validation.
+/// **Rewritten by dired Stage 2a** (§6, acceptance 23). This row
+/// previously pinned "exactly one", which was Q#RD10's deliberate
+/// restraint: removing them all would have routed N buffers through
+/// `remove_buffer_and_fire` — phase 2 without phase 1 — so the second
+/// duplicate was left alive rather than have its window dangle.
+/// `reconcile_delete` composes both phases, so the restraint is gone and
+/// the surviving duplicate is now the defect: it is bound to a path
+/// whose file no longer exists, and `find_by_path` cannot even see it.
+///
+/// Bite: fails against a first-match implementation (one duplicate
+/// survives) and against a widening that skips phase 1 (a window keeps
+/// a removed id).
 #[test]
-fn rd14_clean_duplicates_reconcile_exactly_one() {
+fn rd14_clean_duplicates_all_reconcile() {
     let dir = tempfile::tempdir().expect("tempdir");
     let f = dir.path().join("twin.rs");
     std::fs::write(&f, b"twin\n").expect("write");
@@ -8658,6 +8695,13 @@ fn rd14_clean_duplicates_reconcile_exactly_one() {
         .exec()
         .expect("two clean buffers on one path");
 
+    state
+        .lua_host
+        .lua()
+        .load("pmacs.window.switch_buffer(SECOND)")
+        .exec()
+        .expect("show the second duplicate");
+
     let (ok, err) = rd_delete(&mut state, &f, "");
     assert!(ok, "two clean duplicates must not block: {err}");
 
@@ -8668,9 +8712,23 @@ fn rd14_clean_duplicates_reconcile_exactly_one() {
         .eval()
         .expect("validity probe");
     assert!(
-        first != second,
-        "THE BITE: exactly one duplicate is reconciled away, not both \
-         and not neither (first={first}, second={second})"
+        !first && !second,
+        "THE BITE: both buffers bound to the deleted path must be \
+         reconciled away; a survivor points at a file that is gone and is \
+         invisible to `find_by_path` (first={first}, second={second})"
+    );
+
+    let core = state.core.borrow();
+    let dangling: Vec<_> = core
+        .windows
+        .iter()
+        .filter(|(_, w)| !core.registry.borrow().contains(w.buffer_id))
+        .map(|(id, w)| (*id, w.buffer_id))
+        .collect();
+    assert!(
+        dangling.is_empty(),
+        "THE OTHER HALF: removing every match must not leave a window on \
+         a removed id; dangling: {dangling:?}"
     );
 }
 

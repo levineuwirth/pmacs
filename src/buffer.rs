@@ -148,6 +148,26 @@ struct EditDescription {
     inserted_len: u64,
 }
 
+/// Provenance of a [`Buffer`]'s name (dired Stage 2a, Q#DR30).
+///
+/// A rename must move a name that merely *renders* the file's path and
+/// must leave a name the user chose alone. String inspection cannot
+/// tell those apart — a user may legitimately name a buffer with a
+/// string that normalizes to its own path — so the fact is recorded at
+/// the moment the name is written instead of being reconstructed
+/// later.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BufferNameOrigin {
+    /// A caller named this buffer: `Buffer::new`/`from_bytes`, an
+    /// ordinary [`Buffer::set_name`], or the `pmacs.buffer.set_name`
+    /// binding. A rename leaves the name alone.
+    Explicit,
+    /// The name was derived from the buffer's backing path by a
+    /// path-backed creation site, through
+    /// [`Buffer::set_path_derived_name`]. A rename rewrites it.
+    PathDerived,
+}
+
 /// The unit of editable content: rope + identity + views + undo.
 ///
 /// # Threading
@@ -159,6 +179,14 @@ pub struct Buffer {
     id: BufferId,
     rope: Rope,
     name: String,
+    /// Where [`Self::name`] came from. Recorded rather than inferred,
+    /// because a path-backed buffer's name is **not** reliably its
+    /// path: `get_or_load_buffer` takes the name from the path *as
+    /// given* and normalizes only the stored `file_path`, so a
+    /// relative open is named `foo.rs` while its path is absolute.
+    /// Rename reconciliation asks this bit, never the string
+    /// (dired Stage 2a, Q#DR30).
+    name_origin: BufferNameOrigin,
     /// The buffer's single active major mode, if one has been selected.
     major_mode: Option<String>,
     is_modified: bool,
@@ -247,6 +275,10 @@ impl Buffer {
             id,
             rope,
             name: name.into(),
+            // Construction names a buffer explicitly. A path-backed
+            // creation site re-records provenance through
+            // `set_path_derived_name` right after binding the path.
+            name_origin: BufferNameOrigin::Explicit,
             major_mode: None,
             is_modified: false,
             read_only: false,
@@ -449,9 +481,35 @@ impl Buffer {
         &self.name
     }
 
-    /// Set the buffer's name. Used by save-as and rename operations.
+    /// Set the buffer's name, recording it as **explicitly chosen**
+    /// ([`BufferNameOrigin::Explicit`]).
+    ///
+    /// This is the user-facing door — `pmacs.buffer.set_name` and
+    /// save-as go through it — and it is deliberately explicit even
+    /// when the string happens to denote the file: naming a buffer
+    /// `notes` for `${cwd}/notes` is still a naming operation, and a
+    /// later rename must not overwrite it. Path-backed creation sites
+    /// use [`Self::set_path_derived_name`] instead.
     pub fn set_name(&mut self, name: impl Into<String>) {
         self.name = name.into();
+        self.name_origin = BufferNameOrigin::Explicit;
+    }
+
+    /// Set the buffer's name **and** record that it was derived from
+    /// the buffer's backing path ([`BufferNameOrigin::PathDerived`]).
+    ///
+    /// Every site that creates or re-binds a path-backed buffer uses
+    /// this door, including rename reconciliation itself — so a second
+    /// rename still follows the path.
+    pub fn set_path_derived_name(&mut self, name: impl Into<String>) {
+        self.name = name.into();
+        self.name_origin = BufferNameOrigin::PathDerived;
+    }
+
+    /// Where this buffer's name came from (dired Stage 2a, Q#DR30).
+    #[must_use]
+    pub fn name_origin(&self) -> BufferNameOrigin {
+        self.name_origin
     }
 
     /// This buffer's active major mode, if any.

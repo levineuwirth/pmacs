@@ -788,6 +788,177 @@ has **no branch and no framing yet**.
   `git fetch githubsucks && git worktree add ../pmacs-rd-impl
   -b resource-op-delete-guard-impl githubsucks/resource-op-delete-guard-impl`.
 
+## dired Stage 2a — rename/delete reconciliation — PR #196 OPEN, review round 1 closed
+
+- Portable branch: `githubsucks/dired-stage2-impl`, worktree
+  `../pmacs-dired-s2`. Implements **Stage 2a only** of the framing merged
+  as #171 (`docs/dired-stage2-framing.md` rev 9, §5/§6/§10 — the
+  substrate transaction, no dired surface). Position against `main`, as
+  pasted command output rather than a remembered constant:
+
+  ```
+  $ git merge-base HEAD githubsucks/main
+  e003b81cdd577140fc77330bd4578d3090696877
+  ```
+
+  That base is the #190 merge, and #190 matters here specifically:
+  Stage 2a **adopts** its `delete_verdict` refusal rather than
+  reinventing one, and lifts its walk query out into
+  `editor_core::buffers_bound_under` so the guard and both
+  reconciliation seams cannot disagree about which buffers an operation
+  touches. **Re-measure the merge-base before relying on it** —
+  `main` has branch protection, all 12 checks must pass on the merging
+  head, and a conflicting PR builds no merge ref at all, so a green run
+  from before a move reads as current when it is not. **Re-measured after
+  round 1: `main` had not moved, so no integration was needed** — that is
+  a reading of the tree, not a standing fact.
+- **What 2b and 2c still owe, stated so the split boundary is auditable.**
+  2a ships **no user-visible surface at all** and no dired code: the
+  `dired_acceptance` count is deliberately unchanged at **25**, and a
+  moved count there would mean it touched something it should not have.
+  2b owes the mark and operation layer (`m u U t d x D R w M`),
+  `pmacs.minibuffer.confirm` plus its `src/editor.rs` load-sequence line,
+  `pmacs.killring.push`, dired's own `resource.renamed` subscriber, and
+  acceptance 1–22, 33, 39–41. 2c owes `mkdir`/`copy`/`remove_dir_all`,
+  `JobKind` 12 → 15, `dired.recursive-deletes`, and acceptance 42–47.
+- **The split boundary has not moved since rev 9.** It was re-checked
+  against this tree: #188 (generated-buffer immutability Stage 1) did not
+  convert dired's `paint`, so §3.1's coordination note is still an
+  obligation of that lane rather than a collision with this one, and
+  nothing in this diff touches `builtin/runtime/dired.lua`.
+- **Two m4 rows were re-pinned, and that is a behaviour change to a
+  landed lane's assertions.** `rd9` and `rd14` pinned #190's deliberate
+  restraint on the `apply_resource_op` delete arm — descendants stay
+  orphaned, only the first of two duplicate path-bound buffers is
+  reconciled — and both doc comments gave the same reason: widening
+  would have routed N buffers through `remove_buffer_and_fire`, phase 2
+  without phase 1, leaving up to N windows on removed ids.
+  `EditorCore::reconcile_delete` composes both phases, so the constraint
+  is discharged and the old assertions became the defect. Each row now
+  asserts BOTH directions — reconciled away **and** no window holding a
+  removed id — and each direction is bite-verified.
+- **One framing claim is wrong and is corrected at the test, not
+  silently worked around.** §5's G1 says a stale captured path
+  "materializes a phantom" by reaching `resolve_target_buffer`'s
+  `NotFound` arm. It does not: `pmacs.buffer.find_or_open` calls
+  `crate::file_io::load_file` directly and maps the error, so a missing
+  path **raises**, and the `NotFound` arm belongs to
+  `resolve_target_buffer`, which serves `pmacs.window.display_file` and
+  the startup/daemon target rather than that binding. The defect is real
+  and smaller: the `pcall` swallows the raise, so the user is stranded
+  wherever the last applied op left them. Acceptance 34 is restructured
+  to bite on that (its plan edits another file first, which is what makes
+  the restore observable at all) and the correction is recorded in the
+  test's own doc comment.
+- **Two bites were vacuous as the framing specified them, and both
+  reasons are worth keeping.** Item 28's *rename* row cannot pin the
+  walk's containment rule: `reconcile_rename` calls
+  `Path::strip_prefix` to rebuild a descendant's tail, and that is
+  component-aware too, so a string-prefix walk is silently corrected a
+  second time. The row moved to the **delete** side, where the walk's
+  verdict IS the kill list. Item 30's composition-order assertion was a
+  tautology: the LSP attach leaves `diagnostic` **last** in the stack, and
+  moving the last element to the end is a no-op, so a remove-and-re-push
+  was indistinguishable from an in-place mutation; the row now pushes one
+  more overlay after it and asserts that precondition explicitly.
+- **23 acceptance criteria are bite-verified by executed mutation**, each
+  labelled `OK (assertion)` — none merely `OK (COMPILE)`, and none
+  vacuous. Items 25, 27, 28, 29 (both directions), 30 (both mutations),
+  31, 31b (both gates), 31d (both halves), 34, 50 (both mutations), 51,
+  52, 53b, 54, 55, plus the two re-pinned m4 rows in three
+  configurations.
+- **Review round 1 found four defects; all four are fixed, and all four
+  were the same shape — a failure that left state wrong and told nobody.**
+  Worth keeping as one lesson rather than four bugs: every one of them
+  was a `pcall` or a discarded return value, and each *looked* like
+  defensive coding.
+  - **P1 — delete refusals were silent.** `reconcile_delete_and_fire`
+    returned `kept_modified` and `refused` and both production callers
+    discarded them, so a last-buffer refusal or the asynchronous
+    modified-buffer race left the file gone and the buffer still bound to
+    it — and the next `C-x C-s` recreates the deleted file. Reporting
+    moved **inside the shared seam**, for the same reason the
+    reconciliation lives there: a caller that has to remember to report
+    is a caller that will forget. Channel is `EditorCore::status`;
+    **not `pmacs.error`**, which is defined only by a test stub, so a
+    report there would have been the same silence.
+  - **P2 — the LSP subscribers swallowed their own reconciliation
+    failures.** Ignored `pcall`s made the callback return successfully,
+    so the `all-must-succeed` logger had nothing to log. A shared
+    failure sink now attributes each step and raises **after** the loop,
+    because a fix that aborts on the first failure would leave every
+    other attachment unreconciled — that wrong fix is itself a
+    bite-verified mutation.
+  - **P2 — `forget_uri` left purged requests live in the client.** It
+    dropped `pending_routes` and `pending_external` but not the ids
+    `send_request` puts in `LspClient.pending`, and recorded nothing in
+    `cancelled_rids`, so a server that never replies leaked the entry and
+    a late reply surfaced as a generic unrouted response. The per-rid
+    work is now extracted from `drain_cancelled_externals` as
+    `abandon_request` and **reused** rather than copied.
+  - **P2 — acceptance 35 was unpinned even after the G1 correction.**
+    With a plain delete the forbidden path fallback is unobservable:
+    `find_or_open` raises out of `load_file` and the `pcall` swallows it,
+    so both assertions passed with the fallback present. The plan now
+    deletes the origin's file **and recreates it**, which gives the
+    fallback something to open. The corrected G1 explanation also reached
+    the production comments, which still repeated the false
+    `resolve_target_buffer::NotFound` story — *a correction that stops at
+    the test comment has only half landed.*
+- **One round-1 pin passed with its own bug restored, and the reason is
+  reusable.** Acceptance 53 asserted `contains("only.txt")` for the
+  buffer-name attribution — but the status line opens with
+  `deleted only.txt:`, the deleted path's **basename**, so stripping the
+  attribution changed nothing the assertion could see. Both halves now
+  assert the buffer's *own* name, which for a path-backed buffer is the
+  full path and which only the attribution can produce. **A pin written
+  to close a review finding is exactly the kind that passes with the bug
+  restored**, and the detector was running the bite rather than reading
+  the assertion.
+- **31 bites now, all executed, every one labelled `OK (assertion)`** —
+  the original 23 plus 8 for round 1 (report call removed; refusal reason
+  unattributed; kept-modified name dropped; subscriber failures
+  swallowed; the wrong fix that aborts the loop; `forget_uri` skipping
+  `abandon_request`; and the forbidden path fallback restored, which must
+  fail acceptance 34 **and** 35 independently).
+- Verification at this head, each gate run to its own file and its own
+  exit code checked (never through a pipe): `cargo fmt --check` clean;
+  `cargo clippy --workspace --all-targets -- -D warnings` clean;
+  `cargo test --lib` **1,876** passed / 3 ignored; `--lib --features
+  crdt` **2,061** / 4 ignored; the new
+  `resource_reconciliation_acceptance` **25** default and **25** crdt;
+  `dired_acceptance` **25** and **25** crdt, deliberately unmoved; the
+  frozen additivity gate `m8_1` **10** / `m8_2` **15** / `m8_3` **32**,
+  all unchanged; `m4_acceptance -- --skip basedpyright` **149** passed /
+  3 ignored / 1 filtered; `lsp_multi_root_acceptance` **13**;
+  `lsp_dispatch_seams_acceptance` **15**;
+  `typed_edit_chain_acceptance` **13**; `journey_acceptance` **24**
+  (the ratchet floor, asserted as a count rather than a colour);
+  `gpu_invocation_acceptance` **15** crdt — **and that number is only
+  real with `pmacs` and `pmacs-gpu` built first**, which is the `a37`
+  trap in §5: the same command reported 12 failures before the build and
+  15 passes after, so a red run there is not evidence of a regression
+  until the binaries exist; `PMACS_REQUIRE_GPU=1 cargo test -p
+  pmacs-gpu` **202**; isolated-`XDG_CONFIG_HOME` workspace sweep with
+  `--no-fail-fast` **3,559** passed across **104** suites, 19 ignored, 0
+  failed; `git diff --check` clean. Every one of those was run as its own
+  step with its own exit status checked — never `cmd | tail` inside an
+  `&&` chain, which returns *tail's* status and has masked a real failure
+  in this repo before.
+- **Ownership, per the framing's own warning.** §16 says 2a must not run
+  concurrently with **Journey Stage 1b**, because 1b's LSP
+  spawn-failure reporting lands in `builtin/runtime/lsp.lua`'s
+  attachment lifecycle and 1b's compile/binding half touches
+  `src/editor_core.rs` — the same two files 2a rewrites, where the
+  conflicts are semantic rather than textual so a clean `git merge`
+  proves nothing. **1b must not be started while this PR is open.** No
+  other lane in flight touches them: #188 is `dired.lua`/`buffer.rs`
+  generated-buffer writes, and the bottom-panel and CI lanes are
+  elsewhere.
+- Recovery from a clean checkout:
+  `git fetch githubsucks && git worktree add ../pmacs-dired-s2
+  -b dired-stage2-impl githubsucks/dired-stage2-impl`.
+
 ## Generated-buffer immutability framing lane — MERGED AS PR #188
 
 - Portable branch: `githubsucks/generated-buffer-immutability`; worktree
@@ -1087,6 +1258,183 @@ has **no branch and no framing yet**.
   at 42 insertions against 88 deletions — merging it would *revert*
   current documentation. The section said "whoever confirms the branch
   carries nothing unique removes the section"; this is that.
+
+## Test-improvement arc, lane 3a — CI timeouts and concurrency
+
+- Portable branch: `githubsucks/ci-timeouts-concurrency`, worktree
+  `../pmacs-ci3`. Workflow only — **no product code, no tests changed.**
+- **Base, measured at write time:**
+
+  ```
+  $ git log --oneline -1 githubsucks/main
+  b7bf2c6 Merge pull request #194 from levineuwirth/silent-skip-arming
+  ```
+
+- Ships the three cheap, deterministic items of `TEST_IMPROVEMENT.md`
+  §5-6. The larger ones — nextest (§6.3), the serial/parallel split
+  (§6.2), the parallel canary leg (§5.6), the nightly cron (§5.5), and
+  the macOS matrix trim (§6.4) — are **deliberately not here**: each
+  changes what CI certifies or how it runs, and each wants its own
+  decision rather than riding a timeout patch.
+- **`timeout-minutes` on every job (§5.2).** Measured before changing:
+  **7 of 8 jobs had none** and inherited GitHub's 360-minute default;
+  only `m6-perf-gates` had one (15). A single hung test therefore burnt
+  six hours, times four on the test matrix.
+  **This is the gate that must land before `PMACS_REQUIRE_PYRIGHT` can
+  ever be set** — lane 2 left basedpyright unarmed precisely because
+  this did not exist.
+- **The ceilings are 25, and 35 for the test job — anchored on observed
+  execution, corrected in review.** Revision 1 cited "~14.6 min, ample
+  headroom", which was one reading quoted as a property. Re-measured
+  over two windows: **17 min** max over 25 runs and **15.8 min** over
+  12, both macOS/luajit; every other job under 4 min. Against 17, a
+  flat 25 is ~1.5x, not "ample".
+  - `timeout-minutes` counts **execution, not queue** — a 33-minute
+    wall-clock run in that window executed its longest job in 17 — so
+    **no run in observed history would have been killed** by either
+    value.
+  - The real exposure is what the window does *not* contain: a **cold
+    cache**. A stable-toolchain bump invalidates Swatinem's key on
+    every leg simultaneously, and a cold macOS debug build plus suite
+    is the plausible way a *healthy* run overruns. It would present as
+    four legs timing out at once, the day after a Rust release.
+  - So the test job takes 35 (~2x its observed max) and the rest keep
+    25 (~6x theirs), and **the diagnosis is written into the workflow
+    before the event**: simultaneous four-leg timeouts after a
+    toolchain release are a cold cache, not a hang; a single leg
+    timing out beside passing siblings is the hang case.
+- **`concurrency` with `cancel-in-progress` (§6.1)**, scoped to pull
+  requests. `github.event.pull_request.number` is empty on a push to
+  `main`, so the fallback keys those by SHA and no `main` run can
+  cancel another — cancelling one would leave the branch-protection
+  record ambiguous about a commit that already landed.
+- **`-p pmacs-protocol` clippy (§5.7).** Verified passing locally
+  *before* proposing it, so adding it cannot turn CI red on arrival.
+  The root-package clippy never covered it: the workspace default
+  member is only `pmacs`.
+- **§5.1 branch protection is DONE, not deferred** — it belongs in
+  neither this lane's shipped list nor its deferrals, and review was
+  right that its absence from both was an omission. It was enabled
+  earlier in this session; verified against the API at review time:
+
+  ```
+  $ gh api repos/levineuwirth/pmacs/branches/main/protection
+  {"enforce_admins":false,"force_push":false,"required_checks":12,"strict":false}
+  ```
+
+  All 12 checks required; `strict` off deliberately, so a PR need not
+  rebase every time `main` moves (this repository's ledger contention
+  makes strict expensive); `enforce_admins` off so the user retains an
+  override. **This matters to the concurrency comment**, which
+  justifies exempting `main` pushes by appeal to "the
+  branch-protection record" — that record now exists, so the
+  justification is real rather than aspirational.
+- **Required status checks are NAME-COUPLED to job names, and this
+  lane's own deferrals will break them.** A required context that no
+  longer exists does not fail — it leaves every PR pinned on
+  "Expected — waiting for status", indefinitely, which is
+  `main` becoming unmergeable by policy rather than by a red run.
+  Three deferrals above change job names or the matrix: the macOS trim
+  (§6.4) removes two contexts outright, and nextest (§6.3) or the
+  serial/parallel split (§6.2) rename or add them.
+  **Rule: any job rename, removal, or matrix change updates the
+  branch-protection required-checks list in the same motion.** Recorded
+  here because this is the entry that both enabled protection and named
+  the lanes that will invalidate it.
+- Recovery from a clean checkout:
+  `git fetch githubsucks && git worktree add ../pmacs-ci3
+  -b ci-timeouts-concurrency githubsucks/ci-timeouts-concurrency`.
+
+## Test-improvement arc, lane 4 — process teardown stdin deadlock
+
+- Portable branch: `githubsucks/process-teardown-stdin-deadlock`,
+  worktree `../pmacs-hang`. Implements
+  `docs/process-teardown-stdin-deadlock-framing.md` (rev 3: one review
+  round, then a CI round that falsified the reproduction).
+- **Base, measured rather than quoted:**
+
+  ```
+  $ git log --oneline -1 githubsucks/main
+  e003b81 Merge pull request #190 from levineuwirth/resource-op-delete-guard-impl
+  ```
+
+- Recovery from a clean checkout:
+  `git fetch githubsucks && git worktree add ../pmacs-hang
+  -b process-teardown-stdin-deadlock
+  githubsucks/process-teardown-stdin-deadlock`.
+- **The defect:** `RuntimeHandles::drop` joined its reader threads in
+  the `Drop` **body**, which runs before any field drops. The
+  `ChildStdin` sink lives in the `stdin` **field**, so it could only be
+  released after the join returned — and the join waited on readers
+  blocked in `read()` on pipes whose write ends the child still held,
+  because the child never got the stdin EOF that would have made it
+  exit. A closed cycle inside one function; teardown hung forever.
+- **This is the root cause of the `m4_5_basedpyright` hang** that has
+  parked `--workspace` sweeps (once for 2h26m) and forced
+  `-- --skip basedpyright` into every gate recipe. The handoff's §3
+  claim that the desktop's binary was broken is **retired by this PR**:
+  the binary was fine. `basedpyright-langserver` is a uv console script
+  that runs bundled `node` via `subprocess.run` and **waits**; at
+  teardown `shutdown()` SIGTERMs the recorded pid (the wrapper), which
+  dies without forwarding, and **that** orphans node to `PPid: 1`
+  holding the pipes. A direct binary like `clangd` is a genuine child
+  whose pipes close on reap. That is the whole of the "intermittent"
+  story.
+- **Corrected in review round 2:** rev 1–3 said the wrapper "spawns node
+  and exits". Wrong — and refutable from evidence already in hand, since
+  the initialize handshake succeeds, which a wrapper that exited at spawn
+  could not have done. The `PPid: 1` observation was taken *after*
+  `shutdown()` had killed the wrapper. **We create the orphan.** The fix
+  is unaffected; the parked follow-up changes from "tolerate
+  self-orphaning servers" to "stop orphaning them" (signal the group).
+- **Diagnosis method, because reproduce-first was the instruction:**
+  gdb thread stacks plus `/proc` fd forensics on a live wedged process,
+  both pipe ends identified in both processes, reproduced 5/5. Three
+  earlier reproductions were vacuous — see the handoff §5 lesson; the
+  shipped test carries two positive controls because of it.
+- Verification (each gate its own step, real exit status, no
+  `cmd | tail`): fmt 0; `git diff --check` 0; clippy 0; `--lib` 1864
+  passed; `--lib --features crdt` 2049 passed; **`m4_acceptance`
+  without the skip 150 passed in 2.66s with the basedpyright test
+  `ok`**; the **eleven** PTY/REPL/worker/panel suites of the framing's
+  Bet 2 all 0 (144 tests); `PMACS_REQUIRE_GPU=1 -p pmacs-gpu` 202
+  passed. Bite verified by revert: `ok` in 2.03s with the fix, FAILED on
+  timeout at 10.00s without it, both controls passing first.
+- **CI round 1 falsified the reproduction, and the control is what
+  caught it.** Three Test legs failed on `9b1cf3d`'s predecessor: the
+  synthetic child used `sh -c 'cat <&0 & exit 0'`, and `<&0` does not
+  defeat the `/dev/null` rule it was chosen for — the rule applies
+  *before explicit redirections*, so fd 0 is already `/dev/null` and the
+  redirect duplicates it onto itself. `bash` skips the default when a
+  stdin redirect is present; **`dash`, which is Ubuntu's and CI's
+  `/bin/sh`, does not.** Local probing through `/bin/sh` could not see
+  it. Now `setsid --fork cat`, with no shell at all. **Lesson recorded in
+  the handoff §5: never probe shell behaviour through `/bin/sh` — name
+  the implementation.**
+- **`acc28` on macos/lua54 was a flake, established not assumed.**
+  `bottom_panel_stage1_acceptance::acc28` failed once on that leg;
+  rerunning the same job on the *identical* head passed, and the suite is
+  46/46 locally. It is now in Bet 2's falsifier list — its absence from
+  rev 1 was a real gap, since it drives real child input through a PTY in
+  a panel and this PR changes PTY-mode teardown ordering.
+- **Not fixed here, parked in the framing §5:** cancellable non-group
+  `read` (covers a child that ignores EOF, and one that stops draining
+  while `write_all` is blocked); the orphaned-server **leak** — post-fix
+  the server exits by cooperation, not enforcement.
+- `CLAUDE.md`'s `--skip basedpyright` entry is deliberately untouched.
+  Dropping it is a separate proposal owed evidence of repeated green.
+  The timeout precondition is **already satisfied** — #195 (this PR's
+  base) gave every job a `timeout-minutes` — so the only remaining reason
+  `PMACS_REQUIRE_PYRIGHT` stays unarmed is that CI does not install
+  basedpyright at all; arming it would fail rather than test anything.
+- Adds `PMACS_REQUIRE_SETSID`, armed on Linux. The teardown test's
+  fixture needs `setsid --fork`, which is util-linux rather than
+  coreutils, so it **skips** when absent (the standard `--lib` gate must
+  not hard-fail a minimal container on an undeclared tool) and the
+  variable makes that skip fatal where the tool is guaranteed. Both arms
+  verified against a PATH with `setsid` genuinely removed: unarmed skips,
+  armed FAILS. README's test-dependency list declares it.
+
 ## Parked lane: kill-ring browser + persistence
 
 - Portable branch: `githubsucks/kill-ring-browser`
