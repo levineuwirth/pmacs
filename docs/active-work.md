@@ -333,13 +333,14 @@ compatible.
     githubsucks/test-ambient-config-isolation
   ```
 
-## Reap-ledger silent failures — FRAMING OPEN, revision 2
+## Reap-ledger silent failures — FRAMING OPEN, revision 3
 
 - **Branch `reap-ledger-silent-failures`**, worktree
   `../pmacs-reap-ledger`, based on `githubsucks/main` @ `22df6ab`.
   **Framing only; no code, no PR yet.**
-  `docs/reap-ledger-silent-failures-framing.md`, revision 2; one review
-  round closed (three blocking, two major, all accepted).
+  `docs/reap-ledger-silent-failures-framing.md`, revision 3; two review
+  rounds closed (round 1: three blocking, two major; round 2: two
+  blocking, two major; all accepted).
 - **Unparked from PR #200's §5.** #200 retired the premise that
   justified the ledger's leniency and deliberately changed no
   disposition; this lane owns what it refused.
@@ -376,8 +377,15 @@ compatible.
   multi-outcome**: `shutdown()` calls `self.signal()` before its ledger
   force-kill, so a single global slot would be consumed by the wrong
   call, and the coupling test needs two pending outcomes at once. The
-  first PR is the seam **plus** the tests that exercise it — a seam
-  without tests does not show it reaches the intended calls.
+  in-drain probe repeats every 1 ms but only cancels readers after 50 ms
+  of false "dead", so it needs a directed full-drain override rather
+  than a one-shot error. Test state is per-supervisor and shared into
+  the drain context, never global; teardown proves its intended site was
+  reached. The in-drain SIGKILL's local flag has no independently
+  observable outer-path consequence, so it is named but not given a
+  dead injection seam. The first PR is the seam **plus** the tests that
+  exercise it — a seam without tests does not show it reaches the
+  intended calls.
 - **Diagnosis first, no disposition change proposed.** Stage A of the
   signal lane had three tolerance rules rejected across three revisions
   for the same shape of error on the same data structure.

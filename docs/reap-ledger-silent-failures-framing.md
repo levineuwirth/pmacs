@@ -1,6 +1,6 @@
 # Framing — group cleanup fails silently at four sites
 
-**Revision 2.** Status: awaiting review round 2. Proposed lane:
+**Revision 3.** Status: awaiting review round 3. Proposed lane:
 `reap-ledger-silent-failures`, worktree `../pmacs-reap-ledger`, based on
 `githubsucks/main` @ `22df6ab` (a reading; re-measure at branch time).
 
@@ -9,6 +9,30 @@ retired the premise that justified the ledger's leniency; it deliberately
 changed no disposition, and said so. This lane owns what it refused.
 
 ## Revision history
+
+**Revision 2 → 3**, after review round 2 (two blocking, two major).
+All four accepted; all four verified in the code first.
+
+- **The new in-drain test could not fire under the specified seam.** The
+  drain initializes `last_data` on entry and probes again after each 1 ms
+  sleep; `quiesced` needs a false result for the full 50 ms
+  `READER_SEND_POLL_INTERVAL`. A one-shot error is therefore gone before
+  reader cancellation. The in-drain override now returns its selected
+  result for that one `GroupDrainCtx`, and the acceptance requires named
+  late output to prove the cancellation through `poll_one`.
+- **The in-drain SIGKILL had no outer-path discriminator.** Its local
+  `group_killed` flag is followed by the persistent ledger's retry in the
+  same outer tick; testing it would require a call-count assertion or a
+  direct free-function test. It remains an explicit code fact but is
+  outside this diagnostic PR's injection seam.
+- **The seam needed a lifetime owner.** A context-local queue cannot be
+  asserted at fixture teardown and a global one crosses test fixtures.
+  The test state is now specified as per-supervisor and shared into the
+  production `GroupDrainCtx`; an unconsumed outcome proves the intended
+  site was never reached.
+- **The four-site scope had stale "three" language.** Acceptance and
+  handoff obligations now distinguish the three persistent-ledger paths
+  from the in-drain probe twin.
 
 **Revision 1 → 2**, after review round 1 (three blocking, two major).
 All five accepted; all five verified in the code first.
@@ -127,10 +151,12 @@ if group_alive && now >= ctx.deadline && !group_killed {
 ```
 
 `is_ok()` collapses every errno into "dead", exactly as the persistent
-ledger's `is_err()` does — and the consequence differs. A false "dead"
-here makes `quiesced` true, which sets `rt.cancel` and **cancels the
-readers**, so the failure mode is truncated output rather than a leaked
-process.
+ledger's `is_err()` does — and the consequence differs. Once that false
+"dead" persists for one quiescent `READER_SEND_POLL_INTERVAL`, it makes
+`quiesced` true, which sets `rt.cancel` and **cancels the readers**, so
+the failure mode is truncated output rather than a leaked process. One
+false probe is not enough: the loop probes again every millisecond, and
+`last_data` starts at the drain's entry.
 
 **It is not identical to the persistent ledger and the framing does not
 claim it is.** A later `tick` can retry the ledger entry; this decision
@@ -138,10 +164,23 @@ is terminal for that drain. It is in scope because it is the same
 collapse on the same data with its own consequence, not because it is
 the same bug.
 
+The ignored in-drain `SIGKILL` is a real code fact, but not an
+independently observable acceptance in this diagnostic PR. Its
+`group_killed` flag is local; when the drain returns, the same outer
+`tick` reaches the persistent ledger and can retry the group. Proving
+the local non-retry without a call-count assertion would mean testing
+the free function directly rather than its production caller. This lane
+therefore tests the probe-collapse consequence above and does **not**
+promise an injection seam for the in-drain `SIGKILL`. Any later retry
+policy must re-scout that local flag with the persistent ledger.
+
 **It constrains the seam.** `final_drain_runtime` is a free function
 taking `&RuntimeHandles` and `Option<GroupDrainCtx>` — there is no
-`&mut self` to hang a supervisor field on, so the injected outcome has
-to arrive through `GroupDrainCtx`, populated at the `:1573` call site.
+`&mut self` to hang a supervisor field on. Test-only injection state
+therefore remains owned by the `ProcessSupervisor` and is shared into
+`GroupDrainCtx` at the `:1573` production call site. It is never global:
+fixture teardown can then assert the planned outcome was consumed, even
+when unit tests run in parallel.
 
 ### 1.3 The shutdown loop's exit condition depends on the silent drop
 
@@ -253,34 +292,44 @@ noted so a red run on it is not mistaken for this lane's doing.*
   force-kill, so a single shared one-shot would be consumed by the wrong
   call and the test would pass while proving nothing.
 
-  The seam is **directed and one-shot per site**, with four independently
-  addressable outcomes:
+  The persistent-ledger and shutdown outcomes are **directed and
+  one-shot**. The in-drain probe instead needs a directed result for one
+  complete drain: a one-shot error is consumed by its next 1 ms probe and
+  cannot reach `quiesced`'s 50 ms interval. The test mode must therefore
+  return the selected error for every in-drain probe until that
+  `GroupDrainCtx` ends, while leaving the later persistent-ledger probe
+  real.
+
+  The independently addressable outcomes are:
 
   | Site | What is injected |
   |---|---|
   | `tick_reap_ledger` probe | the `kill(-pgid, None)` result |
   | `tick_reap_ledger` escalation | the `SIGKILL` result |
   | `shutdown()` force-kill | the `SIGKILL` result |
-  | `final_drain_runtime` probe / kill | both, via `GroupDrainCtx` (§1.2a) |
+  | `final_drain_runtime` probe | one selected result for the complete drain, via `GroupDrainCtx` (§1.2a) |
 
   Bet 3's coupling test needs **two at once** — a failed shutdown
   force-kill *and* a failed subsequent probe — so the seam must express
   more than one pending outcome. A typed queue per site, or a per-site
   slot, either is acceptable; a single global slot is not.
 
-  **Fixture cleanup is part of the seam, not an afterthought.** An
-  uninjected outcome left armed leaks into the next test in the same
-  binary, and these tests run single-threaded in CI. Each seam is
-  consumed on use and asserted empty at fixture teardown.
+  **Fixture cleanup is part of the seam, not an afterthought.** Test
+  state is per-supervisor, not global. An unconsumed planned outcome
+  proves the fixture missed its intended production site; each finite
+  outcome is consumed on use and asserted empty at fixture teardown, and
+  the in-drain override records that it was used before its context ends.
   - *Falsified if* a site cannot take a directed outcome without
     restructuring the code under test — which would make the test a test
     of the restructuring. `final_drain_runtime` is the one at risk,
     being a free function.
 
-- **Bet 2 — each silent failure is demonstrable once injectable.** With
-  the seam: an `EPERM` probe drops an entry whose group is still alive;
-  a failed `SIGKILL` leaves `killed = true` and is never retried; and
-  `shutdown()`'s discard does the same at exit.
+- **Bet 2 — each silent consequence is demonstrable once injectable.**
+  With the seam: an `EPERM` probe drops an entry whose group is still
+  alive; a failed `SIGKILL` leaves `killed = true` and is never retried;
+  `shutdown()`'s discard does the same at exit; and a continuously false
+  in-drain probe cancels readers before a live descendant's deliberately
+  late output can arrive.
   - *Falsified if* any of the three turns out to be unreachable in
     practice — for instance if some earlier guard makes the entry
     already absent. **That would be a genuinely good outcome** and would
@@ -307,13 +356,16 @@ noted so a red run on it is not mistaken for this lane's doing.*
 
 ## 4. Acceptance
 
-1. A **directed, multi-outcome** injection seam covering all four sites
-   of §3 Bet 1, on Q#PD4's terms: result only, everything else
-   production code. Consumed on use, asserted empty at teardown.
-2. A test per silent failure, each asserting the observable consequence
+1. A **directed, multi-outcome** injection seam covering the three
+   persistent-ledger paths plus the in-drain probe of §3 Bet 1, on
+   Q#PD4's terms: result only, everything else production code. The
+   in-drain result lasts only for its one production `GroupDrainCtx`.
+   Finite outcomes are consumed on use and asserted empty at teardown.
+2. A test per silent consequence, each asserting the observable consequence
    — entry dropped while the group lives; `killed` set after a failed
    kill; the same at shutdown; readers cancelled after a false "dead" in
-   the drain — rather than that a function was called.
+   the drain and the live descendant's named late output absent — rather
+   than that a function was called.
 3. Each new test falsified by an actual revert, both directions
    recorded in the PR body.
 4. The `shutdown()` coupling of §1.3 pinned by a test, whichever way
@@ -323,8 +375,9 @@ noted so a red run on it is not mistaken for this lane's doing.*
    visible and testable; changing them is §5's.
 6. Q#RL3 answered in the PR body with the channels actually found, or
    an explicit statement that none exists.
-7. `docs/agent-handoff.md` records the three silent paths and that none
-   has been observed — the distinction #200 had to make twice.
+7. `docs/agent-handoff.md` records the three persistent-ledger paths and
+   the in-drain probe twin, and that none has been observed — the
+   distinction #200 had to make twice.
 
 ## 5. Parked
 
