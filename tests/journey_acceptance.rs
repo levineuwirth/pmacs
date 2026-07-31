@@ -1744,6 +1744,301 @@ fn journey_step9_the_compile_directory_is_detection_canonical() {
 }
 
 // ---------------------------------------------------------------------------
+// Step 4 — understand the visible interface (Journey Stage 1b-3)
+//
+// `COHERENCE.md` §18 graded onboarding "missing entirely": no welcome,
+// no cheat sheet reachable from inside the editor, and `M-x` the only
+// door in — which a new user has no way to learn about.
+//
+// These rows drive `prepare_startup`, the production call `run()` makes.
+// Calling `finalize_local_launch` by hand instead would leave the wiring
+// unpinned: deleting the one call inside `prepare_startup` would keep
+// every other assertion here green while shipping no welcome at all.
+// ---------------------------------------------------------------------------
+
+/// The `*scratch*` buffer's text, wherever it currently sits.
+fn scratch_text(s: &EditorState) -> String {
+    eval(
+        s,
+        r#"
+        for _, id in ipairs(pmacs.buffer.list()) do
+            if pmacs.describe.buffer(id).name == "*scratch*" then
+                return id:slice(0, id:len())
+            end
+        end
+        return ""
+        "#,
+    )
+}
+
+fn welcome_entries(s: &EditorState) -> Vec<(String, String)> {
+    let raw: Vec<String> = eval(
+        s,
+        "local out = {}
+         for _, e in ipairs(pmacs.welcome.entries) do
+           out[#out + 1] = e.keys .. '\\1' .. e.label
+         end
+         return out",
+    );
+    raw.into_iter()
+        .map(|row| {
+            let (keys, label) = row
+                .split_once('\u{1}')
+                .expect("entry encodes keys and label");
+            (keys.to_owned(), label.to_owned())
+        })
+        .collect()
+}
+
+/// Drive the production startup path with no target, as `pmacs` does.
+fn start_local() -> EditorState {
+    match pmacs::editor::prepare_startup(None).expect("startup must not fail") {
+        pmacs::editor::Startup::Local(state) => *state,
+        pmacs::editor::Startup::HandOff(_) => panic!("no init.lua attach request in a test"),
+    }
+}
+
+/// **N** — journey step 4: a no-target local launch greets.
+///
+/// Falsified by deleting the `finalize_local_launch` call inside
+/// `prepare_startup` — the mutation every by-hand pin would survive.
+#[test]
+fn journey_step4_a_no_target_launch_greets_in_scratch() {
+    let s = start_local();
+
+    // Preconditions asserted, not assumed (framing §3.2b): a developer
+    // whose real init.lua arms desktop mode would otherwise get a
+    // restored scratch and a silently different result.
+    assert!(
+        eval::<bool>(
+            &s,
+            "return pmacs.session == nil or pmacs.session.desktop_armed ~= true"
+        ),
+        "precondition: desktop restore must be unarmed for this pin to mean anything"
+    );
+    assert_eq!(active_name(&s), "*scratch*");
+
+    let text = active_text(&s);
+    assert!(
+        !text.is_empty(),
+        "an unconfigured launch must say something"
+    );
+    assert!(
+        text.contains("M-x"),
+        "and must name the one key that opens everything; got {text:?}"
+    );
+}
+
+/// **N** — every entry the welcome names is actually bound.
+///
+/// A property over the structured list, not a scrape of prose: `C-c c`
+/// is two chords and nothing in the rendered text marks the boundary.
+#[test]
+fn journey_step4_every_advertised_key_is_bound() {
+    let s = start_local();
+    let entries = welcome_entries(&s);
+    assert!(
+        !entries.is_empty(),
+        "precondition: the entry list must be non-empty or this loop is vacuous"
+    );
+    for (keys, label) in entries {
+        let bound: Option<String> = eval(
+            &s,
+            &format!("local b = pmacs.keymap.lookup({keys:?}) return b and b.command"),
+        );
+        assert!(
+            bound.is_some(),
+            "the welcome advertises {keys:?} ({label}) but nothing is bound to it"
+        );
+    }
+}
+
+/// **N** — the rendered text contains every entry.
+///
+/// Pin 2 alone would pass if rendering silently dropped one.
+#[test]
+fn journey_step4_the_rendered_welcome_contains_every_entry() {
+    let s = start_local();
+    let text = active_text(&s);
+    for (keys, label) in welcome_entries(&s) {
+        assert!(
+            text.contains(&keys),
+            "welcome text omits the key {keys:?}; got {text:?}"
+        );
+        assert!(
+            text.contains(&label),
+            "welcome text omits the label {label:?}; got {text:?}"
+        );
+    }
+}
+
+/// **N** — `M-x help` renders the cheat sheet, reached the way a user
+/// reaches it.
+///
+/// `pmacs.command.invoke` is the *programmatic* API; M-x is
+/// `editor.execute-command`, a minibuffer with the `commands` completion
+/// source that calls `invoke_interactive` only on accept.
+///
+/// The selection is asserted **before** RET: a selected candidate
+/// shadows typed text, and `Minibuffer::accept` does `session.take()`,
+/// so nothing about the accepted value survives afterwards.
+#[test]
+fn journey_step4_m_x_help_renders_the_cheat_sheet() {
+    let mut s = start_local();
+
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char('x'), KeyModifiers::ALT),
+    );
+    assert!(
+        eval::<bool>(&s, "return pmacs.minibuffer.is_active()"),
+        "M-x must open the command palette"
+    );
+    for ch in "help".chars() {
+        type_char(&mut s, ch);
+    }
+    assert_eq!(
+        eval::<Option<String>>(&s, "return pmacs.minibuffer.selected()").as_deref(),
+        Some("help"),
+        "the completion source must have `help` selected; a different \
+         candidate would accept a different command"
+    );
+
+    press(&mut s, KeyCode::Enter);
+    pump(&mut s);
+
+    let help = named_text(&s, "*help*");
+    for (keys, _) in welcome_entries(&s) {
+        assert!(
+            help.contains(&keys),
+            "the cheat sheet omits {keys:?}; got:\n{help}"
+        );
+    }
+}
+
+/// **P** — the greeted buffer is editable and unmodified.
+///
+/// Targeted mutation: rendering through `set_generated_contents`, which
+/// would lift read-only, discard history, and fail the insert.
+#[test]
+fn journey_step4_preservation_the_greeted_scratch_is_editable_and_clean() {
+    let mut s = start_local();
+    assert!(
+        eval::<bool>(
+            &s,
+            "return pmacs.describe.buffer(pmacs.window.buffer()).modified == false"
+        ),
+        "a greeting must not look like unsaved work"
+    );
+
+    let before = active_text(&s).len();
+    type_char(&mut s, 'X');
+    assert!(
+        active_text(&s).len() > before,
+        "step 5 must still work from the first frame: typing inserts"
+    );
+}
+
+/// **P** — a file target does not greet.
+#[test]
+fn journey_step4_preservation_a_file_target_does_not_greet() {
+    let td = project();
+    let path = td.path().join("alpha.txt");
+    let s = match pmacs::editor::prepare_startup(Some(path.clone())).expect("startup") {
+        pmacs::editor::Startup::Local(state) => *state,
+        pmacs::editor::Startup::HandOff(_) => panic!("no attach request"),
+    };
+    assert_eq!(active_name(&s), path.display().to_string());
+    assert_eq!(
+        scratch_text(&s),
+        "",
+        "a positional argument means \"open this\", not \"greet me\""
+    );
+}
+
+/// **P** — a directory target does not greet either, so Stage 1a's
+/// dired listing is what the user sees.
+///
+/// Separate from the file pin because the directory path reaches
+/// `*scratch*` differently: the bootstrap replaces the window's buffer
+/// and `replace_active_buffer` removes nothing, so the scratch buffer
+/// still exists to be wrongly greeted.
+#[test]
+fn journey_step4_preservation_a_directory_target_does_not_greet() {
+    let td = project();
+    let mut s =
+        match pmacs::editor::prepare_startup(Some(td.path().to_path_buf())).expect("startup") {
+            pmacs::editor::Startup::Local(state) => *state,
+            pmacs::editor::Startup::HandOff(_) => panic!("no attach request"),
+        };
+    pump(&mut s);
+    assert!(active_name(&s).starts_with("*dired:"));
+    assert_eq!(scratch_text(&s), "", "the dired listing is the greeting");
+}
+
+/// **P** — a non-empty `*scratch*` is never overwritten.
+#[test]
+fn journey_step4_preservation_existing_scratch_content_survives() {
+    let mut s = EditorState::new();
+    exec(&s, "pmacs.window.buffer():insert(0, 'user content')");
+    s.finalize_local_launch(false);
+    assert_eq!(
+        active_text(&s),
+        "user content",
+        "config or a restored desktop owns whatever is already there"
+    );
+}
+
+/// **P** — a non-active `*scratch*` is not greeted. Stands in for a
+/// desktop restore having put something else in front.
+#[test]
+fn journey_step4_preservation_a_backgrounded_scratch_is_not_greeted() {
+    let td = project();
+    let mut s = EditorState::new();
+    exec(
+        &s,
+        &format!(
+            "pmacs.window.display_file({:?})",
+            td.path().join("alpha.txt").display().to_string()
+        ),
+    );
+    pump(&mut s);
+    s.finalize_local_launch(false);
+    assert_eq!(
+        scratch_text(&s),
+        "",
+        "only the buffer actually greeting the user is written to"
+    );
+}
+
+/// **P** — the constructors greet nothing on their own.
+///
+/// This is what makes the seam the only writer, and would catch a
+/// greeting smuggled back into a constructor — including the daemon's.
+/// Necessary but not sufficient: pin 1 is what proves the seam is
+/// reached in production.
+#[test]
+fn journey_step4_preservation_constructors_never_greet() {
+    let bare = EditorState::new();
+    assert_eq!(scratch_text(&bare), "", "EditorState::new must not greet");
+
+    let td = project();
+    let file = EditorState::open(td.path().join("alpha.txt")).expect("open file");
+    assert_eq!(
+        scratch_text(&file),
+        "",
+        "EditorState::open(file) must not greet"
+    );
+
+    let mut dir = EditorState::open(td.path().to_path_buf()).expect("open dir");
+    pump(&mut dir);
+    assert_eq!(
+        scratch_text(&dir),
+        "",
+        "EditorState::open(dir) must not greet"
+    );
+}
+
 // Step 6 — receive language intelligence (Journey Stage 1b-2)
 //
 // `COHERENCE.md` §2 graded this **Partial**: a preconfigured server that
@@ -1827,5 +2122,73 @@ fn journey_step6_a_missing_language_server_is_reported_not_swallowed() {
         Some("LSP:!"),
         "and the modeline says so, rather than rendering nothing — which \
          is what made highlighting able to mask this"
+    );
+}
+
+/// **N** — the greeting renders as separate rows on the **first frame**.
+///
+/// Writing to the registry without `notify_buffer_edit` leaves the
+/// window's `TextView` indexed against the empty `*scratch*` it was
+/// built for. Newlines are zero-width to a painter working from a stale
+/// line index, so the whole three-line greeting collapses onto row 0 —
+/// visible to a user, invisible to every buffer-text assertion above.
+///
+/// Falsified by dropping the `notify_buffer_edit` call in
+/// `finalize_local_launch`.
+#[test]
+fn journey_step4_the_welcome_paints_as_multiple_rows_on_the_first_frame() {
+    use pmacs::cell::{Cell, CellGrid, CellSize, Glyph};
+
+    let s = start_local();
+    let (rows, cols) = (12u32, 100u32);
+    let mut cells = vec![Cell::default(); (rows * cols) as usize];
+    let mut grid = CellGrid {
+        cells: &mut cells,
+        stride: cols,
+        size: CellSize::new(rows, cols),
+    };
+    let _ = pmacs::editor::paint_frame(
+        &s,
+        FrontendId::LOCAL,
+        &std::collections::HashMap::new(),
+        &mut grid,
+        CellSize::new(rows, cols),
+    );
+
+    let row_text = |row: u32| -> String {
+        (0..cols)
+            .map(
+                |column| match &cells[(row * cols + column) as usize].glyph {
+                    Glyph::Char(ch) => *ch,
+                    Glyph::Cluster(bytes) => std::str::from_utf8(bytes)
+                        .ok()
+                        .and_then(|t| t.chars().next())
+                        .unwrap_or(' '),
+                    Glyph::Continuation => ' ',
+                },
+            )
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    };
+
+    assert!(
+        row_text(0).contains("Welcome to pmacs"),
+        "row 0 is the greeting's first line; got {:?}",
+        row_text(0)
+    );
+    // The discriminating half: with a stale TextView these land on row 0
+    // too, and row 1 is blank.
+    assert!(
+        row_text(1).contains("C-x C-f"),
+        "the second line must occupy its own row, not collapse into the \
+         first; row 1 = {:?}, row 0 = {:?}",
+        row_text(1),
+        row_text(0)
+    );
+    assert!(
+        !row_text(0).contains("C-x C-f"),
+        "and must not have been folded into row 0; got {:?}",
+        row_text(0)
     );
 }

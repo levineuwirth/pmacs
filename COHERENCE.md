@@ -95,7 +95,7 @@ remain open to them.
 
 | § | Concern | Grade | One-line state |
 |---|---|---|---|
-| 2 | Golden product journey | **Runs to step 5** | `pmacs .` opens the directory (Journey Stage 1a); thin from step 6 on |
+| 2 | Golden product journey | **Runs to step 10** | `pmacs .` opens the directory (1a); the interface introduces itself (1b-3); a missing language server says so (1b-2, #204); a build is bound and prefilled (1b-1, #203). Steps 1, 11 and 12 remain the thin end |
 | 3 | Zero-configuration state | **Partial** | Defaults genuinely strong; missing-tool failure is silent, not graceful |
 | 4 | Progressive disclosure | **Inverted** | The advanced level is real; the beginner level is the missing one |
 | 5 | Unified discoverability | **Substrate without surface** | Best-in-class registration metadata; almost no way for a user to reach it |
@@ -111,8 +111,8 @@ remain open to them.
 | 15 | Contextual affordances | **Weak** | Right-click menu only; code actions apply first-blindly; no git integration at all |
 | 16 | Semantic frontend | **Strong** | v6..=v21 schema support; production attach remains v20 during the dark panel slice; degradation practiced |
 | 17 | Distribution | **Missing** | CI is test-only; no binaries, channels, checksums, or update path |
-| 18 | Onboarding | **Missing** | No welcome, no tutorial; `C-h` deletes a word; `M-x` is the only door in |
-| 19 | Coherence acceptance tests | **Started** | `tests/journey_acceptance.rs` exists (steps 2, 3, 5); the other five scenarios are still unwritten |
+| 18 | Onboarding | **Partial** | Journey Stage 1b-3: an unconfigured launch greets in `*scratch*` naming `M-x` and four real bindings, and `M-x help` renders a cheat sheet. Still no tutorial and `C-h` still deletes a word — deliberately, see §18 |
+| 19 | Coherence acceptance tests | **Started** | `tests/journey_acceptance.rs` carries 45 pins over steps 2, 3, 4, 5, 6 and 9 — the ratchet is real and stages add rows to it. The other five §19 scenarios (workspace lifecycle, worker ownership, config provenance, package lifecycle, extension isolation) are still unwritten |
 
 Three cross-cutting patterns explain most of the table; they are
 detailed in §1.1–§1.3: **substrate without surface**, **the silence
@@ -392,9 +392,9 @@ Full verdict table:
 | 1 | Install | **Partial** | Source build only: `cargo build --release --workspace --features pmacs/crdt` (`README.md`). No binaries, no packaging. Runtime deps (`/bin/sh`, git, tar, coreutils) documented, never checked at runtime |
 | 2 | Launch unconfigured | **Works** | `EditorState::new()` → empty `*scratch*`; missing config is not an error (`src/config.rs:7-9`); recentf/saveplace/autosave default-on |
 | 3 | Open real project | **Works at the CLI** | Journey Stage 1a: `resolve_target_buffer` answers `ResolvedTarget::Directory` before the EISDIR-producing load, and `EditorState::open` / the daemon bootstrap dispatch the `path.open-directory` chain, whose fallback is dired (#165's buffer, reached rather than duplicated). Startup no longer fails: an unreadable directory, a crashed resolver, and a cleared handler all report on the status line and leave the session running. Because the listing is async and the bootstrap is synchronous, the commit runs against a destination captured at request time (`pmacs.window.commit_to`) rather than against the ambient frontend |
-| 4 | Understand interface | **Partial** | Mode line gives name/modified/L:C/scroll + mode/LSP/terminal segments; but no welcome text (`EditorCore::new` sets `status: String::new()`), no cheat sheet, and `C-h` deletes a word (§18) |
+| 4 | Understand interface | **Partial** | Mode line gives name/modified/L:C/scroll + mode/LSP/terminal segments. Journey Stage 1b-3 adds a welcome in `*scratch*` and `M-x help`; **still Partial** because `C-h` deletes a word (deliberately — §18) and there is no tutorial |
 | 5 | Edit | **Works** | Full CUA + Emacs keymap in 161 lines (`builtin/keymaps/default.lua`); isearch, query-replace, kill ring, undo/redo, auto-indent/pair/comment, atomic save. Genuinely excellent zero-config |
-| 6 | Language intelligence | **Partial** | Rust grammar bundled and auto-attaches; rust-analyzer preconfigured (`builtin/runtime/lsp.lua`). **Journey Stage 1b-2 (PR open) ends the silence** for a server that fails to *start*: the status line names the command, language and errno once per `(language, root, command)`; the modeline reads `LSP:!` instead of nothing; and `M-x lsp.status` renders `*lsp*` over the `status_buffer_text()` renderer that had existed since M4.8 with no caller. **Still Partial**, and flips only on merge (§25): a server that starts and then *crashes* is still unsurfaced |
+| 6 | Language intelligence | **Partial** | Rust grammar bundled and auto-attaches; rust-analyzer preconfigured (`builtin/runtime/lsp.lua`). **Journey Stage 1b-2 (#204) ended the silence** for a server that fails to *start*: the status line names the command, language and errno once per `(language, root, command)`; the modeline reads `LSP:!` instead of nothing; and `M-x lsp.status` renders `*lsp*` over the `status_buffer_text()` renderer that had existed since M4.8 with no caller. **Still Partial**, for a reason unaffected by that landing: a server that starts and then *crashes* is still unsurfaced — `LspEventKind::Crashed` is pushed and no builtin subscriber handles it |
 | 7 | Find symbol / file | **File: fixed (open by path merged #162; browsing #165). Symbol: works but undiscoverable** | No find-file/dired/picker existed at audit. Now `C-x C-f` opens a known path and `C-x d` / `C-x C-j` browse (flat listing, `dired` mode keymap); `M-.`/`M-?`/`C-c o` still bound but advertised nowhere and server-gated; no workspace-symbol command; `pmacs.index.*` has no UI |
 | 8 | Open terminal | **Works** | Full PTY with scrollback + modeline segment, bound to `C-c t` and configurable through three registered settings (`terminal.default-profile`, `terminal.scrollback-rows`, `terminal.escape-key`) plus named `pmacs.terminal.profiles` (PR #173), and searchable through `M-x terminal.copy-mode` / `C-c C-t`, which materializes the retained scrollback into an ordinary read-only buffer (Stage 2). Named limitations: `C-c t` is unreachable from *inside* a terminal window, where `C-c` is consumed as the escape — `M-x terminal` still works there; and there is still **no close/kill command**, which is the remaining half of this step's discoverability gap. *Was broken outright on the GPU frontend until the double terminal-layout sync was fixed: the child took a `SIGWINCH` storm at tick cadence, so typing into it was impossible while output still flowed.* |
 | 9 | Build / test | **Works** | Journey Stage 1b-1 (#203): `C-c c` runs `compile.run`, and the first prompt is prefilled from the detected project kind (`pmacs.compile.defaults`, seeded `rust = "cargo build"`, extensible from `init.lua`) via `ProjectKind::Rust` — **not** `Cargo`, see §24. The prompt **captures** its directory rather than re-resolving at accept time, so the command it offers and the directory it runs in cannot drift while the minibuffer waits. Still defaults cwd to the detected project root and parses Rust `-->` errors. Named limitation: after `pmacs <dir>` the active buffer is dired's and pathless, so the cwd falls back to the process cwd — §8's execution-location model owns that, and the degradation stays coherent (no suggestion is offered for a directory with no detected Cargo project) |
@@ -1482,16 +1482,26 @@ restartable help workspace, not a one-time modal wizard.
 
 ### Ground truth
 
-**Grade: missing entirely.**
+**Grade: partial — the cheap floor's first two items landed with Journey
+Stage 1b-3.**
 
-No welcome buffer, no tutorial, no first-run detection, no cheat sheet
-reachable from inside the editor (`docs/keybindings.md` exists on disk
-only). `C-h` is `buffer.delete-word-backward`; there is no help prefix
-key and no `F1`. The sole discovery affordance is knowing to press
-`M-x` (`builtin/keymaps/default.lua:141` — whose own header comment
-calls it the "command palette"). The empty `*scratch*` buffer that
-greets a new user says nothing (`EditorCore::new` sets an empty
-status).
+An unconfigured launch now greets in `*scratch*` naming `M-x` and four
+real bindings, and `M-x help` renders a cheat sheet through the existing
+`*help*` mechanism. The greeting happens in a launch-finalization seam
+(`prepare_startup` → `EditorState::finalize_local_launch`) that runs
+after config, after attach dispatch resolves to local, and after desktop
+restore — no constructor is the right hook, because `EditorState::open`
+calls `new` before resolving its target and the daemon constructs one
+too.
+
+Still missing: no tutorial, no first-run detection, and **`C-h` still
+deletes a word — deliberately.** It is bound to
+`buffer.delete-word-backward` because non-kitty terminals cannot
+disambiguate Ctrl+Backspace from Ctrl+H (both produce byte 0x08,
+`builtin/keymaps/default.lua:78-86`), so rebinding it to a help prefix
+would break Ctrl+Backspace on every legacy terminal. The help-prefix
+question is a real trade for §20 Priority 4's discovery arc to weigh
+across the whole command family, not an oversight.
 
 Note the dependency: five of the ten onboarding steps above currently
 lead somewhere broken or invisible (find a file — the mechanism is fixed
@@ -1500,7 +1510,9 @@ diagnostic — silent-failure risk; view workers — undiscoverable;
 setting provenance — unanswerable). Onboarding is correctly sequenced
 *after* the P1/P4 fixes, but the cheap floor — a welcome buffer in
 `*scratch*` naming `M-x`, the keybinding cheat sheet as a help buffer,
-and a help prefix decision — has no prerequisites at all.
+and a help prefix decision — had no prerequisites at all. **The first
+two are done** (Stage 1b-3); the third is deferred with its reason
+recorded above.
 
 ---
 
@@ -1563,19 +1575,20 @@ Establish the end-to-end workflow; treat regressions as release
 blockers. **State: runs to step 5; thin from step 6 (§2). Mostly wiring,
 and unusually cheap:** directory-argument handling (**done**: Journey
 Stage 1a); a find-file surface (**done**: #162 open-by-path, #165
-browsing); surfacing the LSP spawn failure with guidance (**in flight**:
-Journey Stage 1b-2, §1.2); a compile keybinding + `cargo build`/`test`
-default (**done**: Journey Stage 1b-1, #203, from the existing
+browsing); surfacing the LSP spawn failure with guidance (**done**: Journey Stage
+1b-2, #204, §1.2); a compile keybinding + `cargo build`/`test` default
+(**done**: Journey Stage 1b-1, #203, from the existing
 `ProjectKind::Rust` — **not** `Cargo`, see §24); a terminal keybinding
-(**done**: `C-c t`, #173); a welcome buffer. The journey acceptance
+(**done**: `C-c t`, #173); a welcome buffer (**in flight**: Journey
+Stage 1b-3). The journey acceptance
 suite (§19) is the ratchet that keeps it fixed — it **exists now**
 (`tests/journey_acceptance.rs`, Stage 1a), seeded with steps 2, 3 and 5,
 and carrying step 9 since #203.
 
-Journey Stage 1b is the named remainder, and it splits: **1b-1 — the
-compile binding + project-kind defaults — landed as #203**; **1b-2**
-(LSP spawn guidance, step 6) is in flight; **1b-3**, the welcome buffer
-(step 4), remains.
+Journey Stage 1b is the named remainder, and it splits: **1b-1** (the
+compile binding + project-kind defaults) landed as #203 and **1b-2**
+(LSP spawn guidance, step 6) as #204; **1b-3**, the welcome buffer
+(step 4), is in flight and completes the split.
 
 ### Priority 2: Make workspace and location explicit
 
@@ -1648,8 +1661,9 @@ implementation — this list is direction, not commitment):
    #165's dired buffer rather than growing a second directory surface.
    **Stage 1b-1 — landed (#203)**: the compile binding and project-kind
    defaults, with the prompt capturing its directory rather than
-   re-resolving it at accept time. **Stage 1b-2 — in flight**:
-   LSP-failure surfacing. **Stage 1b-3 — remaining**: welcome buffer.
+   re-resolving it at accept time. **Stage 1b-2 — landed (#204)**:
+   LSP-failure surfacing. **Stage 1b-3 — in flight**: the welcome
+   buffer and `M-x help`. With it the 1b split is complete.
 2. **Discovery surface** (P4): the describe/list/where-is command
    family, M-x rich rows, help unification, help prefix.
 3. **Transient keymap layer** (§6): the overlay scope + lifetime

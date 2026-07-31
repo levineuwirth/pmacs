@@ -300,12 +300,45 @@ commands, read `docs/active-work.md` immediately after this file.
     disagree — and it still establishes no identity, because it is read
     inside the same read-then-act window and no portable mechanism closes
     that for a *group* (`pidfd` covers a process; macOS has neither).
-- **Journey arc (P1) — Stage 1b-2 IMPLEMENTED, PR open**
+- **Journey arc (P1) — Stage 1b-3 IMPLEMENTED, PR open**
+  (`docs/journey-stage1b3-welcome-framing.md`, rev 4, three review
+  rounds). The last of the 1b split. An unconfigured launch greets in
+  `*scratch*`; `M-x help` renders a cheat sheet. **§18 and the scorecard
+  move Missing → Partial**; §2's step-4 row stays Partial.
+  - **No constructor is the startup hook.** `EditorState::open` calls
+    `new` *before* resolving its target, the daemon constructs one too,
+    `init.lua` runs inside `new`, and desktop restore happens later
+    still. `run()`'s terminal-free prefix is now `prepare_startup`, and
+    the greeting is its last step.
+  - **Extraction is what makes wiring testable.** With the seam called
+    by hand from tests, deleting the production call left every
+    assertion green while shipping no welcome — the "guard with no
+    production caller" shape. `prepare_startup` is `pub` because the
+    journey suite is a separate crate and the rest of the sequence
+    (`run`, `new`, `open`, `install_state_dirs`,
+    `restore_desktop_if_armed`) is already public.
+  - **`C-h` is not free**, and §2's step-4 row used to imply it was: it
+    deletes a word because non-kitty terminals cannot disambiguate
+    Ctrl+Backspace from Ctrl+H (both byte 0x08). Rebinding it to a help
+    prefix breaks Ctrl+Backspace on every legacy terminal. Deferred to
+    the discovery arc **with the reason recorded**.
+  - **Deliberately NOT `set_generated_contents`** — it would lift
+    read-only, discard history and mark the buffer generated, all wrong
+    for a buffer step 5 requires the user to type into immediately. The
+    one place not adopting that invariant is correct.
+  - **`pmacs.command.invoke` is not the M-x path.** M-x is
+    `editor.execute-command`, a minibuffer with the `commands`
+    completion source calling `invoke_interactive` on accept — and
+    because a selected candidate shadows typed text while `accept()`
+    does `session.take()`, the pin asserts
+    `pmacs.minibuffer.selected() == "help"` **before** RET.
+- **Journey arc (P1) — Stage 1b-2 LANDED (#204)**
   (`docs/journey-stage1b2-lsp-guidance-framing.md`, rev 4, three review
   rounds). `COHERENCE.md` §1.2's canonical silence: a preconfigured
   language server that is not installed now reports with guidance, marks
-  the modeline `LSP:!`, and appears in `M-x lsp.status`. Per §25 the
-  step-6 grade flips only on merge.
+  the modeline `LSP:!`, and appears in `M-x lsp.status`. §2's step-6 row
+  **stays Partial** for a reason that landing did not touch: a server
+  that starts and then *crashes* is still unsurfaced.
   - **`status_buffer_text()` had existed since M4.8, exposed to Lua and
     tested, with no production caller and no `*lsp*` buffer** — several
     `src/lsp.rs` and `src/project.rs` doc comments referred to that

@@ -255,72 +255,129 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
-## Journey lane (P1) — 1a and 1b-1 MERGED; 1b-2 PR OPEN; 1b-3 REMAINS
+## Journey lane (P1) — 1a, 1b-1, 1b-2 MERGED; 1b-3 PR #205 OPEN
 
-**Rewritten, not removed, at #203's merge.** Rule 4 removes a lane when
-its ARC is done; the journey arc is not — 1b-2 is in flight and 1b-3 is
-unframed. Stage 1a (#182/#183) and Stage 1b-1 (#203) are on `main` and
-their durable facts are in `docs/agent-handoff.md` §1, which is rule 4's
-precondition satisfied rather than deferred.
+**Rewritten, not removed.** Rule 4 removes a lane when its ARC is done;
+the journey arc is not — 1b-3 is the last stage of the 1b split and is
+still open. Stages 1a (#182/#183), 1b-1 (#203) and **1b-2 (#204)** are
+all on `main` and their durable facts are in `docs/agent-handoff.md` §1,
+which is rule 4's precondition satisfied rather than deferred — so their
+per-stage blocks are gone from here rather than left to rot as
+"PR OPEN".
 
-**#203's merge obligation is DISCHARGED**: `COHERENCE.md` §2's step-9
-row now reads **Works**, §2's keybinding-inversion paragraph records all
-three examples answered (the quote itself deliberately unchanged), §20
-Priority 1 and its arc list say "landed", and the handoff bullet says
-LANDED. That flip rides *this* branch rather than a standalone docs PR,
-because #204 already touches all three files and a separate PR would
-re-conflict on every merge.
+**#203's merge obligation is DISCHARGED** on this branch: `COHERENCE.md`
+§2's step-9 row reads **Works**, §2's keybinding-inversion paragraph
+records all three examples answered (the quote itself deliberately
+unchanged), §20 Priority 1 and its arc list say "landed", and the
+handoff bullet says LANDED. **#204's is discharged too**: §2's step-6
+row names it as landed and stays **Partial** for a reason that landing
+did not touch — a server that starts and then *crashes* is still
+unsurfaced. Both rode this branch rather than standalone docs PRs,
+which would have re-conflicted on every merge.
 
-- **Branch `journey-stage1b2-lsp-guidance`**, worktree
-  `../pmacs-journey-1b2`, based on `githubsucks/main` @ `fbcf235`,
-  **integrated with `main` @ `1f290d5` (#203)**.
-  `docs/journey-stage1b2-lsp-guidance-framing.md` revision 4, three
-  review rounds closed (round 1: two blocking, three major, one minor;
-  round 2: two blocking, two cleanups; round 3: one blocking; all
-  accepted). **Implemented; PR #204 open.**
-- **What it is.** `COHERENCE.md` §1.2's canonical silence, journey step
-  6: a preconfigured-but-missing language server now reports with
-  guidance, marks the modeline `LSP:!`, and appears in `M-x lsp.status`.
-- **Half of it was already built and unwired.**
-  `LspManager::status_buffer_text()` and `last_error()` have existed
-  since M4.8, exposed to Lua and tested, with **no production caller**
-  and no `*lsp*` buffer, while several `src/lsp.rs` and `src/project.rs`
-  doc comments refer to that buffer as though it existed.
-- **The reporting shape was already adopted twice in `lsp.lua` itself**
-  (root resolvers, notification subscribers). The canonical case was
-  silent because nobody had converted it — this finishes an adoption.
-- **`COHERENCE.md` §1.2's frequency note was wrong, and it decided the
-  design.** `LspManager::spawn` returns early *before* both
-  `status_tracker.ensure` and `clients.insert`, so a failed spawn leaves
-  **no record**, `pmacs.lsp.list()` cannot see it, and the affinity loop
-  re-spawns: the real rate is **once per file open**, not once per
-  project root. Hence **memoize the report, not the failure**.
-- **The affinity key is `(language, key_uri)`, and `key_uri` is nil for
-  markerless files**, which deliberately share one server per language.
-  Lua cannot index by nil (`t[nil]` raises), so one encoding function
-  serves both tables with a `u`/`n` discriminator no URI can collide
-  with.
-- **Three tables, three lifetimes**, plus a buffer-keyed projection for
-  the modeline — that provider runs for every window on every paint, so
-  deriving an affinity key inside it would invoke user root resolvers
-  during painting. **A success sweeps every projection sharing the key**,
-  and the projection has its own `pmacs.buffer.on_removed` teardown
-  because nothing existing reaches it (`attachments_under` iterates
-  `attachments`, and a failed buffer has none by construction).
-- **ON MERGE of #204, flip the step-6 grade.** §2's step-6 row stays
-  **Partial** while the PR is open, per §25's landed-evidence rule, and
-  says so in the row.
-- **Stage 1b-3 (welcome buffer, step 4) is unframed** — the last of the
-  1b split.
-- Recovery from a clean checkout — **the two-argument form does not
-  work** (`git worktree add <path> <remote-only-branch>` fails with
-  `fatal: invalid reference`):
+### Stage 1b-3 — IMPLEMENTED, PR #205 open
+
+- **Branch `journey-stage1b3-welcome`**, worktree `../pmacs-journey-1b3`,
+  based on `githubsucks/main` @ `1f290d5`, **integrated with `main` @
+  `5376af1`** (#204). **Implemented; PR #205 open.**
+  `docs/journey-stage1b3-welcome-framing.md` revision 4, three
+  review rounds closed (round 1: four findings; round 2: two acceptance
+  holes plus a doc correction; round 3: a visibility mismatch and an
+  unobservable assertion; all accepted). The last of the 1b split
+  (1b-1 landed #203, 1b-2 landed #204 at `5376af1`).
+- **What it is.** Journey step 4 / `COHERENCE.md` §18: a fresh `pmacs`
+  greets the user with an empty buffer, an empty status line, and no
+  indication that `M-x` exists. The stage renders a three-line welcome
+  into `*scratch*` and adds a minimal `M-x help`.
+- **`EditorState::new()` is NOT the no-argument entry point**, and
+  revision 1 rested every criterion on the assumption that it was.
+  `EditorState::open` calls it *before* resolving the target
+  (`src/editor.rs:944`), the daemon constructs one too, user config runs
+  *inside* it, and desktop restore happens much later
+  (`restore_desktop_if_armed`, `:3637`, inside `run()`'s `RunLocal`
+  arm). The stage now adds a **launch-finalization seam** called right
+  after desktop restore, with `had_file` — already threaded to that
+  point for the same kind of question — as the no-target signal.
+  **Round 2 closed the wiring hole rather than disclaiming it.**
+  Revision 2 called `run()`'s call to the seam an untestable residual —
+  but deleting that one line left every proposed pin green while
+  shipping no welcome, because the pins called the seam by hand. The
+  terminal-free prefix of `run()` (everything before `Frontend::new()`)
+  is now extracted into `prepare_startup`, which `run()` delegates to
+  and the pins drive. It is **`pub`**, not `pub(crate)`: the journey
+  suite is a separate integration crate and cannot reach crate-private
+  items, and `run`/`new`/`open`/`install_state_dirs`/
+  `restore_desktop_if_armed` are already public, so this completes that
+  surface rather than widening it for a test. The pin must assert
+  desktop restore was **unarmed** (an ambient `init.lua` calling
+  `desktop_mode(true)` would otherwise change the result) and must
+  assert buffer content only, since `install_state_dirs` resolves real
+  XDG/`PMACS_STATE_HOME` roots that tests cannot override
+  (`set_var` is unsafe and forbidden).
+- **The step-2 pin is NOT amended.** Revision 1 analysed a status-line
+  welcome and then chose `*scratch*`, but kept the amendment — an
+  internal contradiction. The status stays empty, so the pin stays true,
+  and "no error text" has no defined predicate over an unstructured
+  status string anyway.
+- **`C-h` is NOT free, and the reason is load-bearing.** It is bound to
+  `buffer.delete-word-backward` because non-kitty terminals cannot
+  disambiguate Ctrl+Backspace from Ctrl+H — both produce byte 0x08
+  (`builtin/keymaps/default.lua:78-86`). Rebinding it to a help prefix
+  would break Ctrl+Backspace on every legacy terminal, so §2's step-4
+  row calling it an oversight is wrong: it is a deliberate trade. The
+  help-prefix decision is deferred to §20 Priority 4's discovery arc
+  with the constraint recorded.
+- **`*help*` already exists** (`builtin/commands/default.lua:1226`,
+  `show_help_text`, reused buffer, buffer-local `q`), used by
+  `editor.describe-command` / `-setting`, over `src/help.rs`'s
+  renderers and link resolution. Two gaps recorded rather than
+  inherited silently: it writes with `buf:delete`/`buf:insert` instead
+  of `set_generated_contents`, and it is **found by name**, so a
+  foreign `*help*` would be cleared.
+- **Deliberately NOT `set_generated_contents` for the welcome** — that
+  lifts read-only, discards history and marks the buffer generated, all
+  wrong for a buffer step 5 requires the user to type into immediately.
+  The one place not adopting that invariant is correct, stated so a
+  later audit does not "fix" it.
+- **Step 4 stays Partial, but there IS a §25 obligation** — revision 1
+  claimed there was none. The scorecard's row 18 and §18's ground truth
+  both read **Missing**, and both become false on merge: they move to
+  **Partial**. A stage can be too small to flip its journey step while
+  still falsifying a "missing entirely" grade.
+- **The welcome renders from a structured entry list**, not from scraped
+  prose: `M-x help` mixes a chord with a command name and `C-c c` is two
+  chords whose boundary prose does not mark, so the binding checks run
+  `pmacs.keymap.lookup` over the same list that renders the text.
+- **`pmacs.command.invoke` is NOT the M-x path** — it is the
+  programmatic API. M-x is `editor.execute-command`, a minibuffer with
+  the `commands` completion source that calls `invoke_interactive` on
+  accept. The `M-x help` pin dispatches the chord, enters the name and
+  accepts — and asserts **`pmacs.minibuffer.selected() == "help"`
+  BEFORE RET**, because a selected candidate shadows typed text (dired
+  refused a completion source for exactly this reason) and `accept()`
+  does `session.take()`, so nothing about the accepted value survives
+  afterwards.
+- **Integrated with `main` @ `5376af1`** (#204). The journey suite's
+  conflict was additive on both sides — step 4 (this lane) and step 6
+  (#204) — and both are kept: **44 pins, covering steps 2, 3, 4, 5, 6
+  and 9**.
+- **§18 and the scorecard move Missing → Partial ON THIS PR**, per §25;
+  §2's step-4 row stays Partial because `C-h` and the tutorial remain.
+  No deferred flip is owed at merge — unlike 1b-1's.
+- **Bites, all directed.** Deleting the production `run()` wiring fails
+  the two greeting pins — **the mutation revision 2's design would have
+  survived entirely**. Removing `mark_clean` fails the editable/clean
+  pin; the `had_file` guard fails the directory pin (not the file pin,
+  because a file buffer is active by then while the dired listing is
+  async); the emptiness guard fails the existing-content pin; the
+  active-buffer requirement fails the backgrounded pin; and advertising
+  an unbound key fails the binding pin.
 
   ```sh
   git fetch githubsucks
-  git worktree add ../pmacs-journey-1b2 \
-    -b journey-stage1b2-lsp-guidance \
-    githubsucks/journey-stage1b2-lsp-guidance
+  git worktree add ../pmacs-journey-1b3 \
+    -b journey-stage1b3-welcome \
+    githubsucks/journey-stage1b3-welcome
   ```
 
 ## Generated-buffer immutability lane (Arc: workbench primitives) — STAGE 1 MERGED; STAGE 2 IS NEXT
@@ -403,7 +460,7 @@ compatible.
     githubsucks/test-ambient-config-isolation
   ```
 
-## Reap-ledger silent failures — IMPLEMENTED, PR OPEN
+## Reap-ledger silent failures — MERGED (#202); kept for its parked follow-ons
 
 - **Branch `reap-ledger-silent-failures`**, worktree
   `../pmacs-reap-ledger`, based on `githubsucks/main` @ `22df6ab`.
