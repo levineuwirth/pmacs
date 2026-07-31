@@ -1,11 +1,44 @@
 # Journey Stage 1b-3 — say something when the editor opens
 
-**Status: framing, rev 1 — awaiting approval.**
+**Status: framing, rev 2 — awaiting review round 2.**
 **Serves `COHERENCE.md` §2 (the golden journey, step 4), §18
 (onboarding), §19, §20 Priority 1.**
 
 ## 0. Revision history
 
+- rev 2 (2026-07-31) — review round 1. Four findings, all accepted, all
+  verified in the tree first. §7's three questions are answered and
+  folded into the design.
+  - **The startup seam was wrong.** `EditorState::new()` is not the
+    no-argument entry point: `EditorState::open` calls it
+    (`src/editor.rs:944`) *before* handling the file or directory, the
+    daemon constructs it too, user config runs *inside* it, and desktop
+    restore happens later still (`:3637`). Greeting from `new()` would
+    greet a daemon, greet before a file argument replaced the buffer,
+    and run before config or restore could put anything in `*scratch*`.
+    §3.2 now defines a **launch-finalization seam** that runs after
+    config, after attach dispatch resolves to local, and after desktop
+    restore — and §4 pins the three paths that must *not* greet.
+  - **The status-pin amendment was unnecessary and weakened a stronger
+    ratchet.** Rev 1 analysed a status-line welcome in §2.2 and then
+    chose `*scratch*` in §3.2, but kept the amendment — an internal
+    contradiction. With the chosen design
+    `journey_step2_launches_unconfigured_into_scratch` stays correct as
+    written, and "no error text" has no defined predicate over an
+    unstructured status string anyway. **The pin is untouched**; the
+    welcome gets its own row.
+  - **"No §25 landed-evidence obligation" was false.** The scorecard
+    row 18 reads **Missing** and §18's ground truth says "missing
+    entirely" — both are audited claims that a landed welcome plus
+    interactive help changes. §6 now records the obligation: §18 and the
+    scorecard move **Missing → Partial** on merge, while §2's step-4 row
+    stays Partial.
+  - **Acceptance 2 could not be implemented as written.** "Parse the key
+    sequences out of the rendered text" is ambiguous: `M-x help` mixes a
+    chord with a command name, and multi-chord sequences like `C-c c`
+    cannot be scraped unambiguously from prose. §3.1 now specifies a
+    **structured entry list** that both renders the text and drives the
+    binding checks.
 - rev 1 (2026-07-30) — first framing. Scouted against `githubsucks/main`
   @ `1f290d5` (Journey Stage 1b-1, #203).
 
@@ -40,32 +73,59 @@ no indication that `M-x` exists.
 "command palette" — the sole discovery affordance in the product is
 knowing to press it.
 
-### 2.2 The step-2 ratchet pin will collide with any status-line welcome
+### 2.2 `EditorState::new()` is not the no-argument entry point
 
-This is the finding that most shapes the design.
-`tests/journey_acceptance.rs`:
+Rev 1 assumed it was, and every acceptance criterion rested on that.
+It is wrong four ways, all in `src/editor.rs`:
+
+- **`EditorState::open` calls it first** (`:944`), *then* resolves the
+  target. So a greeting inside `new()` fires before the file or
+  directory is handled, and the `*scratch*` buffer survives that
+  handling — `replace_active_buffer` reassigns the window's buffer and
+  removes nothing.
+- **The daemon constructs one too**, so a greeting there is written into
+  a session no human is looking at.
+- **User `init.lua` runs inside `new()`**, so a greeting written there
+  precedes anything config might put in `*scratch*`.
+- **Desktop restore happens much later** — `restore_desktop_if_armed`
+  at `:3637`, inside the `RunLocal` arm of `run()`, after
+  `install_state_dirs` and after attach dispatch. A restored session can
+  populate `*scratch*`, and a greeting from `new()` would already have
+  written into it.
+
+`run()`'s shape is what defines the correct seam:
 
 ```rust
-fn journey_step2_launches_unconfigured_into_scratch() {
-    let s = EditorState::new();
-    assert_eq!(active_name(&s), "*scratch*");
-    assert!(
-        status(&s).is_empty(),
-        "a clean launch reports no error; got {:?}", status(&s)
-    );
-}
+let mut state = match target {
+    Some(path) => EditorState::open(path)?,   // config runs inside
+    None       => EditorState::new(),         // …and here
+};
+state.install_state_dirs();
+let requested = state.lua_host.take_requested_attach();
+match dispatch_attach(requested) {
+    RunLocal => {
+        state.restore_desktop_if_armed(had_file);   // :3637
+        // ← the only correct place to greet
 ```
 
-The assertion's *message* says "reports no error"; the assertion itself
-says **the status is empty**. Those are the same predicate only while
-nothing ever writes a non-error status at startup — which is exactly
-what a welcome would do.
+Note `had_file` is already threaded to exactly this point for exactly
+this kind of question ("a positional argument means *open this*, not
+*restore my desktop*"), so the no-target signal does not need inventing.
 
-So a status-line welcome does not merely need a new row, it needs that
-existing pin's predicate corrected to what its own message already
-claims. §4 treats that as a deliberate, named amendment rather than a
-silent edit, because the ratchet's rule is *stages add rows, none
-removes them* and an assertion change deserves the same scrutiny.
+### 2.2a The step-2 pin stays as it is
+
+Rev 1 proposed amending
+`journey_step2_launches_unconfigured_into_scratch`'s
+`assert!(status(&s).is_empty())`. **That was left over from a
+status-line design rev 1 then rejected**, and keeping both was an
+internal contradiction.
+
+The welcome goes into `*scratch*` (§3.2), so the status line stays empty
+and the pin stays true as written. It is also the stronger assertion:
+"no *error* text" has no defined predicate over an unstructured status
+string, so replacing an exact check with a fuzzy one would weaken the
+ratchet to buy nothing. **The pin is untouched**; the welcome gets its
+own row (§4).
 
 ### 2.3 `C-h` is not free, and the reason is load-bearing
 
@@ -121,21 +181,52 @@ otherwise be assumed in either direction.
 
 ## 3. Design
 
-### 3.1 What the welcome says
+### 3.1 What the welcome says, and the shape it is built from
 
-Three lines, no more. The floor is "this editor is not inert and here is
-the one key that opens everything":
+**Three lines** (Q#W1), naming `C-c c` and `C-c t` (Q#W2):
 
 ```
-Welcome to pmacs.   M-x  run a command      C-x C-f  open a file
-                    C-c c  build            C-c t    terminal
-This buffer is *scratch* — type to edit it, or M-x help for more.
+Welcome to pmacs.  M-x runs any command; M-x help lists the keys.
+  C-x C-f  open a file      C-c t  terminal
+  C-c c    build            C-x b  switch buffer
 ```
 
-Every key named must be **bound in the default keymap and verified by
-the acceptance suite**, or the welcome becomes documentation drift with
-a user attached. §4 pins that as a property over the message, not a
-hardcoded list.
+**The text is rendered from a structured list, never scraped back out
+of it.** Rev 1 said the acceptance would "parse the key sequences out of
+the rendered text"; that cannot be implemented reliably — `M-x help`
+puts a chord and a command name in one phrase, and `C-c c` is two chords
+whose boundary prose does not mark.
+
+One list is the single source for both the rendering and the checks:
+
+```lua
+-- Each entry is { keys = "<sequence>", label = "<what it does>" }.
+-- `keys` is EXACTLY what `pmacs.keymap.lookup` accepts, so a binding
+-- check is a lookup, not a guess about where a chord ends.
+pmacs.welcome.entries = {
+  { keys = "C-x C-f", label = "open a file"    },
+  { keys = "C-c t",   label = "terminal"       },
+  { keys = "C-c c",   label = "build"          },
+  { keys = "C-x b",   label = "switch buffer"  },
+}
+```
+
+`M-x` and `M-x help` are prose in the first line rather than entries:
+`M-x` is the palette itself and `help` is a command name, so neither is
+a keymap lookup. The acceptance checks the command exists instead (§4.3).
+
+**Every entry must resolve through `pmacs.keymap.lookup`**, asserted as
+a property over the list (§4.2). That is what stops the welcome becoming
+documentation drift with a user attached — and it is why the list is
+public: a user who rebinds can rebuild it.
+
+### 3.1a `M-x help`
+
+Named `help` (Q#W3). It renders the cheat sheet through the existing
+`show_help_text` mechanism (§2.4) and is the **root of the eventual
+family**: when the discovery arc adds `help.keys`, `help.commands` and
+friends, `help` remains the index they are reached from, so no
+deprecation is owed.
 
 ### 3.2 Where it goes — `*scratch*`, not the status line
 
@@ -145,17 +236,45 @@ the only pointer to `M-x`. §18 says "a welcome buffer in `*scratch*`",
 and that is right for the reason the audit itself gives — *the empty
 `*scratch*` buffer is what greets the user*.
 
-So: **welcome text is rendered into `*scratch*`**, under three
-conditions, all necessary:
+### 3.2a **When** it goes — a launch-finalization seam
 
-1. **No arguments.** `pmacs FILE` and `pmacs DIR` both put something
-   else on screen; a welcome would be noise, and for the directory case
-   it would fight Stage 1a's dired listing.
-2. **`*scratch*` is empty.** Never overwrite content — including a
-   restored session's scratch, or anything an `init.lua` wrote.
-3. **It leaves the buffer unmodified**, so nothing about the greeting
-   looks like unsaved work. §2.5 shows quitting is not blocked either
-   way; this is about not lying in the modeline.
+Per §2.2, no existing constructor is the right hook. The stage adds one
+named seam:
+
+```rust
+/// Final step of a LOCAL, no-target launch, after config, attach
+/// dispatch and desktop restore have all had their say. The only
+/// caller is `run()`'s `RunLocal` arm; the only thing it does is
+/// conditionally greet an untouched `*scratch*`.
+pub fn finalize_local_launch(&mut self, had_file: bool)
+```
+
+called from `run()` immediately after `restore_desktop_if_armed(had_file)`.
+
+It greets only when **all four** hold, and each excludes a case §2.2
+showed rev 1 would have got wrong:
+
+1. **`had_file` is false** — a positional argument means "open this".
+2. **The session is local** — it is inside the `RunLocal` arm, so a
+   daemon or an attach hand-off never reaches it.
+3. **`*scratch*` is the active buffer** — desktop restore may have put
+   something else in front.
+4. **`*scratch*` is empty** — never overwrite config's or a restored
+   session's content.
+
+And it leaves the buffer **unmodified**, so the greeting does not look
+like unsaved work in the modeline. §2.5 shows quitting is not blocked
+either way; this is about not lying.
+
+**Honest limit on the seam's testability.** `run()` takes over the
+terminal, so no test drives it end to end. The acceptance therefore pins
+(a) the seam's own behaviour under each condition, and (b) that the
+three constructors — `new()`, `open(file)`, `open(dir)` — greet
+**nothing** on their own, which is what makes the seam the only writer.
+What remains unpinned is `run()` actually calling it; that is stated
+here rather than papered over, and it is the reason the seam is a single
+named function with one call site rather than logic inlined into the
+arm.
 
 ### 3.3 What it must not do
 
@@ -171,55 +290,75 @@ conditions, all necessary:
   where *not* adopting the generated-buffer invariant is correct, and it
   is stated so a later audit does not "fix" it.
 
-### 3.4 `M-x help`
+### 3.4 `M-x help` is deliberately minimal
 
-The welcome names `M-x help`, so that command has to exist. It renders
-the keybinding cheat sheet through the existing `show_help_text`
-mechanism (§2.4).
-
-**This is the smallest possible version of §18's second item**, and it
-is included only because the welcome would otherwise point at nothing.
-The full cheat sheet, `where-is`, `describe-key` and the help-prefix
-question belong to §20 Priority 4's discovery arc (§5).
+It exists only because the welcome would otherwise point at nothing.
+**This is the smallest possible version of §18's second item**: the full
+cheat sheet, `where-is`, `describe-key` and the help-prefix question all
+belong to §20 Priority 4's discovery arc (§5).
 
 ## 4. Acceptance
 
 **N** = new behaviour, must fail on full revert. **P** = preservation,
 falsified by a named mutation.
 
-1. **N — journey step 4, through the real entry point.**
-   `EditorState::new()` — the same construction `pmacs` with no
-   arguments performs — leaves `*scratch*` active **and non-empty**, and
-   its text names `M-x`. This is the ratchet row.
-2. **N — every key the welcome names is actually bound.** Parse the key
-   sequences out of the rendered text and assert each resolves through
-   `pmacs.keymap.lookup`. A property over the message, so the pin cannot
-   rot when the wording changes — and so the welcome cannot advertise a
-   binding that a later stage removes.
-3. **N — `M-x help` renders the cheat sheet** into `*help*`, containing
-   at least the keys the welcome names. Asserts content produced.
-4. **P — the buffer is editable and unmodified.** Typing a character
-   into the greeted `*scratch*` inserts it (step 5 still works from the
-   first frame), and the buffer reports unmodified *before* that
-   keystroke. Targeted mutation: rendering through
-   `set_generated_contents`, which would make the buffer read-only and
-   fail the insert.
-5. **P — a file argument suppresses the welcome.** `EditorState::open`
-   on a file leaves that file active with no greeting anywhere.
-   Targeted mutation: greeting unconditionally in `EditorCore::new`.
-6. **P — a directory argument suppresses it too**, so Stage 1a's dired
-   listing is what the user sees. Same mutation; separate pin because
-   the directory path reaches scratch differently (the bootstrap
-   replaces the buffer rather than never creating it).
-7. **P — a non-empty `*scratch*` is never overwritten.** Write to
-   scratch, then trigger the greeting path: the content survives.
-8. **P (amended pin) — step 2 still reports no error.**
-   `journey_step2_launches_unconfigured_into_scratch` currently asserts
-   `status.is_empty()` while its message says "reports no error"
-   (§2.2). The assertion is corrected to the message's claim — no error
-   text on the status line — rather than deleted or weakened. **This is
-   the one existing assertion this stage changes**, it is called out
-   here rather than buried in the diff, and the row itself is kept.
+1. **N — journey step 4: a no-target local launch greets.**
+   Construct through `EditorState::new()`, then call
+   `finalize_local_launch(false)` — the seam `run()` calls. `*scratch*`
+   is active and **non-empty**, and its text names `M-x`. This is the
+   ratchet row.
+   *Rev 1 claimed `EditorState::new()` was itself the entry point; §2.2
+   shows it is shared with `open()` and the daemon, so the pin drives the
+   seam instead.*
+2. **N — every entry the welcome names is bound.** For each
+   `pmacs.welcome.entries` item, `pmacs.keymap.lookup(entry.keys)`
+   resolves. A property over the **structured list** (§3.1), not a scrape
+   of prose — so it cannot rot when the wording changes, and it fails
+   loudly if a later stage unbinds something the welcome advertises.
+   Includes a precondition that the list is non-empty, or the loop is
+   vacuous.
+3. **N — the rendered text contains every entry's `keys` and `label`.**
+   This is what ties the list to the thing the user actually sees; pin 2
+   alone would pass if rendering dropped an entry.
+4. **N — `M-x help` renders the cheat sheet** into `*help*`, containing
+   at least the entries' key sequences. **Invoked through the real
+   palette path** (`pmacs.command.invoke`), not by calling the render
+   helper, so the command is proven reachable the way a user reaches it.
+5. **P — the buffer is editable and unmodified.** After greeting,
+   `*scratch*` reports unmodified; typing a character inserts it, so
+   step 5 works from the first frame. Targeted mutation: rendering
+   through `set_generated_contents`, which would lift read-only, discard
+   history, and make the insert fail.
+6. **P — a file target does not greet.** `EditorState::open(file)` then
+   `finalize_local_launch(true)`: no welcome anywhere, and the file is
+   active. Targeted mutation: dropping the `had_file` guard.
+7. **P — a directory target does not greet.** Same with a directory, so
+   Stage 1a's dired listing is untouched. Separate pin because the
+   directory path reaches `*scratch*` differently — the bootstrap
+   replaces the window's buffer and `replace_active_buffer` removes
+   nothing, so the scratch buffer still exists to be wrongly greeted.
+8. **P — a non-empty `*scratch*` is never overwritten.** Write to
+   scratch (standing in for config or a restored desktop), then run the
+   seam: the content survives byte for byte. Targeted mutation: dropping
+   the emptiness guard.
+9. **P — a non-active `*scratch*` is not greeted.** Switch the active
+   buffer away, then run the seam: scratch stays empty. Stands in for
+   desktop restore having put something else in front. Targeted
+   mutation: dropping the active-buffer guard.
+10. **P — the three constructors greet nothing on their own.**
+    `EditorState::new()`, `open(file)` and `open(dir)`, each with no
+    seam call, leave `*scratch*` empty. **This is what makes the seam the
+    only writer**, and it is the pin that would catch a greeting
+    smuggled back into a constructor — including the daemon's.
+11. **P — the step-2 pin is unchanged and still passes.**
+    `journey_step2_launches_unconfigured_into_scratch` keeps asserting
+    an empty status, because the welcome goes to the buffer (§2.2a). Not
+    a new test — a stated requirement that this stage does not touch it.
+
+**What is not pinned, stated rather than implied:** that `run()` calls
+`finalize_local_launch`. `run()` takes over the terminal and no test
+drives it (§3.2a). Pins 1 and 10 bracket the risk — the seam works, and
+nothing else greets — but the wiring itself is reviewed, not tested.
 
 ## 5. Deferred, and why
 
@@ -237,14 +376,30 @@ falsified by a named mutation.
 
 **Step 4 therefore stays Partial**, and the PR must say so: §2's row
 names a welcome, a cheat sheet *and* `C-h`, and this closes the first
-plus a minimal version of the second.
+plus a minimal version of the second. **§18 and the scorecard do move**,
+Missing → Partial (§6) — a stage can be too small to flip its journey
+step while still falsifying a "missing entirely" grade.
 
 ## 6. Coherence impact
 
-- **Journey steps touched:** 4 (Partial → still Partial, with the
-  welcome half closed); 2 indirectly, whose pin is amended (§4.8). No
-  grade flips on merge, which makes this the first 1b stage with no
-  §25 landed-evidence obligation.
+- **Journey steps touched:** 4 — **and it stays Partial**, because §2's
+  row names a welcome, a cheat sheet *and* `C-h`, and this closes the
+  first plus a minimal second. Step 2 is not touched at all (§2.2a).
+- **§25 landed-evidence obligation: yes, and rev 1 said otherwise.**
+  Two audited claims change on merge and both must move
+  **Missing → Partial**:
+  - the **scorecard** row 18, "Onboarding | **Missing** | No welcome, no
+    tutorial; `C-h` deletes a word; `M-x` is the only door in";
+  - **§18's ground truth**, "Grade: missing entirely. No welcome buffer,
+    … no cheat sheet reachable from inside the editor".
+
+  Both become false the moment this lands — a welcome buffer exists and
+  a cheat sheet is reachable by `M-x help` — while `C-h` and the tutorial
+  stay untrue, which is what makes the new grade Partial rather than
+  Works. §25 requires the update to ride the landing PR. Rev 1's claim
+  that this stage had no such obligation was simply wrong, and would
+  have left the document asserting "missing entirely" about a feature
+  the same PR shipped.
 - **Interaction islands: none added.** `M-x help` renders through the
   existing `*help*` mechanism rather than inventing a second help
   surface — though §2.4 records that mechanism's own two gaps rather
@@ -255,26 +410,23 @@ plus a minimal version of the second.
   should not gain a token entry from a stage this small.
 - **Background-work attribution:** unchanged; nothing here is
   asynchronous.
-- **Docs riding the PR:** `COHERENCE.md` §2's step-4 row and §18's
-  ground-truth grade (both stay Partial, with the closed half named);
-  `docs/keybindings.md` gains `M-x help`; `docs/agent-handoff.md` §1;
-  the ledger.
+- **Docs riding the PR:** `COHERENCE.md`'s **scorecard row 18** and
+  **§18's ground truth** (Missing → **Partial**), §2's **step-4 row**
+  (stays Partial, with the closed half named), and §18's own note that
+  the cheap floor's first two items are done and the help-prefix
+  decision is not; `docs/keybindings.md` gains `M-x help`;
+  `docs/agent-handoff.md` §1; the ledger.
 
-## 7. Questions
+## 7. Questions — answered in review round 1
 
-- **Q#W1 — three lines, or one?** One line ("`M-x` runs a command")
-  is the true floor and never wraps at 80 columns. Three teaches more
-  but risks looking like chrome the user must clear. Recommended:
-  three, because the whole complaint in §18 is that the editor teaches
-  nothing.
-- **Q#W2 — should the welcome name `C-c c` and `C-c t`?** They are
-  real, bound, and journey steps 8 and 9 — but naming them means the
-  welcome must be updated whenever the default map changes.
-  Acceptance 2 turns that from a risk into a caught failure, which is
-  the argument for naming them.
-- **Q#W3 — is `M-x help` the right name?** `help` is short and
-  guessable. The discovery arc may want `help.keys` /
-  `help.commands` as a family, and renaming later costs a deprecation.
+- **Q#W1 — three lines, or one? → three.** The whole complaint in §18 is
+  that the editor teaches nothing, so the floor is not one line.
+- **Q#W2 — name `C-c c` and `C-c t`? → yes**, and verify them from the
+  structured entries (§3.1). Naming real bindings is the point; pin 2
+  turns the maintenance risk into a caught failure rather than drift.
+- **Q#W3 — is `help` the right name? → yes.** It stays the **root/index**
+  when `help.keys` and friends arrive under the discovery arc, so no
+  future rename or deprecation is owed.
 
 ## 8. Ledger
 

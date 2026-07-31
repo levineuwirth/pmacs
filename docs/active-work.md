@@ -347,24 +347,34 @@ If it does not, stop and repair the remote/fetch configuration.
     githubsucks/journey-stage1b1-compile-defaults
   ```
 
-## Journey Stage 1b-3 (P1) — FRAMING OPEN, revision 1
+## Journey Stage 1b-3 (P1) — FRAMING OPEN, revision 2
 
 - **Branch `journey-stage1b3-welcome`**, worktree `../pmacs-journey-1b3`,
   based on `githubsucks/main` @ `1f290d5`. **Framing only; no code, no
-  PR yet.** `docs/journey-stage1b3-welcome-framing.md` revision 1, no
-  review rounds. The last of the 1b split (1b-1 landed #203, 1b-2 is
-  PR #204).
+  PR yet.** `docs/journey-stage1b3-welcome-framing.md` revision 2, one
+  review round closed (four findings, all accepted). The last of the 1b
+  split (1b-1 landed #203, 1b-2 landed #204).
 - **What it is.** Journey step 4 / `COHERENCE.md` §18: a fresh `pmacs`
   greets the user with an empty buffer, an empty status line, and no
   indication that `M-x` exists. The stage renders a three-line welcome
   into `*scratch*` and adds a minimal `M-x help`.
-- **The existing step-2 pin collides with it.**
-  `journey_step2_launches_unconfigured_into_scratch` asserts
-  `status.is_empty()` while its own message says "reports no error" —
-  the same predicate only while nothing writes a *non-error* status at
-  startup. Acceptance 8 corrects the assertion to its message's claim
-  and calls it out rather than burying it, since the ratchet's rule is
-  that stages add rows.
+- **`EditorState::new()` is NOT the no-argument entry point**, and
+  revision 1 rested every criterion on the assumption that it was.
+  `EditorState::open` calls it *before* resolving the target
+  (`src/editor.rs:944`), the daemon constructs one too, user config runs
+  *inside* it, and desktop restore happens much later
+  (`restore_desktop_if_armed`, `:3637`, inside `run()`'s `RunLocal`
+  arm). The stage now adds a **launch-finalization seam** called right
+  after desktop restore, with `had_file` — already threaded to that
+  point for the same kind of question — as the no-target signal.
+  Residual, stated: `run()` takes over the terminal, so *that it calls
+  the seam* is reviewed, not tested; pins bracket it by proving the seam
+  works and that no constructor greets on its own.
+- **The step-2 pin is NOT amended.** Revision 1 analysed a status-line
+  welcome and then chose `*scratch*`, but kept the amendment — an
+  internal contradiction. The status stays empty, so the pin stays true,
+  and "no error text" has no defined predicate over an unstructured
+  status string anyway.
 - **`C-h` is NOT free, and the reason is load-bearing.** It is bound to
   `buffer.delete-word-backward` because non-kitty terminals cannot
   disambiguate Ctrl+Backspace from Ctrl+H — both produce byte 0x08
@@ -385,10 +395,15 @@ If it does not, stop and repair the remote/fetch configuration.
   wrong for a buffer step 5 requires the user to type into immediately.
   The one place not adopting that invariant is correct, stated so a
   later audit does not "fix" it.
-- **Step 4 stays Partial**, so this is the first 1b stage with no §25
-  landed-evidence obligation on merge: §2's row names a welcome, a
-  cheat sheet *and* `C-h`, and this closes the first plus a minimal
-  second.
+- **Step 4 stays Partial, but there IS a §25 obligation** — revision 1
+  claimed there was none. The scorecard's row 18 and §18's ground truth
+  both read **Missing**, and both become false on merge: they move to
+  **Partial**. A stage can be too small to flip its journey step while
+  still falsifying a "missing entirely" grade.
+- **The welcome renders from a structured entry list**, not from scraped
+  prose: `M-x help` mixes a chord with a command name and `C-c c` is two
+  chords whose boundary prose does not mark, so the binding checks run
+  `pmacs.keymap.lookup` over the same list that renders the text.
 - **Integrate late.** #204 is open and touches `COHERENCE.md`,
   `docs/agent-handoff.md` and `docs/active-work.md`; this lane will
   conflict there. Never open a standalone refresh PR.
