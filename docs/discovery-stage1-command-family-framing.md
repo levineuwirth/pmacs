@@ -1,11 +1,34 @@
 # Discovery Stage 1 — the describe/list command family
 
-**Status: framing, rev 2 — awaiting review round 2.**
+**Status: framing, rev 3 — awaiting review round 3.**
 **Serves `COHERENCE.md` §5 (unify discoverability), §1.1 (substrate
 without surface), §20 Priority 4.**
 
 ## 0. Revision history
 
+- rev 3 (2026-07-31) — review round 2. Two blocking, two major; all four
+  accepted.
+  - **The ledger lane still said revision 1 and kept refuted claims.**
+    Rev 2's ledger edit **aborted on a failed assertion before writing**,
+    so only one paragraph of it landed while the commit message reported
+    all of it. The lane is rewritten from scratch and the result was
+    verified by re-reading the file, not inferred from an exit code.
+    *(Second occurrence of this failure mode in this project — an
+    assert-then-write block discards every earlier edit in the block.)*
+  - **`names_from` does not exist.** Rev 2's completion source called a
+    helper nobody has written, over `config.list()`'s descriptor
+    **tables** where `Custom` wants a sequence of **strings** — the
+    prompt would have raised on an undefined global the first time it
+    opened. §3.2 now specifies the mapper.
+  - **`*help*` has no read-only intercept.** Rev 2's §3.4 claimed one.
+    `show_help_text` writes with plain `delete`/`insert` and #205
+    recorded that this mechanism has not adopted the generated-buffer
+    write invariant. §3.4 now names the four policies that are actually
+    shared.
+  - **The naming was underspecified.** The nine-command table contains
+    no `help.describe-command`, so calling the `editor.*` commands
+    "aliases-by-retention" was wrong on both halves. They are now stated
+    as explicit exceptions, and Q#D2 is sharpened to the two ways out.
 - rev 2 (2026-07-31) — review round 1. Two blocking, two major; all four
   accepted, all four verified in the code first.
   - **Completion does not close the free-text hole**, and rev 1 said it
@@ -162,12 +185,24 @@ Nine commands, all rendering existing data:
 | `apropos` | substring match over **names and descriptions** |
 | `list-settings` | `config.list()` |
 
-**Naming.** They are `help.*`-prefixed (`help.describe-key`,
-`help.where-is`, …) with the existing `editor.describe-*` kept as
-aliases-by-retention, not renamed. #205 established `help` as the index;
-this makes the family's identity match. Existing names are not removed
-— `editor.describe-command` is bound in muscle memory and in
-`docs/keybindings.md`.
+**Naming, stated exactly.** The nine **new** commands are `help.*`
+(`help.describe-key`, `help.where-is`, …). #205 established `help` as
+the index, so the family it indexes shares its prefix.
+
+**The two pre-existing commands are intentional exceptions, not
+aliases.** `editor.describe-command` and `editor.describe-setting` keep
+their names and are **not** duplicated under `help.*` — rev 1 called
+them "aliases-by-retention", which was wrong twice over: nothing
+forwards to them, and the nine-command table never contained a
+`help.describe-command` for them to be aliases *of*.
+
+So the shipped surface is nine `help.*` commands plus two `editor.*`
+ones covering the same family. **That asymmetry is a wart**, and it is
+Q#D2's whole subject: either the two get `help.*` names with the old
+ones forwarding (eleven commands, two forwarders), or the family stays
+`editor.*` throughout (nine commands, no new prefix). This framing does
+not decide it, because a rename that this arc's later stages would
+revisit is worse than an explicit exception recorded for one round.
 
 ### 3.2 `describe-setting` gains completion — which is assistance, not validation
 
@@ -201,10 +236,29 @@ semantics — "refuse a value that is not a candidate" — is Rust work**
 (`resolve_accepted_value` and a per-session flag) and is deferred to
 §5 rather than smuggled in as a side effect.
 
-**Still no Rust in this stage.** `parse_completion_source`
-(`mod.rs:14145-14165`) accepts `none` / `commands` / `buffers` / `files`
-**and a Lua `Function`** → `CompletionSource::Custom`. The source is
-`function() return names_from(pmacs.config.list()) end`.
+**Still no Rust in this stage**, but the source needs a mapper.
+`parse_completion_source` (`mod.rs:14145-14165`) accepts `none` /
+`commands` / `buffers` / `files` **and a Lua `Function`** →
+`CompletionSource::Custom`, and `Custom` consumes a **sequence of
+strings**. `pmacs.config.list()` returns descriptor **tables**, so
+handing it over directly would not typecheck — and rev 1 wrote
+`names_from(...)`, **a helper that does not exist**; the prompt would
+have raised on an undefined global the first time it opened.
+
+The mapper is three lines and belongs to this stage:
+
+```lua
+source = function()
+  local names = {}
+  for _, d in ipairs(pmacs.config.list()) do names[#names + 1] = d.name end
+  table.sort(names)
+  return names
+end,
+```
+
+Sorted because `Custom` candidates are presented in the order returned,
+and `config.list()`'s order is registration order — which is neither
+stable across a config edit nor useful to a reader.
 
 ### 3.3 `M-x help` becomes the index
 
@@ -218,10 +272,25 @@ Every new command renders through **`pmacs.editor._show_help`** — the
 seam #205 added — and **not** by calling `show_help_text` directly or
 building its own buffer.
 
-**What that buys, precisely: one owner for `*help*` writes.** Buffer
-ownership, the read-only intercept, `q`, and the found-by-name hazard
-are decided in one place instead of eleven. That is real and it is the
-reason to do it.
+**What that buys, precisely: one owner for `*help*` writes.** Four
+shared policies get decided in one place instead of eleven:
+
+- **reuse-by-name** — a single `*help*` buffer found by name and reused
+  across invocations;
+- **wholesale replacement** — `buf:delete(0, len)` then `buf:insert(0,
+  text)`, never a diff, because `*help*` is reflowed per subject;
+- the **`q` binding**, rebound per fresh buffer;
+- the **foreign-`*help*` hazard** — found-by-name is not ownership, so a
+  user's buffer of that name is cleared.
+
+**`*help*` is ordinary editable content.** Rev 1 wrote "the read-only
+intercept"; there isn't one. `show_help_text` writes with plain
+`delete`/`insert`, the buffer keeps its undo history, and #205 already
+recorded that this mechanism has **not** adopted the generated-buffer
+write invariant. Saying otherwise would have had this stage claim a
+guarantee it does not provide — and the fourth policy above is exactly
+the hazard that a read-only intercept would have mitigated and does
+not.
 
 **What it does not buy, and rev 1 claimed it did:** a one-site migration
 to `src/help.rs`. That layer has semantic renderers for **command, key,
@@ -365,9 +434,14 @@ the palette, not the command.
 
 ## 7. Questions
 
-- **Q#D2 — `help.*` prefix, or keep `editor.*`?** §3.1 proposes `help.*`
-  with the old names retained. The counter-argument is that two names
-  for one thing is exactly the duplication this arc exists to remove.
+- **Q#D2 — `help.*` prefix, or keep `editor.*`?** §3.1 ships nine
+  `help.*` commands and leaves `editor.describe-command` /
+  `editor.describe-setting` as **exceptions**, so the family is split
+  across two prefixes. Resolve it one of two ways: give those two
+  `help.*` names with the `editor.*` ones **forwarding** (eleven
+  commands, two forwarders, one canonical prefix), or drop `help.*` and
+  keep the family `editor.*` throughout (nine commands, no new prefix).
+  A split surface is the one outcome that should not survive review.
 - **Q#D3 — should `apropos` fuzzy-match?** `fuzzy_score` exists
   (`src/minibuffer.rs:637-666`) and M-x already uses it. Substring is
   more predictable for a search command; fuzzy is more consistent with

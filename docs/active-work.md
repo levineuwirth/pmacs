@@ -380,41 +380,56 @@ which would have re-conflicted on every merge.
     githubsucks/journey-stage1b3-welcome
   ```
 
-## Discovery Stage 1 (P4) — FRAMING OPEN, revision 1
+## Discovery Stage 1 (P4) — FRAMING OPEN, revision 3
 
 - **Branch `discovery-stage1-commands`**, worktree `../pmacs-p4-discovery`,
   based on `githubsucks/main` @ `54a092e`. **Framing only; no code, no
-  PR yet.** `docs/discovery-stage1-command-family-framing.md` revision 1.
+  PR yet.** `docs/discovery-stage1-command-family-framing.md` revision 3,
+  two review rounds closed (round 1: two blocking, two major; round 2:
+  two blocking, two major; all accepted).
 - **What it is.** `COHERENCE.md` §20 Priority 4 — "almost pure wiring,
   the best payoff-per-effort in this document". Nine describe/list
   commands (describe-key/mode/hook/buffer, where-is, list-commands,
   list-keybindings, list-settings, apropos) over introspection that
   already exists.
-- **It adds NO Rust.** `pmacs.describe.*`, `pmacs.keymap.list()`,
+- **It adds no Rust.** `pmacs.describe.*`, `pmacs.keymap.list()`,
   `pmacs.command.list()` and `pmacs.config.list()` already return
   everything needed, and `parse_completion_source` accepts a **Lua
   `Function`** (`CompletionSource::Custom`), so even the prompts need no
-  new Rust — which also closes `describe-setting`'s free-text hole.
-- **The decision that matters: ONE rendering seam.** `src/help.rs`'s
-  renderer is orphaned and the reachable Lua `show_help_text` renders
-  less, so nine new commands calling it directly would turn a two-site
-  migration into a ten-site one. Everything routes through
-  `pmacs.editor._show_help` (the seam #205 added) so the later help
-  unification stays a one-site change — pinned by a counting stub, not
-  left as a convention. **Narrowed in revision 2:** the seam buys one
-  *owner for `*help*` writes*, not a one-site migration — `src/help.rs`
-  has renderers for command/key/buffer/mode/hook/view and **none for
-  settings, lists or apropos**, and `_show_help` takes already-flattened
-  text. Each command's rendering is therefore a named per-subject
-  function, so the future Rust work is enumerated per-subject instead of
-  discovered per-call-site.
+  new Rust.
+- **Completion is ASSISTANCE, not validation.**
+  `resolve_accepted_value` returns the **literal typed text** whenever
+  no candidate is selected, so a non-matching typo still reaches
+  `on_accept` and the existing error path — and a fuzzy near-miss can
+  silently describe a *different* setting, a new failure mode.
+  Closed-set acceptance ("refuse a non-candidate") is Rust work and is
+  deferred. The custom source needs a **mapper**: `config.list()`
+  yields descriptor *tables* while `Custom` consumes a sequence of
+  strings.
+- **`invoke_interactive` is NOT the M-x path** — the error #205
+  corrected, repeated one PR later. The path is dispatch `M-x` →
+  `editor.execute-command` → assert the selected candidate **before**
+  RET (`accept()` does `session.take()`) → accept → `invoke_interactive`.
+  Five of the nine commands open a **second** prompt the pins must drive
+  too; a pin that stops after the first RET has tested the palette.
+- **One owner for `*help*` writes — NOT a one-site migration.**
+  `src/help.rs` has semantic renderers for command/key/buffer/mode/
+  hook/view and **none for settings, lists or apropos**, and
+  `_show_help` takes already-flattened text, so a later migration still
+  changes each command's subject-specific logic. What the funnel buys is
+  the shared policy in one place: reuse-by-name, wholesale
+  delete+insert, the `q` binding, and the foreign-`*help*` hazard.
+  **`*help*` is ordinary editable content** — it has no read-only
+  intercept and no generated-content invariant. Each command's rendering
+  is a named per-subject function so the future Rust work is enumerated
+  per-subject (three new renderers) rather than discovered per-call-site.
 - **Deliberately deferred, each with a reason:** richer M-x rows
   (`MinibufferPrompt.candidates` is `Vec<String>` — protocol change);
   `Command` gaining title/category/flags (~147 definition sites);
-  predicate evaluation (**stored and exposed but never evaluated** — a
-  behaviour change); help-layer unification; and the **help prefix key**,
-  which this stage does not touch because #205 recorded why `C-h` is not
-  free.
+  predicate evaluation (**read only at `src/help.rs:76` and one test** —
+  a behaviour change); help-layer unification; closed-set acceptance;
+  and the **help prefix key**, which this stage does not touch because
+  #205 recorded why `C-h` is not free.
 - Recovery:
 
   ```sh
