@@ -380,14 +380,15 @@ which would have re-conflicted on every merge.
     githubsucks/journey-stage1b3-welcome
   ```
 
-## Discovery Stage 1 (P4) — FRAMING APPROVED (rev 5); implementation next
+## Discovery Stage 1 (P4) — FRAMING APPROVED (rev 6); implementation next
 
 - **Branch `discovery-stage1-commands`**, worktree `../pmacs-p4-discovery`,
   based on `githubsucks/main` @ `54a092e`. **Framing only; no code, no
-  PR yet.** `docs/discovery-stage1-command-family-framing.md` revision 5,
+  PR yet.** `docs/discovery-stage1-command-family-framing.md` revision 6,
   three review rounds closed (round 1: two blocking, two major; round 2:
   two blocking, two major; round 3: two factual corrections; all
-  accepted), and **Q#D2 / Q#D3 decided by the user**.
+  accepted), Q#D2 / Q#D3 decided by the user, and the final review's
+  acceptance corrections applied.
 - **What it is.** `COHERENCE.md` §20 Priority 4 — "almost pure wiring,
   the best payoff-per-effort in this document". **Eleven commands under
   one `help.*` prefix**: nine new (describe-key/mode/hook/buffer,
@@ -399,7 +400,10 @@ which would have re-conflicted on every merge.
 - **`apropos` matches by SUBSTRING, not fuzzy** (Q#D3). `fuzzy_score`
   is subsequence-based and descriptions are long sentences, so fuzzy
   would match nearly every command. Pinned by a
-  subsequence-that-is-not-a-substring finding nothing.
+  `test.apropos-subsequence-fixture` whose `qzjx` letters occur as `q z
+  j x`, only after asserting no registered name or description contains
+  `qzjx` as a substring; it must find nothing, whereas fuzzy finds the
+  fixture.
 - **It adds no Rust.** `pmacs.describe.*`, `pmacs.keymap.list()`,
   `pmacs.command.list()` and `pmacs.config.list()` already return
   everything needed, and `parse_completion_source` accepts a **Lua
@@ -422,8 +426,11 @@ which would have re-conflicted on every merge.
   corrected, repeated one PR later. The path is dispatch `M-x` →
   `editor.execute-command` → assert the selected candidate **before**
   RET (`accept()` does `session.take()`) → accept → `invoke_interactive`.
-  Five of the nine commands open a **second** prompt the pins must drive
-  too; a pin that stops after the first RET has tested the palette.
+  Six of the eleven canonical commands (`help.describe-command`,
+  `help.describe-setting`, `help.describe-key`, `help.describe-hook`,
+  `help.where-is`, and `help.apropos`) open a **second** prompt the pins
+  must drive too; a pin that stops after the first RET has tested the
+  palette.
 - **One owner for `*help*` writes — NOT a one-site migration.**
   `src/help.rs` has semantic renderers for command/key/buffer/mode/
   hook/view and **none for settings, lists or apropos**, and

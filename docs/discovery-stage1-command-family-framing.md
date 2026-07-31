@@ -1,11 +1,28 @@
 # Discovery Stage 1 — the describe/list command family
 
-**Status: framing, rev 5 — Q#D2 and Q#D3 decided; ready for implementation approval.**
+**Status: framing, rev 6 — final review corrections applied; ready for
+implementation approval.**
 **Serves `COHERENCE.md` §5 (unify discoverability), §1.1 (substrate
 without surface), §20 Priority 4.**
 
 ## 0. Revision history
 
+- rev 6 (2026-07-31) — final review corrections applied.
+  - **The second-prompt census now includes `help.describe-command`.**
+    Six of the eleven canonical commands take an argument, not five:
+    `describe-command`, `describe-setting`, `describe-key`,
+    `describe-hook`, `where-is`, and `apropos`. The full M-x driver must
+    accept each command's second prompt before it has tested the command.
+  - **The negative substring pin now has a discriminating fixture.** It
+    registers `test.apropos-subsequence-fixture` with a description whose
+    `qzjx` letters occur only as the non-contiguous sequence `q z j x`, then
+    first asserts that no registered command name or description contains
+    `qzjx` as a substring. `help.apropos qzjx` finding nothing therefore
+    fails under a fuzzy implementation rather than passing as an ordinary
+    no-match.
+  - **The index-property arithmetic follows the eleven-command family.**
+    Its targeted mutation is now adding a twelfth canonical command
+    without indexing it.
 - rev 5 (2026-07-31) — **Q#D2 and Q#D3 answered by the user**; no review
   findings at `1cc9d96`.
   - **Q#D2 → `help.*` is canonical, with two forwarders.**
@@ -397,11 +414,11 @@ The pre-RET assertion is not decoration: `accept()` does
 `session.take()`, so afterwards nothing about the accepted value
 survives, and a selected candidate shadows typed text.
 
-**Commands that take an argument open a SECOND prompt** (`where-is`,
-`describe-key`, `describe-hook`, `describe-setting`, `apropos`). Those
-pins drive that prompt too, and assert against it with the same
-pre-accept discipline. A pin that stops after the first RET has tested
-the palette, not the command.
+**Six of the eleven canonical commands take an argument and open a SECOND
+prompt** (`describe-command`, `describe-setting`, `describe-key`,
+`describe-hook`, `where-is`, `apropos`). Those pins drive that prompt too,
+and assert against it with the same pre-accept discipline. A pin that stops
+after the first RET has tested the palette, not the command.
 
 ### 4.1 Pins
 
@@ -418,11 +435,14 @@ the palette, not the command.
 4. **N — `apropos` matches descriptions, not only names, and does so by
    substring.** Two assertions: a word appearing in exactly one
    command's *description* and no command *name* finds that command
-   (what distinguishes apropos from a name filter); and a
-   **subsequence that is not a substring** — letters present in order
-   but not contiguous — finds **nothing**. The second is what pins
-   Q#D3's decision rather than leaving matching semantics to whatever
-   the implementation reaches for.
+   (what distinguishes apropos from a name filter); and a deliberately
+   discriminating negative: register
+   `test.apropos-subsequence-fixture`, whose description's `qzjx` letters
+   occur only as the non-contiguous sequence `q z j x`, assert that **no**
+   registered command name or description contains `qzjx` as a substring,
+   then assert `help.apropos qzjx` finds **nothing**. A fuzzy implementation
+   finds the fixture, so this pins Q#D3's substring decision rather than
+   passing as an ordinary no-match.
 5. **N — `describe-setting` completes, and a non-matching typo still
    reaches the existing error path.** Two assertions, because §3.2 has
    two outcomes: (a) typing a real setting's prefix makes it the
@@ -432,7 +452,7 @@ the palette, not the command.
    *Rev 1 asserted a typo "cannot reach `on_accept`", which
    `resolve_accepted_value` contradicts.*
 6. **N — `M-x help` lists the family.** A property over the family list,
-   so adding a tenth command without indexing it fails.
+   so adding a twelfth canonical command without indexing it fails.
 7. **P — every command's `*help*` write goes through `_show_help`.**
    Replace that function with a counting stub, drive all **eleven**
    through §4.0's path, and assert the count equals eleven. Pins §3.4's
