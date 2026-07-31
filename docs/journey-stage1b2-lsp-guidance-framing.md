@@ -1,11 +1,31 @@
 # Journey Stage 1b-2 — say when language intelligence did not start
 
-**Status: framing, rev 3 — awaiting review round 3.**
+**Status: framing, rev 4 — awaiting review round 4.**
 **Serves `COHERENCE.md` §1.2 (the silence asymmetry), §2 (the golden
 journey, step 6), §19, §20 Priority 1.**
 
 ## 0. Revision history
 
+- rev 4 (2026-07-30) — review round 3. One blocking lifecycle gap,
+  accepted; the registry's dispatch order was read before specifying the
+  fix.
+  - **`failed_attachments` had no removal path.** It is keyed by
+    `tostring(buf)` and rev 3 never said who deletes an entry, so killing
+    a failed buffer leaked its projection **for the session**. That also
+    made rev 3's sweep bound — "at most the number of open buffers" —
+    false, since the table could exceed the number of buffers that
+    exist.
+  - **Nothing else would have cleaned it incidentally.** The LSP
+    resource reconciliation iterates `attachments` via
+    `attachments_under` (`lsp.lua:2934-2944`), and a failed buffer has
+    no attachment **by construction** — that is the whole reason the
+    projection exists. So the gap could not be closed by an existing
+    subscriber; it needed its own registration.
+  - Rev 4 adds a per-projection `pmacs.buffer.on_removed` registration
+    (§2.5), a **stated disposition on rename and delete** (§2.6) — clear
+    it, rather than leaving an old-path failure projected onto a changed
+    buffer — an amended sweep bound that now *follows* from the cleanup
+    rather than being asserted beside it, and acceptance rows 14–16.
 - rev 3 (2026-07-30) — review round 2. Two blocking, two cleanups; all
   four accepted, and the two blockers verified by running Lua rather
   than by reading it.
@@ -451,9 +471,78 @@ project with more than one file:
 > is the one the user is looking at.
 
 So a success for key `K` clears `failures[K]` **and every projection
-whose `key == K`**. The sweep is bounded by the number of buffers with a
-recorded failure, which is at most the number of open buffers, and it
-runs on a spawn success — not on a paint.
+whose `key == K`**. The sweep runs on a spawn success, never on a paint.
+
+**The sweep's bound is a consequence of the cleanup below, not a
+separate claim.** Rev 3 asserted the table holds "at most the number of
+open buffers" while specifying no deletion path, which made the bound
+false: a killed buffer's projection would have outlived it, for the
+session. `failed_attachments` is bounded by the live buffer set **only
+because §2.5.1 removes an entry when its buffer goes away.**
+
+#### 2.5.1 Removal — the entry has to have an owner
+
+`pmacs.buffer.on_removed(buf, fn)` is registered **when a projection is
+created**, and its handle is stored in the projection:
+
+```lua
+failed_attachments[key] = {
+  key = affinity_key(language, key_uri),
+  language = …, command = …,
+  on_removed = pmacs.buffer.on_removed(buf, function() … end),
+}
+```
+
+Three rules, each with a reason:
+
+- **Register on creation, never on refresh.** `attach_buffer` is
+  reachable more than once for the same buffer, so registering per
+  failed *attempt* would stack callbacks on one buffer — the
+  unbounded-registrar shape, with the leak simply moved.
+- **The removal callback clears the projection and does not call
+  `handle:remove()`.** Dispatch does `callbacks.take(id)` and then
+  iterates a local vector (`src/lua_bindings/mod.rs:1949-1957`), so the
+  entry is already gone; removing from inside would be a no-op at best.
+  (It is also why this is *not* a mutation-during-iteration hazard — the
+  registry hands out an owned list before invoking anything.)
+- **The success sweep *does* call `handle:remove()`.** There the buffer
+  is still alive, so an unreleased callback would linger for its whole
+  lifetime and fire against a projection that no longer exists.
+
+**Nothing existing would have done this for us.** The LSP resource
+reconciliation finds work through `attachments_under`
+(`lsp.lua:2934-2944`), which iterates `attachments` — and a failed
+buffer has no attachment by construction. The projection is invisible to
+every current cleanup path, which is exactly why it needs its own.
+
+#### 2.6 Rename and delete — clear, do not re-key
+
+`resource.renamed` and `resource.deleted` already have LSP subscribers
+(`lsp.lua:3004`, `:3074`), and they reconcile `attachments`. A failed
+buffer is not in that table, so those subscribers must **also** dispose
+of its projection.
+
+**The disposition is to clear it.** The projection asserts one thing:
+*this buffer's server failed for affinity K*. After a rename, that claim
+is no longer known to hold — the new path may sit in a different
+project, under a different root, or under none. Re-keying would assert a
+failure at a location where none has been observed, which is the same
+error shape this arc has been correcting all along: concluding something
+about one entity from evidence about another.
+
+Clearing degrades to "we no longer know", which renders as no modeline
+marker — the pre-stage behaviour, not a regression. The next attach for
+that buffer re-establishes the truth, and if it fails again the report
+memo (`reported`, §2.2) correctly treats the *new* affinity as a new
+failure worth naming.
+
+Delete is the same, for the stronger reason that the path is gone.
+
+**What must not happen** is the third option: leaving the old-path
+projection attached to a buffer whose path has changed, so the modeline
+reports `LSP:!` for a location the buffer no longer has. Acceptance 15
+and 16 pin the chosen behaviour rather than merely the absence of that
+one.
 
 The segment becomes one more map lookup and computes nothing:
 
@@ -589,20 +678,40 @@ stage worked.
     source file with a failed spawn renders `LSP:!`; a plain-text buffer
     renders nothing. **Both halves asserted** — a pin that checks only
     the failing case passes if the segment renders `!` unconditionally.
-14. **P — the segment does no work.** With a failure recorded, painting
+14. **N — a killed buffer's projection is removed.** Fail an attach,
+    then kill the buffer; the projection is gone. Observable without
+    reaching into module internals: open a *new* buffer for the same
+    path, and assert the sweep on a later success still terminates and
+    that no `LSP:!` is attributed to a buffer that never failed.
+    Falsified by omitting the `on_removed` registration, which is rev
+    3's state — the entry then outlives its buffer for the session.
+    *This is the pin that makes §2.5's bound true rather than asserted;*
+    without cleanup the table is bounded by nothing.
+15. **N — a rename clears the projection.** Fail an attach, then rename
+    the file through the real `resource.renamed` path. The modeline no
+    longer reads `LSP:!` for that buffer. Falsified by leaving the
+    projection keyed to the old affinity, which would report a failure
+    for a path the buffer no longer has.
+16. **N — a delete clears the projection.** Same shape through
+    `resource.deleted`. Falsified the same way.
+    *Both 15 and 16 assert the chosen behaviour, not merely the absence
+    of the forbidden one:* a pin that only checked "does not show a
+    stale path" would pass on an implementation that cleared nothing and
+    happened to render nothing for an unrelated reason.
+17. **P — the segment does no work.** With a failure recorded, painting
     the modeline invokes neither a root resolver nor
     `pmacs.project.detect`. Pinned with a counting resolver installed
     through the real config; assert the count is unchanged across
     repeated renders. Targeted mutation: rev 1's design, which derives
     the affinity key inside the provider.
-15. **P — a working server is unaffected.** Attach, modeline label,
+18. **P — a working server is unaffected.** Attach, modeline label,
     requests: unchanged. Targeted mutation: making the new branch fire
     whenever an attachment is absent, which would mark every plain-text
     buffer failed.
-16. **P — the two existing report sites still report.** Root-resolver
+19. **P — the two existing report sites still report.** Root-resolver
     and subscriber failures keep their messages. Targeted mutation:
     refactoring the three sites onto a shared helper that drops one.
-17. **P — a fabricated attachment is never created.** After a failed
+20. **P — a fabricated attachment is never created.** After a failed
     spawn, `attachment_for_request` returns nil and no request is
     issued. Targeted mutation: §2.5's forbidden implementation.
 

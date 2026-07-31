@@ -255,14 +255,15 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
-## Journey Stage 1b-2 (P1) — FRAMING OPEN, revision 3
+## Journey Stage 1b-2 (P1) — FRAMING OPEN, revision 4
 
 - **Branch `journey-stage1b2-lsp-guidance`**, worktree
   `../pmacs-journey-1b2`, based on `githubsucks/main` @ `fbcf235`.
   **Framing only; no code, no PR yet.**
-  `docs/journey-stage1b2-lsp-guidance-framing.md` revision 3, two review
-  rounds closed (round 1: two blocking, three major, one minor; round 2:
-  two blocking, two cleanups; all accepted).
+  `docs/journey-stage1b2-lsp-guidance-framing.md` revision 4, three
+  review rounds closed (round 1: two blocking, three major, one minor;
+  round 2: two blocking, two cleanups; round 3: one blocking; all
+  accepted).
   Sibling of Stage 1b-1 (PR #203, step 9); this is step 6.
 - **What it is.** `COHERENCE.md` §1.2's canonical silence: a
   preconfigured-but-missing language server fails with no status
@@ -319,6 +320,19 @@ If it does not, stop and repair the remote/fetch configuration.
   `language .. "\0" .. (key_uri and ("u" .. key_uri) or "n")`. The
   `u`/`n` discriminator is what makes markerless unambiguous against any
   URI, and Lua strings are 8-bit clean so `\0` is a safe separator.
+- **A new per-buffer table needs a removal path, and no existing one
+  would have supplied it.** Round 3 found the buffer projection had no
+  teardown, so killing a failed buffer leaked its entry for the session
+  and the sweep bound was false. The LSP resource reconciliation finds
+  work through `attachments_under` (`lsp.lua:2934-2944`), which iterates
+  `attachments` — and a failed buffer has **no attachment by
+  construction**, so it is invisible to every existing cleanup path. The
+  fix registers `pmacs.buffer.on_removed` once per projection, releases
+  the handle on the success sweep but **not** from inside the removal
+  callback (dispatch does `callbacks.take(id)` then iterates a local
+  vector, `src/lua_bindings/mod.rs:1949-1957`), and **clears** rather
+  than re-keys on `resource.renamed` / `resource.deleted` — re-keying
+  would assert a failure at a location where none was observed.
 - **The durable surface cannot show the failure today.**
   `status_buffer_text` renders from `self.clients`, which a failed spawn
   never enters. The stage keeps its failure record in Lua and renders it
