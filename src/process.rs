@@ -48,7 +48,7 @@
 //! `unsafe` block — see [`build_pty_command`] for the full
 //! rationale.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -480,6 +480,17 @@ pub struct ProcessSupervisor {
     /// Test seam for the PTY foreground-group lookup (see
     /// `force_next_pty_lookup`). Always `None` outside tests.
     forced_pty_lookup: Option<Result<i32, PtyLookupFailure>>,
+    /// Directed test seam for the reap ledger's **own** `kill(2)` calls
+    /// (see [`ReapKillFaults`]). Always empty in production: the only
+    /// ways to add an outcome are `#[cfg(test)]`.
+    ///
+    /// Shared behind an `Arc` because `final_drain_runtime` is a free
+    /// function taking `&RuntimeHandles` — there is no `&mut self` to
+    /// reach — so the plan travels into it through [`GroupDrainCtx`].
+    /// It is owned by the supervisor rather than living in a global, so
+    /// fixture teardown can assert its plan was consumed even when unit
+    /// tests run in parallel.
+    reap_kill_faults: Arc<Mutex<ReapKillFaults>>,
 }
 
 /// One armed group in the reap ledger.
@@ -489,6 +500,104 @@ struct GroupReap {
     /// SIGKILL already sent — keep probing to ESRCH but don't
     /// re-kill every tick.
     killed: bool,
+}
+
+/// Which of the reap ledger's `kill(2)` calls a planned test outcome
+/// belongs to.
+///
+/// **The seam is directed, and that is the whole point.** `shutdown()`
+/// signals every managed process through [`ProcessSupervisor::signal`]
+/// *before* it reaches its ledger force-kill, so a single undirected
+/// "next kill fails" slot would be eaten by the wrong call and the test
+/// would report a pass while proving nothing.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+enum ReapKillSite {
+    /// `tick_reap_ledger`'s liveness probe, `kill(-pgid, None)`.
+    LedgerProbe,
+    /// `tick_reap_ledger`'s deadline escalation, `kill(-pgid, SIGKILL)`.
+    LedgerEscalation,
+    /// `shutdown()`'s pre-loop force-kill, `kill(-pgid, SIGKILL)`.
+    ShutdownForceKill,
+}
+
+/// Planned failures for the reap ledger's own `kill(2)` calls. Empty in
+/// production; populated only by `#[cfg(test)]` helpers.
+///
+/// Two shapes, because the sites need different lifetimes:
+///
+/// * The three persistent-ledger paths take a **FIFO of one-shot**
+///   outcomes each, since one tick makes one call per site. A queue
+///   rather than a slot because the shutdown-coupling pin needs a failed
+///   force-kill *and* a failed subsequent probe pending at once.
+/// * The in-drain probe takes **one outcome that repeats for one whole
+///   drain**. A one-shot cannot work there: `final_drain_runtime` probes
+///   again every millisecond and `quiesced` needs a false answer to
+///   persist across a full [`READER_SEND_POLL_INTERVAL`], so a one-shot
+///   error is long gone before reader cancellation can be reached.
+#[derive(Default)]
+struct ReapKillFaults {
+    /// Per-site queue; each entry is consumed by one call at that site.
+    queued: HashMap<ReapKillSite, VecDeque<nix::errno::Errno>>,
+    /// The errno every probe inside the one claiming `GroupDrainCtx`
+    /// reports, for that drain's whole lifetime.
+    in_drain: Option<nix::errno::Errno>,
+    /// Set once a drain has claimed `in_drain`, so a second drain in the
+    /// same test probes for real instead of inheriting the fault.
+    in_drain_claimed: bool,
+    /// Set the first time the claiming drain actually reported the
+    /// fault. Teardown asserts it: an armed-but-never-reported plan
+    /// proves the fixture never reached the site it aimed at.
+    #[cfg(test)]
+    in_drain_used: bool,
+}
+
+impl ReapKillFaults {
+    /// Consume one planned failure for `site`, if any.
+    fn take(&mut self, site: ReapKillSite) -> Option<nix::errno::Errno> {
+        self.queued.get_mut(&site)?.pop_front()
+    }
+
+    /// Claim the armed in-drain fault for one `GroupDrainCtx`. Returns
+    /// `false` in production, where `in_drain` is always `None`.
+    fn claim_in_drain(&mut self) -> bool {
+        if self.in_drain.is_none() || self.in_drain_claimed {
+            return false;
+        }
+        self.in_drain_claimed = true;
+        true
+    }
+
+    /// The errno the claiming drain's probe should report.
+    fn in_drain_report(&mut self) -> Option<nix::errno::Errno> {
+        let errno = self.in_drain?;
+        #[cfg(test)]
+        {
+            self.in_drain_used = true;
+        }
+        Some(errno)
+    }
+}
+
+/// The reap ledger's own `kill(2)`, with the directed seam of
+/// [`ReapKillSite`] applied first.
+///
+/// On Q#PD4's terms: the injection replaces the **result only**. The
+/// branch it feeds, the ledger bookkeeping, and every other syscall run
+/// as production code.
+fn reap_kill(
+    faults: &Mutex<ReapKillFaults>,
+    site: ReapKillSite,
+    pgid: i32,
+    signal: Option<Signal>,
+) -> nix::Result<()> {
+    if let Some(errno) = faults
+        .lock()
+        .expect("reap fault plan is never held across a panic")
+        .take(site)
+    {
+        return Err(errno);
+    }
+    nix::sys::signal::kill(Pid::from_raw(-pgid), signal)
 }
 
 struct ManagedProcess {
@@ -1140,6 +1249,55 @@ impl ProcessSupervisor {
             group_term_grace: GROUP_TERM_GRACE,
             forced_kill_errno: None,
             forced_pty_lookup: None,
+            reap_kill_faults: Arc::new(Mutex::new(ReapKillFaults::default())),
+        }
+    }
+
+    /// Plan a one-shot failure for the reap ledger's `kill(2)` at
+    /// `site`. Queued per site (see [`ReapKillFaults`]), so a plan for
+    /// one site can never be consumed by another's call.
+    #[cfg(test)]
+    fn plan_reap_kill_failure(&mut self, site: ReapKillSite, errno: nix::errno::Errno) {
+        self.reap_kill_faults
+            .lock()
+            .expect("reap fault plan")
+            .queued
+            .entry(site)
+            .or_default()
+            .push_back(errno);
+    }
+
+    /// Plan the in-drain probe failure: the *next* group drain to start
+    /// claims it and reports `errno` from every probe for that drain's
+    /// whole lifetime. See [`ReapKillFaults`] for why this one is not a
+    /// one-shot.
+    #[cfg(test)]
+    fn plan_in_drain_probe_failure(&mut self, errno: nix::errno::Errno) {
+        self.reap_kill_faults
+            .lock()
+            .expect("reap fault plan")
+            .in_drain = Some(errno);
+    }
+
+    /// Fixture teardown: every planned outcome must have been consumed
+    /// by the production site it was aimed at. An unconsumed plan means
+    /// the fixture never reached that site, which would otherwise leave
+    /// a test asserting the *absence* of an effect it never provoked.
+    #[cfg(test)]
+    fn assert_reap_faults_consumed(&self) {
+        let faults = self.reap_kill_faults.lock().expect("reap fault plan");
+        for (site, queue) in &faults.queued {
+            assert!(
+                queue.is_empty(),
+                "{} planned {site:?} failure(s) were never consumed — the fixture did not reach that production site",
+                queue.len()
+            );
+        }
+        if faults.in_drain.is_some() {
+            assert!(
+                faults.in_drain_used,
+                "the in-drain probe fault was armed but never reported — the fixture did not reach final_drain_runtime's probe"
+            );
         }
     }
 
@@ -1471,6 +1629,8 @@ impl ProcessSupervisor {
     /// see that survivor; only group liveness can).
     fn tick_reap_ledger(&mut self) {
         let now = Instant::now();
+        // Cloned out before `retain` takes `&mut self.reap_ledger`.
+        let faults = Arc::clone(&self.reap_kill_faults);
         self.reap_ledger.retain(|pgid, entry| {
             // ESRCH: no such group — done. Any other probe error is
             // also treated as "nothing left we can reach", so the
@@ -1491,11 +1651,16 @@ impl ProcessSupervisor {
             // Both are known and deliberately unchanged here: the
             // diagnostic lane that found them does not alter
             // disposition. Fixing it is its own lane.
-            if nix::sys::signal::kill(Pid::from_raw(-*pgid), None).is_err() {
+            if reap_kill(&faults, ReapKillSite::LedgerProbe, *pgid, None).is_err() {
                 return false;
             }
             if now >= entry.deadline && !entry.killed {
-                let _ = nix::sys::signal::kill(Pid::from_raw(-*pgid), Some(Signal::SIGKILL));
+                let _ = reap_kill(
+                    &faults,
+                    ReapKillSite::LedgerEscalation,
+                    *pgid,
+                    Some(Signal::SIGKILL),
+                );
                 entry.killed = true;
             }
             true
@@ -1564,13 +1729,19 @@ impl ProcessSupervisor {
                 GroupDrainCtx {
                     pgid,
                     deadline: entry.deadline,
+                    faults: Arc::clone(&self.reap_kill_faults),
+                    in_drain_fault_claimed: self
+                        .reap_kill_faults
+                        .lock()
+                        .expect("reap fault plan is never held across a panic")
+                        .claim_in_drain(),
                 }
             })
         } else {
             None
         };
         let now = Instant::now();
-        let final_output = final_drain_runtime(runtime, group_ctx);
+        let final_output = final_drain_runtime(runtime, group_ctx.as_ref());
         let (termination, event) = match status {
             Ok(Some(TermStatus::Exited(code))) => (
                 Termination::Exited {
@@ -1760,8 +1931,14 @@ impl ProcessSupervisor {
         // (leader exited promptly, TERM-ignoring group member alive)
         // would be silently discarded at Drop and leak the member
         // (Q#CM3, round-4 finding 1).
+        let faults = Arc::clone(&self.reap_kill_faults);
         for (pgid, entry) in &mut self.reap_ledger {
-            let _ = nix::sys::signal::kill(Pid::from_raw(-*pgid), Some(Signal::SIGKILL));
+            let _ = reap_kill(
+                &faults,
+                ReapKillSite::ShutdownForceKill,
+                *pgid,
+                Some(Signal::SIGKILL),
+            );
             entry.killed = true;
         }
         // Final reap loop. SIGKILL is delivered immediately by the
@@ -1804,6 +1981,15 @@ impl ProcessSupervisor {
     #[cfg(test)]
     fn reap_ledger_len(&self) -> usize {
         self.reap_ledger.len()
+    }
+
+    /// Whether the ledger has recorded a SIGKILL as sent for `pgid`.
+    /// `None` if no entry is armed. The whole point of the
+    /// failed-escalation pin is that this reads `true` after a kill
+    /// that never happened.
+    #[cfg(test)]
+    fn reap_ledger_killed(&self, pgid: i32) -> Option<bool> {
+        self.reap_ledger.get(&pgid).map(|e| e.killed)
     }
 }
 
@@ -2322,13 +2508,40 @@ fn drain_runtime_output(rt: &RuntimeHandles) -> Vec<ProcessEventKind> {
 /// ledger's deadline for this group: the drain enforces it from
 /// inside its loop because no other tick runs while the drain
 /// blocks the frame.
-#[derive(Clone, Copy)]
 struct GroupDrainCtx {
     pgid: i32,
     deadline: Instant,
+    /// The supervisor's fault plan (empty in production), carried here
+    /// because this drain runs in a free function with no `&mut self`.
+    faults: Arc<Mutex<ReapKillFaults>>,
+    /// True when this drain claimed the armed in-drain probe fault at
+    /// construction. Exactly one drain can claim it.
+    in_drain_fault_claimed: bool,
 }
 
-fn final_drain_runtime(rt: &RuntimeHandles, group: Option<GroupDrainCtx>) -> Vec<ProcessEventKind> {
+/// The in-drain liveness probe, with the seam of §1.2a applied first.
+///
+/// The injected errno is *returned*, and the caller's `.is_ok()` then
+/// discards it — which is the collapse under test, left exactly as it
+/// is. This function changes what the probe reports, never what the
+/// drain does with the report.
+fn in_drain_probe(ctx: &GroupDrainCtx) -> nix::Result<()> {
+    if ctx.in_drain_fault_claimed
+        && let Some(errno) = ctx
+            .faults
+            .lock()
+            .expect("reap fault plan is never held across a panic")
+            .in_drain_report()
+    {
+        return Err(errno);
+    }
+    nix::sys::signal::kill(Pid::from_raw(-ctx.pgid), None)
+}
+
+fn final_drain_runtime(
+    rt: &RuntimeHandles,
+    group: Option<&GroupDrainCtx>,
+) -> Vec<ProcessEventKind> {
     let deadline = Instant::now() + EXIT_OUTPUT_DRAIN_TIMEOUT;
     let mut out = Vec::new();
     // Group drains get tighter bounds than the plain byte-flush
@@ -2358,9 +2571,9 @@ fn final_drain_runtime(rt: &RuntimeHandles, group: Option<GroupDrainCtx>) -> Vec
         if rt.readers.iter().all(std::thread::JoinHandle::is_finished) && !drained_any {
             return out;
         }
-        if let Some(ctx) = &group {
+        if let Some(ctx) = group {
             let now = Instant::now();
-            let group_alive = nix::sys::signal::kill(Pid::from_raw(-ctx.pgid), None).is_ok();
+            let group_alive = in_drain_probe(ctx).is_ok();
             if group_alive && now >= ctx.deadline && !group_killed {
                 let _ = nix::sys::signal::kill(Pid::from_raw(-ctx.pgid), Some(Signal::SIGKILL));
                 group_killed = true;
@@ -4372,6 +4585,319 @@ mod tests {
             0,
             "shutdown must probe forced kills to ESRCH"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Reap-ledger silent failures (framing §4).
+    //
+    // Every pin below asserts the *consequence* of a discarded kill(2)
+    // result — a live group the ledger stopped tracking, a survivor the
+    // ledger records as killed, output cancelled before it arrived —
+    // and never that a function was called. All five pin CURRENT
+    // behaviour, including the behaviour that is wrong: this lane
+    // changes no disposition (§7).
+    //
+    // Each ends with `assert_reap_faults_consumed`, which is not
+    // ceremony: a planned failure that was never consumed means the
+    // fixture never reached the production site, and an
+    // absence-assertion under those conditions is vacuous.
+    // -----------------------------------------------------------------
+
+    /// Kill a leaked fixture descendant that a pin deliberately let
+    /// survive. Called after the assertions, never before them.
+    fn reap_fixture_survivor(pid: i32) {
+        let _ = nix::sys::signal::kill(Pid::from_raw(pid), Some(Signal::SIGKILL));
+    }
+
+    #[test]
+    fn an_unreachable_probe_drops_an_entry_whose_group_is_still_alive() {
+        // §1.2 (a). `retain` returning false deletes the entry, so
+        // escalation is cancelled — and the probe cannot tell ESRCH
+        // ("the group is gone", correct) from any other errno ("we
+        // could not ask", not correct).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut sup = ProcessSupervisor::new();
+        // Long enough that the escalation cannot fire and confuse the
+        // reading: the only thing that empties the ledger here is (a).
+        sup.set_group_term_grace(Duration::from_secs(30));
+        let (script, pidfile) = survivor_script(dir.path(), true);
+        let id = sup
+            .spawn(sh_group_spec("probe-eperm", &script))
+            .expect("spawn");
+        let _ = drain_until(&mut sup, id, Duration::from_secs(5), has_exited);
+        let survivor = wait_pidfile(&pidfile);
+        assert!(pid_alive(survivor), "survivor alive before the probe");
+        assert_eq!(sup.reap_ledger_len(), 1, "ledger armed before the probe");
+
+        sup.plan_reap_kill_failure(ReapKillSite::LedgerProbe, nix::errno::Errno::EPERM);
+        sup.tick();
+
+        assert_eq!(
+            sup.reap_ledger_len(),
+            0,
+            "an EPERM probe drops the entry exactly as ESRCH would"
+        );
+        assert!(
+            pid_alive(survivor),
+            "and the group it stopped tracking is still alive — this is the leak"
+        );
+        sup.assert_reap_faults_consumed();
+        reap_fixture_survivor(survivor);
+    }
+
+    #[test]
+    fn a_failed_escalation_is_recorded_as_a_successful_one() {
+        // §1.2 (b). `entry.killed = true` runs unconditionally, so a
+        // SIGKILL that never landed satisfies `!entry.killed == false`
+        // forever. The consequence is not bookkeeping: **no later tick
+        // retries it**, so the survivor outlives every escalation the
+        // ledger will ever attempt during the session.
+        //
+        // Scoped to ticks deliberately. `shutdown()`'s force-kill loop
+        // iterates the ledger with **no `!entry.killed` guard**, so it
+        // does re-kill an entry this arm marked — which is why that
+        // failure mode is distinct and has its own pin. This one ticks
+        // and never calls `shutdown`, so what it asserts is exactly
+        // what it says.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut sup = ProcessSupervisor::new();
+        sup.set_group_term_grace(Duration::from_millis(150));
+        let (script, pidfile) = survivor_script(dir.path(), true);
+        let id = sup
+            .spawn(sh_group_spec("kill-eperm", &script))
+            .expect("spawn");
+        let events = drain_until(&mut sup, id, Duration::from_secs(5), has_exited);
+        let pgid = i32::try_from(started_pid(&events).expect("leader pid")).expect("pgid fits");
+        let survivor = wait_pidfile(&pidfile);
+
+        sup.plan_reap_kill_failure(ReapKillSite::LedgerEscalation, nix::errno::Errno::EPERM);
+        // Past the grace, so the escalation arm is the one that runs.
+        std::thread::sleep(Duration::from_millis(250));
+        sup.tick();
+
+        assert_eq!(
+            sup.reap_ledger_killed(pgid),
+            Some(true),
+            "the entry records a SIGKILL that returned EPERM as sent"
+        );
+        // The retry that `killed = true` forecloses: keep ticking well
+        // past the grace and the survivor is still there.
+        let stop = Instant::now() + Duration::from_millis(600);
+        while Instant::now() < stop {
+            sup.tick();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            pid_alive(survivor),
+            "no tick ever retries the failed SIGKILL, so the survivor outlives the ledger's only escalation"
+        );
+        assert_eq!(
+            sup.reap_ledger_len(),
+            1,
+            "the entry is retained, and inert to every subsequent tick"
+        );
+        sup.assert_reap_faults_consumed();
+        reap_fixture_survivor(survivor);
+    }
+
+    #[test]
+    fn shutdown_still_force_kills_a_group_a_failed_escalation_marked_killed() {
+        // The boundary of the pin above, and the reason its claim is
+        // "no later TICK retries it" rather than "nothing retries it".
+        //
+        // `shutdown()`'s force-kill loop iterates the ledger with no
+        // `!entry.killed` guard, so the one thing that still acts on an
+        // entry the escalation arm gave up on is editor exit. That
+        // keeps the two failure modes distinct: a failed escalation
+        // leaks the group until exit; a failed force-kill leaks it
+        // past exit.
+        //
+        // No fault is planned for the shutdown site here — the whole
+        // point is that this force-kill really lands.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut sup = ProcessSupervisor::new();
+        sup.set_group_term_grace(Duration::from_millis(150));
+        let (script, pidfile) = survivor_script(dir.path(), true);
+        let id = sup
+            .spawn(sh_group_spec("escalation-then-shutdown", &script))
+            .expect("spawn");
+        let events = drain_until(&mut sup, id, Duration::from_secs(5), has_exited);
+        let pgid = i32::try_from(started_pid(&events).expect("leader pid")).expect("pgid fits");
+        let survivor = wait_pidfile(&pidfile);
+
+        sup.plan_reap_kill_failure(ReapKillSite::LedgerEscalation, nix::errno::Errno::EPERM);
+        std::thread::sleep(Duration::from_millis(250));
+        sup.tick();
+        assert_eq!(
+            sup.reap_ledger_killed(pgid),
+            Some(true),
+            "precondition: the entry is marked killed by a SIGKILL that failed"
+        );
+        assert!(pid_alive(survivor), "precondition: the survivor is alive");
+
+        sup.shutdown();
+
+        assert!(
+            !pid_alive(survivor),
+            "shutdown force-kills every armed entry, marked or not — so an escalation \
+             failure is not the survivor's last reprieve"
+        );
+        assert_eq!(sup.reap_ledger_len(), 0, "and the entry probes to ESRCH");
+        sup.assert_reap_faults_consumed();
+    }
+
+    #[test]
+    fn a_failed_shutdown_force_kill_leaks_the_group_and_burns_the_bound() {
+        // §1.2 (c). The path that exists specifically to stop a leak at
+        // editor exit discards its own kill result — and because it
+        // still sets `killed`, the final loop can never escalate again.
+        // It therefore runs to its full 2s bound and exits with the
+        // member alive.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut sup = ProcessSupervisor::new();
+        // The ledger must not be able to reap on its own; only
+        // shutdown's force-kill could have.
+        sup.set_group_term_grace(Duration::from_secs(30));
+        let (script, pidfile) = survivor_script(dir.path(), true);
+        let id = sup
+            .spawn(sh_group_spec("shutdown-eperm", &script))
+            .expect("spawn");
+        let _ = drain_until(&mut sup, id, Duration::from_secs(5), has_exited);
+        let survivor = wait_pidfile(&pidfile);
+        assert!(pid_alive(survivor), "survivor alive pre-shutdown");
+
+        sup.plan_reap_kill_failure(ReapKillSite::ShutdownForceKill, nix::errno::Errno::EPERM);
+        let t0 = Instant::now();
+        sup.shutdown();
+        let elapsed = t0.elapsed();
+
+        assert!(
+            pid_alive(survivor),
+            "the group survives editor exit — the leak this path was written to prevent"
+        );
+        assert_eq!(
+            sup.reap_ledger_len(),
+            1,
+            "the entry never reaches ESRCH, so the loop holds it to the bound"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(1900),
+            "the final loop runs to its 2s bound rather than converging; took {elapsed:?}"
+        );
+        sup.assert_reap_faults_consumed();
+        reap_fixture_survivor(survivor);
+    }
+
+    #[test]
+    fn a_probe_error_after_a_failed_force_kill_exits_the_shutdown_loop_early() {
+        // Bet 3, and §1.3's coupling. The loop runs while
+        // `any_running() || !reap_ledger.is_empty()`, so an early exit
+        // needs BOTH: the fixture is a leader that has already exited
+        // (any_running() false) leaving a group survivor, which is
+        // exactly the case the ledger exists to serve.
+        //
+        // This is also the pin that justifies a multi-outcome seam:
+        // it needs a failed force-kill AND a failed subsequent probe
+        // pending at the same time.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut sup = ProcessSupervisor::new();
+        sup.set_group_term_grace(Duration::from_secs(30));
+        let (script, pidfile) = survivor_script(dir.path(), true);
+        let id = sup
+            .spawn(sh_group_spec("coupling", &script))
+            .expect("spawn");
+        let _ = drain_until(&mut sup, id, Duration::from_secs(5), has_exited);
+        let survivor = wait_pidfile(&pidfile);
+        assert!(
+            !sup.any_running(),
+            "the leader has exited: the other arm of the disjunction is already false"
+        );
+
+        sup.plan_reap_kill_failure(ReapKillSite::ShutdownForceKill, nix::errno::Errno::EPERM);
+        sup.plan_reap_kill_failure(ReapKillSite::LedgerProbe, nix::errno::Errno::EPERM);
+        let t0 = Instant::now();
+        sup.shutdown();
+        let elapsed = t0.elapsed();
+
+        assert_eq!(
+            sup.reap_ledger_len(),
+            0,
+            "the errored probe empties the ledger"
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "and the loop then exits early, concluding cleanup finished because the probe failed; took {elapsed:?}"
+        );
+        assert!(
+            pid_alive(survivor),
+            "while the survivor it concluded about is alive"
+        );
+        sup.assert_reap_faults_consumed();
+        reap_fixture_survivor(survivor);
+    }
+
+    #[test]
+    fn a_collapsed_in_drain_probe_cancels_readers_before_late_output() {
+        // §1.2a, the fourth site. `is_ok()` collapses every errno into
+        // "the group is dead", which makes `quiesced` true and cancels
+        // the readers. Unlike the persistent ledger, no later tick can
+        // revisit this: the decision is terminal for that drain, and
+        // the failure mode is truncated output rather than a leak.
+        //
+        // The fault repeats for the whole drain because a one-shot
+        // cannot reach `quiesced`: the loop probes again every 1ms and
+        // the quiescent window is a full READER_SEND_POLL_INTERVAL.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pidfile = dir.path().join("pid");
+        let mut sup = ProcessSupervisor::new();
+        // Far enough out that the real path would wait, and the drain's
+        // own 2s EXIT_OUTPUT_DRAIN_TIMEOUT would still collect the late
+        // marker at ~500ms. That is what makes the absence meaningful.
+        sup.set_group_term_grace(Duration::from_secs(3));
+        // The descendant keeps fd1, so the readers stay open after the
+        // leader exits. EARLY is written before the leader exits, so it
+        // is in the pipe before the drain begins.
+        //
+        // **`trap '' TERM` is load-bearing, and its absence made the
+        // first draft of this pin vacuous.** `poll_one` TERMs the whole
+        // group on leader exit, so an untrapped descendant dies before
+        // its 0.5s sleep ends — the late marker then never arrives on
+        // *either* path, and "LATE-MARKER is absent" holds for a reason
+        // that has nothing to do with the probe. The bite caught it:
+        // with the seam reverted the pin still passed both content
+        // assertions and failed only the consumed-plan check.
+        //
+        // The readiness gate is `survivor_script`'s, for its reason: a
+        // slow scheduler can otherwise deliver the group TERM before
+        // the subshell's `trap` runs.
+        let ready = dir.path().join("ready");
+        let script = format!(
+            "echo EARLY; ( trap '' TERM; : > {ready}; sleep 0.5; echo LATE-MARKER; sleep 5 ) & \
+             echo $! > {pid}; while [ ! -e {ready} ]; do sleep 0.01; done",
+            ready = ready.display(),
+            pid = pidfile.display(),
+        );
+        sup.plan_in_drain_probe_failure(nix::errno::Errno::EPERM);
+        let id = sup
+            .spawn(sh_group_spec("in-drain", &script))
+            .expect("spawn");
+        let events = drain_until(&mut sup, id, Duration::from_secs(5), has_exited);
+        let survivor = wait_pidfile(&pidfile);
+
+        // Positive control on the fixture itself. Without it, "LATE is
+        // absent" would also hold if the pipe never carried anything.
+        assert!(
+            stdout_contains(&events, b"EARLY"),
+            "the fixture's pipe must actually deliver output; events: {events:?}"
+        );
+        assert!(
+            !stdout_contains(&events, b"LATE-MARKER"),
+            "a probe that reports EPERM as 'dead' quiesces the drain and cancels the readers \
+             before the live descendant's later output can arrive; events: {events:?}"
+        );
+        sup.assert_reap_faults_consumed();
+        reap_fixture_survivor(survivor);
+        sup.shutdown();
     }
 
     #[test]
