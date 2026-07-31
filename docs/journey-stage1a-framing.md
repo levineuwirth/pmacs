@@ -230,6 +230,12 @@ Not in 1a — Stage 1b: a compile keybinding and `cargo build`/`test`
 defaults from the existing `ProjectKind::Cargo`, LSP spawn-failure
 guidance (§1.2), a welcome buffer.
 
+*(Correction, added by Stage 1b-1: there is no `ProjectKind::Cargo`. The
+variant is `ProjectKind::Rust`; this line inherited the error from
+`COHERENCE.md` §20, now recorded in its §24. Left in place rather than
+rewritten — this document records what was planned — but flagged so the
+wrong type name does not survive by being quoted.)*
+
 ---
 
 ## 2. Ground truth (scouted 2026-07-26, `main` @ `d400f30`; re-verified rev 4)

@@ -1299,6 +1299,451 @@ fn preservation_display_file_still_refuses_a_directory() {
 }
 
 // ---------------------------------------------------------------------------
+// Step 9 — build or test the project (Journey Stage 1b-1)
+//
+// `COHERENCE.md` §2 graded this **Partial**: `M-x compile.run` worked but
+// had no keybinding, an empty first prompt, and no `cargo build`
+// suggestion. These rows are the ratchet for the three.
+//
+// The trap these fixtures are built around: compile's last-resort cwd is
+// `std::env::current_dir()` evaluated at call time, which under `cargo
+// test` is the **pmacs repo root — itself a Cargo project**
+// (`compile_mode_acceptance.rs` pins exactly that). So any pin asserting
+// the *absence* of a Cargo suggestion must be shaped so the fallback is
+// never consulted: each fixture carries its own marker, and
+// `project_root_of_active()` therefore answers from inside the fixture.
+// `set_search_boundary` is not the defence — it clamps only a walk that
+// starts below the boundary, and the fallback's walk starts at the repo.
+// ---------------------------------------------------------------------------
+
+fn ctrl(s: &mut EditorState, c: char) {
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char(c), KeyModifiers::CONTROL),
+    );
+}
+
+/// Open the compile prompt through the real `C-c c` binding.
+fn press_compile_chord(s: &mut EditorState) {
+    ctrl(s, 'c');
+    type_char(s, 'c');
+}
+
+/// A Cargo project a journey can plausibly be run against.
+fn cargo_project() -> TempDir {
+    let td = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        td.path().join("Cargo.toml"),
+        b"[package]\nname = \"journey-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("write Cargo.toml");
+    std::fs::create_dir_all(td.path().join("src")).expect("mkdir src");
+    std::fs::write(td.path().join("src/main.rs"), b"fn main() {}\n").expect("write main.rs");
+    td
+}
+
+/// Clamp detection to the fixture so a stray marker above the tempdir
+/// (a developer's `/tmp/.git`) cannot leak in.
+fn bound_detection_to(s: &EditorState, dir: &Path) {
+    exec(
+        s,
+        &format!(
+            "pmacs.project.set_search_boundary({:?})",
+            dir.display().to_string()
+        ),
+    );
+}
+
+/// The project root as **detection** reports it.
+///
+/// `pmacs.project.detect` canonicalizes before walking
+/// (`canonicalize_or_passthrough`, `src/project.rs:509-511`), so a
+/// `/var/folders/...` tempdir on macOS comes back as
+/// `/private/var/folders/...`. `canon()` is *lexical* — it never
+/// resolves symlinks — so it is the wrong expectation for any value
+/// that has passed through detection, which is exactly what the compile
+/// cwd is. Using it here failed both macOS CI legs while Ubuntu (where
+/// `/tmp` is not a symlink) stayed green.
+fn detected_root(path: &Path) -> String {
+    std::fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn minibuffer_active(s: &EditorState) -> bool {
+    eval(s, "return pmacs.minibuffer.is_active()")
+}
+
+fn minibuffer_contents(s: &EditorState) -> String {
+    eval(s, "return pmacs.minibuffer.contents()")
+}
+
+fn named_text(s: &EditorState, name: &str) -> String {
+    eval(
+        s,
+        &format!(
+            r#"
+            for _, id in ipairs(pmacs.buffer.list()) do
+                if pmacs.describe.buffer(id).name == {name:?} then
+                    return id:slice(0, id:len())
+                end
+            end
+            return ""
+            "#
+        ),
+    )
+}
+
+/// Drive frames until `pred` holds, pumping the process supervisor as
+/// well as the async runtime — a compile run is a spawned child.
+fn pump_processes_until(
+    s: &mut EditorState,
+    timeout_ms: u64,
+    mut pred: impl FnMut(&EditorState) -> bool,
+) -> bool {
+    let stop = Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        if pred(s) {
+            return true;
+        }
+        if Instant::now() >= stop {
+            return false;
+        }
+        s.tick_processes();
+        s.tick_async();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Walk the journey to the point where a build would be run: launch on
+/// the directory, then `RET` on `name` to open a file.
+fn walk_to_open_file(dir: &Path, name: &str) -> EditorState {
+    let mut s = launch(dir);
+    bound_detection_to(&s, dir);
+    let line = line_of(&s, name);
+    exec(&s, &format!("pmacs.editor.move_to_line({line})"));
+    press(&mut s, KeyCode::Enter);
+    pump(&mut s);
+    assert_eq!(
+        active_name(&s),
+        dir.join(name).display().to_string(),
+        "precondition: the walk must actually open the file, or every pin \
+         below is really testing the dired buffer"
+    );
+    s
+}
+
+/// **N** — `C-c c` reaches `compile.run`. Separate from N2 because a
+/// prefill assertion alone stays green if the binding is removed and the
+/// prompt is opened another way — and the binding is the thing
+/// `COHERENCE.md` says is missing.
+#[test]
+fn journey_step9_the_compile_chord_opens_the_prompt() {
+    let td = cargo_project();
+    let mut s = walk_to_open_file(td.path(), "Cargo.toml");
+    press_compile_chord(&mut s);
+    assert!(
+        minibuffer_active(&s),
+        "C-c c must open the compile prompt; active buffer is {}",
+        active_name(&s)
+    );
+}
+
+/// **N** — the prompt is prefilled from the detected project kind.
+#[test]
+fn journey_step9_the_prompt_is_prefilled_for_a_cargo_project() {
+    let td = cargo_project();
+    let mut s = walk_to_open_file(td.path(), "Cargo.toml");
+    press_compile_chord(&mut s);
+    assert_eq!(
+        minibuffer_contents(&s),
+        "cargo build",
+        "a Rust project's first compile prompt must offer its build command"
+    );
+}
+
+/// **N** — the directory the prompt captured survives a window switch.
+///
+/// The prompt is opened against A, the active buffer then moves to an
+/// unrelated directory B, and only then is the command accepted. Both
+/// readings — the header pmacs writes and the shell's own `pwd` — must
+/// say A. Falsified by dropping `{ cwd = ctx.cwd }` from `on_accept`,
+/// which is what re-resolving at accept time looks like.
+#[test]
+fn journey_step9_the_prompt_runs_in_the_directory_it_captured() {
+    let a = cargo_project();
+    let b = project();
+    let mut s = walk_to_open_file(a.path(), "Cargo.toml");
+    press_compile_chord(&mut s);
+    assert!(minibuffer_active(&s), "prompt must be open against A");
+
+    // Move the active buffer to B while the prompt waits for input.
+    exec(
+        &s,
+        &format!(
+            "pmacs.window.display_file({:?})",
+            b.path().join("alpha.txt").display().to_string()
+        ),
+    );
+    pump(&mut s);
+
+    // Accept a cheap command: the subject is the directory, so a fast
+    // one keeps the failure message about the directory. Only the
+    // editing of an already-open prompt is short-circuited; the prompt
+    // itself was opened through the real chord.
+    exec(&s, "pmacs.minibuffer.set_contents('pwd')");
+    press(&mut s, KeyCode::Enter);
+    let finished = pump_processes_until(&mut s, 10_000, |s| {
+        named_text(s, "*compilation*").contains("exited")
+    });
+    assert!(finished, "the accepted run must finish");
+
+    let text = named_text(&s, "*compilation*");
+    // Detection-canonical, not lexical: the compile cwd came from
+    // `pmacs.project.detect`, and `pwd` reports the physical directory.
+    let a_path = detected_root(a.path());
+    assert!(
+        text.contains(&format!("Directory: {a_path}")),
+        "the header must name the directory the prompt captured, not the newly active one;\n{text}"
+    );
+    assert!(
+        text.contains(&a_path),
+        "and `pwd` must agree with the header;\n{text}"
+    );
+}
+
+/// **N** — the offered command runs, in the offered directory.
+///
+/// Every other pin here compares values the prompt and the resolver
+/// already agree on. A wrong directory inside `on_accept` passes all of
+/// them. This one accepts what was offered, unedited, and observes a
+/// real process.
+#[test]
+fn journey_step9_the_offered_command_builds_the_project() {
+    if !binary_available("cargo") {
+        assert!(
+            std::env::var_os("PMACS_REQUIRE_CARGO_BUILD").is_none(),
+            "PMACS_REQUIRE_CARGO_BUILD is set but `cargo` is not on PATH"
+        );
+        eprintln!("skipping: `cargo` is not on PATH");
+        return;
+    }
+    let td = cargo_project();
+    let mut s = walk_to_open_file(td.path(), "Cargo.toml");
+    press_compile_chord(&mut s);
+    assert_eq!(
+        minibuffer_contents(&s),
+        "cargo build",
+        "precondition: the prompt offers the build command"
+    );
+
+    // Accept exactly what was offered — no editing.
+    press(&mut s, KeyCode::Enter);
+    let finished = pump_processes_until(&mut s, 120_000, |s| {
+        named_text(s, "*compilation*").contains("exited")
+    });
+    assert!(finished, "the offered build must finish");
+
+    let text = named_text(&s, "*compilation*");
+    assert!(
+        text.contains(&format!("Directory: {}", detected_root(td.path()))),
+        "the build runs in the detected project root;\n{text}"
+    );
+    assert!(
+        text.contains("[compile exited with code 0]"),
+        "and the command that was offered is one that actually runs;\n{text}"
+    );
+    // Positive control on the run itself. A clean exit alone does not
+    // prove cargo compiled anything — this names the fixture crate, so
+    // the pin fails if the offered command ever stops being a build.
+    assert!(
+        text.contains("journey-fixture"),
+        "cargo must actually have built the fixture crate;\n{text}"
+    );
+}
+
+/// **N** — the suggestion follows the directory the run will use.
+///
+/// A Node project nested inside a Cargo one, opened at the *inner* file.
+/// Falsified by deriving the kind from the launch directory (the Cargo
+/// root here) or from the process cwd — both yield `cargo build`.
+///
+/// It does **not** catch re-detecting from `project_root_of_active()`'s
+/// answer: that helper already returns the innermost root, so detecting
+/// from it yields `node` again and this pin stays green.
+#[test]
+fn journey_step9_a_nested_project_gets_its_own_kind_not_the_outer_one() {
+    let outer = cargo_project();
+    let sub = outer.path().join("sub");
+    std::fs::create_dir_all(&sub).expect("mkdir sub");
+    std::fs::write(sub.join("package.json"), b"{ \"name\": \"inner\" }\n").expect("write pkg");
+    std::fs::write(sub.join("index.js"), b"console.log(1)\n").expect("write index.js");
+
+    let mut s = walk_to_open_file(&sub, "index.js");
+    press_compile_chord(&mut s);
+    // `minibuffer_contents` is "" both for an empty prefill and for no
+    // minibuffer at all, so the emptiness assertion below is vacuous
+    // without this. Bite A caught it: with the binding removed this pin
+    // stayed green while six others failed.
+    assert!(
+        minibuffer_active(&s),
+        "precondition: the prompt is actually open"
+    );
+    assert_eq!(
+        eval::<String>(&s, "return pmacs.compile.context().kind"),
+        "node",
+        "the kind is detected from the resolved cwd, not the launch directory"
+    );
+    assert_eq!(
+        minibuffer_contents(&s),
+        "",
+        "and `node` has no seeded default, so nothing is offered"
+    );
+}
+
+/// **N** — `context()` is total in a launched session.
+///
+/// Asserted with the pathless dired buffer active, so the fallback
+/// branch is the one under test. It pins a *property*, deliberately not
+/// a value: which directory the fallback resolves to is the test
+/// runner's cwd and pinning it would pin the environment.
+#[test]
+fn journey_step9_the_compile_context_is_total_even_with_no_file_open() {
+    let td = cargo_project();
+    let s = launch(td.path());
+    assert!(
+        active_name(&s).starts_with("*dired:"),
+        "precondition: the pathless dired buffer is active"
+    );
+    assert!(
+        eval::<bool>(&s, "return pmacs.compile.context().cwd ~= nil"),
+        "a launched session always has somewhere to run a build"
+    );
+    assert!(
+        eval::<bool>(
+            &s,
+            "local c = pmacs.compile.context()
+             local ok, p = pcall(pmacs.project.detect, c.cwd)
+             local detected = (ok and p) and p.kind or nil
+             return c.kind == detected"
+        ),
+        "and its kind is exactly what detection answers for that cwd"
+    );
+}
+
+/// **P** — `_last` still outranks the kind default.
+///
+/// Green on the pre-image (there was no default). The targeted mutation
+/// is reordering the precedence chain to put `defaults[kind]` first.
+#[test]
+fn journey_step9_preservation_the_last_command_outranks_the_default() {
+    let td = cargo_project();
+    let mut s = walk_to_open_file(td.path(), "Cargo.toml");
+    exec(&s, "pmacs.compile.run('true')");
+    let finished = pump_processes_until(&mut s, 10_000, |s| {
+        named_text(s, "*compilation*").contains("exited")
+    });
+    assert!(finished, "precondition: a run completed and set _last");
+
+    press_compile_chord(&mut s);
+    assert_eq!(
+        minibuffer_contents(&s),
+        "true",
+        "a session that has compiled keeps its own command, not the project default"
+    );
+}
+
+/// **P** — the compile keys that already existed still dispatch.
+///
+/// Targeted mutation: writing the new binding as an unbind+bind pair
+/// over one of these sequences.
+#[test]
+fn journey_step9_preservation_the_existing_compile_bindings_survive() {
+    let td = cargo_project();
+    let s = walk_to_open_file(td.path(), "Cargo.toml");
+    for (sequence, command) in [
+        ("M-g n", "error.next"),
+        ("M-g p", "error.previous"),
+        ("C-x `", "error.next"),
+        ("M-!", "shell.command"),
+        ("C-c c", "compile.run"),
+    ] {
+        let bound: String = eval(
+            &s,
+            &format!("return pmacs.keymap.lookup({sequence:?}).command"),
+        );
+        assert_eq!(
+            bound, command,
+            "{sequence} must still dispatch to {command}"
+        );
+    }
+}
+
+/// True when `name` resolves on PATH — the fixture-dependency gate the
+/// process suite uses, so a missing binary skips rather than fails.
+fn binary_available(name: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(name)
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// **N** — the compile directory is *detection*-canonical, not lexical.
+///
+/// This pin exists because its absence broke both macOS CI legs while
+/// Ubuntu stayed green: `/var` is a symlink to `/private/var` there, so
+/// a tempdir's lexical and canonical paths differ, and the original
+/// assertions used the lexical one.
+///
+/// Reproducing it on Linux needs an explicit symlink — which is also a
+/// real configuration `Workspace::detect`'s own doc comment names
+/// ("`/tmp/sandbox/foo` symlinked to `/home/user/code/foo`"). Launching
+/// through the link makes the two paths disagree on every platform, so
+/// the regression can no longer hide behind a filesystem that happens
+/// not to use symlinks.
+#[cfg(unix)]
+#[test]
+fn journey_step9_the_compile_directory_is_detection_canonical() {
+    let parent = tempfile::tempdir().expect("tempdir");
+    let real = parent.path().join("real");
+    std::fs::create_dir_all(real.join("src")).expect("mkdir real");
+    std::fs::write(
+        real.join("Cargo.toml"),
+        b"[package]\nname = \"journey-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("write Cargo.toml");
+    std::fs::write(real.join("src/main.rs"), b"fn main() {}\n").expect("write main.rs");
+
+    let link = parent.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+    // Precondition, or the pin is vacuous: the two spellings must
+    // actually differ, which is the whole condition macOS creates for
+    // free and Linux does not.
+    assert_ne!(
+        canon(&link),
+        detected_root(&link),
+        "the fixture must make lexical and canonical paths disagree"
+    );
+
+    let mut s = walk_to_open_file(&link, "Cargo.toml");
+    press_compile_chord(&mut s);
+    exec(&s, "pmacs.minibuffer.set_contents('pwd')");
+    press(&mut s, KeyCode::Enter);
+    let finished = pump_processes_until(&mut s, 10_000, |s| {
+        named_text(s, "*compilation*").contains("exited")
+    });
+    assert!(finished, "the accepted run must finish");
+
+    let text = named_text(&s, "*compilation*");
+    assert!(
+        text.contains(&format!("Directory: {}", detected_root(&link))),
+        "the header must name the directory detection resolved to;\n{text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Step 6 — receive language intelligence (Journey Stage 1b-2)
 //
 // `COHERENCE.md` §2 graded this **Partial**: a preconfigured server that

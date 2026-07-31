@@ -187,9 +187,13 @@ Source: `builtin/runtime/compile.lua`.
 | `M-g n` / `M-g p` | `error.next` / `error.previous` — compile/grep errors when that source has claimed navigation, otherwise LSP diagnostics |
 | `` C-x ` `` | `error.next` |
 | `M-!` | `shell.command` — asynchronous output in `*shell-command*` |
+| `C-c c` | `compile.run` — prompts, prefilled from the detected project kind |
 
-`compile.run` and `compile.recompile` are available through `M-x`; no
-global key is assigned to them.
+`compile.recompile` is available through `M-x`, and through `g` inside
+`*compilation*`; no global key is assigned to it. `C-c c` is unreachable
+from inside a terminal window (`C-c` is consumed as the escape key) and
+inside a repl buffer (which binds `C-c` at buffer scope); `M-x
+compile.run` still works in both.
 
 ## 2. Buffer-local panel keymaps
 

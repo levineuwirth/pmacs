@@ -620,6 +620,60 @@ local function daemon_working_directory()
   return nil
 end
 
+-- Where a run started right now would execute. Extracted from the
+-- inline expression that used to live in `pmacs.compile.run`, because
+-- the interactive command needs the SAME answer to build its prompt:
+-- a suggestion computed from a different rule than the run obeys can
+-- name a toolchain that is not at the directory the command executes
+-- in (journey Stage 1b-1 framing §3.1).
+local function resolve_cwd(explicit)
+  return explicit or project_root_of_active() or daemon_working_directory()
+end
+
+--- Default compile command per detected project kind, keyed by the tag
+--- `pmacs.project.detect` returns. Assign into this table from
+--- `init.lua` to add or override one:
+---
+---     pmacs.compile.defaults.go = "go build ./..."
+---
+--- Only `rust` ships seeded, and that is a decision rather than an
+--- omission: Rust has one answer, while npm/yarn/pnpm, make/cmake, and
+--- `go build` versus `go test` do not. A wrong prefill costs more than
+--- an empty one — the user must delete it before typing.
+pmacs.compile.defaults = { rust = "cargo build" }
+
+-- Read `defaults[kind]` defensively. The table is public and
+-- assignable, so a metatable with a throwing `__index`, a non-string
+-- entry, or a non-table replacement all have to be survivable — the
+-- same discipline `validated_rules` keeps for a hostile rule container
+-- (round-2 finding 3). A broken `defaults` degrades to the pre-stage
+-- empty prompt; it never prevents compiling.
+local function default_command_for(kind)
+  if type(kind) ~= "string" then return nil end
+  local ok, value = pcall(function() return pmacs.compile.defaults[kind] end)
+  if ok and type(value) == "string" and #value > 0 then return value end
+  return nil
+end
+
+--- Where the next compile would run, and what kind of project is
+--- detected *from that directory*. Public getter (per API
+--- conventions): `{ cwd = string|nil, kind = string|nil }`.
+---
+--- `kind` is always `detect(cwd)`, one rule regardless of which branch
+--- produced `cwd`. Note that is not the same as "`cwd` is a project
+--- root": a Cargo workspace subdirectory contains no `Cargo.toml`, is
+--- detected as `rust` by the ancestor walk, and is a perfectly good
+--- place to run `cargo build`.
+function pmacs.compile.context(explicit_cwd)
+  local cwd = resolve_cwd(explicit_cwd)
+  local kind = nil
+  if cwd then
+    local ok, proj = pcall(pmacs.project.detect, cwd)
+    if ok and proj and type(proj.kind) == "string" then kind = proj.kind end
+  end
+  return { cwd = cwd, kind = kind }
+end
+
 local function format_exit_marker(label, ev)
   if ev.kind == "exited" then
     return string.format("\n[%s exited with code %d]\n", label, ev.code or 0)
@@ -762,7 +816,7 @@ local function start_run(slot, cmdline, opts)
   if cur and not pmacs.compile.is_generated_buffer(cur) then
     slot.prev = cur
   end
-  local cwd = opts.cwd or project_root_of_active() or daemon_working_directory()
+  local cwd = resolve_cwd(opts.cwd)
 
   -- Supersede (Q#CM9): terminate the old group and tombstone its
   -- pump entry; its terminal event still drives forget.
@@ -1132,13 +1186,27 @@ pmacs.command.define {
   description = "Compile: run a command in a streaming *compilation* buffer (M-x compile).",
   fn = function()
     local last = pmacs.compile._last
+    -- Captured ONCE, here. `pmacs.minibuffer.read` is asynchronous and
+    -- nothing freezes the active window while a prompt is open, so
+    -- re-resolving inside `on_accept` would let the prompt offer
+    -- `cargo build` for A and execute in B. Sharing the resolver is
+    -- necessary and not sufficient; the resolution has to be captured.
+    -- This is Journey Stage 1a's `commit_to` discipline on a smaller
+    -- seam — the mechanism differs, the failure prevented is the same.
+    local ctx = pmacs.compile.context()
     pmacs.minibuffer.read {
       prompt = "Compile command: ",
       history = "compile",
-      initial = last and last.cmdline or "",
+      -- `_last` still wins: a user who ran `cargo test` once gets it
+      -- back rather than being reset to the project default.
+      initial = last and last.cmdline or default_command_for(ctx.kind) or "",
       on_accept = function(cmdline)
         if cmdline == nil or cmdline == "" then return end
-        pmacs.compile.run(cmdline)
+        -- `ctx.cwd` passes through verbatim, INCLUDING nil: a nil cwd
+        -- means every resolution step failed, and the header renders
+        -- "(unknown)" exactly as before. Re-resolving here would
+        -- reintroduce the drift for the case least able to tolerate it.
+        pmacs.compile.run(cmdline, { cwd = ctx.cwd })
       end,
     }
   end,
@@ -1186,3 +1254,16 @@ pmacs.keymap.bind { scope = "global", sequence = "M-g n", command = "error.next"
 pmacs.keymap.bind { scope = "global", sequence = "M-g p", command = "error.previous" }
 pmacs.keymap.bind { scope = "global", sequence = "C-x `", command = "error.next" }
 pmacs.keymap.bind { scope = "global", sequence = "M-!", command = "shell.command" }
+-- Journey step 9 (COHERENCE §2): running a build had no binding at all,
+-- while `C-c @ C-M-s` opened all folds. `C-c c` is free, sits under the
+-- established `C-c` prefix, and does not collide with CUA copy (that is
+-- `M-w`). Bound here rather than in `default.lua` because a runtime
+-- module owns its own global keys — `terminal.lua` binds `C-c t`,
+-- `lsp.lua` binds `C-c o`.
+--
+-- Two inherited reachability limits, both pre-existing: inside a
+-- terminal window `C-c` is consumed as the escape key, and the repl
+-- package binds `C-c` at buffer scope. `M-x compile.run` still works in
+-- both. `compile.recompile` gets no global chord — `g` in
+-- `*compilation*` already covers rerun.
+pmacs.keymap.bind { scope = "global", sequence = "C-c c", command = "compile.run" }

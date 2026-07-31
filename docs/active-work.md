@@ -255,105 +255,63 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
-## Journey Stage 1b-2 (P1) — IMPLEMENTED, PR OPEN
+## Journey lane (P1) — 1a and 1b-1 MERGED; 1b-2 PR OPEN; 1b-3 REMAINS
+
+**Rewritten, not removed, at #203's merge.** Rule 4 removes a lane when
+its ARC is done; the journey arc is not — 1b-2 is in flight and 1b-3 is
+unframed. Stage 1a (#182/#183) and Stage 1b-1 (#203) are on `main` and
+their durable facts are in `docs/agent-handoff.md` §1, which is rule 4's
+precondition satisfied rather than deferred.
+
+**#203's merge obligation is DISCHARGED**: `COHERENCE.md` §2's step-9
+row now reads **Works**, §2's keybinding-inversion paragraph records all
+three examples answered (the quote itself deliberately unchanged), §20
+Priority 1 and its arc list say "landed", and the handoff bullet says
+LANDED. That flip rides *this* branch rather than a standalone docs PR,
+because #204 already touches all three files and a separate PR would
+re-conflict on every merge.
 
 - **Branch `journey-stage1b2-lsp-guidance`**, worktree
-  `../pmacs-journey-1b2`, based on `githubsucks/main` @ `fbcf235`.
+  `../pmacs-journey-1b2`, based on `githubsucks/main` @ `fbcf235`,
+  **integrated with `main` @ `1f290d5` (#203)**.
   `docs/journey-stage1b2-lsp-guidance-framing.md` revision 4, three
   review rounds closed (round 1: two blocking, three major, one minor;
   round 2: two blocking, two cleanups; round 3: one blocking; all
-  accepted).
-  Sibling of Stage 1b-1 (PR #203, step 9); this is step 6.
-- **What it is.** `COHERENCE.md` §1.2's canonical silence: a
-  preconfigured-but-missing language server fails with no status
-  message, no record, and no modeline marker, while tree-sitter
-  highlighting keeps working and masks it. The stage reports the
-  failure with guidance, wires an `M-x lsp.status` surface, and gives
-  the modeline a way to say "failed" rather than nothing.
-- **Half of it is already built and unwired.**
-  `LspManager::status_buffer_text()` renders "the `*lsp*` status buffer",
-  `last_error(sid)` exists, **both are exposed to Lua and tested**
-  (`pmacs.lsp.status_buffer_text`, `src/lua_bindings/mod.rs:10949`;
-  `tests/m4_acceptance.rs:2634`) — and there is **no production caller,
-  no `*lsp*` buffer, and no command**. Several `src/lsp.rs` and
-  `src/project.rs` doc comments refer to that buffer as if it exists.
-- **The reporting pattern is already adopted twice in `lsp.lua` itself**
-  — root-resolver failures (`:570-585`) and subscriber failures
-  (`:1831-1836`), both `pcall(pmacs.editor.set_status, msg)` with the
-  `pmacs.error` arm riding along. The canonical case at `:658-674` was
-  simply never converted. This stage finishes an adoption; it does not
-  start one.
-- **`COHERENCE.md` §1.2's frequency note is wrong, and it decides the
-  design.** It says the failure fires "once per project root".
-  `LspManager::spawn` returns early on failure *before* both
-  `status_tracker.ensure` and `clients.insert` (`src/lsp.rs:1287-1297`),
-  so a failed spawn leaves **no record at all**, `pmacs.lsp.list()`
-  cannot see it, and `ensure_server`'s affinity loop re-spawns. The real
-  rate is **once per file open**. Hence the rule: **memoize the report,
-  not the failure** — the spawn is still retried, so installing the
-  binary mid-session recovers with nothing to invalidate.
+  accepted). **Implemented; PR #204 open.**
+- **What it is.** `COHERENCE.md` §1.2's canonical silence, journey step
+  6: a preconfigured-but-missing language server now reports with
+  guidance, marks the modeline `LSP:!`, and appears in `M-x lsp.status`.
+- **Half of it was already built and unwired.**
+  `LspManager::status_buffer_text()` and `last_error()` have existed
+  since M4.8, exposed to Lua and tested, with **no production caller**
+  and no `*lsp*` buffer, while several `src/lsp.rs` and `src/project.rs`
+  doc comments refer to that buffer as though it existed.
+- **The reporting shape was already adopted twice in `lsp.lua` itself**
+  (root resolvers, notification subscribers). The canonical case was
+  silent because nobody had converted it — this finishes an adoption.
+- **`COHERENCE.md` §1.2's frequency note was wrong, and it decided the
+  design.** `LspManager::spawn` returns early *before* both
+  `status_tracker.ensure` and `clients.insert`, so a failed spawn leaves
+  **no record**, `pmacs.lsp.list()` cannot see it, and the affinity loop
+  re-spawns: the real rate is **once per file open**, not once per
+  project root. Hence **memoize the report, not the failure**.
 - **The affinity key is `(language, key_uri)`, and `key_uri` is nil for
-  markerless files** — `ensure_server` sets it only when the root came
-  from config or a marker walk (`lsp.lua:644-648`), so loose files in
-  unrelated directories deliberately share one server per language.
-  Round 1 caught revision 1 keying the memo on the resolved *root*,
-  which would have split what the runtime shares and re-reported one
-  failure per directory.
-- **Dedupe and current-failure state are two records, not one.**
-  `reported` is keyed by `(language, key_uri, command)` and never
-  cleared — the command is in the key so repointing config at a
-  different missing executable reports again. `failures` is keyed by
-  `(language, key_uri)` and **cleared when a spawn for that key
-  succeeds**, so `*lsp*` stops showing a failure the user has fixed.
-  A third, buffer-keyed projection feeds the modeline, because the
-  statusline provider is a **pure per-buffer lookup** and deriving an
-  affinity key inside it would run root resolvers and project detection
-  every frame, for every window. **Each projection carries its affinity
-  key and a success sweeps every projection holding it** — round 2 found
-  that clearing only the succeeding buffer leaves an earlier buffer
-  showing `LSP:!` while `*lsp*` reports nothing wrong, which is the
-  normal case for a project with more than one file.
-- **`key_uri` is nil and Lua cannot index by nil** (`t[nil] = v` raises
-  `table index is nil`, checked under LuaJIT and 5.4), so the framing
-  prescribes **one** key encoding used by both tables:
-  `language .. "\0" .. (key_uri and ("u" .. key_uri) or "n")`. The
-  `u`/`n` discriminator is what makes markerless unambiguous against any
-  URI, and Lua strings are 8-bit clean so `\0` is a safe separator.
-- **A new per-buffer table needs a removal path, and no existing one
-  would have supplied it.** Round 3 found the buffer projection had no
-  teardown, so killing a failed buffer leaked its entry for the session
-  and the sweep bound was false. The LSP resource reconciliation finds
-  work through `attachments_under` (`lsp.lua:2934-2944`), which iterates
-  `attachments` — and a failed buffer has **no attachment by
-  construction**, so it is invisible to every existing cleanup path. The
-  fix registers `pmacs.buffer.on_removed` once per projection, releases
-  the handle on the success sweep but **not** from inside the removal
-  callback (dispatch does `callbacks.take(id)` then iterates a local
-  vector, `src/lua_bindings/mod.rs:1949-1957`), and **clears** rather
-  than re-keys on `resource.renamed` / `resource.deleted` — re-keying
-  would assert a failure at a location where none was observed.
-- **The durable surface cannot show the failure today.**
-  `status_buffer_text` renders from `self.clients`, which a failed spawn
-  never enters. The stage keeps its failure record in Lua and renders it
-  as a section above that output, rather than reshaping Rust's status
-  model before anyone has used the surface. Stated as a limitation, with
-  promotion named as follow-on.
-- Its §1.7 records four stale `COHERENCE.md` §1.2 citations
-  (`:614-626` → `:658-674`; `:895-897` → `:1019-1021`; the frequency
-  note; and the now-false implication that no background failure is
-  reported anywhere).
-- **ON MERGE, flip the step-6 grade.** `COHERENCE.md` §2's step-6 row
-  stays **Partial** while the PR is open, per §25's landed-evidence
-  rule, and says so in the row itself. §20 Priority 1 and the arc list
-  say "in flight". Same obligation shape as 1b-1's.
-- **Bites, all directed.** Full revert fails 14 of 16 pins; removing the
-  modeline branch fails 6; removing the sweep fails **exactly one** —
-  the shared-affinity pin written for round 2's blocking finding, which
-  confirms no other pin covers it; removing the rename/delete
-  disposition fails exactly those two; removing the dedupe memo fails
-  the two dedupe pins; and keying the memo on the resolved root (the
-  revision-1 design) fails **only** the markerless pin, which is the
-  case where root and affinity key differ.
+  markerless files**, which deliberately share one server per language.
+  Lua cannot index by nil (`t[nil]` raises), so one encoding function
+  serves both tables with a `u`/`n` discriminator no URI can collide
+  with.
+- **Three tables, three lifetimes**, plus a buffer-keyed projection for
+  the modeline — that provider runs for every window on every paint, so
+  deriving an affinity key inside it would invoke user root resolvers
+  during painting. **A success sweeps every projection sharing the key**,
+  and the projection has its own `pmacs.buffer.on_removed` teardown
+  because nothing existing reaches it (`attachments_under` iterates
+  `attachments`, and a failed buffer has none by construction).
+- **ON MERGE of #204, flip the step-6 grade.** §2's step-6 row stays
+  **Partial** while the PR is open, per §25's landed-evidence rule, and
+  says so in the row.
+- **Stage 1b-3 (welcome buffer, step 4) is unframed** — the last of the
+  1b split.
 - Recovery from a clean checkout — **the two-argument form does not
   work** (`git worktree add <path> <remote-only-branch>` fails with
   `fatal: invalid reference`):
