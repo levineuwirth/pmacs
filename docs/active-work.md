@@ -380,19 +380,26 @@ which would have re-conflicted on every merge.
     githubsucks/journey-stage1b3-welcome
   ```
 
-## Discovery Stage 1 (P4) — FRAMING OPEN, revision 4
+## Discovery Stage 1 (P4) — FRAMING APPROVED (rev 5); implementation next
 
 - **Branch `discovery-stage1-commands`**, worktree `../pmacs-p4-discovery`,
   based on `githubsucks/main` @ `54a092e`. **Framing only; no code, no
-  PR yet.** `docs/discovery-stage1-command-family-framing.md` revision 4,
+  PR yet.** `docs/discovery-stage1-command-family-framing.md` revision 5,
   three review rounds closed (round 1: two blocking, two major; round 2:
   two blocking, two major; round 3: two factual corrections; all
-  accepted).
+  accepted), and **Q#D2 / Q#D3 decided by the user**.
 - **What it is.** `COHERENCE.md` §20 Priority 4 — "almost pure wiring,
-  the best payoff-per-effort in this document". Nine describe/list
-  commands (describe-key/mode/hook/buffer, where-is, list-commands,
-  list-keybindings, list-settings, apropos) over introspection that
-  already exists.
+  the best payoff-per-effort in this document". **Eleven commands under
+  one `help.*` prefix**: nine new (describe-key/mode/hook/buffer,
+  where-is, list-commands, list-keybindings, list-settings, apropos)
+  plus `editor.describe-command` / `editor.describe-setting` renamed,
+  with the old names retained as **forwarders** so nothing documented
+  breaks. Typing `help` at M-x surfaces the whole family, which is the
+  discoverability win the arc exists for (Q#D2).
+- **`apropos` matches by SUBSTRING, not fuzzy** (Q#D3). `fuzzy_score`
+  is subsequence-based and descriptions are long sentences, so fuzzy
+  would match nearly every command. Pinned by a
+  subsequence-that-is-not-a-substring finding nothing.
 - **It adds no Rust.** `pmacs.describe.*`, `pmacs.keymap.list()`,
   `pmacs.command.list()` and `pmacs.config.list()` already return
   everything needed, and `parse_completion_source` accepts a **Lua

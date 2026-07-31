@@ -1,11 +1,25 @@
 # Discovery Stage 1 — the describe/list command family
 
-**Status: framing, rev 4 — awaiting review round 4.**
+**Status: framing, rev 5 — Q#D2 and Q#D3 decided; ready for implementation approval.**
 **Serves `COHERENCE.md` §5 (unify discoverability), §1.1 (substrate
 without surface), §20 Priority 4.**
 
 ## 0. Revision history
 
+- rev 5 (2026-07-31) — **Q#D2 and Q#D3 answered by the user**; no review
+  findings at `1cc9d96`.
+  - **Q#D2 → `help.*` is canonical, with two forwarders.**
+    `editor.describe-command` and `editor.describe-setting` are renamed
+    to `help.*` and the old names retained as thin forwarders. The
+    family is **eleven** commands under one prefix, so typing `help` at
+    M-x surfaces all of it — which is the arc's entire purpose. The
+    split surface rev 3 flagged as "the one outcome that should not
+    survive review" is gone.
+  - **Q#D3 → `apropos` matches by substring**, stated in its own
+    description. `fuzzy_score` is subsequence-based and descriptions are
+    long sentences, so a short query's letters almost always appear in
+    order — fuzzy would match nearly every command and destroy the
+    precision that makes apropos worth having.
 - rev 4 (2026-07-31) — review round 3. Two factual corrections, both
   accepted.
   - **The custom source does not control display order.** Rev 3
@@ -174,8 +188,9 @@ decision about what "unavailable" means at each call site.
 is **orphaned** — the reachable renderer is the Lua `show_help_text`,
 which renders *less* (no source, no scope).
 
-**Nine new commands each calling `show_help_text` would turn a two-site
-migration into an eleven-site one.** §3.4 is the answer, and it is the
+**Eleven commands each calling `show_help_text` directly would make it
+an eleven-site migration** (nine new, plus the two renamed ones that
+call it today). §3.4 is the answer, and it is the
 most consequential decision in this framing — but §3.4 is careful about
 what it can actually promise, because `src/help.rs` has renderers for
 command / key / buffer / mode / hook / view and **none for settings,
@@ -183,40 +198,44 @@ lists, or apropos**.
 
 ## 3. Design
 
-### 3.1 The family
+### 3.1 The family — eleven commands under one prefix
 
-Nine commands, all rendering existing data:
+**Nine new**, all rendering data that already exists:
 
 | Command | Reads |
 |---|---|
-| `describe-key` | `pmacs.describe.key` — prompts for a chord, resolved against the active buffer + mode |
-| `describe-mode` | `pmacs.describe.mode` for the active buffer |
-| `describe-buffer` | `pmacs.describe.buffer` |
-| `describe-hook` | `pmacs.describe.hook` |
-| `where-is` | `describe.command(name).key_bindings` |
-| `list-commands` | `command.list()` + each description |
-| `list-keybindings` | `keymap.list()`, grouped by scope |
-| `apropos` | substring match over **names and descriptions** |
-| `list-settings` | `config.list()` |
+| `help.describe-key` | `pmacs.describe.key` — prompts for a chord, resolved against the active buffer + mode |
+| `help.describe-mode` | `pmacs.describe.mode` for the active buffer |
+| `help.describe-buffer` | `pmacs.describe.buffer` |
+| `help.describe-hook` | `pmacs.describe.hook` |
+| `help.where-is` | `describe.command(name).key_bindings` |
+| `help.list-commands` | `command.list()` + each description |
+| `help.list-keybindings` | `keymap.list()`, grouped by scope |
+| `help.list-settings` | `config.list()` |
+| `help.apropos` | **substring** over names and descriptions (Q#D3) |
 
-**Naming, stated exactly.** The nine **new** commands are `help.*`
-(`help.describe-key`, `help.where-is`, …). #205 established `help` as
-the index, so the family it indexes shares its prefix.
+**Two renamed**, so the family is not split:
 
-**The two pre-existing commands are intentional exceptions, not
-aliases.** `editor.describe-command` and `editor.describe-setting` keep
-their names and are **not** duplicated under `help.*` — rev 1 called
-them "aliases-by-retention", which was wrong twice over: nothing
-forwards to them, and the nine-command table never contained a
-`help.describe-command` for them to be aliases *of*.
+| Command | Was |
+|---|---|
+| `help.describe-command` | `editor.describe-command` |
+| `help.describe-setting` | `editor.describe-setting` |
 
-So the shipped surface is nine `help.*` commands plus two `editor.*`
-ones covering the same family. **That asymmetry is a wart**, and it is
-Q#D2's whole subject: either the two get `help.*` names with the old
-ones forwarding (eleven commands, two forwarders), or the family stays
-`editor.*` throughout (nine commands, no new prefix). This framing does
-not decide it, because a rename that this arc's later stages would
-revisit is worse than an explicit exception recorded for one round.
+**Naming — decided (Q#D2).** `help.*` is canonical. #205 established
+`help` as the index, so the family it indexes shares its prefix, and
+typing `help` at M-x now surfaces the whole family rather than only the
+index. That grouping *is* the discoverability win this arc exists for.
+
+**The two old names become forwarders, not exceptions.**
+`editor.describe-command` and `editor.describe-setting` remain
+registered and invoke their `help.*` counterparts, so nothing a user has
+in muscle memory or that `docs/keybindings.md` names stops working.
+
+Two forwarders are a real, bounded cost — two names for one thing is the
+duplication §5 complains about. They are accepted because the
+alternative is breaking documented commands, and they carry a
+deprecation path a later stage can take. **What is not accepted is a
+split family**, which is what rev 3 shipped and rev 5 removes.
 
 ### 3.2 `describe-setting` gains completion — which is assistance, not validation
 
@@ -386,18 +405,24 @@ the palette, not the command.
 
 ### 4.1 Pins
 
-1. **N — each of the nine commands runs from M-x and renders content.**
-   Through §4.0's full path, including the second prompt where the
-   command takes one. Asserts **content produced** in `*help*`.
+1. **N — each of the eleven commands runs from M-x and renders
+   content.** Through §4.0's full path, including the second prompt
+   where the command takes one. Asserts **content produced** in
+   `*help*`.
 2. **N — `where-is` agrees with the keymap.** Bind a command to a known
    chord, then assert `where-is` reports that chord. Falsified by
    rendering a static string.
 3. **N — `list-keybindings` covers every binding `keymap.list()`
    reports.** A property over the data, with a non-empty precondition so
    the loop cannot be vacuous.
-4. **N — `apropos` matches descriptions, not only names.** Search a word
-   that appears in exactly one command's *description* and in no command
-   *name*. This is what distinguishes apropos from a name filter.
+4. **N — `apropos` matches descriptions, not only names, and does so by
+   substring.** Two assertions: a word appearing in exactly one
+   command's *description* and no command *name* finds that command
+   (what distinguishes apropos from a name filter); and a
+   **subsequence that is not a substring** — letters present in order
+   but not contiguous — finds **nothing**. The second is what pins
+   Q#D3's decision rather than leaving matching semantics to whatever
+   the implementation reaches for.
 5. **N — `describe-setting` completes, and a non-matching typo still
    reaches the existing error path.** Two assertions, because §3.2 has
    two outcomes: (a) typing a real setting's prefix makes it the
@@ -408,15 +433,19 @@ the palette, not the command.
    `resolve_accepted_value` contradicts.*
 6. **N — `M-x help` lists the family.** A property over the family list,
    so adding a tenth command without indexing it fails.
-7. **P — every new command's `*help*` write goes through
-   `_show_help`.** Replace that function with a counting stub, drive all
-   nine through §4.0's path, and assert the count equals nine. Pins
-   §3.4's *actual* claim — one owner for `*help*` writes — rather than
-   the migration claim rev 1 overstated.
-8. **P — the existing describe/list commands still work.**
-   `editor.describe-command`, `editor.describe-setting`,
-   `editor.list-buffers`, `editor.list-workers` unchanged. Targeted
-   mutation: renaming rather than retaining them.
+7. **P — every command's `*help*` write goes through `_show_help`.**
+   Replace that function with a counting stub, drive all **eleven**
+   through §4.0's path, and assert the count equals eleven. Pins §3.4's
+   *actual* claim — one owner for `*help*` writes — rather than the
+   migration claim rev 1 overstated. The two renamed commands are in the
+   count precisely because they were the pre-existing direct callers.
+8. **P — the old names still work, as forwarders.** Invoke
+   `editor.describe-command` and `editor.describe-setting` through
+   §4.0's M-x path and assert they render the same subject as their
+   `help.*` counterparts. `editor.list-buffers` and
+   `editor.list-workers` are untouched and asserted unchanged.
+   Targeted mutation: dropping the forwarders after the rename — which
+   is the failure a user with muscle memory would hit first.
 9. **P — no command's predicate is evaluated.** Register a command whose
    predicate **raises**, then run it through §4.0's full M-x path and
    assert it **runs**. Pins §2.4's deliberate non-change, so a stage
@@ -464,20 +493,20 @@ the palette, not the command.
 - **Config registry: not adopted.** Nothing here is a tunable.
 - **Background-work attribution:** unchanged.
 
-## 7. Questions
+## 7. Questions — decided
 
-- **Q#D2 — `help.*` prefix, or keep `editor.*`?** §3.1 ships nine
-  `help.*` commands and leaves `editor.describe-command` /
-  `editor.describe-setting` as **exceptions**, so the family is split
-  across two prefixes. Resolve it one of two ways: give those two
-  `help.*` names with the `editor.*` ones **forwarding** (eleven
-  commands, two forwarders, one canonical prefix), or drop `help.*` and
-  keep the family `editor.*` throughout (nine commands, no new prefix).
-  A split surface is the one outcome that should not survive review.
-- **Q#D3 — should `apropos` fuzzy-match?** `fuzzy_score` exists
-  (`src/minibuffer.rs:637-666`) and M-x already uses it. Substring is
-  more predictable for a search command; fuzzy is more consistent with
-  M-x. Recommended: substring, and say so in the command description.
+- **Q#D2 — `help.*` or `editor.*`? → `help.*` canonical, with two
+  forwarders.** Eleven commands under one prefix, so typing `help` at
+  M-x surfaces the family. `editor.describe-command` /
+  `editor.describe-setting` keep working as forwarders. The split
+  surface rev 3 flagged is gone; the forwarders' duplication is the
+  accepted, bounded price of not breaking documented names.
+- **Q#D3 — should `apropos` fuzzy-match? → No, substring.**
+  `fuzzy_score` is subsequence-based and descriptions are long
+  sentences, so a short query's letters almost always appear in order —
+  fuzzy would match nearly every command. Substring is stated in the
+  command's own description, and acceptance 4 pins it with a
+  subsequence-that-is-not-a-substring finding nothing.
 
 ## 8. Ledger
 
