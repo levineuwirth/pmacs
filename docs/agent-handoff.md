@@ -1639,6 +1639,35 @@ git diff --check
 Machine-specific caveats — re-verify on a machine you haven't used
 before trusting them:
 
+- **Ambient storage roots: control all FIVE, not four.** Until the
+  ambient-root isolation lane lands
+  (`docs/test-ambient-config-isolation-framing.md`), the ~96 integration
+  suites read the developer's real `~/.config/pmacs/init.lua` and
+  **write** bundled packages into the real data root:
+  `#[cfg(not(test))]` guards the crate's own unit tests only, and
+  `EditorState::new` materializes packages outside every `cfg` guard.
+  A local full-suite run therefore needs, all pointed at a fresh
+  directory:
+
+  ```
+  XDG_CONFIG_HOME  XDG_DATA_HOME  XDG_STATE_HOME  XDG_CACHE_HOME
+  PMACS_STATE_HOME
+  ```
+
+  **The fifth is not redundant.** `PMACS_STATE_HOME` outranks
+  `XDG_STATE_HOME` (`src/state.rs`), so redirecting the four XDG
+  variables on a machine that exports it leaves the real state root
+  live. `HOME` is deliberately left alone: it is the fallback for the
+  XDG roots (already covered once they are set) and separately drives
+  `~`-expansion, which `find_file_acceptance` pins on purpose.
+  A run isolating only `XDG_CONFIG_HOME` stops the `init.lua` reads and
+  still writes through the real data root — every local gate run in this
+  repo before 2026-07-31 had that hole.
+
+  **After the lane lands** the in-process population isolates itself
+  through `EditorState::new_with_roots(&crate::iso::roots())` and the
+  five variables are belt-and-braces rather than required.
+
 - **basedpyright**: the desktop binary was **never broken** — this was a
   real code defect, diagnosed and fixed 2026-07-29 (see §5, "A `Drop`
   body runs before its fields"). `RuntimeHandles::drop` joined its reader
