@@ -255,75 +255,27 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
-## Journey lane (P1) — 1a, 1b-1, 1b-2 MERGED; 1b-3 PR OPEN
+## Journey lane (P1) — 1a, 1b-1, 1b-2 MERGED; 1b-3 PR #205 OPEN
 
 **Rewritten, not removed.** Rule 4 removes a lane when its ARC is done;
 the journey arc is not — 1b-3 is the last stage of the 1b split and is
-still open. Stage 1a (#182/#183) and Stage 1b-1 (#203) are on `main` and
-their durable facts are in `docs/agent-handoff.md` §1, which is rule 4's
-precondition satisfied rather than deferred.
+still open. Stages 1a (#182/#183), 1b-1 (#203) and **1b-2 (#204)** are
+all on `main` and their durable facts are in `docs/agent-handoff.md` §1,
+which is rule 4's precondition satisfied rather than deferred — so their
+per-stage blocks are gone from here rather than left to rot as
+"PR OPEN".
 
-**#203's merge obligation is DISCHARGED**: `COHERENCE.md` §2's step-9
-row now reads **Works**, §2's keybinding-inversion paragraph records all
-three examples answered (the quote itself deliberately unchanged), §20
-Priority 1 and its arc list say "landed", and the handoff bullet says
-LANDED. That flip rides *this* branch rather than a standalone docs PR,
-because #204 already touches all three files and a separate PR would
-re-conflict on every merge.
+**#203's merge obligation is DISCHARGED** on this branch: `COHERENCE.md`
+§2's step-9 row reads **Works**, §2's keybinding-inversion paragraph
+records all three examples answered (the quote itself deliberately
+unchanged), §20 Priority 1 and its arc list say "landed", and the
+handoff bullet says LANDED. **#204's is discharged too**: §2's step-6
+row names it as landed and stays **Partial** for a reason that landing
+did not touch — a server that starts and then *crashes* is still
+unsurfaced. Both rode this branch rather than standalone docs PRs,
+which would have re-conflicted on every merge.
 
-- **Branch `journey-stage1b2-lsp-guidance`**, worktree
-  `../pmacs-journey-1b2`, based on `githubsucks/main` @ `fbcf235`,
-  **integrated with `main` @ `1f290d5` (#203)**.
-  `docs/journey-stage1b2-lsp-guidance-framing.md` revision 4, three
-  review rounds closed (round 1: two blocking, three major, one minor;
-  round 2: two blocking, two cleanups; round 3: one blocking; all
-  accepted). **Implemented; PR #204 open.**
-- **What it is.** `COHERENCE.md` §1.2's canonical silence, journey step
-  6: a preconfigured-but-missing language server now reports with
-  guidance, marks the modeline `LSP:!`, and appears in `M-x lsp.status`.
-- **Half of it was already built and unwired.**
-  `LspManager::status_buffer_text()` and `last_error()` have existed
-  since M4.8, exposed to Lua and tested, with **no production caller**
-  and no `*lsp*` buffer, while several `src/lsp.rs` and `src/project.rs`
-  doc comments refer to that buffer as though it existed.
-- **The reporting shape was already adopted twice in `lsp.lua` itself**
-  (root resolvers, notification subscribers). The canonical case was
-  silent because nobody had converted it — this finishes an adoption.
-- **`COHERENCE.md` §1.2's frequency note was wrong, and it decided the
-  design.** `LspManager::spawn` returns early *before* both
-  `status_tracker.ensure` and `clients.insert`, so a failed spawn leaves
-  **no record**, `pmacs.lsp.list()` cannot see it, and the affinity loop
-  re-spawns: the real rate is **once per file open**, not once per
-  project root. Hence **memoize the report, not the failure**.
-- **The affinity key is `(language, key_uri)`, and `key_uri` is nil for
-  markerless files**, which deliberately share one server per language.
-  Lua cannot index by nil (`t[nil]` raises), so one encoding function
-  serves both tables with a `u`/`n` discriminator no URI can collide
-  with.
-- **Three tables, three lifetimes**, plus a buffer-keyed projection for
-  the modeline — that provider runs for every window on every paint, so
-  deriving an affinity key inside it would invoke user root resolvers
-  during painting. **A success sweeps every projection sharing the key**,
-  and the projection has its own `pmacs.buffer.on_removed` teardown
-  because nothing existing reaches it (`attachments_under` iterates
-  `attachments`, and a failed buffer has none by construction).
-- **ON MERGE of #204, flip the step-6 grade.** §2's step-6 row stays
-  **Partial** while the PR is open, per §25's landed-evidence rule, and
-  says so in the row.
-- **Stage 1b-3 (welcome buffer, step 4) is unframed** — the last of the
-  1b split.
-- Recovery from a clean checkout — **the two-argument form does not
-  work** (`git worktree add <path> <remote-only-branch>` fails with
-  `fatal: invalid reference`):
-
-  ```sh
-  git fetch githubsucks
-  git worktree add ../pmacs-journey-1b2 \
-    -b journey-stage1b2-lsp-guidance \
-    githubsucks/journey-stage1b2-lsp-guidance
-  ```
-
-## Journey Stage 1b-3 (P1) — IMPLEMENTED, PR OPEN
+### Stage 1b-3 — IMPLEMENTED, PR #205 open
 
 - **Branch `journey-stage1b3-welcome`**, worktree `../pmacs-journey-1b3`,
   based on `githubsucks/main` @ `1f290d5`, **integrated with `main` @
@@ -508,7 +460,7 @@ compatible.
     githubsucks/test-ambient-config-isolation
   ```
 
-## Reap-ledger silent failures — IMPLEMENTED, PR OPEN
+## Reap-ledger silent failures — MERGED (#202); kept for its parked follow-ons
 
 - **Branch `reap-ledger-silent-failures`**, worktree
   `../pmacs-reap-ledger`, based on `githubsucks/main` @ `22df6ab`.

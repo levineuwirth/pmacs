@@ -332,12 +332,13 @@ commands, read `docs/active-work.md` immediately after this file.
     because a selected candidate shadows typed text while `accept()`
     does `session.take()`, the pin asserts
     `pmacs.minibuffer.selected() == "help"` **before** RET.
-- **Journey arc (P1) — Stage 1b-2 IMPLEMENTED, PR open**
+- **Journey arc (P1) — Stage 1b-2 LANDED (#204)**
   (`docs/journey-stage1b2-lsp-guidance-framing.md`, rev 4, three review
   rounds). `COHERENCE.md` §1.2's canonical silence: a preconfigured
   language server that is not installed now reports with guidance, marks
-  the modeline `LSP:!`, and appears in `M-x lsp.status`. Per §25 the
-  step-6 grade flips only on merge.
+  the modeline `LSP:!`, and appears in `M-x lsp.status`. §2's step-6 row
+  **stays Partial** for a reason that landing did not touch: a server
+  that starts and then *crashes* is still unsurfaced.
   - **`status_buffer_text()` had existed since M4.8, exposed to Lua and
     tested, with no production caller and no `*lsp*` buffer** — several
     `src/lsp.rs` and `src/project.rs` doc comments referred to that
