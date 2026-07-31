@@ -417,8 +417,16 @@ compatible.
 ## Test ambient-root isolation — IMPLEMENTATION OPEN
 
 - **Framing MERGED (#201)**;
-  `docs/test-ambient-config-isolation-framing.md` revision 4, three
-  review rounds closed (eight blocking, six major, all accepted).
+  `docs/test-ambient-config-isolation-framing.md` **revision 5**
+  (revision 4 approved after three review rounds — eight blocking, six
+  major, all accepted; revision 5 rides the implementation PR and records
+  findings, not a new design round).
+- **PR #206 OPEN**, one review round closed. **§7's branch plan was
+  consciously exceeded**: the whole-corpus migration rides this PR rather
+  than a follow-up lane, because splitting would either leave 65 suites
+  writing the real data root or ship acceptance 12's ratchet with a
+  ~65-file allowlist that does not ratchet. Recorded in framing revision
+  5; accepted in review.
 - **Implementation branch `test-ambient-isolation-impl`**, worktree
   `../pmacs-test-isolation-impl`, based on `githubsucks/main` @
   `54a092e`. The framing-only worktree `../pmacs-test-isolation`

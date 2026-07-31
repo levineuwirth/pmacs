@@ -1,9 +1,11 @@
 # Framing — integration tests use the developer's real ambient roots
 
-**Revision 4.** Status: awaiting review round 4. Proposed lane:
-`test-ambient-config-isolation`, worktree `../pmacs-test-isolation`,
-based on `githubsucks/main` @ `4cd4a7b` (a reading; re-measure at branch
-time).
+**Revision 5.** Status: implemented on branch
+`test-ambient-isolation-impl` (worktree `../pmacs-test-isolation-impl`,
+based on `githubsucks/main` @ `54a092e`), PR #206. Revision 4 was
+approved after three review rounds and merged as #201; revision 5 records
+implementation findings and one **deliberate departure from §7's branch
+plan**, not a new design round.
 
 **The suite is green in CI and red on a developer machine that has a
 real `~/.config/pmacs/init.lua`.** Not flaky — deterministic, and
@@ -15,6 +17,51 @@ directory**. The lane is therefore about *ambient roots*, not about
 `init.lua`. See §1.6.
 
 ## Revision history
+
+**Revision 4 → 5**, at implementation. No design changed; two things are
+recorded that a later reader would otherwise have to reconstruct.
+
+### The §7 branch plan was consciously exceeded
+
+**§7 said: classification first and alone, "its answer belongs in review
+before any mechanical edit rides on it."** The classification came back
+at **342 in-process construction sites across 66 of 97 files** — large
+enough that §7's shape would naturally suggest splitting the mechanical
+migration into its own lane. **It was not split, and that is deliberate.**
+
+The alternatives were both worse, and both worse in the way this lane
+exists to prevent:
+
+- **Split, migrating nothing now.** The seam would land while 65 files
+  kept reading the developer's real `init.lua` and writing their real
+  data root. The lane's own defect would survive its own PR.
+- **Split, with a broad temporary allowlist.** Acceptance 12's ratchet
+  would ship exempting ~65 files. A ratchet whose allowlist is most of
+  the corpus does not ratchet; it records. And the exemption would have
+  to be removed later by the same reviewer who granted it, with nothing
+  failing in the meantime to remind anyone.
+
+So the whole-corpus migration is the atomic remediation and rides this
+PR. §7's *ordering* is honoured — the classification is the first commit,
+before any mechanical edit — while its implied *scoping* is not. The
+qualification this leaves on acceptance 12 (the allowlist is narrow
+because everything else moved, not because the change was small) was
+raised in the PR and accepted in review round 1.
+
+### The exemption shape acceptance 12 needs
+
+Review round 1 found an ambient `EditorState::new()` in an ordinary
+parent test of the isolation suite itself — the exposure, committed by
+the suite written to remove it. **A file-level allowlist did not catch
+it**, because the file was already exempted for its re-exec'd positive
+control, and a bare exemption licenses a named file to grow new ambient
+sites indefinitely.
+
+The fix is that **every exemption carries its exact site count**, so an
+added site fails even inside an exempted file. That is the shape
+acceptance 12 needs; "a narrow, named allowlist" is not sufficient on its
+own, because narrowness constrains which files are exempt and says
+nothing about how far each exemption stretches.
 
 **Revision 3 → 4**, after review round 3 (one blocking, two major). All
 three accepted.
