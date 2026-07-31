@@ -62,17 +62,19 @@ lesson, §1 for the two framings).
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `7586905` (the docs-only coherence listview
-  correction #189, atop the docs-only landed-state refresh #185, the M4
-  config-sink race fix #174, bottom-panel Stage 2B-1 #184, the
-  Journey/GPU directory-target ratchet #183, Journey Stage 1a #182 and
-  the previously recorded landed work).
+  `githubsucks/main` @ `fbcf235` (the reap-ledger diagnostic #202, atop
+  the test ambient-root isolation framing #201, the reap-ledger framing
+  #200, the ledger absorption #199, the M5.5 protocol-version pin #198,
+  the docs-only coherence listview correction #189, the docs-only
+  landed-state refresh #185, the M4 config-sink race fix #174,
+  bottom-panel Stage 2B-1 #184, the Journey/GPU directory-target ratchet
+  #183, Journey Stage 1a #182 and the previously recorded landed work).
   **Protocol schema support is
   `v6..=v21`; the production server-first `Hello` still advertises
   v20** — two different facts, and #184 landed only the first. The
-  previous snapshot named `0442d78`, and **the
+  previous snapshot named `7586905`, and **the
   recovery floor advances with it**: the check below now requires
-  `7586905` or newer, so a tree at `0442d78` no longer passes. That is
+  `fbcf235` or newer, so a tree at `7586905` no longer passes. That is
   deliberate — the floor moves with the base, because a check that
   accepts an older commit than the declared base passes on a tree the
   rest of this file does not describe.
@@ -111,7 +113,7 @@ git worktree list
 git status --short --branch
 ```
 
-The `git log` command must expose `7586905` — the base named above — or a
+The `git log` command must expose `fbcf235` — the base named above — or a
 newer intentional main. Keep this threshold and the canonical-base line in
 step: a recovery check that accepts an older commit than the base it
 declares canonical will pass on a tree the rest of this file does not
@@ -258,8 +260,9 @@ If it does not, stop and repair the remote/fetch configuration.
 - **Branch `journey-stage1b2-lsp-guidance`**, worktree
   `../pmacs-journey-1b2`, based on `githubsucks/main` @ `fbcf235`.
   **Framing only; no code, no PR yet.**
-  `docs/journey-stage1b2-lsp-guidance-framing.md` revision 1, no review
-  rounds yet. Sibling of Stage 1b-1 (PR #203, step 9); this is step 6.
+  `docs/journey-stage1b2-lsp-guidance-framing.md` revision 2, one review
+  round closed (two blocking, three major, one minor; all accepted).
+  Sibling of Stage 1b-1 (PR #203, step 9); this is step 6.
 - **What it is.** `COHERENCE.md` §1.2's canonical silence: a
   preconfigured-but-missing language server fails with no status
   message, no record, and no modeline marker, while tree-sitter
@@ -288,6 +291,23 @@ If it does not, stop and repair the remote/fetch configuration.
   rate is **once per file open**. Hence the rule: **memoize the report,
   not the failure** — the spawn is still retried, so installing the
   binary mid-session recovers with nothing to invalidate.
+- **The affinity key is `(language, key_uri)`, and `key_uri` is nil for
+  markerless files** — `ensure_server` sets it only when the root came
+  from config or a marker walk (`lsp.lua:644-648`), so loose files in
+  unrelated directories deliberately share one server per language.
+  Round 1 caught revision 1 keying the memo on the resolved *root*,
+  which would have split what the runtime shares and re-reported one
+  failure per directory.
+- **Dedupe and current-failure state are two records, not one.**
+  `reported` is keyed by `(language, key_uri, command)` and never
+  cleared — the command is in the key so repointing config at a
+  different missing executable reports again. `failures` is keyed by
+  `(language, key_uri)` and **cleared when a spawn for that key
+  succeeds**, so `*lsp*` stops showing a failure the user has fixed.
+  A third, buffer-keyed projection feeds the modeline, because the
+  statusline provider is a **pure per-buffer lookup** and deriving an
+  affinity key inside it would run root resolvers and project detection
+  every frame, for every window.
 - **The durable surface cannot show the failure today.**
   `status_buffer_text` renders from `self.clients`, which a failed spawn
   never enters. The stage keeps its failure record in Lua and renders it

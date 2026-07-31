@@ -1,11 +1,50 @@
 # Journey Stage 1b-2 — say when language intelligence did not start
 
-**Status: framing, rev 1 — awaiting approval.**
+**Status: framing, rev 2 — awaiting review round 2.**
 **Serves `COHERENCE.md` §1.2 (the silence asymmetry), §2 (the golden
 journey, step 6), §19, §20 Priority 1.**
 
 ## 0. Revision history
 
+- rev 2 (2026-07-30) — review round 1. Two blocking, three major, one
+  minor; all six accepted, all six verified in the code first.
+  - **The affinity key was misstated** (§2.2). The runtime's reuse key
+    is `(language, key_uri)`, and `key_uri` is deliberately **nil** for a
+    markerless file — `ensure_server` sets it only when the root came
+    from config or a marker walk (`lsp.lua:644-648`), so loose files
+    across unrelated directories share **one** server per language, on
+    purpose. Rev 1 said "(root, language)", which would have given every
+    directory of loose files its own memo entry and re-reported the same
+    shared failure once per directory. The stage now keys on the real
+    affinity key and does not change that behaviour.
+  - **Dedupe and current-failure state were conflated** (§2.2, §2.4).
+    Rev 1 had one record and said nothing about recovery. One record
+    cannot do both jobs: keep it and `*lsp*` shows a failure that has
+    since been fixed; clear it and the per-session dedupe is lost, so
+    the message returns on the next file open. They are now two records
+    with different lifetimes, and **the reported identity includes the
+    command**, so repointing config from one missing executable to
+    another reports again. Recovery is pinned in both surfaces.
+  - **The modeline's pure per-buffer projection had to be preserved**
+    (§2.5). The provider reads `attachments[ctx.buffer]` specifically so
+    a passive split reports its own buffer, and does no work while
+    painting. Rev 1's "read the failure table" would have made the
+    segment recompute an affinity key — invoking `project_root_for`,
+    user root resolvers, and `pmacs.project.detect` **every frame, for
+    every window**. The failure is now projected per buffer at attach
+    time, and the segment stays a single map lookup.
+  - **"Adopt listview's idiom" was too weak** (§2.3). It now requires
+    `pmacs.listview.open` and names the guarantees that come with it,
+    including `on_refresh` — without which `listview.refresh` early
+    returns (`listview.lua:259`) and `g` is a **dead key** in the new
+    panel.
+  - **§19's journey ratchet was missing from acceptance** (§4). This
+    stage makes step 6 real, and `tests/journey_acceptance.rs`'s stated
+    rule is that steps 6–12 join as later stages make them real. The M4
+    pins stay; an end-to-end journey row is added.
+  - **The ledger's canonical-base anchor was stale** — it named
+    `7586905` while `main` is `fbcf235`. Updated with the recovery
+    floor, which moves with it.
 - rev 1 (2026-07-30) — first framing. Scouted against `githubsucks/main`
   @ `fbcf235` (reap-ledger #202).
 
@@ -204,27 +243,89 @@ Three parts, each load-bearing:
 3. **The two things a user can do** — install it, or repoint the config
    — plus the durable surface.
 
-### 2.2 When to say it — once per (root, language), per session
+### 2.2 When to say it — and two records, not one
 
 Per §1.4 the failure recurs on every file open, so the report is
-memoized on the **same affinity key `ensure_server` already computes**
-(`key_uri` plus `language`).
+memoized. Two things have to be got right, and rev 1 got both wrong.
 
-**Memoize the report, not the failure.** The spawn is still attempted
-every time, so a user who installs the binary mid-session gets a working
-server on the next file open with no cache to invalidate. Only the
-*message* is suppressed after the first.
+**The key is `ensure_server`'s own affinity key, which is not the
+root.** `ensure_server` computes:
 
-That asymmetry is the whole rule, and it is the one thing here easy to
-get backwards: memoizing the failure would be a behaviour change, would
-need invalidation, and would make recovery require a restart.
+```lua
+-- builtin/runtime/lsp.lua:644-648
+local root, source = project_root_for(language, path)
+local key_uri = nil
+if source == "config" or source == "detected" then
+  key_uri = file_uri_for(root)
+end
+```
+
+`key_uri` is **nil** whenever the root came from the fallback (the
+file's own directory), and the reuse loop matches `info.root_uri ==
+key_uri`, nil matching nil. That is deliberate and documented in place:
+loose files in unrelated directories share **one** server per language,
+because keying them on their own directories "would give every directory
+of loose scratch files its own server, for every language".
+
+So the memo key is `(language, key_uri)` — the same pair, nil included —
+and **not** the resolved root. Keying on the root would split what the
+runtime deliberately shares and re-report one shared failure once per
+directory. This stage does not change that behaviour; it matches it.
+
+**Two records, because one cannot do both jobs.**
+
+| Record | Key | Lifetime | Read by |
+|---|---|---|---|
+| `reported` | `(language, key_uri, command)` | never cleared, session-scoped | the status-line report only |
+| `failures` | `(language, key_uri)` | **cleared when a spawn for that key succeeds** | `*lsp*`, and the per-buffer projection |
+
+Rev 1 had one record and said nothing about recovery. One record forces
+a bad choice: keep it and `*lsp*` reports a failure the user has since
+fixed; clear it and the dedupe is gone, so the message returns on the
+next file open.
+
+**`reported` includes the command.** A user who repoints
+`pmacs.lsp.config.rust.command` from one missing executable to another
+has a genuinely new failure and must hear about it; a key without the
+command would swallow it as a duplicate.
+
+**Memoize the report, not the failure.** The spawn is still attempted on
+every file open, so a user who installs the binary mid-session gets a
+working server with no cache to invalidate — and that success is what
+clears `failures`. This asymmetry is the whole rule and the easiest
+thing here to get backwards: memoizing the *failure* would be a
+behaviour change, would need invalidation, and would make recovery
+require a restart.
 
 ### 2.3 Where — status line now, `*lsp*` for later
 
 The status line is transient and can be overwritten before it is read;
 COHERENCE's rule is that an automatic failure must leave a **trace**,
-not a flash. So the same event also lands in a durable record that
+not a flash. So the same event also lands in `failures`, which
 `M-x lsp.status` renders.
+
+**`*lsp*` is opened with `pmacs.listview.open`, not merely "in its
+idiom".** Naming the primitive is what buys the guarantees, and a
+hand-rolled panel would have to re-derive every one of them:
+
+- **Owned-handle identity.** Found-by-name is *not* adoption
+  (`listview.lua:157-167`): a foreign buffer already called `*lsp*` is
+  never claimed, clobbered, or given an erroring intercept.
+- **Collision behaviour.** A taken name disambiguates `*lsp*<2>`…`<99>`
+  and **raises** when exhausted rather than adopting.
+- **Immutable generated contents** — a read-only intercept with a named
+  error, plus round-trip input so a semantic frontend cannot swallow the
+  panel's single-key bindings.
+- **`q`** quits to the previous buffer.
+- **`on_refresh`, which is not optional here.** `listview.refresh`
+  early-returns unless the panel has one (`listview.lua:259`), so
+  omitting it makes **`g` a dead key** — a bound chord that silently
+  does nothing. The panel's `on_refresh` recomputes *both* sections, so
+  `g` after installing a server shows the recovery.
+
+`status_buffer_text()` returns one string; the panel splits it into
+inert rows (no `on_visit`) beneath the failure section. Rows without a
+visit action are an ordinary listview shape, not a special case.
 
 ### 2.4 The durable record lives in Lua, and that is a deliberate limit
 
@@ -249,19 +350,54 @@ promoting it as follow-on work rather than pretending it is done.
 
 §1.5 is the sharpest half of §1.2: highlighting masks the failure, so a
 user has no reason to *go looking* for a command. The segment therefore
-gains one branch — when the buffer's (root, language) has a recorded
-failure and no attachment, render a distinct label:
+gains one branch — when the buffer has a recorded failure and no
+attachment, render a distinct label:
 
 ```
 LSP:!        (vs LSP:ok / LSP:… / nothing at all)
 ```
 
+**The segment must stay a pure per-buffer projection.** Its comment says
+so — *"pure modeline projection … reads the private per-buffer
+attachment map directly so passive split windows report their own buffer
+… never attaches, flushes didChange, or issues a request"*
+(`lsp.lua:969-983`) — and the reason is structural, not stylistic: it
+runs for **every window, every paint**.
+
+Rev 1 said the segment should "read the failure table", which is keyed
+by `(language, key_uri)`. Deriving that key from a buffer means calling
+`project_root_for`, which invokes **user-supplied root resolvers** and
+`pmacs.project.detect`. Per frame, per window. A resolver with a side
+effect, or one that raises, would then run inside painting.
+
+So the failure is **projected per buffer at attach time**, beside the
+existing map:
+
+```lua
+failed_attachments[tostring(buf)] = { language = …, command = … }
+```
+
+written where `attach_buffer` observes `ensure_server` returning nil, and
+**cleared on the same path when an attach succeeds**. The segment
+becomes one more map lookup and computes nothing:
+
+```lua
+local rec = attachments[key]
+if rec then return "LSP:" .. pmacs.lsp.modeline_label(rec.server) end
+if failed_attachments[key] then return "LSP:!" end
+return nil
+```
+
 **It must not fabricate an attachment record.** `attachments` is read by
-`attachment_for_request`, the completion driver, and the request paths,
+`attachment_for_request`, the completion driver, and every request path,
 all of which treat a record as naming a live server; inventing one would
-route requests at a server that does not exist. The segment reads the
-failure table directly and returns early, exactly as it does today for
-"no record".
+route requests at a server that does not exist. The failure projection is
+a **separate** table for exactly that reason.
+
+Two tables with two lifetimes: `failures` (affinity-keyed, for `*lsp*`)
+and `failed_attachments` (buffer-keyed, for the modeline). They are
+written and cleared at the same moment, but neither can serve the
+other's reader without doing work in the wrong place.
 
 ### 2.6 What this stage does not do
 
@@ -301,38 +437,83 @@ failure table directly and returns early, exactly as it does today for
 Labels per Stage 1a §6.0: **N** new behaviour, must fail on full
 revert; **P** preservation, falsified by a named mutation.
 
-1. **N — the failure is reported, through the real path.** Open a file
-   whose configured server command does not exist; the status line names
-   the command, the language, and the underlying error. Driven through
-   `buffer.after-load`, not by calling `ensure_server` directly — the
-   hook's `pcall` is part of what is being tested.
-2. **N — it is reported once per (root, language).** Open a second file
-   in the same project: the spawn is attempted again (observable), the
-   message is not repeated. Falsified by dropping the memo.
-3. **N — the memo is on the report, not the failure.** After a failed
+**The journey row comes first**, because it is the one that says the
+stage worked.
+
+1. **N — journey step 6, end to end** (`tests/journey_acceptance.rs`).
+   That file's rule is that steps 6–12 join as later stages make them
+   real, and 1b-1 added step 9 the same way. Launch on a project whose
+   configured server command does not exist, open a source file through
+   the real dired `RET`, and assert the user is **told**: the status
+   line names the command and the modeline reads `LSP:!` rather than
+   nothing. This is the ratchet row; the M4-level pins below stay and
+   cover the mechanism.
+2. **N — the failure is reported, through the real path.** The status
+   line names the command, the language, and the underlying error.
+   Driven through `buffer.after-load`, not by calling `ensure_server`
+   directly — the hook's `pcall` is part of what is being tested.
+3. **N — reported once per `(language, key_uri, command)`.** Open a
+   second file **in the same project** (same detected root, so the same
+   non-nil `key_uri`): the spawn is attempted again — observable, and
+   asserted — and the message is not repeated. Falsified by dropping the
+   memo.
+4. **N — the markerless case shares one memo, as it shares one server.**
+   Two loose files in *different* directories, neither under a project
+   marker, both resolve `key_uri = nil` and report **once** between them.
+   Falsified by keying the memo on the resolved root, which is rev 1's
+   design: that reports twice. This pin exists because the root and the
+   affinity key differ exactly here.
+5. **N — a different language, or a genuinely different root, reports
+   again.** Falsified by keying on the language alone, and by keying on
+   the language plus a constant.
+6. **N — a changed command reports again.** Repoint the config from one
+   missing executable to another and open a file: a second message,
+   naming the new command. Falsified by dropping `command` from the
+   reported identity.
+7. **N — the memo is on the report, not the failure.** After a failed
    attach, make the command resolvable and open another file: a server
-   attaches. Falsified by memoizing the failure instead — this is §2.2's
-   whole claim and needs its own pin.
-4. **N — a different language, or a different root, reports again.**
-   Falsified by keying the memo on the language alone.
-5. **N — `M-x lsp.status` renders a buffer** containing both the failure
-   section and `status_buffer_text()`'s output. Falsified by removing
-   either half. Must assert **content produced**, not that a buffer
-   exists.
-6. **N — the modeline distinguishes failed from not-applicable.** A
-   `.rs` file with a failed spawn renders `LSP:!`; a `.txt` file renders
-   nothing. Both halves asserted — a pin that only checks the `.rs` case
-   passes if the segment renders `!` unconditionally.
-7. **P — a working server is unaffected.** Attach, modeline label,
-   requests: unchanged. Targeted mutation: making the new branch fire
-   whenever an attachment is absent, which would mark every plain-text
-   buffer failed.
-8. **P — the two existing report sites still report.** Root-resolver and
-   subscriber failures keep their messages. Targeted mutation:
-   refactoring the three sites onto a shared helper that drops one.
-9. **P — a fabricated attachment is never created.** After a failed
-   spawn, `attachment_for_request` returns nil and no request is issued.
-   Targeted mutation: §2.5's forbidden implementation.
+   attaches. Falsified by memoizing the failure instead — §2.2's whole
+   claim, and it needs its own pin.
+8. **N — recovery clears both surfaces.** Continuing from 7 in the same
+   session: the modeline for the recovered buffer reads its live label,
+   and `M-x lsp.status` no longer lists that failure. Falsified by never
+   clearing `failures` / `failed_attachments`, which is what one record
+   would have forced. **Asserted in both surfaces**, because they read
+   different tables (§2.5).
+9. **N — `M-x lsp.status` renders a buffer** containing both the failure
+   section and `status_buffer_text()`'s output. Asserts **content
+   produced**, not that a buffer exists.
+10. **N — `g` refreshes the panel.** With the panel open, resolve the
+    failure and press `g`: the failure section is gone. Falsified by
+    omitting `on_refresh`, which makes `listview.refresh` early-return
+    (`listview.lua:259`) and leaves the panel stale while `g` appears
+    bound.
+11. **N — a foreign `*lsp*` buffer is not adopted.** Create a buffer
+    named `*lsp*` with user content, then run `lsp.status`: the user's
+    bytes are untouched and the panel opens as `*lsp*<2>`. This is
+    `listview.open`'s guarantee, and it is pinned here rather than
+    assumed because "found by name is not adoption" is precisely the
+    rule a hand-rolled panel loses.
+12. **N — the modeline distinguishes failed from not-applicable.** A
+    source file with a failed spawn renders `LSP:!`; a plain-text buffer
+    renders nothing. **Both halves asserted** — a pin that checks only
+    the failing case passes if the segment renders `!` unconditionally.
+13. **P — the segment does no work.** With a failure recorded, painting
+    the modeline invokes neither a root resolver nor
+    `pmacs.project.detect`. Pinned with a counting resolver installed
+    through the real config; assert the count is unchanged across
+    repeated renders. Targeted mutation: rev 1's design, which derives
+    the affinity key inside the provider.
+14. **P — a working server is unaffected.** Attach, modeline label,
+    requests: unchanged. Targeted mutation: making the new branch fire
+    whenever an attachment is absent, which would mark every plain-text
+    buffer failed.
+15. **P — the two existing report sites still report.** Root-resolver
+    and subscriber failures keep their messages. Targeted mutation:
+    refactoring the three sites onto a shared helper that drops one.
+16. **P — a fabricated attachment is never created.** After a failed
+    spawn, `attachment_for_request` returns nil and no request is
+    issued. Targeted mutation: §2.5's forbidden implementation.
 
 **Fixture note.** The natural fixture points a config at a path that
 does not exist, which is reliable and hermetic. It must assert its own
@@ -362,12 +543,18 @@ relying on rust-analyzer's absence.
 
 - **Journey steps touched:** 6 (Partial → Works for the failure case;
   the success case is already fine). Indirectly 10, which is gated on 6
-  or 9 succeeding. 9 was closed by 1b-1.
+  or 9 succeeding. 9 was closed by 1b-1. **The ratchet gains a step-6
+  row** (§4 acceptance 1) — `tests/journey_acceptance.rs` states that
+  steps 6–12 join as later stages make them real, so a stage that makes
+  one real and adds no row leaves the ratchet describing a journey the
+  editor has outgrown.
 - **Interaction islands: none added.** The message uses the existing
-  status line; `*lsp*` is a generated read-only buffer of the kind
-  `COHERENCE.md` §14 already calls the proven "output channel" pattern,
-  and it should adopt `listview`'s idiom rather than inventing a third
-  read-only buffer shape.
+  status line; `*lsp*` is opened through **`pmacs.listview.open`**
+  (§2.3), the primitive `COHERENCE.md` §14 records as the proven
+  listview/panel shape — not a third hand-rolled read-only buffer. §14's
+  complaint is precisely that each new panel re-invented ownership,
+  read-only enforcement, and quit behaviour; naming the primitive is how
+  this stage avoids being the next example.
 - **Config registry:** not adopted. Nothing here is a user-tunable
   scalar; the memo is session state, not configuration.
 - **Background-work attribution:** this *is* the attribution fix for one
