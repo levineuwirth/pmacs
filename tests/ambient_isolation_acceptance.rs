@@ -91,9 +91,14 @@ fn isolated_construction_is_init_complete() {
         "isolated construction must still leave the init phase, or every \
          suite that reopens it (m8_2) breaks"
     );
-    // The paired half: the ambient constructor is unchanged.
-    let ambient = EditorState::new();
-    assert!(ambient.lua_host.is_init_complete());
+    // The paired half — that the *ambient* constructor is unchanged —
+    // deliberately does NOT live here. Asserting it needs an ambient
+    // `EditorState::new()`, and an ambient construction in an ordinary
+    // parent test reads the developer's real `init.lua` and materializes
+    // packages into their real data root: the exact exposure this suite
+    // exists to remove, committed by the suite itself. It lives in the
+    // re-exec'd positive control below, where the roots are controlled
+    // by construction.
 }
 
 /// **N** — the init phase is genuinely closed, not merely reported
@@ -288,14 +293,30 @@ fn run_child(test_name: &str, env: Vec<(&'static str, PathBuf)>) -> (bool, Strin
 /// `init.lua` that never loads under any circumstances would satisfy
 /// "the isolated editor did not load it" while proving nothing.
 ///
-/// Runs only as a re-exec'd child (marker set), so an ordinary suite run
-/// does not construct an ambient editor.
+/// **This is the suite's only ambient construction, and it runs only as
+/// a re-exec'd child** (the marker gates it), where the roots are
+/// controlled by construction. An ambient `EditorState::new()` in an
+/// ordinary parent test would read the developer's real `init.lua` and
+/// write their real data root — so the one place that legitimately needs
+/// the ambient constructor is also the one place where the environment
+/// has already been redirected. Every ambient claim this suite makes
+/// belongs here for that reason.
 #[test]
 fn ambient_construction_under_a_hostile_environment_is_captured_by_it() {
     if std::env::var_os(AMBIENT_CONTROL_CHILD).is_none() {
         return;
     }
     let state = EditorState::new();
+    // Relocated from `isolated_construction_is_init_complete`: the
+    // ambient constructor is unchanged by this lane and still finishes
+    // initialization. Asserting it needs an ambient construction, which
+    // is only safe here.
+    assert!(
+        state.lua_host.is_init_complete(),
+        "the ambient constructor must still leave the init phase — the \
+         roots parameter changes which directory is read, never whether \
+         the block runs"
+    );
     let ran: bool = state
         .lua_host
         .lua()
@@ -409,7 +430,7 @@ fn a_hostile_ambient_environment_is_neither_read_nor_written() {
 // ---------------------------------------------------------------------------
 
 /// Files permitted to construct an editor through the **ambient** entry
-/// points.
+/// points, **with the exact number of sites each is permitted**.
 ///
 /// `journey_acceptance` is ambient on purpose: it is the golden-journey
 /// ratchet, and its whole claim is that the production entry point
@@ -417,7 +438,24 @@ fn a_hostile_ambient_environment_is_neither_read_nor_written() {
 /// with controlled roots instead (framing §1.10). This file is ambient
 /// only inside the positive control above, which never runs except as a
 /// deliberately re-exec'd child.
-const AMBIENT_ALLOWLIST: &[&str] = &["journey_acceptance.rs", "ambient_isolation_acceptance.rs"];
+///
+/// **The count is the point, not decoration.** A bare file-level
+/// exemption is the weakest form of this ratchet: it licenses the named
+/// file to grow *new* ambient sites forever. That is not hypothetical —
+/// review round 1 of this PR found an ambient `EditorState::new()` in an
+/// ordinary parent test of **this very file**, and the file-level
+/// exemption is precisely what let it through a green ratchet. Every
+/// exemption is now a census entry, so an added site fails even inside
+/// an allowlisted file, and a removed one has to be recorded.
+const AMBIENT_ALLOWLIST: &[(&str, usize)] = &[
+    // 19 `new()` + 7 `open(` — the golden journey, every one of them
+    // reached only from inside a re-exec'd child. (29 textual
+    // occurrences; the scanner drops 2 assertion-message mentions and
+    // the assembled `concat!` needle in the self-source check.)
+    ("journey_acceptance.rs", 26),
+    // Exactly one: the re-exec'd positive control.
+    ("ambient_isolation_acceptance.rs", 1),
+];
 
 /// Strip comments and string-literal *contents* from Rust source, so a
 /// scan counts calls rather than mentions.
@@ -559,6 +597,7 @@ fn no_test_outside_the_allowlist_constructs_an_ambient_editor() {
         concat!("EditorState::", "open("),
     ];
     let mut offenders: Vec<String> = Vec::new();
+    let mut miscounted: Vec<String> = Vec::new();
     let mut seen_allowlisted: Vec<&str> = Vec::new();
     for (name, src) in &sources {
         let code = strip_comments_and_strings(src);
@@ -566,18 +605,20 @@ fn no_test_outside_the_allowlist_constructs_an_ambient_editor() {
         if hits == 0 {
             continue;
         }
-        if AMBIENT_ALLOWLIST.contains(&name.as_str()) {
-            seen_allowlisted.push(
-                AMBIENT_ALLOWLIST
-                    .iter()
-                    .find(|a| **a == name.as_str())
-                    .expect("just matched"),
-            );
-        } else {
-            offenders.push(format!("{name} ({hits} site(s))"));
+        match AMBIENT_ALLOWLIST.iter().find(|(f, _)| *f == name.as_str()) {
+            Some((file, allowed)) => {
+                seen_allowlisted.push(file);
+                // An allowlisted file is exempted for the sites it was
+                // reviewed with, not for any it grows later.
+                if hits != *allowed {
+                    miscounted.push(format!("{name}: {hits} site(s), allowlist says {allowed}"));
+                }
+            }
+            None => offenders.push(format!("{name} ({hits} site(s))")),
         }
     }
     offenders.sort();
+    miscounted.sort();
     assert!(
         offenders.is_empty(),
         "these suites construct an editor through the ambient entry \
@@ -587,11 +628,19 @@ fn no_test_outside_the_allowlist_constructs_an_ambient_editor() {
          tests/common/iso.rs), or add the file to AMBIENT_ALLOWLIST with \
          a reason.",
     );
+    assert!(
+        miscounted.is_empty(),
+        "allowlisted files whose ambient site count moved: {miscounted:?}\n\
+         MORE than allowed means a new ambient construction slipped into \
+         an exempted file — the failure mode a bare file-level exemption \
+         cannot see. FEWER means the census is stale; update the count.",
+    );
     // Dead allowlist entries are how a ratchet rots: an entry that no
     // longer needs to be there silently licenses a future regression.
-    let mut missing: Vec<&&str> = AMBIENT_ALLOWLIST
+    let mut missing: Vec<&str> = AMBIENT_ALLOWLIST
         .iter()
-        .filter(|a| !seen_allowlisted.contains(&**a))
+        .map(|(f, _)| *f)
+        .filter(|f| !seen_allowlisted.contains(f))
         .collect();
     missing.sort_unstable();
     assert!(
