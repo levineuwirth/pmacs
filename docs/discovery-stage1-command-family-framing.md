@@ -1,11 +1,25 @@
 # Discovery Stage 1 — the describe/list command family
 
-**Status: framing, rev 3 — awaiting review round 3.**
+**Status: framing, rev 4 — awaiting review round 4.**
 **Serves `COHERENCE.md` §5 (unify discoverability), §1.1 (substrate
 without surface), §20 Priority 4.**
 
 ## 0. Revision history
 
+- rev 4 (2026-07-31) — review round 3. Two factual corrections, both
+  accepted.
+  - **The custom source does not control display order.** Rev 3
+    justified `table.sort` by claiming `Custom` candidates appear in
+    return order; `recompute_candidates` immediately runs
+    `filter_and_sort`, which ranks by fuzzy score and tie-breaks
+    lexically. The sort is kept for a reason that is true — `.take(
+    CANDIDATE_LIMIT)` is applied to the filtered iterator *before* the
+    sort, so pool order decides which candidates survive truncation.
+  - **Read-only would not mitigate the foreign-`*help*` collision.**
+    Rev 3 said it would. A user-created buffer of that name has no
+    intercept of ours; the renderer finds it by name and clears it
+    regardless. The missing guarantee is **ownership identity**, the
+    thing `listview` and dired both have.
 - rev 3 (2026-07-31) — review round 2. Two blocking, two major; all four
   accepted.
   - **The ledger lane still said revision 1 and kept refuted claims.**
@@ -256,9 +270,18 @@ source = function()
 end,
 ```
 
-Sorted because `Custom` candidates are presented in the order returned,
-and `config.list()`'s order is registration order — which is neither
-stable across a config edit nor useful to a reader.
+Sorted for **deterministic pool construction**, not for display order —
+rev 2's stated reason was false. `recompute_candidates` hands the pool
+straight to `filter_and_sort`, which ranks by fuzzy score descending and
+breaks ties lexically (`src/minibuffer.rs:672-680`), so what the source
+returns never reaches the user in that order.
+
+The sort still earns its place, for a subtler reason: `filter_and_sort`
+applies `.take(CANDIDATE_LIMIT)` to the **filtered** iterator *before*
+sorting, so when more than `CANDIDATE_LIMIT` settings match a needle,
+**pool order decides which ones survive truncation**. Registration
+order would make that selection vary with an unrelated config edit;
+sorting makes it reproducible.
 
 ### 3.3 `M-x help` becomes the index
 
@@ -280,17 +303,26 @@ shared policies get decided in one place instead of eleven:
 - **wholesale replacement** — `buf:delete(0, len)` then `buf:insert(0,
   text)`, never a diff, because `*help*` is reflowed per subject;
 - the **`q` binding**, rebound per fresh buffer;
-- the **foreign-`*help*` hazard** — found-by-name is not ownership, so a
-  user's buffer of that name is cleared.
+- the **foreign-`*help*` hazard** — `find_or_create_help_buffer` matches
+  on the *name*, so a user's own buffer called `*help*` is adopted and
+  cleared.
 
 **`*help*` is ordinary editable content.** Rev 1 wrote "the read-only
 intercept"; there isn't one. `show_help_text` writes with plain
 `delete`/`insert`, the buffer keeps its undo history, and #205 already
 recorded that this mechanism has **not** adopted the generated-buffer
-write invariant. Saying otherwise would have had this stage claim a
-guarantee it does not provide — and the fourth policy above is exactly
-the hazard that a read-only intercept would have mitigated and does
-not.
+write invariant.
+
+**And read-only would not fix the fourth policy either** — rev 2 implied
+it would. A buffer the *user* created and named `*help*` carries no
+intercept of ours, so an intercept on the buffers we create protects
+nothing: the renderer still finds theirs by name and clears it. The
+missing protection is **ownership identity** — a private table of
+buffers this module created, so found-by-name is not adoption — which
+is exactly what `listview` (`panels`) and dired (its handle table) both
+carry and this mechanism does not. Naming the right missing guarantee
+matters, because the wrong one would send a later fix at the wrong
+layer.
 
 **What it does not buy, and rev 1 claimed it did:** a one-site migration
 to `src/help.rs`. That layer has semantic renderers for **command, key,

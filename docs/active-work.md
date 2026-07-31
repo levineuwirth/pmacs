@@ -380,13 +380,14 @@ which would have re-conflicted on every merge.
     githubsucks/journey-stage1b3-welcome
   ```
 
-## Discovery Stage 1 (P4) — FRAMING OPEN, revision 3
+## Discovery Stage 1 (P4) — FRAMING OPEN, revision 4
 
 - **Branch `discovery-stage1-commands`**, worktree `../pmacs-p4-discovery`,
   based on `githubsucks/main` @ `54a092e`. **Framing only; no code, no
-  PR yet.** `docs/discovery-stage1-command-family-framing.md` revision 3,
-  two review rounds closed (round 1: two blocking, two major; round 2:
-  two blocking, two major; all accepted).
+  PR yet.** `docs/discovery-stage1-command-family-framing.md` revision 4,
+  three review rounds closed (round 1: two blocking, two major; round 2:
+  two blocking, two major; round 3: two factual corrections; all
+  accepted).
 - **What it is.** `COHERENCE.md` §20 Priority 4 — "almost pure wiring,
   the best payoff-per-effort in this document". Nine describe/list
   commands (describe-key/mode/hook/buffer, where-is, list-commands,
@@ -405,7 +406,11 @@ which would have re-conflicted on every merge.
   Closed-set acceptance ("refuse a non-candidate") is Rust work and is
   deferred. The custom source needs a **mapper**: `config.list()`
   yields descriptor *tables* while `Custom` consumes a sequence of
-  strings.
+  strings. **It does not control display order** —
+  `recompute_candidates` runs `filter_and_sort` (fuzzy score, lexical
+  tiebreak); sorting the pool matters only because `.take(
+  CANDIDATE_LIMIT)` runs *before* the sort, so pool order decides which
+  candidates survive truncation.
 - **`invoke_interactive` is NOT the M-x path** — the error #205
   corrected, repeated one PR later. The path is dispatch `M-x` →
   `editor.execute-command` → assert the selected candidate **before**
@@ -419,8 +424,12 @@ which would have re-conflicted on every merge.
   changes each command's subject-specific logic. What the funnel buys is
   the shared policy in one place: reuse-by-name, wholesale
   delete+insert, the `q` binding, and the foreign-`*help*` hazard.
-  **`*help*` is ordinary editable content** — it has no read-only
-  intercept and no generated-content invariant. Each command's rendering
+  **`*help*` is ordinary editable content** — no read-only intercept, no
+  generated-content invariant. And read-only would **not** fix the
+  foreign-buffer hazard either: a user's own `*help*` carries no
+  intercept of ours, so the renderer still finds it by name and clears
+  it. The missing guarantee is **ownership identity**, which `listview`
+  and dired both carry and this mechanism does not. Each command's rendering
   is a named per-subject function so the future Rust work is enumerated
   per-subject (three new renderers) rather than discovered per-call-site.
 - **Deliberately deferred, each with a reason:** richer M-x rows
