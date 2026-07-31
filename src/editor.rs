@@ -940,20 +940,29 @@ impl EditorState {
             // gets no greeting, not a failed launch.
             Err(_) => return,
         };
+        // Capture the edit and RELEASE the registry borrow before
+        // notifying: `notify_buffer_edit` borrows the registry itself.
         let registry = self.core.borrow().registry.clone();
-        let mut reg = registry.borrow_mut();
-        let Ok(buf) = reg.get_mut(buffer_id) else {
-            return;
-        };
-        if buf
-            .apply_edit(crate::buffer::EditOp::Insert {
+        let edit = {
+            let mut reg = registry.borrow_mut();
+            let Ok(buf) = reg.get_mut(buffer_id) else {
+                return;
+            };
+            let Ok(edit) = buf.apply_edit(crate::buffer::EditOp::Insert {
                 pos: 0,
                 bytes: text.as_bytes(),
-            })
-            .is_ok()
-        {
+            }) else {
+                return;
+            };
             buf.mark_clean();
-        }
+            edit
+        };
+        // Without this the greeting renders as ONE row on the first
+        // frame: the window's `TextView` indexed `*scratch*` while it
+        // was empty, and newlines are zero-width to a painter working
+        // from a stale line index. Every other direct-registry writer
+        // notifies for the same reason.
+        self.core.borrow_mut().notify_buffer_edit(buffer_id, &edit);
     }
 
     /// Restore the session saved under this desktop's key, if armed

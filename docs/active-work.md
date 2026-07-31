@@ -255,11 +255,11 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
-## Journey lane (P1) — 1a and 1b-1 MERGED; 1b-2 PR OPEN; 1b-3 REMAINS
+## Journey lane (P1) — 1a, 1b-1, 1b-2 MERGED; 1b-3 PR OPEN
 
-**Rewritten, not removed, at #203's merge.** Rule 4 removes a lane when
-its ARC is done; the journey arc is not — 1b-2 is in flight and 1b-3 is
-unframed. Stage 1a (#182/#183) and Stage 1b-1 (#203) are on `main` and
+**Rewritten, not removed.** Rule 4 removes a lane when its ARC is done;
+the journey arc is not — 1b-3 is the last stage of the 1b split and is
+still open. Stage 1a (#182/#183) and Stage 1b-1 (#203) are on `main` and
 their durable facts are in `docs/agent-handoff.md` §1, which is rule 4's
 precondition satisfied rather than deferred.
 
@@ -326,7 +326,8 @@ re-conflict on every merge.
 ## Journey Stage 1b-3 (P1) — IMPLEMENTED, PR OPEN
 
 - **Branch `journey-stage1b3-welcome`**, worktree `../pmacs-journey-1b3`,
-  based on `githubsucks/main` @ `1f290d5`. **Framing only; no code, no
+  based on `githubsucks/main` @ `1f290d5`, **integrated with `main` @
+  `5376af1`** (#204). **Implemented; PR #205 open.**
   `docs/journey-stage1b3-welcome-framing.md` revision 4, three
   review rounds closed (round 1: four findings; round 2: two acceptance
   holes plus a doc correction; round 3: a visibility mismatch and an

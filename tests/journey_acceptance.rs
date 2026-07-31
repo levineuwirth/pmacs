@@ -2124,3 +2124,71 @@ fn journey_step6_a_missing_language_server_is_reported_not_swallowed() {
          is what made highlighting able to mask this"
     );
 }
+
+/// **N** — the greeting renders as separate rows on the **first frame**.
+///
+/// Writing to the registry without `notify_buffer_edit` leaves the
+/// window's `TextView` indexed against the empty `*scratch*` it was
+/// built for. Newlines are zero-width to a painter working from a stale
+/// line index, so the whole three-line greeting collapses onto row 0 —
+/// visible to a user, invisible to every buffer-text assertion above.
+///
+/// Falsified by dropping the `notify_buffer_edit` call in
+/// `finalize_local_launch`.
+#[test]
+fn journey_step4_the_welcome_paints_as_multiple_rows_on_the_first_frame() {
+    use pmacs::cell::{Cell, CellGrid, CellSize, Glyph};
+
+    let s = start_local();
+    let (rows, cols) = (12u32, 100u32);
+    let mut cells = vec![Cell::default(); (rows * cols) as usize];
+    let mut grid = CellGrid {
+        cells: &mut cells,
+        stride: cols,
+        size: CellSize::new(rows, cols),
+    };
+    let _ = pmacs::editor::paint_frame(
+        &s,
+        FrontendId::LOCAL,
+        &std::collections::HashMap::new(),
+        &mut grid,
+        CellSize::new(rows, cols),
+    );
+
+    let row_text = |row: u32| -> String {
+        (0..cols)
+            .map(
+                |column| match &cells[(row * cols + column) as usize].glyph {
+                    Glyph::Char(ch) => *ch,
+                    Glyph::Cluster(bytes) => std::str::from_utf8(bytes)
+                        .ok()
+                        .and_then(|t| t.chars().next())
+                        .unwrap_or(' '),
+                    Glyph::Continuation => ' ',
+                },
+            )
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    };
+
+    assert!(
+        row_text(0).contains("Welcome to pmacs"),
+        "row 0 is the greeting's first line; got {:?}",
+        row_text(0)
+    );
+    // The discriminating half: with a stale TextView these land on row 0
+    // too, and row 1 is blank.
+    assert!(
+        row_text(1).contains("C-x C-f"),
+        "the second line must occupy its own row, not collapse into the \
+         first; row 1 = {:?}, row 0 = {:?}",
+        row_text(1),
+        row_text(0)
+    );
+    assert!(
+        !row_text(0).contains("C-x C-f"),
+        "and must not have been folded into row 0; got {:?}",
+        row_text(0)
+    );
+}

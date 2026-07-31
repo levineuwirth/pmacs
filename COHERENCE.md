@@ -1575,19 +1575,20 @@ Establish the end-to-end workflow; treat regressions as release
 blockers. **State: runs to step 5; thin from step 6 (§2). Mostly wiring,
 and unusually cheap:** directory-argument handling (**done**: Journey
 Stage 1a); a find-file surface (**done**: #162 open-by-path, #165
-browsing); surfacing the LSP spawn failure with guidance (**in flight**:
-Journey Stage 1b-2, §1.2); a compile keybinding + `cargo build`/`test`
-default (**done**: Journey Stage 1b-1, #203, from the existing
+browsing); surfacing the LSP spawn failure with guidance (**done**: Journey Stage
+1b-2, #204, §1.2); a compile keybinding + `cargo build`/`test` default
+(**done**: Journey Stage 1b-1, #203, from the existing
 `ProjectKind::Rust` — **not** `Cargo`, see §24); a terminal keybinding
-(**done**: `C-c t`, #173); a welcome buffer. The journey acceptance
+(**done**: `C-c t`, #173); a welcome buffer (**in flight**: Journey
+Stage 1b-3). The journey acceptance
 suite (§19) is the ratchet that keeps it fixed — it **exists now**
 (`tests/journey_acceptance.rs`, Stage 1a), seeded with steps 2, 3 and 5,
 and carrying step 9 since #203.
 
-Journey Stage 1b is the named remainder, and it splits: **1b-1 — the
-compile binding + project-kind defaults — landed as #203**; **1b-2**
-(LSP spawn guidance, step 6) is in flight; **1b-3**, the welcome buffer
-(step 4), remains.
+Journey Stage 1b is the named remainder, and it splits: **1b-1** (the
+compile binding + project-kind defaults) landed as #203 and **1b-2**
+(LSP spawn guidance, step 6) as #204; **1b-3**, the welcome buffer
+(step 4), is in flight and completes the split.
 
 ### Priority 2: Make workspace and location explicit
 
@@ -1660,8 +1661,9 @@ implementation — this list is direction, not commitment):
    #165's dired buffer rather than growing a second directory surface.
    **Stage 1b-1 — landed (#203)**: the compile binding and project-kind
    defaults, with the prompt capturing its directory rather than
-   re-resolving it at accept time. **Stage 1b-2 — in flight**:
-   LSP-failure surfacing. **Stage 1b-3 — remaining**: welcome buffer.
+   re-resolving it at accept time. **Stage 1b-2 — landed (#204)**:
+   LSP-failure surfacing. **Stage 1b-3 — in flight**: the welcome
+   buffer and `M-x help`. With it the 1b split is complete.
 2. **Discovery surface** (P4): the describe/list/where-is command
    family, M-x rich rows, help unification, help prefix.
 3. **Transient keymap layer** (§6): the overlay scope + lifetime
