@@ -253,13 +253,19 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
-## Journey lane (P1) — STAGE 1a MERGED; STAGE 1b-1 FRAMING OPEN, revision 2
+## Journey lane (P1) — STAGE 1a MERGED; STAGE 1b-1 IMPLEMENTED, PR OPEN
 
 - **Branch `journey-stage1b1-compile-defaults`**, worktree
   `../pmacs-journey-1b1`, based on `githubsucks/main` @ `22df6ab`.
-  **Framing only; no code, no PR yet.**
-  `docs/journey-stage1b1-compile-defaults-framing.md` revision 2, one
-  review round closed (two blocking, two major, all accepted).
+  `docs/journey-stage1b1-compile-defaults-framing.md` revision 2,
+  approved after one review round (two blocking, two major, all
+  accepted). **Implemented; PR open.**
+- **Bites found two vacuous pins of my own.** The nested-project pin
+  passed with the keybinding removed, because `minibuffer.contents()` is
+  `""` both for an empty prefill and for no minibuffer at all — `""`
+  compared with `""`. And the hostile-`defaults` pin called
+  `compile.run` directly, so it never consulted `defaults` and passed
+  with the guard removed. Both now assert their precondition.
 - **Round 1's blocking finding is the Stage 1a lesson repeating.**
   Sharing one cwd resolver between the prompt and the run is *not*
   enough: `pmacs.minibuffer.read` is async, the active window can change

@@ -104,6 +104,48 @@ commands, read `docs/active-work.md` immediately after this file.
   interaction islands added, config-registry adoption, background-work
   attribution. Its §2 grades the golden journey; **Journey Stage 1a
   moved that grade off "broken at step 3"** — see the arc bullet below.
+- **Journey arc (P1) — Stage 1b-1 LANDED** (`docs/journey-stage1b1-compile-defaults-framing.md`).
+  Journey step 9 moves **Partial → Works**: `C-c c` runs `compile.run`,
+  and the first prompt is prefilled from the detected project kind via
+  `pmacs.compile.defaults` (seeded `rust = "cargo build"`, extensible
+  from `init.lua`). Lua, tests and docs; no Rust change, no protocol
+  change. The ratchet now carries steps 2, 3, 5 and **9**.
+  - **Sharing a resolver is not capturing one.** `pmacs.minibuffer.read`
+    is asynchronous and nothing freezes the active window while a prompt
+    is open, so having the prompt and `compile.run` call the *same* cwd
+    resolver still let them disagree: the user could be offered
+    `cargo build` for A and given a run in B by clicking away
+    mid-prompt. The interactive command captures `pmacs.compile.context()`
+    once and passes its `cwd` through to the run. **This is Stage 1a's
+    `commit_to` lesson on a smaller seam** — capture at request time,
+    never re-derive when the async work lands. Review found it; the
+    first framing had the weaker design and said it was sufficient.
+  - **A pin that never crosses the accept boundary cannot see that
+    class of bug.** Every originally-proposed pin compared values the
+    prompt and the resolver already agreed on, so the defect above
+    passed all of them. Two pins now accept the prompt and observe a
+    real process.
+  - **`ProjectKind::Cargo` does not exist** — `COHERENCE.md` named it
+    twice, citing `src/project.rs:77`, which is the *doc comment*; the
+    variant on line 78 is `ProjectKind::Rust`. Lua never sees the
+    variant anyway: `pmacs.project.detect` returns the tag string
+    `"rust"`. Corrected in both COHERENCE sites and recorded in its §24.
+  - **The compile fallback cwd is the process cwd, which under `cargo
+    test` is the pmacs repo — itself a Cargo project.** Any pin
+    asserting the *absence* of a Cargo suggestion that reaches the
+    fallback reports pmacs's own `Cargo.toml`. Bite D confirmed it: with
+    the kind derived from the process cwd, the plain-fixture prefill pin
+    still passed and only the nested-project pin caught it.
+    `set_search_boundary` is no defence — it clamps only a walk starting
+    *below* the boundary.
+  - **Named limitation, deliberately unfixed:** after `pmacs <dir>` the
+    active buffer is dired's and **pathless** (`pmacs.buffer.create`
+    assigns no path; dired compensates through its own module-local
+    `handle_for_buffer`), so the cwd falls through to the process cwd.
+    Launched from elsewhere that is the wrong directory. The fix is
+    §8's execution-location model, not a reach into dired's private
+    table. What is guaranteed is that the failure stays *coherent*: the
+    suggestion always describes the directory the run will use.
 - **Journey arc (P1) — Stage 1a LANDED**
   (`docs/journey-stage1a-framing.md`). `pmacs .` opens a directory
   instead of exiting 1, on **one** path: `resolve_target_buffer` gained a
