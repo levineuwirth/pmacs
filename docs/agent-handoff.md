@@ -104,11 +104,9 @@ commands, read `docs/active-work.md` immediately after this file.
   interaction islands added, config-registry adoption, background-work
   attribution. Its §2 grades the golden journey; **Journey Stage 1a
   moved that grade off "broken at step 3"** — see the arc bullet below.
-- **Journey arc (P1) — Stage 1b-1 IMPLEMENTED, PR #203 OPEN**
-  (`docs/journey-stage1b1-compile-defaults-framing.md`). Not landed: per
-  `COHERENCE.md` §25 a grade changes only on landed evidence, so §2's
-  step-9 row still reads **Partial** and flips at merge.
-  Journey step 9 will move **Partial → Works**: `C-c c` runs `compile.run`,
+- **Journey arc (P1) — Stage 1b-1 LANDED (#203)**
+  (`docs/journey-stage1b1-compile-defaults-framing.md`).
+  Journey step 9 moves **Partial → Works**: `C-c c` runs `compile.run`,
   and the first prompt is prefilled from the detected project kind via
   `pmacs.compile.defaults` (seeded `rust = "cargo build"`, extensible
   from `init.lua`). Lua, tests and docs; no Rust change, no protocol
@@ -302,6 +300,45 @@ commands, read `docs/active-work.md` immediately after this file.
     disagree — and it still establishes no identity, because it is read
     inside the same read-then-act window and no portable mechanism closes
     that for a *group* (`pidfd` covers a process; macOS has neither).
+- **Journey arc (P1) — Stage 1b-2 IMPLEMENTED, PR open**
+  (`docs/journey-stage1b2-lsp-guidance-framing.md`, rev 4, three review
+  rounds). `COHERENCE.md` §1.2's canonical silence: a preconfigured
+  language server that is not installed now reports with guidance, marks
+  the modeline `LSP:!`, and appears in `M-x lsp.status`. Per §25 the
+  step-6 grade flips only on merge.
+  - **`status_buffer_text()` had existed since M4.8, exposed to Lua and
+    tested, with no production caller and no `*lsp*` buffer** — several
+    `src/lsp.rs` and `src/project.rs` doc comments referred to that
+    buffer as though it existed. Half the stage was wiring dark matter.
+  - **The reporting shape was already adopted twice in `lsp.lua`** (root
+    resolvers, notification subscribers). The canonical case was silent
+    because nobody had converted it, not for want of a mechanism.
+  - **A failed spawn leaves NO record**: `LspManager::spawn` returns
+    early before both `status_tracker.ensure` and `clients.insert`, so
+    `pmacs.lsp.list()` cannot see it and the affinity loop re-spawns.
+    The failure therefore recurs **once per file open**, not once per
+    project root as COHERENCE recorded. Hence: **memoize the report, not
+    the failure** — the spawn is still retried, so installing the binary
+    mid-session recovers with nothing to invalidate.
+  - **The affinity key is `(language, key_uri)` and `key_uri` is nil for
+    markerless files**, which deliberately share one server per
+    language. Lua cannot index by nil, so one encoding function serves
+    both tables with a `u`/`n` discriminator no URI can collide with.
+  - **Three tables, three lifetimes.** `reported` (never cleared,
+    includes the command so repointing at another missing executable
+    re-reports); `failures` (cleared on a successful spawn for that
+    key); and a **buffer-keyed projection** for the modeline, because
+    that provider runs for every window on every paint and deriving an
+    affinity key inside it would invoke root resolvers during painting.
+  - **A success must SWEEP the projections, not clear one.** Clearing
+    only the succeeding buffer leaves an earlier buffer rendering
+    `LSP:!` while `lsp.status` reports nothing wrong.
+  - **A new per-buffer table needs its own teardown.** Nothing existing
+    reaches it: the LSP resource reconciliation iterates `attachments`,
+    and a failed buffer has none by construction. `pmacs.buffer.on_removed`
+    is registered once per projection; rename and delete **clear** rather
+    than re-key, because after a rename the failure is no longer known to
+    apply at the new location.
 - **Reap-ledger silent failures — DIAGNOSTIC, in flight**
   (`docs/reap-ledger-silent-failures-framing.md`). The lane #200's
   framing §5 parked and its evidence unparked. **Four `kill(2)` results

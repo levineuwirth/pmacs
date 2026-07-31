@@ -219,16 +219,31 @@ Automatic, background failures are swallowed. The canonical case, hit on
 **every file open** when a language server is preconfigured but not
 installed: `Command::spawn` ENOENT propagates up through
 `LspManager::spawn` and raises in Lua — where `ensure_server` `pcall`s
-it and returns nil (`builtin/runtime/lsp.lua:614-626`), and the
-`buffer.after-load` hook `pcall`s the whole attach
-(`builtin/runtime/lsp.lua:895-897`). Net user-visible result: nothing.
-No status message, no `*errors*` entry, no modeline marker (the LSP
-segment is gated on an attachment record existing, so absence is
-indistinguishable from "unsupported file type"). Working tree-sitter
-highlighting **actively masks** the failure — the user sees colored text
-and assumes language intelligence is on. Post-crash is the same shape:
-`LspEventKind::Crashed` is pushed (`src/lsp.rs:2394`) and no builtin
-subscriber surfaces it.
+it, and the `buffer.after-load` hook `pcall`s the whole attach. Net
+user-visible result used to be nothing: no status message, no `*errors*`
+entry, no modeline marker (the LSP segment is gated on an attachment
+record existing, so absence was indistinguishable from "unsupported file
+type"). Working tree-sitter highlighting **actively masks** the failure —
+the user sees colored text and assumes language intelligence is on.
+
+**Journey Stage 1b-2 answers this specific case**
+(`docs/journey-stage1b2-lsp-guidance-framing.md`): the failure is
+reported once per `(language, root, command)` with the command, the
+language and the errno; `M-x lsp.status` renders a durable `*lsp*` panel;
+and the modeline says `LSP:!` instead of nothing. **The asymmetry itself
+is not retired** — the rule below still needs adopting site by site, and
+`pmacs.error` is still undefined.
+
+Post-crash is the same shape and is **not** covered:
+`LspEventKind::Crashed` is pushed and no builtin subscriber surfaces it.
+A server that started and then died is a different failure with a
+different message.
+
+*(Citation note: this paragraph carried three stale line references —
+`ensure_server` was cited at `:614-626` when the spawn `pcall` is at
+`:658-674`, and the `buffer.after-load` hook at `:895-897` when it is at
+`:1019-1021`. Symbols are authoritative per §25; the numbers are dropped
+rather than re-pinned.)*
 
 This directly contradicts the product thesis (§23): the "without
 freezing" half is delivered; the "without becoming opaque" half is
@@ -258,10 +273,14 @@ wiring must log attributed failure, never discard it. Corollary from the
 above: report through a channel with a **test that observes it**, or the
 guard is indistinguishable from the silence it was meant to fix.
 
-**Frequency note (PR #161):** per-root server affinity means the
-preconfigured-but-missing-server failure now fires **once per project
-root** rather than once per language per session. The silence is
-unchanged in kind; it is strictly more frequent. Surfacing it stays
+**Frequency note — corrected by Stage 1b-2.** This previously said the
+failure fires "once per project root". It did not: `LspManager::spawn`
+returns early *before* both `status_tracker.ensure` and
+`clients.insert`, so a failed spawn left **no record at all**,
+`pmacs.lsp.list()` could not see it, and `ensure_server`'s affinity loop
+re-spawned. The real rate was **once per file open** — strictly worse
+than recorded, and the reason the fix memoizes the *report* while still
+retrying the spawn. Surfacing it stays
 Priority 1 work with its own framing — it is a user-visible product
 behavior (what message, where, with what guidance), not a substrate fix
 to smuggle into an affinity PR.
@@ -375,10 +394,10 @@ Full verdict table:
 | 3 | Open real project | **Works at the CLI** | Journey Stage 1a: `resolve_target_buffer` answers `ResolvedTarget::Directory` before the EISDIR-producing load, and `EditorState::open` / the daemon bootstrap dispatch the `path.open-directory` chain, whose fallback is dired (#165's buffer, reached rather than duplicated). Startup no longer fails: an unreadable directory, a crashed resolver, and a cleared handler all report on the status line and leave the session running. Because the listing is async and the bootstrap is synchronous, the commit runs against a destination captured at request time (`pmacs.window.commit_to`) rather than against the ambient frontend |
 | 4 | Understand interface | **Partial** | Mode line gives name/modified/L:C/scroll + mode/LSP/terminal segments; but no welcome text (`EditorCore::new` sets `status: String::new()`), no cheat sheet, and `C-h` deletes a word (§18) |
 | 5 | Edit | **Works** | Full CUA + Emacs keymap in 161 lines (`builtin/keymaps/default.lua`); isearch, query-replace, kill ring, undo/redo, auto-indent/pair/comment, atomic save. Genuinely excellent zero-config |
-| 6 | Language intelligence | **Partial** | Rust grammar bundled and auto-attaches; rust-analyzer preconfigured (`builtin/runtime/lsp.lua:44-52`) — but a missing binary fails silently (§1.2) and highlighting masks it. No LSP status command exists to diagnose |
+| 6 | Language intelligence | **Partial** | Rust grammar bundled and auto-attaches; rust-analyzer preconfigured (`builtin/runtime/lsp.lua`). **Journey Stage 1b-2 (PR open) ends the silence** for a server that fails to *start*: the status line names the command, language and errno once per `(language, root, command)`; the modeline reads `LSP:!` instead of nothing; and `M-x lsp.status` renders `*lsp*` over the `status_buffer_text()` renderer that had existed since M4.8 with no caller. **Still Partial**, and flips only on merge (§25): a server that starts and then *crashes* is still unsurfaced |
 | 7 | Find symbol / file | **File: fixed (open by path merged #162; browsing #165). Symbol: works but undiscoverable** | No find-file/dired/picker existed at audit. Now `C-x C-f` opens a known path and `C-x d` / `C-x C-j` browse (flat listing, `dired` mode keymap); `M-.`/`M-?`/`C-c o` still bound but advertised nowhere and server-gated; no workspace-symbol command; `pmacs.index.*` has no UI |
 | 8 | Open terminal | **Works** | Full PTY with scrollback + modeline segment, bound to `C-c t` and configurable through three registered settings (`terminal.default-profile`, `terminal.scrollback-rows`, `terminal.escape-key`) plus named `pmacs.terminal.profiles` (PR #173), and searchable through `M-x terminal.copy-mode` / `C-c C-t`, which materializes the retained scrollback into an ordinary read-only buffer (Stage 2). Named limitations: `C-c t` is unreachable from *inside* a terminal window, where `C-c` is consumed as the escape — `M-x terminal` still works there; and there is still **no close/kill command**, which is the remaining half of this step's discoverability gap. *Was broken outright on the GPU frontend until the double terminal-layout sync was fixed: the child took a `SIGWINCH` storm at tick cadence, so typing into it was impossible while output still flowed.* |
-| 9 | Build / test | **Partial** | `M-x compile.run` works, defaults cwd to the detected project root, and parses Rust `-->` errors — but no keybinding, an **empty first prompt** (`initial = last and last.cmdline or ""`, `builtin/runtime/compile.lua`), and no `cargo build` suggestion despite `ProjectKind::Rust` existing (`src/project.rs:78` — **not** `Cargo`, see §24). **PR #203 (open) closes all three**: `C-c c` runs `compile.run`, and the first prompt is prefilled from the detected project kind (`pmacs.compile.defaults`, seeded `rust = "cargo build"`). The prompt **captures** its directory rather than re-resolving at accept time, so the command it offers and the directory it runs in cannot drift while the minibuffer waits. Named limitation it does not fix: after `pmacs <dir>` the active buffer is dired's and pathless, so the cwd falls back to the process cwd — §8's execution-location model owns that. **This row flips to Works when #203 merges**; per §25 a grade changes only on landed evidence |
+| 9 | Build / test | **Works** | Journey Stage 1b-1 (#203): `C-c c` runs `compile.run`, and the first prompt is prefilled from the detected project kind (`pmacs.compile.defaults`, seeded `rust = "cargo build"`, extensible from `init.lua`) via `ProjectKind::Rust` — **not** `Cargo`, see §24. The prompt **captures** its directory rather than re-resolving at accept time, so the command it offers and the directory it runs in cannot drift while the minibuffer waits. Still defaults cwd to the detected project root and parses Rust `-->` errors. Named limitation: after `pmacs <dir>` the active buffer is dired's and pathless, so the cwd falls back to the process cwd — §8's execution-location model owns that, and the degradation stays coherent (no suggestion is offered for a directory with no detected Cargo project) |
 | 10 | Inspect error | **Partial (good once reached)** | `E:n W:n` modeline counts, underlines, `M-g n/p` + ``C-x ` `` walking a unified compile/grep/diag source, message echo, `RET` visits. Gated entirely on step 6 or 9 succeeding first |
 | 11 | See background work | **Works but undiscoverable** | `*workers*` view via `M-x editor.list-workers`; `C-c C-k` cancel-at-point. No keybinding, no statusline spinner/progress indicator anywhere (§9) |
 | 12 | Close + restore | **Partial** | Per-file cursor+scroll (saveplace), recent files, minibuffer history, autosave recovery all restore zero-config. Open-buffer set and window layout do **not**: desktop-save is opt-in (`pmacs.session.desktop_mode(true)`) *and* a documented no-op under a daemon (`src/desktop.rs:323-326`, `:353-356`, Q#DS9) |
@@ -388,14 +407,15 @@ A journey observation worth keeping verbatim from the audit:
 C-M-s` opens all folds, while opening a file, opening a terminal, and
 running a build have no bindings at all.
 
-Two of that observation's three examples have been answered — opening a
-file by `C-x C-f` (#162) and opening a terminal by `C-c t` (#173).
-**Running a build still has no binding on `main`**; PR #203 is open and
-adds `C-c c`. **The quote stays as written either way**: it names a standing bias in how new work gets bound,
-not three isolated omissions, and two fixes do not retire a bias.
-**Running a build remains its uncontested golden-journey example until
-#203 lands.** A new surface that ships without a binding would be further
-evidence the pattern is live, and should be read that way.
+All three of that observation's examples have now been answered —
+opening a file by `C-x C-f` (#162), opening a terminal by `C-c t`
+(#173), and running a build by `C-c c` (Journey Stage 1b-1, #203).
+**The quote stays as written**: it names a standing bias in how new work
+gets bound, not three isolated omissions, and three fixes do not retire
+a bias. What has changed is that the bias no longer has an uncontested
+example in the golden journey — a new surface that ships without a
+binding would be evidence the pattern is live again, and should be read
+that way.
 
 ---
 
@@ -1543,19 +1563,19 @@ Establish the end-to-end workflow; treat regressions as release
 blockers. **State: runs to step 5; thin from step 6 (§2). Mostly wiring,
 and unusually cheap:** directory-argument handling (**done**: Journey
 Stage 1a); a find-file surface (**done**: #162 open-by-path, #165
-browsing); surfacing the LSP spawn failure with guidance (§1.2); a
-compile keybinding + `cargo build`/`test` default (**in flight**:
-Journey Stage 1b-1, PR #203, from the existing `ProjectKind::Rust` —
-**not** `Cargo`, see §24); a terminal keybinding (**done**: `C-c t`,
-#173); a welcome buffer. The journey acceptance suite (§19) is the ratchet that
-keeps it fixed — it **exists now** (`tests/journey_acceptance.rs`,
-Stage 1a), seeded with steps 2, 3, and 5.
+browsing); surfacing the LSP spawn failure with guidance (**in flight**:
+Journey Stage 1b-2, §1.2); a compile keybinding + `cargo build`/`test`
+default (**done**: Journey Stage 1b-1, #203, from the existing
+`ProjectKind::Rust` — **not** `Cargo`, see §24); a terminal keybinding
+(**done**: `C-c t`, #173); a welcome buffer. The journey acceptance
+suite (§19) is the ratchet that keeps it fixed — it **exists now**
+(`tests/journey_acceptance.rs`, Stage 1a), seeded with steps 2, 3 and 5,
+and carrying step 9 since #203.
 
 Journey Stage 1b is the named remainder, and it splits: **1b-1 — the
-compile binding + project-kind defaults — is in flight as PR #203**;
-1b-2 (LSP spawn guidance, step 6) and 1b-3 (the welcome buffer, step 4)
-remain. The ratchet is seeded with steps 2, 3 and 5, and gains step 9
-when #203 lands.
+compile binding + project-kind defaults — landed as #203**; **1b-2**
+(LSP spawn guidance, step 6) is in flight; **1b-3**, the welcome buffer
+(step 4), remains.
 
 ### Priority 2: Make workspace and location explicit
 
@@ -1626,10 +1646,10 @@ implementation — this list is direction, not commitment):
    `resolve_target_buffer` unification, the destination-scope substrate,
    and the first journey acceptance suite. It routes `pmacs .` into
    #165's dired buffer rather than growing a second directory surface.
-   **Stage 1b-1 — in flight (PR #203)**: the compile binding and
-   project-kind defaults, with the prompt capturing its directory rather
-   than re-resolving it at accept time. **Stage 1b-2 / 1b-3 —
-   remaining**: LSP-failure surfacing, welcome buffer.
+   **Stage 1b-1 — landed (#203)**: the compile binding and project-kind
+   defaults, with the prompt capturing its directory rather than
+   re-resolving it at accept time. **Stage 1b-2 — in flight**:
+   LSP-failure surfacing. **Stage 1b-3 — remaining**: welcome buffer.
 2. **Discovery surface** (P4): the describe/list/where-is command
    family, M-x rich rows, help unification, help prefix.
 3. **Transient keymap layer** (§6): the overlay scope + lifetime
@@ -1721,6 +1741,11 @@ available without being imposed.
 Found during the audit; fix opportunistically, ideally before this
 document is wired into CLAUDE.md/AGENTS.md as required reading:
 
+- **§1.2's frequency note was wrong**, not merely stale: it recorded the
+  missing-server failure as firing once per project root when the real
+  rate was once per file open, because a failed spawn leaves no record
+  for the affinity loop to find. Corrected in place by Journey Stage
+  1b-2, along with three stale line citations in the same paragraph.
 - **This document named a `ProjectKind` variant that does not exist**,
   in two places: §2's step-9 row and §20 Priority 1 both said
   "`ProjectKind::Cargo` existing (`src/project.rs:77`)". Line 77 is the
@@ -1731,6 +1756,7 @@ document is wired into CLAUDE.md/AGENTS.md as required reading:
   `pmacs.project.detect` returns the **tag string** `"rust"`. Kept here
   rather than silently fixed, because a wrong type name in the document
   work is evaluated against costs a scout a real detour.
+
 - `docs/keybindings.md` — every `src/editor.rs` line citation in §3 is
   stale by ~250–1000 lines despite a "last verified @ `f8096ff`
   (2026-07-20)" stamp; its shadow list also omits the terminal `C-c`

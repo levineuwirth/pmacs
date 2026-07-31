@@ -1742,3 +1742,90 @@ fn journey_step9_the_compile_directory_is_detection_canonical() {
         "the header must name the directory detection resolved to;\n{text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Step 6 — receive language intelligence (Journey Stage 1b-2)
+//
+// `COHERENCE.md` §2 graded this **Partial**: a preconfigured server that
+// is not installed failed silently, and working tree-sitter highlighting
+// masked it. This row pins the failure being *told*, end to end, through
+// the same walk a user takes.
+// ---------------------------------------------------------------------------
+
+/// The `lsp` modeline segment for the active buffer, found by face —
+/// `EvaluatedStatuslineSegment` carries `provider_id`, not the
+/// registration's name.
+fn lsp_segment(s: &EditorState) -> Option<String> {
+    let outcome = pmacs::statusline::evaluate_statusline(
+        s.lua_host.lua(),
+        &s.core,
+        &s.statusline_registry,
+        pmacs::statusline::StatuslineEvaluationTarget::Grid {
+            frontend_id: FrontendId::LOCAL,
+        },
+    );
+    let pmacs::statusline::StatuslineEvaluationOutcome::Ready(windows) = outcome.outcome else {
+        return None;
+    };
+    windows
+        .into_iter()
+        .flat_map(|w| w.right)
+        .find(|seg| seg.face == "ui.modeline.lsp")
+        .map(|seg| seg.text)
+}
+
+/// **N** — step 6: when language intelligence cannot start, the user is
+/// told, on the path `pmacs .` actually takes.
+///
+/// The configured command is one that cannot exist, so a developer with
+/// `rust-analyzer` installed gets the same result as CI — and the
+/// fixture asserts that precondition, or every assertion here would be
+/// vacuous.
+#[test]
+fn journey_step6_a_missing_language_server_is_reported_not_swallowed() {
+    let td = tempfile::tempdir().expect("tempdir");
+    std::fs::write(td.path().join("Cargo.toml"), b"[package]\nname=\"x\"\n").expect("write toml");
+    std::fs::write(td.path().join("main.rs"), b"fn main() {}\n").expect("write rs");
+
+    let absent = td.path().join("no-such-bin").join("rust-analyzer");
+    assert!(
+        !absent.exists(),
+        "fixture precondition: the configured server must not exist"
+    );
+
+    // Launch as `pmacs .` does — this lists the directory in dired.
+    let mut s = launch(td.path());
+    // `launch` clears `pmacs.lsp.config`, so configure after it.
+    exec(
+        &s,
+        &format!(
+            "pmacs.project.set_search_boundary({:?})
+             pmacs.lsp.config.rust = {{ command = {:?} }}",
+            td.path().display().to_string(),
+            absent.display().to_string()
+        ),
+    );
+
+    // Visit the source file with the real key, as step 5 does.
+    let line = line_of(&s, "main.rs");
+    exec(&s, &format!("pmacs.editor.move_to_line({line})"));
+    press(&mut s, KeyCode::Enter);
+    pump(&mut s);
+    assert_eq!(
+        active_name(&s),
+        td.path().join("main.rs").display().to_string(),
+        "precondition: the walk must actually open the source file"
+    );
+
+    let msg = status(&s);
+    assert!(
+        msg.contains(&absent.display().to_string()),
+        "the user is told which command did not start; got {msg:?}"
+    );
+    assert_eq!(
+        lsp_segment(&s).as_deref(),
+        Some("LSP:!"),
+        "and the modeline says so, rather than rendering nothing — which \
+         is what made highlighting able to mask this"
+    );
+}

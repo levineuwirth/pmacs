@@ -62,17 +62,19 @@ lesson, §1 for the two framings).
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `7586905` (the docs-only coherence listview
-  correction #189, atop the docs-only landed-state refresh #185, the M4
-  config-sink race fix #174, bottom-panel Stage 2B-1 #184, the
-  Journey/GPU directory-target ratchet #183, Journey Stage 1a #182 and
-  the previously recorded landed work).
+  `githubsucks/main` @ `fbcf235` (the reap-ledger diagnostic #202, atop
+  the test ambient-root isolation framing #201, the reap-ledger framing
+  #200, the ledger absorption #199, the M5.5 protocol-version pin #198,
+  the docs-only coherence listview correction #189, the docs-only
+  landed-state refresh #185, the M4 config-sink race fix #174,
+  bottom-panel Stage 2B-1 #184, the Journey/GPU directory-target ratchet
+  #183, Journey Stage 1a #182 and the previously recorded landed work).
   **Protocol schema support is
   `v6..=v21`; the production server-first `Hello` still advertises
   v20** — two different facts, and #184 landed only the first. The
-  previous snapshot named `0442d78`, and **the
+  previous snapshot named `7586905`, and **the
   recovery floor advances with it**: the check below now requires
-  `7586905` or newer, so a tree at `0442d78` no longer passes. That is
+  `fbcf235` or newer, so a tree at `7586905` no longer passes. That is
   deliberate — the floor moves with the base, because a check that
   accepts an older commit than the declared base passes on a tree the
   rest of this file does not describe.
@@ -111,7 +113,7 @@ git worktree list
 git status --short --branch
 ```
 
-The `git log` command must expose `7586905` — the base named above — or a
+The `git log` command must expose `fbcf235` — the base named above — or a
 newer intentional main. Keep this threshold and the canonical-base line in
 step: a recovery check that accepts an older commit than the base it
 declares canonical will pass on a tree the rest of this file does not
@@ -253,98 +255,72 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
-## Journey lane (P1) — STAGE 1a MERGED; STAGE 1b-1 IMPLEMENTED, PR OPEN
+## Journey lane (P1) — 1a and 1b-1 MERGED; 1b-2 PR OPEN; 1b-3 REMAINS
 
-- **Branch `journey-stage1b1-compile-defaults`**, worktree
-  `../pmacs-journey-1b1`, based on `githubsucks/main` @ `22df6ab`.
-  `docs/journey-stage1b1-compile-defaults-framing.md` revision 2,
-  approved after one review round (two blocking, two major, all
-  accepted). **Implemented; PR open.**
-- **ON MERGE OF #203, flip four places to landed.** The PR deliberately
-  ships them as *in flight*, because `COHERENCE.md` §25 says a grade
-  changes only on landed evidence and the PR is open: `COHERENCE.md`
-  §2's step-9 verdict row (Partial → **Works**), §2's post-table
-  keybinding-inversion paragraph (third example answered; the build is
-  no longer its uncontested example), §20 Priority 1 and its arc list (in
-  flight → done), and
-  `docs/agent-handoff.md` §1's arc bullet (IMPLEMENTED → LANDED).
-  **Recorded here because an unowned doc flip is exactly how this
-  ledger's drift starts** — the same rule-4 precondition that kept #176's
-  lane alive past its merge.
-- **A lexical path expectation is wrong for anything detection touched.**
-  `pmacs.project.detect` canonicalizes before walking
-  (`canonicalize_or_passthrough`, `src/project.rs:509-511`) while the
-  suite's `canon()` is lexical, so the compile-directory assertions
-  passed on Ubuntu and **failed both macOS legs**, where `/var` is a
-  symlink to `/private/var`. Fixed with a `detected_root()` expectation
-  and pinned by a **symlinked fixture**, which reproduces the disagreement
-  on any platform — a Linux-only bite could not have caught it.
-- **Bites found two vacuous pins of my own.** The nested-project pin
-  passed with the keybinding removed, because `minibuffer.contents()` is
-  `""` both for an empty prefill and for no minibuffer at all — `""`
-  compared with `""`. And the hostile-`defaults` pin called
-  `compile.run` directly, so it never consulted `defaults` and passed
-  with the guard removed. Both now assert their precondition.
-- **Round 1's blocking finding is the Stage 1a lesson repeating.**
-  Sharing one cwd resolver between the prompt and the run is *not*
-  enough: `pmacs.minibuffer.read` is async, the active window can change
-  while the prompt is open, and `run` re-resolved at accept time — so
-  the prompt could offer `cargo build` for A and execute in B. The
-  interactive command now **captures** `context()` and passes its `cwd`
-  through to `run`, which is `commit_to`'s discipline on a smaller seam.
-  The second blocker was that no pin crossed the accept boundary at all,
-  so that defect passed every proposed pin.
-- **Why this lane exists.** `COHERENCE.md` §20 Priority 1 names Journey
-  Stage 1b as the golden journey's remainder — "the compile binding +
-  Cargo defaults, LSP spawn guidance, and the welcome buffer" — and it
-  had no branch, no framing, and no lane. It is the only §20 priority
-  with nothing in flight.
-- **What 1b-1 is.** Journey step 9 only: a global `C-c c` for
-  `compile.run`, and a first prompt prefilled from the detected project
-  kind instead of empty. Lua, tests, and docs; **no Rust change and no
-  protocol change**. 1b-2 (LSP spawn guidance, step 6) and 1b-3 (welcome
-  buffer, step 4) are separate stages — see the framing §7 for why the
-  three are not one PR.
-- **`ProjectKind::Cargo` does not exist.** `COHERENCE.md` names it twice
-  (§2's step-9 row and §20 Priority 1); the variant is
-  `ProjectKind::Rust` (`src/project.rs:78`) and line 77 is its doc
-  comment. The audit read the comment. Lua matches on the **tag string**
-  `"rust"` that `pmacs.project.detect` returns, so no Rust primitive is
-  needed. The PR corrects both COHERENCE sites.
-- **The suggestion and the run must share one cwd resolution.** Today
-  the cwd is computed *inside* `pmacs.compile.run`
-  (`builtin/runtime/compile.lua:765`), after the prompt has closed, so a
-  suggestion computed in the command's `fn` would obey a different rule
-  than the run. The stage extracts it and exposes
-  `pmacs.compile.context()`, consumed by both.
-- **The trap the acceptance is designed around.** The last-resort cwd is
-  `std::env::current_dir()` evaluated at call time
-  (`pmacs-protocol/src/message.rs:1703-1706`), so in tests it is the
-  **test runner's cwd — the pmacs repo root, itself a Cargo project**.
-  `compile_mode_acceptance.rs:1721` already pins this. A pin asserting
-  "no Cargo suggestion" that reaches the fallback would report pmacs's
-  own `Cargo.toml`. Negative pins therefore use a fixture carrying a
-  *different* marker so the fallback is never consulted;
-  `set_search_boundary` does **not** help here, because it only clamps a
-  walk that starts below the boundary.
-- **Known limitation, deliberately not fixed.** After `pmacs <dir>` the
-  active buffer is dired's and **pathless** (`pmacs.buffer.create` never
-  assigns a path; dired compensates through its own module-local
-  `handle_for_buffer`, `dired.lua:205-217`), so the cwd falls through to
-  the process cwd. Launched from elsewhere that is the wrong directory.
-  The fix is `COHERENCE.md` §8 (First-Class Execution Locations), a
-  model gap; reaching into dired's private table for one string would
-  add an interaction island.
+**Rewritten, not removed, at #203's merge.** Rule 4 removes a lane when
+its ARC is done; the journey arc is not — 1b-2 is in flight and 1b-3 is
+unframed. Stage 1a (#182/#183) and Stage 1b-1 (#203) are on `main` and
+their durable facts are in `docs/agent-handoff.md` §1, which is rule 4's
+precondition satisfied rather than deferred.
+
+**#203's merge obligation is DISCHARGED**: `COHERENCE.md` §2's step-9
+row now reads **Works**, §2's keybinding-inversion paragraph records all
+three examples answered (the quote itself deliberately unchanged), §20
+Priority 1 and its arc list say "landed", and the handoff bullet says
+LANDED. That flip rides *this* branch rather than a standalone docs PR,
+because #204 already touches all three files and a separate PR would
+re-conflict on every merge.
+
+- **Branch `journey-stage1b2-lsp-guidance`**, worktree
+  `../pmacs-journey-1b2`, based on `githubsucks/main` @ `fbcf235`,
+  **integrated with `main` @ `1f290d5` (#203)**.
+  `docs/journey-stage1b2-lsp-guidance-framing.md` revision 4, three
+  review rounds closed (round 1: two blocking, three major, one minor;
+  round 2: two blocking, two cleanups; round 3: one blocking; all
+  accepted). **Implemented; PR #204 open.**
+- **What it is.** `COHERENCE.md` §1.2's canonical silence, journey step
+  6: a preconfigured-but-missing language server now reports with
+  guidance, marks the modeline `LSP:!`, and appears in `M-x lsp.status`.
+- **Half of it was already built and unwired.**
+  `LspManager::status_buffer_text()` and `last_error()` have existed
+  since M4.8, exposed to Lua and tested, with **no production caller**
+  and no `*lsp*` buffer, while several `src/lsp.rs` and `src/project.rs`
+  doc comments refer to that buffer as though it existed.
+- **The reporting shape was already adopted twice in `lsp.lua` itself**
+  (root resolvers, notification subscribers). The canonical case was
+  silent because nobody had converted it — this finishes an adoption.
+- **`COHERENCE.md` §1.2's frequency note was wrong, and it decided the
+  design.** `LspManager::spawn` returns early *before* both
+  `status_tracker.ensure` and `clients.insert`, so a failed spawn leaves
+  **no record**, `pmacs.lsp.list()` cannot see it, and the affinity loop
+  re-spawns: the real rate is **once per file open**, not once per
+  project root. Hence **memoize the report, not the failure**.
+- **The affinity key is `(language, key_uri)`, and `key_uri` is nil for
+  markerless files**, which deliberately share one server per language.
+  Lua cannot index by nil (`t[nil]` raises), so one encoding function
+  serves both tables with a `u`/`n` discriminator no URI can collide
+  with.
+- **Three tables, three lifetimes**, plus a buffer-keyed projection for
+  the modeline — that provider runs for every window on every paint, so
+  deriving an affinity key inside it would invoke user root resolvers
+  during painting. **A success sweeps every projection sharing the key**,
+  and the projection has its own `pmacs.buffer.on_removed` teardown
+  because nothing existing reaches it (`attachments_under` iterates
+  `attachments`, and a failed buffer has none by construction).
+- **ON MERGE of #204, flip the step-6 grade.** §2's step-6 row stays
+  **Partial** while the PR is open, per §25's landed-evidence rule, and
+  says so in the row.
+- **Stage 1b-3 (welcome buffer, step 4) is unframed** — the last of the
+  1b split.
 - Recovery from a clean checkout — **the two-argument form does not
   work** (`git worktree add <path> <remote-only-branch>` fails with
-  `fatal: invalid reference`, because after a bare fetch no local branch
-  exists):
+  `fatal: invalid reference`):
 
   ```sh
   git fetch githubsucks
-  git worktree add ../pmacs-journey-1b1 \
-    -b journey-stage1b1-compile-defaults \
-    githubsucks/journey-stage1b1-compile-defaults
+  git worktree add ../pmacs-journey-1b2 \
+    -b journey-stage1b2-lsp-guidance \
+    githubsucks/journey-stage1b2-lsp-guidance
   ```
 
 ## Generated-buffer immutability lane (Arc: workbench primitives) — STAGE 1 MERGED; STAGE 2 IS NEXT
