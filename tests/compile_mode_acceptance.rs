@@ -2750,3 +2750,106 @@ fn r5f3_tracked_line_start_matches_the_scan_across_transitions() {
         "every rewind lands at the tracked line start; buffer:\n{text:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Journey Stage 1b-1 — `pmacs.compile.defaults` is public and assignable
+//
+// The table is user-writable, so a metatable with a throwing `__index`, a
+// non-string entry, and a non-table replacement all have to be
+// survivable — the same discipline `validated_rules` keeps for a hostile
+// rule container. A broken `defaults` must degrade to the pre-stage empty
+// prompt; it must never prevent compiling.
+// ---------------------------------------------------------------------------
+
+/// Open the compile prompt and return what it offered.
+fn compile_prompt_initial(s: &EditorState) -> String {
+    exec(s, "pmacs.command.invoke('compile.run')");
+    assert!(
+        eval::<bool>(s, "return pmacs.minibuffer.is_active()"),
+        "compile.run must open a prompt even with a hostile defaults table"
+    );
+    eval(s, "return pmacs.minibuffer.contents()")
+}
+
+#[test]
+fn j1b1_a_non_table_defaults_degrades_to_an_empty_prompt() {
+    let s = editor();
+    exec(&s, "pmacs.compile.defaults = 42");
+    assert_eq!(compile_prompt_initial(&s), "");
+}
+
+#[test]
+fn j1b1_a_raising_defaults_index_degrades_to_an_empty_prompt() {
+    let s = editor();
+    exec(
+        &s,
+        "pmacs.compile.defaults = setmetatable({}, {
+             __index = function() error('hostile') end,
+         })",
+    );
+    assert_eq!(compile_prompt_initial(&s), "");
+}
+
+#[test]
+fn j1b1_a_non_string_default_is_ignored() {
+    let s = editor();
+    exec(&s, "pmacs.compile.defaults = { rust = {}, }");
+    assert_eq!(compile_prompt_initial(&s), "");
+}
+
+#[test]
+fn j1b1_a_hostile_defaults_still_lets_a_typed_command_run() {
+    // The consequence that matters: degradation must not cost the user
+    // the ability to compile. Asserts output produced, not a property
+    // preserved.
+    let mut s = editor();
+    exec(
+        &s,
+        "pmacs.compile.defaults = setmetatable({}, {
+             __index = function() error('hostile') end,
+         })",
+    );
+    // Through the INTERACTIVE command, so the hostile lookup actually
+    // happens. Calling `pmacs.compile.run` directly never consults
+    // `defaults` at all, which made an earlier draft of this pin vacuous
+    // — it passed with the guard removed.
+    exec(&s, "pmacs.command.invoke('compile.run')");
+    assert!(
+        eval::<bool>(&s, "return pmacs.minibuffer.is_active()"),
+        "the prompt must still open"
+    );
+    exec(&s, "pmacs.minibuffer.set_contents('echo still-compiles')");
+    exec(&s, "pmacs.minibuffer.accept()");
+    assert!(
+        pump_until(&mut s, 10_000, |s| {
+            compilation_text(s).contains("still-compiles")
+        }),
+        "a broken defaults table must not prevent compiling; got:\n{}",
+        compilation_text(&s)
+    );
+}
+
+#[test]
+fn j1b1_context_reports_the_cwd_a_run_would_use() {
+    // `pmacs.compile.context` and `pmacs.compile.run` must answer from
+    // one resolution — an explicit cwd is honoured by both, and the kind
+    // is detected from that same directory.
+    let s = editor();
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("Cargo.toml"), b"[package]\nname=\"x\"\n").expect("write");
+    exec(
+        &s,
+        &format!(
+            "pmacs.project.set_search_boundary({:?})",
+            dir.path().display().to_string()
+        ),
+    );
+    let kind: String = eval(
+        &s,
+        &format!(
+            "return pmacs.compile.context({:?}).kind",
+            dir.path().display().to_string()
+        ),
+    );
+    assert_eq!(kind, "rust", "the kind is detected from the given cwd");
+}

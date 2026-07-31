@@ -253,6 +253,100 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
+## Journey lane (P1) — STAGE 1a MERGED; STAGE 1b-1 IMPLEMENTED, PR OPEN
+
+- **Branch `journey-stage1b1-compile-defaults`**, worktree
+  `../pmacs-journey-1b1`, based on `githubsucks/main` @ `22df6ab`.
+  `docs/journey-stage1b1-compile-defaults-framing.md` revision 2,
+  approved after one review round (two blocking, two major, all
+  accepted). **Implemented; PR open.**
+- **ON MERGE OF #203, flip four places to landed.** The PR deliberately
+  ships them as *in flight*, because `COHERENCE.md` §25 says a grade
+  changes only on landed evidence and the PR is open: `COHERENCE.md`
+  §2's step-9 verdict row (Partial → **Works**), §2's post-table
+  keybinding-inversion paragraph (third example answered; the build is
+  no longer its uncontested example), §20 Priority 1 and its arc list (in
+  flight → done), and
+  `docs/agent-handoff.md` §1's arc bullet (IMPLEMENTED → LANDED).
+  **Recorded here because an unowned doc flip is exactly how this
+  ledger's drift starts** — the same rule-4 precondition that kept #176's
+  lane alive past its merge.
+- **A lexical path expectation is wrong for anything detection touched.**
+  `pmacs.project.detect` canonicalizes before walking
+  (`canonicalize_or_passthrough`, `src/project.rs:509-511`) while the
+  suite's `canon()` is lexical, so the compile-directory assertions
+  passed on Ubuntu and **failed both macOS legs**, where `/var` is a
+  symlink to `/private/var`. Fixed with a `detected_root()` expectation
+  and pinned by a **symlinked fixture**, which reproduces the disagreement
+  on any platform — a Linux-only bite could not have caught it.
+- **Bites found two vacuous pins of my own.** The nested-project pin
+  passed with the keybinding removed, because `minibuffer.contents()` is
+  `""` both for an empty prefill and for no minibuffer at all — `""`
+  compared with `""`. And the hostile-`defaults` pin called
+  `compile.run` directly, so it never consulted `defaults` and passed
+  with the guard removed. Both now assert their precondition.
+- **Round 1's blocking finding is the Stage 1a lesson repeating.**
+  Sharing one cwd resolver between the prompt and the run is *not*
+  enough: `pmacs.minibuffer.read` is async, the active window can change
+  while the prompt is open, and `run` re-resolved at accept time — so
+  the prompt could offer `cargo build` for A and execute in B. The
+  interactive command now **captures** `context()` and passes its `cwd`
+  through to `run`, which is `commit_to`'s discipline on a smaller seam.
+  The second blocker was that no pin crossed the accept boundary at all,
+  so that defect passed every proposed pin.
+- **Why this lane exists.** `COHERENCE.md` §20 Priority 1 names Journey
+  Stage 1b as the golden journey's remainder — "the compile binding +
+  Cargo defaults, LSP spawn guidance, and the welcome buffer" — and it
+  had no branch, no framing, and no lane. It is the only §20 priority
+  with nothing in flight.
+- **What 1b-1 is.** Journey step 9 only: a global `C-c c` for
+  `compile.run`, and a first prompt prefilled from the detected project
+  kind instead of empty. Lua, tests, and docs; **no Rust change and no
+  protocol change**. 1b-2 (LSP spawn guidance, step 6) and 1b-3 (welcome
+  buffer, step 4) are separate stages — see the framing §7 for why the
+  three are not one PR.
+- **`ProjectKind::Cargo` does not exist.** `COHERENCE.md` names it twice
+  (§2's step-9 row and §20 Priority 1); the variant is
+  `ProjectKind::Rust` (`src/project.rs:78`) and line 77 is its doc
+  comment. The audit read the comment. Lua matches on the **tag string**
+  `"rust"` that `pmacs.project.detect` returns, so no Rust primitive is
+  needed. The PR corrects both COHERENCE sites.
+- **The suggestion and the run must share one cwd resolution.** Today
+  the cwd is computed *inside* `pmacs.compile.run`
+  (`builtin/runtime/compile.lua:765`), after the prompt has closed, so a
+  suggestion computed in the command's `fn` would obey a different rule
+  than the run. The stage extracts it and exposes
+  `pmacs.compile.context()`, consumed by both.
+- **The trap the acceptance is designed around.** The last-resort cwd is
+  `std::env::current_dir()` evaluated at call time
+  (`pmacs-protocol/src/message.rs:1703-1706`), so in tests it is the
+  **test runner's cwd — the pmacs repo root, itself a Cargo project**.
+  `compile_mode_acceptance.rs:1721` already pins this. A pin asserting
+  "no Cargo suggestion" that reaches the fallback would report pmacs's
+  own `Cargo.toml`. Negative pins therefore use a fixture carrying a
+  *different* marker so the fallback is never consulted;
+  `set_search_boundary` does **not** help here, because it only clamps a
+  walk that starts below the boundary.
+- **Known limitation, deliberately not fixed.** After `pmacs <dir>` the
+  active buffer is dired's and **pathless** (`pmacs.buffer.create` never
+  assigns a path; dired compensates through its own module-local
+  `handle_for_buffer`, `dired.lua:205-217`), so the cwd falls through to
+  the process cwd. Launched from elsewhere that is the wrong directory.
+  The fix is `COHERENCE.md` §8 (First-Class Execution Locations), a
+  model gap; reaching into dired's private table for one string would
+  add an interaction island.
+- Recovery from a clean checkout — **the two-argument form does not
+  work** (`git worktree add <path> <remote-only-branch>` fails with
+  `fatal: invalid reference`, because after a bare fetch no local branch
+  exists):
+
+  ```sh
+  git fetch githubsucks
+  git worktree add ../pmacs-journey-1b1 \
+    -b journey-stage1b1-compile-defaults \
+    githubsucks/journey-stage1b1-compile-defaults
+  ```
+
 ## Generated-buffer immutability lane (Arc: workbench primitives) — STAGE 1 MERGED; STAGE 2 IS NEXT
 
 **Framing #188 (revision 7) and Stage 1 #191 are both on `main` @
