@@ -1503,9 +1503,10 @@ fn journey_step9_the_prompt_runs_in_the_directory_it_captured() {
 #[test]
 fn journey_step9_the_offered_command_builds_the_project() {
     if !binary_available("cargo") {
-        if std::env::var_os("PMACS_REQUIRE_CARGO_BUILD").is_some() {
-            panic!("PMACS_REQUIRE_CARGO_BUILD is set but `cargo` is not on PATH");
-        }
+        assert!(
+            std::env::var_os("PMACS_REQUIRE_CARGO_BUILD").is_none(),
+            "PMACS_REQUIRE_CARGO_BUILD is set but `cargo` is not on PATH"
+        );
         eprintln!("skipping: `cargo` is not on PATH");
         return;
     }
