@@ -46,6 +46,7 @@ pub mod attach_dispatch;
 pub mod attach_reconnect;
 pub mod audit;
 pub mod autosave;
+pub mod bootstrap;
 pub mod buffer;
 pub mod buffer_registry;
 pub mod builtin_packages;
