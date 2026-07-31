@@ -60,7 +60,7 @@ fn snapshot_text(snapshot: &pmacs::terminal::TerminalSnapshot) -> String {
     reason = "cross-surface Lua transaction scenario"
 )]
 fn lua_surface_is_strict_fresh_transactional_and_context_safe() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let command_lua = lua_string("/bin/sh");
     let baseline_buffer_id = state.core.borrow().active_buffer_id();
 
@@ -364,7 +364,7 @@ fn lua_surface_is_strict_fresh_transactional_and_context_safe() {
 #[test]
 #[allow(clippy::too_many_lines, reason = "shared view and controller scenario")]
 fn shared_screen_keeps_view_scroll_selection_and_controller_independent() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let mut spec = TerminalSpec::new("/bin/sh");
     spec.args = vec![
         "-c".into(),
@@ -508,7 +508,7 @@ fn terminal_escape_gates_local_bindings_and_double_escape_sends_interrupt() {
         ready_path.to_str().expect("UTF-8 ready path"),
         input_path.to_str().expect("UTF-8 input path")
     );
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     state
         .lua_host
         .lua()
@@ -986,3 +986,11 @@ fn longest_rendered_prefix_separates_absent_child_text_from_a_split_render() {
         needle.len()
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root. Re-exported rather than re-declared
+// with `#[path]` — this file already pulls in `common`, and loading one
+// source file as two modules is `clippy::duplicate_mod`.
+use common::iso;

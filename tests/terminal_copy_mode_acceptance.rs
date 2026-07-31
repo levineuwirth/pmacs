@@ -223,7 +223,7 @@ fn buffer_count(state: &EditorState) -> usize {
 /// `copy_selection_bytes` itself.
 #[test]
 fn acc13_snapshot_is_the_whole_retained_range_through_the_shared_serializer() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let terminal = open_fill_terminal(&mut state);
     focus_terminal(&state, terminal);
 
@@ -250,7 +250,7 @@ fn acc13_snapshot_is_the_whole_retained_range_through_the_shared_serializer() {
 /// buffer-shaped consumer work and what removes the transport arm.
 #[test]
 fn acc14_the_snapshot_is_an_ordinary_non_terminal_buffer() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let terminal = open_fill_terminal(&mut state);
     focus_terminal(&state, terminal);
     exec(&state, "pmacs.terminal.copy_mode(TERM_BUF)");
@@ -272,7 +272,7 @@ fn acc14_the_snapshot_is_an_ordinary_non_terminal_buffer() {
 /// with no change to `src/search.rs` (B1).
 #[test]
 fn acc15_isearch_finds_content_only_in_scrollback() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let terminal = open_fill_terminal(&mut state);
     focus_terminal(&state, terminal);
 
@@ -319,7 +319,7 @@ fn acc15_isearch_finds_content_only_in_scrollback() {
 /// agreement; what stops the mutation is this.
 #[test]
 fn acc16_dispatch_idle_is_false_while_the_snapshot_is_focused() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let terminal = open_fill_terminal(&mut state);
     focus_terminal(&state, terminal);
     exec(&state, "pmacs.terminal.copy_mode(TERM_BUF)");
@@ -344,7 +344,7 @@ fn acc16_dispatch_idle_is_false_while_the_snapshot_is_focused() {
 /// protection does not depend on which key or command was used.
 #[test]
 fn acc16b_the_snapshot_is_immutable_at_the_rope_not_merely_intercepted() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let terminal = open_fill_terminal(&mut state);
     focus_terminal(&state, terminal);
     exec(&state, "pmacs.terminal.copy_mode(TERM_BUF)");
@@ -390,7 +390,7 @@ fn acc16b_the_snapshot_is_immutable_at_the_rope_not_merely_intercepted() {
 /// leaves the buffer emptiable. Only rope-level `read_only` closes both.
 #[test]
 fn acc16c_undo_cannot_empty_the_snapshot_by_chord_or_by_command() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let terminal = open_fill_terminal(&mut state);
     focus_terminal(&state, terminal);
     exec(&state, "pmacs.terminal.copy_mode(TERM_BUF)");
@@ -523,7 +523,7 @@ fn grid_row(cells: &[pmacs::cell::Cell], row: u32, cols: u32) -> String {
 /// any other owner that adopts the primitive later.
 #[test]
 fn acc16d_a_generated_write_notifies_the_window_that_displays_it() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     exec(
         &state,
         r"
@@ -567,7 +567,7 @@ fn acc16d_a_generated_write_notifies_the_window_that_displays_it() {
 #[cfg(feature = "crdt")]
 #[test]
 fn acc16e_a_refresh_queues_the_owners_write_for_replica_mirrors() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let terminal = open_fill_terminal(&mut state);
     focus_terminal(&state, terminal);
     exec(&state, "pmacs.terminal.copy_mode(TERM_BUF)");
@@ -606,7 +606,7 @@ fn acc16e_a_refresh_queues_the_owners_write_for_replica_mirrors() {
 /// both directions.
 #[test]
 fn acc18_reinvoke_refreshes_in_place_and_lifecycle_runs_both_ways() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let terminal = open_fill_terminal(&mut state);
     focus_terminal(&state, terminal);
 
@@ -681,7 +681,7 @@ fn acc18_reinvoke_refreshes_in_place_and_lifecycle_runs_both_ways() {
 /// `q` returns to the source terminal.
 #[test]
 fn acc19_escape_c_t_enters_copy_mode_and_g_and_q_work() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let terminal = open_fill_terminal(&mut state);
     focus_terminal(&state, terminal);
     let terminal_name = active_buffer_name(&state);
@@ -749,7 +749,7 @@ fn acc19_escape_c_t_enters_copy_mode_and_g_and_q_work() {
 /// tail.
 #[test]
 fn acc20_live_terminal_keys_are_unchanged_while_a_snapshot_exists() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let terminal = open_fill_terminal(&mut state);
     let key = focus_terminal(&state, terminal);
     exec(&state, "pmacs.terminal.copy_mode(TERM_BUF)");
@@ -806,7 +806,7 @@ fn acc20_live_terminal_keys_are_unchanged_while_a_snapshot_exists() {
 /// (or nothing) while the keys behaved differently.
 #[test]
 fn acc21_describe_key_reports_the_truth_for_the_snapshot_bindings() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let terminal = open_fill_terminal(&mut state);
     focus_terminal(&state, terminal);
     exec(&state, "pmacs.terminal.copy_mode(TERM_BUF)");
@@ -847,7 +847,7 @@ fn acc21_describe_key_reports_the_truth_for_the_snapshot_bindings() {
 /// (dired's F7 rule); a taken name gets a `<2>` variant instead.
 #[test]
 fn acc18a_a_foreign_same_named_buffer_is_never_adopted_or_clobbered() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let terminal = open_fill_terminal(&mut state);
     focus_terminal(&state, terminal);
 
@@ -898,7 +898,7 @@ fn acc18a_a_foreign_same_named_buffer_is_never_adopted_or_clobbered() {
 /// terminal, and killing either one removes the shared snapshot.
 #[test]
 fn acc18b_two_same_named_terminals_get_two_independent_snapshots() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     exec(&state, FILL_PROFILE);
 
     let before = terminal_buffers(&state);
@@ -985,7 +985,7 @@ fn acc18b_two_same_named_terminals_get_two_independent_snapshots() {
 /// snapshot of nothing.
 #[test]
 fn copy_mode_refuses_a_non_terminal_buffer() {
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     let err = eval_err(&state, "return pmacs.terminal.copy_mode()");
     assert!(
         err.contains("not a terminal"),
@@ -1010,7 +1010,7 @@ fn copy_mode_refuses_a_non_terminal_buffer() {
 /// state. Falsify by deleting the `win.cursor > len` clamp.
 #[test]
 fn acc16f_a_shrinking_generated_write_clamps_the_window_cursor() {
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     exec(
         &state,
         r"
@@ -1066,7 +1066,7 @@ fn acc16f_a_shrinking_generated_write_clamps_the_window_cursor() {
 /// the measurement.
 #[test]
 fn acc16g_a_line_collapsing_generated_write_clamps_view_top() {
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     exec(
         &state,
         r"
@@ -1129,7 +1129,7 @@ fn acc16g_a_line_collapsing_generated_write_clamps_view_top() {
 /// `notify_buffer_edit`; the first copy reaches the stale-anchor panic.
 #[test]
 fn acc16h_a_shrinking_generated_write_clamps_or_clears_the_selection() {
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     exec(
         &state,
         r"
@@ -1224,7 +1224,7 @@ fn acc16h_a_shrinking_generated_write_clamps_or_clears_the_selection() {
 /// `acc16h` stays green.
 #[test]
 fn acc16i_a_shrinking_view_rebuild_clamps_or_clears_the_selection() {
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     // 286 bytes, then 154: a real shrink through the help renderer.
     exec(
         &state,
@@ -1300,3 +1300,10 @@ fn acc16i_a_shrinking_view_rebuild_clamps_or_clears_the_selection() {
         "the collapsed region is not retained as active-but-empty"
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

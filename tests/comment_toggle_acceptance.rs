@@ -25,7 +25,7 @@ fn fresh_state_dir() -> PathBuf {
 }
 
 fn editor(state_dir: &std::path::Path) -> EditorState {
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     s.lua_host.lua().remove_app_data::<StateDir>();
     s.lua_host
         .lua()
@@ -366,3 +366,10 @@ fn toggle_between_kills_breaks_the_kill_chain() {
         "C-k, M-;, C-k yields two ring entries (chain broken)"
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

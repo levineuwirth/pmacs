@@ -26,7 +26,7 @@ fn editor_with_state_dir() -> (EditorState, PathBuf) {
         SEQ.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&dir).expect("mk state tempdir");
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     // Override whatever startup configured with our tempdir.
     s.lua_host.lua().remove_app_data::<StateDir>();
     s.lua_host.lua().set_app_data(StateDir(dir.clone()));
@@ -73,12 +73,12 @@ fn state_round_trips_and_rejects_escapes() {
 
 #[test]
 fn state_is_inert_when_unconfigured() {
-    // A plain EditorState::new() must NOT configure a state dir — that
+    // A plain `EditorState::new()` must NOT configure a state dir — that
     // is what keeps the whole integration-test suite (which links the
     // lib without cfg(test)) from writing to a developer's real
     // ~/.local/state/pmacs. Only the real entry points call
     // install_state_dirs(); tests construct EditorState directly.
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     assert!(
         s.lua_host.lua().app_data_ref::<StateDir>().is_none(),
         "new() must leave the state dir unconfigured"
@@ -182,3 +182,10 @@ fn saveplace_can_be_disabled() {
     assert_eq!(cursor, 0, "disabled saveplace leaves the cursor at the top");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

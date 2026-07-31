@@ -278,7 +278,7 @@ fn m6_6_sustained_ingest_rate_meets_100mbps_gate() {
     )
     .max(1);
 
-    let mut editor = EditorState::new();
+    let mut editor = EditorState::new_with_roots(&crate::iso::roots());
     // 100 chars + newline per line. The exact value is unimportant;
     // what matters is that `yes` blasts at a higher rate than pmacs's
     // ingest path, so pmacs is the bottleneck under measurement.
@@ -389,7 +389,7 @@ fn m6_6_buffer_memory_stays_under_200mb_during_run() {
         baseline_rss as f64 / (1024.0 * 1024.0)
     );
 
-    let mut editor = EditorState::new();
+    let mut editor = EditorState::new_with_roots(&crate::iso::roots());
     // 100-char line; the line content is unimportant for the ceiling
     // gate. Total target = 150 MB of bytes-into-history.
     let line = "a".repeat(100);
@@ -526,7 +526,7 @@ fn m6_6_cancel_response_p99_under_100ms() {
         let delay_ms = MIN_DELAY_MS + (r % (max_delay_ms - MIN_DELAY_MS + 1));
         let delay = Duration::from_millis(delay_ms);
 
-        let mut editor = EditorState::new();
+        let mut editor = EditorState::new_with_roots(&crate::iso::roots());
         let _ = spawn_repl(&mut editor, &["yes"]);
         wait_until_running(&mut editor);
 
@@ -670,7 +670,7 @@ fn m6_7_scrollback_navigation_p99_under_16ms() {
     const TRIALS: usize = 1000;
     const P99_THRESHOLD: Duration = Duration::from_millis(16);
 
-    let mut editor = EditorState::new();
+    let mut editor = EditorState::new_with_roots(&crate::iso::roots());
     populate_scrollback(&mut editor, LINES);
     seek_cursor_to_middle(&mut editor, LINES);
 
@@ -749,7 +749,7 @@ fn m6_7_scrollback_search_p99_under_100ms() {
     const TRIALS: usize = 1000;
     const P99_THRESHOLD: Duration = Duration::from_millis(100);
 
-    let mut editor = EditorState::new();
+    let mut editor = EditorState::new_with_roots(&crate::iso::roots());
     populate_scrollback(&mut editor, LINES);
 
     // Warmup: 100 searches at varied positions. Same trace-compilation
@@ -815,3 +815,10 @@ fn m6_7_scrollback_search_p99_under_100ms() {
          p50={p50:?}, p90={p90:?}, max={max:?}"
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

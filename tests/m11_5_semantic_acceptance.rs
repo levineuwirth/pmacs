@@ -129,7 +129,7 @@ fn assert_disjoint_within(ranges: &[ByteRange], vp: ByteRange) {
 
 #[test]
 fn incremental_reconstruction_equals_fresh_full_projection() {
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     let buffer_id = active_buffer(&state);
     let vp1 = ByteRange { start: 0, end: 64 };
 
@@ -327,3 +327,11 @@ fn daemon_routes_semantic_family_to_semantic_session_only() {
         "grid session must NOT receive the semantic family"
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root. Re-exported rather than re-declared
+// with `#[path]` — this file already pulls in `common`, and loading one
+// source file as two modules is `clippy::duplicate_mod`.
+use common::iso;

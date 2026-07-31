@@ -22,7 +22,7 @@ const ROWS: u32 = 24;
 const COLS: u32 = 60;
 
 fn editor() -> EditorState {
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     exec(&s, "pmacs.lsp.config = {}");
     s.sync_frame_geometry(FrontendId::LOCAL, CellSize::new(ROWS, COLS));
     s
@@ -896,3 +896,10 @@ fn a_provider_closing_the_document_split_still_clears_the_statusline() {
          the phase-1 document identity, even when a callback closed that window; got {msgs:?}"
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

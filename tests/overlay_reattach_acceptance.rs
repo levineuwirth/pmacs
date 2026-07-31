@@ -41,7 +41,7 @@ fn count_of(kinds: &[String], kind: &str) -> usize {
 
 #[test]
 fn switch_away_and_back_reattaches_syntax_overlay_exactly_once() {
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     let path = open_probe_file(&s);
     s.lua_host
         .lua()
@@ -86,7 +86,7 @@ fn switch_away_and_back_reattaches_syntax_overlay_exactly_once() {
 
 #[test]
 fn panel_quit_restores_overlays_on_the_source_buffer() {
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     let path = open_probe_file(&s);
     s.lua_host
         .lua()
@@ -121,3 +121,10 @@ fn panel_quit_restores_overlays_on_the_source_buffer() {
         "leaving a panel restores the source buffer's styling (got {after:?})"
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

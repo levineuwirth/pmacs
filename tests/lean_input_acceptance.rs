@@ -72,7 +72,7 @@ fn lean_editor() -> (EditorState, PathBuf) {
     let dir = fresh_dir();
     let f = dir.join("a.lean");
     std::fs::write(&f, "").unwrap();
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     exec(&s, "pmacs.lsp.config = {}");
     let fd = f.display().to_string();
     exec(&s, &format!("pmacs.buffer.find_or_open({fd:?})"));
@@ -543,7 +543,7 @@ fn no_abbreviation_state_is_opened_outside_a_lean_buffer() {
     let dir = fresh_dir();
     let f = dir.join("a.rs");
     std::fs::write(&f, "").unwrap();
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     exec(&s, "pmacs.lsp.config = {}");
     let fd = f.display().to_string();
     exec(&s, &format!("pmacs.buffer.find_or_open({fd:?})"));
@@ -811,7 +811,7 @@ fn the_expansion_reaches_the_first_did_change() {
 
     let f = dir.join("a.lean");
     std::fs::write(&f, "").unwrap();
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     s.lua_host.lua().remove_app_data::<StateDir>();
     s.lua_host.lua().set_app_data(StateDir(dir.clone()));
     exec(&s, "pmacs.lsp.config = {}");
@@ -1018,3 +1018,10 @@ fn detaching_a_frontend_purges_only_its_own_pending_state() {
         "B's detachment purged B's entries and left A's record valid"
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

@@ -38,7 +38,7 @@ fn fresh_state_dir() -> PathBuf {
 }
 
 fn editor(state_dir: &std::path::Path) -> EditorState {
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     s.lua_host.lua().remove_app_data::<StateDir>();
     s.lua_host
         .lua()
@@ -243,7 +243,7 @@ fn acc10b_the_prime_suffix_does_not_pair_in_lean() {
 /// WRITE-ONLY proxy (the canonical map lives Rust-side), so an
 /// alias-table read would prove nothing about what the parser does.
 fn markdown_layer_languages(src: &[u8]) -> Vec<String> {
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     let buf_id = state
         .lua_host
         .registry()
@@ -323,7 +323,7 @@ fn acc12_opening_lean_spawns_no_process_without_a_server_config() {
 
     // Constructing an editor touches no process, even though the Lean
     // config now exists and names `lake`.
-    let pristine = EditorState::new();
+    let pristine = EditorState::new_with_roots(&crate::iso::roots());
     let at_init: i64 = eval(&pristine, "return #pmacs.process.list()");
     assert_eq!(
         at_init, 0,
@@ -352,3 +352,10 @@ fn acc12_opening_lean_spawns_no_process_without_a_server_config() {
         "with no server configured, opening a Lean buffer spawns nothing"
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

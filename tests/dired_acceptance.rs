@@ -116,7 +116,7 @@ fn eval<T: mlua::FromLuaMulti>(s: &EditorState, src: &str) -> T {
 /// frame size *is* its geometry declaration, and the panel tests need
 /// one before any side window can be placed).
 fn editor() -> EditorState {
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     exec(&s, "pmacs.lsp.config = {}");
     s.sync_frame_geometry(FrontendId::LOCAL, CellSize::new(ROWS, COLS));
     s
@@ -1997,3 +1997,10 @@ fn dired_the_fold_refusal_names_the_read_only_lock() {
         "and not the sentence that is no longer true; got {st:?}"
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

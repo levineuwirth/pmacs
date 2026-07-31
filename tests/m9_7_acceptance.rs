@@ -74,7 +74,7 @@ fn prompts_package_path() -> PathBuf {
 fn editor_with_prompts() -> (EditorState, TempDir, TempDir) {
     let cache = tempfile::tempdir().expect("cache tempdir");
     let user_root = tempfile::tempdir().expect("user-root tempdir");
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     state.lua_host.reopen_init_phase_for_testing();
     state.lua_host.set_package_install_override(
         PackageInstallOverride::new()
@@ -1386,3 +1386,10 @@ fn m9_7_prompt_hash_includes_required_argument_order() {
         "reordering required args must change the prompt hash so reconcile re-registers"
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

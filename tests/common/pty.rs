@@ -112,6 +112,21 @@ pub fn spawn_pmacs_in_pty(args: &[&str], envs: &[(&str, &Path)], rows: u16, cols
     for arg in args {
         cmd.arg(arg);
     }
+    // Backfill any of the five storage variables the caller did not set
+    // (`docs/test-ambient-config-isolation-framing.md` §1.6a). Callers
+    // pin the roots their assertions read (a per-test `XDG_CONFIG_HOME`,
+    // a `PMACS_STATE_HOME` they inspect); the rest would otherwise be
+    // inherited, and the child would materialize bundled packages into
+    // the developer's real data root. Caller entries win: this only
+    // fills holes.
+    let fallback = pmacs::bootstrap::BootstrapRoots::isolated_under(&super::iso::base());
+    for (key, value) in fallback.child_env() {
+        if envs.iter().any(|(k, _)| *k == key) {
+            continue;
+        }
+        std::fs::create_dir_all(&value).expect("create isolated root for PTY child");
+        cmd.env(key, value.as_os_str());
+    }
     for (k, v) in envs {
         let mut value = OsString::new();
         value.push(v);

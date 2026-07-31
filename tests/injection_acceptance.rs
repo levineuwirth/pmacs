@@ -35,7 +35,7 @@ fn pump_async<F: Fn(&EditorState) -> bool>(state: &mut EditorState, predicate: F
 /// resolver would leave the Lua write-through + snapshot bridge unproven.
 #[test]
 fn lua_alias_override_resolves_on_async_parse() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
 
     // Add a bespoke fence alias from Lua (write-through to the registry).
     state
@@ -98,7 +98,7 @@ fn lua_alias_override_resolves_on_async_parse() {
 /// alias discriminates the fix: with the empty map it would not resolve.
 #[test]
 fn sync_parse_now_resolves_alias() {
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     let src = b"# Doc\n\n```py\nx = 1\n```\n";
     let buf_id = state
         .lua_host
@@ -136,7 +136,7 @@ fn sync_parse_now_resolves_alias() {
 /// the file drops below the cap and exceeds it again.
 #[test]
 fn injection_cap_surfaced_once_and_rearms_via_lua() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     // Capture pmacs.error messages into a Lua global.
     state
         .lua_host
@@ -305,3 +305,10 @@ fn many_paragraph_settle_under_budget_with_tail_covered() {
         "the final paragraph still receives an inline layer (no tail loss)"
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

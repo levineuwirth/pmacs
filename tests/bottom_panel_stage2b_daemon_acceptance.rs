@@ -56,7 +56,7 @@ impl Session {
     /// A semantic, panel-capable frontend with one document window and
     /// no geometry declared yet.
     fn new() -> Self {
-        let state = EditorState::new();
+        let state = EditorState::new_with_roots(&crate::iso::roots());
         exec(&state, "pmacs.lsp.config = {}");
         let document = {
             let mut core = state.core.borrow_mut();
@@ -659,7 +659,7 @@ fn a2b1_a_rejected_declaration_reconciles_nothing() {
 fn a2b1_grid_allocator_exhaustion_clears_the_declaration_and_hides() {
     // The grid/LOCAL allocator, which mints its own epochs. `LOCAL` is
     // panel-capable, so this is the production path for a TUI.
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     exec(&state, "pmacs.lsp.config = {}");
     state.sync_frame_geometry(FrontendId::LOCAL, CellSize::new(ROWS, COLS));
     exec(
@@ -1340,3 +1340,10 @@ fn sweep_a_panel_wider_than_the_terminal_cap_still_presents_its_terminal() {
     );
     exec(&session.state, "pmacs.terminal.terminate(TERM_BUF)");
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

@@ -90,7 +90,7 @@ fn status(s: &EditorState) -> String {
 fn editor_in(dir: &std::path::Path) -> EditorState {
     let anchor = dir.join("anchor.txt");
     std::fs::write(&anchor, b"anchor\n").expect("write anchor");
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     state.lua_host.reopen_init_phase_for_testing();
     let anchor_str = anchor.display().to_string();
     exec(
@@ -279,7 +279,7 @@ fn find_file_accepting_a_directory_reports_instead_of_raising() {
 /// stable, real candidate there.
 #[test]
 fn find_file_without_a_backing_path_roots_at_the_process_cwd() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     s.lua_host.reopen_init_phase_for_testing();
     assert!(
         active_path(&s).is_none(),
@@ -352,7 +352,7 @@ fn find_file_expands_a_leading_tilde() {
         return;
     }
 
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     s.lua_host.reopen_init_phase_for_testing();
     open_prompt(&mut s);
     // Contains a '/', so the typed text reaches on_accept verbatim.
@@ -371,3 +371,10 @@ fn find_file_expands_a_leading_tilde() {
         "the expansion must use $HOME; got {path} with HOME={home}"
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

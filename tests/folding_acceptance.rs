@@ -301,7 +301,7 @@ fn insert_into(s: &EditorState, id: BufferId, text: &str) {
 
 #[test]
 fn command_path_self_insert_unfolds_at_point() {
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     let id = active_id(&s);
     insert_into(&s, id, "line0\nline1\nline2\nline3\n");
     // Fold the interior of lines 1..2: [end of line0, end of line2].
@@ -330,7 +330,7 @@ fn self_insert_at_head_line_end_does_not_unfold() {
     // `(start, end]` containment: a self-insert exactly at the end of the
     // head line (== range.start) is outside the fold — it must NOT unfold,
     // and the translator shifts the fold right so the char lands visible.
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     let id = active_id(&s);
     insert_into(&s, id, "line0\nline1\nline2\nline3\n");
     let store = {
@@ -389,7 +389,7 @@ fn install_rust_parse(s: &EditorState, id: BufferId) {
 
 #[test]
 fn folding_moves_point_to_head_line() {
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     let id = active_id(&s);
     let src = "fn foo() {\n    let x = 1;\n    let y = 2;\n}\n";
     insert_into(&s, id, src);
@@ -413,7 +413,7 @@ fn folding_moves_point_to_head_line() {
 
 #[test]
 fn data_api_validation() {
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     // A plain document buffer with four lines.
     exec(
         &s,
@@ -465,7 +465,7 @@ fn data_api_validation() {
 
 #[test]
 fn forget_drops_store_and_detaches_view() {
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     let id = active_id(&s);
     insert_into(&s, id, "line0\nline1\nline2\n");
     let store = {
@@ -500,7 +500,7 @@ fn killing_a_buffer_through_the_real_path_purges_its_fold_store() {
     // assertion reads through the DEAD id on purpose: BufferIds are never
     // reused, so a stale id cannot alias a later buffer. Mirrors
     // config_registry's `killing_a_buffer_through_the_real_path_...`.
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     exec(
         &s,
         "b = pmacs.buffer.from_bytes('kill.rs', 'aaa\\nbbb\\nccc\\nddd\\n')",
@@ -530,7 +530,7 @@ fn close_all_command_moves_point_to_enclosing_head() {
     // Q#FD3 through the command surface: `fold.close-all` is interactive,
     // so when it collapses a top-level fold around the invoking point, the
     // point moves to that fold's head line (Finding 3, round 1).
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     let id = active_id(&s);
     let src = "fn first() {\n    a();\n    b();\n}\nfn second() {\n    c();\n    d();\n}\n";
     insert_into(&s, id, src);
@@ -553,7 +553,7 @@ fn close_all_command_moves_point_to_enclosing_head() {
 fn stale_parse_tree_refuses_fold() {
     // Q#FD10: an edit after the parse leaves `pending_edit_count() > 0`,
     // so a fold command refuses (the settled coordinates are stale).
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     let id = active_id(&s);
     let src = "fn foo() {\n    let x = 1;\n    let y = 2;\n}\n";
     insert_into(&s, id, src);
@@ -571,7 +571,7 @@ fn stale_parse_tree_refuses_fold() {
 fn read_only_buffer_is_rejected() {
     // Q#FD11's "normal document buffer" guard: terminals are read-only, so
     // a read-only buffer is not foldable.
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     exec(
         &s,
         "b = pmacs.buffer.from_bytes('ro.rs', 'aaa\\nbbb\\nccc\\n')",
@@ -592,7 +592,7 @@ fn read_only_buffer_is_rejected() {
 
 #[test]
 fn unfold_normalizes_an_arbitrary_range_to_a_stored_fold() {
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     exec(
         &s,
         "b = pmacs.buffer.from_bytes('doc.rs', 'aaa\\nbbb\\nccc\\nddd\\n')",
@@ -608,3 +608,10 @@ fn unfold_normalizes_an_arbitrary_range_to_a_stored_fold() {
     let n: i64 = eval(&s, "return #pmacs.fold.folds(b)");
     assert_eq!(n, 0);
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

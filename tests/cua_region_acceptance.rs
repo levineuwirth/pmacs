@@ -50,7 +50,7 @@ fn probe(s: &EditorState) -> (String, bool, i64) {
 
 #[test]
 fn backspace_deletes_the_shift_selected_region() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     type_str(&mut s, "hello");
 
     // Shift+Left three times: region [2, 5), cursor at 2.
@@ -85,7 +85,7 @@ fn backspace_deletes_the_shift_selected_region() {
 /// chorded deletion keys to this same dispatch path.
 #[test]
 fn ctrl_backspace_deletes_the_previous_word() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     type_str(&mut s, "alpha beta");
 
     s.dispatch_key(
@@ -111,7 +111,7 @@ fn ctrl_backspace_deletes_the_previous_word() {
 
 #[test]
 fn typing_replaces_the_shift_selected_region() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     type_str(&mut s, "hello");
 
     // Select "llo" (region [2, 5), cursor at 2), then type 'X':
@@ -149,7 +149,7 @@ fn typing_replaces_the_shift_selected_region() {
 
 #[test]
 fn type_over_is_a_single_undo_step() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     type_str(&mut s, "hello");
 
     // Select "llo" (region [2, 5)) and type 'X' → "heX".
@@ -177,7 +177,7 @@ fn type_over_is_a_single_undo_step() {
 
 #[test]
 fn delete_forward_deletes_the_shift_selected_region() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     type_str(&mut s, "world");
 
     // Shift+Home-equivalent: extend left over the whole word.
@@ -200,3 +200,10 @@ fn delete_forward_deletes_the_shift_selected_region() {
     assert_eq!(text, "b", "no region ⇒ plain forward delete at cursor");
     assert_eq!(cursor, 0);
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

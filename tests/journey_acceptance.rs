@@ -210,12 +210,94 @@ fn launch(path: &Path) -> EditorState {
 }
 
 // ---------------------------------------------------------------------------
+// Ambient-roots isolation
+// ---------------------------------------------------------------------------
+//
+// This suite is the one place that must NOT take the
+// `EditorState::new_with_roots` / `open_with_roots` seam
+// (`docs/test-ambient-config-isolation-framing.md` §1.7). Its whole job
+// is to prove the production entry point is wired: an `open` arm with no
+// production caller passes every direct-call test, so the ratchet drives
+// the same `EditorState::open` that `pmacs FILE` does — parameterless,
+// ambient, exactly as production calls it.
+//
+// That leaves nothing in the process able to isolate it. Cargo launches
+// each integration-test binary with the caller's environment, and a
+// binary cannot re-point its own roots before its tests run:
+// `std::env::set_var` is `unsafe` and pmacs is
+// `#![forbid(unsafe_code)]`. "Isolated by the environment it is launched
+// with" is not a mechanism — it is a hope that whoever typed `cargo
+// test` wrapped it, which is the external workaround this lane exists to
+// delete.
+//
+// So each test is a thin **parent** that re-execs this same binary for
+// its own test name, with controlled roots in the child's environment.
+// The child sees the marker, runs the real body, and calls the ambient
+// entry point — production's call, against a controlled tree.
+
+/// Marker the parent sets on the child. Its presence, not its value, is
+/// the signal.
+const ISOLATED_CHILD: &str = "PMACS_JOURNEY_ISOLATED_CHILD";
+
+/// Re-exec this test binary for `name` under controlled bootstrap
+/// storage roots.
+///
+/// Returns `true` in the **parent** — the child has already run and been
+/// asserted, so the caller must return without doing anything itself —
+/// and `false` in the **child**, whose job is to run the body.
+#[must_use]
+fn reexec_isolated(name: &str) -> bool {
+    if std::env::var_os(ISOLATED_CHILD).is_some() {
+        return false;
+    }
+    // Under `target/`, not `/tmp`: nothing unlinks this (libtest has no
+    // teardown hook), so it belongs somewhere `cargo clean` owns.
+    let base = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("journey-isolation")
+        .join(name);
+    let _ = std::fs::remove_dir_all(&base);
+    let roots = pmacs::bootstrap::BootstrapRoots::isolated_under(&base);
+    let child_env = roots.child_env();
+    for (_, dir) in &child_env {
+        std::fs::create_dir_all(dir).expect("create controlled root");
+    }
+    let exe = std::env::current_exe().expect("current test binary");
+    let output = std::process::Command::new(exe)
+        .args(["--exact", name, "--nocapture", "--test-threads=1"])
+        .env(ISOLATED_CHILD, "1")
+        .envs(child_env)
+        .output()
+        .unwrap_or_else(|e| panic!("re-exec `{name}`: {e}"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "isolated child for `{name}` failed ({})\n--- child stdout ---\n{stdout}\
+         \n--- child stderr ---\n{stderr}",
+        output.status
+    );
+    // A filter that matches nothing exits 0. Without this the parent
+    // would pass while running no test at all — the failure mode a
+    // renamed test produces, and the one that would quietly hollow out
+    // the whole ratchet.
+    assert!(
+        stdout.contains("1 passed"),
+        "isolated child for `{name}` ran no test — the `--exact` filter went \
+         stale against the function name\n--- child stdout ---\n{stdout}"
+    );
+    true
+}
+
+// ---------------------------------------------------------------------------
 // Step 2 — launch unconfigured
 // ---------------------------------------------------------------------------
 
 /// **N** — the editor starts with no configuration and no arguments.
 #[test]
 fn journey_step2_launches_unconfigured_into_scratch() {
+    if reexec_isolated("journey_step2_launches_unconfigured_into_scratch") {
+        return;
+    }
     let s = EditorState::new();
     assert_eq!(active_name(&s), "*scratch*");
     assert!(
@@ -236,6 +318,9 @@ fn journey_step2_launches_unconfigured_into_scratch() {
 /// `Err(EISDIR)` and `main` exited 1.
 #[test]
 fn journey_step3_opening_a_directory_lists_it() {
+    if reexec_isolated("journey_step3_opening_a_directory_lists_it") {
+        return;
+    }
     let td = project();
     let s = launch(td.path());
 
@@ -259,6 +344,9 @@ fn journey_step3_opening_a_directory_lists_it() {
 /// the assertion above while `pmacs .` still printed a diagnostic.
 #[test]
 fn journey_step3_directory_startup_reports_no_error() {
+    if reexec_isolated("journey_step3_directory_startup_reports_no_error") {
+        return;
+    }
     let td = project();
     let s = launch(td.path());
     assert!(
@@ -274,6 +362,9 @@ fn journey_step3_directory_startup_reports_no_error() {
 #[test]
 fn journey_step3_unreadable_directory_reports_without_failing_startup() {
     use std::os::unix::fs::PermissionsExt;
+    if reexec_isolated("journey_step3_unreadable_directory_reports_without_failing_startup") {
+        return;
+    }
     let td = tempfile::tempdir().expect("tempdir");
     let locked = td.path().join("locked");
     std::fs::create_dir(&locked).expect("mkdir");
@@ -301,6 +392,9 @@ fn journey_step3_unreadable_directory_reports_without_failing_startup() {
 /// because no buffer is created and `set_buffer_path` never runs.
 #[test]
 fn journey_directory_resolver_receives_a_canonical_path() {
+    if reexec_isolated("journey_directory_resolver_receives_a_canonical_path") {
+        return;
+    }
     let td = project();
     let mut s = EditorState::new();
     exec(&s, "pmacs.lsp.config = {}");
@@ -331,6 +425,9 @@ fn journey_directory_resolver_receives_a_canonical_path() {
 /// fallback is a clearable slot rather than a builtin hook subscription.
 #[test]
 fn journey_unclaimed_directory_starts_successfully_with_a_status() {
+    if reexec_isolated("journey_unclaimed_directory_starts_successfully_with_a_status") {
+        return;
+    }
     let td = project();
     let mut s = EditorState::new();
     exec(&s, "pmacs.lsp.config = {}");
@@ -360,6 +457,9 @@ fn journey_unclaimed_directory_starts_successfully_with_a_status() {
 /// a claim suppresses the fallback.
 #[test]
 fn journey_resolver_chain_is_first_claimant_wins() {
+    if reexec_isolated("journey_resolver_chain_is_first_claimant_wins") {
+        return;
+    }
     let td = project();
     let mut s = EditorState::new();
     exec(&s, "pmacs.lsp.config = {}");
@@ -395,6 +495,9 @@ fn journey_resolver_chain_is_first_claimant_wins() {
 /// `proceed == false`.
 #[test]
 fn journey_a_raising_resolver_suppresses_the_fallback_and_reports() {
+    if reexec_isolated("journey_a_raising_resolver_suppresses_the_fallback_and_reports") {
+        return;
+    }
     let td = project();
     let mut s = EditorState::new();
     exec(&s, "pmacs.lsp.config = {}");
@@ -458,6 +561,9 @@ const COMPETITOR: FrontendId = FrontendId(7);
 /// ambient display: the file then appears in the competitor's window.
 #[test]
 fn commit_to_delivers_to_the_requesting_frontend_not_the_ambient_one() {
+    if reexec_isolated("commit_to_delivers_to_the_requesting_frontend_not_the_ambient_one") {
+        return;
+    }
     let td = project();
     let mut s = EditorState::new();
     exec(&s, "pmacs.lsp.config = {}");
@@ -519,6 +625,9 @@ fn commit_to_delivers_to_the_requesting_frontend_not_the_ambient_one() {
 /// `acting_frontend`, or by reordering it after the interactive origin.
 #[test]
 fn commit_to_outranks_an_interactive_origin() {
+    if reexec_isolated("commit_to_outranks_an_interactive_origin") {
+        return;
+    }
     let td = project();
     let mut s = EditorState::new();
     exec(&s, "pmacs.lsp.config = {}");
@@ -586,6 +695,9 @@ fn commit_to_outranks_an_interactive_origin() {
 /// `display`, or by reading `prev` from the ambient window.
 #[test]
 fn a_background_open_uses_the_captured_window_not_the_selected_one() {
+    if reexec_isolated("a_background_open_uses_the_captured_window_not_the_selected_one") {
+        return;
+    }
     let td = project();
     let mut s = EditorState::new();
     exec(&s, "pmacs.lsp.config = {}");
@@ -652,6 +764,9 @@ fn a_background_open_uses_the_captured_window_not_the_selected_one() {
 /// competitor and the assertion fails from the other direction).
 #[test]
 fn commit_to_scopes_and_restores_on_a_normal_return() {
+    if reexec_isolated("commit_to_scopes_and_restores_on_a_normal_return") {
+        return;
+    }
     let td = project();
     let mut s = EditorState::new();
     exec(&s, "pmacs.lsp.config = {}");
@@ -701,6 +816,9 @@ fn commit_to_scopes_and_restores_on_a_normal_return() {
 /// through the scope, or by restoring on the success path only.
 #[test]
 fn commit_to_restores_when_the_callback_raises() {
+    if reexec_isolated("commit_to_restores_when_the_callback_raises") {
+        return;
+    }
     let td = project();
     let mut s = EditorState::new();
     exec(&s, "pmacs.lsp.config = {}");
@@ -744,6 +862,9 @@ fn commit_to_restores_when_the_callback_raises() {
 /// `<no raise>`.
 #[test]
 fn commit_to_refuses_an_await_and_restores() {
+    if reexec_isolated("commit_to_refuses_an_await_and_restores") {
+        return;
+    }
     let td = project();
     let mut s = EditorState::new();
     exec(&s, "pmacs.lsp.config = {}");
@@ -795,6 +916,9 @@ fn commit_to_refuses_an_await_and_restores() {
 /// userdata after invoking the callback.
 #[test]
 fn commit_to_refuses_a_forged_destination() {
+    if reexec_isolated("commit_to_refuses_a_forged_destination") {
+        return;
+    }
     let td = project();
     let mut s = EditorState::new();
     exec(&s, "pmacs.lsp.config = {}");
@@ -831,6 +955,9 @@ fn commit_to_refuses_a_forged_destination() {
 /// a shared mutable table.
 #[test]
 fn a_declining_listener_cannot_redirect_the_destination() {
+    if reexec_isolated("a_declining_listener_cannot_redirect_the_destination") {
+        return;
+    }
     let td = project();
     let mut s = EditorState::new();
     exec(&s, "pmacs.lsp.config = {}");
@@ -907,6 +1034,9 @@ fn a_declining_listener_cannot_redirect_the_destination() {
 /// distinguish "validates" from "validates in time".
 #[test]
 fn preservation_a_failed_precondition_never_reaches_the_callback() {
+    if reexec_isolated("preservation_a_failed_precondition_never_reaches_the_callback") {
+        return;
+    }
     // (label, Lua that breaks the precondition, expected reason fragment)
     let cases: [(&str, &str, &str); 4] = [
         (
@@ -994,6 +1124,9 @@ fn preservation_a_failed_precondition_never_reaches_the_callback() {
 /// (window-only validation). The dired buffer then replaces the user's.
 #[test]
 fn preservation_a_stale_destination_loses_to_the_users_newer_buffer() {
+    if reexec_isolated("preservation_a_stale_destination_loses_to_the_users_newer_buffer") {
+        return;
+    }
     let td = project();
     let mut s = EditorState::new();
     exec(&s, "pmacs.lsp.config = {}");
@@ -1062,6 +1195,11 @@ fn preservation_a_stale_destination_loses_to_the_users_newer_buffer() {
 /// `*competitor*`.
 #[test]
 fn preservation_dired_captures_prev_from_the_destination_not_the_ambient_frontend() {
+    if reexec_isolated(
+        "preservation_dired_captures_prev_from_the_destination_not_the_ambient_frontend",
+    ) {
+        return;
+    }
     let td = project();
     let mut s = EditorState::new();
     exec(&s, "pmacs.lsp.config = {}");
@@ -1117,6 +1255,9 @@ fn preservation_dired_captures_prev_from_the_destination_not_the_ambient_fronten
 /// the read-only contract rather than pin the journey.
 #[test]
 fn journey_step5_editing_a_file_reached_through_the_directory() {
+    if reexec_isolated("journey_step5_editing_a_file_reached_through_the_directory") {
+        return;
+    }
     let td = project();
     let mut s = launch(td.path());
     assert!(active_name(&s).starts_with("*dired:"));
@@ -1169,6 +1310,9 @@ fn journey_step5_editing_a_file_reached_through_the_directory() {
 /// preserve is which window shows the file, and that is what this pins.
 #[test]
 fn preservation_opening_a_file_shows_it_in_the_active_window() {
+    if reexec_isolated("preservation_opening_a_file_shows_it_in_the_active_window") {
+        return;
+    }
     let td = project();
     let target = td.path().join("alpha.txt");
     let s = EditorState::open(target.clone()).expect("open");
@@ -1204,6 +1348,9 @@ fn preservation_opening_a_file_shows_it_in_the_active_window() {
 /// failure mode is a hard error on a perfectly ordinary gesture.
 #[test]
 fn preservation_a_missing_path_becomes_a_new_file_buffer() {
+    if reexec_isolated("preservation_a_missing_path_becomes_a_new_file_buffer") {
+        return;
+    }
     let td = project();
     let fresh = td.path().join("not-yet.txt");
     let s = EditorState::open(fresh.clone()).expect("a missing path is not an error");
@@ -1223,6 +1370,9 @@ fn preservation_a_missing_path_becomes_a_new_file_buffer() {
 #[test]
 fn preservation_an_unreadable_file_reports_with_its_path() {
     use std::os::unix::fs::PermissionsExt;
+    if reexec_isolated("preservation_an_unreadable_file_reports_with_its_path") {
+        return;
+    }
     let td = project();
     let locked = td.path().join("locked.txt");
     std::fs::write(&locked, b"secret\n").expect("write");
@@ -1270,6 +1420,9 @@ fn preservation_an_unreadable_file_reports_with_its_path() {
 /// real accept path; this one pins the primitive and the window state.
 #[test]
 fn preservation_display_file_still_refuses_a_directory() {
+    if reexec_isolated("preservation_display_file_still_refuses_a_directory") {
+        return;
+    }
     let td = project();
     let mut s = EditorState::open(td.path().join("alpha.txt")).expect("open");
     exec(&s, "pmacs.lsp.config = {}");
@@ -1440,6 +1593,9 @@ fn walk_to_open_file(dir: &Path, name: &str) -> EditorState {
 /// `COHERENCE.md` says is missing.
 #[test]
 fn journey_step9_the_compile_chord_opens_the_prompt() {
+    if reexec_isolated("journey_step9_the_compile_chord_opens_the_prompt") {
+        return;
+    }
     let td = cargo_project();
     let mut s = walk_to_open_file(td.path(), "Cargo.toml");
     press_compile_chord(&mut s);
@@ -1453,6 +1609,9 @@ fn journey_step9_the_compile_chord_opens_the_prompt() {
 /// **N** — the prompt is prefilled from the detected project kind.
 #[test]
 fn journey_step9_the_prompt_is_prefilled_for_a_cargo_project() {
+    if reexec_isolated("journey_step9_the_prompt_is_prefilled_for_a_cargo_project") {
+        return;
+    }
     let td = cargo_project();
     let mut s = walk_to_open_file(td.path(), "Cargo.toml");
     press_compile_chord(&mut s);
@@ -1472,6 +1631,9 @@ fn journey_step9_the_prompt_is_prefilled_for_a_cargo_project() {
 /// which is what re-resolving at accept time looks like.
 #[test]
 fn journey_step9_the_prompt_runs_in_the_directory_it_captured() {
+    if reexec_isolated("journey_step9_the_prompt_runs_in_the_directory_it_captured") {
+        return;
+    }
     let a = cargo_project();
     let b = project();
     let mut s = walk_to_open_file(a.path(), "Cargo.toml");
@@ -1521,6 +1683,9 @@ fn journey_step9_the_prompt_runs_in_the_directory_it_captured() {
 /// real process.
 #[test]
 fn journey_step9_the_offered_command_builds_the_project() {
+    if reexec_isolated("journey_step9_the_offered_command_builds_the_project") {
+        return;
+    }
     if !binary_available("cargo") {
         assert!(
             std::env::var_os("PMACS_REQUIRE_CARGO_BUILD").is_none(),
@@ -1574,6 +1739,9 @@ fn journey_step9_the_offered_command_builds_the_project() {
 /// from it yields `node` again and this pin stays green.
 #[test]
 fn journey_step9_a_nested_project_gets_its_own_kind_not_the_outer_one() {
+    if reexec_isolated("journey_step9_a_nested_project_gets_its_own_kind_not_the_outer_one") {
+        return;
+    }
     let outer = cargo_project();
     let sub = outer.path().join("sub");
     std::fs::create_dir_all(&sub).expect("mkdir sub");
@@ -1610,6 +1778,9 @@ fn journey_step9_a_nested_project_gets_its_own_kind_not_the_outer_one() {
 /// runner's cwd and pinning it would pin the environment.
 #[test]
 fn journey_step9_the_compile_context_is_total_even_with_no_file_open() {
+    if reexec_isolated("journey_step9_the_compile_context_is_total_even_with_no_file_open") {
+        return;
+    }
     let td = cargo_project();
     let s = launch(td.path());
     assert!(
@@ -1638,6 +1809,9 @@ fn journey_step9_the_compile_context_is_total_even_with_no_file_open() {
 /// is reordering the precedence chain to put `defaults[kind]` first.
 #[test]
 fn journey_step9_preservation_the_last_command_outranks_the_default() {
+    if reexec_isolated("journey_step9_preservation_the_last_command_outranks_the_default") {
+        return;
+    }
     let td = cargo_project();
     let mut s = walk_to_open_file(td.path(), "Cargo.toml");
     exec(&s, "pmacs.compile.run('true')");
@@ -1660,6 +1834,9 @@ fn journey_step9_preservation_the_last_command_outranks_the_default() {
 /// over one of these sequences.
 #[test]
 fn journey_step9_preservation_the_existing_compile_bindings_survive() {
+    if reexec_isolated("journey_step9_preservation_the_existing_compile_bindings_survive") {
+        return;
+    }
     let td = cargo_project();
     let s = walk_to_open_file(td.path(), "Cargo.toml");
     for (sequence, command) in [
@@ -1705,6 +1882,9 @@ fn binary_available(name: &str) -> bool {
 #[cfg(unix)]
 #[test]
 fn journey_step9_the_compile_directory_is_detection_canonical() {
+    if reexec_isolated("journey_step9_the_compile_directory_is_detection_canonical") {
+        return;
+    }
     let parent = tempfile::tempdir().expect("tempdir");
     let real = parent.path().join("real");
     std::fs::create_dir_all(real.join("src")).expect("mkdir real");
@@ -1804,6 +1984,9 @@ fn start_local() -> EditorState {
 /// `prepare_startup` — the mutation every by-hand pin would survive.
 #[test]
 fn journey_step4_a_no_target_launch_greets_in_scratch() {
+    if reexec_isolated("journey_step4_a_no_target_launch_greets_in_scratch") {
+        return;
+    }
     let s = start_local();
 
     // Preconditions asserted, not assumed (framing §3.2b): a developer
@@ -1835,6 +2018,9 @@ fn journey_step4_a_no_target_launch_greets_in_scratch() {
 /// is two chords and nothing in the rendered text marks the boundary.
 #[test]
 fn journey_step4_every_advertised_key_is_bound() {
+    if reexec_isolated("journey_step4_every_advertised_key_is_bound") {
+        return;
+    }
     let s = start_local();
     let entries = welcome_entries(&s);
     assert!(
@@ -1858,6 +2044,9 @@ fn journey_step4_every_advertised_key_is_bound() {
 /// Pin 2 alone would pass if rendering silently dropped one.
 #[test]
 fn journey_step4_the_rendered_welcome_contains_every_entry() {
+    if reexec_isolated("journey_step4_the_rendered_welcome_contains_every_entry") {
+        return;
+    }
     let s = start_local();
     let text = active_text(&s);
     for (keys, label) in welcome_entries(&s) {
@@ -1884,6 +2073,9 @@ fn journey_step4_the_rendered_welcome_contains_every_entry() {
 /// so nothing about the accepted value survives afterwards.
 #[test]
 fn journey_step4_m_x_help_renders_the_cheat_sheet() {
+    if reexec_isolated("journey_step4_m_x_help_renders_the_cheat_sheet") {
+        return;
+    }
     let mut s = start_local();
 
     s.dispatch_key(
@@ -1922,6 +2114,9 @@ fn journey_step4_m_x_help_renders_the_cheat_sheet() {
 /// would lift read-only, discard history, and fail the insert.
 #[test]
 fn journey_step4_preservation_the_greeted_scratch_is_editable_and_clean() {
+    if reexec_isolated("journey_step4_preservation_the_greeted_scratch_is_editable_and_clean") {
+        return;
+    }
     let mut s = start_local();
     assert!(
         eval::<bool>(
@@ -1942,6 +2137,9 @@ fn journey_step4_preservation_the_greeted_scratch_is_editable_and_clean() {
 /// **P** — a file target does not greet.
 #[test]
 fn journey_step4_preservation_a_file_target_does_not_greet() {
+    if reexec_isolated("journey_step4_preservation_a_file_target_does_not_greet") {
+        return;
+    }
     let td = project();
     let path = td.path().join("alpha.txt");
     let s = match pmacs::editor::prepare_startup(Some(path.clone())).expect("startup") {
@@ -1965,6 +2163,9 @@ fn journey_step4_preservation_a_file_target_does_not_greet() {
 /// still exists to be wrongly greeted.
 #[test]
 fn journey_step4_preservation_a_directory_target_does_not_greet() {
+    if reexec_isolated("journey_step4_preservation_a_directory_target_does_not_greet") {
+        return;
+    }
     let td = project();
     let mut s =
         match pmacs::editor::prepare_startup(Some(td.path().to_path_buf())).expect("startup") {
@@ -1979,6 +2180,9 @@ fn journey_step4_preservation_a_directory_target_does_not_greet() {
 /// **P** — a non-empty `*scratch*` is never overwritten.
 #[test]
 fn journey_step4_preservation_existing_scratch_content_survives() {
+    if reexec_isolated("journey_step4_preservation_existing_scratch_content_survives") {
+        return;
+    }
     let mut s = EditorState::new();
     exec(&s, "pmacs.window.buffer():insert(0, 'user content')");
     s.finalize_local_launch(false);
@@ -1993,6 +2197,9 @@ fn journey_step4_preservation_existing_scratch_content_survives() {
 /// desktop restore having put something else in front.
 #[test]
 fn journey_step4_preservation_a_backgrounded_scratch_is_not_greeted() {
+    if reexec_isolated("journey_step4_preservation_a_backgrounded_scratch_is_not_greeted") {
+        return;
+    }
     let td = project();
     let mut s = EditorState::new();
     exec(
@@ -2019,6 +2226,9 @@ fn journey_step4_preservation_a_backgrounded_scratch_is_not_greeted() {
 /// reached in production.
 #[test]
 fn journey_step4_preservation_constructors_never_greet() {
+    if reexec_isolated("journey_step4_preservation_constructors_never_greet") {
+        return;
+    }
     let bare = EditorState::new();
     assert_eq!(scratch_text(&bare), "", "EditorState::new must not greet");
 
@@ -2078,6 +2288,9 @@ fn lsp_segment(s: &EditorState) -> Option<String> {
 /// vacuous.
 #[test]
 fn journey_step6_a_missing_language_server_is_reported_not_swallowed() {
+    if reexec_isolated("journey_step6_a_missing_language_server_is_reported_not_swallowed") {
+        return;
+    }
     let td = tempfile::tempdir().expect("tempdir");
     std::fs::write(td.path().join("Cargo.toml"), b"[package]\nname=\"x\"\n").expect("write toml");
     std::fs::write(td.path().join("main.rs"), b"fn main() {}\n").expect("write rs");
@@ -2138,6 +2351,9 @@ fn journey_step6_a_missing_language_server_is_reported_not_swallowed() {
 #[test]
 fn journey_step4_the_welcome_paints_as_multiple_rows_on_the_first_frame() {
     use pmacs::cell::{Cell, CellGrid, CellSize, Glyph};
+    if reexec_isolated("journey_step4_the_welcome_paints_as_multiple_rows_on_the_first_frame") {
+        return;
+    }
 
     let s = start_local();
     let (rows, cols) = (12u32, 100u32);
@@ -2190,5 +2406,88 @@ fn journey_step4_the_welcome_paints_as_multiple_rows_on_the_first_frame() {
         !row_text(0).contains("C-x C-f"),
         "and must not have been folded into row 0; got {:?}",
         row_text(0)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The isolation mechanism itself
+// ---------------------------------------------------------------------------
+
+/// **N** — the re-exec of §1.10 actually redirects the child's roots.
+///
+/// Every other test in this file is *protected* by the mechanism; none
+/// of them fails if it silently stops working, because they assert about
+/// editor behaviour and a developer's `init.lua` usually leaves that
+/// alone. This one asserts the mechanism's own output: the roots the
+/// child resolves, from inside the child.
+///
+/// Falsified by dropping `.envs(child_env)` from `reexec_isolated` — the
+/// child then resolves the developer's real `~/.config/pmacs` and
+/// `~/.local/share`, and all four assertions below fail.
+#[test]
+fn journey_isolated_child_resolves_the_controlled_roots() {
+    if reexec_isolated("journey_isolated_child_resolves_the_controlled_roots") {
+        return;
+    }
+    let base = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("journey-isolation")
+        .join("journey_isolated_child_resolves_the_controlled_roots");
+    let under = |p: Option<std::path::PathBuf>, what: &str| {
+        let p = p.unwrap_or_else(|| panic!("{what} must resolve in the child"));
+        assert!(
+            p.starts_with(&base),
+            "{what} resolved to {} — outside the controlled base {}",
+            p.display(),
+            base.display()
+        );
+    };
+    under(pmacs::config::user_config_dir(), "the config dir");
+    under(
+        Some(pmacs::builtin_packages::bundled_runtime_dir()),
+        "the bundled-package dir",
+    );
+    // `PMACS_STATE_HOME` is the fifth variable: it outranks
+    // `XDG_STATE_HOME`, so a child given only the four XDG ones inherits
+    // whatever the launching shell exported.
+    under(pmacs::state::user_state_dir(), "the state dir");
+    under(pmacs::minibuffer::user_history_dir(), "the history dir");
+}
+
+/// **N** — the ambient entry point is still what this suite drives.
+///
+/// The isolation seam has a `new_with_roots` / `open_with_roots` sibling
+/// that every other suite in the tree now takes. Taking it *here* would
+/// be a silent regression of what the ratchet exists to prove — a
+/// production entry point with no caller — and would leave every
+/// assertion in this file green. Asserted against this file's own source
+/// rather than left as an obvious-by-inspection property.
+#[test]
+fn journey_drives_the_ambient_production_entry_point() {
+    let src = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("journey_acceptance.rs"),
+    )
+    .expect("read this suite's own source");
+    // Every needle is assembled rather than written whole: a literal
+    // spelled out here would appear in this file and match itself, which
+    // turns the positive check vacuous and the negative ones into
+    // guaranteed failures.
+    let ambient_open = concat!("EditorState::open(", "path.to_path_buf())");
+    let seam_open = concat!("EditorState::open", "_with_roots(");
+    let seam_new = concat!("EditorState::new", "_with_roots(");
+    assert!(
+        src.contains(ambient_open),
+        "journey must call the parameterless production `open`"
+    );
+    assert!(
+        !src.contains(seam_open),
+        "journey must not take the isolation seam — its isolation comes \
+         from the environment its child is launched with"
+    );
+    assert!(
+        !src.contains(seam_new),
+        "journey must not take the isolation seam — its isolation comes \
+         from the environment its child is launched with"
     );
 }

@@ -89,14 +89,14 @@ fn repl_manifest_declares_exports_and_pmacs_required() {
 // Bullet 2b: bootstrap loads through the package system
 // ---------------------------------------------------------------------------
 //
-// EditorState::new() runs the M7.11 bootstrap that materializes
+// `EditorState::new()` runs the M7.11 bootstrap that materializes
 // the bundled REPL and pushes its InstalledPackage record into
 // the roster. After that, `require("repl")` from Lua resolves
 // through the M7.7 searcher (not the legacy direct eval).
 
 #[test]
 fn editor_init_makes_repl_loadable_via_require() {
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     let result: bool = state
         .lua_host
         .lua()
@@ -202,3 +202,10 @@ fn materialize_all_produces_one_record_per_bundled_package() {
     assert!(repl.entry_path().exists());
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

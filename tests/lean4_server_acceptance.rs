@@ -90,7 +90,7 @@ impl Fixture {
 /// resolver. That combination is the point: the root rule under test is
 /// production code, only the command is a stand-in.
 fn editor(fx: &Fixture) -> EditorState {
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     exec(&state, "pmacs.lsp.config = {}");
     exec(
         &state,
@@ -1880,3 +1880,10 @@ fn r6_no_swap_retires_only_the_failed_root() {
          swap occurred"
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;
