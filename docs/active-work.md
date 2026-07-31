@@ -363,10 +363,15 @@ compatible.
   justified the ledger's leniency and deliberately changed no
   disposition; this lane owns what it refused.
 - **Four sites, not the two #200 named.** In the persistent ledger: a
-  probe error of any errno drops the entry and cancels escalation; a failed escalating
-  `SIGKILL` is marked as succeeded and never retried; and `shutdown()`
-  discards its own force-kill result the same way — on the path that
-  exists specifically to stop a leak at editor exit. **Plus the in-drain
+  probe error of any errno drops the entry and cancels escalation; a
+  failed escalating `SIGKILL` is marked as succeeded, so **no later tick
+  retries it**; and `shutdown()` discards its own force-kill result the
+  same way — on the path that exists specifically to stop a leak at
+  editor exit. Those last two are **distinct, not cumulative**:
+  `shutdown()` force-kills every entry with no `!entry.killed` guard, so
+  a failed escalation still gets one attempt at exit, while a failed
+  force-kill leaks the group past exit with nothing left to try.
+  **Plus the in-drain
   twin** `final_drain_runtime`, which collapses every errno to "dead"
   while no tick runs; a false "dead" there cancels the readers, so its
   failure mode is truncated output rather than a leaked process.

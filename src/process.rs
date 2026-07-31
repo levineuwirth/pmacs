@@ -4649,8 +4649,16 @@ mod tests {
     fn a_failed_escalation_is_recorded_as_a_successful_one() {
         // §1.2 (b). `entry.killed = true` runs unconditionally, so a
         // SIGKILL that never landed satisfies `!entry.killed == false`
-        // forever. The consequence is not bookkeeping: the survivor is
-        // never killed again, by anything.
+        // forever. The consequence is not bookkeeping: **no later tick
+        // retries it**, so the survivor outlives every escalation the
+        // ledger will ever attempt during the session.
+        //
+        // Scoped to ticks deliberately. `shutdown()`'s force-kill loop
+        // iterates the ledger with **no `!entry.killed` guard**, so it
+        // does re-kill an entry this arm marked — which is why that
+        // failure mode is distinct and has its own pin. This one ticks
+        // and never calls `shutdown`, so what it asserts is exactly
+        // what it says.
         let dir = tempfile::tempdir().expect("tempdir");
         let mut sup = ProcessSupervisor::new();
         sup.set_group_term_grace(Duration::from_millis(150));
@@ -4683,9 +4691,59 @@ mod tests {
             pid_alive(survivor),
             "no tick ever retries the failed SIGKILL, so the survivor outlives the ledger's only escalation"
         );
-        assert_eq!(sup.reap_ledger_len(), 1, "the entry is retained, and inert");
+        assert_eq!(
+            sup.reap_ledger_len(),
+            1,
+            "the entry is retained, and inert to every subsequent tick"
+        );
         sup.assert_reap_faults_consumed();
         reap_fixture_survivor(survivor);
+    }
+
+    #[test]
+    fn shutdown_still_force_kills_a_group_a_failed_escalation_marked_killed() {
+        // The boundary of the pin above, and the reason its claim is
+        // "no later TICK retries it" rather than "nothing retries it".
+        //
+        // `shutdown()`'s force-kill loop iterates the ledger with no
+        // `!entry.killed` guard, so the one thing that still acts on an
+        // entry the escalation arm gave up on is editor exit. That
+        // keeps the two failure modes distinct: a failed escalation
+        // leaks the group until exit; a failed force-kill leaks it
+        // past exit.
+        //
+        // No fault is planned for the shutdown site here — the whole
+        // point is that this force-kill really lands.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut sup = ProcessSupervisor::new();
+        sup.set_group_term_grace(Duration::from_millis(150));
+        let (script, pidfile) = survivor_script(dir.path(), true);
+        let id = sup
+            .spawn(sh_group_spec("escalation-then-shutdown", &script))
+            .expect("spawn");
+        let events = drain_until(&mut sup, id, Duration::from_secs(5), has_exited);
+        let pgid = i32::try_from(started_pid(&events).expect("leader pid")).expect("pgid fits");
+        let survivor = wait_pidfile(&pidfile);
+
+        sup.plan_reap_kill_failure(ReapKillSite::LedgerEscalation, nix::errno::Errno::EPERM);
+        std::thread::sleep(Duration::from_millis(250));
+        sup.tick();
+        assert_eq!(
+            sup.reap_ledger_killed(pgid),
+            Some(true),
+            "precondition: the entry is marked killed by a SIGKILL that failed"
+        );
+        assert!(pid_alive(survivor), "precondition: the survivor is alive");
+
+        sup.shutdown();
+
+        assert!(
+            !pid_alive(survivor),
+            "shutdown force-kills every armed entry, marked or not — so an escalation \
+             failure is not the survivor's last reprieve"
+        );
+        assert_eq!(sup.reap_ledger_len(), 0, "and the entry probes to ESRCH");
+        sup.assert_reap_faults_consumed();
     }
 
     #[test]

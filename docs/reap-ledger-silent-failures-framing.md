@@ -169,7 +169,23 @@ behaviour is unchanged: an `EPERM` probe is indistinguishable from
 `ESRCH`.
 
 **(b)** A failed `SIGKILL` is recorded as a successful one. The entry
-then satisfies `!entry.killed == false` forever and is never retried.
+then satisfies `!entry.killed == false` forever, so **no later tick
+retries it** — the escalation arm is guarded by `!entry.killed` and
+never fires again for that group.
+
+**Scoped to ticks, and the scope matters.** `shutdown()`'s force-kill
+loop (c) iterates the ledger with **no `!entry.killed` guard**, so it
+*does* re-kill an entry this arm marked. The two failure modes are
+therefore distinct rather than cumulative:
+
+| Failure | Survivor lives until |
+|---|---|
+| escalation `SIGKILL` fails | editor exit, where `shutdown()` gets one more attempt |
+| `shutdown()` force-kill fails | past editor exit — nothing else tries |
+
+Saying (b) is "never retried by anything" would collapse that
+distinction and overstate it: the one remaining attempt is exactly what
+(c) is, and (c)'s own failure is a different and worse outcome.
 
 **(c) `shutdown()` has the same discard** (`:1763-1766`), on the path
 that exists specifically to stop a leak at editor exit:
@@ -381,8 +397,9 @@ noted so a red run on it is not mistaken for this lane's doing.*
 
 - **Bet 2 — each silent consequence is demonstrable once injectable.**
   With the seam: an `EPERM` probe drops an entry whose group is still
-  alive; a failed `SIGKILL` leaves `killed = true` and is never retried;
-  `shutdown()`'s discard does the same at exit; and a continuously false
+  alive; a failed `SIGKILL` leaves `killed = true` so no later **tick**
+  retries it; `shutdown()`'s discard leaks the group past editor exit,
+  which is a different and worse outcome; and a continuously false
   in-drain probe cancels readers before a live descendant's deliberately
   late output can arrive.
   - *Falsified if* any of the three turns out to be unreachable in

@@ -267,9 +267,17 @@ commands, read `docs/active-work.md` immediately after this file.
     correct) from any other errno (we could not ask — not correct), and
     `retain` deletes the entry either way, cancelling escalation.
   - The deadline escalation sets `killed = true` whether or not the
-    `SIGKILL` landed, so a failed one is **never retried by anything**.
-  - `shutdown()`'s force-kill does the same, on the path written
-    specifically to stop a leak at editor exit.
+    `SIGKILL` landed, so **no later tick retries it** — that arm is
+    guarded by `!entry.killed` and never fires again for the group.
+  - `shutdown()`'s force-kill discards its result the same way, on the
+    path written specifically to stop a leak at editor exit. **It is not
+    the same failure**, and the difference is the retry: `shutdown()`
+    iterates the ledger with *no* `!entry.killed` guard, so it does
+    re-kill an entry the escalation arm marked. A failed escalation
+    leaks the group until editor exit, where one more attempt is made; a
+    failed force-kill leaks it *past* editor exit, with nothing left to
+    try. Saying the escalation is "never retried by anything" collapses
+    the two.
   - `final_drain_runtime`'s twin collapses every errno into "dead",
     which quiesces the drain and **cancels the readers** — truncated
     output rather than a leaked process, and terminal for that drain
