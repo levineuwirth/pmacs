@@ -98,7 +98,7 @@ remain open to them.
 | 2 | Golden product journey | **Runs to step 10** | `pmacs .` opens the directory (1a); the interface introduces itself (1b-3); a missing language server says so (1b-2, #204); a build is bound and prefilled (1b-1, #203). Steps 1, 11 and 12 remain the thin end |
 | 3 | Zero-configuration state | **Partial** | Defaults genuinely strong; missing-tool failure is silent, not graceful |
 | 4 | Progressive disclosure | **Inverted** | The advanced level is real; the beginner level is the missing one |
-| 5 | Unified discoverability | **Substrate without surface** | Best-in-class registration metadata; almost no way for a user to reach it |
+| 5 | Unified discoverability | **Partial** | Discovery Stage 1: eleven `help.*` commands (describe key/mode/hook/buffer/command/setting, where-is, list commands/keybindings/settings, apropos) over the existing registries, indexed by `M-x help`. Commands, keys, modes, hooks and settings are now reachable; **packages and workers are not** (§13, §9), `Command` still has no title/category/flags, M-x rows are still bare names, and the Rust help layer is still orphaned |
 | 6 | Interaction islands | **Weak, and growing** | Six hardcoded key-interception shadows; no transient-keymap mechanism exists |
 | 7 | First-class workspaces | **Missing (conventions only)** | Marker walk + four independent consumers; no workspace object |
 | 8 | Execution locations | **Missing (architecture ready)** | SSH attach works; "location" is not a value anywhere |
@@ -557,7 +557,25 @@ This suggests a general pmacs principle:
 
 ### Ground truth
 
-**Grade: substrate without surface — the sharpest instance of §1.1.**
+**Grade: partial — Discovery Stage 1 built the first surface.**
+
+Eleven `help.*` commands now render the registries that were already
+there: describe-key/mode/hook/buffer/command/setting, where-is, list
+commands/keybindings/settings, and a substring apropos over names and
+descriptions, indexed by `M-x help`. It needed **no Rust** — the data
+was all reachable from Lua, and even the settings completion source is a
+Lua function through `CompletionSource::Custom`.
+
+**What is still missing** is itemized below and unchanged by that stage:
+`Command` has no title/category/aliases/flags/arg-schema; the predicate
+is still never evaluated; M-x rows are still bare name strings; the Rust
+help layer is still orphaned (Stage 1 funnels every command through one
+Lua seam so the eventual migration is enumerated per subject rather than
+per call site); packages and workers have no discovery surface; settings
+value provenance is still absent; and there is still no help prefix key.
+
+*The original audit grade, for reference:* **substrate without surface —
+the sharpest instance of §1.1.**
 
 **What the substrate already has (genuinely strong):**
 

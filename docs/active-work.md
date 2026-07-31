@@ -380,11 +380,11 @@ which would have re-conflicted on every merge.
     githubsucks/journey-stage1b3-welcome
   ```
 
-## Discovery Stage 1 (P4) — FRAMING APPROVED (rev 6); implementation next
+## Discovery Stage 1 (P4) — IMPLEMENTED, PR OPEN
 
 - **Branch `discovery-stage1-commands`**, worktree `../pmacs-p4-discovery`,
-  based on `githubsucks/main` @ `54a092e`. **Framing only; no code, no
-  PR yet.** `docs/discovery-stage1-command-family-framing.md` revision 6,
+  based on `githubsucks/main` @ `54a092e`. **Implemented; PR open.**
+  `docs/discovery-stage1-command-family-framing.md` revision 6,
   three review rounds closed (round 1: two blocking, two major; round 2:
   two blocking, two major; round 3: two factual corrections; all
   accepted), Q#D2 / Q#D3 decided by the user, and the final review's
@@ -453,6 +453,24 @@ which would have re-conflicted on every merge.
   a behaviour change); help-layer unification; closed-set acceptance;
   and the **help prefix key**, which this stage does not touch because
   #205 recorded why `C-h` is not free.
+- **Implementation notes.** `runtime/help.lua` is new and owns the
+  family plus the `help` index, which **moved out of `welcome.lua`** so
+  the greeting file keeps only the greeting; it loads after welcome.lua
+  so the index can read `pmacs.welcome.entries`.
+- **The seam-counting pin caught a real bypass immediately.** The two
+  renamed commands were still calling the file-local `show_help_text`,
+  so the funnel the framing promised was fiction for exactly the two
+  commands that predate the seam. They now call
+  `pmacs.editor._show_help`, with a comment saying why the in-scope
+  local is deliberately not used.
+- **Bites, all directed** — six mutations, each failing exactly one pin:
+  fuzzy apropos, name-only apropos, static where-is, a dropped
+  forwarder, an unindexed family command, and one command writing
+  `*help*` itself (seam count 10 vs 11).
+- **§5 moves substrate-without-surface → Partial ON THIS PR** per §25,
+  with the remaining gaps named in the row: packages and workers have no
+  surface, `Command` still lacks title/category/flags, M-x rows are bare
+  names, and the Rust help layer is still orphaned.
 - Recovery:
 
   ```sh
