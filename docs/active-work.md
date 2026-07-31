@@ -260,6 +260,24 @@ If it does not, stop and repair the remote/fetch configuration.
   `docs/journey-stage1b1-compile-defaults-framing.md` revision 2,
   approved after one review round (two blocking, two major, all
   accepted). **Implemented; PR open.**
+- **ON MERGE OF #203, flip four places to landed.** The PR deliberately
+  ships them as *in flight*, because `COHERENCE.md` §25 says a grade
+  changes only on landed evidence and the PR is open: `COHERENCE.md`
+  §2's step-9 verdict row (Partial → **Works**), §2's post-table
+  keybinding-inversion paragraph (third example answered), §20 Priority
+  1 and its arc list (in flight → done), and
+  `docs/agent-handoff.md` §1's arc bullet (IMPLEMENTED → LANDED).
+  **Recorded here because an unowned doc flip is exactly how this
+  ledger's drift starts** — the same rule-4 precondition that kept #176's
+  lane alive past its merge.
+- **A lexical path expectation is wrong for anything detection touched.**
+  `pmacs.project.detect` canonicalizes before walking
+  (`canonicalize_or_passthrough`, `src/project.rs:509-511`) while the
+  suite's `canon()` is lexical, so the compile-directory assertions
+  passed on Ubuntu and **failed both macOS legs**, where `/var` is a
+  symlink to `/private/var`. Fixed with a `detected_root()` expectation
+  and pinned by a **symlinked fixture**, which reproduces the disagreement
+  on any platform — a Linux-only bite could not have caught it.
 - **Bites found two vacuous pins of my own.** The nested-project pin
   passed with the keybinding removed, because `minibuffer.contents()` is
   `""` both for an empty prefill and for no minibuffer at all — `""`

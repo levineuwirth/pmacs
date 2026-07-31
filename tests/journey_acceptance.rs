@@ -1354,6 +1354,23 @@ fn bound_detection_to(s: &EditorState, dir: &Path) {
     );
 }
 
+/// The project root as **detection** reports it.
+///
+/// `pmacs.project.detect` canonicalizes before walking
+/// (`canonicalize_or_passthrough`, `src/project.rs:509-511`), so a
+/// `/var/folders/...` tempdir on macOS comes back as
+/// `/private/var/folders/...`. `canon()` is *lexical* — it never
+/// resolves symlinks — so it is the wrong expectation for any value
+/// that has passed through detection, which is exactly what the compile
+/// cwd is. Using it here failed both macOS CI legs while Ubuntu (where
+/// `/tmp` is not a symlink) stayed green.
+fn detected_root(path: &Path) -> String {
+    std::fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn minibuffer_active(s: &EditorState) -> bool {
     eval(s, "return pmacs.minibuffer.is_active()")
 }
@@ -1483,7 +1500,9 @@ fn journey_step9_the_prompt_runs_in_the_directory_it_captured() {
     assert!(finished, "the accepted run must finish");
 
     let text = named_text(&s, "*compilation*");
-    let a_path = canon(a.path());
+    // Detection-canonical, not lexical: the compile cwd came from
+    // `pmacs.project.detect`, and `pwd` reports the physical directory.
+    let a_path = detected_root(a.path());
     assert!(
         text.contains(&format!("Directory: {a_path}")),
         "the header must name the directory the prompt captured, not the newly active one;\n{text}"
@@ -1528,7 +1547,7 @@ fn journey_step9_the_offered_command_builds_the_project() {
 
     let text = named_text(&s, "*compilation*");
     assert!(
-        text.contains(&format!("Directory: {}", canon(td.path()))),
+        text.contains(&format!("Directory: {}", detected_root(td.path()))),
         "the build runs in the detected project root;\n{text}"
     );
     assert!(
@@ -1668,4 +1687,58 @@ fn binary_available(name: &str) -> bool {
         .arg(name)
         .output()
         .is_ok_and(|o| o.status.success())
+}
+
+/// **N** — the compile directory is *detection*-canonical, not lexical.
+///
+/// This pin exists because its absence broke both macOS CI legs while
+/// Ubuntu stayed green: `/var` is a symlink to `/private/var` there, so
+/// a tempdir's lexical and canonical paths differ, and the original
+/// assertions used the lexical one.
+///
+/// Reproducing it on Linux needs an explicit symlink — which is also a
+/// real configuration `Workspace::detect`'s own doc comment names
+/// ("`/tmp/sandbox/foo` symlinked to `/home/user/code/foo`"). Launching
+/// through the link makes the two paths disagree on every platform, so
+/// the regression can no longer hide behind a filesystem that happens
+/// not to use symlinks.
+#[cfg(unix)]
+#[test]
+fn journey_step9_the_compile_directory_is_detection_canonical() {
+    let parent = tempfile::tempdir().expect("tempdir");
+    let real = parent.path().join("real");
+    std::fs::create_dir_all(real.join("src")).expect("mkdir real");
+    std::fs::write(
+        real.join("Cargo.toml"),
+        b"[package]\nname = \"journey-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("write Cargo.toml");
+    std::fs::write(real.join("src/main.rs"), b"fn main() {}\n").expect("write main.rs");
+
+    let link = parent.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+    // Precondition, or the pin is vacuous: the two spellings must
+    // actually differ, which is the whole condition macOS creates for
+    // free and Linux does not.
+    assert_ne!(
+        canon(&link),
+        detected_root(&link),
+        "the fixture must make lexical and canonical paths disagree"
+    );
+
+    let mut s = walk_to_open_file(&link, "Cargo.toml");
+    press_compile_chord(&mut s);
+    exec(&s, "pmacs.minibuffer.set_contents('pwd')");
+    press(&mut s, KeyCode::Enter);
+    let finished = pump_processes_until(&mut s, 10_000, |s| {
+        named_text(s, "*compilation*").contains("exited")
+    });
+    assert!(finished, "the accepted run must finish");
+
+    let text = named_text(&s, "*compilation*");
+    assert!(
+        text.contains(&format!("Directory: {}", detected_root(&link))),
+        "the header must name the directory detection resolved to;\n{text}"
+    );
 }

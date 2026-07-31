@@ -378,7 +378,7 @@ Full verdict table:
 | 6 | Language intelligence | **Partial** | Rust grammar bundled and auto-attaches; rust-analyzer preconfigured (`builtin/runtime/lsp.lua:44-52`) — but a missing binary fails silently (§1.2) and highlighting masks it. No LSP status command exists to diagnose |
 | 7 | Find symbol / file | **File: fixed (open by path merged #162; browsing #165). Symbol: works but undiscoverable** | No find-file/dired/picker existed at audit. Now `C-x C-f` opens a known path and `C-x d` / `C-x C-j` browse (flat listing, `dired` mode keymap); `M-.`/`M-?`/`C-c o` still bound but advertised nowhere and server-gated; no workspace-symbol command; `pmacs.index.*` has no UI |
 | 8 | Open terminal | **Works** | Full PTY with scrollback + modeline segment, bound to `C-c t` and configurable through three registered settings (`terminal.default-profile`, `terminal.scrollback-rows`, `terminal.escape-key`) plus named `pmacs.terminal.profiles` (PR #173), and searchable through `M-x terminal.copy-mode` / `C-c C-t`, which materializes the retained scrollback into an ordinary read-only buffer (Stage 2). Named limitations: `C-c t` is unreachable from *inside* a terminal window, where `C-c` is consumed as the escape — `M-x terminal` still works there; and there is still **no close/kill command**, which is the remaining half of this step's discoverability gap. *Was broken outright on the GPU frontend until the double terminal-layout sync was fixed: the child took a `SIGWINCH` storm at tick cadence, so typing into it was impossible while output still flowed.* |
-| 9 | Build / test | **Works** | Journey Stage 1b-1: `C-c c` runs `compile.run`, and the first prompt is prefilled from the detected project kind (`pmacs.compile.defaults`, seeded `rust = "cargo build"`). The prompt **captures** its directory rather than re-resolving at accept time, so the command it offers and the directory it runs in cannot drift while the minibuffer waits. Still defaults cwd to the detected project root and parses Rust `-->` errors. Named limitation: after `pmacs <dir>` the active buffer is dired's and pathless, so the cwd falls back to the process cwd — §8's execution-location model owns that |
+| 9 | Build / test | **Partial** | `M-x compile.run` works, defaults cwd to the detected project root, and parses Rust `-->` errors — but no keybinding, an **empty first prompt** (`initial = last and last.cmdline or ""`, `builtin/runtime/compile.lua`), and no `cargo build` suggestion despite `ProjectKind::Rust` existing (`src/project.rs:78` — **not** `Cargo`, see §24). **PR #203 (open) closes all three**: `C-c c` runs `compile.run`, and the first prompt is prefilled from the detected project kind (`pmacs.compile.defaults`, seeded `rust = "cargo build"`). The prompt **captures** its directory rather than re-resolving at accept time, so the command it offers and the directory it runs in cannot drift while the minibuffer waits. Named limitation it does not fix: after `pmacs <dir>` the active buffer is dired's and pathless, so the cwd falls back to the process cwd — §8's execution-location model owns that. **This row flips to Works when #203 merges**; per §25 a grade changes only on landed evidence |
 | 10 | Inspect error | **Partial (good once reached)** | `E:n W:n` modeline counts, underlines, `M-g n/p` + ``C-x ` `` walking a unified compile/grep/diag source, message echo, `RET` visits. Gated entirely on step 6 or 9 succeeding first |
 | 11 | See background work | **Works but undiscoverable** | `*workers*` view via `M-x editor.list-workers`; `C-c C-k` cancel-at-point. No keybinding, no statusline spinner/progress indicator anywhere (§9) |
 | 12 | Close + restore | **Partial** | Per-file cursor+scroll (saveplace), recent files, minibuffer history, autosave recovery all restore zero-config. Open-buffer set and window layout do **not**: desktop-save is opt-in (`pmacs.session.desktop_mode(true)`) *and* a documented no-op under a daemon (`src/desktop.rs:323-326`, `:353-356`, Q#DS9) |
@@ -388,10 +388,10 @@ A journey observation worth keeping verbatim from the audit:
 C-M-s` opens all folds, while opening a file, opening a terminal, and
 running a build have no bindings at all.
 
-All three of that observation's examples have now been answered —
-opening a file by `C-x C-f` (#162), opening a terminal by `C-c t`
-(#173), and running a build by `C-c c` (Journey Stage 1b-1). **The quote
-stays as written**: it names a standing bias in how new work gets bound,
+Two of that observation's three examples have been answered — opening a
+file by `C-x C-f` (#162) and opening a terminal by `C-c t` (#173).
+**Running a build still has no binding on `main`**; PR #203 is open and
+adds `C-c c`. **The quote stays as written either way**: it names a standing bias in how new work gets bound,
 not three isolated omissions, and three fixes do not retire a bias. What
 has changed is that the bias no longer has an uncontested example in the
 golden journey — the next new surface that ships without a binding is
@@ -1544,17 +1544,18 @@ blockers. **State: runs to step 5; thin from step 6 (§2). Mostly wiring,
 and unusually cheap:** directory-argument handling (**done**: Journey
 Stage 1a); a find-file surface (**done**: #162 open-by-path, #165
 browsing); surfacing the LSP spawn failure with guidance (§1.2); a
-compile keybinding + `cargo build`/`test` default (**done**: Journey
-Stage 1b-1, from the existing `ProjectKind::Rust` — **not** `Cargo`, see
-§24); a terminal keybinding (**done**: `C-c t`, #173); a welcome
-buffer. The journey acceptance suite (§19) is the ratchet that
+compile keybinding + `cargo build`/`test` default (**in flight**:
+Journey Stage 1b-1, PR #203, from the existing `ProjectKind::Rust` —
+**not** `Cargo`, see §24); a terminal keybinding (**done**: `C-c t`,
+#173); a welcome buffer. The journey acceptance suite (§19) is the ratchet that
 keeps it fixed — it **exists now** (`tests/journey_acceptance.rs`,
 Stage 1a), seeded with steps 2, 3, and 5.
 
 Journey Stage 1b is the named remainder, and it splits: **1b-1 — the
-compile binding + project-kind defaults — is done**; 1b-2 (LSP spawn
-guidance, step 6) and 1b-3 (the welcome buffer, step 4) remain. The
-ratchet is now seeded with steps 2, 3, 5 and 9.
+compile binding + project-kind defaults — is in flight as PR #203**;
+1b-2 (LSP spawn guidance, step 6) and 1b-3 (the welcome buffer, step 4)
+remain. The ratchet is seeded with steps 2, 3 and 5, and gains step 9
+when #203 lands.
 
 ### Priority 2: Make workspace and location explicit
 
@@ -1625,10 +1626,10 @@ implementation — this list is direction, not commitment):
    `resolve_target_buffer` unification, the destination-scope substrate,
    and the first journey acceptance suite. It routes `pmacs .` into
    #165's dired buffer rather than growing a second directory surface.
-   **Stage 1b-1 — landed**: the compile binding and project-kind
-   defaults, with the prompt capturing its directory rather than
-   re-resolving it at accept time. **Stage 1b-2 / 1b-3 — remaining**:
-   LSP-failure surfacing, welcome buffer.
+   **Stage 1b-1 — in flight (PR #203)**: the compile binding and
+   project-kind defaults, with the prompt capturing its directory rather
+   than re-resolving it at accept time. **Stage 1b-2 / 1b-3 —
+   remaining**: LSP-failure surfacing, welcome buffer.
 2. **Discovery surface** (P4): the describe/list/where-is command
    family, M-x rich rows, help unification, help prefix.
 3. **Transient keymap layer** (§6): the overlay scope + lifetime

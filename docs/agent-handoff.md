@@ -104,8 +104,11 @@ commands, read `docs/active-work.md` immediately after this file.
   interaction islands added, config-registry adoption, background-work
   attribution. Its §2 grades the golden journey; **Journey Stage 1a
   moved that grade off "broken at step 3"** — see the arc bullet below.
-- **Journey arc (P1) — Stage 1b-1 LANDED** (`docs/journey-stage1b1-compile-defaults-framing.md`).
-  Journey step 9 moves **Partial → Works**: `C-c c` runs `compile.run`,
+- **Journey arc (P1) — Stage 1b-1 IMPLEMENTED, PR #203 OPEN**
+  (`docs/journey-stage1b1-compile-defaults-framing.md`). Not landed: per
+  `COHERENCE.md` §25 a grade changes only on landed evidence, so §2's
+  step-9 row still reads **Partial** and flips at merge.
+  Journey step 9 will move **Partial → Works**: `C-c c` runs `compile.run`,
   and the first prompt is prefilled from the detected project kind via
   `pmacs.compile.defaults` (seeded `rust = "cargo build"`, extensible
   from `init.lua`). Lua, tests and docs; no Rust change, no protocol
