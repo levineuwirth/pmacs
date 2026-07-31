@@ -1,11 +1,30 @@
 # Journey Stage 1b-3 — say something when the editor opens
 
-**Status: framing, rev 3 — awaiting review round 3.**
+**Status: framing, rev 4 — awaiting review round 4.**
 **Serves `COHERENCE.md` §2 (the golden journey, step 4), §18
 (onboarding), §19, §20 Priority 1.**
 
 ## 0. Revision history
 
+- rev 4 (2026-07-31) — review round 3. Two findings, both accepted.
+  - **The pinned API was crate-private but the pin was external.**
+    `tests/journey_acceptance.rs` is a separate integration crate and
+    cannot call `pub(crate) fn prepare_startup` or match a
+    `pub(crate) enum Startup`, so rev 3's acceptance 1 was
+    uncompilable. Resolved by making both **`pub`** — which is
+    consistent with the startup surface already exported (`run`,
+    `new`, `open`, `install_state_dirs`, `restore_desktop_if_armed`
+    are all `pub`), not a widening invented for a test. §3.2b also now
+    states the **isolation** the pin needs, since `prepare_startup`
+    deliberately calls `install_state_dirs` and can reach desktop
+    restore.
+  - **The M-x pin still had an "or", and half of it was impossible.**
+    `Minibuffer::accept` does `self.session.take()` and resolves
+    against the *selected candidate* (`src/minibuffer.rs:334-337`), so
+    after RET neither the session nor the typed contents survive to be
+    asserted. §4.4 now specifies **one** observable, available before
+    RET: `pmacs.minibuffer.selected()`
+    (`src/lua_bindings/mod.rs:14030`) must equal exactly `"help"`.
 - rev 3 (2026-07-31) — review round 2. Two acceptance holes and one doc
   correction; all accepted.
   - **The real startup wiring was still unpinned, and rev 2 knew it.**
@@ -311,9 +330,9 @@ prefix becomes a helper:
 ///
 /// Extracted so the local-startup sequence is testable. `run` adds only
 /// `Frontend::new()` and the event loop.
-pub(crate) fn prepare_startup(file: Option<PathBuf>) -> io::Result<Startup>;
+pub fn prepare_startup(file: Option<PathBuf>) -> io::Result<Startup>;
 
-pub(crate) enum Startup {
+pub enum Startup {
     /// Ready to enter the local TUI loop — desktop restored, launch
     /// finalized.
     Local(EditorState),
@@ -322,6 +341,38 @@ pub(crate) enum Startup {
     HandOff(crate::attach_dispatch::AttachDispatch),
 }
 ```
+
+**`pub`, not `pub(crate)`.** The journey ratchet lives in
+`tests/journey_acceptance.rs`, a separate integration crate that cannot
+reach crate-private items — rev 3 specified `pub(crate)` and an external
+pin, which does not compile. Exporting it is also consistent rather than
+expedient: `run`, `EditorState::new`, `EditorState::open`,
+`install_state_dirs` and `restore_desktop_if_armed` are **already**
+`pub`, so the startup sequence is public surface and this is the piece
+that was missing from it. (The alternative — keep it private and move
+the pin into `src/editor.rs`'s unit tests — was rejected because §19
+wants the journey row in the journey suite.)
+
+**Isolation the pin requires, stated because `prepare_startup` reaches
+real state.** It calls `install_state_dirs`, which resolves
+`user_history_dir()` / `user_state_dir()` from `PMACS_STATE_HOME` and
+XDG (`src/state.rs:54`). Tests cannot set those themselves —
+`std::env::set_var` is `unsafe` and this crate forbids it — so the pin
+inherits the same ambient-root requirement as every other
+editor-constructing test: the five bootstrap-storage variables
+controlled externally, which is already the standing local-gate
+workaround and is what #201's framing owns fixing.
+
+Two consequences the pin must respect:
+
+- **Assert buffer content only.** No assertion may depend on a state
+  directory being present, absent, or writable, so an ambient root
+  cannot change the verdict.
+- **Assert that desktop restore is unarmed**, rather than assuming it.
+  `restore_desktop_if_armed` is gated on `DesktopRestoreArmed`, which
+  only `pmacs.session.desktop_mode(true)` sets from config. A developer
+  whose real `init.lua` arms desktop mode would otherwise get a restored
+  `*scratch*` and a silently different result.
 
 `run()` becomes `match prepare_startup(file)? { … }` plus the loop it
 already has. The attach arms keep calling `run_attach*` from `run()`,
@@ -366,9 +417,14 @@ belong to §20 Priority 4's discovery arc (§5).
 falsified by a named mutation.
 
 1. **N — journey step 4, through the production startup path.**
-   Drive **`prepare_startup(None)`** (§3.2b) — the same call `run()`
-   makes — and assert the returned `Startup::Local` state has `*scratch*`
-   active, **non-empty**, naming `M-x`. This is the ratchet row.
+   In `tests/journey_acceptance.rs`, drive the **public**
+   `prepare_startup(None)` (§3.2b) — the same call `run()` makes — and
+   assert the returned `Startup::Local` state has `*scratch*` active,
+   **non-empty**, naming `M-x`. This is the ratchet row.
+   *Preconditions it must assert rather than assume* (§3.2b): that
+   desktop restore was **unarmed**, so an ambient `init.lua` calling
+   `desktop_mode(true)` cannot silently change the result. It asserts
+   buffer content only — never anything about state directories.
    *Rev 1 claimed `EditorState::new()` was the entry point (§2.2 shows
    it is shared with `open()` and the daemon); rev 2 then called the seam
    by hand, which left the wiring unpinned (§3.2b). This drives neither
@@ -393,15 +449,32 @@ falsified by a named mutation.
    on accept (`builtin/commands/default.lua:743-755`). So the pin
    **dispatches `M-x` as a key**, enters `help`, and accepts — then
    asserts `*help*` contains the entries' key sequences.
-   **Name the hazard, or the pin lies:** with a completion source
-   attached, a selected candidate shadows typed text and the minibuffer
-   selects candidate 0 whenever the list is non-empty (dired's
-   `C-x d` comment records this as S0-1/S0-4, and refuses a source for
-   that reason). Typing `help` and pressing RET can therefore accept a
-   *different* command. The pin must assert **which command ran** — not
-   merely that some help buffer appeared — by checking the minibuffer's
-   accepted value or `*help*`'s subject line before trusting the content
-   assertion.
+   **One observable, chosen here rather than left to implementation.**
+   With a completion source attached, a selected candidate shadows typed
+   text and the minibuffer selects candidate 0 whenever the list is
+   non-empty (dired's `C-x d` comment records this as S0-1/S0-4 and
+   refuses a source for that reason), so typing `help` and pressing RET
+   can accept a *different* command.
+
+   The accepted value cannot be recovered afterwards:
+   `Minibuffer::accept` does `self.session.take()` and resolves against
+   the selected candidate (`src/minibuffer.rs:334-337`), so after RET
+   neither the session nor the contents survive.
+
+   So the assertion happens **before** RET:
+
+   ```
+   dispatch M-x → type "help"
+   assert pmacs.minibuffer.selected() == "help"   -- exact, no fallback
+   dispatch RET
+   assert *help* contains every entry's `keys`
+   ```
+
+   `pmacs.minibuffer.selected()` returns the selected candidate string
+   (`src/lua_bindings/mod.rs:14030`). If the completion source has
+   selected something else, the pin fails **there**, naming what was
+   actually selected — instead of passing on a help buffer some other
+   command produced.
 5. **P — the buffer is editable and unmodified.** After greeting,
    `*scratch*` reports unmodified; typing a character inserts it, so
    step 5 works from the first frame. Targeted mutation: rendering

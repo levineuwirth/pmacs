@@ -347,13 +347,14 @@ If it does not, stop and repair the remote/fetch configuration.
     githubsucks/journey-stage1b1-compile-defaults
   ```
 
-## Journey Stage 1b-3 (P1) — FRAMING OPEN, revision 3
+## Journey Stage 1b-3 (P1) — FRAMING OPEN, revision 4
 
 - **Branch `journey-stage1b3-welcome`**, worktree `../pmacs-journey-1b3`,
   based on `githubsucks/main` @ `1f290d5`. **Framing only; no code, no
-  PR yet.** `docs/journey-stage1b3-welcome-framing.md` revision 3, two
+  PR yet.** `docs/journey-stage1b3-welcome-framing.md` revision 4, three
   review rounds closed (round 1: four findings; round 2: two acceptance
-  holes plus a doc correction; all accepted). The last of the 1b split
+  holes plus a doc correction; round 3: a visibility mismatch and an
+  unobservable assertion; all accepted). The last of the 1b split
   (1b-1 landed #203, 1b-2 landed #204 at `5376af1`).
 - **What it is.** Journey step 4 / `COHERENCE.md` §18: a fresh `pmacs`
   greets the user with an empty buffer, an empty status line, and no
@@ -374,7 +375,16 @@ If it does not, stop and repair the remote/fetch configuration.
   shipping no welcome, because the pins called the seam by hand. The
   terminal-free prefix of `run()` (everything before `Frontend::new()`)
   is now extracted into `prepare_startup`, which `run()` delegates to
-  and the pins drive.
+  and the pins drive. It is **`pub`**, not `pub(crate)`: the journey
+  suite is a separate integration crate and cannot reach crate-private
+  items, and `run`/`new`/`open`/`install_state_dirs`/
+  `restore_desktop_if_armed` are already public, so this completes that
+  surface rather than widening it for a test. The pin must assert
+  desktop restore was **unarmed** (an ambient `init.lua` calling
+  `desktop_mode(true)` would otherwise change the result) and must
+  assert buffer content only, since `install_state_dirs` resolves real
+  XDG/`PMACS_STATE_HOME` roots that tests cannot override
+  (`set_var` is unsafe and forbidden).
 - **The step-2 pin is NOT amended.** Revision 1 analysed a status-line
   welcome and then chose `*scratch*`, but kept the amendment — an
   internal contradiction. The status stays empty, so the pin stays true,
@@ -413,9 +423,11 @@ If it does not, stop and repair the remote/fetch configuration.
   programmatic API. M-x is `editor.execute-command`, a minibuffer with
   the `commands` completion source that calls `invoke_interactive` on
   accept. The `M-x help` pin dispatches the chord, enters the name and
-  accepts — and must assert **which** command ran, because a selected
-  candidate shadows typed text (dired refused a completion source for
-  exactly this reason).
+  accepts — and asserts **`pmacs.minibuffer.selected() == "help"`
+  BEFORE RET**, because a selected candidate shadows typed text (dired
+  refused a completion source for exactly this reason) and `accept()`
+  does `session.take()`, so nothing about the accepted value survives
+  afterwards.
 - **Integrate late.** #204 has landed at `5376af1`; this lane still
   touches `COHERENCE.md`, `docs/agent-handoff.md` and
   `docs/active-work.md`, so merge `main` at PR time rather than opening
