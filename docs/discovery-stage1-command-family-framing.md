@@ -1,11 +1,44 @@
 # Discovery Stage 1 — the describe/list command family
 
-**Status: framing, rev 1 — awaiting approval.**
+**Status: framing, rev 2 — awaiting review round 2.**
 **Serves `COHERENCE.md` §5 (unify discoverability), §1.1 (substrate
 without surface), §20 Priority 4.**
 
 ## 0. Revision history
 
+- rev 2 (2026-07-31) — review round 1. Two blocking, two major; all four
+  accepted, all four verified in the code first.
+  - **Completion does not close the free-text hole**, and rev 1 said it
+    did. `resolve_accepted_value` (`src/minibuffer.rs:564-575`) returns
+    the **literal typed text** whenever `session.selected` is `None`, so
+    a non-matching typo still reaches `on_accept` — and a fuzzy match
+    can instead select a *different* setting silently. Completion here
+    is **assistance**, not validation. §3.2 is reframed and acceptance 5
+    now pins what actually happens; closed-set acceptance is named as
+    Rust work in §5.
+  - **`invoke_interactive` is not the M-x path** — the exact error #205
+    corrected, repeated one PR later. It rotates the interactive-command
+    boundary and calls the body (`mod.rs:6097-6110`); it does not open a
+    palette. The path is **dispatch `M-x` → `editor.execute-command` →
+    accept a command → `invoke_interactive`**. Acceptances 1, 7 and 9
+    are rewritten around it, including the **second** prompt for
+    commands that take an argument.
+  - **`_show_help(text)` is an output sink, not a migration seam.**
+    `src/help.rs` has semantic renderers for command / key / buffer /
+    mode / hook / view and **none** for settings, lists or apropos, so
+    once Lua has flattened those to text a later migration still has to
+    change each command's subject-specific logic. §3.4's claim is
+    narrowed to what is true — one owner for Lua `*help*` writes — and
+    §3.4a states the structure that makes the future Rust work
+    per-subject rather than per-call-site.
+  - **Ground-truth and counting errors.** §2.2 listed eight missing
+    commands and omitted `list-settings` while §3.1 listed nine; §2.5's
+    "two sites into ten" should have been eleven; `pmacs.keymap.lookup`
+    does **not** return `description` (it calls `key_info_table` with
+    `cmd = None`, `mod.rs:6938-6940`); and the `has_predicate` /
+    raw-predicate sites rev 1 cited are **`MenuItem` fields**, not
+    `Command.predicate`. The predicate conclusion survives on correct
+    evidence (§2.4).
 - rev 1 (2026-07-31) — first framing. Scouted against `githubsucks/main`
   @ `54a092e` (Journey Stage 1b-3, #205).
 
@@ -40,7 +73,7 @@ stage adds no Rust.
 | `pmacs.describe.key(seq)` | resolved against the **active buffer + major mode** |
 | `pmacs.describe.{buffer,view,mode,hook}` | structured tables |
 | `pmacs.keymap.list()` | `{ sequence, command, scope }` for **every** binding, via `KeymapStack::iter_all` |
-| `pmacs.keymap.lookup(seq)` | `{ sequence, command, scope, source, description }` |
+| `pmacs.keymap.lookup(seq)` | `{ sequence, command, scope, source }` — **not** `description`: it calls `key_info_table` with `cmd = None` (`mod.rs:6938-6940`), so the description arm never fires |
 | `pmacs.config.list()` / `pmacs.config.describe(name, buf)` | full typed descriptors |
 
 Every one of the commands in §3 is a rendering of data already
@@ -57,8 +90,10 @@ what the surface leaves out.**
 `editor.describe-instance[-buffer]`, `editor.list-buffers`,
 `editor.list-workers`, and `help` (#205).
 
-**Missing entirely:** describe-key, describe-mode, describe-hook,
-describe-buffer, where-is, list-commands, list-keybindings, apropos.
+**Missing entirely — nine, matching §3.1 exactly:** describe-key,
+describe-mode, describe-hook, describe-buffer, where-is, list-commands,
+list-keybindings, **list-settings**, apropos. (Rev 1 listed eight here
+and nine in §3.1.)
 
 ### 2.3 `describe-setting` prompts free-text, deliberately
 
@@ -79,11 +114,17 @@ oversight, so §3.2 says what changes about it.
 
 ### 2.4 `Command.predicate` is stored, exposed, and never evaluated
 
-`predicate: Option<Function>` (`src/command.rs:79`) is surfaced as
-`has_predicate` (`mod.rs:6204`) and handed out whole (`:6257`). No call
-site *evaluates* it — not `invoke`, not `invoke_interactive`, not
-dispatch, not M-x filtering, not the menu. Its doc comment describes
-palette gray-out that never shipped (§24 already logs this).
+`predicate: Option<Function>` (`src/command.rs:79`) is read in exactly
+**two** places: `src/help.rs:76` — inside the orphaned renderer — and one
+assertion past `#[cfg(test)]`. No production call site *evaluates* it:
+not `invoke`, not `invoke_interactive`, not dispatch, not M-x filtering,
+not the menu. Its doc comment describes palette gray-out that never
+shipped (§24 already logs this).
+
+*(Rev 1 cited `mod.rs:6204` / `:6257` as evidence. Those are
+**`MenuItem`** fields — `item.label`, `item.group`, `item.order`,
+`item.predicate` — a different type with its own predicate. The
+conclusion held; the evidence did not.)*
 
 **This stage does not evaluate it either** (§5), because doing so makes
 commands stop being invocable — a behaviour change needing its own
@@ -96,9 +137,12 @@ decision about what "unavailable" means at each call site.
 is **orphaned** — the reachable renderer is the Lua `show_help_text`,
 which renders *less* (no source, no scope).
 
-**A family of eight new commands each calling `show_help_text` turns a
-two-site migration into a ten-site one.** §3.4 is the answer to that,
-and it is the most consequential decision in this framing.
+**Nine new commands each calling `show_help_text` would turn a two-site
+migration into an eleven-site one.** §3.4 is the answer, and it is the
+most consequential decision in this framing — but §3.4 is careful about
+what it can actually promise, because `src/help.rs` has renderers for
+command / key / buffer / mode / hook / view and **none for settings,
+lists, or apropos**.
 
 ## 3. Design
 
@@ -125,21 +169,42 @@ this makes the family's identity match. Existing names are not removed
 — `editor.describe-command` is bound in muscle memory and in
 `docs/keybindings.md`.
 
-### 3.2 `describe-setting` gains a completion source
+### 3.2 `describe-setting` gains completion — which is assistance, not validation
 
-It gains a completion source so a typo cannot reach `on_accept`. The
-dired trade (§2.3) applies but resolves differently here: dired's prompt
-takes an arbitrary *path*, where a shadowing candidate silently opens
-the wrong directory; this prompt takes a name **from a closed set**, so
-a candidate is what the user wants and free text is the failure mode.
+Rev 1 claimed a completion source means "a typo cannot reach
+`on_accept`". **It does not.**
 
-**No Rust is needed for it.** `parse_completion_source`
-(`src/lua_bindings/mod.rs:14145-14165`) accepts the strings `none` /
-`commands` / `buffers` / `files` **and a Lua `Function`**, which becomes
-`CompletionSource::Custom` and is called for candidates. So the source
-is `function() return names_from(pmacs.config.list()) end` — the stage
-stays entirely Lua, and `Custom` is the general escape hatch every other
-command in §3.1 can use if it needs one.
+```rust
+// src/minibuffer.rs:564-575
+fn resolve_accepted_value(session: &MinibufferSession, typed: &str) -> String {
+    if matches!(session.source, CompletionSource::None) { return typed.to_owned(); }
+    if let Some(idx) = session.selected
+        && let Some(cand) = session.candidates.get(idx) { return cand.clone(); }
+    typed.to_owned()          // <-- no selection: the literal typed text
+}
+```
+
+So with a source attached there are **two** outcomes rev 1 conflated:
+
+- **No candidate selected** (a typo matching nothing) → the literal text
+  reaches `on_accept`, exactly as today, and the existing
+  `no such setting: <name>` status path handles it.
+- **A candidate selected** → that candidate wins over the typed text. On
+  a fuzzy source a near-miss can therefore **silently describe a
+  different setting** — a new failure mode, milder than the old one but
+  not nothing.
+
+What the source genuinely buys is *assistance*: the closed set is
+visible and reachable by completion instead of having to be known. That
+is worth doing and is what §3.1 promises. **Closed-set acceptance
+semantics — "refuse a value that is not a candidate" — is Rust work**
+(`resolve_accepted_value` and a per-session flag) and is deferred to
+§5 rather than smuggled in as a side effect.
+
+**Still no Rust in this stage.** `parse_completion_source`
+(`mod.rs:14145-14165`) accepts `none` / `commands` / `buffers` / `files`
+**and a Lua `Function`** → `CompletionSource::Custom`. The source is
+`function() return names_from(pmacs.config.list()) end`.
 
 ### 3.3 `M-x help` becomes the index
 
@@ -147,60 +212,116 @@ command in §3.1 can use if it needs one.
 above, so the arc's own promise — *`help` stays the index they are
 reached from* — is kept rather than merely restated.
 
-### 3.4 One rendering seam, so the later unification is one site
+### 3.4 One owner for Lua `*help*` writes — the honest version of the claim
 
 Every new command renders through **`pmacs.editor._show_help`** — the
-seam #205 added — and **not** by calling `show_help_text` or building
-its own buffer.
+seam #205 added — and **not** by calling `show_help_text` directly or
+building its own buffer.
 
-That is the whole mitigation for §2.5: when the help-layer unification
-stage arrives, migrating to `src/help.rs`'s richer renderer is a change
-at **one** Lua function, not at ten call sites. A stage that adds
-consumers to a duplicated layer without funnelling them is how the
-duplication becomes permanent.
+**What that buys, precisely: one owner for `*help*` writes.** Buffer
+ownership, the read-only intercept, `q`, and the found-by-name hazard
+are decided in one place instead of eleven. That is real and it is the
+reason to do it.
 
-**Corollary this stage must respect:** no new command may render
-anything `src/help.rs` cannot eventually produce. Where the Lua renderer
-is poorer (no source, no scope), the new commands render the poorer form
-rather than inventing a third shape.
+**What it does not buy, and rev 1 claimed it did:** a one-site migration
+to `src/help.rs`. That layer has semantic renderers for **command, key,
+buffer, mode, hook and view** — and **none for settings, lists, or
+apropos**. `_show_help` takes *already-flattened text*, so by the time a
+subject reaches it the structure a richer renderer would need is gone.
+A later migration still has to change each command's subject-specific
+logic; the seam saves the plumbing, not the semantics.
+
+### 3.4a The structure that makes the future work per-subject
+
+So the funnel is paired with a shape that keeps the semantics
+addressable: each command's rendering is a **named per-subject
+function** returning text — `render_key_help(info)`,
+`render_settings_list(rows)` — and the command body does nothing but
+call it and hand the result to `_show_help`.
+
+Then the future help-unification stage is: replace each named renderer
+whose subject `src/help.rs` already covers (key, mode, hook, buffer),
+and **write new Rust renderers for the three subjects it does not
+cover** (settings, lists, apropos). That work is enumerated here rather
+than discovered later, which is the actual deliverable of this section.
+
+**Corollary this stage must respect:** where the Lua renderer is poorer
+than `src/help.rs` for a subject it *does* cover (no source, no scope),
+the new commands render the poorer form rather than inventing a third
+shape.
 
 ## 4. Acceptance
 
 **N** = new behaviour, must fail on full revert. **P** = preservation,
 falsified by a named mutation.
 
-1. **N — each of the nine commands exists and renders content.** Driven
-   through `pmacs.command.invoke_interactive` (the M-x path), asserting
-   **content produced** in `*help*` — not that a buffer exists.
+### 4.0 The M-x path, stated once
+
+Rev 1 said "driven through `pmacs.command.invoke_interactive` (the M-x
+path)". **That is not the M-x path**, and #205 established as much one
+PR earlier. `invoke_interactive` rotates the interactive-command
+boundary and calls the body (`mod.rs:6097-6110`); it opens no palette.
+
+Every pin below that claims to exercise a command as a user does drives:
+
+```
+dispatch M-x
+  → editor.execute-command opens the minibuffer (source = "commands")
+  → type the command name
+  → assert pmacs.minibuffer.selected() == "<name>"     -- BEFORE RET
+  → dispatch RET                                        -- accept
+  → editor.execute-command calls invoke_interactive
+```
+
+The pre-RET assertion is not decoration: `accept()` does
+`session.take()`, so afterwards nothing about the accepted value
+survives, and a selected candidate shadows typed text.
+
+**Commands that take an argument open a SECOND prompt** (`where-is`,
+`describe-key`, `describe-hook`, `describe-setting`, `apropos`). Those
+pins drive that prompt too, and assert against it with the same
+pre-accept discipline. A pin that stops after the first RET has tested
+the palette, not the command.
+
+### 4.1 Pins
+
+1. **N — each of the nine commands runs from M-x and renders content.**
+   Through §4.0's full path, including the second prompt where the
+   command takes one. Asserts **content produced** in `*help*`.
 2. **N — `where-is` agrees with the keymap.** Bind a command to a known
    chord, then assert `where-is` reports that chord. Falsified by
    rendering a static string.
 3. **N — `list-keybindings` covers every binding `keymap.list()`
-   reports.** A property over the data, not a fixed expected list, with
-   a non-empty precondition so the loop cannot be vacuous.
-4. **N — `apropos` matches on descriptions, not only names.** Search for
-   a word that appears in exactly one command's *description* and in no
-   command *name*, and assert that command is listed. This is the pin
-   that distinguishes apropos from a name filter.
-5. **N — `describe-setting` refuses a typo before `on_accept`.** With
-   the completion source attached, assert `pmacs.minibuffer.selected()`
-   resolves to a real setting — the pre-RET observable, since
-   `accept()` does `session.take()` and nothing survives it.
-6. **N — `M-x help` lists the family.** Every command in §3.1 appears in
-   the index. A property over the family list, so adding a tenth command
-   without indexing it fails.
-7. **P — every new command renders through `_show_help`.** Replace that
-   seam with a counting stub and assert the count equals the number of
-   commands exercised. This is §3.4's guarantee, and without it the
-   funnelling is a convention rather than a fact.
+   reports.** A property over the data, with a non-empty precondition so
+   the loop cannot be vacuous.
+4. **N — `apropos` matches descriptions, not only names.** Search a word
+   that appears in exactly one command's *description* and in no command
+   *name*. This is what distinguishes apropos from a name filter.
+5. **N — `describe-setting` completes, and a non-matching typo still
+   reaches the existing error path.** Two assertions, because §3.2 has
+   two outcomes: (a) typing a real setting's prefix makes it the
+   selected candidate, and accepting describes it; (b) typing a string
+   that matches **nothing** leaves `selected()` nil, and accepting
+   produces the `no such setting` status — **not** a described setting.
+   *Rev 1 asserted a typo "cannot reach `on_accept`", which
+   `resolve_accepted_value` contradicts.*
+6. **N — `M-x help` lists the family.** A property over the family list,
+   so adding a tenth command without indexing it fails.
+7. **P — every new command's `*help*` write goes through
+   `_show_help`.** Replace that function with a counting stub, drive all
+   nine through §4.0's path, and assert the count equals nine. Pins
+   §3.4's *actual* claim — one owner for `*help*` writes — rather than
+   the migration claim rev 1 overstated.
 8. **P — the existing describe/list commands still work.**
    `editor.describe-command`, `editor.describe-setting`,
    `editor.list-buffers`, `editor.list-workers` unchanged. Targeted
    mutation: renaming rather than retaining them.
 9. **P — no command's predicate is evaluated.** Register a command whose
-   predicate raises, then invoke it through M-x and assert it **runs**.
-   Pins §2.4's deliberate non-change, so a later stage that starts
-   evaluating predicates has to change this pin knowingly.
+   predicate **raises**, then run it through §4.0's full M-x path and
+   assert it **runs**. Pins §2.4's deliberate non-change, so a stage
+   that starts evaluating predicates must change this pin knowingly.
+   Driven through the palette, not `invoke_interactive` directly —
+   otherwise it would pass even if M-x grew predicate filtering.
 
 ## 5. Deferred, each with its reason
 
@@ -220,6 +341,11 @@ falsified by a named mutation.
   stage that can weigh `F1` / `C-c ?` / a rebind together.
 - **Settings value provenance** (§11) — `describe-setting` will still
   answer "who set this?" with the *definition* site.
+- **Closed-set acceptance semantics** (§3.2). Making a prompt *refuse* a
+  value that is not a candidate needs `resolve_accepted_value` and a
+  per-session flag — Rust, and a change every existing prompt with a
+  source would inherit. Named here because rev 1 claimed this stage
+  delivered it as a side effect of adding completion.
 
 ## 6. Coherence impact
 

@@ -401,7 +401,13 @@ which would have re-conflicted on every merge.
   migration into a ten-site one. Everything routes through
   `pmacs.editor._show_help` (the seam #205 added) so the later help
   unification stays a one-site change — pinned by a counting stub, not
-  left as a convention.
+  left as a convention. **Narrowed in revision 2:** the seam buys one
+  *owner for `*help*` writes*, not a one-site migration — `src/help.rs`
+  has renderers for command/key/buffer/mode/hook/view and **none for
+  settings, lists or apropos**, and `_show_help` takes already-flattened
+  text. Each command's rendering is therefore a named per-subject
+  function, so the future Rust work is enumerated per-subject instead of
+  discovered per-call-site.
 - **Deliberately deferred, each with a reason:** richer M-x rows
   (`MinibufferPrompt.candidates` is `Vec<String>` — protocol change);
   `Command` gaining title/category/flags (~147 definition sites);
