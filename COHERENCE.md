@@ -392,10 +392,10 @@ Two of that observation's three examples have been answered — opening a
 file by `C-x C-f` (#162) and opening a terminal by `C-c t` (#173).
 **Running a build still has no binding on `main`**; PR #203 is open and
 adds `C-c c`. **The quote stays as written either way**: it names a standing bias in how new work gets bound,
-not three isolated omissions, and three fixes do not retire a bias. What
-has changed is that the bias no longer has an uncontested example in the
-golden journey — the next new surface that ships without a binding is
-evidence the pattern is live again, and should be read that way.
+not three isolated omissions, and two fixes do not retire a bias.
+**Running a build remains its uncontested golden-journey example until
+#203 lands.** A new surface that ships without a binding would be further
+evidence the pattern is live, and should be read that way.
 
 ---
 

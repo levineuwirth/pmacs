@@ -264,8 +264,9 @@ If it does not, stop and repair the remote/fetch configuration.
   ships them as *in flight*, because `COHERENCE.md` §25 says a grade
   changes only on landed evidence and the PR is open: `COHERENCE.md`
   §2's step-9 verdict row (Partial → **Works**), §2's post-table
-  keybinding-inversion paragraph (third example answered), §20 Priority
-  1 and its arc list (in flight → done), and
+  keybinding-inversion paragraph (third example answered; the build is
+  no longer its uncontested example), §20 Priority 1 and its arc list (in
+  flight → done), and
   `docs/agent-handoff.md` §1's arc bullet (IMPLEMENTED → LANDED).
   **Recorded here because an unowned doc flip is exactly how this
   ledger's drift starts** — the same rule-4 precondition that kept #176's
