@@ -380,6 +380,44 @@ which would have re-conflicted on every merge.
     githubsucks/journey-stage1b3-welcome
   ```
 
+## Discovery Stage 1 (P4) — FRAMING OPEN, revision 1
+
+- **Branch `discovery-stage1-commands`**, worktree `../pmacs-p4-discovery`,
+  based on `githubsucks/main` @ `54a092e`. **Framing only; no code, no
+  PR yet.** `docs/discovery-stage1-command-family-framing.md` revision 1.
+- **What it is.** `COHERENCE.md` §20 Priority 4 — "almost pure wiring,
+  the best payoff-per-effort in this document". Nine describe/list
+  commands (describe-key/mode/hook/buffer, where-is, list-commands,
+  list-keybindings, list-settings, apropos) over introspection that
+  already exists.
+- **It adds NO Rust.** `pmacs.describe.*`, `pmacs.keymap.list()`,
+  `pmacs.command.list()` and `pmacs.config.list()` already return
+  everything needed, and `parse_completion_source` accepts a **Lua
+  `Function`** (`CompletionSource::Custom`), so even the prompts need no
+  new Rust — which also closes `describe-setting`'s free-text hole.
+- **The decision that matters: ONE rendering seam.** `src/help.rs`'s
+  renderer is orphaned and the reachable Lua `show_help_text` renders
+  less, so nine new commands calling it directly would turn a two-site
+  migration into a ten-site one. Everything routes through
+  `pmacs.editor._show_help` (the seam #205 added) so the later help
+  unification stays a one-site change — pinned by a counting stub, not
+  left as a convention.
+- **Deliberately deferred, each with a reason:** richer M-x rows
+  (`MinibufferPrompt.candidates` is `Vec<String>` — protocol change);
+  `Command` gaining title/category/flags (~147 definition sites);
+  predicate evaluation (**stored and exposed but never evaluated** — a
+  behaviour change); help-layer unification; and the **help prefix key**,
+  which this stage does not touch because #205 recorded why `C-h` is not
+  free.
+- Recovery:
+
+  ```sh
+  git fetch githubsucks
+  git worktree add ../pmacs-p4-discovery \
+    -b discovery-stage1-commands \
+    githubsucks/discovery-stage1-commands
+  ```
+
 ## Generated-buffer immutability lane (Arc: workbench primitives) — STAGE 1 MERGED; STAGE 2 IS NEXT
 
 **Framing #188 (revision 7) and Stage 1 #191 are both on `main` @
