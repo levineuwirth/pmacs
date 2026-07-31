@@ -253,6 +253,62 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
+## Journey Stage 1b-2 (P1) — FRAMING OPEN, revision 1
+
+- **Branch `journey-stage1b2-lsp-guidance`**, worktree
+  `../pmacs-journey-1b2`, based on `githubsucks/main` @ `fbcf235`.
+  **Framing only; no code, no PR yet.**
+  `docs/journey-stage1b2-lsp-guidance-framing.md` revision 1, no review
+  rounds yet. Sibling of Stage 1b-1 (PR #203, step 9); this is step 6.
+- **What it is.** `COHERENCE.md` §1.2's canonical silence: a
+  preconfigured-but-missing language server fails with no status
+  message, no record, and no modeline marker, while tree-sitter
+  highlighting keeps working and masks it. The stage reports the
+  failure with guidance, wires an `M-x lsp.status` surface, and gives
+  the modeline a way to say "failed" rather than nothing.
+- **Half of it is already built and unwired.**
+  `LspManager::status_buffer_text()` renders "the `*lsp*` status buffer",
+  `last_error(sid)` exists, **both are exposed to Lua and tested**
+  (`pmacs.lsp.status_buffer_text`, `src/lua_bindings/mod.rs:10949`;
+  `tests/m4_acceptance.rs:2634`) — and there is **no production caller,
+  no `*lsp*` buffer, and no command**. Several `src/lsp.rs` and
+  `src/project.rs` doc comments refer to that buffer as if it exists.
+- **The reporting pattern is already adopted twice in `lsp.lua` itself**
+  — root-resolver failures (`:570-585`) and subscriber failures
+  (`:1831-1836`), both `pcall(pmacs.editor.set_status, msg)` with the
+  `pmacs.error` arm riding along. The canonical case at `:658-674` was
+  simply never converted. This stage finishes an adoption; it does not
+  start one.
+- **`COHERENCE.md` §1.2's frequency note is wrong, and it decides the
+  design.** It says the failure fires "once per project root".
+  `LspManager::spawn` returns early on failure *before* both
+  `status_tracker.ensure` and `clients.insert` (`src/lsp.rs:1287-1297`),
+  so a failed spawn leaves **no record at all**, `pmacs.lsp.list()`
+  cannot see it, and `ensure_server`'s affinity loop re-spawns. The real
+  rate is **once per file open**. Hence the rule: **memoize the report,
+  not the failure** — the spawn is still retried, so installing the
+  binary mid-session recovers with nothing to invalidate.
+- **The durable surface cannot show the failure today.**
+  `status_buffer_text` renders from `self.clients`, which a failed spawn
+  never enters. The stage keeps its failure record in Lua and renders it
+  as a section above that output, rather than reshaping Rust's status
+  model before anyone has used the surface. Stated as a limitation, with
+  promotion named as follow-on.
+- Its §1.7 records four stale `COHERENCE.md` §1.2 citations
+  (`:614-626` → `:658-674`; `:895-897` → `:1019-1021`; the frequency
+  note; and the now-false implication that no background failure is
+  reported anywhere).
+- Recovery from a clean checkout — **the two-argument form does not
+  work** (`git worktree add <path> <remote-only-branch>` fails with
+  `fatal: invalid reference`):
+
+  ```sh
+  git fetch githubsucks
+  git worktree add ../pmacs-journey-1b2 \
+    -b journey-stage1b2-lsp-guidance \
+    githubsucks/journey-stage1b2-lsp-guidance
+  ```
+
 ## Generated-buffer immutability lane (Arc: workbench primitives) — STAGE 1 MERGED; STAGE 2 IS NEXT
 
 **Framing #188 (revision 7) and Stage 1 #191 are both on `main` @
