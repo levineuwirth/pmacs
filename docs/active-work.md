@@ -255,11 +255,10 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
-## Journey Stage 1b-2 (P1) — FRAMING OPEN, revision 4
+## Journey Stage 1b-2 (P1) — IMPLEMENTED, PR OPEN
 
 - **Branch `journey-stage1b2-lsp-guidance`**, worktree
   `../pmacs-journey-1b2`, based on `githubsucks/main` @ `fbcf235`.
-  **Framing only; no code, no PR yet.**
   `docs/journey-stage1b2-lsp-guidance-framing.md` revision 4, three
   review rounds closed (round 1: two blocking, three major, one minor;
   round 2: two blocking, two cleanups; round 3: one blocking; all
@@ -343,6 +342,18 @@ If it does not, stop and repair the remote/fetch configuration.
   (`:614-626` → `:658-674`; `:895-897` → `:1019-1021`; the frequency
   note; and the now-false implication that no background failure is
   reported anywhere).
+- **ON MERGE, flip the step-6 grade.** `COHERENCE.md` §2's step-6 row
+  stays **Partial** while the PR is open, per §25's landed-evidence
+  rule, and says so in the row itself. §20 Priority 1 and the arc list
+  say "in flight". Same obligation shape as 1b-1's.
+- **Bites, all directed.** Full revert fails 14 of 16 pins; removing the
+  modeline branch fails 6; removing the sweep fails **exactly one** —
+  the shared-affinity pin written for round 2's blocking finding, which
+  confirms no other pin covers it; removing the rename/delete
+  disposition fails exactly those two; removing the dedupe memo fails
+  the two dedupe pins; and keying the memo on the resolved root (the
+  revision-1 design) fails **only** the markerless pin, which is the
+  case where root and affinity key differ.
 - Recovery from a clean checkout — **the two-argument form does not
   work** (`git worktree add <path> <remote-only-branch>` fails with
   `fatal: invalid reference`):
