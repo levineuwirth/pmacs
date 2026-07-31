@@ -1,11 +1,36 @@
 # Journey Stage 1b-2 — say when language intelligence did not start
 
-**Status: framing, rev 2 — awaiting review round 2.**
+**Status: framing, rev 3 — awaiting review round 3.**
 **Serves `COHERENCE.md` §1.2 (the silence asymmetry), §2 (the golden
 journey, step 6), §19, §20 Priority 1.**
 
 ## 0. Revision history
 
+- rev 3 (2026-07-30) — review round 2. Two blocking, two cleanups; all
+  four accepted, and the two blockers verified by running Lua rather
+  than by reading it.
+  - **Recovery was inconsistent across buffers that share an affinity.**
+    Rev 2 cleared `failures[K]` on success but cleared only the
+    *succeeding* buffer's projection. So: buffer A fails, buffer B
+    succeeds for the same `(language, key_uri)` — `M-x lsp.status` says
+    the failure is gone while **A's modeline still reads `LSP:!`**. Rev
+    2's claim that the two tables are "written and cleared at the same
+    moment" was simply false for the cross-buffer case, which is the
+    normal case for a project with more than one file. Each buffer
+    projection now carries its affinity key, and a success **sweeps every
+    projection holding that key** (§2.5). Acceptance 9 pins it.
+  - **The markerless key had no Lua representation.** `key_uri` is
+    deliberately nil, and `t[nil] = v` raises *"table index is nil"* —
+    confirmed by running it, in both LuaJIT and 5.4. So rev 2's central
+    markerless criterion was literally unimplementable as written, and
+    left to implementation would have invited two different ad-hoc
+    encodings for the two tables. §2.2 now prescribes **one** key
+    function, used by both.
+  - **Acceptance 10 could not have observed what it claimed.** Making the
+    command resolvable changes no state by itself; `failures` is cleared
+    by a *successful spawn*, which needs an attach to occur. The pin now
+    reattaches before pressing `g`.
+  - The ledger heading still said revision 1.
 - rev 2 (2026-07-30) — review round 1. Two blocking, three major, one
   minor; all six accepted, all six verified in the code first.
   - **The affinity key was misstated** (§2.2). The runtime's reuse key
@@ -279,6 +304,36 @@ directory. This stage does not change that behaviour; it matches it.
 | `reported` | `(language, key_uri, command)` | never cleared, session-scoped | the status-line report only |
 | `failures` | `(language, key_uri)` | **cleared when a spawn for that key succeeds** | `*lsp*`, and the per-buffer projection |
 
+**`key_uri` is nil, and Lua cannot index a table by nil.** `t[nil] = v`
+raises `table index is nil` — verified by running it under both LuaJIT
+and Lua 5.4, not inferred. Since the markerless case *is* the nil case,
+the central criterion of §4 acceptance 4 is unimplementable without an
+encoding, and leaving it to implementation would let the two tables
+diverge on how they spell it.
+
+**One key function, used by both tables:**
+
+```lua
+-- Lua strings are 8-bit clean (`#"a\0b" == 3`, checked), so \0 is a
+-- separator no path or language id can contain.
+--
+-- The `u`/`n` discriminator is what makes markerless unambiguous: a
+-- bare `key_uri or ""` would collide with a (pathological but legal)
+-- empty URI, and a sentinel like "markerless" is a string a URI could
+-- in principle equal. The prefix cannot collide with anything.
+local function affinity_key(language, key_uri)
+  return language .. "\0" .. (key_uri and ("u" .. key_uri) or "n")
+end
+
+local function reported_key(language, key_uri, command)
+  return affinity_key(language, key_uri) .. "\0" .. tostring(command)
+end
+```
+
+`false` would also be a legal Lua key, but the keys here are tuples, so
+a single encoded string is what both tables want anyway — and one
+function is what stops the two encodings drifting apart.
+
 Rev 1 had one record and said nothing about recovery. One record forces
 a bad choice: keep it and `*lsp*` reports a failure the user has since
 fixed; clear it and the dedupe is gone, so the message returns on the
@@ -371,15 +426,36 @@ by `(language, key_uri)`. Deriving that key from a buffer means calling
 effect, or one that raises, would then run inside painting.
 
 So the failure is **projected per buffer at attach time**, beside the
-existing map:
+existing map, and **each projection carries the affinity key that
+produced it**:
 
 ```lua
-failed_attachments[tostring(buf)] = { language = …, command = … }
+failed_attachments[tostring(buf)] = {
+  key = affinity_key(language, key_uri),   -- §2.2
+  language = …,
+  command = …,
+}
 ```
 
-written where `attach_buffer` observes `ensure_server` returning nil, and
-**cleared on the same path when an attach succeeds**. The segment
-becomes one more map lookup and computes nothing:
+**Clearing has to sweep, not touch one entry.** Rev 2 said the two
+tables were "written and cleared at the same moment"; that is false as
+soon as two buffers share an affinity, which is the normal case for a
+project with more than one file:
+
+> A `.rs` file fails, so `failures[K]` and `failed_attachments[A]` are
+> both written. The user installs the server and opens a *second* `.rs`
+> file in the same project. That spawn succeeds for the same `K`, so
+> `failures[K]` is cleared and `*lsp*` reports nothing wrong — while
+> **A's modeline still reads `LSP:!`**, because only B's projection was
+> touched. The two surfaces now contradict each other, and the stale one
+> is the one the user is looking at.
+
+So a success for key `K` clears `failures[K]` **and every projection
+whose `key == K`**. The sweep is bounded by the number of buffers with a
+recorded failure, which is at most the number of open buffers, and it
+runs on a spawn success — not on a paint.
+
+The segment becomes one more map lookup and computes nothing:
 
 ```lua
 local rec = attachments[key]
@@ -394,10 +470,11 @@ all of which treat a record as naming a live server; inventing one would
 route requests at a server that does not exist. The failure projection is
 a **separate** table for exactly that reason.
 
-Two tables with two lifetimes: `failures` (affinity-keyed, for `*lsp*`)
-and `failed_attachments` (buffer-keyed, for the modeline). They are
-written and cleared at the same moment, but neither can serve the
-other's reader without doing work in the wrong place.
+Two tables with two readers: `failures` (affinity-keyed, for `*lsp*`)
+and `failed_attachments` (buffer-keyed, carrying its affinity key, for
+the modeline). Neither can serve the other's reader without doing work
+in the wrong place — and, per the sweep above, they are cleared by the
+same *event* but not by the same *touch*.
 
 ### 2.6 What this stage does not do
 
@@ -480,38 +557,52 @@ stage worked.
    clearing `failures` / `failed_attachments`, which is what one record
    would have forced. **Asserted in both surfaces**, because they read
    different tables (§2.5).
-9. **N — `M-x lsp.status` renders a buffer** containing both the failure
-   section and `status_buffer_text()`'s output. Asserts **content
-   produced**, not that a buffer exists.
-10. **N — `g` refreshes the panel.** With the panel open, resolve the
-    failure and press `g`: the failure section is gone. Falsified by
-    omitting `on_refresh`, which makes `listview.refresh` early-return
-    (`listview.lua:259`) and leaves the panel stale while `g` appears
-    bound.
-11. **N — a foreign `*lsp*` buffer is not adopted.** Create a buffer
+9. **N — recovery reaches every buffer sharing the affinity.** Buffer A
+   fails; the command becomes resolvable; buffer B in the **same
+   project** attaches successfully. Assert **A's** modeline no longer
+   reads `LSP:!` — not B's. Falsified by clearing only the succeeding
+   buffer's projection, which is rev 2's design and leaves `*lsp*` and
+   A's modeline contradicting each other.
+   *This pin is the reason the projection carries its affinity key at
+   all*, so it must assert on A: a version that checks B passes on the
+   broken implementation.
+10. **N — `M-x lsp.status` renders a buffer** containing both the
+    failure section and `status_buffer_text()`'s output. Asserts
+    **content produced**, not that a buffer exists.
+11. **N — `g` refreshes the panel.** With the panel open: make the
+    command resolvable **and then reattach** — open a file in the
+    project so a spawn actually succeeds — then press `g`, and the
+    failure section is gone. **The reattach is load-bearing**: making
+    the command resolvable changes no state by itself, since `failures`
+    is cleared by a successful spawn, so a version of this pin that
+    only edits the config and presses `g` would assert nothing about
+    refresh. Falsified by omitting `on_refresh`, which makes
+    `listview.refresh` early-return (`listview.lua:259`) and leaves the
+    panel stale while `g` appears bound.
+12. **N — a foreign `*lsp*` buffer is not adopted.** Create a buffer
     named `*lsp*` with user content, then run `lsp.status`: the user's
     bytes are untouched and the panel opens as `*lsp*<2>`. This is
     `listview.open`'s guarantee, and it is pinned here rather than
     assumed because "found by name is not adoption" is precisely the
     rule a hand-rolled panel loses.
-12. **N — the modeline distinguishes failed from not-applicable.** A
+13. **N — the modeline distinguishes failed from not-applicable.** A
     source file with a failed spawn renders `LSP:!`; a plain-text buffer
     renders nothing. **Both halves asserted** — a pin that checks only
     the failing case passes if the segment renders `!` unconditionally.
-13. **P — the segment does no work.** With a failure recorded, painting
+14. **P — the segment does no work.** With a failure recorded, painting
     the modeline invokes neither a root resolver nor
     `pmacs.project.detect`. Pinned with a counting resolver installed
     through the real config; assert the count is unchanged across
     repeated renders. Targeted mutation: rev 1's design, which derives
     the affinity key inside the provider.
-14. **P — a working server is unaffected.** Attach, modeline label,
+15. **P — a working server is unaffected.** Attach, modeline label,
     requests: unchanged. Targeted mutation: making the new branch fire
     whenever an attachment is absent, which would mark every plain-text
     buffer failed.
-15. **P — the two existing report sites still report.** Root-resolver
+16. **P — the two existing report sites still report.** Root-resolver
     and subscriber failures keep their messages. Targeted mutation:
     refactoring the three sites onto a shared helper that drops one.
-16. **P — a fabricated attachment is never created.** After a failed
+17. **P — a fabricated attachment is never created.** After a failed
     spawn, `attachment_for_request` returns nil and no request is
     issued. Targeted mutation: §2.5's forbidden implementation.
 
