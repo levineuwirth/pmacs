@@ -333,6 +333,94 @@ compatible.
     githubsucks/test-ambient-config-isolation
   ```
 
+## Reap-ledger silent failures — IMPLEMENTED, PR OPEN
+
+- **Branch `reap-ledger-silent-failures`**, worktree
+  `../pmacs-reap-ledger`, based on `githubsucks/main` @ `22df6ab`.
+  `docs/reap-ledger-silent-failures-framing.md`, **revision 4**;
+  approved at revision 3 after two review rounds (round 1: three
+  blocking, two major; round 2: two blocking, two major; all accepted).
+  Revision 4 records implementation findings, not a new design round.
+- **All four bets resolved.** Bet 1 (every site takes a directed
+  outcome) and Bet 2 (every consequence is reachable) hold. **Bet 3
+  resolves the shutdown coupling as real and measured** — under 500ms
+  with a failed force-kill plus an errored probe, versus the full 2s
+  bound with only the force-kill failing. **Bet 4 is falsified: no
+  reporting channel exists**, so reporting becomes its own lane.
+- **The in-drain pin's first fixture was vacuous, and the bite caught
+  it.** `poll_one` TERMs the group on leader exit, so an untrapped
+  descendant died before writing its late marker — absent on *both*
+  paths. With the seam reverted the pin failed only the consumed-plan
+  check, never the content assertion. Fixed with `trap '' TERM` behind
+  the readiness gate.
+- **Gates: 10/10 green** on the pushed tree, all five bootstrap-storage
+  variables controlled — fmt, diff-check, clippy, `--lib` (1888),
+  `--lib --features crdt` (2073), compile-mode (67), copy-mode in both
+  feature configurations (18/19), M4 with the basedpyright skip (149),
+  required GPU (221). The five new process pins ran **15/15** as a
+  repetition set, since supervisor tests are load-sensitive.
+- **Unparked from PR #200's §5.** #200 retired the premise that
+  justified the ledger's leniency and deliberately changed no
+  disposition; this lane owns what it refused.
+- **Four sites, not the two #200 named.** In the persistent ledger: a
+  probe error of any errno drops the entry and cancels escalation; a
+  failed escalating `SIGKILL` is marked as succeeded, so **no later tick
+  retries it**; and `shutdown()` discards its own force-kill result the
+  same way — on the path that exists specifically to stop a leak at
+  editor exit. Those last two are **distinct, not cumulative**:
+  `shutdown()` force-kills every entry with no `!entry.killed` guard, so
+  a failed escalation still gets one attempt at exit, while a failed
+  force-kill leaks the group past exit with nothing left to try.
+  **Plus the in-drain
+  twin** `final_drain_runtime`, which collapses every errno to "dead"
+  while no tick runs; a false "dead" there cancels the readers, so its
+  failure mode is truncated output rather than a leaked process.
+- **The blast radius is exactly what the ledger exists for:** a
+  TERM-ignoring descendant that outlived its leader with output
+  redirected. Neither leader state nor reader state can see it; only
+  group liveness can. A silent drop leaks the one process nothing else
+  is watching. **Journey step 9 (build/test), not step 8** — the ledger
+  arms only for `spec.group`, which spawn rejects for PTY mode, so no
+  terminal reaches it; compile mode is the only production caller.
+- **`shutdown()`'s final loop terminates when the ledger empties**,
+  which happens via the same silent drop — so the probe error that hides
+  a leak can also end the cleanup loop early. That coupling is why the
+  probe cannot be made strict on its own. **Its precondition is
+  `any_running()` already false**, so the fixture must be a leader that
+  exited leaving a survivor; any other shape tests the other arm of the
+  disjunction.
+- **None of the three has been observed.** #200 saw an explicit
+  `SIGTERM` fail in `signal()`, not a ledger call. The premise is
+  falsified and the path exposed; the occurrence is not evidence these
+  fire.
+- **They are also untestable today**: `tick_reap_ledger` and
+  `shutdown()` call `nix` directly and consult no injection seam, unlike
+  `signal()`'s `forced_kill_errno`. All five existing ledger tests
+  exercise the success path only. The seam must be **site-directed and
+  multi-outcome**: `shutdown()` calls `self.signal()` before its ledger
+  force-kill, so a single global slot would be consumed by the wrong
+  call, and the coupling test needs two pending outcomes at once. The
+  in-drain probe repeats every 1 ms but only cancels readers after 50 ms
+  of false "dead", so it needs a directed full-drain override rather
+  than a one-shot error. Test state is per-supervisor and shared into
+  the drain context, never global; teardown proves its intended site was
+  reached. The in-drain SIGKILL's local flag has no independently
+  observable outer-path consequence, so it is named but not given a
+  dead injection seam. The first PR is the seam **plus** the tests that
+  exercise it — a seam without tests does not show it reaches the
+  intended calls.
+- **Diagnosis first, no disposition change proposed.** Stage A of the
+  signal lane had three tolerance rules rejected across three revisions
+  for the same shape of error on the same data structure.
+- Recovery from a clean checkout:
+
+  ```sh
+  git fetch githubsucks
+  git worktree add ../pmacs-reap-ledger \
+    -b reap-ledger-silent-failures \
+    githubsucks/reap-ledger-silent-failures
+  ```
+
 ## Folding lane (Arc 6) — Stages 1 and 2 MERGED; Stage 3 (GPU) is next
 
 Both shipped stages are on `main`; nothing in this arc is in flight. Stage 3
