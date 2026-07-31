@@ -347,13 +347,14 @@ If it does not, stop and repair the remote/fetch configuration.
     githubsucks/journey-stage1b1-compile-defaults
   ```
 
-## Journey Stage 1b-3 (P1) — FRAMING OPEN, revision 2
+## Journey Stage 1b-3 (P1) — FRAMING OPEN, revision 3
 
 - **Branch `journey-stage1b3-welcome`**, worktree `../pmacs-journey-1b3`,
   based on `githubsucks/main` @ `1f290d5`. **Framing only; no code, no
-  PR yet.** `docs/journey-stage1b3-welcome-framing.md` revision 2, one
-  review round closed (four findings, all accepted). The last of the 1b
-  split (1b-1 landed #203, 1b-2 landed #204).
+  PR yet.** `docs/journey-stage1b3-welcome-framing.md` revision 3, two
+  review rounds closed (round 1: four findings; round 2: two acceptance
+  holes plus a doc correction; all accepted). The last of the 1b split
+  (1b-1 landed #203, 1b-2 landed #204 at `5376af1`).
 - **What it is.** Journey step 4 / `COHERENCE.md` §18: a fresh `pmacs`
   greets the user with an empty buffer, an empty status line, and no
   indication that `M-x` exists. The stage renders a three-line welcome
@@ -367,9 +368,13 @@ If it does not, stop and repair the remote/fetch configuration.
   arm). The stage now adds a **launch-finalization seam** called right
   after desktop restore, with `had_file` — already threaded to that
   point for the same kind of question — as the no-target signal.
-  Residual, stated: `run()` takes over the terminal, so *that it calls
-  the seam* is reviewed, not tested; pins bracket it by proving the seam
-  works and that no constructor greets on its own.
+  **Round 2 closed the wiring hole rather than disclaiming it.**
+  Revision 2 called `run()`'s call to the seam an untestable residual —
+  but deleting that one line left every proposed pin green while
+  shipping no welcome, because the pins called the seam by hand. The
+  terminal-free prefix of `run()` (everything before `Frontend::new()`)
+  is now extracted into `prepare_startup`, which `run()` delegates to
+  and the pins drive.
 - **The step-2 pin is NOT amended.** Revision 1 analysed a status-line
   welcome and then chose `*scratch*`, but kept the amendment — an
   internal contradiction. The status stays empty, so the pin stays true,
@@ -404,9 +409,17 @@ If it does not, stop and repair the remote/fetch configuration.
   prose: `M-x help` mixes a chord with a command name and `C-c c` is two
   chords whose boundary prose does not mark, so the binding checks run
   `pmacs.keymap.lookup` over the same list that renders the text.
-- **Integrate late.** #204 is open and touches `COHERENCE.md`,
-  `docs/agent-handoff.md` and `docs/active-work.md`; this lane will
-  conflict there. Never open a standalone refresh PR.
+- **`pmacs.command.invoke` is NOT the M-x path** — it is the
+  programmatic API. M-x is `editor.execute-command`, a minibuffer with
+  the `commands` completion source that calls `invoke_interactive` on
+  accept. The `M-x help` pin dispatches the chord, enters the name and
+  accepts — and must assert **which** command ran, because a selected
+  candidate shadows typed text (dired refused a completion source for
+  exactly this reason).
+- **Integrate late.** #204 has landed at `5376af1`; this lane still
+  touches `COHERENCE.md`, `docs/agent-handoff.md` and
+  `docs/active-work.md`, so merge `main` at PR time rather than opening
+  a standalone refresh PR.
 
   ```sh
   git fetch githubsucks

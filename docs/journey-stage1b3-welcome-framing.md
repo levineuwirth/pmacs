@@ -1,11 +1,34 @@
 # Journey Stage 1b-3 — say something when the editor opens
 
-**Status: framing, rev 2 — awaiting review round 2.**
+**Status: framing, rev 3 — awaiting review round 3.**
 **Serves `COHERENCE.md` §2 (the golden journey, step 4), §18
 (onboarding), §19, §20 Priority 1.**
 
 ## 0. Revision history
 
+- rev 3 (2026-07-31) — review round 2. Two acceptance holes and one doc
+  correction; all accepted.
+  - **The real startup wiring was still unpinned, and rev 2 knew it.**
+    Rev 2 named the gap in §3.2a and then accepted it as "residual",
+    which is worse than missing it: deleting the sole `run()` call to
+    `finalize_local_launch` would leave **every** proposed pin green
+    while shipping no welcome at all. Pin 1 called the seam by hand and
+    pin 10 only proved constructors were blank. §3.2b now **extracts the
+    non-terminal part of `run()`** into a production helper that `run()`
+    delegates to, and the pins drive that helper — terminal takeover
+    stays outside the test, which is the only part that ever needed to
+    be.
+  - **Acceptance 4 was not the M-x path.** `pmacs.command.invoke`
+    (`src/lua_bindings/mod.rs:6062`) is the *programmatic* API. M-x is
+    `editor.execute-command`, which opens a minibuffer with the
+    `commands` completion source and calls **`invoke_interactive`** only
+    once the user accepts (`builtin/commands/default.lua:743-755`). The
+    pin now dispatches `M-x`, enters `help`, and accepts — and §4 names
+    the candidate-shadowing hazard that makes "type and press RET"
+    non-trivial with a completion source attached.
+  - **1b-2 has landed.** Rev 2's history said so while §8 and the ledger
+    still called #204 open; `githubsucks/main` @ `5376af1` is the merge.
+    Corrected.
 - rev 2 (2026-07-31) — review round 1. Four findings, all accepted, all
   verified in the tree first. §7's three questions are answered and
   folded into the design.
@@ -46,7 +69,7 @@
 
 The last of the 1b split. `COHERENCE.md` §20 named three things:
 **1b-1** (compile binding + defaults, landed as #203), **1b-2** (LSP
-spawn guidance, PR #204), and this — the welcome buffer.
+spawn guidance, landed as #204), and this — the welcome buffer.
 
 §18 is unusually specific about the size of it:
 
@@ -266,15 +289,55 @@ And it leaves the buffer **unmodified**, so the greeting does not look
 like unsaved work in the modeline. §2.5 shows quitting is not blocked
 either way; this is about not lying.
 
-**Honest limit on the seam's testability.** `run()` takes over the
-terminal, so no test drives it end to end. The acceptance therefore pins
-(a) the seam's own behaviour under each condition, and (b) that the
-three constructors — `new()`, `open(file)`, `open(dir)` — greet
-**nothing** on their own, which is what makes the seam the only writer.
-What remains unpinned is `run()` actually calling it; that is stated
-here rather than papered over, and it is the reason the seam is a single
-named function with one call site rather than logic inlined into the
-arm.
+### 3.2b The wiring is pinned by extracting it, not by disclaiming it
+
+Rev 2 stopped here and called `run()`'s call to the seam an untestable
+residual. That is not good enough: **delete that one line and every pin
+rev 2 proposed still passes**, because pin 1 called the seam by hand and
+pin 10 only asserted that constructors greet nothing. The product would
+ship with no welcome and a green suite — the exact shape of "a guard
+with no production caller passes every direct-call test".
+
+The boundary is already clean. Everything in `run()` from
+`install_panic_hook()` through the end of the attach-dispatch `match` is
+terminal-free; `Frontend::new()?` is where takeover begins. So that
+prefix becomes a helper:
+
+```rust
+/// Everything `run` does before it touches the terminal: construct from
+/// the target, install state dirs, dispatch the init-time attach
+/// request, and — on the local path — restore the desktop and finalize
+/// the launch.
+///
+/// Extracted so the local-startup sequence is testable. `run` adds only
+/// `Frontend::new()` and the event loop.
+pub(crate) fn prepare_startup(file: Option<PathBuf>) -> io::Result<Startup>;
+
+pub(crate) enum Startup {
+    /// Ready to enter the local TUI loop — desktop restored, launch
+    /// finalized.
+    Local(EditorState),
+    /// A hand-off the caller must perform; it takes the terminal, so it
+    /// stays out of here.
+    HandOff(crate::attach_dispatch::AttachDispatch),
+}
+```
+
+`run()` becomes `match prepare_startup(file)? { … }` plus the loop it
+already has. The attach arms keep calling `run_attach*` from `run()`,
+because those take over the terminal.
+
+**What this buys:** the welcome pin now drives `prepare_startup(None)` —
+production code, the same call `run()` makes — so deleting the
+`finalize_local_launch` call inside it turns the pin red. The only thing
+still outside a test is `Frontend::new()` and the event loop, which is
+where terminal takeover genuinely lives and which this stage does not
+touch.
+
+**What remains true and small:** `run()` could in principle stop calling
+`prepare_startup`. But then it has no `EditorState` at all and does not
+compile — the risk collapses to nothing a reviewer could miss, which is
+the difference between this and rev 2's disclaimer.
 
 ### 3.3 What it must not do
 
@@ -302,14 +365,16 @@ belong to §20 Priority 4's discovery arc (§5).
 **N** = new behaviour, must fail on full revert. **P** = preservation,
 falsified by a named mutation.
 
-1. **N — journey step 4: a no-target local launch greets.**
-   Construct through `EditorState::new()`, then call
-   `finalize_local_launch(false)` — the seam `run()` calls. `*scratch*`
-   is active and **non-empty**, and its text names `M-x`. This is the
-   ratchet row.
-   *Rev 1 claimed `EditorState::new()` was itself the entry point; §2.2
-   shows it is shared with `open()` and the daemon, so the pin drives the
-   seam instead.*
+1. **N — journey step 4, through the production startup path.**
+   Drive **`prepare_startup(None)`** (§3.2b) — the same call `run()`
+   makes — and assert the returned `Startup::Local` state has `*scratch*`
+   active, **non-empty**, naming `M-x`. This is the ratchet row.
+   *Rev 1 claimed `EditorState::new()` was the entry point (§2.2 shows
+   it is shared with `open()` and the daemon); rev 2 then called the seam
+   by hand, which left the wiring unpinned (§3.2b). This drives neither
+   — it drives what `run()` drives.*
+   **Falsified by deleting the `finalize_local_launch` call inside
+   `prepare_startup`**, which is the mutation rev 2's pins survived.
 2. **N — every entry the welcome names is bound.** For each
    `pmacs.welcome.entries` item, `pmacs.keymap.lookup(entry.keys)`
    resolves. A property over the **structured list** (§3.1), not a scrape
@@ -320,10 +385,23 @@ falsified by a named mutation.
 3. **N — the rendered text contains every entry's `keys` and `label`.**
    This is what ties the list to the thing the user actually sees; pin 2
    alone would pass if rendering dropped an entry.
-4. **N — `M-x help` renders the cheat sheet** into `*help*`, containing
-   at least the entries' key sequences. **Invoked through the real
-   palette path** (`pmacs.command.invoke`), not by calling the render
-   helper, so the command is proven reachable the way a user reaches it.
+4. **N — `M-x help` renders the cheat sheet**, reached the way a user
+   reaches it. `pmacs.command.invoke` is the **programmatic** API
+   (`src/lua_bindings/mod.rs:6062`) and is *not* the M-x path: M-x is
+   `editor.execute-command`, which opens a minibuffer with the
+   `commands` completion source and calls **`invoke_interactive`** only
+   on accept (`builtin/commands/default.lua:743-755`). So the pin
+   **dispatches `M-x` as a key**, enters `help`, and accepts — then
+   asserts `*help*` contains the entries' key sequences.
+   **Name the hazard, or the pin lies:** with a completion source
+   attached, a selected candidate shadows typed text and the minibuffer
+   selects candidate 0 whenever the list is non-empty (dired's
+   `C-x d` comment records this as S0-1/S0-4, and refuses a source for
+   that reason). Typing `help` and pressing RET can therefore accept a
+   *different* command. The pin must assert **which command ran** — not
+   merely that some help buffer appeared — by checking the minibuffer's
+   accepted value or `*help*`'s subject line before trusting the content
+   assertion.
 5. **P — the buffer is editable and unmodified.** After greeting,
    `*scratch*` reports unmodified; typing a character inserts it, so
    step 5 works from the first frame. Targeted mutation: rendering
@@ -350,15 +428,18 @@ falsified by a named mutation.
     seam call, leave `*scratch*` empty. **This is what makes the seam the
     only writer**, and it is the pin that would catch a greeting
     smuggled back into a constructor — including the daemon's.
+    *Necessary but not sufficient on its own: pin 1 is what proves the
+    seam is actually reached in production.*
 11. **P — the step-2 pin is unchanged and still passes.**
     `journey_step2_launches_unconfigured_into_scratch` keeps asserting
     an empty status, because the welcome goes to the buffer (§2.2a). Not
     a new test — a stated requirement that this stage does not touch it.
 
-**What is not pinned, stated rather than implied:** that `run()` calls
-`finalize_local_launch`. `run()` takes over the terminal and no test
-drives it (§3.2a). Pins 1 and 10 bracket the risk — the seam works, and
-nothing else greets — but the wiring itself is reviewed, not tested.
+**What is not pinned, and why it no longer matters:** `Frontend::new()`
+and the event loop. Those are terminal takeover, this stage does not
+touch them, and everything before them is now inside `prepare_startup`
+and driven by pin 1 (§3.2b). Rev 2 left the whole local-startup wiring
+untested and said so; that hole is closed rather than disclaimed.
 
 ## 5. Deferred, and why
 
@@ -433,9 +514,11 @@ step while still falsifying a "missing entirely" grade.
 Branch `journey-stage1b3-welcome`, worktree `../pmacs-journey-1b3`,
 based on `githubsucks/main` @ `1f290d5`. Framing only; no code, no PR.
 
-**#204 is open and touches `COHERENCE.md`, `docs/agent-handoff.md` and
-`docs/active-work.md`.** This lane will conflict there; integrate late
-(at PR time), never by opening a refresh PR.
+**#204 has landed** (`githubsucks/main` @ `5376af1`), so the conflict
+this note originally warned about is now a plain rebase surface: this
+lane still touches `COHERENCE.md`, `docs/agent-handoff.md` and
+`docs/active-work.md`, so integrate `main` late (at PR time) rather than
+opening a refresh PR.
 
 ```sh
 git fetch githubsucks
