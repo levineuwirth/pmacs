@@ -509,9 +509,10 @@ build actions, menus, missing-tool guidance):
 settings, profiles, package management, task definitions,
 frontend/language settings):
 
-- palette △ (`M-x` fuzzy over bare names, §5) · keybinding search ✗ (no
-  list-keybindings/where-is commands) · workspace settings ✗ (no
-  workspace scope, §11) · profiles ✗ (§12) · package management ✗
+- palette △ (`M-x` fuzzy over bare names — the rows are still bare, §5) ·
+  keybinding search ✓ (`help.list-keybindings`, `help.where-is`,
+  `help.describe-key`; still no key to reach them) · workspace settings
+  ✗ (no workspace scope, §11) · profiles ✗ (§12) · package management ✗
   in-session (§13) · task definitions ✗ · frontend customization △
   (themes, `pmacs.gpu.set_font`, statusline providers — all Lua-only) ·
   language settings △ (raw Lua tables, outside the registry).
@@ -627,18 +628,29 @@ the sharpest instance of §1.1.**
   `builtin/commands/default.lua:1103-1136` — and the one users can
   actually reach (`M-x editor.describe-command`) renders **less** than
   the unreachable one (no source, no scope, no predicate note).
-- **Missing as commands entirely:** describe-key, describe-mode,
-  describe-hook, describe-buffer, where-is, list-commands,
-  list-settings, list-keybindings, apropos. What exists:
-  `editor.describe-command`, `editor.describe-setting`,
-  `editor.describe-instance[-buffer]`, `editor.list-buffers`,
-  `editor.list-workers`. `M-x describe-setting` prompts **free-text
-  with no completion source** (deliberately skipped —
-  `builtin/commands/default.lua:1180-1185`); a typo yields a status
-  line error.
-- **No help prefix key.** `C-h` is `buffer.delete-word-backward`
-  (`builtin/keymaps/default.lua:86`, with a comment noting the key "was
-  free"). No `F1`, no `C-h k/f/b`.
+- **The command family now exists** (Discovery Stage 1): eleven `help.*`
+  commands — describe-key/mode/hook/buffer/command/setting, where-is,
+  list-commands/keybindings/settings, apropos — indexed by `M-x help`,
+  with `editor.describe-command` / `editor.describe-setting` retained as
+  forwarders. `help.describe-setting` **now completes**, through a Lua
+  function passed as `CompletionSource::Custom`.
+  **What remains missing here:** a discovery surface for **packages and
+  workers** (§13, §9), and **no key reaches any of it** — the family is
+  `M-x`-only by design until the help-prefix decision is taken (see the
+  prefix bullet below).
+  *Completion is assistance, not validation:* `resolve_accepted_value`
+  returns the literal typed text when no candidate is selected, so a
+  typo still reaches the handler; refusing a non-candidate is unbuilt
+  Rust work.
+- **No help prefix key**, and `C-h` is **not** available for one.
+  It is `buffer.delete-word-backward` because non-kitty terminals cannot
+  disambiguate Ctrl+Backspace from Ctrl+H — both produce byte 0x08
+  (`builtin/keymaps/default.lua:78-86`), so rebinding it would break
+  Ctrl+Backspace on every legacy terminal. That file's own comment says
+  the key "was free", which reads as an oversight and is not one; §18
+  records the trade. No `F1`, no `C-h k/f/b`. **This is why Discovery
+  Stage 1 shipped the family unbound**: the prefix is one decision for
+  the whole family, not nine.
 - **Settings value provenance is absent.** Overrides are stored as bare
   values (`global: HashMap<String, ConfigValue>`,
   `src/config_registry.rs:693-708`); `describe-setting`'s "Source:" is
