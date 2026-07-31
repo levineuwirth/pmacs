@@ -1259,6 +1259,21 @@ local function show_help_text(text)
   pmacs.window.switch_buffer(buf)
 end
 
+--- Internal seam (journey Stage 1b-3): render `text` into the shared
+--- `*help*` buffer. Exposed under the underscore convention so
+--- `runtime/welcome.lua`'s `M-x help` renders through THIS mechanism
+--- rather than growing a second help surface — `commands/default.lua`
+--- loads before the runtime chunks, so the seam is present by then.
+---
+--- Inherits this mechanism's two known gaps, recorded rather than
+--- papered over: it writes with `delete`/`insert` instead of
+--- `set_generated_contents` (so the buffer stays ordinarily editable and
+--- keeps its undo history), and it finds `*help*` BY NAME, so a foreign
+--- buffer of that name would be cleared.
+function pmacs.editor._show_help(text)
+  show_help_text(text)
+end
+
 cmd { name = "editor.describe-command",
       description = "Prompt for a command name and render its description in *help*.",
       fn = function()

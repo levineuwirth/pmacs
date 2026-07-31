@@ -705,6 +705,17 @@ impl EditorState {
                 include_str!("../builtin/runtime/compile.lua"),
             )
             .expect("load compile builtin chunk");
+        // Journey Stage 1b-3: the welcome text and `M-x help`. Loaded
+        // after `commands/default.lua` (which `attach_editor` above ran)
+        // so `pmacs.editor._show_help` exists, and after the runtime
+        // chunks whose keys it advertises, so a binding it names is
+        // already registered when the acceptance suite checks them.
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/welcome.lua"),
+                include_str!("../builtin/runtime/welcome.lua"),
+            )
+            .expect("load welcome builtin chunk");
         // T M7.11 bundled-package bootstrap. Through M7.10 the REPL
         // was loaded directly via `eval(include_str!(...))`; the
         // M7.11 deliverable migrates it to the package system so it
@@ -875,6 +886,73 @@ impl EditorState {
             self.lua_host
                 .lua()
                 .set_app_data(crate::lua_bindings::StateDir(dir));
+        }
+    }
+
+    /// Final step of a **local, no-target** launch: greet an untouched
+    /// `*scratch*` (journey step 4, `COHERENCE.md` §18).
+    ///
+    /// Called from [`prepare_startup`] after config has run, after
+    /// attach dispatch resolved to local, and after
+    /// [`Self::restore_desktop_if_armed`]. None of the constructors is
+    /// the right hook: `EditorState::open` calls `new` *before*
+    /// resolving its target, the daemon constructs one too, and
+    /// `init.lua` runs inside `new` — so a greeting written there would
+    /// reach a daemon session, precede the file argument that replaces
+    /// the buffer, and outrun anything config or a restored desktop puts
+    /// in `*scratch*`.
+    ///
+    /// Greets only when all four hold; each excludes one of those cases:
+    ///
+    /// 1. `had_file` is false — a positional argument means "open this".
+    /// 2. the session is local — guaranteed by the call site.
+    /// 3. `*scratch*` is the active buffer — restore may have moved it.
+    /// 4. `*scratch*` is empty — never overwrite config or a restore.
+    ///
+    /// Leaves the buffer **unmodified**: the greeting must not look like
+    /// unsaved work. It is deliberately *not* written through
+    /// `set_generated_contents`, which would lift read-only, discard
+    /// history and mark the buffer generated — all wrong for a buffer
+    /// journey step 5 requires the user to type into immediately.
+    pub fn finalize_local_launch(&mut self, had_file: bool) {
+        if had_file {
+            return;
+        }
+        let buffer_id = self.core.borrow().active_buffer_id();
+        {
+            let registry = self.core.borrow().registry.clone();
+            let reg = registry.borrow();
+            let Ok(buf) = reg.get(buffer_id) else {
+                return;
+            };
+            if buf.name() != "*scratch*" || !buf.is_empty() {
+                return;
+            }
+        }
+        let text: String = match self
+            .lua_host
+            .lua()
+            .load("return pmacs.welcome.text()")
+            .eval()
+        {
+            Ok(text) => text,
+            // A user who replaced `pmacs.welcome` with something broken
+            // gets no greeting, not a failed launch.
+            Err(_) => return,
+        };
+        let registry = self.core.borrow().registry.clone();
+        let mut reg = registry.borrow_mut();
+        let Ok(buf) = reg.get_mut(buffer_id) else {
+            return;
+        };
+        if buf
+            .apply_edit(crate::buffer::EditOp::Insert {
+                pos: 0,
+                bytes: text.as_bytes(),
+            })
+            .is_ok()
+        {
+            buf.mark_clean();
         }
     }
 
@@ -3590,6 +3668,68 @@ impl Default for EditorState {
 // Run loop
 // ---------------------------------------------------------------------------
 
+/// Outcome of [`prepare_startup`]: either a session ready for the local
+/// TUI loop, or a hand-off the caller must perform.
+pub enum Startup {
+    /// Ready to enter the local loop — desktop restored, launch
+    /// finalized.
+    Local(Box<EditorState>),
+    /// The init-time attach request resolved to something other than
+    /// local. Performing it takes over the terminal, so it stays out of
+    /// [`prepare_startup`] and is the caller's job.
+    HandOff(crate::attach_dispatch::AttachDispatch),
+}
+
+/// Everything [`run`] does **before** it touches the terminal:
+/// construct from the target, install state dirs, dispatch the
+/// init-time attach request, and — on the local path — restore the
+/// desktop and finalize the launch.
+///
+/// Extracted so the local-startup sequence is testable: `run` adds only
+/// `Frontend::new()` and the event loop, which is where terminal
+/// takeover genuinely lives. Without this split, deleting the
+/// [`EditorState::finalize_local_launch`] call would leave every
+/// direct-call test green while shipping no welcome at all.
+///
+/// `pub` rather than `pub(crate)` because the journey acceptance suite
+/// is a separate integration crate — and because the rest of this
+/// sequence (`run`, `EditorState::new`, `EditorState::open`,
+/// `install_state_dirs`, `restore_desktop_if_armed`) is already public,
+/// so this completes that surface rather than widening it.
+pub fn prepare_startup(file: Option<PathBuf>) -> io::Result<Startup> {
+    // Capture before the `match` consumes `file`: a positional file arg
+    // means "open this", not "restore my desktop" (Q#DS7).
+    let had_file = file.is_some();
+    let mut state = match file {
+        Some(path) => EditorState::open(path)?,
+        None => EditorState::new(),
+    };
+    // Real session: wire up on-disk persistence (history + pmacs.state).
+    state.install_state_dirs();
+    // Post-init dispatch: read whatever init.lua left in the
+    // RequestedAttach slot and decide whether to run local or hand off
+    // to attach mode. `take_requested_attach` consumes the slot.
+    let requested = state.lua_host.take_requested_attach();
+    match crate::attach_dispatch::dispatch_attach(requested) {
+        crate::attach_dispatch::AttachDispatch::RunLocal => {
+            // Committed to local mode: restore the desktop if armed and
+            // no file arg was given (Q#DS7). Done here, not right after
+            // construction, so a hand-off never populates an
+            // EditorState it's about to drop.
+            state.restore_desktop_if_armed(had_file);
+            // Journey step 4: the last thing before the loop, so config
+            // and any restored desktop have already had their say.
+            state.finalize_local_launch(had_file);
+            Ok(Startup::Local(Box::new(state)))
+        }
+        // The EditorState is dropped by the caller before it takes over
+        // the terminal: attach mode constructs its own Frontend, and a
+        // locally-built one would leak its alternate-screen / raw-mode
+        // setup if held across the call.
+        other => Ok(Startup::HandOff(other)),
+    }
+}
+
 /// Main run loop. Opens the file (if any), takes over the terminal,
 /// renders, dispatches keys, until the user quits.
 ///
@@ -3611,54 +3751,22 @@ impl Default for EditorState {
 /// local-TUI for the terminal.
 pub fn run(file: Option<PathBuf>) -> io::Result<()> {
     install_panic_hook();
-    // Capture before the `match` consumes `file`: a positional file arg
-    // means "open this", not "restore my desktop" (Q#DS7).
-    let had_file = file.is_some();
-    let mut state = match file {
-        Some(path) => EditorState::open(path)?,
-        None => EditorState::new(),
-    };
-    // Real session: wire up on-disk persistence (history + pmacs.state).
-    state.install_state_dirs();
-
-    // Post-init dispatch: read whatever init.lua left in the
-    // RequestedAttach slot and decide whether to run local or hand
-    // off to attach mode. `take_requested_attach` consumes the slot
-    // — even on the hand-off path the local EditorState is dropped
-    // before attach::run_attach takes over the terminal, so the
-    // request is consumed exactly once.
-    let requested = state.lua_host.take_requested_attach();
-    match crate::attach_dispatch::dispatch_attach(requested) {
-        crate::attach_dispatch::AttachDispatch::RunLocal => {
-            // Committed to local mode: restore the desktop if armed and
-            // no file arg was given (Q#DS7). Done here, not right after
-            // construction, so a hand-off to attach mode (above) never
-            // populates an EditorState it's about to drop.
-            state.restore_desktop_if_armed(had_file);
-            // Fall through to the local TUI loop below.
-        }
-        crate::attach_dispatch::AttachDispatch::RunAttachLocalSocket(socket) => {
-            // Drop the local EditorState before taking over the
-            // terminal: attach mode constructs its own Frontend, and
-            // the locally-built one would leak its alternate-screen
-            // / raw-mode setup if held across the call.
-            drop(state);
+    let mut state = match prepare_startup(file)? {
+        Startup::Local(state) => *state,
+        Startup::HandOff(crate::attach_dispatch::AttachDispatch::RunAttachLocalSocket(socket)) => {
             return crate::attach::run_attach(socket).map_err(|e| io::Error::other(format!("{e}")));
         }
-        crate::attach_dispatch::AttachDispatch::RunAttachSsh(target) => {
-            // Same EditorState-drop reasoning as the local-socket
-            // path: SSH attach takes over the terminal.
-            drop(state);
+        Startup::HandOff(crate::attach_dispatch::AttachDispatch::RunAttachSsh(target)) => {
             return crate::attach::run_attach_ssh(target)
                 .map_err(|e| io::Error::other(format!("{e}")));
         }
-        dispatch @ crate::attach_dispatch::AttachDispatch::DeferredInV01 { .. } => {
+        Startup::HandOff(dispatch) => {
             let msg = dispatch
                 .deferred_message()
-                .expect("DeferredInV01 always has a message");
+                .unwrap_or_else(|| "unsupported attach dispatch".to_owned());
             return Err(io::Error::other(msg));
         }
-    }
+    };
 
     let mut frontend = Frontend::new()?;
     let mut render_state = crate::instance_render::RenderState::new(frontend.size());
