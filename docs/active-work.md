@@ -347,6 +347,59 @@ If it does not, stop and repair the remote/fetch configuration.
     githubsucks/journey-stage1b1-compile-defaults
   ```
 
+## Journey Stage 1b-3 (P1) — FRAMING OPEN, revision 1
+
+- **Branch `journey-stage1b3-welcome`**, worktree `../pmacs-journey-1b3`,
+  based on `githubsucks/main` @ `1f290d5`. **Framing only; no code, no
+  PR yet.** `docs/journey-stage1b3-welcome-framing.md` revision 1, no
+  review rounds. The last of the 1b split (1b-1 landed #203, 1b-2 is
+  PR #204).
+- **What it is.** Journey step 4 / `COHERENCE.md` §18: a fresh `pmacs`
+  greets the user with an empty buffer, an empty status line, and no
+  indication that `M-x` exists. The stage renders a three-line welcome
+  into `*scratch*` and adds a minimal `M-x help`.
+- **The existing step-2 pin collides with it.**
+  `journey_step2_launches_unconfigured_into_scratch` asserts
+  `status.is_empty()` while its own message says "reports no error" —
+  the same predicate only while nothing writes a *non-error* status at
+  startup. Acceptance 8 corrects the assertion to its message's claim
+  and calls it out rather than burying it, since the ratchet's rule is
+  that stages add rows.
+- **`C-h` is NOT free, and the reason is load-bearing.** It is bound to
+  `buffer.delete-word-backward` because non-kitty terminals cannot
+  disambiguate Ctrl+Backspace from Ctrl+H — both produce byte 0x08
+  (`builtin/keymaps/default.lua:78-86`). Rebinding it to a help prefix
+  would break Ctrl+Backspace on every legacy terminal, so §2's step-4
+  row calling it an oversight is wrong: it is a deliberate trade. The
+  help-prefix decision is deferred to §20 Priority 4's discovery arc
+  with the constraint recorded.
+- **`*help*` already exists** (`builtin/commands/default.lua:1226`,
+  `show_help_text`, reused buffer, buffer-local `q`), used by
+  `editor.describe-command` / `-setting`, over `src/help.rs`'s
+  renderers and link resolution. Two gaps recorded rather than
+  inherited silently: it writes with `buf:delete`/`buf:insert` instead
+  of `set_generated_contents`, and it is **found by name**, so a
+  foreign `*help*` would be cleared.
+- **Deliberately NOT `set_generated_contents` for the welcome** — that
+  lifts read-only, discards history and marks the buffer generated, all
+  wrong for a buffer step 5 requires the user to type into immediately.
+  The one place not adopting that invariant is correct, stated so a
+  later audit does not "fix" it.
+- **Step 4 stays Partial**, so this is the first 1b stage with no §25
+  landed-evidence obligation on merge: §2's row names a welcome, a
+  cheat sheet *and* `C-h`, and this closes the first plus a minimal
+  second.
+- **Integrate late.** #204 is open and touches `COHERENCE.md`,
+  `docs/agent-handoff.md` and `docs/active-work.md`; this lane will
+  conflict there. Never open a standalone refresh PR.
+
+  ```sh
+  git fetch githubsucks
+  git worktree add ../pmacs-journey-1b3 \
+    -b journey-stage1b3-welcome \
+    githubsucks/journey-stage1b3-welcome
+  ```
+
 ## Generated-buffer immutability lane (Arc: workbench primitives) — STAGE 1 MERGED; STAGE 2 IS NEXT
 
 **Framing #188 (revision 7) and Stage 1 #191 are both on `main` @
