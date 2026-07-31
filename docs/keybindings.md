@@ -189,6 +189,13 @@ Source: `builtin/runtime/compile.lua`.
 | `M-!` | `shell.command` — asynchronous output in `*shell-command*` |
 | `C-c c` | `compile.run` — prompts, prefilled from the detected project kind |
 
+`M-x help` renders this file's essentials as a `*help*` buffer inside
+the editor, and is what the startup welcome points at. It is the root of
+the eventual help family (`help.keys` and friends arrive with the
+discovery arc), so it takes no keybinding yet — `C-h` is **not** free:
+it deletes a word because non-kitty terminals cannot tell Ctrl+Backspace
+from Ctrl+H.
+
 `compile.recompile` is available through `M-x`, and through `g` inside
 `*compilation*`; no global key is assigned to it. `C-c c` is unreachable
 from inside a terminal window (`C-c` is consumed as the escape key) and

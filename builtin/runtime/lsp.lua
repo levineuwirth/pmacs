@@ -613,6 +613,163 @@ end
 -- only after this module itself successfully spawns a server.
 local default_servers = {}
 
+-- ---------------------------------------------------------------------
+-- Spawn-failure reporting (journey Stage 1b-2; COHERENCE §1.2)
+-- ---------------------------------------------------------------------
+--
+-- `ensure_server`'s spawn `pcall` used to end in a bare `return nil`:
+-- the canonical background failure — a preconfigured server that is not
+-- installed — produced no status message, no record, and no modeline
+-- marker, while tree-sitter highlighting kept working and masked it.
+--
+-- The reporting SHAPE is not new here. `root_resolver_for` and
+-- `report_subscriber_error` in this same file already report through
+-- `pmacs.editor.set_status` with the `pmacs.error` arm riding along;
+-- this finishes that adoption at the site that matters most.
+
+-- Lua strings are 8-bit clean, so \0 is a separator no language id,
+-- URI, or command can contain.
+--
+-- The `u` / `n` discriminator is what makes the markerless case
+-- expressible at all. `ensure_server`'s affinity key is `key_uri`, which
+-- is deliberately **nil** for a file with no project marker (so loose
+-- files share one server per language) — and `t[nil]` raises "table
+-- index is nil". A bare `key_uri or ""` would instead collide with an
+-- empty URI. One function for both tables, so the two encodings cannot
+-- drift apart.
+local function affinity_key(language, key_uri)
+  return language .. "\0" .. (key_uri and ("u" .. key_uri) or "n")
+end
+
+local function reported_key(language, key_uri, command)
+  return affinity_key(language, key_uri) .. "\0" .. tostring(command)
+end
+
+-- Session-scoped and NEVER cleared: has this exact (language, root,
+-- command) triple already been named on the status line? The command is
+-- part of the key so repointing config at a *different* missing
+-- executable is a new failure and reports again.
+local reported = {}
+
+-- Current failure state per affinity key, CLEARED when a spawn for that
+-- key succeeds. This is what `lsp.status` renders, so recovery makes it
+-- go quiet. Separate from `reported` because one table cannot both
+-- dedupe forever and forget on recovery.
+local failures = {}
+
+-- Per-buffer projection of `failures`, keyed by `tostring(buffer)`.
+--
+-- It exists so the modeline provider stays a PURE per-buffer lookup:
+-- that provider runs for every window on every paint, and deriving an
+-- affinity key inside it would invoke `project_root_for` — user root
+-- resolvers and project detection — during painting.
+--
+-- Each entry carries the affinity key that produced it, so a success can
+-- sweep every buffer sharing that key rather than only the one that
+-- succeeded, and the path it was recorded against, so a rename or delete
+-- can find it the way `attachments_under` finds attachments.
+local failed_attachments = {}
+
+-- Drop one buffer's projection, releasing its removal callback. Safe to
+-- call for a buffer that has none.
+local function clear_failed_buffer(bkey)
+  local entry = failed_attachments[bkey]
+  if not entry then return end
+  if entry.on_removed then
+    pcall(function() entry.on_removed:remove() end)
+  end
+  failed_attachments[bkey] = nil
+end
+
+-- A spawn for `key` succeeded: forget the failure and every buffer
+-- projecting it.
+--
+-- Assigning nil to the CURRENT key during `pairs` is explicitly allowed
+-- by Lua's `next` contract; adding a key would not be.
+local function clear_failure(key)
+  failures[key] = nil
+  for bkey, entry in pairs(failed_attachments) do
+    if entry.key == key then clear_failed_buffer(bkey) end
+  end
+end
+
+-- Record and (at most once per identity) announce a spawn failure.
+-- Returns the affinity key so the caller can project it onto a buffer.
+local function report_spawn_failure(language, key_uri, command, err)
+  local key = affinity_key(language, key_uri)
+  failures[key] = {
+    language = language,
+    command = tostring(command),
+    error = tostring(err),
+    root_uri = key_uri,
+  }
+  local rkey = reported_key(language, key_uri, command)
+  if reported[rkey] then return key end
+  reported[rkey] = true
+  -- The underlying error names NEITHER the program nor the language:
+  -- `Command::spawn`'s io::Error becomes "spawn: No such file or
+  -- directory (os error 2)". So the guidance is composed here, where
+  -- both are still in scope, in the spirit of `src/main.rs`'s GPU
+  -- missing-binary message. The errno is passed through verbatim rather
+  -- than classified — EACCES is not "not installed".
+  local msg = string.format(
+    "LSP: %s for %s did not start (%s) — install it or set " ..
+    "pmacs.lsp.config.%s.command in init.lua. M-x lsp.status for detail.",
+    tostring(command), language, tostring(err), language)
+  pcall(pmacs.editor.set_status, msg)
+  if pmacs.error then pcall(pmacs.error, msg) end
+  return key
+end
+
+-- Project a failure onto the buffer that hit it, registering the
+-- teardown ONCE. `attach_buffer` is reachable more than once for the
+-- same buffer, so registering per failed attempt would stack callbacks
+-- on one buffer — the same unbounded-registrar leak, moved rather than
+-- fixed.
+--
+-- Without this registration the table would be bounded by nothing: a
+-- killed buffer's entry would outlive it for the session, and no
+-- existing cleanup could reach it, because `attachments_under` iterates
+-- `attachments` and a failed buffer has no attachment by construction.
+local function project_failure(buf, key, path)
+  local bkey = tostring(buf)
+  local existing = failed_attachments[bkey]
+  if existing then
+    existing.key = key
+    existing.path = path
+    return
+  end
+  local handle
+  local ok, h = pcall(pmacs.buffer.on_removed, buf, function()
+    -- The registry does `callbacks.take(id)` and then iterates an owned
+    -- list, so the entry is already gone: clear the projection, and do
+    -- NOT call `remove()` on our own handle from in here.
+    failed_attachments[bkey] = nil
+  end)
+  if ok then handle = h end
+  failed_attachments[bkey] = { key = key, path = path, on_removed = handle }
+end
+
+--- Current LSP spawn failures, newest-first is not meaningful here so
+--- they are returned sorted by language for a stable render. Public
+--- getter (per API conventions).
+function pmacs.lsp.spawn_failures()
+  local out = {}
+  for _, f in pairs(failures) do
+    out[#out + 1] = {
+      language = f.language,
+      command = f.command,
+      error = f.error,
+      root_uri = f.root_uri,
+    }
+  end
+  table.sort(out, function(a, b)
+    if a.language ~= b.language then return a.language < b.language end
+    return tostring(a.root_uri) < tostring(b.root_uri)
+  end)
+  return out
+end
+
 local function ensure_server(language, path)
   local cfg = pmacs.lsp.config[language]
   if not cfg or not cfg.command then return nil end
@@ -651,6 +808,8 @@ local function ensure_server(language, path)
         and info.root_uri == key_uri then
       local kind = info.state.kind
       if kind ~= "crashed" and kind ~= "stopped" then
+        -- A live server for this key means there is no failure for it.
+        clear_failure(affinity_key(language, key_uri))
         return info.id
       end
     end
@@ -668,9 +827,13 @@ local function ensure_server(language, path)
   })
   if ok then
     default_servers[tostring(sid)] = language
+    clear_failure(affinity_key(language, key_uri))
     return sid
   end
-  return nil
+  -- `sid` holds the error on the failing branch. Second return value is
+  -- the affinity key, so `attach_buffer` can project it onto the buffer
+  -- without recomputing a root.
+  return nil, report_spawn_failure(language, key_uri, cfg.command, sid)
 end
 
 -- Internal ownership seam for builtins whose lifecycle follows the
@@ -853,8 +1016,17 @@ local function attach_buffer(buf)
   -- Path resolved before spawn so the server's `rootUri` can be
   -- derived from the file's project (see `project_root_for`).
   local path = active_buffer_path()
-  local sid = ensure_server(language, path)
-  if not sid then return nil end
+  local sid, failure_key = ensure_server(language, path)
+  if not sid then
+    -- Journey Stage 1b-2: remember WHY there is no attachment, so the
+    -- modeline can say "failed" instead of rendering nothing — which is
+    -- indistinguishable from "this file type has no server".
+    if failure_key then project_failure(buf, failure_key, path) end
+    return nil
+  end
+  -- Any successful resolution clears this buffer's stale projection;
+  -- `clear_failure` has already swept peers sharing the affinity.
+  clear_failed_buffer(key)
   local uri = file_uri_for(path)
   if not uri then return nil end
   local rec = {
@@ -976,9 +1148,14 @@ pmacs.statusline.register {
   priority = 0,
   face = "ui.modeline.lsp",
   fn = function(ctx)
-    local rec = attachments[tostring(ctx.buffer)]
-    if not rec then return nil end
-    return "LSP:" .. pmacs.lsp.modeline_label(rec.server)
+    local bkey = tostring(ctx.buffer)
+    local rec = attachments[bkey]
+    if rec then return "LSP:" .. pmacs.lsp.modeline_label(rec.server) end
+    -- Journey Stage 1b-2. A plain map lookup, deliberately: deriving an
+    -- affinity key here would run root resolvers and project detection
+    -- once per window per paint.
+    if failed_attachments[bkey] then return "LSP:!" end
+    return nil
   end,
 }
 
@@ -2767,6 +2944,58 @@ end
 
 -- Default commands + keymap entries --------------------------------------
 
+-- Journey Stage 1b-2. `LspManager::status_buffer_text()` and
+-- `last_error` have existed and been exposed to Lua since M4.8, with no
+-- production caller and no buffer to render into — several doc comments
+-- in `src/lsp.rs` refer to "the `*lsp*` buffer" as though it existed.
+-- This is that buffer.
+--
+-- Opened through `pmacs.listview.open` rather than hand-rolled, which is
+-- what buys owned-handle identity (a foreign `*lsp*` is never adopted),
+-- `<2>` collision behaviour, an immutable generated buffer, `q`, and
+-- `g`. `on_refresh` is NOT optional: `listview.refresh` early-returns
+-- without one, which would leave `g` bound and silently dead.
+local function lsp_status_rows()
+  local rows = {}
+  local fails = pmacs.lsp.spawn_failures()
+  if #fails > 0 then
+    rows[#rows + 1] = { text = string.format("Failed to start (%d):", #fails) }
+    for _, f in ipairs(fails) do
+      rows[#rows + 1] = { text = string.format("  %s (%s) — %s",
+        f.command, f.language, f.error) }
+      if f.root_uri then
+        rows[#rows + 1] = { text = "    root: " .. f.root_uri }
+      else
+        rows[#rows + 1] = { text = "    root: (none detected)" }
+      end
+    end
+    rows[#rows + 1] = { text = "" }
+  end
+  rows[#rows + 1] = { text = "Servers:" }
+  local ok, text = pcall(pmacs.lsp.status_buffer_text)
+  if ok and type(text) == "string" then
+    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+      rows[#rows + 1] = { text = line }
+    end
+  else
+    rows[#rows + 1] = { text = "  (status unavailable)" }
+  end
+  return rows
+end
+
+pmacs.command.define {
+  name = "lsp.status",
+  description = "Show language-server status and start failures in *lsp*.",
+  fn = function()
+    pmacs.listview.open {
+      name = "*lsp*",
+      header = "LSP status   g refresh  q quit",
+      rows = lsp_status_rows(),
+      on_refresh = lsp_status_rows,
+    }
+  end,
+}
+
 pmacs.command.define {
   name = "lsp.go-to-definition",
   description = "Jump to the definition of the symbol under the cursor (LSP).",
@@ -2942,6 +3171,22 @@ local function attachments_under(path)
   return out
 end
 
+-- Journey Stage 1b-2: the same query for FAILED buffers, which have no
+-- attachment by construction and are therefore invisible to
+-- `attachments_under`. Matches on the path the projection was recorded
+-- against, exactly as the attachment query matches on the cached
+-- `rec.uri` — the buffer's own path has already been rebound by the time
+-- `resource.renamed` fires.
+local function failed_projections_under(path)
+  local out = {}
+  for bkey, entry in pairs(failed_attachments) do
+    if entry.path and paths_related(entry.path, path) then
+      out[#out + 1] = bkey
+    end
+  end
+  return out
+end
+
 -- How many attributed failures one status line spells out before
 -- collapsing the rest into a count.
 local RESOURCE_REPORT_LIMIT = 2
@@ -3003,6 +3248,16 @@ end
 
 pmacs.hook.add("resource.renamed", function(old_path, new_path)
   if type(old_path) ~= "string" or type(new_path) ~= "string" then return end
+  -- A failed buffer's projection asserts "this buffer's server failed
+  -- for affinity K". After a rename that is no longer known to hold —
+  -- the new path may be in a different project, or none — so it is
+  -- CLEARED rather than re-keyed. Re-keying would assert a failure at a
+  -- location where none was observed. Clearing degrades to "we no longer
+  -- know", which renders as no marker; the next attach re-establishes
+  -- the truth.
+  for _, bkey in ipairs(failed_projections_under(old_path)) do
+    clear_failed_buffer(bkey)
+  end
   local sink = failure_sink("resource.renamed")
   for _, hit in ipairs(attachments_under(old_path)) do
     local key, rec, old_uri = hit.key, hit.rec, hit.rec.uri
@@ -3073,6 +3328,11 @@ end)
 
 pmacs.hook.add("resource.deleted", function(path)
   if type(path) ~= "string" then return end
+  -- Same disposition as rename, for the stronger reason that the path is
+  -- gone entirely.
+  for _, bkey in ipairs(failed_projections_under(path)) do
+    clear_failed_buffer(bkey)
+  end
   local sink = failure_sink("resource.deleted")
   for _, hit in ipairs(attachments_under(path)) do
     local key, rec = hit.key, hit.rec
