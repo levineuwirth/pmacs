@@ -95,7 +95,7 @@ remain open to them.
 
 | § | Concern | Grade | One-line state |
 |---|---|---|---|
-| 2 | Golden product journey | **Runs to step 5** | `pmacs .` opens the directory (Journey Stage 1a); thin from step 6 on |
+| 2 | Golden product journey | **Runs to step 10** | `pmacs .` opens the directory (1a); the interface introduces itself (1b-3); a missing language server says so (1b-2, #204); a build is bound and prefilled (1b-1, #203). Steps 1, 11 and 12 remain the thin end |
 | 3 | Zero-configuration state | **Partial** | Defaults genuinely strong; missing-tool failure is silent, not graceful |
 | 4 | Progressive disclosure | **Inverted** | The advanced level is real; the beginner level is the missing one |
 | 5 | Unified discoverability | **Substrate without surface** | Best-in-class registration metadata; almost no way for a user to reach it |
@@ -112,7 +112,7 @@ remain open to them.
 | 16 | Semantic frontend | **Strong** | v6..=v21 schema support; production attach remains v20 during the dark panel slice; degradation practiced |
 | 17 | Distribution | **Missing** | CI is test-only; no binaries, channels, checksums, or update path |
 | 18 | Onboarding | **Partial** | Journey Stage 1b-3: an unconfigured launch greets in `*scratch*` naming `M-x` and four real bindings, and `M-x help` renders a cheat sheet. Still no tutorial and `C-h` still deletes a word — deliberately, see §18 |
-| 19 | Coherence acceptance tests | **Started** | `tests/journey_acceptance.rs` exists (steps 2, 3, 5); the other five scenarios are still unwritten |
+| 19 | Coherence acceptance tests | **Started** | `tests/journey_acceptance.rs` carries 45 pins over steps 2, 3, 4, 5, 6 and 9 — the ratchet is real and stages add rows to it. The other five §19 scenarios (workspace lifecycle, worker ownership, config provenance, package lifecycle, extension isolation) are still unwritten |
 
 Three cross-cutting patterns explain most of the table; they are
 detailed in §1.1–§1.3: **substrate without surface**, **the silence
