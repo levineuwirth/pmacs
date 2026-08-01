@@ -417,6 +417,17 @@ One branch, `distribution-stage1`:
    acceptance 2–8 against the published artifacts.
 6. **Tag `v1.1.0` from that same verified SHA.**
 
+**A tag before the merge does nothing, silently.** For `on: push:
+tags`, GitHub resolves the workflow file **as it exists at the tagged
+commit** — and it lists a repository's workflows from the *default
+branch*, so `release.yml` is not even registered until this PR merges
+(verified: `gh workflow list` shows only CI while the file lives on the
+branch). Tagging any commit that predates the merge therefore produces
+no run, no error, and no release. **A silent no-op is the worst possible
+outcome for a release step, because it is indistinguishable from "not
+started yet."** Cut the RC from the merge SHA and confirm a run actually
+appeared before concluding anything about it.
+
 **Steps 5 and 6 are the point of the ordering.** A tag on a branch would
 publish a release from unmerged code, so the RC necessarily follows the
 merge — and it is cut *from the merge SHA*, so the final tag can reuse
