@@ -179,13 +179,31 @@ in the primary checkout on the laptop, not a worktree.
   **The dark count is the all-targets comparison, 3,746 − 3,467 = 279.**
   A reviewer who subtracts job totals gets a wrong number that looks
   entirely plausible.
-  - **Those two figures are already superseded** and are kept only to
-    explain the trap. Review round 1 added a pmacs-protocol step to
-    `crdt-test`, and round 2 added two capability tests to that crate,
-    so the expected totals are now **3,487** (3,467 + 1 + 19) and
-    **3,766** (3,746 + 1 + 19). The root-package census is untouched at
-    3,467 / 3,746 — the new tests live in a sibling crate, which is
-    exactly the region `scripts/feature-census` cannot see.
+  - **Those two figures are superseded** and are kept only to explain
+    the trap. Round 1 added a pmacs-protocol step to `crdt-test` and
+    round 2 added two capability tests to that crate. The current
+    totals were **predicted from the census and then confirmed exactly**
+    by run `30706324644` @ `71a1ebd`: `Test (crdt)` **3,766**
+    (3,746 + 1 doc + 19 protocol) and `Test (ubuntu/luajit)` **3,487**
+    (3,467 + 1 + 19). Predicting the count *before* the run and matching
+    it is a stronger reading of acceptance 8 than reconciling afterwards.
+  - The root-package census is untouched at 3,467 / 3,746 — the new
+    tests live in a sibling crate, exactly the region
+    `scripts/feature-census` cannot see.
+  - **The macOS legs report 3,474, thirteen fewer than ubuntu's 3,487**,
+    and that is expected: the Linux-gated process tests
+    (`setsid`, the `bash -m` job-control corroboration) are
+    `cfg`-compiled out rather than skipped. Do not read it as macOS
+    coverage loss.
+- **Verify CI by `head_sha`, never by the check summary — it bit again
+  here.** Round 1's run (`30705916037` @ `6519bc3`) was **cancelled**,
+  not green: round 2's push superseded it, which is the concurrency
+  group working as designed. A `gh pr checks` summary polled around that
+  moment reported the *previous* run's results, with plausible timings,
+  and was briefly reported as round 1 passing. The ledger already
+  carried this lesson from #178 ("twelve checks green on head `1b44c69`
+  — verified by `head_sha`, not by the check summary"); it recurs
+  because the wrong answer looks exactly like the right one.
 
 - **Root cause, unchanged:** `.github/workflows/ci.yml` never enabled
   the `crdt` feature anywhere. Every `#[cfg(feature = "crdt")]` test was
