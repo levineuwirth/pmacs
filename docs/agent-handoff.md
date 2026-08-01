@@ -58,16 +58,114 @@ reads it the way you just did.
 For volatile branches, checkpoints, verification, and recovery
 commands, read `docs/active-work.md` immediately after this file.
 
-## 1. Where the project stands (2026-07-30)
+## 1. Where the project stands (2026-08-01)
 
-- **`main` @ `4cd4a7b`.** Eight PRs landed since the previous anchor, in
-  this order: the generated-buffer immutability **framing** #188, the
-  resource-op delete-guard **implementation** #190, silent-skip arming
-  #192/#193/#194, CI timeouts and concurrency #195, the process teardown
-  stdin-deadlock fix #197, dired Stage 2a #196, generated-buffer
-  immutability **Stage 1** #191, and bottom-panel **Stage 2B-3** #198.
-  Each has its own bullet below; this line is the head-of-`main` anchor
-  and nothing else.
+- **`main` @ `cfc1710`.** Nine PRs landed since the previous anchor, in
+  this order: the ledger absorption #199, the process-signal diagnostic
+  #200, the test ambient-root isolation **framing** #201, the
+  reap-ledger diagnostic #202, Journey Stage **1b-1** #203, **1b-2**
+  #204 and **1b-3** #205, the ambient-root isolation **implementation**
+  #206, and discovery Stage 1 #207. Each has its own bullet below; this
+  line is the head-of-`main` anchor and nothing else.
+- **Two arcs completed in that run, and their lanes are gone from
+  `docs/active-work.md` accordingly** (rule 4 removes a lane once its
+  arc is done *and* its facts are here): **Journey Stage 1** — 1a plus
+  the whole 1b split — and **test ambient-root isolation**. Discovery
+  and reap-ledger merged a stage each and keep rewritten lanes.
+### 1a. Outstanding work — the whole board, 2026-08-01
+
+**Read this before picking anything up.** It is the only place the
+remaining work is enumerated in one view; the per-arc bullets below give
+the detail. Nothing here is in flight: **zero PRs are open** at this
+anchor, so every item is startable.
+
+#### Arc state, against `COHERENCE.md` §20's priority order
+
+| P | Arc | State | What is next |
+|---|---|---|---|
+| 1 | **Journey** | **Stage 1 COMPLETE** (1a #182/#183; 1b-1 #203, 1b-2 #204, 1b-3 #205) | Journey runs to step 10. The thin end is now steps **1** (install — that is P8), **11** (background work: visible but no ownership model, §9) and **12** (session restore: desktop-save is opt-in *and* a documented no-op under a daemon) |
+| 2 | Workspace + location | Missing; model gap | The long-lead arc. Start before a fifth subsystem grows its own root convention — four have already diverged (§7) |
+| 3 | Extension ownership | Missing; prerequisite-shaped | **`pmacs.hook.remove` does not exist.** That one bug-sized gap blocks §13's disable/uninstall, §10's trust classes, and package-scoped cancellation |
+| 4 | **Discovery** | **Stage 1 MERGED (#207)** | Stage 2 candidates, in rough dependency order: richer M-x rows (**protocol change** — `MinibufferPrompt.candidates` is `Vec<String>`; `CompletionPopupRow` already proves the pattern), `Command` gaining title/category/aliases/flags/arg-schema (~147 definition sites), predicate evaluation, help-layer unification, and the help-prefix decision |
+| 5 | Workbench convergence | Partial, best trajectory | Bottom panel done both frontends; **Stage 3 = flip the adopter default**. Then the tree primitive — build it *before* dired and the worker tree invent two |
+| 6 | Config productization | Foundation only | Value provenance, then layering, then adoption migration (**table-valued settings are the hard prerequisite** — `ConfigValue` is four scalars) |
+| 7 | Package lifecycle | Not started | Correctly sequenced after P3 |
+| 8 | Distribution | Zero | Independent of everything, startable any time. **Every other priority's value is invisible until this one exists** |
+
+#### Open lanes (branch exists, work not finished)
+
+- **CRDT half of the corpus is dark in CI — still no lane, no owner.**
+  CI never enables `crdt`, so those tests are *not compiled*, not merely
+  skipped. **Re-measure before quoting a number**; the ledger's figure
+  moves with every merge.
+- **Generated-buffer immutability** — Stage 1 merged (#191); Stage 2
+  not started. Four writer mechanisms have still not adopted
+  `set_generated_contents`; key the inventory by *writer*, not buffer.
+- **Bottom panel** — Stage 2 complete; Stage 3 is the adopter default
+  flip.
+- **Folding** — Stages 1–2 merged; Stage 3 (GPU) next, with
+  mirror-clear-on-snapshot a named obligation.
+- **Reap-ledger** — diagnostic merged (#202); every *disposition* change
+  is still parked (below).
+- **Kill-ring browser + persistence** — parked by choice.
+
+#### Deferred work, by the framing that parked it
+
+Each was a deliberate decision with a stated reason; none is a to-do
+someone forgot.
+
+- **From LSP guidance (#204):** build `pmacs.error` (**fifteen guarded
+  call sites reporting through a channel that does not exist**);
+  promote the spawn-failure record into Rust's status model so `*lsp*`
+  shows failures natively; surface `LspEventKind::Crashed` — a server
+  that *started then died* is unsurfaced and is a different message.
+- **From the welcome (#205):** the help prefix — **`C-h` is not free**;
+  it deletes a word because non-kitty terminals cannot disambiguate
+  Ctrl+Backspace from Ctrl+H (both byte 0x08), so rebinding breaks
+  Ctrl+Backspace on every legacy terminal. Also: make `show_help_text`
+  adopt the generated-buffer write invariant; onboarding proper (§18's
+  ten-step sequence).
+- **From discovery (#207):** everything in the P4 row above, plus
+  settings **value provenance** (§11) and **closed-set acceptance
+  semantics** — completion today is *assistance*, not validation:
+  `resolve_accepted_value` returns the literal typed text when no
+  candidate is selected, so a typo still reaches the handler.
+- **From the reap ledger (#202):** Q#RL1's strict-`ESRCH` probe and
+  Q#RL2's retry policy — **neither can move alone**, because
+  `shutdown()`'s loop exits when the ledger empties, so a strict probe
+  without a loop change converts a silent early exit into a guaranteed
+  2 s stall at every editor exit. Also parked: retargeting to the
+  measured pgid, `signal_target`'s read-then-kill of `tcgetpgrp` (the
+  "most likely real fix site"), and **why** a group-directed `kill`
+  returns `EPERM` against a live owned child — still unknown.
+- **From ambient isolation (#206):** production still resolves ambient
+  roots by default (only *construction* gained a parameter); nothing
+  audits what previously wrote into `~/.local/share/pmacs`.
+
+#### Side quests and standing hazards
+
+- **`pmacs.error` is undefined in production.** Fifteen `if pmacs.error
+  then` guards make the silence look deliberate. Report through
+  `pmacs.editor.set_status` until the channel is built.
+- **Flakes that are not your change.** Judge a red run against these
+  before bisecting: `process::tests::a_successful_signal_disposition_...`
+  (macOS-only, signal timing); `a33_headless_terminal_frame_paints_...`
+  (GPU under parallel load, "0 blue pixels"); `m6_8_supervisor_reaps_...`
+  (load-sensitive). **Rerun before concluding.**
+- **`basedpyright` hangs forever** — always
+  `cargo test --test m4_acceptance -- --skip basedpyright`.
+- **The crdt sweep needs `cargo build --workspace` first**, or twelve
+  `gpu_invocation_acceptance` tests fail on a missing `pmacs-gpu`
+  binary.
+- **A green a37 means nothing on its own** — the vterm real-daemon
+  acceptance returns `ok` without running unless `pmacs-gpu` is built.
+
+- **Previous anchor, retained for provenance:** `4cd4a7b` (the
+  generated-buffer immutability framing #188, the resource-op
+  delete-guard implementation #190, silent-skip arming #192/#193/#194,
+  CI timeouts and concurrency #195, the process teardown stdin-deadlock
+  fix #197, dired Stage 2a #196, generated-buffer immutability Stage 1
+  #191, and bottom-panel Stage 2B-3 #198).
 - **Previous anchor, retained for provenance:** `6c9e765` (the dired
   Stage 2 framing #171 and the resource-op
   delete guard framing #186 — both framing-only, no runtime code, no
