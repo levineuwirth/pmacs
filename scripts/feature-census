@@ -1,0 +1,228 @@
+#!/bin/sh
+# scripts/feature-census --- measure which tests a feature flag HIDES.
+#
+#   scripts/feature-census <config-a> <config-b> [--covers <test-name>]
+#
+# Both arguments are `--features` strings, applied with
+# `--no-default-features`. Config A is the baseline (typically CI's
+# flags); config B is the richer one. The script reports every test that
+# exists under B and NOT under A --- the "dark" set.
+#
+#   scripts/feature-census luajit luajit,crdt
+#   scripts/feature-census luajit luajit,crdt --covers crdt_undo_keeps_invariant
+#
+# WHY THIS EXISTS. A cargo feature is a COMPILE-TIME gate, so a test
+# behind one is not skipped or filtered --- it does not exist. Nothing in
+# a test run says so: the suite reports `ok`, the counts look plausible,
+# and the absent tests are absent from the report too. `.github/
+# workflows/ci.yml` never enabled `crdt` for the project's whole life,
+# and 279 tests --- including 186 library tests behind a REQUIRED
+# CLAUDE.md gate --- had never executed in CI. Nobody was ignoring a red
+# signal; there was no signal.
+#
+# docs/active-work.md therefore says the figure "moves with every merge
+# and must be re-measured, not quoted." That instruction had no tool, so
+# every re-measurement was a hand-rolled `--list` pipeline. This is that
+# tool.
+#
+# EXIT STATUS: 0 when the census completes (and, with --covers, the
+# claim holds); 1 when a --covers claim FAILS; 2 on usage errors; 3 when
+# either configuration FAILS TO BUILD.
+#
+# Exit 3 is the important one, and it is fail-closed on purpose. A
+# configuration that does not compile produces no test list, which is
+# indistinguishable by counting from "this configuration contains no
+# tests" --- and would render as a spectacular, entirely false, "every
+# test is dark under A." A census whose baseline did not build is not a
+# small error; it is a number that will be quoted.
+#
+# PARSING NOTES, each one a mistake made while writing this:
+#
+#  * libtest prints `some::path::name: test` with NO SPACE before the
+#    colon. A filter written as `/ : test$/` matches nothing, reports
+#    zero targets, and looks like a clean run. Cost: one silently empty
+#    census. The pattern below is anchored to end-of-line instead.
+#
+#  * `--list` also emits `: benchmark` lines. Only `: test` is counted.
+#
+#  * Target attribution comes from cargo's `Running` lines, which have
+#    TWO shapes: `Running unittests src/lib.rs (...)` for a lib/bin
+#    target and `Running tests/foo.rs (...)` for an integration test.
+#    Reading a fixed field number handles one and mangles the other.
+#
+#  * A target with zero tests still prints its `Running` line and then
+#    nothing. Counting only test lines DROPS such targets entirely, so
+#    they never appear in the diff --- which is precisely the finding
+#    worth surfacing (eight binaries reported `ok` with nothing in
+#    them). They are tracked from the `Running` line, not inferred from
+#    having tests.
+#
+#  * `--list` includes #[ignore]d tests. They are dark in the same
+#    sense but are NOT recovered by adding the feature to an ordinary
+#    test job --- that needs `--ignored`. Conflating the two overstates
+#    what a fix delivers, so ignored tests are counted separately via a
+#    second `--list --ignored` pass.
+#
+# CARGO_TERM_COLOR is pinned off so escape codes cannot break the
+# anchored matches, the same precaution and for the same reason as
+# scripts/bite.
+
+set -eu
+
+usage() {
+    echo "usage: scripts/feature-census <config-a> <config-b> [--covers <test-name>]" >&2
+    exit 2
+}
+
+[ "$#" -ge 2 ] || usage
+
+config_a=$1
+config_b=$2
+shift 2
+
+covers=""
+while [ "$#" -gt 0 ]; do
+    case $1 in
+        --covers)
+            [ "$#" -ge 2 ] || usage
+            covers=$2
+            shift 2
+            ;;
+        *) usage ;;
+    esac
+done
+
+export CARGO_TERM_COLOR=never
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/feature-census.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT INT TERM
+
+# Emit "<count> <target>" per target. Targets with zero tests are
+# emitted with a count of 0 rather than omitted.
+parse_list() {
+    awk '
+        /^ *Running /{
+            t = $2
+            if (t == "unittests") t = $3
+            sub(/.*\//, "", t)
+            sub(/\.rs$/, "", t)
+            seen[t] = 1
+            next
+        }
+        /: test$/ { c[t]++ }
+        END { for (k in seen) printf "%d %s\n", c[k] + 0, k }
+    ' | sort -k2
+}
+
+# $1 = features, $2 = output basename, $3... = extra libtest args
+run_list() {
+    features=$1
+    out=$2
+    shift 2
+    if ! cargo test --all-targets --no-default-features --features "$features" \
+            -- --list "$@" > "$work/$out.raw" 2>&1; then
+        echo "feature-census: CONFIGURATION FAILED TO BUILD: --features $features" >&2
+        echo "feature-census: refusing to report a census against a config that does not" >&2
+        echo "feature-census: compile --- every test would read as absent. Last output:" >&2
+        tail -n 20 "$work/$out.raw" >&2
+        exit 3
+    fi
+    parse_list < "$work/$out.raw" > "$work/$out.counts"
+}
+
+echo "feature-census: listing A (--features $config_a)" >&2
+run_list "$config_a" a
+echo "feature-census: listing B (--features $config_b)" >&2
+run_list "$config_b" b
+# BOTH sides need an ignored pass. A test that is #[ignore]d under A as
+# well as B is not "dark and ignored" --- it was already there. Counting
+# only B's ignored set attributes pre-existing ignores to the feature
+# and overstates the untouchable remainder.
+echo "feature-census: listing A ignored" >&2
+run_list "$config_a" a_ignored --ignored
+echo "feature-census: listing B ignored" >&2
+run_list "$config_b" b_ignored --ignored
+
+total_a=$(awk '{s+=$1} END {print s+0}' "$work/a.counts")
+total_b=$(awk '{s+=$1} END {print s+0}' "$work/b.counts")
+targets_a=$(wc -l < "$work/a.counts" | tr -d ' ')
+targets_b=$(wc -l < "$work/b.counts" | tr -d ' ')
+
+echo
+echo "  config A: --features $config_a"
+echo "  config B: --features $config_b"
+echo
+
+# One pass over all four count files, keyed by target, so every derived
+# figure comes from the same table rather than a chain of joins whose
+# defaulting rules have to agree.
+awk '
+    FILENAME ~ /a\.counts$/        { a[$2]  = $1; seen[$2] = 1; next }
+    FILENAME ~ /b\.counts$/        { b[$2]  = $1; seen[$2] = 1; next }
+    FILENAME ~ /a_ignored\.counts$/{ ai[$2] = $1; next }
+    FILENAME ~ /b_ignored\.counts$/{ bi[$2] = $1; next }
+    END {
+        for (t in seen) {
+            d = b[t] - a[t]
+            if (d <= 0) continue
+            # A dark test is ignored only if B ignores MORE than A does.
+            di = bi[t] - ai[t]
+            if (di < 0) di = 0
+            if (di > d) di = d
+            printf "row %6d %6d %6d %6d %s\n", d, a[t], b[t], di, t
+            dark += d; darkt++; darkig += di
+        }
+        printf "sum %d %d %d\n", dark + 0, darkt + 0, darkig + 0
+    }
+' "$work/a.counts" "$work/b.counts" "$work/a_ignored.counts" "$work/b_ignored.counts" \
+    > "$work/table"
+
+awk '$1 == "row" { printf "%6d dark | %6d A | %6d B | %s%s\n", $2, $3, $4, ($5 > 0 ? "(" $5 " ignored) " : ""), $6 }' \
+    "$work/table" | sort -rn
+
+read_sum() { awk -v f="$1" '$1 == "sum" { print $(f + 1) }' "$work/table"; }
+dark_total=$(read_sum 1)
+dark_targets=$(read_sum 2)
+dark_ignored=$(read_sum 3)
+
+# Targets with zero tests under A. These build, run, and report `ok`
+# with nothing in them. Split by whether B gives them any, because the
+# two mean different things: one is a target the feature unlocks, the
+# other is a binary that simply has no tests at all.
+empty_a=$(awk '$1 == 0 { n++ } END { print n+0 }' "$work/a.counts")
+empty_a_filled_by_b=$(awk '
+    FILENAME ~ /a\.counts$/ { a[$2] = $1; next }
+    FILENAME ~ /b\.counts$/ { if (a[$2] == 0 && $1 > 0) n++ }
+    END { print n+0 }
+' "$work/a.counts" "$work/b.counts")
+
+echo
+echo "  A: $total_a tests across $targets_a targets"
+echo "  B: $total_b tests across $targets_b targets"
+echo "  DARK: $dark_total tests across $dark_targets targets"
+echo "        of which #[ignore]d under B but not A: $dark_ignored"
+echo "        recovered by adding B's features to a plain test job: $((dark_total - dark_ignored))"
+echo "        (the remainder needs an --ignored invocation, not just the feature)"
+echo
+echo "  $empty_a target(s) run under A with ZERO tests --- they report ok with nothing in them."
+echo "  $empty_a_filled_by_b of those gain tests under B; the rest have no tests in either."
+
+if [ -n "$covers" ]; then
+    echo
+    in_b=no
+    in_a=no
+    grep -q "^${covers}: test$\|::${covers}: test$" "$work/b.raw" && in_b=yes
+    grep -q "^${covers}: test$\|::${covers}: test$" "$work/a.raw" && in_a=yes
+    echo "  --covers $covers"
+    echo "    present under B: $in_b"
+    echo "    present under A: $in_a"
+    if [ "$in_b" = yes ] && [ "$in_a" = no ]; then
+        echo "    => B-only. A configuration running only A cannot see this test."
+    elif [ "$in_b" = no ]; then
+        echo "    => CLAIM FAILED: not present under B at all (misspelled?)." >&2
+        exit 1
+    else
+        echo "    => CLAIM FAILED: present under A too, so B is not load-bearing for it." >&2
+        exit 1
+    fi
+fi
