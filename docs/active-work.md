@@ -1,10 +1,22 @@
 # Active work — cross-machine resume ledger
 
-**Snapshot: 2026-07-30.** This file records volatile work that has not
+**Snapshot: 2026-08-01.** This file records volatile work that has not
 landed on `main`. Read it after `docs/agent-handoff.md`. Remove completed
 entries when their PR merges; do not let this become a second permanent
 backlog.
 
+**This snapshot is an absorption pass, taken with ZERO open PRs** —
+the one window in which a ledger refresh has nothing to re-conflict
+with, and taken deliberately before a machine move. Nine PRs landed
+since the previous anchor (#199–#207). Two arcs completed and their
+lanes are **removed**, their durable facts now in
+`docs/agent-handoff.md` §1: **Journey Stage 1** (1a plus the whole 1b
+split) and **test ambient-root isolation**. Discovery and reap-ledger
+merged a stage each and keep lanes rewritten to what remains.
+`docs/agent-handoff.md` §1a now carries the whole board — every arc,
+open lane, deferred item and standing hazard in one view.
+
+*(Earlier note, retained because its reasoning still governs:)*
 **This snapshot is an absorption pass.** Eight PRs merged on 2026-07-29
 and 2026-07-30 (#188, #190, #191, #194, #195, #196, #197, #198) and the
 ledger had drifted to 1,854 lines carrying six lanes whose work was
@@ -62,19 +74,17 @@ lesson, §1 for the two framings).
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `fbcf235` (the reap-ledger diagnostic #202, atop
-  the test ambient-root isolation framing #201, the reap-ledger framing
-  #200, the ledger absorption #199, the M5.5 protocol-version pin #198,
-  the docs-only coherence listview correction #189, the docs-only
-  landed-state refresh #185, the M4 config-sink race fix #174,
-  bottom-panel Stage 2B-1 #184, the Journey/GPU directory-target ratchet
-  #183, Journey Stage 1a #182 and the previously recorded landed work).
+  `githubsucks/main` @ `cfc1710` (discovery Stage 1 #207, atop the
+  ambient-root isolation implementation #206, Journey Stage 1b-3 #205,
+  1b-2 #204 and 1b-1 #203, the reap-ledger diagnostic #202, the
+  isolation framing #201, the process-signal diagnostic #200, the ledger
+  absorption #199, and the previously recorded landed work).
   **Protocol schema support is
   `v6..=v21`; the production server-first `Hello` still advertises
   v20** — two different facts, and #184 landed only the first. The
-  previous snapshot named `7586905`, and **the
+  previous snapshot named `fbcf235`, and **the
   recovery floor advances with it**: the check below now requires
-  `fbcf235` or newer, so a tree at `7586905` no longer passes. That is
+  `cfc1710` or newer, so a tree at `fbcf235` no longer passes. That is
   deliberate — the floor moves with the base, because a check that
   accepts an older commit than the declared base passes on a tree the
   rest of this file does not describe.
@@ -113,12 +123,21 @@ git worktree list
 git status --short --branch
 ```
 
-The `git log` command must expose `fbcf235` — the base named above — or a
+The `git log` command must expose `cfc1710` — the base named above — or a
 newer intentional main. Keep this threshold and the canonical-base line in
 step: a recovery check that accepts an older commit than the base it
 declares canonical will pass on a tree the rest of this file does not
 describe.
 If it does not, stop and repair the remote/fetch configuration.
+
+**This path was exercised, not asserted, at this snapshot** — ahead of a
+machine move. From an empty directory: `git clone` the canonical URL,
+add the `githubsucks` alias, `git fetch githubsucks --prune`, confirm
+`cfc1710` is an ancestor of `githubsucks/main`, and recover a lane with
+the three-argument `git worktree add <path> -b <local> githubsucks/<branch>`
+form. All four steps ran clean. **The two-argument form still does not
+work** for a remote-only branch (`fatal: invalid reference`), which is
+why every lane below spells out the `-b` form.
 
 ## The CRDT half of the test corpus is dark in CI — NEEDS A LANE
 
@@ -255,230 +274,50 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
-## Journey lane (P1) — 1a, 1b-1, 1b-2 MERGED; 1b-3 PR #205 OPEN
+## Discovery lane (P4) — STAGE 1 MERGED (#207); STAGE 2 IS NEXT
 
 **Rewritten, not removed.** Rule 4 removes a lane when its ARC is done;
-the journey arc is not — 1b-3 is the last stage of the 1b split and is
-still open. Stages 1a (#182/#183), 1b-1 (#203) and **1b-2 (#204)** are
-all on `main` and their durable facts are in `docs/agent-handoff.md` §1,
-which is rule 4's precondition satisfied rather than deferred — so their
-per-stage blocks are gone from here rather than left to rot as
-"PR OPEN".
+this arc is not — Stage 1 built the command surface and everything that
+needs a Rust change is still ahead. Stage 1's durable facts are in
+`docs/agent-handoff.md` §1.
 
-**#203's merge obligation is DISCHARGED** on this branch: `COHERENCE.md`
-§2's step-9 row reads **Works**, §2's keybinding-inversion paragraph
-records all three examples answered (the quote itself deliberately
-unchanged), §20 Priority 1 and its arc list say "landed", and the
-handoff bullet says LANDED. **#204's is discharged too**: §2's step-6
-row names it as landed and stays **Partial** for a reason that landing
-did not touch — a server that starts and then *crashes* is still
-unsurfaced. Both rode this branch rather than standalone docs PRs,
-which would have re-conflicted on every merge.
-
-### Stage 1b-3 — IMPLEMENTED, PR #205 open
-
-- **Branch `journey-stage1b3-welcome`**, worktree `../pmacs-journey-1b3`,
-  based on `githubsucks/main` @ `1f290d5`, **integrated with `main` @
-  `5376af1`** (#204). **Implemented; PR #205 open.**
-  `docs/journey-stage1b3-welcome-framing.md` revision 4, three
-  review rounds closed (round 1: four findings; round 2: two acceptance
-  holes plus a doc correction; round 3: a visibility mismatch and an
-  unobservable assertion; all accepted). The last of the 1b split
-  (1b-1 landed #203, 1b-2 landed #204 at `5376af1`).
-- **What it is.** Journey step 4 / `COHERENCE.md` §18: a fresh `pmacs`
-  greets the user with an empty buffer, an empty status line, and no
-  indication that `M-x` exists. The stage renders a three-line welcome
-  into `*scratch*` and adds a minimal `M-x help`.
-- **`EditorState::new()` is NOT the no-argument entry point**, and
-  revision 1 rested every criterion on the assumption that it was.
-  `EditorState::open` calls it *before* resolving the target
-  (`src/editor.rs:944`), the daemon constructs one too, user config runs
-  *inside* it, and desktop restore happens much later
-  (`restore_desktop_if_armed`, `:3637`, inside `run()`'s `RunLocal`
-  arm). The stage now adds a **launch-finalization seam** called right
-  after desktop restore, with `had_file` — already threaded to that
-  point for the same kind of question — as the no-target signal.
-  **Round 2 closed the wiring hole rather than disclaiming it.**
-  Revision 2 called `run()`'s call to the seam an untestable residual —
-  but deleting that one line left every proposed pin green while
-  shipping no welcome, because the pins called the seam by hand. The
-  terminal-free prefix of `run()` (everything before `Frontend::new()`)
-  is now extracted into `prepare_startup`, which `run()` delegates to
-  and the pins drive. It is **`pub`**, not `pub(crate)`: the journey
-  suite is a separate integration crate and cannot reach crate-private
-  items, and `run`/`new`/`open`/`install_state_dirs`/
-  `restore_desktop_if_armed` are already public, so this completes that
-  surface rather than widening it for a test. The pin must assert
-  desktop restore was **unarmed** (an ambient `init.lua` calling
-  `desktop_mode(true)` would otherwise change the result) and must
-  assert buffer content only, since `install_state_dirs` resolves real
-  XDG/`PMACS_STATE_HOME` roots that tests cannot override
-  (`set_var` is unsafe and forbidden).
-- **The step-2 pin is NOT amended.** Revision 1 analysed a status-line
-  welcome and then chose `*scratch*`, but kept the amendment — an
-  internal contradiction. The status stays empty, so the pin stays true,
-  and "no error text" has no defined predicate over an unstructured
-  status string anyway.
-- **`C-h` is NOT free, and the reason is load-bearing.** It is bound to
-  `buffer.delete-word-backward` because non-kitty terminals cannot
-  disambiguate Ctrl+Backspace from Ctrl+H — both produce byte 0x08
-  (`builtin/keymaps/default.lua:78-86`). Rebinding it to a help prefix
-  would break Ctrl+Backspace on every legacy terminal, so §2's step-4
-  row calling it an oversight is wrong: it is a deliberate trade. The
-  help-prefix decision is deferred to §20 Priority 4's discovery arc
-  with the constraint recorded.
-- **`*help*` already exists** (`builtin/commands/default.lua:1226`,
-  `show_help_text`, reused buffer, buffer-local `q`), used by
-  `editor.describe-command` / `-setting`, over `src/help.rs`'s
-  renderers and link resolution. Two gaps recorded rather than
-  inherited silently: it writes with `buf:delete`/`buf:insert` instead
-  of `set_generated_contents`, and it is **found by name**, so a
-  foreign `*help*` would be cleared.
-- **Deliberately NOT `set_generated_contents` for the welcome** — that
-  lifts read-only, discards history and marks the buffer generated, all
-  wrong for a buffer step 5 requires the user to type into immediately.
-  The one place not adopting that invariant is correct, stated so a
-  later audit does not "fix" it.
-- **Step 4 stays Partial, but there IS a §25 obligation** — revision 1
-  claimed there was none. The scorecard's row 18 and §18's ground truth
-  both read **Missing**, and both become false on merge: they move to
-  **Partial**. A stage can be too small to flip its journey step while
-  still falsifying a "missing entirely" grade.
-- **The welcome renders from a structured entry list**, not from scraped
-  prose: `M-x help` mixes a chord with a command name and `C-c c` is two
-  chords whose boundary prose does not mark, so the binding checks run
-  `pmacs.keymap.lookup` over the same list that renders the text.
-- **`pmacs.command.invoke` is NOT the M-x path** — it is the
-  programmatic API. M-x is `editor.execute-command`, a minibuffer with
-  the `commands` completion source that calls `invoke_interactive` on
-  accept. The `M-x help` pin dispatches the chord, enters the name and
-  accepts — and asserts **`pmacs.minibuffer.selected() == "help"`
-  BEFORE RET**, because a selected candidate shadows typed text (dired
-  refused a completion source for exactly this reason) and `accept()`
-  does `session.take()`, so nothing about the accepted value survives
-  afterwards.
-- **Integrated with `main` @ `5376af1`** (#204). The journey suite's
-  conflict was additive on both sides — step 4 (this lane) and step 6
-  (#204) — and both are kept: **44 pins, covering steps 2, 3, 4, 5, 6
-  and 9**.
-- **§18 and the scorecard move Missing → Partial ON THIS PR**, per §25;
-  §2's step-4 row stays Partial because `C-h` and the tutorial remain.
-  No deferred flip is owed at merge — unlike 1b-1's.
-- **Bites, all directed.** Deleting the production `run()` wiring fails
-  the two greeting pins — **the mutation revision 2's design would have
-  survived entirely**. Removing `mark_clean` fails the editable/clean
-  pin; the `had_file` guard fails the directory pin (not the file pin,
-  because a file buffer is active by then while the dired listing is
-  async); the emptiness guard fails the existing-content pin; the
-  active-buffer requirement fails the backgrounded pin; and advertising
-  an unbound key fails the binding pin.
-
-  ```sh
-  git fetch githubsucks
-  git worktree add ../pmacs-journey-1b3 \
-    -b journey-stage1b3-welcome \
-    githubsucks/journey-stage1b3-welcome
-  ```
-
-## Discovery Stage 1 (P4) — IMPLEMENTED, PR OPEN
-
-- **Branch `discovery-stage1-commands`**, worktree `../pmacs-p4-discovery`,
-  based on `githubsucks/main` @ `54a092e`. **Implemented; PR open.**
-  `docs/discovery-stage1-command-family-framing.md` revision 6,
-  three review rounds closed (round 1: two blocking, two major; round 2:
-  two blocking, two major; round 3: two factual corrections; all
-  accepted), Q#D2 / Q#D3 decided by the user, and the final review's
-  acceptance corrections applied.
-- **What it is.** `COHERENCE.md` §20 Priority 4 — "almost pure wiring,
-  the best payoff-per-effort in this document". **Eleven commands under
-  one `help.*` prefix**: nine new (describe-key/mode/hook/buffer,
-  where-is, list-commands, list-keybindings, list-settings, apropos)
-  plus `editor.describe-command` / `editor.describe-setting` renamed,
-  with the old names retained as **forwarders** so nothing documented
-  breaks. Typing `help` at M-x surfaces the whole family, which is the
-  discoverability win the arc exists for (Q#D2).
-- **`apropos` matches by SUBSTRING, not fuzzy** (Q#D3). `fuzzy_score`
-  is subsequence-based and descriptions are long sentences, so fuzzy
-  would match nearly every command. Pinned by a
-  `test.apropos-subsequence-fixture` whose `qzjx` letters occur as `q z
-  j x`, only after asserting no registered name or description contains
-  `qzjx` as a substring; it must find nothing, whereas fuzzy finds the
-  fixture.
-- **It adds no Rust.** `pmacs.describe.*`, `pmacs.keymap.list()`,
-  `pmacs.command.list()` and `pmacs.config.list()` already return
-  everything needed, and `parse_completion_source` accepts a **Lua
-  `Function`** (`CompletionSource::Custom`), so even the prompts need no
-  new Rust.
-- **Completion is ASSISTANCE, not validation.**
-  `resolve_accepted_value` returns the **literal typed text** whenever
-  no candidate is selected, so a non-matching typo still reaches
-  `on_accept` and the existing error path — and a fuzzy near-miss can
-  silently describe a *different* setting, a new failure mode.
-  Closed-set acceptance ("refuse a non-candidate") is Rust work and is
-  deferred. The custom source needs a **mapper**: `config.list()`
-  yields descriptor *tables* while `Custom` consumes a sequence of
-  strings. **It does not control display order** —
-  `recompute_candidates` runs `filter_and_sort` (fuzzy score, lexical
-  tiebreak); sorting the pool matters only because `.take(
-  CANDIDATE_LIMIT)` runs *before* the sort, so pool order decides which
-  candidates survive truncation.
-- **`invoke_interactive` is NOT the M-x path** — the error #205
-  corrected, repeated one PR later. The path is dispatch `M-x` →
-  `editor.execute-command` → assert the selected candidate **before**
-  RET (`accept()` does `session.take()`) → accept → `invoke_interactive`.
-  Six of the eleven canonical commands (`help.describe-command`,
-  `help.describe-setting`, `help.describe-key`, `help.describe-hook`,
-  `help.where-is`, and `help.apropos`) open a **second** prompt the pins
-  must drive too; a pin that stops after the first RET has tested the
-  palette.
-- **One owner for `*help*` writes — NOT a one-site migration.**
-  `src/help.rs` has semantic renderers for command/key/buffer/mode/
-  hook/view and **none for settings, lists or apropos**, and
-  `_show_help` takes already-flattened text, so a later migration still
-  changes each command's subject-specific logic. What the funnel buys is
-  the shared policy in one place: reuse-by-name, wholesale
-  delete+insert, the `q` binding, and the foreign-`*help*` hazard.
-  **`*help*` is ordinary editable content** — no read-only intercept, no
-  generated-content invariant. And read-only would **not** fix the
-  foreign-buffer hazard either: a user's own `*help*` carries no
-  intercept of ours, so the renderer still finds it by name and clears
-  it. The missing guarantee is **ownership identity**, which `listview`
-  and dired both carry and this mechanism does not. Each command's rendering
-  is a named per-subject function so the future Rust work is enumerated
-  per-subject (three new renderers) rather than discovered per-call-site.
-- **Deliberately deferred, each with a reason:** richer M-x rows
-  (`MinibufferPrompt.candidates` is `Vec<String>` — protocol change);
-  `Command` gaining title/category/flags (~147 definition sites);
-  predicate evaluation (**read only at `src/help.rs:76` and one test** —
-  a behaviour change); help-layer unification; closed-set acceptance;
-  and the **help prefix key**, which this stage does not touch because
-  #205 recorded why `C-h` is not free.
-- **Implementation notes.** `runtime/help.lua` is new and owns the
-  family plus the `help` index, which **moved out of `welcome.lua`** so
-  the greeting file keeps only the greeting; it loads after welcome.lua
-  so the index can read `pmacs.welcome.entries`.
-- **The seam-counting pin caught a real bypass immediately.** The two
-  renamed commands were still calling the file-local `show_help_text`,
-  so the funnel the framing promised was fiction for exactly the two
-  commands that predate the seam. They now call
-  `pmacs.editor._show_help`, with a comment saying why the in-scope
-  local is deliberately not used.
-- **Bites, all directed** — six mutations, each failing exactly one pin:
-  fuzzy apropos, name-only apropos, static where-is, a dropped
-  forwarder, an unindexed family command, and one command writing
-  `*help*` itself (seam count 10 vs 11).
-- **§5 moves substrate-without-surface → Partial ON THIS PR** per §25,
-  with the remaining gaps named in the row: packages and workers have no
-  surface, `Command` still lacks title/category/flags, M-x rows are bare
-  names, and the Rust help layer is still orphaned.
-- Recovery:
-
-  ```sh
-  git fetch githubsucks
-  git worktree add ../pmacs-p4-discovery \
-    -b discovery-stage1-commands \
-    githubsucks/discovery-stage1-commands
-  ```
+- **Landed:** eleven `help.*` commands over the existing registries,
+  indexed by `M-x help`, with `editor.describe-command` /
+  `editor.describe-setting` kept as forwarders. No Rust, no protocol
+  change. §5 moved substrate-without-surface → **Partial**.
+- **Stage 2 candidates, in rough dependency order:**
+  1. **Richer M-x rows** — a **protocol change**:
+     `MinibufferPrompt.candidates` is `Vec<String>`, while
+     `CompletionPopupRow` already carries `kind`/`detail`, so the wire
+     pattern is solved and the bump is the work.
+  2. **`Command` gains title / category / aliases / flags /
+     arg-schema** — a Rust type change across ~147 definition sites.
+     MCP currently works around the missing schema by stuffing rendered
+     JSON into the description string.
+  3. **Predicate evaluation.** `Command.predicate` is read at
+     `src/help.rs:76` and one test, and **evaluated nowhere**. Starting
+     to evaluate it makes commands stop being invocable, so it needs its
+     own decision about what "unavailable" means at each call site —
+     M-x, dispatch, menu. `discovery_acceptance`'s `d9` pins today's
+     behaviour with a *raising* predicate, so that stage must change the
+     pin knowingly.
+  4. **Help-layer unification.** `src/help.rs` is still orphaned. Stage 1
+     funnels every command through `pmacs.editor._show_help` and renders
+     via named per-subject functions, so the work is enumerated:
+     replace the four subjects `src/help.rs` covers (key, mode, hook,
+     buffer) and **write three new Rust renderers** for settings, lists
+     and apropos.
+  5. **The help prefix.** Deliberately untouched by Stage 1 — the
+     decision is one for the whole family, and `C-h` is **not** free
+     (non-kitty terminals cannot disambiguate Ctrl+Backspace from
+     Ctrl+H; both produce byte 0x08). `F1` / `C-c ?` / a rebind are the
+     candidates.
+- **Two Stage-1 facts a Stage-2 author needs.** Completion is
+  **assistance, not validation** — `resolve_accepted_value` returns the
+  literal typed text when no candidate is selected, so closed-set
+  acceptance is unbuilt Rust work. And **`invoke_interactive` is not the
+  M-x path**; the forwarders learned that the hard way in CI, since
+  `pmacs.command.invoke` is a real caller of the old names.
 
 ## Generated-buffer immutability lane (Arc: workbench primitives) — STAGE 1 MERGED; STAGE 2 IS NEXT
 
@@ -513,72 +352,6 @@ compatible.
   2B-3's merge.
 - **DAP waits for Stage 2, not Stage 1** — that dependency is now
   satisfied.
-
-## Test ambient-root isolation — IMPLEMENTATION OPEN
-
-- **Framing MERGED (#201)**;
-  `docs/test-ambient-config-isolation-framing.md` **revision 5**
-  (revision 4 approved after three review rounds — eight blocking, six
-  major, all accepted; revision 5 rides the implementation PR and records
-  findings, not a new design round).
-- **PR #206 OPEN**, one review round closed. **§7's branch plan was
-  consciously exceeded**: the whole-corpus migration rides this PR rather
-  than a follow-up lane, because splitting would either leave 65 suites
-  writing the real data root or ship acceptance 12's ratchet with a
-  ~65-file allowlist that does not ratchet. Recorded in framing revision
-  5; accepted in review.
-- **Implementation branch `test-ambient-isolation-impl`**, worktree
-  `../pmacs-test-isolation-impl`, based on `githubsucks/main` @
-  `54a092e`. The framing-only worktree `../pmacs-test-isolation`
-  (branch `test-ambient-config-isolation`) is spent — its doc is on
-  `main`.
-- **What landed on the branch.** `pmacs::bootstrap::BootstrapRoots`
-  (config/data/state/cache, `ambient()` for production), reachable from
-  `EditorState::new_with_roots` **and** `open_with_roots` and consulted
-  again by `install_state_dirs`; all 342 in-process construction sites
-  in 65 files migrated; `journey_acceptance` keeps the ambient `open`
-  and re-execs itself per test with controlled roots instead; the shared
-  daemon and PTY spawners now set all five storage variables;
-  `tests/ambient_isolation_acceptance.rs` carries the hostile-environment
-  proof and the adoption ratchet.
-- **What it is.** Integration tests use the developer's real ambient
-  roots. `#[cfg(not(test))]` guards config loading against the crate's
-  own unit tests only, so the **65** files in `tests/` that construct an
-  editor load the real `init.lua` — and, separately, `EditorState::new` materializes bundled
-  packages unconditionally into the real `XDG_DATA_HOME`/`$HOME`.
-  **It is not read-only**: `~/.local/share/pmacs/builtin-packages/`
-  exists on the development machine.
-- **Why it matters now.** `cargo test` is red on any machine with a real
-  `~/.config/pmacs/init.lua` (11 of 67 in `compile_mode_acceptance`) and
-  green in CI, so the failure is attributed to whatever branch is
-  checked out. Every local gate run in this repo currently needs all
-  five bootstrap-storage variables controlled as a workaround:
-  `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`,
-  `XDG_CACHE_HOME`, and `PMACS_STATE_HOME`.
-- **Round 1's four blocking findings, all confirmed in code:** the
-  read-only assumption was already false; the population count was 18
-  when 65 of 96 files construct an editor, from a grep that did not
-  match `EditorState::new`; 5 files are both in-process and spawned, so
-  a file-level partition cannot work; and `EditorState::open` calls
-  `Self::new()` while `journey_acceptance` requires that exact entry
-  point.
-- **Two constraints any fix must respect.** `std::env::set_var` is
-  `unsafe` and the crate forbids it, so in-process tests cannot isolate
-  themselves (precedent: `Installer::root_override`). And config loading
-  shares one block with `set_init_complete()`, which
-  `m8_2_acceptance.rs:75` explicitly depends on — skipping the block
-  would leave integration tests permanently in the init phase.
-- Recovery from a clean checkout — **the two-argument form does not
-  work**, verified by running it (`git worktree add <path>
-  <remote-only-branch>` fails with `fatal: invalid reference`, because
-  after a bare fetch no local branch exists):
-
-  ```sh
-  git fetch githubsucks
-  git worktree add ../pmacs-test-isolation-impl \
-    -b test-ambient-isolation-impl \
-    githubsucks/test-ambient-isolation-impl
-  ```
 
 ## Reap-ledger silent failures — MERGED (#202); kept for its parked follow-ons
 
