@@ -19,6 +19,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifi
 use pmacs::editor::EditorState;
 use pmacs::protocol::FrontendId;
 
+#[path = "common/iso.rs"]
+mod iso;
+
 fn exec(s: &EditorState, src: &str) {
     s.lua_host.lua().load(src.to_owned()).exec().unwrap();
 }
@@ -110,8 +113,16 @@ fn run_from_palette(s: &mut EditorState, command: &str, second: Option<&str>) {
     }
 }
 
+/// Constructed with **isolated bootstrap roots**, never ambiently.
+///
+/// An integration test is compiled without `cfg(test)`, so a raw
+/// `EditorState::new()` reads the developer's real `init.lua` and writes
+/// bundled packages into their real data root. The adoption ratchet in
+/// `ambient_isolation_acceptance` caught this suite the moment the
+/// isolation lane merged — which is the ratchet doing its job against
+/// brand-new code, so this file is migrated rather than allowlisted.
 fn editor() -> EditorState {
-    EditorState::new()
+    EditorState::new_with_roots(&iso::roots())
 }
 
 /// The eleven canonical commands and the argument each needs, if any.
