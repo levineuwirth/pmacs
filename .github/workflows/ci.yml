@@ -340,6 +340,20 @@ jobs:
           PMACS_REQUIRE_SETSID: "1"
           PMACS_REQUIRE_BASH: "1"
       - run: cargo test --doc --no-default-features --features luajit,crdt
+      # pmacs-protocol under `crdt`, which nothing else runs. Its own
+      # feature is NOT inert: it gates no tests, so a test census sees
+      # 17 either way, but it changes `cfg!(feature = "crdt")`
+      # EXPRESSIONS inside `InstanceCapabilities::default` and
+      # `FrontendCapabilities::default` — so the same 17 tests exercise
+      # different runtime values. CI had only ever run the non-crdt
+      # ones.
+      #
+      # This is also a blind spot of scripts/feature-census by
+      # construction: it lists the workspace DEFAULT MEMBER (`pmacs`),
+      # so no per-test census of the root package can ever surface a
+      # sibling crate's coverage. The `test` job carries the same
+      # explicit invocation for the same underlying reason.
+      - run: cargo test -p pmacs-protocol --all-targets --features crdt
 
   acceptance:
     name: M1 Acceptance Gates

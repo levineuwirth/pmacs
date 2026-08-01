@@ -148,13 +148,37 @@ form. All four steps ran clean. **The two-argument form still does not
 work** for a remote-only branch (`fatal: invalid reference`), which is
 why every lane below spells out the `-b` form.
 
-## CI CRDT coverage lane — IMPLEMENTED on `ci-crdt-coverage`, PR not yet open
+## CI CRDT coverage lane — **PR #209 OPEN, all 14 checks green**
 
 **This lane had no branch and no owner from #166 until 2026-08-01.** It
-now has both. Framing:
-`docs/ci-crdt-coverage-framing.md` revision 3 (approved at revision 2).
+now has both, and a PR. Framing:
+`docs/ci-crdt-coverage-framing.md` revision 4 (approved at revision 2).
 Branch `ci-crdt-coverage` off `githubsucks/main` @ `4223dd3`, developed
 in the primary checkout on the laptop, not a worktree.
+
+- **PR: <https://github.com/levineuwirth/pmacs/pull/209>**, opened
+  2026-08-01, awaiting user review. Six commits: `7a9cf5b` clippy,
+  `06abbac` m10-perf-gates, `7a8746d` crdt-test, `a776bc3`
+  feature-census, `57abcd9` docs, plus a review-round commit for the
+  pmacs-protocol gap below.
+- **First CI run: all 14 checks green** (run `30705124856`), including
+  both new jobs — `Test (crdt)` 12m20s and `M10 Perf Gates (crdt)`
+  5m40s — and the macOS/luajit leg that is the usual flake surface.
+  **This was the first time in the project's history that any of these
+  tests executed in CI.**
+- **Acceptance criterion 8 — the count reconciliation — HOLDS against
+  the real run.** `Test (crdt)` reported **3,717 passed / 0 failed / 30
+  ignored**. That is 3,746 (the `--all-targets` census, with
+  `basedpyright` not skipped as it is locally) plus 1 doc test, minus
+  the 30 ignored: 3,716 + 1 = 3,717. The job demonstrably compiled and
+  ran the crdt corpus rather than reporting green over nothing.
+- **Do not compare the two jobs' raw totals.** `Test (ubuntu/luajit)`
+  reports 3,485 and `Test (crdt)` 3,747 — a difference of 262, not 279.
+  The jobs run different *sets*: the non-crdt job adds pmacs-protocol's
+  17 tests, and 3,467 + 1 + 17 = 3,485 against 3,746 + 1 = 3,747. The
+  dark count is the all-targets comparison, 3,746 − 3,467 = **279**.
+  A reviewer who subtracts the job totals gets a wrong number that looks
+  plausible.
 
 - **Root cause, unchanged:** `.github/workflows/ci.yml` never enabled
   the `crdt` feature anywhere. Every `#[cfg(feature = "crdt")]` test was

@@ -1,7 +1,26 @@
 # Framing — the CRDT half of the test corpus is dark in CI
 
-**Revision 3.** Status: **implemented** on branch `ci-crdt-coverage`,
-based on `githubsucks/main` @ `4223dd3` (#208). Approved at revision 2.
+**Revision 4.** Status: **PR #209 open, all 14 checks green on the first
+run.** Branch `ci-crdt-coverage`, based on `githubsucks/main` @
+`4223dd3` (#208). Approved at revision 2.
+
+**Revision 3 → 4** records the first CI run and one review finding:
+
+- **Acceptance 8 holds against the real run.** `Test (crdt)` reported
+  **3,717 passed / 0 failed / 30 ignored** — 3,746 census (with
+  `basedpyright` not skipped as it is locally) + 1 doc test − 30
+  ignored. The job compiled and ran the corpus; it did not report green
+  over nothing. §1.7's warning that the local green proved nothing about
+  hosted runners is now **discharged by evidence** rather than still
+  outstanding.
+- **A gap `feature-census` structurally could not see**: pmacs-protocol
+  has its own `crdt` feature. It gates no tests — the census is 17
+  either way — but it changes `cfg!(feature = "crdt")` *expressions*
+  inside the capability defaults, so those 17 tests exercise different
+  runtime values under it, and CI had only ever run the non-crdt ones.
+  Closed by an explicit `-p pmacs-protocol --features crdt` step. **A
+  feature can matter to a crate a per-test census scores as
+  unaffected**, and the script's header now says so.
 
 **Revision 2 → 3** records implementation findings, not a new design
 round. Three things changed:

@@ -94,11 +94,14 @@ anchor, so every item is startable.
 
 #### Open lanes (branch exists, work not finished)
 
-- **CRDT half of the corpus is dark in CI — LANE OPENED 2026-08-01**
-  (`ci-crdt-coverage`, `docs/ci-crdt-coverage-framing.md` rev 3;
-  implemented, PR not yet open). CI never enabled `crdt`, so those tests
-  were *not compiled*, not merely skipped — including 186 library tests
-  behind a **required** `CLAUDE.md` gate CI had never run.
+- **CRDT half of the corpus is dark in CI — PR #209 OPEN, all 14 checks
+  green** (`ci-crdt-coverage`, `docs/ci-crdt-coverage-framing.md` rev 4;
+  opened 2026-08-01, awaiting user review). CI never enabled `crdt`, so
+  those tests were *not compiled*, not merely skipped — including 186
+  library tests behind a **required** `CLAUDE.md` gate CI had never run.
+  The first run reported **3,717 passed / 0 failed / 30 ignored** in
+  `Test (crdt)`, reconciling exactly to the census, so the job is
+  demonstrably not vacuous.
   **Re-measure before quoting a number**, and there is now a tool:
   `scripts/feature-census luajit luajit,crdt`. Measured 279 dark at
   `4223dd3`; 275 recovered, 4 excluded with stated reasons. Two

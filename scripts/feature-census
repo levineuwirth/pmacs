@@ -63,6 +63,20 @@
 #    what a fix delivers, so ignored tests are counted separately via a
 #    second `--list --ignored` pass.
 #
+# SCOPE LIMIT, and it is structural rather than an omission: this
+# censuses the workspace DEFAULT MEMBER only (`pmacs`), because that is
+# what a bare `cargo test --all-targets` builds. Sibling crates
+# --- pmacs-protocol, pmacs-gpu --- are invisible to it no matter what
+# configs are passed.
+#
+# That blind spot is not hypothetical. pmacs-protocol has its own
+# `crdt` feature which gates NO tests, so a census of it would report
+# zero dark either way --- yet the feature changes
+# `cfg!(feature = "crdt")` expressions inside the capability defaults,
+# so its 17 tests exercise different runtime values under it. A feature
+# can therefore matter to a crate this script would score as
+# unaffected. Check sibling crates by hand.
+#
 # CARGO_TERM_COLOR is pinned off so escape codes cannot break the
 # anchored matches, the same precaution and for the same reason as
 # scripts/bite.
