@@ -39,12 +39,14 @@ usage: pmacs [-nw|--no-window] [--help] [--version] [FILE]
        pmacs --attach <target>
        pmacs --daemon-attach [--socket NAME|PATH]
 
-  -nw, --no-window   select the TUI frontend explicitly
-                     (currently the only frontend; reserved for the
-                     M4 GUI rollout, where `pmacs` will default to
-                     the GUI and `-nw` will keep launching the TUI)
+  -nw, --no-window   select the TUI frontend explicitly. This is the
+                     default; `pmacs FILE` already opens the TUI, so
+                     the flag exists to say so unambiguously in
+                     scripts and wrappers.
   --gpu              start or reuse a CRDT daemon, then launch the
-                     separate pmacs-gpu frontend
+                     separate pmacs-gpu frontend. Requires a build
+                     with the `crdt` feature, and the `pmacs-gpu`
+                     binary either beside this one or on PATH.
                      When FILE is present, open it before the GPU window appears.
   --daemon           run as a foreground daemon listening on a Unix
                      socket; supervised by the user (systemd, tmux,
@@ -67,20 +69,24 @@ attach <target> shorthand:
   pmacs --attach user@host               ssh as user
   pmacs --attach ssh:user@host/research  ssh, target instance `research`
   pmacs --attach local:/tmp/foo.sock     explicit local socket path
-  pmacs --attach tls:host:port#cert.pem  TLS (parses; activation in v0.2)
+  pmacs --attach tls:host:port#cert.pem  TLS (parsed, not yet implemented)
 
 A bare hostname is interpreted as `ssh:<host>`. Use `local:` or
 `--socket` for local-socket attaches.
 ";
 
-/// Frontend the user asked for. Only `Tui` is implemented in v0.1;
-/// `GuiAuto` records "the user did not force TUI" so future builds
-/// can dispatch to a GUI frontend without touching the parsing layer.
+/// Frontend the user asked for by IN-PROCESS dispatch. Both variants
+/// run the TUI: the GPU frontend is a separate binary reached through
+/// `--gpu`, not a value of this enum. `Auto` records "the user did not
+/// force TUI" so a future display-detecting default can dispatch
+/// without touching the parsing layer.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum FrontendChoice {
     /// Explicit `-nw` / `--no-window`. Always TUI.
     Tui,
-    /// Default. v0.1: TUI. M4+: TUI when no display is available, GUI otherwise.
+    /// Default. Runs the TUI today. Reserved for a future
+    /// display-detecting default; `--gpu` is the explicit GPU path and
+    /// does not route through here.
     Auto,
 }
 
@@ -93,7 +99,7 @@ struct CliArgs {
 #[derive(Debug, PartialEq, Eq)]
 enum Mode {
     /// Plain `pmacs` (or with `-nw` / a file): run a fresh in-process
-    /// TUI. The default for v0.1 — no daemon-attach magic.
+    /// TUI. The default — no daemon-attach magic.
     Local {
         file: Option<PathBuf>,
         frontend: FrontendChoice,
@@ -177,8 +183,8 @@ fn build_attach_mode(file: Option<PathBuf>, socket: Option<String>) -> Result<At
 /// continue to work.
 ///
 /// IPv6 literals like `[::1]` are not supported as bare hostnames
-/// — the strict parser would reject them anyway. v0.1 SSH config
-/// aliases and IPv4 / DNS hostnames are the supported shapes.
+/// — the strict parser would reject them anyway. SSH config aliases
+/// and IPv4 / DNS hostnames are the supported shapes.
 fn parse_attach_target_with_shorthand(s: &str) -> Result<AttachTarget, AttachTargetError> {
     if s.contains(':') {
         AttachTarget::parse(s)
@@ -399,10 +405,12 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
         CliResult::Run(parsed) => match parsed.mode {
-            // FrontendChoice::Auto and ::Tui both run the TUI in v0.1.
-            // The match is structured this way deliberately so that
-            // when a GUI frontend lands the second arm becomes
-            // `editor::run_gui(file)` without touching parsing.
+            // FrontendChoice::Auto and ::Tui both run the TUI. The
+            // match is structured this way deliberately so a future
+            // display-detecting default can make the second arm
+            // dispatch elsewhere without touching parsing. Note this
+            // is NOT how the GPU frontend is reached — `--gpu` spawns
+            // the separate pmacs-gpu binary via run_gpu().
             Mode::Local {
                 file,
                 frontend: FrontendChoice::Tui | FrontendChoice::Auto,

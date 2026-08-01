@@ -29,17 +29,25 @@ the same buffers concurrently with live cursor/selection presence.
 
 ## Status
 
-**v1.0.0 --- stable core, active development.** The v1.0 gate (the
-instance/frontend partition, the Lua surface, and a REPL package audited
-to use zero direct Rust core access) shipped some time ago. Development
-since has expanded the semantic frontend protocol from v6 through v20,
-brought the GPU frontend near input/render parity with the TUI, and
-completed the LSP, editing, persistence, themes, and terminal arcs. Recent
-work added major modes and modeline detection, a typed configuration
-registry, composable statuslines, multi-language syntax processing, and
-cross-frontend tab-width parity. Current direction lives in
-`docs/roadmap-2026-07.md`. Public contributions are open: use, evaluate,
-file issues, and send pull requests.
+**v1.1.0 --- stable core, active development, and the first release
+with prebuilt binaries.** The v1.0 gate (the instance/frontend
+partition, the Lua surface, and a REPL package audited to use zero
+direct Rust core access) shipped some time ago. Development since has
+expanded the semantic frontend protocol from v6 through **v21**, brought
+the GPU frontend near input/render parity with the TUI, and completed
+the LSP, editing, persistence, themes, and terminal arcs. Recent work
+added major modes and modeline detection, a typed configuration
+registry, composable statuslines, multi-language syntax processing,
+cross-frontend tab-width parity, a directory browser, a describe/list
+command family, and a bottom panel on both frontends.
+
+Current direction lives in `COHERENCE.md` (the product-coherence thesis
+and its audited priority order) and `docs/agent-handoff.md` (durable
+project state). `docs/roadmap-2026-07.md` is a historical planning
+snapshot and is no longer the authority.
+
+Public contributions are open: use, evaluate, file issues, and send
+pull requests.
 
 ## Highlights
 
