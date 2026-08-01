@@ -2393,6 +2393,7 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION + 999,
                 assigned_frontend_id: FrontendId::LOCAL,
                 instance_identity: InstanceIdentity::for_running_process(
+                    env!("CARGO_PKG_VERSION"),
                     None,
                     std::time::Instant::now(),
                 ),
