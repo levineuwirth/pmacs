@@ -634,6 +634,10 @@ pmacs.keymap.bind { scope = "global", sequence = "C-M-t", command = "vterm-probe
 /// prove nothing about the three fitting together.
 #[cfg(feature = "crdt")]
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one real-daemon/real-PTY/real-wgpu scenario; a decoded-message fixture is deliberately not a substitute"
+)]
 fn a37_real_daemon_real_pty_and_headless_gpu_render_one_terminal_session() {
     use std::path::{Path, PathBuf};
 
@@ -813,6 +817,10 @@ fn a37_real_daemon_real_pty_and_headless_gpu_render_one_terminal_session() {
 /// property of the dispatcher loop, not of any function it calls.
 #[cfg(feature = "crdt")]
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "real daemon, real wire, two real frontends in one dispatcher-loop scenario"
+)]
 fn terminal_mode_keeps_reporting_presence_so_peers_drop_the_stale_caret() {
     use pmacs::protocol::{
         AttachRequest, FrontendCapabilities, Hello, Key, KeyEvent, PROTOCOL_VERSION,
@@ -857,13 +865,10 @@ fn terminal_mode_keeps_reporting_presence_so_peers_drop_the_stale_caret() {
     ) -> T {
         let deadline = Instant::now() + Duration::from_secs(20);
         while Instant::now() < deadline {
-            match read_message::<InstanceMessage>(stream) {
-                Ok(msg) => {
-                    if let Some(found) = want(&msg) {
-                        return found;
-                    }
-                }
-                Err(_) => continue,
+            if let Ok(msg) = read_message::<InstanceMessage>(stream)
+                && let Some(found) = want(&msg)
+            {
+                return found;
             }
         }
         panic!("timed out waiting for {what}");

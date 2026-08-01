@@ -39,7 +39,7 @@ fn read_initial_snapshot(
 }
 
 /// Mutate the local replica, export the delta, and ship it as an
-/// optimistic `FrontendEvent::CrdtOp` (the m10_11 idiom).
+/// optimistic `FrontendEvent::CrdtOp` (the `m10_11` idiom).
 fn send_optimistic_op_from<F>(
     stream: &mut std::os::unix::net::UnixStream,
     replica: &CrdtState,

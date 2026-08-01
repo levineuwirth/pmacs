@@ -506,6 +506,10 @@ fn decode_hex(encoded: &str) -> String {
 /// out its safety deadline cannot read as a pass.
 #[cfg(feature = "crdt")]
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one real-daemon/real-PTY/real-wgpu scenario; splitting it would hide the fit it exists to prove"
+)]
 fn a54_real_daemon_real_pty_and_headless_gpu_render_one_panel_hosted_terminal() {
     use std::path::{Path, PathBuf};
 
