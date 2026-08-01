@@ -1,0 +1,376 @@
+# Framing — Bottom panel Stage 3: the adopter default flip
+
+**Revision 2.** Status: **approved with amendments** (revision 1 → 2
+records them). Scouted against `githubsucks/main` @ `000b6cd` (v1.1.0).
+
+**Revision 1 → 2**, all from review and all verified rather than
+accepted:
+
+- **Dired is a FOURTH copy of the validator, not merely a fourth
+  adopter** — and it must keep `"current"` as its default, because the
+  `pmacs .` path reaches it with no `display` at all (§1.1a). Revision 1
+  had this as an open question with a leaning; it is now a decision with
+  a mechanism.
+- **Unify narrowly, not wholesale** (§2 Q#S3-1). A shared
+  `resolve_adopter_display(operation, raw, default)` covering vocabulary,
+  error text and default policy — with terminal's `window`
+  mutual-exclusion staying in its Rust wrapper, because the parsers are
+  *not* identical and pretending otherwise is its own defect.
+- **A negative criterion is added** (acceptance 9): omitted `display`
+  must still mean document placement for direct dired **and** for
+  `pmacs .`.
+- **The suite fallout is named, not just counted** (§1.6a): two Stage 1
+  tests assert the old default deliberately and must be revised
+  knowingly.
+
+Stage 3 is **Arc 7's last step**. Stages 1, 2A, 2B-1, 2B-2 and 2B-3 are
+all on `main` (#155, #175, #177, #184, #187, #198); the panel is complete
+on both frontends and every mechanism this stage needs exists. What
+remains is the decision the arc deferred on purpose: **omitting `display`
+should mean the panel, not the selected window.**
+
+The parent framing already decided the policy (Q#BP12) and wrote the
+acceptance sketch (criteria 56–58). This document re-scouts that plan
+against current `main` and records where it has drifted.
+
+---
+
+## 0. Coherence impact (COHERENCE §20)
+
+- **Concern: §14 Coherent Workbench Primitives**, graded *"partial, with
+  the best trajectory of any concern."* This closes the panel half of
+  P5. §14's bottom-panel bullet names Stage 3 explicitly as what is
+  left.
+- **§6 Interaction islands — this REMOVES one.** Today every adopter
+  that wants a panel must say so at each call site, and three separate
+  code paths decide what silence means. After Stage 3 the policy is the
+  default and the call sites stop carrying it.
+- **Journey steps touched:** none directly, though steps 6 and 9 (LSP
+  panels, compile output) change where their output lands.
+- **Config registry adoption:** none — Q#BP12 is explicit that this is
+  **not a hidden global setting**. It is a resolved default, not a
+  preference.
+- **Background-work attribution:** none.
+- **Enables:** DAP. Q#BP12's adopter table **already contains a
+  `DAP stack/variables` row**, so this stage settles the debugger's panel
+  policy before the debugger exists. That is the intended order.
+
+---
+
+## 1. Ground truth (measured at `000b6cd`)
+
+### 1.1 The flip is three sites in two languages
+
+The parent framing says *"Stage 3 is not one line per consumer."* True —
+but the sharper reason is that **the option was never parsed in one
+place.** Each adopter validates and dispatches `display` itself:
+
+| site | adopter | omission today |
+|---|---|---|
+| `src/lua_bindings/window_panel.rs:269` | `pmacs.terminal.open` | `None \| Some("current") => AdopterPlacement::Current` |
+| `builtin/runtime/listview.lua:235` | listview | `if display == "panel" … else switch_buffer` |
+| `builtin/runtime/compile.lua:899` | compile | same, plus an `already_in_panel` special case |
+
+A **fourth** copy validates the same vocabulary without being a
+default-flip site: `builtin/runtime/dired.lua:645`. It is the one that
+must NOT flip (§1.1a).
+
+`parse_adopter_placement` looks like the shared parser its doc comment
+implies, but **it has exactly one caller** — the terminal. listview and
+compile each re-implement the same three-value validation in Lua,
+including their own copy of the error message.
+
+**The three default-resolution branches are the flip; the fourth
+validator is not.** `window_panel.rs:269`, `listview.lua:235` and
+`compile.lua:899` all move. Changing only the Rust parser would leave
+**both** Lua adopters resolving omission to the current window — a
+half-flip that would look done and behave inconsistently per adopter.
+
+Four copies of one rule is also how the next adopter gets it subtly
+wrong — and the next adopter is **DAP**, already named in Q#BP12's
+table. Hence Q#S3-1's narrow unification.
+
+### 1.1a Dired must NOT flip, and the reason is the golden journey
+
+`dired.lua:645` validates the same `"current" | "panel"` vocabulary with
+the same error shape, so it is a fourth copy of the rule. **Its default
+must stay `"current"`**, and the mechanism is specific rather than
+stylistic:
+
+```lua
+pmacs.path.set_directory_handler(function(path, dest)
+  open_async(path, { dest = dest }, nil, "dired")
+end)
+```
+
+The `pmacs .` path reaches dired through that slot with **`{ dest =
+dest }` and no `display` key at all** — so it resolves by omission. If
+dired's default flipped with the others, **`pmacs .` would open the
+directory listing in a bottom panel**, which is wrong for journey step
+2 and for every subsequent step that navigates from it. Journey Stage
+1a made `pmacs .` open a directory at all; putting the result in a
+panel would undo the point of it.
+
+This is the difference between an adopter and a surface. listview,
+compile and terminal produce *output the user consults*; dired produces
+*a document the user works in*, like a buffer. The panel default is
+right for the first kind and wrong for the second.
+
+### 1.2 `select` is not cosmetic for listview, and the citation drifted
+
+Q#BP12 requires `select = true` for interactive listview, citing
+`listview.lua:64` for `seat_cursor`. **That line is now
+`NAME_VARIANT_LIMIT`; `seat_cursor` is at line 130.** The constraint
+itself is intact and verified:
+
+```lua
+local function seat_cursor(p, line)
+  ...
+  for _ = 1, target do
+    pmacs.editor.move_down()
+  end
+```
+
+`pmacs.editor.move_down()` acts on the **active window**. A listview
+panel displayed without `select` would seat the cursor in whatever
+window is selected — the user's document. `listview.refresh` has the
+same property. **This is a data-corruption-shaped bug, not a focus
+annoyance**, and it is why the table's `select` column differs per
+adopter rather than being uniform.
+
+Compile takes `select = false` deliberately (passive output); terminal
+takes `select = true`.
+
+### 1.3 Compile has already been prepared for this stage
+
+`compile.lua:894` carries a comment written for Stage 3:
+
+> Gated on OMISSION, never on an explicit value: `display = "current"`
+> is the documented user-facing opt-out from the Stage 3 default flip,
+> so it must reach the raw switch even when the previous run was
+> panel-placed.
+
+and the condition is already
+`display == "panel" or (display == nil and already_in_panel(slot.buf))`.
+So compile's *recompile* path already keeps a panel-placed buffer in the
+panel on omission. **Stage 3 makes the first run behave like the
+recompile.** Re-read this comment before editing: it encodes a
+distinction (omission vs explicit `"current"`) that the flip must
+preserve, and the `already_in_panel` branch may become redundant.
+
+### 1.4 What Stage 3 owes beyond the flip
+
+Q#BP12's table is a per-adopter contract, not a single switch. For each
+of listview / compile / terminal:
+
+- **panel placement** with that adopter's `select` value;
+- **`dedicated = false`** — a dedicated panel refuses to host anything
+  else, and dired Stage 1 already established that `display_buffer` will
+  not replace a buffer in a slot dedicated to another (Q#BP3 2.iii);
+- **quit action**: delete the panel if this adopter created it, restore
+  the panel it replaced otherwise;
+- **visit path onto `display_file` / `display_target`** with `select`
+  per the table.
+
+`display_file` already exists and is used by dired (`dired.lua:831`,
+`:840`) and `default.lua:729`, so the visit half has a proven caller
+shape to copy.
+
+### 1.5 Capability fallback still applies, and must be re-proved
+
+The Stage 3 default resolves as a *panel request*, so it passes through
+Q#BP13 capability fallback exactly as an explicit `"panel"` does. On a
+pre-panel semantic frontend the request degrades, and criterion 57
+requires that the degraded path leave **no side parameters and no quit
+action on the document window**.
+
+This is the criterion most likely to be quietly wrong, because the
+fallback is invisible from the adopter's side.
+
+### 1.6 What is NOT established
+
+- **Nothing has been implemented or measured.** Unlike the distribution
+  lane, there is no artifact to inspect; the evidence is the existing
+  suites' behaviour before and after.
+- **The blast radius on existing acceptance suites is partly known
+  now** — see §1.6a for the two named cases. The total is still
+  unmeasured. Stage 1
+  shipped the mechanism opt-in precisely so existing suites kept their
+  meaning. Flipping the default changes where output lands for every
+  suite that exercises listview, compile or terminal **without** passing
+  `display`. Criterion 58 says the default-placement suites are
+  *updated*; how many others move is a measurement this framing has not
+  taken and the implementation must take first.
+- **Interaction with dired.** `dired.lua:18` documents
+  `opts.display = "current" | "panel"` with **default `"current"`**.
+  Dired is not in Q#BP12's table. Whether the flip reaches it, or dired
+  keeps an explicit `"current"`, is Q#S3-2.
+
+---
+
+### 1.6a Two Stage 1 tests assert the OLD default deliberately
+
+These are not collateral damage; they encode intent and must be revised
+knowingly.
+
+- **`tests/bottom_panel_stage1_acceptance.rs:1223`** —
+  `acc19_adopters_place_side_affinely_through_real_entry_points` opens a
+  listview with **no `display`** specifically to seed the panel buffer
+  into a DOCUMENT window first, *"so side-affine placement cannot be
+  vacuous."* After the flip that setup no longer produces a document
+  window, and the test's own anti-vacuity guarantee is what breaks. It
+  needs a new way to seed, not a `display = "current"` bolted on.
+- **`tests/bottom_panel_stage1_acceptance.rs:1308`** —
+  `acc19b_recompile_reuses_the_panel_instead_of_duplicating_into_the_document`
+  is built entirely around a recompile reaching `start_run` with no
+  `display`. Its subject survives the flip, but its mechanism (`§1.3`'s
+  `already_in_panel` gate) may not — see Q#S3-3.
+
+**The rule for the fallout sweep:** a test whose *subject* is placement
+must assert the **new** default. A test whose subject is compile or
+terminal behaviour opts out with `display = "current"` **only when its
+setup genuinely requires the document window**. Mass-adding the opt-out
+to make a suite green converts a behavioural change into an invisible
+one, which is the failure this stage's inverted ordering exists to
+avoid.
+
+## 2. Questions
+
+- **Q#S3-1 — DECIDED: unify NARROWLY.** A shared
+  `resolve_adopter_display(operation, raw, default)` owns exactly three
+  things: the **vocabulary**, the **error text**, and the **default
+  policy**. Its four callers are listview, compile, terminal and dired —
+  the last passing `default = "current"`, which is what makes dired's
+  exemption a parameter rather than a divergent copy.
+
+  **Terminal's `window` mutual-exclusion stays in its Rust wrapper.**
+  The parsers are *not* identical, and a helper that pretended otherwise
+  would be its own defect: only terminal accepts a `window` id, and only
+  it must reject `window` combined with `display = "panel"`.
+
+  **One normalization must be named rather than absorbed.** Terminal
+  reads `spec_table.get::<Option<String>>("display")?`, so a non-string
+  value raises **mlua's type error before** the custom "unknown display"
+  message is ever reached. The Lua callers instead `tostring()` whatever
+  they got and report it inside their own error. These are different
+  observable behaviours for the same bad input, and unifying the error
+  text without deciding this would silently change one of them. The
+  stage must state which it standardizes on and pin it.
+- **Q#S3-2 — DECIDED: dired does not flip.** It keeps `"current"` as
+  its default, expressed as the `default` argument to the shared
+  resolver so the exemption is visible at the call site rather than
+  implied by a fourth copy of the parser. §1.1a records the mechanism —
+  the `pmacs .` handler passes no `display` — and acceptance 9 pins it
+  from both entry points.
+- **Q#S3-3 — does `already_in_panel` survive?** Once omission means
+  panel, compile's special case may be dead code. **Leaning: measure,
+  then delete if dead** — but check the explicit-`"current"` path first,
+  because that arm is what the comment says the gate protects.
+- **Q#S3-4 — how many existing suites move?** Unknown (§1.6). This must
+  be measured **before** the flip, so the diff to acceptance files can be
+  read as intended-vs-collateral rather than discovered afterwards.
+- **Q#S3-5 — is there a user-facing escape beyond per-call `display`?**
+  Q#BP12 says this is deliberately not a setting. Someone who dislikes
+  panels has no global opt-out, only per-call `display = "current"`,
+  which they do not control for builtin commands. **Leaning: accept for
+  this stage and record it**, since a setting is §11 work and panel
+  persistence is already blocked on settings persistence.
+
+---
+
+## 3. Bets
+
+- **Bet 1 — the flip itself is small; the suite churn is the work.**
+  Three dispatch sites, each a few lines. The cost is criterion 58's
+  per-adopter open→visit→return→quit suites plus whatever §1.6's
+  measurement turns up.
+- **Bet 2 — the capability-fallback criterion (57) is where a defect
+  hides.** It is invisible from the adopter side and only observable on a
+  pre-panel semantic frontend.
+- **Bet 3 — `select` gets one adopter wrong.** The values differ per
+  adopter for real reasons (§1.2), and a uniform `select = true` would
+  look correct and break compile's passive-output behaviour.
+
+---
+
+## 4. Acceptance
+
+Inherits the parent framing's criteria 56–58, made concrete:
+
+1. Omitting `display` from listview, compile and terminal entry points
+   resolves to the Q#BP12 panel/select policy on a panel-capable grid
+   **and** semantic frontend.
+2. Explicit `display = "current"` preserves each adopter's pre-arc
+   selected-window behaviour, including compile's raw-switch path.
+3. **Per-adopter `select` matches the table** — listview `true`,
+   compile `false`, terminal `true` — asserted individually, not by a
+   shared helper that would pass with a uniform value.
+4. An interactive listview panel seats its cursor **in the panel**, not
+   in the previously selected window (§1.2's real failure mode).
+5. On a pre-panel semantic frontend the omitted default takes capability
+   fallback with **no side parameters and no quit action** left on the
+   document window; visit and `q` remain the existing non-side paths.
+6. Per-adopter open→visit→return→quit suites, not a generic helper
+   (criterion 58), preserving Stage 1's unknown-value rollback
+   assertions.
+7. **The unknown-`display` error still fires before anything is
+   created** — buffer, session, process or wrapper — for all three
+   adopters, whichever parser survives Q#S3-1.
+8. The count of existing suites whose behaviour changes is **stated**,
+   and each change is classified intended or collateral — **not
+   silenced by mass-adding `display = "current"`** (§1.6a).
+9. **NEGATIVE criterion — omission still means the document for dired.**
+   Both entry points are pinned: a direct `pmacs.dired.open(path)` with
+   no `display`, **and** the `pmacs .` launch path through
+   `pmacs.path.directory_handler`. Neither may place into a panel. This
+   is the criterion that would catch a well-intentioned "make all four
+   consistent" change, and it guards journey step 2.
+
+---
+
+## 5. Parked
+
+- Everything in the parent framing's §6 "Deferred (named)" — left/right/
+  top side windows, multiple slots, `no_other_window`, manual
+  hide/show, `display-buffer-alist`-style user rules, panel persistence
+  (blocked on settings persistence), GPU document splits.
+- **A global panel preference** (Q#S3-5) — §11 work.
+- **The tree primitive.** Not part of this stage, and the next thing to
+  scope: §14 grades Tree ✗, and DAP's variables view is its next
+  would-be inventor.
+
+---
+
+## 6. Gates
+
+The standing `CLAUDE.md` suite, with the touched acceptance suites being
+at minimum `bottom_panel_stage1_acceptance`, `bottom_panel_stage2a`,
+both `stage2b` daemon/GPU suites, plus the listview, compile-mode and
+terminal suites — the last three are where §1.6's unmeasured churn will
+land.
+
+---
+
+## 7. Branch plan
+
+One branch, `bottom-panel-stage3`:
+
+1. **Measure first** (Q#S3-4): run the full suite with the flip applied
+   as a throwaway edit, record which suites move, revert. *The
+   measurement is the first commit's evidence, not the flip.* Classify
+   each mover per §1.6a's rule before writing a line of the fix.
+2. **Land `resolve_adopter_display`** (Q#S3-1) with all four callers
+   still passing their CURRENT defaults, so the unification is provably
+   behaviour-preserving before anything flips. Decide and pin the
+   non-string normalization here.
+3. **Flip the three sites** by changing only the `default` argument at
+   listview, compile and terminal — dired keeps `"current"` — with
+   per-adopter `select`.
+4. **Per-adopter open→visit→return→quit suites** (criterion 6).
+5. **Capability fallback** (criterion 5), the one needing a semantic
+   frontend.
+6. **Update the lane and handoff**; Arc 7 closes.
+
+Step 1 before step 3 is the point: flipping first and reading the
+fallout as it appears makes intended and collateral changes
+indistinguishable.
