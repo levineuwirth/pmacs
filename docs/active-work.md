@@ -172,13 +172,20 @@ in the primary checkout on the laptop, not a worktree.
   `basedpyright` not skipped as it is locally) plus 1 doc test, minus
   the 30 ignored: 3,716 + 1 = 3,717. The job demonstrably compiled and
   ran the crdt corpus rather than reporting green over nothing.
-- **Do not compare the two jobs' raw totals.** `Test (ubuntu/luajit)`
-  reports 3,485 and `Test (crdt)` 3,747 — a difference of 262, not 279.
-  The jobs run different *sets*: the non-crdt job adds pmacs-protocol's
-  17 tests, and 3,467 + 1 + 17 = 3,485 against 3,746 + 1 = 3,747. The
-  dark count is the all-targets comparison, 3,746 − 3,467 = **279**.
-  A reviewer who subtracts the job totals gets a wrong number that looks
-  plausible.
+- **Do not compare the two jobs' raw totals.** In the first run
+  `Test (ubuntu/luajit)` reported 3,485 and `Test (crdt)` 3,747 — a
+  difference of 262, not 279, because the jobs ran different *sets*:
+  3,467 + 1 doc + 17 protocol = 3,485, against 3,746 + 1 doc = 3,747.
+  **The dark count is the all-targets comparison, 3,746 − 3,467 = 279.**
+  A reviewer who subtracts job totals gets a wrong number that looks
+  entirely plausible.
+  - **Those two figures are already superseded** and are kept only to
+    explain the trap. Review round 1 added a pmacs-protocol step to
+    `crdt-test`, and round 2 added two capability tests to that crate,
+    so the expected totals are now **3,487** (3,467 + 1 + 19) and
+    **3,766** (3,746 + 1 + 19). The root-package census is untouched at
+    3,467 / 3,746 — the new tests live in a sibling crate, which is
+    exactly the region `scripts/feature-census` cannot see.
 
 - **Root cause, unchanged:** `.github/workflows/ci.yml` never enabled
   the `crdt` feature anywhere. Every `#[cfg(feature = "crdt")]` test was

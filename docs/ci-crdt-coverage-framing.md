@@ -1,6 +1,6 @@
 # Framing — the CRDT half of the test corpus is dark in CI
 
-**Revision 4.** Status: **PR #209 open, all 14 checks green on the first
+**Revision 5.** Status: **PR #209 open, all 14 checks green on the first
 run.** Branch `ci-crdt-coverage`, based on `githubsucks/main` @
 `4223dd3` (#208). Approved at revision 2.
 
@@ -21,6 +21,38 @@ run.** Branch `ci-crdt-coverage`, based on `githubsucks/main` @
   Closed by an explicit `-p pmacs-protocol --features crdt` step. **A
   feature can matter to a crate a per-test census scores as
   unaffected**, and the script's header now says so.
+
+**Revision 4 → 5** closes review round 2, and it is this lane's own
+defect class one level down.
+
+- **Running the code was not testing it.** Round 1's
+  `-p pmacs-protocol --features crdt` step *executed*
+  `InstanceCapabilities::default` in both configurations, but the crate's
+  only use of that value was a **transport round-trip** — and a
+  round-trip is invariant to the values. An all-false default, or one
+  whose three fields disagreed, encodes and decodes just as happily and
+  passes in both builds. The step added execution and no assertion.
+- **Three tests now pin it**, and their split matters: one asserts all
+  three fields `true` under `crdt`, one asserts all three `false`
+  without it, and a third — **deliberately not feature-gated** — asserts
+  `FrontendCapabilities::default` is all-false in *both* builds.
+- **That third test pins an asymmetry nothing else did.**
+  `FrontendCapabilities` derives `Default` and is feature-**invariant**;
+  `InstanceCapabilities` is feature-**dependent**. This is load-bearing,
+  not an oversight: an instance advertises what it can do, a frontend
+  **opts in** through negotiation, and a v1 frontend has no local CRDT
+  state regardless of how the crate it links was compiled.
+- **Bite-verified rather than assumed**: mutating `multi_frontend` to a
+  literal `false` produced `FAILED. 18 passed; 1 failed` with the
+  expected assertion message; restoring returned 19/19.
+- **Left untested, deliberately:** `InstanceCapabilities::crdt_replica`
+  carries `#[serde(default = "default_true")]`, a *third* default
+  mechanism that is unconditional and therefore disagrees with the
+  `Default` impl in a non-CRDT build. Exercising it needs a
+  self-describing format, and this crate's only serde dependency is
+  postcard, which is not one. Adding `serde_json` as a dev-dependency to
+  test a divergence this lane did not introduce is scope creep; it is
+  recorded here instead.
 
 **Revision 2 → 3** records implementation findings, not a new design
 round. Three things changed:

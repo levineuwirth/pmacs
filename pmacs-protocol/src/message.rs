@@ -2296,3 +2296,79 @@ pub enum InitialTargetResult {
         message: String,
     },
 }
+
+#[cfg(test)]
+mod capability_default_tests {
+    use super::{FrontendCapabilities, InstanceCapabilities};
+
+    // These exist because running code is not testing it.
+    //
+    // The `crdt` feature reaches this crate for exactly one purpose:
+    // `InstanceCapabilities::default` reads `cfg!(feature = "crdt")`,
+    // so the same source produces different advertised capabilities in
+    // the two builds. Until these tests, the only thing exercising that
+    // default was a transport round-trip, and a round-trip is INVARIANT
+    // TO THE VALUES — an all-false default, or one where the three
+    // fields disagreed with each other, encodes and decodes just as
+    // happily and passes in both configurations.
+    //
+    // So the crate was being COMPILED both ways without either set of
+    // values being asserted. That is the same defect class this lane
+    // exists to close, one level down: the CI step that runs
+    // pmacs-protocol under `crdt` executed this code but checked
+    // nothing about it.
+
+    /// The instance advertises CRDT capability exactly when it was
+    /// built with the feature. Advertising `true` on a non-CRDT build
+    /// would be wire-protocol false advertising — the CRDT paths are
+    /// conditionally compiled out — and advertising `false` on a CRDT
+    /// build would strand every frontend in single-frontend mode.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn instance_capability_defaults_are_enabled_under_crdt() {
+        let caps = InstanceCapabilities::default();
+        assert!(caps.multi_frontend, "multi_frontend must default true");
+        assert!(caps.crdt_replica, "crdt_replica must default true");
+        assert!(caps.semantic_render, "semantic_render must default true");
+    }
+
+    /// The non-CRDT counterpart. All three track one `cfg!`, so a
+    /// change that flipped only some of them would leave the daemon
+    /// advertising a capability whose code paths are compiled out.
+    #[cfg(not(feature = "crdt"))]
+    #[test]
+    fn instance_capability_defaults_are_disabled_without_crdt() {
+        let caps = InstanceCapabilities::default();
+        assert!(!caps.multi_frontend, "multi_frontend must default false");
+        assert!(!caps.crdt_replica, "crdt_replica must default false");
+        assert!(
+            !caps.semantic_render,
+            "semantic_render must default false; a semantic session is \
+             necessarily a text replica and a non-CRDT build hosts neither"
+        );
+    }
+
+    /// **Deliberately NOT feature-gated** — this asserts the same thing
+    /// in both builds, which is the point.
+    ///
+    /// `FrontendCapabilities` derives `Default`, so it is
+    /// feature-INVARIANT while `InstanceCapabilities` is
+    /// feature-DEPENDENT. That asymmetry is load-bearing rather than an
+    /// oversight: an instance advertises what it can do, while a
+    /// frontend OPTS IN through the negotiation handshake, and a v1
+    /// frontend has no local CRDT state regardless of how the crate it
+    /// links was compiled. Making this one track the feature would have
+    /// frontends claiming support they do not have.
+    #[test]
+    fn frontend_capability_defaults_do_not_track_the_crdt_feature() {
+        let caps = FrontendCapabilities::default();
+        assert!(
+            !caps.multi_frontend,
+            "frontend multi_frontend must default false in BOTH builds"
+        );
+        assert!(
+            !caps.crdt_replica,
+            "frontend crdt_replica must default false in BOTH builds"
+        );
+    }
+}
