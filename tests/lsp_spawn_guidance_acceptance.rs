@@ -89,7 +89,7 @@ fn open(state: &EditorState, path: &Path) {
 }
 
 fn editor_for(dir: &Path) -> EditorState {
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     // Clamp detection so a stray marker above the tempdir cannot leak in.
     exec(
         &state,
@@ -565,3 +565,10 @@ fn j1b2_preservation_a_spawnable_server_still_attaches() {
     );
     assert_eq!(failure_count(&state), 0);
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

@@ -113,7 +113,7 @@ impl Fixture {
 }
 
 fn editor() -> EditorState {
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     // No language server may spawn from these fixtures. The LSP rows
     // that DO want one configure it explicitly.
     exec(&state, "pmacs.lsp.config = {}");
@@ -2043,3 +2043,10 @@ fn a_subscriber_reconciliation_failure_is_reported_and_the_rest_still_reconcile(
          unreconciled — the raise has to come after the loop, not inside it"
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

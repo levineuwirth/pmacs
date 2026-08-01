@@ -80,7 +80,7 @@ fn locate_shell(name: &str) -> Option<PathBuf> {
 /// Construct a fresh editor and run the given Lua chunk against it.
 fn run(chunk: &str) {
     let _guard = pump_test_guard();
-    let mut editor = EditorState::new();
+    let mut editor = EditorState::new_with_roots(&crate::iso::roots());
     editor
         .lua_host
         .eval(Some("@m6_5_test"), chunk)
@@ -95,7 +95,7 @@ fn run(chunk: &str) {
 /// after-tick contract is exercised end-to-end.
 fn run_with_pump(setup_chunk: &str, predicate_chunk: &str, timeout_ms: u64) {
     let _guard = pump_test_guard();
-    let mut editor = EditorState::new();
+    let mut editor = EditorState::new_with_roots(&crate::iso::roots());
     editor
         .lua_host
         .eval(Some("@m6_5_setup"), setup_chunk)
@@ -528,3 +528,10 @@ fn m6_5_close_terminates_child_and_unregisters() {
         pmacs.hook.run("process.after-tick")
     "#);
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

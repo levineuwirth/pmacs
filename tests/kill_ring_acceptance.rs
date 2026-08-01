@@ -74,7 +74,7 @@ fn status(s: &EditorState) -> String {
 
 /// Fresh editor whose scratch buffer holds `text`, cursor at 0.
 fn editor_with(text: &str) -> EditorState {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     type_str(&mut s, text);
     exec(&s, "pmacs.editor.goto_byte(0)");
     s
@@ -855,3 +855,10 @@ fn frontend_detached_drops_per_frontend_state() {
     );
     assert!(gone, "detach dropped B's killring state");
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

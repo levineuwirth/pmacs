@@ -180,7 +180,7 @@ fn m6_8_three_repls_render_independently() {
     let Some(lua) = locate_lua() else {
         return;
     };
-    let mut editor = EditorState::new();
+    let mut editor = EditorState::new_with_roots(&crate::iso::roots());
     spawn_three_and_wait_running(&mut editor, &lua);
 
     // Write a unique marker through each REPL: `io.write("MARK_<n>\n")`
@@ -246,7 +246,7 @@ fn m6_8_three_repls_respond_independently() {
     let Some(lua) = locate_lua() else {
         return;
     };
-    let mut editor = EditorState::new();
+    let mut editor = EditorState::new_with_roots(&crate::iso::roots());
     spawn_three_and_wait_running(&mut editor, &lua);
 
     // Type into h1, switch to h2, type into h2, etc. Each typed marker
@@ -308,7 +308,7 @@ fn m6_8_close_one_does_not_affect_others() {
     let Some(lua) = locate_lua() else {
         return;
     };
-    let mut editor = EditorState::new();
+    let mut editor = EditorState::new_with_roots(&crate::iso::roots());
     spawn_three_and_wait_running(&mut editor, &lua);
 
     // Capture h2's proc_id before close; Handle:close clears the
@@ -375,7 +375,7 @@ fn m6_8_supervisor_reaps_all_children_across_cycles() {
     let Some(lua) = locate_lua() else {
         return;
     };
-    let mut editor = EditorState::new();
+    let mut editor = EditorState::new_with_roots(&crate::iso::roots());
 
     // Baseline: list size before any spawning. The post-cycle list
     // size must equal this — no REPL processes left behind.
@@ -480,7 +480,7 @@ fn m6_8_supervisor_reaps_all_children_across_cycles() {
 /// `pmacs.repl.create` (which the spawn path also calls).
 #[test]
 fn m6_8_repls_have_independent_parser_state() {
-    let mut editor = EditorState::new();
+    let mut editor = EditorState::new_with_roots(&crate::iso::roots());
     editor
         .lua_host
         .eval(
@@ -505,7 +505,7 @@ fn m6_8_repls_have_independent_parser_state() {
 /// accidentally shared.
 #[test]
 fn m6_8_repls_have_independent_scrollback_state() {
-    let mut editor = EditorState::new();
+    let mut editor = EditorState::new_with_roots(&crate::iso::roots());
     editor
         .lua_host
         .eval(
@@ -535,7 +535,7 @@ fn m6_8_buffer_scoped_bindings_route_to_active_buffer() {
     let Some(lua) = locate_lua() else {
         return;
     };
-    let mut editor = EditorState::new();
+    let mut editor = EditorState::new_with_roots(&crate::iso::roots());
     let setup = format!(
         r#"
             _G.h1 = pmacs.repl.spawn {{ argv = {{ "{lua}", "-i" }} }}
@@ -618,7 +618,7 @@ fn m6_8_after_tick_hook_drains_all_handles_per_tick() {
     let Some(lua) = locate_lua() else {
         return;
     };
-    let mut editor = EditorState::new();
+    let mut editor = EditorState::new_with_roots(&crate::iso::roots());
     spawn_three_and_wait_running(&mut editor, &lua);
 
     // Capture pre-tick history_end on each handle.
@@ -692,3 +692,10 @@ fn m6_8_after_tick_hook_drains_all_handles_per_tick() {
         .exec()
         .expect("teardown");
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

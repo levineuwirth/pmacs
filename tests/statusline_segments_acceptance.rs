@@ -29,7 +29,8 @@ use pmacs::statusline::{
     StatuslineEvaluationOutcome, StatuslineEvaluationTarget, evaluate_statusline,
 };
 
-#[cfg(feature = "crdt")]
+// Ungated: `common::iso` (isolated bootstrap roots) is needed in every
+// build, not only the CRDT one.
 mod common;
 
 fn exec(state: &EditorState, source: &str) {
@@ -41,7 +42,7 @@ fn eval<T: mlua::FromLuaMulti>(state: &EditorState, source: &str) -> T {
 }
 
 fn editor() -> EditorState {
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     exec(&state, "pmacs.lsp.config = {}");
     state
 }
@@ -689,7 +690,7 @@ fn a09_11_full_tui_frame_composes_unicode_clips_and_preserves_echo() {
 // map and polls the real tracker without a buffer edit.
 #[test]
 fn a12_builtin_lsp_provider_tracks_real_attachment_and_unknown_label() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = env!("CARGO_BIN_EXE_pmacs_fake_lsp");
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("statusline.rs");
@@ -1048,3 +1049,11 @@ fn a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join() {
         "late join sees established state"
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root. Re-exported rather than re-declared
+// with `#[path]` — this file already pulls in `common`, and loading one
+// source file as two modules is `clippy::duplicate_mod`.
+use common::iso;

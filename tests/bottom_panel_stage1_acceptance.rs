@@ -39,7 +39,7 @@ const COLS: u32 = 60;
 const AREA_ROWS: u32 = ROWS - 1;
 
 fn editor() -> EditorState {
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     exec(&s, "pmacs.lsp.config = {}");
     // Geometry is authoritative state, and a grid frontend's real frame
     // size IS its declaration. Every test that does not render declares
@@ -2571,7 +2571,7 @@ fn panel_hidden_never_describes_a_panel_that_no_longer_exists() {
 
 #[test]
 fn unknown_geometry_is_not_twenty_four_by_eighty() {
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     exec(&s, "pmacs.lsp.config = {}");
     let fid = FrontendId(77);
     attach_frontend(&s, fid, false);
@@ -2619,3 +2619,10 @@ fn cell_coord_helper_is_used() {
     // Keeps the CellCoord import honest for grid assertions above.
     assert_eq!(CellCoord::new(1, 2).row, 1);
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

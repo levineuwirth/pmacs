@@ -57,7 +57,7 @@ fn save_refuses_to_clobber_a_file_changed_on_disk() {
     write(&f, "original\n");
     let fs = f.display().to_string();
 
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     open_and_dirty(&s, &fs);
 
     // Another writer lands between our read and our save.
@@ -88,7 +88,7 @@ fn the_save_command_does_not_fire_after_save_when_it_refuses() {
     write(&f, "original\n");
     let fs = f.display().to_string();
 
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     open_and_dirty(&s, &fs);
     exec(
         &s,
@@ -110,7 +110,7 @@ fn save_anyway_overwrites_deliberately_and_resyncs_meta() {
     write(&f, "original\n");
     let fs = f.display().to_string();
 
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     open_and_dirty(&s, &fs);
     write(&f, "theirs\n");
     assert!(!eval::<bool>(&s, "return pmacs.editor.save()"));
@@ -137,7 +137,7 @@ fn an_unchanged_file_saves_normally_and_repeatedly() {
     write(&f, "original\n");
     let fs = f.display().to_string();
 
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     open_and_dirty(&s, &fs);
     assert!(eval::<bool>(&s, "return pmacs.editor.save()"));
     assert_eq!(read(&f), "mine original\n");
@@ -157,7 +157,7 @@ fn a_deleted_file_is_recreated_not_refused() {
     write(&f, "original\n");
     let fs = f.display().to_string();
 
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     open_and_dirty(&s, &fs);
     // Nothing on disk to clobber, so recreating it is not data loss.
     std::fs::remove_file(&f).unwrap();
@@ -174,7 +174,7 @@ fn a_new_file_buffer_refuses_once_someone_else_creates_the_file() {
     let dir = tempdir();
     let missing = dir.join("draft.txt");
 
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     // The argv `[new file]` shape: a path with nothing on disk, no meta.
     exec(
         &s,
@@ -200,3 +200,10 @@ fn a_new_file_buffer_refuses_once_someone_else_creates_the_file() {
     assert_eq!(read(&missing), "my draft");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

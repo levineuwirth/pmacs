@@ -52,7 +52,7 @@ fn probe(s: &EditorState) -> (String, bool, i64) {
 /// the prefix is replaced by the candidate in one step.
 #[test]
 fn typing_opens_popup_and_tab_accepts() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     type_str(&mut s, "hello_world ");
     let (_, visible, _) = probe(&s);
     assert!(
@@ -95,7 +95,7 @@ fn typing_opens_popup_and_tab_accepts() {
 /// candidate wins. Uses a custom provider for a deterministic order.
 #[test]
 fn ctrl_n_navigates_then_ret_accepts_second_candidate() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     s.lua_host
         .lua()
         .load(
@@ -133,7 +133,7 @@ fn ctrl_n_navigates_then_ret_accepts_second_candidate() {
 /// key self-inserts normally (the shadow is partial, not modal).
 #[test]
 fn esc_dismisses_and_typing_falls_through() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     type_str(&mut s, "hello_world he");
     let (_, visible, _) = probe(&s);
     assert!(visible);
@@ -154,7 +154,7 @@ fn esc_dismisses_and_typing_falls_through() {
 /// anchor.
 #[test]
 fn motion_before_anchor_closes_popup() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     type_str(&mut s, "hello_world he");
     let (_, visible, _) = probe(&s);
     assert!(visible);
@@ -169,7 +169,7 @@ fn motion_before_anchor_closes_popup() {
 /// the Q#C9 single-char signature rejects paste-shaped deltas.
 #[test]
 fn yank_shaped_edit_does_not_auto_open() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     type_str(&mut s, "hello_world hello");
     // Select the trailing word and cut it (C-w): the popup that was
     // open over `hello` closes as its word dies.
@@ -198,7 +198,7 @@ fn yank_shaped_edit_does_not_auto_open() {
 /// auto-open prefix threshold.
 #[test]
 fn at_point_command_opens_below_threshold() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     type_str(&mut s, "hello_world h");
     let (_, visible, _) = probe(&s);
     assert!(!visible, "a 1-char prefix stays below the auto-open bar");
@@ -223,7 +223,7 @@ fn at_point_command_opens_below_threshold() {
 /// `C-g` abort) reaches the dispatcher instead of the popup shadow.
 #[test]
 fn pending_prefix_dismisses_popup_and_keeps_dispatcher_control() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     type_str(&mut s, "hello_world he");
     let (_, visible, _) = probe(&s);
     assert!(visible);
@@ -258,7 +258,7 @@ fn pending_prefix_dismisses_popup_and_keeps_dispatcher_control() {
 /// index sweep meant the server was never asked).
 #[test]
 fn empty_sync_sweep_still_leaves_a_pending_session() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     // A buffer whose only word is the one being typed: dabbrev is
     // structurally empty, no LSP attached. The popup cannot open...
     type_str(&mut s, "qz");
@@ -282,7 +282,7 @@ fn empty_sync_sweep_still_leaves_a_pending_session() {
 /// because the real LSP store is Rust-side.
 #[test]
 fn collect_scopes_lsp_candidates_to_ctx_uri() {
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     let (scoped, unscoped): (u64, u64) = s
         .lua_host
         .lua()
@@ -322,3 +322,10 @@ fn collect_scopes_lsp_candidates_to_ctx_uri() {
     assert_eq!(scoped, 1, "ctx.uri reaches Lua providers (9th arg)");
     assert_eq!(unscoped, 2, "no uri → all documents");
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

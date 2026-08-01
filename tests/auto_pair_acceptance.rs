@@ -29,7 +29,7 @@ fn fresh_state_dir() -> PathBuf {
 }
 
 fn editor(state_dir: &std::path::Path) -> EditorState {
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     s.lua_host.lua().remove_app_data::<StateDir>();
     s.lua_host
         .lua()
@@ -114,7 +114,7 @@ fn status(s: &EditorState) -> String {
 /// Fresh scratch-buffer editor whose buffer holds `body`, cursor at 0.
 /// No state dir / no files: scratch pairing uses the `default` set.
 fn editor_with(body: &str) -> EditorState {
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     if !body.is_empty() {
         exec(&s, &format!("pmacs.window.buffer():insert(0, {body:?})"));
     }
@@ -1378,3 +1378,10 @@ fn relocated_closer_first_did_change_carries_the_complete_effective_text() {
          text in the first didChange — never an opener-only intermediate"
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

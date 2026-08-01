@@ -332,7 +332,7 @@ fn m9_3_cancellation_reaches_server() {
 fn m9_3_lua_invoke_tool_returns_awaitable_handle() {
     use pmacs::editor::EditorState;
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_mcp_path();
 
     state
@@ -496,3 +496,10 @@ fn m9_3_lua_invoke_tool_returns_awaitable_handle() {
         .load("pmacs.mcp.stop(_G._mcp_test_server)")
         .exec();
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

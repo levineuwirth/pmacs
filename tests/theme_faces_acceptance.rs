@@ -20,7 +20,8 @@ use pmacs::protocol::{ByteRange, FrontendId, InstanceMessage, ThemeFace};
 use pmacs::semantic_render::SemanticRenderState;
 use std::time::{Duration, Instant};
 
-#[cfg(feature = "crdt")]
+// Ungated: `common::iso` (isolated bootstrap roots) is needed in every
+// build, not only the CRDT one.
 mod common;
 
 // ---------------------------------------------------------------------------
@@ -78,7 +79,7 @@ fn eval<T: mlua::FromLuaMulti>(s: &EditorState, src: &str) -> T {
 
 /// Fresh editor with LSP spawning disabled.
 fn editor() -> EditorState {
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     exec(&s, "pmacs.lsp.config = {}");
     s
 }
@@ -184,7 +185,7 @@ fn current_tree_language(state: &EditorState) -> Option<String> {
 
 /// Open `path` and pump until its parse settles (highlights attached).
 fn open_and_wait_for_parse(path: std::path::PathBuf) -> EditorState {
-    let mut state = EditorState::open(path).expect("open file");
+    let mut state = EditorState::open_with_roots(path, &crate::iso::roots()).expect("open file");
     exec(&state, "pmacs.lsp.config = {}");
     pump_async(&mut state, |s| current_tree_language(s).is_some());
     state
@@ -1511,3 +1512,11 @@ fn minibuffer_and_candidate_faces_apply_through_m_x() {
         panic!("no candidate suffix rendered: {text:?}");
     }
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root. Re-exported rather than re-declared
+// with `#[path]` — this file already pulls in `common`, and loading one
+// source file as two modules is `clippy::duplicate_mod`.
+use common::iso;

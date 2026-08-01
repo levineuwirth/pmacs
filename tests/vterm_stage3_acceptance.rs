@@ -156,7 +156,7 @@ fn one_frame(messages: &[InstanceMessage]) -> TerminalFrame {
     reason = "one producer-baseline lifecycle scenario"
 )]
 fn a30_first_frame_is_authoritative_then_only_real_changes_emit() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let frontend_id = FrontendId(31);
     let terminal_buffer = open_terminal(
         &mut state,
@@ -314,7 +314,7 @@ fn a30_first_frame_is_authoritative_then_only_real_changes_emit() {
     reason = "one shared-session two-frontend scenario"
 )]
 fn a31_two_semantic_frontends_share_one_session_with_independent_views() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let first_id = FrontendId(41);
     let second_id = FrontendId(42);
     let terminal_buffer = open_terminal(
@@ -459,7 +459,7 @@ fn a31_two_semantic_frontends_share_one_session_with_independent_views() {
     reason = "one case per rejected identity or bound"
 )]
 fn a32_forged_stale_and_out_of_bounds_terminal_events_change_nothing() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let owner = FrontendId(51);
     let attacker = FrontendId(52);
     let terminal_buffer = open_terminal(&mut state, "sleep 30", 6, 20);
@@ -978,7 +978,7 @@ fn terminal_mode_keeps_reporting_presence_so_peers_drop_the_stale_caret() {
 /// gesture still claims; only motion does not.
 #[test]
 fn hover_does_not_steal_terminal_control_from_the_active_frontend() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let owner = FrontendId(71);
     let bystander = FrontendId(72);
     let terminal_buffer = open_terminal(&mut state, "sleep 30", 6, 20);
@@ -1075,7 +1075,7 @@ fn hover_does_not_steal_terminal_control_from_the_active_frontend() {
 /// the empty identity buffer.
 #[test]
 fn a28_a30_a_v18_semantic_peer_has_no_terminal_surface() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let frontend_id = FrontendId(61);
     let terminal_buffer = open_terminal(&mut state, "sleep 30", 4, 20);
     tick_until(&mut state, Duration::from_secs(5), |state| {
@@ -1341,3 +1341,11 @@ fn gpu_terminal_input_reaches_the_child_and_returns_in_a_frame() {
         report()
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root. Re-exported rather than re-declared
+// with `#[path]` — this file already pulls in `common`, and loading one
+// source file as two modules is `clippy::duplicate_mod`.
+use common::iso;

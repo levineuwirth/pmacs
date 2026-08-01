@@ -114,7 +114,7 @@ fn status(s: &EditorState) -> String {
 /// typing RET would route through edit.newline-and-indent and clone
 /// leading whitespace), cursor at 0.
 fn editor_with(text: &str) -> EditorState {
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     exec(
         &s,
         &format!(
@@ -1155,7 +1155,7 @@ fn temp_path(name: &str) -> std::path::PathBuf {
 fn trim_on_save_defaults_off_and_writes_untouched_bytes() {
     let path = temp_path("off.txt");
     std::fs::write(&path, "x  \ny\t\n").unwrap();
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     let on: bool = eval(&s, "return pmacs.editops.trim_on_save()");
     assert!(!on, "default off");
     exec(
@@ -1175,7 +1175,7 @@ fn trim_on_save_defaults_off_and_writes_untouched_bytes() {
 fn trim_on_save_trims_the_written_bytes_before_later_callbacks() {
     let path = temp_path("on.txt");
     std::fs::write(&path, "x  \ny\t\n").unwrap();
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     exec(&s, "pmacs.editops.trim_on_save(true)");
     // A callback registered AFTER editops' (load-time) hook observes
     // the fan-out order saveplace sees: post-trim text.
@@ -1215,7 +1215,7 @@ fn trim_on_save_trims_the_written_bytes_before_later_callbacks() {
 fn trim_on_save_failure_never_vetoes_the_save() {
     let path = temp_path("veto-immune.txt");
     std::fs::write(&path, "x  \n").unwrap();
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     exec(&s, "pmacs.editops.trim_on_save(true)");
     exec(
         &s,
@@ -1246,7 +1246,7 @@ fn trim_on_save_failure_never_vetoes_the_save() {
 fn trim_on_save_unexpected_error_reports_and_still_saves() {
     let path = temp_path("unexpected.txt");
     std::fs::write(&path, "x  \n").unwrap();
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     exec(&s, "pmacs.editops.trim_on_save(true)");
     // Capture the pmacs.error log (the m9_6 stub pattern — the
     // `if pmacs.error` branch is a no-op without it).
@@ -1293,7 +1293,7 @@ fn trim_on_save_unexpected_error_reports_and_still_saves() {
 fn another_callbacks_veto_is_not_masked_by_trim() {
     let path = temp_path("veto.txt");
     std::fs::write(&path, "x  \n").unwrap();
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     exec(&s, "pmacs.editops.trim_on_save(true)");
     exec(
         &s,
@@ -1318,3 +1318,10 @@ fn another_callbacks_veto_is_not_masked_by_trim() {
     );
     let _ = std::fs::remove_file(&path);
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

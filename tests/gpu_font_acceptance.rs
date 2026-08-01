@@ -18,7 +18,8 @@ use pmacs::editor::EditorState;
 use pmacs::protocol::{ByteRange, FrontendId, InstanceMessage};
 use pmacs::semantic_render::SemanticRenderState;
 
-#[cfg(feature = "crdt")]
+// Ungated: `common::iso` (isolated bootstrap roots) is needed in every
+// build, not only the CRDT one.
 mod common;
 
 // ---------------------------------------------------------------------------
@@ -43,7 +44,7 @@ fn eval<T: mlua::FromLuaMulti>(s: &EditorState, src: &str) -> T {
 
 /// Fresh editor with LSP spawning disabled.
 fn editor() -> EditorState {
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     exec(&s, "pmacs.lsp.config = {}");
     s
 }
@@ -490,3 +491,11 @@ fn preference_set_before_attach_ships_on_the_first_frame() {
         "the first frame ships the pre-attach preference"
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root. Re-exported rather than re-declared
+// with `#[path]` — this file already pulls in `common`, and loading one
+// source file as two modules is `clippy::duplicate_mod`.
+use common::iso;

@@ -35,7 +35,7 @@ fn fake_lsp_path() -> String {
 /// A fresh editor with the shipped language configs cleared, so the only
 /// server any test can spawn is the fake one it configures itself.
 fn editor() -> EditorState {
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     exec(&state, "pmacs.lsp.config = {}");
     state
 }
@@ -702,3 +702,10 @@ fn a_resolver_returning_nil_declines_silently() {
         file_uri(&fx.dir("proj"))
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

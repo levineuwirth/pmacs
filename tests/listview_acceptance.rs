@@ -212,7 +212,7 @@ fn probe(s: &EditorState) -> (String, String, i64, Option<String>) {
 
 #[test]
 fn open_seats_cursor_and_ret_visits_the_row() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     open_test_panel(&mut s);
     let (name, text, line, _) = probe(&s);
     assert_eq!(name, "*test-panel*");
@@ -227,7 +227,7 @@ fn open_seats_cursor_and_ret_visits_the_row() {
 
 #[test]
 fn header_row_is_not_visitable() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     open_test_panel(&mut s);
     press(&mut s, KeyCode::Char('p')); // up onto the header
     press(&mut s, KeyCode::Enter);
@@ -237,7 +237,7 @@ fn header_row_is_not_visitable() {
 
 #[test]
 fn q_restores_the_previous_buffer() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     open_test_panel(&mut s);
     press(&mut s, KeyCode::Char('q'));
     let (name, _, _, _) = probe(&s);
@@ -246,7 +246,7 @@ fn q_restores_the_previous_buffer() {
 
 #[test]
 fn panel_rejects_typing() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     open_test_panel(&mut s);
     let (_, before, _, _) = probe(&s);
     press(&mut s, KeyCode::Char('z')); // unbound printable → self-insert → intercept rejects
@@ -258,7 +258,7 @@ fn panel_rejects_typing() {
 fn dispatch_idle_is_false_while_a_panel_is_focused() {
     // Q#P6: while the panel is the active buffer, semantic frontends
     // must round-trip every key (RET = visit, not an optimistic \n).
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     assert!(s.dispatch_idle(), "scratch buffer: idle");
     open_test_panel(&mut s);
     assert!(!s.dispatch_idle(), "panel focused: keys must round-trip");
@@ -268,7 +268,7 @@ fn dispatch_idle_is_false_while_a_panel_is_focused() {
 
 #[test]
 fn refresh_reruns_the_source_and_reseats() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     open_test_panel(&mut s);
     press(&mut s, KeyCode::Char('g'));
     let (_, text, line, _) = probe(&s);
@@ -304,7 +304,7 @@ const PANEL_TEXT: &str = "3 items   RET visit  q quit\nalpha\nbeta\ngamma";
 /// consulting the intercept chain.
 #[test]
 fn s1_1_the_undo_chord_cannot_empty_a_listview_panel() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     open_test_panel(&mut s);
     assert_eq!(active_text(&s), PANEL_TEXT, "precondition: rendered");
 
@@ -327,7 +327,7 @@ fn s1_1_the_undo_chord_cannot_empty_a_listview_panel() {
 /// *Bite:* same empty result on the pre-image.
 #[test]
 fn s1_2_m_x_buffer_undo_cannot_empty_a_listview_panel() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     open_test_panel(&mut s);
 
     m_x(&mut s, "buffer.undo");
@@ -355,7 +355,7 @@ fn s1_2_m_x_buffer_undo_cannot_empty_a_listview_panel() {
 /// raising.
 #[test]
 fn s1_4_the_owners_refresh_still_works_after_the_lock() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     open_test_panel(&mut s);
     let panel = id_of(&s, "*test-panel*");
     assert!(
@@ -388,7 +388,7 @@ fn s1_4_the_owners_refresh_still_works_after_the_lock() {
 /// therefore passes the rope half and fails the lifted half.
 #[test]
 fn s1_5_the_rope_lock_and_named_intercept_refuse_in_order() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     open_test_panel(&mut s);
     let panel = id_of(&s, "*test-panel*");
     let before = active_text(&s);
@@ -453,7 +453,7 @@ fn s1_5_the_rope_lock_and_named_intercept_refuse_in_order() {
 /// pinned through `dispatch_idle_for` rather than through `read_only`.
 #[test]
 fn s1_6_round_trip_input_survives_the_adoption() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     open_test_panel(&mut s);
 
     // (a) the premise.
@@ -498,7 +498,7 @@ fn s1_6_round_trip_input_survives_the_adoption() {
 /// the old line index live and this paint assertion bites.
 #[test]
 fn s1_7_a_shrinking_refresh_reaches_the_window() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     open_test_panel(&mut s);
     let painted = paint_active_window(&s, 6, 24);
     assert_eq!(
@@ -540,7 +540,7 @@ fn s1_7_a_shrinking_refresh_reaches_the_window() {
 /// builtin/runtime/listview.lua` falsifies it.
 #[test]
 fn s1_9_a_foreign_buffer_with_the_panels_name_is_never_adopted() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     exec(
         &s,
         "FOREIGN = pmacs.buffer.create('*test-panel*')\n\
@@ -585,7 +585,7 @@ fn s1_9_a_foreign_buffer_with_the_panels_name_is_never_adopted() {
 /// created.
 #[test]
 fn s1_10_the_disambiguation_limit_raises_rather_than_adopting() {
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     exec(
         &s,
         "MINE = pmacs.buffer.create('*test-panel*')\n\
@@ -624,7 +624,7 @@ fn s1_10_the_disambiguation_limit_raises_rather_than_adopting() {
 /// command produced, never on "it did not raise".
 #[test]
 fn s1_11_a_disambiguated_panel_still_answers_ret_g_and_q() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     exec(
         &s,
         "FOREIGN = pmacs.buffer.create('*test-panel*')\n\
@@ -678,7 +678,7 @@ fn s1_11_a_disambiguated_panel_still_answers_ret_g_and_q() {
 /// the disambiguation and `q` lands back in `*test-panel*<2>`.
 #[test]
 fn s1_12_the_q_target_capture_is_not_inverted_across_two_panels() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     exec(
         &s,
         "FOREIGN = pmacs.buffer.create('*test-panel*')\n\
@@ -755,3 +755,10 @@ fn s1_14_no_bypass_write_or_name_keyed_identity_remains() {
         "every `panels[` subscript must be an append; found {subscripts:?}"
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;
