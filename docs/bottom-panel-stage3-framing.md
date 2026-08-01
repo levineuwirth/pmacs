@@ -1,7 +1,14 @@
 # Framing — Bottom panel Stage 3: the adopter default flip
 
-**Revision 2.** Status: **approved with amendments** (revision 1 → 2
-records them). Scouted against `githubsucks/main` @ `000b6cd` (v1.1.0).
+**Revision 3.** Status: **approved; branch-plan step 1 (the fallout
+census) is complete and recorded in §1.6b–c.** Branch
+`bottom-panel-stage3`, based on `githubsucks/main` @ `21de0b2`.
+
+**Revision 2 → 3** adds the measurement and its classification. Two
+findings changed the plan rather than confirming it: the census needs
+`--no-fail-fast` or it under-reports by an order of magnitude, and
+**`m4_acceptance` is a transitive adopter via listview that no table
+named**.
 
 **Revision 1 → 2**, all from review and all verified rather than
 accepted:
@@ -192,9 +199,8 @@ fallback is invisible from the adopter's side.
 - **Nothing has been implemented or measured.** Unlike the distribution
   lane, there is no artifact to inspect; the evidence is the existing
   suites' behaviour before and after.
-- **The blast radius on existing acceptance suites is partly known
-  now** — see §1.6a for the two named cases. The total is still
-  unmeasured. Stage 1
+- ~~The blast radius on existing acceptance suites is unmeasured.~~
+  **MEASURED — see §1.6b: 37 failures across 5 suites.** Stage 1
   shipped the mechanism opt-in precisely so existing suites kept their
   meaning. Flipping the default changes where output lands for every
   suite that exercises listview, compile or terminal **without** passing
@@ -233,6 +239,79 @@ setup genuinely requires the document window**. Mass-adding the opt-out
 to make a suite green converts a behavioural change into an invisible
 one, which is the failure this stage's inverted ordering exists to
 avoid.
+
+### 1.6b The fallout census — MEASURED, and it found an adopter nobody named
+
+Taken as branch-plan step 1: record a baseline, apply the three-site
+flip as a throwaway edit, sweep, revert. The flip is **not** in the
+tree; only this table survives it.
+
+**A census that stops at the first failing binary is not a census.**
+The first sweep reported **2 failures in 1 suite** and looked
+comfortingly small — `cargo test` halts after a failing test binary, so
+everything alphabetically past `bottom_panel_stage1_acceptance` never
+ran. With `--no-fail-fast` the real figure is **37 failures across 5
+suites**. Any future re-measurement must pass that flag or it will
+under-report by an order of magnitude, in the same shape as this arc's
+other silent-success traps.
+
+| suite | base → flipped | failures | share of suite |
+|---|---|---:|---:|
+| `listview_acceptance` | 17 → 4 | **13** | **76%** |
+| `compile_mode_acceptance` | 72 → 55 | **17** | 24% |
+| `vterm_stage2_acceptance` | 6 → 3 | **3** | 50% |
+| `bottom_panel_stage1_acceptance` | 46 → 44 | **2** | 4% |
+| `m4_acceptance` | 149 → 147 | **2** | 1% |
+| | | **37** | |
+
+**`m4_acceptance` was predicted by nobody** — not the parent framing,
+not Q#BP12's adopter table, not revision 1 of this document. Its two
+failures are `hover_doc_panel_shows_full_contents_via_binding` and
+`outline_panel_opens_visits_and_restores`: **the LSP panels are
+listview consumers**, so flipping listview's default reaches the LSP
+suite transitively.
+
+This materially improves the adopter map. Q#BP12 lists four rows
+(listview, compile, terminal, DAP) as though they were the population.
+They are the *direct* population; **the real one includes everything
+built on listview**, and the LSP hover/outline panels are the proof.
+Anything added on listview later inherits the panel default without
+appearing in any table — which is the intended behaviour, but only if
+the map says so.
+
+**The proportions invert the obvious reading.** `compile_mode` has the
+most failures and the least placement content: `acc01_spawn_streams…`,
+`acc05_kill_reaps_backgrounded_descendant`,
+`acc21_kill_produces_signaled_marker` and the `r1f*`/`r5f*`/`r6f*` group
+are process-lifecycle and styling tests that merely *use* compile and
+now find its output elsewhere. `listview_acceptance` has fewer failures
+but loses **three quarters of its suite**, and its failures
+(`open_seats_cursor_and_ret_visits_the_row`, `panel_rejects_typing`,
+`dispatch_idle_is_false_while_a_panel_is_focused`) are placement in
+substance.
+
+### 1.6c Classification, decided
+
+Applying §1.6a's rule to the measured set. **Placement-subject tests
+assert the NEW default; only genuine document-window setups opt out.**
+
+| test | classification |
+|---|---|
+| `bottom_panel_stage1::acc19` | **placement** — needs a new way to seed a document window (§1.6a) |
+| `bottom_panel_stage1::acc19b` | **placement** — subject survives; mechanism may not (Q#S3-3) |
+| `m4::outline_panel_opens_visits_and_restores` | **placement** — *almost a direct realization of criterion 58*: open → visit → jump-back → quit. Assert the panel/document split |
+| `m4::hover_doc_panel_shows_full_contents_via_binding` | **placement** — a listview panel lifecycle test. Keep the omitted default; assert the new placement **plus** its existing content and quit guarantees |
+| `compile::acc15_ret_visits_error_and_jump_back_returns` | **placement** — Q#BP12 explicitly requires compilation panel → RET source → `M-,` back to the still-present panel with the document window intact |
+| `compile::acc16_n_p_walk_error_lines_without_wrap` | **opt out**, explicit `display = "current"` — its subject is cursor navigation *within* compile output, which genuinely needs the compilation buffer selected |
+| `listview_acceptance` ×13 | **placement**, predominantly — assert the new default |
+| remaining `compile_mode` ×15 | **incidental** — process lifecycle and styling; opt out only where the setup needs the document window |
+| `vterm_stage2` ×3 | **to classify at implementation** — terminal's `select = true` makes these likelier placement than incidental |
+
+The `acc15` / `acc16` split is the one worth remembering: **two
+neighbouring tests in the same suite land on opposite sides**, because
+one is about where output goes and the other is about moving within it.
+A sweep that classified per *suite* rather than per *test* would have
+got both wrong.
 
 ## 2. Questions
 
