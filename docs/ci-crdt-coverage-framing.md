@@ -1,15 +1,25 @@
 # Framing — the CRDT half of the test corpus is dark in CI
 
-**Revision 2.** Status: framing only. No branch, no implementation.
-Scouted against `githubsucks/main` @ `4223dd3` (#208), with **zero open
-PRs** on the board.
+**Revision 3.** Status: **implemented** on branch `ci-crdt-coverage`,
+based on `githubsucks/main` @ `4223dd3` (#208). Approved at revision 2.
 
-**Revision 1 → 2** records the user's decisions on Q#CC3, Q#CC4 and
-Q#CC7, and **corrects revision 1's classification of `m10_10_perf`**,
-which was wrong in a way that would have made the lane worse. See §1.3a.
-The correction also completes the disposition accounting: all 279 dark
-tests are now assigned, with 275 recovered and 4 excluded for named
-reasons (§1.2a).
+**Revision 2 → 3** records implementation findings, not a new design
+round. Three things changed:
+
+- **§1.1's target-column claim was wrong**, and `scripts/feature-census`
+  found it. "Eight test binaries contain zero tests" merged two
+  different true statements; the corrected reading is in §1.1.
+- **The census now has a tool** (§1.9). The ledger's standing "re-measure,
+  don't quote" instruction had never had one.
+- **Acceptance 9 is revised** — the deliberate-break bite is replaced by
+  a structural coverage assertion plus the CI count reconciliation, with
+  what each does and does not prove stated explicitly. See §4.
+
+**Revision 1 → 2** recorded the decisions on Q#CC3, Q#CC4 and Q#CC7, and
+**corrected revision 1's classification of `m10_10_perf`**, which was
+wrong in a way that would have made the lane worse (§1.3a). It also
+completed the disposition accounting: all 279 dark tests assigned, 275
+recovered and 4 excluded for named reasons (§1.2a).
 
 `.github/workflows/ci.yml` never enables the `crdt` feature anywhere.
 Every `#[cfg(feature = "crdt")]` test is therefore **not compiled** in
@@ -51,16 +61,27 @@ did: the previous reading was 273 at `74301d1`.
 
 Under CI's exact flags versus the same flags plus `crdt`:
 
-| | tests | test binaries |
+| | tests | targets with ≥1 test |
 |---|---:|---:|
 | `--no-default-features --features luajit` | 3,467 | 93 |
 | `--no-default-features --features luajit,crdt` | 3,746 | 101 |
-| **dark** | **279** | **8** |
+| **dark** | **279** | **8 targets gain tests** |
 
-The binary column is a fact the earlier census did not carry: **eight
-test binaries contain zero tests under CI's flags.** They are still
-built, still run, and still report `ok` — with nothing in them. A green
-result from those eight is not weak evidence, it is no evidence.
+**Corrected in revision 3.** Revisions 1 and 2 read the target column as
+"eight test binaries contain zero tests under CI's flags." That is not
+what the column measures, and `scripts/feature-census` (§1.9) found the
+error by reporting both figures separately. Two different true
+statements had been merged:
+
+- **Eleven** targets run under CI's flags with **zero tests**. They
+  build, run, and report `ok` with nothing in them.
+- **Eight** of those eleven **gain tests under `crdt`** — the ones this
+  lane recovers. The other three are helper binaries (`pmacs_audit`,
+  `pmacs_fake_lsp`, `pmacs_fake_mcp`) with no tests in either
+  configuration, which is correct and not a gap.
+
+A green result from the eight is not weak evidence, it is no evidence.
+The three are fine. Conflating them inflates the defect.
 
 Per target, every row with a nonzero delta:
 
@@ -328,6 +349,38 @@ as evidence that the CI leg will be green.**
 
 ---
 
+### 1.9 The census now has a tool
+
+`docs/active-work.md` says the dark-test figure "moves with every merge
+and must be re-measured, not quoted." **That instruction had no tool**,
+so every re-measurement was a hand-rolled `--list` pipeline written from
+scratch — including this lane's, whose first attempt filtered on
+`/ : test$/` when libtest prints `name: test` with no space before the
+colon. It matched nothing, reported zero targets, and looked like a
+clean run.
+
+`scripts/feature-census <config-a> <config-b> [--covers <test>]` is that
+tool. It reproduces every figure in §1.1 and §1.2 independently, and its
+header records each parsing trap, all of which were hit while writing
+it. Two are worth repeating here because they change results rather than
+merely breaking a run:
+
+- **A target with zero tests prints its `Running` line and nothing
+  else.** Counting only test lines drops it from the diff entirely —
+  losing precisely the finding worth surfacing. This is how the §1.1
+  error above survived two revisions.
+- **Both configurations need an `--ignored` pass, not just the richer
+  one.** Counting only B's ignored set attributes pre-existing ignores
+  to the feature: `rope::tests::perf_smoke_*` are ignored under both and
+  are not "dark and ignored." The difference is what turns a flat
+  "279 dark" into §1.2's "268 recovered, 11 needing `--ignored`."
+
+It is **fail-closed on a build failure** (exit 3). A configuration that
+does not compile yields no test list, which is indistinguishable by
+counting from "this configuration has no tests" and would render as an
+entirely false "every test is dark." That is not a small error; it is a
+number that would get quoted.
+
 ## 2. Questions
 
 - **Q#CC1 — does the `crdt` leg go on the existing `test` matrix or its
@@ -474,12 +527,41 @@ easiest to ship unnoticed.
    for the suites it runs, the way §1.7 reconciles to 3,746. A job that
    runs fewer tests than the census predicts has found a silently-absent
    binary, and that is the defect class this whole lane exists to end.
-9. **A deliberately-broken bite proves the leg is not vacuous.** Before
-   merge, break one `crdt`-gated library test on the branch and confirm
-   the new CI job goes red. A leg added to a corpus that is already
-   green locally cannot otherwise be distinguished from a leg that
-   compiles nothing — which is precisely the failure `.github` has today
-   and the reason criterion 8 is not sufficient on its own.
+9. **The leg is proven load-bearing, structurally rather than by
+   breakage.** *Revised in revision 3 — the original criterion asked for
+   a deliberately-broken test, and it is worth saying plainly why that
+   was dropped rather than quietly meeting a weaker bar.*
+
+   The original: break a `crdt`-gated library test, confirm the job goes
+   red, revert. It proves two things at once — that the leg compiles
+   crdt tests, and that a failure propagates to a red job. The second is
+   generic cargo/libtest behavior, not anything this lane changes, and
+   buying it costs a mutation of tracked source restored by a shell
+   trap, plus a broken commit in the PR's history.
+
+   What replaces it, in two parts:
+
+   - **Structural, and stronger on the point that matters:**
+     `scripts/feature-census luajit luajit,crdt --covers <test>` asserts
+     a named test is present under the new job's flags and **absent
+     under the old job's**. That is a claim the break test does *not*
+     make — a red job proves the leg caught something, but not that the
+     existing job could never have. Verified for
+     `crdt_apply_edit_keeps_invariant_basic`: present under B, absent
+     under A, exit 0. The negative cases are exercised too (a test in
+     both configs, and a misspelled name, both exit 1).
+   - **Empirical, from the first CI run:** criterion 8's count
+     reconciliation. A job reporting ~3,715 passed has demonstrably
+     compiled and run the crdt corpus; a vacuous leg reports a number
+     near the `test` job's.
+
+   **What is no longer proven, stated rather than glossed:** that a
+   *failing* crdt test turns this specific job red. Nothing on this
+   branch demonstrates it. It rests on cargo returning non-zero on test
+   failure and GitHub Actions failing a step on non-zero — both
+   universal, neither lane-specific. If review wants that proven
+   directly, the break test is still the way, and it belongs on a
+   throwaway PR rather than in this one's history.
 
 ---
 
@@ -511,6 +593,8 @@ make meaningful:
 - `cargo fmt --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - **`cargo clippy --workspace --all-targets --features crdt --keep-going -- -D warnings`** (new, and the lane's own subject)
+- **`scripts/feature-census luajit luajit,crdt`** (new; re-measures the
+  census rather than quoting it forward, per the ledger's own rule)
 - `cargo test --lib`
 - `cargo test --lib --features crdt`
 - the touched acceptance suites
@@ -534,31 +618,42 @@ newly compiles.
 ## 7. Branch plan
 
 One branch, `ci-crdt-coverage`. Commits in this order, because each
-earlier one is a precondition for the next being observable:
+earlier one is a precondition for the next being observable. **As
+landed:**
 
-1. **Clear the eight clippy findings** (§1.4). Nothing can compile the
-   `crdt` targets under `-D warnings` until this lands, so no CI change
-   is testable before it.
+1. **Clear the eight clippy findings** (§1.4) — `7a9cf5b`. Nothing can
+   compile the `crdt` targets under `-D warnings` until this lands, so
+   no CI change was testable before it.
 2. **Add the `m10-perf-gates` job** for `m10_2_perf` and `m10_11_perf`
-   (Q#CC4), shaped like `m5-perf-gates` / `m6-perf-gates`:
-   `--release --features crdt -- --ignored --nocapture`, with
-   `timeout-minutes` and a written luajit-only justification.
-   **No source file changes** — per Q#CC3 and §1.3a, `m10_10_perf` is
-   not touched and gets no `#[ignore]`.
-3. **Add the non-GPU `crdt` leg**, ubuntu-only, luajit-only, with its
-   justification written in the workflow. This is the commit that
-   recovers 268 tests, `m10_10_perf`'s 4 among them.
-4. **Prove the leg is not vacuous** (acceptance 9): break one
-   `crdt`-gated library test, confirm the new job goes red, revert.
-   Do this *before* step 5, so the proof is against the simpler job.
-5. **Add the GPU-requiring `crdt` suites to `gpu-render`**, with the
-   per-suite execution proof from Q#CC5 — this is where §1.5's
-   package mismatch has to be handled explicitly.
-6. **Update `docs/active-work.md` and `docs/agent-handoff.md`** per
+   (Q#CC4) — `06abbac`. **No source file changes**: per Q#CC3 and
+   §1.3a, `m10_10_perf` is not touched and gets no `#[ignore]`.
+3. **Add the `crdt-test` job** — `7a8746d`. Recovers 268 tests,
+   `m10_10_perf`'s 4 among them.
+4. **Give the census a tool** — `a776bc3`, `scripts/feature-census`
+   (§1.9). This replaced the planned break-test as the non-vacuity
+   proof; see acceptance 9 for what was traded away and why.
+5. **Update `docs/active-work.md` and `docs/agent-handoff.md`** per
    acceptance 7.
 
-**The GPU-suite commit is the one that needs Universum.** Steps 1–3 are
-fully verifiable on this laptop; step 4's failures cannot be
-distinguished from thermal and load noise here (§1.8), and settling them
-on the 7900 XTX proves the tests are sound without proving the lavapipe
-CI job will pass. Budget for that gap rather than assuming it away.
+**Two departures from the plan as approved, both deliberate:**
+
+- **The GPU suites did not get a separate commit against `gpu-render`.**
+  The plan's step 5 assumed they could be added to that job; §1.5
+  established it runs a different package, so co-locating them there
+  would have meant a new invocation rather than an extension, plus a
+  standing requirement to classify every future suite as GPU-requiring
+  or not. They are covered by `crdt-test` instead, which installs
+  lavapipe and sets `PMACS_REQUIRE_GPU=1` for the whole corpus. **One
+  job cannot develop the hole that splitting invites.**
+- **The break-test became a coverage assertion plus a tool** (acceptance
+  9). The proof got stronger on the claim specific to this lane — that
+  the old job *structurally cannot* see these tests — and weaker on a
+  generic one it no longer makes.
+
+**Universum is still where the GPU question settles.** Everything above
+was verified on this laptop, whose integrated Radeon renders the GPU
+suites but is thermally constrained, so a red `a37` here is ambiguous by
+construction (§1.8). What Universum's 7900 XTX can establish is that the
+tests are sound; it cannot establish that the lavapipe CI job will pass,
+and the first PR run is the only thing that can. Budget for that gap
+rather than assuming it away.

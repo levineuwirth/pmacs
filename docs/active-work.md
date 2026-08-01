@@ -5,6 +5,15 @@ landed on `main`. Read it after `docs/agent-handoff.md`. Remove completed
 entries when their PR merges; do not let this become a second permanent
 backlog.
 
+**Updated later the same day, on a new machine.** Development moved to
+the laptop; the recovery path in "Repository authority" below was
+exercised from this checkout and the `githubsucks` alias was absent and
+had to be added, exactly as that section anticipates. **One lane opened:
+CI CRDT coverage**, which had been sitting under "NEEDS A LANE" with no
+branch and no owner since #166. It is implemented on
+`ci-crdt-coverage` and its block replaces the old one below. Everything
+else in this file is unchanged.
+
 **This snapshot is an absorption pass, taken with ZERO open PRs** —
 the one window in which a ledger refresh has nothing to re-conflict
 with, and taken deliberately before a machine move. Nine PRs landed
@@ -139,140 +148,132 @@ form. All four steps ran clean. **The two-argument form still does not
 work** for a remote-only branch (`fatal: invalid reference`), which is
 why every lane below spells out the `-b` form.
 
-## The CRDT half of the test corpus is dark in CI — NEEDS A LANE
+## CI CRDT coverage lane — IMPLEMENTED on `ci-crdt-coverage`, PR not yet open
 
-- **No branch, no framing yet.** Found while gating #166, then measured
-  properly during the vterm as-framed audit. Deliberately kept out of #166 so
-  a CI change would not arrive after review approval.
-- **Root cause:** `.github/workflows/ci.yml` never enables the `crdt` feature
-  anywhere — zero hits across the workflow directory. The `test` job runs
-  `cargo test --all-targets --no-default-features --features luajit|lua54`.
-  Every `#[cfg(feature = "crdt")]` test is therefore **not compiled** in CI,
-  not merely skipped.
-- **Measured, `--list` under CI's exact flags versus the same flags plus
-  `crdt`: 3,176 vs 3,449 — 273 tests dark.** Re-measured at `74301d1`
-  (2026-07-26; at `fe8b8ba` it read 3,170 vs 3,443, the same 273 dark —
-  #176 added six tests, none of them `crdt`-gated). **The number moves
-  with every merge and must be
-  re-measured, not quoted.** #168 reported 3,024 vs 3,288 — 264 dark,
-  177 in the library — at `1b6a084`; #178 then added CRDT-only
-  generated-buffer coverage, and other lanes landed CRDT tests in
-  between. Per target:
+**This lane had no branch and no owner from #166 until 2026-08-01.** It
+now has both. Framing:
+`docs/ci-crdt-coverage-framing.md` revision 3 (approved at revision 2).
+Branch `ci-crdt-coverage` off `githubsucks/main` @ `4223dd3`, developed
+in the primary checkout on the laptop, not a worktree.
 
-  | dark | CI | full | target |
-  |---:|---:|---:|---|
-  | 185 | 1,848 | 2,033 | **the library itself** (`src/lib.rs`) |
-  | 21 | 15 | 36 | `m5_5_acceptance` |
-  | 13 | 1 | 14 | `gpu_invocation_acceptance` |
-  | 13 | 1 | 14 | `gpu_initial_target_acceptance` |
-  | 8 | 0 | 8 | `m10_11_acceptance` |
-  | 6 | 0 | 6 | `auto_pair_crdt_acceptance` |
-  | 6 | 0 | 6 | `m10_2_perf` |
-  | 4 | 5 | 9 | `vterm_stage3_acceptance` |
-  | 4 | 0 | 4 | `m10_10_perf` |
-  | 3 | 0 | 3 | `compile_mode_crdt_acceptance` |
-  | 2 | 22 | 24 | `theme_faces_acceptance` |
-  | 2 | 0 | 2 | `m11_5_semantic_acceptance` |
-  | 1 | 14 | 15 | `terminal_copy_mode_acceptance` |
-  | 1 | 9 | 10 | `vterm_stage1_acceptance` |
-  | 1 | 7 | 8 | `statusline_segments_acceptance` |
-  | 1 | 10 | 11 | `gpu_font_acceptance` |
-  | 1 | 0 | 1 | `auto_indent_crdt_acceptance` |
-  | 1 | 0 | 1 | `m10_11_perf` |
+- **Root cause, unchanged:** `.github/workflows/ci.yml` never enabled
+  the `crdt` feature anywhere. Every `#[cfg(feature = "crdt")]` test was
+  therefore **not compiled** in CI, not merely skipped — including the
+  186 library tests behind `cargo test --lib --features crdt`, which
+  `CLAUDE.md` lists as a REQUIRED pre-PR gate. CI had never run a
+  required gate.
+- **Re-measured at `4223dd3`: 3,467 vs 3,746 — 279 dark**, up from the
+  273 recorded at `74301d1`. **Do not quote this number either.** It
+  moves with every merge, and there is now a tool: `scripts/feature-census
+  luajit luajit,crdt` reproduces the whole per-target table, the ignored
+  split, and the zero-test-target count in one command.
+- **The 279 are fully dispositioned; 275 are recovered.** 268 by the new
+  `crdt-test` job, 7 by the new `m10-perf-gates` job, and 4 deliberately
+  excluded: `m10_11_acceptance`'s three PTY-doubled tests (marked
+  operator-invoked before tagging) and the #157 CRDT undo repro, an
+  `#[ignore]`d known-defect marker whose arming belongs to that defect's
+  lane.
+- **The deliberate/accidental classification the old lane text called
+  "the lane's first task" is finished**, and it found THREE dispositions
+  rather than two: benches awaiting a job (`m10_2_perf`,
+  `m10_11_perf`), deliberately-manual operator tests
+  (`m10_11_acceptance`), and known-defect markers. Collapsing the second
+  into the first would have given a CI job to tests whose `#[ignore]`
+  reason says not to.
+- **`m10_10_perf` is NOT a perf gate**, and the framing got this wrong
+  first. Its header says its bounds are "generous ... to catch
+  catastrophic regressions, not to verify a tight perf claim," so its
+  lack of `#[ignore]` is the design. Adding one to give it a job would
+  have shipped a coverage reduction inside a coverage lane. It stays
+  untouched and rides the plain leg.
+- **The clippy obstacle is cleared, and the old inventory was stale in
+  both directions.** `cargo clippy --workspace --all-targets --features
+  crdt` had never passed. The previous seven-item list was correctly
+  labelled "a lower bound, not an inventory" — `--keep-going` is what
+  converts it. The real set was eight findings across four files; the
+  `unneeded mut` at `daemon.rs:4965` had been fixed incidentally, a
+  finding in `bottom_panel_stage2b_gpu_acceptance.rs` was new, and every
+  `daemon.rs` line number had moved.
+- **One job, not two.** The fix-shape recorded here previously put the
+  GPU-requiring suites onto `gpu-render` "which already has lavapipe and
+  PMACS_REQUIRE_GPU". **That job runs `cargo test -p pmacs-gpu` — a
+  different package** from the four root-package suites, so co-locating
+  them means a new invocation rather than an extension. Splitting also
+  requires classifying every future suite as GPU-requiring or not, and a
+  misclassified one skips forever. `crdt-test` installs lavapipe and
+  sets `PMACS_REQUIRE_GPU=1` for the whole corpus instead.
+- **`PMACS_REQUIRE_GPU` is not uniform and cannot serve as blanket
+  proof**: it appears in `vterm_stage3_acceptance` (twice) and
+  `bottom_panel_stage2b_gpu_acceptance` (once), and **not at all** in
+  `gpu_invocation_acceptance` or `gpu_initial_target_acceptance`.
+- **The external-tool install block is deliberately not duplicated.**
+  Measured: it gates `m4_acceptance`, `m6_5_repl_acceptance` and
+  `m6_8_multi_repl_acceptance`, none of which has a single dark test.
+  The only tool-gated code in the dark set is `src/process.rs`, whose
+  two variables need no install.
+- **Crdt clippy runs in `crdt-test`, not the `clippy` job.** The `clippy`
+  job matrixes over Lua flavor and never enables `crdt`, so clearing
+  those lints once would let them drift straight back and the next job
+  to compile them would be red on arrival — the exact state this lane
+  found.
+- **Verification on the laptop (integrated Radeon, 16 threads), all at
+  the exact commands CI runs:** clippy green with and without `crdt`;
+  fmt; diff-check; `--lib` 1,896; `--lib --features crdt` 2,081; doc
+  tests; `m10_2_perf` 6/6 in 79s and `m10_11_perf` 1/1 in 5s under
+  release; and the full serialized sweep with `PMACS_REQUIRE_GPU=1` at
+  **3,715 passed / 0 failed / 30 ignored in 366s**, reconciling exactly
+  to the 3,746 census (3,715 + 30 + 1 basedpyright-skipped). The
+  reconciliation is the point: a sweep that does not reconcile is the
+  a37 vacuum at corpus scale.
+- **What is NOT established, and it is the lane's whole remaining risk:**
+  the sweep is green *serialized on a developer machine*. The failures
+  this lane expects are hosted-runner timing and concurrency — real PTY
+  on CI runners, wgpu under lavapipe, daemon sockets at unfamiliar
+  concurrency. A green local run removes the "tests are wrong"
+  explanation and leaves the expected one untested. **Do not quote it as
+  evidence the CI leg will be green.**
+- **Red-first-run policy, decided:** fix in-lane by default, with one
+  escape hatch keyed on cause class. Lane-configuration failures and
+  locally-reproducing failures are fixed here; an environment-only
+  failure (green locally and on Universum, red only on a hosted runner)
+  becomes a named follow-on rather than an unbounded investigation
+  inside a workflow-config PR. The local green makes that third class
+  the most likely red, which is why the hatch exists.
+- **Universum (7900 XTX, remote) is where the GPU ambiguity settles.**
+  The laptop renders the GPU suites but is thermally constrained, which
+  is the documented condition for a37's "all spaces with nonzero
+  rendered_nonuniform_frames" signature. Universum can establish the
+  tests are sound; it cannot establish that the lavapipe CI job passes.
 
-  The rows sum to 273; the table is the whole census, not its head.
+Recovery from a clean checkout:
 
-- **The single worst line is the library.** `cargo test --lib --features crdt`
-  is a REQUIRED local gate in `CLAUDE.md`, and CI has never run it. 185
-  library tests — the whole CRDT half — are developer-machine-only, and
-  that count grows with every merged branch that adds a `crdt`-gated
-  unit test.
-- **Ten suites run zero or one test in CI**, including `gpu_initial_target`
-  (#148's entire acceptance, 1/14), `gpu_invocation` (#141's, 1/14), and
-  `a37`, the Vterm Stage 3 real-daemon/real-PTY/real-wgpu path that #135
-  built specifically because "a decoded-message fixture would prove none of
-  the three fit together".
-- **⚠ `a37` will report green in the new job without running, unless the
-  job builds `pmacs-gpu` AND sets `PMACS_REQUIRE_GPU=1`.** Measured
-  2026-07-26 while gating #173. `a37_real_daemon_real_pty_and_headless_gpu_
-  render_one_terminal_session` derives its sibling binary path from
-  `CARGO_BIN_EXE_pmacs`, and on a missing binary it `eprintln!`s a skip and
-  **returns `ok`**. A fresh worktree running
-  `cargo test --features crdt --test vterm_stage3_acceptance` reports **9/9
-  in 0.17 s having never run it**; a real run takes ~4 s. Only
-  `PMACS_REQUIRE_GPU=1` promotes that skip to a failure, and `CLAUDE.md`
-  applies that flag to `cargo test -p pmacs-gpu` — a **different package**,
-  so the required local gate does not cover a37 either. The `gpu-render`
-  job already sets the flag, which is what makes fix-shape part 2 sound;
-  state it as a **requirement** of that job rather than inheriting it by
-  luck, because a `crdt` leg added to the plain `test` job would run a37
-  vacuously.
-- **`a37` is also load-sensitive, which changes how to read the expected
-  first-run failures.** It passed at `d152120` and failed at that *same
-  commit* twenty minutes later, with a second agent saturating the machine
-  with `rustc` in between; it then failed identically on `d152120`,
-  `04c5ad1`, and the #173 merge commit, which is how #173 established the
-  failure was not its own. The signature is `last_frame_text` all spaces
-  with `rendered_nonuniform_frames` nonzero — frames arrive, content does
-  not. `pmacs-gpu`'s own suite flaked the same way under the same load
-  (201/202, then 202/202 on immediate rerun). **So a red a37 on the first
-  CI run is ambiguous by construction**: before treating it as a real
-  failure, run the same command on the merge base, and prefer serialized
-  execution for this suite over retry-until-green.
-- **Sort deliberate from accidental before proposing a fix.** Some of the 264
-  are perf suites that are `#[ignore]`d by default and belong to their own
-  jobs (`m10_2_perf` 6, `m10_11_perf` 1). `m10_10_perf` has **no** `#[ignore]`
-  and no CI job naming it, so it looks accidental. This classification is not
-  finished and is the lane's first task.
-- **Fix shape, two parts** (the flag combination is verified to work:
-  `--no-default-features --features luajit,crdt` lists 10 vterm Stage 1 tests
-  versus 9 without):
-  1. a `crdt` leg on the `test` job for the non-GPU suites and the library;
-  2. the GPU-requiring `crdt` suites onto the existing `gpu-render` job, which
-     already has lavapipe and `PMACS_REQUIRE_GPU=1` —
-     `vterm_stage3_acceptance`, `gpu_invocation_acceptance`,
-     `gpu_initial_target_acceptance`, `gpu_font_acceptance`.
-- **Expect first-run failures, and budget for them.** These would execute in
-  CI for the first time ever: real PTY timing on CI runners, wgpu under
-  lavapipe, and daemon-socket tests at unfamiliar concurrency. Start
-  ubuntu-only and decide about macOS from evidence. A red first run is the
-  lane working, not the lane failing.
-- Mitigating fact, verified rather than assumed: #166's three unit pins are
-  **not** `crdt`-gated and do run under CI's exact flags, including the
-  controller-release pin whose only job is catching the plausible wrong fix.
-- **This lane also owns a `--lib --features crdt` flake, observed and
-  scoped without overclaiming its cause** (inherited from #178's gating,
-  where the terminal lane recorded it). `cargo test --lib --features
-  crdt` failed ~1 run in 5 on
+```sh
+git fetch githubsucks
+git worktree add ../pmacs-ci-crdt \
+  -b ci-crdt-coverage \
+  githubsucks/ci-crdt-coverage
+```
+
+### Still owned by this lane, not yet done
+
+- **The `--lib --features crdt` flake.**
   `process::tests::setsid_escapee_is_not_reaped_and_teardown_reclaims_readers`
-  — `active_reader_probe` returning `None` at `process.rs:3179` ("live
-  runtime probe"). **Pre-existing and unrelated to #178:** that branch
-  did not touch `src/process.rs` at all, and the test passed 10/10
-  standalone; the observed
-  failures were during parallel full-suite runs. That localizes the
-  trigger to suite load or interaction, but does **not** distinguish
-  parallelism from another full-suite effect — no serial full-suite bite
-  was run. The leading code-path explanation is the known `drain_until`
-  trap: draining for `Started` also ticks, and a tick can reap the leader
-  before the following `active_reader_probe`. That is an inference from
-  the failure site and control flow, not yet a falsified root cause.
-  Discriminating it belongs here. Two unnamed CRDT failures in #178's
-  round-2 gating are a plausible match but remain **unattributed** — no
-  test names were captured.
-- **A second standing obstacle for this lane:** `cargo clippy --workspace
-  --all-targets --features crdt -- -D warnings` **fails on `main`** —
-  measured at `74301d1`: seven errors before the build aborts, four in
-  `src/daemon.rs` (`useless_conversion` at 3996, missing doc backticks at
-  4076, `too_many_lines` 112/100 at 4083, an unneeded `mut` at 4965) and
-  three in `tests/vterm_stage3_acceptance.rs` (`too_many_lines` at 637
-  and 793, a redundant `continue` at 843). **Treat that as a lower
-  bound, not an inventory:** Clippy abandons the remaining targets once
-  one fails, and a run on an older tree surfaced a further doc-backticks
-  error in `tests/auto_indent_crdt_acceptance.rs:42` that this run never
-  reached. The
-  standing gate list runs Clippy without `crdt`, so these lints have
-  never been enforced. Any CI job that compiles the `crdt` targets has to
-  fix them first or it will be red on arrival.
+  failed ~1 run in 5 with `active_reader_probe` returning `None`. **It
+  did not reproduce in this lane's runs** — `--lib --features crdt` was
+  2,081/2,081 and the full serialized sweep was clean — but a
+  non-reproduction under serial execution is consistent with the
+  leading hypothesis rather than evidence against it: the trigger was
+  observed under *parallel* full-suite load, and every run here was
+  `--test-threads=1`. The `drain_until` explanation (draining for
+  `Started` also ticks, and a tick can reap the leader before the
+  following probe) remains an inference from control flow, not a
+  falsified root cause. Discriminating it is its own PR — it is a
+  product-defect hypothesis and everything else here is workflow
+  configuration.
+- **The two unattributed CRDT failures from #178's round-2 gating.** No
+  test names were captured, so there is nothing to reproduce.
+- **macOS.** Ubuntu-only first, deliberately; a macOS `crdt` leg is a
+  follow-on decided from the first run's evidence.
 
 ## Discovery lane (P4) — STAGE 1 MERGED (#207); STAGE 2 IS NEXT
 

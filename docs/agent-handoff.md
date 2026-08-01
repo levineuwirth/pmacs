@@ -1,6 +1,6 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-29, as bottom-panel Stage 2B-3 — the GPU panel
+**Last updated: 2026-08-01 (CI CRDT coverage lane opened on `ci-crdt-coverage`; development moved to the laptop). Previously 2026-07-29, as bottom-panel Stage 2B-3 — the GPU panel
 band, compatible protocol-v21 activation, and the negotiated
 `panel_capable` flip, completing Arc 7 Stage 2 — opens atop `e003b81`.
 Beneath it, bottom-panel Stage 2B-2 (#187) — the
@@ -94,10 +94,21 @@ anchor, so every item is startable.
 
 #### Open lanes (branch exists, work not finished)
 
-- **CRDT half of the corpus is dark in CI — still no lane, no owner.**
-  CI never enables `crdt`, so those tests are *not compiled*, not merely
-  skipped. **Re-measure before quoting a number**; the ledger's figure
-  moves with every merge.
+- **CRDT half of the corpus is dark in CI — LANE OPENED 2026-08-01**
+  (`ci-crdt-coverage`, `docs/ci-crdt-coverage-framing.md` rev 3;
+  implemented, PR not yet open). CI never enabled `crdt`, so those tests
+  were *not compiled*, not merely skipped — including 186 library tests
+  behind a **required** `CLAUDE.md` gate CI had never run.
+  **Re-measure before quoting a number**, and there is now a tool:
+  `scripts/feature-census luajit luajit,crdt`. Measured 279 dark at
+  `4223dd3`; 275 recovered, 4 excluded with stated reasons. Two
+  corrections it forced are worth carrying: **`m10_10_perf` is a
+  CI-default regression tripwire, not a bench** (its bounds are
+  deliberately generous, so `#[ignore]`ing it to give it a perf job
+  would *reduce* coverage), and **`gpu-render` runs a different
+  package** (`pmacs-gpu`) from the root-package GPU suites, so the
+  long-recorded "move them onto gpu-render" fix-shape does not work as
+  written.
 - **Generated-buffer immutability** — Stage 1 merged (#191); Stage 2
   not started. Four writer mechanisms have still not adopted
   `set_generated_contents`; key the inventory by *writer*, not buffer.
@@ -156,7 +167,17 @@ someone forgot.
   `cargo test --test m4_acceptance -- --skip basedpyright`.
 - **The crdt sweep needs `cargo build --workspace` first**, or twelve
   `gpu_invocation_acceptance` tests fail on a missing `pmacs-gpu`
-  binary.
+  binary. `cargo build --workspace --no-default-features --features
+  luajit,crdt` is the invocation that produces both binaries.
+- **Never hand-roll the dark-test census — use
+  `scripts/feature-census`.** libtest prints `name: test` with **no
+  space before the colon**, so a filter written `/ : test$/` matches
+  nothing and reports a clean zero; a target with zero tests prints its
+  `Running` line and nothing else, so counting only test lines drops it
+  from the diff; and both configurations need an `--ignored` pass, or
+  pre-existing ignores get attributed to the feature. Each of those was
+  hit while writing the script, and the second one survived two
+  revisions of a framing doc.
 - **A green a37 means nothing on its own** — the vterm real-daemon
   acceptance returns `ok` without running unless `pmacs-gpu` is built.
 
