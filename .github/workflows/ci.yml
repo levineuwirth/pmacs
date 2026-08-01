@@ -249,6 +249,98 @@ jobs:
       # off the shared cache).
       - run: cargo test -p pmacs-protocol --all-targets
 
+  # crdt-test: the reason this job exists is that NOTHING in this
+  # workflow ever enabled the `crdt` feature. Every
+  # `#[cfg(feature = "crdt")]` test was therefore NOT COMPILED — not
+  # skipped, not filtered, not reported. Measured at 4223dd3: 3,467
+  # tests under the `test` job's flags versus 3,746 with `crdt`, so 279
+  # tests had never executed in CI. 186 of them are in the library,
+  # whose `cargo test --lib --features crdt` invocation CLAUDE.md lists
+  # as a REQUIRED pre-PR gate — a required gate CI had never run.
+  #
+  # Eight test binaries also contained zero tests under the old flags.
+  # They built, ran, and reported `ok` with nothing in them.
+  #
+  # ONE JOB, NOT TWO, and deliberately so. The obvious split — non-GPU
+  # suites here, GPU-requiring ones onto `gpu-render` — was rejected
+  # because `gpu-render` runs `cargo test -p pmacs-gpu`, a DIFFERENT
+  # PACKAGE from the root-package suites that would move there. Splitting
+  # would also require enumerating which suites are GPU-requiring, and a
+  # suite added later would silently land in whichever job did not need
+  # a GPU and skip there forever. Running the whole corpus in one place
+  # with a working adapter cannot develop that hole.
+  #
+  # ubuntu-only and luajit-only to start, per the standing guidance to
+  # take macOS from evidence rather than assumption; `crdt` is
+  # orthogonal to the Lua flavor, the same reasoning m5/m6-perf-gates
+  # already apply.
+  #
+  # The external-tool block from the `test` job is deliberately NOT
+  # duplicated here. It gates m4_acceptance, m6_5_repl_acceptance and
+  # m6_8_multi_repl_acceptance, and MEASURED: none of those has a single
+  # dark test, so installing clangd/zsh/fish/lua/rust-analyzer/gopls/npm
+  # servers again would cost minutes to change nothing. The only
+  # tool-gated code in the dark set is src/process.rs, whose two
+  # variables need no install on this runner and are set below.
+  #
+  # OBSERVED EXECUTION (local, 2026-08-01): the full serialized sweep —
+  # this job's exact test command plus PMACS_REQUIRE_GPU=1 — ran in 366s
+  # (6.1 min) for 3,715 passed / 0 failed / 30 ignored. The ceiling is
+  # 35 rather than something near that for two reasons: a hosted runner
+  # is slower per-core than the measuring machine and renders the GPU
+  # suites through lavapipe rather than a real adapter, and a cold cache
+  # adds a full debug workspace build. 35 matches the `test` job, which
+  # runs the same corpus without `crdt` and whose own observed max is
+  # 17 min — the closest available comparison, and the reason this
+  # number is not smaller.
+  crdt-test:
+    name: Test (crdt)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Several dark suites drive a real GPU frontend. Without an adapter
+      # they do not fail — a37 and its siblings `eprintln!` a skip and
+      # return `ok`, measured at 9/9 in 0.17s versus ~4s for a real run.
+      # lavapipe plus PMACS_REQUIRE_GPU below is what makes that skip
+      # fatal instead of silent.
+      - name: Install lavapipe (Vulkan software rasterizer)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
+      - name: Confirm a Vulkan adapter is present
+        run: vulkaninfo --summary || true
+      # Lint the crdt targets HERE rather than in the `clippy` job.
+      # Clearing these lints once is not enough: the `clippy` job matrixes
+      # over Lua flavor and never enables `crdt`, so without this step the
+      # crdt targets would drift straight back out of compliance and the
+      # next job to compile them would be red on arrival — which is
+      # exactly the state this lane found and fixed. Keeping it beside
+      # the crdt build and test means one job owns "crdt compiles, lints,
+      # and passes."
+      #
+      # `crdt` is orthogonal to the Lua flavor, so this runs once rather
+      # than matrixed. --keep-going reports every finding in one run
+      # instead of aborting at the first failing target, which is what
+      # made the original inventory of these lints a lower bound rather
+      # than a list.
+      - run: cargo clippy --workspace --all-targets --no-default-features --features luajit,crdt --keep-going -- -D warnings
+      # --workspace, not the root package: a37 and the gpu_* suites
+      # locate the `pmacs-gpu` binary beside `pmacs`, and a root-only
+      # build leaves it absent. This is the documented cause of twelve
+      # gpu_invocation_acceptance failures on a crdt sweep.
+      - run: cargo build --workspace --no-default-features --features luajit,crdt
+      # Serial for the same reason the `test` job is: these suites spawn
+      # real daemons and real PTYs, and this job adds MORE of them.
+      - run: cargo test --all-targets --no-default-features --features luajit,crdt -- --test-threads=1
+        env:
+          PMACS_REQUIRE_GPU: "1"
+          PMACS_REQUIRE_SETSID: "1"
+          PMACS_REQUIRE_BASH: "1"
+      - run: cargo test --doc --no-default-features --features luajit,crdt
+
   acceptance:
     name: M1 Acceptance Gates
     runs-on: ubuntu-latest
