@@ -205,6 +205,47 @@ git worktree add ../pmacs-ci-crdt \
   githubsucks/ci-crdt-coverage
 ```
 
+## Distribution (P8) — STAGE 1 SHIPPED as v1.1.0 (#211)
+
+**Rewritten as a lane rather than removed**: the arc is not done — Stage
+1 was scoped to binaries-on-tag and everything else in §17 is untouched.
+Framing `docs/distribution-stage1-framing.md` revision 3. Durable facts
+are in `docs/agent-handoff.md` §1.
+
+- **Released 2026-08-01.** `v1.1.0-rc.1` (prerelease) then `v1.1.0`,
+  **both cut from the same commit `000b6cd`** — the #211 merge SHA — so
+  the final release was built from byte-identical source to the one whose
+  artifacts were verified.
+- **Verified against the DOWNLOADED artifacts, both tags, not the build
+  logs:** archive member lists (exactly `pmacs`, `pmacs-gpu`, README, two
+  licenses), executable bits, absence of `pmacs-audit` /
+  `pmacs_fake_lsp` / `pmacs_fake_mcp`, `pmacs --version` = `1.1.0` and
+  `pmacs-gpu --version` = `1.1.0 (protocol v21)`, `SHA256SUMS`, the
+  glibc floor, and CRDT presence **against a non-CRDT negative control**
+  (1,576 `loro` strings shipped versus **0** in a control build — the
+  control is what makes the number mean anything).
+- **`pmacs` alone needs only glibc 2.34; `pmacs-gpu` needs 2.35.** The
+  stated floor is the pair's, 2.35, not the more flattering single-binary
+  number. That is why RHEL 9 (2.34) is excluded even though the editor
+  binary would run there.
+
+### Still owned by this lane, not yet done
+
+Each is a stated non-goal of Stage 1 (framing §5), not an oversight.
+**The next increment is a decision about which of these the project
+wants, not a continuation of a plan.**
+
+- **Channels** (stable/nightly), **in-place update**, **rollback**.
+- **Signing and notarization.** macOS binaries are Gatekeeper-quarantined
+  today; the release notes say so.
+- **RHEL 9 and older glibc** — needs a container or cross-build, not a
+  runner change.
+- **Intel macOS**, **Windows**, **reproducible builds**,
+  **package-manager distribution**.
+- **Runtime dependency checking.** §17 asks first launch to identify
+  optional external tools; `/bin/sh`, `stty`, git and tar are documented
+  and never checked. That is §18 onboarding work.
+
 ## Discovery lane (P4) — STAGE 1 MERGED (#207); STAGE 2 IS NEXT
 
 **Rewritten, not removed.** Rule 4 removes a lane when its ARC is done;

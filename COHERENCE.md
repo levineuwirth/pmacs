@@ -95,7 +95,7 @@ remain open to them.
 
 | § | Concern | Grade | One-line state |
 |---|---|---|---|
-| 2 | Golden product journey | **Runs to step 10** | `pmacs .` opens the directory (1a); the interface introduces itself (1b-3); a missing language server says so (1b-2, #204); a build is bound and prefilled (1b-1, #203). Steps 1, 11 and 12 remain the thin end |
+| 2 | Golden product journey | **Runs end to end, thin at 11–12** | **Step 1 now works — v1.1.0 ships binaries (#211)**, so the journey no longer begins with a source build. `pmacs .` opens the directory (1a); the interface introduces itself (1b-3); a missing language server says so (1b-2, #204); a build is bound and prefilled (1b-1, #203). **Steps 11 (background-work ownership, §9) and 12 (session restore) are the remaining thin end** |
 | 3 | Zero-configuration state | **Partial** | Defaults genuinely strong; missing-tool failure is silent, not graceful |
 | 4 | Progressive disclosure | **Inverted** | The advanced level is real; the beginner level is the missing one |
 | 5 | Unified discoverability | **Partial** | Discovery Stage 1: eleven `help.*` commands (describe key/mode/hook/buffer/command/setting, where-is, list commands/keybindings/settings, apropos) over the existing registries, indexed by `M-x help`. Commands, keys, modes, hooks and settings are now reachable, and `*workers*` already was (`M-x editor.list-workers`); **packages have no comparable surface** (§13), and workers still lack owner/purpose/hierarchy and any indicator (§9). `Command` still has no title/category/flags, M-x rows are still bare names, and the Rust help layer is still orphaned |
@@ -110,7 +110,7 @@ remain open to them.
 | 14 | Workbench primitives | **Partial (best trajectory)** | Listview is a real primitive but only 3 call sites, all LSP panels; buffer-list and search re-implement it; bottom panel complete on BOTH frontends (#155 + Stage 2) |
 | 15 | Contextual affordances | **Weak** | Right-click menu only; code actions apply first-blindly; no git integration at all |
 | 16 | Semantic frontend | **Strong** | v6..=v21 schema support; production attach remains v20 during the dark panel slice; degradation practiced |
-| 17 | Distribution | **Missing** | CI is test-only; no binaries, channels, checksums, or update path |
+| 17 | Distribution | **Partial** | **v1.1.0 ships prebuilt Linux/macOS binaries on tag** (#211) with checksums and a stated glibc floor. No channels, in-place update, rollback, signing, or package-manager distribution |
 | 18 | Onboarding | **Partial** | Journey Stage 1b-3: an unconfigured launch greets in `*scratch*` naming `M-x` and four real bindings, and `M-x help` renders a cheat sheet. Still no tutorial and `C-h` still deletes a word — deliberately, see §18 |
 | 19 | Coherence acceptance tests | **Started** | `tests/journey_acceptance.rs` carries 45 pins over steps 2, 3, 4, 5, 6 and 9 — the ratchet is real and stages add rows to it. The other five §19 scenarios (workspace lifecycle, worker ownership, config provenance, package lifecycle, extension isolation) are still unwritten |
 
@@ -389,7 +389,7 @@ Full verdict table:
 
 | # | Step | Verdict | Evidence |
 |---|---|---|---|
-| 1 | Install | **Partial** | Source build only: `cargo build --release --workspace --features pmacs/crdt` (`README.md`). No binaries, no packaging. Runtime deps (`/bin/sh`, git, tar, coreutils) documented, never checked at runtime |
+| 1 | Install | **Works** | **v1.1.0 ships prebuilt Linux x86_64 / macOS arm64 binaries with `SHA256SUMS`** (#211); source build remains. Not yet: package managers, in-place update, signing. Runtime deps (`/bin/sh`, git, tar, coreutils) are documented in the release notes but still never checked at runtime |
 | 2 | Launch unconfigured | **Works** | `EditorState::new()` → empty `*scratch*`; missing config is not an error (`src/config.rs:7-9`); recentf/saveplace/autosave default-on |
 | 3 | Open real project | **Works at the CLI** | Journey Stage 1a: `resolve_target_buffer` answers `ResolvedTarget::Directory` before the EISDIR-producing load, and `EditorState::open` / the daemon bootstrap dispatch the `path.open-directory` chain, whose fallback is dired (#165's buffer, reached rather than duplicated). Startup no longer fails: an unreadable directory, a crashed resolver, and a cleared handler all report on the status line and leave the session running. Because the listing is async and the bootstrap is synchronous, the commit runs against a destination captured at request time (`pmacs.window.commit_to`) rather than against the ambient frontend |
 | 4 | Understand interface | **Partial** | Mode line gives name/modified/L:C/scroll + mode/LSP/terminal segments. Journey Stage 1b-3 adds a welcome in `*scratch*` and `M-x help`; **still Partial** because `C-h` deletes a word (deliberately — §18) and there is no tutorial |
@@ -1487,13 +1487,22 @@ optional external tools, and let the user open a project immediately.
 
 ### Ground truth
 
-**Grade: missing — zero release machinery exists.**
+**Grade: partial — binaries on tag exist; everything after them does
+not.**
 
-`.github/workflows/` contains exactly one workflow, `ci.yml`, and it is
-test-only (fmt/clippy/test matrix; the only `release` strings in it are
-`cargo test --release` flags). No release job, no artifact upload, no
-tags-to-binaries path, no checksums, no channels, no update or rollback
-mechanism. Installation is `git clone` + `cargo build --release
+**Distribution Stage 1 (#211, shipped as v1.1.0) closed the first of the
+seven things this section asks for.** A `v*` tag now builds `pmacs` and
+`pmacs-gpu` on pinned `ubuntu-22.04` and `macos-15`, asserts the tag
+against the crate version and the commit against `main`, verifies the
+archive's exact contents, machine-checks a **glibc ≥ 2.35** floor, and
+publishes a GitHub Release with `SHA256SUMS`.
+
+Still missing: channels, in-place update, rollback, signing and
+notarization, reproducible builds, package-manager distribution,
+Windows, Intel macOS, RHEL 9 (below the glibc floor), and
+protocol/package-API compatibility reporting. See
+`docs/distribution-stage1-framing.md` §5, where each is a stated
+non-goal rather than an omission. Installation is `git clone` + `cargo build --release
 --workspace --features pmacs/crdt` (README), which additionally requires
 knowing the feature-flag matrix (luajit vs lua54 × crdt). Runtime
 dependencies (`/bin/sh`, `stty`, git, tar) are documented in the README
@@ -1681,10 +1690,18 @@ sequencing per §13.
 
 ### Priority 8: Ship binaries and release channels
 
-**State: zero (§17). Independent of everything — can start anytime.**
-The editor becomes testable by users who are not repository
-contributors; every other priority's value is invisible until this one
-exists.
+**State: Stage 1 SHIPPED as v1.1.0 (#211); the rest of §17 is
+untouched.** The editor is now installable by someone who has never
+cloned the repository — **journey step 1 is reachable for the first
+time**, and this priority's stated blocker ("every other priority's
+value is invisible until this one exists") is lifted.
+
+What Stage 1 deliberately did not do is as important as what it did:
+channels, in-place update, rollback, signing, reproducible builds, and
+package-manager distribution are all still absent, and each is a named
+non-goal in `docs/distribution-stage1-framing.md` §5 rather than an
+oversight. The next increment is a decision about which of those the
+project actually wants, not a continuation of a plan.
 
 ### How this maps to arcs
 
@@ -1718,7 +1735,9 @@ implementation — this list is direction, not commitment):
 6. **Workspace entity** (P2): the object, then location values.
 7. **Config provenance + adoption** (P6).
 8. **Package lifecycle** (P7, after 4).
-9. **Distribution** (P8, anytime).
+9. **Distribution** (P8): **Stage 1 landed (#211)** — binaries on tag,
+   checksums, a machine-checked glibc floor. Later stages (channels,
+   update, signing) are unscoped and independent.
 
 A standing process change accompanies all of them (§1.3): **every new
 framing doc must state its coherence impact** — which journey steps it

@@ -1,6 +1,9 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-08-01, as the CI CRDT coverage lane #209 — the
+**Last updated: 2026-08-01, as Distribution Stage 1 #211 — released as
+v1.1.0, the first pmacs release with prebuilt binaries, which makes
+journey step 1 reachable without cloning the repository. Beneath it the
+docs absorption #210 and the CI CRDT coverage lane #209 — the
 first time CI has ever compiled and run the `crdt` half of the test
 corpus, closing a gap that left 279 tests (including a REQUIRED
 `CLAUDE.md` gate) unexecuted for the project's whole life. Development
@@ -65,14 +68,55 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-08-01)
 
-- **`main` @ `c5f7501`.** The CI CRDT coverage lane #209 lands atop the
-  docs absorption #208 and `cfc1710`. Beneath that, nine PRs landed in
+- **`main` @ `000b6cd`, released as v1.1.0.** Distribution Stage 1 #211
+  lands atop the docs absorption #210, the CI CRDT coverage lane #209,
+  the absorption #208 and `cfc1710`. Beneath that, nine PRs landed in
   this order: the ledger absorption #199, the process-signal diagnostic
   #200, the test ambient-root isolation **framing** #201, the
   reap-ledger diagnostic #202, Journey Stage **1b-1** #203, **1b-2**
   #204 and **1b-3** #205, the ambient-root isolation **implementation**
   #206, and discovery Stage 1 #207. Each has its own bullet below; this
   line is the head-of-`main` anchor and nothing else.
+- **pmacs is installable without cloning — Distribution Stage 1, #211,
+  released as v1.1.0.** A `v*` tag builds `pmacs` and `pmacs-gpu` on
+  pinned `ubuntu-22.04` / `macos-15` and publishes a GitHub Release with
+  `SHA256SUMS`. **Journey step 1 works for the first time**, and
+  `COHERENCE.md` §17 moves missing → Partial. Scope was deliberately
+  binaries-only; channels, update, rollback and signing are stated
+  non-goals. Five durable facts:
+  - **A release build can produce FIVE binaries and three must never
+    ship.** Cargo auto-discovers `src/bin/*.rs`, so `pmacs-audit`,
+    `pmacs_fake_lsp` and `pmacs_fake_mcp` appear alongside the two real
+    ones. Exclusion is **two-layered** — explicit `--bin` targets *and*
+    an explicit staged asset list — and layer 2 is not belt-and-braces:
+    building the branch, `target/release` still held all three from an
+    earlier `cargo test --release`, and `Swatinem/rust-cache` restores
+    exactly that in CI. **Archiving `target/release` would have published
+    a fake language server.**
+  - **`env!("CARGO_PKG_VERSION")` expands in the crate being COMPILED.**
+    `InstanceIdentity::for_running_process` lived in `pmacs-protocol` and
+    read it there, so the daemon reported the *protocol* crate's version
+    to every frontend under a field named `pmacs_version`. Three tests
+    asserted the right thing and **could not fail** while both crates
+    read 1.0.0 — diverging them is what made the tests discriminating.
+    *A test can be correct and still prove nothing when the two things it
+    compares are equal for an unrelated reason.*
+  - **Pin release runners, never `-latest`.** `ubuntu-latest` (glibc
+    2.39) silently produces binaries that fail to load on Ubuntu 22.04
+    and Debian 12; `macos-latest` drifts the minimum supported macOS with
+    no commit to point at. And **a pinned runner proves nothing about the
+    artifact** — the glibc floor is asserted by reading versioned symbols
+    out of the binary (`objdump -T | grep GLIBC_`), so a bad runner
+    change fails in CI instead of shipping.
+  - **A tag pushed before its workflow is on the default branch does
+    nothing, silently.** `on: push: tags` resolves the workflow file at
+    the tagged commit, and GitHub registers workflows from the default
+    branch. No run, no error — indistinguishable from "not started yet",
+    which is the worst possible shape for a release step. Confirm a run
+    actually appeared.
+  - **Verify a release from the DOWNLOADED artifact, and use a negative
+    control.** Checking CRDT presence by counting `loro` strings means
+    nothing without building a non-CRDT binary and getting zero.
 - **CI runs the CRDT half of the corpus for the first time — #209.**
   `.github/workflows/ci.yml` had never enabled the `crdt` feature, so
   every `#[cfg(feature = "crdt")]` test was **not compiled** — not
@@ -140,7 +184,7 @@ anchor, so every item is startable.
 | 5 | Workbench convergence | Partial, best trajectory | Bottom panel done both frontends; **Stage 3 = flip the adopter default**. Then the tree primitive — build it *before* dired and the worker tree invent two |
 | 6 | Config productization | Foundation only | Value provenance, then layering, then adoption migration (**table-valued settings are the hard prerequisite** — `ConfigValue` is four scalars) |
 | 7 | Package lifecycle | Not started | Correctly sequenced after P3 |
-| 8 | Distribution | Zero | Independent of everything, startable any time. **Every other priority's value is invisible until this one exists** |
+| 8 | **Distribution** | **Stage 1 SHIPPED (v1.1.0, #211)** | Binaries on tag, checksums, machine-checked glibc floor. **Journey step 1 now works and the "invisible until this exists" blocker is lifted.** Next is a *decision* about channels / update / signing, not a queued plan |
 
 #### Open lanes (branch exists, work not finished)
 
