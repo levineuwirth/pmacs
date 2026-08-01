@@ -380,11 +380,21 @@ pmacs.command.define {
 -- the bounded price of not breaking documented commands, and it carries
 -- a deprecation path a later stage can take.
 
+-- `invoke`, NOT `invoke_interactive`. The forwarder must work however it
+-- was itself reached, and `pmacs.command.invoke('editor.describe-setting')`
+-- is a real caller (`tests/config_registry_acceptance.rs`) — CI caught
+-- that, because the acceptance pin here only drove the M-x path.
+--
+-- Plain `invoke` is also the correct semantics, not merely the working
+-- one: the interactive-command boundary is rotated once, by whatever
+-- entry point the user actually used, for the name the user actually
+-- typed. Rotating again on the inner call would record a second
+-- boundary for a command the user never invoked.
 local function forward(old_name, new_name)
   pmacs.command.define {
     name = old_name,
     description = string.format("Deprecated alias for `%s`.", new_name),
-    fn = function() pmacs.command.invoke_interactive(new_name) end,
+    fn = function() pmacs.command.invoke(new_name) end,
   }
 end
 

@@ -434,6 +434,29 @@ fn d8_preservation_the_old_names_forward() {
     );
 }
 
+/// **P (acceptance 8, cont.)** — the forwarders also work when invoked
+/// **programmatically**, not only from M-x.
+///
+/// This pin exists because its absence shipped a bug: the forwarder body
+/// used `invoke_interactive`, which raises when the alias is reached
+/// through `pmacs.command.invoke` — a real caller in
+/// `config_registry_acceptance`. The M-x pin above passed throughout,
+/// because M-x is not the only way in.
+#[test]
+fn d8c_preservation_the_forwarders_work_programmatically() {
+    let s = editor();
+    for old in ["editor.describe-command", "editor.describe-setting"] {
+        let ok: bool = eval(
+            &s,
+            &format!("return pcall(pmacs.command.invoke, {old:?}) and true or false"),
+        );
+        assert!(
+            ok,
+            "{old} must be invocable programmatically, not only from the palette"
+        );
+    }
+}
+
 /// **P (acceptance 8, cont.)** — the untouched list commands still work.
 #[test]
 fn d8b_preservation_list_buffers_and_workers_are_untouched() {
