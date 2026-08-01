@@ -98,7 +98,7 @@ remain open to them.
 | 2 | Golden product journey | **Runs to step 10** | `pmacs .` opens the directory (1a); the interface introduces itself (1b-3); a missing language server says so (1b-2, #204); a build is bound and prefilled (1b-1, #203). Steps 1, 11 and 12 remain the thin end |
 | 3 | Zero-configuration state | **Partial** | Defaults genuinely strong; missing-tool failure is silent, not graceful |
 | 4 | Progressive disclosure | **Inverted** | The advanced level is real; the beginner level is the missing one |
-| 5 | Unified discoverability | **Partial** | Discovery Stage 1: eleven `help.*` commands (describe key/mode/hook/buffer/command/setting, where-is, list commands/keybindings/settings, apropos) over the existing registries, indexed by `M-x help`. Commands, keys, modes, hooks and settings are now reachable; **packages and workers are not** (§13, §9), `Command` still has no title/category/flags, M-x rows are still bare names, and the Rust help layer is still orphaned |
+| 5 | Unified discoverability | **Partial** | Discovery Stage 1: eleven `help.*` commands (describe key/mode/hook/buffer/command/setting, where-is, list commands/keybindings/settings, apropos) over the existing registries, indexed by `M-x help`. Commands, keys, modes, hooks and settings are now reachable, and `*workers*` already was (`M-x editor.list-workers`); **packages have no comparable surface** (§13), and workers still lack owner/purpose/hierarchy and any indicator (§9). `Command` still has no title/category/flags, M-x rows are still bare names, and the Rust help layer is still orphaned |
 | 6 | Interaction islands | **Weak, and growing** | Six hardcoded key-interception shadows; no transient-keymap mechanism exists |
 | 7 | First-class workspaces | **Missing (conventions only)** | Marker walk + four independent consumers; no workspace object |
 | 8 | Execution locations | **Missing (architecture ready)** | SSH attach works; "location" is not a value anywhere |
@@ -524,8 +524,11 @@ orchestrate workers, replace interaction models):
 - inspect ✓ (SourceLocation on everything; no jump-to-source command
   though) · redefine live ✓ (`unregister` + `define`) · packages ✓
   (authoring is real, §13) · new views ✓ (listview is Lua-usable) ·
-  providers ✓ (statusline; completion/minibuffer sources are a fixed
-  Rust vocabulary) · keymap layers ✗ (§6 — the mechanism does not
+  providers ✓ (statusline; and minibuffer completion is **not** a fixed
+  Rust vocabulary — `parse_completion_source` accepts a Lua function as
+  `CompletionSource::Custom`, which is how Discovery Stage 1 gave
+  `help.describe-setting` completion with no Rust at all) · keymap
+  layers ✗ (§6 — the mechanism does not
   exist) · workspace policy ✗ · orchestrate workers △
   (`pmacs.workers.register` funnels into builtin dispatchers, §9) ·
   replace interaction models ✗ (the shadows, §6).
@@ -572,7 +575,9 @@ Lua function through `CompletionSource::Custom`.
 is still never evaluated; M-x rows are still bare name strings; the Rust
 help layer is still orphaned (Stage 1 funnels every command through one
 Lua seam so the eventual migration is enumerated per subject rather than
-per call site); packages and workers have no discovery surface; settings
+per call site); **packages** have no discovery surface, and workers,
+though `M-x editor.list-workers` opens `*workers*`, still lack the
+ownership model and the activity indicator §9 asks for; settings
 value provenance is still absent; and there is still no help prefix key.
 
 *The original audit grade, for reference:* **substrate without surface —
@@ -634,10 +639,12 @@ the sharpest instance of §1.1.**
   with `editor.describe-command` / `editor.describe-setting` retained as
   forwarders. `help.describe-setting` **now completes**, through a Lua
   function passed as `CompletionSource::Custom`.
-  **What remains missing here:** a discovery surface for **packages and
-  workers** (§13, §9), and **no key reaches any of it** — the family is
-  `M-x`-only by design until the help-prefix decision is taken (see the
-  prefix bullet below).
+  **What remains missing here:** a discovery surface for **packages**
+  (§13) — `*workers*` already has one, reachable by
+  `M-x editor.list-workers`, though §9's ownership model and activity
+  indicator are still absent — and **no key reaches any of this**: the
+  family is `M-x`-only by design until the help-prefix decision is taken
+  (see the prefix bullet below).
   *Completion is assistance, not validation:* `resolve_accepted_value`
   returns the literal typed text when no candidate is selected, so a
   typo still reaches the handler; refusing a non-candidate is unbuilt
