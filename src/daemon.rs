@@ -4461,8 +4461,7 @@ mod tests {
                     .expect("export snapshot")
             };
             let peer = loro::LoroDoc::new();
-            peer.set_peer_id(u64::from(FrontendId::LOCAL.0))
-                .expect("set peer id");
+            peer.set_peer_id(FrontendId::LOCAL.0).expect("set peer id");
             peer.import(&snapshot_bytes).expect("import snapshot");
             let v_before = peer.oplog_vv();
             peer.get_text("body").insert(0, "x").expect("peer insert");
@@ -4541,13 +4540,17 @@ mod tests {
     }
 
     /// Kill ring Q#KR2 — GPU typing arrives here without touching
-    /// dispatch_key, so it must update the source frontend's command
+    /// `dispatch_key`, so it must update the source frontend's command
     /// boundary or `C-k x C-k` on the GPU would append across the typed
     /// character. A single-codepoint insert classifies as
     /// `buffer.self-insert` (the input-origin signal for signature
     /// help); anything else breaks the chain outright.
     #[cfg(feature = "crdt")]
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one end-to-end classification scenario per kill-chain case"
+    )]
     fn handle_remote_crdt_op_classifies_typed_input_and_ends_kill_chains() {
         use crate::editor::EditorState;
         use crate::protocol::FrontendId;
