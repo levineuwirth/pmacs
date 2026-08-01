@@ -30,7 +30,7 @@ fn live_threads() -> usize {
 fn editor_state_drop_releases_workers_and_shutdown_is_idempotent() {
     let baseline = live_threads();
     for _ in 0..3 {
-        let s = EditorState::new();
+        let s = EditorState::new_with_roots(&crate::iso::roots());
         drop(s);
     }
     // Signal-only shutdown: parked workers exit within their 100ms
@@ -45,7 +45,7 @@ fn editor_state_drop_releases_workers_and_shutdown_is_idempotent() {
 
     // Idempotence: explicit shutdown twice, then drop runs it a
     // third time --- none may hang or panic.
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     s.async_runtime.shutdown_workers();
     s.async_runtime.shutdown_workers();
     drop(s);
@@ -55,8 +55,15 @@ fn editor_state_drop_releases_workers_and_shutdown_is_idempotent() {
 #[cfg(not(target_os = "linux"))]
 #[test]
 fn explicit_shutdown_is_idempotent() {
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     s.async_runtime.shutdown_workers();
     s.async_runtime.shutdown_workers(); // second call must not hang or panic
     drop(s); // drop runs shutdown a third time
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

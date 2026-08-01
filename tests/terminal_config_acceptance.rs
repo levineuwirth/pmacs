@@ -187,7 +187,7 @@ fn escape_was_armed(state: &mut EditorState, buffer: pmacs::buffer::BufferId, pr
 /// Acceptance 1: a profile spec is strict, and rejects before anything spawns.
 #[test]
 fn acc1_profile_specs_are_strict_and_reject_before_spawning() {
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     let before = state.core.borrow().registry.borrow().ids().len();
 
     exec(
@@ -218,7 +218,7 @@ fn acc1_profile_specs_are_strict_and_reject_before_spawning() {
 /// Acceptance 2: an unknown profile names the known ones and creates nothing.
 #[test]
 fn acc2_unknown_profile_lists_known_names_and_creates_nothing() {
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     exec(&state, CAT_PROFILE);
     exec(
         &state,
@@ -262,7 +262,7 @@ fn acc2_unknown_profile_lists_known_names_and_creates_nothing() {
 /// unknown-profile path, replacing the exact error being asked for.
 #[test]
 fn acc2_malformed_profile_keys_do_not_mask_the_unknown_profile_error() {
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     exec(&state, CAT_PROFILE);
     exec(
         &state,
@@ -297,7 +297,7 @@ fn acc2_malformed_profile_keys_do_not_mask_the_unknown_profile_error() {
 /// `env` MERGES rather than replacing.
 #[test]
 fn acc3_field_resolution_order_and_env_merge() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     exec(
         &state,
         r#"
@@ -323,7 +323,7 @@ fn acc3_field_resolution_order_and_env_merge() {
 /// Acceptance 3 (explicit command wins) and 4 (`""` means no profile).
 #[test]
 fn acc3_acc4_explicit_command_wins_and_empty_default_means_no_profile() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     exec(&state, CAT_PROFILE);
     exec(
         &state,
@@ -373,7 +373,7 @@ pmacs.terminal.profiles.fill = {
 /// fallback) deleted outright.
 #[test]
 fn acc5_scrollback_setting_reaches_retained_history() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     exec(&state, FILL_PROFILE);
 
     // Arm 1: `0` is legal, and means the early rows are GONE.
@@ -423,7 +423,7 @@ fn acc5_scrollback_setting_reaches_retained_history() {
 /// values, and `0` is inside it rather than a disabled sentinel.
 #[test]
 fn acc5_scrollback_bounds() {
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     exec(&state, r#"pmacs.config.set("terminal.scrollback-rows", 0)"#);
     assert_eq!(
         state
@@ -458,7 +458,7 @@ fn acc5_scrollback_bounds() {
 /// THAT chord to the child, and an ordinary `C-c` still reaches the child.
 #[test]
 fn acc6_acc9_configured_escape_chord_and_literal_repeat() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     exec(&state, CAT_PROFILE);
     let buffer = open_cat_terminal(&state, r#"profile = "echo""#);
     assert!(tick_until(&mut state, "READY", buffer));
@@ -499,7 +499,7 @@ fn acc6_acc9_configured_escape_chord_and_literal_repeat() {
 /// count that does not grow, and a cache that dies with its terminal.
 #[test]
 fn acc7_acc8_acc8a_per_terminal_escape_cache_identity_and_lifecycle() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     exec(&state, CAT_PROFILE);
     let a = open_cat_terminal(&state, r#"profile = "echo""#);
     exec(&state, "TERM_A = TERM_BUF");
@@ -633,7 +633,7 @@ fn acc7_acc8_acc8a_per_terminal_escape_cache_identity_and_lifecycle() {
 /// the status line, and reports once per terminal per effective bad value.
 #[test]
 fn acc10_acc10a_invalid_escape_falls_back_and_reports_once() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     exec(&state, CAT_PROFILE);
     let buffer = open_cat_terminal(&state, r#"profile = "echo""#);
     assert!(tick_until(&mut state, "READY", buffer));
@@ -699,7 +699,7 @@ fn acc10_acc10a_invalid_escape_falls_back_and_reports_once() {
 /// proves the second half).
 #[test]
 fn acc11_terminal_opening_binding_is_bound_and_shadowed_nothing() {
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     let command: Option<String> = state
         .lua_host
         .lua()
@@ -717,7 +717,7 @@ fn acc11_terminal_opening_binding_is_bound_and_shadowed_nothing() {
 /// defaults reproduce the pre-arc behavior.
 #[test]
 fn acc12_defaults_reproduce_prior_behavior() {
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     let lua = state.lua_host.lua();
     assert_eq!(
         lua.load(r#"return pmacs.config.get("terminal.default-profile")"#)
@@ -744,3 +744,10 @@ fn acc12_defaults_reproduce_prior_behavior() {
         "no profiles are registered by default"
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

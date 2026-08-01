@@ -82,7 +82,7 @@ fn errors_buffer(s: &EditorState) -> String {
 /// Fresh editor with LSP spawning disabled (language detection still
 /// works; the after-load hook must not exec real servers).
 fn editor() -> EditorState {
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     exec(&s, "pmacs.lsp.config = {}");
     s
 }
@@ -2853,3 +2853,10 @@ fn j1b1_context_reports_the_cwd_a_run_would_use() {
     );
     assert_eq!(kind, "rust", "the kind is detected from the given cwd");
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

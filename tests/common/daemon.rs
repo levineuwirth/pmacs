@@ -159,9 +159,31 @@ pub fn spawn_daemon_process_with_env(socket_path: &Path, env_vars: &[(&str, &str
     cmd.args(["--daemon", "--socket"])
         .arg(socket_path)
         .env("HOME", isolated_home)
-        .env("XDG_CONFIG_HOME", isolated_home)
         .stdout(Stdio::null())
         .stderr(Stdio::from(stderr));
+    // All FIVE storage variables, not just `XDG_CONFIG_HOME`
+    // (`docs/test-ambient-config-isolation-framing.md` §1.6a).
+    //
+    // `HOME` above is only a *fallback*: it isolates a root only while
+    // the corresponding `XDG_*` variable is unset. On a developer
+    // machine that exports `XDG_DATA_HOME`, a daemon given `HOME` alone
+    // still materializes bundled packages into the real data root — so
+    // the harness's apparent adequacy was a property of one machine's
+    // environment, not of the harness. And `PMACS_STATE_HOME` outranks
+    // `XDG_STATE_HOME`, so the four XDG variables alone leave a
+    // higher-precedence state override live.
+    //
+    // Flat layout (every root at the socket's tempdir) so
+    // `spawn_with_config`'s `<tempdir>/pmacs/init.lua` keeps loading
+    // through the real `load_user_config` path.
+    let roots = pmacs::bootstrap::BootstrapRoots::ambient()
+        .with_config_root(isolated_home.to_path_buf())
+        .with_data_root(isolated_home.to_path_buf())
+        .with_state_root(isolated_home.to_path_buf())
+        .with_cache_root(isolated_home.to_path_buf());
+    for (key, value) in roots.child_env() {
+        cmd.env(key, value);
+    }
     for (key, value) in env_vars {
         cmd.env(key, value);
     }

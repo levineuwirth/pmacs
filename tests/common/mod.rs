@@ -14,8 +14,14 @@
 //! - [`daemon`]: `pmacs --daemon` subprocess fixture. First
 //!   consumer M5.5 acceptance suite; second consumer M10.11
 //!   doubled-PTY tests.
+//! - [`iso`]: isolated bootstrap storage roots, so an in-process
+//!   editor neither reads the developer's real `init.lua` nor writes
+//!   into their real data root. Most suites include it directly via
+//!   `#[path = "common/iso.rs"] mod iso;` rather than through this
+//!   module; it is re-exported here for `daemon`'s use.
 
 #![allow(dead_code)] // not every integration-test file uses every helper
 
 pub mod daemon;
+pub mod iso;
 pub mod pty;

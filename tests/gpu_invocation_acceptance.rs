@@ -38,6 +38,11 @@ fn non_crdt_root_rejects_gpu_before_socket_io_discovery_or_spawn() {
         .arg("--gpu")
         .env(TEST_GPU_OVERRIDE, &fake_gpu)
         .env("PMACS_TEST_MARKER", &marker)
+        .env("XDG_CONFIG_HOME", temp.path())
+        .env("XDG_DATA_HOME", temp.path())
+        .env("XDG_STATE_HOME", temp.path())
+        .env("PMACS_STATE_HOME", temp.path())
+        .env("XDG_CACHE_HOME", temp.path())
         .env("XDG_RUNTIME_DIR", &runtime)
         .output()
         .expect("run non-CRDT pmacs --gpu");
@@ -61,6 +66,11 @@ fn non_crdt_root_rejects_gpu_before_socket_io_discovery_or_spawn() {
         .arg(&occupied_socket)
         .env(TEST_GPU_OVERRIDE, &fake_gpu)
         .env("PMACS_TEST_MARKER", &marker)
+        .env("XDG_CONFIG_HOME", temp.path())
+        .env("XDG_DATA_HOME", temp.path())
+        .env("XDG_STATE_HOME", temp.path())
+        .env("PMACS_STATE_HOME", temp.path())
+        .env("XDG_CACHE_HOME", temp.path())
         .output()
         .expect("run non-CRDT pmacs --gpu against occupied socket");
     assert!(!occupied.status.success());

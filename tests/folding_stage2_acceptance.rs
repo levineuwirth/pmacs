@@ -61,7 +61,7 @@ fn end_of(line: usize) -> u64 {
 }
 
 fn editor() -> EditorState {
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     exec(&s, "pmacs.lsp.config = {}");
     s
 }
@@ -1772,3 +1772,10 @@ fn wheel_over_an_inactive_unfolded_pane_uses_that_windows_map() {
         "the folded pane did not scroll"
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

@@ -273,6 +273,14 @@ pub struct EditorState {
     /// steal or clear another's in-flight gesture, and concurrent drags
     /// are perfectly legal.
     window_drag: HashMap<FrontendId, WindowDragState>,
+    /// The bootstrap storage roots this session was constructed
+    /// against (`docs/test-ambient-config-isolation-framing.md`).
+    ///
+    /// [`BootstrapRoots::ambient`] in production. Retained past
+    /// construction because [`Self::install_state_dirs`] resolves a root
+    /// too and runs *after* the constructor --- resolving it from the
+    /// environment there would reopen the hole the constructor closed.
+    bootstrap_roots: crate::bootstrap::BootstrapRoots,
 }
 
 #[derive(Default)]
@@ -345,6 +353,24 @@ impl EditorState {
     /// Panics only if Lua initialization or the builtin command/keymap
     /// chunks fail to load --- both indicate broken builds.
     #[must_use]
+    pub fn new() -> Self {
+        Self::new_with_roots(&crate::bootstrap::BootstrapRoots::ambient())
+    }
+
+    /// Construct a fresh editor against explicit bootstrap storage
+    /// roots (`docs/test-ambient-config-isolation-framing.md` §1.4).
+    ///
+    /// [`Self::new`] is this with [`BootstrapRoots::ambient`], so
+    /// production behaviour is unchanged. An integration test passes
+    /// redirected roots instead: it links this crate without
+    /// `cfg(test)`, so the guard below is live for it, and without a
+    /// parameter it would read the developer's real `init.lua` and
+    /// write bundled packages into the developer's real data root.
+    /// `std::env::set_var` is not an alternative --- it is `unsafe` and
+    /// this crate is `#![forbid(unsafe_code)]`.
+    ///
+    /// [`BootstrapRoots::ambient`]: crate::bootstrap::BootstrapRoots::ambient
+    #[must_use]
     #[allow(
         clippy::too_many_lines,
         reason = "linear bootstrap sequence: registry → core → LuaHost → \
@@ -352,7 +378,7 @@ impl EditorState {
                   Splitting into helpers fragments the wiring without removing \
                   any single decision the reader needs to follow."
     )]
-    pub fn new() -> Self {
+    pub fn new_with_roots(roots: &crate::bootstrap::BootstrapRoots) -> Self {
         // Build the buffer registry first so EditorCore and LuaHost
         // share the same `Rc`. Both reach buffers through this handle;
         // multi-window dispatch (T M2.8) requires that ids resolve to
@@ -748,9 +774,34 @@ impl EditorState {
         // Depends on `pmacs.buffer.add_intercept` (T M6.4 Stage 1)
         // and `pmacs.ansi.parser()` (T M6.4 Stage 2), both available
         // by the time `attach_editor` returns above.
-        let bundled_root = crate::builtin_packages::bundled_runtime_dir();
+        //
+        // `materialize_all` CREATES DIRECTORIES AND WRITES FILES, and
+        // it is outside every `cfg` guard — so this, not config
+        // loading, is the write half of the ambient-roots exposure
+        // (`docs/test-ambient-config-isolation-framing.md` §1.6). The
+        // redirected root is consulted first for exactly that reason.
+        let bundled_root = roots
+            .bundled_runtime_dir()
+            .unwrap_or_else(crate::builtin_packages::bundled_runtime_dir);
         let bundled_packages = crate::builtin_packages::materialize_all(&bundled_root)
             .expect("materialize bundled packages");
+        // Redirected roots also redirect where `pmacs.packages.install`
+        // would later fetch and install, so a caller that isolated its
+        // storage cannot reach the real `$XDG_CACHE_HOME/pmacs/git` or
+        // `$XDG_DATA_HOME/pmacs/packages` through Lua either. Installed
+        // before user config runs, so an `init.lua` that installs a
+        // package lands inside the isolated tree. Production leaves the
+        // slot empty (ambient roots take this branch not at all).
+        if !roots.is_ambient() {
+            let mut override_ = crate::lua_bindings::PackageInstallOverride::new();
+            if let Some(cache) = roots.package_cache_dir() {
+                override_ = override_.with_cache_dir(cache);
+            }
+            if let Some(install) = roots.package_install_root() {
+                override_ = override_.with_user_install_root(install);
+            }
+            lua_host.set_package_install_override(override_);
+        }
         {
             let slot = lua_host
                 .lua()
@@ -782,17 +833,43 @@ impl EditorState {
         // to exercise config loading do so explicitly via
         // [`crate::config::load_user_config_at`].
         //
+        // **`cfg(test)` covers the lib's unit tests and NOTHING ELSE.**
+        // An integration test in `tests/` links this crate as an
+        // ordinary dependency, compiled without `cfg(test)`, so this
+        // block is fully live for all ~96 of them: `cargo test --lib` is
+        // protected, `cargo test --test <name>` is not. That is what the
+        // `roots` parameter is for — an integration test redirects the
+        // config root instead of relying on a guard that does not reach
+        // it. (Nor is this the only ambient root: the bundled-package
+        // materialization above runs unconditionally and WRITES.) See
+        // `docs/test-ambient-config-isolation-framing.md` §1.2, §1.6.
+        //
+        // The guard is deliberately NOT widened to cover integration
+        // tests: production deciding it is under test is how a suite
+        // passes against behaviour production never runs (Q#TI1).
+        //
         // The init-complete flip happens here too so lifecycle-gated
         // Lua APIs (e.g. `pmacs.attach`, M5.6d+) become inert after
         // user config returns. Tests that need post-init semantics flip
         // the flag explicitly via [`crate::lua::LuaHost::set_init_complete`];
         // see the option-(A) discussion in the M5.6c survey.
+        //
+        // Redirected roots change *which directory* is read, never
+        // *whether* the block runs: `tests/m8_2_acceptance.rs:75`
+        // documents its dependence on integration-test construction
+        // finishing init-complete, so skipping the block for isolated
+        // construction would leave every such test permanently in the
+        // init phase (framing §1.8).
         #[cfg(not(test))]
         {
-            crate::config::load_user_config(&mut lua_host);
+            match roots.config_dir() {
+                Some(dir) => crate::config::load_user_config_at(&mut lua_host, &dir),
+                None => crate::config::load_user_config(&mut lua_host),
+            }
             lua_host.set_init_complete();
         }
         Self {
+            bootstrap_roots: roots.clone(),
             core,
             lua_host,
             dispatchers: HashMap::new(),
@@ -889,10 +966,24 @@ impl EditorState {
     /// `~/.local/state/pmacs`. Honors the `PMACS_STATE_HOME` override
     /// (see [`crate::state::user_state_dir`]).
     pub fn install_state_dirs(&self) {
-        if let Some(dir) = crate::minibuffer::user_history_dir() {
+        // Redirected roots win over the environment here too. This runs
+        // after construction, so resolving from the environment would
+        // hand an isolated session the developer's real state dir --- and
+        // `PMACS_STATE_HOME` outranks `XDG_STATE_HOME`, so an
+        // environment-side fix would have to cover five variables, not
+        // four (framing §1.6a).
+        let history = self
+            .bootstrap_roots
+            .history_dir()
+            .or_else(crate::minibuffer::user_history_dir);
+        if let Some(dir) = history {
             self.core.borrow_mut().minibuffer.history_dir = Some(dir);
         }
-        if let Some(dir) = crate::state::user_state_dir() {
+        let state = self
+            .bootstrap_roots
+            .state_dir()
+            .or_else(crate::state::user_state_dir);
+        if let Some(dir) = state {
             self.lua_host
                 .lua()
                 .set_app_data(crate::lua_bindings::StateDir(dir));
@@ -1039,7 +1130,27 @@ impl EditorState {
                   behavioral gain"
     )]
     pub fn open(path: PathBuf) -> io::Result<Self> {
-        let mut state = Self::new();
+        Self::open_with_roots(path, &crate::bootstrap::BootstrapRoots::ambient())
+    }
+
+    /// [`Self::open`] against explicit bootstrap storage roots.
+    ///
+    /// `open` calls `Self::new()` internally, so a roots parameter on
+    /// the constructor alone leaves every open-path test ambient
+    /// (`docs/test-ambient-config-isolation-framing.md` §1.7). The two
+    /// entry points therefore gain the parameter together, and `open`
+    /// stays a thin ambient caller of this — the golden-journey ratchet
+    /// requires that exact public entry point to have a production
+    /// caller shape.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "mirrors `open`'s stable signature; see the note there"
+    )]
+    pub fn open_with_roots(
+        path: PathBuf,
+        roots: &crate::bootstrap::BootstrapRoots,
+    ) -> io::Result<Self> {
+        let mut state = Self::new_with_roots(roots);
         let resolved = state
             .core
             .borrow_mut()

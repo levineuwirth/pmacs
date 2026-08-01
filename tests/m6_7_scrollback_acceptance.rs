@@ -31,7 +31,7 @@ use pmacs::editor::EditorState;
 // ---------------------------------------------------------------------------
 
 fn run(chunk: &str) {
-    let mut editor = EditorState::new();
+    let mut editor = EditorState::new_with_roots(&crate::iso::roots());
     editor
         .lua_host
         .eval(Some("@m6_7_test"), chunk)
@@ -341,3 +341,10 @@ fn m6_7_50_truncation_events_preserve_block_boundaries() {
         pmacs.repl.config.scrollback_bytes = 16 * 1024 * 1024
     "#);
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

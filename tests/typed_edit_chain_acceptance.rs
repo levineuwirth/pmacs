@@ -78,7 +78,7 @@ fn status(s: &EditorState) -> String {
 /// Fresh scratch-buffer editor, cursor at 0. Scratch pairing uses the
 /// `default` set, so `(` pairs — which is what 46c reads.
 fn editor_with(body: &str) -> EditorState {
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     if !body.is_empty() {
         exec(&s, &format!("pmacs.window.buffer():insert(0, {body:?})"));
     }
@@ -656,7 +656,7 @@ fn a_chain_consumers_edit_reaches_the_first_did_change() {
     let sink_disp = sink.display().to_string();
     let fake = fake_lsp_path();
 
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     s.lua_host.lua().remove_app_data::<StateDir>();
     s.lua_host.lua().set_app_data(StateDir(dir.clone()));
     exec(&s, "pmacs.lsp.config = {}");
@@ -733,3 +733,10 @@ fn a_chain_consumers_edit_reaches_the_first_did_change() {
          before lsp.lua's synchronous flush (Q#AP7)"
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

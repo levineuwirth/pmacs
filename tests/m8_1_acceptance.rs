@@ -36,7 +36,7 @@ fn pump_until<F: Fn(&EditorState) -> bool>(state: &mut EditorState, predicate: F
 /// Spin up a fresh editor with no file open. The caller drives the
 /// fs API entirely from Lua chunks via `lua_host.eval`.
 fn fresh_editor() -> EditorState {
-    EditorState::new()
+    EditorState::new_with_roots(&crate::iso::roots())
 }
 
 /// Run a Lua chunk to completion (no `:await`); returns the chunk's
@@ -609,3 +609,10 @@ fn fs_watch_reports_file_change_and_can_cancel() {
         .expect("cancelled");
     assert!(cancelled, "watch handle must report cancellation");
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

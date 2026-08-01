@@ -85,7 +85,7 @@ fn start_query_replace(s: &mut EditorState, from: &str, to: &str, regex: bool) {
 
 #[test]
 fn replace_skip_and_quit_is_selective() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     type_str(&mut s, "x x x x");
     // Cursor to buffer start so all four are ahead of point.
     goto_start(&s);
@@ -107,7 +107,7 @@ fn replace_skip_and_quit_is_selective() {
 
 #[test]
 fn bang_replaces_all_remaining() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     type_str(&mut s, "a a a a");
     goto_start(&s);
     start_query_replace(&mut s, "a", "b", false);
@@ -119,7 +119,7 @@ fn bang_replaces_all_remaining() {
 
 #[test]
 fn dot_replaces_current_then_quits() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     type_str(&mut s, "a a a");
     goto_start(&s);
     start_query_replace(&mut s, "a", "z", false);
@@ -133,7 +133,7 @@ fn dot_replaces_current_then_quits() {
 fn growing_replacement_does_not_loop() {
     // a → aa must not re-match the inserted text (offset-shift + the
     // search-forward-past-replacement rule).
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     type_str(&mut s, "a a a");
     goto_start(&s);
     start_query_replace(&mut s, "a", "aa", false);
@@ -144,7 +144,7 @@ fn growing_replacement_does_not_loop() {
 
 #[test]
 fn empty_to_deletes() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     type_str(&mut s, "a-b-c");
     goto_start(&s);
     start_query_replace(&mut s, "-", "", false);
@@ -155,7 +155,7 @@ fn empty_to_deletes() {
 
 #[test]
 fn regex_query_replace_via_binding() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     type_str(&mut s, "a1 b2 c3");
     goto_start(&s);
     start_query_replace(&mut s, "[0-9]", "#", true);
@@ -167,7 +167,7 @@ fn regex_query_replace_via_binding() {
 #[test]
 fn m_percent_binding_starts_query_replace() {
     // The literal chord: M-% (Alt + Shift+5 → Char('%') with ALT).
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     type_str(&mut s, "cat cat");
     goto_start(&s);
     s.dispatch_key(
@@ -196,7 +196,7 @@ fn m_percent_binding_starts_query_replace() {
 fn c_m_percent_binding_starts_regexp_query_replace() {
     // Control-meta-shifted punctuation — the chord most likely to parse
     // differently across key paths (the C-c H lesson).
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     type_str(&mut s, "x1 x2");
     goto_start(&s);
     s.dispatch_key(
@@ -224,7 +224,7 @@ fn c_m_percent_binding_starts_regexp_query_replace() {
 
 #[test]
 fn nothing_matched_leaves_buffer_untouched() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     type_str(&mut s, "hello");
     start_query_replace(&mut s, "zzz", "q", false);
     let (text, active) = probe(&s);
@@ -236,7 +236,7 @@ fn nothing_matched_leaves_buffer_untouched() {
 fn query_replace_flips_dispatch_idle_so_gpu_round_trips() {
     // While the interactive phase runs, dispatch_idle must be false so a
     // semantic frontend round-trips y/n/etc. instead of self-inserting.
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     type_str(&mut s, "a a");
     goto_start(&s);
     start_query_replace(&mut s, "a", "b", false);
@@ -251,7 +251,7 @@ fn query_replace_flips_dispatch_idle_so_gpu_round_trips() {
 #[test]
 fn replace_fires_after_edit_hook() {
     // The Q#QR1 hook: an LSP/syntax observer must see replaced text.
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     s.lua_host
         .lua()
         .load(
@@ -289,7 +289,7 @@ fn bang_fires_after_edit_hook_once_for_the_batch() {
     // Q#QR1: `!` applies many replacements under one keypress, but the
     // debounced didChange wants a single after-edit — the shadow
     // compares revision once across the whole handler.
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     s.lua_host
         .lua()
         .load(
@@ -322,7 +322,7 @@ fn bang_fires_after_edit_hook_once_for_the_batch() {
 fn quit_via_ret_and_esc_keeps_replacements() {
     // Q#QR10: RET and Esc both quit (keeping replacements), not just q.
     for quit in [KeyCode::Enter, KeyCode::Esc] {
-        let mut s = EditorState::new();
+        let mut s = EditorState::new_with_roots(&crate::iso::roots());
         type_str(&mut s, "a a a");
         goto_start(&s);
         start_query_replace(&mut s, "a", "b", false);
@@ -337,7 +337,7 @@ fn quit_via_ret_and_esc_keeps_replacements() {
 #[test]
 fn ctrl_g_quits_keeping_replacements() {
     // Q#QR10: C-g exits and KEEPS replacements (unlike isearch's C-g).
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     type_str(&mut s, "a a a");
     goto_start(&s);
     start_query_replace(&mut s, "a", "b", false);
@@ -353,7 +353,7 @@ fn ctrl_g_quits_keeping_replacements() {
 
 #[test]
 fn del_key_skips_like_n() {
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     type_str(&mut s, "a a a");
     goto_start(&s);
     start_query_replace(&mut s, "a", "b", false);
@@ -373,7 +373,7 @@ fn focus_drift_mid_session_aborts_without_touching_either_buffer() {
     // (simulated by switch_buffer, which the pointer path also uses)
     // while query-replace is active. The next y must abort, not apply
     // the origin-buffer match to the now-active unrelated buffer.
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     type_str(&mut s, "foo foo");
     goto_start(&s);
     start_query_replace(&mut s, "foo", "bar", false);
@@ -416,3 +416,10 @@ fn focus_drift_mid_session_aborts_without_touching_either_buffer() {
         "origin buffer untouched by the aborted replace"
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

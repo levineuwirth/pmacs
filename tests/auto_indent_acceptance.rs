@@ -74,7 +74,7 @@ fn status(s: &EditorState) -> String {
 
 /// Fresh editor whose active scratch buffer holds `body`, cursor at 0.
 fn editor_with(body: &str) -> EditorState {
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     if !body.is_empty() {
         exec(&s, &format!("pmacs.window.buffer():insert(0, {body:?})"));
     }
@@ -503,3 +503,10 @@ fn isearch_ret_accepts_instead_of_inserting() {
         "RET during isearch accepts; no newline is inserted"
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

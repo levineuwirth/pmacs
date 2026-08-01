@@ -60,7 +60,7 @@ fn terminal_cells_reject_child_control_characters() {
 
 #[test]
 fn spawn_failure_is_transactional() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let buffers_before = state.core.borrow().registry.borrow().len();
     let processes_before = state.process_supervisor.borrow().ids().count();
     state.process_supervisor.borrow_mut().shutdown();
@@ -77,7 +77,7 @@ fn spawn_failure_is_transactional() {
 
 #[test]
 fn strict_owned_spec_rejects_before_spawn_and_is_mutation_independent() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let buffers_before = state.core.borrow().registry.borrow().len();
     let mut invalid = TerminalSpec::new("/bin/sh");
     invalid.rows = 0;
@@ -193,7 +193,7 @@ fn read_only_empty_crdt_bootstrap_is_immutable_against_remote_content() {
 
 #[test]
 fn final_output_precedes_exact_nonzero_annotation_and_buffer_is_retained() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let mut spec = TerminalSpec::new("/bin/sh");
     spec.args = vec![
         "-c".into(),
@@ -306,7 +306,7 @@ fn normal_and_signal_annotations_use_exact_pid_and_outcome() {
             "exited abnormally with signal SIGTERM",
         ),
     ] {
-        let mut state = EditorState::new();
+        let mut state = EditorState::new_with_roots(&crate::iso::roots());
         let mut spec = TerminalSpec::new("/bin/sh");
         spec.args = vec!["-c".into(), script.into()];
         spec.rows = 6;
@@ -334,7 +334,7 @@ fn normal_and_signal_annotations_use_exact_pid_and_outcome() {
 
 #[test]
 fn killing_terminal_buffer_prunes_session_and_reaps_owned_process() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let mut spec = TerminalSpec::new("/bin/sh");
     spec.args = vec!["-c".into(), "sleep 30".into()];
     let buffer_id = state.open_terminal(spec).expect("open terminal");
@@ -364,7 +364,7 @@ fn killing_terminal_buffer_prunes_session_and_reaps_owned_process() {
 #[test]
 fn editor_shutdown_kills_term_ignoring_terminal_child() {
     let pid = {
-        let mut state = EditorState::new();
+        let mut state = EditorState::new_with_roots(&crate::iso::roots());
         state
             .process_supervisor
             .borrow_mut()
@@ -397,7 +397,7 @@ fn editor_shutdown_kills_term_ignoring_terminal_child() {
 
 #[test]
 fn terminal_tick_does_not_take_non_terminal_process_events() {
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let mut process = pmacs::process::ProcessSpec::new("ordinary", "/bin/sh");
     process.args = vec!["-c".into(), "printf ordinary".into()];
     let ordinary_id = state
@@ -424,3 +424,10 @@ fn terminal_tick_does_not_take_non_terminal_process_events() {
         "TerminalManager must not steal ordinary process output"
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

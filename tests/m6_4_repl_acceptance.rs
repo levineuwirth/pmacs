@@ -43,7 +43,7 @@ use pmacs::lua_bindings::BufferIdLua;
 /// translate them into typed Rust errors because the chunk's
 /// assertions are the test contract.
 fn run(chunk: &str) {
-    let mut editor = EditorState::new();
+    let mut editor = EditorState::new_with_roots(&crate::iso::roots());
     editor
         .lua_host
         .eval(Some("@m6_4_test"), chunk)
@@ -53,7 +53,7 @@ fn run(chunk: &str) {
 /// Construct a fresh editor and return a captured value (for tests
 /// that want to do final assertions on the Rust side).
 fn run_returning<T: mlua::FromLuaMulti>(chunk: &str) -> T {
-    let mut editor = EditorState::new();
+    let mut editor = EditorState::new_with_roots(&crate::iso::roots());
     editor
         .lua_host
         .eval(Some("@m6_4_test"), chunk)
@@ -438,7 +438,7 @@ fn m6_4_buffer_id_is_a_real_buffer_handle() {
     // The handle's `buffer_id()` returns a real BufferIdLua that
     // resolves through the registry. This locks in that the package
     // is built atop genuinely-public surface; no shadow APIs.
-    let mut editor = EditorState::new();
+    let mut editor = EditorState::new_with_roots(&crate::iso::roots());
     let returned: mlua::Value = editor
         .lua_host
         .eval(
@@ -457,3 +457,10 @@ fn m6_4_buffer_id_is_a_real_buffer_handle() {
     let buf = r.get(id_lua.id()).expect("registered");
     assert_eq!(buf.name(), "*handle*");
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;

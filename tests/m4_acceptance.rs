@@ -258,7 +258,7 @@ fn m4_1_parse_tree_introspectable_via_lua() {
     use pmacs::editor::EditorState;
     use pmacs::lua_bindings::BufferIdLua;
 
-    let editor = EditorState::new();
+    let editor = EditorState::new_with_roots(&crate::iso::roots());
     // Insert a buffer with known shape; bind its handle into Lua as
     // `BUF` so the script can reference it by name.
     let buf_id = editor
@@ -359,7 +359,8 @@ fn m4_2_opening_a_rust_file_produces_a_parse_tree() {
     let path = dir.path().join("hello.rs");
     std::fs::write(&path, b"fn main() { let x = 1 + 2; }\n").expect("write");
 
-    let mut state = pmacs::editor::EditorState::open(path).expect("open .rs");
+    let mut state =
+        pmacs::editor::EditorState::open_with_roots(path, &crate::iso::roots()).expect("open .rs");
     pump_async(&mut state, |s| current_tree_language(s).is_some());
     assert_eq!(current_tree_language(&state).as_deref(), Some("rust"));
 
@@ -389,7 +390,8 @@ fn m4_2_opening_a_lua_file_produces_a_parse_tree() {
     let path = dir.path().join("hello.lua");
     std::fs::write(&path, b"local x = 1\nreturn x + 2\n").expect("write");
 
-    let mut state = pmacs::editor::EditorState::open(path).expect("open .lua");
+    let mut state =
+        pmacs::editor::EditorState::open_with_roots(path, &crate::iso::roots()).expect("open .lua");
     pump_async(&mut state, |s| current_tree_language(s).is_some());
     assert_eq!(current_tree_language(&state).as_deref(), Some("lua"));
 
@@ -420,7 +422,8 @@ fn m4_2_register_extension_attaches_for_a_runtime_added_extension() {
     let path = dir.path().join("hello.myrust");
     std::fs::write(&path, b"fn main() {}\n").expect("write");
 
-    let mut state = pmacs::editor::EditorState::open(path).expect("open .myrust");
+    let mut state = pmacs::editor::EditorState::open_with_roots(path, &crate::iso::roots())
+        .expect("open .myrust");
     // The auto-attach hook fires *during* open, but at that point our
     // custom extension isn't registered yet --- so the first hook
     // invocation is a no-op. Register the extension and trigger the
@@ -516,7 +519,8 @@ fn render_active_window_to_grid(
 /// either the parse settles (so highlights can attach) or the
 /// timeout deadline hits.
 fn open_and_wait_for_parse(path: std::path::PathBuf) -> pmacs::editor::EditorState {
-    let mut state = pmacs::editor::EditorState::open(path).expect("open file");
+    let mut state =
+        pmacs::editor::EditorState::open_with_roots(path, &crate::iso::roots()).expect("open file");
     pump_async(&mut state, |s| current_tree_language(s).is_some());
     state
 }
@@ -1155,7 +1159,7 @@ fn m4_4_pty_mode_child_observes_a_tty() {
 /// to Lua" spec invariant for the process case.
 #[test]
 fn m4_4_lua_surface_drives_lifecycle() {
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     let id_raw: i64 = state
         .lua_host
         .lua()
@@ -1611,7 +1615,7 @@ fn m4_5_protocol_violation_surfaces_as_structured_error() {
 fn m4_5_lua_surface_drives_lsp_lifecycle() {
     use pmacs::editor::EditorState;
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
     let lua = state.lua_host.lua();
     let sid_raw: u64 = lua
@@ -1846,7 +1850,7 @@ fn m4_6_diagnostic_source_field_is_preserved() {
 fn m4_6_lua_surface_reads_diagnostics() {
     use pmacs::editor::EditorState;
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
     let lua = state.lua_host.lua();
     let sid_raw: u64 = lua
@@ -1958,7 +1962,7 @@ fn m4_6_lua_surface_reads_diagnostics() {
 fn m4_6_diag_navigate_commands_and_bindings_are_registered() {
     use pmacs::editor::EditorState;
 
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     let lua = state.lua_host.lua();
 
     let commands: Vec<String> = lua
@@ -2028,7 +2032,7 @@ fn m4_6_diag_navigate_commands_and_bindings_are_registered() {
 fn m4_6_diag_attach_view_pushes_diagnostic_overlay() {
     use pmacs::editor::EditorState;
 
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     let attached: bool = state
         .lua_host
         .lua()
@@ -2260,7 +2264,7 @@ fn m4_7_signature_help_during_function_call() {
 fn m4_7_lua_surface_drives_completion_hover_signature() {
     use pmacs::editor::EditorState;
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
     let lua = state.lua_host.lua();
     let sid_raw: u64 = lua
@@ -2581,7 +2585,7 @@ fn m4_8_status_buffer_text_reflects_state_and_capabilities() {
 fn m4_8_lua_surface_exposes_status() {
     use pmacs::editor::EditorState;
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
     let lua = state.lua_host.lua();
     let sid_raw: u64 = lua
@@ -2761,7 +2765,7 @@ fn m4_9_project_switch_is_first_class() {
     touch_file(&d1.path().join("Cargo.toml"));
     touch_file(&d2.path().join(".luarc.json"));
 
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     let lua = state.lua_host.lua();
     let d1_path = d1.path().display().to_string();
     let d2_path = d2.path().display().to_string();
@@ -2817,7 +2821,7 @@ fn m4_9_lsp_runs_per_project_not_per_buffer() {
     touch_file(&d1.path().join("Cargo.toml"));
     touch_file(&d2.path().join("Cargo.toml"));
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let d1_path = d1.path().display().to_string();
     let d2_path = d2.path().display().to_string();
 
@@ -2929,7 +2933,7 @@ fn m4_10_index_persists_across_sessions() {
 
     // Session A: index a synthetic source file, save to disk.
     {
-        let state = EditorState::new();
+        let state = EditorState::new_with_roots(&crate::iso::roots());
         let lua = state.lua_host.lua();
         let saved_path: String = lua
             .load(format!(
@@ -2957,7 +2961,7 @@ fn m4_10_index_persists_across_sessions() {
     // searches still find what session A indexed --- without ever
     // calling upsert_file again.
     let started = std::time::Instant::now();
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     let lua = state.lua_host.lua();
     let (file_count, symbol_count, hit_count, hit_name): (u64, u64, u64, String) = lua
         .load(format!(
@@ -3063,7 +3067,7 @@ fn m4_10_lua_surface_drives_index() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().display().to_string();
 
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     let lua = state.lua_host.lua();
 
     let (files_before, syms_before, hit_count, after_invalidate, generation_after): (
@@ -3111,7 +3115,7 @@ fn m4_10_lua_surface_ingests_lsp_workspace_symbol() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().display().to_string();
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     let lua = state.lua_host.lua();
     // The URI we feed has to be under the project root so the
     // resulting absolute path is deterministic.
@@ -3160,7 +3164,7 @@ fn m4_10_lua_surface_ingests_lsp_workspace_symbol() {
 fn m4_11_multiple_sources_combine_without_duplicates() {
     use pmacs::editor::EditorState;
 
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     let lua = state.lua_host.lua();
 
     let (parse_count, parse_source, total_count): (u64, String, u64) = lua
@@ -3235,7 +3239,7 @@ fn m4_11_multiple_sources_combine_without_duplicates() {
 fn m4_11_source_priority_configurable() {
     use pmacs::editor::EditorState;
 
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     let lua = state.lua_host.lua();
 
     let (winner_first, winner_second): (String, String) = lua
@@ -3289,7 +3293,7 @@ fn m4_11_source_priority_configurable() {
 fn m4_11_custom_sources_from_lua() {
     use pmacs::editor::EditorState;
 
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     let lua = state.lua_host.lua();
 
     let (custom_count_active, custom_label, custom_source, count_disabled, count_unregistered): (
@@ -3373,7 +3377,7 @@ fn m4_11_custom_sources_from_lua() {
 fn m4_11_snippets_surface_through_completion() {
     use pmacs::editor::EditorState;
 
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     let lua = state.lua_host.lua();
     let (label, kind, insert_text, source): (String, String, String, String) = lua
         .load(
@@ -3529,7 +3533,7 @@ fn m4_12_formatting_response_lands_in_store() {
 fn m4_12_lua_surface_drives_definition_and_formatting() {
     use pmacs::editor::EditorState;
 
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
 
     // Spawn a server through the Lua surface.
@@ -3667,7 +3671,7 @@ fn m4_12_cross_file_go_to_definition_and_jump_back() {
     let b_disp = b_path.display().to_string();
     let b_uri = format!("file://{b_disp}");
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
 
     // Point the default `rust` server at the fake, in `defenv` mode,
@@ -3787,7 +3791,7 @@ fn m4_13_rename_applies_cross_file_workspace_edit() {
     let b_disp = b_path.display().to_string();
     let b_uri = format!("file://{b_disp}");
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
 
     state
@@ -3915,7 +3919,7 @@ fn m4_14_code_action_command_drives_apply_edit() {
     std::fs::write(&a_path, b"abcfooxyz\n___zzz\n").expect("write a");
     let a_disp = a_path.display().to_string();
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
 
     state
@@ -4028,7 +4032,7 @@ fn m4_15_workspace_edit_resource_ops_apply_in_order() {
     let created = dir.path().join("created.rs");
     let b2 = dir.path().join("b2.rs");
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
 
     state
@@ -4131,7 +4135,7 @@ fn m4_15_workspace_edit_resource_ops_apply_in_order() {
 /// kinds, and `paddingRight`.
 #[test]
 fn m4_16_lua_surface_drives_inlay_hints() {
-    let mut s = pmacs::editor::EditorState::new();
+    let mut s = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     spawn_lsp_and_init(&mut s, Some("inlaybounds"));
 
     let uri = "file:///tmp/m4_16_inlay.rs";
@@ -4190,7 +4194,7 @@ fn m4_16_lua_surface_drives_inlay_hints() {
 /// the `token_type` index resolves to a name.
 #[test]
 fn m4_17_lua_surface_drives_semantic_tokens() {
-    let mut s = pmacs::editor::EditorState::new();
+    let mut s = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     spawn_lsp_and_init(&mut s, None);
 
     let uri = "file:///tmp/m4_17_sem.rs";
@@ -4261,7 +4265,7 @@ fn m4_18_inlay_hint_refresh_repulls_via_server_request() {
     std::fs::write(&a_path, b"fn a() {}\n\n").expect("write a");
     let a_disp = a_path.display().to_string();
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
     state
         .lua_host
@@ -4314,7 +4318,7 @@ fn m4_18b_inlay_hints_auto_pull_after_initialize() {
     std::fs::write(&a_path, b"fn a() {}\n\n").expect("write a");
     let a_disp = a_path.display().to_string();
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
     state
         .lua_host
@@ -4365,7 +4369,7 @@ fn m4_19_semantic_tokens_refresh_repulls_via_server_request() {
     std::fs::write(&a_path, b"fn a() {}\n\n").expect("write a");
     let a_disp = a_path.display().to_string();
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
     state
         .lua_host
@@ -4422,7 +4426,7 @@ fn arc1c_semantic_tokens_auto_pull_on_attach() {
     std::fs::write(&a_path, b"fn a() {}\n\n").expect("write a");
     let a_disp = a_path.display().to_string();
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
     state
         .lua_host
@@ -4466,7 +4470,7 @@ fn arc1c_semantic_tokens_repull_after_edit_flush() {
     std::fs::write(&a_path, b"fn a() {}\n\n").expect("write a");
     let a_disp = a_path.display().to_string();
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
     state
         .lua_host
@@ -4529,7 +4533,7 @@ fn arc1d_signature_help_auto_triggers_on_trigger_char() {
     std::fs::write(&a_path, b"\n").expect("write a");
     let a_disp = a_path.display().to_string();
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
     state
         .lua_host
@@ -4589,7 +4593,7 @@ fn arc1d_signature_help_does_not_trigger_on_ordinary_typing() {
     std::fs::write(&a_path, b"\n").expect("write a");
     let a_disp = a_path.display().to_string();
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
     state
         .lua_host
@@ -4648,7 +4652,7 @@ fn arc1c_range_only_server_is_served_range_requests() {
     std::fs::write(&a_path, b"fn a() {}\n\n").expect("write a");
     let a_disp = a_path.display().to_string();
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
     state
         .lua_host
@@ -4703,7 +4707,7 @@ fn arc1c_range_only_utf16_server_gets_converted_bounds() {
     std::fs::write(&a_path, "fn a() {}\nlet x = \u{e9}\u{e9};".as_bytes()).expect("write a");
     let a_disp = a_path.display().to_string();
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
     state
         .lua_host
@@ -4752,7 +4756,7 @@ fn arc1d_signature_help_triggers_on_non_ascii_trigger_char() {
     std::fs::write(&a_path, b"\n").expect("write a");
     let a_disp = a_path.display().to_string();
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
     state
         .lua_host
@@ -4810,7 +4814,7 @@ fn arc1d_signature_help_ignores_non_typed_edits() {
     std::fs::write(&a_path, b"\n").expect("write a");
     let a_disp = a_path.display().to_string();
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
     state
         .lua_host
@@ -4881,7 +4885,7 @@ fn arc1c_full_only_server_repulls_via_full_not_delta() {
     std::fs::write(&a_path, b"fn a() {}\n\n").expect("write a");
     let a_disp = a_path.display().to_string();
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
     state
         .lua_host
@@ -4954,7 +4958,7 @@ fn arc1c_full_only_server_repulls_via_full_not_delta() {
 /// fake returns one token.
 #[test]
 fn m4_20_semantic_tokens_range() {
-    let mut s = pmacs::editor::EditorState::new();
+    let mut s = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     spawn_lsp_and_init(&mut s, None);
 
     let uri = "file:///tmp/m4_20_sem.rs";
@@ -4998,7 +5002,7 @@ fn m4_20_semantic_tokens_range() {
 /// `resultId` "rid-2".
 #[test]
 fn m4_21_semantic_tokens_full_then_delta() {
-    let mut s = pmacs::editor::EditorState::new();
+    let mut s = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     spawn_lsp_and_init(&mut s, None);
 
     let uri = "file:///tmp/m4_21_sem.rs";
@@ -5078,7 +5082,7 @@ fn m4_22_rename_prepare_gates_and_prefills() {
     std::fs::write(&a_path, b"abcfooxyz\n").expect("write a");
     let a_disp = a_path.display().to_string();
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
     state
         .lua_host
@@ -5179,7 +5183,7 @@ fn m4_23_rename_prepare_refusal_aborts() {
     std::fs::write(&a_path, b"abcfooxyz\n").expect("write a");
     let a_disp = a_path.display().to_string();
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
     state
         .lua_host
@@ -5272,7 +5276,7 @@ fn m4_24_workspace_did_change_watched_files() {
     let received = base.join(".received");
     let foo_uri = format!("file://{}", base.join("foo.txt").display());
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
     state
         .lua_host
@@ -5351,7 +5355,7 @@ fn m4_24_workspace_did_change_watched_files() {
 fn m4_25_tier1_language_server_configs_and_filetypes() {
     use pmacs::editor::EditorState;
 
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     let probe: mlua::Table = s
         .lua_host
         .lua()
@@ -5455,7 +5459,7 @@ fn m4_26_auto_attach_roots_server_at_opened_files_project() {
     let go_file_disp = go_file.display().to_string();
     let fake = fake_lsp_path();
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     // Clamp the marker walk to the tempdir so a stray ancestor marker
     // (a developer's /tmp/.git, say) can't masquerade as the root.
     // Point the default `go` server at the fake in `rooturi` mode.
@@ -5567,7 +5571,7 @@ fn m4_27_real_gopls_analyzes_module_via_auto_attach() {
     let go_file_disp = go_file.display().to_string();
     let uri = format!("file://{go_file_disp}");
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     // gopls handshake + workspace load is slow on a cold cache (30s).
     real_server_open_and_init(&mut state, "go", &gopls, &root_disp, &go_file_disp);
 
@@ -5664,7 +5668,7 @@ fn m4_28_real_clangd_diagnostics_and_semantic_tokens_via_auto_attach() {
     let cpp_disp = cpp.display().to_string();
     let uri = format!("file://{cpp_disp}");
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     real_server_open_and_init(&mut state, "cpp", &clangd, &root_disp, &cpp_disp);
 
     // Fire a semantic-tokens request; diagnostics flow unsolicited
@@ -5767,7 +5771,7 @@ fn m4_29_real_rust_analyzer_inlay_hints_via_auto_attach() {
     let file_disp = file.display().to_string();
     let uri = format!("file://{file_disp}");
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     real_server_open_and_init(&mut state, "rust", &rust_analyzer, &root_disp, &file_disp);
 
     // rust-analyzer only answers `textDocument/inlayHint` after it has
@@ -5815,7 +5819,7 @@ fn m4_29_real_rust_analyzer_inlay_hints_via_auto_attach() {
 fn m4_12_default_bundle_wires_commands_and_keymaps() {
     use pmacs::editor::EditorState;
 
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     let probe: mlua::Table = s
         .lua_host
         .lua()
@@ -5870,7 +5874,7 @@ fn m4_12_default_bundle_wires_commands_and_keymaps() {
 fn m4_12_default_bundle_wires_cuda() {
     use pmacs::editor::EditorState;
 
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     let probe: mlua::Table = s
         .lua_host
         .lua()
@@ -5926,7 +5930,7 @@ fn m4_12_default_bundle_wires_cuda() {
 fn m4_12_default_bundle_wires_bash() {
     use pmacs::editor::EditorState;
 
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     let probe: mlua::Table = s
         .lua_host
         .lua()
@@ -5970,7 +5974,7 @@ fn m4_12_default_bundle_wires_bash() {
 #[test]
 fn m4_shebang_resolver_maps_interpreters() {
     use pmacs::editor::EditorState;
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     let resolve = |first_line: &str| -> Option<String> {
         s.lua_host
             .lua()
@@ -6030,7 +6034,7 @@ fn m4_shebang_resolver_maps_interpreters() {
 #[test]
 fn m4_shebang_extensionless_script_resolves_bash() {
     use pmacs::editor::EditorState;
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     let dir = tempfile::tempdir().expect("tempdir");
     let hook = dir.path().join("pre-commit"); // no extension
     std::fs::write(&hook, b"#!/bin/sh\nset -e\necho building\n").expect("write");
@@ -6071,7 +6075,7 @@ fn m4_shebang_extensionless_script_resolves_bash() {
 #[test]
 fn m4_shebang_does_not_override_extension() {
     use pmacs::editor::EditorState;
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     let dir = tempfile::tempdir().expect("tempdir");
     let f = dir.path().join("tool.py");
     std::fs::write(&f, b"#!/bin/sh\nprint('hi')\n").expect("write");
@@ -6116,7 +6120,7 @@ fn m4_shebang_does_not_override_extension() {
 #[test]
 fn m4_shebang_extensionless_grammarless_language_is_silent() {
     use pmacs::editor::EditorState;
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     let dir = tempfile::tempdir().expect("tempdir");
     let f = dir.path().join("generate"); // no extension
     // `ruby` is deliberately grammarless (and serverless) — a language the
@@ -6166,7 +6170,7 @@ fn m4_shebang_extensionless_grammarless_language_is_silent() {
 #[test]
 fn m4_shebang_edit_keeps_pinned_grammar() {
     use pmacs::editor::EditorState;
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     let dir = tempfile::tempdir().expect("tempdir");
     let hook = dir.path().join("deploy"); // no extension
     std::fs::write(&hook, b"#!/bin/sh\necho one\n").expect("write");
@@ -6261,7 +6265,7 @@ fn m4_shebang_edit_keeps_pinned_grammar() {
 #[test]
 fn m4_modeline_overrides_extension_end_to_end() {
     use pmacs::editor::EditorState;
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     let dir = tempfile::tempdir().expect("tempdir");
     let file = dir.path().join("misleading.py");
     std::fs::write(&file, b"-- -*- mode: lua -*-\nprint('ok')\n").expect("write");
@@ -6299,7 +6303,7 @@ fn m4_modeline_overrides_extension_end_to_end() {
 #[test]
 fn m4_modeline_parser_matches_supported_emacs_and_vim_forms() {
     use pmacs::editor::EditorState;
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     let resolve = |text: &str| -> Option<String> {
         s.lua_host
             .lua()
@@ -6344,7 +6348,7 @@ fn m4_modeline_parser_matches_supported_emacs_and_vim_forms() {
 #[test]
 fn m4_modeline_parser_enforces_boundaries_aliases_and_conflicts() {
     use pmacs::editor::EditorState;
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     let resolve = |text: &str| -> Option<String> {
         s.lua_host
             .lua()
@@ -6428,7 +6432,7 @@ fn m4_modeline_parser_enforces_boundaries_aliases_and_conflicts() {
 #[test]
 fn m4_modeline_unknown_mode_is_quiet_and_parser_free() {
     use pmacs::editor::EditorState;
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     let dir = tempfile::tempdir().expect("tempdir");
     let file = dir.path().join("notes.txt");
     std::fs::write(&file, b"# vim:ft=prose:\nhello\n").expect("write");
@@ -6464,7 +6468,7 @@ fn m4_modeline_unknown_mode_is_quiet_and_parser_free() {
 #[test]
 fn m4_modeline_language_is_pinned_until_reopen() {
     use pmacs::editor::EditorState;
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     let dir = tempfile::tempdir().expect("tempdir");
     let file = dir.path().join("mutable.txt");
     let other = dir.path().join("other.txt");
@@ -6558,7 +6562,7 @@ fn m4_modeline_language_is_pinned_until_reopen() {
 #[test]
 fn m4_modeline_shared_resolver_preserves_pathless_lsp_guard() {
     use pmacs::editor::EditorState;
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     let (syntax, lsp): (Option<String>, Option<String>) = s
         .lua_host
         .lua()
@@ -6580,7 +6584,7 @@ fn m4_modeline_shared_resolver_preserves_pathless_lsp_guard() {
 #[test]
 fn m4_filename_map_resolves_special_files() {
     use pmacs::editor::EditorState;
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     let probe: mlua::Table = s
         .lua_host
         .lua()
@@ -6650,7 +6654,7 @@ fn m4_filename_map_resolves_special_files() {
 #[test]
 fn m4_filename_extensionless_dockerfile_highlights() {
     use pmacs::editor::EditorState;
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     let dir = tempfile::tempdir().expect("tempdir");
     let f = dir.path().join("Dockerfile"); // no extension
     std::fs::write(&f, b"FROM alpine:3\nRUN apk add curl\n").expect("write");
@@ -6690,7 +6694,7 @@ fn m4_filename_extensionless_dockerfile_highlights() {
 #[test]
 fn m4_gap_grammars_align_with_lsp_configs() {
     use pmacs::editor::EditorState;
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     for (path, id) in [
         ("app.py", "python"),
         ("srv.go", "go"),
@@ -6733,7 +6737,7 @@ fn m4_gap_grammars_align_with_lsp_configs() {
 #[test]
 fn m4_json_yaml_lsp_configs_pin_command_and_sections() {
     use pmacs::editor::EditorState;
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     let lua = s.lua_host.lua();
 
     // json: the `@t1ckbase/vscode-langservers-extracted@2.0.2` binary
@@ -6809,7 +6813,7 @@ fn m4_json_yaml_lsp_configs_pin_command_and_sections() {
 #[test]
 fn m4_5_initial_config_pushed_via_did_change_configuration() {
     use pmacs::editor::EditorState;
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
     let dir = tempfile::tempdir().expect("tempdir");
     let sink = dir.path().join("config.jsonl");
@@ -6895,7 +6899,7 @@ fn m4_real_json_provider_receives_config_and_reports_diagnostics() {
     let file_disp = file.display().to_string();
     let uri = format!("file://{file_disp}");
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     state
         .lua_host
         .lua()
@@ -6964,7 +6968,7 @@ fn m4_real_yaml_provider_pulls_config_and_reports_diagnostics() {
     let file_disp = file.display().to_string();
     let uri = format!("file://{file_disp}");
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     state
         .lua_host
         .lua()
@@ -7043,7 +7047,7 @@ fn m4_real_yaml_provider_pulls_config_and_reports_diagnostics() {
 fn m4_lua_bundle_debounces_did_change_per_keystroke() {
     use pmacs::editor::EditorState;
 
-    let mut s = EditorState::new();
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
     let dir = tempfile::TempDir::new().unwrap();
     let file = dir.path().join("debounce.rs");
@@ -7144,12 +7148,12 @@ fn m4_lua_bundle_debounces_did_change_per_keystroke() {
 fn m4_12_default_bundle_after_load_robust_to_missing_server() {
     use pmacs::editor::EditorState;
     let _dir = tempfile::TempDir::new().unwrap();
-    let s = EditorState::new();
+    let s = EditorState::new_with_roots(&crate::iso::roots());
     // Plain after-load with no buffer path attached — the hook should
     // run, find no language for path=nil, and exit silently. If it
     // throws, the *errors* buffer would record it; verify it doesn't.
     s.lua_host.hooks();
-    let s2 = EditorState::new();
+    let s2 = EditorState::new_with_roots(&crate::iso::roots());
     drop(s);
     let saw_error: bool = s2
         .lua_host
@@ -7199,7 +7203,7 @@ fn project_set_search_boundary_clamps_lua_detect_call() {
     let f = workspace.join("src/main.rs");
     std::fs::write(&f, b"").expect("touch file");
 
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     let lua = state.lua_host.lua();
     let workspace_str = workspace.display().to_string();
     let f_str = f.display().to_string();
@@ -7234,7 +7238,7 @@ fn project_search_boundary_round_trips_via_lua() {
 
     let dir = tempfile::tempdir().expect("dir");
     let dir_str = dir.path().display().to_string();
-    let state = EditorState::new();
+    let state = EditorState::new_with_roots(&crate::iso::roots());
     let lua = state.lua_host.lua();
 
     let (initial, after_set, after_clear): (Option<String>, Option<String>, Option<String>) = lua
@@ -7420,7 +7424,7 @@ fn spawn_lsp_and_init(state: &mut pmacs::editor::EditorState, mode: Option<&str>
 #[test]
 fn m4_5_await_completion_returns_result_and_populates_store() {
     use pmacs::editor::EditorState;
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     spawn_lsp_and_init(&mut state, None);
     state
         .lua_host
@@ -7456,7 +7460,7 @@ fn m4_5_await_completion_returns_result_and_populates_store() {
 #[test]
 fn m4_5_await_server_error_raises_failed() {
     use pmacs::editor::EditorState;
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     spawn_lsp_and_init(&mut state, Some("error"));
     state
         .lua_host
@@ -7496,7 +7500,7 @@ fn m4_5_await_server_error_raises_failed() {
 #[test]
 fn m4_5_await_cancelled_when_server_stops_mid_request() {
     use pmacs::editor::EditorState;
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     spawn_lsp_and_init(&mut state, Some("silent"));
     state
         .lua_host
@@ -7534,7 +7538,7 @@ fn m4_5_await_cancelled_when_server_stops_mid_request() {
 #[test]
 fn m4_5_await_times_out_against_silent_server() {
     use pmacs::editor::EditorState;
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     spawn_lsp_and_init(&mut state, Some("silent"));
     state
         .lua_host
@@ -7576,7 +7580,7 @@ fn m4_5_await_times_out_against_silent_server() {
 #[test]
 fn m4_5_await_superseded_request_is_cancelled() {
     use pmacs::editor::EditorState;
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     spawn_lsp_and_init(&mut state, Some("silent"));
     state
         .lua_host
@@ -7622,7 +7626,7 @@ fn m4_5_await_superseded_request_is_cancelled() {
 #[test]
 fn m4_5_await_resolves_same_frame_as_response_absorbed() {
     use pmacs::editor::EditorState;
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     spawn_lsp_and_init(&mut state, None);
     state
         .lua_host
@@ -7710,7 +7714,7 @@ fn m4_5_await_resolves_same_frame_as_response_absorbed() {
 #[test]
 fn m4_5_position_encoding_utf16_round_trips_non_ascii() {
     use pmacs::editor::EditorState;
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     spawn_lsp_and_init(&mut state, Some("posecho"));
     state
         .lua_host
@@ -7766,7 +7770,7 @@ fn m4_5_position_encoding_utf16_round_trips_non_ascii() {
 fn m4_5_utf16_rename_and_prepare_rename_convert_positions() {
     use pmacs::editor::EditorState;
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     spawn_lsp_and_init(&mut state, Some("posecho"));
     let uri = "file:///tmp/m4_5_rename_utf16.rs";
     state
@@ -7806,7 +7810,7 @@ fn m4_5_utf16_rename_and_prepare_rename_convert_positions() {
 #[test]
 fn m4_5_workspace_configuration_answered_from_settings() {
     use pmacs::editor::EditorState;
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
     state
         .lua_host
@@ -7863,7 +7867,7 @@ fn m4_5_workspace_configuration_answered_from_settings() {
 #[test]
 fn m4_5_location_nav_requests_route_by_kind() {
     use pmacs::editor::EditorState;
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     spawn_lsp_and_init(&mut state, None);
     state
         .lua_host
@@ -7913,7 +7917,7 @@ fn m4_5_location_nav_requests_route_by_kind() {
 #[test]
 fn m4_5_symbols_and_highlight_round_trip() {
     use pmacs::editor::EditorState;
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     spawn_lsp_and_init(&mut state, None);
     state
         .lua_host
@@ -7977,7 +7981,7 @@ fn m4_5_symbols_and_highlight_round_trip() {
 /// Open `path` against the fake server and wait for initialization
 /// (shared bootstrap for the panel tests).
 fn open_against_fake(path: &std::path::Path) -> pmacs::editor::EditorState {
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     let fake = fake_lsp_path();
     state
         .lua_host
@@ -8223,7 +8227,7 @@ fn rd1_delete_refuses_when_a_bound_buffer_is_modified() {
     let f = dir.path().join("a.rs");
     std::fs::write(&f, b"original\n").expect("write");
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     rd_open(&mut state, "B", &f);
     state
         .lua_host
@@ -8265,7 +8269,7 @@ fn rd2_delete_still_succeeds_for_a_clean_open_buffer() {
     let f = dir.path().join("clean.rs");
     std::fs::write(&f, b"untouched\n").expect("write");
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     rd_open(&mut state, "B", &f);
 
     let (ok, err) = rd_delete(&mut state, &f, "");
@@ -8310,7 +8314,7 @@ fn rd3_filesystem_failure_leaves_the_clean_buffer_intact() {
     let target = dir.path().join("target");
     std::fs::write(&target, b"was a file\n").expect("write");
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     rd_open(&mut state, "B", &target);
 
     // The path changes type behind pmacs's back — the same class of
@@ -8354,7 +8358,7 @@ fn rd4_on_removed_observes_the_path_already_gone() {
     std::fs::write(&f, b"bye\n").expect("write");
     let p = f.display().to_string();
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     rd_open(&mut state, "B", &f);
     state
         .lua_host
@@ -8399,7 +8403,7 @@ fn rd5_delete_from_inside_the_targets_own_intercept_refuses_before_disk() {
     std::fs::write(&f, b"busy\n").expect("write");
     let p = f.display().to_string();
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     rd_open(&mut state, "B", &f);
     state
         .lua_host
@@ -8455,7 +8459,7 @@ fn rd6_a_clean_first_match_cannot_hide_a_modified_duplicate() {
     std::fs::write(&f, b"shared\n").expect("write");
     let p = f.display().to_string();
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     state
         .lua_host
         .lua()
@@ -8493,7 +8497,7 @@ fn rd7_a_sibling_directory_sharing_a_name_prefix_does_not_block() {
     let outside = sibling.join("out.rs");
     std::fs::write(&outside, b"out\n").expect("write out");
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     rd_open(&mut state, "B", &outside);
     state
         .lua_host
@@ -8527,7 +8531,7 @@ fn rd8_recursive_delete_refuses_for_a_modified_descendant() {
     let inner = nested.join("deep.rs");
     std::fs::write(&inner, b"deep\n").expect("write");
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     rd_open(&mut state, "B", &inner);
     state
         .lua_host
@@ -8575,7 +8579,7 @@ fn rd9_clean_recursive_delete_reconciles_descendants_through_both_phases() {
     let inner = tree.join("kept.rs");
     std::fs::write(&inner, b"kept\n").expect("write");
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     rd_open(&mut state, "B", &inner);
     // Display it, so the phase-1 window redirect has something to do.
     state
@@ -8629,7 +8633,7 @@ fn rd10_absent_plus_ignore_does_not_destroy_a_modified_buffer() {
     let f = dir.path().join("vanished.rs");
     std::fs::write(&f, b"content\n").expect("write");
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     rd_open(&mut state, "B", &f);
     state
         .lua_host
@@ -8684,7 +8688,7 @@ fn rd14_clean_duplicates_all_reconcile() {
     std::fs::write(&f, b"twin\n").expect("write");
     let p = f.display().to_string();
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     state
         .lua_host
         .lua()
@@ -8940,7 +8944,7 @@ fn rd11_absent_plus_ignore_succeeds_through_the_server_pump() {
     let victim = dir.path().join("victim.rs");
     std::fs::write(&victim, b"content\n").expect("write");
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     let plan = serde_json::json!({
         "documentChanges": [
             { "kind": "delete", "uri": rd_uri(&victim),
@@ -8991,7 +8995,7 @@ fn rd11a_present_plus_ignore_with_a_modified_buffer_is_refused() {
     let victim = dir.path().join("victim.rs");
     std::fs::write(&victim, b"content\n").expect("write");
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     let plan = serde_json::json!({
         "documentChanges": [
             { "kind": "delete", "uri": rd_uri(&victim),
@@ -9049,7 +9053,7 @@ fn rd11b_a_dangling_symlink_counts_as_present() {
     std::fs::write(&real, b"content\n").expect("write");
     std::os::unix::fs::symlink(&real, &link).expect("symlink");
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     let plan = serde_json::json!({
         "documentChanges": [
             { "kind": "delete", "uri": rd_uri(&link),
@@ -9113,7 +9117,7 @@ fn rd11c_absent_without_ignore_refuses_before_the_earlier_op_runs() {
     let missing = dir.path().join("never-existed.rs");
     std::fs::write(&a, b"abcfooxyz\n").expect("write a");
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     let plan = serde_json::json!({
         "documentChanges": [
             rd_edit_op(&a, 0, 3, 6, "EDITED"),
@@ -9167,7 +9171,7 @@ fn rd11d_an_unanswerable_stat_fails_closed_in_the_plan() {
     std::fs::write(&not_a_dir, b"I am a file\n").expect("write the would-be parent");
     let target = not_a_dir.join("child.rs");
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     let plan = serde_json::json!({
         "documentChanges": [
             rd_edit_op(&a, 0, 3, 6, "EDITED"),
@@ -9223,7 +9227,7 @@ fn rd12a_edit_then_delete_answers_the_server_and_reports_partial_work() {
     let a = dir.path().join("a.rs");
     std::fs::write(&a, b"abcfooxyz\n").expect("write a");
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     let plan = serde_json::json!({
         "documentChanges": [
             rd_edit_op(&a, 0, 3, 6, "EDITED"),
@@ -9276,7 +9280,7 @@ fn rd12b_rename_into_delete_answers_the_server_and_reports_partial_work() {
     let inside = tree.join("m.rs");
     std::fs::write(&outside, b"content\n").expect("write");
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     let plan = serde_json::json!({
         "documentChanges": [
             { "kind": "rename", "oldUri": rd_uri(&outside), "newUri": rd_uri(&inside) },
@@ -9341,7 +9345,7 @@ fn rd13_the_refusal_answers_the_server_and_leaves_a_durable_trace() {
     let victim = dir.path().join("victim.rs");
     std::fs::write(&victim, b"content\n").expect("write");
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     let plan = serde_json::json!({
         "documentChanges": [ { "kind": "delete", "uri": rd_uri(&victim) } ]
     });
@@ -9411,7 +9415,7 @@ fn rd15_defensive_a_parse_failure_still_attempts_a_response() {
     let a = dir.path().join("a.rs");
     std::fs::write(&a, b"abcfooxyz\n").expect("write a");
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     // A plan that would otherwise succeed, so a response saying
     // `applied = false` can only have come from the parse stub.
     let plan = serde_json::json!({
@@ -9476,7 +9480,7 @@ fn rd18_non_recursive_delete_is_not_blocked_by_an_orphan_beneath_it() {
     let gone = tree.join("gone.rs");
     std::fs::write(&gone, b"content\n").expect("write");
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     rd_open(&mut state, "B", &gone);
     state
         .lua_host
@@ -9521,7 +9525,7 @@ fn rd19a_create_then_delete_is_not_refused_by_the_plan_time_preflight() {
     let transient = dir.path().join("transient.rs");
     let witness = dir.path().join("witness.rs");
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     let plan = serde_json::json!({
         "documentChanges": [
             { "kind": "create", "uri": rd_uri(&transient) },
@@ -9563,7 +9567,7 @@ fn rd19b_rename_then_delete_is_not_refused_by_the_plan_time_preflight() {
     let destination = dir.path().join("destination.rs");
     std::fs::write(&source, b"moving\n").expect("write source");
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     let plan = serde_json::json!({
         "documentChanges": [
             { "kind": "rename", "oldUri": rd_uri(&source), "newUri": rd_uri(&destination) },
@@ -9607,7 +9611,7 @@ fn rd19c_deferring_the_check_does_not_skip_it() {
     std::fs::write(&a, b"abcfooxyz\n").expect("write a");
     let fresh = dir.path().join("fresh.rs");
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     let plan = serde_json::json!({
         "documentChanges": [
             { "kind": "create", "uri": rd_uri(&fresh) },
@@ -9671,7 +9675,7 @@ fn rd20_the_user_facing_message_reports_partial_application() {
     let a = dir.path().join("a.rs");
     std::fs::write(&a, b"abcfooxyz\n").expect("write a");
 
-    let mut state = EditorState::new();
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
     let plan = serde_json::json!({
         "documentChanges": [
             rd_edit_op(&a, 0, 3, 6, "EDITED"),
@@ -9753,7 +9757,7 @@ fn rd21_equivalent_dot_path_create_then_delete_is_not_preflight_refused() {
         "fixture: the URI spellings must differ"
     );
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     let plan = serde_json::json!({
         "documentChanges": [
             { "kind": "create", "uri": dot_uri },
@@ -9792,7 +9796,7 @@ fn rd22a_partial_edits_inside_one_item_are_reported_conservatively() {
     let target = dir.path().join("target.rs");
     std::fs::write(&target, b"abcdef\n").expect("write target");
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     let plan = serde_json::json!({
         "documentChanges": [{
             "textDocument": { "uri": rd_uri(&target), "version": 1 },
@@ -9877,7 +9881,7 @@ fn rd22b_a_failing_resource_item_can_leave_filesystem_state() {
         "fixture: destination parent must start absent"
     );
 
-    let mut state = pmacs::editor::EditorState::new();
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
     let plan = serde_json::json!({
         "documentChanges": [{
             "kind": "rename",
@@ -9907,3 +9911,10 @@ fn rd22b_a_failing_resource_item_can_leave_filesystem_state() {
         "the response must not deny the directory left on disk: {reason:?}"
     );
 }
+
+// Isolated bootstrap storage roots (see the module docs): an
+// integration test is compiled without `cfg(test)`, so a raw
+// `EditorState::new()` would read the developer's real `init.lua` and
+// write into their real data root.
+#[path = "common/iso.rs"]
+mod iso;
