@@ -1885,13 +1885,30 @@ impl InstanceIdentity {
     /// call site, so calling twice on different days surfaces different
     /// uptimes from the same anchor.
     ///
-    /// The version comes from `CARGO_PKG_VERSION` and the build hash
-    /// from the optional `PMACS_GIT_HASH` environment variable populated
-    /// by the build script.
+    /// `pmacs_version` is supplied BY THE CALLER, and must be
+    /// `env!("CARGO_PKG_VERSION")` evaluated in the `pmacs` crate.
+    ///
+    /// It is a parameter rather than an `env!` here because `env!`
+    /// expands in the crate being COMPILED: reading it inside
+    /// `pmacs-protocol` yields the *protocol* crate's version, which
+    /// this field is not. The two crates held the same number until the
+    /// 1.1.0 release bump moved `pmacs` and left `pmacs-protocol` at
+    /// 1.0.0 — at which point the daemon began reporting the protocol
+    /// crate's version to every attached frontend, under a field named
+    /// `pmacs_version`. Nothing detected it earlier because the values
+    /// had always agreed by coincidence.
+    ///
+    /// The build hash still comes from the optional `PMACS_GIT_HASH`
+    /// environment variable populated by the build script; that one is
+    /// genuinely crate-independent.
     #[must_use]
-    pub fn for_running_process(instance_name: Option<String>, started: std::time::Instant) -> Self {
+    pub fn for_running_process(
+        pmacs_version: &str,
+        instance_name: Option<String>,
+        started: std::time::Instant,
+    ) -> Self {
         Self {
-            pmacs_version: env!("CARGO_PKG_VERSION").into(),
+            pmacs_version: pmacs_version.into(),
             build_hash: option_env!("PMACS_GIT_HASH").map(String::from),
             instance_name,
             uptime_secs: started.elapsed().as_secs(),

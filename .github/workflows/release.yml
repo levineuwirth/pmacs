@@ -1,0 +1,362 @@
+name: Release
+
+# Distribution Stage 1 — binaries on tag. See
+# docs/distribution-stage1-framing.md.
+#
+# Scope is deliberately one stage: build the two shipped binaries when a
+# `v*` tag is pushed and attach them to a GitHub Release. There are no
+# channels, no rollback, no update-in-place, no signing. Those are named
+# as out of scope in the framing's §5 rather than forgotten.
+#
+# Nothing here runs on a branch push or a pull request. A tag is the
+# only trigger, because a release built from anything else would publish
+# artifacts for a commit nobody reviewed as a release.
+on:
+  push:
+    tags:
+      - 'v*'
+
+# A release must never race itself. Two tags pushed close together would
+# otherwise both mutate the same release page.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------
+  # Preflight runs BEFORE any build, because both of its checks catch
+  # mistakes that are cheap now and expensive once artifacts exist: a
+  # published release is a public URL, and unpublishing one is not the
+  # same as never having published it.
+  # ---------------------------------------------------------------
+  preflight:
+    name: Preflight (tag/version, ancestry)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    steps:
+      # Full history: the ancestry check below cannot run on a shallow
+      # clone, and the default checkout depth is 1.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: check
+        name: Tag must match the root crate version, and be on main
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+
+          # Strip the leading v, then strip any prerelease suffix:
+          # v1.1.0-rc.1 and v1.1.0 must both match a crate version of
+          # 1.1.0. Cargo has no place to record "rc.1", so requiring the
+          # manifest to carry it would make prereleases impossible.
+          version="${tag#v}"
+          base="${version%%-*}"
+
+          # Read the ROOT package version specifically. A grep for
+          # `^version` across the workspace would match whichever
+          # manifest sorted first, and pmacs-protocol deliberately holds
+          # a different number.
+          manifest=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="pmacs"))')
+
+          echo "tag=$tag base=$base manifest=$manifest"
+          if [ "$base" != "$manifest" ]; then
+            echo "::error::tag $tag implies version $base but the pmacs crate is $manifest." \
+                 "Bump Cargo.toml or fix the tag; publishing this would ship a binary whose" \
+                 "--version disagrees with its release."
+            exit 1
+          fi
+
+          # A tag on a branch is the realistic mistake. Re-running the
+          # test suite here would be duplicated cost -- CI already tested
+          # this commit -- but nothing otherwise enforces that the tagged
+          # commit is one CI ever saw on main.
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::tagged commit $GITHUB_SHA is not an ancestor of origin/main." \
+                 "Releases are cut from main."
+            exit 1
+          fi
+
+          # Anything with a suffix (-rc.1, -beta) is a prerelease. The
+          # framing requires the RC to be marked so it cannot be mistaken
+          # for the real thing on the releases page.
+          if [ "$version" = "$base" ]; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------
+  # Both runners are PINNED, never `-latest`. Two different reasons,
+  # both about a silent choice:
+  #
+  #   * ubuntu-22.04 sets the glibc floor at 2.35, which covers Ubuntu
+  #     22.04 and Debian 12. `ubuntu-latest` (24.04, glibc 2.39) would
+  #     silently produce binaries that fail to load on both with a bare
+  #     `GLIBC_2.39 not found`. Note the floor does NOT reach RHEL 9
+  #     (glibc 2.34) -- that needs a container or cross-build and is
+  #     parked in the framing's §5.
+  #
+  #   * macos-15 is arm64. `macos-latest` drifts, so a future runner
+  #     change could move the minimum supported macOS with no commit in
+  #     this repository to point at.
+  # ---------------------------------------------------------------
+  build:
+    name: Build ${{ matrix.target-label }}
+    needs: preflight
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target-label: linux-x86_64
+          - os: macos-15
+            target-label: macos-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # CRDT is not optional. `run_gpu` refuses outright without it
+      # ("--gpu requires pmacs built with --features crdt"), and
+      # InstanceCapabilities::default advertises multi_frontend /
+      # crdt_replica / semantic_render only under the feature. A
+      # non-CRDT release would ship an editor that cannot use the GPU
+      # frontend shipped beside it.
+      #
+      # EXPLICIT --bin TARGETS, layer 1 of 2. Cargo auto-discovers
+      # src/bin/*.rs, so a plain `--workspace` release build also
+      # produces pmacs-audit, pmacs_fake_lsp and pmacs_fake_mcp -- the
+      # last two being test fixtures. Naming targets keeps them from
+      # being built at all.
+      - name: Build the shipped binaries only
+        run: |
+          set -euo pipefail
+          cargo build --release --bin pmacs --features crdt
+          cargo build --release -p pmacs-gpu
+
+      # EXPLICIT STAGED ASSET LIST, layer 2 of 2. Layer 1 alone is not
+      # enough: a cached target/release can still hold binaries from an
+      # earlier build, and archiving that directory would publish them.
+      # Copying named files into a clean staging dir makes the archive's
+      # contents a decision rather than a directory's residue.
+      #
+      # The two binaries are staged into the SAME directory on purpose.
+      # `pmacs --gpu` prefers a co-located pmacs-gpu and only then falls
+      # back to a PATH lookup, so co-location is what makes an unpacked
+      # release self-contained for someone who unpacks it off PATH.
+      - name: Stage the archive
+        id: stage
+        run: |
+          set -euo pipefail
+          name="pmacs-${{ needs.preflight.outputs.version }}-${{ matrix.target-label }}"
+          mkdir -p "staging/$name"
+          cp target/release/pmacs "staging/$name/"
+          cp target/release/pmacs-gpu "staging/$name/"
+          cp README.md LICENSE* "staging/$name/" 2>/dev/null || true
+          chmod +x "staging/$name/pmacs" "staging/$name/pmacs-gpu"
+          tar -C staging -czf "$name.tar.gz" "$name"
+          echo "archive=$name.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      # Assert the archive rather than the build command. The build
+      # could change, a target could be added, a cache could leak -- the
+      # only thing that decides what users receive is what is inside
+      # this file.
+      - name: Assert archive contents
+        run: |
+          set -euo pipefail
+          archive="${{ steps.stage.outputs.archive }}"
+          name="${{ steps.stage.outputs.name }}"
+
+          members=$(tar -tzf "$archive" | sed "s#^$name/##" | grep -v '^$' | sort)
+          echo "members:"; echo "$members" | sed 's/^/  /'
+
+          for forbidden in pmacs-audit pmacs_fake_lsp pmacs_fake_mcp; do
+            if echo "$members" | grep -qx "$forbidden"; then
+              echo "::error::$forbidden is present in $archive and must never ship"
+              exit 1
+            fi
+          done
+
+          for required in pmacs pmacs-gpu; do
+            echo "$members" | grep -qx "$required" \
+              || { echo "::error::$required missing from $archive"; exit 1; }
+          done
+
+          # Executable bits, read back out of the archive itself.
+          for required in pmacs pmacs-gpu; do
+            mode=$(tar -tvzf "$archive" | awk -v f="$name/$required" '$NF==f {print $1}')
+            case "$mode" in
+              *x*) : ;;
+              *) echo "::error::$required is not executable in the archive (mode $mode)"; exit 1 ;;
+            esac
+          done
+
+      # Run the staged binaries. `--version` is the cheapest end-to-end
+      # proof that what was built is what will ship, and it is the check
+      # that would have caught a tag/manifest mismatch reaching this far.
+      - name: Assert the staged binaries report the tagged version
+        run: |
+          set -euo pipefail
+          expected="${{ needs.preflight.outputs.version }}"
+          base="${expected%%-*}"
+          name="${{ steps.stage.outputs.name }}"
+
+          got_pmacs=$("staging/$name/pmacs" --version)
+          got_gpu=$("staging/$name/pmacs-gpu" --version)
+          echo "pmacs:     $got_pmacs"
+          echo "pmacs-gpu: $got_gpu"
+
+          echo "$got_pmacs" | grep -qx "pmacs $base" \
+            || { echo "::error::pmacs --version reported '$got_pmacs', expected 'pmacs $base'"; exit 1; }
+          echo "$got_gpu" | grep -q "^pmacs-gpu $base " \
+            || { echo "::error::pmacs-gpu --version reported '$got_gpu', expected 'pmacs-gpu $base ...'"; exit 1; }
+
+      # The glibc floor, MACHINE-CHECKED rather than trusted.
+      #
+      # Pinning ubuntu-22.04 is what sets the floor, but nothing about a
+      # pinned runner *proves* the resulting binary honours it, and the
+      # failure is invisible at build time -- it surfaces as a bare
+      # `GLIBC_2.xx not found` on a user's machine, with no clue which
+      # commit caused it. Reading the required symbol versions out of
+      # the binary turns a runner choice into an assertion, so switching
+      # this job to `ubuntu-latest` fails HERE instead of shipping.
+      #
+      # Linux only: Mach-O has no equivalent versioned-symbol scheme.
+      - name: Assert the glibc floor
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          floor="2.35"   # Ubuntu 22.04 / Debian 12; see the framing §1.6
+          name="${{ steps.stage.outputs.name }}"
+          fail=0
+          for bin in pmacs pmacs-gpu; do
+            max=$(objdump -T "staging/$name/$bin" \
+                  | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
+                  | sed 's/GLIBC_//' | sort -uV | tail -1)
+            echo "$bin requires at most glibc $max (floor $floor)"
+            highest=$(printf '%s\n%s\n' "$floor" "$max" | sort -V | tail -1)
+            if [ "$highest" != "$floor" ]; then
+              echo "::error::$bin requires glibc $max, above the declared floor $floor." \
+                   "It will not load on Ubuntu 22.04 or Debian 12. Check the runner image."
+              fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ]
+
+      - name: Checksum
+        run: |
+          set -euo pipefail
+          archive="${{ steps.stage.outputs.archive }}"
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$archive" > "$archive.sha256"
+          else
+            shasum -a 256 "$archive" > "$archive.sha256"
+          fi
+          cat "$archive.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.stage.outputs.name }}
+          path: |
+            ${{ steps.stage.outputs.archive }}
+            ${{ steps.stage.outputs.archive }}.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: [preflight, build]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # One SHA256SUMS covering every published artifact, alongside the
+      # per-archive files. Without it a download cannot be verified by
+      # anyone; with it, verification is one command.
+      - name: Collect checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          ls -la
+          cat ./*.sha256 | sed 's#\./##' | sort -k2 > SHA256SUMS
+          echo "--- SHA256SUMS ---"; cat SHA256SUMS
+          sha256sum -c SHA256SUMS
+
+      - name: Release notes
+        run: |
+          set -euo pipefail
+          cat > notes.md <<'NOTES'
+          ## Install
+
+          Download the archive for your platform, unpack it, and put both
+          binaries somewhere on your `PATH` — **keep them together**:
+          `pmacs --gpu` looks for `pmacs-gpu` beside itself first, then
+          falls back to `PATH`.
+
+          Verify a download against `SHA256SUMS`:
+
+          ```sh
+          sha256sum -c SHA256SUMS --ignore-missing
+          ```
+
+          ## Platform support
+
+          - **Linux x86_64** — built on Ubuntu 22.04, so the floor is
+            **glibc ≥ 2.35**. Covers Ubuntu 22.04+ and Debian 12+.
+            **RHEL 9 (glibc 2.34) is below the floor and not supported
+            yet.**
+          - **macOS arm64 (Apple Silicon)** — Intel macOS is not built
+            yet. The binaries are **unsigned and not notarized**, so
+            Gatekeeper will quarantine them; you will need to allow them
+            explicitly.
+
+          ## Runtime dependencies
+
+          Not checked at startup — the editor assumes them:
+          `/bin/sh`, `stty` and coreutils (PTY raw-mode trampoline, used
+          by the REPL and terminal), plus `git` and `tar` for package
+          installation. The Lua VM is statically vendored, so there is no
+          external Lua dependency.
+
+          `pmacs-gpu` additionally needs a working Vulkan (Linux) or
+          Metal (macOS) adapter. There is no software-rasterizer
+          fallback in a shipped binary.
+
+          ## Not in this release
+
+          Channels, in-place update, rollback, signing, reproducible
+          builds, package-manager distribution, and Windows. See
+          `docs/distribution-stage1-framing.md` §5.
+          NOTES
+          echo "notes written"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          flags=(--title "pmacs ${{ needs.preflight.outputs.version }}" --notes-file notes.md)
+          if [ "${{ needs.preflight.outputs.prerelease }}" = "true" ]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "${GITHUB_REF_NAME}" "${flags[@]}" \
+            dist/*.tar.gz dist/SHA256SUMS

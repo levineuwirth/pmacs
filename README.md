@@ -141,6 +141,33 @@ loaded after the builtin runtime so plain assignments override
 defaults --- keybindings, `pmacs.lsp.config`, theme overrides, and
 package installs all live there.
 
+## Install
+
+Download an archive from the
+[releases page](https://github.com/levineuwirth/pmacs/releases), unpack
+it, and put both binaries somewhere on your `PATH`.
+
+**Keep `pmacs` and `pmacs-gpu` together.** `pmacs --gpu` looks for
+`pmacs-gpu` beside itself first and only then falls back to a `PATH`
+lookup, so an unpacked release is self-contained as long as the two
+stay in the same directory.
+
+Verify a download:
+
+```sh
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+| platform | built on | notes |
+|---|---|---|
+| Linux x86_64 | Ubuntu 22.04 | requires **glibc ≥ 2.35** — Ubuntu 22.04+, Debian 12+. **RHEL 9 (glibc 2.34) is not supported yet.** |
+| macOS arm64 | macOS 15 | Apple Silicon only; Intel is not built yet. Binaries are **unsigned and not notarized**, so Gatekeeper will quarantine them until you allow them explicitly. |
+
+Releases carry binaries only — there is no in-place update, rollback, or
+package-manager distribution yet. Build from source for any platform not
+listed, and see "Runtime dependencies" below for what the editor assumes
+is present.
+
 ## Build
 
 Builds on the toolchain pinned in `rust-toolchain.toml` (Rust

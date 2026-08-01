@@ -395,7 +395,11 @@ impl LocalInstanceInfo {
     #[must_use]
     pub fn build_identity(&self) -> InstanceIdentity {
         let data = self.0.borrow();
-        InstanceIdentity::for_running_process(data.name.clone(), data.started)
+        InstanceIdentity::for_running_process(
+            env!("CARGO_PKG_VERSION"),
+            data.name.clone(),
+            data.started,
+        )
     }
 }
 

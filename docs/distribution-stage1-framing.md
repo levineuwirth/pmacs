@@ -1,7 +1,25 @@
 # Framing — Distribution Stage 1: binaries on tag
 
-**Revision 2.** Status: **approved with amendments** (revision 1 →
-2 records them). Scouted against `githubsucks/main` @ `c5f7501` (#209).
+**Revision 3.** Status: **implemented** on branch `distribution-stage1`,
+based on `githubsucks/main` @ `4984169` (#210). Approved at revision 2.
+
+**Revision 2 → 3** records two implementation findings, not a new design
+round:
+
+- **Layer 2 of the binary exclusion is load-bearing, and this is now
+  demonstrated rather than argued** (§1.2b). The argument for it was
+  hypothetical; building the branch produced the exact case it guards
+  against, on the first try.
+- **The glibc floor is machine-checked** (§1.6a), which is stronger than
+  acceptance 7's original container test and runs on every release
+  instead of once at RC time.
+- **The version bump exposed a real product defect** (§1.3a): the daemon
+  reported the *protocol* crate's version to every attached frontend
+  under a field named `pmacs_version`. It was invisible while the two
+  crates happened to share a number, and Q#D1's decision to diverge them
+  is what surfaced it. Fixed here, because shipping a release whose
+  daemon misreports its own version is precisely what this stage
+  exists to prevent.
 
 `.github/workflows/` contains exactly one workflow and it is test-only.
 **There is no release job, no artifact upload, no tags-to-binaries path.**
@@ -94,6 +112,60 @@ layer 1 relies on a list nobody re-checks when a new `src/bin/*.rs`
 appears. Acceptance 2 asserts the **complete member list**, the
 **executable bits**, and the **absence of all three** excluded binaries.
 
+### 1.2b Layer 2 is load-bearing — demonstrated, not argued
+
+Revision 2 justified the second layer with a hypothetical: "a cached
+`target/release` can still hold binaries from an earlier build."
+**Implementing the branch produced that case immediately.** After
+running only
+
+```sh
+cargo build --release --bin pmacs --features crdt
+cargo build --release -p pmacs-gpu
+```
+
+on a tree where earlier work had run `cargo test --release` for the M10
+perf gates, `target/release` contained:
+
+```
+pmacs  pmacs-audit  pmacs_fake_lsp  pmacs_fake_mcp  pmacs-gpu
+```
+
+**All three forbidden binaries were present**, left by the earlier test
+build, despite this build naming only two targets. `Swatinem/rust-cache`
+restores exactly this kind of directory in CI, so the risk is not
+theoretical there either.
+
+An implementation that took layer 1 as sufficient and archived
+`target/release` would have published a fake language server in the
+first release. The three archive assertions are bite-verified: a
+smuggled `pmacs_fake_lsp`, a missing `pmacs-gpu`, and a cleared
+executable bit are each caught, with the honest archive passing.
+
+### 1.6a The glibc floor is asserted, not trusted
+
+Acceptance 7 originally proposed verifying the floor by running the
+binary in containers. **The shipped check is stronger and cheaper**:
+read the versioned-symbol requirements straight out of the binary and
+fail the build when any exceeds the floor.
+
+```sh
+objdump -T <binary> | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -uV | tail -1
+```
+
+Why this beats the container test: it runs on **every** release rather
+than once at RC time, it needs no network or images, and it fails at the
+point of causation. Pinning `ubuntu-22.04` sets the floor but proves
+nothing about the artifact — switching the job to `ubuntu-latest` would
+otherwise ship binaries that fail to load with a bare `GLIBC_2.39 not
+found` on a user's machine, with no clue which commit caused it. With
+the assertion, that change fails in CI instead.
+
+Bite-verified in both directions on a glibc 2.44 host, which stands in
+for a mis-pinned runner: against a 2.35 floor both binaries are caught;
+against a 2.44 floor both pass. Linux only — Mach-O has no equivalent
+versioned-symbol scheme.
+
 ### 1.2a Why `pmacs` and `pmacs-gpu` must be co-located — corrected
 
 Revision 1 said separating them makes `--gpu` "silently fail." **That is
@@ -130,6 +202,36 @@ Tagging `v1.1.0` against the tree as it stands would publish a release
 containing a `pmacs` reporting `1.0.0` and a `pmacs-gpu` reporting
 `0.0.1`. **The workflow must refuse rather than publish** (acceptance
 4), and acceptance asserts the *binaries'* output, not the manifests.
+
+### 1.3a The bump exposed a defect: the daemon reported the wrong crate's version
+
+**`InstanceIdentity::for_running_process` is defined in
+`pmacs-protocol` and expanded `env!("CARGO_PKG_VERSION")` there.**
+`env!` expands in the crate being *compiled*, so the field documented as
+"Pmacs version string" carried the **protocol crate's** version.
+
+This is not cosmetic. That identity reaches Lua as
+`pmacs.instance.identity()` and goes on the wire in `Hello`, so every
+attached frontend was told the daemon's version — and after the bump it
+would have been told `1.0.0` by a `1.1.0` release.
+
+**Nothing could have detected it before this stage.** Three tests assert
+`id.pmacs_version == env!("CARGO_PKG_VERSION")` evaluated in the `pmacs`
+crate, which is the correct assertion — but while both crates read
+`1.0.0` they compared the same number reached by two different paths and
+**could not fail**. Q#D1's decision to hold `pmacs-protocol` at 1.0.0
+while moving `pmacs` is what made them discriminating, and all three
+failed immediately on the bump.
+
+The fix makes the version a **parameter**, so the `env!` expands in the
+caller's crate; all three call sites are in `pmacs` and pass their own.
+This is a breaking signature change to a `pub` function in
+`pmacs-protocol`, which stays at 1.0.0 per Q#D1 — acceptable because the
+crate is a path dependency with no external consumers, and recorded here
+rather than silently absorbed.
+
+*A test can be correct and still prove nothing, when the two things it
+compares are equal for a reason unrelated to the code under test.*
 
 ### 1.4 The existing `v1.0.0` tag is stale and is not re-used
 
@@ -257,8 +359,10 @@ change the minimum supported macOS without a commit to point at.
 5. The tagged commit is an ancestor of `main`.
 6. Each artifact is a **CRDT build**, verified by running the shipped
    binary rather than trusting the flag (§1.5).
-7. The Linux binary **runs on Ubuntu 22.04 and Debian 12** — verified in
-   containers — and its glibc floor is stated in the release notes.
+7. The Linux binary honours the **glibc ≥ 2.35** floor, asserted from
+   the binary's own versioned symbols on every release (§1.6a) rather
+   than by a one-off container run, and the floor is stated in the
+   release notes and README.
 8. `SHA256SUMS` covers every published artifact and verifies against the
    downloads.
 9. Release notes carry the runtime dependencies (§1.7), the glibc floor,
