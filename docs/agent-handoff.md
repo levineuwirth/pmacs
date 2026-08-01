@@ -1,6 +1,11 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-08-01 (CI CRDT coverage lane opened on `ci-crdt-coverage`; development moved to the laptop). Previously 2026-07-29, as bottom-panel Stage 2B-3 — the GPU panel
+**Last updated: 2026-08-01, as the CI CRDT coverage lane #209 — the
+first time CI has ever compiled and run the `crdt` half of the test
+corpus, closing a gap that left 279 tests (including a REQUIRED
+`CLAUDE.md` gate) unexecuted for the project's whole life. Development
+moved to the laptop in the same session; the docs absorption #208 sits
+beneath it. Previously 2026-07-29, as bottom-panel Stage 2B-3 — the GPU panel
 band, compatible protocol-v21 activation, and the negotiated
 `panel_capable` flip, completing Arc 7 Stage 2 — opens atop `e003b81`.
 Beneath it, bottom-panel Stage 2B-2 (#187) — the
@@ -60,13 +65,58 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-08-01)
 
-- **`main` @ `cfc1710`.** Nine PRs landed since the previous anchor, in
+- **`main` @ `c5f7501`.** The CI CRDT coverage lane #209 lands atop the
+  docs absorption #208 and `cfc1710`. Beneath that, nine PRs landed in
   this order: the ledger absorption #199, the process-signal diagnostic
   #200, the test ambient-root isolation **framing** #201, the
   reap-ledger diagnostic #202, Journey Stage **1b-1** #203, **1b-2**
   #204 and **1b-3** #205, the ambient-root isolation **implementation**
   #206, and discovery Stage 1 #207. Each has its own bullet below; this
   line is the head-of-`main` anchor and nothing else.
+- **CI runs the CRDT half of the corpus for the first time — #209.**
+  `.github/workflows/ci.yml` had never enabled the `crdt` feature, so
+  every `#[cfg(feature = "crdt")]` test was **not compiled** — not
+  skipped, not filtered, not reported. **279 tests had never executed in
+  CI, 186 of them in the library**, behind the
+  `cargo test --lib --features crdt` invocation `CLAUDE.md` lists as a
+  **required** pre-PR gate: a required gate CI had never run. `Test
+  (crdt)` now runs 3,766 tests, `M10 Perf Gates (crdt)` covers two
+  suites no workflow had named, and `clippy --features crdt` is
+  enforced. **275 of 279 recovered**; the other four are excluded with
+  stated reasons. Five durable facts, each of which contradicted
+  something previously recorded:
+  - **`gpu-render` runs a DIFFERENT PACKAGE** (`cargo test -p
+    pmacs-gpu`) from the root-package GPU suites. The long-recorded fix
+    shape — "move the GPU-requiring crdt suites onto `gpu-render`, it
+    already has lavapipe" — does not work as written. One job covers the
+    whole corpus instead, which also cannot develop the hole splitting
+    invites: a suite added later would otherwise land in the job needing
+    no GPU and skip there forever.
+  - **`PMACS_REQUIRE_GPU` is not uniform.** Present in
+    `vterm_stage3_acceptance` (×2) and `bottom_panel_stage2b_gpu_
+    acceptance` (×1), **absent entirely** from `gpu_invocation_
+    acceptance` and `gpu_initial_target_acceptance`. It cannot serve as
+    blanket proof the GPU suites ran.
+  - **`m10_10_perf` is a CI-default regression tripwire, not a bench.**
+    Its header says its bounds are "generous … to catch catastrophic
+    regressions, not to verify a tight perf claim", so the *absence* of
+    `#[ignore]` is the design. Giving it a perf job would have shipped a
+    coverage reduction inside a coverage lane. Classifying the three
+    `_perf` suites by filename and marker counts got the one whose name
+    disagreed with its purpose exactly backwards.
+  - **`--keep-going` is what turns a clippy run into an inventory.**
+    Clippy abandons remaining targets at the first failure, so any
+    un-`--keep-going` list is a lower bound. The recorded seven-item
+    list was stale in *both* directions: one finding had been fixed
+    incidentally, one was new, and every line number had moved.
+  - **A feature can matter to a crate a per-test census scores as
+    unaffected.** `pmacs-protocol`'s `crdt` feature gates no tests — 17
+    either way — but changes `cfg!(feature = "crdt")` *expressions*
+    inside the capability defaults, so the same tests exercise different
+    runtime values. Worse, the crate's only use of those defaults was a
+    **transport round-trip, which is invariant to the values**: an
+    all-false default passes identically. Running code is not testing
+    it, and that gap survived the first review round.
 - **Two arcs completed in that run, and their lanes are gone from
   `docs/active-work.md` accordingly** (rule 4 removes a lane once its
   arc is done *and* its facts are here): **Journey Stage 1** — 1a plus
@@ -94,14 +144,10 @@ anchor, so every item is startable.
 
 #### Open lanes (branch exists, work not finished)
 
-- **CRDT half of the corpus is dark in CI — PR #209 OPEN, all 14 checks
-  green** (`ci-crdt-coverage`, `docs/ci-crdt-coverage-framing.md` rev 4;
-  opened 2026-08-01, awaiting user review). CI never enabled `crdt`, so
-  those tests were *not compiled*, not merely skipped — including 186
-  library tests behind a **required** `CLAUDE.md` gate CI had never run.
-  The first run reported **3,717 passed / 0 failed / 30 ignored** in
-  `Test (crdt)`, reconciling exactly to the census, so the job is
-  demonstrably not vacuous.
+- **CRDT half of the corpus is dark in CI — FIXED, merged as #209.**
+  Now a lane kept only for three follow-ons (macOS leg, the `--lib
+  --features crdt` flake, the `crdt_replica` serde divergence). See the
+  arc bullet in §1.
   **Re-measure before quoting a number**, and there is now a tool:
   `scripts/feature-census luajit luajit,crdt`. Measured 279 dark at
   `4223dd3`; 275 recovered, 4 excluded with stated reasons. Two
@@ -422,7 +468,7 @@ someone forgot.
     disagree — and it still establishes no identity, because it is read
     inside the same read-then-act window and no portable mechanism closes
     that for a *group* (`pidfd` covers a process; macOS has neither).
-- **Discovery arc (P4) — Stage 1 IMPLEMENTED, PR open**
+- **Discovery arc (P4) — Stage 1 LANDED (#207)**
   (`docs/discovery-stage1-command-family-framing.md`, rev 6, three
   review rounds). Eleven `help.*` commands over the existing registries,
   indexed by `M-x help`. **§5 moves substrate-without-surface →
@@ -453,7 +499,7 @@ someone forgot.
     `src/help.rs:76` and one test. A preservation pin registers a
     *raising* predicate and asserts the command still runs, so a stage
     that starts evaluating must change that pin knowingly.
-- **Journey arc (P1) — Stage 1b-3 IMPLEMENTED, PR open**
+- **Journey arc (P1) — Stage 1b-3 LANDED (#205)**
   (`docs/journey-stage1b3-welcome-framing.md`, rev 4, three review
   rounds). The last of the 1b split. An unconfigured launch greets in
   `*scratch*`; `M-x help` renders a cheat sheet. **§18 and the scorecard

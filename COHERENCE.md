@@ -1609,23 +1609,24 @@ missing runtime entity — a real arc).
 ### Priority 1: Protect the golden product journey
 
 Establish the end-to-end workflow; treat regressions as release
-blockers. **State: runs to step 5; thin from step 6 (§2). Mostly wiring,
-and unusually cheap:** directory-argument handling (**done**: Journey
-Stage 1a); a find-file surface (**done**: #162 open-by-path, #165
-browsing); surfacing the LSP spawn failure with guidance (**done**: Journey Stage
-1b-2, #204, §1.2); a compile keybinding + `cargo build`/`test` default
-(**done**: Journey Stage 1b-1, #203, from the existing
+blockers. **State: Stage 1 COMPLETE — the journey runs to step 10 (§2,
+§0).** Every item this priority originally named is done:
+directory-argument handling (Journey Stage 1a, #182/#183); a find-file
+surface (#162 open-by-path, #165 browsing); surfacing the LSP spawn
+failure with guidance (Stage 1b-2, #204, §1.2); a compile keybinding +
+`cargo build`/`test` default (Stage 1b-1, #203, from the existing
 `ProjectKind::Rust` — **not** `Cargo`, see §24); a terminal keybinding
-(**done**: `C-c t`, #173); a welcome buffer (**in flight**: Journey
-Stage 1b-3). The journey acceptance
-suite (§19) is the ratchet that keeps it fixed — it **exists now**
-(`tests/journey_acceptance.rs`, Stage 1a), seeded with steps 2, 3 and 5,
-and carrying step 9 since #203.
+(`C-c t`, #173); and a welcome buffer (Stage 1b-3, #205). The journey
+acceptance suite (§19) is the ratchet that keeps it fixed —
+`tests/journey_acceptance.rs` carries 45 pins over steps 2, 3, 4, 5, 6
+and 9, and **stages add rows to it, none removes them**.
 
-Journey Stage 1b is the named remainder, and it splits: **1b-1** (the
-compile binding + project-kind defaults) landed as #203 and **1b-2**
-(LSP spawn guidance, step 6) as #204; **1b-3**, the welcome buffer
-(step 4), is in flight and completes the split.
+**The remaining thin end is no longer inside this priority.** Step 1 is
+install, which is **P8**; step 11 is background-work ownership, which is
+§9; step 12 is session restore, where desktop-save is opt-in *and* a
+documented no-op under a daemon. Journey Stage 1 closing is what moves
+this priority's own work to done — what is left is other priorities'
+work showing up in the journey.
 
 ### Priority 2: Make workspace and location explicit
 
@@ -1699,10 +1700,15 @@ implementation — this list is direction, not commitment):
    **Stage 1b-1 — landed (#203)**: the compile binding and project-kind
    defaults, with the prompt capturing its directory rather than
    re-resolving it at accept time. **Stage 1b-2 — landed (#204)**:
-   LSP-failure surfacing. **Stage 1b-3 — in flight**: the welcome
-   buffer and `M-x help`. With it the 1b split is complete.
-2. **Discovery surface** (P4): the describe/list/where-is command
-   family, M-x rich rows, help unification, help prefix.
+   LSP-failure surfacing. **Stage 1b-3 — landed (#205)**: the welcome
+   buffer and `M-x help`. **The 1b split, and with it Journey Stage 1,
+   is COMPLETE.**
+2. **Discovery surface** (P4): **Stage 1 landed (#207)** — the
+   describe/list/where-is family, eleven `help.*` commands indexed by
+   `M-x help`. Remaining: M-x rich rows (a protocol change),
+   title/category on `Command` (~147 sites), predicate evaluation, help
+   unification, and the help prefix — where **`C-h` is not free**, see
+   §18.
 3. **Transient keymap layer** (§6): the overlay scope + lifetime
    handle + derived `dispatch_idle`, then migrate shadows one per PR.
 4. **Extension ownership** (P3): `hook.remove`, owner-carrying

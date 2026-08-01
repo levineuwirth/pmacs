@@ -148,181 +148,62 @@ form. All four steps ran clean. **The two-argument form still does not
 work** for a remote-only branch (`fatal: invalid reference`), which is
 why every lane below spells out the `-b` form.
 
-## CI CRDT coverage lane — **PR #209 OPEN, all 14 checks green**
+## CI CRDT coverage — MERGED (#209); kept for its three follow-ons
 
-**This lane had no branch and no owner from #166 until 2026-08-01.** It
-now has both, and a PR. Framing:
-`docs/ci-crdt-coverage-framing.md` revision 4 (approved at revision 2).
-Branch `ci-crdt-coverage` off `githubsucks/main` @ `4223dd3`, developed
-in the primary checkout on the laptop, not a worktree.
+**Rewritten, not removed.** Rule 4 removes a lane when its ARC is done;
+the coverage itself has landed but three named follow-ons have not.
+Durable facts — the corrections, the traps, the census tool — are in
+`docs/agent-handoff.md` §§1/5 per rule 3, so they are not repeated here.
 
-- **PR: <https://github.com/levineuwirth/pmacs/pull/209>**, opened
-  2026-08-01, awaiting user review. Six commits: `7a9cf5b` clippy,
-  `06abbac` m10-perf-gates, `7a8746d` crdt-test, `a776bc3`
-  feature-census, `57abcd9` docs, plus a review-round commit for the
-  pmacs-protocol gap below.
-- **First CI run: all 14 checks green** (run `30705124856`), including
-  both new jobs — `Test (crdt)` 12m20s and `M10 Perf Gates (crdt)`
-  5m40s — and the macOS/luajit leg that is the usual flake surface.
-  **This was the first time in the project's history that any of these
-  tests executed in CI.**
-- **Acceptance criterion 8 — the count reconciliation — HOLDS against
-  the real run.** `Test (crdt)` reported **3,717 passed / 0 failed / 30
-  ignored**. That is 3,746 (the `--all-targets` census, with
-  `basedpyright` not skipped as it is locally) plus 1 doc test, minus
-  the 30 ignored: 3,716 + 1 = 3,717. The job demonstrably compiled and
-  ran the crdt corpus rather than reporting green over nothing.
-- **Do not compare the two jobs' raw totals.** In the first run
-  `Test (ubuntu/luajit)` reported 3,485 and `Test (crdt)` 3,747 — a
-  difference of 262, not 279, because the jobs ran different *sets*:
-  3,467 + 1 doc + 17 protocol = 3,485, against 3,746 + 1 doc = 3,747.
-  **The dark count is the all-targets comparison, 3,746 − 3,467 = 279.**
-  A reviewer who subtracts job totals gets a wrong number that looks
-  entirely plausible.
-  - **Those two figures are superseded** and are kept only to explain
-    the trap. Round 1 added a pmacs-protocol step to `crdt-test` and
-    round 2 added two capability tests to that crate. The current
-    totals were **predicted from the census and then confirmed exactly**
-    by run `30706324644` @ `71a1ebd`: `Test (crdt)` **3,766**
-    (3,746 + 1 doc + 19 protocol) and `Test (ubuntu/luajit)` **3,487**
-    (3,467 + 1 + 19). Predicting the count *before* the run and matching
-    it is a stronger reading of acceptance 8 than reconciling afterwards.
-  - The root-package census is untouched at 3,467 / 3,746 — the new
-    tests live in a sibling crate, exactly the region
-    `scripts/feature-census` cannot see.
-  - **The macOS legs report 3,474, thirteen fewer than ubuntu's 3,487**,
-    and that is expected: the Linux-gated process tests
-    (`setsid`, the `bash -m` job-control corroboration) are
-    `cfg`-compiled out rather than skipped. Do not read it as macOS
-    coverage loss.
-- **Verify CI by `head_sha`, never by the check summary — it bit again
-  here.** Round 1's run (`30705916037` @ `6519bc3`) was **cancelled**,
-  not green: round 2's push superseded it, which is the concurrency
-  group working as designed. A `gh pr checks` summary polled around that
-  moment reported the *previous* run's results, with plausible timings,
-  and was briefly reported as round 1 passing. The ledger already
-  carried this lesson from #178 ("twelve checks green on head `1b44c69`
-  — verified by `head_sha`, not by the check summary"); it recurs
-  because the wrong answer looks exactly like the right one.
-
-- **Root cause, unchanged:** `.github/workflows/ci.yml` never enabled
-  the `crdt` feature anywhere. Every `#[cfg(feature = "crdt")]` test was
-  therefore **not compiled** in CI, not merely skipped — including the
-  186 library tests behind `cargo test --lib --features crdt`, which
-  `CLAUDE.md` lists as a REQUIRED pre-PR gate. CI had never run a
-  required gate.
-- **Re-measured at `4223dd3`: 3,467 vs 3,746 — 279 dark**, up from the
-  273 recorded at `74301d1`. **Do not quote this number either.** It
-  moves with every merge, and there is now a tool: `scripts/feature-census
-  luajit luajit,crdt` reproduces the whole per-target table, the ignored
-  split, and the zero-test-target count in one command.
-- **The 279 are fully dispositioned; 275 are recovered.** 268 by the new
-  `crdt-test` job, 7 by the new `m10-perf-gates` job, and 4 deliberately
-  excluded: `m10_11_acceptance`'s three PTY-doubled tests (marked
-  operator-invoked before tagging) and the #157 CRDT undo repro, an
-  `#[ignore]`d known-defect marker whose arming belongs to that defect's
-  lane.
-- **The deliberate/accidental classification the old lane text called
-  "the lane's first task" is finished**, and it found THREE dispositions
-  rather than two: benches awaiting a job (`m10_2_perf`,
-  `m10_11_perf`), deliberately-manual operator tests
-  (`m10_11_acceptance`), and known-defect markers. Collapsing the second
-  into the first would have given a CI job to tests whose `#[ignore]`
-  reason says not to.
-- **`m10_10_perf` is NOT a perf gate**, and the framing got this wrong
-  first. Its header says its bounds are "generous ... to catch
-  catastrophic regressions, not to verify a tight perf claim," so its
-  lack of `#[ignore]` is the design. Adding one to give it a job would
-  have shipped a coverage reduction inside a coverage lane. It stays
-  untouched and rides the plain leg.
-- **The clippy obstacle is cleared, and the old inventory was stale in
-  both directions.** `cargo clippy --workspace --all-targets --features
-  crdt` had never passed. The previous seven-item list was correctly
-  labelled "a lower bound, not an inventory" — `--keep-going` is what
-  converts it. The real set was eight findings across four files; the
-  `unneeded mut` at `daemon.rs:4965` had been fixed incidentally, a
-  finding in `bottom_panel_stage2b_gpu_acceptance.rs` was new, and every
-  `daemon.rs` line number had moved.
-- **One job, not two.** The fix-shape recorded here previously put the
-  GPU-requiring suites onto `gpu-render` "which already has lavapipe and
-  PMACS_REQUIRE_GPU". **That job runs `cargo test -p pmacs-gpu` — a
-  different package** from the four root-package suites, so co-locating
-  them means a new invocation rather than an extension. Splitting also
-  requires classifying every future suite as GPU-requiring or not, and a
-  misclassified one skips forever. `crdt-test` installs lavapipe and
-  sets `PMACS_REQUIRE_GPU=1` for the whole corpus instead.
-- **`PMACS_REQUIRE_GPU` is not uniform and cannot serve as blanket
-  proof**: it appears in `vterm_stage3_acceptance` (twice) and
-  `bottom_panel_stage2b_gpu_acceptance` (once), and **not at all** in
-  `gpu_invocation_acceptance` or `gpu_initial_target_acceptance`.
-- **The external-tool install block is deliberately not duplicated.**
-  Measured: it gates `m4_acceptance`, `m6_5_repl_acceptance` and
-  `m6_8_multi_repl_acceptance`, none of which has a single dark test.
-  The only tool-gated code in the dark set is `src/process.rs`, whose
-  two variables need no install.
-- **Crdt clippy runs in `crdt-test`, not the `clippy` job.** The `clippy`
-  job matrixes over Lua flavor and never enables `crdt`, so clearing
-  those lints once would let them drift straight back and the next job
-  to compile them would be red on arrival — the exact state this lane
-  found.
-- **Verification on the laptop (integrated Radeon, 16 threads), all at
-  the exact commands CI runs:** clippy green with and without `crdt`;
-  fmt; diff-check; `--lib` 1,896; `--lib --features crdt` 2,081; doc
-  tests; `m10_2_perf` 6/6 in 79s and `m10_11_perf` 1/1 in 5s under
-  release; and the full serialized sweep with `PMACS_REQUIRE_GPU=1` at
-  **3,715 passed / 0 failed / 30 ignored in 366s**, reconciling exactly
-  to the 3,746 census (3,715 + 30 + 1 basedpyright-skipped). The
-  reconciliation is the point: a sweep that does not reconcile is the
-  a37 vacuum at corpus scale.
-- **What is NOT established, and it is the lane's whole remaining risk:**
-  the sweep is green *serialized on a developer machine*. The failures
-  this lane expects are hosted-runner timing and concurrency — real PTY
-  on CI runners, wgpu under lavapipe, daemon sockets at unfamiliar
-  concurrency. A green local run removes the "tests are wrong"
-  explanation and leaves the expected one untested. **Do not quote it as
-  evidence the CI leg will be green.**
-- **Red-first-run policy, decided:** fix in-lane by default, with one
-  escape hatch keyed on cause class. Lane-configuration failures and
-  locally-reproducing failures are fixed here; an environment-only
-  failure (green locally and on Universum, red only on a hosted runner)
-  becomes a named follow-on rather than an unbounded investigation
-  inside a workflow-config PR. The local green makes that third class
-  the most likely red, which is why the hatch exists.
-- **Universum (7900 XTX, remote) is where the GPU ambiguity settles.**
-  The laptop renders the GPU suites but is thermally constrained, which
-  is the documented condition for a37's "all spaces with nonzero
-  rendered_nonuniform_frames" signature. Universum can establish the
-  tests are sound; it cannot establish that the lavapipe CI job passes.
-
-Recovery from a clean checkout:
-
-```sh
-git fetch githubsucks
-git worktree add ../pmacs-ci-crdt \
-  -b ci-crdt-coverage \
-  githubsucks/ci-crdt-coverage
-```
+- **MERGED as #209** (`main` @ `c5f7501`, 2026-08-01, two review rounds),
+  framing `docs/ci-crdt-coverage-framing.md` revision 5. The lane had sat
+  under "NEEDS A LANE" with no branch and no owner since #166.
+- **CI compiles and runs the CRDT corpus for the first time.**
+  `Test (crdt)` runs **3,766** tests where none ran before;
+  `M10 Perf Gates (crdt)` covers two suites no workflow had ever named;
+  `cargo clippy --features crdt` is enforced going forward rather than
+  being a required local gate that rots in CI. **275 of 279 dark tests
+  recovered**, the other four excluded with stated reasons.
+- Branch `ci-crdt-coverage` retained; it carries nothing unmerged.
 
 ### Still owned by this lane, not yet done
 
+- **The macOS `crdt` leg.** Deliberately ubuntu-only at first, "decide
+  about macOS from evidence." **That evidence now exists** and is
+  favourable: the non-crdt macOS legs pass at 3,474 (thirteen fewer than
+  ubuntu's 3,487 — `cfg`-compilation of the Linux-gated process tests,
+  not lost coverage), and no crdt-specific failure appeared anywhere.
+  This is now a small, decidable addition rather than an open question.
 - **The `--lib --features crdt` flake.**
   `process::tests::setsid_escapee_is_not_reaped_and_teardown_reclaims_readers`
-  failed ~1 run in 5 with `active_reader_probe` returning `None`. **It
-  did not reproduce in this lane's runs** — `--lib --features crdt` was
-  2,081/2,081 and the full serialized sweep was clean — but a
-  non-reproduction under serial execution is consistent with the
-  leading hypothesis rather than evidence against it: the trigger was
-  observed under *parallel* full-suite load, and every run here was
-  `--test-threads=1`. The `drain_until` explanation (draining for
-  `Started` also ticks, and a tick can reap the leader before the
-  following probe) remains an inference from control flow, not a
-  falsified root cause. Discriminating it is its own PR — it is a
-  product-defect hypothesis and everything else here is workflow
-  configuration.
+  failed ~1 run in 5 with `active_reader_probe` returning `None`.
+  **It did not reproduce in #209's runs** — `--lib --features crdt` was
+  2,081/2,081 and the full serialized sweep clean — but that is *not*
+  evidence against the hypothesis: every run was `--test-threads=1` and
+  the trigger was observed under **parallel** full-suite load. The
+  `drain_until` explanation (draining for `Started` also ticks, and a
+  tick can reap the leader before the following probe) remains an
+  inference from control flow, not a falsified root cause. **Its own
+  PR** — a product-defect hypothesis, where everything in #209 was
+  workflow configuration.
+- **`InstanceCapabilities::crdt_replica`'s serde default.**
+  `#[serde(default = "default_true")]` is a *third* default mechanism,
+  unconditional, and therefore disagrees with the `Default` impl in a
+  non-CRDT build. Exercising it needs a self-describing format and
+  `pmacs-protocol`'s only serde dependency is postcard, which is not
+  one. Adding `serde_json` as a dev-dependency to test a divergence
+  #209 did not introduce was refused as scope creep. Parked, not
+  forgotten.
 - **The two unattributed CRDT failures from #178's round-2 gating.** No
   test names were captured, so there is nothing to reproduce.
-- **macOS.** Ubuntu-only first, deliberately; a macOS `crdt` leg is a
-  follow-on decided from the first run's evidence.
+
+Recovery, only if a follow-on needs the branch:
+
+```sh
+git worktree add ../pmacs-ci-crdt \
+  -b ci-crdt-coverage-followup \
+  githubsucks/ci-crdt-coverage
+```
 
 ## Discovery lane (P4) — STAGE 1 MERGED (#207); STAGE 2 IS NEXT
 
