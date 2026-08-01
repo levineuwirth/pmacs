@@ -4,8 +4,15 @@
 "Deferred (named)" section, the handoff §6 consolidated list, the
 `docs/roadmap-2026-07.md` arcs, and a code-level marker sweep
 (src/, builtin/, pmacs-gpu/, pmacs-protocol/). **Updated 2026-07-15:**
-multi-language injections shipped (#122) — item pruned to its remaining
-follow-ups; north star and Jupyter gate revised.
+multi-language injections shipped (#122).
+
+**Pruned 2026-08-01.** This file had drifted six weeks and was listing
+landed work as open — #123 as "PR open" (merged 2026-07-21), #137 as
+"in review" (merged), and HTML/CSS as an unshipped grammar (#146). It is
+the cross-cutting index, so a stale entry here sends someone to build
+something that exists. **`docs/agent-handoff.md` §1a is the authority
+for arc state; this file is the long tail.** Re-check an item here
+against the handoff before starting it.
 
 **Scope.** This is the *side-quest* backlog: self-contained,
 frontend-agnostic-ish work that does **not** belong to the **themes /
@@ -42,13 +49,14 @@ The direct continuation of the #114–#118 grammar/detection stack.
   (`<script>`/`<style>`, template literals, doc-comment code).
 - ~~**Modeline detection**~~ — **SHIPPED as #132.** Bounded Emacs/Vim
   metadata now precedes extension → filetype → filename → shebang inference.
-- **JSON + YAML — PR #123 open.** Grammars and LSP configs exist on the
-  feature line; review fixes are preserved on
-  `json-yaml-handoff-2026-07-20`. A real YAML-through-pmacs smoke,
-  rebase, and full gates remain before review resumes. JSON is also the
-  prerequisite for the notebook path; see `docs/active-work.md`.
+- ~~**JSON + YAML**~~ — **SHIPPED as #123** (merged 2026-07-21).
+  Grammars and LSP configs for both. JSON was the notebook path's
+  prerequisite, so Jupyter is now gated only on its own arc.
+- ~~**HTML + CSS grammars**~~ — **SHIPPED as #146.** They also lit up
+  HTML's `INJECTIONS_QUERY` (`<script>` → js, `<style>` → css), so the
+  injection-consumer follow-up below is partly discharged.
 - **More grammars for languages with neither grammar nor LSP** — ruby,
-  php, html, css, sql, etc.
+  php, sql, etc. (html and css are done; see above).
 - **Grapheme / combining-mark awareness** in the text view
   (`text_view.rs` skips zero-width marks).
 - **Byte-accurate multibyte cursor placement** — `move_active_cursor_to`
@@ -120,7 +128,7 @@ The direct continuation of the #114–#118 grammar/detection stack.
   language-aware indent, per-language comment padding, and per-project
   compile commands — the last three are now ordinary work, expressed as
   a `buffer.after-load` hook calling `set_local`, not blocked work.
-- ~~**Tab-width rendering parity**~~ — **IMPLEMENTED, IN REVIEW AS #137.** One fixed
+- ~~**Tab-width rendering parity**~~ — **SHIPPED as #137.** One fixed
   8-column constant now drives the core/TUI display-column paths, GPU rich-text
   projection, and minimap widths. GPU expansion retains source-tab provenance,
   so caret, hit, selection, and diagnostic geometry remain byte-correct through
@@ -235,14 +243,14 @@ guides (visual, not color).
 
 ## North star (highest-leverage first)
 
-**The original north-star items have shipped or reached review** —
-multi-language injections (#122), the config registry (#127), JSON + YAML
-(#123), mode-system wiring (#129), locals queries (#134), and tab-width
-rendering parity (PR #137, review pending). The remaining board now
-starts with the broader ranked arcs below rather than another unresolved
-cross-frontend rendering invariant.
+**Every original north-star item has now SHIPPED** — multi-language
+injections (#122), the config registry (#127), JSON + YAML (#123),
+mode-system wiring (#129), locals queries (#134), tab-width rendering
+parity (#137), modeline detection (#132), and the HTML/CSS grammars
+(#146) that were named here as the cleanest remaining one-shot.
 
-Beyond those, the cleanest remaining one-shots in the highlight family are the
-HTML/CSS grammars that light up more injection *consumers*; modeline detection
-shipped in #132. The most-missed editing table-stakes remain **word-kills +
-`C-SPC` set-mark**.
+**This file no longer sets direction.** `COHERENCE.md` §20 carries the
+priority order and `docs/agent-handoff.md` §1a carries the board; both
+postdate this document and are audited. What remains here is the long
+tail — genuinely useful, genuinely optional. The most-missed editing
+table-stakes are still **word-kills + `C-SPC` set-mark**.

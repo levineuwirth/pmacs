@@ -1,8 +1,11 @@
 # JSON + YAML grammars — framing (side quest, highlight family)
 
-**Revision 4 — 2026-07-21. Status: PR #123 open and awaiting review;
-the public and checkpoint branches are at fully gated `5c202c5`, rebased
-onto `main` `f8096ff`.**
+**Revision 4 — 2026-07-21. Status: MERGED as #123 on 2026-07-21.**
+*(Status line corrected 2026-08-01: it read "PR #123 open and awaiting
+review" for six weeks after the PR merged. The revision-4 body below is
+the as-reviewed text and is left unedited.)* At review the public and
+checkpoint branches were at fully gated `5c202c5`, rebased onto `main`
+`f8096ff`.
 The JSON provider and Red Hat YAML 1.24.0 have each passed their
 PATH-gated pmacs acceptance, in addition to the deterministic fake-server
 config-push proof and the YAML standalone protocol smoke.
