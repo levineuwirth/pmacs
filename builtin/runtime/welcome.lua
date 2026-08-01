@@ -69,34 +69,6 @@ end
 -- M-x help
 -- ---------------------------------------------------------------------
 --
--- The smallest version of §18's second item, included because the
--- welcome would otherwise point at nothing. It is the ROOT of the
--- eventual family: when the discovery arc adds `help.keys` and friends,
--- `help` stays the index they are reached from, so no rename is owed.
---
--- Renders through `editor.describe-command`'s existing `*help*`
--- mechanism rather than growing a second help surface.
-local function help_text()
-  local lines = {
-    "pmacs help",
-    "",
-    "  M-x                run a command by name",
-  }
-  for _, e in ipairs(pmacs.welcome.entries) do
-    lines[#lines + 1] = string.format("  %-18s %s", e.keys, e.label)
-  end
-  lines[#lines + 1] = ""
-  lines[#lines + 1] = "  M-x editor.describe-command   what a command does"
-  lines[#lines + 1] = "  M-x editor.list-buffers       every open buffer"
-  lines[#lines + 1] = ""
-  lines[#lines + 1] = "The full keymap reference is docs/keybindings.md."
-  return table.concat(lines, "\n") .. "\n"
-end
-
-pmacs.command.define {
-  name = "help",
-  description = "Show the pmacs key and command cheat sheet.",
-  fn = function()
-    pmacs.editor._show_help(help_text())
-  end,
-}
+-- The `help` command itself lives in `runtime/help.lua`, which owns the
+-- whole discovery family and loads after this file so its index can read
+-- `pmacs.welcome.entries` above. This file keeps only the greeting.

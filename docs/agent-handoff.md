@@ -300,6 +300,37 @@ commands, read `docs/active-work.md` immediately after this file.
     disagree — and it still establishes no identity, because it is read
     inside the same read-then-act window and no portable mechanism closes
     that for a *group* (`pidfd` covers a process; macOS has neither).
+- **Discovery arc (P4) — Stage 1 IMPLEMENTED, PR open**
+  (`docs/discovery-stage1-command-family-framing.md`, rev 6, three
+  review rounds). Eleven `help.*` commands over the existing registries,
+  indexed by `M-x help`. **§5 moves substrate-without-surface →
+  Partial.** No Rust: the data was all reachable from Lua, and the
+  settings completion source is a Lua function through
+  `CompletionSource::Custom` — correcting a `default.lua` comment that
+  claimed `source` was a fixed Rust-side vocabulary.
+  - **Completion is assistance, not validation.**
+    `resolve_accepted_value` returns the literal typed text whenever no
+    candidate is selected, so a typo still reaches `on_accept`; and a
+    fuzzy near-miss would silently select a *different* value. Refusing
+    a non-candidate is Rust work, deferred.
+  - **`apropos` is substring, not fuzzy.** `fuzzy_score` is
+    subsequence-based and descriptions are long sentences, so fuzzy
+    matches nearly everything. Pinned by a fixture whose description
+    contains the needle only as a non-contiguous subsequence.
+  - **One owner for `*help*` writes is what the seam buys — not a
+    one-site migration.** `src/help.rs` has renderers for
+    command/key/buffer/mode/hook/view and **none** for settings, lists
+    or apropos, and `_show_help` takes already-flattened text. Rendering
+    is therefore a named per-subject function, so the future Rust work
+    is enumerated per subject (three new renderers) rather than
+    discovered per call site.
+  - **The seam-counting pin caught a real bypass**: the two renamed
+    commands were still calling the file-local `show_help_text`, so the
+    funnel was fiction for exactly the two that predate it.
+  - **`Command.predicate` is still never evaluated** — read only at
+    `src/help.rs:76` and one test. A preservation pin registers a
+    *raising* predicate and asserts the command still runs, so a stage
+    that starts evaluating must change that pin knowingly.
 - **Journey arc (P1) — Stage 1b-3 IMPLEMENTED, PR open**
   (`docs/journey-stage1b3-welcome-framing.md`, rev 4, three review
   rounds). The last of the 1b split. An unconfigured launch greets in

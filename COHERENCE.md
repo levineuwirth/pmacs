@@ -98,7 +98,7 @@ remain open to them.
 | 2 | Golden product journey | **Runs to step 10** | `pmacs .` opens the directory (1a); the interface introduces itself (1b-3); a missing language server says so (1b-2, #204); a build is bound and prefilled (1b-1, #203). Steps 1, 11 and 12 remain the thin end |
 | 3 | Zero-configuration state | **Partial** | Defaults genuinely strong; missing-tool failure is silent, not graceful |
 | 4 | Progressive disclosure | **Inverted** | The advanced level is real; the beginner level is the missing one |
-| 5 | Unified discoverability | **Substrate without surface** | Best-in-class registration metadata; almost no way for a user to reach it |
+| 5 | Unified discoverability | **Partial** | Discovery Stage 1: eleven `help.*` commands (describe key/mode/hook/buffer/command/setting, where-is, list commands/keybindings/settings, apropos) over the existing registries, indexed by `M-x help`. Commands, keys, modes, hooks and settings are now reachable, and `*workers*` already was (`M-x editor.list-workers`); **packages have no comparable surface** (§13), and workers still lack owner/purpose/hierarchy and any indicator (§9). `Command` still has no title/category/flags, M-x rows are still bare names, and the Rust help layer is still orphaned |
 | 6 | Interaction islands | **Weak, and growing** | Six hardcoded key-interception shadows; no transient-keymap mechanism exists |
 | 7 | First-class workspaces | **Missing (conventions only)** | Marker walk + four independent consumers; no workspace object |
 | 8 | Execution locations | **Missing (architecture ready)** | SSH attach works; "location" is not a value anywhere |
@@ -509,9 +509,10 @@ build actions, menus, missing-tool guidance):
 settings, profiles, package management, task definitions,
 frontend/language settings):
 
-- palette △ (`M-x` fuzzy over bare names, §5) · keybinding search ✗ (no
-  list-keybindings/where-is commands) · workspace settings ✗ (no
-  workspace scope, §11) · profiles ✗ (§12) · package management ✗
+- palette △ (`M-x` fuzzy over bare names — the rows are still bare, §5) ·
+  keybinding search ✓ (`help.list-keybindings`, `help.where-is`,
+  `help.describe-key`; still no key to reach them) · workspace settings
+  ✗ (no workspace scope, §11) · profiles ✗ (§12) · package management ✗
   in-session (§13) · task definitions ✗ · frontend customization △
   (themes, `pmacs.gpu.set_font`, statusline providers — all Lua-only) ·
   language settings △ (raw Lua tables, outside the registry).
@@ -523,8 +524,11 @@ orchestrate workers, replace interaction models):
 - inspect ✓ (SourceLocation on everything; no jump-to-source command
   though) · redefine live ✓ (`unregister` + `define`) · packages ✓
   (authoring is real, §13) · new views ✓ (listview is Lua-usable) ·
-  providers ✓ (statusline; completion/minibuffer sources are a fixed
-  Rust vocabulary) · keymap layers ✗ (§6 — the mechanism does not
+  providers ✓ (statusline; and minibuffer completion is **not** a fixed
+  Rust vocabulary — `parse_completion_source` accepts a Lua function as
+  `CompletionSource::Custom`, which is how Discovery Stage 1 gave
+  `help.describe-setting` completion with no Rust at all) · keymap
+  layers ✗ (§6 — the mechanism does not
   exist) · workspace policy ✗ · orchestrate workers △
   (`pmacs.workers.register` funnels into builtin dispatchers, §9) ·
   replace interaction models ✗ (the shadows, §6).
@@ -557,7 +561,27 @@ This suggests a general pmacs principle:
 
 ### Ground truth
 
-**Grade: substrate without surface — the sharpest instance of §1.1.**
+**Grade: partial — Discovery Stage 1 built the first surface.**
+
+Eleven `help.*` commands now render the registries that were already
+there: describe-key/mode/hook/buffer/command/setting, where-is, list
+commands/keybindings/settings, and a substring apropos over names and
+descriptions, indexed by `M-x help`. It needed **no Rust** — the data
+was all reachable from Lua, and even the settings completion source is a
+Lua function through `CompletionSource::Custom`.
+
+**What is still missing** is itemized below and unchanged by that stage:
+`Command` has no title/category/aliases/flags/arg-schema; the predicate
+is still never evaluated; M-x rows are still bare name strings; the Rust
+help layer is still orphaned (Stage 1 funnels every command through one
+Lua seam so the eventual migration is enumerated per subject rather than
+per call site); **packages** have no discovery surface, and workers,
+though `M-x editor.list-workers` opens `*workers*`, still lack the
+ownership model and the activity indicator §9 asks for; settings
+value provenance is still absent; and there is still no help prefix key.
+
+*The original audit grade, for reference:* **substrate without surface —
+the sharpest instance of §1.1.**
 
 **What the substrate already has (genuinely strong):**
 
@@ -609,18 +633,31 @@ This suggests a general pmacs principle:
   `builtin/commands/default.lua:1103-1136` — and the one users can
   actually reach (`M-x editor.describe-command`) renders **less** than
   the unreachable one (no source, no scope, no predicate note).
-- **Missing as commands entirely:** describe-key, describe-mode,
-  describe-hook, describe-buffer, where-is, list-commands,
-  list-settings, list-keybindings, apropos. What exists:
-  `editor.describe-command`, `editor.describe-setting`,
-  `editor.describe-instance[-buffer]`, `editor.list-buffers`,
-  `editor.list-workers`. `M-x describe-setting` prompts **free-text
-  with no completion source** (deliberately skipped —
-  `builtin/commands/default.lua:1180-1185`); a typo yields a status
-  line error.
-- **No help prefix key.** `C-h` is `buffer.delete-word-backward`
-  (`builtin/keymaps/default.lua:86`, with a comment noting the key "was
-  free"). No `F1`, no `C-h k/f/b`.
+- **The command family now exists** (Discovery Stage 1): eleven `help.*`
+  commands — describe-key/mode/hook/buffer/command/setting, where-is,
+  list-commands/keybindings/settings, apropos — indexed by `M-x help`,
+  with `editor.describe-command` / `editor.describe-setting` retained as
+  forwarders. `help.describe-setting` **now completes**, through a Lua
+  function passed as `CompletionSource::Custom`.
+  **What remains missing here:** a discovery surface for **packages**
+  (§13) — `*workers*` already has one, reachable by
+  `M-x editor.list-workers`, though §9's ownership model and activity
+  indicator are still absent — and **no key reaches any of this**: the
+  family is `M-x`-only by design until the help-prefix decision is taken
+  (see the prefix bullet below).
+  *Completion is assistance, not validation:* `resolve_accepted_value`
+  returns the literal typed text when no candidate is selected, so a
+  typo still reaches the handler; refusing a non-candidate is unbuilt
+  Rust work.
+- **No help prefix key**, and `C-h` is **not** available for one.
+  It is `buffer.delete-word-backward` because non-kitty terminals cannot
+  disambiguate Ctrl+Backspace from Ctrl+H — both produce byte 0x08
+  (`builtin/keymaps/default.lua:78-86`), so rebinding it would break
+  Ctrl+Backspace on every legacy terminal. That file's own comment says
+  the key "was free", which reads as an oversight and is not one; §18
+  records the trade. No `F1`, no `C-h k/f/b`. **This is why Discovery
+  Stage 1 shipped the family unbound**: the prefix is one decision for
+  the whole family, not nine.
 - **Settings value provenance is absent.** Overrides are stored as bare
   values (`global: HashMap<String, ConfigValue>`,
   `src/config_registry.rs:693-708`); `describe-setting`'s "Source:" is

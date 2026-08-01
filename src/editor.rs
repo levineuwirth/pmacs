@@ -742,6 +742,16 @@ impl EditorState {
                 include_str!("../builtin/runtime/welcome.lua"),
             )
             .expect("load welcome builtin chunk");
+        // Discovery Stage 1: the help/describe/list family. After
+        // `welcome.lua` so its index can read `pmacs.welcome.entries`,
+        // and after `commands/default.lua` (run by `attach_editor`) for
+        // `pmacs.editor._show_help` and the two commands it forwards to.
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/help.lua"),
+                include_str!("../builtin/runtime/help.lua"),
+            )
+            .expect("load help builtin chunk");
         // T M7.11 bundled-package bootstrap. Through M7.10 the REPL
         // was loaded directly via `eval(include_str!(...))`; the
         // M7.11 deliverable migrates it to the package system so it

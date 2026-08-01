@@ -1,0 +1,546 @@
+# Discovery Stage 1 — the describe/list command family
+
+**Status: framing, rev 6 — final review corrections applied; ready for
+implementation approval.**
+**Serves `COHERENCE.md` §5 (unify discoverability), §1.1 (substrate
+without surface), §20 Priority 4.**
+
+## 0. Revision history
+
+- rev 6 (2026-07-31) — final review corrections applied.
+  - **The second-prompt census now includes `help.describe-command`.**
+    Six of the eleven canonical commands take an argument, not five:
+    `describe-command`, `describe-setting`, `describe-key`,
+    `describe-hook`, `where-is`, and `apropos`. The full M-x driver must
+    accept each command's second prompt before it has tested the command.
+  - **The negative substring pin now has a discriminating fixture.** It
+    registers `test.apropos-subsequence-fixture` with a description whose
+    `qzjx` letters occur only as the non-contiguous sequence `q z j x`, then
+    first asserts that no registered command name or description contains
+    `qzjx` as a substring. `help.apropos qzjx` finding nothing therefore
+    fails under a fuzzy implementation rather than passing as an ordinary
+    no-match.
+  - **The index-property arithmetic follows the eleven-command family.**
+    Its targeted mutation is now adding a twelfth canonical command
+    without indexing it.
+- rev 5 (2026-07-31) — **Q#D2 and Q#D3 answered by the user**; no review
+  findings at `1cc9d96`.
+  - **Q#D2 → `help.*` is canonical, with two forwarders.**
+    `editor.describe-command` and `editor.describe-setting` are renamed
+    to `help.*` and the old names retained as thin forwarders. The
+    family is **eleven** commands under one prefix, so typing `help` at
+    M-x surfaces all of it — which is the arc's entire purpose. The
+    split surface rev 3 flagged as "the one outcome that should not
+    survive review" is gone.
+  - **Q#D3 → `apropos` matches by substring**, stated in its own
+    description. `fuzzy_score` is subsequence-based and descriptions are
+    long sentences, so a short query's letters almost always appear in
+    order — fuzzy would match nearly every command and destroy the
+    precision that makes apropos worth having.
+- rev 4 (2026-07-31) — review round 3. Two factual corrections, both
+  accepted.
+  - **The custom source does not control display order.** Rev 3
+    justified `table.sort` by claiming `Custom` candidates appear in
+    return order; `recompute_candidates` immediately runs
+    `filter_and_sort`, which ranks by fuzzy score and tie-breaks
+    lexically. The sort is kept for a reason that is true — `.take(
+    CANDIDATE_LIMIT)` is applied to the filtered iterator *before* the
+    sort, so pool order decides which candidates survive truncation.
+  - **Read-only would not mitigate the foreign-`*help*` collision.**
+    Rev 3 said it would. A user-created buffer of that name has no
+    intercept of ours; the renderer finds it by name and clears it
+    regardless. The missing guarantee is **ownership identity**, the
+    thing `listview` and dired both have.
+- rev 3 (2026-07-31) — review round 2. Two blocking, two major; all four
+  accepted.
+  - **The ledger lane still said revision 1 and kept refuted claims.**
+    Rev 2's ledger edit **aborted on a failed assertion before writing**,
+    so only one paragraph of it landed while the commit message reported
+    all of it. The lane is rewritten from scratch and the result was
+    verified by re-reading the file, not inferred from an exit code.
+    *(Second occurrence of this failure mode in this project — an
+    assert-then-write block discards every earlier edit in the block.)*
+  - **`names_from` does not exist.** Rev 2's completion source called a
+    helper nobody has written, over `config.list()`'s descriptor
+    **tables** where `Custom` wants a sequence of **strings** — the
+    prompt would have raised on an undefined global the first time it
+    opened. §3.2 now specifies the mapper.
+  - **`*help*` has no read-only intercept.** Rev 2's §3.4 claimed one.
+    `show_help_text` writes with plain `delete`/`insert` and #205
+    recorded that this mechanism has not adopted the generated-buffer
+    write invariant. §3.4 now names the four policies that are actually
+    shared.
+  - **The naming was underspecified.** The nine-command table contains
+    no `help.describe-command`, so calling the `editor.*` commands
+    "aliases-by-retention" was wrong on both halves. They are now stated
+    as explicit exceptions, and Q#D2 is sharpened to the two ways out.
+- rev 2 (2026-07-31) — review round 1. Two blocking, two major; all four
+  accepted, all four verified in the code first.
+  - **Completion does not close the free-text hole**, and rev 1 said it
+    did. `resolve_accepted_value` (`src/minibuffer.rs:564-575`) returns
+    the **literal typed text** whenever `session.selected` is `None`, so
+    a non-matching typo still reaches `on_accept` — and a fuzzy match
+    can instead select a *different* setting silently. Completion here
+    is **assistance**, not validation. §3.2 is reframed and acceptance 5
+    now pins what actually happens; closed-set acceptance is named as
+    Rust work in §5.
+  - **`invoke_interactive` is not the M-x path** — the exact error #205
+    corrected, repeated one PR later. It rotates the interactive-command
+    boundary and calls the body (`mod.rs:6097-6110`); it does not open a
+    palette. The path is **dispatch `M-x` → `editor.execute-command` →
+    accept a command → `invoke_interactive`**. Acceptances 1, 7 and 9
+    are rewritten around it, including the **second** prompt for
+    commands that take an argument.
+  - **`_show_help(text)` is an output sink, not a migration seam.**
+    `src/help.rs` has semantic renderers for command / key / buffer /
+    mode / hook / view and **none** for settings, lists or apropos, so
+    once Lua has flattened those to text a later migration still has to
+    change each command's subject-specific logic. §3.4's claim is
+    narrowed to what is true — one owner for Lua `*help*` writes — and
+    §3.4a states the structure that makes the future Rust work
+    per-subject rather than per-call-site.
+  - **Ground-truth and counting errors.** §2.2 listed eight missing
+    commands and omitted `list-settings` while §3.1 listed nine; §2.5's
+    "two sites into ten" should have been eleven; `pmacs.keymap.lookup`
+    does **not** return `description` (it calls `key_info_table` with
+    `cmd = None`, `mod.rs:6938-6940`); and the `has_predicate` /
+    raw-predicate sites rev 1 cited are **`MenuItem` fields**, not
+    `Command.predicate`. The predicate conclusion survives on correct
+    evidence (§2.4).
+- rev 1 (2026-07-31) — first framing. Scouted against `githubsucks/main`
+  @ `54a092e` (Journey Stage 1b-3, #205).
+
+## 1. Why this, and why now
+
+`COHERENCE.md` §20 Priority 4 calls unified discovery **"almost pure
+wiring — the best payoff-per-effort in this document"**, and §5 grades
+it *"substrate without surface — the sharpest instance of §1.1"*.
+
+Journey Stage 1b-3 (#205) just landed `M-x help` and documented it as
+**the root of this family**: *"when the discovery arc adds `help.keys`
+and friends, `help` stays the index they are reached from, so no rename
+is owed."* This stage is that family. It also inherits 1b-3's deferred
+question — the help prefix — with the constraint already recorded (§6).
+
+Two journey steps are graded *works but undiscoverable* and move here
+without any new machinery: step 7 (symbol search — `M-.`/`M-?`/`C-c o`
+bound but "advertised nowhere") and step 11 (`*workers*` — "no
+keybinding, no indicator").
+
+## 2. Ground truth
+
+Read in the tree at `54a092e`. **The substrate is already there**; this
+stage adds no Rust.
+
+### 2.1 What Lua can already ask
+
+| Surface | Returns |
+|---|---|
+| `pmacs.command.list()` | every command name |
+| `pmacs.describe.command(name)` | description, source, **`key_bindings`** (where-is, computed on demand) |
+| `pmacs.describe.key(seq)` | resolved against the **active buffer + major mode** |
+| `pmacs.describe.{buffer,view,mode,hook}` | structured tables |
+| `pmacs.keymap.list()` | `{ sequence, command, scope }` for **every** binding, via `KeymapStack::iter_all` |
+| `pmacs.keymap.lookup(seq)` | `{ sequence, command, scope, source }` — **not** `description`: it calls `key_info_table` with `cmd = None` (`mod.rs:6938-6940`), so the description arm never fires |
+| `pmacs.config.list()` / `pmacs.config.describe(name, buf)` | full typed descriptors |
+
+Every one of the commands in §3 is a rendering of data already
+reachable, and `CompletionSource::Custom(Function)` means even the
+prompts need no new Rust (§3.2). **This stage adds no Rust at all.**
+
+That is what "pure wiring" means here, and it is worth stating precisely
+so the stage is not oversold: **the work is surface, and the risk is in
+what the surface leaves out.**
+
+### 2.2 What exists as a command today
+
+`editor.describe-command`, `editor.describe-setting`,
+`editor.describe-instance[-buffer]`, `editor.list-buffers`,
+`editor.list-workers`, and `help` (#205).
+
+**Missing entirely — nine, matching §3.1 exactly:** describe-key,
+describe-mode, describe-hook, describe-buffer, where-is, list-commands,
+list-keybindings, **list-settings**, apropos. (Rev 1 listed eight here
+and nine in §3.1.)
+
+### 2.3 `describe-setting` prompts free-text, deliberately
+
+```lua
+-- builtin/commands/default.lua
+pmacs.minibuffer.read {
+  prompt = "Describe setting: ",
+  history = "command",          -- note: no `source`
+  on_accept = function(name) … end,
+```
+
+A typo yields a status-line error. `describe-command` **does** pass
+`source = "commands"`. The asymmetry is real and this stage closes it
+(§3.2) — but note *why* it was skipped: dired's `C-x d` records that a
+completion source makes RET-on-empty accept whatever sorts first, and a
+selected candidate shadows typed text. That is a genuine trade, not an
+oversight, so §3.2 says what changes about it.
+
+### 2.4 `Command.predicate` is stored, exposed, and never evaluated
+
+`predicate: Option<Function>` (`src/command.rs:79`) is read in exactly
+**two** places: `src/help.rs:76` — inside the orphaned renderer — and one
+assertion past `#[cfg(test)]`. No production call site *evaluates* it:
+not `invoke`, not `invoke_interactive`, not dispatch, not M-x filtering,
+not the menu. Its doc comment describes palette gray-out that never
+shipped (§24 already logs this).
+
+*(Rev 1 cited `mod.rs:6204` / `:6257` as evidence. Those are
+**`MenuItem`** fields — `item.label`, `item.group`, `item.order`,
+`item.predicate` — a different type with its own predicate. The
+conclusion held; the evidence did not.)*
+
+**This stage does not evaluate it either** (§5), because doing so makes
+commands stop being invocable — a behaviour change needing its own
+decision about what "unavailable" means at each call site.
+
+### 2.5 The help layer is duplicated, and this stage would deepen it
+
+`src/help.rs` has `render_command` / `render_key` / `render_buffer` /
+`render_mode` / `render_hook` / `render_view` plus link resolution, and
+is **orphaned** — the reachable renderer is the Lua `show_help_text`,
+which renders *less* (no source, no scope).
+
+**Eleven commands each calling `show_help_text` directly would make it
+an eleven-site migration** (nine new, plus the two renamed ones that
+call it today). §3.4 is the answer, and it is the
+most consequential decision in this framing — but §3.4 is careful about
+what it can actually promise, because `src/help.rs` has renderers for
+command / key / buffer / mode / hook / view and **none for settings,
+lists, or apropos**.
+
+## 3. Design
+
+### 3.1 The family — eleven commands under one prefix
+
+**Nine new**, all rendering data that already exists:
+
+| Command | Reads |
+|---|---|
+| `help.describe-key` | `pmacs.describe.key` — prompts for a chord, resolved against the active buffer + mode |
+| `help.describe-mode` | `pmacs.describe.mode` for the active buffer |
+| `help.describe-buffer` | `pmacs.describe.buffer` |
+| `help.describe-hook` | `pmacs.describe.hook` |
+| `help.where-is` | `describe.command(name).key_bindings` |
+| `help.list-commands` | `command.list()` + each description |
+| `help.list-keybindings` | `keymap.list()`, grouped by scope |
+| `help.list-settings` | `config.list()` |
+| `help.apropos` | **substring** over names and descriptions (Q#D3) |
+
+**Two renamed**, so the family is not split:
+
+| Command | Was |
+|---|---|
+| `help.describe-command` | `editor.describe-command` |
+| `help.describe-setting` | `editor.describe-setting` |
+
+**Naming — decided (Q#D2).** `help.*` is canonical. #205 established
+`help` as the index, so the family it indexes shares its prefix, and
+typing `help` at M-x now surfaces the whole family rather than only the
+index. That grouping *is* the discoverability win this arc exists for.
+
+**The two old names become forwarders, not exceptions.**
+`editor.describe-command` and `editor.describe-setting` remain
+registered and invoke their `help.*` counterparts, so nothing a user has
+in muscle memory or that `docs/keybindings.md` names stops working.
+
+Two forwarders are a real, bounded cost — two names for one thing is the
+duplication §5 complains about. They are accepted because the
+alternative is breaking documented commands, and they carry a
+deprecation path a later stage can take. **What is not accepted is a
+split family**, which is what rev 3 shipped and rev 5 removes.
+
+### 3.2 `describe-setting` gains completion — which is assistance, not validation
+
+Rev 1 claimed a completion source means "a typo cannot reach
+`on_accept`". **It does not.**
+
+```rust
+// src/minibuffer.rs:564-575
+fn resolve_accepted_value(session: &MinibufferSession, typed: &str) -> String {
+    if matches!(session.source, CompletionSource::None) { return typed.to_owned(); }
+    if let Some(idx) = session.selected
+        && let Some(cand) = session.candidates.get(idx) { return cand.clone(); }
+    typed.to_owned()          // <-- no selection: the literal typed text
+}
+```
+
+So with a source attached there are **two** outcomes rev 1 conflated:
+
+- **No candidate selected** (a typo matching nothing) → the literal text
+  reaches `on_accept`, exactly as today, and the existing
+  `no such setting: <name>` status path handles it.
+- **A candidate selected** → that candidate wins over the typed text. On
+  a fuzzy source a near-miss can therefore **silently describe a
+  different setting** — a new failure mode, milder than the old one but
+  not nothing.
+
+What the source genuinely buys is *assistance*: the closed set is
+visible and reachable by completion instead of having to be known. That
+is worth doing and is what §3.1 promises. **Closed-set acceptance
+semantics — "refuse a value that is not a candidate" — is Rust work**
+(`resolve_accepted_value` and a per-session flag) and is deferred to
+§5 rather than smuggled in as a side effect.
+
+**Still no Rust in this stage**, but the source needs a mapper.
+`parse_completion_source` (`mod.rs:14145-14165`) accepts `none` /
+`commands` / `buffers` / `files` **and a Lua `Function`** →
+`CompletionSource::Custom`, and `Custom` consumes a **sequence of
+strings**. `pmacs.config.list()` returns descriptor **tables**, so
+handing it over directly would not typecheck — and rev 1 wrote
+`names_from(...)`, **a helper that does not exist**; the prompt would
+have raised on an undefined global the first time it opened.
+
+The mapper is three lines and belongs to this stage:
+
+```lua
+source = function()
+  local names = {}
+  for _, d in ipairs(pmacs.config.list()) do names[#names + 1] = d.name end
+  table.sort(names)
+  return names
+end,
+```
+
+Sorted for **deterministic pool construction**, not for display order —
+rev 2's stated reason was false. `recompute_candidates` hands the pool
+straight to `filter_and_sort`, which ranks by fuzzy score descending and
+breaks ties lexically (`src/minibuffer.rs:672-680`), so what the source
+returns never reaches the user in that order.
+
+The sort still earns its place, for a subtler reason: `filter_and_sort`
+applies `.take(CANDIDATE_LIMIT)` to the **filtered** iterator *before*
+sorting, so when more than `CANDIDATE_LIMIT` settings match a needle,
+**pool order decides which ones survive truncation**. Registration
+order would make that selection vary with an unrelated config edit;
+sorting makes it reproducible.
+
+### 3.3 `M-x help` becomes the index
+
+#205 shipped `help` as a static cheat sheet. It now lists the family
+above, so the arc's own promise — *`help` stays the index they are
+reached from* — is kept rather than merely restated.
+
+### 3.4 One owner for Lua `*help*` writes — the honest version of the claim
+
+Every new command renders through **`pmacs.editor._show_help`** — the
+seam #205 added — and **not** by calling `show_help_text` directly or
+building its own buffer.
+
+**What that buys, precisely: one owner for `*help*` writes.** Four
+shared policies get decided in one place instead of eleven:
+
+- **reuse-by-name** — a single `*help*` buffer found by name and reused
+  across invocations;
+- **wholesale replacement** — `buf:delete(0, len)` then `buf:insert(0,
+  text)`, never a diff, because `*help*` is reflowed per subject;
+- the **`q` binding**, rebound per fresh buffer;
+- the **foreign-`*help*` hazard** — `find_or_create_help_buffer` matches
+  on the *name*, so a user's own buffer called `*help*` is adopted and
+  cleared.
+
+**`*help*` is ordinary editable content.** Rev 1 wrote "the read-only
+intercept"; there isn't one. `show_help_text` writes with plain
+`delete`/`insert`, the buffer keeps its undo history, and #205 already
+recorded that this mechanism has **not** adopted the generated-buffer
+write invariant.
+
+**And read-only would not fix the fourth policy either** — rev 2 implied
+it would. A buffer the *user* created and named `*help*` carries no
+intercept of ours, so an intercept on the buffers we create protects
+nothing: the renderer still finds theirs by name and clears it. The
+missing protection is **ownership identity** — a private table of
+buffers this module created, so found-by-name is not adoption — which
+is exactly what `listview` (`panels`) and dired (its handle table) both
+carry and this mechanism does not. Naming the right missing guarantee
+matters, because the wrong one would send a later fix at the wrong
+layer.
+
+**What it does not buy, and rev 1 claimed it did:** a one-site migration
+to `src/help.rs`. That layer has semantic renderers for **command, key,
+buffer, mode, hook and view** — and **none for settings, lists, or
+apropos**. `_show_help` takes *already-flattened text*, so by the time a
+subject reaches it the structure a richer renderer would need is gone.
+A later migration still has to change each command's subject-specific
+logic; the seam saves the plumbing, not the semantics.
+
+### 3.4a The structure that makes the future work per-subject
+
+So the funnel is paired with a shape that keeps the semantics
+addressable: each command's rendering is a **named per-subject
+function** returning text — `render_key_help(info)`,
+`render_settings_list(rows)` — and the command body does nothing but
+call it and hand the result to `_show_help`.
+
+Then the future help-unification stage is: replace each named renderer
+whose subject `src/help.rs` already covers (key, mode, hook, buffer),
+and **write new Rust renderers for the three subjects it does not
+cover** (settings, lists, apropos). That work is enumerated here rather
+than discovered later, which is the actual deliverable of this section.
+
+**Corollary this stage must respect:** where the Lua renderer is poorer
+than `src/help.rs` for a subject it *does* cover (no source, no scope),
+the new commands render the poorer form rather than inventing a third
+shape.
+
+## 4. Acceptance
+
+**N** = new behaviour, must fail on full revert. **P** = preservation,
+falsified by a named mutation.
+
+### 4.0 The M-x path, stated once
+
+Rev 1 said "driven through `pmacs.command.invoke_interactive` (the M-x
+path)". **That is not the M-x path**, and #205 established as much one
+PR earlier. `invoke_interactive` rotates the interactive-command
+boundary and calls the body (`mod.rs:6097-6110`); it opens no palette.
+
+Every pin below that claims to exercise a command as a user does drives:
+
+```
+dispatch M-x
+  → editor.execute-command opens the minibuffer (source = "commands")
+  → type the command name
+  → assert pmacs.minibuffer.selected() == "<name>"     -- BEFORE RET
+  → dispatch RET                                        -- accept
+  → editor.execute-command calls invoke_interactive
+```
+
+The pre-RET assertion is not decoration: `accept()` does
+`session.take()`, so afterwards nothing about the accepted value
+survives, and a selected candidate shadows typed text.
+
+**Six of the eleven canonical commands take an argument and open a SECOND
+prompt** (`describe-command`, `describe-setting`, `describe-key`,
+`describe-hook`, `where-is`, `apropos`). Those pins drive that prompt too,
+and assert against it with the same pre-accept discipline. A pin that stops
+after the first RET has tested the palette, not the command.
+
+### 4.1 Pins
+
+1. **N — each of the eleven commands runs from M-x and renders
+   content.** Through §4.0's full path, including the second prompt
+   where the command takes one. Asserts **content produced** in
+   `*help*`.
+2. **N — `where-is` agrees with the keymap.** Bind a command to a known
+   chord, then assert `where-is` reports that chord. Falsified by
+   rendering a static string.
+3. **N — `list-keybindings` covers every binding `keymap.list()`
+   reports.** A property over the data, with a non-empty precondition so
+   the loop cannot be vacuous.
+4. **N — `apropos` matches descriptions, not only names, and does so by
+   substring.** Two assertions: a word appearing in exactly one
+   command's *description* and no command *name* finds that command
+   (what distinguishes apropos from a name filter); and a deliberately
+   discriminating negative: register
+   `test.apropos-subsequence-fixture`, whose description's `qzjx` letters
+   occur only as the non-contiguous sequence `q z j x`, assert that **no**
+   registered command name or description contains `qzjx` as a substring,
+   then assert `help.apropos qzjx` finds **nothing**. A fuzzy implementation
+   finds the fixture, so this pins Q#D3's substring decision rather than
+   passing as an ordinary no-match.
+5. **N — `describe-setting` completes, and a non-matching typo still
+   reaches the existing error path.** Two assertions, because §3.2 has
+   two outcomes: (a) typing a real setting's prefix makes it the
+   selected candidate, and accepting describes it; (b) typing a string
+   that matches **nothing** leaves `selected()` nil, and accepting
+   produces the `no such setting` status — **not** a described setting.
+   *Rev 1 asserted a typo "cannot reach `on_accept`", which
+   `resolve_accepted_value` contradicts.*
+6. **N — `M-x help` lists the family.** A property over the family list,
+   so adding a twelfth canonical command without indexing it fails.
+7. **P — every command's `*help*` write goes through `_show_help`.**
+   Replace that function with a counting stub, drive all **eleven**
+   through §4.0's path, and assert the count equals eleven. Pins §3.4's
+   *actual* claim — one owner for `*help*` writes — rather than the
+   migration claim rev 1 overstated. The two renamed commands are in the
+   count precisely because they were the pre-existing direct callers.
+8. **P — the old names still work, as forwarders.** Invoke
+   `editor.describe-command` and `editor.describe-setting` through
+   §4.0's M-x path and assert they render the same subject as their
+   `help.*` counterparts. `editor.list-buffers` and
+   `editor.list-workers` are untouched and asserted unchanged.
+   Targeted mutation: dropping the forwarders after the rename — which
+   is the failure a user with muscle memory would hit first.
+9. **P — no command's predicate is evaluated.** Register a command whose
+   predicate **raises**, then run it through §4.0's full M-x path and
+   assert it **runs**. Pins §2.4's deliberate non-change, so a stage
+   that starts evaluating predicates must change this pin knowingly.
+   Driven through the palette, not `invoke_interactive` directly —
+   otherwise it would pass even if M-x grew predicate filtering.
+
+## 5. Deferred, each with its reason
+
+- **Richer M-x rows.** `MinibufferPrompt.candidates` is `Vec<String>` on
+  the wire; `CompletionPopupRow` already carries `kind`/`detail`, so the
+  pattern exists — but it is a **protocol change** and belongs to its
+  own stage with a version bump.
+- **`Command` gaining title/category/aliases/flags/arg-schema.** A Rust
+  type change with ~147 definition sites; own stage.
+- **Predicate evaluation** (§2.4) — a behaviour change.
+- **Help-layer unification.** The reason §3.4 exists; own stage, made
+  cheaper by this one rather than harder.
+- **A help prefix key.** #205 recorded the constraint in §18: `C-h`
+  deletes a word because non-kitty terminals cannot disambiguate
+  Ctrl+Backspace from Ctrl+H. This stage adds **no keybindings at all**,
+  so the prefix decision is taken once, for the whole family, by the
+  stage that can weigh `F1` / `C-c ?` / a rebind together.
+- **Settings value provenance** (§11) — `describe-setting` will still
+  answer "who set this?" with the *definition* site.
+- **Closed-set acceptance semantics** (§3.2). Making a prompt *refuse* a
+  value that is not a candidate needs `resolve_accepted_value` and a
+  per-session flag — Rust, and a change every existing prompt with a
+  source would inherit. Named here because rev 1 claimed this stage
+  delivered it as a side effect of adding completion.
+
+## 6. Coherence impact
+
+- **Journey steps touched:** 7 and 11, both graded *works but
+  undiscoverable*; this makes the existing bindings and the `*workers*`
+  view reachable by name. No step's grade flips on this stage alone —
+  both also want keybindings, which §5 defers.
+- **§5's grade moves** from "substrate without surface" toward Partial:
+  the surface exists for commands, keys, modes, hooks and settings; it
+  does not yet exist for packages or workers (§13, §9). **That is a
+  §25 obligation on the landing PR.**
+- **Interaction islands: none added.** Everything renders into the one
+  `*help*` buffer through the one seam (§3.4) — this stage's main job
+  is to *avoid* becoming the next island.
+- **Config registry: not adopted.** Nothing here is a tunable.
+- **Background-work attribution:** unchanged.
+
+## 7. Questions — decided
+
+- **Q#D2 — `help.*` or `editor.*`? → `help.*` canonical, with two
+  forwarders.** Eleven commands under one prefix, so typing `help` at
+  M-x surfaces the family. `editor.describe-command` /
+  `editor.describe-setting` keep working as forwarders. The split
+  surface rev 3 flagged is gone; the forwarders' duplication is the
+  accepted, bounded price of not breaking documented names.
+- **Q#D3 — should `apropos` fuzzy-match? → No, substring.**
+  `fuzzy_score` is subsequence-based and descriptions are long
+  sentences, so a short query's letters almost always appear in order —
+  fuzzy would match nearly every command. Substring is stated in the
+  command's own description, and acceptance 4 pins it with a
+  subsequence-that-is-not-a-substring finding nothing.
+
+## 8. Ledger
+
+Branch `discovery-stage1-commands`, worktree `../pmacs-p4-discovery`,
+based on `githubsucks/main` @ `54a092e`. Framing only; no code, no PR.
+
+A sibling lane (`test-ambient-isolation-impl`) is in flight in another
+worktree and touches `src/editor.rs` and `tests/`. This lane is
+`builtin/` plus its own suite, so the surfaces are disjoint; integrate
+`main` late regardless.
+
+```sh
+git fetch githubsucks
+git worktree add ../pmacs-p4-discovery \
+  -b discovery-stage1-commands \
+  githubsucks/discovery-stage1-commands
+```

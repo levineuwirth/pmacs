@@ -380,6 +380,106 @@ which would have re-conflicted on every merge.
     githubsucks/journey-stage1b3-welcome
   ```
 
+## Discovery Stage 1 (P4) — IMPLEMENTED, PR OPEN
+
+- **Branch `discovery-stage1-commands`**, worktree `../pmacs-p4-discovery`,
+  based on `githubsucks/main` @ `54a092e`. **Implemented; PR open.**
+  `docs/discovery-stage1-command-family-framing.md` revision 6,
+  three review rounds closed (round 1: two blocking, two major; round 2:
+  two blocking, two major; round 3: two factual corrections; all
+  accepted), Q#D2 / Q#D3 decided by the user, and the final review's
+  acceptance corrections applied.
+- **What it is.** `COHERENCE.md` §20 Priority 4 — "almost pure wiring,
+  the best payoff-per-effort in this document". **Eleven commands under
+  one `help.*` prefix**: nine new (describe-key/mode/hook/buffer,
+  where-is, list-commands, list-keybindings, list-settings, apropos)
+  plus `editor.describe-command` / `editor.describe-setting` renamed,
+  with the old names retained as **forwarders** so nothing documented
+  breaks. Typing `help` at M-x surfaces the whole family, which is the
+  discoverability win the arc exists for (Q#D2).
+- **`apropos` matches by SUBSTRING, not fuzzy** (Q#D3). `fuzzy_score`
+  is subsequence-based and descriptions are long sentences, so fuzzy
+  would match nearly every command. Pinned by a
+  `test.apropos-subsequence-fixture` whose `qzjx` letters occur as `q z
+  j x`, only after asserting no registered name or description contains
+  `qzjx` as a substring; it must find nothing, whereas fuzzy finds the
+  fixture.
+- **It adds no Rust.** `pmacs.describe.*`, `pmacs.keymap.list()`,
+  `pmacs.command.list()` and `pmacs.config.list()` already return
+  everything needed, and `parse_completion_source` accepts a **Lua
+  `Function`** (`CompletionSource::Custom`), so even the prompts need no
+  new Rust.
+- **Completion is ASSISTANCE, not validation.**
+  `resolve_accepted_value` returns the **literal typed text** whenever
+  no candidate is selected, so a non-matching typo still reaches
+  `on_accept` and the existing error path — and a fuzzy near-miss can
+  silently describe a *different* setting, a new failure mode.
+  Closed-set acceptance ("refuse a non-candidate") is Rust work and is
+  deferred. The custom source needs a **mapper**: `config.list()`
+  yields descriptor *tables* while `Custom` consumes a sequence of
+  strings. **It does not control display order** —
+  `recompute_candidates` runs `filter_and_sort` (fuzzy score, lexical
+  tiebreak); sorting the pool matters only because `.take(
+  CANDIDATE_LIMIT)` runs *before* the sort, so pool order decides which
+  candidates survive truncation.
+- **`invoke_interactive` is NOT the M-x path** — the error #205
+  corrected, repeated one PR later. The path is dispatch `M-x` →
+  `editor.execute-command` → assert the selected candidate **before**
+  RET (`accept()` does `session.take()`) → accept → `invoke_interactive`.
+  Six of the eleven canonical commands (`help.describe-command`,
+  `help.describe-setting`, `help.describe-key`, `help.describe-hook`,
+  `help.where-is`, and `help.apropos`) open a **second** prompt the pins
+  must drive too; a pin that stops after the first RET has tested the
+  palette.
+- **One owner for `*help*` writes — NOT a one-site migration.**
+  `src/help.rs` has semantic renderers for command/key/buffer/mode/
+  hook/view and **none for settings, lists or apropos**, and
+  `_show_help` takes already-flattened text, so a later migration still
+  changes each command's subject-specific logic. What the funnel buys is
+  the shared policy in one place: reuse-by-name, wholesale
+  delete+insert, the `q` binding, and the foreign-`*help*` hazard.
+  **`*help*` is ordinary editable content** — no read-only intercept, no
+  generated-content invariant. And read-only would **not** fix the
+  foreign-buffer hazard either: a user's own `*help*` carries no
+  intercept of ours, so the renderer still finds it by name and clears
+  it. The missing guarantee is **ownership identity**, which `listview`
+  and dired both carry and this mechanism does not. Each command's rendering
+  is a named per-subject function so the future Rust work is enumerated
+  per-subject (three new renderers) rather than discovered per-call-site.
+- **Deliberately deferred, each with a reason:** richer M-x rows
+  (`MinibufferPrompt.candidates` is `Vec<String>` — protocol change);
+  `Command` gaining title/category/flags (~147 definition sites);
+  predicate evaluation (**read only at `src/help.rs:76` and one test** —
+  a behaviour change); help-layer unification; closed-set acceptance;
+  and the **help prefix key**, which this stage does not touch because
+  #205 recorded why `C-h` is not free.
+- **Implementation notes.** `runtime/help.lua` is new and owns the
+  family plus the `help` index, which **moved out of `welcome.lua`** so
+  the greeting file keeps only the greeting; it loads after welcome.lua
+  so the index can read `pmacs.welcome.entries`.
+- **The seam-counting pin caught a real bypass immediately.** The two
+  renamed commands were still calling the file-local `show_help_text`,
+  so the funnel the framing promised was fiction for exactly the two
+  commands that predate the seam. They now call
+  `pmacs.editor._show_help`, with a comment saying why the in-scope
+  local is deliberately not used.
+- **Bites, all directed** — six mutations, each failing exactly one pin:
+  fuzzy apropos, name-only apropos, static where-is, a dropped
+  forwarder, an unindexed family command, and one command writing
+  `*help*` itself (seam count 10 vs 11).
+- **§5 moves substrate-without-surface → Partial ON THIS PR** per §25,
+  with the remaining gaps named in the row: packages and workers have no
+  surface, `Command` still lacks title/category/flags, M-x rows are bare
+  names, and the Rust help layer is still orphaned.
+- Recovery:
+
+  ```sh
+  git fetch githubsucks
+  git worktree add ../pmacs-p4-discovery \
+    -b discovery-stage1-commands \
+    githubsucks/discovery-stage1-commands
+  ```
+
 ## Generated-buffer immutability lane (Arc: workbench primitives) — STAGE 1 MERGED; STAGE 2 IS NEXT
 
 **Framing #188 (revision 7) and Stage 1 #191 are both on `main` @

@@ -189,8 +189,26 @@ Source: `builtin/runtime/compile.lua`.
 | `M-!` | `shell.command` — asynchronous output in `*shell-command*` |
 | `C-c c` | `compile.run` — prompts, prefilled from the detected project kind |
 
-`M-x help` renders this file's essentials as a `*help*` buffer inside
-the editor, and is what the startup welcome points at. It is the root of
+`M-x help` is the **index of the discovery family**, rendered as a
+`*help*` buffer inside the editor, and is what the startup welcome
+points at. The family — all reachable by name, none bound to a key:
+
+| Command | Shows |
+|---|---|
+| `help.describe-command` | a command's description and bindings |
+| `help.describe-setting` | a setting's type, default, effective value |
+| `help.describe-key` | what a chord runs in **this** buffer |
+| `help.describe-mode` | the active buffer's major mode |
+| `help.describe-buffer` | the active buffer |
+| `help.describe-hook` | a hook and its listeners |
+| `help.where-is` | which keys run a command |
+| `help.list-commands` | every command with its description |
+| `help.list-keybindings` | every binding, grouped by scope |
+| `help.list-settings` | every registered setting |
+| `help.apropos` | substring search over names **and** descriptions |
+
+`editor.describe-command` and `editor.describe-setting` still work as
+deprecated aliases of their `help.*` counterparts. It is the root of
 the eventual help family (`help.keys` and friends arrive with the
 discovery arc), so it takes no keybinding yet — `C-h` is **not** free:
 it deletes a word because non-kitty terminals cannot tell Ctrl+Backspace

@@ -1274,7 +1274,15 @@ function pmacs.editor._show_help(text)
   show_help_text(text)
 end
 
-cmd { name = "editor.describe-command",
+-- The two family commands below call `pmacs.editor._show_help`, NOT the
+-- local `show_help_text`, even though they are in the same file and the
+-- local is in scope. That is deliberate: discovery Stage 1's funnel
+-- ("one owner for `*help*` writes") is only real if every command goes
+-- through the PUBLIC seam — a command calling the local bypasses any
+-- later change made at the seam, and bypassed the acceptance pin that
+-- counts seam calls, which is how this was caught.
+
+cmd { name = "help.describe-command",
       description = "Prompt for a command name and render its description in *help*.",
       fn = function()
         pmacs.minibuffer.read {
@@ -1303,7 +1311,7 @@ cmd { name = "editor.describe-command",
                 lines[#lines + 1] = "  " .. tostring(seq)
               end
             end
-            show_help_text(table.concat(lines, "\n"))
+            pmacs.editor._show_help(table.concat(lines, "\n"))
           end,
         }
       end }
@@ -1315,12 +1323,17 @@ cmd { name = "editor.describe-command",
 -- way in, modeled on `editor.describe-command` directly above and sharing
 -- its `*help*` buffer handling.
 --
--- The prompt takes free text: `pmacs.minibuffer.read`'s `source` is a
--- fixed vocabulary ("commands", "buffers") resolved in Rust, and adding a
--- settings source means touching the minibuffer candidate machinery,
--- which this arc deliberately stays out of. `pmacs.config.list()` is the
--- programmatic way to enumerate names meanwhile; a completion source (and
--- an M-x list-settings panel) are named deferrals in the framing.
+-- The prompt now completes. That comment used to say `source` is "a fixed
+-- vocabulary ("commands", "buffers") resolved in Rust" — it is not:
+-- `parse_completion_source` also accepts a Lua **function**, which
+-- becomes `CompletionSource::Custom` and is called for candidates. So a
+-- settings source needs no Rust at all (discovery Stage 1).
+--
+-- **Completion here is assistance, not validation.**
+-- `resolve_accepted_value` returns the literal typed text whenever no
+-- candidate is selected, so a non-matching typo still reaches
+-- `on_accept` and the `no such setting` path below still earns its
+-- keep. Refusing a non-candidate outright is Rust work and is deferred.
 
 local function describe_setting_lines(name, info)
   -- Header block mirrors help.rs's `format_hook_text`: aligned label
@@ -1354,12 +1367,28 @@ local function describe_setting_lines(name, info)
   return lines
 end
 
-cmd { name = "editor.describe-setting",
+cmd { name = "help.describe-setting",
       description = "Prompt for a setting name and render its definition in *help*.",
       fn = function()
         pmacs.minibuffer.read {
           prompt = "Describe setting: ",
           history = "command",
+          -- Sorted for DETERMINISTIC POOL CONSTRUCTION, not display
+          -- order: `recompute_candidates` runs `filter_and_sort`, which
+          -- ranks by fuzzy score and tie-breaks lexically, so this order
+          -- never reaches the user. It matters because
+          -- `.take(CANDIDATE_LIMIT)` is applied to the filtered iterator
+          -- BEFORE that sort, so pool order decides which candidates
+          -- survive truncation; registration order would make that vary
+          -- with an unrelated config edit.
+          source = function()
+            local names = {}
+            for _, d in ipairs(pmacs.config.list()) do
+              names[#names + 1] = d.name
+            end
+            table.sort(names)
+            return names
+          end,
           on_accept = function(name)
             if name == nil or name == "" then return end
             -- An undefined name raises NotFound rather than returning nil
@@ -1370,7 +1399,7 @@ cmd { name = "editor.describe-setting",
               pmacs.editor.set_status("describe-setting: no such setting: " .. name)
               return
             end
-            show_help_text(table.concat(describe_setting_lines(name, info), "\n"))
+            pmacs.editor._show_help(table.concat(describe_setting_lines(name, info), "\n"))
           end,
         }
       end }
