@@ -319,3 +319,57 @@ jobs:
           PMACS_M6_CANCEL_TRIALS: "30"
           PMACS_M6_CANCEL_MAX_DELAY_MS: "500"
         run: cargo test --release --test m6_perf_acceptance -- --ignored --nocapture --test-threads=1
+
+  # m10-perf-gates: the M10 suites, which were dark for TWO independent
+  # reasons. Both are fixed here.
+  #
+  # 1. They are `crdt`-gated, and nothing in this workflow enabled the
+  #    feature, so they were never compiled. That is this lane's subject.
+  # 2. Even setting `crdt` aside, NO job named them. Grepping this file
+  #    for `--test` before this job existed yielded exactly four suites:
+  #    acceptance, m4_acceptance, m5_perf_acceptance, m6_perf_acceptance.
+  #    Their `#[ignore]` is deliberate; their absence from CI was not.
+  #
+  # luajit-only, for the same reason m5-perf-gates and m6-perf-gates are:
+  # the measured paths (CRDT buffer mutation, socket round-trips) do not
+  # enter the Lua VM, so matrixing over flavors doubles cost for no
+  # signal.
+  #
+  # WHAT EACH SUITE ACTUALLY GATES — these differ, and the difference
+  # matters for how a red run is read:
+  #
+  #   * m10_11_perf asserts ONE budget: cross-frontend propagation p99
+  #     under 50ms. Observed 1.47ms locally (2026-08-01), a ~34x margin,
+  #     so a red here is a real regression rather than runner noise.
+  #
+  #   * m10_2_perf asserts NOTHING. It is six measurement benches that
+  #     print throughput numbers — the baselines M10.2's 391x unicode
+  #     finding and v0.2+ optimization work compare against. It cannot
+  #     fail a budget because it has none.
+  #
+  #     It is here anyway, and NOT as a perf gate: `run_workload` drives
+  #     30 seconds of randomized mixed edits against both the v0.1 and
+  #     CRDT buffer paths, and nothing else in the corpus exercises a
+  #     sustained randomized CRDT workload. Its CI value is soak and
+  #     panic detection. Do not "fix" a future silent run by adding
+  #     budget assertions — the numbers are deliberately reported, not
+  #     enforced, and asserting throughput on shared runners is how perf
+  #     jobs become flaky.
+  #
+  # OBSERVED EXECUTION (local, 2026-08-01, release): m10_2_perf 79s
+  # (6 tests), m10_11_perf 5s (1 test) — about 85s combined. The ceiling
+  # is 25 rather than something near that, because a perf job's cost is
+  # dominated by its COLD-CACHE RELEASE BUILD, not its tests; this is
+  # the same reasoning that gives m5-perf-gates 25.
+  m10-perf-gates:
+    name: M10 Perf Gates (crdt)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: CRDT buffer throughput baselines (soak; asserts nothing)
+        run: cargo test --release --features crdt --test m10_2_perf -- --ignored --nocapture
+      - name: cross-frontend propagation p99 over a real socket
+        run: cargo test --release --features crdt --test m10_11_perf -- --ignored --nocapture
