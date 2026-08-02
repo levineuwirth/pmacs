@@ -642,11 +642,13 @@ local function open_directory(path, opts, departed)
       error(string.format("pmacs.dired.open: unknown opts key %q", tostring(key)))
     end
   end
-  local wanted = opts.display
-  if wanted ~= nil and wanted ~= "current" and wanted ~= "panel" then
-    error(string.format('pmacs.dired.open: unknown display %q (expected "current" or "panel")',
-      tostring(wanted)))
-  end
+  -- Q#S3-1/§1.1a: the shared rule, with dired's default passed
+  -- EXPLICITLY as "current" and kept there through Stage 3. The
+  -- `pmacs.path.directory_handler` slot calls this with no `display` at
+  -- all, so flipping dired's default would open `pmacs .` in a bottom
+  -- panel. Dired produces a document the user works in, not output they
+  -- consult; the panel default is right for the latter only.
+  local wanted = pmacs.window._resolve_display("pmacs.dired.open", opts.display, "current")
   local canonical = canonicalize(path)
 
   -- Read first: a failure must leave no buffer, no window change, and

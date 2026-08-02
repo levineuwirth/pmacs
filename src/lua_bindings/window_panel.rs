@@ -251,8 +251,96 @@ pub(crate) enum AdopterPlacement {
     Window(WindowId),
 }
 
+/// The one rule for the adopter `display` vocabulary: which values are
+/// legal, what the error says, and what omission means.
+///
+/// **Bottom-panel Stage 3 (Q#S3-1).** Before this, four adopters
+/// validated the same three-value vocabulary in three places — Rust for
+/// the terminal, and hand-written Lua copies in `listview.lua`,
+/// `compile.lua` and `dired.lua`, each with its own copy of the error
+/// string. Four copies of one rule is how the next adopter gets it
+/// subtly wrong, and the next adopter is DAP.
+///
+/// `default` is a **parameter, not a constant**, because the adopters do
+/// not share one. listview / compile / terminal resolve omission to the
+/// panel; **dired resolves it to `"current"`** and must keep doing so —
+/// `pmacs.path.directory_handler` calls it with no `display` at all, so
+/// a flipped default would open `pmacs .` in a bottom panel (§1.1a).
+/// Passing the default in is what makes dired's exemption visible at its
+/// call site instead of hidden in a divergent copy.
+///
+/// **Non-string values are reported as unknown, not as type errors**,
+/// and this is a deliberate normalization (Q#S3-1). Terminal previously
+/// read `get::<Option<String>>` and so raised mlua's type error *before*
+/// reaching any custom message, while the Lua copies stringified and
+/// reported their own. Nothing pinned either behaviour. The custom error
+/// wins because it names the legal vocabulary and mlua's does not.
+///
+/// # Errors
+/// Any non-nil value that is not `"current"` or `"panel"`.
+pub(crate) fn resolve_adopter_display(
+    operation: &str,
+    raw: Option<&mlua::Value>,
+    default: AdopterDefault,
+) -> mlua::Result<AdopterPlacement> {
+    let raw = match raw {
+        None | Some(mlua::Value::Nil) => return Ok(default.placement()),
+        Some(value) => value,
+    };
+    match raw.as_str().as_deref() {
+        Some("current") => Ok(AdopterPlacement::Current),
+        Some("panel") => Ok(AdopterPlacement::Panel),
+        _ => Err(mlua::Error::runtime(format!(
+            "{operation}: unknown display {} (expected \"current\" or \"panel\")",
+            display_for_error(raw)
+        ))),
+    }
+}
+
+/// What omission means for one adopter.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AdopterDefault {
+    /// listview, compile, terminal — Stage 3's flip.
+    Panel,
+    /// dired, and anything else whose output is a document the user
+    /// works in rather than output they consult.
+    Current,
+}
+
+impl AdopterDefault {
+    fn placement(self) -> AdopterPlacement {
+        match self {
+            Self::Panel => AdopterPlacement::Panel,
+            Self::Current => AdopterPlacement::Current,
+        }
+    }
+}
+
+/// Render a rejected `display` value for the error message.
+///
+/// Strings are quoted so `display = "sideways"` reads as `"sideways"`;
+/// anything else is shown **by type alone** — `unknown display
+/// (number)` — because quoting a non-string as `"42"` would imply the
+/// caller passed a string when they passed a number.
+///
+/// The value itself is deliberately not interpolated: it is already
+/// wrong, `mlua::Value`'s `Display` is not guaranteed useful for tables
+/// or userdata, and the type is what tells the caller what to fix.
+fn display_for_error(value: &mlua::Value) -> String {
+    value.as_str().map_or_else(
+        || format!("({})", value.type_name()),
+        |s| format!("{:?}", &*s),
+    )
+}
+
 /// Parse an adopter's placement **before** it creates a buffer, session,
 /// process, or wrapper — so an unknown value leaves nothing to roll back.
+///
+/// Terminal-specific wrapper around [`resolve_adopter_display`]: only
+/// the terminal accepts a `window` id, and only it must reject `window`
+/// combined with `display = "panel"`. That asymmetry stays here rather
+/// than in the shared resolver, because a helper that pretended the four
+/// parsers were identical would be its own defect.
 ///
 /// # Errors
 /// An unknown `display` value, a `window` combined with
@@ -262,18 +350,11 @@ pub(crate) fn parse_adopter_placement(
     core: &SharedCore,
     fid: FrontendId,
     operation: &str,
-    display: Option<&str>,
+    display: Option<&mlua::Value>,
     window: Option<u64>,
+    default: AdopterDefault,
 ) -> mlua::Result<AdopterPlacement> {
-    let display = match display {
-        None | Some("current") => AdopterPlacement::Current,
-        Some("panel") => AdopterPlacement::Panel,
-        Some(other) => {
-            return Err(mlua::Error::runtime(format!(
-                "{operation}: unknown display {other:?} (expected \"current\" or \"panel\")"
-            )));
-        }
-    };
+    let display = resolve_adopter_display(operation, display, default)?;
     match (window, &display) {
         (Some(_), AdopterPlacement::Panel) => Err(mlua::Error::runtime(format!(
             "{operation}: `window` and `display = \"panel\"` are mutually exclusive"
@@ -476,6 +557,43 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
                     let mut out = result?;
                     out.push_front(mlua::Value::Boolean(true));
                     Ok(out)
+                },
+            )?,
+        )?;
+    }
+
+    {
+        // Q#S3-1 — the shared adopter-display rule, reachable from Lua.
+        //
+        // Underscore-prefixed because it is an internal seam between the
+        // builtin runtime modules and this one, not user-facing API:
+        // `listview.lua`, `compile.lua` and `dired.lua` call it instead
+        // of each keeping a hand-written copy of the same three-value
+        // check and error string.
+        //
+        // Returns the resolved `"current"` / `"panel"` rather than an
+        // opaque handle, so the Lua callers keep their existing
+        // `if display == "panel"` dispatch and this change stays a
+        // validation unification rather than a control-flow rewrite.
+        win.set(
+            "_resolve_display",
+            lua.create_function(
+                |_,
+                 (operation, raw, default): (String, mlua::Value, String)|
+                 -> mlua::Result<&'static str> {
+                    let default = match default.as_str() {
+                        "panel" => AdopterDefault::Panel,
+                        "current" => AdopterDefault::Current,
+                        other => {
+                            return Err(mlua::Error::runtime(format!(
+                                "window._resolve_display: bad default {other:?}"
+                            )));
+                        }
+                    };
+                    match resolve_adopter_display(&operation, Some(&raw), default)? {
+                        AdopterPlacement::Panel => Ok("panel"),
+                        AdopterPlacement::Current | AdopterPlacement::Window(_) => Ok("current"),
+                    }
                 },
             )?,
         )?;

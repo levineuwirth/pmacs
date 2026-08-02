@@ -226,12 +226,10 @@ function pmacs.listview.open(spec)
   -- window. In Stages 1-2 omitting `display` keeps today's raw switch;
   -- Stage 3 flips the default. An unknown value errors before anything
   -- is displayed.
-  local display = spec.display
-  if display ~= nil and display ~= "current" and display ~= "panel" then
-    error(string.format(
-      "listview.open: unknown display %q (expected \"current\" or \"panel\")",
-      tostring(display)))
-  end
+  -- Q#S3-1: the vocabulary, the error and the default policy are one
+  -- rule (`window._resolve_display`), not a copy per adopter. The
+  -- default is passed in because the adopters do not share one.
+  local display = pmacs.window._resolve_display("listview.open", spec.display, "current")
   if display == "panel" then
     pmacs.window.display(p.buffer, { side = "bottom", select = true })
   else

@@ -9320,12 +9320,18 @@ fn install_terminal(
                 // Bottom-panel arc (Q#BP11b): parse placement BEFORE the
                 // session, process, buffer, or wrapper exists, so an
                 // unknown `display` value creates nothing to roll back.
+                // Stage 3 step 2: the shared resolver, still carrying the
+                // PRE-FLIP default. The unification must be provably
+                // behaviour-preserving before the default moves, so the
+                // flip to `AdopterDefault::Panel` is its own commit.
+                let display_value = spec_table.get::<mlua::Value>("display")?;
                 let placement = window_panel::parse_adopter_placement(
                     &core,
                     frontend_id,
                     "pmacs.terminal.open",
-                    spec_table.get::<Option<String>>("display")?.as_deref(),
+                    Some(&display_value),
                     spec_table.get::<Option<u64>>("window")?,
+                    window_panel::AdopterDefault::Current,
                 )?;
                 let buffer_id = {
                     let mut manager = manager.borrow_mut();

@@ -803,12 +803,17 @@ local function start_run(slot, cmdline, opts)
   -- supersedes anything, rewrites the buffer, or spawns a process, so
   -- an unknown value leaves no half-started run behind. In Stages 1-2
   -- omission means "current"; Stage 3 flips the default.
-  local display = opts.display
-  if display ~= nil and display ~= "current" and display ~= "panel" then
-    error(string.format(
-      "compile.run: unknown display %q (expected \"current\" or \"panel\")",
-      tostring(display)))
-  end
+  -- Q#S3-1: one shared rule for vocabulary, error text and default.
+  --
+  -- `display_omitted` is captured SEPARATELY and deliberately. The
+  -- resolver collapses omission into its default, but the recompile gate
+  -- below distinguishes them: it fires on OMISSION only, never on an
+  -- explicit `display = "current"`, which is the documented opt-out and
+  -- must reach the raw switch even when the previous run was
+  -- panel-placed. Resolving first and testing `== "current"` afterwards
+  -- would silently merge the two and break that opt-out.
+  local display_omitted = opts.display == nil
+  local display = pmacs.window._resolve_display("compile.run", opts.display, "current")
   -- q-target discipline (Q#CM11): capture only when coming from a
   -- non-generated buffer, so `g` reruns don't re-capture and
   -- compile → g → q restores the original buffer.
@@ -896,7 +901,7 @@ local function start_run(slot, cmdline, opts)
   -- so it must reach the raw switch even when the previous run was
   -- panel-placed. The duplicate presentation that produces is the
   -- escape hatch's documented cost (R3-rp2).
-  if display == "panel" or (display == nil and already_in_panel(slot.buf)) then
+  if display == "panel" or (display_omitted and already_in_panel(slot.buf)) then
     pmacs.window.display(slot.buf, { side = "bottom", select = false })
   else
     pmacs.window.switch_buffer(slot.buf)

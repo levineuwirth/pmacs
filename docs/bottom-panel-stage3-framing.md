@@ -196,21 +196,17 @@ fallback is invisible from the adopter's side.
 
 ### 1.6 What is NOT established
 
-- **Nothing has been implemented or measured.** Unlike the distribution
-  lane, there is no artifact to inspect; the evidence is the existing
-  suites' behaviour before and after.
-- ~~The blast radius on existing acceptance suites is unmeasured.~~
-  **MEASURED — see §1.6b: 37 failures across 5 suites.** Stage 1
-  shipped the mechanism opt-in precisely so existing suites kept their
-  meaning. Flipping the default changes where output lands for every
-  suite that exercises listview, compile or terminal **without** passing
-  `display`. Criterion 58 says the default-placement suites are
-  *updated*; how many others move is a measurement this framing has not
-  taken and the implementation must take first.
-- **Interaction with dired.** `dired.lua:18` documents
-  `opts.display = "current" | "panel"` with **default `"current"`**.
-  Dired is not in Q#BP12's table. Whether the flip reaches it, or dired
-  keeps an explicit `"current"`, is Q#S3-2.
+- **The blast radius is MEASURED — §1.6b: 37 failures across 5 suites**,
+  classified per test in §1.6c. Stage 1 shipped the mechanism opt-in
+  precisely so existing suites kept their meaning; flipping the default
+  changes where output lands for every suite that exercises listview,
+  compile or terminal **without** passing `display`.
+- **Steps 1 and 2 of §7 are done** (`0224c68`, `a2f4411`). The flip
+  itself, the test revisions, and the capability-fallback criterion are
+  not.
+- ~~Interaction with dired.~~ **DECIDED — §1.1a and Q#S3-2: dired keeps
+  `"current"`**, passed explicitly to the shared resolver so the
+  exemption is visible at its call site.
 
 ---
 
@@ -333,8 +329,26 @@ got both wrong.
   message is ever reached. The Lua callers instead `tostring()` whatever
   they got and report it inside their own error. These are different
   observable behaviours for the same bad input, and unifying the error
-  text without deciding this would silently change one of them. The
-  stage must state which it standardizes on and pin it.
+  text without deciding this would silently change one of them.
+
+  **RESOLVED and PINNED at step 2.** The custom error wins, because it
+  names the legal vocabulary where mlua's type error does not.
+  Non-strings render by **type alone** (`unknown display (integer)`),
+  never quoted, so the message cannot imply a string was passed. Pinned
+  in `bottom_panel_stage1_acceptance::acc19` at the **terminal** entry
+  point — the one adopter whose behaviour actually changed — asserting
+  the shared error *and* that nothing is created, exactly as the
+  unknown-string case already does.
+
+  **The type SPELLING is deliberately not pinned.** Lua 5.4 reports
+  `integer`; LuaJIT has no integer subtype. Asserting either literal
+  would pass on one CI flavor and fail on the other, so the test pins
+  the shape (`unknown display (`, the vocabulary, and the *absence* of a
+  quoted value). Verified 46/46 under both flavors.
+
+  Consequently step 2 is **default-preserving with one intentional
+  normalization**, not "behaviour-preserving": every adopter kept its
+  default, but invalid-input behaviour moved on purpose.
 - **Q#S3-2 — DECIDED: dired does not flip.** It keeps `"current"` as
   its default, expressed as the `default` argument to the shared
   resolver so the exemption is visible at the call site rather than

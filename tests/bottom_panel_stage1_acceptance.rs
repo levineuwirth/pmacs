@@ -1291,6 +1291,53 @@ fn acc19_adopters_place_side_affinely_through_real_entry_points() {
         "unknown display fails before session/process/buffer creation"
     );
     assert_eq!(s.core.borrow().registry.borrow().ids().len(), before);
+
+    // Bottom-panel Stage 3, Q#S3-1 — the NON-STRING normalization.
+    //
+    // Pinned because step 2 CHANGED this deliberately and nothing else
+    // covers it. Before the shared resolver, terminal read
+    // `get::<Option<String>>("display")?`, so a number raised mlua's
+    // TYPE error before any custom message existed; the Lua adopters
+    // stringified instead and reported their own. Unifying the error
+    // text without pinning this would have let the two drift back apart
+    // unnoticed, and the surrounding assertions could not have caught it
+    // — they all pass unknown STRINGS, which take the same path in both
+    // designs.
+    //
+    // The custom error wins because it names the legal vocabulary. The
+    // type is reported WITHOUT the value, so the message cannot imply a
+    // string was passed.
+    let before = s.core.borrow().registry.borrow().ids().len();
+    let err = try_exec(
+        &s,
+        "pmacs.terminal.open { command = \"/bin/sh\", display = 42 }",
+    )
+    .expect_err("a non-string display is rejected");
+    // The TYPE SPELLING is deliberately not pinned: Lua 5.4 reports
+    // `integer` where LuaJIT has no integer subtype, so asserting either
+    // literal would pass on one CI flavor and fail on the other. What is
+    // pinned is the shape — our operation name, a parenthesised type
+    // rather than a quoted value, and the vocabulary.
+    assert!(
+        err.contains("pmacs.terminal.open: unknown display ("),
+        "a non-string display takes the shared unknown-display error naming the \
+         operation and a type, not mlua's type error; got: {err}"
+    );
+    assert!(
+        err.contains("expected \"current\" or \"panel\""),
+        "the error still names the legal values; got: {err}"
+    );
+    assert!(
+        !err.contains("\"42\""),
+        "the rejected value is reported by TYPE, not quoted as though it were a \
+         string; got: {err}"
+    );
+    assert_eq!(
+        s.core.borrow().registry.borrow().ids().len(),
+        before,
+        "…and still creates nothing, exactly as an unknown string does"
+    );
+
     exec(
         &s,
         "TERM_BUF = pmacs.terminal.open { command = \"/bin/sh\", display = \"panel\" }",
