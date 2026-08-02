@@ -311,19 +311,82 @@ them) and why `dired`/`listview` were the correct first two families.
   Whichever starts second integrates first.
 
 
-## Bottom-panel lane (Arc 7) — STAGE 2 COMPLETE; STAGE 3 IS THE LAST STEP
+## Bottom-panel lane (Arc 7) — STAGE 3 IN PROGRESS on `bottom-panel-stage3`
 
 **Stage 1, the Stage 2 framing, and Stages 2A, 2B-1, 2B-2 and 2B-3 are
-all on `main` @ `4cd4a7b`** (#155, #175, #177, #184, #187, #198). Stage 2
-is complete. Durable facts are in `docs/agent-handoff.md` §1, including
-the v20-baseline / v21-negotiated handshake that Stage 2B-3 made
-compatible.
+all on `main`** (#155, #175, #177, #184, #187, #198). Stage 2 is
+complete. Durable facts are in `docs/agent-handoff.md` §1, including the
+v20-baseline / v21-negotiated handshake that Stage 2B-3 made compatible.
 
-- **Stage 3 — the adopter default flip — is the arc's last step and is
-  not started.** This lane stays until it lands; it is not removed at
-  2B-3's merge.
-- **DAP waits for Stage 2, not Stage 1** — that dependency is now
-  satisfied.
+**Stage 3 — the adopter default flip — is Arc 7's last step and is NOW
+IN PROGRESS**, not "not started" as this lane said until 2026-08-01.
+Framing `docs/bottom-panel-stage3-framing.md` revision 3, approved with
+amendments after one review round.
+
+- **Branch `bottom-panel-stage3`**, based on `githubsucks/main` @
+  `21de0b2`. Developed in the primary checkout on the laptop, not a
+  worktree. **No PR yet** — the flip has not landed.
+- **Steps 1 and 2 of the framing's §7 are DONE:**
+  - `0224c68` — the **fallout census**, taken before any change: a
+    throwaway flip, a full `--no-fail-fast` sweep, then revert. **37
+    failures across 5 suites**, classified per test in framing §1.6c.
+  - `41d37fc` — the **shared resolver**
+    (`resolve_adopter_display` / `pmacs.window._resolve_display`),
+    replacing four hand-written copies of the same validation.
+    **Default-preserving with one intentional normalization** (below).
+- **Steps 3–6 are NOT done:** the flip itself, the ~37 test revisions,
+  the capability-fallback criterion, and the lane/handoff close-out.
+
+### What the census established, and why it ran first
+
+- **A census that stops at the first failing binary is not a census.**
+  The first sweep reported 2 failures in 1 suite because `cargo test`
+  halts after a failing binary; `--no-fail-fast` revealed 37 across 5.
+  **Any re-measurement must pass that flag.**
+- **`m4_acceptance` is a transitive adopter nobody named.** Its two
+  failures are the LSP hover and outline panels, which are **listview
+  consumers**. Q#BP12's four rows are the *direct* population; the real
+  one is everything built on listview.
+- **The proportions invert the obvious reading.** `compile_mode` has the
+  most failures (17) and the least placement content; `listview_
+  acceptance` has 13 but loses **three quarters of its suite**.
+
+### The normalization step 2 changed, deliberately
+
+Terminal previously raised **mlua's type error** for a non-string
+`display`; the Lua adopters stringified into their own message. Now all
+four take the shared custom error, rendered **by type alone**
+(`unknown display (integer)`), because it names the legal vocabulary.
+
+**Pinned** in `bottom_panel_stage1_acceptance::acc19` at the terminal
+entry point, asserting the error *and* that nothing is created. The type
+**spelling** is deliberately unpinned — Lua 5.4 says `integer` where
+LuaJIT has no integer subtype, so a literal assertion would pass on one
+CI flavor and fail on the other. **Verified 46/46 under both.**
+
+### Verification at this head
+
+Full serialized suite **3447 passed / 0 failed**, with **zero suites
+differing from the pre-change baseline** — the measurement that makes
+"default-preserving" a claim rather than an intention. Plus fmt,
+diff-check, clippy, `--lib` 1896, and
+`bottom_panel_stage1_acceptance` 46/46 under **both** Lua flavors.
+
+### Recovery from a clean checkout
+
+```sh
+git fetch githubsucks
+git worktree add ../pmacs-bp-stage3 \
+  -b bottom-panel-stage3 \
+  githubsucks/bottom-panel-stage3
+```
+
+- **DAP waits for Stage 2, not Stage 1** — satisfied. Q#BP12's adopter
+  table already carries a `DAP stack/variables` row, so Stage 3 settles
+  the debugger's panel policy before the debugger exists.
+- **The tree primitive is the next thing to scope after this**, per
+  `COHERENCE.md` §14: Tree is graded ✗, and DAP's variables view is its
+  next would-be inventor.
 
 ## Reap-ledger silent failures — MERGED (#202); kept for its parked follow-ons
 
