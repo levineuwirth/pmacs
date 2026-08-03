@@ -77,6 +77,41 @@ commands, read `docs/active-work.md` immediately after this file.
   #204 and **1b-3** #205, the ambient-root isolation **implementation**
   #206, and discovery Stage 1 #207. Each has its own bullet below; this
   line is the head-of-`main` anchor and nothing else.
+- **Bottom panel Arc 7 COMPLETE — Stage 3, the adopter default flip.**
+  Omitting `display` now means the panel for listview, compile and
+  terminal; **dired keeps `"current"`** because
+  `pmacs.path.directory_handler` calls it with no `display` and a flipped
+  default would open `pmacs .` in a bottom panel. Four hand-written
+  copies of the validator collapsed into one
+  `resolve_adopter_display(operation, raw, default)` — the default is a
+  **parameter**, which is what makes dired's exemption visible at its
+  call site instead of hidden in a divergent copy. Durable facts:
+  - **A visit FROM a panel must never use the raw switch.**
+    `pmacs.window.switch_buffer` replaces the buffer in the ACTIVE
+    window, so from a panel it clobbers the panel itself. The outline's
+    `on_visit` still did this; the references panel had been migrated to
+    `display_file` when the arc landed and the outline was missed,
+    because nothing exercised it from a panel until the default flipped.
+    **Q#BP11c is the contract**: after RET, `M-,` must FOCUS the
+    still-present panel, not clone its buffer into the document — and an
+    assertion on the active buffer name alone cannot tell those apart.
+  - **An opt-out that does not survive replay is not an opt-out.**
+    `compile._last` stored `{cmdline, cwd}` only, so `g` re-resolved
+    `display` and silently reverted an explicit `"current"` to the new
+    default. Anything that replays a stored invocation must store the
+    escape hatch with it.
+  - **Compile's chords are PANEL-LOCAL, deliberately.** All are bound
+    `scope = "buffer"`, so with `select = false` none dispatch from the
+    document — `C-c C-k` included. `M-x compile.kill` still works
+    anywhere via its `or compile_slot()` fallback. A global chord is a
+    command-surface decision, framed separately.
+  - **Two `q` mechanisms coexist by design**: presentation history
+    chains in the side slot (`C → B → A → delete`, Q#BP2c), while
+    `p.prev` prevents raw-switch and capability-fallback listview loops.
+    Neither supersedes the other.
+  - **A capability fallback must strip the QUIT ACTION too**, not just
+    the side parameters — a quit action stranded on a document window
+    makes a later `q` try to restore a presentation that never happened.
 - **pmacs is installable without cloning — Distribution Stage 1, #211,
   released as v1.1.0.** A `v*` tag builds `pmacs` and `pmacs-gpu` on
   pinned `ubuntu-22.04` / `macos-15` and publishes a GitHub Release with
@@ -181,7 +216,7 @@ anchor, so every item is startable.
 | 2 | Workspace + location | Missing; model gap | The long-lead arc. Start before a fifth subsystem grows its own root convention — four have already diverged (§7) |
 | 3 | Extension ownership | Missing; prerequisite-shaped | **`pmacs.hook.remove` does not exist.** That one bug-sized gap blocks §13's disable/uninstall, §10's trust classes, and package-scoped cancellation |
 | 4 | **Discovery** | **Stage 1 MERGED (#207)** | Stage 2 candidates, in rough dependency order: richer M-x rows (**protocol change** — `MinibufferPrompt.candidates` is `Vec<String>`; `CompletionPopupRow` already proves the pattern), `Command` gaining title/category/aliases/flags/arg-schema (~147 definition sites), predicate evaluation, help-layer unification, and the help-prefix decision |
-| 5 | Workbench convergence | Partial, best trajectory | Bottom panel done both frontends; **Stage 3 = flip the adopter default**. Then the tree primitive — build it *before* dired and the worker tree invent two |
+| 5 | Workbench convergence | Partial; **Arc 7 COMPLETE** (Stage 3 implemented) | The bottom panel is finished on both frontends and the adopter default is flipped. **The tree primitive is now the arc's successor** — `COHERENCE.md` §14 grades Tree ✗, and DAP's variables view is its next would-be inventor. Build it *before* dired's `i` and the worker tree invent two |
 | 6 | Config productization | Foundation only | Value provenance, then layering, then adoption migration (**table-valued settings are the hard prerequisite** — `ConfigValue` is four scalars) |
 | 7 | Package lifecycle | Not started | Correctly sequenced after P3 |
 | 8 | **Distribution** | **Stage 1 SHIPPED (v1.1.0, #211)** | Binaries on tag, checksums, machine-checked glibc floor. **Journey step 1 now works and the "invisible until this exists" blocker is lifted.** Next is a *decision* about channels / update / signing, not a queued plan |

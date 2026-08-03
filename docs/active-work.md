@@ -311,82 +311,81 @@ them) and why `dired`/`listview` were the correct first two families.
   Whichever starts second integrates first.
 
 
-## Bottom-panel lane (Arc 7) — STAGE 3 IN PROGRESS on `bottom-panel-stage3`
+## Bottom-panel lane (Arc 7) — STAGE 3 COMPLETE; ARC DONE, pending PR
 
-**Stage 1, the Stage 2 framing, and Stages 2A, 2B-1, 2B-2 and 2B-3 are
-all on `main`** (#155, #175, #177, #184, #187, #198). Stage 2 is
-complete. Durable facts are in `docs/agent-handoff.md` §1, including the
-v20-baseline / v21-negotiated handshake that Stage 2B-3 made compatible.
+**Arc 7 is finished.** Stage 1 (#155), the Stage 2 framing (#175),
+Stages 2A (#177), 2B-1 (#184), 2B-2 (#187) and 2B-3 (#198) are on
+`main`; **Stage 3 — the adopter default flip — is implemented on
+`bottom-panel-stage3`** and is the arc's last step. Framing
+`docs/bottom-panel-stage3-framing.md` revision 3, approved with
+amendments after three review rounds.
 
-**Stage 3 — the adopter default flip — is Arc 7's last step and is NOW
-IN PROGRESS**, not "not started" as this lane said until 2026-08-01.
-Framing `docs/bottom-panel-stage3-framing.md` revision 3, approved with
-amendments after one review round.
+**This lane is removed once Stage 3 merges and its facts are in
+`docs/agent-handoff.md` §1** (rule 4). It is retained now only because
+the PR has not landed.
 
-- **Branch `bottom-panel-stage3`**, based on `githubsucks/main` @
-  `21de0b2`. Developed in the primary checkout on the laptop, not a
-  worktree. **No PR yet** — the flip has not landed.
-- **Steps 1 and 2 of the framing's §7 are DONE:**
-  - `0224c68` — the **fallout census**, taken before any change: a
-    throwaway flip, a full `--no-fail-fast` sweep, then revert. **37
-    failures across 5 suites**, classified per test in framing §1.6c.
-  - `41d37fc` — the **shared resolver**
-    (`resolve_adopter_display` / `pmacs.window._resolve_display`),
-    replacing four hand-written copies of the same validation.
-    **Default-preserving with one intentional normalization** (below).
-- **Steps 3–6 are NOT done:** the flip itself, the ~37 test revisions,
-  the capability-fallback criterion, and the lane/handoff close-out.
+- **Branch `bottom-panel-stage3`** off `githubsucks/main` @ `21de0b2`,
+  pushed, upstream tracking set. Six commits: `fa12095` framing,
+  `0224c68` census, `41d37fc` shared resolver, `8d14e6a` lane/portability,
+  `c0eb16b` the flip + test revisions, `5f01ede` the fallback pin.
+- **Verification:** full serialized sweep **3449 passed / 0 failed**
+  against a 3447 baseline (+2 new pins); fmt, diff-check, clippy with and
+  without `crdt`, `--lib` 1896, `--lib --features crdt` 2081,
+  pmacs-protocol 19, m4 149, required GPU 221, and
+  `bottom_panel_stage1_acceptance` 47/47 under both Lua flavors.
 
-### What the census established, and why it ran first
+### What Stage 3 changed
 
-- **A census that stops at the first failing binary is not a census.**
-  The first sweep reported 2 failures in 1 suite because `cargo test`
-  halts after a failing binary; `--no-fail-fast` revealed 37 across 5.
-  **Any re-measurement must pass that flag.**
-- **`m4_acceptance` is a transitive adopter nobody named.** Its two
-  failures are the LSP hover and outline panels, which are **listview
-  consumers**. Q#BP12's four rows are the *direct* population; the real
-  one is everything built on listview.
-- **The proportions invert the obvious reading.** `compile_mode` has the
-  most failures (17) and the least placement content; `listview_
-  acceptance` has 13 but loses **three quarters of its suite**.
+Omitting `display` resolves to the **panel** for listview, compile and
+terminal. **Dired keeps `"current"`** — `pmacs.path.directory_handler`
+calls it with no `display`, so a flipped default would open `pmacs .` in
+a bottom panel. Per-adopter `select`: listview `true`, compile `false`,
+terminal `true`.
 
-### The normalization step 2 changed, deliberately
+Four hand-written copies of the `display` validator collapsed into one
+shared `resolve_adopter_display(operation, raw, default)`; the default is
+a **parameter**, which is what makes dired's exemption visible at its
+call site rather than hidden in a divergent copy.
 
-Terminal previously raised **mlua's type error** for a non-string
-`display`; the Lua adopters stringified into their own message. Now all
-four take the shared custom error, rendered **by type alone**
-(`unknown display (integer)`), because it names the legal vocabulary.
+### Three defects the flip exposed, each fixed rather than tested around
 
-**Pinned** in `bottom_panel_stage1_acceptance::acc19` at the terminal
-entry point, asserting the error *and* that nothing is created. The type
-**spelling** is deliberately unpinned — Lua 5.4 says `integer` where
-LuaJIT has no integer subtype, so a literal assertion would pass on one
-CI flavor and fail on the other. **Verified 46/46 under both.**
+- **The outline panel's `on_visit` used the RAW switch**
+  (`pmacs.window.switch_buffer`), which replaces the buffer in the ACTIVE
+  window. Harmless while the outline opened into a document window;
+  once the panel became the default, RET **clobbered the panel with the
+  source**. The references panel was migrated to `display_file` when the
+  arc landed — the outline was missed because nothing exercised it from a
+  panel until the flip. Q#BP11c names this exact corruption.
+- **`compile._last` stored only `{cmdline, cwd}`**, so `g` reached
+  `start_run` with no `display` and took the new default: an explicit
+  `display = "current"` silently reverted on the next recompile. **An
+  opt-out that reverts is not an opt-out.**
+- **`opts.display` on a nil `opts`** — a regression introduced by the
+  fix above and caught by `journey_acceptance`, which is what that
+  ratchet is for.
 
-### Verification at this head
+### Two contracts now pinned, not merely observed
 
-Full serialized suite **3447 passed / 0 failed**, with **zero suites
-differing from the pre-change baseline** — the measurement that makes
-"default-preserving" a claim rather than an intention. Plus fmt,
-diff-check, clippy, `--lib` 1896, and
-`bottom_panel_stage1_acceptance` 46/46 under **both** Lua flavors.
+- **Compile's chords are PANEL-LOCAL.** All are bound
+  `scope = "buffer"`, so with `select = false` none dispatch from the
+  document — `C-c C-k` included. `M-x compile.kill` still reaches the
+  running slot anywhere via its `or compile_slot()` fallback. A global
+  chord is a command-surface decision and belongs in its own framing.
+- **The two `q` mechanisms are complementary, not competing.**
+  Presentation history chains in the side slot (`C → B → A → delete`,
+  Q#BP2c); `p.prev` prevents raw-switch and capability-fallback listview
+  loops. `s1_12` pins the second with explicit `display = "current"`;
+  the new `s3_1` pins the first.
 
-### Recovery from a clean checkout
+### The census lesson worth carrying past this arc
 
-```sh
-git fetch githubsucks
-git worktree add ../pmacs-bp-stage3 \
-  -b bottom-panel-stage3 \
-  githubsucks/bottom-panel-stage3
-```
-
-- **DAP waits for Stage 2, not Stage 1** — satisfied. Q#BP12's adopter
-  table already carries a `DAP stack/variables` row, so Stage 3 settles
-  the debugger's panel policy before the debugger exists.
-- **The tree primitive is the next thing to scope after this**, per
-  `COHERENCE.md` §14: Tree is graded ✗, and DAP's variables view is its
-  next would-be inventor.
+**It counted failures, not causes.** Thirteen listview failures had ONE
+root cause — a panel is derived-hidden while frame geometry is unknown,
+and that suite never declared any because it never needed to. The same
+applied to `m4_acceptance` and `vterm_stage2_acceptance`. And
+**`--no-fail-fast` is mandatory**: the first sweep reported 2 failures in
+1 suite because `cargo test` halts after a failing binary; the real
+figure was 37 across 5.
 
 ## Reap-ledger silent failures — MERGED (#202); kept for its parked follow-ons
 

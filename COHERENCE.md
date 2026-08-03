@@ -107,7 +107,7 @@ remain open to them.
 | 11 | Config layering + provenance | **Partial (foundation only)** | Typed registry is right; 5 settings live in it; no value provenance |
 | 12 | Profiles | **Missing** | One hardcoded default keymap; not a named concept |
 | 13 | Package lifecycle UX | **Resolution without lifecycle** | Mature resolver/lockfile; init-only install; no uninstall/disable/search |
-| 14 | Workbench primitives | **Partial (best trajectory)** | Listview is a real primitive but only 3 call sites, all LSP panels; buffer-list and search re-implement it; bottom panel complete on BOTH frontends (#155 + Stage 2) |
+| 14 | Workbench primitives | **Partial (best trajectory)** | Listview is a real primitive but only 3 call sites, all LSP panels; buffer-list and search re-implement it; **the bottom panel is COMPLETE — both frontends, and Stage 3 flipped the adopter default so omission means the panel**. **Tree is still ✗ and is now the arc's successor** |
 | 15 | Contextual affordances | **Weak** | Right-click menu only; code actions apply first-blindly; no git integration at all |
 | 16 | Semantic frontend | **Strong** | v6..=v21 schema support; production attach remains v20 during the dark panel slice; degradation practiced |
 | 17 | Distribution | **Partial** | **v1.1.0 ships prebuilt Linux/macOS binaries on tag** (#211) with checksums and a stated glibc floor. No channels, in-place update, rollback, signing, or package-manager distribution |
@@ -1667,10 +1667,9 @@ and §18's floor ride on this.
 
 ### Priority 5: Finish the workbench convergence
 
-**State: partial and moving (§14) — the bottom panel is now complete on
-both frontends (Stage 1 #155 through Stage 2B-3), and listview is
-proven.** Only the adopter default flip (Stage 3) remains on the panel
-itself. Remaining elsewhere: the tree primitive (build it before dired
+**State: the bottom panel is DONE (§14) — both frontends, Stage 1 #155
+through Stage 2B-3, and Stage 3 flipped the adopter default so omitting
+`display` means the panel. Arc 7 is complete.** Remaining elsewhere: the tree primitive (build it before dired
 and the worker tree invent two), table/inspector/diff, help unification.
 Wiring plus one modest model piece (the tree model).
 

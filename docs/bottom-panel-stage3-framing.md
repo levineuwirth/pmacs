@@ -1,8 +1,21 @@
 # Framing — Bottom panel Stage 3: the adopter default flip
 
-**Revision 3.** Status: **approved; branch-plan step 1 (the fallout
-census) is complete and recorded in §1.6b–c.** Branch
-`bottom-panel-stage3`, based on `githubsucks/main` @ `21de0b2`.
+**Revision 4.** Status: **IMPLEMENTED — all six branch-plan steps done;
+Arc 7 complete.** Branch `bottom-panel-stage3`, based on
+`githubsucks/main` @ `21de0b2`. Full sweep 3449 passed / 0 failed
+against a 3447 baseline.
+
+**Revision 3 → 4** records what implementation found. The plan held; the
+surprises were all defects the flip exposed rather than design changes:
+
+- **Three defects, each fixed rather than tested around** — the outline's
+  raw-switch visit (§1.7a), compile's non-replayed opt-out (§1.7b), and
+  a nil-`opts` regression of my own that `journey_acceptance` caught.
+- **The census counted failures, not causes** (§1.6d): 13 listview
+  failures had ONE root cause, a missing frame-geometry declaration.
+- **Compile's chords are panel-local** (§1.5a), pinned by `acc34`.
+- **The two `q` mechanisms are complementary** (§1.7c), pinned by
+  `s1_12` and the new `s3_1`.
 
 **Revision 2 → 3** adds the measurement and its classification. Two
 findings changed the plan rather than confirming it: the census needs
@@ -347,6 +360,68 @@ neighbouring tests in the same suite land on opposite sides**, because
 one is about where output goes and the other is about moving within it.
 A sweep that classified per *suite* rather than per *test* would have
 got both wrong.
+
+
+### 1.6d The census counted failures, not causes
+
+The measured 37 was accurate as a count and misleading as a work
+estimate. **Thirteen listview failures had one root cause:** a panel is
+derived-hidden while frame geometry is unknown, and
+`listview_acceptance` never declared any — it never needed to while
+listview defaulted to the current window. One helper took it from 13 to
+2. `m4_acceptance` and `vterm_stage2_acceptance` were the same.
+
+Read a census as "how many assertions move", never "how many decisions
+are required". The two differed here by an order of magnitude.
+
+### 1.7a Defect: the outline visited through the RAW switch
+
+`lsp.lua`'s outline `on_visit` called `pmacs.window.switch_buffer`,
+which replaces the buffer in the **active** window. Harmless while the
+outline opened into a document window — the switch simply reused it.
+Once the panel became the default, the active window WAS the outline
+panel, so **RET clobbered the panel with the source file** and left
+nothing for `M-,` to return to.
+
+The references panel (`visit_location`) was migrated to `display_file`
+when the arc landed; the outline was missed because **nothing exercised
+it from a panel until the default flipped**. Its own neighbouring
+comment states the rule it violated: *"a visit FROM a panel must land in
+the document target and leave the panel intact."*
+
+Q#BP11c names the corruption precisely, and it is why both the outline
+and compile tests now assert `M-,` **focuses** the still-present panel
+rather than cloning its buffer into a document window — the previous
+assertion, on the active buffer name alone, could not tell those apart.
+
+### 1.7b Defect: an opt-out that did not survive replay
+
+`pmacs.compile._last` stored `{cmdline, cwd}` and no `display`, so `g`
+reached `start_run` with the value omitted and took the new default. A
+user who ran `compile.run{display="current"}` was moved into a panel the
+moment they recompiled.
+
+**An opt-out that reverts on the next replay is not an opt-out.**
+`display` is now stored and replayed, with `nil` kept as `nil` so an
+omitted value still resolves to the current default rather than freezing
+at the first run's resolution. The general form: *anything that replays
+a stored invocation must store the escape hatch alongside it.*
+
+### 1.7c The two `q` mechanisms are complementary
+
+Stage 3 made a latent conflict live. `listview.lua`'s `p.prev` captures
+the previous buffer only if it is not a panel; `QuitAction::Restore`
+(Q#BP2c) deliberately chains `C → B → A → delete`. With two listviews
+sharing one bottom slot, the second replaces the first and `q` walks the
+restore chain.
+
+**The restore chain wins**, per criterion 20 — listview `q` routes
+through `window.quit` and must not exempt itself from the panel
+contract. The mechanisms are then complementary rather than competing:
+**presentation history chains in the side slot; `p.prev` prevents
+raw-switch and capability-fallback loops.** `s1_12` keeps its Q#GB18
+name-keyed-identity bite by pinning its panels in document windows,
+isolating `p.prev`; the new `s3_1` pins the chain.
 
 ## 2. Questions
 
