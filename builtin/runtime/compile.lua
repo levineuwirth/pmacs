@@ -813,7 +813,10 @@ local function start_run(slot, cmdline, opts)
   -- panel-placed. Resolving first and testing `== "current"` afterwards
   -- would silently merge the two and break that opt-out.
   local display_omitted = opts.display == nil
-  local display = pmacs.window._resolve_display("compile.run", opts.display, "current")
+  -- Stage 3 (Q#BP12): omission resolves to the PANEL, with
+  -- `select = false` at the display call below — compile output is
+  -- passive and must not steal focus from the buffer being compiled.
+  local display = pmacs.window._resolve_display("compile.run", opts.display, "panel")
   -- q-target discipline (Q#CM11): capture only when coming from a
   -- non-generated buffer, so `g` reruns don't re-capture and
   -- compile → g → q restores the original buffer.
@@ -1150,7 +1153,15 @@ function pmacs.compile.run(cmdline, opts)
   slot.parse = true
   local proc = start_run(slot, cmdline, opts)
   if proc then
-    pmacs.compile._last = { cmdline = cmdline, cwd = slot.cwd }
+    -- Stage 3: `display` is stored too. It is the documented opt-out
+    -- from the panel default, and `g` (recompile) reaches `start_run`
+    -- with whatever `_last` holds — so without this, a user who ran
+    -- `compile.run{display="current"}` would be moved into a panel the
+    -- moment they recompiled. An opt-out that reverts on the next `g`
+    -- is not an opt-out. `nil` is stored as `nil`, so an omitted
+    -- `display` keeps resolving to the default rather than being
+    -- frozen at the first run's resolution.
+    pmacs.compile._last = { cmdline = cmdline, cwd = slot.cwd, display = opts and opts.display }
     claim_compile_source(slot)
   end
   return proc
@@ -1226,7 +1237,7 @@ pmacs.command.define {
       pmacs.editor.set_status("compile: nothing to recompile yet (run compile.run first)")
       return
     end
-    pmacs.compile.run(last.cmdline, { cwd = last.cwd })
+    pmacs.compile.run(last.cmdline, { cwd = last.cwd, display = last.display })
   end,
 }
 

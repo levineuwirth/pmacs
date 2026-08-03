@@ -236,6 +236,45 @@ to make a suite green converts a behavioural change into an invisible
 one, which is the failure this stage's inverted ordering exists to
 avoid.
 
+### 1.5a Compile's chords become PANEL-LOCAL — a deliberate contract
+
+**Discovered while revising the fallout, and decided rather than
+absorbed.** Every compile-mode chord is bound
+`scope = "buffer", buffer = slot.buf` (`compile.lua:221`): `RET`, `n`,
+`p`, `q`, **`C-c C-k`**, `g`, and the seven undo no-ops. They dispatch
+only when `*compilation*` is the focused buffer.
+
+Before Stage 3 compile switched in place, so the user was *in* that
+buffer and the chords worked. **Stage 3 keeps `select = false`** — Q#BP12
+is explicit, and passive build output stealing focus mid-edit would be
+worse than the alternative — so the user stays in their document and
+none of those chords reach compile-mode without focusing the panel
+first.
+
+**The contract, stated so it is deliberate rather than an accidental
+reachability loss:**
+
+1. A default `compile.run` opens **passively**; document focus remains.
+2. **Buffer-local compile chords require focusing the panel** (`C-x o`,
+   or a click).
+3. **The capability is not lost.** `compile.kill` is reachable through
+   `M-x` from anywhere, because its body is
+   `slot_for_buffer(pmacs.window.buffer()) or compile_slot()` — the
+   `or` arm falls back to the current compilation slot precisely when
+   the caller is not in a compile buffer (`compile.lua:1124`). Verified,
+   not assumed; it is what makes panel-local chords acceptable rather
+   than a lost feature.
+
+**A global `C-c C-k` is deliberately NOT part of this stage.** It is a
+command-surface decision — which chords earn global scope — and it would
+ride in on a placement flip without its own reasoning. Framed
+separately or not at all.
+
+Pinned by a default-placement test asserting `C-c C-k` from the document
+window does **not** dispatch to compile (acceptance 10), so a future
+change that quietly makes it global has to change a test that says why
+it was not.
+
 ### 1.6b The fallout census — MEASURED, and it found an adopter nobody named
 
 Taken as branch-plan step 1: record a baseline, apply the three-site
@@ -412,7 +451,12 @@ Inherits the parent framing's criteria 56–58, made concrete:
 8. The count of existing suites whose behaviour changes is **stated**,
    and each change is classified intended or collateral — **not
    silenced by mass-adding `display = "current"`** (§1.6a).
-9. **NEGATIVE criterion — omission still means the document for dired.**
+9. **NEGATIVE criterion — compile's chords are panel-local.** With the
+   default placement, `C-c C-k` pressed in the **document** window does
+   not dispatch to compile (§1.5a). Tests whose subject is
+   compile-BUFFER behaviour opt out with `display = "current"` and say
+   why. `M-x compile.kill` still works from anywhere.
+10. **NEGATIVE criterion — omission still means the document for dired.**
    Both entry points are pinned: a direct `pmacs.dired.open(path)` with
    no `display`, **and** the `pmacs .` launch path through
    `pmacs.path.directory_handler`. Neither may place into a panel. This

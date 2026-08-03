@@ -262,8 +262,9 @@ pub(crate) enum AdopterPlacement {
 /// subtly wrong, and the next adopter is DAP.
 ///
 /// `default` is a **parameter, not a constant**, because the adopters do
-/// not share one. listview / compile / terminal resolve omission to the
-/// panel; **dired resolves it to `"current"`** and must keep doing so —
+/// not share one. Since Stage 3, listview / compile / terminal resolve
+/// omission to the panel; **dired resolves it to `"current"`** and must
+/// keep doing so —
 /// `pmacs.path.directory_handler` calls it with no `display` at all, so
 /// a flipped default would open `pmacs .` in a bottom panel (§1.1a).
 /// Passing the default in is what makes dired's exemption visible at its

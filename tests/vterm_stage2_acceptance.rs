@@ -87,11 +87,20 @@ fn lua_surface_is_strict_fresh_transactional_and_context_safe() {
         let kind: String = lua
             .load(format!(
                 r#"
+                -- Bottom-panel Stage 3: an EXPLICIT opt-out. This test
+                -- drives an 8x30 frame (see `sync_terminal_layout`
+                -- below), and DEFAULT_PANEL_ROWS is 12 — a panel plus a
+                -- MIN_WINDOW_OUTER_ROWS document window cannot fit in
+                -- eight rows, so the default placement would be hidden
+                -- by construction and there would be no layout to sync.
+                -- The subject here is the Lua surface being strict,
+                -- fresh and transactional, not placement.
                 TERM_BUFFER = pmacs.terminal.open {{
                   command = {command_lua},
                   args = {{ "-c", "printf 'copy-me\\n'; sleep 30" }},
                   rows = 4,
                   cols = 30,
+                  display = "current",
                 }}
                 local first = pmacs.terminal.state(TERM_BUFFER)
                 first.process.kind = "poisoned"
@@ -365,6 +374,11 @@ fn lua_surface_is_strict_fresh_transactional_and_context_safe() {
 #[allow(clippy::too_many_lines, reason = "shared view and controller scenario")]
 fn shared_screen_keeps_view_scroll_selection_and_controller_independent() {
     let mut state = EditorState::new_with_roots(&crate::iso::roots());
+    // Bottom-panel Stage 3: `terminal.open` now defaults to the panel
+    // (with `select = true`, so focus follows). A panel is derived-hidden
+    // while frame geometry is unknown, and a hidden terminal has no
+    // layout to sync — declare it, as the panel suites always have.
+    state.sync_frame_geometry(FrontendId::LOCAL, CellSize::new(24, 80));
     let mut spec = TerminalSpec::new("/bin/sh");
     spec.args = vec![
         "-c".into(),
@@ -509,6 +523,11 @@ fn terminal_escape_gates_local_bindings_and_double_escape_sends_interrupt() {
         input_path.to_str().expect("UTF-8 input path")
     );
     let mut state = EditorState::new_with_roots(&crate::iso::roots());
+    // Bottom-panel Stage 3: `terminal.open` now defaults to the panel
+    // (with `select = true`, so focus follows). A panel is derived-hidden
+    // while frame geometry is unknown, and a hidden terminal has no
+    // layout to sync — declare it, as the panel suites always have.
+    state.sync_frame_geometry(FrontendId::LOCAL, CellSize::new(24, 80));
     state
         .lua_host
         .lua()
@@ -802,12 +821,22 @@ fn real_tui_terminal_smoke_restores_host_after_output_input_resize_scroll_copy_a
           if f then f:write(text) f:close() end
         end
         breadcrumb({:?}, "1")
+        -- Bottom-panel Stage 3: an EXPLICIT opt-out. This is the real
+        -- TUI smoke -- a genuine pmacs in a genuine PTY -- and its
+        -- subject is that the HOST terminal is restored after output,
+        -- input, resize, scroll, copy (OSC 52) and bell. All of that is
+        -- measured against the rendered host stream over a full-frame
+        -- terminal; placing the child in a 12-row bottom panel changes
+        -- the geometry those measurements are taken over and the copy
+        -- path stops reaching the host. Placement is covered by the
+        -- panel suites, not here.
         local ok, terminal_buffer = pcall(pmacs.terminal.open, {{
           command = "/bin/sh",
           args = {{ "-c", "exec /usr/bin/python3 -c \"$1\"", "pmacs-vterm-probe", {} }},
           rows = 10,
           cols = 40,
           scrollback_rows = 200,
+          display = "current",
         }})
         breadcrumb({:?}, ok and "ok" or ("ERROR: " .. tostring(terminal_buffer)))
         assert(ok, terminal_buffer)

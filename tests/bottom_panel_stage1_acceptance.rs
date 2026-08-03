@@ -1220,18 +1220,42 @@ fn acc18_display_file_targets_the_document_from_a_focused_panel() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one placement scenario per adopter; splitting it would hide that they share a contract"
+)]
 fn acc19_adopters_place_side_affinely_through_real_entry_points() {
-    // listview: pre-seed the persistent panel buffer in a DOCUMENT window
-    // first, so side-affine placement cannot be vacuous.
+    // Stage 3: the DEFAULT is now the panel, so assert that first —
+    // this test's subject is placement through the real entry points.
     let s = editor();
     exec(
         &s,
-        "pmacs.listview.open { name = \"*outline*\", rows = { { text = \"row\" } } }",
+        "pmacs.listview.open { name = \"*default*\", rows = { { text = \"row\" } } }",
+    );
+    assert!(
+        side_window(&s).is_some(),
+        "omitting display places a listview in the panel"
+    );
+
+    // listview: pre-seed the persistent panel buffer in a DOCUMENT window
+    // first, so side-affine placement cannot be vacuous.
+    //
+    // The seed now says `display = "current"` EXPLICITLY. That is not a
+    // bolt-on to keep the test green: the seed's whole purpose is "this
+    // buffer starts in a document window", and after the flip that
+    // requires saying so. Leaving it omitted would seed a panel and the
+    // side-affine assertion below would pass without having moved
+    // anything — exactly the vacuity this fixture was built to prevent.
+    let s = editor();
+    exec(
+        &s,
+        "pmacs.listview.open { name = \"*outline*\", rows = { { text = \"row\" } }, \
+         display = \"current\" }",
     );
     let seeded = active_window(&s);
     assert!(
         side_window(&s).is_none(),
-        "the default placement is unchanged"
+        "the explicit opt-out still places in the document window"
     );
     exec(
         &s,
@@ -1254,9 +1278,10 @@ fn acc19_adopters_place_side_affinely_through_real_entry_points() {
         "an unknown display value is a pointed error"
     );
 
-    // compile: same shape, but passive (`select = false`).
+    // compile: same shape, but passive (`select = false`). Seeded with
+    // the explicit opt-out for the same reason as the listview above.
     let s = editor();
-    exec(&s, "pmacs.compile.run(\"true\")");
+    exec(&s, "pmacs.compile.run(\"true\", { display = \"current\" })");
     assert!(side_window(&s).is_none());
     let document = active_window(&s);
     exec(&s, "pmacs.compile.run(\"true\", { display = \"panel\" })");
@@ -1404,8 +1429,11 @@ fn acc19b_recompile_reuses_the_panel_instead_of_duplicating_into_the_document() 
     );
 
     // A compilation that is NOT in a panel keeps the pre-arc raw switch.
+    // Reaching that state now takes an explicit opt-out, since the
+    // default would panel it — and "not in a panel" is the precondition
+    // this half exists to exercise.
     let s = editor();
-    exec(&s, "pmacs.compile.run(\"true\")");
+    exec(&s, "pmacs.compile.run(\"true\", { display = \"current\" })");
     assert!(side_window(&s).is_none());
     let target = active_window(&s);
     exec(&s, "pmacs.command.invoke(\"compile.recompile\")");

@@ -84,6 +84,13 @@ fn errors_buffer(s: &EditorState) -> String {
 fn editor() -> EditorState {
     let s = EditorState::new_with_roots(&crate::iso::roots());
     exec(&s, "pmacs.lsp.config = {}");
+    // Bottom-panel Stage 3: a panel is derived-hidden while the
+    // frontend's frame geometry is unknown, so the default-placement
+    // tests here could neither see nor focus one. Geometry is
+    // authoritative state and a grid frontend's real frame size IS its
+    // declaration; every test that does not render declares it, exactly
+    // as `bottom_panel_stage1_acceptance` always has.
+    s.sync_frame_geometry(FrontendId::LOCAL, pmacs::protocol::CellSize::new(24, 80));
     s
 }
 
@@ -148,7 +155,38 @@ fn pump_until(
 }
 
 /// Start a compile run programmatically with an explicit cwd.
+/// Run a compilation **in the document window**, via an explicit
+/// `display = "current"`.
+///
+/// Bottom-panel Stage 3 flipped `compile.run`'s default to the panel
+/// with `select = false`, so a default run leaves focus in the user's
+/// document — and every compile-mode chord is bound
+/// `scope = "buffer", buffer = slot.buf` (`compile.lua:221`): `RET`,
+/// `n`, `p`, `q`, `C-c C-k`, `g`, and the seven undo no-ops. None of
+/// them dispatch unless `*compilation*` is focused.
+///
+/// **This suite's subject is compile-BUFFER behaviour** — streaming,
+/// styling, error navigation, kill/reap, undo suppression — all of which
+/// genuinely require that buffer selected. Opting out here is a
+/// statement about what these tests are for, not a way to make them
+/// green: the placement-subject tests use [`compile_run_default`]
+/// instead, and the panel-local contract itself is pinned by
+/// `acc34_default_placement_leaves_compile_chords_panel_local`.
 fn compile_run(s: &EditorState, cmdline: &str, cwd: &Path) {
+    exec(
+        s,
+        &format!(
+            "pmacs.compile.run({cmdline:?}, {{ cwd = {:?}, display = \"current\" }})",
+            cwd.display().to_string()
+        ),
+    );
+}
+
+/// Run a compilation through the **Stage 3 default** — no `display` at
+/// all, so it resolves to the panel with `select = false`.
+///
+/// For tests whose subject IS placement.
+fn compile_run_default(s: &EditorState, cmdline: &str, cwd: &Path) {
     exec(
         s,
         &format!(
@@ -715,17 +753,113 @@ fn acc14_malformed_rule_containers_fail_closed() {
 
 /// Fixture: a target file plus a compile run reporting one error at
 /// target.c:3:2. Returns the editor, finished, in *compilation*.
-fn error_fixture(dir: &Path) -> EditorState {
+/// The same fixture through the **Stage 3 default** — the compilation
+/// lands in the panel and focus stays in the document.
+fn error_fixture_default(dir: &Path) -> EditorState {
     std::fs::write(dir.join("target.c"), "l1\nl2\nl3 body\nl4\n").unwrap();
     let mut s = editor();
-    compile_and_finish(&mut s, "printf 'target.c:3:2: error: boom\\n'", dir);
+    compile_run_default(&s, "printf 'target.c:3:2: error: boom\\n'", dir);
+    assert!(
+        pump_until(&mut s, 10_000, |s| compilation_text(s)
+            .contains("[compile ")),
+        "compile run must reach its exit marker"
+    );
     s
+}
+
+/// Is `*compilation*` currently shown in a side window?
+fn compilation_is_panelled(s: &EditorState) -> bool {
+    let core = s.core.borrow();
+    core.windows.values().any(|w| {
+        w.is_side()
+            && core
+                .registry
+                .borrow()
+                .get(w.buffer_id)
+                .is_ok_and(|b| b.name() == "*compilation*")
+    })
+}
+
+/// Bottom-panel Stage 3 §1.5a — compile's chords are PANEL-LOCAL, and
+/// that is a contract rather than an accidental reachability loss.
+///
+/// The default flip put compile output in the panel with
+/// `select = false`, so document focus survives a build. Every
+/// compile-mode chord is bound `scope = "buffer", buffer = slot.buf`
+/// (`compile.lua:221`), so none of them dispatch from the document —
+/// `C-c C-k` included.
+///
+/// This is pinned so a future change that quietly promotes one of them
+/// to a global binding has to edit a test that says why it was not. The
+/// capability is NOT lost: `M-x compile.kill` reaches the running slot
+/// from anywhere, because its body falls back to `compile_slot()` when
+/// the caller is not in a compile buffer.
+///
+/// A global `C-c C-k` is a command-surface decision and belongs in its
+/// own framing, not in a placement flip.
+#[test]
+fn acc34_default_placement_leaves_compile_chords_panel_local() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = editor();
+    compile_run_default(&s, "echo ready; sleep 30", dir.path());
+    assert!(
+        pump_until(&mut s, 5_000, |s| compilation_text(s).contains("\nready\n")),
+        "the run is live before we test the chord; buffer:\n{}",
+        compilation_text(&s)
+    );
+    assert_ne!(
+        active_buffer_name(&s),
+        "*compilation*",
+        "premise: the default left focus in the document"
+    );
+
+    // C-c C-k from the DOCUMENT does not reach compile-mode.
+    ctrl(&mut s, 'c');
+    ctrl(&mut s, 'k');
+    assert!(
+        !status(&s).contains("killed"),
+        "C-c C-k must NOT dispatch to compile from the document window; \
+         status was: {}",
+        status(&s)
+    );
+
+    // The capability is reachable, just not by that chord from here.
+    exec(&s, "pmacs.command.invoke('compile.kill')");
+    assert!(
+        status(&s).contains("killed"),
+        "M-x compile.kill still reaches the running slot from anywhere; \
+         status was: {}",
+        status(&s)
+    );
 }
 
 #[test]
 fn acc15_ret_visits_error_and_jump_back_returns() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = error_fixture(dir.path());
+    // Stage 3: this test's SUBJECT is placement, so it takes the default
+    // — Q#BP12 requires compilation panel -> RET source -> `M-,` back to
+    // the still-present panel, with the document window intact.
+    let mut s = error_fixture_default(dir.path());
+    assert!(
+        compilation_is_panelled(&s),
+        "premise: the default put compilation in the panel"
+    );
+    assert_ne!(
+        active_buffer_name(&s),
+        "*compilation*",
+        "premise: select = false left focus in the document"
+    );
+
+    // The chords are PANEL-LOCAL (§1.5a), so reaching them is an
+    // explicit focus change — that is the contract, not a workaround.
+    ctrl(&mut s, 'x');
+    press(&mut s, KeyCode::Char('o'));
+    assert_eq!(
+        active_buffer_name(&s),
+        "*compilation*",
+        "C-x o reaches the panel"
+    );
+
     // Cursor starts on the header (row 0): RET there reports and
     // stays.
     press(&mut s, KeyCode::Enter);
@@ -742,9 +876,33 @@ fn acc15_ret_visits_error_and_jump_back_returns() {
     let line: i64 = eval(&s, "return pmacs.editor.cursor_line()");
     let col: i64 = eval(&s, "return pmacs.editor.cursor_col()");
     assert_eq!((line, col), (2, 1), "0-based landing from 1-based 3:2");
-    // M-, returns to the compilation buffer (jump ring).
+    // M-, returns to the compilation buffer (jump ring) — and the panel
+    // is still present rather than having been consumed by the visit.
     alt(&mut s, ',');
     assert_eq!(active_buffer_name(&s), "*compilation*");
+    assert!(
+        compilation_is_panelled(&s),
+        "the panel survives the visit and the jump back"
+    );
+    // …and the jump back FOCUSED the panel rather than duplicating
+    // `*compilation*` into the document window. Without this, the
+    // assertion above would pass for a tree holding the buffer twice.
+    let doc_shows_compilation = {
+        let core = s.core.borrow();
+        core.windows.values().any(|w| {
+            !w.is_side()
+                && core
+                    .registry
+                    .borrow()
+                    .get(w.buffer_id)
+                    .is_ok_and(|b| b.name() == "*compilation*")
+        })
+    };
+    assert!(
+        !doc_shows_compilation,
+        "M-, must focus the existing panel, not clone the compilation \
+         buffer into a document window"
+    );
 }
 
 #[test]
@@ -984,7 +1142,13 @@ fn acc24_command_path_undo_after_completed_run_recovers_immediately() {
     exec(
         &s,
         &format!(
-            "pmacs.shell.command('echo shell-out', {{ cwd = {:?} }})",
+            // Stage 3: explicit `display = "current"`. `shell.command`
+            // shares compile's `start_run` and so flipped with it, but
+            // this test's subject is that `M-x buffer.undo` recovers
+            // SYNCHRONOUSLY in the generated buffer — which requires
+            // that buffer focused, or the undo targets the document
+            // instead and the test would pass for the wrong reason.
+            "pmacs.shell.command('echo shell-out', {{ cwd = {:?}, display = 'current' }})",
             dir.path().display().to_string()
         ),
     );
