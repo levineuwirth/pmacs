@@ -1660,6 +1660,70 @@ fn acc21_panel_visit_and_jump_back_returns_to_the_panel() {
     );
 }
 
+/// Bottom-panel Stage 3, criterion 5 — the OMITTED default degrades on a
+/// frontend that cannot host a panel.
+///
+/// `acc14` already proves capability fallback for an EXPLICIT
+/// `request.side` at the core level. This is the Stage 3 case and it is
+/// not the same one: the default is now resolved into a panel request
+/// inside the adopter, so a pre-panel semantic frontend must degrade a
+/// request the caller never wrote. The framing calls this the criterion
+/// most likely to be quietly wrong, because the fallback is invisible
+/// from the adopter's side — nothing in `listview.open` says "panel",
+/// yet the request that reaches the core does.
+///
+/// What must survive the degradation: no side window, no side
+/// parameters, and NO QUIT ACTION left on the document window. A quit
+/// action stranded on a document window would make a later `q` try to
+/// restore a presentation that never existed.
+#[test]
+fn s3_2_the_omitted_default_degrades_on_a_pre_panel_frontend() {
+    let s = editor();
+    let fid = FrontendId(31);
+    let document = attach_frontend(&s, fid, false);
+    s.core.borrow_mut().active_frontend = fid;
+
+    // No `display` at all — the Stage 3 default resolves to a panel
+    // request, which this frontend cannot honour.
+    exec(
+        &s,
+        "pmacs.listview.open { name = \"*degraded*\", rows = { { text = \"row\" } } }",
+    );
+
+    assert!(
+        s.core.borrow().side_window_for(fid).is_none(),
+        "a pre-panel frontend gets no side window from the omitted default"
+    );
+    {
+        let core = s.core.borrow();
+        let window = &core.windows[&document];
+        assert!(
+            window.params.side.is_none(),
+            "no side parameter is left on the document window"
+        );
+        assert!(
+            !window.params.dedicated,
+            "the document window is not dedicated by a degraded request"
+        );
+        assert!(
+            window.params.quit_action().is_none(),
+            "NO quit action is left behind — `q` must not try to restore a \
+             presentation that never happened"
+        );
+        assert_eq!(
+            core.registry
+                .borrow()
+                .get(window.buffer_id)
+                .expect("live buffer")
+                .name(),
+            "*degraded*",
+            "the buffer still reached the document target"
+        );
+    }
+
+    s.core.borrow_mut().active_frontend = FrontendId::LOCAL;
+}
+
 #[test]
 fn acc22_jump_histories_are_per_frontend_and_skip_stale_side_origins() {
     let s = editor();
