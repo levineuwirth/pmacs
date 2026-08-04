@@ -1,9 +1,12 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-08-01, as Distribution Stage 1 #211 — released as
-v1.1.0, the first pmacs release with prebuilt binaries, which makes
-journey step 1 reachable without cloning the repository. Beneath it the
-docs absorption #210 and the CI CRDT coverage lane #209 — the
+**Last updated: 2026-08-04, as bottom-panel Stage 3 #213 — the adopter
+default flip, which COMPLETES ARC 7: omitting `display` now means the
+panel, and the workbench's panel half is done on both frontends. Beneath
+it the post-release accuracy pass #212 and Distribution Stage 1 #211 —
+released as v1.1.0, the first pmacs release with prebuilt binaries,
+which makes journey step 1 reachable without cloning the repository —
+and the CI CRDT coverage lane #209, the
 first time CI has ever compiled and run the `crdt` half of the test
 corpus, closing a gap that left 279 tests (including a REQUIRED
 `CLAUDE.md` gate) unexecuted for the project's whole life. Development
@@ -68,7 +71,9 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-08-01)
 
-- **`main` @ `000b6cd`, released as v1.1.0.** Distribution Stage 1 #211
+- **`main` @ `f186253`.** Bottom-panel Stage 3 **#213** completes Arc 7,
+  atop the post-release accuracy pass #212 and `000b6cd` / **v1.1.0**.
+  Beneath that, Distribution Stage 1 #211
   lands atop the docs absorption #210, the CI CRDT coverage lane #209,
   the absorption #208 and `cfc1710`. Beneath that, nine PRs landed in
   this order: the ledger absorption #199, the process-signal diagnostic
@@ -77,7 +82,8 @@ commands, read `docs/active-work.md` immediately after this file.
   #204 and **1b-3** #205, the ambient-root isolation **implementation**
   #206, and discovery Stage 1 #207. Each has its own bullet below; this
   line is the head-of-`main` anchor and nothing else.
-- **Bottom panel Arc 7 COMPLETE — Stage 3, the adopter default flip.**
+- **Bottom panel Arc 7 COMPLETE — Stage 3 (#213), the adopter default
+  flip.**
   Omitting `display` now means the panel for listview, compile and
   terminal; **dired keeps `"current"`** because
   `pmacs.path.directory_handler` calls it with no `display` and a flipped
@@ -216,7 +222,7 @@ anchor, so every item is startable.
 | 2 | Workspace + location | Missing; model gap | The long-lead arc. Start before a fifth subsystem grows its own root convention — four have already diverged (§7) |
 | 3 | Extension ownership | Missing; prerequisite-shaped | **`pmacs.hook.remove` does not exist.** That one bug-sized gap blocks §13's disable/uninstall, §10's trust classes, and package-scoped cancellation |
 | 4 | **Discovery** | **Stage 1 MERGED (#207)** | Stage 2 candidates, in rough dependency order: richer M-x rows (**protocol change** — `MinibufferPrompt.candidates` is `Vec<String>`; `CompletionPopupRow` already proves the pattern), `Command` gaining title/category/aliases/flags/arg-schema (~147 definition sites), predicate evaluation, help-layer unification, and the help-prefix decision |
-| 5 | Workbench convergence | Partial; **Arc 7 COMPLETE** (Stage 3 implemented) | The bottom panel is finished on both frontends and the adopter default is flipped. **The tree primitive is now the arc's successor** — `COHERENCE.md` §14 grades Tree ✗, and DAP's variables view is its next would-be inventor. Build it *before* dired's `i` and the worker tree invent two |
+| 5 | Workbench convergence | Partial; **Arc 7 COMPLETE** (Stage 3 merged, #213) | The bottom panel is finished on both frontends and the adopter default is flipped. **The tree primitive is now the arc's successor** — `COHERENCE.md` §14 grades Tree ✗, and DAP's variables view is its next would-be inventor. Build it *before* dired's `i` and the worker tree invent two |
 | 6 | Config productization | Foundation only | Value provenance, then layering, then adoption migration (**table-valued settings are the hard prerequisite** — `ConfigValue` is four scalars) |
 | 7 | Package lifecycle | Not started | Correctly sequenced after P3 |
 | 8 | **Distribution** | **Stage 1 SHIPPED (v1.1.0, #211)** | Binaries on tag, checksums, machine-checked glibc floor. **Journey step 1 now works and the "invisible until this exists" blocker is lifted.** Next is a *decision* about channels / update / signing, not a queued plan |
@@ -297,6 +303,21 @@ someone forgot.
   `gpu_invocation_acceptance` tests fail on a missing `pmacs-gpu`
   binary. `cargo build --workspace --no-default-features --features
   luajit,crdt` is the invocation that produces both binaries.
+- **A local sweep is blind to whichever feature configuration it does
+  not build.** Stage 3's census and every verification sweep ran
+  `--features luajit` WITHOUT `crdt`, so no crdt-gated suite was
+  exercised and `compile_mode_crdt_acceptance` reached CI broken. Sweep
+  BOTH configurations before claiming a corpus is green — the crdt job
+  exists precisely because that blindness is easy.
+- **"My change made this fragile" is a different finding from "this was
+  always flaky", and only one of them is yours to fix.** Stage 3 saw two
+  CI runs on one commit fail DIFFERENT PTY/GPU suites — the
+  load-sensitivity signature, on suites the flake list already names.
+  The tell that it was neither: the failures kept landing on GPU
+  *terminal* tests, and terminal placement was what the PR changed.
+  Those fixtures opened with no `display`, so the flip shrank the very
+  window whose rendered frames they assert against. **Ask which tests
+  and why those, before reaching for a rerun.**
 - **Never hand-roll the dark-test census — use
   `scripts/feature-census`.** libtest prints `name: test` with **no
   space before the colon**, so a filter written `/ : test$/` matches

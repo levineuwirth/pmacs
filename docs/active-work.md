@@ -11,8 +11,15 @@ exercised from this checkout and the `githubsucks` alias was absent and
 had to be added, exactly as that section anticipates. **One lane opened:
 CI CRDT coverage**, which had been sitting under "NEEDS A LANE" with no
 branch and no owner since #166. It is implemented on
-`ci-crdt-coverage` and its block replaces the old one below. Everything
-else in this file is unchanged.
+`ci-crdt-coverage` and its block replaces the old one below.
+
+**Updated 2026-08-04.** Four PRs landed since: the CI CRDT coverage
+lane #209, Distribution Stage 1 #211 (released as **v1.1.0**), the
+post-release accuracy pass #212, and **bottom-panel Stage 3 #213 —
+which completes Arc 7**. Its lane is **removed** per rule 4: the arc is
+done *and* its durable facts are in `docs/agent-handoff.md` §1. The
+distribution and CI-CRDT lanes are rewritten rather than removed,
+because each keeps named follow-ons.
 
 **This snapshot is an absorption pass, taken with ZERO open PRs** —
 the one window in which a ledger refresh has nothing to re-conflict
@@ -82,21 +89,23 @@ lesson, §1 for the two framings).
   are identical on every machine. Remote names are otherwise
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
-- Canonical base at this snapshot:
-  `githubsucks/main` @ `cfc1710` (discovery Stage 1 #207, atop the
-  ambient-root isolation implementation #206, Journey Stage 1b-3 #205,
-  1b-2 #204 and 1b-1 #203, the reap-ledger diagnostic #202, the
-  isolation framing #201, the process-signal diagnostic #200, the ledger
-  absorption #199, and the previously recorded landed work).
-  **Protocol schema support is
-  `v6..=v21`; the production server-first `Hello` still advertises
-  v20** — two different facts, and #184 landed only the first. The
-  previous snapshot named `fbcf235`, and **the
-  recovery floor advances with it**: the check below now requires
-  `cfc1710` or newer, so a tree at `fbcf235` no longer passes. That is
-  deliberate — the floor moves with the base, because a check that
-  accepts an older commit than the declared base passes on a tree the
-  rest of this file does not describe.
+- Canonical base at this snapshot: **`githubsucks/main` @ `f186253`**
+  — bottom-panel Stage 3 **#213**, which completes Arc 7, atop the
+  post-release accuracy pass **#212**, Distribution Stage 1 **#211**
+  (released as **v1.1.0**, the first release with prebuilt binaries),
+  and the CI CRDT coverage lane **#209**. Beneath those, `cfc1710`:
+  discovery Stage 1 #207, the ambient-root isolation implementation
+  #206, Journey Stage 1b-3 #205, 1b-2 #204 and 1b-1 #203, the
+  reap-ledger diagnostic #202, the isolation framing #201, the
+  process-signal diagnostic #200 and the ledger absorption #199.
+  **Protocol schema support is `v6..=v21`; the production server-first
+  `Hello` still advertises v20** — two different facts, and #184 landed
+  only the first.
+  **The recovery floor advances with the base**, so the check below
+  now requires `f186253` or newer; a tree at `cfc1710` no longer
+  passes. That is deliberate — a check accepting an older commit than
+  the declared base passes on a tree the rest of this file does not
+  describe.
   **Lanes below that name an older base have not been re-based; derive
   their integration surface from `git diff <their base>..main`.**
 - On the transfer source, `origin/main` named a release mirror at
@@ -132,7 +141,7 @@ git worktree list
 git status --short --branch
 ```
 
-The `git log` command must expose `cfc1710` — the base named above — or a
+The `git log` command must expose `f186253` — the base named above — or a
 newer intentional main. Keep this threshold and the canonical-base line in
 step: a recovery check that accepts an older commit than the base it
 declares canonical will pass on a tree the rest of this file does not
@@ -142,7 +151,7 @@ If it does not, stop and repair the remote/fetch configuration.
 **This path was exercised, not asserted, at this snapshot** — ahead of a
 machine move. From an empty directory: `git clone` the canonical URL,
 add the `githubsucks` alias, `git fetch githubsucks --prune`, confirm
-`cfc1710` is an ancestor of `githubsucks/main`, and recover a lane with
+`f186253` is an ancestor of `githubsucks/main`, and recover a lane with
 the three-argument `git worktree add <path> -b <local> githubsucks/<branch>`
 form. All four steps ran clean. **The two-argument form still does not
 work** for a remote-only branch (`fatal: invalid reference`), which is
@@ -165,6 +174,28 @@ Durable facts — the corrections, the traps, the census tool — are in
   being a required local gate that rots in CI. **275 of 279 dark tests
   recovered**, the other four excluded with stated reasons.
 - Branch `ci-crdt-coverage` retained; it carries nothing unmerged.
+
+### Two CI weaknesses Stage 3 exposed — decisions, not defects
+
+Both surfaced while gating #213 and belong to this lane because it owns
+the crdt job.
+
+- **CI does not pass `--no-fail-fast`, so a multi-suite break reports as
+  a single-suite one.** `cargo test` halts after a failing binary, so
+  #213's first crdt failure showed **one** suite when a local
+  `--no-fail-fast` sweep of the same tree showed **thirteen**. The
+  Stage 3 census hit the identical trap and recorded it; CI has it too.
+  The cost of the flag is running the remaining suites on a red build,
+  which is usually what you want when diagnosing.
+- **The crdt job pairs the heaviest build with real-PTY deadlines.** It
+  installs lavapipe, builds the full workspace with `crdt`, runs the
+  largest test count, and includes real-PTY smokes with **5-second**
+  waits. #213 saw two different such suites fail on two runs of the
+  same commit. One of those was a real regression the flip caused; the
+  other was load. **That ambiguity is the problem** — a job where noise
+  and signal look alike trains people to rerun rather than read.
+  Candidate: longer deadlines for real-PTY assertions in this job
+  specifically, or serialize the PTY suites.
 
 ### Still owned by this lane, not yet done
 
@@ -310,82 +341,6 @@ them) and why `dired`/`listview` were the correct first two families.
 - **It collides with dired Stage 2b**, which changes `paint`'s callers.
   Whichever starts second integrates first.
 
-
-## Bottom-panel lane (Arc 7) — STAGE 3 COMPLETE; ARC DONE, pending PR
-
-**Arc 7 is finished.** Stage 1 (#155), the Stage 2 framing (#175),
-Stages 2A (#177), 2B-1 (#184), 2B-2 (#187) and 2B-3 (#198) are on
-`main`; **Stage 3 — the adopter default flip — is implemented on
-`bottom-panel-stage3`** and is the arc's last step. Framing
-`docs/bottom-panel-stage3-framing.md` revision 3, approved with
-amendments after three review rounds.
-
-**This lane is removed once Stage 3 merges and its facts are in
-`docs/agent-handoff.md` §1** (rule 4). It is retained now only because
-the PR has not landed.
-
-- **Branch `bottom-panel-stage3`** off `githubsucks/main` @ `21de0b2`,
-  pushed, upstream tracking set. Six commits: `fa12095` framing,
-  `0224c68` census, `41d37fc` shared resolver, `8d14e6a` lane/portability,
-  `c0eb16b` the flip + test revisions, `5f01ede` the fallback pin.
-- **Verification:** full serialized sweep **3449 passed / 0 failed**
-  against a 3447 baseline (+2 new pins); fmt, diff-check, clippy with and
-  without `crdt`, `--lib` 1896, `--lib --features crdt` 2081,
-  pmacs-protocol 19, m4 149, required GPU 221, and
-  `bottom_panel_stage1_acceptance` 47/47 under both Lua flavors.
-
-### What Stage 3 changed
-
-Omitting `display` resolves to the **panel** for listview, compile and
-terminal. **Dired keeps `"current"`** — `pmacs.path.directory_handler`
-calls it with no `display`, so a flipped default would open `pmacs .` in
-a bottom panel. Per-adopter `select`: listview `true`, compile `false`,
-terminal `true`.
-
-Four hand-written copies of the `display` validator collapsed into one
-shared `resolve_adopter_display(operation, raw, default)`; the default is
-a **parameter**, which is what makes dired's exemption visible at its
-call site rather than hidden in a divergent copy.
-
-### Three defects the flip exposed, each fixed rather than tested around
-
-- **The outline panel's `on_visit` used the RAW switch**
-  (`pmacs.window.switch_buffer`), which replaces the buffer in the ACTIVE
-  window. Harmless while the outline opened into a document window;
-  once the panel became the default, RET **clobbered the panel with the
-  source**. The references panel was migrated to `display_file` when the
-  arc landed — the outline was missed because nothing exercised it from a
-  panel until the flip. Q#BP11c names this exact corruption.
-- **`compile._last` stored only `{cmdline, cwd}`**, so `g` reached
-  `start_run` with no `display` and took the new default: an explicit
-  `display = "current"` silently reverted on the next recompile. **An
-  opt-out that reverts is not an opt-out.**
-- **`opts.display` on a nil `opts`** — a regression introduced by the
-  fix above and caught by `journey_acceptance`, which is what that
-  ratchet is for.
-
-### Two contracts now pinned, not merely observed
-
-- **Compile's chords are PANEL-LOCAL.** All are bound
-  `scope = "buffer"`, so with `select = false` none dispatch from the
-  document — `C-c C-k` included. `M-x compile.kill` still reaches the
-  running slot anywhere via its `or compile_slot()` fallback. A global
-  chord is a command-surface decision and belongs in its own framing.
-- **The two `q` mechanisms are complementary, not competing.**
-  Presentation history chains in the side slot (`C → B → A → delete`,
-  Q#BP2c); `p.prev` prevents raw-switch and capability-fallback listview
-  loops. `s1_12` pins the second with explicit `display = "current"`;
-  the new `s3_1` pins the first.
-
-### The census lesson worth carrying past this arc
-
-**It counted failures, not causes.** Thirteen listview failures had ONE
-root cause — a panel is derived-hidden while frame geometry is unknown,
-and that suite never declared any because it never needed to. The same
-applied to `m4_acceptance` and `vterm_stage2_acceptance`. And
-**`--no-fail-fast` is mandatory**: the first sweep reported 2 failures in
-1 suite because `cargo test` halts after a failing binary; the real
-figure was 37 across 5.
 
 ## Reap-ledger silent failures — MERGED (#202); kept for its parked follow-ons
 
