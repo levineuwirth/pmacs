@@ -105,6 +105,13 @@ where
 /// the daemon broadcasts a snapshot for the newly-CRDT-backed buffer
 /// and via the active-buffer-follow path). Re-seats the replica's
 /// mirror on that buffer.
+///
+/// **Bottom-panel Stage 3:** this is why the runs below pass an explicit
+/// `display = "current"`. The default now places compile output in the
+/// panel with `select = false`, so the ACTIVE buffer never becomes
+/// `*compilation*` — and the active-buffer-follow path named above is
+/// what publishes the snapshot this function waits for. The subject
+/// here is CRDT convergence of a generated buffer, not placement.
 fn adopt_next_buffer(replica: &mut Replica, what: &str) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -188,7 +195,7 @@ fn compile_run_converges_and_replica_edit_triggers_recovery() {
             name = "test.compile",
             description = "compile-mode CRDT fixture trigger",
             fn = function()
-                pmacs.compile.run("sh {script}", {{ cwd = "{dir}" }})
+                pmacs.compile.run("sh {script}", {{ cwd = "{dir}", display = "current" }})
             end,
         }}
         pmacs.keymap.bind {{ scope = "global", sequence = "C-c 9", command = "test.compile" }}
@@ -275,7 +282,7 @@ fn r3f1_unicode_cr_backspace_survive_crdt_replication() {
             name = "test.compile-unicode",
             description = "round-3 unicode fixture trigger",
             fn = function()
-                pmacs.compile.run("sh {script}", {{ cwd = "{dir}" }})
+                pmacs.compile.run("sh {script}", {{ cwd = "{dir}", display = "current" }})
             end,
         }}
         pmacs.keymap.bind {{ scope = "global", sequence = "C-c 8", command = "test.compile-unicode" }}
@@ -327,7 +334,7 @@ fn r4f1_column_rewrites_replicate_and_converge() {
             name = "test.compile-columns",
             description = "round-4 column-rewrite fixture trigger",
             fn = function()
-                pmacs.compile.run("sh {script}", {{ cwd = "{dir}" }})
+                pmacs.compile.run("sh {script}", {{ cwd = "{dir}", display = "current" }})
             end,
         }}
         pmacs.keymap.bind {{ scope = "global", sequence = "C-c 7", command = "test.compile-columns" }}

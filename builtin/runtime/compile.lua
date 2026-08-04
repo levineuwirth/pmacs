@@ -893,11 +893,16 @@ local function start_run(slot, cmdline, opts)
   -- not preempt the requested panel. Compile output is passive, so it
   -- takes `select = false` explicitly.
   --
-  -- A recompile reaches here with NO `display` (only cmdline/cwd are
-  -- stored in `_last`), so the raw switch below would put this buffer in
-  -- the selected DOCUMENT window while the panel still shows it — the
-  -- duplicate presentation this arc removes elsewhere. Detect that the
-  -- buffer already owns the panel slot and keep it there.
+  -- A recompile REPLAYS `_last`, which since Stage 3 carries `display`
+  -- alongside cmdline/cwd — an opt-out that did not survive replay
+  -- would silently revert to the panel on the next `g`. So an explicit
+  -- `display = "current"` reaches here again on a recompile, and must
+  -- still take the raw switch below.
+  --
+  -- The `display_omitted` arm remains for the genuinely omitted case:
+  -- it keeps a buffer that already owns the panel slot in the panel
+  -- rather than duplicating it into the selected DOCUMENT window while
+  -- the panel still shows it.
   --
   -- Gated on OMISSION, never on an explicit value: `display = "current"`
   -- is the documented user-facing opt-out from the Stage 3 default flip,

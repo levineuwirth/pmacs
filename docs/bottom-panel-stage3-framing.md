@@ -572,9 +572,12 @@ One branch, `bottom-panel-stage3`:
    measurement is the first commit's evidence, not the flip.* Classify
    each mover per §1.6a's rule before writing a line of the fix.
 2. **Land `resolve_adopter_display`** (Q#S3-1) with all four callers
-   still passing their CURRENT defaults, so the unification is provably
-   behaviour-preserving before anything flips. Decide and pin the
-   non-string normalization here.
+   still passing their CURRENT defaults, so nothing flips yet. It is
+   **default-preserving with one intentional normalization**, not
+   "behaviour-preserving" — every adopter keeps its default and the
+   suite is byte-identical to baseline, but terminal's invalid-input
+   behaviour moves deliberately (§1.6b). Decide and pin that
+   normalization here, since no existing assertion can catch it.
 3. **Flip the three sites** by changing only the `default` argument at
    listview, compile and terminal — dired keeps `"current"` — with
    per-adopter `select`.
