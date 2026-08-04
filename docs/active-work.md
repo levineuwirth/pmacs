@@ -311,19 +311,81 @@ them) and why `dired`/`listview` were the correct first two families.
   Whichever starts second integrates first.
 
 
-## Bottom-panel lane (Arc 7) — STAGE 2 COMPLETE; STAGE 3 IS THE LAST STEP
+## Bottom-panel lane (Arc 7) — STAGE 3 COMPLETE; ARC DONE, pending PR
 
-**Stage 1, the Stage 2 framing, and Stages 2A, 2B-1, 2B-2 and 2B-3 are
-all on `main` @ `4cd4a7b`** (#155, #175, #177, #184, #187, #198). Stage 2
-is complete. Durable facts are in `docs/agent-handoff.md` §1, including
-the v20-baseline / v21-negotiated handshake that Stage 2B-3 made
-compatible.
+**Arc 7 is finished.** Stage 1 (#155), the Stage 2 framing (#175),
+Stages 2A (#177), 2B-1 (#184), 2B-2 (#187) and 2B-3 (#198) are on
+`main`; **Stage 3 — the adopter default flip — is implemented on
+`bottom-panel-stage3`** and is the arc's last step. Framing
+`docs/bottom-panel-stage3-framing.md` revision 3, approved with
+amendments after three review rounds.
 
-- **Stage 3 — the adopter default flip — is the arc's last step and is
-  not started.** This lane stays until it lands; it is not removed at
-  2B-3's merge.
-- **DAP waits for Stage 2, not Stage 1** — that dependency is now
-  satisfied.
+**This lane is removed once Stage 3 merges and its facts are in
+`docs/agent-handoff.md` §1** (rule 4). It is retained now only because
+the PR has not landed.
+
+- **Branch `bottom-panel-stage3`** off `githubsucks/main` @ `21de0b2`,
+  pushed, upstream tracking set. Six commits: `fa12095` framing,
+  `0224c68` census, `41d37fc` shared resolver, `8d14e6a` lane/portability,
+  `c0eb16b` the flip + test revisions, `5f01ede` the fallback pin.
+- **Verification:** full serialized sweep **3449 passed / 0 failed**
+  against a 3447 baseline (+2 new pins); fmt, diff-check, clippy with and
+  without `crdt`, `--lib` 1896, `--lib --features crdt` 2081,
+  pmacs-protocol 19, m4 149, required GPU 221, and
+  `bottom_panel_stage1_acceptance` 47/47 under both Lua flavors.
+
+### What Stage 3 changed
+
+Omitting `display` resolves to the **panel** for listview, compile and
+terminal. **Dired keeps `"current"`** — `pmacs.path.directory_handler`
+calls it with no `display`, so a flipped default would open `pmacs .` in
+a bottom panel. Per-adopter `select`: listview `true`, compile `false`,
+terminal `true`.
+
+Four hand-written copies of the `display` validator collapsed into one
+shared `resolve_adopter_display(operation, raw, default)`; the default is
+a **parameter**, which is what makes dired's exemption visible at its
+call site rather than hidden in a divergent copy.
+
+### Three defects the flip exposed, each fixed rather than tested around
+
+- **The outline panel's `on_visit` used the RAW switch**
+  (`pmacs.window.switch_buffer`), which replaces the buffer in the ACTIVE
+  window. Harmless while the outline opened into a document window;
+  once the panel became the default, RET **clobbered the panel with the
+  source**. The references panel was migrated to `display_file` when the
+  arc landed — the outline was missed because nothing exercised it from a
+  panel until the flip. Q#BP11c names this exact corruption.
+- **`compile._last` stored only `{cmdline, cwd}`**, so `g` reached
+  `start_run` with no `display` and took the new default: an explicit
+  `display = "current"` silently reverted on the next recompile. **An
+  opt-out that reverts is not an opt-out.**
+- **`opts.display` on a nil `opts`** — a regression introduced by the
+  fix above and caught by `journey_acceptance`, which is what that
+  ratchet is for.
+
+### Two contracts now pinned, not merely observed
+
+- **Compile's chords are PANEL-LOCAL.** All are bound
+  `scope = "buffer"`, so with `select = false` none dispatch from the
+  document — `C-c C-k` included. `M-x compile.kill` still reaches the
+  running slot anywhere via its `or compile_slot()` fallback. A global
+  chord is a command-surface decision and belongs in its own framing.
+- **The two `q` mechanisms are complementary, not competing.**
+  Presentation history chains in the side slot (`C → B → A → delete`,
+  Q#BP2c); `p.prev` prevents raw-switch and capability-fallback listview
+  loops. `s1_12` pins the second with explicit `display = "current"`;
+  the new `s3_1` pins the first.
+
+### The census lesson worth carrying past this arc
+
+**It counted failures, not causes.** Thirteen listview failures had ONE
+root cause — a panel is derived-hidden while frame geometry is unknown,
+and that suite never declared any because it never needed to. The same
+applied to `m4_acceptance` and `vterm_stage2_acceptance`. And
+**`--no-fail-fast` is mandatory**: the first sweep reported 2 failures in
+1 suite because `cargo test` halts after a failing binary; the real
+figure was 37 across 5.
 
 ## Reap-ledger silent failures — MERGED (#202); kept for its parked follow-ons
 

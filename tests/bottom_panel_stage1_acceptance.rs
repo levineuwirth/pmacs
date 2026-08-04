@@ -1220,18 +1220,42 @@ fn acc18_display_file_targets_the_document_from_a_focused_panel() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one placement scenario per adopter; splitting it would hide that they share a contract"
+)]
 fn acc19_adopters_place_side_affinely_through_real_entry_points() {
-    // listview: pre-seed the persistent panel buffer in a DOCUMENT window
-    // first, so side-affine placement cannot be vacuous.
+    // Stage 3: the DEFAULT is now the panel, so assert that first —
+    // this test's subject is placement through the real entry points.
     let s = editor();
     exec(
         &s,
-        "pmacs.listview.open { name = \"*outline*\", rows = { { text = \"row\" } } }",
+        "pmacs.listview.open { name = \"*default*\", rows = { { text = \"row\" } } }",
+    );
+    assert!(
+        side_window(&s).is_some(),
+        "omitting display places a listview in the panel"
+    );
+
+    // listview: pre-seed the persistent panel buffer in a DOCUMENT window
+    // first, so side-affine placement cannot be vacuous.
+    //
+    // The seed now says `display = "current"` EXPLICITLY. That is not a
+    // bolt-on to keep the test green: the seed's whole purpose is "this
+    // buffer starts in a document window", and after the flip that
+    // requires saying so. Leaving it omitted would seed a panel and the
+    // side-affine assertion below would pass without having moved
+    // anything — exactly the vacuity this fixture was built to prevent.
+    let s = editor();
+    exec(
+        &s,
+        "pmacs.listview.open { name = \"*outline*\", rows = { { text = \"row\" } }, \
+         display = \"current\" }",
     );
     let seeded = active_window(&s);
     assert!(
         side_window(&s).is_none(),
-        "the default placement is unchanged"
+        "the explicit opt-out still places in the document window"
     );
     exec(
         &s,
@@ -1254,9 +1278,10 @@ fn acc19_adopters_place_side_affinely_through_real_entry_points() {
         "an unknown display value is a pointed error"
     );
 
-    // compile: same shape, but passive (`select = false`).
+    // compile: same shape, but passive (`select = false`). Seeded with
+    // the explicit opt-out for the same reason as the listview above.
     let s = editor();
-    exec(&s, "pmacs.compile.run(\"true\")");
+    exec(&s, "pmacs.compile.run(\"true\", { display = \"current\" })");
     assert!(side_window(&s).is_none());
     let document = active_window(&s);
     exec(&s, "pmacs.compile.run(\"true\", { display = \"panel\" })");
@@ -1291,6 +1316,53 @@ fn acc19_adopters_place_side_affinely_through_real_entry_points() {
         "unknown display fails before session/process/buffer creation"
     );
     assert_eq!(s.core.borrow().registry.borrow().ids().len(), before);
+
+    // Bottom-panel Stage 3, Q#S3-1 — the NON-STRING normalization.
+    //
+    // Pinned because step 2 CHANGED this deliberately and nothing else
+    // covers it. Before the shared resolver, terminal read
+    // `get::<Option<String>>("display")?`, so a number raised mlua's
+    // TYPE error before any custom message existed; the Lua adopters
+    // stringified instead and reported their own. Unifying the error
+    // text without pinning this would have let the two drift back apart
+    // unnoticed, and the surrounding assertions could not have caught it
+    // — they all pass unknown STRINGS, which take the same path in both
+    // designs.
+    //
+    // The custom error wins because it names the legal vocabulary. The
+    // type is reported WITHOUT the value, so the message cannot imply a
+    // string was passed.
+    let before = s.core.borrow().registry.borrow().ids().len();
+    let err = try_exec(
+        &s,
+        "pmacs.terminal.open { command = \"/bin/sh\", display = 42 }",
+    )
+    .expect_err("a non-string display is rejected");
+    // The TYPE SPELLING is deliberately not pinned: Lua 5.4 reports
+    // `integer` where LuaJIT has no integer subtype, so asserting either
+    // literal would pass on one CI flavor and fail on the other. What is
+    // pinned is the shape — our operation name, a parenthesised type
+    // rather than a quoted value, and the vocabulary.
+    assert!(
+        err.contains("pmacs.terminal.open: unknown display ("),
+        "a non-string display takes the shared unknown-display error naming the \
+         operation and a type, not mlua's type error; got: {err}"
+    );
+    assert!(
+        err.contains("expected \"current\" or \"panel\""),
+        "the error still names the legal values; got: {err}"
+    );
+    assert!(
+        !err.contains("\"42\""),
+        "the rejected value is reported by TYPE, not quoted as though it were a \
+         string; got: {err}"
+    );
+    assert_eq!(
+        s.core.borrow().registry.borrow().ids().len(),
+        before,
+        "…and still creates nothing, exactly as an unknown string does"
+    );
+
     exec(
         &s,
         "TERM_BUF = pmacs.terminal.open { command = \"/bin/sh\", display = \"panel\" }",
@@ -1357,8 +1429,11 @@ fn acc19b_recompile_reuses_the_panel_instead_of_duplicating_into_the_document() 
     );
 
     // A compilation that is NOT in a panel keeps the pre-arc raw switch.
+    // Reaching that state now takes an explicit opt-out, since the
+    // default would panel it — and "not in a panel" is the precondition
+    // this half exists to exercise.
     let s = editor();
-    exec(&s, "pmacs.compile.run(\"true\")");
+    exec(&s, "pmacs.compile.run(\"true\", { display = \"current\" })");
     assert!(side_window(&s).is_none());
     let target = active_window(&s);
     exec(&s, "pmacs.command.invoke(\"compile.recompile\")");
@@ -1583,6 +1658,70 @@ fn acc21_panel_visit_and_jump_back_returns_to_the_panel() {
         2,
         "no duplicate presentation was created"
     );
+}
+
+/// Bottom-panel Stage 3, criterion 5 — the OMITTED default degrades on a
+/// frontend that cannot host a panel.
+///
+/// `acc14` already proves capability fallback for an EXPLICIT
+/// `request.side` at the core level. This is the Stage 3 case and it is
+/// not the same one: the default is now resolved into a panel request
+/// inside the adopter, so a pre-panel semantic frontend must degrade a
+/// request the caller never wrote. The framing calls this the criterion
+/// most likely to be quietly wrong, because the fallback is invisible
+/// from the adopter's side — nothing in `listview.open` says "panel",
+/// yet the request that reaches the core does.
+///
+/// What must survive the degradation: no side window, no side
+/// parameters, and NO QUIT ACTION left on the document window. A quit
+/// action stranded on a document window would make a later `q` try to
+/// restore a presentation that never existed.
+#[test]
+fn s3_2_the_omitted_default_degrades_on_a_pre_panel_frontend() {
+    let s = editor();
+    let fid = FrontendId(31);
+    let document = attach_frontend(&s, fid, false);
+    s.core.borrow_mut().active_frontend = fid;
+
+    // No `display` at all — the Stage 3 default resolves to a panel
+    // request, which this frontend cannot honour.
+    exec(
+        &s,
+        "pmacs.listview.open { name = \"*degraded*\", rows = { { text = \"row\" } } }",
+    );
+
+    assert!(
+        s.core.borrow().side_window_for(fid).is_none(),
+        "a pre-panel frontend gets no side window from the omitted default"
+    );
+    {
+        let core = s.core.borrow();
+        let window = &core.windows[&document];
+        assert!(
+            window.params.side.is_none(),
+            "no side parameter is left on the document window"
+        );
+        assert!(
+            !window.params.dedicated,
+            "the document window is not dedicated by a degraded request"
+        );
+        assert!(
+            window.params.quit_action().is_none(),
+            "NO quit action is left behind — `q` must not try to restore a \
+             presentation that never happened"
+        );
+        assert_eq!(
+            core.registry
+                .borrow()
+                .get(window.buffer_id)
+                .expect("live buffer")
+                .name(),
+            "*degraded*",
+            "the buffer still reached the document target"
+        );
+    }
+
+    s.core.borrow_mut().active_frontend = FrontendId::LOCAL;
 }
 
 #[test]

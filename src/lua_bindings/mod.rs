@@ -9320,12 +9320,19 @@ fn install_terminal(
                 // Bottom-panel arc (Q#BP11b): parse placement BEFORE the
                 // session, process, buffer, or wrapper exists, so an
                 // unknown `display` value creates nothing to roll back.
+                // Stage 3 (Q#BP12): omitting `display` resolves to the
+                // PANEL. `select = true` is passed to
+                // `place_adopter_buffer` below — a terminal is
+                // interactive, so it takes focus, unlike compile's
+                // passive output.
+                let display_value = spec_table.get::<mlua::Value>("display")?;
                 let placement = window_panel::parse_adopter_placement(
                     &core,
                     frontend_id,
                     "pmacs.terminal.open",
-                    spec_table.get::<Option<String>>("display")?.as_deref(),
+                    Some(&display_value),
                     spec_table.get::<Option<u64>>("window")?,
+                    window_panel::AdopterDefault::Panel,
                 )?;
                 let buffer_id = {
                     let mut manager = manager.borrow_mut();

@@ -7982,6 +7982,19 @@ fn m4_5_symbols_and_highlight_round_trip() {
 /// (shared bootstrap for the panel tests).
 fn open_against_fake(path: &std::path::Path) -> pmacs::editor::EditorState {
     let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
+    // Bottom-panel Stage 3: the LSP panels are listview consumers, so
+    // they inherited the panel default — and a panel is derived-hidden
+    // while frame geometry is unknown. Without this declaration the
+    // outline and hover panels open into a hidden window and the probes
+    // below read the document buffer instead.
+    //
+    // This suite is the TRANSITIVE adopter the arc's own Q#BP12 table
+    // never named: nothing here calls `listview.open` directly, but
+    // `lsp.lua` does.
+    state.sync_frame_geometry(
+        pmacs::protocol::FrontendId::LOCAL,
+        pmacs::protocol::CellSize::new(40, 100),
+    );
     let fake = fake_lsp_path();
     state
         .lua_host
@@ -8013,6 +8026,10 @@ fn open_against_fake(path: &std::path::Path) -> pmacs::editor::EditorState {
 /// method): open, depth-indented rows, RET jump-ring visit to the
 /// symbol's selectionRange, M-, back to the outline row, q restore.
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "criterion 58's whole flow: open -> visit -> jump-back -> quit, in one scenario"
+)]
 fn outline_panel_opens_visits_and_restores() {
     let dir = tempfile::tempdir().expect("tempdir");
     let a_path = dir.path().join("a.rs");
@@ -8097,6 +8114,30 @@ fn outline_panel_opens_visits_and_restores() {
         .eval()
         .expect("post-jump-back probe");
     assert_eq!(name, "*outline*", "M-, returns to the outline panel");
+    // Q#BP11c — and it FOCUSES the panel rather than cloning `*outline*`
+    // into the document window. The jump ring stores only
+    // `(BufferId, Position)`, so a naive `jump_back` would switch the
+    // active (document) window to the panel's buffer and leave the panel
+    // open too: the duplicate-buffer/window corruption that question
+    // names. The assertion above cannot tell those apart on its own.
+    let (panelled, doc_clone): (bool, bool) = {
+        let core = state.core.borrow();
+        let named = |w: &pmacs::window::Window| {
+            core.registry
+                .borrow()
+                .get(w.buffer_id)
+                .is_ok_and(|b| b.name() == "*outline*")
+        };
+        (
+            core.windows.values().any(|w| w.is_side() && named(w)),
+            core.windows.values().any(|w| !w.is_side() && named(w)),
+        )
+    };
+    assert!(panelled, "the outline is still in its panel after M-,");
+    assert!(
+        !doc_clone,
+        "M-, must not clone *outline* into a document window (Q#BP11c)"
+    );
 
     // q restores the source buffer.
     state.dispatch_key(

@@ -2493,7 +2493,21 @@ function pmacs.lsp.document_symbols()
       rows = rows,
       on_visit = function(sym)
         pmacs.editor.push_jump()
-        local okv = pcall(pmacs.window.switch_buffer, source_buf)
+        -- Bottom-panel arc (Q#BP11b), completed in Stage 3: a visit FROM
+        -- a panel must land in the DOCUMENT target and leave the panel
+        -- intact — the same rule `visit_location` above already follows
+        -- via `display_file`.
+        --
+        -- This path used `pmacs.window.switch_buffer`, the RAW switch,
+        -- which replaces the buffer in the ACTIVE window. That was
+        -- harmless while the outline opened into a document window: the
+        -- switch simply reused it. Once Stage 3 made the panel the
+        -- default, the active window IS the outline panel, so RET
+        -- clobbered the panel with the source and left nothing for `M-,`
+        -- to return to. The references panel was migrated when the arc
+        -- landed; the outline was missed because nothing exercised it
+        -- from a panel until the default flipped.
+        local okv = pcall(pmacs.window.display, source_buf, { select = true })
         if not okv then
           pmacs.editor.jump_back()
           pmacs.editor.set_status("LSP: outline source buffer is gone")

@@ -17,7 +17,23 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use pmacs::buffer::BufferId;
 use pmacs::editor::EditorState;
-use pmacs::protocol::FrontendId;
+use pmacs::protocol::{CellSize, FrontendId};
+
+/// Bottom-panel Stage 3: a listview now opens into the PANEL by default,
+/// and a panel is derived-hidden while the frontend's frame geometry is
+/// unknown — so focus would fall back to the document window and every
+/// panel assertion here would read the wrong buffer.
+///
+/// `bottom_panel_stage1_acceptance` has always declared geometry for the
+/// same reason: a grid frontend's real frame size IS its declaration,
+/// and every test that does not render must state it before any input.
+/// This suite never needed to while listview defaulted to the current
+/// window. It does now.
+fn editor() -> EditorState {
+    let s = EditorState::new_with_roots(&crate::iso::roots());
+    s.sync_frame_geometry(FrontendId::LOCAL, CellSize::new(24, 80));
+    s
+}
 
 fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
     KeyEvent {
@@ -194,6 +210,31 @@ fn open_test_panel(s: &mut EditorState) {
         .expect("open test panel");
 }
 
+/// Open the fixture panel with an explicit `display = "current"`, for
+/// the tests whose subject requires it to sit in a document window.
+fn open_test_panel_in_document(s: &mut EditorState) {
+    s.lua_host
+        .lua()
+        .load(
+            r#"
+            _G.VISITED = nil
+            pmacs.listview.open {
+              name = "*test-panel*",
+              header = "3 items   RET visit  q quit",
+              display = "current",
+              rows = {
+                { text = "alpha", item = "A" },
+                { text = "beta",  item = "B" },
+                { text = "gamma", item = "C" },
+              },
+              on_visit = function(item) _G.VISITED = item end,
+            }
+            "#,
+        )
+        .exec()
+        .expect("open test panel in a document window");
+}
+
 /// `(active buffer name, buffer text, cursor line, visited)` probed
 /// through the Lua surface.
 fn probe(s: &EditorState) -> (String, String, i64, Option<String>) {
@@ -212,7 +253,7 @@ fn probe(s: &EditorState) -> (String, String, i64, Option<String>) {
 
 #[test]
 fn open_seats_cursor_and_ret_visits_the_row() {
-    let mut s = EditorState::new_with_roots(&crate::iso::roots());
+    let mut s = editor();
     open_test_panel(&mut s);
     let (name, text, line, _) = probe(&s);
     assert_eq!(name, "*test-panel*");
@@ -227,7 +268,7 @@ fn open_seats_cursor_and_ret_visits_the_row() {
 
 #[test]
 fn header_row_is_not_visitable() {
-    let mut s = EditorState::new_with_roots(&crate::iso::roots());
+    let mut s = editor();
     open_test_panel(&mut s);
     press(&mut s, KeyCode::Char('p')); // up onto the header
     press(&mut s, KeyCode::Enter);
@@ -237,7 +278,7 @@ fn header_row_is_not_visitable() {
 
 #[test]
 fn q_restores_the_previous_buffer() {
-    let mut s = EditorState::new_with_roots(&crate::iso::roots());
+    let mut s = editor();
     open_test_panel(&mut s);
     press(&mut s, KeyCode::Char('q'));
     let (name, _, _, _) = probe(&s);
@@ -246,7 +287,7 @@ fn q_restores_the_previous_buffer() {
 
 #[test]
 fn panel_rejects_typing() {
-    let mut s = EditorState::new_with_roots(&crate::iso::roots());
+    let mut s = editor();
     open_test_panel(&mut s);
     let (_, before, _, _) = probe(&s);
     press(&mut s, KeyCode::Char('z')); // unbound printable → self-insert → intercept rejects
@@ -258,7 +299,7 @@ fn panel_rejects_typing() {
 fn dispatch_idle_is_false_while_a_panel_is_focused() {
     // Q#P6: while the panel is the active buffer, semantic frontends
     // must round-trip every key (RET = visit, not an optimistic \n).
-    let mut s = EditorState::new_with_roots(&crate::iso::roots());
+    let mut s = editor();
     assert!(s.dispatch_idle(), "scratch buffer: idle");
     open_test_panel(&mut s);
     assert!(!s.dispatch_idle(), "panel focused: keys must round-trip");
@@ -268,7 +309,7 @@ fn dispatch_idle_is_false_while_a_panel_is_focused() {
 
 #[test]
 fn refresh_reruns_the_source_and_reseats() {
-    let mut s = EditorState::new_with_roots(&crate::iso::roots());
+    let mut s = editor();
     open_test_panel(&mut s);
     press(&mut s, KeyCode::Char('g'));
     let (_, text, line, _) = probe(&s);
@@ -304,7 +345,7 @@ const PANEL_TEXT: &str = "3 items   RET visit  q quit\nalpha\nbeta\ngamma";
 /// consulting the intercept chain.
 #[test]
 fn s1_1_the_undo_chord_cannot_empty_a_listview_panel() {
-    let mut s = EditorState::new_with_roots(&crate::iso::roots());
+    let mut s = editor();
     open_test_panel(&mut s);
     assert_eq!(active_text(&s), PANEL_TEXT, "precondition: rendered");
 
@@ -327,7 +368,7 @@ fn s1_1_the_undo_chord_cannot_empty_a_listview_panel() {
 /// *Bite:* same empty result on the pre-image.
 #[test]
 fn s1_2_m_x_buffer_undo_cannot_empty_a_listview_panel() {
-    let mut s = EditorState::new_with_roots(&crate::iso::roots());
+    let mut s = editor();
     open_test_panel(&mut s);
 
     m_x(&mut s, "buffer.undo");
@@ -355,7 +396,7 @@ fn s1_2_m_x_buffer_undo_cannot_empty_a_listview_panel() {
 /// raising.
 #[test]
 fn s1_4_the_owners_refresh_still_works_after_the_lock() {
-    let mut s = EditorState::new_with_roots(&crate::iso::roots());
+    let mut s = editor();
     open_test_panel(&mut s);
     let panel = id_of(&s, "*test-panel*");
     assert!(
@@ -388,7 +429,7 @@ fn s1_4_the_owners_refresh_still_works_after_the_lock() {
 /// therefore passes the rope half and fails the lifted half.
 #[test]
 fn s1_5_the_rope_lock_and_named_intercept_refuse_in_order() {
-    let mut s = EditorState::new_with_roots(&crate::iso::roots());
+    let mut s = editor();
     open_test_panel(&mut s);
     let panel = id_of(&s, "*test-panel*");
     let before = active_text(&s);
@@ -453,8 +494,15 @@ fn s1_5_the_rope_lock_and_named_intercept_refuse_in_order() {
 /// pinned through `dispatch_idle_for` rather than through `read_only`.
 #[test]
 fn s1_6_round_trip_input_survives_the_adoption() {
-    let mut s = EditorState::new_with_roots(&crate::iso::roots());
-    open_test_panel(&mut s);
+    let mut s = editor();
+    // Stage 3: an EXPLICIT opt-out, because this fixture genuinely needs
+    // the document window. `dispatch_idle` goes false for TWO reasons —
+    // a round-trip buffer (this test's subject) and a focused panel
+    // (`dispatch_idle_is_false_while_a_panel_is_focused`, a different
+    // test). Letting the panel default apply here would satisfy the gate
+    // for the wrong reason and the test would pass while proving
+    // nothing. The premise assertion below is what keeps that honest.
+    open_test_panel_in_document(&mut s);
 
     // (a) the premise.
     {
@@ -498,7 +546,7 @@ fn s1_6_round_trip_input_survives_the_adoption() {
 /// the old line index live and this paint assertion bites.
 #[test]
 fn s1_7_a_shrinking_refresh_reaches_the_window() {
-    let mut s = EditorState::new_with_roots(&crate::iso::roots());
+    let mut s = editor();
     open_test_panel(&mut s);
     let painted = paint_active_window(&s, 6, 24);
     assert_eq!(
@@ -540,7 +588,7 @@ fn s1_7_a_shrinking_refresh_reaches_the_window() {
 /// builtin/runtime/listview.lua` falsifies it.
 #[test]
 fn s1_9_a_foreign_buffer_with_the_panels_name_is_never_adopted() {
-    let mut s = EditorState::new_with_roots(&crate::iso::roots());
+    let mut s = editor();
     exec(
         &s,
         "FOREIGN = pmacs.buffer.create('*test-panel*')\n\
@@ -585,7 +633,7 @@ fn s1_9_a_foreign_buffer_with_the_panels_name_is_never_adopted() {
 /// created.
 #[test]
 fn s1_10_the_disambiguation_limit_raises_rather_than_adopting() {
-    let s = EditorState::new_with_roots(&crate::iso::roots());
+    let s = editor();
     exec(
         &s,
         "MINE = pmacs.buffer.create('*test-panel*')\n\
@@ -624,7 +672,7 @@ fn s1_10_the_disambiguation_limit_raises_rather_than_adopting() {
 /// command produced, never on "it did not raise".
 #[test]
 fn s1_11_a_disambiguated_panel_still_answers_ret_g_and_q() {
-    let mut s = EditorState::new_with_roots(&crate::iso::roots());
+    let mut s = editor();
     exec(
         &s,
         "FOREIGN = pmacs.buffer.create('*test-panel*')\n\
@@ -676,21 +724,96 @@ fn s1_11_a_disambiguated_panel_still_answers_ret_g_and_q() {
 ///
 /// *Bite:* restore the name-keyed `panels[d.name]` lookup while keeping
 /// the disambiguation and `q` lands back in `*test-panel*<2>`.
+/// Bottom-panel Stage 3 — the SIDE-WINDOW half of `q`, complementary to
+/// `s1_12`'s buffer-level `p.prev` rule.
+///
+/// The parent framing's criterion 20 requires listview `q` to route
+/// through `window.quit`, with `C → B → A` restoring each prior
+/// presentation and the first panel deleting its wrapper. Before Stage 3
+/// this was unreachable from listview's own entry point without an
+/// explicit `display = "panel"` on every open; the default flip makes it
+/// the ordinary path, so it gets an ordinary-path test.
+///
+/// The two mechanisms are complementary, not competing: **presentation
+/// history chains in the side slot**, while **`p.prev` prevents
+/// raw-switch and capability-fallback listview loops**. `s1_12` pins the
+/// second by keeping its panels in document windows; this pins the
+/// first.
+#[test]
+fn s3_1_q_walks_the_side_presentation_chain_back_to_the_document() {
+    let mut s = editor();
+    exec(
+        &s,
+        "ORIGIN = pmacs.buffer.create('*origin*')\n\
+              pmacs.window.switch_buffer(ORIGIN)",
+    );
+    assert_eq!(active_name(&s), "*origin*", "premise: a document window");
+
+    for name in ["*panel-a*", "*panel-b*", "*panel-c*"] {
+        exec(
+            &s,
+            &format!(
+                "pmacs.listview.open {{ name = '{name}', header = 'H', \
+                 rows = {{ {{ text = 'x', item = 'X' }} }} }}"
+            ),
+        );
+        assert_eq!(active_name(&s), name, "each open takes the panel slot");
+    }
+
+    // C → B → A: each `q` restores the presentation the next one
+    // replaced, rather than forgetting them or jumping straight out.
+    press(&mut s, KeyCode::Char('q'));
+    assert_eq!(
+        active_name(&s),
+        "*panel-b*",
+        "q restores the replaced panel"
+    );
+    press(&mut s, KeyCode::Char('q'));
+    assert_eq!(active_name(&s), "*panel-a*", "…and again, in order");
+
+    // A → delete: the FIRST panel deletes its wrapper and focus lands
+    // back in the document. This is what bounds the chain — a loop
+    // between panels would never reach here.
+    press(&mut s, KeyCode::Char('q'));
+    assert_eq!(
+        active_name(&s),
+        "*origin*",
+        "the last q deletes the wrapper and returns to the document"
+    );
+    assert!(
+        s.core.borrow().windows.values().all(|w| !w.is_side()),
+        "the side wrapper is collapsed, not left empty"
+    );
+}
+
 #[test]
 fn s1_12_the_q_target_capture_is_not_inverted_across_two_panels() {
-    let mut s = EditorState::new_with_roots(&crate::iso::roots());
+    let mut s = editor();
     exec(
         &s,
         "FOREIGN = pmacs.buffer.create('*test-panel*')\n\
          ORIGIN = pmacs.buffer.create('*origin*')\n\
          pmacs.window.switch_buffer(ORIGIN)",
     );
-    open_test_panel(&mut s);
+    // Stage 3: BOTH opens are explicitly `display = "current"`, and that
+    // is what keeps this test meaningful rather than what makes it pass.
+    //
+    // Its subject is the BUFFER-level `p.prev` skip rule and the Q#GB18
+    // name-keyed identity guard — the `FOREIGN` buffer above shares the
+    // panel's name, so the disambiguation to `*test-panel*<2>` is the
+    // regression this pins. Under the panel default those two listviews
+    // would share the one bottom slot and `q` would exercise the
+    // SIDE-WINDOW restore chain instead (Q#BP2c criterion 20), which is
+    // a different mechanism with its own test below. Keeping them in
+    // document windows isolates the two, so a `p.prev` inversion stays
+    // detectable rather than being masked by presentation history.
+    open_test_panel_in_document(&mut s);
     assert_eq!(active_name(&s), "*test-panel*<2>", "premise: disambiguated");
 
     exec(
         &s,
         "pmacs.listview.open { name = '*other-panel*', header = 'O', \
+         display = 'current', \
          rows = { { text = 'x', item = 'X' } } }",
     );
     assert_eq!(active_name(&s), "*other-panel*", "premise: second panel");
@@ -700,7 +823,8 @@ fn s1_12_the_q_target_capture_is_not_inverted_across_two_panels() {
     assert_ne!(
         active_name(&s),
         "*test-panel*<2>",
-        "q must never return into another panel --- the chained-panel loop"
+        "q must never return into another panel via p.prev --- the \
+         raw-switch/capability-fallback loop this rule exists to prevent"
     );
     assert_eq!(
         active_name(&s),
