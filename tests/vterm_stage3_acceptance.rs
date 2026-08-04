@@ -608,8 +608,14 @@ pmacs.command.define {
   name = "vterm-probe.open",
   description = "Open the Stage 3 acceptance terminal child.",
   fn = function()
+    -- Bottom-panel Stage 3: explicit opt-out. This suite measures
+    -- RENDERED FRAMES and child PTY geometry against a full document
+    -- window; the panel default would put the child in a 12-row side
+    -- window and change the very geometry under test. Placement is
+    -- covered by the panel suites.
     return pmacs.terminal.open {
       command = "/bin/sh",
+      display = "current",
       args = { "-c",
         "i=0; while [ $i -lt 400 ]; do printf 'VTERMROW%02d\n' \"$i\"; i=$((i+1)); sleep 0.05; done" },
     }
@@ -1140,8 +1146,11 @@ pmacs.command.define {
   name = "vterm-probe.open",
   description = "Open a quiet terminal that counts SIGWINCH.",
   fn = function()
+    -- Stage 3 opt-out: this test asserts the child's PTY geometry
+    -- settles and stops signalling. A panel changes that geometry.
     return pmacs.terminal.open {
       command = "/bin/sh",
+      display = "current",
       args = { "-c",
         "n=0; trap 'n=$((n+1)); printf \"WINCH %d\r\n\" \"$n\"' WINCH; " ..
         "printf 'READY\r\n'; while :; do sleep 0.2; done" },
@@ -1163,8 +1172,11 @@ pmacs.command.define {
   name = "vterm-probe.open",
   description = "Open a terminal child that copies stdin to stdout.",
   fn = function()
+    -- Stage 3 opt-out: input must round-trip through a frame rendered
+    -- over the document window this test measures.
     return pmacs.terminal.open {
       command = "/bin/sh",
+      display = "current",
       args = { "-c", "printf 'READY\r\n'; exec cat" },
     }
   end,
