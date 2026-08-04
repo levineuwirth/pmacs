@@ -1,7 +1,11 @@
 # Framing — macOS CI signal integrity: a signature registry, then hardening
 
-**Revision 1.** Status: framing only. No branch work beyond this
-document. Scouted against `githubsucks/main` @ `bfb97c6`.
+**Revision 2.** Status: framing only. No branch work beyond this
+document. Scouted against `githubsucks/main` @ `bfb97c6`. Revision 2
+separates a machine-matchable signature from verbatim, variable CI
+output; preserves historical incident evidence while centralizing live
+triage policy; gives retirement a causal rule rather than an arbitrary
+green-run count; and corrects the rerun rule.
 
 Four red CI incidents across #213 and #214 were each correctly judged
 "not caused by this PR" — and #214's case is airtight, because it is
@@ -39,12 +43,21 @@ alone produced two, with different mechanisms and different causal
 status — collapsing them under one name would have hidden a possible
 product defect behind a known-flaky label.
 
-| # | test | job / flavor | exact signature | causal status |
+The registry key is an exact **test selector + job/flavor + normalized
+match rule**, not a pasted panic block. PIDs, elapsed times, and rendered
+OS-error suffixes vary between runs; each row therefore names the
+required invariant fragments and the evidence link preserves the
+verbatim occurrence. A row matches only when every listed requirement
+is satisfied; where a requirement lists alternative platform renderings,
+one of those alternatives suffices. A test-name match by itself never
+matches a registry entry.
+
+| # | exact test selector | job / flavor | required signature fragments | causal status |
 |---|---|---|---|---|
-| 1 | `async_runtime::tests::supersede_cancels_in_flight_job_within_50ms` | macOS / luajit | `supersede did not cancel within 50ms` | **measurement design** — see §1.2 |
-| 2 | `process::tests::a_successful_signal_disposition_depends_on_whether_it_is_fatal` | macOS / lua54 | `leader=exited(signal SIGUSR1)` | **test race** — see §1.3 |
-| 3 | *(same test)* | macOS / lua54 | `EPERM, measured_group=unobservable(ESRCH), leader=live` | **UNRESOLVED — possible product defect** — see §1.4 |
-| 4 | `vterm_stage2::terminal_escape_gates_local_bindings_and_double_escape_sends_interrupt` | macOS / luajit | `left: [], right: [49]` | **test race** — see §1.5 |
+| 1 | `--lib async_runtime::tests::supersede_cancels_in_flight_job_within_50ms` | macOS / luajit | `supersede did not cancel within 50ms` | **measurement design** — see §1.2 |
+| 2 | `--lib process::tests::a_successful_signal_disposition_depends_on_whether_it_is_fatal` | macOS / lua54 | `leader=exited(signal SIGUSR1)` | **test race** — see §1.3 |
+| 3 | *(same test)* | macOS / lua54 | all of `EPERM`, `measured_group=unobservable(` + `ESRCH` / `No such process`, and `leader=live` | **UNRESOLVED — possible product defect** — see §1.4 |
+| 4 | `--test vterm_stage2_acceptance terminal_escape_gates_local_bindings_and_double_escape_sends_interrupt` | macOS / luajit | both `left: []` and `right: [49]` | **test race** — see §1.5 |
 
 Evidence:
 [#213 run 30826884642](https://github.com/levineuwirth/pmacs/actions/runs/30826884642),
@@ -111,9 +124,9 @@ installed".
 
 ### 1.4 Signature 3 — the live-leader EPERM, deliberately unresolved
 
-`EPERM, measured_group=unobservable(ESRCH), leader=live` is **not** a
-test race. It is the group-target behaviour the process-signal lanes
-have circled three times:
+`EPERM, measured_group=unobservable(ESRCH), leader=live` is **not
+established as a test race**. It is the group-target behaviour the
+process-signal lanes have circled three times:
 
 - #176 established that a group-directed `kill` returned EPERM while the
   leader was observed alive by a real `try_wait`, retiring "EPERM cannot
@@ -147,18 +160,25 @@ on a zero-byte file and `wait_for_file` returns `[]`. The caller then
 asserts `== b"1"` and fails `left: [], right: [49]`.
 
 The predicate is "readable"; the assertion is "contains `1`". This is
-the same shape as §1.3 and is fixable at the helper — every caller
-inherits the fix.
+the same shape as §1.3 and is fixable at the helper. All four callers of
+this helper require concrete non-empty content; the similar bottom-panel
+helper already rejects empty reads.
 
-### 1.6 The prose is duplicated and keyed by name
+### 1.6 Live triage policy and historical evidence are mixed together
 
-Flake claims currently live in at least six places: the handoff's
-hazards list, `docs/active-work.md` (twice), and the reap-ledger,
-process-signal, vterm and terminal-config framings. They disagree in
-detail, none carries an exact signature or an evidence link, and the
-handoff's list names three tests — **two of which are not among the
-four incidents seen here**, while three of these four are absent from
-it.
+Flake language currently appears in the handoff's two operational
+rules, `docs/active-work.md`, and several landed framing documents. It
+is not all duplication. The process-signal and reap-ledger framings, for
+example, preserve exact historical occurrences and the reasoning those
+lanes built from them; replacing that evidence with a pointer would
+make a durable framing depend on a mutable registry.
+
+The real duplication is **live classification and triage policy**. The
+handoff's hazards list names three tests — two of which are not among
+the four incidents seen here — while three of these four are absent.
+Elsewhere, historical occurrence notes, forward-looking risk warnings,
+and current "known flaky" claims are written in the same voice even
+though they require different treatment.
 
 A list that is both stale and incomplete is worse than none: it confers
 "known flaky" on whatever happens to be named, and withholds it from
@@ -178,26 +198,29 @@ everything else.
 
 ## 2. Questions
 
-- **Q#MS1 — where does the registry live?** It must be one file, and
-  every other mention becomes a pointer. `docs/agent-handoff.md` §5 is
-  the natural home (it already holds the hazards list), but a dedicated
-  `docs/ci-flake-registry.md` is easier to keep in one voice and to diff.
-  **Leaning: a dedicated file, with the handoff pointing at it**, since
-  the handoff is a briefing and this is a table that will grow.
-- **Q#MS2 — what retires an entry?** Proposal: hardening that removes
-  the mechanism, plus N consecutive green runs of that job on `main`.
-  N needs a number, and the number is a judgement about how much
-  evidence "gone" requires.
-- **Q#MS3 — does signature 1 get reformulated or re-measured?** §1.2
+- **Q#MCI1 — where does the registry live? DECIDED:** one dedicated
+  `docs/ci-red-signatures.md`, with the handoff's operational rule
+  pointing at it. The handoff is a briefing; the registry is an
+  occurrence ledger whose rows remain available after retirement.
+- **Q#MCI2 — what retires an entry? DECIDED:** a mechanism-specific
+  causal result, not N green runs. A known-race entry requires hardening
+  that removes the named mechanism plus a discriminating acceptance
+  witness for the stronger predicate. A measurement-design entry
+  requires its owning lane to replace or justify the measurement and
+  pin the resulting claim. An unresolved entry requires diagnosis and
+  an explicit disposition. Main-job greens remain occurrence evidence,
+  but cannot retire any row by themselves; retired rows remain in the
+  history with their disposition.
+- **Q#MCI3 — does signature 1 get reformulated or re-measured?** §1.2
   argues its budget measures the observer. Reformulating as an ordering
   assertion changes what the test proves; keeping a duration means
   finding a clock the pump loop does not participate in. **This is the
   one question this lane should not answer alone** — it is the
   async-runtime lane's design call.
-- **Q#MS4 — does hardening ship before or with the registry?** The user
-  has already answered: **registry now, hardening next.** Recorded here
-  so the sequencing is visible in the document rather than only in the
-  conversation.
+- **Q#MCI4 — does hardening ship before or with the registry? DECIDED:**
+  the user has already answered: **registry now, hardening next.**
+  Recorded here so the sequencing is visible in the document rather
+  than only in the conversation.
 
 ---
 
@@ -206,11 +229,15 @@ everything else.
 - **Bet 1 — signatures 2 and 4 disappear under hardening**, because both
   have a named mechanism and a fix at the readiness predicate.
   *Falsified if either recurs after the predicate is strengthened.*
-- **Bet 2 — signature 1 does not**, because widening a budget that
-  measures the observer changes nothing about what it measures.
-- **Bet 3 — signature 3 recurs and stays unexplained** until the
-  process-signal lane resolves the group-target question. The registry's
-  job is to keep it visible, not to fix it.
+- **Bet 2 — a signature-keyed registry refuses name-based immunity.** A
+  future failure in the process test which does not contain all of row
+  2's or row 3's required fragments is a new incident, not a known
+  flake. *Falsified if the operational rule permits a test-name-only
+  match.*
+- **Bet 3 — green reruns do not erase unresolved evidence.** Signature
+  3 remains unresolved until the process-signal lane diagnoses and
+  disposes it, whether or not later runs pass. *Falsified if a green run
+  changes that row's status or retirement condition.*
 
 ---
 
@@ -219,33 +246,42 @@ everything else.
 **Stage 1 — the registry (this lane's first PR):**
 
 1. **One authoritative table**, with a row per **signature**: exact test
-   path, job and Lua flavor, **exact signature text**, evidence link,
-   causal status, and retirement condition.
-2. **Every duplicate mention becomes a pointer.** The handoff hazards
-   list, both `active-work.md` mentions, and the four framing docs cite
-   the registry rather than restating a claim.
+   selector, job and Lua flavor, normalized machine-match rule, evidence
+   link to the verbatim occurrence, causal status, and mechanism-specific
+   retirement condition. Matching requires the selector, job/flavor,
+   and every required fragment; variable values are explicitly
+   normalized rather than silently abbreviated.
+2. **One live triage policy.** Operational duplicate classifications and
+   rerun rules become pointers to the registry. Historical occurrence
+   evidence stays where it supports a landed framing; a relevant note
+   may gain a registry status link, but its evidence and reasoning are
+   not replaced. Forward-looking risk statements are audited as risks,
+   not silently promoted to known flakes.
 3. **The three tests named in the current handoff list are audited**:
    each is either carried into the registry with a signature and
    evidence, or removed with a note saying it was never substantiated.
    No entry survives on reputation.
 4. **The rerun rule is replaced**, not softened:
-   - one rerun that reproduces **the same signature** is evidence of
-     **intermittence only**;
-   - a **different signature**, or **the same signature twice
-     consecutively**, requires investigation or a merge-base control
-     before the red is attributed to the environment.
+   - a **green rerun after a red** establishes intermittence only; it
+     does not establish environmental cause, harmlessness, or retirement;
+   - the **same signature on the rerun** is a second occurrence and
+     remains blocking pending investigation or a merge-base control;
+   - a **different signature** is a new incident and is judged
+     independently. A known test name confers no immunity.
 5. Signature 3 is recorded **UNRESOLVED — possible product defect**, and
    its retirement condition is a diagnosis, never a green rerun.
 
 **Stage 2 — hardening (a separate PR):**
 
-6. `wait_for_file` requires a **non-empty** result — or better, the
-   expected content — so the predicate matches the assertion. Every
-   caller inherits it.
+6. The vterm Stage 2 `wait_for_file` requires the **expected content**
+   (preferred) or at minimum a non-empty result, so the predicate
+   matches the assertion. Its four callers all require concrete
+   non-empty content; the bottom-panel helper already rejects empty
+   reads and is not evidence for widening this change further.
 7. The USR1 fixture proves the **trap is installed**, not merely that
    the process started. The child publishes readiness after installing
    the trap, and the test waits on that.
-8. Signature 1 is **not** fixed by widening the budget (Q#MS3).
+8. Signature 1 is **not** fixed by widening the budget (Q#MCI3).
 9. Both hardened tests run **repeatedly** (a repetition set, as the
    reap-ledger lane did) rather than once, because a single green run of
    a formerly intermittent test proves nothing.
