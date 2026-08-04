@@ -292,11 +292,19 @@ someone forgot.
 - **`pmacs.error` is undefined in production.** Fifteen `if pmacs.error
   then` guards make the silence look deliberate. Report through
   `pmacs.editor.set_status` until the channel is built.
-- **Flakes that are not your change.** Judge a red run against these
-  before bisecting: `process::tests::a_successful_signal_disposition_...`
-  (macOS-only, signal timing); `a33_headless_terminal_frame_paints_...`
-  (GPU under parallel load, "0 blue pixels"); `m6_8_supervisor_reaps_...`
-  (load-sensitive). **Rerun before concluding.**
+- **Judging a red CI run: `docs/ci-red-signatures.md` is the authority.**
+  It keys on **signature**, not test name — a failure in a listed test
+  that lacks that row's fragments is a NEW incident, not a known one.
+  The old rule here ("rerun before concluding") is retired: **a green
+  rerun establishes intermittence only**, never environmental cause or
+  harmlessness; the same signature again is a second occurrence and
+  stays blocking. One row is an **unresolved possible product defect**
+  that no rerun can clear.
+
+  This list previously named three tests. The audit found one of them
+  had produced **two distinct signatures** with different causes, and
+  that two of the four incidents actually seen were absent from it —
+  which is why name-keyed lists are not trustworthy.
 - **`basedpyright` hangs forever** — always
   `cargo test --test m4_acceptance -- --skip basedpyright`.
 - **The crdt sweep needs `cargo build --workspace` first**, or twelve
@@ -1996,8 +2004,12 @@ before trusting them:
 - **GPU on the laptop**: AMD Radeon 780M (RADV) — native Vulkan,
   `PMACS_REQUIRE_GPU=1` works without lavapipe.
 - **Flaky-under-load tests — rerun isolated before treating a sweep
-  failure as a regression.** The m8 daemon tests and the m6 process/PTY
-  tests (`m6_1_pty_mode_lifecycle_started_then_exited`,
+  failure as a regression.** *(Historical, from this lane. For LIVE
+  triage of a red run use `docs/ci-red-signatures.md`, whose rerun rule
+  supersedes "rerun isolated" — a green rerun proves intermittence only.
+  `m6_8_supervisor_reaps_all_children_across_cycles` is R6 there, with
+  no signature ever captured.)* The m8 daemon tests and the m6
+  process/PTY tests (`m6_1_pty_mode_lifecycle_started_then_exited`,
   `m6_8_supervisor_reaps_all_children_across_cycles`) are timing-based;
   `editor::composition_overhead_under_ten_percent` is a render-ratio
   microbenchmark that fails ~1/3 even isolated single-threaded (already

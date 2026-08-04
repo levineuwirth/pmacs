@@ -194,6 +194,11 @@ the crdt job.
   same commit. One of those was a real regression the flip caused; the
   other was load. **That ambiguity is the problem** — a job where noise
   and signal look alike trains people to rerun rather than read.
+  **The triage half of this is now owned by
+  `docs/ci-red-signatures.md`** — signature-keyed rows and a rerun rule
+  that refuses to treat a green rerun as an all-clear. What remains here
+  is the job-cost question: whether the crdt job should carry real-PTY
+  deadlines at all.
   Candidate: longer deadlines for real-PTY assertions in this job
   specifically, or serialize the PTY suites.
 
