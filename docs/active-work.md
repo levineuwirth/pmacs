@@ -186,15 +186,14 @@ already approved. Stage 1 is acceptance 1–5; Stage 2 is acceptance 6–9.
   `githubsucks/main` @ `12f2970` (the #215 merge). Opened from an
   **isolated worktree** because the shared checkout was on another
   lane's branch with clean-but-foreign state; never switch it.
-- **PR: opened from this branch; the number and its first CI checkpoint
-  land in the follow-up commit** — this block is written *with* the
-  work, before the PR exists, so the row below is filled in rather than
-  invented. **Checkpoints, newest last**, because a lane that records
-  only one head goes stale on the next push:
+- **PR: <https://github.com/levineuwirth/pmacs/pull/216>**. This block
+  was written *with* the work, before the PR existed, so the row below
+  was filled in rather than invented. **Checkpoints, newest last**,
+  because a lane that records only one head goes stale on the next push:
 
   | head | CI run | result |
   |---|---|---|
-  | *(opening head)* | *(pending — filled in once the run exists)* | — |
+  | `2d9c678` | [31003333581](https://github.com/levineuwirth/pmacs/actions/runs/31003333581) | **14/14 green** — the opening head, including **both macOS legs**: R2's job (macOS / lua54) and R4's (macOS / luajit) |
 
   **The branch tip is authoritative over any row here.** Verify with
   `git rev-parse githubsucks/ci-signal-hardening` rather than trusting
@@ -229,10 +228,62 @@ already approved. Stage 1 is acceptance 1–5; Stage 2 is acceptance 6–9.
   parallelism) **15/15**.
 - **Verification:** fmt, diff-check, clippy with and without `crdt`,
   `--lib` 1897, `--lib --features crdt` 2082, vterm Stage 2 9, m4 149,
-  required GPU 221, and the **full serialized sweep in BOTH feature
-  configurations against a `main` baseline** — the blindness the handoff
-  §5 warns about, which is why the baseline is taken first. Each `--lib`
-  figure is exactly one above #215's (1896 / 2081): the R2 witness.
+  required GPU 221. Each `--lib` figure is exactly one above #215's
+  (1896 / 2081): the R2 witness.
+- **Full serialized sweep in BOTH feature configurations, baseline
+  first** — the blindness handoff §5 warns about, and the baseline is
+  what makes any failure attributable:
+
+  | tree | config | suites | passed | failed |
+  |---|---|---|---|---|
+  | `main` @ `12f2970` | luajit | 108 | 3691 | 0 |
+  | `main` @ `12f2970` | luajit,crdt | 108 | 3959 | 0 |
+  | branch | luajit | 108 | 3695 | 0 |
+  | branch | luajit,crdt | 108 | 3962 | **1 — see below** |
+
+  **Every total is exactly +4 on its baseline** — 3691→3695 and
+  3959→3963 (3962 passed plus the one failure). Four witnesses, and
+  nothing else moved.
+- **The one branch-`crdt` failure is recorded rather than rerun away.**
+  `lsp_dispatch_seams_acceptance
+  acc33_apply_edit_still_handled_with_a_response_subscriber` —
+  *"the executeCommand response reaches its one-shot, left: 0, right:
+  1"*. It is a **new incident** by the registry's rules (no row's
+  fragments match), and it is **not attributable to this branch**, on a
+  structural argument rather than on the green rerun:
+  - the only Rust change is inside `#[cfg(test)] mod tests` in
+    `src/process.rs`, which is compiled **only into the lib test
+    target** — an integration-test binary links the non-`cfg(test)`
+    lib, so this suite's artifact is what `main` builds;
+  - the other change is a different test binary entirely;
+  - CI's **`Test (crdt)` job passed at this same head**, and it runs
+    this suite;
+  - it occurred while a **second full workspace sweep** was running
+    concurrently in another worktree, against a deadline-based fake-LSP
+    one-shot;
+  - the suite then ran **15/15 as a repetition set** — which, per this
+    project's own rerun rule, establishes **intermittence only** and is
+    the weakest of these five points, not the argument.
+
+  **No registry row is opened**, because the registry judges red **CI**
+  runs and keys on linked CI occurrences; this is a local observation
+  under known contention. If it appears in CI, it is a first recorded
+  occurrence and gets a row then.
+- **A SHARED `CARGO_TARGET_DIR` MAKES A LOCAL SWEEP UNATTRIBUTABLE, and
+  it bit this lane.** The branch `crdt` sweep first reported 7 failures
+  in three suites while the baseline `crdt` sweep was clean. All three
+  spawn the **real `pmacs` binary out of the target directory**, and the
+  failure text named its own cause: *"daemon does not advertise required
+  capabilities … start the daemon built with the `crdt` feature"*. A
+  concurrent `cargo test --workspace` in a **different worktree**, with
+  default (non-`crdt`) features and the same `CARGO_TARGET_DIR`, had
+  overwritten `target/debug/pmacs` mid-sweep. Confirmed by `pgrep` while
+  it was happening, and discriminated by re-running the same three
+  suites from the same tree with a **dedicated** `CARGO_TARGET_DIR`:
+  41/41 green, then the whole config swept clean the same way. **Give a
+  sweep its own target directory whenever another worktree is live** —
+  a feature-flavored binary is a shared mutable file, not a build
+  artifact private to your invocation.
 
 Recovery from a clean checkout:
 
