@@ -116,8 +116,8 @@ end
 -- re-asserts the lock, all inside one registry borrow.
 -- Tree support (docs/tree-primitive-framing.md, Q#TR1-TR4).
 --
--- A row MAY carry `depth` (0-based, structural) and `id` (opaque,
--- consumer-supplied, compared by equality). Both optional: a row
+-- A row MAY carry `depth` (0-based, structural) and `id` (a STRING or
+-- NUMBER, consumer-supplied, compared by value). Both optional: a row
 -- without them behaves exactly as before, which is what keeps the
 -- three flat consumers byte-identical.
 --
@@ -158,15 +158,46 @@ local function hidden_by_ancestor(p, rows, i)
   return false
 end
 
+-- Ids must be scalars, and the reason is not fussiness about types.
+-- Selection compares them with `==`, which honours `__eq`; collapse
+-- state stores them as TABLE KEYS, and Lua indexes tables by raw
+-- identity, consulting no metamethod. A table id would therefore
+-- satisfy one and quietly fail the other: after a refresh minted fresh
+-- id tables, selection would be restored and the fold would be lost.
+--
+-- Equality-aware collapse lookup is the alternative, and it is worse
+-- here: `hidden_by_ancestor` runs per row and would turn a linear
+-- render quadratic to support a key type no consumer has wanted. So
+-- the contract is narrowed to the one both halves can honour, and
+-- enforced where rows enter rather than discovered as a lost fold.
+local function check_ids(rows)
+  for i, row in ipairs(rows) do
+    local k = type(row.id)
+    if row.id ~= nil and k ~= "string" and k ~= "number" then
+      error(string.format(
+        "listview: row %d has a %s id; ids must be a string or number "
+        .. "(collapse state keys a table by identity, so a %s id would "
+        .. "lose its fold across a refresh)", i, k, k))
+    end
+  end
+  return rows
+end
+
 local function render(p, rows)
   local lines = { p.header }
+  p.visible = 0
   p.line_to_item = {}
   p.line_to_row = {}
   for i, row in ipairs(rows) do
     if not hidden_by_ancestor(p, rows, i) then
       lines[#lines + 1] = row.text
+      -- SPARSE BY CONSTRUCTION: `item` is optional, and a display-only
+      -- row (a grouping header in a tree, say) supplies none, so this
+      -- key is simply absent for it. Nothing may take `#` of this
+      -- table; `visible` below is the row count.
       p.line_to_item[#lines - 1] = row.item
       p.line_to_row[#lines - 1] = row
+      p.visible = #lines - 1
     end
   end
   pmacs.buffer.set_generated_contents(p.buffer, table.concat(lines, "\n"))
@@ -188,7 +219,11 @@ end
 -- `switch_active_buffer` zeroes the window cursor, so a fresh switch
 -- puts us on the header; walk down from there.
 local function seat_cursor(p, line)
-  local count = #p.line_to_item
+  -- `p.visible`, NOT `#p.line_to_item`: that map is sparse whenever a
+  -- row omits the optional `item`, and `#` on a sparse table is not
+  -- the row count. Reading it there left a tree of display-only rows
+  -- with the cursor stranded on the header, where TAB finds no node.
+  local count = p.visible or 0
   if count == 0 then return end
   local target = math.max(1, math.min(line or 1, count))
   for _ = 1, target do
@@ -248,7 +283,7 @@ local function ensure_panel(name)
 
   local buf = pmacs.buffer.create(actual)
   p = { requested_name = name, buffer = buf, line_to_item = {},
-        line_to_row = {}, collapsed = {}, rows = {} }
+        line_to_row = {}, collapsed = {}, rows = {}, visible = 0 }
   panels[#panels + 1] = p
   -- Read-only (Q#P3): every non-bypass edit is rejected, with a NAMED
   -- error. Kept beside the rope lock, not replaced by it: the layering
@@ -284,7 +319,7 @@ function pmacs.listview.open(spec)
   -- Keep the row array: collapse re-renders from it WITHOUT calling the
   -- consumer, which is what lets a panel with no `on_refresh` still
   -- expand and collapse (the outline has none -- framing §1.5a).
-  p.rows = spec.rows or {}
+  p.rows = check_ids(spec.rows or {})
   p.collapsed = {}
   render(p, p.rows)
   -- Bottom-panel arc (Q#BP11b): the placement opt-in. `seat_cursor` and
@@ -332,7 +367,7 @@ pmacs.command.define {
     -- the row set moves every line; the id survives it.
     local saved_row = p.line_to_row[saved]
     local saved_id = saved_row and saved_row.id
-    local rows = p.on_refresh() or {}
+    local rows = check_ids(p.on_refresh() or {})
     p.rows = rows
     render(p, rows)
     -- `set_generated_contents` has already refreshed this window's

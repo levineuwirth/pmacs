@@ -1075,6 +1075,75 @@ fn s1_14_no_bypass_write_or_name_keyed_identity_remains() {
     );
 }
 
+/// A tree row need not carry `item` — `on_visit` is optional, so a
+/// display-only node (a grouping header) is a legitimate row. The
+/// cursor must still seat on it.
+///
+/// This bit: `line_to_item` is SPARSE when rows omit `item`, and
+/// `seat_cursor` took `#` of it. For an all-display-only tree that
+/// length is 0, so the cursor never left the header — where TAB finds
+/// no row and answers "no node here", making the tree unfoldable.
+#[test]
+fn tr_5_a_tree_of_display_only_rows_is_still_navigable_and_foldable() {
+    let mut s = editor();
+    exec(
+        &s,
+        r#"pmacs.listview.open {
+             name = "*tr5*",
+             header = "display-only   TAB fold",
+             rows = {
+               { text = "root",  depth = 0, id = "r"  },
+               { text = "  kid", depth = 1, id = "rk" },
+             },
+           }"#,
+    );
+
+    // Seated on a data row, not stranded on the header.
+    let line: i64 = eval(&s, "return pmacs.editor.cursor_line()");
+    assert_eq!(
+        line, 1,
+        "cursor seats on the first data row despite no `item`"
+    );
+
+    press(&mut s, KeyCode::Tab);
+    assert!(
+        !status(&s).contains("no node here"),
+        "TAB found the node: {}",
+        status(&s)
+    );
+    assert!(
+        !active_text(&s).contains("kid"),
+        "and folded it: {:?}",
+        active_text(&s)
+    );
+}
+
+/// Q#TR3's contract is that ids compare by value. Collapse state keys
+/// a Lua table, and table indexing consults no `__eq`, so a non-scalar
+/// id would compare equal for selection and unequal for folding: a
+/// refresh would restore the cursor and silently lose the fold. The
+/// contract is narrowed to scalars and enforced where rows enter,
+/// rather than left to surface as a lost fold much later.
+#[test]
+fn tr_6_a_non_scalar_id_is_rejected_where_rows_enter() {
+    let s = editor();
+    let err: String = eval(
+        &s,
+        r#"local ok, e = pcall(function()
+             pmacs.listview.open {
+               name = "*tr6*",
+               header = "h",
+               rows = { { text = "a", depth = 0, id = {} } },
+             }
+           end)
+           return tostring(e)"#,
+    );
+    assert!(
+        err.contains("ids must be a string or number"),
+        "rejected where rows enter, with a reason: {err}"
+    );
+}
+
 // Isolated bootstrap storage roots (see the module docs): an
 // integration test is compiled without `cfg(test)`, so a raw
 // `EditorState::new()` would read the developer's real `init.lua` and
