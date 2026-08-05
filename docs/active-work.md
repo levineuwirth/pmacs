@@ -169,15 +169,23 @@ are all in place. It is held pending the user's decision to open the
 PR, not pending further work.
 
 - **Branch `tree-primitive-framing`**, base `githubsucks/main` @
-  `12f2970`. **Unpushed** while held. Framing
+  `12f2970`. **Pushed and in sync** — held means no PR is open, not
+  that the work is stranded locally, so it is portable per the
+  handoff's rule. `githubsucks/tree-primitive-framing` is the
+  authoritative tip; `62993e0` was it as of the line above, and any
+  edit to this lane advances past it, which is why the ref and not a
+  pinned SHA is the thing to trust. Recover with `git fetch githubsucks
+  && git checkout tree-primitive-framing`. Framing
   `docs/tree-primitive-framing.md` **revision 5** — approved after four
   review rounds, with Q#TR1–TR4 decided.
-- **Commits:** `61b1062` framing, `cf4ac1c` rev 2, `932b3ab` rev 3,
-  `5186bfd` rev 4 (carrying the `COHERENCE.md` §14 call-site
-  correction), `49a42ec` the primitive, `8f64c3b` byte-identity coverage
-  plus the verification record, `38e94dc` this lane, §14's ✗ → ◐ and the
-  handoff facts, `c59de95` the review round — moving-selection test,
-  flat-panel TAB delegation, §20's build → adopt correction.
+- **The substantive arc** (not an exhaustive log — read `git log
+  12f2970..githubsucks/tree-primitive-framing` for that): `61b1062`
+  framing through `5186bfd` rev 4, which carried the `COHERENCE.md` §14
+  call-site correction; `49a42ec` the primitive; `8f64c3b`
+  byte-identity coverage plus the verification record; `38e94dc` this
+  lane, §14's ✗ → ◐ and the handoff facts; `c59de95` the review round —
+  moving-selection witness, flat-panel TAB delegation, §20's build →
+  adopt correction.
 
 ### What it ships
 
