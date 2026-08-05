@@ -1,7 +1,29 @@
 # Framing — the tree primitive
 
-**Revision 1.** Status: framing only. No implementation. Scouted against
-`githubsucks/main` @ `12f2970`.
+**Revision 2.** Status: framing only, **not yet approved**. No
+implementation. Scouted against `githubsucks/main` @ `12f2970`.
+
+**Revision 1 → 2**, all from review, all verified against source before
+applying:
+
+- **Refresh was unscoped for the anchor consumer.** Two criteria rested
+  on `g` refresh; the outline has no `g`, no `on_refresh`, and
+  `listview.refresh` no-ops without one. Refresh is now **out of scope**,
+  with the LSP re-request question it actually raises stated (§1.5a).
+- **Acceptance 1 decided Q#TR4 while calling it open** — "no
+  `string.rep` in `lsp.lua`" commits to primitive-owned indentation. It
+  is representation-neutral now.
+- **Q#TR1 misread §14.** A tree is not the "second primitive" §14 warns
+  against; §14 **explicitly lists one**. The warning is against bespoke
+  per-consumer plumbing. Retradeoffed without prejudging.
+- **The regression criterion named the wrong consumers.**
+  `*buffer-list*` and project search do **not** use listview — §14 says
+  so and calls the older claim an error. The real siblings are
+  `*references*` and `*lsp-help*`.
+- **Consumer accounting tightened**: five named future consumers, not
+  six; **one** existing anchor plus **one** future constraint source,
+  not "two that exist"; and "every input a tree needs" qualified, since
+  stable identity is exactly what is missing.
 
 `COHERENCE.md` §14 grades **Tree ✗ — none**, and it is the last missing
 workbench primitive. §20's Priority 5 names it as what remains after the
@@ -9,21 +31,30 @@ bottom panel, and its argument is specific: *"building it once before
 dired's directory view and the workers tree harden their own conventions
 is exactly this section's point."*
 
-**This document deliberately narrows that argument.** §14 lists six
+**This document deliberately narrows that argument.** §14 names five
 future consumers — project files, symbol hierarchy, package dependency
 graph, worker trees, git status — and designing a shared primitive
-against six hypothetical consumers is how you get a model that fits
-none. The scout found something better: **one consumer already ships a
-tree and fakes it**, and a second is already scoped and deliberately
-deferred. Those two are the design's evidence base.
+against five hypothetical ones is how you get a model that fits none.
+
+The scout found a narrower and firmer basis, and the distinction between
+its two halves matters:
+
+- **One EXISTING anchor consumer.** The LSP outline already ships a
+  tree and fakes it (§1.1). It is the only consumer that exists today.
+- **One FUTURE constraint source.** dired's `i` insert-subdirectory is
+  scoped and deliberately deferred (§1.2). It constrains the design; it
+  does not validate it, because nothing has been built against it.
+
+Calling these "two consumers that exist" would overstate the evidence by
+exactly one.
 
 ---
 
 ## 0. Coherence impact (COHERENCE §20)
 
 - **Concern: §14 Coherent Workbench Primitives.** Tree is the one
-  remaining ✗ in its inventory. This closes it for the two consumers
-  that exist and gives the rest an adoption path.
+  remaining ✗ in its inventory. This closes it for the **one consumer
+  that exists** (the LSP outline) and gives the rest an adoption path.
 - **Journey steps touched:** none directly. Step 6 (LSP) gains a real
   hierarchy view where it currently has indented text.
 - **Interaction islands (§6): NONE, unless evidence forces one.** The
@@ -69,8 +100,12 @@ text = string.format("%s%s  [%s]", string.rep("  ", sym.depth or 0), sym.name, t
 ```
 
 So the outline has **no collapse, no expand, no parent/child
-navigation** — indentation is a string. Every input a tree needs is
-already computed; only the view throws it away.
+navigation** — indentation is a string.
+
+**Every input a tree needs to RENDER is already computed** — depth,
+parent, and order — and only the view throws it away. That is not the
+same as every input a tree needs: **stable node identity is missing**
+(§1.5, Q#TR3), and it is the one input no existing field supplies.
 
 **This is the anchor consumer.** It needs no new data plumbing, and its
 limitation is observable today rather than hypothetical.
@@ -82,8 +117,8 @@ the recursive case explicitly: `docs/dired-framing.md` §13 names
 **`i` insert-subdirectory (in-buffer recursive listing)** as deferred.
 
 §14 credits this directly: dired "landed **without** inventing one". That
-restraint is what keeps the door open — and it means the second consumer
-arrives with real requirements rather than a wishlist: a fixed-width
+restraint is what keeps the door open — and it means this constraint
+source carries real requirements rather than a wishlist: a fixed-width
 column contract (`pmacs.dired._layout`), a frozen test fixture, and
 path-keyed entries.
 
@@ -158,6 +193,34 @@ neither `line_to_item` nor an opaque `item` can do.
 **This is why Q#TR3 exists and why it is not a detail.** It decides
 whether selection and expansion can survive a model update at all.
 
+### 1.5a …but the ANCHOR CONSUMER HAS NO REFRESH AT ALL
+
+Revision 1 built two acceptance criteria on `g` refresh without checking
+that the outline supports it. **It does not:**
+
+- its header offers `RET visit  n/p move  q quit` — **no `g`**
+  (`lsp.lua:2490`);
+- it supplies **no `on_refresh`**;
+- and `listview.refresh` opens `if not (p and p.on_refresh) then return
+  end` — **a no-op** for this panel (`listview.lua:262`).
+
+So "collapse state survives `g`" was unreachable for the only consumer
+that exists. **Refresh is therefore out of scope for this stage** unless
+someone first answers a question this framing does not: an outline
+refresh means **re-requesting `textDocument/documentSymbol`**, which is
+an async LSP round-trip with its own await, failure and staleness
+handling — and it raises who owns the resulting state when the response
+arrives against a buffer the user may have edited or left.
+
+That is a real feature (`*references*` has `g` and an `on_refresh`; the
+outline never gained one), and it is **not** a tree concern. Bundling it
+here would make the tree lane responsible for LSP request lifecycle.
+
+**Consequence for acceptance:** the criteria are re-scoped to what the
+anchor consumer can actually exercise — collapse and selection surviving
+**re-render**, which the primitive controls — and refresh-survival is
+recorded as a follow-on for whoever gives the outline a refresh.
+
 ### 1.6 What is NOT established
 
 - **Nothing is implemented or measured.** Unlike the last two lanes
@@ -181,13 +244,31 @@ All four are genuinely open. The first two the review already flagged as
 open; the third is the one review added; the fourth follows from §1.4.
 
 - **Q#TR1 — extend `listview`, or add a separate `treeview`?**
-  Extending touches three shipped call sites and the `line_to_item`
-  contract, and risks making a working flat primitive worse for the two
-  consumers that do not need depth. A separate primitive avoids that but
-  is exactly the "second primitive" §14 warns about, and would duplicate
-  panel plumbing, `q`/`g` bindings, the Q#GB18 identity rule and the
-  generated-buffer write invariant. **No leaning recorded** — the scout
-  did not find evidence that decides it.
+
+  **Revision 1 framed this wrongly and the correction changes the
+  tradeoff.** It claimed a separate treeview would be "exactly the
+  second primitive §14 warns about". §14 does not warn against a tree —
+  **it explicitly lists one**, alongside virtual list, in the reusable
+  set it wants: *"editable text view, virtual list, **tree**, structured
+  table, inspector…"* (`COHERENCE.md:1264`). A tree surface is a named
+  goal, not a violation.
+
+  What §14 actually warns against is **bespoke per-consumer plumbing** —
+  each subsystem inventing its own UI vocabulary. A `treeview` that
+  shares the existing buffer/panel disciplines (generated-buffer writes,
+  Q#GB18 handle identity, panel placement, `q` quit-action) is not that;
+  a tree hand-rolled inside `lsp.lua` would be.
+
+  So the real tradeoff is narrower:
+  - **Extending listview** touches three shipped call sites and the
+    `line_to_item` contract, and risks making a working flat primitive
+    worse for the consumers that do not need depth.
+  - **A separate treeview** keeps the flat primitive untouched, but must
+    *share* rather than *duplicate* the panel disciplines — and "shares
+    them" is an implementation claim that has to be verified, not
+    asserted.
+
+  **No leaning recorded**; the scout found nothing that decides it.
 - **Q#TR2 — who owns collapse state?** Candidates: the primitive (keyed
   by node id), the consumer (passed in with the rows each render), or
   the buffer (as generated-buffer state). Consumer-owned keeps the
@@ -233,17 +314,33 @@ open; the third is the one review added; the fourth follows from §1.4.
 **Not final** — this framing argues a model, and the criteria cannot be
 fixed until Q#TR1–TR3 are decided. The shapes they will take:
 
-1. The **LSP outline** renders through the primitive with **no
-   `string.rep` indentation in `lsp.lua`**, and `Symbol` is unchanged.
-2. **Collapse and expand** work, and **collapse state survives
-   `g` refresh** — the criterion that Q#TR3 exists to make possible.
-3. **Selection survives refresh by node, not by line** (§1.5).
+1. The **LSP outline renders its hierarchy through the primitive**
+   rather than by pre-formatting it into row text, and `Symbol` is
+   unchanged. **Representation-neutral on purpose:** whether the
+   primitive emits the indentation, or the consumer still supplies a
+   rendered string alongside structural depth, is **Q#TR4** and is not
+   decided here. Revision 1's wording ("no `string.rep` in `lsp.lua`")
+   committed to primitive-owned indentation while calling that question
+   open.
+2. **Collapse and expand work**, and **collapse state survives a
+   re-render** — the primitive re-emitting the buffer from the same
+   model. *(Not "survives `g` refresh": the anchor consumer has no
+   refresh at all — §1.5a.)*
+3. **Selection survives a re-render by node, not by line** (§1.5).
 4. **No new interaction island**: every tree key is a buffer-local
    binding, and the dispatch-shadow count is unchanged. Asserted, not
    assumed.
-5. The **flat consumers are unaffected** — references, buffer-list and
-   the search panel render byte-identically, pinned by their existing
-   suites rather than by inspection.
+5. **listview's OTHER consumers are unaffected** — `*references*` and
+   `*lsp-help*`, which with `*outline*` are the **only three
+   `pmacs.listview.open` call sites, all in `lsp.lua`**. They render
+   byte-identically, pinned by their existing suites.
+
+   **Revision 1 named `*buffer-list*` and project search here and was
+   wrong** — §14 measured that they do **not** use listview and calls
+   the earlier claim a documentation error (`COHERENCE.md:1286`).
+   Repeating it would have re-introduced a mistake that document exists
+   to correct. If the broader surfaces are ever in scope, their
+   independent render paths and tests must be named explicitly.
 6. **Q#GB18 identity holds**: a foreign buffer with the panel's name is
    never adopted, and the primitive is keyed by handle, not name.
 7. The **generated-buffer write invariant** is preserved
@@ -266,6 +363,13 @@ fixed until Q#TR1–TR3 are decided. The shapes they will take:
   raw-switch hazard noted there.
 - **Tree rendering in the GPU frontend** beyond whatever the shared
   generated-buffer path already gives.
+- **Giving the outline a refresh** (§1.5a). `*references*` has `g` and
+  an `on_refresh`; the outline never gained one. Adding it means
+  re-requesting `textDocument/documentSymbol` with its own await,
+  failure and staleness handling, and deciding who owns the result when
+  it arrives against a buffer the user may have edited. **That is LSP
+  request-lifecycle work, not tree work** — and only once it exists can
+  "collapse survives refresh" be a criterion rather than an aspiration.
 
 ---
 
