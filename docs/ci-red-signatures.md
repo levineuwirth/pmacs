@@ -79,9 +79,18 @@ Main-branch greens are **occurrence evidence** and accumulate toward a
 rate. They retire nothing by themselves. Retired rows stay in this file
 with their disposition, so a recurrence is recognisable.
 
+**A red matching a RETIRED row is a recurrence, and it puts the
+retirement in question — it is not a known flake.** The claim a
+retirement makes is that the mechanism is gone; the same signature
+afterwards falsifies that claim, which is a stronger finding than a live
+row, not a weaker one. Reopen the row rather than rerunning.
+
 ---
 
 ## Live rows
+
+**Two of the four evidenced rows are live.** R2 and R4 were retired on
+2026-08-05 and are below, under "Retired rows", with their dispositions.
 
 ### R1 — supersede cancellation budget
 
@@ -101,22 +110,6 @@ its 50ms clock starts before the second dispatch and is consumed by the
 test's own `tick()` + `sleep(1ms)` pump, so the interval is dominated by
 when *the test* was scheduled. **Widening the budget would make it pass
 and measure nothing more.**
-
-### R2 — USR1 delivered before the trap is installed
-
-| field | value |
-|---|---|
-| **selector** | `--lib process::tests::a_successful_signal_disposition_depends_on_whether_it_is_fatal` |
-| **job / flavor** | macOS / lua54 |
-| **required fragments** | `leader=exited(signal SIGUSR1)` — **one exact fragment, not two loose ones**. Split into `leader=exited(` and `SIGUSR1` it would match a child that exited by some *other* disposition while `SIGUSR1` appeared elsewhere in the output |
-| **causal status** | **test race** |
-| **evidence** | [#213 run 30927084982 attempt 1](https://github.com/levineuwirth/pmacs/actions/runs/30927084982/attempts/1) |
-| **retirement** | the fixture proves the trap is installed, with a witness that fails without it |
-
-Readiness is `ProcessEventKind::Started`, emitted at **spawn** — not when
-`/bin/sh` has parsed `trap '' USR1`. SIGUSR1's default disposition is
-terminate, so a signal inside that window kills the child. The fixture's
-own comment states the requirement it does not enforce.
 
 ### R3 — live-leader EPERM with an unobservable group
 
@@ -138,7 +131,69 @@ field able to disagree — could not be read at all.
 **Do not treat a red matching this row as environmental.** A green rerun
 changes nothing about it.
 
-### R4 — readiness predicate satisfied by an empty file
+**R2's retirement does not touch this row, and must not be read as
+touching it.** The 2026-08-05 hardening changed that test's *fixture* —
+a readiness gate and an `exec` — and changed **no product code at all**;
+the same group-directed `kill` runs against the same supervisor. What
+the fixture change does do is alter the shape of the group being
+signalled (one process now, where a forked `sleep` could make two), so
+**a change in how often this row appears would be evidence about
+frequency, not about cause**. A red carrying these fragments after that
+date is this same unresolved row, and its retirement is still a
+diagnosis by the process-signal / reap-ledger lanes.
+
+---
+
+## Retired rows
+
+**These stay here on purpose.** A retirement is a claim that a mechanism
+is gone; keeping the signature is what makes a recurrence recognisable
+as a falsification of that claim rather than as a fresh mystery. Both
+were retired **causally** — the mechanism removed, plus a discriminating
+witness that fails without the fix — never by a count of green runs.
+
+### R2 — USR1 delivered before the trap is installed — RETIRED 2026-08-05
+
+| field | value |
+|---|---|
+| **selector** | `--lib process::tests::a_successful_signal_disposition_depends_on_whether_it_is_fatal` |
+| **job / flavor** | macOS / lua54 |
+| **required fragments** | `leader=exited(signal SIGUSR1)` — **one exact fragment, not two loose ones**. Split into `leader=exited(` and `SIGUSR1` it would match a child that exited by some *other* disposition while `SIGUSR1` appeared elsewhere in the output |
+| **causal status** | **test race** |
+| **evidence** | [#213 run 30927084982 attempt 1](https://github.com/levineuwirth/pmacs/actions/runs/30927084982/attempts/1) |
+| **retirement condition** | the fixture proves the trap is installed, with a witness that fails without it |
+| **disposition** | **met.** The child publishes a readiness marker *after* `trap '' USR1`, the test waits for that marker's **content**, and `process::tests::usr1_readiness_waits_for_the_trap_not_for_the_spawn` is the witness |
+
+Readiness was `ProcessEventKind::Started`, emitted at **spawn** — not when
+`/bin/sh` has parsed `trap '' USR1`. SIGUSR1's default disposition is
+terminate, so a signal inside that window kills the child. The fixture's
+own comment stated the requirement it did not enforce.
+
+Three things the fix and the witness settled that the row did not say:
+
+- **Which call failed.** The fragment is rendered only on a *failed*
+  `kill`, and the USR1 that killed the child cannot itself have failed —
+  it is what did the killing. The failing call is therefore the SIGTERM
+  that follows, whose diagnostic reports the leader's earlier death.
+  **Why a group-directed TERM found no group is not established here**,
+  and the fix does not depend on the answer. **This says nothing about
+  R3**, whose leader was observed **live**.
+- **The witness proves the predicate, not the platform.** The old fixture
+  passes on Linux; the window is real everywhere but only macOS ever
+  reported it. So the witness widens the pre-trap window *deliberately*
+  (the fixture sleeps before `trap`) instead of hoping a loaded runner
+  supplies one, and it proves survival by the child's **exit
+  disposition** — a child that took the USR1 reports
+  `Signaled { signal: "SIGUSR1" }` — rather than by an absence observed
+  within a window.
+- **The fixture had a second, unnamed dependency.** These signals are
+  group-directed, so a forked `sleep` would be an *untrapped* member of
+  the same group. That it survived at all depended on the shell
+  suppressing the fork for the last command of a `-c` script — a bash
+  and dash optimization, not a guarantee. The fixture now says `exec`,
+  and an ignored disposition survives `exec` by POSIX.
+
+### R4 — readiness predicate satisfied by an empty file — RETIRED 2026-08-05
 
 | field | value |
 |---|---|
@@ -147,13 +202,27 @@ changes nothing about it.
 | **required fragments** | `left: []` **and** `right: [49]` |
 | **causal status** | **test race** |
 | **evidence** | [#214 run 30932558752 attempt 1](https://github.com/levineuwirth/pmacs/actions/runs/30932558752/attempts/1) |
-| **retirement** | `wait_for_file` requires the expected content, with a witness that fails against a zero-byte file |
+| **retirement condition** | `wait_for_file` requires the expected content, with a witness that fails against a zero-byte file |
+| **disposition** | **met.** The helper takes the expected bytes and waits while the file holds a **strict prefix** of them; `wait_for_file_does_not_return_a_zero_byte_readiness_file` is the witness, and with the old predicate restored it fails with `left: []`, `right: [49]` — **this row's two fragments, verbatim** |
 
-`wait_for_file` returns as soon as `fs::read` succeeds — which succeeds
+`wait_for_file` returned as soon as `fs::read` succeeded — which succeeds
 on a **zero-byte file**. The probe writes readiness with
 `open(path,'wb').write(b'1')`, and `open()` creates the file before
-`write()` fills it. The predicate is "readable"; the assertion is
+`write()` fills it. The predicate was "readable"; the assertion is
 "contains `1`" (`49` is ASCII `'1'`).
+
+Two notes for anyone who reads a future red here:
+
+- **The same mechanism lived in a second helper.** `wait_for_published_file`,
+  one function away in the same suite, gated the real-TUI smoke's
+  `assert_eq!(…, b"1")` on the identical "readable" predicate. It was
+  fixed with the same predicate; leaving it would have let this row
+  recur under a different selector, which the registry would have had to
+  judge a new incident.
+- **The helper returns divergent content instead of waiting for a
+  match**, so a child that publishes the *wrong* thing is reported as a
+  diff by the caller that owns the expectation, rather than as a timeout
+  in a helper that does not. That behaviour has its own witness.
 
 ---
 
@@ -218,6 +287,14 @@ replaces: nothing is pre-excused.
 
 Four incidents, three tests, **four signatures**. Count signatures: the
 process test contributed two, and only one of them is a test bug.
+
+| date | row | event |
+|---|---|---|
+| 2026-08-05 | R2, R4 | **retired** — mechanism removed, discriminating witness added; see "Retired rows" |
+
+**The retirements are not occurrences and do not close the log.** R1 and
+R3 stay live, and each retired row keeps its signature so a later red
+matching one reopens it.
 
 **All four *evidenced* rows (R1–R4) are macOS.** That is a property of
 these occurrences, not of the file: **A1's job is `GPU Render

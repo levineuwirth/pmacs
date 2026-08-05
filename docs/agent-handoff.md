@@ -1,7 +1,9 @@
 # Agent handoff — cross-machine continuity
 
 **Last updated: 2026-08-05.** The live CI-triage rule in §5 now points
-at `docs/ci-red-signatures.md` (PR #215, in review), which keys on
+at `docs/ci-red-signatures.md` (**PR #215, merged as `main` @
+`12f2970`**; its Stage 2 hardening is in flight — see
+`docs/active-work.md`), which keys on
 signature rather than test name; the hazards list this file used to
 carry is retired, and its two unevidenced entries are audit notes there.
 Previously **2026-08-04, as bottom-panel Stage 3 #213 — the adopter
@@ -346,15 +348,26 @@ someone forgot.
   binary. `cargo build --workspace --no-default-features --features
   luajit,crdt` is the invocation that produces both binaries.
 - **A shared `CARGO_TARGET_DIR` makes concurrent sweeps unattributable.**
-  Two worktrees both defaulting to it means one lane's
-  `cargo test --workspace` **overwrites `target/debug/pmacs` mid-sweep**
-  in the other, and every real-daemon suite then spawns the wrong
-  binary. Observed twice on 2026-08-05, from both sides: the failing
-  text named its own cause ("start the daemon built with the `crdt`
-  feature"), and re-running the same suites with a dedicated target dir
-  gave 41/41. **Give a second worktree its own target dir**, and treat
-  any red from a sweep that overlapped another build as unattributable
-  rather than as evidence.
+  Every worktree on this machine resolves to the same target directory,
+  so `target/debug/pmacs` is a **shared mutable file**: a
+  `cargo test --workspace` at default features in one worktree
+  overwrites the binary a running `crdt` sweep is spawning, and every
+  real-daemon suite then starts the wrong one. **Established once, on
+  2026-08-05, in the Stage 2 hardening sweep** — seven failures across
+  three real-daemon suites against a clean baseline, the failure text
+  naming its own cause (*"start the daemon built with the `crdt`
+  feature"*), `pgrep` confirming the rival build, and a re-run from the
+  same tree with a **dedicated** `CARGO_TARGET_DIR` giving 41/41. The
+  reciprocal case was seen from the other side the same day.
+  **Give a second worktree its own target dir**, check for live
+  worktrees before believing a sweep failure, and treat any red from a
+  sweep that overlapped another build as unattributable rather than as
+  evidence. *(This mechanism does NOT retroactively explain the tree
+  lane's unclassified occurrence — that one's signatures were destroyed
+  before being read, so it has no captured text to match against this
+  one's, and it keeps two non-causal hypotheses. A mechanism
+  established in one occurrence is not evidence about a different
+  occurrence that was never characterized.)*
 - **A local sweep leaks daemons, and they accumulate across days.**
   `gpu_invocation_acceptance`'s one-command tests leave ~3 orphaned
   `pmacs --daemon` processes per sweep, reparented to systemd with

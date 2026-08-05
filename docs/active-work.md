@@ -17,6 +17,24 @@ branch and no owner since #166. It is implemented on
 (#215, in review), which this file required a lane for and did not have
 until review caught it — the #171 defect recurring. Its block is below.
 
+**Updated later the same day.** #215 **merged** (`main` @ `12f2970`) and
+that lane is **rewritten, not removed** — rule 4 removes a lane when its
+ARC is done, and Stage 2 is the arc. Stage 2 (**hardening**) ran on
+`ci-signal-hardening`, with its own lane block, its own checkpoint
+table, and a lane written **before** the PR was opened rather than
+after review asked for it. **It merged as #216 on 2026-08-05**, which
+completes the arc: R2 and R4 are retired with discriminating
+witnesses.
+
+**The lane is kept, not yet removed, and that is a deferral rather than
+a judgement.** Rule 4 would remove it now — but its residue must be
+re-homed first, or removing it loses the state: **R1** is referred to
+the async-runtime lane (Q#MCI3) and **R3** is an unresolved possible
+product defect owned by the process-signal / PTY lane, neither of which
+has a block here yet. Retiring this arc and opening those two is an
+**absorption pass**, and doing it inside an unrelated feature PR is how
+a ledger acquires edits nobody reviewed.
+
 **Updated 2026-08-04.** Four PRs landed since: the CI CRDT coverage
 lane #209, Distribution Stage 1 #211 (released as **v1.1.0**), the
 post-release accuracy pass #212, and **bottom-panel Stage 3 #213 —
@@ -93,8 +111,9 @@ lesson, §1 for the two framings).
   are identical on every machine. Remote names are otherwise
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
-- Canonical base at this snapshot: **`githubsucks/main` @ `f186253`**
-  — bottom-panel Stage 3 **#213**, which completes Arc 7, atop the
+- Canonical base at this snapshot: **`githubsucks/main` @ `12f2970`** —
+  the macOS CI signal-integrity registry **#215**, atop `f186253`:
+  bottom-panel Stage 3 **#213**, which completes Arc 7, atop the
   post-release accuracy pass **#212**, Distribution Stage 1 **#211**
   (released as **v1.1.0**, the first release with prebuilt binaries),
   and the CI CRDT coverage lane **#209**. Beneath those, `cfc1710`:
@@ -106,7 +125,7 @@ lesson, §1 for the two framings).
   `Hello` still advertises v20** — two different facts, and #184 landed
   only the first.
   **The recovery floor advances with the base**, so the check below
-  now requires `f186253` or newer; a tree at `cfc1710` no longer
+  now requires `12f2970` or newer; a tree at `f186253` no longer
   passes. That is deliberate — a check accepting an older commit than
   the declared base passes on a tree the rest of this file does not
   describe.
@@ -145,7 +164,7 @@ git worktree list
 git status --short --branch
 ```
 
-The `git log` command must expose `f186253` — the base named above — or a
+The `git log` command must expose `12f2970` — the base named above — or a
 newer intentional main. Keep this threshold and the canonical-base line in
 step: a recovery check that accepts an older commit than the base it
 declares canonical will pass on a tree the rest of this file does not
@@ -282,31 +301,147 @@ reap, or does the daemon fail to exit when its socket disappears? Those
 have different fixes, and the second would be a product defect rather
 than a test one.
 
-## macOS CI signal integrity — STAGE 1 IN REVIEW, PR #215
+## macOS CI signal integrity — STAGES 1 AND 2 MERGED (#215, #216)
 
 **This file requires a lane for every open PR** (see the #171/#174 note
 above: an open PR is exactly the volatile work this file records, and
-#171 drifted 153 commits while invisible here). #215 had none until this
-entry — the same defect, caught in review.
+#171 drifted 153 commits while invisible here). #215 had none until
+review caught it; **Stage 2's lane is written with its first commit**,
+which is where the same defect stops recurring.
 
-- **Branch `macos-ci-signal-integrity`**, base `githubsucks/main` @
-  `bfb97c6`. Framing `docs/macos-ci-signal-integrity-framing.md`
-  **revision 3**.
-- **PR: <https://github.com/levineuwirth/pmacs/pull/215>** — Stage 1,
-  docs only. **Checkpoints, newest last** — a lane that records only the
-  *reviewed* head goes stale the moment a review round is pushed, which
-  is how #171 became invisible:
+Framing `docs/macos-ci-signal-integrity-framing.md` **revision 3**,
+already approved. Stage 1 is acceptance 1–5; Stage 2 is acceptance 6–9.
+
+### Stage 2 — hardening, MERGED as #216
+
+- **Branch `ci-signal-hardening`**, worktree `../pmacs-ci-signals`, base
+  `githubsucks/main` @ `12f2970` (the #215 merge). Opened from an
+  **isolated worktree** because the shared checkout was on another
+  lane's branch with clean-but-foreign state; never switch it.
+- **PR: <https://github.com/levineuwirth/pmacs/pull/216>, MERGED**
+  2026-08-05 as `2657568`, all 14 checks green at head `8ab20b5`. This
+  block was written *with* the work, before the PR existed, so the row
+  below was filled in rather than invented. **Checkpoints, newest
+  last**, because a lane that records only one head goes stale on the
+  next push:
+
+  | head | CI run | result |
+  |---|---|---|
+  | `2d9c678` | [31003333581](https://github.com/levineuwirth/pmacs/actions/runs/31003333581) | **14/14 green** — the opening head, and the last one carrying code. Includes **both macOS legs**: R2's job (macOS / lua54) and R4's (macOS / luajit) |
+  | `668fc72` | [31006160334](https://github.com/levineuwirth/pmacs/actions/runs/31006160334) | **14/14 green** — this ledger block, docs only |
+  | *(tip)* | — | the checkpoint row for `668fc72`; a table can never carry the head that adds it |
+
+  **The branch tip is authoritative over any row here.** Verify with
+  `git rev-parse githubsucks/ci-signal-hardening` rather than trusting
+  the newest line.
+- **What it ships — exactly two fixes, both at the readiness
+  predicate**, plus four witnesses:
+  - **R4.** `wait_for_file` takes the **expected bytes** and waits while
+    the file holds a *strict prefix* of them, so a zero-byte or torn
+    read is no longer a readiness signal. Four callers updated; **the
+    identical mechanism in `wait_for_published_file`**, one function
+    away in the same suite, is fixed with it — leaving it would have let
+    R4 recur under a different selector.
+  - **R2.** The USR1 fixture publishes a marker **after** `trap '' USR1`
+    and the test waits for that marker's **content**; `exec` replaces
+    the forked `sleep`, so the group holds one process and the ignored
+    disposition survives by POSIX rather than by a shell's
+    fork-suppression optimization.
+- **The witnesses were verified by REVERTING each fix**, not by
+  reasoning. With the old predicate restored,
+  `wait_for_file_does_not_return_a_zero_byte_readiness_file` fails
+  `left: []`, `right: [49]` — **R4's two required fragments, verbatim**
+  — and with the readiness wait removed,
+  `usr1_readiness_waits_for_the_trap_not_for_the_spawn` fails
+  `left: Some("SIGUSR1")`, `right: Some("SIGTERM")`.
+- **R1 is NOT touched** — referred to the async-runtime lane (Q#MCI3);
+  widening its budget would make it pass and measure nothing more.
+  **R3 is NOT touched** and stays **unresolved**; it belongs to the
+  process-signal / reap-ledger lanes and nothing here may make it look
+  otherwise.
+- **Repetition sets, not single runs:** the two `--lib` process tests
+  **15/15**, the whole `vterm_stage2_acceptance` suite (9 tests, default
+  parallelism) **15/15**.
+- **Verification:** fmt, diff-check, clippy with and without `crdt`,
+  `--lib` 1897, `--lib --features crdt` 2082, vterm Stage 2 9, m4 149,
+  required GPU 221. Each `--lib` figure is exactly one above #215's
+  (1896 / 2081): the R2 witness.
+- **Full serialized sweep in BOTH feature configurations, baseline
+  first** — the blindness handoff §5 warns about, and the baseline is
+  what makes any failure attributable:
+
+  | tree | config | suites | passed | failed |
+  |---|---|---|---|---|
+  | `main` @ `12f2970` | luajit | 108 | 3691 | 0 |
+  | `main` @ `12f2970` | luajit,crdt | 108 | 3959 | 0 |
+  | branch | luajit | 108 | 3695 | 0 |
+  | branch | luajit,crdt | 108 | 3962 | **1 — see below** |
+
+  **Every total is exactly +4 on its baseline** — 3691→3695 and
+  3959→3963 (3962 passed plus the one failure). Four witnesses, and
+  nothing else moved.
+- **The one branch-`crdt` failure is recorded rather than rerun away.**
+  `lsp_dispatch_seams_acceptance
+  acc33_apply_edit_still_handled_with_a_response_subscriber` —
+  *"the executeCommand response reaches its one-shot, left: 0, right:
+  1"*. It is a **new incident** by the registry's rules (no row's
+  fragments match), and it is **not attributable to this branch**, on a
+  structural argument rather than on the green rerun:
+  - the only Rust change is inside `#[cfg(test)] mod tests` in
+    `src/process.rs`, which is compiled **only into the lib test
+    target** — an integration-test binary links the non-`cfg(test)`
+    lib, so this suite's artifact is what `main` builds;
+  - the other change is a different test binary entirely;
+  - CI's **`Test (crdt)` job passed at this same head**, and it runs
+    this suite;
+  - it occurred while a **second full workspace sweep** was running
+    concurrently in another worktree, against a deadline-based fake-LSP
+    one-shot;
+  - the suite then ran **15/15 as a repetition set** — which, per this
+    project's own rerun rule, establishes **intermittence only** and is
+    the weakest of these five points, not the argument.
+
+  **No registry row is opened**, because the registry judges red **CI**
+  runs and keys on linked CI occurrences; this is a local observation
+  under known contention. If it appears in CI, it is a first recorded
+  occurrence and gets a row then.
+- **A SHARED `CARGO_TARGET_DIR` MAKES A LOCAL SWEEP UNATTRIBUTABLE, and
+  it bit this lane.** The branch `crdt` sweep first reported 7 failures
+  in three suites while the baseline `crdt` sweep was clean. All three
+  spawn the **real `pmacs` binary out of the target directory**, and the
+  failure text named its own cause: *"daemon does not advertise required
+  capabilities … start the daemon built with the `crdt` feature"*. A
+  concurrent `cargo test --workspace` in a **different worktree**, with
+  default (non-`crdt`) features and the same `CARGO_TARGET_DIR`, had
+  overwritten `target/debug/pmacs` mid-sweep. Confirmed by `pgrep` while
+  it was happening, and discriminated by re-running the same three
+  suites from the same tree with a **dedicated** `CARGO_TARGET_DIR`:
+  41/41 green, then the whole config swept clean the same way. **Give a
+  sweep its own target directory whenever another worktree is live** —
+  a feature-flavored binary is a shared mutable file, not a build
+  artifact private to your invocation.
+
+Recovery from a clean checkout:
+
+```sh
+git fetch githubsucks
+git worktree add ../pmacs-ci-signals \
+  -b ci-signal-hardening \
+  githubsucks/ci-signal-hardening
+```
+
+### Stage 1 — MERGED as #215
+
+- **Branch `macos-ci-signal-integrity`**, merged to `main` @ `12f2970`
+  after two review rounds. Docs only. Final CI checkpoint:
 
   | head | CI run | result |
   |---|---|---|
   | `d33bf4d` | [30950108477](https://github.com/levineuwirth/pmacs/actions/runs/30950108477) | 14/14 green — the reviewed head |
   | `f76897c` | [30990816890](https://github.com/levineuwirth/pmacs/actions/runs/30990816890) | review round 1 |
-  | *(tip)* | — | review round 2: framing wording, the missing quote, this table |
+  | `2e0617f` | — | review round 2: framing wording, the missing quote, the checkpoint table |
 
-  **The branch tip is authoritative over any row here.** Verify with
-  `git rev-parse githubsucks/macos-ci-signal-integrity` rather than
-  trusting the newest line.
-- **What Stage 1 ships:** `docs/ci-red-signatures.md`, the single
+- **What Stage 1 shipped:** `docs/ci-red-signatures.md`, the single
   authority for judging a red CI run. Rows key on **signature** —
   selector + job/flavor + every required fragment, normalized — so **a
   test-name match confers nothing**. The rerun rule is replaced: a green
@@ -323,30 +458,6 @@ entry — the same defect, caught in review.
   not rows — unmatchable by construction, so a red in either is a new
   incident. The registry is therefore *stricter* than the list it
   replaces: nothing is pre-excused.
-- **Verification:** fmt, diff-check, clippy with and without `crdt`,
-  `--lib` 1896, `--lib --features crdt` 2081, pmacs-protocol 19, m4 149,
-  required GPU 221. All three named tests pass locally on Linux —
-  consistent with R1–R4 being macOS occurrences, and **not evidence
-  about any of them**.
-
-### Stage 2 — hardening, NOT started
-
-Waits on #215's merge. Owns R2's trap-readiness fix and R4's
-`wait_for_file` predicate, each with a **repetition set** rather than a
-single green run, plus a discriminating witness that fails without the
-fix. **R1 is referred to the async-runtime lane** (Q#MCI3) rather than
-patched: widening its budget would make it pass and measure nothing
-more. **R3 stays unresolved** and belongs to the process-signal /
-reap-ledger lanes.
-
-Recovery from a clean checkout:
-
-```sh
-git fetch githubsucks
-git worktree add ../pmacs-ci-signals \
-  -b macos-ci-signal-integrity \
-  githubsucks/macos-ci-signal-integrity
-```
 
 ## CI CRDT coverage — MERGED (#209); kept for its three follow-ons
 
