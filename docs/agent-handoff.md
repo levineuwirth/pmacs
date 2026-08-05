@@ -1,7 +1,9 @@
 # Agent handoff — cross-machine continuity
 
 **Last updated: 2026-08-05.** The live CI-triage rule in §5 now points
-at `docs/ci-red-signatures.md` (PR #215, in review), which keys on
+at `docs/ci-red-signatures.md` (**PR #215, merged as `main` @
+`12f2970`**; its Stage 2 hardening is in flight — see
+`docs/active-work.md`), which keys on
 signature rather than test name; the hazards list this file used to
 carry is retired, and its two unevidenced entries are audit notes there.
 Previously **2026-08-04, as bottom-panel Stage 3 #213 — the adopter

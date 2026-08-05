@@ -544,7 +544,10 @@ fn terminal_escape_gates_local_bindings_and_double_escape_sends_interrupt() {
         ))
         .eval::<AnyUserData>()
         .expect("open raw input probe");
-    assert_eq!(wait_for_file(&ready_path, Duration::from_secs(5)), b"1");
+    assert_eq!(
+        wait_for_file(&ready_path, b"1", Duration::from_secs(5)),
+        b"1"
+    );
 
     let frontend_id = FrontendId::LOCAL;
     state.dispatch_key(
@@ -564,9 +567,10 @@ fn terminal_escape_gates_local_bindings_and_double_escape_sends_interrupt() {
         KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT),
     );
 
+    let expected_input = b"\x1bv\x03\x1bw";
     assert_eq!(
-        wait_for_file(&input_path, Duration::from_secs(5)),
-        b"\x1bv\x03\x1bw",
+        wait_for_file(&input_path, expected_input, Duration::from_secs(5)),
+        expected_input,
         "unescaped local bindings reach the child; C-c C-c sends one literal interrupt"
     );
 }
@@ -718,40 +722,149 @@ fn wait_for_output(
 /// The plain helper panics with only the missing path, which is the least
 /// useful thing to know: a readiness file that never appears is exactly when
 /// "how far did startup get" decides where to look next.
+///
+/// Carries [`wait_for_file`]'s `expected` predicate for the same reason:
+/// this helper gates on a file the probe fills with `open(path,'wb')`
+/// too, so "readable" would let a zero-byte read through here as well.
 fn wait_for_published_file(
     pty: &mut PmacsPty,
     path: &Path,
+    expected: &[u8],
     timeout: Duration,
     startup: &[(&str, &Path)],
 ) -> Vec<u8> {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Ok(bytes) = fs::read(path) {
+        if let Some(bytes) = settled_file(path, expected) {
             return bytes;
         }
         assert!(
             Instant::now() < deadline,
-            "child never published {} within {timeout:?}\n  startup: {}",
+            "child never published {expected:?} to {} within {timeout:?}\n  \
+             last read: {:?}\n  startup: {}",
             path.display(),
+            fs::read(path).ok(),
             describe_startup(pty, startup)
         );
         thread::sleep(Duration::from_millis(20));
     }
 }
 
-fn wait_for_file(path: &Path, timeout: Duration) -> Vec<u8> {
+/// Wait until `path` holds bytes the caller can assert against, and
+/// return them.
+///
+/// **The predicate is the content, not readability.** Every probe in this
+/// suite publishes with `open(path,'wb').write(...)`, and `open()` creates
+/// the file *before* `write()` fills it — so "`fs::read` succeeded" is
+/// satisfied by a **zero-byte file** and this helper used to return `[]`
+/// into a caller asserting `== b"1"`. That is `docs/ci-red-signatures.md`
+/// R4, whose failure text is `left: []`, `right: [49]`.
+///
+/// The wait therefore continues while the file holds a **strict prefix**
+/// of `expected` — the states a write in flight can be observed in — and
+/// returns as soon as the bytes are anything else. Returning on
+/// divergence rather than insisting on a match is deliberate: the
+/// caller's `assert_eq!` stays the discriminating assertion, so wrong
+/// content is reported as a diff by the test that owns the expectation,
+/// not as a timeout in a helper that does not.
+fn wait_for_file(path: &Path, expected: &[u8], timeout: Duration) -> Vec<u8> {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Ok(bytes) = fs::read(path) {
+        if let Some(bytes) = settled_file(path, expected) {
             return bytes;
         }
         assert!(
             Instant::now() < deadline,
-            "file was not published: {}",
-            path.display()
+            "file never settled: {} (expected {expected:?}, last read {:?})",
+            path.display(),
+            fs::read(path).ok()
         );
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// `Some(bytes)` once `path` is readable and no longer a write in
+/// flight; `None` while it is missing or holds a strict prefix of
+/// `expected`.
+fn settled_file(path: &Path, expected: &[u8]) -> Option<Vec<u8>> {
+    let bytes = fs::read(path).ok()?;
+    let in_flight = bytes.len() < expected.len() && expected.starts_with(&bytes);
+    (!in_flight).then_some(bytes)
+}
+
+/// R4's discriminating witness — the zero-byte file, reproduced exactly.
+///
+/// `docs/ci-red-signatures.md` R4 is `wait_for_file` returning `[]` into a
+/// caller asserting `== b"1"`, because `open(path,'wb')` creates the file
+/// before `write()` fills it. The file here is created empty and filled
+/// later, which makes that window certain instead of load-dependent.
+///
+/// Revert the predicate to "`fs::read` succeeded" and this fails with
+/// `left: []`, `right: [49]` — R4's two required fragments, verbatim.
+#[test]
+fn wait_for_file_does_not_return_a_zero_byte_readiness_file() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let path = temp.path().join("ready");
+    // The state `open(path,'wb')` leaves behind before its `write`.
+    drop(fs::File::create(&path).expect("create the empty readiness file"));
+
+    let filled = path.clone();
+    let writer = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(150));
+        fs::write(&filled, b"1").expect("fill the readiness file");
+    });
+
+    assert_eq!(wait_for_file(&path, b"1", Duration::from_secs(5)), b"1");
+    writer.join().expect("writer thread");
+}
+
+/// The same predicate, one step past R4: a **partial** write is a torn
+/// read, not a readiness signal.
+///
+/// R4's occurrence was the zero-byte case because the marker is one byte.
+/// The multi-byte callers in this suite (`b"\x1bv\x03\x1bw"`,
+/// `b"VTERM_INPUT_SMOKE\n"`) can observe a prefix for the same reason, and
+/// a helper that only rejected *empty* would hand one to `assert_eq!`.
+#[test]
+fn wait_for_file_does_not_return_a_partial_write() {
+    let expected = b"VTERM_INPUT_SMOKE\n";
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let path = temp.path().join("child-input");
+    drop(fs::File::create(&path).expect("create the empty input file"));
+
+    let filled = path.clone();
+    let writer = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(100));
+        fs::write(&filled, b"VTERM").expect("partial write");
+        thread::sleep(Duration::from_millis(100));
+        fs::write(&filled, expected).expect("complete write");
+    });
+
+    assert_eq!(
+        wait_for_file(&path, expected, Duration::from_secs(5)),
+        expected
+    );
+    writer.join().expect("writer thread");
+}
+
+/// Content that is *wrong* rather than *unfinished* comes straight back,
+/// so the caller's `assert_eq!` reports it.
+///
+/// This is what keeps the strengthened predicate from moving the
+/// assertion into the helper: waiting for an exact match would turn a
+/// child that published the wrong thing into a timeout in a function that
+/// does not know what was expected of it, and delete the diff that says
+/// what arrived instead.
+#[test]
+fn wait_for_file_returns_divergent_content_rather_than_timing_out() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let path = temp.path().join("child-size");
+    fs::write(&path, b"29 90\n").expect("publish the wrong geometry");
+
+    assert_eq!(
+        wait_for_file(&path, b"28 90\n", Duration::from_millis(500)),
+        b"29 90\n"
+    );
 }
 
 #[test]
@@ -888,7 +1001,13 @@ fn real_tui_terminal_smoke_restores_host_after_output_input_resize_scroll_copy_a
     // are protocol escapes pmacs writes directly, never painted cells, so the
     // differ cannot split them.
     assert_eq!(
-        wait_for_published_file(&mut pty, &alt_ready_path, Duration::from_secs(10), startup),
+        wait_for_published_file(
+            &mut pty,
+            &alt_ready_path,
+            b"1",
+            Duration::from_secs(10),
+            startup
+        ),
         b"1",
         "alt-screen readiness breadcrumb was published but malformed"
     );
@@ -904,12 +1023,19 @@ fn real_tui_terminal_smoke_restores_host_after_output_input_resize_scroll_copy_a
     pty.write_input(b"\x03\x1bw")
         .expect("escaped copy selection binding");
     wait_for_output(&mut pty, b"\x1b]52;c;", Duration::from_secs(5), startup);
-    let input = wait_for_file(&input_path, Duration::from_secs(5));
-    assert_eq!(input, b"VTERM_INPUT_SMOKE\n");
+    let expected_input = b"VTERM_INPUT_SMOKE\n";
+    let input = wait_for_file(&input_path, expected_input, Duration::from_secs(5));
+    assert_eq!(input, expected_input);
     pty.write_input(b"\x1b[200~PASTE_AFTER_EXIT\x1b[201~")
         .expect("route a real host paste event");
-    let size = String::from_utf8(wait_for_file(&size_path, Duration::from_secs(5)))
-        .expect("UTF-8 stty size");
+    // The probe writes `f'{lines} {columns}\n'`, so the settled content
+    // carries the trailing newline the assertion below trims.
+    let size = String::from_utf8(wait_for_file(
+        &size_path,
+        b"28 90\n",
+        Duration::from_secs(5),
+    ))
+    .expect("UTF-8 stty size");
     assert_eq!(size.trim(), "28 90", "child PTY must receive cell geometry");
     thread::sleep(Duration::from_millis(200));
     pty.write_input(b"\x03\x18\x03").expect("quit pmacs");
