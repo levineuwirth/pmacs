@@ -1,7 +1,31 @@
 # Framing — the tree primitive
 
-**Revision 2.** Status: framing only, **not yet approved**. No
+**Revision 3.** Status: framing only, **not yet approved**. No
 implementation. Scouted against `githubsucks/main` @ `12f2970`.
+
+**Revision 2 → 3**, three further review findings, all verified in
+source:
+
+- **`*references*` has no `g` and no `on_refresh`** — revision 2 claimed
+  it twice. The consumer with refresh is **`*lsp*`** (§1.5a). The error
+  came from reading `listview.lua`'s **module-docstring example**, which
+  illustrates the API using `*references*` with `g refresh` in the
+  header. An example is not a consumer. *The refresh-scoping conclusion
+  is unaffected — it depended on the OUTLINE lacking refresh, which
+  holds.*
+- **The branch plan still said "references or buffer-list"** — the same
+  `*buffer-list*` error acceptance 5 had already been corrected for,
+  surviving one section further down.
+- **"Byte-identically, pinned by their existing suites" was
+  unsupported.** `listview_acceptance` states in its own header that
+  `*references*` needs a live LSP and is not exercised there, and the m4
+  hover test asserts content *presence*, not byte-exact output.
+  Acceptance 5 now poses that as a decision — write the byte-identity
+  test, or weaken the claim — with a leaning and its cost.
+
+**Found while verifying those: §14's "exactly three call sites" is
+stale — there are FOUR** (§1.3a), and the fourth (`*lsp*`, added by
+#204) is the only one with refresh.
 
 **Revision 1 → 2**, all from review, all verified against source before
 applying:
@@ -135,6 +159,28 @@ current one.
 3. It is harmless while `*workers*` is not a panel, and inherits the
 hazard the moment it becomes one.)*
 
+### 1.3a There are FOUR listview consumers now, not three
+
+§14 measured "exactly **three** `pmacs.listview.open` call sites, all
+three in `builtin/runtime/lsp.lua`" at `ad41cf1`. **There are four**, and
+the fourth matters here:
+
+| call site | panel | `on_visit` | `on_refresh` / `g` |
+|---|---|---|---|
+| `lsp.lua:2442` | `*references*` | yes | **no** |
+| `lsp.lua:2488` | `*outline*` | yes | **no** |
+| `lsp.lua:2924` | `*lsp-help*` | no | **no** |
+| `lsp.lua:3004` | `*lsp*` (`lsp.status`) | no | **yes** |
+
+`*lsp*` arrived with Journey Stage 1b-2 (#204), after §14's audit. It is
+**the only listview consumer with refresh at all**, which is why §1.5a's
+scoping conclusion holds: refresh is a feature exactly one panel has, and
+it is not the anchor.
+
+§14's line numbers have also drifted (`:2056`/`:2102`/`:2513` against
+today's `:2442`/`:2488`/`:2924`). The count is the part that matters;
+this is recorded so the next reader does not inherit "three".
+
 ### 1.4 What listview's model would have to gain
 
 listview's contract today:
@@ -212,9 +258,17 @@ an async LSP round-trip with its own await, failure and staleness
 handling — and it raises who owns the resulting state when the response
 arrives against a buffer the user may have edited or left.
 
-That is a real feature (`*references*` has `g` and an `on_refresh`; the
-outline never gained one), and it is **not** a tree concern. Bundling it
-here would make the tree lane responsible for LSP request lifecycle.
+That is a real feature — **`*lsp*` (`lsp.status`) has `g refresh` and an
+`on_refresh`** (`lsp.lua:3004`); the outline never gained one — and it is
+**not** a tree concern. Bundling it here would make the tree lane
+responsible for LSP request lifecycle.
+
+*(Revision 2 attributed refresh to `*references*` twice. It has neither:
+its header is `RET visit  n/p move  q quit` and it supplies only
+`on_visit` (`lsp.lua:2442`). The error came from reading
+`listview.lua`'s **module-docstring example**, which illustrates the API
+using `name = "*references*"` and a header containing `g refresh` — an
+example, not a consumer.)*
 
 **Consequence for acceptance:** the criteria are re-scoped to what the
 anchor consumer can actually exercise — collapse and selection surviving
@@ -330,10 +384,32 @@ fixed until Q#TR1–TR3 are decided. The shapes they will take:
 4. **No new interaction island**: every tree key is a buffer-local
    binding, and the dispatch-shadow count is unchanged. Asserted, not
    assumed.
-5. **listview's OTHER consumers are unaffected** — `*references*` and
-   `*lsp-help*`, which with `*outline*` are the **only three
-   `pmacs.listview.open` call sites, all in `lsp.lua`**. They render
-   byte-identically, pinned by their existing suites.
+5. **listview's OTHER consumers are unaffected** — `*references*`,
+   `*lsp-help*` and `*lsp*` (§1.3a: four call sites, all in `lsp.lua`).
+
+   **What existing suites actually pin, stated honestly.**
+   `listview_acceptance` drives the substrate hermetically and says so
+   in its own header: *"The references panel itself needs a live LSP and
+   is validated manually / via the m4 harness"* — so **it does not
+   exercise `*references*` at all**. The m4 hover test asserts content
+   *presence*, not byte-exact output. **"Byte-identical, pinned by
+   existing suites" was therefore unsupported** for both panels named.
+
+   So this criterion needs a decision, not a wording tweak:
+   - **either** byte-identity becomes a **new test requirement** this
+     stage writes — capturing each panel's rendered buffer before and
+     after and diffing it, which needs the m4 fake-LSP harness for
+     `*references*`;
+   - **or** the claim weakens to what is genuinely pinned today:
+     the substrate behaviours `listview_acceptance` covers (open,
+     navigate, visit, `q` restore, the read-only intercept, the
+     round-trip gate, refresh) plus content-presence for hover.
+
+   **Leaning: write the byte-identity test**, because a flat consumer
+   silently gaining an indent column is exactly the regression this
+   criterion exists to catch, and content-presence would not see it.
+   Recorded as a leaning rather than a decision because it costs harness
+   work the stage has not scoped.
 
    **Revision 1 named `*buffer-list*` and project search here and was
    wrong** — §14 measured that they do **not** use listview and calls
@@ -363,8 +439,8 @@ fixed until Q#TR1–TR3 are decided. The shapes they will take:
   raw-switch hazard noted there.
 - **Tree rendering in the GPU frontend** beyond whatever the shared
   generated-buffer path already gives.
-- **Giving the outline a refresh** (§1.5a). `*references*` has `g` and
-  an `on_refresh`; the outline never gained one. Adding it means
+- **Giving the outline a refresh** (§1.5a). **`*lsp*` has `g` and an
+  `on_refresh`**; the outline never gained one. Adding it means
   re-requesting `textDocument/documentSymbol` with its own await,
   failure and staleness handling, and deciding who owns the result when
   it arrives against a buffer the user may have edited. **That is LSP
@@ -393,7 +469,10 @@ Not settled, because it depends on Q#TR1. Two shapes:
 
 - **If listview is extended:** one branch, with the flat-consumer
   no-change proof (acceptance 5) landing *before* the outline adopts, so
-  a regression in references or buffer-list is attributable.
+  a regression in `*references*`, `*lsp-help*` or `*lsp*` is
+  attributable. *(Revision 2 said "references or buffer-list" here —
+  the same `*buffer-list*` error acceptance 5 had already been corrected
+  for. `*buffer-list*` does not use listview.)*
 - **If a separate `treeview`:** the primitive and its first consumer are
   separable, and the outline's adoption can be its own PR.
 
