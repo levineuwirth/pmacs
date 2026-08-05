@@ -1,6 +1,10 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-08-04, as bottom-panel Stage 3 #213 — the adopter
+**Last updated: 2026-08-05.** The live CI-triage rule in §5 now points
+at `docs/ci-red-signatures.md` (PR #215, in review), which keys on
+signature rather than test name; the hazards list this file used to
+carry is retired, and its two unevidenced entries are audit notes there.
+Previously **2026-08-04, as bottom-panel Stage 3 #213 — the adopter
 default flip, which COMPLETES ARC 7: omitting `display` now means the
 panel, and the workbench's panel half is done on both frontends. Beneath
 it the post-release accuracy pass #212 and Distribution Stage 1 #211 —
@@ -292,11 +296,19 @@ someone forgot.
 - **`pmacs.error` is undefined in production.** Fifteen `if pmacs.error
   then` guards make the silence look deliberate. Report through
   `pmacs.editor.set_status` until the channel is built.
-- **Flakes that are not your change.** Judge a red run against these
-  before bisecting: `process::tests::a_successful_signal_disposition_...`
-  (macOS-only, signal timing); `a33_headless_terminal_frame_paints_...`
-  (GPU under parallel load, "0 blue pixels"); `m6_8_supervisor_reaps_...`
-  (load-sensitive). **Rerun before concluding.**
+- **Judging a red CI run: `docs/ci-red-signatures.md` is the authority.**
+  It keys on **signature**, not test name — a failure in a listed test
+  that lacks that row's fragments is a NEW incident, not a known one.
+  The old rule here ("rerun before concluding") is retired: **a green
+  rerun establishes intermittence only**, never environmental cause or
+  harmlessness; the same signature again is a second occurrence and
+  stays blocking. One row is an **unresolved possible product defect**
+  that no rerun can clear.
+
+  This list previously named three tests. The audit found one of them
+  had produced **two distinct signatures** with different causes, and
+  that two of the four incidents actually seen were absent from it —
+  which is why name-keyed lists are not trustworthy.
 - **`basedpyright` hangs forever** — always
   `cargo test --test m4_acceptance -- --skip basedpyright`.
 - **The crdt sweep needs `cargo build --workspace` first**, or twelve
@@ -1995,9 +2007,15 @@ before trusting them:
   separate proposals, each owed its own evidence.
 - **GPU on the laptop**: AMD Radeon 780M (RADV) — native Vulkan,
   `PMACS_REQUIRE_GPU=1` works without lavapipe.
-- **Flaky-under-load tests — rerun isolated before treating a sweep
-  failure as a regression.** The m8 daemon tests and the m6 process/PTY
-  tests (`m6_1_pty_mode_lifecycle_started_then_exited`,
+- **Flaky-under-load tests — what this lane OBSERVED.** *(Historical
+  record. This bullet no longer states a triage rule: for judging a red
+  run, `docs/ci-red-signatures.md` is the authority, and its rule
+  supersedes "rerun isolated" — a green rerun establishes intermittence
+  only, never environmental cause.
+  `m6_8_supervisor_reaps_all_children_across_cycles` is **A2** there —
+  an audit note, not a matchable row, because no signature was ever
+  captured.)* The m8 daemon tests and the m6
+  process/PTY tests (`m6_1_pty_mode_lifecycle_started_then_exited`,
   `m6_8_supervisor_reaps_all_children_across_cycles`) are timing-based;
   `editor::composition_overhead_under_ten_percent` is a render-ratio
   microbenchmark that fails ~1/3 even isolated single-threaded (already
@@ -2005,9 +2023,11 @@ before trusting them:
   `real_tui_terminal_smoke_restores_host_after_output_input_resize_scroll_copy_and_bell`;
   the complete failed-job rerun passed. The required-GPU gate also failed once
   in `headless_diag_face_recolors_band_counter_despite_unchanged_text`, then
-  passed both an isolated single-thread rerun and the full 139-test rerun. A
-  lone timing failure → rerun the test alone (`-- --test-threads=1`) before
-  investigating. Run the workspace
+  passed both an isolated single-thread rerun and the full 139-test rerun.
+  *(That "rerun the test alone before investigating" instruction is
+  retired — an isolated green reproduces nothing about a load-sensitive
+  failure and establishes intermittence at most. See the registry's
+  rerun rule.)* Run the workspace
   sweep as ONE `cargo test` invocation piped to a full log — a double
   invocation + `grep -c "test result: ok"` can mask real failures with a
   misleading `0`.
