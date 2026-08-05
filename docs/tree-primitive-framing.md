@@ -1,13 +1,33 @@
 # Framing — the tree primitive
 
-**Revision 3.** Status: framing only, **not yet approved**. No
-implementation. Scouted against `githubsucks/main` @ `12f2970`.
+**Revision 4.** Status: framing only, **not yet approved**. Scouted
+against `githubsucks/main` @ `12f2970`. **This revision also carries a
+correction to `COHERENCE.md` §14** — see below.
+
+**Revision 3 → 4**:
+
+- **"No `g`" was literally false**, in revisions 2 and 3 both.
+  `bind_local_keymap` binds `g → listview.refresh` on **every** panel
+  unconditionally (`listview.lua:147`). What three of the four lack is
+  an `on_refresh`. The §1.3a table now separates **`g` bound**,
+  **refresh advertised** and **refresh functional**, because those are
+  three different facts and I had been collapsing them into one.
+  Consequence worth noting on its own: the outline has a **dead refresh
+  binding** — `g` is dispatched and silently does nothing, with no
+  status message.
+- **`COHERENCE.md` §14 is corrected in this branch**, not deferred.
+  §25 requires an audited claim to be updated by the PR that changes
+  it; **#204 changed it and missed it**, so the correction rides the
+  framing that found it. The `ad41cf1` audit fact is retained as
+  history, with the current count of four and `*lsp*` named as the
+  post-audit addition. The §0 scorecard row moves with the body, since
+  it carried the same "3 call sites".
 
 **Revision 2 → 3**, three further review findings, all verified in
 source:
 
-- **`*references*` has no `g` and no `on_refresh`** — revision 2 claimed
-  it twice. The consumer with refresh is **`*lsp*`** (§1.5a). The error
+- **`*references*` has no `on_refresh`** — revision 2 claimed it had
+  refresh, twice. The consumer with refresh is **`*lsp*`** (§1.5a). The error
   came from reading `listview.lua`'s **module-docstring example**, which
   illustrates the API using `*references*` with `g refresh` in the
   header. An example is not a consumer. *The refresh-scoping conclusion
@@ -165,12 +185,24 @@ hazard the moment it becomes one.)*
 three in `builtin/runtime/lsp.lua`" at `ad41cf1`. **There are four**, and
 the fourth matters here:
 
-| call site | panel | `on_visit` | `on_refresh` / `g` |
-|---|---|---|---|
-| `lsp.lua:2442` | `*references*` | yes | **no** |
-| `lsp.lua:2488` | `*outline*` | yes | **no** |
-| `lsp.lua:2924` | `*lsp-help*` | no | **no** |
-| `lsp.lua:3004` | `*lsp*` (`lsp.status`) | no | **yes** |
+| call site | panel | `on_visit` | `on_refresh` | `g` bound? | refresh advertised? | refresh FUNCTIONAL? |
+|---|---|---|---|---|---|---|
+| `lsp.lua:2442` | `*references*` | yes | no | **yes** | no | **no** |
+| `lsp.lua:2488` | `*outline*` | yes | no | **yes** | no | **no** |
+| `lsp.lua:2924` | `*lsp-help*` | no | no | **yes** | no | **no** |
+| `lsp.lua:3004` | `*lsp*` (`lsp.status`) | no | **yes** | **yes** | **yes** | **yes** |
+
+**`g` is bound on ALL FOUR.** `bind_local_keymap` binds
+`g → listview.refresh` for every panel unconditionally
+(`listview.lua:147`), so "no `g`" — which revisions 2 and 3 both said —
+is **literally false**. What three of them lack is an `on_refresh`, and
+`listview.refresh` returns immediately without one.
+
+**So `g` on the outline is a DEAD BINDING**: bound, dispatched,
+silently does nothing. That is a small UX wart in its own right — a key
+that responds to nothing, with no status message — and it is a separate
+observation from anything this framing proposes. Recorded, not fixed
+here.
 
 `*lsp*` arrived with Journey Stage 1b-2 (#204), after §14's audit. It is
 **the only listview consumer with refresh at all**, which is why §1.5a's
@@ -244,11 +276,13 @@ whether selection and expansion can survive a model update at all.
 Revision 1 built two acceptance criteria on `g` refresh without checking
 that the outline supports it. **It does not:**
 
-- its header offers `RET visit  n/p move  q quit` — **no `g`**
-  (`lsp.lua:2490`);
+- its header offers `RET visit  n/p move  q quit` — refresh is **not
+  advertised** (`lsp.lua:2490`);
 - it supplies **no `on_refresh`**;
-- and `listview.refresh` opens `if not (p and p.on_refresh) then return
-  end` — **a no-op** for this panel (`listview.lua:262`).
+- `listview.refresh` opens `if not (p and p.on_refresh) then return
+  end` — **a no-op** for this panel (`listview.lua:262`);
+- and `g` **is** bound regardless (§1.3a), so the outline has a
+  **dead refresh binding**, not an absent one.
 
 So "collapse state survives `g`" was unreachable for the only consumer
 that exists. **Refresh is therefore out of scope for this stage** unless

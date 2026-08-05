@@ -107,7 +107,7 @@ remain open to them.
 | 11 | Config layering + provenance | **Partial (foundation only)** | Typed registry is right; 5 settings live in it; no value provenance |
 | 12 | Profiles | **Missing** | One hardcoded default keymap; not a named concept |
 | 13 | Package lifecycle UX | **Resolution without lifecycle** | Mature resolver/lockfile; init-only install; no uninstall/disable/search |
-| 14 | Workbench primitives | **Partial (best trajectory)** | Listview is a real primitive but only 3 call sites, all LSP panels; buffer-list and search re-implement it; **the bottom panel is COMPLETE — both frontends, and Stage 3 flipped the adopter default so omission means the panel**. **Tree is still ✗ and is now the arc's successor** |
+| 14 | Workbench primitives | **Partial (best trajectory)** | Listview is a real primitive but only **4** call sites, all LSP panels (`*lsp*` added post-audit by #204); buffer-list and search re-implement it; **the bottom panel is COMPLETE — both frontends, and Stage 3 flipped the adopter default so omission means the panel**. **Tree is still ✗ and is now the arc's successor** |
 | 15 | Contextual affordances | **Weak** | Right-click menu only; code actions apply first-blindly; no git integration at all |
 | 16 | Semantic frontend | **Strong** | v6..=v21 schema support; production attach remains v20 during the dark panel slice; degradation practiced |
 | 17 | Distribution | **Partial** | **v1.1.0 ships prebuilt Linux/macOS binaries on tag** (#211) with checksums and a stated glibc floor. No channels, in-place update, rollback, signing, or package-manager distribution |
@@ -1282,10 +1282,23 @@ Primitive-by-primitive against the list above:
   buffer-local keymap idiom (RET/SPC visit, n/p, g refresh, q quit)
   that is inspectable and rebindable (§6's counter-example). **But its
   adoption is narrower than this document claimed, and the correction
-  matters more than the grade.** Measured at `ad41cf1`: there are
+  matters more than the grade.** Measured at `ad41cf1`: there were
   exactly **three** `pmacs.listview.open` call sites, **all three in
   `builtin/runtime/lsp.lua`** — `*references*` (`:2056`), `*outline*`
-  (`:2102`) and `*lsp-help*` (`:2513`). The three other `listview`
+  (`:2102`) and `*lsp-help*` (`:2513`).
+
+  **Updated: there are now FOUR.** Journey Stage 1b-2 (**#204**) added
+  `*lsp*` via `lsp.status` — the audited claim above changed and that PR
+  did not update it, so this correction rides the tree-primitive framing
+  that found it (§25). All four remain in `lsp.lua`; per §25 the
+  symbols are authoritative and the `ad41cf1` line numbers have drifted.
+
+  **`*lsp*` is the only one of the four with a working refresh** — it is
+  the only one supplying `on_refresh`. `g` is bound on all four
+  unconditionally by `bind_local_keymap`, so the other three carry a
+  **dead refresh binding**: bound, dispatched, silently does nothing.
+
+  The three other `listview`
   mentions under `builtin/` are comments in `compile.lua` and
   `dired.lua` citing "the listview idiom", which is a *pattern being
   copied*, not the primitive being used.
