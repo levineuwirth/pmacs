@@ -1,7 +1,9 @@
 # Agent handoff — cross-machine continuity
 
 **Last updated: 2026-08-05.** The live CI-triage rule in §5 now points
-at `docs/ci-red-signatures.md` (PR #215, in review), which keys on
+at `docs/ci-red-signatures.md` (**PR #215, merged as `main` @
+`12f2970`**; its Stage 2 hardening is in flight — see
+`docs/active-work.md`), which keys on
 signature rather than test name; the hazards list this file used to
 carry is retired, and its two unevidenced entries are audit notes there.
 Previously **2026-08-04, as bottom-panel Stage 3 #213 — the adopter
@@ -315,6 +317,18 @@ someone forgot.
   `gpu_invocation_acceptance` tests fail on a missing `pmacs-gpu`
   binary. `cargo build --workspace --no-default-features --features
   luajit,crdt` is the invocation that produces both binaries.
+- **A shared `CARGO_TARGET_DIR` makes a local sweep unattributable.**
+  Every worktree on this machine resolves to the same target directory,
+  so `target/debug/pmacs` is a **shared mutable file**: a concurrent
+  `cargo test --workspace` in another worktree, at default (non-`crdt`)
+  features, overwrites the binary that a running `crdt` sweep is
+  spawning. That produced seven failures in three real-daemon suites
+  during the Stage 2 hardening sweep while the baseline was clean, and
+  the failure text named its own cause — *"start the daemon built with
+  the `crdt` feature"*. Confirmed with `pgrep` and discriminated by
+  re-running from the same tree with a **dedicated**
+  `CARGO_TARGET_DIR`. **Check for other live worktrees before believing
+  a sweep failure, and give the sweep its own target directory.**
 - **A local sweep is blind to whichever feature configuration it does
   not build.** Stage 3's census and every verification sweep ran
   `--features luajit` WITHOUT `crdt`, so no crdt-gated suite was

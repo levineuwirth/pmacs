@@ -2796,6 +2796,61 @@ mod tests {
             .expect("Started carries a pid")
     }
 
+    /// Wait until `path` holds exactly `expected`.
+    ///
+    /// **The predicate is the content, never the file's existence.** A
+    /// shell publishes readiness with `printf … > path`, and the `>`
+    /// redirection creates the file *before* the command that fills it —
+    /// so "it exists", and even "it is readable", is satisfied by a
+    /// zero-byte file. That is `docs/ci-red-signatures.md` R4's mechanism
+    /// arriving in a second place; a readiness gate written the weak way
+    /// re-opens the very window R2 is about.
+    fn wait_for_published(path: &std::path::Path, expected: &[u8], timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if std::fs::read(path).is_ok_and(|bytes| bytes == expected) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "child never published {expected:?} to {} within {timeout:?} \
+                 (last read: {:?})",
+                path.display(),
+                std::fs::read(path).ok()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// `/bin/sh -c` argument for a child that ignores SIGUSR1, says so,
+    /// and then becomes `sleep` — the R2 fixture.
+    ///
+    /// The order is the whole point:
+    ///
+    /// - **`trap '' USR1` first.** SIGUSR1's default disposition is
+    ///   terminate, and `ProcessEventKind::Started` is emitted when the
+    ///   process is *spawned*, not when `/bin/sh` has parsed anything.
+    ///   Waiting on `Started` therefore returns inside a window where the
+    ///   signal kills the child.
+    /// - **The marker second**, so the test has something to wait on that
+    ///   the shell can only publish once the trap exists.
+    /// - **`exec` last**, so the process group holds exactly one process.
+    ///   An *ignored* disposition survives `exec`, while a forked `sleep`
+    ///   would be an untrapped member of the same group — and these
+    ///   signals are group-directed, so it would die and take the shell's
+    ///   `wait` (and the group) with it.
+    ///
+    /// `pre_trap` is the delay the R2 witness prepends to widen the
+    /// pre-trap window deliberately; the fixture itself passes `""`.
+    fn trapped_usr1_command(ready: &std::path::Path, pre_trap: &str) -> String {
+        let path = ready.to_str().expect("UTF-8 temp path");
+        assert!(
+            !path.contains('\''),
+            "the single-quoting below assumes no quote in the temp path: {path}"
+        );
+        format!("{pre_trap}trap '' USR1; printf trapped > '{path}'; exec sleep 30")
+    }
+
     /// Drive the production diagnostic until it observes the leader as
     /// exited, bounded by `timeout`.
     ///
@@ -3223,13 +3278,20 @@ mod tests {
     #[test]
     fn a_successful_signal_disposition_depends_on_whether_it_is_fatal() {
         let mut sup = ProcessSupervisor::new();
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let ready = temp.path().join("usr1-trapped");
         let mut spec = ProcessSpec::new("diag-disposition-live", "/bin/sh");
         // Ignore USR1 so the successful non-fatal signal cannot end the
-        // child and confuse the state assertion with a real exit.
-        spec.args = vec!["-c".into(), "trap '' USR1; sleep 30".into()];
+        // child and confuse the state assertion with a real exit — and
+        // then WAIT for the child to say it has done so. `Started` is
+        // emitted at spawn and proves nothing about what `/bin/sh` has
+        // parsed (`docs/ci-red-signatures.md` R2); see
+        // `trapped_usr1_command`.
+        spec.args = vec!["-c".into(), trapped_usr1_command(&ready, "")];
         spec.group = true;
         let id = sup.spawn(spec).expect("spawn");
         let pid = spawn_started_pid(&mut sup, id);
+        wait_for_published(&ready, b"trapped", Duration::from_secs(10));
 
         sup.signal(id, Signal::SIGUSR1).expect("USR1 delivers");
         assert!(
@@ -3255,6 +3317,57 @@ mod tests {
         assert!(
             !sup.reap_ledger.is_empty(),
             "a successful fatal signal arms the group reap ledger"
+        );
+
+        let _ =
+            nix::sys::signal::kill(Pid::from_raw(-i32::try_from(pid).unwrap()), Signal::SIGKILL);
+    }
+
+    /// R2's discriminating witness — readiness must gate on the **trap**,
+    /// not on the spawn.
+    ///
+    /// `spawn_started_pid` returns when `ProcessEventKind::Started`
+    /// arrives, which is emitted at spawn; the shell has not parsed
+    /// `trap '' USR1` yet, and SIGUSR1's default disposition is
+    /// terminate. This fixture makes that window a deliberate second wide
+    /// instead of leaving it to a loaded runner, so the weak predicate is
+    /// *guaranteed* to return inside it — which is what makes this test
+    /// discriminating rather than lucky.
+    ///
+    /// Survival is proved by the child's **exit disposition**, not by an
+    /// absence observed within a window: a child that took the USR1
+    /// reports `Signaled { signal: "SIGUSR1" }`, and one that ignored it
+    /// reports the SIGTERM sent afterwards. Remove the
+    /// `wait_for_published` line and this test reports `SIGUSR1`.
+    #[test]
+    fn usr1_readiness_waits_for_the_trap_not_for_the_spawn() {
+        let mut sup = ProcessSupervisor::new();
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let ready = temp.path().join("usr1-trapped");
+        let mut spec = ProcessSpec::new("diag-trap-readiness", "/bin/sh");
+        spec.args = vec!["-c".into(), trapped_usr1_command(&ready, "sleep 1; ")];
+        spec.group = true;
+        let id = sup.spawn(spec).expect("spawn");
+        let pid = spawn_started_pid(&mut sup, id);
+
+        // The weak predicate is already satisfied, a second before the
+        // trap exists. The strong one cannot be.
+        wait_for_published(&ready, b"trapped", Duration::from_secs(10));
+
+        sup.signal(id, Signal::SIGUSR1)
+            .expect("USR1 delivers to a child that has trapped it");
+        sup.terminate(id).expect("TERM delivers");
+
+        let events = drain_until(&mut sup, id, Duration::from_secs(5), has_exited);
+        let signal = events.iter().find_map(|e| match &e.kind {
+            ProcessEventKind::Signaled { signal } => Some(signal.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            signal.as_deref(),
+            Some("SIGTERM"),
+            "a child that trapped USR1 before the signal must die of the \
+             TERM instead: {events:?}"
         );
 
         let _ =
