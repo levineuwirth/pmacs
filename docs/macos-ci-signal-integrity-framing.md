@@ -1,8 +1,13 @@
 # Framing — macOS CI signal integrity: a signature registry, then hardening
 
-**Revision 3.** Status: **Stage 1 implemented** on
-`macos-ci-signal-integrity`, PR #215. Scouted against
+**Revision 4.** Status: **Stage 1 MERGED** as #215 (`main` @ `12f2970`);
+**Stage 2 implemented** on `ci-signal-hardening`. Scouted against
 `githubsucks/main` @ `bfb97c6`.
+
+**Revision 4 records implementation findings, not a new design round.**
+The acceptance in §4 is unchanged and was approved at revision 3; §8
+below is what building Stage 2 established, including two places where
+this document's own account of a mechanism was imprecise.
 
 **Revision 2 → 3** exists because the implementation discovered a state
 the contract did not allow, and the contract — not the implementation —
@@ -356,15 +361,80 @@ survives on reputation. Stage 2 adds the repetition sets of acceptance 9.
 
 ---
 
-## 7. Branch plan
+## 7. Stage 2 implementation notes (revision 4)
 
-Two PRs, in this order:
+Stage 2 landed acceptance 6–9 on `ci-signal-hardening`. Four findings,
+two of which correct this document.
+
+### 7.1 §1.3 named the right window and the wrong assertion
+
+`leader=exited(signal SIGUSR1)` is rendered **only on a failed `kill`**,
+by `signal_failure_report`. The USR1 cannot be the call that failed — it
+is the call that did the killing — so the failing call is the **SIGTERM
+that follows**, and the assertion that blew up is
+`.expect("TERM delivers")`, not the `Running` state check. §1.3's "the
+record is `exited(signal SIGUSR1)` instead of `Running`" reads as though
+`ProcessState` carries that value; it does not, and nothing ticks
+between the two calls, so the state assertion could not have seen an
+exit. **The row's fragment and its mechanism were both right.** Why a
+group-directed TERM then found no group is *not* established, and the
+fix does not depend on it.
+
+### 7.2 The fixture had a second dependency nobody had named
+
+These signals are **group-directed**, so the fixture's `sleep 30` — if
+the shell *forks* it — is an **untrapped member of the same group**, and
+the USR1 kills it even when the trap is installed correctly. That the
+old fixture survived at all depended on bash and dash suppressing the
+fork for the last command of a `-c` script when no non-ignored trap is
+set. Verified locally, and the suppression is visible in `ps`: with
+`trap '' USR1` present, the only member of the group is the **shell's
+own pid** running `sleep` — the shell replaced itself, so there was
+never an untrapped child to kill.
+
+**An optimization is not a guarantee.** The fixture now says `exec`, so
+the group holds exactly one process and the ignored disposition survives
+by POSIX. This is a second readiness-shaped defect in the same fixture:
+the test depended on a state it never established.
+
+### 7.3 §1.5 scoped the fix one function too narrowly
+
+`wait_for_published_file` — in the same suite, one function above
+`wait_for_file` — gates the real-TUI smoke's `assert_eq!(…, b"1")` on
+the identical "`fs::read` succeeded" predicate. §1.5's note that the
+*bottom-panel* helper already rejects empty reads is about a different
+file and correctly refuses scope creep there; it does not cover this
+one. Fixing only `wait_for_file` would have left R4's mechanism live
+under a different selector, where the registry would have had to judge
+the recurrence a **new incident**.
+
+### 7.4 What a witness had to be, in each case
+
+- **R4's witness reproduces the row.** The file is created empty and
+  filled later, so the window is certain rather than load-dependent, and
+  with the old predicate restored it fails `left: []`, `right: [49]` —
+  the row's two required fragments, verbatim.
+- **R2's witness could not reproduce the row on Linux**, because the old
+  fixture passes here; the pre-trap window is real everywhere but only
+  macOS ever reported the failure. So the witness **widens the window
+  deliberately** (the fixture sleeps before `trap`) and proves survival
+  by the child's **exit disposition** — `Signaled { signal: "SIGUSR1" }`
+  versus `"SIGTERM"` — rather than by an absence observed within a
+  window, which would have been another timing assumption in a lane
+  about timing assumptions.
+- Bet 1 is therefore **supported but not yet resolved**: both mechanisms
+  are gone and both are witnessed, but the bet is falsified only by a
+  recurrence in CI, which only time can supply.
+
+## 8. Branch plan
+
+Two PRs, in this order — **both now exist**:
 
 1. **`macos-ci-signal-integrity`** — the registry, the pointer
-   rewrites, the audit, and the rerun rule. No code.
-2. **A hardening PR** — the `wait_for_file` predicate and the USR1 trap
-   readiness, each with a repetition set. Signature 1 is referred to the
-   async-runtime design question rather than patched.
+   rewrites, the audit, and the rerun rule. No code. **Merged as #215.**
+2. **`ci-signal-hardening`** — the `wait_for_file` predicate and the
+   USR1 trap readiness, each with a repetition set. Signature 1 is
+   referred to the async-runtime design question rather than patched.
 
 Quarantine, if it happens, is a third and is scoped by what hardening
 fails to fix.

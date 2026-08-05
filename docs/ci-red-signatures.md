@@ -131,6 +131,17 @@ field able to disagree — could not be read at all.
 **Do not treat a red matching this row as environmental.** A green rerun
 changes nothing about it.
 
+**R2's retirement does not touch this row, and must not be read as
+touching it.** The 2026-08-05 hardening changed that test's *fixture* —
+a readiness gate and an `exec` — and changed **no product code at all**;
+the same group-directed `kill` runs against the same supervisor. What
+the fixture change does do is alter the shape of the group being
+signalled (one process now, where a forked `sleep` could make two), so
+**a change in how often this row appears would be evidence about
+frequency, not about cause**. A red carrying these fragments after that
+date is this same unresolved row, and its retirement is still a
+diagnosis by the process-signal / reap-ledger lanes.
+
 ---
 
 ## Retired rows
