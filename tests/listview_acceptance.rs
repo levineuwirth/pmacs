@@ -739,6 +739,112 @@ fn s1_11_a_disambiguated_panel_still_answers_ret_g_and_q() {
 /// raw-switch and capability-fallback listview loops**. `s1_12` pins the
 /// second by keeping its panels in document windows; this pins the
 /// first.
+/// Tree primitive — a panel with `depth` + `id` collapses and expands,
+/// and BOTH the collapse state and the selection survive a re-render.
+///
+/// Acceptance 2 and 3. The re-render is what the primitive controls;
+/// `g` refresh is deliberately out of scope because the anchor consumer
+/// (the outline) has no `on_refresh` at all — see the framing's §1.5a.
+#[test]
+fn tr_1_collapse_hides_descendants_and_survives_re_render() {
+    let mut s = editor();
+    exec(
+        &s,
+        r#"pmacs.listview.open {
+             name = "*tree*",
+             header = "tree   TAB fold",
+             rows = {
+               { text = "root",   item = "root", depth = 0, id = "a" },
+               { text = "  kid1", item = "kid1", depth = 1, id = "b" },
+               { text = "  kid2", item = "kid2", depth = 1, id = "c" },
+               { text = "tail",   item = "tail", depth = 0, id = "d" },
+             },
+           }"#,
+    );
+    let body = |s: &EditorState| active_text(s);
+    assert!(
+        body(&s).contains("kid1"),
+        "children visible before collapse"
+    );
+
+    // Cursor opens on the first data row (root); TAB collapses it.
+    press(&mut s, KeyCode::Tab);
+    let collapsed = body(&s);
+    assert!(
+        !collapsed.contains("kid1"),
+        "descendants hidden: {collapsed}"
+    );
+    assert!(
+        !collapsed.contains("kid2"),
+        "ALL descendants hidden: {collapsed}"
+    );
+    assert!(
+        collapsed.contains("root") && collapsed.contains("tail"),
+        "the node itself and its SIBLING survive — collapse hides \
+         descendants, not the following run: {collapsed}"
+    );
+
+    // Selection is re-seated by ID, so the cursor is still on `root`.
+    let on_root: String = eval(
+        &s,
+        "return pmacs.describe.buffer(pmacs.window.buffer()).name",
+    );
+    assert_eq!(on_root, "*tree*");
+
+    press(&mut s, KeyCode::Tab);
+    assert!(
+        body(&s).contains("kid1") && body(&s).contains("kid2"),
+        "TAB again expands"
+    );
+}
+
+/// A leaf reports rather than silently doing nothing.
+///
+/// The outline's `g` is already a dead binding — bound, dispatched, no
+/// feedback (framing §1.3a). This primitive must not add a second one.
+#[test]
+fn tr_2_toggling_a_leaf_reports_instead_of_silently_doing_nothing() {
+    let mut s = editor();
+    exec(
+        &s,
+        r#"pmacs.listview.open {
+             name = "*tree*", header = "tree",
+             rows = { { text = "leaf", item = "leaf", depth = 0, id = "only" } },
+           }"#,
+    );
+    press(&mut s, KeyCode::Tab);
+    assert!(
+        status(&s).contains("no children"),
+        "a leaf toggle says so; got: {}",
+        status(&s)
+    );
+}
+
+/// Rows WITHOUT `depth`/`id` behave exactly as before — the property
+/// that keeps the three flat consumers unaffected (acceptance 5).
+#[test]
+fn tr_3_a_flat_panel_is_untouched_by_the_tree_extension() {
+    let mut s = editor();
+    exec(
+        &s,
+        r#"pmacs.listview.open {
+             name = "*flat*", header = "flat",
+             rows = { { text = "one", item = 1 }, { text = "two", item = 2 } },
+           }"#,
+    );
+    let before = active_text(&s);
+    press(&mut s, KeyCode::Tab);
+    assert_eq!(
+        active_text(&s),
+        before,
+        "TAB on a depthless panel changes nothing"
+    );
+    assert!(
+        before.contains("one") && before.contains("two"),
+        "both rows render: {before}"
+    );
+}
+
 #[test]
 fn s3_1_q_walks_the_side_presentation_chain_back_to_the_document() {
     let mut s = editor();

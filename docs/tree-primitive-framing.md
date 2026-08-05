@@ -1,8 +1,29 @@
 # Framing — the tree primitive
 
-**Revision 4.** Status: framing only, **not yet approved**. Scouted
-against `githubsucks/main` @ `12f2970`. **This revision also carries a
-correction to `COHERENCE.md` §14** — see below.
+**Revision 5.** Status: **APPROVED; Q#TR1–TR4 decided.** Scouted against
+`githubsucks/main` @ `12f2970`. Carries a correction to `COHERENCE.md`
+§14 (revision 4, below).
+
+**Revision 4 → 5** records the four decisions and makes acceptance final.
+
+**The decision that made the others cheap:** collapse only ever *hides*
+rows — it never changes a surviving row's depth. Combined with §1.1's
+document order (**parents before children**), a node's descendants are a
+**contiguous run of following rows with greater depth**. So collapse is
+**filtering an existing array**, not re-deriving one. The primitive
+therefore never calls the consumer to re-render a collapse, and
+pre-rendered indentation stays correct — which is why Q#TR4 resolves
+toward the consumer keeping `text`.
+
+| question | decision |
+|---|---|
+| **Q#TR1** | **Extend `listview`.** A separate `treeview` would either duplicate ~200 lines of panel discipline (Q#GB18 handle identity, Q#GB13 `<2>` disambiguation, the read-only intercept, `prev` capture, quit chain, generated-buffer writes) or require *extracting* them from a shipped primitive first — the riskier change. Extending is backward-compatible by construction: absent `depth`/`id` give today's behaviour exactly, which the three flat consumers already produce. |
+| **Q#TR2** | **Primitive-owned collapse state**, keyed by row id, held in the panel record. Consumer-owned would make every consumer reimplement refresh survival. |
+| **Q#TR3** | **Consumer-supplied `row.id`**, compared by equality; the primitive never derives one. The outline uses **`line:col`** — unique per document and stable across re-render, where the `::` parent chain collides on overloads. |
+| **Q#TR4** | **Consumer keeps pre-rendered `text`**; `depth` is structural only. Also sidesteps the conflict with dired's fixed-width `_layout` column contract when it adopts. |
+
+**Acceptance 5 is decided too: byte-identity coverage is written**,
+including the fake-LSP harness work for `*references*`.
 
 **Revision 3 → 4**:
 
@@ -402,14 +423,12 @@ open; the third is the one review added; the fourth follows from §1.4.
 **Not final** — this framing argues a model, and the criteria cannot be
 fixed until Q#TR1–TR3 are decided. The shapes they will take:
 
-1. The **LSP outline renders its hierarchy through the primitive**
-   rather than by pre-formatting it into row text, and `Symbol` is
-   unchanged. **Representation-neutral on purpose:** whether the
-   primitive emits the indentation, or the consumer still supplies a
-   rendered string alongside structural depth, is **Q#TR4** and is not
-   decided here. Revision 1's wording ("no `string.rep` in `lsp.lua`")
-   committed to primitive-owned indentation while calling that question
-   open.
+1. The **LSP outline supplies structural `depth` and `id`** so the
+   primitive can collapse and expand, and `Symbol` is unchanged.
+   **Per Q#TR4 its `text` stays consumer-rendered** — the `string.rep`
+   indentation remains in `lsp.lua`, because collapse hides rows without
+   changing any surviving row's depth, so pre-rendered indentation is
+   still correct. `id` is `line:col`.
 2. **Collapse and expand work**, and **collapse state survives a
    re-render** — the primitive re-emitting the buffer from the same
    model. *(Not "survives `g` refresh": the anchor consumer has no
@@ -439,11 +458,10 @@ fixed until Q#TR1–TR3 are decided. The shapes they will take:
      navigate, visit, `q` restore, the read-only intercept, the
      round-trip gate, refresh) plus content-presence for hover.
 
-   **Leaning: write the byte-identity test**, because a flat consumer
-   silently gaining an indent column is exactly the regression this
-   criterion exists to catch, and content-presence would not see it.
-   Recorded as a leaning rather than a decision because it costs harness
-   work the stage has not scoped.
+   **DECIDED: write the byte-identity test**, including the fake-LSP
+   harness work for `*references*`. A flat consumer silently gaining an
+   indent column is exactly the regression this criterion exists to
+   catch, and content-presence would not see it.
 
    **Revision 1 named `*buffer-list*` and project search here and was
    wrong** — §14 measured that they do **not** use listview and calls
@@ -499,17 +517,19 @@ reports as one suite.
 
 ## 7. Branch plan
 
-Not settled, because it depends on Q#TR1. Two shapes:
+Q#TR1 is decided, so the listview-extension shape applies:
 
-- **If listview is extended:** one branch, with the flat-consumer
-  no-change proof (acceptance 5) landing *before* the outline adopts, so
-  a regression in `*references*`, `*lsp-help*` or `*lsp*` is
-  attributable. *(Revision 2 said "references or buffer-list" here —
-  the same `*buffer-list*` error acceptance 5 had already been corrected
-  for. `*buffer-list*` does not use listview.)*
-- **If a separate `treeview`:** the primitive and its first consumer are
-  separable, and the outline's adoption can be its own PR.
+1. **Extend `listview`** — optional `depth` / `id` on rows,
+   primitive-owned collapse state, ancestor-collapsed filtering in
+   `render`, selection re-seated **by id**, and a toggle binding. Absent
+   `depth`/`id` must behave exactly as today.
+2. **Byte-identity proof for the flat consumers** (acceptance 5),
+   landing *before* the outline adopts, so any regression in
+   `*references*`, `*lsp-help*` or `*lsp*` is attributable to the
+   primitive change rather than to adoption.
+3. **The outline adopts** — supplies `depth` and `id = line:col`, keeps
+   its rendered `text`.
+4. **Lane, handoff and `COHERENCE.md` §14** updated; the §14 correction
+   from revision 4 rides this PR per §25.
 
-Either way the outline adopts **before** dired's `i` is attempted: it is
-the consumer whose data already fits, and it is the one that proves the
-model without also needing a new listing mode.
+dired's `i` is **not** attempted here (§5).
