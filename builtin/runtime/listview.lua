@@ -158,26 +158,58 @@ local function hidden_by_ancestor(p, rows, i)
   return false
 end
 
--- Ids must be scalars, and the reason is not fussiness about types.
--- Selection compares them with `==`, which honours `__eq`; collapse
--- state stores them as TABLE KEYS, and Lua indexes tables by raw
--- identity, consulting no metamethod. A table id would therefore
+-- Ids must be usable, unique table keys, and none of the three checks
+-- below is fussiness about types.
+--
+-- SCALAR. Selection compares ids with `==`, which honours `__eq`;
+-- collapse state stores them as TABLE KEYS, and Lua indexes tables by
+-- raw identity, consulting no metamethod. A table id would therefore
 -- satisfy one and quietly fail the other: after a refresh minted fresh
 -- id tables, selection would be restored and the fold would be lost.
 --
 -- Equality-aware collapse lookup is the alternative, and it is worse
 -- here: `hidden_by_ancestor` runs per row and would turn a linear
--- render quadratic to support a key type no consumer has wanted. So
--- the contract is narrowed to the one both halves can honour, and
--- enforced where rows enter rather than discovered as a lost fold.
+-- render quadratic to support a key type no consumer has wanted.
+--
+-- NOT NaN. `0/0` passes a `type(x) == "number"` test and then *errors*
+-- at `p.collapsed[row.id]` with "table index is NaN" — the one scalar
+-- Lua accepts as a number and refuses as a key. Caught here so the
+-- report names the row, rather than surfacing on whichever later TAB
+-- happens to reach it.
+--
+-- UNIQUE. Every lookup here resolves an id to the FIRST row bearing
+-- it, so duplicates do not merely collide: selecting the second such
+-- row toggles the first and re-seats the cursor onto it. An id that
+-- does not identify a node is not an id, and the contract's word for
+-- itself is identity.
+--
+-- All three are enforced where rows enter, so a bad id is a named
+-- error at the call site instead of a lost fold or a stray jump later.
 local function check_ids(rows)
+  local seen = {}
   for i, row in ipairs(rows) do
-    local k = type(row.id)
-    if row.id ~= nil and k ~= "string" and k ~= "number" then
-      error(string.format(
-        "listview: row %d has a %s id; ids must be a string or number "
-        .. "(collapse state keys a table by identity, so a %s id would "
-        .. "lose its fold across a refresh)", i, k, k))
+    local id, k = row.id, type(row.id)
+    if id ~= nil then
+      if k ~= "string" and k ~= "number" then
+        error(string.format(
+          "listview: row %d has a %s id; ids must be a string or number "
+          .. "(collapse state keys a table by identity, so a %s id would "
+          .. "lose its fold across a refresh)", i, k, k))
+      end
+      if id ~= id then
+        error(string.format(
+          "listview: row %d has a NaN id; NaN is a number but not a "
+          .. "usable table key, and collapse state would raise "
+          .. "\"table index is NaN\" on the first fold", i))
+      end
+      if seen[id] then
+        error(string.format(
+          "listview: rows %d and %d share the id %q; ids must be unique "
+          .. "(every lookup resolves to the first match, so selecting "
+          .. "the later row would toggle and re-seat the earlier one)",
+          seen[id], i, tostring(id)))
+      end
+      seen[id] = i
     end
   end
   return rows

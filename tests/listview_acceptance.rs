@@ -1144,6 +1144,58 @@ fn tr_6_a_non_scalar_id_is_rejected_where_rows_enter() {
     );
 }
 
+/// A NaN id passes `type(x) == "number"` and then errors at
+/// `p.collapsed[row.id]` with "table index is NaN" — the one scalar
+/// Lua accepts as a number and refuses as a table key. It must be
+/// caught where rows enter, naming the row, rather than surfacing on
+/// whichever later TAB happens to reach it.
+#[test]
+fn tr_7_a_nan_id_is_rejected_rather_than_erroring_on_the_first_fold() {
+    let s = editor();
+    let err: String = eval(
+        &s,
+        r#"local ok, e = pcall(function()
+             pmacs.listview.open {
+               name = "*tr7*",
+               header = "h",
+               rows = { { text = "a", depth = 0, id = 0 / 0 } },
+             }
+           end)
+           return tostring(e)"#,
+    );
+    assert!(
+        err.contains("NaN id"),
+        "named at entry, not as a table-index error later: {err}"
+    );
+}
+
+/// Duplicate ids do not merely collide — every lookup resolves an id to
+/// the FIRST row bearing it, so selecting the second toggles the first
+/// and re-seats the cursor onto it. An id that does not identify a node
+/// is not an id.
+#[test]
+fn tr_8_duplicate_ids_are_rejected_because_lookup_takes_the_first_match() {
+    let s = editor();
+    let err: String = eval(
+        &s,
+        r#"local ok, e = pcall(function()
+             pmacs.listview.open {
+               name = "*tr8*",
+               header = "h",
+               rows = {
+                 { text = "first",  depth = 0, id = "same" },
+                 { text = "second", depth = 0, id = "same" },
+               },
+             }
+           end)
+           return tostring(e)"#,
+    );
+    assert!(
+        err.contains("share the id") && err.contains("rows 1 and 2"),
+        "both offending rows named: {err}"
+    );
+}
+
 // Isolated bootstrap storage roots (see the module docs): an
 // integration test is compiled without `cfg(test)`, so a raw
 // `EditorState::new()` would read the developer's real `init.lua` and
