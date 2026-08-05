@@ -193,7 +193,9 @@ already approved. Stage 1 is acceptance 1–5; Stage 2 is acceptance 6–9.
 
   | head | CI run | result |
   |---|---|---|
-  | `2d9c678` | [31003333581](https://github.com/levineuwirth/pmacs/actions/runs/31003333581) | **14/14 green** — the opening head, including **both macOS legs**: R2's job (macOS / lua54) and R4's (macOS / luajit) |
+  | `2d9c678` | [31003333581](https://github.com/levineuwirth/pmacs/actions/runs/31003333581) | **14/14 green** — the opening head, and the last one carrying code. Includes **both macOS legs**: R2's job (macOS / lua54) and R4's (macOS / luajit) |
+  | `668fc72` | [31006160334](https://github.com/levineuwirth/pmacs/actions/runs/31006160334) | **14/14 green** — this ledger block, docs only |
+  | *(tip)* | — | the checkpoint row for `668fc72`; a table can never carry the head that adds it |
 
   **The branch tip is authoritative over any row here.** Verify with
   `git rev-parse githubsucks/ci-signal-hardening` rather than trusting
