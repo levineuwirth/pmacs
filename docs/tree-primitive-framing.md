@@ -515,6 +515,63 @@ reports as one suite.
 
 ---
 
+## 6a. Verification record, including one unclassified occurrence
+
+**The luajit sweep is 3453 / 0** and the count reconciles exactly:
+`main` is 3450 (Stage 3's 3449 sweep predated its own capability-fallback
+pin) plus this lane's three listview tests and one m4 test.
+
+**The crdt sweep is 3722 / 0**, likewise +4 on `main`'s 3718.
+
+### An UNCLASSIFIED, UNCAPTURED local occurrence
+
+The **first** local crdt sweep of this branch reported **7 failures**.
+**It is recorded here as unclassified and it is deliberately NOT a row
+in `docs/ci-red-signatures.md`** — that registry keys on a normalized
+signature, and this occurrence has none to match, so a row would confer
+recognisability it cannot support.
+
+**The signatures were destroyed before they were read.** The sweep was
+piped through an aggregation that emitted only totals. That is the exact
+failure the registry exists to prevent, committed one lane after writing
+it — and it is why the cause cannot now be established rather than
+merely being unknown.
+
+**Re-runs, with what each does and does not support:**
+
+| run | isolated? | result |
+|---|---|---|
+| first | no — concurrent with another lane's build | **7 failed, signatures lost** |
+| second | no | 3722 / 0 |
+| A | **no** — the isolation guard printed "aborting" and did not abort | 3722 / 0 |
+| B | **yes** — verified idle | 3722 / 0 |
+| C | **yes** — verified idle | 3722 / 0 |
+
+Two genuinely isolated runs, both clean. **That supports repeatability
+under isolation. It does not establish what caused the original.**
+
+### Two NON-CAUSAL hypotheses, neither testable now
+
+Both are mechanisms known to have been present. Neither is offered as an
+explanation, because the occurrence's signatures no longer exist to test
+either against:
+
+1. **Shared `CARGO_TARGET_DIR`.** Another lane's worktree shared
+   `/home/jeans/build/cargo-target`, so its `cargo test --workspace`
+   overwrote `target/debug/pmacs` mid-sweep. That lane observed the
+   reciprocal case independently, caught the concurrent build with
+   `pgrep`, and its failing text named its own cause ("start the daemon
+   built with the `crdt` feature").
+2. **Resident leaked daemons.** ~40 orphaned `pmacs --daemon` processes
+   were present, some four days old (see the lane in
+   `docs/active-work.md`). Isolated sweeps leak 3–4 each, so the
+   population was growing throughout.
+
+**Having two plausible mechanisms and no way to discriminate is the
+result.** Reporting either as *the* cause would be the reasoning this
+project has rejected repeatedly: concluding something about an
+occurrence from something that was not about that occurrence.
+
 ## 7. Branch plan
 
 Q#TR1 is decided, so the listview-extension shape applies:

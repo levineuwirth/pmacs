@@ -161,6 +161,44 @@ form. All four steps ran clean. **The two-argument form still does not
 work** for a remote-only branch (`fatal: invalid reference`), which is
 why every lane below spells out the `-b` form.
 
+## Leaked daemons from `gpu_invocation_acceptance` — NEEDS A LANE
+
+**Found 2026-08-05 while cleaning up after the tree-primitive work. No
+branch, no framing.**
+
+- **42 orphaned `pmacs --daemon` processes** were resident on the
+  development machine, **the oldest 3 days 23 hours old**. All had been
+  **reparented to systemd** (`ppid=1`) and all had **deleted sockets**,
+  so nothing could ever reach or reap them.
+- **Source: `tests/gpu_invocation_acceptance.rs`** — the one-command
+  tests, whose daemons carry `--socket <tempdir>/one-command.sock`. The
+  tempdir is cleaned up; the daemon is not.
+- **Rate measured, not estimated: 3 per sweep.** A single isolated
+  `--features luajit,crdt` sweep leaked exactly three. 42 is what
+  several days of sweeps accumulate to.
+- **This predates the tree work** — the oldest is four days old — so it
+  is a standing leak, not something a current lane introduced.
+
+**Why it belongs to the reap-ledger family.** This is precisely the
+shape that lane exists for: a process that outlives its supervisor with
+nothing left watching it. The ledger arms only for `spec.group`, and
+these are daemons spawned by a test harness rather than by compile mode,
+so **nothing in the existing ledger covers them**.
+
+**Why it matters beyond tidiness.** Dozens of resident daemons were
+present during every local sweep run this week, including the one that
+produced the unclassified failure recorded in the tree lane below. That
+makes them a **rival explanation** to the shared-target-dir mechanism
+for that occurrence, and neither can be tested against it now — the
+signatures were not captured. A leak that quietly changes the
+environment of every subsequent test run is a measurement problem as
+well as a resource one.
+
+**First questions for whoever takes it:** does the test harness fail to
+reap, or does the daemon fail to exit when its socket disappears? Those
+have different fixes, and the second would be a product defect rather
+than a test one.
+
 ## macOS CI signal integrity — STAGE 1 IN REVIEW, PR #215
 
 **This file requires a lane for every open PR** (see the #171/#174 note

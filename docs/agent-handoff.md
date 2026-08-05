@@ -315,6 +315,23 @@ someone forgot.
   `gpu_invocation_acceptance` tests fail on a missing `pmacs-gpu`
   binary. `cargo build --workspace --no-default-features --features
   luajit,crdt` is the invocation that produces both binaries.
+- **A shared `CARGO_TARGET_DIR` makes concurrent sweeps unattributable.**
+  Two worktrees both defaulting to it means one lane's
+  `cargo test --workspace` **overwrites `target/debug/pmacs` mid-sweep**
+  in the other, and every real-daemon suite then spawns the wrong
+  binary. Observed twice on 2026-08-05, from both sides: the failing
+  text named its own cause ("start the daemon built with the `crdt`
+  feature"), and re-running the same suites with a dedicated target dir
+  gave 41/41. **Give a second worktree its own target dir**, and treat
+  any red from a sweep that overlapped another build as unattributable
+  rather than as evidence.
+- **A local sweep leaks daemons, and they accumulate across days.**
+  `gpu_invocation_acceptance`'s one-command tests leave ~3 orphaned
+  `pmacs --daemon` processes per sweep, reparented to systemd with
+  deleted sockets; 42 were resident at one point, the oldest four days
+  old. They are a rival explanation for any load-sensitive local
+  failure, so **check `pgrep -f "pmacs --daemon"` before trusting a
+  local red**. Lane recorded in `docs/active-work.md`.
 - **A local sweep is blind to whichever feature configuration it does
   not build.** Stage 3's census and every verification sweep ran
   `--features luajit` WITHOUT `crdt`, so no crdt-gated suite was
