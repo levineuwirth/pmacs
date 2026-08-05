@@ -13,6 +13,10 @@ CI CRDT coverage**, which had been sitting under "NEEDS A LANE" with no
 branch and no owner since #166. It is implemented on
 `ci-crdt-coverage` and its block replaces the old one below.
 
+**Updated 2026-08-05.** One lane opened: **macOS CI signal integrity**
+(#215, in review), which this file required a lane for and did not have
+until review caught it — the #171 defect recurring. Its block is below.
+
 **Updated 2026-08-04.** Four PRs landed since: the CI CRDT coverage
 lane #209, Distribution Stage 1 #211 (released as **v1.1.0**), the
 post-release accuracy pass #212, and **bottom-panel Stage 3 #213 —
@@ -156,6 +160,62 @@ the three-argument `git worktree add <path> -b <local> githubsucks/<branch>`
 form. All four steps ran clean. **The two-argument form still does not
 work** for a remote-only branch (`fatal: invalid reference`), which is
 why every lane below spells out the `-b` form.
+
+## macOS CI signal integrity — STAGE 1 IN REVIEW, PR #215
+
+**This file requires a lane for every open PR** (see the #171/#174 note
+above: an open PR is exactly the volatile work this file records, and
+#171 drifted 153 commits while invisible here). #215 had none until this
+entry — the same defect, caught in review.
+
+- **Branch `macos-ci-signal-integrity`**, base `githubsucks/main` @
+  `bfb97c6`. Framing `docs/macos-ci-signal-integrity-framing.md`
+  **revision 3**.
+- **PR: <https://github.com/levineuwirth/pmacs/pull/215>** — Stage 1,
+  docs only. Reviewed at head `d33bf4d` with all 14 checks green
+  ([run 30950108477](https://github.com/levineuwirth/pmacs/actions/runs/30950108477));
+  one review round since.
+- **What Stage 1 ships:** `docs/ci-red-signatures.md`, the single
+  authority for judging a red CI run. Rows key on **signature** —
+  selector + job/flavor + every required fragment, normalized — so **a
+  test-name match confers nothing**. The rerun rule is replaced: a green
+  rerun establishes **intermittence only**; the same signature again is
+  a second occurrence and stays blocking; a different signature is a new
+  incident. Retirement is **causal**, never a count of green runs.
+- **Four incidents, three tests, four signatures.** The process test
+  produced two — one a test race (R2), one an **unresolved possible
+  product defect** (R3) that no rerun can clear. Counting by test name
+  would have hidden the second behind the first.
+- **The audit found a third state the framing did not allow**, which is
+  why the framing is at revision 3: two incumbents have a historical
+  claim but **no linked occurrence ever**. They are **audit notes A1/A2**,
+  not rows — unmatchable by construction, so a red in either is a new
+  incident. The registry is therefore *stricter* than the list it
+  replaces: nothing is pre-excused.
+- **Verification:** fmt, diff-check, clippy with and without `crdt`,
+  `--lib` 1896, `--lib --features crdt` 2081, pmacs-protocol 19, m4 149,
+  required GPU 221. All three named tests pass locally on Linux —
+  consistent with R1–R4 being macOS occurrences, and **not evidence
+  about any of them**.
+
+### Stage 2 — hardening, NOT started
+
+Waits on #215's merge. Owns R2's trap-readiness fix and R4's
+`wait_for_file` predicate, each with a **repetition set** rather than a
+single green run, plus a discriminating witness that fails without the
+fix. **R1 is referred to the async-runtime lane** (Q#MCI3) rather than
+patched: widening its budget would make it pass and measure nothing
+more. **R3 stays unresolved** and belongs to the process-signal /
+reap-ledger lanes.
+
+Recovery from a clean checkout:
+
+```sh
+git fetch githubsucks
+git worktree add ../pmacs-ci-signals \
+  -b macos-ci-signal-integrity \
+  githubsucks/macos-ci-signal-integrity
+```
 
 ## CI CRDT coverage — MERGED (#209); kept for its three follow-ons
 

@@ -69,7 +69,11 @@ by removing or explaining its mechanism:
 | **test race** | hardening that removes the named mechanism, plus a discriminating witness for the stronger predicate |
 | **measurement design** | the owning lane replaces or justifies the measurement and pins the resulting claim |
 | **unresolved** | diagnosis and an explicit disposition |
-| **mechanism named, no occurrence** | a linked occurrence promotes it to one of the above; sustained absence is not retirement, because nothing was ever measured |
+
+**Audit notes (`A`-numbers) have no retirement condition**, because they
+have nothing to retire — see that section. A linked occurrence promotes
+one into an `R` row; absence retires nothing, because nothing was ever
+measured.
 
 Main-branch greens are **occurrence evidence** and accumulate toward a
 rate. They retire nothing by themselves. Retired rows stay in this file
@@ -104,7 +108,7 @@ and measure nothing more.**
 |---|---|
 | **selector** | `--lib process::tests::a_successful_signal_disposition_depends_on_whether_it_is_fatal` |
 | **job / flavor** | macOS / lua54 |
-| **required fragments** | `leader=exited(` + `SIGUSR1` |
+| **required fragments** | `leader=exited(signal SIGUSR1)` — **one exact fragment, not two loose ones**. Split into `leader=exited(` and `SIGUSR1` it would match a child that exited by some *other* disposition while `SIGUSR1` appeared elsewhere in the output |
 | **causal status** | **test race** |
 | **evidence** | [#213 run 30927084982 attempt 1](https://github.com/levineuwirth/pmacs/actions/runs/30927084982/attempts/1) |
 | **retirement** | the fixture proves the trap is installed, with a witness that fails without it |
@@ -153,40 +157,54 @@ on a **zero-byte file**. The probe writes readiness with
 
 ---
 
-## Audited incumbents — mechanism named, no occurrence recorded
+## Audit notes — historical claims with no linked occurrence
 
-These were carried in the handoff's hazards list **without evidence**.
-The audit found the tests real and the mechanisms plausible, so they are
-neither confirmed nor deleted: they are recorded honestly as unmeasured.
+**These are NOT registry rows.** They carry `A`-numbers, not `R`-numbers,
+because nothing here can be matched against a red run and nothing here
+confers any status.
 
-**Nothing here confers "known flaky".** A red matching one of these is a
-first recorded occurrence and should be investigated, not reruns-to-green.
+They were named in the handoff's hazards list without evidence. The audit
+found the tests real and the claims recorded in good faith — but **an
+assertion string existing is not a mechanism, and "timing-based" is not
+an observation.** No occurrence of either was ever linked, so nothing is
+known about how either fails, or whether either has failed.
 
-### R5 — GPU terminal cell background did not paint
+Deleting them would discard a real recorded belief. Listing them beside
+the evidenced rows would grant the reputation this file exists to deny.
+So they are stated as what they are: **claims awaiting a first
+occurrence.** A red in either test is a first recorded occurrence, to be
+investigated and then promoted to an `R` row — not matched against
+anything here.
+
+### A1 — GPU terminal cell background did not paint
 
 | field | value |
 |---|---|
 | **selector** | `-p pmacs-gpu a33_headless_terminal_frame_paints_cells_without_document_layers` |
 | **job / flavor** | GPU Render (headless), under parallel load |
 | **required fragments** | `the terminal cell background did not paint` + `blue pixels` |
-| **causal status** | **mechanism named, no occurrence recorded** |
-| **evidence** | **none linked.** The assertion string is real (`pmacs-gpu/src/main.rs:17973`); no run was ever cited |
-| **retirement** | a linked occurrence promotes this row; absence retires nothing, because nothing was measured |
+| **status** | **historical claim, no linked occurrence** |
+| **what IS established** | the test exists and the assertion string is real (`pmacs-gpu/src/main.rs:17973`). That is all |
+| **what is NOT** | any mechanism, and any occurrence. No run was ever cited |
+| **promotion** | a linked occurrence makes this an `R` row with a signature. Absence retires nothing, because nothing was measured |
 
-### R6 — supervisor reap across cycles
+### A2 — supervisor reap across cycles
 
 | field | value |
 |---|---|
 | **selector** | `--test m6_8_multi_repl_acceptance m6_8_supervisor_reaps_all_children_across_cycles` |
 | **job / flavor** | not recorded |
 | **required fragments** | **not recorded** — no signature was ever captured |
-| **causal status** | **mechanism named, no occurrence recorded** ("timing-based", 10 cycles) |
-| **evidence** | **none linked** |
-| **retirement** | a linked occurrence with a signature promotes this row |
+| **status** | **historical claim, no linked occurrence** |
+| **what IS established** | the test exists and runs 10 cycles; the handoff called it "timing-based" |
+| **what is NOT** | any mechanism, any signature, any occurrence |
+| **promotion** | a linked occurrence *with a captured signature* makes this an `R` row |
 
-**R6 cannot currently be matched.** Without required fragments there is
-no rule to apply, so a red in this test is a new incident by default.
-That is the correct outcome for an entry that never carried evidence.
+**A2 cannot be matched, and neither can A1** — that is what makes them
+notes rather than rows. A red in either test is a new incident by
+default. That is the correct outcome for an entry that never carried
+evidence, and it means this file is **stricter** than the list it
+replaces: nothing is pre-excused.
 
 ---
 
@@ -200,6 +218,12 @@ That is the correct outcome for an entry that never carried evidence.
 
 Four incidents, three tests, **four signatures**. Count signatures: the
 process test contributed two, and only one of them is a test bug.
+
+**All four *evidenced* rows (R1–R4) are macOS.** That is a property of
+these occurrences, not of the file: **A1's job is `GPU Render
+(headless)`, which runs on Ubuntu**, and **A2's job was never
+recorded**. Nothing here is macOS-only by construction, and a future
+row from any job belongs in the same table.
 
 The #214 occurrence is the strongest available evidence that these are
 not caused by the PRs they appeared on — that PR is **docs-only and its

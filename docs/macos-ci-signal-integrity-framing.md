@@ -1,7 +1,27 @@
 # Framing — macOS CI signal integrity: a signature registry, then hardening
 
-**Revision 2.** Status: framing only. No branch work beyond this
-document. Scouted against `githubsucks/main` @ `bfb97c6`. Revision 2
+**Revision 3.** Status: **Stage 1 implemented** on
+`macos-ci-signal-integrity`, PR #215. Scouted against
+`githubsucks/main` @ `bfb97c6`.
+
+**Revision 2 → 3** exists because the implementation discovered a state
+the contract did not allow, and the contract — not the implementation —
+was what needed changing. Acceptance 3 offered a binary: carry an
+incumbent in with a signature and evidence, or remove it as never
+substantiated. **Both incumbents are neither**, and shipping a third
+state while the governing criterion still said "two" would have made the
+framing describe something the branch does not do.
+
+Revision 3 also **retires the phrase "mechanism named"**, which
+overstated what the audit found. The a33 audit proves an assertion
+string and a historical claim exist; the m6_8 audit proves a test is
+timing-based.
+**Neither establishes a failure mechanism** — no occurrence was ever
+observed, so nothing is known about how either fails. They become
+**audit notes A1/A2**, not registry rows, and `R`-numbers are reserved
+for signatures with linked evidence.
+
+Revision 2
 separates a machine-matchable signature from verbatim, variable CI
 output; preserves historical incident evidence while centralizing live
 triage policy; gives retirement a causal rule rather than an arbitrary
@@ -257,10 +277,21 @@ everything else.
    may gain a registry status link, but its evidence and reasoning are
    not replaced. Forward-looking risk statements are audited as risks,
    not silently promoted to known flakes.
-3. **The three tests named in the current handoff list are audited**:
-   each is either carried into the registry with a signature and
-   evidence, or removed with a note saying it was never substantiated.
-   No entry survives on reputation.
+3. **The three tests named in the current handoff list are audited**,
+   into one of **three** states — the third was found by doing the audit
+   and is why this is revision 3:
+   - **carried as a registry row** (`R`-numbered) when a signature and a
+     linked occurrence both exist;
+   - **removed** when nothing substantiates it at all;
+   - **recorded as an audit note** (`A`-numbered) when a *historical
+     claim* exists but **no occurrence was ever linked**. An audit note
+     is not a registry row, cannot be matched against a red run, and
+     confers nothing.
+
+   **No entry survives on reputation, and an audit note is not a weaker
+   row — it is a different kind of statement.** A row says "this was
+   seen, here is the evidence"; a note says "someone recorded a belief
+   and no occurrence backs it.
 4. **The rerun rule is replaced**, not softened:
    - a **green rerun after a red** establishes intermittence only; it
      does not establish environmental cause, harmlessness, or retirement;
@@ -304,9 +335,13 @@ everything else.
   recorded in the CI CRDT lane. Related in spirit, separate in scope.
 - **A general flake-rate dashboard.** The registry accumulates
   occurrences; turning that into a rate with alerting is its own thing.
-- **Linux and GPU flakes.** `a33_headless_terminal_frame_paints_...` and
-  `m6_8_supervisor_reaps_...` are in the current handoff list and get
-  audited under acceptance 3, but this lane's incidents are macOS.
+- **Linux and GPU flakes.** `a33_headless_terminal_frame_paints_...`
+  and `m6_8_supervisor_reaps_...` were audited under acceptance 3 and
+  became **audit notes A1/A2** — claims with no linked occurrence.
+  **A1's job runs on Ubuntu**, so the registry is not macOS-only even
+  now; A2's job was never recorded. This lane's four *evidenced*
+  incidents are macOS, which is a fact about them and not about the
+  file.
 
 ---
 
