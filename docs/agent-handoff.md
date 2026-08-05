@@ -2066,7 +2066,16 @@ before trusting them:
   `m6_8_supervisor_reaps_all_children_across_cycles`) are timing-based;
   `editor::composition_overhead_under_ten_percent` is a render-ratio
   microbenchmark that fails ~1/3 even isolated single-threaded (already
-  `cfg!(macos)`-disabled). Vterm Stage 3's merge CI saw one macOS timeout in
+  `cfg!(macos)`-disabled). *(One local measurement, 2026-08-04, 16-core
+  Linux, tree-primitive branch: it went red inside the full `--features
+  crdt` lib run at `dispatch overhead 30.7%`, then 5/5 green run alone
+  at ratios of -0.6% to +0.2%, and the next full-suite run was also
+  green. Recorded as a measurement, NOT a cause — 5 isolated greens
+  establish that the ratio is far from the threshold when alone, not
+  that in-suite contention is what pushed it over. It is also not a
+  `ci-red-signatures.md` row: that registry judges red **CI** runs, and
+  this was local. The branch could not reach it — its diff versus `main`
+  touched no `src/`, no crate, and no manifest.)* Vterm Stage 3's merge CI saw one macOS timeout in
   `real_tui_terminal_smoke_restores_host_after_output_input_resize_scroll_copy_and_bell`;
   the complete failed-job rerun passed. The required-GPU gate also failed once
   in `headless_diag_face_recolors_band_counter_despite_unchanged_text`, then

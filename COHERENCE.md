@@ -1694,9 +1694,19 @@ and §18's floor ride on this.
 
 **State: the bottom panel is DONE (§14) — both frontends, Stage 1 #155
 through Stage 2B-3, and Stage 3 flipped the adopter default so omitting
-`display` means the panel. Arc 7 is complete.** Remaining elsewhere: the tree primitive (build it before dired
-and the worker tree invent two), table/inspector/diff, help unification.
-Wiring plus one modest model piece (the tree model).
+`display` means the panel. Arc 7 is complete.**
+
+**The tree primitive is IMPLEMENTED too (§14, ◐)** — `listview` carries
+optional `depth`/`id`, primitive-owned collapse, and selection re-seated
+by id. It was built before dired's recursive view and the worker tree
+could invent their own, which was this priority's stated reason for
+doing it early.
+
+**What remains is ADOPTION, not construction.** The LSP outline is the
+only consumer; dired's `i` insert-subdirectory is the next real
+constraint source, and DAP's variables view is why the primitive was
+worth building first. Also remaining: table / inspector / diff, and help
+unification.
 
 ### Priority 6: Productize configuration
 

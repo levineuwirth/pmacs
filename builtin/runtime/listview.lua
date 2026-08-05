@@ -356,6 +356,24 @@ pmacs.command.define {
   fn = function()
     local p = active_panel()
     if not p then return end
+    -- A FLAT panel must keep its pre-tree TAB behaviour exactly.
+    --
+    -- `bind_local_keymap` binds TAB for every listview, so this command
+    -- now intercepts a key that previously fell through to the global
+    -- `buffer.tab` and was refused by the Q#P3 read-only intercept.
+    -- Emitting a listview status instead would be a behaviour change
+    -- for the three flat consumers -- invisible to a byte-identity test,
+    -- which sees the buffer and not the status line or the dispatch
+    -- path. So a panel with no tree rows at all delegates.
+    local is_tree = false
+    for _, r in ipairs(p.rows) do
+      if r.id ~= nil then is_tree = true break end
+    end
+    if not is_tree then
+      pmacs.command.invoke("buffer.tab")
+      return
+    end
+
     local line = pmacs.editor.cursor_line()
     local row = p.line_to_row[line]
     if not (row and row.id ~= nil) then

@@ -798,6 +798,83 @@ fn tr_1_collapse_hides_descendants_and_survives_re_render() {
     );
 }
 
+/// Selection survives a re-render that MOVES the selected node.
+///
+/// `tr_1` is not sufficient for this and was vacuous as a selection
+/// test: it toggles the ROOT, which occupies line 1 before and after the
+/// collapse, so the old line-based re-seating would pass it unchanged.
+/// A selection test has to move the node.
+///
+/// Here `on_refresh` inserts a child ABOVE the selected sibling, so the
+/// sibling's line shifts. Re-seating by line would land on the inserted
+/// row; re-seating by id stays on the sibling.
+#[test]
+fn tr_4_selection_follows_the_node_when_rows_are_inserted_above_it() {
+    let mut s = editor();
+    exec(
+        &s,
+        r#"_G.EXTRA = false
+           pmacs.listview.open {
+             name = "*tree*", header = "tree",
+             rows = {
+               { text = "root",    item = "root",    depth = 0, id = "a" },
+               { text = "  kid",   item = "kid",     depth = 1, id = "b" },
+               { text = "sibling", item = "sibling", depth = 0, id = "z" },
+             },
+             on_refresh = function()
+               if _G.EXTRA then
+                 return {
+                   { text = "root",     item = "root",  depth = 0, id = "a" },
+                   { text = "  kid",    item = "kid",   depth = 1, id = "b" },
+                   { text = "  kid2",   item = "kid2",  depth = 1, id = "c" },
+                   { text = "sibling",  item = "sib",   depth = 0, id = "z" },
+                 }
+               end
+               return {
+                 { text = "root",    item = "root", depth = 0, id = "a" },
+                 { text = "  kid",   item = "kid",  depth = 1, id = "b" },
+                 { text = "sibling", item = "sib",  depth = 0, id = "z" },
+               }
+             end,
+           }"#,
+    );
+
+    // Select `sibling` — data line 3.
+    press(&mut s, KeyCode::Char('n'));
+    press(&mut s, KeyCode::Char('n'));
+    let line_before: i64 = eval(&s, "return pmacs.editor.cursor_line()");
+    let text_at = |s: &EditorState| -> String {
+        let body = active_text(s);
+        let line: i64 = eval(s, "return pmacs.editor.cursor_line()");
+        body.lines()
+            .nth(usize::try_from(line).expect("line fits"))
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert_eq!(text_at(&s), "sibling", "premise: sibling is selected");
+
+    // Refresh inserts `kid2` ABOVE sibling, so its line moves.
+    exec(&s, "_G.EXTRA = true");
+    press(&mut s, KeyCode::Char('g'));
+
+    let line_after: i64 = eval(&s, "return pmacs.editor.cursor_line()");
+    // Substantive claim first, so a regression reports as what it is.
+    // Under line-based re-seating the cursor stays on line 3, which now
+    // holds the INSERTED row.
+    assert_eq!(
+        text_at(&s),
+        "sibling",
+        "selection follows the NODE, not the line"
+    );
+    // …and the fixture really did move it, so the assertion above is not
+    // satisfied by the node happening to stay put (which is exactly how
+    // `tr_1` is vacuous as a selection test).
+    assert_ne!(
+        line_before, line_after,
+        "fixture: the insert must move the selected node"
+    );
+}
+
 /// A leaf reports rather than silently doing nothing.
 ///
 /// The outline's `g` is already a dead binding — bound, dispatched, no
@@ -833,11 +910,23 @@ fn tr_3_a_flat_panel_is_untouched_by_the_tree_extension() {
            }"#,
     );
     let before = active_text(&s);
+    let status_before = status(&s);
     press(&mut s, KeyCode::Tab);
     assert_eq!(
         active_text(&s),
         before,
         "TAB on a depthless panel changes nothing"
+    );
+    // Byte-identity of the BUFFER is not enough: TAB is bound for every
+    // listview, so the tree command intercepts a key that previously
+    // fell through to `buffer.tab` and the read-only intercept. A
+    // listview-specific status here would be a behaviour change the
+    // flat consumers never had, and invisible to a buffer comparison.
+    assert!(
+        !status(&s).contains("no node here") && !status(&s).contains("no children"),
+        "a flat panel must not gain tree feedback; status was {:?} (was {:?})",
+        status(&s),
+        status_before
     );
     assert!(
         before.contains("one") && before.contains("two"),

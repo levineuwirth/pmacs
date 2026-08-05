@@ -163,8 +163,10 @@ why every lane below spells out the `-b` form.
 
 ## Tree primitive (P5) — IMPLEMENTED and GATED, PR HELD
 
-**Held deliberately, not stalled.** The work is complete and green; the
-PR is not open pending review of the documentation this lane records.
+**Held deliberately, not stalled.** The work is complete, green, and
+documented — this lane, the handoff facts, and `COHERENCE.md` §14/§20
+are all in place. It is held pending the user's decision to open the
+PR, not pending further work.
 
 - **Branch `tree-primitive-framing`**, base `githubsucks/main` @
   `12f2970`. **Unpushed** while held. Framing
@@ -173,7 +175,9 @@ PR is not open pending review of the documentation this lane records.
 - **Commits:** `61b1062` framing, `cf4ac1c` rev 2, `932b3ab` rev 3,
   `5186bfd` rev 4 (carrying the `COHERENCE.md` §14 call-site
   correction), `49a42ec` the primitive, `8f64c3b` byte-identity coverage
-  plus the verification record.
+  plus the verification record, `38e94dc` this lane, §14's ✗ → ◐ and the
+  handoff facts, and a review round adding the moving-selection test and
+  the flat-panel TAB delegation.
 
 ### What it ships
 
@@ -200,7 +204,7 @@ The LSP outline adopts, supplying `depth` and `id = line:col`; its
 |---|---|
 | luajit sweep | **3453 / 0** (= `main` 3450 + 3 listview tests) |
 | crdt sweep, isolated ×2 | **3722 / 0** (= `main` 3718 + 4 tests) |
-| `listview_acceptance` | 21 / 21 |
+| `listview_acceptance` | 22 / 22 |
 | `m4_acceptance` | 150 / 150 (basedpyright skipped) |
 | `--lib` | 1896 / 0 |
 | fmt · diff-check · clippy ±crdt | pass |
