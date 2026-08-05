@@ -161,6 +161,76 @@ form. All four steps ran clean. **The two-argument form still does not
 work** for a remote-only branch (`fatal: invalid reference`), which is
 why every lane below spells out the `-b` form.
 
+## Tree primitive (P5) — IMPLEMENTED and GATED, PR HELD
+
+**Held deliberately, not stalled.** The work is complete and green; the
+PR is not open pending review of the documentation this lane records.
+
+- **Branch `tree-primitive-framing`**, base `githubsucks/main` @
+  `12f2970`. **Unpushed** while held. Framing
+  `docs/tree-primitive-framing.md` **revision 5** — approved after four
+  review rounds, with Q#TR1–TR4 decided.
+- **Commits:** `61b1062` framing, `cf4ac1c` rev 2, `932b3ab` rev 3,
+  `5186bfd` rev 4 (carrying the `COHERENCE.md` §14 call-site
+  correction), `49a42ec` the primitive, `8f64c3b` byte-identity coverage
+  plus the verification record.
+
+### What it ships
+
+`listview` gains **optional** `depth` and `id` on rows; absent, a row
+behaves exactly as before, which is what leaves the flat consumers
+untouched. Collapse state is **primitive-owned**, keyed by
+consumer-supplied id. Selection is re-seated **by id, not by line**.
+`TAB` toggles; a leaf reports rather than silently doing nothing.
+
+**The observation that made it cheap:** collapse only ever *hides* rows
+and never changes a surviving row's depth, and consumers emit parents
+before children, so descendants are a **contiguous run**. Folding is
+therefore **local projection state, not a refresh protocol** — the
+primitive re-renders from its own array without calling the consumer,
+which is why the anchor consumer works at all: **the outline has no
+`on_refresh`**.
+
+The LSP outline adopts, supplying `depth` and `id = line:col`; its
+`text` stays consumer-rendered per Q#TR4.
+
+### Verification
+
+| gate | result |
+|---|---|
+| luajit sweep | **3453 / 0** (= `main` 3450 + 3 listview tests) |
+| crdt sweep, isolated ×2 | **3722 / 0** (= `main` 3718 + 4 tests) |
+| `listview_acceptance` | 21 / 21 |
+| `m4_acceptance` | 150 / 150 (basedpyright skipped) |
+| `--lib` | 1896 / 0 |
+| fmt · diff-check · clippy ±crdt | pass |
+
+Both behavioural claims are **bite-verified**: disabling the ancestor
+filter fails the fold test; an unconditional gutter fails the
+byte-identity test.
+
+**One unclassified occurrence** — the first crdt sweep reported 7
+failures whose signatures were destroyed before being read. It is
+recorded in the framing's §6a, **not** as a row in
+`docs/ci-red-signatures.md`, because it has no normalized signature to
+match. Two non-causal hypotheses are recorded there; neither is testable
+now.
+
+### Recovery, once pushed
+
+```sh
+git fetch githubsucks
+git worktree add ../pmacs-tree \
+  -b tree-primitive-framing \
+  githubsucks/tree-primitive-framing
+```
+
+### Not in scope
+
+dired's `i` insert-subdirectory (the second consumer, its own stage);
+the other four §14 consumers; DAP's variables view; giving the outline a
+refresh, which is LSP request-lifecycle work.
+
 ## Leaked daemons from `gpu_invocation_acceptance` — NEEDS A LANE
 
 **Found 2026-08-05 while cleaning up after the tree-primitive work. No
@@ -187,7 +257,8 @@ so **nothing in the existing ledger covers them**.
 
 **Why it matters beyond tidiness.** Dozens of resident daemons were
 present during every local sweep run this week, including the one that
-produced the unclassified failure recorded in the tree lane below. That
+produced the unclassified failure recorded in the **tree-primitive lane
+above** (and, in full, in that lane's framing §6a). That
 makes them a **rival explanation** to the shared-target-dir mechanism
 for that occurrence, and neither can be tested against it now — the
 signatures were not captured. A leak that quietly changes the

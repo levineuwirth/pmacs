@@ -1,6 +1,8 @@
 # Framing — the tree primitive
 
-**Revision 5.** Status: **APPROVED; Q#TR1–TR4 decided.** Scouted against
+**Revision 5.** Status: **IMPLEMENTED and GATED; PR HELD for review.**
+Q#TR1–TR4 decided at approval. Both sweeps green and both behavioural
+claims bite-verified — see §6a. Scouted against
 `githubsucks/main` @ `12f2970`. Carries a correction to `COHERENCE.md`
 §14 (revision 4, below).
 
