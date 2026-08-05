@@ -2480,15 +2480,28 @@ function pmacs.lsp.document_symbols()
     for _, sym in ipairs(syms) do
       local tag = SYMBOL_KIND_TAGS[sym.kind] or "symbol"
       rows[#rows + 1] = {
+        -- Tree primitive (docs/tree-primitive-framing.md): `depth` is
+        -- STRUCTURAL and `text` stays rendered here (Q#TR4). Collapse
+        -- only hides rows and never changes a surviving row's depth, so
+        -- the indentation below remains correct without the primitive
+        -- re-formatting anything.
+        --
+        -- `id` is line:col (Q#TR3) — unique per document and stable
+        -- across a re-render. The `::` parent chain was rejected: it
+        -- collides on overloads and same-named siblings, which is
+        -- exactly where a stale expansion would reattach to the wrong
+        -- node.
         text = string.format(
           "%s%s  [%s]", string.rep("  ", sym.depth or 0), sym.name, tag),
         item = sym,
+        depth = sym.depth or 0,
+        id = string.format("%d:%d", sym.line, sym.col),
       }
     end
     pmacs.listview.open {
       name = "*outline*",
       header = string.format(
-        "%d symbol%s   RET visit  n/p move  q quit",
+        "%d symbol%s   RET visit  TAB fold  n/p move  q quit",
         #syms, (#syms == 1 and "" or "s")),
       rows = rows,
       on_visit = function(sym)

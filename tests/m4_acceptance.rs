@@ -8025,6 +8025,99 @@ fn open_against_fake(path: &std::path::Path) -> pmacs::editor::EditorState {
 /// hierarchical documentSymbol response ("Outer" class > "inner"
 /// method): open, depth-indented rows, RET jump-ring visit to the
 /// symbol's selectionRange, M-, back to the outline row, q restore.
+/// Tree primitive, acceptance 5 — the FLAT listview consumers render
+/// **byte-identically** after the depth/collapse extension.
+///
+/// This exists because the weaker claim was not true. `listview_
+/// acceptance` says in its own header that the references panel "needs
+/// a live LSP and is validated manually / via the m4 harness", so it
+/// does not exercise `*references*` at all; and the hover test asserts
+/// content *presence*, not exact output. Neither would notice a flat
+/// consumer silently gaining an indent column — which is precisely the
+/// regression a tree extension can introduce.
+///
+/// So the assertion is on the **exact rendered bytes**, through the
+/// real entry points, against the fake language server.
+#[test]
+fn flat_listview_consumers_render_byte_identically_after_the_tree_extension() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a_path = dir.path().join("r.rs");
+    std::fs::write(&a_path, b"fn main() {}\n").expect("write r");
+    let mut state = open_against_fake(&a_path);
+
+    let body = |state: &pmacs::editor::EditorState| -> String {
+        state
+            .lua_host
+            .lua()
+            .load("local b = pmacs.window.buffer() return b:slice(0, b:len())")
+            .eval()
+            .expect("panel text")
+    };
+
+    // --- *references* (on_visit, no depth) ---
+    state
+        .lua_host
+        .lua()
+        .load("pmacs.lsp.find_references()")
+        .exec()
+        .expect("invoke find_references");
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "pmacs.describe.buffer(pmacs.window.buffer()).name == '*references*'",
+            5,
+        ),
+        "the references panel opened"
+    );
+    let refs = body(&state);
+    let (header, rows) = refs.split_once('\n').expect("header then rows");
+    assert_eq!(
+        header, "1 reference   RET visit  n/p move  q quit",
+        "the header is unchanged — no fold affordance is advertised on a \
+         flat panel"
+    );
+    // EXACT: the row is the location string and nothing else. An added
+    // indent column, tree gutter or fold marker would all fail here.
+    assert_eq!(
+        rows,
+        format!("{}:12:3", a_path.display()),
+        "the flat references row renders verbatim"
+    );
+
+    // --- *lsp* (on_refresh, no depth) ---
+    state
+        .lua_host
+        .lua()
+        .load("pmacs.command.invoke('lsp.status')")
+        .exec()
+        .expect("invoke lsp.status");
+    let status_body = body(&state);
+    let (status_header, status_rows) = status_body.split_once('\n').expect("header then rows");
+    assert_eq!(
+        status_header, "LSP status   g refresh  q quit",
+        "the one panel WITH refresh keeps its exact header"
+    );
+    // `*lsp*` formats its OWN indentation — two spaces on detail lines —
+    // so "starts with a space" is not a violation here. What must hold
+    // is that the primitive reproduces the consumer's text EXACTLY: a
+    // prefix added by render would shift this line and break the match.
+    //
+    // Matched as a whole line rather than a substring, because a
+    // substring would still be found inside a further-indented version
+    // of itself. Volatile parts (pid, elapsed) are deliberately not
+    // included.
+    assert!(
+        status_rows
+            .lines()
+            .any(|l| l == "  capabilities: sync, hover, completion, definition, diagnostics"),
+        "the consumer's own two-space indentation survives verbatim; got:\n{status_rows}"
+    );
+    assert!(
+        status_rows.lines().any(|l| l == "Servers:"),
+        "an unindented row stays unindented; got:\n{status_rows}"
+    );
+}
+
 #[test]
 #[allow(
     clippy::too_many_lines,

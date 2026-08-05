@@ -19,10 +19,21 @@ until review caught it — the #171 defect recurring. Its block is below.
 
 **Updated later the same day.** #215 **merged** (`main` @ `12f2970`) and
 that lane is **rewritten, not removed** — rule 4 removes a lane when its
-ARC is done, and Stage 2 is the arc. Stage 2 (**hardening**) is now in
-flight on `ci-signal-hardening`, with its own lane block, its own
-checkpoint table, and a lane written **before** the PR was opened rather
-than after review asked for it.
+ARC is done, and Stage 2 is the arc. Stage 2 (**hardening**) ran on
+`ci-signal-hardening`, with its own lane block, its own checkpoint
+table, and a lane written **before** the PR was opened rather than
+after review asked for it. **It merged as #216 on 2026-08-05**, which
+completes the arc: R2 and R4 are retired with discriminating
+witnesses.
+
+**The lane is kept, not yet removed, and that is a deferral rather than
+a judgement.** Rule 4 would remove it now — but its residue must be
+re-homed first, or removing it loses the state: **R1** is referred to
+the async-runtime lane (Q#MCI3) and **R3** is an unresolved possible
+product defect owned by the process-signal / PTY lane, neither of which
+has a block here yet. Retiring this arc and opening those two is an
+**absorption pass**, and doing it inside an unrelated feature PR is how
+a ledger acquires edits nobody reviewed.
 
 **Updated 2026-08-04.** Four PRs landed since: the CI CRDT coverage
 lane #209, Distribution Stage 1 #211 (released as **v1.1.0**), the
@@ -169,7 +180,128 @@ form. All four steps ran clean. **The two-argument form still does not
 work** for a remote-only branch (`fatal: invalid reference`), which is
 why every lane below spells out the `-b` form.
 
-## macOS CI signal integrity — STAGE 1 MERGED (#215); STAGE 2 IN REVIEW
+## Tree primitive (P5) — PR #217 OPEN, awaiting review
+
+**PR #217** — https://github.com/levineuwirth/pmacs/pull/217. It was
+held through four framing rounds plus a review round; the hold is over
+and the work is with the user. Full gate suite green at the tip,
+including `PMACS_REQUIRE_GPU=1 -p pmacs-gpu` 221/0.
+
+- **Branch `tree-primitive-framing`**, base `githubsucks/main` @
+  `12f2970`. **Pushed and in sync** — held means no PR is open, not
+  that the work is stranded locally, so it is portable per the
+  handoff's rule. `githubsucks/tree-primitive-framing` is the
+  authoritative tip; `d92f0ad` was it as of the line above, and any
+  edit to this lane advances past it, which is why the ref and not a
+  pinned SHA is the thing to trust. Recover with `git fetch githubsucks
+  && git checkout tree-primitive-framing`. Framing
+  `docs/tree-primitive-framing.md` **revision 5** — approved after four
+  review rounds, with Q#TR1–TR4 decided.
+- **The substantive arc** (not an exhaustive log — read `git log
+  12f2970..githubsucks/tree-primitive-framing` for that): `61b1062`
+  framing through `5186bfd` rev 4, which carried the `COHERENCE.md` §14
+  call-site correction; `49a42ec` the primitive; `8f64c3b`
+  byte-identity coverage plus the verification record; `38e94dc` this
+  lane, §14's ✗ → ◐ and the handoff facts; `c59de95` the review round —
+  moving-selection witness, flat-panel TAB delegation, §20's build →
+  adopt correction.
+
+### What it ships
+
+`listview` gains **optional** `depth` and `id` on rows; absent, a row
+behaves exactly as before, which is what leaves the flat consumers
+untouched. Collapse state is **primitive-owned**, keyed by
+consumer-supplied id. Selection is re-seated **by id, not by line**.
+`TAB` toggles; a leaf reports rather than silently doing nothing.
+
+**The observation that made it cheap:** collapse only ever *hides* rows
+and never changes a surviving row's depth, and consumers emit parents
+before children, so descendants are a **contiguous run**. Folding is
+therefore **local projection state, not a refresh protocol** — the
+primitive re-renders from its own array without calling the consumer,
+which is why the anchor consumer works at all: **the outline has no
+`on_refresh`**.
+
+The LSP outline adopts, supplying `depth` and `id = line:col`; its
+`text` stays consumer-rendered per Q#TR4.
+
+### Verification
+
+| gate | result |
+|---|---|
+| luajit sweep | **3453 / 0** (= `main` 3450 + 3 listview tests) |
+| crdt sweep, isolated ×2 | **3722 / 0** (= `main` 3718 + 4 tests) |
+| `listview_acceptance` | 22 / 22 |
+| `m4_acceptance` | 150 / 150 (basedpyright skipped) |
+| `--lib` | 1896 / 0 |
+| fmt · diff-check · clippy ±crdt | pass |
+
+Both behavioural claims are **bite-verified**: disabling the ancestor
+filter fails the fold test; an unconditional gutter fails the
+byte-identity test.
+
+**One unclassified occurrence** — the first crdt sweep reported 7
+failures whose signatures were destroyed before being read. It is
+recorded in the framing's §6a, **not** as a row in
+`docs/ci-red-signatures.md`, because it has no normalized signature to
+match. Two non-causal hypotheses are recorded there; neither is testable
+now.
+
+### Recovery, once pushed
+
+```sh
+git fetch githubsucks
+git worktree add ../pmacs-tree \
+  -b tree-primitive-framing \
+  githubsucks/tree-primitive-framing
+```
+
+### Not in scope
+
+dired's `i` insert-subdirectory (the second consumer, its own stage);
+the other four §14 consumers; DAP's variables view; giving the outline a
+refresh, which is LSP request-lifecycle work.
+
+## Leaked daemons from `gpu_invocation_acceptance` — NEEDS A LANE
+
+**Found 2026-08-05 while cleaning up after the tree-primitive work. No
+branch, no framing.**
+
+- **42 orphaned `pmacs --daemon` processes** were resident on the
+  development machine, **the oldest 3 days 23 hours old**. All had been
+  **reparented to systemd** (`ppid=1`) and all had **deleted sockets**,
+  so nothing could ever reach or reap them.
+- **Source: `tests/gpu_invocation_acceptance.rs`** — the one-command
+  tests, whose daemons carry `--socket <tempdir>/one-command.sock`. The
+  tempdir is cleaned up; the daemon is not.
+- **Rate measured, not estimated: 3 per sweep.** A single isolated
+  `--features luajit,crdt` sweep leaked exactly three. 42 is what
+  several days of sweeps accumulate to.
+- **This predates the tree work** — the oldest is four days old — so it
+  is a standing leak, not something a current lane introduced.
+
+**Why it belongs to the reap-ledger family.** This is precisely the
+shape that lane exists for: a process that outlives its supervisor with
+nothing left watching it. The ledger arms only for `spec.group`, and
+these are daemons spawned by a test harness rather than by compile mode,
+so **nothing in the existing ledger covers them**.
+
+**Why it matters beyond tidiness.** Dozens of resident daemons were
+present during every local sweep run this week, including the one that
+produced the unclassified failure recorded in the **tree-primitive lane
+above** (and, in full, in that lane's framing §6a). That
+makes them a **rival explanation** to the shared-target-dir mechanism
+for that occurrence, and neither can be tested against it now — the
+signatures were not captured. A leak that quietly changes the
+environment of every subsequent test run is a measurement problem as
+well as a resource one.
+
+**First questions for whoever takes it:** does the test harness fail to
+reap, or does the daemon fail to exit when its socket disappears? Those
+have different fixes, and the second would be a product defect rather
+than a test one.
+
+## macOS CI signal integrity — STAGES 1 AND 2 MERGED (#215, #216)
 
 **This file requires a lane for every open PR** (see the #171/#174 note
 above: an open PR is exactly the volatile work this file records, and
@@ -180,16 +312,18 @@ which is where the same defect stops recurring.
 Framing `docs/macos-ci-signal-integrity-framing.md` **revision 3**,
 already approved. Stage 1 is acceptance 1–5; Stage 2 is acceptance 6–9.
 
-### Stage 2 — hardening, IN REVIEW
+### Stage 2 — hardening, MERGED as #216
 
 - **Branch `ci-signal-hardening`**, worktree `../pmacs-ci-signals`, base
   `githubsucks/main` @ `12f2970` (the #215 merge). Opened from an
   **isolated worktree** because the shared checkout was on another
   lane's branch with clean-but-foreign state; never switch it.
-- **PR: <https://github.com/levineuwirth/pmacs/pull/216>**. This block
-  was written *with* the work, before the PR existed, so the row below
-  was filled in rather than invented. **Checkpoints, newest last**,
-  because a lane that records only one head goes stale on the next push:
+- **PR: <https://github.com/levineuwirth/pmacs/pull/216>, MERGED**
+  2026-08-05 as `2657568`, all 14 checks green at head `8ab20b5`. This
+  block was written *with* the work, before the PR existed, so the row
+  below was filled in rather than invented. **Checkpoints, newest
+  last**, because a lane that records only one head goes stale on the
+  next push:
 
   | head | CI run | result |
   |---|---|---|

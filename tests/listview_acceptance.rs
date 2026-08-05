@@ -739,6 +739,201 @@ fn s1_11_a_disambiguated_panel_still_answers_ret_g_and_q() {
 /// raw-switch and capability-fallback listview loops**. `s1_12` pins the
 /// second by keeping its panels in document windows; this pins the
 /// first.
+/// Tree primitive — a panel with `depth` + `id` collapses and expands,
+/// and BOTH the collapse state and the selection survive a re-render.
+///
+/// Acceptance 2 and 3. The re-render is what the primitive controls;
+/// `g` refresh is deliberately out of scope because the anchor consumer
+/// (the outline) has no `on_refresh` at all — see the framing's §1.5a.
+#[test]
+fn tr_1_collapse_hides_descendants_and_survives_re_render() {
+    let mut s = editor();
+    exec(
+        &s,
+        r#"pmacs.listview.open {
+             name = "*tree*",
+             header = "tree   TAB fold",
+             rows = {
+               { text = "root",   item = "root", depth = 0, id = "a" },
+               { text = "  kid1", item = "kid1", depth = 1, id = "b" },
+               { text = "  kid2", item = "kid2", depth = 1, id = "c" },
+               { text = "tail",   item = "tail", depth = 0, id = "d" },
+             },
+           }"#,
+    );
+    let body = |s: &EditorState| active_text(s);
+    assert!(
+        body(&s).contains("kid1"),
+        "children visible before collapse"
+    );
+
+    // Cursor opens on the first data row (root); TAB collapses it.
+    press(&mut s, KeyCode::Tab);
+    let collapsed = body(&s);
+    assert!(
+        !collapsed.contains("kid1"),
+        "descendants hidden: {collapsed}"
+    );
+    assert!(
+        !collapsed.contains("kid2"),
+        "ALL descendants hidden: {collapsed}"
+    );
+    assert!(
+        collapsed.contains("root") && collapsed.contains("tail"),
+        "the node itself and its SIBLING survive — collapse hides \
+         descendants, not the following run: {collapsed}"
+    );
+
+    // Selection is re-seated by ID, so the cursor is still on `root`.
+    let on_root: String = eval(
+        &s,
+        "return pmacs.describe.buffer(pmacs.window.buffer()).name",
+    );
+    assert_eq!(on_root, "*tree*");
+
+    press(&mut s, KeyCode::Tab);
+    assert!(
+        body(&s).contains("kid1") && body(&s).contains("kid2"),
+        "TAB again expands"
+    );
+}
+
+/// Selection survives a re-render that MOVES the selected node.
+///
+/// `tr_1` is not sufficient for this and was vacuous as a selection
+/// test: it toggles the ROOT, which occupies line 1 before and after the
+/// collapse, so the old line-based re-seating would pass it unchanged.
+/// A selection test has to move the node.
+///
+/// Here `on_refresh` inserts a child ABOVE the selected sibling, so the
+/// sibling's line shifts. Re-seating by line would land on the inserted
+/// row; re-seating by id stays on the sibling.
+#[test]
+fn tr_4_selection_follows_the_node_when_rows_are_inserted_above_it() {
+    let mut s = editor();
+    exec(
+        &s,
+        r#"_G.EXTRA = false
+           pmacs.listview.open {
+             name = "*tree*", header = "tree",
+             rows = {
+               { text = "root",    item = "root",    depth = 0, id = "a" },
+               { text = "  kid",   item = "kid",     depth = 1, id = "b" },
+               { text = "sibling", item = "sibling", depth = 0, id = "z" },
+             },
+             on_refresh = function()
+               if _G.EXTRA then
+                 return {
+                   { text = "root",     item = "root",  depth = 0, id = "a" },
+                   { text = "  kid",    item = "kid",   depth = 1, id = "b" },
+                   { text = "  kid2",   item = "kid2",  depth = 1, id = "c" },
+                   { text = "sibling",  item = "sib",   depth = 0, id = "z" },
+                 }
+               end
+               return {
+                 { text = "root",    item = "root", depth = 0, id = "a" },
+                 { text = "  kid",   item = "kid",  depth = 1, id = "b" },
+                 { text = "sibling", item = "sib",  depth = 0, id = "z" },
+               }
+             end,
+           }"#,
+    );
+
+    // Select `sibling` — data line 3.
+    press(&mut s, KeyCode::Char('n'));
+    press(&mut s, KeyCode::Char('n'));
+    let line_before: i64 = eval(&s, "return pmacs.editor.cursor_line()");
+    let text_at = |s: &EditorState| -> String {
+        let body = active_text(s);
+        let line: i64 = eval(s, "return pmacs.editor.cursor_line()");
+        body.lines()
+            .nth(usize::try_from(line).expect("line fits"))
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert_eq!(text_at(&s), "sibling", "premise: sibling is selected");
+
+    // Refresh inserts `kid2` ABOVE sibling, so its line moves.
+    exec(&s, "_G.EXTRA = true");
+    press(&mut s, KeyCode::Char('g'));
+
+    let line_after: i64 = eval(&s, "return pmacs.editor.cursor_line()");
+    // Substantive claim first, so a regression reports as what it is.
+    // Under line-based re-seating the cursor stays on line 3, which now
+    // holds the INSERTED row.
+    assert_eq!(
+        text_at(&s),
+        "sibling",
+        "selection follows the NODE, not the line"
+    );
+    // …and the fixture really did move it, so the assertion above is not
+    // satisfied by the node happening to stay put (which is exactly how
+    // `tr_1` is vacuous as a selection test).
+    assert_ne!(
+        line_before, line_after,
+        "fixture: the insert must move the selected node"
+    );
+}
+
+/// A leaf reports rather than silently doing nothing.
+///
+/// The outline's `g` is already a dead binding — bound, dispatched, no
+/// feedback (framing §1.3a). This primitive must not add a second one.
+#[test]
+fn tr_2_toggling_a_leaf_reports_instead_of_silently_doing_nothing() {
+    let mut s = editor();
+    exec(
+        &s,
+        r#"pmacs.listview.open {
+             name = "*tree*", header = "tree",
+             rows = { { text = "leaf", item = "leaf", depth = 0, id = "only" } },
+           }"#,
+    );
+    press(&mut s, KeyCode::Tab);
+    assert!(
+        status(&s).contains("no children"),
+        "a leaf toggle says so; got: {}",
+        status(&s)
+    );
+}
+
+/// Rows WITHOUT `depth`/`id` behave exactly as before — the property
+/// that keeps the three flat consumers unaffected (acceptance 5).
+#[test]
+fn tr_3_a_flat_panel_is_untouched_by_the_tree_extension() {
+    let mut s = editor();
+    exec(
+        &s,
+        r#"pmacs.listview.open {
+             name = "*flat*", header = "flat",
+             rows = { { text = "one", item = 1 }, { text = "two", item = 2 } },
+           }"#,
+    );
+    let before = active_text(&s);
+    let status_before = status(&s);
+    press(&mut s, KeyCode::Tab);
+    assert_eq!(
+        active_text(&s),
+        before,
+        "TAB on a depthless panel changes nothing"
+    );
+    // Byte-identity of the BUFFER is not enough: TAB is bound for every
+    // listview, so the tree command intercepts a key that previously
+    // fell through to `buffer.tab` and the read-only intercept. A
+    // listview-specific status here would be a behaviour change the
+    // flat consumers never had, and invisible to a buffer comparison.
+    assert!(
+        !status(&s).contains("no node here") && !status(&s).contains("no children"),
+        "a flat panel must not gain tree feedback; status was {:?} (was {:?})",
+        status(&s),
+        status_before
+    );
+    assert!(
+        before.contains("one") && before.contains("two"),
+        "both rows render: {before}"
+    );
+}
+
 #[test]
 fn s3_1_q_walks_the_side_presentation_chain_back_to_the_document() {
     let mut s = editor();
@@ -877,6 +1072,127 @@ fn s1_14_no_bypass_write_or_name_keyed_identity_remains() {
     assert!(
         subscripts.is_empty(),
         "every `panels[` subscript must be an append; found {subscripts:?}"
+    );
+}
+
+/// A tree row need not carry `item` — `on_visit` is optional, so a
+/// display-only node (a grouping header) is a legitimate row. The
+/// cursor must still seat on it.
+///
+/// This bit: `line_to_item` is SPARSE when rows omit `item`, and
+/// `seat_cursor` took `#` of it. For an all-display-only tree that
+/// length is 0, so the cursor never left the header — where TAB finds
+/// no row and answers "no node here", making the tree unfoldable.
+#[test]
+fn tr_5_a_tree_of_display_only_rows_is_still_navigable_and_foldable() {
+    let mut s = editor();
+    exec(
+        &s,
+        r#"pmacs.listview.open {
+             name = "*tr5*",
+             header = "display-only   TAB fold",
+             rows = {
+               { text = "root",  depth = 0, id = "r"  },
+               { text = "  kid", depth = 1, id = "rk" },
+             },
+           }"#,
+    );
+
+    // Seated on a data row, not stranded on the header.
+    let line: i64 = eval(&s, "return pmacs.editor.cursor_line()");
+    assert_eq!(
+        line, 1,
+        "cursor seats on the first data row despite no `item`"
+    );
+
+    press(&mut s, KeyCode::Tab);
+    assert!(
+        !status(&s).contains("no node here"),
+        "TAB found the node: {}",
+        status(&s)
+    );
+    assert!(
+        !active_text(&s).contains("kid"),
+        "and folded it: {:?}",
+        active_text(&s)
+    );
+}
+
+/// Q#TR3's contract is that ids compare by value. Collapse state keys
+/// a Lua table, and table indexing consults no `__eq`, so a non-scalar
+/// id would compare equal for selection and unequal for folding: a
+/// refresh would restore the cursor and silently lose the fold. The
+/// contract is narrowed to scalars and enforced where rows enter,
+/// rather than left to surface as a lost fold much later.
+#[test]
+fn tr_6_a_non_scalar_id_is_rejected_where_rows_enter() {
+    let s = editor();
+    let err: String = eval(
+        &s,
+        r#"local ok, e = pcall(function()
+             pmacs.listview.open {
+               name = "*tr6*",
+               header = "h",
+               rows = { { text = "a", depth = 0, id = {} } },
+             }
+           end)
+           return tostring(e)"#,
+    );
+    assert!(
+        err.contains("ids must be a string or number"),
+        "rejected where rows enter, with a reason: {err}"
+    );
+}
+
+/// A NaN id passes `type(x) == "number"` and then errors at
+/// `p.collapsed[row.id]` with "table index is NaN" — the one scalar
+/// Lua accepts as a number and refuses as a table key. It must be
+/// caught where rows enter, naming the row, rather than surfacing on
+/// whichever later TAB happens to reach it.
+#[test]
+fn tr_7_a_nan_id_is_rejected_rather_than_erroring_on_the_first_fold() {
+    let s = editor();
+    let err: String = eval(
+        &s,
+        r#"local ok, e = pcall(function()
+             pmacs.listview.open {
+               name = "*tr7*",
+               header = "h",
+               rows = { { text = "a", depth = 0, id = 0 / 0 } },
+             }
+           end)
+           return tostring(e)"#,
+    );
+    assert!(
+        err.contains("NaN id"),
+        "named at entry, not as a table-index error later: {err}"
+    );
+}
+
+/// Duplicate ids do not merely collide — every lookup resolves an id to
+/// the FIRST row bearing it, so selecting the second toggles the first
+/// and re-seats the cursor onto it. An id that does not identify a node
+/// is not an id.
+#[test]
+fn tr_8_duplicate_ids_are_rejected_because_lookup_takes_the_first_match() {
+    let s = editor();
+    let err: String = eval(
+        &s,
+        r#"local ok, e = pcall(function()
+             pmacs.listview.open {
+               name = "*tr8*",
+               header = "h",
+               rows = {
+                 { text = "first",  depth = 0, id = "same" },
+                 { text = "second", depth = 0, id = "same" },
+               },
+             }
+           end)
+           return tostring(e)"#,
+    );
+    assert!(
+        err.contains("share the id") && err.contains("rows 1 and 2"),
+        "both offending rows named: {err}"
     );
 }
 

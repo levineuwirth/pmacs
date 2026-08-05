@@ -107,7 +107,7 @@ remain open to them.
 | 11 | Config layering + provenance | **Partial (foundation only)** | Typed registry is right; 5 settings live in it; no value provenance |
 | 12 | Profiles | **Missing** | One hardcoded default keymap; not a named concept |
 | 13 | Package lifecycle UX | **Resolution without lifecycle** | Mature resolver/lockfile; init-only install; no uninstall/disable/search |
-| 14 | Workbench primitives | **Partial (best trajectory)** | Listview is a real primitive but only 3 call sites, all LSP panels; buffer-list and search re-implement it; **the bottom panel is COMPLETE — both frontends, and Stage 3 flipped the adopter default so omission means the panel**. **Tree is still ✗ and is now the arc's successor** |
+| 14 | Workbench primitives | **Partial (best trajectory)** | Listview is a real primitive but only **4** call sites, all LSP panels (`*lsp*` added post-audit by #204); buffer-list and search re-implement it; **the bottom panel is COMPLETE — both frontends, and Stage 3 flipped the adopter default so omission means the panel**. **Tree is implemented (◐) with the LSP outline as its one adopter; the remaining consumers, including dired's `i`, have not adopted** |
 | 15 | Contextual affordances | **Weak** | Right-click menu only; code actions apply first-blindly; no git integration at all |
 | 16 | Semantic frontend | **Strong** | v6..=v21 schema support; production attach remains v20 during the dark panel slice; degradation practiced |
 | 17 | Distribution | **Partial** | **v1.1.0 ships prebuilt Linux/macOS binaries on tag** (#211) with checksums and a stated glibc floor. No channels, in-place update, rollback, signing, or package-manager distribution |
@@ -1282,10 +1282,23 @@ Primitive-by-primitive against the list above:
   buffer-local keymap idiom (RET/SPC visit, n/p, g refresh, q quit)
   that is inspectable and rebindable (§6's counter-example). **But its
   adoption is narrower than this document claimed, and the correction
-  matters more than the grade.** Measured at `ad41cf1`: there are
+  matters more than the grade.** Measured at `ad41cf1`: there were
   exactly **three** `pmacs.listview.open` call sites, **all three in
   `builtin/runtime/lsp.lua`** — `*references*` (`:2056`), `*outline*`
-  (`:2102`) and `*lsp-help*` (`:2513`). The three other `listview`
+  (`:2102`) and `*lsp-help*` (`:2513`).
+
+  **Updated: there are now FOUR.** Journey Stage 1b-2 (**#204**) added
+  `*lsp*` via `lsp.status` — the audited claim above changed and that PR
+  did not update it, so this correction rides the tree-primitive framing
+  that found it (§25). All four remain in `lsp.lua`; per §25 the
+  symbols are authoritative and the `ad41cf1` line numbers have drifted.
+
+  **`*lsp*` is the only one of the four with a working refresh** — it is
+  the only one supplying `on_refresh`. `g` is bound on all four
+  unconditionally by `bind_local_keymap`, so the other three carry a
+  **dead refresh binding**: bound, dispatched, silently does nothing.
+
+  The three other `listview`
   mentions under `builtin/` are comments in `compile.lua` and
   `dired.lua` citing "the listview idiom", which is a *pattern being
   copied*, not the primitive being used.
@@ -1354,15 +1367,27 @@ Primitive-by-primitive against the list above:
   (§9).
 - **Help view** △ — exists twice (§5); needs unification, not
   invention.
-- **Tree** ✗ — none. The named future consumers (project files, symbol
-  hierarchy, package dependency graph, worker trees, git status) will
-  each need it; building it once *before* dired's directory view and
-  the workers tree harden their own conventions is exactly this
-  section's point. Dired Stage 1 (merged #165) landed **without** inventing
-  one: its listing is flat (Emacs parity), and the recursive
-  in-buffer case — `i` insert-subdirectory — is a named deferral in
-  `docs/dired-framing.md` §13, which is where a shared tree primitive
-  would land.
+- **Tree** ◐ — **implemented, one consumer.** `listview` carries
+  optional `depth` and `id` on rows, primitive-owned collapse state, and
+  selection re-seated by id rather than by line; `TAB` toggles. Absent
+  `depth`/`id`, a row behaves exactly as before, which is what leaves
+  the flat consumers untouched (pinned by byte-identity coverage).
+  **The LSP outline is the only adopter**: it previously flattened a
+  genuine `DocumentSymbol` tree into indented strings, and now supplies
+  structure while keeping its rendered text.
+
+  The organising fact, worth carrying: **folding is local projection
+  state, not a refresh protocol.** Collapse only hides rows and never
+  changes a surviving row's depth, so the primitive re-renders from its
+  own array without calling the consumer — which is why the outline
+  works at all, having no `on_refresh`.
+
+  **Still one consumer, hence ◐ not ✓.** The named future consumers
+  (project files, package dependency graph, worker trees, git status)
+  have not adopted, and dired's recursive `i` insert-subdirectory — the
+  second real constraint source — remains the deferral in
+  `docs/dired-framing.md` §13. Dired Stage 1 (merged #165) landed
+  **without** inventing its own, which is what kept this possible.
 - **Structured table / inspector / diff view** ✗ — none. (`describe.*`
   tables are the inspector's data model without a view; the
   wire-declared `ResourceOffer` family was reserved for diff/blame
@@ -1669,9 +1694,19 @@ and §18's floor ride on this.
 
 **State: the bottom panel is DONE (§14) — both frontends, Stage 1 #155
 through Stage 2B-3, and Stage 3 flipped the adopter default so omitting
-`display` means the panel. Arc 7 is complete.** Remaining elsewhere: the tree primitive (build it before dired
-and the worker tree invent two), table/inspector/diff, help unification.
-Wiring plus one modest model piece (the tree model).
+`display` means the panel. Arc 7 is complete.**
+
+**The tree primitive is IMPLEMENTED too (§14, ◐)** — `listview` carries
+optional `depth`/`id`, primitive-owned collapse, and selection re-seated
+by id. It was built before dired's recursive view and the worker tree
+could invent their own, which was this priority's stated reason for
+doing it early.
+
+**What remains is ADOPTION, not construction.** The LSP outline is the
+only consumer; dired's `i` insert-subdirectory is the next real
+constraint source, and DAP's variables view is why the primitive was
+worth building first. Also remaining: table / inspector / diff, and help
+unification.
 
 ### Priority 6: Productize configuration
 

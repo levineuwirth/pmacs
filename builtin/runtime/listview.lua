@@ -114,21 +114,148 @@ end
 -- `M-x buffer.undo` did too, and no rebinding can remove that. The
 -- primitive lifts the rope lock, writes, discards the history and
 -- re-asserts the lock, all inside one registry borrow.
+-- Tree support (docs/tree-primitive-framing.md, Q#TR1-TR4).
+--
+-- A row MAY carry `depth` (0-based, structural) and `id` (a STRING or
+-- NUMBER, consumer-supplied, compared by value). Both optional: a row
+-- without them behaves exactly as before, which is what keeps the
+-- three flat consumers byte-identical.
+--
+-- `text` stays CONSUMER-RENDERED (Q#TR4). The primitive owns structure,
+-- not presentation -- collapse only ever HIDES rows and never changes a
+-- surviving row's depth, so pre-rendered indentation remains correct
+-- and the primitive never has to re-format anything.
+--
+-- Descendants are a CONTIGUOUS RUN of following rows with greater
+-- depth. That holds because consumers emit parents before children in
+-- document order (the LSP outline's `Symbol` ordering guarantees it);
+-- a consumer that emits depth out of order gets nonsense, which is why
+-- `has_children` reads only the NEXT row rather than scanning.
+local function has_children(rows, i)
+  local d = rows[i].depth
+  if not d then return false end
+  local nxt = rows[i + 1]
+  return nxt ~= nil and (nxt.depth or 0) > d
+end
+
+-- Is `rows[i]` hidden because some ANCESTOR is collapsed?
+--
+-- Walks backwards to shallower rows, which is the ancestor chain under
+-- the contiguous-run invariant above. Stops at depth 0: a root has no
+-- ancestor to hide it.
+local function hidden_by_ancestor(p, rows, i)
+  local d = rows[i].depth
+  if not d or d == 0 then return false end
+  local want = d - 1
+  for j = i - 1, 1, -1 do
+    local dj = rows[j].depth or 0
+    if dj <= want then
+      if rows[j].id ~= nil and p.collapsed[rows[j].id] then return true end
+      want = dj - 1
+      if want < 0 then return false end
+    end
+  end
+  return false
+end
+
+-- Ids must be usable, unique table keys, and none of the three checks
+-- below is fussiness about types.
+--
+-- SCALAR. Selection compares ids with `==`, which honours `__eq`;
+-- collapse state stores them as TABLE KEYS, and Lua indexes tables by
+-- raw identity, consulting no metamethod. A table id would therefore
+-- satisfy one and quietly fail the other: after a refresh minted fresh
+-- id tables, selection would be restored and the fold would be lost.
+--
+-- Equality-aware collapse lookup is the alternative, and it is worse
+-- here: `hidden_by_ancestor` runs per row and would turn a linear
+-- render quadratic to support a key type no consumer has wanted.
+--
+-- NOT NaN. `0/0` passes a `type(x) == "number"` test and then *errors*
+-- at `p.collapsed[row.id]` with "table index is NaN" — the one scalar
+-- Lua accepts as a number and refuses as a key. Caught here so the
+-- report names the row, rather than surfacing on whichever later TAB
+-- happens to reach it.
+--
+-- UNIQUE. Every lookup here resolves an id to the FIRST row bearing
+-- it, so duplicates do not merely collide: selecting the second such
+-- row toggles the first and re-seats the cursor onto it. An id that
+-- does not identify a node is not an id, and the contract's word for
+-- itself is identity.
+--
+-- All three are enforced where rows enter, so a bad id is a named
+-- error at the call site instead of a lost fold or a stray jump later.
+local function check_ids(rows)
+  local seen = {}
+  for i, row in ipairs(rows) do
+    local id, k = row.id, type(row.id)
+    if id ~= nil then
+      if k ~= "string" and k ~= "number" then
+        error(string.format(
+          "listview: row %d has a %s id; ids must be a string or number "
+          .. "(collapse state keys a table by identity, so a %s id would "
+          .. "lose its fold across a refresh)", i, k, k))
+      end
+      if id ~= id then
+        error(string.format(
+          "listview: row %d has a NaN id; NaN is a number but not a "
+          .. "usable table key, and collapse state would raise "
+          .. "\"table index is NaN\" on the first fold", i))
+      end
+      if seen[id] then
+        error(string.format(
+          "listview: rows %d and %d share the id %q; ids must be unique "
+          .. "(every lookup resolves to the first match, so selecting "
+          .. "the later row would toggle and re-seat the earlier one)",
+          seen[id], i, tostring(id)))
+      end
+      seen[id] = i
+    end
+  end
+  return rows
+end
+
 local function render(p, rows)
   local lines = { p.header }
+  p.visible = 0
   p.line_to_item = {}
-  for _, row in ipairs(rows) do
-    lines[#lines + 1] = row.text
-    p.line_to_item[#lines - 1] = row.item
+  p.line_to_row = {}
+  for i, row in ipairs(rows) do
+    if not hidden_by_ancestor(p, rows, i) then
+      lines[#lines + 1] = row.text
+      -- SPARSE BY CONSTRUCTION: `item` is optional, and a display-only
+      -- row (a grouping header in a tree, say) supplies none, so this
+      -- key is simply absent for it. Nothing may take `#` of this
+      -- table; `visible` below is the row count.
+      p.line_to_item[#lines - 1] = row.item
+      p.line_to_row[#lines - 1] = row
+      p.visible = #lines - 1
+    end
   end
   pmacs.buffer.set_generated_contents(p.buffer, table.concat(lines, "\n"))
+end
+
+-- The data line currently showing `id`, or nil. Selection is re-seated
+-- BY ID rather than by line (Q#TR3): a collapse or expand inserts or
+-- removes rows above the cursor, so a line-keyed restore lands on an
+-- unrelated node.
+local function line_of_id(p, id)
+  if id == nil then return nil end
+  for line, row in pairs(p.line_to_row) do
+    if row.id ~= nil and row.id == id then return line end
+  end
+  return nil
 end
 
 -- Re-seat the cursor on data line `line` (1-based, clamped).
 -- `switch_active_buffer` zeroes the window cursor, so a fresh switch
 -- puts us on the header; walk down from there.
 local function seat_cursor(p, line)
-  local count = #p.line_to_item
+  -- `p.visible`, NOT `#p.line_to_item`: that map is sparse whenever a
+  -- row omits the optional `item`, and `#` on a sparse table is not
+  -- the row count. Reading it there left a tree of display-only rows
+  -- with the cursor stranded on the header, where TAB finds no node.
+  local count = p.visible or 0
   if count == 0 then return end
   local target = math.max(1, math.min(line or 1, count))
   for _ = 1, target do
@@ -146,6 +273,7 @@ local function bind_local_keymap(buf)
   bind("<down>", "cursor.down")
   bind("p", "cursor.up")
   bind("<up>", "cursor.up")
+  bind("TAB", "listview.toggle")
   bind("g", "listview.refresh")
   bind("q", "listview.quit")
 end
@@ -186,7 +314,8 @@ local function ensure_panel(name)
   end
 
   local buf = pmacs.buffer.create(actual)
-  p = { requested_name = name, buffer = buf, line_to_item = {} }
+  p = { requested_name = name, buffer = buf, line_to_item = {},
+        line_to_row = {}, collapsed = {}, rows = {}, visible = 0 }
   panels[#panels + 1] = p
   -- Read-only (Q#P3): every non-bypass edit is rejected, with a NAMED
   -- error. Kept beside the rope lock, not replaced by it: the layering
@@ -219,7 +348,12 @@ function pmacs.listview.open(spec)
   if active and not panel_for_buffer(active) then
     p.prev = active
   end
-  render(p, spec.rows or {})
+  -- Keep the row array: collapse re-renders from it WITHOUT calling the
+  -- consumer, which is what lets a panel with no `on_refresh` still
+  -- expand and collapse (the outline has none -- framing §1.5a).
+  p.rows = check_ids(spec.rows or {})
+  p.collapsed = {}
+  render(p, p.rows)
   -- Bottom-panel arc (Q#BP11b): the placement opt-in. `seat_cursor` and
   -- `listview.refresh` are active-window-only, so an interactive panel
   -- MUST take `select = true` or it would silently seat the wrong
@@ -261,7 +395,12 @@ pmacs.command.define {
     local p = active_panel()
     if not (p and p.on_refresh) then return end
     local saved = pmacs.editor.cursor_line()
-    local rows = p.on_refresh() or {}
+    -- Q#TR3: remember the NODE, not the line. A refresh that changes
+    -- the row set moves every line; the id survives it.
+    local saved_row = p.line_to_row[saved]
+    local saved_id = saved_row and saved_row.id
+    local rows = check_ids(p.on_refresh() or {})
+    p.rows = rows
     render(p, rows)
     -- `set_generated_contents` has already refreshed this window's
     -- TextView. Re-seat through the editor primitives instead of
@@ -270,7 +409,63 @@ pmacs.command.define {
     pmacs.editor.clear_selection()
     pmacs.editor.set_view_top(0)
     pmacs.editor.move_to_line(0)
-    seat_cursor(p, saved)
+    seat_cursor(p, line_of_id(p, saved_id) or saved)
+  end,
+}
+
+-- TAB toggles the node under the cursor. A leaf is a no-op with a
+-- status, never a silent nothing -- the outline's `g` is already a
+-- dead binding that responds to nothing (framing §1.3a) and this
+-- primitive should not add a second one.
+pmacs.command.define {
+  name = "listview.toggle",
+  description = "Collapse or expand the tree node under the cursor.",
+  fn = function()
+    local p = active_panel()
+    if not p then return end
+    -- A FLAT panel must keep its pre-tree TAB behaviour exactly.
+    --
+    -- `bind_local_keymap` binds TAB for every listview, so this command
+    -- now intercepts a key that previously fell through to the global
+    -- `buffer.tab` and was refused by the Q#P3 read-only intercept.
+    -- Emitting a listview status instead would be a behaviour change
+    -- for the three flat consumers -- invisible to a byte-identity test,
+    -- which sees the buffer and not the status line or the dispatch
+    -- path. So a panel with no tree rows at all delegates.
+    local is_tree = false
+    for _, r in ipairs(p.rows) do
+      if r.id ~= nil then is_tree = true break end
+    end
+    if not is_tree then
+      pmacs.command.invoke("buffer.tab")
+      return
+    end
+
+    local line = pmacs.editor.cursor_line()
+    local row = p.line_to_row[line]
+    if not (row and row.id ~= nil) then
+      pmacs.editor.set_status("listview: no node here")
+      return
+    end
+    -- `has_children` reads the FULL row array, not the rendered subset:
+    -- a collapsed node's children are absent from `line_to_row` by
+    -- construction, so asking the rendered view whether it has any
+    -- would answer "no" for every collapsed node and make expanding
+    -- impossible.
+    local idx
+    for i, r in ipairs(p.rows) do
+      if r.id ~= nil and r.id == row.id then idx = i break end
+    end
+    if not (idx and has_children(p.rows, idx)) then
+      pmacs.editor.set_status("listview: no children")
+      return
+    end
+    p.collapsed[row.id] = not p.collapsed[row.id] or nil
+    render(p, p.rows)
+    pmacs.editor.clear_selection()
+    pmacs.editor.set_view_top(0)
+    pmacs.editor.move_to_line(0)
+    seat_cursor(p, line_of_id(p, row.id) or line)
   end,
 }
 

@@ -124,6 +124,36 @@ commands, read `docs/active-work.md` immediately after this file.
   - **A capability fallback must strip the QUIT ACTION too**, not just
     the side parameters — a quit action stranded on a document window
     makes a later `q` try to restore a presentation that never happened.
+- **The tree primitive ships — `listview` gained depth, collapse and
+  identity** (P5, §14's last missing workbench primitive; implemented,
+  PR held). Rows carry **optional** `depth` and `id`; absent, a row
+  behaves exactly as before, which is what leaves the flat consumers
+  untouched. The LSP outline is the one adopter. Durable facts:
+  - **Folding is local projection state, not a refresh protocol.**
+    Collapse only *hides* rows and never changes a surviving row's
+    depth, and consumers emit parents before children, so descendants
+    are a **contiguous run**. The primitive therefore re-renders from
+    its own array **without calling the consumer** — which is the only
+    reason the anchor consumer works, because **the outline has no
+    `on_refresh` at all**. A design requiring the consumer to re-supply
+    rows on every fold would have fitted no existing consumer.
+  - **Identity is consumer-supplied and compared by equality; the
+    primitive never derives one.** `item` is opaque by design. The
+    outline uses `line:col`, because the `::` parent chain collides on
+    overloads and same-named siblings — exactly where a stale expansion
+    would reattach to the wrong node. **Selection is re-seated by id,
+    not by line**, since a fold inserts or removes rows above the
+    cursor.
+  - **`has_children` must read the FULL row array, not the rendered
+    subset.** A collapsed node's children are absent from the rendered
+    map by construction, so asking the view would answer "no" for every
+    collapsed node and make expanding impossible — a self-sealing bug
+    that looks like fold working and unfold silently not.
+  - **A bite that passes validates the pair, not the test.** The first
+    byte-identity injection used `row.depth or 0`; flat rows have no
+    depth, so it changed nothing and the test "passed" against a
+    regression the flat path is immune to. Ask which defect you
+    injected before believing a green bite.
 - **pmacs is installable without cloning — Distribution Stage 1, #211,
   released as v1.1.0.** A `v*` tag builds `pmacs` and `pmacs-gpu` on
   pinned `ubuntu-22.04` / `macos-15` and publishes a GitHub Release with
@@ -228,7 +258,7 @@ anchor, so every item is startable.
 | 2 | Workspace + location | Missing; model gap | The long-lead arc. Start before a fifth subsystem grows its own root convention — four have already diverged (§7) |
 | 3 | Extension ownership | Missing; prerequisite-shaped | **`pmacs.hook.remove` does not exist.** That one bug-sized gap blocks §13's disable/uninstall, §10's trust classes, and package-scoped cancellation |
 | 4 | **Discovery** | **Stage 1 MERGED (#207)** | Stage 2 candidates, in rough dependency order: richer M-x rows (**protocol change** — `MinibufferPrompt.candidates` is `Vec<String>`; `CompletionPopupRow` already proves the pattern), `Command` gaining title/category/aliases/flags/arg-schema (~147 definition sites), predicate evaluation, help-layer unification, and the help-prefix decision |
-| 5 | Workbench convergence | Partial; **Arc 7 COMPLETE** (Stage 3 merged, #213) | The bottom panel is finished on both frontends and the adopter default is flipped. **The tree primitive is now the arc's successor** — `COHERENCE.md` §14 grades Tree ✗, and DAP's variables view is its next would-be inventor. Build it *before* dired's `i` and the worker tree invent two |
+| 5 | Workbench convergence | Partial; **Arc 7 COMPLETE** (#213) and **the tree primitive is implemented** (PR held) | The bottom panel is finished on both frontends and the adopter default is flipped. The tree primitive has landed on a held PR: §14's Tree moves ✗ → ◐ with the LSP outline as its one adopter. **Next: adoption** — dired's `i`, then DAP's variables view, which is why it was built first |
 | 6 | Config productization | Foundation only | Value provenance, then layering, then adoption migration (**table-valued settings are the hard prerequisite** — `ConfigValue` is four scalars) |
 | 7 | Package lifecycle | Not started | Correctly sequenced after P3 |
 | 8 | **Distribution** | **Stage 1 SHIPPED (v1.1.0, #211)** | Binaries on tag, checksums, machine-checked glibc floor. **Journey step 1 now works and the "invisible until this exists" blocker is lifted.** Next is a *decision* about channels / update / signing, not a queued plan |
@@ -317,18 +347,34 @@ someone forgot.
   `gpu_invocation_acceptance` tests fail on a missing `pmacs-gpu`
   binary. `cargo build --workspace --no-default-features --features
   luajit,crdt` is the invocation that produces both binaries.
-- **A shared `CARGO_TARGET_DIR` makes a local sweep unattributable.**
+- **A shared `CARGO_TARGET_DIR` makes concurrent sweeps unattributable.**
   Every worktree on this machine resolves to the same target directory,
-  so `target/debug/pmacs` is a **shared mutable file**: a concurrent
-  `cargo test --workspace` in another worktree, at default (non-`crdt`)
-  features, overwrites the binary that a running `crdt` sweep is
-  spawning. That produced seven failures in three real-daemon suites
-  during the Stage 2 hardening sweep while the baseline was clean, and
-  the failure text named its own cause — *"start the daemon built with
-  the `crdt` feature"*. Confirmed with `pgrep` and discriminated by
-  re-running from the same tree with a **dedicated**
-  `CARGO_TARGET_DIR`. **Check for other live worktrees before believing
-  a sweep failure, and give the sweep its own target directory.**
+  so `target/debug/pmacs` is a **shared mutable file**: a
+  `cargo test --workspace` at default features in one worktree
+  overwrites the binary a running `crdt` sweep is spawning, and every
+  real-daemon suite then starts the wrong one. **Established once, on
+  2026-08-05, in the Stage 2 hardening sweep** — seven failures across
+  three real-daemon suites against a clean baseline, the failure text
+  naming its own cause (*"start the daemon built with the `crdt`
+  feature"*), `pgrep` confirming the rival build, and a re-run from the
+  same tree with a **dedicated** `CARGO_TARGET_DIR` giving 41/41. The
+  reciprocal case was seen from the other side the same day.
+  **Give a second worktree its own target dir**, check for live
+  worktrees before believing a sweep failure, and treat any red from a
+  sweep that overlapped another build as unattributable rather than as
+  evidence. *(This mechanism does NOT retroactively explain the tree
+  lane's unclassified occurrence — that one's signatures were destroyed
+  before being read, so it has no captured text to match against this
+  one's, and it keeps two non-causal hypotheses. A mechanism
+  established in one occurrence is not evidence about a different
+  occurrence that was never characterized.)*
+- **A local sweep leaks daemons, and they accumulate across days.**
+  `gpu_invocation_acceptance`'s one-command tests leave ~3 orphaned
+  `pmacs --daemon` processes per sweep, reparented to systemd with
+  deleted sockets; 42 were resident at one point, the oldest four days
+  old. They are a rival explanation for any load-sensitive local
+  failure, so **check `pgrep -f "pmacs --daemon"` before trusting a
+  local red**. Lane recorded in `docs/active-work.md`.
 - **A local sweep is blind to whichever feature configuration it does
   not build.** Stage 3's census and every verification sweep ran
   `--features luajit` WITHOUT `crdt`, so no crdt-gated suite was
@@ -2033,7 +2079,20 @@ before trusting them:
   `m6_8_supervisor_reaps_all_children_across_cycles`) are timing-based;
   `editor::composition_overhead_under_ten_percent` is a render-ratio
   microbenchmark that fails ~1/3 even isolated single-threaded (already
-  `cfg!(macos)`-disabled). Vterm Stage 3's merge CI saw one macOS timeout in
+  `cfg!(macos)`-disabled). *(Local measurements, 2026-08-05, 16-core
+  Linux, tree-primitive branch, which could not reach it — its diff
+  versus `main` touches no `src/`, no crate, no manifest. **Two reds,
+  both inside the full `--features crdt` lib run**, at `dispatch
+  overhead` 30.7% and 10.3%; two full-suite runs at the same tips were
+  green; and **10/10 green run alone**, ratios spanning -2.3% to
+  +1.5%. So the in-suite/isolated split has now been seen twice, and
+  the second red cleared the 10% budget by 0.3 points — the threshold
+  is marginal, not comfortably clear. Recorded as measurements, NOT a
+  cause: ten isolated greens establish that the ratio sits nowhere near
+  the threshold when alone, not that in-suite contention is what pushed
+  it over, and two reds against two greens in-suite is intermittence
+  rather than a mechanism. Not a `ci-red-signatures.md` row either —
+  that registry judges red **CI** runs, and these were local.)* Vterm Stage 3's merge CI saw one macOS timeout in
   `real_tui_terminal_smoke_restores_host_after_output_input_resize_scroll_copy_and_bell`;
   the complete failed-job rerun passed. The required-GPU gate also failed once
   in `headless_diag_face_recolors_band_counter_despite_unchanged_text`, then
