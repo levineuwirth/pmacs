@@ -172,9 +172,19 @@ entry — the same defect, caught in review.
   `bfb97c6`. Framing `docs/macos-ci-signal-integrity-framing.md`
   **revision 3**.
 - **PR: <https://github.com/levineuwirth/pmacs/pull/215>** — Stage 1,
-  docs only. Reviewed at head `d33bf4d` with all 14 checks green
-  ([run 30950108477](https://github.com/levineuwirth/pmacs/actions/runs/30950108477));
-  one review round since.
+  docs only. **Checkpoints, newest last** — a lane that records only the
+  *reviewed* head goes stale the moment a review round is pushed, which
+  is how #171 became invisible:
+
+  | head | CI run | result |
+  |---|---|---|
+  | `d33bf4d` | [30950108477](https://github.com/levineuwirth/pmacs/actions/runs/30950108477) | 14/14 green — the reviewed head |
+  | `f76897c` | [30990816890](https://github.com/levineuwirth/pmacs/actions/runs/30990816890) | review round 1 |
+  | *(tip)* | — | review round 2: framing wording, the missing quote, this table |
+
+  **The branch tip is authoritative over any row here.** Verify with
+  `git rev-parse githubsucks/macos-ci-signal-integrity` rather than
+  trusting the newest line.
 - **What Stage 1 ships:** `docs/ci-red-signatures.md`, the single
   authority for judging a red CI run. Rows key on **signature** —
   selector + job/flavor + every required fragment, normalized — so **a

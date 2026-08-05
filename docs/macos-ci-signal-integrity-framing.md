@@ -17,7 +17,10 @@ overstated what the audit found. The a33 audit proves an assertion
 string and a historical claim exist; the m6_8 audit proves a test is
 timing-based.
 **Neither establishes a failure mechanism** — no occurrence was ever
-observed, so nothing is known about how either fails. They become
+**linked or captured**, so nothing is known about how either fails.
+(Not "never observed": someone may well have seen one and not recorded
+it. What is established is the absence of a *record*, which is the only
+thing this audit can speak to.) They become
 **audit notes A1/A2**, not registry rows, and `R`-numbers are reserved
 for signatures with linked evidence.
 
@@ -291,7 +294,7 @@ everything else.
    **No entry survives on reputation, and an audit note is not a weaker
    row — it is a different kind of statement.** A row says "this was
    seen, here is the evidence"; a note says "someone recorded a belief
-   and no occurrence backs it.
+   and no occurrence backs it."
 4. **The rerun rule is replaced**, not softened:
    - a **green rerun after a red** establishes intermittence only; it
      does not establish environmental cause, harmlessness, or retirement;
