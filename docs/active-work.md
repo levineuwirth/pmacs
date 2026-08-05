@@ -161,18 +161,18 @@ form. All four steps ran clean. **The two-argument form still does not
 work** for a remote-only branch (`fatal: invalid reference`), which is
 why every lane below spells out the `-b` form.
 
-## Tree primitive (P5) — IMPLEMENTED and GATED, PR HELD
+## Tree primitive (P5) — PR #217 OPEN, awaiting review
 
-**Held deliberately, not stalled.** The work is complete, green, and
-documented — this lane, the handoff facts, and `COHERENCE.md` §14/§20
-are all in place. It is held pending the user's decision to open the
-PR, not pending further work.
+**PR #217** — https://github.com/levineuwirth/pmacs/pull/217. It was
+held through four framing rounds plus a review round; the hold is over
+and the work is with the user. Full gate suite green at the tip,
+including `PMACS_REQUIRE_GPU=1 -p pmacs-gpu` 221/0.
 
 - **Branch `tree-primitive-framing`**, base `githubsucks/main` @
   `12f2970`. **Pushed and in sync** — held means no PR is open, not
   that the work is stranded locally, so it is portable per the
   handoff's rule. `githubsucks/tree-primitive-framing` is the
-  authoritative tip; `62993e0` was it as of the line above, and any
+  authoritative tip; `d92f0ad` was it as of the line above, and any
   edit to this lane advances past it, which is why the ref and not a
   pinned SHA is the thing to trust. Recover with `git fetch githubsucks
   && git checkout tree-primitive-framing`. Framing
