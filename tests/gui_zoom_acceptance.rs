@@ -122,6 +122,54 @@ fn n_steps_in_then_n_out_returns_exactly() {
     );
 }
 
+/// The round trip holds for a step that is NOT centi-pixel
+/// representable, which is the case the 0.37 test above cannot reach.
+///
+/// The registry accepts any finite number in range — `ConfigKind::Number`
+/// validates finiteness and bounds and nothing else, and `on_change`
+/// cannot veto — so 0.015 is a settable step. Used raw it breaks the
+/// contract: each operation rounds independently, 16.015 rounds up and
+/// 16.005 rounds down, giving 16.00 -> 16.02 -> 16.01.
+///
+/// Quantizing the step at the point of use restores exactness for every
+/// accepted step, not just the representable ones.
+#[test]
+fn the_round_trip_survives_a_step_that_is_not_representable() {
+    let (roots, _) = roots_for("round_trip_unrepresentable");
+    let s = session(&roots);
+    exec(&s, "pmacs.gpu.set_font { size = 16.0 }");
+    exec(&s, r#"pmacs.config.set("ui.gpu-zoom-step", 0.015)"#);
+
+    exec(&s, "pmacs.zoom.increase()");
+    assert_eq!(
+        size(&s),
+        Some(16.02),
+        "the effective step is the quantized one — 0.015 rounds to 0.02,          the same operation `validate_font_size` already applies to sizes"
+    );
+
+    exec(&s, "pmacs.zoom.decrease()");
+    assert_eq!(
+        size(&s),
+        Some(16.0),
+        "and back exactly. Used raw, 0.015 would land on 16.01 here,          because each operation rounds independently"
+    );
+}
+
+/// A base that is not representable still yields a predictable origin,
+/// and every step after the first is exact.
+#[test]
+fn an_unrepresentable_base_is_quantized_too() {
+    let (roots, _) = roots_for("base_quantized");
+    let s = session(&roots);
+    exec(&s, r#"pmacs.config.set("ui.gpu-font-size-base", 20.004)"#);
+    exec(&s, "pmacs.zoom.increase()");
+    assert_eq!(
+        size(&s),
+        Some(21.0),
+        "20.004 quantizes to 20.00, then + 1.0"
+    );
+}
+
 /// An out-of-range step leaves the preference **unmutated** rather than
 /// pinning it to the boundary. Pinning would silently break the round
 /// trip precisely at the edges, where a user steps back and forth most.

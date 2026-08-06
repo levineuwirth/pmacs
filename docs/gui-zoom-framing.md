@@ -1,6 +1,9 @@
 # GUI zoom — QoL Stage 2
 
-**Status: revision 4 — proposed, awaiting approval.** Q#Z1 approved as
+**Status: revision 5 — APPROVED, IMPLEMENTED, in review as PR #220.**
+Revision 5 closes a gap review found in the shipped code: the
+round-trip guarantee in §3.1 needed the step to be **quantized where it
+is used**, because the registry cannot enforce precision (§3.2). Q#Z1 approved as
 **(c)** (configured base, `None` preserved) and Q#Z2 as **additive**.
 Revision 4 fixes a self-contradiction in §5a1: the specified parser
 `^(%d+)$` rejects the newline-terminated format specified beside it.
@@ -122,7 +125,42 @@ command does something coherent, just the opposite of its name.
 than the whole domain can only ever clamp or be rejected, so permitting
 it buys a setting that cannot be used.
 
-**These bounds are what make the round-trip claim true.** "n steps in,
+### 3.2 The bounds are not sufficient on their own
+
+Review found the gap in the implementation: `ConfigKind::Number`
+validates **finiteness and bounds and nothing else**
+(`src/config_registry.rs`), and `on_change` listeners are notified
+*after* a value is stored — they cannot veto. So `0.015` is a
+perfectly settable step, and nothing in the registry can refuse it.
+
+Used raw it breaks the guarantee below, because each operation rounds
+independently and `16.015` and `16.005` round in **opposite
+directions**:
+
+```
+step 0.015:  16.00 -> 16.02 -> 16.01     round trip broken
+step 0.37 :  16.00 -> 16.37 -> 16.00     round trip holds
+```
+
+The original test used `0.37` — centi-pixel representable — so it could
+not reach this.
+
+**Resolution: quantize the step and the base where they are used.** Not
+a workaround: sizes live in integer hundredths end to end, and
+`validate_font_size` already range-checks the original and then rounds
+to the nearest hundredth. Rounding the step is that same operation one
+level up. A step of `0.015` is not a finer step in this domain, it is
+`0.02` written imprecisely.
+
+Enforcing at `set` time was considered and rejected: the registry
+cannot express it, and a validating wrapper is bypassed by a direct
+`pmacs.config.set` — the same seam `autosave` documents about its own
+`interval_ms` wrapper. Quantizing at the point of use cannot be
+bypassed. Both settings say "quantized to hundredths" in their
+`description`, so `describe-setting` shows it.
+
+**These bounds and that quantization are what make the round-trip claim
+true.** "n steps in,
 then n steps out, returns to exactly the starting value" holds because
 the step is centi-pixel representable and addition is exact in that
 domain — *provided no clamp occurred*, which is why §6 requires an
@@ -380,6 +418,10 @@ Revision 1 left all three unspecified. As recommended in review:
 - **The round trip holds only where no clamp occurred**, so the
   out-of-range case asserts the preference is left **unmutated** rather
   than pinned to the boundary.
+- **The round trip holds for a step that is NOT representable** —
+  `0.015`, which the registry accepts and which the original `0.37`
+  case could not reach. Bitten: with the raw value it lands on `16.01`
+  instead of `16.00` (§3.2).
 - **Zoom from the untouched state uses the configured base**, not a
   hardcoded 16.0 — bitten by changing the base and asserting the first
   step follows it.

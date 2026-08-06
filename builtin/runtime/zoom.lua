@@ -29,7 +29,7 @@ local STATE_KEY = "gpu-zoom"
 
 pmacs.config.define {
   name = "ui.gpu-font-size-base",
-  description = "Logical-pixel size the first zoom step starts from when no font size is set.",
+  description = "Logical-pixel size the first zoom step starts from when no font size is set (quantized to hundredths).",
   type = "number",
   default = 16.0,
   min = MIN_PX,
@@ -46,7 +46,7 @@ pmacs.config.define {
 -- only ever clamp.
 pmacs.config.define {
   name = "ui.gpu-zoom-step",
-  description = "Logical pixels added or removed per zoom step.",
+  description = "Logical pixels added or removed per zoom step (quantized to hundredths).",
   type = "number",
   default = 1.0,
   min = 0.01,
@@ -59,6 +59,36 @@ pmacs.config.define {
 -- n out" is exact addition rather than float drift.
 local function quantize(px)
   return math.floor(px * 100 + 0.5) / 100
+end
+
+-- The configured step and base, QUANTIZED.
+--
+-- The registry cannot enforce this: `ConfigKind::Number` validates
+-- finiteness and bounds and nothing else (src/config_registry.rs), and
+-- `on_change` listeners are notified after the fact --- they cannot
+-- veto. A wrapper function would not help either, since a direct
+-- `pmacs.config.set` bypasses it (the same seam `autosave` documents).
+--
+-- So quantize where the value is USED. A step of 0.015 is not a
+-- meaningful step in this domain: sizes live in integer hundredths of a
+-- logical pixel end to end, and `validate_font_size` already
+-- range-checks the original and then rounds to the nearest hundredth.
+-- Rounding the step is the same operation applied one level up, not a
+-- workaround for one.
+--
+-- It also RESTORES the round-trip contract, which a raw step breaks:
+-- with 0.015 the sequence is 16.00 -> 16.02 -> 16.01, because each
+-- operation rounds independently and 16.015 and 16.005 round in
+-- opposite directions. Quantizing first makes every step exact
+-- addition in the quantized domain, so n in and n out returns to the
+-- starting value for ANY accepted step, not only for the ones that
+-- happened to be representable.
+local function effective_step()
+  return quantize(pmacs.config.get("ui.gpu-zoom-step"))
+end
+
+local function effective_base()
+  return quantize(pmacs.config.get("ui.gpu-font-size-base"))
 end
 
 -- The current size in logical px, or nil when the preference is unset.
@@ -92,7 +122,7 @@ end
 -- Step by `delta` logical px. Returns the new size, or nil plus a
 -- reason.
 local function step(delta)
-  local base = current_px() or pmacs.config.get("ui.gpu-font-size-base")
+  local base = current_px() or effective_base()
   local want = quantize(base + delta)
   if want < MIN_PX or want > MAX_PX then
     -- Reject the WHOLE step rather than pinning to the boundary. This
@@ -111,11 +141,11 @@ end
 -- Named `increase`/`decrease` rather than `in`/`out`: `in` is a Lua
 -- keyword, and `in_` reads like a workaround for one.
 function pmacs.zoom.increase()
-  return step(pmacs.config.get("ui.gpu-zoom-step"))
+  return step(effective_step())
 end
 
 function pmacs.zoom.decrease()
-  return step(-pmacs.config.get("ui.gpu-zoom-step"))
+  return step(-effective_step())
 end
 
 -- Reset returns the preference to NIL --- the frontend's own default ---
