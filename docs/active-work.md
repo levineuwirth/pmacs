@@ -296,10 +296,12 @@ change to *when* `needs_full_grid` is set — the producer's triggers
 were verified correct, along with per-frame geometry sync and
 `view_top` reconciliation on shrink.
 
-## GUI zoom (QoL Stage 2) — IN FLIGHT
+## GUI zoom (QoL Stage 2) — PR #220 OPEN
 
-**Written with the lane's first commit, before the PR exists** — the
-standing correction from #171 and #215.
+**PR #220** — https://github.com/levineuwirth/pmacs/pull/220. **Written
+with the lane's first commit, before the PR existed** — the standing
+correction from #171 and #215 — so the row below was filled in rather
+than invented.
 
 - **Branch `gui-zoom`**, base `githubsucks/main` @ `218d2e7` (the #219
   merge). `githubsucks/gui-zoom` is the authoritative tip.
