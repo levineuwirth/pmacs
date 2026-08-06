@@ -1,8 +1,8 @@
 # Long lines — QoL Stage 3
 
-**Status: revision 17 — branched as `long-lines`; Q#LL1–LL7 settled;
-Q#LL8 awaiting approval (aggregate abandoned for a byte percentage).
-Not yet implemented.**
+**Status: revision 18 — branched as `long-lines`; Q#LL1–LL7 settled;
+Q#LL8 awaiting approval, and §5d.6 (where the classifier lives) needs a
+decision. Not yet implemented.**
 
 **Revision 2** corrected a load-bearing error in revision 1: it claimed
 both frontends render from the same `CellGrid`. They do not — the GPU
@@ -250,7 +250,7 @@ and additive `sub_row`: self-validating over maintained. And *content*
 width, not window width, because the gutter changes at the line-count
 digit boundary.
 
-**Revision 17 — the current one.** Review of `b95506f` falsified the
+**Revision 17** — review of `b95506f` falsified the
 premise revision 16 gave the GPU: it said cosmic-text "already knows
 each line's visual height". It does not. The GPU shapes **only the
 viewport slice** — `rebuild_code_slice` feeds cosmic-text
@@ -273,8 +273,35 @@ actually read.
 unnecessary.** That correction was right for the design as it stood;
 the design moved under it. §5d.2 is marked superseded rather than
 deleted, so a later reader can tell "the key was fixed" from "there is
-no key". §5d.5 adds the **large-file guard witnesses**, because "no
+no key". §5d.7 adds the **large-file guard witnesses**, because "no
 whole-document work happens" must be enforced, not merely intended.
+
+**Revision 18 — the current one.** Review of `d6b5285` found the
+interface contradiction the byte fallback left behind. Revision 16 had
+claimed the formatter could keep its signature and change only its
+arguments; it cannot. **Every branch of `format_scroll_indicator`
+derives from `total_lines`** — including `Bot` via
+`view_top + visible >= total_lines`, which with a byte total would
+compare **rows against bytes** — and any stand-in small enough to pass
+restores the false `All`. "Local predicates" is not something that
+signature can express, because it has no parameter for them.
+
+**Resolved by not asking it to (§5d.5).** `truncate` calls the existing
+formatter **untouched**, so its output is byte-identical *by
+construction* and every existing formatter test stays valid; `wrap`
+calls a new `classify(first_visible, last_visible, byte_pos, byte_len)`
+returning `All`/`Top`/`Bot`/`Percent`, which never sees a row count —
+so the unit mixing is not avoided but **unrepresentable**. Trying to
+serve two genuinely different contracts from one four-count signature
+was the mistake; it could only do so by making units implicit, which is
+how the contradiction arose.
+
+**§5d.6 is a new open question**: `pmacs-gpu` depends on
+`pmacs-protocol` only, never on the `pmacs` lib, so the duplication is
+**structural**. Duplicating the classifier preserves exactly the
+condition that produced §5d.3's defect; sharing it via
+`pmacs-protocol` makes agreement structural but widens that crate
+toward presentation — a §16 layering call I am not taking alone.
 
 Drafted while GitHub Actions was in a major outage and #220 could not
 merge. Nothing here depends on #220 landing; the two lanes touch no
@@ -1267,14 +1294,10 @@ The GPU's `visible` argument is wrong under `wrap` for the same reason:
 `estimated_visible_lines(...)` counts **lines**, and visible *rows* is
 what the indicator needs once one line owns several.
 
-**Both copies keep their signature and semantics.** The formatter is a
-pure function over counts and is correct as written; what changes is
-**what the callers pass** --- visual rows rather than source lines, and
-visible rows rather than visible lines. That keeps every existing
-formatter test valid, including the GPU's
-`format_scroll_indicator(0, 10, 1, 0) == "All"` (`:13091`), which
-correctly pins line-space behavior and must **not** silently change
-meaning.
+**Revision 16 said both copies could keep their signature and change
+only what callers pass. That is not sufficient, and review of
+`d6b5285` was right to reject it.** See §5d.5 --- every branch of the
+formatter derives from `total_lines`, which revision 17 removed.
 
 **Revision 16 said the GPU could derive its total locally because
 "cosmic-text already knows each line's visual height". That is false**,
@@ -1329,7 +1352,88 @@ fold stage is unstarted), so this is currently a single-frontend
 nuance, and it matches Emacs. It should be revisited **by the GPU
 folding lane**, not by this one.
 
-### 5d.5 The large-file guard
+### 5d.5 The formatter cannot express the new contract --- so it is not asked to
+
+**The contradiction, stated plainly.** `format_scroll_indicator`
+(`src/editor.rs:5509`) derives **every** branch from `total_lines`:
+
+```rust
+if total_lines <= 1 { return "All" }
+if visible >= total_lines { return "All" }
+if view_top == 0 { return "Top" }
+if view_top + visible >= total_lines { return "Bot" }
+let pct = (cursor_row + 1) * 100 / total_lines;
+```
+
+Revision 17 removed the total. So:
+
+- **Passing byte counts mixes units.** `view_top` and `visible` are
+  rows; a byte `total_lines` makes `view_top + visible >= total_lines`
+  compare rows against bytes. It would return plausible strings and be
+  meaningless.
+- **Passing a fake total restores the bug.** Any stand-in that is
+  `<= 1`, or `<= visible`, returns the false `All` this section exists
+  to remove.
+
+"Local predicates" is therefore not something the retained formatter
+can evaluate --- it has no parameter for them.
+
+**Resolution: `truncate` keeps the existing formatter untouched;
+`wrap` gets a new classifier.**
+
+This is §5b.5's identity-case strategy applied to the indicator itself,
+and it is stronger than adapting one function to two contracts:
+
+- **`truncate` calls `format_scroll_indicator` exactly as today**, with
+  the same arguments in the same units. Byte-identical output is
+  guaranteed **by construction**, not by a test --- and every existing
+  formatter test stays valid unchanged, including the GPU's
+  `format_scroll_indicator(0, 10, 1, 0) == "All"` (`:13091`), which
+  correctly pins line-space behavior.
+- **`wrap` calls a new classifier** that never sees a row total:
+
+  ```text
+  enum ScrollPosition { All, Top, Bot, Percent(u8) }
+
+  classify(first_visible: bool,   // is the buffer's first row on screen?
+           last_visible: bool,    // is the buffer's last row on screen?
+           byte_pos: u64,         // cursor byte
+           byte_len: u64) -> ScrollPosition
+  ```
+
+  `All = first && last`; `Top = first && !last`; `Bot = last && !first`;
+  otherwise `Percent` from bytes. **No count of rows enters it**, so the
+  unit mixing above is not merely avoided, it is unrepresentable.
+
+Attempting one signature for both modes was the actual mistake: the two
+contracts genuinely differ, and a shared four-count signature can only
+serve them by making units implicit --- which is how this contradiction
+arose.
+
+### 5d.6 Where the classifier lives --- **OPEN, needs a decision**
+
+`pmacs-gpu` depends on **`pmacs-protocol` only**, never on the `pmacs`
+lib (`pmacs-gpu/Cargo.toml:65`). So `format_scroll_indicator` is
+duplicated **structurally**, not by oversight, and a new classifier
+faces the same fork:
+
+- **(a) Duplicate it too.** Matches what is there, adds nothing to any
+  crate's remit --- and preserves exactly the condition that produced
+  §5d.3's defect, where one copy was fixed and the other was not.
+- **(b) Put it in `pmacs-protocol`.** The only crate both sides
+  already share. Agreement becomes **structural rather than
+  maintained** --- the principle that chose byte-anchoring, additive
+  `sub_row`, and a content-derived cache key.
+
+**I lean (b) and will not take it unilaterally**, because it widens
+`pmacs-protocol` from wire vocabulary toward presentation, which is a
+`COHERENCE.md` §16 layering question and not this lane's to settle
+alone. The narrow version --- share the `ScrollPosition` enum and
+`classify`, leave the string rendering per-frontend --- keeps the
+protocol crate holding a *decision type* rather than presentation, and
+`panel.rs` is arguably precedent for that.
+
+### 5d.7 The large-file guard
 
 Because the whole point is that no whole-document work happens, that
 must be a **witness, not an intention**:
@@ -1352,17 +1456,28 @@ two call sites must change, and nothing in the type system connects
 them. That is the same shape as Q#LL7's three resend triggers: a
 correct fix in one place that looks complete.
 
-### 5d.6 Verification
+### 5d.8 Verification
 
 - **The reported case, as a direct witness, IN BOTH FRONTENDS:** one
   source line, viewport shorter than its wrapped height, mode `wrap`
   --- the indicator must **not** be `All`. This fails against revision
   14's design in the TUI and revision 15's in the GPU, which is what
   makes it worth writing first, twice.
-- **The large-file guards of §5d.5**, in both frontends --- an
+- **The large-file guards of §5d.7**, in both frontends --- an
   indicator paint must leave the GPU's `view_range` / `shaped_top`
   untouched, and must not lay out beyond the viewport in the TUI.
 - **`open_100mb_under_200ms` (M1) with `wrap` as the default mode.**
+- **A `truncate` output-identity witness against the retained
+  formatter** (§5d.5): same buffer, same viewport, byte-identical
+  string. Cheap, and it is the assertion that the identity case is real
+  rather than asserted.
+- **Classifier unit-safety**, which is what the old signature could not
+  give: `classify` takes two booleans and a byte pair, so a
+  rows-versus-bytes comparison is unrepresentable. Witness the four
+  outcomes directly --- `first && last` is `All`, `first && !last` is
+  `Top`, `last && !first` is `Bot`, neither is `Percent` --- including
+  the one-line-wrapped case, where `first && !last` must yield `Top`
+  and **not** `All`.
 - The fold witnesses revision 16 asked for are **withdrawn with the
   cache they guarded** (§5d.2, §5d.4). What survives from that round is
   the `truncate` control below, which still pins the identity case.

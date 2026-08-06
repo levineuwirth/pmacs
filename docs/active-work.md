@@ -306,7 +306,7 @@ records. Recover: `git fetch githubsucks && git checkout long-lines`.
 **This block was written with the lane's first commit, before any PR
 exists** — the standing correction from #171, #215 and #220.
 
-- **Framing `docs/long-lines-framing.md` revision 17.** Q#LL1-LL7
+- **Framing `docs/long-lines-framing.md` revision 18.** Q#LL1-LL7
   settled; **Q#LL8 not yet approved** --- implementation is blocked on
   it, because it changes what gets built rather than how.
 - **Independent of #220.** Stage 2 (GUI zoom) and Stage 3 share no
@@ -378,6 +378,17 @@ for the user to express a preference in either.
   predicates. This retires the cache *and* the fold-key fix above,
   which is kept in the framing marked superseded so a reader can tell
   "the key was fixed" from "there is no key".
+
+  **Then the retained formatter turned out unable to express the new
+  contract (revision 18).** Every branch of `format_scroll_indicator`
+  derives from `total_lines`, so a byte total would compare rows
+  against bytes and a fake total restores the false `All`. Resolved by
+  keeping the existing formatter **untouched for `truncate`** — output
+  identical by construction — and adding a `classify(first_visible,
+  last_visible, byte_pos, byte_len)` for `wrap` that never sees a row
+  count. **Open: where the classifier lives.** `pmacs-gpu` depends on
+  `pmacs-protocol` only, so the duplication is structural; sharing it
+  is a §16 layering call.
 
 ### The two decisions most likely to be questioned later
 
