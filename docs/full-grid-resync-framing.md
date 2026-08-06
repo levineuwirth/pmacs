@@ -1,6 +1,9 @@
 # Honoring `full_grid` — QoL Stage 1
 
-**Status: revision 2 — proposed, awaiting approval.** Reported from daily-driver use:
+**Status: revision 2 — APPROVED, IMPLEMENTED, in review as PR #219.**
+Q#FG1 was decided **A**: the sole grid consumer honors the flag by
+resetting style, clearing, then applying spans. Reported from
+daily-driver use:
 zooming a terminal with `Ctrl +/-` leaves the TUI visibly broken —
 stale glyphs where content should be blank, and dead regions where
 content should be.
@@ -180,7 +183,15 @@ is the better answer on the merits:
 - A makes the protocol's documented sentence true, rather than working
   around it.
 
-**Q#FG1 is the one decision that needs approval before implementation.**
+**Q#FG1 — DECIDED: A**, on approval. The consumer honors the flag;
+`full_grid` keeps its sparse-resync meaning and the producer is
+unchanged.
+
+*Implementation note, recorded because it confirmed the reasoning
+rather than merely following it:* the fix is `emit_cell_delta` beside
+`emit_span` and `emit_status_overlay` — no struct change, no generic
+parameter, no new pattern. B would have touched the producer, changed
+what every resync costs on the wire, and left the flag unread.
 
 ---
 
@@ -230,7 +241,29 @@ new pattern.
    blank.
 3. **`full_grid: false` emits neither**, whatever the spans are.
 
-### 5.2 PTY acceptance
+### 5.1a What implementation changed about §5.2
+
+**The time-based settle described below does not work**, and the
+framing said to build it. A settled pmacs screen emits per-frame bytes
+indefinitely, so "output stopped growing" never becomes true — the wait
+simply runs to its deadline. The vterm suite already recorded the same
+behaviour ("a settled screen emits empty diffs forever"); this framing
+did not connect it.
+
+The shipped witness anchors its mark to **content** instead: just past
+the first painted byte of the fixture. That excludes both of startup's
+clears *by construction* rather than by timing — `Frontend::new` clears
+before any frame exists, and the first frame is itself a resync whose
+clear precedes its own spans — so no timing assumption survives in the
+test at all. It is strictly stronger than what §5.2 asked for.
+
+One further correction found by running it: the repaint-ordering
+assertion must be scoped to **after the new clear**. The fixture
+repeats its marker, so the suffix opens with the tail of startup's own
+frame, and an unscoped comparison measures the clear against paints it
+was never meant to precede.
+
+### 5.2 PTY acceptance — as originally framed
 
 `tests/common/pty.rs:42` exposes `resize(rows, cols)`, so the real
 scenario is reachable: spawn pmacs, put distinctive content on screen,
