@@ -2236,6 +2236,50 @@ round-trip cannot detect a discriminant shift.
 
 ## 5. Hard-won ops lessons
 
+- **An optional field that a data structure's shape depends on is not
+  optional.** `listview` rows may omit `item`, so
+  `line_to_item[n] = row.item` leaves that map **sparse** — and
+  `seat_cursor` took `#` of it, which for an all-display-only tree is
+  0, stranding the cursor on the header where TAB finds no row. The
+  whole existing suite missed it because **every test supplied
+  `item`**: the field was optional in the API and mandatory in
+  practice, and nothing in a passing run distinguishes those. When a
+  field is optional, write one test that omits it — the sparse-table
+  `#` is a Lua-specific trap, but "optional in the signature, required
+  by the shape" is not.
+- **A contract two mechanisms must honour is only as strong as the
+  weaker mechanism.** `listview` ids were documented "opaque, compared
+  by equality". Selection compares with `==`, honouring `__eq`; collapse
+  state stores ids as **table keys**, and Lua indexes tables by raw
+  identity, consulting no metamethod. A table id satisfied one half and
+  silently failed the other — a refresh would restore the cursor and
+  lose the fold, surfacing arbitrarily later with nothing pointing at
+  the id. **Narrow the contract to what both halves can honour and
+  enforce it where the data enters**, rather than generalizing the
+  strong half to match the weak one: equality-aware collapse lookup
+  would have turned a linear render quadratic to support a key type no
+  consumer wanted. The same pass found the contract said "identity"
+  while accepting duplicates (every lookup takes the first match, so
+  selecting the later row toggles the earlier) and "number" while
+  accepting NaN (a number Lua refuses as a key). **Enforcement and
+  documentation drift apart silently; only the enforcement is real.**
+- **Match a red by its required fragment, never by test name or
+  resemblance.** An occurrence scan on 2026-08-06 nearly filed `main`
+  run 30710662474 as **R3** — same test, same `EPERM`, same
+  `measured_group=unobservable(ESRCH…)`. R3 requires `leader=live`;
+  that run reads `leader=exited(signal SIGUSR1)`, which is **R2's**
+  exact fragment, four days before R2 was retired. The two rows are a
+  live possible **product defect** and a fixed **test race** in the
+  same test, and only the fragment separates them. A second red in the
+  same scan was filed as **R5** rather than folded into R1 for the same
+  reason: both are supersede under a deadline on macOS, and **sharing a
+  subject is not sharing a signature**.
+- **A retired row's recurrence rule is about time, not just text.** A
+  red matching a retired row falsifies the retirement **only if it
+  postdates it**. An earlier occurrence found later corroborates the
+  row instead — and can still add something: 30710662474 is macOS
+  *luajit* where R2's evidence was *lua54*, so the mechanism was never
+  flavor-specific.
 - **A gate summary assembled through a pipe can report success over a
   failure.** `cmd | tail -2` returns **`tail`'s** exit status, not
   `cmd`'s — in `fish` and `bash` alike — so a chain of

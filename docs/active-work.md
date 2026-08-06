@@ -180,87 +180,38 @@ form. All four steps ran clean. **The two-argument form still does not
 work** for a remote-only branch (`fatal: invalid reference`), which is
 why every lane below spells out the `-b` form.
 
-## Tree primitive (P5) — PR #217 OPEN, awaiting review
+## Tree primitive (P5) — MERGED as #217; adoption is the open work
 
-**PR #217** — https://github.com/levineuwirth/pmacs/pull/217. It was
-held through four framing rounds plus a review round; the hold is over
-and the work is with the user. Full gate suite green at the tip,
-including `PMACS_REQUIRE_GPU=1 -p pmacs-gpu` 221/0.
+**The lane is gone, not the work.** Rule 4 removes a lane after merge,
+and the primitive is merged: `listview` rows take optional `depth` and
+`id`, collapse is primitive-owned, selection re-seats by id, and the
+LSP outline is the one adopter. `COHERENCE.md` §14 is ◐ and §20 says
+adoption rather than construction, which is where the remaining work is
+recorded — **not here**, because none of it is in flight.
 
-- **Branch `tree-primitive-framing`**, base `githubsucks/main` @
-  `12f2970`. **Pushed and in sync** — held means no PR is open, not
-  that the work is stranded locally, so it is portable per the
-  handoff's rule. `githubsucks/tree-primitive-framing` is the
-  authoritative tip; `d92f0ad` was it as of the line above, and any
-  edit to this lane advances past it, which is why the ref and not a
-  pinned SHA is the thing to trust. Recover with `git fetch githubsucks
-  && git checkout tree-primitive-framing`. Framing
-  `docs/tree-primitive-framing.md` **revision 5** — approved after four
-  review rounds, with Q#TR1–TR4 decided.
-- **The substantive arc** (not an exhaustive log — read `git log
-  12f2970..githubsucks/tree-primitive-framing` for that): `61b1062`
-  framing through `5186bfd` rev 4, which carried the `COHERENCE.md` §14
-  call-site correction; `49a42ec` the primitive; `8f64c3b`
-  byte-identity coverage plus the verification record; `38e94dc` this
-  lane, §14's ✗ → ◐ and the handoff facts; `c59de95` the review round —
-  moving-selection witness, flat-panel TAB delegation, §20's build →
-  adopt correction.
+What review found is worth carrying forward, since all four were
+invisible to a passing suite:
 
-### What it ships
+- **A selection test that toggled the root proved nothing.** The root
+  sits on line 1 before and after collapsing, so it passed unchanged
+  under the line-keyed re-seating that id-keyed re-seating replaced.
+  A moving-node witness (`tr_4`) was the fix.
+- **TAB was bound on every listview**, so flat panels lost their
+  fall-through to the global binding and the Q#P3 read-only intercept.
+  Delegation restored it.
+- **`item` was effectively required.** `line_to_item` is sparse when a
+  row omits the optional `item`, and `seat_cursor` took `#` of it — a
+  display-only tree stranded the cursor on the header. Every existing
+  test supplied `item`, so none could reach it.
+- **"Opaque, compared by equality" was two contracts.** Selection uses
+  `==`; collapse keys a table, which consults no `__eq`. Narrowed to
+  string-or-number, and with it uniqueness and not-NaN, all enforced
+  where rows enter.
 
-`listview` gains **optional** `depth` and `id` on rows; absent, a row
-behaves exactly as before, which is what leaves the flat consumers
-untouched. Collapse state is **primitive-owned**, keyed by
-consumer-supplied id. Selection is re-seated **by id, not by line**.
-`TAB` toggles; a leaf reports rather than silently doing nothing.
-
-**The observation that made it cheap:** collapse only ever *hides* rows
-and never changes a surviving row's depth, and consumers emit parents
-before children, so descendants are a **contiguous run**. Folding is
-therefore **local projection state, not a refresh protocol** — the
-primitive re-renders from its own array without calling the consumer,
-which is why the anchor consumer works at all: **the outline has no
-`on_refresh`**.
-
-The LSP outline adopts, supplying `depth` and `id = line:col`; its
-`text` stays consumer-rendered per Q#TR4.
-
-### Verification
-
-| gate | result |
-|---|---|
-| luajit sweep | **3453 / 0** (= `main` 3450 + 3 listview tests) |
-| crdt sweep, isolated ×2 | **3722 / 0** (= `main` 3718 + 4 tests) |
-| `listview_acceptance` | 22 / 22 |
-| `m4_acceptance` | 150 / 150 (basedpyright skipped) |
-| `--lib` | 1896 / 0 |
-| fmt · diff-check · clippy ±crdt | pass |
-
-Both behavioural claims are **bite-verified**: disabling the ancestor
-filter fails the fold test; an unconditional gutter fails the
-byte-identity test.
-
-**One unclassified occurrence** — the first crdt sweep reported 7
-failures whose signatures were destroyed before being read. It is
-recorded in the framing's §6a, **not** as a row in
-`docs/ci-red-signatures.md`, because it has no normalized signature to
-match. Two non-causal hypotheses are recorded there; neither is testable
-now.
-
-### Recovery, once pushed
-
-```sh
-git fetch githubsucks
-git worktree add ../pmacs-tree \
-  -b tree-primitive-framing \
-  githubsucks/tree-primitive-framing
-```
-
-### Not in scope
-
-dired's `i` insert-subdirectory (the second consumer, its own stage);
-the other four §14 consumers; DAP's variables view; giving the outline a
-refresh, which is LSP request-lifecycle work.
+The last two are the durable lesson and it is in the handoff: **an
+optional field that a data structure's shape depends on is not
+optional**, and a contract that two mechanisms must honour is only as
+strong as the weaker mechanism.
 
 ## Leaked daemons from `gpu_invocation_acceptance` — NEEDS A LANE
 
@@ -301,163 +252,74 @@ reap, or does the daemon fail to exit when its socket disappears? Those
 have different fixes, and the second would be a product defect rather
 than a test one.
 
-## macOS CI signal integrity — STAGES 1 AND 2 MERGED (#215, #216)
+## macOS CI signal integrity — ARC RETIRED (#215, #216); residue re-homed
 
-**This file requires a lane for every open PR** (see the #171/#174 note
-above: an open PR is exactly the volatile work this file records, and
-#171 drifted 153 commits while invisible here). #215 had none until
-review caught it; **Stage 2's lane is written with its first commit**,
-which is where the same defect stops recurring.
+**Both stages merged and the arc is done**, so rule 4 removes the lane.
+Stage 1 built `docs/ci-red-signatures.md` and audited the incumbents;
+Stage 2 retired **R2** and **R4** with discriminating witnesses. The
+framing `docs/macos-ci-signal-integrity-framing.md` and the registry
+both survive the lane — the registry is the durable artifact this arc
+existed to produce.
 
-Framing `docs/macos-ci-signal-integrity-framing.md` **revision 3**,
-already approved. Stage 1 is acceptance 1–5; Stage 2 is acceptance 6–9.
+**Retiring it required re-homing the residue first**, which is why this
+did not happen at merge. A lane removed while it still owns undone work
+does not close that work, it hides it. What it owned:
 
-### Stage 2 — hardening, MERGED as #216
+- **R1** (supersede cancellation budget, *measurement design*) → the
+  **async-runtime lane**, below. Its retirement condition is Q#MCI3:
+  replace or justify the measurement. Widening the budget would make it
+  pass and measure nothing more.
+- **R3** (live-leader EPERM, **UNRESOLVED — possible product defect**)
+  → the **reap-ledger lane**, below, which already parks every
+  disposition change pending exactly this question.
+- **R5** and **R6**, added 2026-08-06 and neither diagnosed → the
+  async-runtime lane and a **readiness-helper audit** respectively.
 
-- **Branch `ci-signal-hardening`**, worktree `../pmacs-ci-signals`, base
-  `githubsucks/main` @ `12f2970` (the #215 merge). Opened from an
-  **isolated worktree** because the shared checkout was on another
-  lane's branch with clean-but-foreign state; never switch it.
-- **PR: <https://github.com/levineuwirth/pmacs/pull/216>, MERGED**
-  2026-08-05 as `2657568`, all 14 checks green at head `8ab20b5`. This
-  block was written *with* the work, before the PR existed, so the row
-  below was filled in rather than invented. **Checkpoints, newest
-  last**, because a lane that records only one head goes stale on the
-  next push:
+### The rows are the state now, not this block
 
-  | head | CI run | result |
-  |---|---|---|
-  | `2d9c678` | [31003333581](https://github.com/levineuwirth/pmacs/actions/runs/31003333581) | **14/14 green** — the opening head, and the last one carrying code. Includes **both macOS legs**: R2's job (macOS / lua54) and R4's (macOS / luajit) |
-  | `668fc72` | [31006160334](https://github.com/levineuwirth/pmacs/actions/runs/31006160334) | **14/14 green** — this ledger block, docs only |
-  | *(tip)* | — | the checkpoint row for `668fc72`; a table can never carry the head that adds it |
+An occurrence scan on 2026-08-06 (last 25 `main` runs: 23 green, 2 red)
+turned up two things worth recording as method rather than as trivia.
 
-  **The branch tip is authoritative over any row here.** Verify with
-  `git rev-parse githubsucks/ci-signal-hardening` rather than trusting
-  the newest line.
-- **What it ships — exactly two fixes, both at the readiness
-  predicate**, plus four witnesses:
-  - **R4.** `wait_for_file` takes the **expected bytes** and waits while
-    the file holds a *strict prefix* of them, so a zero-byte or torn
-    read is no longer a readiness signal. Four callers updated; **the
-    identical mechanism in `wait_for_published_file`**, one function
-    away in the same suite, is fixed with it — leaving it would have let
-    R4 recur under a different selector.
-  - **R2.** The USR1 fixture publishes a marker **after** `trap '' USR1`
-    and the test waits for that marker's **content**; `exec` replaces
-    the forked `sleep`, so the group holds one process and the ignored
-    disposition survives by POSIX rather than by a shell's
-    fork-suppression optimization.
-- **The witnesses were verified by REVERTING each fix**, not by
-  reasoning. With the old predicate restored,
-  `wait_for_file_does_not_return_a_zero_byte_readiness_file` fails
-  `left: []`, `right: [49]` — **R4's two required fragments, verbatim**
-  — and with the readiness wait removed,
-  `usr1_readiness_waits_for_the_trap_not_for_the_spawn` fails
-  `left: Some("SIGUSR1")`, `right: Some("SIGTERM")`.
-- **R1 is NOT touched** — referred to the async-runtime lane (Q#MCI3);
-  widening its budget would make it pass and measure nothing more.
-  **R3 is NOT touched** and stays **unresolved**; it belongs to the
-  process-signal / reap-ledger lanes and nothing here may make it look
-  otherwise.
-- **Repetition sets, not single runs:** the two `--lib` process tests
-  **15/15**, the whole `vterm_stage2_acceptance` suite (9 tests, default
-  parallelism) **15/15**.
-- **Verification:** fmt, diff-check, clippy with and without `crdt`,
-  `--lib` 1897, `--lib --features crdt` 2082, vterm Stage 2 9, m4 149,
-  required GPU 221. Each `--lib` figure is exactly one above #215's
-  (1896 / 2081): the R2 witness.
-- **Full serialized sweep in BOTH feature configurations, baseline
-  first** — the blindness handoff §5 warns about, and the baseline is
-  what makes any failure attributable:
+**A signature very nearly got misfiled by theme.** `main` run
+30710662474 is the same test as R3, with `EPERM` and
+`measured_group=unobservable(ESRCH…)` — and R3 requires `leader=live`
+where that run reads `leader=exited(signal SIGUSR1)`, which is R2's
+exact fragment. Read by test name and shared fragments it looks like
+R3; read by required fragment it is R2, four days before R2's
+retirement, on the *other* macOS flavor. **Attaching a live unresolved
+product-defect row to an occurrence of a retired test race is precisely
+the error the exact-fragment rule prevents**, and it was caught by
+checking the fragment rather than the resemblance.
 
-  | tree | config | suites | passed | failed |
-  |---|---|---|---|---|
-  | `main` @ `12f2970` | luajit | 108 | 3691 | 0 |
-  | `main` @ `12f2970` | luajit,crdt | 108 | 3959 | 0 |
-  | branch | luajit | 108 | 3695 | 0 |
-  | branch | luajit,crdt | 108 | 3962 | **1 — see below** |
+**A second red matched nothing at all** and became R5, rather than
+being folded into R1 because both involve supersede under a deadline on
+macOS. Sharing a subject is not sharing a signature.
 
-  **Every total is exactly +4 on its baseline** — 3691→3695 and
-  3959→3963 (3962 passed plus the one failure). Four witnesses, and
-  nothing else moved.
-- **The one branch-`crdt` failure is recorded rather than rerun away.**
-  `lsp_dispatch_seams_acceptance
-  acc33_apply_edit_still_handled_with_a_response_subscriber` —
-  *"the executeCommand response reaches its one-shot, left: 0, right:
-  1"*. It is a **new incident** by the registry's rules (no row's
-  fragments match), and it is **not attributable to this branch**, on a
-  structural argument rather than on the green rerun:
-  - the only Rust change is inside `#[cfg(test)] mod tests` in
-    `src/process.rs`, which is compiled **only into the lib test
-    target** — an integration-test binary links the non-`cfg(test)`
-    lib, so this suite's artifact is what `main` builds;
-  - the other change is a different test binary entirely;
-  - CI's **`Test (crdt)` job passed at this same head**, and it runs
-    this suite;
-  - it occurred while a **second full workspace sweep** was running
-    concurrently in another worktree, against a deadline-based fake-LSP
-    one-shot;
-  - the suite then ran **15/15 as a repetition set** — which, per this
-    project's own rerun rule, establishes **intermittence only** and is
-    the weakest of these five points, not the argument.
+### Async-runtime lane — NOT STARTED, owns R1 and R5
 
-  **No registry row is opened**, because the registry judges red **CI**
-  runs and keys on linked CI occurrences; this is a local observation
-  under known contention. If it appears in CI, it is a first recorded
-  occurrence and gets a row then.
-- **A SHARED `CARGO_TARGET_DIR` MAKES A LOCAL SWEEP UNATTRIBUTABLE, and
-  it bit this lane.** The branch `crdt` sweep first reported 7 failures
-  in three suites while the baseline `crdt` sweep was clean. All three
-  spawn the **real `pmacs` binary out of the target directory**, and the
-  failure text named its own cause: *"daemon does not advertise required
-  capabilities … start the daemon built with the `crdt` feature"*. A
-  concurrent `cargo test --workspace` in a **different worktree**, with
-  default (non-`crdt`) features and the same `CARGO_TARGET_DIR`, had
-  overwritten `target/debug/pmacs` mid-sweep. Confirmed by `pgrep` while
-  it was happening, and discriminated by re-running the same three
-  suites from the same tree with a **dedicated** `CARGO_TARGET_DIR`:
-  41/41 green, then the whole config swept clean the same way. **Give a
-  sweep its own target directory whenever another worktree is live** —
-  a feature-flavored binary is a shared mutable file, not a build
-  artifact private to your invocation.
+No branch, no framing. Owns **R1** (Q#MCI3: the 50ms budget starts
+before the second dispatch and is consumed by the test's own pump, so
+it measures when the test was scheduled) and **R5**
+(`stream_supersede_delivers_cancelled_to_on_close`, `async pump
+deadline exceeded`, undiagnosed). Filed together because both are the
+async runtime under a deadline; they are **not** assumed to share a
+cause.
 
-Recovery from a clean checkout:
+### Readiness-helper audit — NOT STARTED, owns R6
 
-```sh
-git fetch githubsucks
-git worktree add ../pmacs-ci-signals \
-  -b ci-signal-hardening \
-  githubsucks/ci-signal-hardening
-```
+No branch, no framing. **Three independently written readiness helpers
+now exist**, and they disagree: `vterm_stage2_acceptance`'s waits for
+expected content (hardened by #216), `wait_for_published_file` was
+fixed with it, and
+`tests/bottom_panel_stage1_acceptance.rs:2446` carries only the
+zero-byte half. R4's disposition predicted this recurrence under a new
+selector, and R6 is it.
 
-### Stage 1 — MERGED as #215
-
-- **Branch `macos-ci-signal-integrity`**, merged to `main` @ `12f2970`
-  after two review rounds. Docs only. Final CI checkpoint:
-
-  | head | CI run | result |
-  |---|---|---|
-  | `d33bf4d` | [30950108477](https://github.com/levineuwirth/pmacs/actions/runs/30950108477) | 14/14 green — the reviewed head |
-  | `f76897c` | [30990816890](https://github.com/levineuwirth/pmacs/actions/runs/30990816890) | review round 1 |
-  | `2e0617f` | — | review round 2: framing wording, the missing quote, the checkpoint table |
-
-- **What Stage 1 shipped:** `docs/ci-red-signatures.md`, the single
-  authority for judging a red CI run. Rows key on **signature** —
-  selector + job/flavor + every required fragment, normalized — so **a
-  test-name match confers nothing**. The rerun rule is replaced: a green
-  rerun establishes **intermittence only**; the same signature again is
-  a second occurrence and stays blocking; a different signature is a new
-  incident. Retirement is **causal**, never a count of green runs.
-- **Four incidents, three tests, four signatures.** The process test
-  produced two — one a test race (R2), one an **unresolved possible
-  product defect** (R3) that no rerun can clear. Counting by test name
-  would have hidden the second behind the first.
-- **The audit found a third state the framing did not allow**, which is
-  why the framing is at revision 3: two incumbents have a historical
-  claim but **no linked occurrence ever**. They are **audit notes A1/A2**,
-  not rows — unmatchable by construction, so a red in either is a new
-  incident. The registry is therefore *stricter* than the list it
-  replaces: nothing is pre-excused.
+**Scope is the audit, not the call site**: how many helpers exist,
+whether they can be one, what each promises. Patching `acc28` alone
+leaves the question open under a fourth selector — which is the same
+mistake as fixing `wait_for_file` and leaving
+`wait_for_published_file`, already made once in this arc.
 
 ## CI CRDT coverage — MERGED (#209); kept for its three follow-ons
 
@@ -678,6 +540,23 @@ them) and why `dired`/`listview` were the correct first two families.
 - **Unparked from PR #200's §5.** #200 retired the premise that
   justified the ledger's leniency and deliberately changed no
   disposition; this lane owns what it refused.
+- **Now also owns R3**, re-homed 2026-08-06 when the macOS CI
+  signal-integrity arc retired. `docs/ci-red-signatures.md` R3 is a
+  group-directed `kill` returning **EPERM while the leader was observed
+  live**, with `measured_group` — the one field able to disagree —
+  unreadable. It is the **same group-target question** #176 and #200
+  circled and this lane parks every disposition change pending, which
+  is why it lands here rather than staying with a retired CI lane. Its
+  registry entry is explicit that it is an **unresolved possible
+  product defect** and that **a green rerun never retires it**; that
+  constraint travels with the row, not with whoever inherits it.
+
+  Note what it is *not*: R2 is the same test with `leader=exited(signal
+  SIGUSR1)`, a test race, retired. An occurrence scan on 2026-08-06
+  nearly filed a second R2 occurrence here as R3 on the strength of the
+  shared test name and shared `EPERM` fragment. **`leader=live` is the
+  fragment that separates a product-defect candidate from a fixed
+  fixture bug**, and it is the whole reason the row lists it.
 - **Four sites, not the two #200 named.** In the persistent ledger: a
   probe error of any errno drops the entry and cancels escalation; a
   failed escalating `SIGKILL` is marked as succeeded, so **no later tick
