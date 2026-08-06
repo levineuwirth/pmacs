@@ -323,10 +323,8 @@ impl Frontend {
     /// are reserved for v0.3 (GUI / multi-frontend) and ignored here.
     pub fn apply_message(&mut self, msg: &InstanceMessage) -> io::Result<()> {
         match msg {
-            InstanceMessage::CellDelta { spans, .. } => {
-                for span in spans {
-                    emit_span(&mut self.out, span)?;
-                }
+            InstanceMessage::CellDelta { spans, full_grid } => {
+                emit_cell_delta(&mut self.out, spans, *full_grid)?;
             }
             InstanceMessage::Cursor(state) => match state {
                 Some(cs) if cs.visible => {
@@ -580,6 +578,49 @@ impl Drop for Frontend {
 // ---------------------------------------------------------------------------
 // Span emission (pure; testable)
 // ---------------------------------------------------------------------------
+
+/// Emit one `CellDelta` — the resync blank, then every span.
+///
+/// **FG-INV.** A `CellDelta` with `full_grid: true` carries only the
+/// **non-default** cells of the frame: the producer diffs against a
+/// blank grid (`crate::instance_render::RenderState::render_frame`), so
+/// a cell that should be blank produces no span at all. The resync is a
+/// picture of the screen's *ink*, not of the screen. A consumer that
+/// applies those spans to a surface it has not blanked keeps whatever
+/// was underneath every blank cell.
+///
+/// That is not hypothetical. The startup path clears once
+/// ([`Frontend::new`]), which made the sparse resync correct for
+/// exactly one frame — the fresh-attach frame, where the screen
+/// provably is blank — and wrong for every resize after it. Zooming a
+/// terminal font left the reflowed previous frame showing through.
+///
+/// The clear is preceded by `ResetColor` + `SetAttribute(Reset)`
+/// because `Clear` paints with the *current* background: a resync taken
+/// while a styled span was last emitted would otherwise wash the screen
+/// in that style.
+///
+/// **Empty spans still clear.** A resync whose frame is entirely blank
+/// carries no spans at all, and that is precisely the frame that most
+/// needs the surface blanked. Returning early on `spans.is_empty()`
+/// would look like an optimization and reintroduce the whole defect.
+///
+/// Pure and tested below by capturing into a `Vec<u8>`, like its
+/// neighbours.
+fn emit_cell_delta<W: Write>(w: &mut W, spans: &[DiffSpan], full_grid: bool) -> io::Result<()> {
+    if full_grid {
+        queue!(
+            w,
+            ResetColor,
+            SetAttribute(Attribute::Reset),
+            Clear(ClearType::All)
+        )?;
+    }
+    for span in spans {
+        emit_span(w, span)?;
+    }
+    Ok(())
+}
 
 /// Emit a diff span as escape sequences to `w`.
 ///
@@ -859,6 +900,74 @@ mod tests {
             right: Vec::new(),
         })
         .expect("the grid frontend must drop StatuslineSegments silently");
+    }
+
+    /// FG-INV, witness 1: a resync blanks the surface before it paints,
+    /// and the ORDER is the claim — a clear *after* a span erases the
+    /// frame it was meant to precede.
+    #[test]
+    fn a_resync_resets_style_and_clears_before_any_span() {
+        let span = DiffSpan {
+            start: CellCoord::new(0, 0),
+            cells: vec![ch('x')],
+        };
+        let mut out = Vec::new();
+        emit_cell_delta(&mut out, std::slice::from_ref(&span), true).unwrap();
+        let s = String::from_utf8_lossy(&out);
+
+        let clear = s.find("\x1b[2J").expect("resync must clear: {s:?}");
+        let reset_color = s.find("\x1b[0m").expect("resync must reset: {s:?}");
+        let glyph = s.find('x').expect("the span is still painted: {s:?}");
+
+        assert!(
+            reset_color < clear,
+            "reset must precede the clear — `Clear` paints with the CURRENT \
+             background, so a resync taken mid-style would wash the screen \
+             in it: {s:?}"
+        );
+        assert!(
+            clear < glyph,
+            "the clear must precede the paint, or it erases the frame it \
+             was meant to precede: {s:?}"
+        );
+    }
+
+    /// FG-INV, witness 2: the frame that most needs blanking carries no
+    /// spans at all.
+    ///
+    /// A resync of an entirely blank frame produces zero spans, because
+    /// the producer diffs against a blank grid. `spans.is_empty()` looks
+    /// exactly like "nothing to do" — and an early return there
+    /// reintroduces the whole defect for the one frame whose entire
+    /// content IS the blanking.
+    #[test]
+    fn a_resync_with_no_spans_still_clears() {
+        let mut out = Vec::new();
+        emit_cell_delta(&mut out, &[], true).unwrap();
+        let s = String::from_utf8_lossy(&out);
+        assert!(
+            s.contains("\x1b[2J"),
+            "an empty resync is the stale-blank case, not a no-op: {s:?}"
+        );
+    }
+
+    /// FG-INV, witness 3: the obligation is the flag's, not the
+    /// message's. A differential frame that clears would erase
+    /// everything it does not repaint.
+    #[test]
+    fn a_differential_frame_never_clears() {
+        let span = DiffSpan {
+            start: CellCoord::new(1, 1),
+            cells: vec![ch('y')],
+        };
+        let mut out = Vec::new();
+        emit_cell_delta(&mut out, std::slice::from_ref(&span), false).unwrap();
+        let s = String::from_utf8_lossy(&out);
+        assert!(
+            !s.contains("\x1b[2J"),
+            "a differential frame must not clear: {s:?}"
+        );
+        assert!(s.contains('y'), "but it still paints: {s:?}");
     }
 
     #[test]

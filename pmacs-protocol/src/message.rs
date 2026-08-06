@@ -648,15 +648,42 @@ pub enum GoodbyeReason {
 /// Rendering and signals from instance to frontend.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum InstanceMessage {
-    /// Cell deltas. `full_grid = true` is the initial sync sent on
-    /// fresh attach (or after a resize where the previous grid is no
-    /// longer applicable); `full_grid = false` is a differential
-    /// frame.
+    /// Cell deltas. `full_grid = true` is a resync, sent on fresh
+    /// attach and after a resize; `full_grid = false` is a
+    /// differential frame.
+    ///
+    /// # FG-INV — a resync carries only the frame's *ink*
+    ///
+    /// **A consumer MUST blank its surface before applying the spans of
+    /// a `full_grid = true` delta.** This is an obligation, not a
+    /// label.
+    ///
+    /// The producer builds a resync by diffing the frame against a
+    /// **blank** grid, so a cell that should be blank equals its blank
+    /// counterpart and **produces no span**. A resync is therefore a
+    /// picture of the screen's *ink*, not a picture of the screen: it
+    /// says where the non-default cells are and says nothing whatever
+    /// about the rest. Apply it to a surface that was not blanked and
+    /// every cell the resync considers empty keeps what was underneath.
+    ///
+    /// A resync whose frame is entirely blank carries **no spans at
+    /// all**, and it is exactly the delta that most needs the surface
+    /// blanked — so "no spans, nothing to do" is wrong.
+    ///
+    /// This rule previously lived only in a doc comment on a private
+    /// field of the producer's struct, where no consumer author would
+    /// read it. The grid TUI consequently ignored the flag: correct for
+    /// the fresh-attach frame, which follows a `Clear`, and wrong for
+    /// every resize after, which follows nothing. Zooming a terminal
+    /// font left the previous frame showing through.
     CellDelta {
-        /// One run of changed cells per `DiffSpan`.
+        /// One run of changed cells per `DiffSpan`. On a resync these
+        /// are the frame's non-default cells **only** — see FG-INV
+        /// above.
         spans: Vec<DiffSpan>,
-        /// Whether `spans` represents a full-grid resync (true on
-        /// fresh attach or post-resize) versus an incremental frame.
+        /// Whether `spans` is a resync (fresh attach or post-resize)
+        /// versus an incremental frame. On `true` the consumer owes
+        /// the blanking FG-INV describes.
         full_grid: bool,
     },
     /// Cursor position and visibility update.

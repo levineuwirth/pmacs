@@ -225,6 +225,77 @@ are the lanes this one creates, not work it does. Retiring the
 CI-CRDT, Distribution, or reap-ledger lanes: each still owns undone
 work and rule 4 does not apply to them.
 
+## Honoring `full_grid` (QoL Stage 1) — PR #219 OPEN
+
+**PR #219** — https://github.com/levineuwirth/pmacs/pull/219. **This
+block was written with the lane's first commit, before the PR
+existed** — the standing correction from #171 and #215 — so the row
+below was filled in rather than invented.
+
+- **Branch `full-grid-resync`**, base `githubsucks/main` @ `da56bec`
+  (the #218 merge). `githubsucks/full-grid-resync` is the
+  authoritative tip; any edit to this block advances past whatever SHA
+  it records. Recover with `git fetch githubsucks && git checkout
+  full-grid-resync`.
+- **Framing `docs/full-grid-resync-framing.md` revision 2**, approved
+  with **Q#FG1 = A**: the sole grid consumer honors the flag by
+  resetting style, clearing, then applying spans.
+- **First of three QoL stages**, from daily-driver use. Stage 2 is GUI
+  zoom (the machinery exists — `FontMetrics::scale` already derives
+  every dimension and is driven by an attach message in centi-pixels;
+  it is unbound and unpersisted). Stage 3 is long-line wrap/scroll,
+  which is a design round: **no horizontal viewport exists at all**
+  (`view_left` / `col_offset` / `hscroll` match nothing in `src/` or
+  `pmacs-gpu/src/`). Separate branches on purpose — Stage 1 is a
+  contained fix and must not wait behind Stage 3's design.
+
+### What it ships
+
+`FG-INV` moves onto the protocol type, where consumer authors read it:
+a `full_grid: true` delta carries only the frame's **non-default**
+cells, so a consumer MUST blank its surface first. The rule already
+existed — in the doc comment of a **private field** on the producer's
+struct (`src/instance_render.rs:36`), which is why the one consumer
+never honored it.
+
+`emit_cell_delta` joins the existing pure escape-sequence helpers in
+`src/frontend.rs` (`emit_span`, `emit_status_overlay`, …), and
+`apply_message` routes through it.
+
+### Why a green suite missed it for so long
+
+Seven tests cover the flag. Every one asserts the **producer sets it**;
+none asserted a **consumer acts on it**, and no runtime reader existed
+anywhere in the workspace. "Add a test for the flag" had already been
+done. This is handoff §5's *enforcement and documentation drift apart
+silently* in a second register, and it is why the fix ships the
+contract and the consumer together.
+
+### Verification
+
+- Three unit witnesses, all bitten: order (reset → clear → spans),
+  **empty spans still clear**, and a differential frame clears never.
+  The empty-spans case discriminates on its own — under the plausible
+  `spans.is_empty()` early return the order test still passes and only
+  that one fails.
+- PTY acceptance (`tests/full_grid_resync_acceptance.rs`) drives a real
+  `SIGWINCH`. **The mark is anchored to content, not time**: a
+  time-based settle cannot work because a settled pmacs screen emits
+  per-frame bytes forever. Bitten against the original defect: 34,831
+  bytes after the first painted frame with no `CSI 2 J`.
+- **What it does not prove:** the suites assert on raw bytes; there is
+  no screen model and no `vt100`/`termwiz`/`vte` dependency. This shows
+  pmacs *emitted* a blank at the right moment, not that the screen
+  ended correct. A terminal emulator in test deps is a candidate, not
+  smuggled in here.
+
+### Not in scope
+
+Stages 2 and 3. The `pmacs.terminal` child-PTY `SIGWINCH` path. Any
+change to *when* `needs_full_grid` is set — the producer's triggers
+were verified correct, along with per-frame geometry sync and
+`view_top` reconciliation on shrink.
+
 ## Tree primitive (P5) — MERGED as #217; adoption is the open work
 
 **The lane is gone, not the work.** Rule 4 removes a lane after merge,
