@@ -1,7 +1,7 @@
 # Long lines — QoL Stage 3
 
-**Status: revision 16 — branched as `long-lines`; Q#LL1–LL7 settled;
-**Q#LL8 not yet approved** (two corrections from review of `1c9ff6a`).
+**Status: revision 17 — branched as `long-lines`; Q#LL1–LL7 settled;
+Q#LL8 awaiting approval (aggregate abandoned for a byte percentage).
 Not yet implemented.**
 
 **Revision 2** corrected a load-bearing error in revision 1: it claimed
@@ -225,7 +225,7 @@ forbids. Every wrap-point example is now the explicit triple
 same `row`, which is the information a redefinition would have
 destroyed.
 
-**Revision 16 — the current one.** Review of `1c9ff6a` found two more,
+**Revision 16** — review of `1c9ff6a` found two more,
 both in Q#LL8, and both the same shape: a fix that looked complete
 because it was correct in one of two places.
 
@@ -249,6 +249,32 @@ a maintained revision counter that can. Same principle as byte-anchoring
 and additive `sub_row`: self-validating over maintained. And *content*
 width, not window width, because the gutter changes at the line-count
 digit boundary.
+
+**Revision 17 — the current one.** Review of `b95506f` falsified the
+premise revision 16 gave the GPU: it said cosmic-text "already knows
+each line's visual height". It does not. The GPU shapes **only the
+viewport slice** — `rebuild_code_slice` feeds cosmic-text
+`current_text[vstart..vend]` because Session S1 found the whole rope
+made large-file editing **O(file) per keystroke**
+(`pmacs-gpu/src/main.rs:7912`, `:1710`). Its layout cannot produce a
+total, and re-shaping the document to get one would reintroduce exactly
+that cost — for a status-line readout.
+
+**So the aggregate is abandoned rather than relocated (§5d.4): `NN%` is
+byte-based in both frontends**, with `truncate` keeping today's
+visible-line percentage. Computing rows arithmetically would only
+*approximate* what cosmic-text actually renders — the same trap Q#LL5
+rejected — and letting the two frontends use different rules would be
+this lane's own defect a third time. `All`/`Top`/`Bot` are unaffected:
+they are local predicates and stay exact, and they are what users
+actually read.
+
+**This makes revision 16's cache — and its fold-key correction —
+unnecessary.** That correction was right for the design as it stood;
+the design moved under it. §5d.2 is marked superseded rather than
+deleted, so a later reader can tell "the key was fixed" from "there is
+no key". §5d.5 adds the **large-file guard witnesses**, because "no
+whole-document work happens" must be enforced, not merely intended.
 
 Drafted while GitHub Actions was in a major outage and #220 could not
 merge. Nothing here depends on #220 landing; the two lanes touch no
@@ -1146,8 +1172,10 @@ with §5b.5's identity-case strategy.
 - `All` --- every visual row of the buffer is on screen.
 - `Top` --- the first visual row is on screen and `All` does not hold.
 - `Bot` --- the last visual row is on screen and `All` does not hold.
-- `NN%` --- the cursor's **visual row ordinal** as a percent of the
-  buffer's total visual rows.
+- `NN%` --- **byte position**, not a visual-row ordinal. See §5d.4:
+  a true row ordinal is unobtainable in the GPU without violating its
+  large-file design, and approximating it would diverge from what is
+  actually rendered.
 
 ### 5d.2 What must be computed, and what must not
 
@@ -1158,6 +1186,13 @@ the buffer end within the viewport)? Both fall out of the render walk
 that already happens. **Only `NN%` needs a total**, which matters
 because `All`/`Top`/`Bot` are the states a user reads most and the
 common cases stay `O(viewport)`.
+
+> **SUPERSEDED by §5d.4 (revision 17).** There is no total and no
+> cache: `NN%` is byte-based in both frontends. Everything below was
+> correct for the design as it stood in revision 16 and is kept because
+> the reasoning still applies to any future aggregate --- and because a
+> reader should be able to tell "the key was fixed" from "there is no
+> key". Skip to §5d.4 for what is built.
 
 The total may be computed **lazily and cached** --- but revision 15's
 key was wrong, and review of `1c9ff6a` caught it. It said "buffer
@@ -1241,31 +1276,96 @@ formatter test valid, including the GPU's
 correctly pins line-space behavior and must **not** silently change
 meaning.
 
-The GPU derives its total from its own layout, not from a wire message:
-cosmic-text already knows each line's visual height, so this is a local
-query there --- and Q#LL7's message tells it *which mode* to be in, not
-how many rows there are.
+**Revision 16 said the GPU could derive its total locally because
+"cosmic-text already knows each line's visual height". That is false**,
+and review of `b95506f` caught it. The GPU's cosmic-text buffer holds
+**only the viewport slice**: `rebuild_code_slice` shapes
+`current_text[vstart..vend]` and nothing else
+(`pmacs-gpu/src/main.rs:7912`), because Session S1 found that feeding
+the whole rope "made large-file editing **O(file) per keystroke**".
+`scroll_top`'s own doc says the same (`:1710`). Its layout cannot yield
+total visual rows, nor the cursor's or top's visual-row ordinal.
+
+Re-shaping the whole document to get them would reintroduce exactly the
+cost Session S1 exists to prevent. That is not a tradeoff worth
+reopening for a status-line readout.
+
+### 5d.4 The aggregate is abandoned: byte percentage, both frontends
+
+**Decision: under `wrap`, `NN%` is computed from BYTE POSITION, in both
+frontends. No aggregate, no cache, no invalidation.** Under `truncate`,
+both keep today's visible-line percentage unchanged.
+
+This is the fallback §5d.2 named as a contingency, promoted to the
+plan. The reasoning:
+
+- **The GPU cannot produce a true total** without violating Session S1.
+- **Arithmetic would only approximate it.** Rows-per-line could be
+  computed as `ceil(width / cols)` without shaping --- but cosmic-text
+  decides the real break points, so the number could disagree with what
+  is actually on screen. That is the same *approximate parity* trap
+  Q#LL5 rejected for whitespace wrapping, and it should be rejected
+  here for the same reason.
+- **A divergent choice would be worse than either.** Visual-row `NN%`
+  in the TUI and byte `NN%` in the GPU means the same buffer shows two
+  different percentages --- this lane's own defect, for a third time
+  (§5d.3). One rule in both frontends is the point.
+- **`All`/`Top`/`Bot` are unaffected and stay exact**, because they are
+  local predicates (§5d.2). Those are the states a user actually reads;
+  `NN%` is a coarse readout, and a byte-based one is honest rather than
+  wrong.
+- Emacs computes its percentage from buffer position too.
+
+**This makes §5d.2's cache unnecessary, including the fold-key
+correction from revision 16.** That correction was right for the design
+as it then stood, and the design has since changed underneath it ---
+recorded rather than quietly deleted, because "we fixed the key" and
+"there is no key" are different states and a later reader should be
+able to tell which happened.
+
+**Known imprecision, stated rather than discovered:** under folds, a
+byte percentage counts hidden bytes. Folding is TUI-only today (the GPU
+fold stage is unstarted), so this is currently a single-frontend
+nuance, and it matches Emacs. It should be revisited **by the GPU
+folding lane**, not by this one.
+
+### 5d.5 The large-file guard
+
+Because the whole point is that no whole-document work happens, that
+must be a **witness, not an intention**:
+
+- Painting the indicator on a large buffer with `wrap` active must
+  perform **no whole-document layout**. In the GPU this is observable
+  directly --- `view_range` and `shaped_top` must be unchanged by an
+  indicator paint --- and in the TUI by bounding the lines laid out to
+  the viewport.
+- The existing `open_100mb_under_200ms` gate (M1) must still pass with
+  `wrap` as the default mode, which is the end-to-end version of the
+  same claim.
+
+Without these, the byte-percentage decision is an unenforced comment,
+and a later "improvement" to a real row count would silently reintroduce
+`O(file)` work.
 
 **The duplication is itself the hazard worth naming.** Two copies means
 two call sites must change, and nothing in the type system connects
 them. That is the same shape as Q#LL7's three resend triggers: a
 correct fix in one place that looks complete.
 
-### 5d.4 Verification
+### 5d.6 Verification
 
 - **The reported case, as a direct witness, IN BOTH FRONTENDS:** one
   source line, viewport shorter than its wrapped height, mode `wrap`
   --- the indicator must **not** be `All`. This fails against revision
   14's design in the TUI and revision 15's in the GPU, which is what
   makes it worth writing first, twice.
-- **A "cache, then toggle a fold" witness.** Paint `NN%` so the total
-  is cached, collapse (or expand) a fold **without any edit, resize or
-  mode change**, and assert the indicator changes. This fails against
-  revision 15's cache key, which is the point.
-- **A digit-boundary witness**, since content width is in the key: a
-  buffer crossing 9 -> 10 or 99 -> 100 lines changes the gutter and
-  therefore the wrap width, and the total must not be served stale
-  across it.
+- **The large-file guards of §5d.5**, in both frontends --- an
+  indicator paint must leave the GPU's `view_range` / `shaped_top`
+  untouched, and must not lay out beyond the viewport in the TUI.
+- **`open_100mb_under_200ms` (M1) with `wrap` as the default mode.**
+- The fold witnesses revision 16 asked for are **withdrawn with the
+  cache they guarded** (§5d.2, §5d.4). What survives from that round is
+  the `truncate` control below, which still pins the identity case.
 - `Top` at the buffer start, `Bot` at the end, `All` only when every
   visual row fits --- each with a wrapped line present.
 - **A `truncate` control** asserting the indicator is byte-identical to

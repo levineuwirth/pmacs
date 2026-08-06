@@ -306,7 +306,7 @@ records. Recover: `git fetch githubsucks && git checkout long-lines`.
 **This block was written with the lane's first commit, before any PR
 exists** — the standing correction from #171, #215 and #220.
 
-- **Framing `docs/long-lines-framing.md` revision 16.** Q#LL1-LL7
+- **Framing `docs/long-lines-framing.md` revision 17.** Q#LL1-LL7
   settled; **Q#LL8 not yet approved** --- implementation is blocked on
   it, because it changes what gets built rather than how.
 - **Independent of #220.** Stage 2 (GUI zoom) and Stage 3 share no
@@ -368,6 +368,16 @@ for the user to express a preference in either.
   edit, resize or mode change; now keyed on the fold projection's own
   contents, which cannot be forgotten, rather than a maintained
   revision counter that can.
+
+  **Then the aggregate was abandoned entirely (revision 17).** The GPU
+  shapes **only the viewport slice** — Session S1 found the whole rope
+  made large-file editing `O(file)` per keystroke — so its layout
+  cannot yield a total, and re-shaping the document for a status-line
+  readout would reintroduce that cost. `NN%` is now **byte-based in
+  both frontends**; `All`/`Top`/`Bot` stay exact because they are local
+  predicates. This retires the cache *and* the fold-key fix above,
+  which is kept in the framing marked superseded so a reader can tell
+  "the key was fixed" from "there is no key".
 
 ### The two decisions most likely to be questioned later
 
