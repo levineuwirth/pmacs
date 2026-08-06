@@ -304,10 +304,12 @@ correction from #171 and #215 — so the row below was filled in rather
 than invented.
 
 - **Branch `gui-zoom`**, base `githubsucks/main` @ `218d2e7` (the #219
-  merge). `githubsucks/gui-zoom` is the authoritative tip.
+  merge). Pushed; `githubsucks/gui-zoom` is the authoritative tip, at
+  `1e054f7`.
   Recover: `git fetch githubsucks && git checkout gui-zoom`.
-- **Framing `docs/gui-zoom-framing.md` revision 4**, approved after
-  four review rounds. **Q#Z1 = (c)** configured base with `None`
+- **Framing `docs/gui-zoom-framing.md` revision 5**, approved after
+  four review rounds; revision 5 adds §3.2 for a finding raised against
+  the implementation. **Q#Z1 = (c)** configured base with `None`
   preserved; **Q#Z2 = additive**; **Q#Z3 = (C)** commands only, no
   default bindings; **Q#Z4** eager restore inside `install_state_dirs`.
 
@@ -320,7 +322,7 @@ than invented.
 dimension and `apply_font_facts` already re-metriced everything; this
 drives the preference that existed.
 
-### The three findings review caught, none of which was in revision 1
+### The findings review caught, none of which was in revision 1
 
 - **Q#Z3 was not implementable.** `keymap_stack::Scope` is
   `Buffer | Mode | Global` with no frontend identity, and
@@ -339,14 +341,38 @@ drives the preference that existed.
 - **Every size write clobbered the family.** `set_font` replaces both
   fields unconditionally, so `{ size = n }` alone silently cleared a
   configured family until restart.
+- **The bounds could not carry the round-trip guarantee** (raised
+  against the implementation, not the framing). `ConfigKind::Number`
+  validates finiteness and bounds and *nothing else*, and `on_change`
+  is notified after the value is stored — so it cannot veto. A step of
+  `0.015` is therefore settable, and used raw it broke the framed
+  exact round trip: `16.00 -> 16.02 -> 16.01`. Fixed by quantizing the
+  step **and** the base at the point of use, which is the operation
+  `validate_font_size` already applies to sizes, one level up.
+  Set-time enforcement was rejected: the registry cannot express
+  precision, and a validating wrapper is bypassed by a direct
+  `pmacs.config.set` — the seam `autosave` documents about
+  `interval_ms`.
+
+A fifth, documentation-only: the explanation of *why* `0.015` broke
+said the two intermediates rounded in opposite directions. They do not.
+`16.015` and `16.005` are exactly `1601.5` and `1600.5` centi-pixels —
+both exact ties, and half-up sends **both up**. The mechanism is that
+half-up is not symmetric under negation, so the two roundings
+accumulate rather than cancel. Corrected in all three copies; no
+behavior change.
 
 ### Verification
 
-13 acceptance tests, three bitten: dropping family preservation fails
+15 acceptance tests, four bitten: dropping family preservation fails
 3; reverting to the framing's first parser `^(%d+)$` fails 4 including
 the seam restore (it anchors to end-of-subject and rejects the
 newline-terminated file the writer emits); hardcoding the 16.0 origin
-fails the base test.
+fails the base test; **using the raw step instead of the quantized one
+fails the unrepresentable-step witness** with
+`left: Some(16.01) / right: Some(16.0)` **while the pre-existing 0.37
+test still passes** — which is exactly why the new case had to be its
+own test rather than another parameter of that one.
 
 ### Not in scope
 
@@ -372,6 +398,41 @@ Both passed isolated and the full suite was green on a quiet machine,
 so this is load-sensitive and **undiagnosed** — recorded as a scope
 note for the audit, not as a registry row: these were local, and the
 registry judges red **CI** runs.
+
+## Pre-checkout CI reds — a class the registry has no row shape for
+
+Seen 2026-08-06 on #220, three times across two runs (`M4`+`M5`, then
+`M5` again on the rerun):
+
+```
+Prepare all required actions
+Getting action download info
+Failed to resolve action download info. Error: Internal Server Error
+##[error]Failed to resolve action download info.
+```
+
+**This is not a flake and not a test failure.** The job dies inside
+`Set up job`, before `actions/checkout` — a `grep` for
+`checkout|cargo|test result:` over the full job log returns **0**. No
+repo code is fetched, so the red carries *zero* information about the
+commit, in either direction.
+
+Two things follow, and both matter for signal integrity:
+
+- **Re-running is a first execution, not a retry-to-green.** The rerun
+  rule governs a test that ran and failed; nothing ran here. The
+  discriminator is objective and cheap — did the job reach checkout?
+- **It cannot be a registry row as the registry is written.** Matching
+  requires an *exact test selector* plus fragments, and there is no
+  test. Recorded here rather than forced into a shape it does not fit.
+
+The second `M5` failure took **4m52s**, which read like a real run;
+the duration was entirely retry backoff. Duration is not evidence that
+a job executed — **the log is**.
+
+Whether `docs/ci-red-signatures.md` should grow a short non-row section
+for this class is an open question for its owner, not something this
+lane decided.
 
 ## Tree primitive (P5) — MERGED as #217; adoption is the open work
 
