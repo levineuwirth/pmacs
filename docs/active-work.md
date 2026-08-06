@@ -196,7 +196,7 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## Docs absorption after #217 — PR #218 OPEN
+## Docs absorption after #217 — MERGED as #218 (2026-08-06 09:59Z)
 
 **PR #218** — https://github.com/levineuwirth/pmacs/pull/218. **This
 block was written with the lane's first commit, before the PR
@@ -225,7 +225,7 @@ are the lanes this one creates, not work it does. Retiring the
 CI-CRDT, Distribution, or reap-ledger lanes: each still owns undone
 work and rule 4 does not apply to them.
 
-## Honoring `full_grid` (QoL Stage 1) — PR #219 OPEN
+## Honoring `full_grid` (QoL Stage 1) — MERGED as #219 (2026-08-06 13:41Z)
 
 **PR #219** — https://github.com/levineuwirth/pmacs/pull/219. **This
 block was written with the lane's first commit, before the PR
@@ -295,6 +295,80 @@ Stages 2 and 3. The `pmacs.terminal` child-PTY `SIGWINCH` path. Any
 change to *when* `needs_full_grid` is set — the producer's triggers
 were verified correct, along with per-frame geometry sync and
 `view_top` reconciliation on shrink.
+
+## Long lines (QoL Stage 3) — BRANCHED, no PR yet
+
+**Branch `long-lines`**, base `githubsucks/main` @ `218d2e7` (the #219
+merge). `githubsucks/long-lines` is the authoritative tip — the ref,
+not a SHA, since any edit to this block advances past whatever SHA it
+records. Recover: `git fetch githubsucks && git checkout long-lines`.
+
+**This block was written with the lane's first commit, before any PR
+exists** — the standing correction from #171, #215 and #220.
+
+- **Framing `docs/long-lines-framing.md` revision 14, APPROVED**, after
+  **eleven** revisions of review. All six questions answered.
+- **Independent of #220.** Stage 2 (GUI zoom) and Stage 3 share no
+  code, so this branch does not wait on that merge — which matters,
+  because #220 is blocked on a GitHub Actions outage, not on itself.
+
+### The defect
+
+A line wider than the window is unreadable past the edge **in the
+TUI**. The GPU is not in that state: it already wraps. So the
+cross-frontend defect is **not** unreadability — it is that *neither
+behavior was chosen*. The TUI truncates because a cell walk breaks at
+`max_cols`; the GPU wraps because cosmic-text's `Wrap::WordOrGlyph`
+default was never overridden. Two accidents that disagree, with no way
+for the user to express a preference in either.
+
+### The six answers
+
+- **Q#LL1** — ships `wrap` + `truncate`, **default `wrap`**; horizontal
+  scroll is **Stage 4**. No default preserves both frontends, so this
+  knowingly changes the TUI's behavior and leaves the GPU's alone.
+- **Q#LL2** — the mode is **buffer-local**; `Viewport` carries the
+  *resolved* mode as it already carries `folds`, so `TextView` stays
+  config-agnostic.
+- **Q#LL4** — do **not** adopt `editing.fill-column`; it is orphaned
+  because its consumer (`M-q` / auto-fill) does not exist. Sharpen its
+  description, and name ours `ui.line-wrap` (`ConfigKind::Enum`).
+- **Q#LL5** — **character wrap in both frontends**; the GPU document
+  buffer gets its first explicit `set_wrap`, `Wrap::Glyph`.
+- **Q#LL6** — no global map (every vertical consumer is local, so
+  layout is per-line); `view_top`'s sub-line component is a **byte**;
+  `DisplayCoord` gains `sub_row` rather than redefining `row`.
+
+### The two decisions most likely to be questioned later
+
+- **GUI users lose word wrap.** Character-wrap parity is cheap and
+  Emacs-consistent, but the GPU has word-wrapped since it existed.
+  Accepted deliberately (user, 2026-08-06). **Must appear in the PR
+  description and release notes**, not only in the framing.
+- **The audit strategy is asymmetric on purpose.** The coordinate
+  functions gain a required context parameter so the **compiler
+  enumerates** every call site; `DisplayCoord` gains an **additive**
+  field so untouched consumers stay *correct* rather than merely
+  findable. Compiler-enforced where possible, correct-by-default where
+  not.
+
+### Verification (planned, from framing §7)
+
+Cell-level tests at several **window widths** (not offsets — offsets
+are Stage 4). Wrapped visual-row mapping with identity on cursor
+boundaries and projection elsewhere. The **wrap-point** case: the
+position at a soft break belongs to `(k+1, 0)`, while a **hard** line
+end filling the row exactly keeps `(k, max_cols)` — a control that the
+wrap work did not move it. A `truncate` control for every mapping
+claim. A GPU witness that `truncate` is *honored*, since the existing
+`wrapped_caret_survives_size_changes` passes against a wrap nobody
+configured.
+
+### Not in scope
+
+Horizontal scroll in full (Stage 4). `M-q` / auto-fill / reflow. Word
+wrap as a mode value — a named future third choice, not this stage.
+Bidi/RTL. Soft-wrap gutter indicators.
 
 ## Tree primitive (P5) — MERGED as #217; adoption is the open work
 
