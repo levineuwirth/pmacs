@@ -85,10 +85,18 @@ pub fn classify(
             if byte_len == 0 {
                 return ScrollPosition::All;
             }
-            // Saturating, then clamped: a caller that reports a cursor
-            // past the end (a stale readout mid-edit) gets 100%, not a
-            // wrapped or panicking percent.
-            let pct = byte_pos.saturating_mul(100) / byte_len;
+            // Widen to u128 before scaling. `saturating_mul` was wrong
+            // here, not merely inelegant: it *silently undercounts*.
+            // `u64::MAX * 100` saturates to `u64::MAX`, so a cursor at
+            // the end of a maximal buffer divided out to 1% — a wrong
+            // answer that looked safe because it stayed in range.
+            //
+            // `u64::MAX * 100` fits in u128 with room to spare, so the
+            // product is exact and the only clamp left is the genuine
+            // one below.
+            let pct = u128::from(byte_pos) * 100 / u128::from(byte_len);
+            // Clamped for a caller that reports a cursor past the end
+            // (a stale readout mid-edit): 100%, never above.
             ScrollPosition::Percent(u8::try_from(pct.min(100)).unwrap_or(100))
         }
     }
@@ -156,6 +164,12 @@ mod tests {
     }
 
     /// Percent never leaves `0..=100`, for any input.
+    ///
+    /// **In range is not the same as correct**, which is why
+    /// [`large_byte_counts_stay_accurate`] exists beside this. This
+    /// sweep passed against a `saturating_mul` that silently reported
+    /// 1% for a cursor at the end of a maximal buffer — a wrong answer
+    /// that satisfies every assertion here.
     #[test]
     fn percent_is_always_in_range() {
         for pos in [0_u64, 1, 7, 99, 100, 1_000, u64::MAX / 2, u64::MAX] {
@@ -165,5 +179,40 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The percentage stays *accurate* where `u64` arithmetic would
+    /// overflow, not merely bounded.
+    ///
+    /// `byte_pos * 100` exceeds `u64::MAX` for any position above
+    /// `u64::MAX / 100`. Saturating there collapses the numerator to a
+    /// constant, so the quotient stops tracking the position at all:
+    /// `u64::MAX / u64::MAX` is 1, and the readout said **1%** at the
+    /// very end of the buffer.
+    #[test]
+    fn large_byte_counts_stay_accurate() {
+        assert_eq!(
+            classify(false, false, u64::MAX, u64::MAX),
+            ScrollPosition::Percent(100),
+            "the end of a maximal buffer is 100%, not 1%"
+        );
+        assert_eq!(
+            classify(false, false, u64::MAX / 2, u64::MAX),
+            ScrollPosition::Percent(49),
+            "halfway through a maximal buffer, floored"
+        );
+        assert_eq!(
+            classify(false, false, u64::MAX / 4, u64::MAX),
+            ScrollPosition::Percent(24),
+            "a quarter through, floored"
+        );
+        // The smallest position whose scaling overflows u64 — the first
+        // input the old implementation got wrong.
+        let first_overflowing = u64::MAX / 100 + 1;
+        assert_eq!(
+            classify(false, false, first_overflowing, u64::MAX),
+            ScrollPosition::Percent(1),
+            "correct by arithmetic here, not by saturation"
+        );
     }
 }
