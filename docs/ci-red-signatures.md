@@ -79,11 +79,26 @@ Main-branch greens are **occurrence evidence** and accumulate toward a
 rate. They retire nothing by themselves. Retired rows stay in this file
 with their disposition, so a recurrence is recognisable.
 
-**A red matching a RETIRED row is a recurrence, and it puts the
-retirement in question — it is not a known flake.** The claim a
-retirement makes is that the mechanism is gone; the same signature
-afterwards falsifies that claim, which is a stronger finding than a live
-row, not a weaker one. Reopen the row rather than rerunning.
+**A red matching a RETIRED row AND POSTDATING ITS RETIREMENT is a
+recurrence, and it puts the retirement in question — it is not a known
+flake.** The claim a retirement makes is that the mechanism is gone
+*from the retirement forward*; the same signature afterwards falsifies
+that claim, which is a stronger finding than a live row, not a weaker
+one. Reopen the row rather than rerunning.
+
+**A matching red that PREDATES the retirement corroborates the row
+instead.** It is an additional occurrence of the mechanism the fix
+removed, so it strengthens the evidence and challenges nothing. Add it
+to the row's evidence; do not reopen. This is not a technicality — an
+occurrence scan reaches backwards by construction, so most matches it
+finds will be of this kind, and treating them as recurrences would
+reopen every retired row the first time anyone looked.
+
+**Both halves need the date, which means a row is unmatchable without
+one.** R2's second occurrence (`main` run 30710662474, 2026-08-01, four
+days before its 2026-08-05 retirement) is the worked example, and it
+also shows the flavor field is not part of matching: R2's first
+evidence is macOS / lua54 and that one is macOS / luajit.
 
 ---
 
@@ -153,14 +168,6 @@ diagnosis by the process-signal / reap-ledger lanes.
 
 ---
 
-## Retired rows
-
-**These stay here on purpose.** A retirement is a claim that a mechanism
-is gone; keeping the signature is what makes a recurrence recognisable
-as a falsification of that claim rather than as a fresh mystery. Both
-were retired **causally** — the mechanism removed, plus a discriminating
-witness that fails without the fix — never by a count of green runs.
-
 ### R5 — async pump deadline exceeded in the supersede close path
 
 | field | value |
@@ -218,6 +225,14 @@ The scope this row implies is the audit, not the test: how many
 readiness helpers exist, whether they can be one, and what each
 promises. Patching this call site alone would leave the same question
 open under a fourth selector.
+
+## Retired rows
+
+**These stay here on purpose.** A retirement is a claim that a mechanism
+is gone; keeping the signature is what makes a recurrence recognisable
+as a falsification of that claim rather than as a fresh mystery. Both
+were retired **causally** — the mechanism removed, plus a discriminating
+witness that fails without the fix — never by a count of green runs.
 
 ### R2 — USR1 delivered before the trap is installed — RETIRED 2026-08-05
 

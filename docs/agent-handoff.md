@@ -1,11 +1,19 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-08-05.** The live CI-triage rule in §5 now points
-at `docs/ci-red-signatures.md` (**PR #215, merged as `main` @
-`12f2970`**; its Stage 2 hardening is in flight — see
-`docs/active-work.md`), which keys on
-signature rather than test name; the hazards list this file used to
-carry is retired, and its two unevidenced entries are audit notes there.
+**Last updated: 2026-08-06.** `main` is **`db1bbe9`** — the tree
+primitive **#217**, atop **#216**, which completed the macOS CI
+signal-integrity arc by retiring R2 and R4 with discriminating
+witnesses, atop **#215**, which built the registry. **That arc is
+retired**; its live residue (R1, R3, and the newer R5 and R6) is
+re-homed to the async-runtime, reap-ledger, and readiness-helper-audit
+lanes in `docs/active-work.md`.
+
+The live CI-triage rule in §5 points at `docs/ci-red-signatures.md`,
+which keys on **signature, not test name** — and, since 2026-08-06,
+on **signature plus date**: a red matching a retired row is a
+recurrence only if it *postdates* the retirement, and an earlier one
+corroborates instead. The hazards list this file used to carry is
+retired, and its two unevidenced entries are audit notes there.
 Previously **2026-08-04, as bottom-panel Stage 3 #213 — the adopter
 default flip, which COMPLETES ARC 7: omitting `display` now means the
 panel, and the workbench's panel half is done on both frontends. Beneath
@@ -75,9 +83,16 @@ reads it the way you just did.
 For volatile branches, checkpoints, verification, and recovery
 commands, read `docs/active-work.md` immediately after this file.
 
-## 1. Where the project stands (2026-08-01)
+## 1. Where the project stands (2026-08-06)
 
-- **`main` @ `f186253`.** Bottom-panel Stage 3 **#213** completes Arc 7,
+- **`main` @ `db1bbe9`.** The **tree primitive #217** — `listview` rows
+  take optional `depth`/`id`, collapse is primitive-owned, folding is
+  **local projection state and not a refresh protocol**, and the LSP
+  outline is the sole adopter (`COHERENCE.md` §14 ◐; §20 says adoption,
+  not construction). Atop `2657568` **#216**, which completed the macOS
+  CI signal-integrity arc, atop `12f2970` **#215**, which built
+  `docs/ci-red-signatures.md`. Beneath those, `f186253`: bottom-panel
+  Stage 3 **#213** completes Arc 7,
   atop the post-release accuracy pass #212 and `000b6cd` / **v1.1.0**.
   Beneath that, Distribution Stage 1 #211
   lands atop the docs absorption #210, the CI CRDT coverage lane #209,
@@ -137,13 +152,27 @@ commands, read `docs/active-work.md` immediately after this file.
     reason the anchor consumer works, because **the outline has no
     `on_refresh` at all**. A design requiring the consumer to re-supply
     rows on every fold would have fitted no existing consumer.
-  - **Identity is consumer-supplied and compared by equality; the
-    primitive never derives one.** `item` is opaque by design. The
-    outline uses `line:col`, because the `::` parent chain collides on
-    overloads and same-named siblings — exactly where a stale expansion
-    would reattach to the wrong node. **Selection is re-seated by id,
-    not by line**, since a fold inserts or removes rows above the
-    cursor.
+  - **Identity is consumer-supplied and the primitive never derives
+    one**, but it is **not opaque**: `row.id` must be a **string or
+    number, unique among rows, and not NaN**, enforced by `check_ids`
+    where rows enter (`open` and `refresh`). Review narrowed this from
+    "opaque, compared by equality", which was **two contracts wearing
+    one name** — selection compares with `==`, honouring `__eq`, while
+    collapse state stores ids as **table keys**, and Lua indexes tables
+    by raw identity consulting no metamethod. A table id satisfied one
+    half and silently failed the other. Uniqueness and not-NaN came
+    from the same pass: every lookup resolves to the **first** match,
+    so a duplicate makes selecting the later row toggle the earlier,
+    and `0/0` is a `number` Lua refuses as a key. The outline uses
+    `line:col`, because the `::` parent chain collides on overloads and
+    same-named siblings — exactly where a stale expansion would
+    reattach to the wrong node. **Selection is re-seated by id, not by
+    line**, since a fold inserts or removes rows above the cursor.
+  - **`item` is optional in the API and was mandatory in practice.**
+    `line_to_item` is sparse when a row omits it, and `seat_cursor`
+    took `#` of that map — a display-only tree stranded the cursor on
+    the header. It counts visible rows explicitly now. Every existing
+    test supplied `item`, so none could reach it.
   - **`has_children` must read the FULL row array, not the rendered
     subset.** A collapsed node's children are absent from the rendered
     map by construction, so asking the view would answer "no" for every

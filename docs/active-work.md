@@ -111,8 +111,10 @@ lesson, §1 for the two framings).
   are identical on every machine. Remote names are otherwise
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
-- Canonical base at this snapshot: **`githubsucks/main` @ `12f2970`** —
-  the macOS CI signal-integrity registry **#215**, atop `f186253`:
+- Canonical base at this snapshot: **`githubsucks/main` @ `db1bbe9`** —
+  the tree primitive **#217**, atop `2657568` the macOS CI
+  signal-integrity **Stage 2 #216** (which retired R2 and R4), atop
+  `12f2970` its Stage 1 registry **#215**, atop `f186253`:
   bottom-panel Stage 3 **#213**, which completes Arc 7, atop the
   post-release accuracy pass **#212**, Distribution Stage 1 **#211**
   (released as **v1.1.0**, the first release with prebuilt binaries),
@@ -125,8 +127,9 @@ lesson, §1 for the two framings).
   `Hello` still advertises v20** — two different facts, and #184 landed
   only the first.
   **The recovery floor advances with the base**, so the check below
-  now requires `12f2970` or newer; a tree at `f186253` no longer
-  passes. That is deliberate — a check accepting an older commit than
+  now requires `db1bbe9` or newer; a tree at `12f2970` no longer
+  passes — it would lack #216 and #217, both of which this file
+  describes as complete. That is deliberate — a check accepting an older commit than
   the declared base passes on a tree the rest of this file does not
   describe.
   **Lanes below that name an older base have not been re-based; derive
@@ -164,21 +167,34 @@ git worktree list
 git status --short --branch
 ```
 
-The `git log` command must expose `12f2970` — the base named above — or a
+The `git log` command must expose `db1bbe9` — the base named above — or a
 newer intentional main. Keep this threshold and the canonical-base line in
 step: a recovery check that accepts an older commit than the base it
 declares canonical will pass on a tree the rest of this file does not
 describe.
 If it does not, stop and repair the remote/fetch configuration.
 
-**This path was exercised, not asserted, at this snapshot** — ahead of a
-machine move. From an empty directory: `git clone` the canonical URL,
-add the `githubsucks` alias, `git fetch githubsucks --prune`, confirm
-`f186253` is an ancestor of `githubsucks/main`, and recover a lane with
-the three-argument `git worktree add <path> -b <local> githubsucks/<branch>`
-form. All four steps ran clean. **The two-argument form still does not
-work** for a remote-only branch (`fatal: invalid reference`), which is
-why every lane below spells out the `-b` form.
+**This path was exercised, not asserted, at this snapshot** — re-run
+from an empty directory on 2026-08-06 when the base advanced to
+`db1bbe9`, rather than having its SHA swapped. `git clone` the
+canonical URL, add the `githubsucks` alias, `git fetch githubsucks
+--prune`, confirm `db1bbe9` is an ancestor of `githubsucks/main`, and
+recover a lane with the three-argument `git worktree add <path> -b
+<local> githubsucks/<branch>` form. All four steps ran clean.
+
+**Correction, found by re-running it.** This file claimed the
+two-argument form fails for a remote-only branch with `fatal: invalid
+reference`. **It does not fail.** On git 2.55.0 it *succeeds* and
+leaves a **detached HEAD** — no branch, no upstream, `git status`
+reporting `## HEAD (no branch)`.
+
+Still use `-b`, but for the opposite reason to the one recorded: the
+danger is not an error that stops you, it is that nothing stops you.
+Work committed in that worktree sits on no branch, is not pushed by a
+bare `git push`, and is exactly the "uncommitted work does not travel"
+hazard in a shape that looks committed. **A documented error message
+that never appears is worse than no documentation**, because the reader
+waits for a signal that is not coming.
 
 ## Docs absorption after #217 — PR #218 OPEN
 
