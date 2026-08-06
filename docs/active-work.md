@@ -306,10 +306,9 @@ records. Recover: `git fetch githubsucks && git checkout long-lines`.
 **This block was written with the lane's first commit, before any PR
 exists** — the standing correction from #171, #215 and #220.
 
-- **Framing `docs/long-lines-framing.md` revision 15.** Q#LL1-LL6
-  answered; **Q#LL7 and Q#LL8 raised by review of this lane's first
-  commit and not yet approved** --- implementation is blocked on them,
-  because both change what gets built rather than how.
+- **Framing `docs/long-lines-framing.md` revision 16.** Q#LL1-LL7
+  settled; **Q#LL8 not yet approved** --- implementation is blocked on
+  it, because it changes what gets built rather than how.
 - **Independent of #220.** Stage 2 (GUI zoom) and Stage 3 share no
   code, so this branch does not wait on that merge — which matters,
   because #220 is blocked on a GitHub Actions outage, not on itself.
@@ -358,6 +357,17 @@ for the user to express a preference in either.
   forty-nine rows sit off-screen. The bounded distinction survives: a
   *total* is one lazily-computed number; an *index* is `O(N)` resident
   storage, still ruled out.
+
+  **Two further corrections, from review of the second commit.**
+  `format_scroll_indicator` is **duplicated, not shared**
+  (`src/editor.rs:5509`, `pmacs-gpu/src/main.rs:10114`), and the GPU
+  passes a source-line count --- so the first fix would have corrected
+  one frontend and left the other wrong, *this lane's own defect
+  reproduced by the section meant to close it*. And the lazy total's
+  cache key omitted **fold state**, which changes per window with no
+  edit, resize or mode change; now keyed on the fold projection's own
+  contents, which cannot be forgotten, rather than a maintained
+  revision counter that can.
 
 ### The two decisions most likely to be questioned later
 

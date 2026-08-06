@@ -1,8 +1,8 @@
 # Long lines — QoL Stage 3
 
-**Status: revision 15 — branched as `long-lines`; Q#LL1–LL6 answered;
-Q#LL7 and Q#LL8 raised by review of the lane's first commit and NOT yet
-approved. Not yet implemented.**
+**Status: revision 16 — branched as `long-lines`; Q#LL1–LL7 settled;
+**Q#LL8 not yet approved** (two corrections from review of `1c9ff6a`).
+Not yet implemented.**
 
 **Revision 2** corrected a load-bearing error in revision 1: it claimed
 both frontends render from the same `CellGrid`. They do not — the GPU
@@ -196,7 +196,7 @@ is worse than honest divergence. **Q#LL6 items 1-2** (§5b.4):
 breaking on the input side so the compiler enumerates the audit,
 additive on the output side so untouched consumers stay correct.
 
-**Revision 15 — the current one.** Review of `bd752f2` found two holes
+**Revision 15** — review of `bd752f2` found two holes
 and one notation hazard.
 
 **Q#LL7 (§5c) — the GPU had no wire.** §4 resolves the mode into
@@ -224,6 +224,31 @@ forbids. Every wrap-point example is now the explicit triple
 `{row, sub_row, col}`, and both coordinates at a soft break share the
 same `row`, which is the information a redefinition would have
 destroyed.
+
+**Revision 16 — the current one.** Review of `1c9ff6a` found two more,
+both in Q#LL8, and both the same shape: a fix that looked complete
+because it was correct in one of two places.
+
+**The GPU has its own indicator** (§5d.3). `format_scroll_indicator` is
+**duplicated, not shared** — `src/editor.rs:5509` and
+`pmacs-gpu/src/main.rs:10114` — and the GPU passes
+`current_line_starts.len()`, a source-line count. So revision 15 would
+have fixed the indicator in the TUI and left the GPU reporting `All`
+for a one-line wrapped buffer: **this lane's own defect, reproduced by
+the section meant to close it.** Both copies keep their signature; what
+changes is what the callers pass, so every existing formatter test
+stays valid.
+
+**The lazy total's cache key omitted fold state** (§5d.2). Folds are
+per rendered window and can change with no edit, no resize and no mode
+change, so all three of revision 15's key components stay put while the
+projection moves. Corrected to **(buffer generation, content width,
+mode, fold projection)** — keyed on the projection's own `components`,
+which is `O(folds)` to compare and **cannot be forgotten**, rather than
+a maintained revision counter that can. Same principle as byte-anchoring
+and additive `sub_row`: self-validating over maintained. And *content*
+width, not window width, because the gutter changes at the line-count
+digit boundary.
 
 Drafted while GitHub Actions was in a major outage and #220 could not
 merge. Nothing here depends on #220 landing; the two lanes touch no
@@ -1134,9 +1159,46 @@ that already happens. **Only `NN%` needs a total**, which matters
 because `All`/`Top`/`Bot` are the states a user reads most and the
 common cases stay `O(viewport)`.
 
-The total may be computed **lazily and cached**, keyed by buffer
-generation, width and mode, and invalidated by any of the three. It
-composes with folds by counting rows only for lines the fold map
+The total may be computed **lazily and cached** --- but revision 15's
+key was wrong, and review of `1c9ff6a` caught it. It said "buffer
+generation, width and mode". Two corrections:
+
+**Fold state must be in the key.** `Viewport.folds` is built **per
+rendered window** (`src/view.rs:146`) and a fold can be collapsed or
+expanded with **no edit, no width change and no mode change** --- so
+all three key components are unchanged while the projection underneath
+them is not. Compute `NN%`, collapse a fold, and the stale total is
+served for the new projection.
+
+**Prefer a content-derived key over a maintained one.**
+`VisibleLineMap` is `{ components: Vec<HiddenComponent> }`
+(`src/fold_view.rs:104`) with no revision field, and
+`fold_map_for_window` rebuilds it per call. Two ways to key on it:
+
+- A revision counter on the fold registry, bumped by every mutation.
+  Cheap to compare, and it carries a *did-you-remember-to-bump* hazard
+  on every present and future mutation path --- the same failure shape
+  as Q#LL7's buffer-switch trigger.
+- **The projection's own contents.** `components` holds one entry per
+  collapsed region, so hashing or comparing it is `O(folds)`, not
+  `O(N)` --- negligible per frame, and it **cannot be forgotten**,
+  because the key *is* the thing it guards.
+
+**Take the second**, for the same reason byte-anchoring beat a row
+index (§5b.4) and an additive `sub_row` beat redefining `row`
+(§5b.5): a key that derives from the state is self-validating, while
+one maintained alongside it is a standing invitation to drift.
+
+**And it is the CONTENT width, not the window width.** Wrapping happens
+in the text area, so the gutter is already subtracted --- and the
+gutter's width changes with the line-count digit boundary (9 -> 10,
+99 -> 100), which the GPU's `sync_buffer_dimensions` comment already
+records for its own shaping (`pmacs-gpu/src/main.rs:4338`). Keying on
+window width would serve a stale total across a digit boundary.
+
+So: **(buffer generation, content width, mode, fold projection)**.
+
+It composes with folds by counting rows only for lines the fold map
 vouches as visible (§5b.3).
 
 **It must not become a resident prefix-sum index** --- that is the
@@ -1151,12 +1213,59 @@ large buffers, the fallback is to report a **byte-based** percentage
 under `wrap` and say so; what is not acceptable is today's silent
 `All`.
 
-### 5d.3 Verification
+### 5d.3 The GPU has its own indicator, and revision 15 missed it
 
-- **The reported case, as a direct witness:** one source line, viewport
-  shorter than its wrapped height, mode `wrap` --- the indicator must
-  **not** be `All`. This fails against revision 14's design, which is
-  what makes it worth writing first.
+**Raised in review of `1c9ff6a`.** §5d as written specified only the
+TUI path. `format_scroll_indicator` is **duplicated, not shared** ---
+`src/editor.rs:5509` and `pmacs-gpu/src/main.rs:10114`, each with its
+own tests --- and the GPU calls its copy with
+`self.current_line_starts.len()`, a **source-line** count
+(`pmacs-gpu/src/main.rs:7199`).
+
+So a one-line wrapped buffer reports `All` in the GPU too, by an
+entirely independent path. **Stage 3 as framed through revision 15
+would have fixed the indicator in one frontend and left it wrong in the
+other** --- which is this lane's own defect, reproduced by the lane
+meant to close it.
+
+The GPU's `visible` argument is wrong under `wrap` for the same reason:
+`estimated_visible_lines(...)` counts **lines**, and visible *rows* is
+what the indicator needs once one line owns several.
+
+**Both copies keep their signature and semantics.** The formatter is a
+pure function over counts and is correct as written; what changes is
+**what the callers pass** --- visual rows rather than source lines, and
+visible rows rather than visible lines. That keeps every existing
+formatter test valid, including the GPU's
+`format_scroll_indicator(0, 10, 1, 0) == "All"` (`:13091`), which
+correctly pins line-space behavior and must **not** silently change
+meaning.
+
+The GPU derives its total from its own layout, not from a wire message:
+cosmic-text already knows each line's visual height, so this is a local
+query there --- and Q#LL7's message tells it *which mode* to be in, not
+how many rows there are.
+
+**The duplication is itself the hazard worth naming.** Two copies means
+two call sites must change, and nothing in the type system connects
+them. That is the same shape as Q#LL7's three resend triggers: a
+correct fix in one place that looks complete.
+
+### 5d.4 Verification
+
+- **The reported case, as a direct witness, IN BOTH FRONTENDS:** one
+  source line, viewport shorter than its wrapped height, mode `wrap`
+  --- the indicator must **not** be `All`. This fails against revision
+  14's design in the TUI and revision 15's in the GPU, which is what
+  makes it worth writing first, twice.
+- **A "cache, then toggle a fold" witness.** Paint `NN%` so the total
+  is cached, collapse (or expand) a fold **without any edit, resize or
+  mode change**, and assert the indicator changes. This fails against
+  revision 15's cache key, which is the point.
+- **A digit-boundary witness**, since content width is in the key: a
+  buffer crossing 9 -> 10 or 99 -> 100 lines changes the gutter and
+  therefore the wrap width, and the total must not be served stale
+  across it.
 - `Top` at the buffer start, `Bot` at the end, `All` only when every
   visual row fits --- each with a wrapped line present.
 - **A `truncate` control** asserting the indicator is byte-identical to
