@@ -1,8 +1,7 @@
 # Long lines — QoL Stage 3
 
-**Status: revision 18 — branched as `long-lines`; Q#LL1–LL7 settled;
-Q#LL8 awaiting approval, and §5d.6 (where the classifier lives) needs a
-decision. Not yet implemented.**
+**Status: revision 19 — APPROVED (2026-08-06). All eight questions
+answered; §5d.6 resolved. Implementation begun.**
 
 **Revision 2** corrected a load-bearing error in revision 1: it claimed
 both frontends render from the same `CellGrid`. They do not — the GPU
@@ -276,7 +275,7 @@ deleted, so a later reader can tell "the key was fixed" from "there is
 no key". §5d.7 adds the **large-file guard witnesses**, because "no
 whole-document work happens" must be enforced, not merely intended.
 
-**Revision 18 — the current one.** Review of `d6b5285` found the
+**Revision 18** — review of `d6b5285` found the
 interface contradiction the byte fallback left behind. Revision 16 had
 claimed the formatter could keep its signature and change only its
 arguments; it cannot. **Every branch of `format_scroll_indicator`
@@ -302,6 +301,14 @@ how the contradiction arose.
 condition that produced §5d.3's defect; sharing it via
 `pmacs-protocol` makes agreement structural but widens that crate
 toward presentation — a §16 layering call I am not taking alone.
+
+**Revision 19 — the current one.** §5d.6 answered as **(b)**:
+`ScrollPosition` and `classify` go in `pmacs-protocol`, string
+rendering stays per-frontend. The §16 reading that decides it — each
+frontend computes its own local layout facts, the shared crate owns the
+semantic decision they feed — is a sharper split than "shared
+vocabulary", and it adds **no wire message and no version bump**.
+Q#LL8 is approved. **The framing is approved; implementation begins.**
 
 Drafted while GitHub Actions was in a major outage and #220 could not
 merge. Nothing here depends on #220 landing; the two lanes touch no
@@ -1410,7 +1417,7 @@ contracts genuinely differ, and a shared four-count signature can only
 serve them by making units implicit --- which is how this contradiction
 arose.
 
-### 5d.6 Where the classifier lives --- **OPEN, needs a decision**
+### 5d.6 Where the classifier lives --- **ANSWERED: `pmacs-protocol`**
 
 `pmacs-gpu` depends on **`pmacs-protocol` only**, never on the `pmacs`
 lib (`pmacs-gpu/Cargo.toml:65`). So `format_scroll_indicator` is
@@ -1425,13 +1432,27 @@ faces the same fork:
   maintained** --- the principle that chose byte-anchoring, additive
   `sub_row`, and a content-derived cache key.
 
-**I lean (b) and will not take it unilaterally**, because it widens
-`pmacs-protocol` from wire vocabulary toward presentation, which is a
-`COHERENCE.md` §16 layering question and not this lane's to settle
-alone. The narrow version --- share the `ScrollPosition` enum and
-`classify`, leave the string rendering per-frontend --- keeps the
-protocol crate holding a *decision type* rather than presentation, and
-`panel.rs` is arguably precedent for that.
+**Answered 2026-08-06: (b), in the narrow form.** `ScrollPosition` and
+the pure `classify(first_visible, last_visible, byte_pos, byte_len)`
+live in `pmacs-protocol`; **string rendering stays in each frontend.**
+
+The §16 reading that settles it, and it is a better statement of the
+split than "shared vocabulary": **each frontend computes its own local
+layout facts --- which rows are on screen is a question only it can
+answer --- while the shared crate owns the common semantic decision
+those facts feed.** That is not presentation moving into the protocol
+crate; it is the *decision* being placed where both frontends are
+structurally unable to disagree about it, with the rendering left where
+it belongs.
+
+Two properties worth recording because they bound the change:
+
+- **No wire message and no protocol-version bump.** `classify` is a
+  pure function over values each side already has. Q#LL7's v22 variant
+  is unrelated and unaffected.
+- **The §5d.3 defect becomes unrepresentable**, rather than guarded by
+  a reviewer noticing the second copy. A frontend cannot classify
+  differently, because there is only one classifier.
 
 ### 5d.7 The large-file guard
 

@@ -296,7 +296,7 @@ change to *when* `needs_full_grid` is set — the producer's triggers
 were verified correct, along with per-frame geometry sync and
 `view_top` reconciliation on shrink.
 
-## Long lines (QoL Stage 3) — BRANCHED, no PR yet
+## Long lines (QoL Stage 3) — APPROVED, implementing; no PR yet
 
 **Branch `long-lines`**, base `githubsucks/main` @ `218d2e7` (the #219
 merge). `githubsucks/long-lines` is the authoritative tip — the ref,
@@ -306,7 +306,7 @@ records. Recover: `git fetch githubsucks && git checkout long-lines`.
 **This block was written with the lane's first commit, before any PR
 exists** — the standing correction from #171, #215 and #220.
 
-- **Framing `docs/long-lines-framing.md` revision 18.** Q#LL1-LL7
+- **Framing `docs/long-lines-framing.md` revision 19, APPROVED.** Q#LL1-LL7
   settled; **Q#LL8 not yet approved** --- implementation is blocked on
   it, because it changes what gets built rather than how.
 - **Independent of #220.** Stage 2 (GUI zoom) and Stage 3 share no
@@ -386,9 +386,12 @@ for the user to express a preference in either.
   keeping the existing formatter **untouched for `truncate`** — output
   identical by construction — and adding a `classify(first_visible,
   last_visible, byte_pos, byte_len)` for `wrap` that never sees a row
-  count. **Open: where the classifier lives.** `pmacs-gpu` depends on
-  `pmacs-protocol` only, so the duplication is structural; sharing it
-  is a §16 layering call.
+  count. **Resolved: the classifier lives in `pmacs-protocol`** —
+  `ScrollPosition` plus a pure `classify`, with string rendering left
+  in each frontend. Per §16: each frontend computes its own local
+  layout facts, the shared crate owns the semantic decision they feed.
+  **No wire message, no version bump**, and the one-copy-fixed defect
+  becomes unrepresentable rather than reviewer-guarded.
 
 ### The two decisions most likely to be questioned later
 
