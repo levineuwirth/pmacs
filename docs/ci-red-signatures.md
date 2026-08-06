@@ -79,18 +79,42 @@ Main-branch greens are **occurrence evidence** and accumulate toward a
 rate. They retire nothing by themselves. Retired rows stay in this file
 with their disposition, so a recurrence is recognisable.
 
-**A red matching a RETIRED row is a recurrence, and it puts the
-retirement in question — it is not a known flake.** The claim a
-retirement makes is that the mechanism is gone; the same signature
-afterwards falsifies that claim, which is a stronger finding than a live
-row, not a weaker one. Reopen the row rather than rerunning.
+**A red matching a RETIRED row AND POSTDATING ITS RETIREMENT is a
+recurrence, and it puts the retirement in question — it is not a known
+flake.** The claim a retirement makes is that the mechanism is gone
+*from the retirement forward*; the same signature afterwards falsifies
+that claim, which is a stronger finding than a live row, not a weaker
+one. Reopen the row rather than rerunning.
+
+**A matching red that PREDATES the retirement corroborates the row
+instead.** It is an additional occurrence of the mechanism the fix
+removed, so it strengthens the evidence and challenges nothing. Add it
+to the row's evidence; do not reopen. This is not a technicality — an
+occurrence scan reaches backwards by construction, so most matches it
+finds will be of this kind, and treating them as recurrences would
+reopen every retired row the first time anyone looked.
+
+**Both halves need the date, which means a row is unmatchable without
+one.** R2's second occurrence (`main` run 30710662474, 2026-08-01, four
+days before its 2026-08-05 retirement) is the worked example, and it
+also shows the flavor field is not part of matching: R2's first
+evidence is macOS / lua54 and that one is macOS / luajit.
 
 ---
 
 ## Live rows
 
-**Two of the four evidenced rows are live.** R2 and R4 were retired on
+**Four of the six evidenced rows are live.** R2 and R4 were retired on
 2026-08-05 and are below, under "Retired rows", with their dispositions.
+R5 and R6 were added on 2026-08-06 from an occurrence scan and a live
+red; neither is diagnosed.
+
+**Rate, as of 2026-08-06.** Of the last 25 `main` runs, **23 green and
+2 red** — the two reds being R2's second occurrence (30710662474) and
+R5 (30555667095). R6 has **no** occurrence in that window; it was first
+seen on a PR branch. This is the first rate this file has carried, and
+it is a floor rather than a measurement: it counts only `main`, only 25
+runs, and only reds that were still readable.
 
 ### R1 — supersede cancellation budget
 
@@ -144,6 +168,64 @@ diagnosis by the process-signal / reap-ledger lanes.
 
 ---
 
+### R5 — async pump deadline exceeded in the supersede close path
+
+| field | value |
+|---|---|
+| **selector** | `--lib editor::tests::stream_supersede_delivers_cancelled_to_on_close` |
+| **job / flavor** | macOS / lua54 |
+| **required fragments** | `async pump deadline exceeded` |
+| **causal status** | **UNRESOLVED — no diagnosis** |
+| **evidence** | `main` [run 30555667095](https://github.com/levineuwirth/pmacs/actions/runs/30555667095), 2026-07-30 |
+| **retirement** | diagnosis by the async-runtime lane, alongside R1's measurement question (Q#MCI3). **Never a green rerun.** |
+
+**Not R1, though it is the nearest thing to it.** R1 is
+`async_runtime::tests::supersede_cancels_in_flight_job_within_50ms`
+failing `supersede did not cancel within 50ms`; this is a different
+test in a different module failing a different assertion. They share a
+subject — supersede, under a deadline, on macOS — and sharing a subject
+is not sharing a signature. Filed separately so that a fix for one is
+not read as a disposition for the other.
+
+What the row does **not** claim: that the pump is slow, that the
+deadline is wrong, or that this is the same measurement-design problem
+R1 has. Nothing here has been diagnosed. It is recorded because it
+happened and had a signature, which is the entire bar for a row.
+
+### R6 — readiness file never published in the panel terminal fixture
+
+| field | value |
+|---|---|
+| **selector** | `--test bottom_panel_stage1_acceptance acc28_child_input_and_the_c_c_escape_work_unchanged_in_a_panel` |
+| **job / flavor** | macOS / lua54 |
+| **required fragments** | `timed out waiting for` **and** `/ready` |
+| **causal status** | **UNRESOLVED — no diagnosis** |
+| **evidence** | #217 [run 31023651701](https://github.com/levineuwirth/pmacs/actions/runs/31023651701), 2026-08-05 |
+| **retirement** | the readiness helpers are audited and reconciled, with a witness. **Never a green rerun** — the next push was green and that retires nothing. |
+
+**A THIRD copy of the readiness helper.** R4's disposition already
+recorded that the empty-file predicate lived in a second helper
+(`wait_for_published_file`) and warned that leaving it would let the
+mechanism recur under a different selector as a new incident.
+`tests/bottom_panel_stage1_acceptance.rs:2446` is a third,
+independently written `wait_for_file` carrying only *half* the
+hardening: it rejects a zero-byte file (`!bytes.is_empty()`) but never
+waits for the expected content.
+
+So the honest statement is narrow. This red is a **timeout**, not R4's
+`left: [] / right: [49]`, and a timeout is what a *correct* predicate
+does when the content never arrives — it is not evidence of the R4 bug.
+What is established is only that a third copy exists and diverges from
+the other two. **Whether this occurrence is a slow runner, a child that
+never published, or something in the panel path is not known**, and the
+suite passed 5/5 locally on Linux, which reproduces nothing about a
+macOS runner and is not evidence about this occurrence.
+
+The scope this row implies is the audit, not the test: how many
+readiness helpers exist, whether they can be one, and what each
+promises. Patching this call site alone would leave the same question
+open under a fourth selector.
+
 ## Retired rows
 
 **These stay here on purpose.** A retirement is a claim that a mechanism
@@ -160,7 +242,7 @@ witness that fails without the fix — never by a count of green runs.
 | **job / flavor** | macOS / lua54 |
 | **required fragments** | `leader=exited(signal SIGUSR1)` — **one exact fragment, not two loose ones**. Split into `leader=exited(` and `SIGUSR1` it would match a child that exited by some *other* disposition while `SIGUSR1` appeared elsewhere in the output |
 | **causal status** | **test race** |
-| **evidence** | [#213 run 30927084982 attempt 1](https://github.com/levineuwirth/pmacs/actions/runs/30927084982/attempts/1) |
+| **evidence** | [#213 run 30927084982 attempt 1](https://github.com/levineuwirth/pmacs/actions/runs/30927084982/attempts/1); **and `main` [run 30710662474](https://github.com/levineuwirth/pmacs/actions/runs/30710662474), 2026-08-01, macOS / *luajit*** — same exact fragment on the **other flavor**, found by an occurrence scan on 2026-08-06 |
 | **retirement condition** | the fixture proves the trap is installed, with a witness that fails without it |
 | **disposition** | **met.** The child publishes a readiness marker *after* `trap '' USR1`, the test waits for that marker's **content**, and `process::tests::usr1_readiness_waits_for_the_trap_not_for_the_spawn` is the witness |
 
@@ -186,6 +268,25 @@ Three things the fix and the witness settled that the row did not say:
   disposition** — a child that took the USR1 reports
   `Signaled { signal: "SIGUSR1" }` — rather than by an absence observed
   within a window.
+- **The second occurrence is pre-retirement, and that is the whole
+  question.** `main` run 30710662474 predates the 2026-08-05 retirement
+  by four days, so it corroborates the row rather than falsifying its
+  disposition — a red matching a retired row is a recurrence **only if
+  it postdates the retirement**, and the rule above is about the claim
+  a retirement makes going forward. It does add something: this row's
+  evidence was macOS / lua54 and this one is macOS / **luajit**, so the
+  mechanism was never flavor-specific, which is what the fix already
+  assumed when it widened the window deliberately rather than hoping a
+  loaded runner supplied one.
+
+  *It was also very nearly filed as R3.* Same test, same `EPERM`, same
+  `measured_group=unobservable(ESRCH…)` — and R3 explicitly requires
+  `leader=live`, where this reads `leader=exited(signal SIGUSR1)`.
+  Matching on the shared fragments and the shared test name would have
+  attached a live, unresolved possible-product-defect row to an
+  occurrence of a retired test race. **This is why the rows key on
+  exact fragments and why R2's says "one exact fragment, not two loose
+  ones."**
 - **The fixture had a second, unnamed dependency.** These signals are
   group-directed, so a forked `sleep` would be an *untrapped* member of
   the same group. That it survived at all depended on the shell
