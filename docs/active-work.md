@@ -225,10 +225,12 @@ are the lanes this one creates, not work it does. Retiring the
 CI-CRDT, Distribution, or reap-ledger lanes: each still owns undone
 work and rule 4 does not apply to them.
 
-## Honoring `full_grid` (QoL Stage 1) — IN FLIGHT
+## Honoring `full_grid` (QoL Stage 1) — PR #219 OPEN
 
-**This block is written with the lane's first commit, before the PR
-exists** — the standing correction from #171 and #215.
+**PR #219** — https://github.com/levineuwirth/pmacs/pull/219. **This
+block was written with the lane's first commit, before the PR
+existed** — the standing correction from #171 and #215 — so the row
+below was filled in rather than invented.
 
 - **Branch `full-grid-resync`**, base `githubsucks/main` @ `da56bec`
   (the #218 merge). `githubsucks/full-grid-resync` is the
