@@ -180,6 +180,34 @@ form. All four steps ran clean. **The two-argument form still does not
 work** for a remote-only branch (`fatal: invalid reference`), which is
 why every lane below spells out the `-b` form.
 
+## Docs absorption after #217 — IN FLIGHT
+
+**This block is written with the lane's first commit, before the PR
+exists.** That is the standing correction from #171 (153 commits of
+drift while invisible here) and #215 (no lane until review caught it):
+this file requires a lane for every open PR, and the way that stops
+recurring is writing it now rather than after someone asks.
+
+- **Branch `docs-absorption-217`**, base `githubsucks/main` @ `db1bbe9`
+  (the #217 merge). `githubsucks/docs-absorption-217` is the
+  authoritative tip — any edit to this block advances past whatever SHA
+  it records, so the ref is the thing to trust. Recover with `git fetch
+  githubsucks && git checkout docs-absorption-217`.
+- **Docs only.** No `src/`, no crate, no manifest, no test changes.
+  Gates run are fmt, `git diff --check`, `--lib`, and
+  `listview_acceptance`; the full suite is not re-run for a change that
+  cannot reach it, and that is stated rather than left as a gap.
+- **Scope:** retire the tree and macOS-CI arcs per rule 4, re-home
+  their residue first, file R5 and R6, and carry four durable lessons
+  into the handoff.
+
+### Not in scope
+
+Diagnosing R5 or R6, or auditing the three readiness helpers — those
+are the lanes this one creates, not work it does. Retiring the
+CI-CRDT, Distribution, or reap-ledger lanes: each still owns undone
+work and rule 4 does not apply to them.
+
 ## Tree primitive (P5) — MERGED as #217; adoption is the open work
 
 **The lane is gone, not the work.** Rule 4 removes a lane after merge,
