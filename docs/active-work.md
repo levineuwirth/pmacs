@@ -306,8 +306,10 @@ records. Recover: `git fetch githubsucks && git checkout long-lines`.
 **This block was written with the lane's first commit, before any PR
 exists** — the standing correction from #171, #215 and #220.
 
-- **Framing `docs/long-lines-framing.md` revision 14, APPROVED**, after
-  **eleven** revisions of review. All six questions answered.
+- **Framing `docs/long-lines-framing.md` revision 15.** Q#LL1-LL6
+  answered; **Q#LL7 and Q#LL8 raised by review of this lane's first
+  commit and not yet approved** --- implementation is blocked on them,
+  because both change what gets built rather than how.
 - **Independent of #220.** Stage 2 (GUI zoom) and Stage 3 share no
   code, so this branch does not wait on that merge — which matters,
   because #220 is blocked on a GitHub Actions outage, not on itself.
@@ -338,6 +340,24 @@ for the user to express a preference in either.
 - **Q#LL6** — no global map (every vertical consumer is local, so
   layout is per-line); `view_top`'s sub-line component is a **byte**;
   `DisplayCoord` gains `sub_row` rather than redefining `row`.
+
+### The two holes review found in the first commit
+
+- **Q#LL7 --- the GPU had no wire.** The mode resolved into `Viewport`,
+  which reaches only the *grid* renderer; the GPU lays out locally and
+  no message expresses a wrap mode. `truncate` would have changed the
+  TUI and left the GPU wrapping --- the exact disagreement this lane
+  exists to close. Now specified as an additive v22 variant carrying
+  `buffer_id`, resent on attach, config change, **and buffer switch**.
+  That third trigger is the subtle one: font size is global, wrap mode
+  is per buffer, so a `FontFacts`-shaped design is silently wrong and
+  looks right in every single-buffer test.
+- **Q#LL8 --- "every vertical consumer is local" was false.** The
+  scroll indicator needs a total. A one-line buffer wrapping to fifty
+  rows has `total_lines == 1`, so the indicator reports `All` while
+  forty-nine rows sit off-screen. The bounded distinction survives: a
+  *total* is one lazily-computed number; an *index* is `O(N)` resident
+  storage, still ruled out.
 
 ### The two decisions most likely to be questioned later
 

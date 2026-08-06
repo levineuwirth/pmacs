@@ -1,7 +1,8 @@
 # Long lines — QoL Stage 3
 
-**Status: revision 14 — APPROVED to branch (2026-08-06). All six
-questions answered. Not yet implemented.**
+**Status: revision 15 — branched as `long-lines`; Q#LL1–LL6 answered;
+Q#LL7 and Q#LL8 raised by review of the lane's first commit and NOT yet
+approved. Not yet implemented.**
 
 **Revision 2** corrected a load-bearing error in revision 1: it claimed
 both frontends render from the same `CellGrid`. They do not — the GPU
@@ -177,7 +178,7 @@ anchor** — `scroll_top` plus `code_scroll_residual`, renormalized by
 `normalize_code_scroll` (framing Q#F6) when reflow pushes the residual
 across source lines. The shape is precedent, not invention.
 
-**Revision 14 — the current one.** Answers the remaining four questions
+**Revision 14** — answers the remaining four questions
 and moves the document to APPROVED.
 
 **Q#LL2** (§4): buffer-local, with `Viewport` carrying the *resolved*
@@ -194,6 +195,35 @@ is worse than honest divergence. **Q#LL6 items 1-2** (§5b.4):
 `TextView` methods, no cache initially, one `Copy` context parameter —
 breaking on the input side so the compiler enumerates the audit,
 additive on the output side so untouched consumers stay correct.
+
+**Revision 15 — the current one.** Review of `bd752f2` found two holes
+and one notation hazard.
+
+**Q#LL7 (§5c) — the GPU had no wire.** §4 resolves the mode into
+`Viewport`, which reaches the *grid*. The GPU is not a grid consumer:
+it lays out locally, `BufferSnapshot` carries only CRDT bytes, and no
+message expresses a wrap mode. So `truncate` would have changed the TUI
+and left the GPU wrapping — the exact disagreement this lane closes.
+Specified as an additive variant at v22 (advertised baseline unmoved),
+carrying `buffer_id` because the mode is buffer-local, resent on
+attach, on config change, **and on buffer switch** — the third being
+the one a `FontFacts`-shaped design misses, since font size is global
+while wrap mode is per buffer.
+
+**Q#LL8 (§5d) — "every vertical consumer is local" was false.** The
+scroll indicator needs a total: a one-line buffer wrapping to fifty
+rows has `total_lines == 1`, so `format_scroll_indicator` returns
+`All` while forty-nine rows sit off-screen. §5b.5 is narrowed
+accordingly, keeping the distinction that bounds the cost — a *total*
+is one lazily-computed number, an *index* is `O(N)` resident. `All`,
+`Top` and `Bot` need no aggregate at all; only `NN%` does.
+
+**Notation (§7).** Revision 14 said `pos_to_display` returns "the
+visual row", which reads as redefining `row` — the thing §5b.5
+forbids. Every wrap-point example is now the explicit triple
+`{row, sub_row, col}`, and both coordinates at a soft break share the
+same `row`, which is the information a redefinition would have
+destroyed.
 
 Drafted while GitHub Actions was in a major outage and #220 could not
 merge. Nothing here depends on #220 landing; the two lanes touch no
@@ -873,11 +903,20 @@ memory and an `O(N)` rebuild on every width change --- against an M1
 gate that includes `open_100mb_under_200ms`. That is a real perf risk
 and §5b.7's "authoritative map" framing invited it.
 
-It is not required, because every vertical consumer is **local**:
-rendering walks forward from `view_top` bounded by viewport height;
-`move_down`/`move_up` need one step; paging needs viewport-height rows;
-the wheel needs *n* rows from `view_top`. Nothing asks for the absolute
-visual row of line 40,000, and nothing indexes by one.
+No **index** is required, because every *positioning* consumer is
+local: rendering walks forward from `view_top` bounded by viewport
+height; `move_down`/`move_up` need one step; paging needs
+viewport-height rows; the wheel needs *n* rows from `view_top`. Nothing
+asks for the absolute visual row of line 40,000, and nothing **indexes**
+by one.
+
+**Revision 14 overstated this as "every vertical consumer is local",
+and that is false.** Review of `bd752f2` found the counterexample: the
+scroll indicator needs a **total**. See §5d --- and note the
+distinction that survives, because it is what keeps the cost bounded: a
+*total* is one number, computable lazily and cacheable; a *prefix-sum
+index* is `O(N)` resident storage. Stage 3 needs the former and still
+does not need the latter.
 
 So "the map" is two per-line functions --- how many rows this line
 occupies at this width, and which row a given byte falls on --- plus
@@ -987,6 +1026,146 @@ its current behavior is provably unchanged.
 
 ---
 
+## 5c. Q#LL7 --- the GPU needs a wire message, and revision 14 had none
+
+**Raised in review of `bd752f2`, and it is a hole in the lane's central
+claim.** §4 resolves `ui.line-wrap` into `Viewport`, which reaches the
+**grid** renderer. The GPU is not a grid consumer (§1.2): it lays out
+locally and ignores `CellDelta`. `BufferSnapshot` carries only CRDT
+bytes (`pmacs-protocol/src/message.rs:777`), and no `InstanceMessage`
+variant expresses a wrap mode.
+
+So as framed through revision 14, `ui.line-wrap = "truncate"` would
+change the TUI and **leave the GPU wrapping** --- the two frontends
+still disagreeing, which is the exact defect this lane exists to close.
+Q#LL5's "character wrap in both" is likewise unreachable without a
+wire: setting `Wrap::Glyph` at GPU startup is not the same as honoring
+a mode that can change.
+
+### 5c.1 The message
+
+**Additive variant, appended after the current final `InstanceMessage`
+variant; `PROTOCOL_VERSION` 21 -> 22; `ADVERTISED_PROTOCOL_VERSION`
+stays 20.** This is the path `FontFacts` took at v17 and the panel
+shapes took at v21, and the constant's own doc reserves moving the
+advertised baseline for changes "that cannot be expressed additively"
+--- this one can.
+
+It carries `buffer_id` alongside the mode. **Not optional: the mode is
+buffer-local (§4)**, so "the current mode" is meaningless without
+naming the buffer it belongs to, and the GPU tracks
+`current_buffer_id` already.
+
+### 5c.2 Resend semantics --- the part most likely to be got wrong
+
+The mode must reach the GPU on **all three** of:
+
+1. **Attach**, for the initially-shown buffer, as part of the same
+   initial-state burst that establishes font facts. A frontend that
+   attaches to an existing session must not have to wait for a change
+   to learn the current mode.
+2. **Config change**, via the registry's `on_change` --- for every
+   attached frontend showing that buffer.
+3. **Buffer switch.** This is the one a `FontFacts`-shaped design
+   misses. Font size is global; **wrap mode is per buffer**, so
+   switching from a buffer set to `truncate` to one left at `wrap`
+   changes the effective mode with **no config event at all**. A
+   design that only listens to `on_change` is silently wrong here, and
+   would look correct in every single-buffer test.
+
+### 5c.3 GPU behavior on receipt
+
+Set `Wrap::Glyph` (mode `wrap`) or `Wrap::None` (mode `truncate`) on
+the **document** buffer --- its first explicit `set_wrap` either way
+(§1.2) --- then reshape and **renormalize the scroll anchor** through
+`normalize_code_scroll` (`pmacs-gpu/src/main.rs:7955`). That path
+already exists for exactly this situation: reflow moving the retained
+residual across source lines. Changing wrap mode reflows the whole
+document, so it is the same event class as a font-size change, and must
+reuse that repair rather than reimplement it.
+
+An out-of-range or unknown mode value is **rejected as a whole
+message**, matching `apply_font_facts` rather than clamping --- the
+convention Stage 2 followed (`docs/gui-zoom-framing.md`).
+
+### 5c.4 Older frontends
+
+A v21-or-older frontend never receives the variant and keeps wrapping.
+That is a **documented divergence**, not a silent one: the guarantee
+"both frontends agree" holds for peers that negotiated v22, and the
+release notes must say so alongside the word-wrap regression (§5a).
+
+---
+
+## 5d. Q#LL8 --- the scroll indicator, which falsifies "everything is local"
+
+**Raised in review of `bd752f2`.** `format_scroll_indicator`
+(`src/editor.rs:5509`) reckons `All`/`Top`/`Bot`/`NN%` from
+`total_lines`, fed in visible-line space (`src/editor.rs:4336`, Arc 6
+Q#FD18) so a collapsed remainder correctly reads `All`.
+
+Under `wrap` that is wrong in a way a user sees immediately. **A
+one-line buffer wrapping to fifty screen rows has `total_lines == 1`,
+so the very first branch --- `if total_lines <= 1 { return "All" }` ---
+reports `All` while forty-nine rows sit below the viewport.** The
+indicator claims the whole buffer is on screen when almost none of it
+is.
+
+### 5d.1 The contract
+
+The indicator is reckoned in **visual rows** whenever the mode is
+`wrap`, and in visible lines under `truncate` --- where the two
+coincide, so `truncate` remains exactly today's behavior, consistent
+with §5b.5's identity-case strategy.
+
+- `All` --- every visual row of the buffer is on screen.
+- `Top` --- the first visual row is on screen and `All` does not hold.
+- `Bot` --- the last visual row is on screen and `All` does not hold.
+- `NN%` --- the cursor's **visual row ordinal** as a percent of the
+  buffer's total visual rows.
+
+### 5d.2 What must be computed, and what must not
+
+**`All` / `Top` / `Bot` need no aggregate.** Each is a local predicate:
+is the first visual row on screen (`view_top` byte == first visible
+byte), and is the last one (does the forward walk from `view_top` reach
+the buffer end within the viewport)? Both fall out of the render walk
+that already happens. **Only `NN%` needs a total**, which matters
+because `All`/`Top`/`Bot` are the states a user reads most and the
+common cases stay `O(viewport)`.
+
+The total may be computed **lazily and cached**, keyed by buffer
+generation, width and mode, and invalidated by any of the three. It
+composes with folds by counting rows only for lines the fold map
+vouches as visible (§5b.3).
+
+**It must not become a resident prefix-sum index** --- that is the
+`O(N)` storage §5b.5 rules out, and the distinction is exactly one
+number versus one number per line.
+
+**The `open_100mb_under_200ms` gate (M1) constrains this.** Computing
+total visual rows means laying out every line, so it must not happen on
+open, on every frame, or on any path the gate measures --- only on
+first `NN%` paint after an invalidation. If that proves too slow on
+large buffers, the fallback is to report a **byte-based** percentage
+under `wrap` and say so; what is not acceptable is today's silent
+`All`.
+
+### 5d.3 Verification
+
+- **The reported case, as a direct witness:** one source line, viewport
+  shorter than its wrapped height, mode `wrap` --- the indicator must
+  **not** be `All`. This fails against revision 14's design, which is
+  what makes it worth writing first.
+- `Top` at the buffer start, `Bot` at the end, `All` only when every
+  visual row fits --- each with a wrapped line present.
+- **A `truncate` control** asserting the indicator is byte-identical to
+  today's output for the same buffer and viewport.
+- A **folded + wrapped** case, since §5b.3's composition applies here
+  too and the Q#FD18 contract must survive.
+
+---
+
 ## 6. Q#LL4 --- `editing.fill-column` **ANSWERED**
 
 > **Answered 2026-08-06: do not adopt it** --- but the reason is
@@ -1034,9 +1213,17 @@ Not final --- it depends on Q#LL1.
   quietly re-importing deferred scope. What `wrap` actually needs
   witnessed:
   - For a source line occupying N visual rows, `pos_to_display` returns
-    the **visual** row and the column *within* that row --- not the
-    source-line index and the whole prefix width, which is what it
-    returns today (`src/text_view.rs:184`).
+    `{ row: source_line, sub_row, col }` --- the **same `row` it
+    returns today**, plus which visual row *within* that line and the
+    column within *that* row, rather than the whole prefix width
+    (`src/text_view.rs:184`).
+
+    **Notation matters here and revision 14 got it wrong.** It said
+    `pos_to_display` returns "the visual row", which reads as a
+    redefinition of `row` --- exactly what §5b.5 forbids. Every example
+    below is therefore written as the explicit triple
+    `{row, sub_row, col}`; a bare pair anywhere in this section is a
+    bug in the document, not a shorthand.
   - `display_to_pos` inverts it: a click on visual row *k* of a wrapped
     line lands in that row's byte range, not the source line's head.
   - Round trip is identity for **every valid cursor boundary** in a
@@ -1075,9 +1262,13 @@ Not final --- it depends on Q#LL1.
 
     Take `abcdef` soft-wrapping after `abc`. Buffer positions are
     `0=a 1=b 2=c 3=d 4=e 5=f`. **Position 3 is a single source position
-    with two defensible display coordinates**: `(k, 3)` --- just past
-    the last glyph of row *k* --- and `(k+1, 0)` --- just before the
-    first glyph of row *k+1*. Revision 5 called these "the last
+    with two defensible display coordinates**:
+    `{row: L, sub_row: k, col: 3}` --- just past the last glyph of
+    visual row *k* of line *L* --- and `{row: L, sub_row: k+1, col: 0}`
+    --- just before the first glyph of visual row *k+1* of the **same
+    source line**. Note both share `row: L`: the wrap point does not
+    cross a source line, which is precisely why redefining `row` would
+    have destroyed the information this case turns on. Revision 5 called these "the last
     position on row *k* and the first on row *k+1*" and demanded they
     "not collide". They are the same position. Nothing can be asserted
     about their collision.
@@ -1104,12 +1295,14 @@ Not final --- it depends on Q#LL1.
     > one exists on some row; otherwise to the column just past the
     > last glyph.**
 
-    - Soft wrap: position 3 is followed by `d` at `(k+1, 0)`. A
+    - Soft wrap: position 3 is followed by `d` at
+      `{row: L, sub_row: k+1, col: 0}`. A
       following glyph exists, so that is the answer. There is a genuine
       choice here, and this resolves it.
     - Hard line end: no glyph follows on any row, so the coordinate is
       the column just past the last glyph --- `(k, width)`, **including
-      `(k, max_cols)` when the line fills the row exactly.** No choice
+      `{row: L, sub_row: last, col: max_cols}` when the line fills its
+      final visual row exactly.** No choice
       exists, and **this preserves current behavior unchanged**, which
       is the point: the wrap work must not quietly move hard-end
       coordinates.
@@ -1127,9 +1320,11 @@ Not final --- it depends on Q#LL1.
     source-line space. Read §5b before costing this.
 
     Consequences to witness, and they are the discriminating ones:
-    - `pos_to_display(3)` is `(k+1, 0)`, never `(k, 3)`.
+    - `pos_to_display(3)` is `{row: L, sub_row: k+1, col: 0}`, never
+      `{row: L, sub_row: k, col: 3}`.
     - **A hard line end that exactly fills the row still maps to
-      `(k, max_cols)`** --- a control asserting the wrap work left the
+      `{row: L, sub_row: 0, col: max_cols}` with `sub_row` still 0** ---
+      a control asserting the wrap work left the
       existing hard-end coordinate alone, since the soft-wrap rule
       superficially resembles a rule that would have moved it.
     - `display_to_pos` on the trailing cells of row *k* --- which exist
@@ -1148,7 +1343,8 @@ Not final --- it depends on Q#LL1.
     distinctly**, which is the requirement revision 5 was reaching for.
     The start of the last codepoint on row *k* (position 2, `c`) and
     the start of the first on row *k+1* (position 3, `d`) are two
-    different positions; they must give `(k, 2)` and `(k+1, 0)`, and
+    different positions; they must give `{row: L, sub_row: k, col: 2}`
+    and `{row: L, sub_row: k+1, col: 0}`, and
     the round trip must return each unchanged.
   - A `truncate` **control** asserting the mapping is unchanged from
     today, so the wrap work cannot silently alter the non-wrapped path.
