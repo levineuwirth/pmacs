@@ -180,10 +180,11 @@ form. All four steps ran clean. **The two-argument form still does not
 work** for a remote-only branch (`fatal: invalid reference`), which is
 why every lane below spells out the `-b` form.
 
-## Docs absorption after #217 — IN FLIGHT
+## Docs absorption after #217 — PR #218 OPEN
 
-**This block is written with the lane's first commit, before the PR
-exists.** That is the standing correction from #171 (153 commits of
+**PR #218** — https://github.com/levineuwirth/pmacs/pull/218. **This
+block was written with the lane's first commit, before the PR
+existed**, so the row above was filled in rather than invented. That is the standing correction from #171 (153 commits of
 drift while invisible here) and #215 (no lane until review caught it):
 this file requires a lane for every open PR, and the way that stops
 recurring is writing it now rather than after someone asks.
