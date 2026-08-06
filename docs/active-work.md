@@ -296,6 +296,81 @@ change to *when* `needs_full_grid` is set — the producer's triggers
 were verified correct, along with per-frame geometry sync and
 `view_top` reconciliation on shrink.
 
+## GUI zoom (QoL Stage 2) — IN FLIGHT
+
+**Written with the lane's first commit, before the PR exists** — the
+standing correction from #171 and #215.
+
+- **Branch `gui-zoom`**, base `githubsucks/main` @ `218d2e7` (the #219
+  merge). `githubsucks/gui-zoom` is the authoritative tip.
+  Recover: `git fetch githubsucks && git checkout gui-zoom`.
+- **Framing `docs/gui-zoom-framing.md` revision 4**, approved after
+  four review rounds. **Q#Z1 = (c)** configured base with `None`
+  preserved; **Q#Z2 = additive**; **Q#Z3 = (C)** commands only, no
+  default bindings; **Q#Z4** eager restore inside `install_state_dirs`.
+
+### What it ships
+
+`builtin/runtime/zoom.lua`: two settings (`ui.gpu-font-size-base`,
+`ui.gpu-zoom-step`), three commands (`gpu.zoom-in` / `-out` /
+`-reset`), and `pmacs.zoom.restore` called from `install_state_dirs`.
+**No rendering work** — `FontMetrics::scale` already derived every GUI
+dimension and `apply_font_facts` already re-metriced everything; this
+drives the preference that existed.
+
+### The three findings review caught, none of which was in revision 1
+
+- **Q#Z3 was not implementable.** `keymap_stack::Scope` is
+  `Buffer | Mode | Global` with no frontend identity, and
+  `FrontendEvent` has no command-invocation variant — so neither "bind
+  on GPU only" nor "the GPU asks for a command" exists. Commands ship;
+  the binding waits on **capability-aware keymap resolution**, now a
+  named follow-on.
+- **The restore seam did not exist.** Builtins and `init.lua` both run
+  *before* `install_state_dirs`, so a `pmacs.state.read` at module load
+  returns nothing, always. `saveplace` and `recentf` never meet this
+  because **both read lazily**; zoom must apply with no user action,
+  making it the **first eager state consumer**. Restore lives at the
+  end of `install_state_dirs` — by definition when state becomes
+  readable, so it cannot be mis-ordered or missed by a future third
+  startup path.
+- **Every size write clobbered the family.** `set_font` replaces both
+  fields unconditionally, so `{ size = n }` alone silently cleared a
+  configured family until restart.
+
+### Verification
+
+13 acceptance tests, three bitten: dropping family preservation fails
+3; reverting to the framing's first parser `^(%d+)$` fails 4 including
+the seam restore (it anchors to end-of-subject and rejects the
+newline-terminated file the writer emits); hardcoding the 16.0 origin
+fails the base test.
+
+### Not in scope
+
+Stage 3 (long lines). Capability-aware keymap resolution — Q#Z3's
+option (A), deliberately deferred rather than half-built. Per-buffer
+zoom. Any change to `FontFacts` or the wire.
+
+## Empty-content readiness, a fourth and fifth instance — FOR THE R6 AUDIT
+
+Found 2026-08-06 while gating this lane, recorded here because it
+widens an existing lane's scope rather than starting one.
+
+A loaded `--features crdt` run failed `m6_1_pty_raw_mode_disables_kernel_echo`
+and `m6_1_pty_canonical_mode_keeps_kernel_echo` with
+**`stty -a output was: ""`** — read-before-write on the child's output.
+That is the **same family as R4** (readiness predicate satisfied by an
+empty file) and **R6** (readiness file never published), and it means
+the readiness-helper audit's scope is not just three `wait_for_file`
+copies under `tests/`: `src/process.rs`'s own tests carry the shape
+too.
+
+Both passed isolated and the full suite was green on a quiet machine,
+so this is load-sensitive and **undiagnosed** — recorded as a scope
+note for the audit, not as a registry row: these were local, and the
+registry judges red **CI** runs.
+
 ## Tree primitive (P5) — MERGED as #217; adoption is the open work
 
 **The lane is gone, not the work.** Rule 4 removes a lane after merge,
