@@ -77,12 +77,16 @@ end
 -- workaround for one.
 --
 -- It also RESTORES the round-trip contract, which a raw step breaks:
--- with 0.015 the sequence is 16.00 -> 16.02 -> 16.01, because each
--- operation rounds independently and 16.015 and 16.005 round in
--- opposite directions. Quantizing first makes every step exact
--- addition in the quantized domain, so n in and n out returns to the
--- starting value for ANY accepted step, not only for the ones that
--- happened to be representable.
+-- with 0.015 the sequence is 16.00 -> 16.02 -> 16.01. Each operation
+-- rounds independently, and both intermediates land on an EXACT tie ---
+-- 16.015 and 16.005 are 1601.5 and 1600.5 centi-px --- which this
+-- half-up quantizer sends UP. Half-up is not symmetric under negation:
+-- rounding up on the way in adds half a centi-pixel, and rounding up on
+-- the way out adds another, so the two errors accumulate instead of
+-- cancelling. Quantizing first makes every step exact addition in the
+-- quantized domain, so n in and n out returns to the starting value for
+-- ANY accepted step, not only for the ones that happened to be
+-- representable.
 local function effective_step()
   return quantize(pmacs.config.get("ui.gpu-zoom-step"))
 end

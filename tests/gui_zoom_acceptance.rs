@@ -128,8 +128,10 @@ fn n_steps_in_then_n_out_returns_exactly() {
 /// The registry accepts any finite number in range — `ConfigKind::Number`
 /// validates finiteness and bounds and nothing else, and `on_change`
 /// cannot veto — so 0.015 is a settable step. Used raw it breaks the
-/// contract: each operation rounds independently, 16.015 rounds up and
-/// 16.005 rounds down, giving 16.00 -> 16.02 -> 16.01.
+/// contract: each operation rounds independently, and both intermediates
+/// land on an exact tie — 16.015 and 16.005 — which half-up rounding
+/// sends *up*. Up on the way in and up on the way out accumulate rather
+/// than cancel, giving 16.00 -> 16.02 -> 16.01.
 ///
 /// Quantizing the step at the point of use restores exactness for every
 /// accepted step, not just the representable ones.

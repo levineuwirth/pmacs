@@ -133,9 +133,13 @@ validates **finiteness and bounds and nothing else**
 *after* a value is stored — they cannot veto. So `0.015` is a
 perfectly settable step, and nothing in the registry can refuse it.
 
-Used raw it breaks the guarantee below, because each operation rounds
-independently and `16.015` and `16.005` round in **opposite
-directions**:
+Used raw it breaks the guarantee below. Each operation rounds
+independently, and both intermediates land on an **exact tie** —
+`16.015` and `16.005` are `1601.5` and `1600.5` centi-pixels — which the
+half-up quantizer sends **up**. Half-up is not symmetric under negation:
+rounding up on the way in adds half a centi-pixel, rounding up on the
+way out adds another, so the two errors accumulate instead of
+cancelling:
 
 ```
 step 0.015:  16.00 -> 16.02 -> 16.01     round trip broken
