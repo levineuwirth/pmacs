@@ -304,8 +304,9 @@ correction from #171 and #215 — so the row below was filled in rather
 than invented.
 
 - **Branch `gui-zoom`**, base `githubsucks/main` @ `218d2e7` (the #219
-  merge). Pushed; `githubsucks/gui-zoom` is the authoritative tip, at
-  `1e054f7`.
+  merge). Pushed; **`githubsucks/gui-zoom` is the authoritative tip** —
+  the ref, deliberately not a SHA, since writing one into the commit
+  that updates this lane makes it stale in that same commit.
   Recover: `git fetch githubsucks && git checkout gui-zoom`.
 - **Framing `docs/gui-zoom-framing.md` revision 5**, approved after
   four review rounds; revision 5 adds §3.2 for a finding raised against
