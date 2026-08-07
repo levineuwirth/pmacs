@@ -483,6 +483,7 @@ mod tests {
     use crate::cell::{Cell, CellSize, Glyph, UnderlineStyle};
     use crate::text_view::TextView;
     use crate::view::Viewport;
+    use crate::view::WrapMode;
 
     fn make_grid(rows: u32, cols: u32) -> Vec<Cell> {
         vec![Cell::default(); (rows * cols) as usize]
@@ -496,6 +497,7 @@ mod tests {
             cell_size: CellSize::new(rows, cols),
             gutter_w: 0,
             folds: None,
+            wrap: WrapMode::Truncate,
         }
     }
 

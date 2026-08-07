@@ -336,13 +336,31 @@ fn one_daemon_serves_a_v21_panel_session_and_a_shipped_v20_client() {
 /// and the counter-offer is what reaches the current wire.
 #[test]
 fn the_baseline_stays_and_the_counter_offer_activates() {
-    assert_eq!(PROTOCOL_VERSION, 21);
+    // A deliberate tripwire: bumping the wire must be a conscious edit
+    // here, not a silent one. v22 is `LineWrapFacts` (long-lines Stage 3).
+    assert_eq!(PROTOCOL_VERSION, 22);
     assert_eq!(
         ADVERTISED_PROTOCOL_VERSION, 20,
         "moving this is the incompatible act the mechanism exists to avoid"
     );
     const { assert!(PROTOCOL_VERSION > ADVERTISED_PROTOCOL_VERSION) };
-    assert_eq!(PANEL_MIN_VERSION, PROTOCOL_VERSION);
+
+    // Panel frames are gated ABOVE the advertised floor and at or below
+    // this binary's wire. Both halves are durable properties of the
+    // gate.
+    //
+    // This replaces `assert_eq!(PANEL_MIN_VERSION, PROTOCOL_VERSION)`,
+    // which asserted a **coincidence**: panel frames were the newest
+    // feature when it was written, so their minimum happened to equal
+    // the current wire. Any later feature falsifies that — v22 is the
+    // first, and the equality would have had to be edited on every
+    // subsequent bump while telling a reader something that was never
+    // the contract.
+    // `const` blocks, matching the line above: these are compile-time
+    // constants, so a runtime `assert!` is both a clippy error and a
+    // weaker check than the language already offers.
+    const { assert!(PANEL_MIN_VERSION > ADVERTISED_PROTOCOL_VERSION) };
+    const { assert!(PANEL_MIN_VERSION <= PROTOCOL_VERSION) };
 
     // The current baseline is answered with this binary's own version.
     assert_eq!(
@@ -584,8 +602,24 @@ fn a54_real_daemon_real_pty_and_headless_gpu_render_one_panel_hosted_terminal() 
         "a deadline-driven pass must not read as success: {text}"
     );
     // The activation, end to end on a real socket.
-    assert_eq!(fact("session_protocol_version"), "21", "{text}");
+    //
+    // The session version is compared against `PROTOCOL_VERSION` rather
+    // than the literal "21" it used to pin: what the counter-offer
+    // activates is *this binary's* wire, so the literal was only ever
+    // correct while the panel stage was the newest one. The baseline
+    // stays a literal, because 20 not moving IS the claim.
+    assert_eq!(
+        fact("session_protocol_version"),
+        PROTOCOL_VERSION.to_string(),
+        "{text}"
+    );
     assert_eq!(fact("baseline_protocol_version"), "20", "{text}");
+    // …and that negotiated version is panel-capable, which is the part
+    // "21" used to carry implicitly.
+    assert!(
+        number("session_protocol_version") >= PANEL_MIN_VERSION,
+        "the negotiated wire must reach the panel minimum: {text}"
+    );
 
     // The band is real: declared, projected, focused, and carrying the child.
     assert!(

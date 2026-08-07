@@ -763,6 +763,12 @@ impl EditorState {
                 include_str!("../builtin/runtime/zoom.lua"),
             )
             .expect("load zoom builtin chunk");
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/linewrap.lua"),
+                include_str!("../builtin/runtime/linewrap.lua"),
+            )
+            .expect("load linewrap builtin chunk");
         // T M7.11 bundled-package bootstrap. Through M7.10 the REPL
         // was loaded directly via `eval(include_str!(...))`; the
         // M7.11 deliverable migrates it to the package system so it
@@ -2351,6 +2357,7 @@ impl EditorState {
                 None
             };
             window.last_visible_rows = content.size.rows;
+            window.last_content_cols = content.size.cols;
             // A2A-3 / parent 48: the auto-scroll clamp belongs to the
             // FOCUSED window only. Running it for a passive panel would
             // move a `view_top` the user is not driving.
@@ -3603,7 +3610,9 @@ impl EditorState {
             let Ok(buf) = reg.get(buffer_id) else {
                 return;
             };
-            core.windows[&win_id].text_view.display_to_pos(buf, target)
+            core.windows[&win_id]
+                .text_view
+                .display_to_pos(buf, target, core.layout_ctx(win_id))
         };
         if let Some(p) = pos {
             let aw = core
@@ -3662,7 +3671,9 @@ impl EditorState {
             let reg = registry.borrow();
             reg.get(buffer_id).ok().and_then(|buf| {
                 let aw = &core.windows[&win_id];
-                let cur = aw.text_view.pos_to_display(buf, aw.cursor)?;
+                let cur = aw
+                    .text_view
+                    .pos_to_display(buf, aw.cursor, aw.layout_ctx())?;
                 let cur_row = cur.row as usize;
                 let target_row_usize = match folds.as_ref() {
                     Some(map) if scroll_up => map.nth_visible_back(cur_row, view_shift),
@@ -3674,7 +3685,11 @@ impl EditorState {
                 };
                 let target_row = u32::try_from(target_row_usize).ok()?;
                 aw.text_view
-                    .display_to_pos(buf, crate::view::DisplayCoord::new(target_row, cur.col))
+                    .display_to_pos(
+                        buf,
+                        crate::view::DisplayCoord::new(target_row, cur.col),
+                        aw.layout_ctx(),
+                    )
                     .or_else(|| aw.text_view.line_offset(target_row_usize))
             })
         };
@@ -4270,7 +4285,7 @@ fn prepare_window_cursor_visible(
 ) {
     let cursor_row = window
         .text_view
-        .pos_to_display(buf, window.cursor)
+        .pos_to_display(buf, window.cursor, window.layout_ctx())
         .map_or(0, |d| d.row as usize);
     match folds {
         // The logical cursor may sit on a hidden line (a shared fold, or
@@ -4348,12 +4363,32 @@ fn paint_window_content(
         cell_size: crate::cell::CellSize::new(inner_rows, rect.size.cols - gutter_w),
         gutter_w,
         folds,
+        // The resolved mode belongs here beside `folds`, for the same
+        // reason: the driver holds the registry and the buffer, the view
+        // holds neither.
+        //
+        // It reads `last_wrap` rather than resolving again. The render
+        // loop already resolved it for this window this frame, and the
+        // coordinate callers read that same field through
+        // `Window::layout_ctx` — so a second resolution here could
+        // disagree with the one the cursor is placed against, which is
+        // the failure this whole one-resolution arrangement exists to
+        // prevent.
+        wrap: window.last_wrap,
     };
     // Composition (T M2.9): base text_view paints first, then the
     // gutter numbers — before the overlays, so a diagnostic overlay
     // can draw its severity sign into the gutter's leading column
     // without the gutter's own blank pass erasing it — then each
     // overlay in attach order. See [`crate::view::View`].
+    // Record the width text actually wrapped at, taken from the
+    // viewport itself rather than recomputed: a second derivation could
+    // disagree with the one the renderer used, and the disagreement
+    // would only show as a cursor on the wrong row.
+    // Width only: `last_wrap` was resolved before the viewport was
+    // built and is what the viewport was built FROM, so writing it back
+    // here would be circular.
+    window.last_content_cols = viewport.cell_size.cols;
     window.text_view.render(buf, viewport, grid);
     if gutter_w > 0 {
         paint_line_number_gutter(grid, window, &rect, inner_rows, gutter_w, folds, theme);
@@ -4366,7 +4401,7 @@ fn paint_window_content(
     // itself is always visible regardless of overlay activity.
     let coord = window
         .text_view
-        .pos_to_display(buf, window.cursor)
+        .pos_to_display(buf, window.cursor, window.layout_ctx())
         .unwrap_or_default();
     // Arc 6 Stage 2 (Q#FD18): All/Top/Bot/% are reckoned in
     // VISIBLE-line space — a buffer whose remainder is collapsed
@@ -4384,7 +4419,30 @@ fn paint_window_content(
             coord.row as usize,
         ),
     };
-    let scroll = format_scroll_indicator(ind_top, inner_rows as usize, ind_total, ind_cursor);
+    let scroll = if window.last_wrap == crate::view::WrapMode::Wrap {
+        // Under wrapping the line-space formatter is not merely
+        // imprecise, it is wrong: a one-line buffer wrapping to fifty
+        // rows has `total_lines == 1`, so its first branch reports
+        // "All" while forty-nine rows sit below the viewport.
+        //
+        // There is no row total to give it instead. The GPU shapes only
+        // its viewport slice, so it cannot count rows it never laid out,
+        // and computing a total arithmetically would disagree with the
+        // break points actually rendered. So `All`/`Top`/`Bot` come from
+        // LOCAL predicates — which the render walk already knows — and
+        // the percentage comes from byte position. Both frontends use
+        // the same rule, from `pmacs_protocol::scroll`.
+        let first_visible = viewport_buffer_start == 0;
+        let last_visible = window.text_view.reached_buffer_end();
+        render_scroll_position(pmacs_protocol::scroll::classify(
+            first_visible,
+            last_visible,
+            window.cursor,
+            buf.len(),
+        ))
+    } else {
+        format_scroll_indicator(ind_top, inner_rows as usize, ind_total, ind_cursor)
+    };
     // Lock scoped to the summary computation only: the overlay
     // renders above include `DiagnosticView`, which takes this
     // same mutex — holding the guard across the loop deadlocked
@@ -4550,6 +4608,13 @@ pub fn paint_frame(
         // Record viewport height for page motion (cursor.page-down /
         // cursor.page-up consume this).
         window.last_visible_rows = inner_rows;
+        // Resolve the buffer's wrap mode once per window per frame and
+        // record it here. Every later consumer — the viewport below,
+        // and the coordinate callers via `Window::layout_ctx` — reads
+        // this one answer, so nothing re-resolves and two callers
+        // cannot disagree about one buffer.
+        window.last_wrap =
+            crate::lua_bindings::config_line_wrap(state.lua_host.lua(), Some(window.buffer_id));
         if inner_rows == 0 || rect.size.cols == 0 {
             continue;
         }
@@ -4676,7 +4741,9 @@ fn window_cursor_cell(
         ),
         None => window.cursor,
     };
-    let disp = window.text_view.pos_to_display(buf, cursor)?;
+    let disp = window
+        .text_view
+        .pos_to_display(buf, cursor, window.layout_ctx())?;
     let row_offset = match folds {
         Some(map) => {
             let top = map.clamp_view_top(window.view_top);
@@ -5003,10 +5070,17 @@ fn paint_local_selection(
             continue;
         }
 
-        let Some(start_coord) = window.text_view.pos_to_display(buf, paint_start) else {
+        let Some(start_coord) =
+            window
+                .text_view
+                .pos_to_display(buf, paint_start, window.layout_ctx())
+        else {
             continue;
         };
-        let Some(end_coord) = window.text_view.pos_to_display(buf, paint_end) else {
+        let Some(end_coord) = window
+            .text_view
+            .pos_to_display(buf, paint_end, window.layout_ctx())
+        else {
             continue;
         };
         if start_coord.row as usize != display_row || end_coord.row as usize != display_row {
@@ -5541,6 +5615,23 @@ fn first_line(s: &str) -> &str {
 /// `visible` may be 0 in tests that never rendered (so
 /// `last_visible_rows` was never populated); in that case we fall
 /// back to cursor-row-based percent without the All/Top/Bot caps.
+/// Render a [`pmacs_protocol::scroll::ScrollPosition`] for the status
+/// line.
+///
+/// The classification is shared with the GPU frontend; only this
+/// rendering is per-frontend, which is the split framing §5d.6 settled:
+/// each frontend answers its own layout questions, the shared crate owns
+/// the decision they feed.
+fn render_scroll_position(pos: pmacs_protocol::scroll::ScrollPosition) -> String {
+    use pmacs_protocol::scroll::ScrollPosition;
+    match pos {
+        ScrollPosition::All => "All".to_owned(),
+        ScrollPosition::Top => "Top".to_owned(),
+        ScrollPosition::Bot => "Bot".to_owned(),
+        ScrollPosition::Percent(p) => format!("{p}%"),
+    }
+}
+
 fn format_scroll_indicator(
     view_top: usize,
     visible: usize,
@@ -5653,6 +5744,7 @@ fn printable_char(seq: &[Chord]) -> Option<char> {
 
 #[cfg(test)]
 mod tests {
+    use crate::view::WrapMode;
     // Acceptance home for T M5.4 (FrontendId on input events) — the
     // `m5_4_*`-prefixed tests verify the FrontendId field threads from
     // synthetic event construction through `dispatch_key` /
@@ -8450,6 +8542,7 @@ mod tests {
             cell_size: CellSize::new(rect.size.rows, rect.size.cols),
             gutter_w: 0,
             folds: None,
+            wrap: WrapMode::Truncate,
         };
         let mut grid = CellGrid {
             cells: &mut backing,
@@ -8585,6 +8678,7 @@ mod tests {
                 cell_size: CellSize::new(24, 80),
                 gutter_w: 0,
                 folds: None,
+                wrap: WrapMode::Truncate,
             };
 
             // Two no-op overlays: probe the dispatch cost only.

@@ -835,6 +835,33 @@ impl EditorCore {
         crate::fold_view::map_for_window(&self.fold_registry, window)
     }
 
+    /// The layout facts a coordinate mapping needs for `win_id`.
+    ///
+    /// **One resolver, so every consumer flips together.** The wrap mode
+    /// is buffer-local and the registry has no ambient buffer, so the
+    /// resolution belongs somewhere that holds both — here — rather than
+    /// at each of the twenty call sites. When `ui.line-wrap` is
+    /// registered, only this function changes and every caller becomes
+    /// wrap-aware at once.
+    ///
+    /// Width comes from the last render (`Window::last_content_cols`);
+    /// `0` until the first frame lands, which
+    /// [`LayoutCtx::wrapping`](crate::view::LayoutCtx::wrapping) already
+    /// treats as unwrapped.
+    #[must_use]
+    pub fn layout_ctx(&self, win_id: WindowId) -> crate::view::LayoutCtx {
+        self.windows.get(&win_id).map_or_else(
+            crate::view::LayoutCtx::truncated,
+            crate::window::Window::layout_ctx,
+        )
+    }
+
+    /// [`Self::layout_ctx`] for the active window.
+    #[must_use]
+    pub fn layout_ctx_active(&self) -> crate::view::LayoutCtx {
+        self.layout_ctx(self.active_window_id())
+    }
+
     /// [`Self::fold_map_for_window`] for the active window — the target
     /// of motion, paging, and the auto-scroll clamp.
     #[must_use]
@@ -2089,6 +2116,7 @@ impl EditorCore {
         self.normalize_cursor_to_visible(folds.as_ref());
         let id = self.active_buffer_id();
         let cursor = self.active_window().cursor;
+        let ctx = self.layout_ctx_active();
         let goal_col = self.active_window().goal_col;
         let result = {
             let reg = self.registry.borrow();
@@ -2096,7 +2124,7 @@ impl EditorCore {
             let aw = self.active_window();
             let coord = aw
                 .text_view
-                .pos_to_display(buffer, cursor)
+                .pos_to_display(buffer, cursor, ctx)
                 .unwrap_or_default();
             let from_row = coord.row as usize;
             if from_row == 0 {
@@ -2110,7 +2138,7 @@ impl EditorCore {
                 return;
             };
             let target = DisplayCoord::new(target_row, goal);
-            let new_pos = aw.text_view.display_to_pos(buffer, target);
+            let new_pos = aw.text_view.display_to_pos(buffer, target, ctx);
             (goal, new_pos)
         };
         let (goal, new_pos) = result;
@@ -2128,6 +2156,7 @@ impl EditorCore {
         self.normalize_cursor_to_visible(folds.as_ref());
         let id = self.active_buffer_id();
         let cursor = self.active_window().cursor;
+        let ctx = self.layout_ctx_active();
         let goal_col = self.active_window().goal_col;
         let result = {
             let reg = self.registry.borrow();
@@ -2135,7 +2164,7 @@ impl EditorCore {
             let aw = self.active_window();
             let coord = aw
                 .text_view
-                .pos_to_display(buffer, cursor)
+                .pos_to_display(buffer, cursor, ctx)
                 .unwrap_or_default();
             let from_row = coord.row as usize;
             let next_row = folds
@@ -2149,7 +2178,7 @@ impl EditorCore {
                 return;
             };
             let target = DisplayCoord::new(next_row, goal);
-            let new_pos = aw.text_view.display_to_pos(buffer, target);
+            let new_pos = aw.text_view.display_to_pos(buffer, target, ctx);
             (goal, new_pos)
         };
         let (goal, new_pos) = result;
@@ -2306,6 +2335,7 @@ impl EditorCore {
         self.normalize_cursor_to_visible(folds.as_ref());
         let step = self.page_step();
         let cursor = self.active_window().cursor;
+        let ctx = self.layout_ctx_active();
         let view_top = self.active_window().view_top;
         let id = self.active_buffer_id();
         let result = {
@@ -2314,7 +2344,7 @@ impl EditorCore {
             let aw = self.active_window();
             let coord = aw
                 .text_view
-                .pos_to_display(buffer, cursor)
+                .pos_to_display(buffer, cursor, ctx)
                 .unwrap_or_default();
             let max_line = aw.text_view.line_count().saturating_sub(1);
             let goal_col = aw.goal_col.unwrap_or(coord.col);
@@ -2333,7 +2363,7 @@ impl EditorCore {
                 return;
             };
             let target = DisplayCoord::new(target_row, goal_col);
-            let new_pos = aw.text_view.display_to_pos(buffer, target);
+            let new_pos = aw.text_view.display_to_pos(buffer, target, ctx);
             (goal_col, new_pos, new_top)
         };
         let (goal, new_pos, new_top) = result;
@@ -2358,6 +2388,7 @@ impl EditorCore {
         self.normalize_cursor_to_visible(folds.as_ref());
         let step = self.page_step();
         let cursor = self.active_window().cursor;
+        let ctx = self.layout_ctx_active();
         let view_top = self.active_window().view_top;
         let id = self.active_buffer_id();
         let result = {
@@ -2366,7 +2397,7 @@ impl EditorCore {
             let aw = self.active_window();
             let coord = aw
                 .text_view
-                .pos_to_display(buffer, cursor)
+                .pos_to_display(buffer, cursor, ctx)
                 .unwrap_or_default();
             let goal_col = aw.goal_col.unwrap_or(coord.col);
             let (target_row, new_top) = match folds.as_ref() {
@@ -2383,7 +2414,7 @@ impl EditorCore {
                 return;
             };
             let target = DisplayCoord::new(target_row, goal_col);
-            let new_pos = aw.text_view.display_to_pos(buffer, target);
+            let new_pos = aw.text_view.display_to_pos(buffer, target, ctx);
             (goal_col, new_pos, new_top)
         };
         let (goal, new_pos, new_top) = result;

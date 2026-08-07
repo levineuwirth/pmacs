@@ -773,6 +773,7 @@ impl View for LspStyleView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::view::WrapMode;
 
     #[test]
     fn theme_lookup_walks_dotted_prefixes() {
@@ -1111,6 +1112,7 @@ mod tests {
             cell_size: CellSize::new(1, 20),
             gutter_w: 0,
             folds: None,
+            wrap: WrapMode::Truncate,
         };
         let registry = state.core.borrow().registry.clone();
         let reg = registry.borrow();
@@ -1209,6 +1211,7 @@ mod tests {
             cell_size: CellSize::new(1, 20),
             gutter_w: 0,
             folds: None,
+            wrap: WrapMode::Truncate,
         };
         let registry = state.core.borrow().registry.clone();
         let reg = registry.borrow();
@@ -1329,6 +1332,7 @@ mod tests {
             cell_size: CellSize::new(1, 20),
             gutter_w: 0,
             folds: None,
+            wrap: WrapMode::Truncate,
         };
         let registry = state.core.borrow().registry.clone();
         let reg = registry.borrow();
@@ -1389,6 +1393,7 @@ mod tests {
             cell_size: CellSize::new(rows as u32, cols as u32),
             gutter_w: 0,
             folds: None,
+            wrap: WrapMode::Truncate,
         };
         let registry = buf; // keep buf alive
         hv.render(&registry, viewport, &mut grid);
@@ -1446,6 +1451,7 @@ mod tests {
             cell_size: CellSize::new(rows as u32, cols as u32),
             gutter_w: 0,
             folds: None,
+            wrap: WrapMode::Truncate,
         };
         let registry = buf; // keep buf alive
         hv.render(&registry, viewport, &mut grid);
@@ -1511,6 +1517,7 @@ mod tests {
             cell_size: CellSize::new(rows as u32, cols as u32),
             gutter_w: 0,
             folds: None,
+            wrap: WrapMode::Truncate,
         };
         let registry = buf;
         hv.render(&registry, viewport, &mut grid);
@@ -1578,6 +1585,7 @@ mod tests {
             cell_size: CellSize::new(rows as u32, cols as u32),
             gutter_w: 0,
             folds: None,
+            wrap: WrapMode::Truncate,
         };
         hv.render(&buf, viewport, &mut grid);
         grid.get(CellCoord::new(0, col)).style
@@ -1820,6 +1828,7 @@ mod tests {
             cell_size: CellSize::new(rows as u32, cols as u32),
             gutter_w: 0,
             folds: None,
+            wrap: WrapMode::Truncate,
         };
         let registry = buf;
         hv.render(&registry, viewport, &mut grid);
@@ -1883,6 +1892,7 @@ mod tests {
             cell_size: CellSize::new(rows as u32, cols as u32),
             gutter_w: 0,
             folds: None,
+            wrap: WrapMode::Truncate,
         };
         let registry = buf;
         hv.render(&registry, viewport, &mut grid);

@@ -442,6 +442,11 @@ impl Frontend {
             // grid and negotiates no panel capability, so this cannot
             // legitimately reach here.
             | InstanceMessage::PanelFrame(_)
+            // Long lines: the grid TUI learns its wrap mode through the
+            // viewport the daemon already resolved for it, so this
+            // message is for semantic frontends that lay out locally
+            // and would otherwise never hear the setting at all.
+            | InstanceMessage::LineWrapFacts { .. }
             | InstanceMessage::ResourceOffer { .. }
             // T M11.6 — DispatchIdle is consumed by `attach.rs`'s
             // optimistic-apply gate; if any reaches this render path

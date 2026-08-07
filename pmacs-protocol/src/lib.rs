@@ -41,6 +41,7 @@ pub mod crdt;
 pub mod ids;
 pub mod message;
 pub mod panel;
+pub mod scroll;
 pub mod terminal;
 pub mod transport;
 pub mod wire_grid;

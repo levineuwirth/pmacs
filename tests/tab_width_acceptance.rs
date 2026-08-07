@@ -6,7 +6,7 @@ use pmacs::buffer::{Buffer, BufferId};
 use pmacs::cell::{Cell, CellCoord, CellGrid, CellSize, Glyph, Style};
 use pmacs::overlay::{BufferStyleOverlay, BufferStyleSpan, SharedBufferStyleSpans};
 use pmacs::text_view::TextView;
-use pmacs::view::{DisplayCoord, View, Viewport};
+use pmacs::view::{DisplayCoord, LayoutCtx, View, Viewport, WrapMode};
 
 fn viewport(rows: u32, cols: u32, buffer_end: u64) -> Viewport<'static> {
     Viewport {
@@ -16,6 +16,7 @@ fn viewport(rows: u32, cols: u32, buffer_end: u64) -> Viewport<'static> {
         cell_size: CellSize::new(rows, cols),
         gutter_w: 0,
         folds: None,
+        wrap: WrapMode::Truncate,
     }
 }
 
@@ -36,10 +37,16 @@ fn plain_text_projects_tabs_without_changing_source_bytes() {
     let buf = Buffer::from_bytes(BufferId::next(), "tabs", source);
     let cells = render_text(&buf, 3, 20);
     let view = TextView::new(&buf);
-    assert_eq!(view.pos_to_display(&buf, 1), Some(DisplayCoord::new(0, 8)));
-    assert_eq!(view.pos_to_display(&buf, 11), Some(DisplayCoord::new(1, 8)));
     assert_eq!(
-        view.pos_to_display(&buf, 22),
+        view.pos_to_display(&buf, 1, LayoutCtx::truncated()),
+        Some(DisplayCoord::new(0, 8))
+    );
+    assert_eq!(
+        view.pos_to_display(&buf, 11, LayoutCtx::truncated()),
+        Some(DisplayCoord::new(1, 8))
+    );
+    assert_eq!(
+        view.pos_to_display(&buf, 22, LayoutCtx::truncated()),
         Some(DisplayCoord::new(2, 16))
     );
 

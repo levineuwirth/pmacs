@@ -144,7 +144,7 @@ fn set_read_only(s: &EditorState, id: BufferId, value: bool) {
 /// bites: the rope is right and the screen is not.
 fn paint_active_window(s: &EditorState, rows: u32, cols: u32) -> Vec<pmacs::cell::Cell> {
     use pmacs::cell::{Cell, CellGrid, CellSize};
-    use pmacs::view::{View, Viewport};
+    use pmacs::view::{View, Viewport, WrapMode};
     use pmacs::window::Rect;
 
     let mut core = s.core.borrow_mut();
@@ -162,6 +162,7 @@ fn paint_active_window(s: &EditorState, rows: u32, cols: u32) -> Vec<pmacs::cell
         cell_size: CellSize::new(rows, cols),
         gutter_w: 0,
         folds: None,
+        wrap: WrapMode::Truncate,
     };
     let mut grid = CellGrid {
         cells: &mut backing,

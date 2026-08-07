@@ -737,10 +737,18 @@ fn a37_real_daemon_real_pty_and_headless_gpu_render_one_terminal_session() {
     // which is exactly the incompatible change this mechanism exists to
     // avoid — and asserting only the baseline would pass with the whole
     // activation missing.
+    // Compared against `PROTOCOL_VERSION`, not the literal "21": the
+    // counter-offer activates THIS BINARY's wire, so the literal held
+    // only while the panel stage was the newest one (long-lines Stage 3
+    // appended v22). The baseline assertion below stays literal,
+    // because 20 not moving is the actual claim.
+    // Fully qualified: this file imports `PROTOCOL_VERSION` inside a
+    // different test's scope, not at module level.
+    let session_version = pmacs_protocol::PROTOCOL_VERSION.to_string();
     assert_eq!(
         facts.get("session_protocol_version").copied(),
-        Some("21"),
-        "the real client must negotiate the v21 panel wire: {text}"
+        Some(session_version.as_str()),
+        "the real client must negotiate this binary's wire: {text}"
     );
     assert_eq!(
         facts.get("baseline_protocol_version").copied(),
@@ -880,7 +888,9 @@ fn terminal_mode_keeps_reporting_presence_so_peers_drop_the_stale_caret() {
         panic!("timed out waiting for {what}");
     }
 
-    assert_eq!(PROTOCOL_VERSION, 21);
+    // Tripwire: a wire bump must be a conscious edit here. v22 is
+    // `LineWrapFacts` (long-lines Stage 3).
+    assert_eq!(PROTOCOL_VERSION, 22);
     let daemon = common::daemon::TestDaemon::spawn_with_env_and_init(
         &[
             ("PMACS_INSTANCE_SEMANTIC_RENDER", "1"),

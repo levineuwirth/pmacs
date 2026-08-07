@@ -3913,6 +3913,21 @@ impl State {
             &mut font_system,
             Metrics::new(fm.code_font_size(), fm.code_line_height()),
         );
+        // Declare the document's wrap mode instead of inheriting
+        // cosmic-text's constructor default (`Wrap::WordOrGlyph`).
+        //
+        // `Glyph`, not `None`: `ui.line-wrap` defaults to `wrap`, so a
+        // frontend that has not yet been told anything — or is talking
+        // to a pre-v22 daemon that never will be — should already be in
+        // the default mode. What changes versus the inherited default is
+        // only the break rule, word to character, which is the
+        // cross-frontend parity this stage buys.
+        //
+        // Declaring it is load-bearing rather than tidy: without it the
+        // document runs on `WordOrGlyph` until some message happens to
+        // change it, so a frontend talking to a pre-v22 daemon word
+        // wraps forever while the grid renderer character wraps.
+        buffer.set_wrap(&mut font_system, Wrap::Glyph);
         buffer.set_size(
             &mut font_system,
             Some(config.width as f32),
@@ -5149,6 +5164,10 @@ impl State {
             }
             InstanceMessage::TerminalFrame(frame) => {
                 self.apply_terminal_frame(frame);
+                None
+            }
+            InstanceMessage::LineWrapFacts { buffer_id, wrap } => {
+                self.apply_line_wrap(buffer_id, wrap);
                 None
             }
             InstanceMessage::PanelFrame(payload) => {
@@ -7137,7 +7156,14 @@ impl State {
     /// legacy diagnostic/cursor/scroll suffix. Custom boundaries are one
     /// base-colored space; the built-in suffix retains its exact two-space
     /// separators.
-    fn compose_status_runs(&self) -> Vec<(String, Color)> {
+    /// `&mut self` because the wrapped branch asks cosmic-text where two
+    /// bytes actually landed, and laying a line out shapes it. That is
+    /// the point rather than a wart: the alternative is a per-frame
+    /// cached `(first_visible, last_visible)` pair, which is a value
+    /// maintained beside the layout and free to disagree with it —
+    /// the same shape as the `code_wrap` shadow field this lane already
+    /// removed once.
+    fn compose_status_runs(&mut self) -> Vec<(String, Color)> {
         use std::fmt::Write as _;
 
         let base = self.status_right_base_color();
@@ -7196,12 +7222,54 @@ impl State {
             let _ = write!(readout, "L{}:C{}", line + 1, col + 1);
             readout.push_str("  ");
         }
-        readout.push_str(&format_scroll_indicator(
-            self.scroll_top,
-            estimated_visible_lines(self.config.height, self.fm, self.band_inset()),
-            self.current_line_starts.len(),
-            cursor_row,
-        ));
+        if self.buffer.wrap() == Wrap::None {
+            readout.push_str(&format_scroll_indicator(
+                self.scroll_top,
+                estimated_visible_lines(self.config.height, self.fm, self.band_inset()),
+                self.current_line_starts.len(),
+                cursor_row,
+            ));
+        } else {
+            // Wrapping makes the line-space formatter wrong, not merely
+            // imprecise: it compares `visible` (VISUAL rows that fit)
+            // against `total_lines` (SOURCE lines), so a document whose
+            // lines each wrap to three rows reports `Bot` from a third
+            // of the way down. This is not new in this lane — the GPU
+            // has always wrapped — but the lane is where it became
+            // nameable, because `ui.line-wrap` is now what decides which
+            // formula applies.
+            //
+            // The percentage comes from bytes because there is no row
+            // total to take it from: only the viewport slice is shaped,
+            // so rows below it were never laid out and counting them
+            // arithmetically would disagree with the breaks cosmic-text
+            // actually chose. Same rule as the TUI, from
+            // `pmacs_protocol::scroll`.
+            let byte_len = self.current_text.len() as u64;
+            let byte_pos = self
+                .own_cursor
+                .filter(|own| self.current_buffer_id == Some(own.buffer_id))
+                .map_or_else(
+                    // No cursor of ours in this buffer: the viewport's
+                    // own top is the honest position, matching the
+                    // `cursor_row = self.scroll_top` fallback above.
+                    || {
+                        self.current_line_starts
+                            .get(self.scroll_top)
+                            .copied()
+                            .unwrap_or(0)
+                    },
+                    |own| own.byte.min(byte_len),
+                );
+            let first_visible = self.code_byte_painted(0);
+            let last_visible = self.code_byte_painted(byte_len);
+            readout.push_str(&render_scroll_position(pmacs_protocol::scroll::classify(
+                first_visible,
+                last_visible,
+                byte_pos,
+                byte_len,
+            )));
+        }
         builtins.push((readout, base));
 
         if !runs.is_empty() {
@@ -7976,6 +8044,41 @@ impl State {
                 return;
             }
         }
+    }
+
+    /// Honor a wrap mode for `buffer_id` (protocol v22).
+    ///
+    /// The document buffer has never set a wrap mode, so it has been
+    /// running on cosmic-text's constructor default,
+    /// `Wrap::WordOrGlyph` — word wrap that nobody chose. This makes the
+    /// mode explicit in both directions and settles it on
+    /// **`Wrap::Glyph`**: character wrap is what the grid renderer can
+    /// implement identically without pulling UAX #14 into it, and it is
+    /// what Emacs does by default. GUI users lose word wrap; that is a
+    /// deliberate, documented trade for the two frontends agreeing.
+    ///
+    /// Changing wrap reflows the whole document, exactly like a font
+    /// change, so the retained scroll anchor is repaired through
+    /// `normalize_code_scroll` rather than left pointing at a row that
+    /// no longer exists.
+    fn apply_line_wrap(&mut self, buffer_id: BufferId, wrap: bool) {
+        // Only the buffer on screen can be reflowed; the mode is
+        // buffer-local, so a message for anything else is not ours to
+        // apply. The daemon resends on buffer switch precisely so this
+        // stays correct rather than needing a per-buffer cache here.
+        if self.current_buffer_id != Some(buffer_id) {
+            return;
+        }
+        let want = if wrap { Wrap::Glyph } else { Wrap::None };
+        // Compare against the BUFFER, not a shadow field. A cached copy
+        // can disagree with what cosmic-text actually holds — and when
+        // it does, the short-circuit turns a real mode change into a
+        // silent no-op. Reading the authority cannot drift from it.
+        if self.buffer.wrap() == want {
+            return;
+        }
+        self.buffer.set_wrap(&mut self.font_system, want);
+        self.reshape();
     }
 
     fn reshape(&mut self) {
@@ -9609,6 +9712,51 @@ impl State {
         self.minibuffer.is_none() && self.code_caret_rect_in_clip().is_some()
     }
 
+    /// Whether an arbitrary source `byte` is actually painted in the
+    /// drawable code area — [`Self::code_caret_rect_in_clip`]'s test,
+    /// generalized off the own cursor.
+    ///
+    /// The scroll indicator needs this and nothing weaker. Two cheaper
+    /// predicates are available and both are wrong:
+    ///
+    /// - `view_range.0 == 0` / `view_range.1 == len` describe the
+    ///   **shaped** span, which carries `SCROLL_OVERSCAN` source lines
+    ///   past the window. A slice that merely reaches EOF says nothing
+    ///   about whether EOF is on screen, so `Bot` would latch on early.
+    ///   (This is exactly the guess that broke
+    ///   `extreme_sizes_render_with_contained_popups` when it was tried.)
+    /// - `scroll_top == 0` ignores `code_scroll_residual`, so scrolling
+    ///   into the middle of a wrapped first line still claims `Top`.
+    ///
+    /// Asking where the byte lands answers both, because cosmic-text
+    /// laid it out: wrapped continuation runs pushed below the band and
+    /// overscan lines shaped past the bottom both fail the clip.
+    fn code_byte_painted(&mut self, byte: u64) -> bool {
+        let (vstart, vend) = self.view_range;
+        if byte < vstart || byte > vend {
+            return false;
+        }
+        // Deliberately no `vend <= vstart` rejection, though the caret
+        // and completion-anchor paths both carry one. An empty range is
+        // not the same as an empty layout: a file ending in a newline
+        // has a final empty line, and a viewport parked on it shapes
+        // one real row at `(len, len)`. Rejecting that reported
+        // "neither end visible" — a percentage — at the exact moment
+        // the user had scrolled to the bottom. `code_byte_px` already
+        // returns `None` when nothing is shaped, which is the condition
+        // that guard was reaching for.
+        let Some((_x, top, line_height)) = self.code_byte_px(byte) else {
+            return false;
+        };
+        let y = TEXT_TOP + top;
+        let bottom = document_text_bottom(self.config.height, self.fm, self.band_inset());
+        // Partial overlap counts as painted, the same rule the caret
+        // clip uses. A first row half-scrolled under the top edge is
+        // still legible, and a stricter test here would disagree with
+        // the caret about the very same row.
+        y < bottom && y + line_height > TEXT_TOP
+    }
+
     /// Push one rect per visual line whose glyphs overlap the
     /// slice-relative source byte range `[lo, hi)`, spanning the
     /// matching projected glyphs' horizontal extent. Each source-line
@@ -10108,9 +10256,28 @@ fn minimap_band_contains(
         && y < MINIMAP_TOP + height
 }
 
+/// Render a [`pmacs_protocol::scroll::ScrollPosition`] for the status
+/// line. The classification is shared with the TUI; only this spelling
+/// is local (framing §5d.6), so the two frontends cannot decide
+/// differently but each stays free to present it.
+fn render_scroll_position(pos: pmacs_protocol::scroll::ScrollPosition) -> String {
+    use pmacs_protocol::scroll::ScrollPosition;
+    match pos {
+        ScrollPosition::All => "All".to_owned(),
+        ScrollPosition::Top => "Top".to_owned(),
+        ScrollPosition::Bot => "Bot".to_owned(),
+        ScrollPosition::Percent(p) => format!("{p}%"),
+    }
+}
+
 /// The TUI mode line's scroll readout, ported verbatim (Q#S1): "All"
 /// when the buffer fits, "Top"/"Bot" at the extremes, else the cursor
 /// row as a percentage of the file.
+///
+/// Only reached when wrapping is **off**. Under wrapping it is not
+/// merely imprecise but wrong — it reckons in source lines while the
+/// window holds visual rows — so that path goes through
+/// [`render_scroll_position`] instead.
 fn format_scroll_indicator(
     view_top: usize,
     visible: usize,
@@ -10484,6 +10651,7 @@ fn debug_apply() -> bool {
 fn instance_message_label(msg: &InstanceMessage) -> &'static str {
     match msg {
         InstanceMessage::CellDelta { .. } => "CellDelta",
+        InstanceMessage::LineWrapFacts { .. } => "LineWrapFacts",
         InstanceMessage::Cursor(_) => "Cursor",
         InstanceMessage::ModeLine(_) => "ModeLine",
         InstanceMessage::Signal(_) => "Signal",
@@ -15847,6 +16015,222 @@ mod tests {
 
     /// Acceptance 11 — a caret painted on a wrapped visual run
     /// survives 16px → 72px → 6px re-wraps, with the normalized
+    /// A fresh frontend must already be CHARACTER wrapping, not word
+    /// wrapping.
+    ///
+    /// The subtle failure this catches: `apply_line_wrap` short-circuits
+    /// when the request matches `code_wrap`, so if the field said
+    /// `Glyph` while the buffer was still on cosmic-text's inherited
+    /// `WordOrGlyph`, the first `wrap: true` message would be a no-op
+    /// and the document would keep **word** wrapping — the exact
+    /// divergence from the grid renderer that framing Q#LL5 exists to
+    /// close, surviving invisibly.
+    ///
+    /// Wrap-versus-truncate cannot see it, because both modes differ
+    /// from each other either way. Word-versus-character can: with
+    /// character wrap, spaces are just glyphs, so a spaced line and an
+    /// unspaced line of the same length occupy the same number of rows.
+    /// Word wrap breaks early at the spaces and needs more.
+    #[test]
+    fn a_fresh_frontend_wraps_by_character_not_by_word() {
+        let Some(state) = headless_or_skip(320, 400, "hello world\n") else {
+            return;
+        };
+        assert_eq!(
+            state.buffer.wrap(),
+            Wrap::Glyph,
+            "a frontend told nothing must already be in the DEFAULT mode \
+             and wrapping by CHARACTER. Inheriting cosmic-text's \
+             WordOrGlyph would word-wrap the document forever against a \
+             pre-v22 daemon, diverging from the grid renderer"
+        );
+    }
+
+    /// The discriminating witness framing §7 asked for.
+    ///
+    /// `wrapped_caret_survives_size_changes` passes today against a wrap
+    /// nobody configured — cosmic-text's constructor default — so it
+    /// cannot tell "honors the setting" from "the default happened to
+    /// match". The other value is what discriminates: with wrap OFF, an
+    /// overlong line must NOT occupy a second row.
+    #[test]
+    fn the_gpu_honors_an_explicit_non_wrap_mode() {
+        let long = "x".repeat(400);
+        let Some(mut state) = headless_or_skip(320, 400, &format!("{long}\nsecond\n")) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+
+        state.apply_line_wrap(bid, true);
+        state.reshape();
+        let wrapped_rows = state.buffer.layout_runs().count();
+
+        state.apply_line_wrap(bid, false);
+        state.reshape();
+        let truncated_rows = state.buffer.layout_runs().count();
+
+        assert!(
+            wrapped_rows > truncated_rows,
+            "wrap must produce more visual rows than truncate \
+             (wrapped={wrapped_rows}, truncated={truncated_rows}); equal counts \
+             would mean the mode reached nothing"
+        );
+    }
+
+    /// The scroll indicator token: the last builtin in the right-hand
+    /// status runs, which are joined by a two-space separator.
+    fn scroll_readout(state: &mut State) -> String {
+        let runs = state.compose_status_runs();
+        let text: String = runs.iter().map(|(text, _)| text.as_str()).collect();
+        text.rsplit("  ").next().unwrap_or_default().to_owned()
+    }
+
+    /// Put `state` in a wrapped, scrolled-to-top state over `text`.
+    fn wrapped_at_top(state: &mut State, wrap: bool) {
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.apply_line_wrap(bid, wrap);
+        state.scroll_top = 0;
+        state.code_scroll_residual = 0.0;
+        state.reshape();
+    }
+
+    /// The defect the shared classifier exists for, in its purest form:
+    /// **one** source line, wrapping to far more rows than fit.
+    ///
+    /// `format_scroll_indicator` returns "All" on its very first branch
+    /// (`total_lines <= 1`) without consulting anything else — so the
+    /// mode line claimed the whole buffer was on screen while most of it
+    /// sat below the window. The truncate control below shows "All" is
+    /// the right answer *in line space*; it is the space that is wrong.
+    #[test]
+    fn a_wrapped_single_line_is_not_all() {
+        let long = "x".repeat(4000);
+        let Some(mut state) = headless_or_skip(320, 240, &long) else {
+            return;
+        };
+        wrapped_at_top(&mut state, true);
+        assert_eq!(
+            scroll_readout(&mut state),
+            "Top",
+            "one source line wrapping past the window bottom: the first \
+             row is on screen and the last is not"
+        );
+
+        wrapped_at_top(&mut state, false);
+        assert_eq!(
+            scroll_readout(&mut state),
+            "All",
+            "control: truncating, this really is one row and all of it \
+             is on screen — the line formula is right when it applies"
+        );
+    }
+
+    /// `Bot` must mean the last byte is painted, not that the shaped
+    /// slice happens to reach EOF.
+    ///
+    /// This is the discriminating case for [`State::code_byte_painted`]
+    /// over the cheaper `view_range.1 == len`: few source lines, each
+    /// wrapping to many rows, so `SCROLL_OVERSCAN` pulls EOF into the
+    /// slice while EOF is nowhere near the screen.
+    #[test]
+    fn a_slice_that_reaches_eof_is_not_yet_bot() {
+        let long = "y".repeat(1200);
+        let text = format!("{long}\n{long}\n{long}\n");
+        let Some(mut state) = headless_or_skip(320, 240, &text) else {
+            return;
+        };
+        wrapped_at_top(&mut state, true);
+        assert_eq!(
+            state.view_range.1,
+            state.current_text.len() as u64,
+            "precondition: the shaped slice does reach EOF — otherwise \
+             this test would pass for the wrong reason"
+        );
+        assert_eq!(
+            scroll_readout(&mut state),
+            "Top",
+            "EOF is shaped but painted far below the band"
+        );
+
+        while state.scroll_by_lines(1).is_some() {}
+        assert_eq!(
+            scroll_readout(&mut state),
+            "Bot",
+            "scrolled to the last source line, EOF is now painted"
+        );
+    }
+
+    /// A file ending in a newline has a final **empty** line, and a
+    /// viewport parked on it has `view_range == (len, len)`.
+    ///
+    /// Named separately because the first version of
+    /// [`State::code_byte_painted`] rejected an empty range outright —
+    /// borrowed from the caret path, where it means "nothing shaped".
+    /// Here it means "one empty row", and rejecting it reported a
+    /// percentage at the precise moment the user reached the bottom.
+    #[test]
+    fn an_empty_final_line_still_counts_as_bot() {
+        let Some(mut state) = headless_or_skip(320, 240, "alpha\nbeta\n") else {
+            return;
+        };
+        wrapped_at_top(&mut state, true);
+        while state.scroll_by_lines(1).is_some() {}
+        assert_eq!(
+            state.view_range.0, state.view_range.1,
+            "precondition: parked on the trailing empty line"
+        );
+        assert_eq!(scroll_readout(&mut state), "Bot");
+    }
+
+    /// Scrolling *within* a wrapped first line moves the first byte off
+    /// screen, and the readout has to notice.
+    ///
+    /// `scroll_top == 0` is still true here — which is why the cheap
+    /// predicate would keep saying `Top` while row one of the document
+    /// has scrolled away under the top edge.
+    #[test]
+    fn a_sub_line_residual_moves_off_top() {
+        let long = "z".repeat(4000);
+        let Some(mut state) = headless_or_skip(320, 240, &long) else {
+            return;
+        };
+        wrapped_at_top(&mut state, true);
+        assert_eq!(scroll_readout(&mut state), "Top");
+
+        // Past several wrapped rows, still inside source line 0.
+        state.code_scroll_residual = state.fm.code_line_height() * 4.0;
+        state.reshape();
+        assert_eq!(state.scroll_top, 0, "still the same source line");
+        assert_ne!(
+            scroll_readout(&mut state),
+            "Top",
+            "the document's first row is above the top edge, so `Top` \
+             would be a claim about a row that is not painted"
+        );
+    }
+
+    /// A mode for a buffer that is not on screen is not ours to apply.
+    /// The daemon resends on buffer switch precisely so this holds.
+    #[test]
+    fn a_wrap_message_for_another_buffer_is_ignored() {
+        let Some(mut state) = headless_or_skip(320, 200, "hello\n") else {
+            return;
+        };
+        let mine = BufferId::next();
+        let other = BufferId::next();
+        state.current_buffer_id = Some(mine);
+        state.apply_line_wrap(mine, true);
+        let after_mine = state.buffer.wrap();
+        state.apply_line_wrap(other, false);
+        assert_eq!(
+            state.buffer.wrap(),
+            after_mine,
+            "another buffer's mode must not reflow this one"
+        );
+    }
+
     /// scroll invariant intact throughout.
     #[test]
     #[allow(clippy::float_cmp)] // exact: assigned constants, not computed sums

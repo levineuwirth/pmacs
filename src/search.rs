@@ -541,6 +541,7 @@ impl View for SearchView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::view::WrapMode;
 
     fn r(start: u64, end: u64) -> ByteRange {
         ByteRange { start, end }
@@ -759,6 +760,7 @@ mod tests {
                 cell_size: CellSize::new(1, 10),
                 gutter_w: 0,
                 folds: None,
+                wrap: WrapMode::Truncate,
             },
             &mut grid,
         );
@@ -788,6 +790,7 @@ mod tests {
                 cell_size: CellSize::new(1, 10),
                 gutter_w: 0,
                 folds: None,
+                wrap: WrapMode::Truncate,
             },
             &mut grid2,
         );
@@ -830,6 +833,7 @@ mod tests {
                 cell_size: CellSize::new(rows, cols),
                 gutter_w: 0,
                 folds: None,
+                wrap: WrapMode::Truncate,
             },
             &mut grid,
         );

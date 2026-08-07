@@ -32,7 +32,7 @@ use pmacs::editor_core::GeometryUpdate;
 use pmacs::protocol::{FrontendId, InstanceMessage, PROTOCOL_VERSION};
 use pmacs::semantic_render::SemanticRenderState;
 use pmacs::window::{FrontendView, Layout, Window, WindowId};
-use pmacs_protocol::panel::{PanelFrame, PanelFramePayload};
+use pmacs_protocol::panel::{PANEL_MIN_VERSION, PanelFrame, PanelFramePayload};
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -740,10 +740,25 @@ fn acc51_a_pre_panel_semantic_frontend_is_never_sent_a_panel_frame() {
     );
 }
 
+/// A peer below [`PANEL_MIN_VERSION`] gets no `PanelFrame` even when the
+/// daemon could build one for it.
+///
+/// **Anchored on `PANEL_MIN_VERSION - 1`, not `PROTOCOL_VERSION - 1`.**
+/// The original spelling was the latter, which expressed an *absolute*
+/// contract — "older than the version that introduced panel frames" —
+/// as arithmetic on a *moving* constant. It held only while
+/// `PROTOCOL_VERSION` happened to equal `PANEL_MIN_VERSION`, and the
+/// long-lines lane's bump to v22 made `PROTOCOL_VERSION - 1` equal
+/// `PANEL_MIN_VERSION` exactly: the fixture's "old" peer became
+/// panel-capable, so the daemon correctly sent a frame and the test
+/// correctly failed. The production code was never wrong.
+///
+/// `src/daemon.rs` and `pmacs-gpu/src/main.rs` already spell this
+/// `PANEL_MIN_VERSION - 1` in five places; this was the one outlier.
 #[test]
-fn acc51_a_v20_peer_is_sent_no_panel_frame_even_when_capable() {
+fn acc51_a_sub_panel_version_peer_is_sent_no_panel_frame_even_when_capable() {
     let mut session = Session::new();
-    session.render = SemanticRenderState::for_peer(FID, PROTOCOL_VERSION - 1);
+    session.render = SemanticRenderState::for_peer(FID, PANEL_MIN_VERSION - 1);
     session.declare(1, ROWS, COLS);
     open_panel(&session, "*panel*", 4);
 

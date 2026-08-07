@@ -166,7 +166,10 @@ pub fn paint_other_frontend_overlays(
                 ),
                 None => presence.snapshot.cursor,
             };
-            let Some(disp) = window.text_view.pos_to_display(buf, peer_cursor) else {
+            let Some(disp) = window
+                .text_view
+                .pos_to_display(buf, peer_cursor, window.layout_ctx())
+            else {
                 continue;
             };
             // Filter to viewport visible range. `view_top` is the
@@ -309,7 +312,10 @@ fn paint_selection_in_window(
     // straightforward walk is fine.
     let mut pos = lo;
     while pos < hi {
-        let Some(disp) = window.text_view.pos_to_display(buf, pos) else {
+        let Some(disp) = window
+            .text_view
+            .pos_to_display(buf, pos, window.layout_ctx())
+        else {
             break;
         };
         let row_in_window = match folds {

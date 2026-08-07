@@ -108,18 +108,123 @@ impl InterceptContext {
 /// and inline expansions appear.
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
 pub struct DisplayCoord {
-    /// 0-based row.
+    /// 0-based **source line** index.
+    ///
+    /// Deliberately still the source line under wrapping, not a visual
+    /// row. Redefining it would have broken every existing consumer —
+    /// `overlay_paint`'s `row - view_top`, vertical motion's bounds
+    /// check — with no compile error. Adding [`Self::sub_row`] beside it
+    /// instead leaves those consumers *correct*, not merely findable.
     pub row: u32,
-    /// 0-based column.
+    /// Which visual row **within** `row`, when the line wraps.
+    ///
+    /// `0` for every unwrapped line and under
+    /// [`WrapMode::Truncate`](crate::view::WrapMode::Truncate), which is
+    /// what makes this field additive: code that has never heard of
+    /// wrapping keeps computing the right answer.
+    pub sub_row: u32,
+    /// 0-based column, within the visual row named by `sub_row`.
     pub col: u32,
 }
 
 impl DisplayCoord {
-    /// Construct a display coordinate.
+    /// Construct a display coordinate on a line's first visual row.
     #[must_use]
     pub const fn new(row: u32, col: u32) -> Self {
-        Self { row, col }
+        Self {
+            row,
+            sub_row: 0,
+            col,
+        }
     }
+
+    /// Construct a display coordinate on a specific visual row of a
+    /// wrapped line.
+    #[must_use]
+    pub const fn wrapped(row: u32, sub_row: u32, col: u32) -> Self {
+        Self { row, sub_row, col }
+    }
+}
+
+/// The layout facts a coordinate mapping needs, which the mapping
+/// itself cannot know.
+///
+/// # Why this is a required parameter
+///
+/// `pos_to_display` took `(&self, buf, pos)` and had no notion of the
+/// grid at all — so under wrapping it could not compute a visual row,
+/// and `display_to_pos` could not invert one. Passing the missing
+/// facts as a required argument is deliberate: it makes the compiler
+/// enumerate every call site rather than leaving an audit to grep.
+///
+/// That is the opposite choice from [`DisplayCoord::sub_row`], and for
+/// the opposite reason. Enforcement is possible on the way in, so it is
+/// taken; it is not possible on the way out, so the output is made
+/// correct-by-default instead.
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
+pub struct LayoutCtx {
+    /// Width in cells of the content area the text wraps within.
+    ///
+    /// `0` means "not rendered yet" — the same convention
+    /// `Window::last_visible_rows` uses — and is treated as unwrapped,
+    /// since a viewport with no columns has no rows to distinguish.
+    pub cols: u32,
+    /// The window's resolved wrap mode.
+    pub wrap: WrapMode,
+}
+
+impl LayoutCtx {
+    /// The identity context: no wrapping, width irrelevant.
+    ///
+    /// Every pre-wrap caller means this, and saying so explicitly is
+    /// what makes those call sites readable as decisions rather than
+    /// oversights.
+    #[must_use]
+    pub const fn truncated() -> Self {
+        Self {
+            cols: 0,
+            wrap: WrapMode::Truncate,
+        }
+    }
+
+    /// Whether this context actually wraps.
+    #[must_use]
+    pub const fn wrapping(self) -> bool {
+        matches!(self.wrap, WrapMode::Wrap) && self.cols > 0
+    }
+}
+
+/// How a line wider than the viewport is shown --- the long-lines
+/// stage, `docs/long-lines-framing.md`.
+///
+/// # Why the renderer is told, rather than asking
+///
+/// This is the *resolved* mode, not the setting's name. `ui.line-wrap`
+/// is **buffer-local** (framing Q#LL2), and the config registry has no
+/// ambient current buffer by design (`config_registry.rs`, Q#CR4) — a
+/// caller wanting buffer-aware behavior must pass the `BufferId`. The
+/// render driver holds both the registry and the buffer, resolves once
+/// per window per frame, and puts the answer here. Views stay
+/// config-agnostic, exactly as they do for folds.
+///
+/// # `Truncate` is the identity case, deliberately
+///
+/// Every behavior predating this type is `Truncate`, and it must stay
+/// byte-identical under it — which is what lets the wrap work be
+/// verified against the existing suite rather than against new
+/// assertions.
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Default, Hash)]
+pub enum WrapMode {
+    /// One source line per row; the remainder is clipped at the right
+    /// edge. What every pre-Stage-3 caller did.
+    #[default]
+    Truncate,
+    /// A line longer than the viewport continues on the following rows.
+    ///
+    /// Character wrap, not word wrap (framing Q#LL5): it matches
+    /// Emacs's default, and it is the only break rule both frontends
+    /// can implement identically without pulling UAX #14 into the grid.
+    Wrap,
 }
 
 /// What to render and where.
@@ -152,6 +257,14 @@ pub struct Viewport<'a> {
     /// split may show different buffers) and hands the same shared
     /// reference to every painter of that window.
     pub folds: Option<&'a VisibleLineMap>,
+    /// How lines wider than `cell_size.cols` are shown, already
+    /// resolved for this window's buffer (see [`WrapMode`]).
+    ///
+    /// A required field rather than a defaulted one on purpose: every
+    /// construction site has to state which behavior it means, so the
+    /// pre-Stage-3 sites read as *deliberately* unwrapped rather than
+    /// merely untouched.
+    pub wrap: WrapMode,
 }
 
 impl Viewport<'_> {
@@ -268,14 +381,24 @@ pub trait View {
     /// view holds a meaningful mapping for that position.
     ///
     /// Default: returns `None` (view has no opinion).
-    fn pos_to_display(&self, _buf: &Buffer, _pos: Position) -> Option<DisplayCoord> {
+    fn pos_to_display(
+        &self,
+        _buf: &Buffer,
+        _pos: Position,
+        _ctx: LayoutCtx,
+    ) -> Option<DisplayCoord> {
         None
     }
 
     /// Translate a display coordinate back to a buffer byte position.
     ///
     /// Default: returns `None`.
-    fn display_to_pos(&self, _buf: &Buffer, _coord: DisplayCoord) -> Option<Position> {
+    fn display_to_pos(
+        &self,
+        _buf: &Buffer,
+        _coord: DisplayCoord,
+        _ctx: LayoutCtx,
+    ) -> Option<Position> {
         None
     }
 
@@ -360,6 +483,7 @@ mod tests {
             cell_size: CellSize::new(10, 10),
             gutter_w: 0,
             folds: None,
+            wrap: WrapMode::Truncate,
         };
         assert_eq!(vp.row_offset_of(4, 4), Some(0));
         assert_eq!(vp.row_offset_of(4, 9), Some(5));
@@ -380,6 +504,7 @@ mod tests {
             cell_size: CellSize::new(10, 10),
             gutter_w: 0,
             folds: Some(&map),
+            wrap: WrapMode::Truncate,
         };
         assert_eq!(vp.row_offset_of(0, 1), Some(1), "the head keeps its row");
         assert_eq!(vp.row_offset_of(0, 3), None, "hidden lines have no row");
