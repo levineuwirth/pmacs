@@ -1,13 +1,24 @@
 # Horizontal scroll — QoL Stage 4
 
-**Status: revision 2 — NOT APPROVED. Q#HS1, HS2 and HS6 answered by the
-user (2026-08-07); Q#HS3–HS5 stand; Q#HS7 is NEW and BLOCKING. No
+**Status: revision 3 — NOT APPROVED. Q#HS1, HS2 and HS6 answered by the
+user (2026-08-07). Q#HS7 remains BLOCKING and its part (c) is
+**withdrawn and replaced** — a setter-time snap cannot exist for a
+window-wide offset. Q#HS5's condition is now concrete. No
 implementation may begin.**
 
-This closes the QoL arc opened by one daily-driver report. Stage 1
-(#219) made the TUI survive terminal zoom; Stage 2 (#220) gave the GUI
-native zoom; Stage 3 (#221) added `ui.line-wrap` and made `wrap` the
-default. Stage 4 is the other half of the user's own sentence:
+**Stage 4 does NOT close the QoL arc.** Revision 1 said it did, and
+that was written before Q#HS1 moved GPU horizontal scroll to Stage 5.
+The claim is not merely stale — it is load-bearing in the wrong
+direction: `docs/active-work.md`'s **Rule 4 removes a lane when its
+ARC is done**, so a framing asserting Stage 4 closes the arc would
+license retiring this lane at the TUI merge, **orphaning the very
+Stage 5 that Q#HS1's time box exists to guarantee**. The arc closes at
+**Stage 5**.
+
+Stage 1 (#219) made the TUI survive terminal zoom; Stage 2 (#220) gave
+the GUI native zoom; Stage 3 (#221) added `ui.line-wrap` and made
+`wrap` the default. Stage 4 is the TUI half of the other half of the
+user's own sentence:
 
 > long lines need to either **wrap somehow or be scrollable**. […] This
 > should also be something that the user can configure, whether to wrap
@@ -181,15 +192,36 @@ hazard for whenever explicit commands arrive.
 Deferring rather than deleting, because the hazard is real and
 rediscovering it costs more than carrying the paragraph.
 
-### Q#HS5 — does `view_left` survive a restart? **OPEN**
+### Q#HS5 — does `view_left` survive a restart? **OPEN, with the condition now concrete**
 
-`view_top` does (§1.4). Consistency argues yes; a defaulted field
-avoids a `DESKTOP_VERSION` bump.
+`view_top` does (§1.4). Consistency argues yes.
 
-**My vote: yes, defaulted, no version bump** — but **confirm
-`SavedLeaf`'s deserializer tolerates a missing field before relying on
-it.** §1.4 cites the struct's *shape*, not serde's behavior on it, and
-that gap is exactly the kind §1.3 exists to warn about.
+**Verified, not assumed:** `SavedLeaf` is a plain
+`#[derive(Serialize, Deserialize)]` (`src/desktop.rs:85`) with **no
+`#[serde(default)]` on any field and none anywhere in the file**. So
+serde will **reject** a version-1 desktop JSON that omits a newly added
+`view_left` — a missing field is a deserialization error, not a zero.
+Revision 2 cited the struct's shape as though it settled serde's
+behavior on it; it did not.
+
+**"Yes, persisted, no `DESKTOP_VERSION` bump" is sound only with both
+of:**
+
+1. **`#[serde(default)]` on the new field.** This is the whole of the
+   new-binary-reads-old-file direction.
+2. **A regression fixture**: a literal version-1 desktop JSON with no
+   `view_left`, deserialized in a test, asserting it restores at offset
+   0 rather than erroring. Without this, (1) is an untested claim about
+   a crate's behavior — which is precisely the failure this question
+   was reopened for.
+
+**The other direction already works, and that is why no bump is
+needed.** An old binary reading a new file passes the version check
+(`version` is still 1, `src/desktop.rs:366`) and then meets an unknown
+`view_left` field — which serde **ignores** by default, and
+`src/desktop.rs` sets no `deny_unknown_fields` anywhere (verified). So
+both directions are safe at `DESKTOP_VERSION = 1` **given (1)**, and
+neither is safe without it.
 
 ### Q#HS6 — the coherence statement **ANSWERED: keep `wrap` default**
 
@@ -231,32 +263,83 @@ nothing and lose tab correctness. Starting at 0 and suppressing paint
 until `col >= view_left` preserves tab stops **for free**, and costs no
 more than `paint_line` already pays under wrapping.
 
-**(b) Which columns may be a left edge.** A tab straddling the edge is
-unambiguous: its expansion is width-1 spaces, so the remaining ones
-paint. **A wide (width-2) glyph is not** — a grid cannot paint half of
-one.
+**(b) What happens at a left edge that bisects a glyph.** A tab
+straddling the edge is unambiguous: its expansion is width-1 spaces, so
+the remaining ones paint. **A wide (width-2) glyph is not** — a grid
+cannot paint half of one.
 
-*My vote: a left edge may not fall inside a wide glyph's cells.*
+**(c) ~~The snap rule when an invalid edge is requested.~~ WITHDRAWN
+(revision 3).**
 
-**(c) The snap rule when an invalid edge is requested.** Stage 3's
-coordinate contract is *"identity on canonical inputs; otherwise
-projection to the contract's **designated** canonical representative"* —
-designated, not nearest, because the direction differs per function and
-"nearest" hides that.
+> Revision 2 voted *"a left edge may not fall inside a wide glyph"* plus
+> *"snap toward the line start, at the moment `view_left` is set"*.
+> **That cannot hold, and the reason is structural rather than a detail
+> to tune.**
+>
+> `view_left` is **one** per-window display column. "Does column N
+> bisect a wide glyph?" is a **per-line** question: column 11 can be a
+> wide glyph's trailing cell on line 3 and an ordinary ASCII cell on
+> line 4. **No single setter-time value is canonical for every visible
+> line**, so a snap performed once is simply wrong for most of them —
+> and the invariant in (d), which the whole question exists to serve,
+> would stay undefined exactly where it matters.
+>
+> Snapping *per line* is the other way to read it, and it is worse: the
+> same source column would then appear at different screen columns on
+> different rows, destroying the vertical alignment that a
+> column-oriented view exists to provide.
 
-*My vote: snap toward the line start.* Snapping left can only reveal a
-character, never hide one that was visible; snapping right can hide the
-very glyph the user scrolled to reach. And snapping at the moment
-`view_left` is **set** — rather than clipping in the painter — keeps
-one canonical value that both painter and mapper read, instead of two
-that can disagree.
+**(c′) The per-line effective edge, which replaces it.**
+
+`view_left` is stored **unsnapped** — the requested display column,
+constrained only to `>= 0` and whatever maximum the design picks. Each
+line derives its own **effective edge** during the walk it already
+performs from column 0.
+
+When the requested edge bisects a wide glyph *on this line*, that
+glyph's trailing cell is the leftmost visible cell. It cannot be
+painted as half a glyph, so:
+
+- **It paints as a space**, carrying the glyph's own cell style.
+- **The mapping designates that cell to the wide glyph's START byte.**
+
+Both halves are load-bearing, and the second is the part the finding
+correctly says was missing:
+
+- The cell visually belongs to that character, so a click there
+  selecting it is what a user expects.
+- It keeps `byte_at_place` **total** over visible cells — every painted
+  cell maps to some byte, with no hole at column 0.
+- It preserves the round trip: `place_of_byte(glyph_start)` reports the
+  straddle and designates cell 0, so `byte_at_place(0) == glyph_start`.
+
+**And the direction rule `place_of_byte` needs at the left edge:** a
+byte whose cells lie *entirely* left of the effective edge is **not
+visible**, and `place_of_byte` must report that rather than clamping to
+column 0. Clamping would make arbitrarily many bytes share cell 0 and
+destroy (d). Only the straddling glyph designates cell 0.
+
+**This is deliberately NOT the mirror of Stage 3's right-edge rule**,
+and the asymmetry should be stated so nobody "fixes" one to match the
+other. Under `wrap`, a wide glyph that will not fit at the right edge is
+pushed to the next row **entirely** (`advance_wrapped`, with its
+`max_cols >= 2` guard). At the left edge under `truncate` there is no
+next row to push to, so the blank-plus-designation rule is what the
+same intent requires here.
 
 **(d) The invariant rendering and coordinate mapping share.** For a
-given `view_left`, `byte_at_place` must invert `place_of_byte` on every
-canonical input, and `paint_line` must place exactly the bytes
-`place_of_byte` claims. If the painter clips where the mapper does not,
-**clicks land on the wrong character** — silently, and only for lines
-wide enough to scroll.
+given `view_left` **and line**, `byte_at_place` must invert
+`place_of_byte` on every canonical input, and `paint_line` must place
+exactly the bytes `place_of_byte` claims. If the painter clips where the
+mapper does not, **clicks land on the wrong character** — silently, and
+only for lines wide enough to scroll.
+
+**"And line" is what (c′) forced**, and it is the whole of that
+finding: the invariant is not a property of `view_left` alone. It is a
+property of `(view_left, line)`, because the effective edge is derived
+per line. A test that fixes one line and sweeps offsets will not see
+the failure; the oracle has to sweep **lines whose glyph widths differ
+at the same column**.
 
 *This is the invariant the verification sketch needs as its oracle*,
 and it is why Q#HS7 blocks: §4 cannot be written until it exists.
@@ -274,9 +357,16 @@ and it is why Q#HS7 blocks: §4 cannot be written until it exists.
 - Round-trip identity for `place_of_byte` / `byte_at_place` at non-zero
   offset — the Q#HS7(d) invariant, walked exhaustively over a short
   line rather than sampled, as Stage 3 established.
-- **The Q#HS7(b)/(c) cases, which have no oracle until it is
+- **The Q#HS7(b)/(c′) cases, which have no oracle until it is
   answered**: a wide glyph straddling the left edge; a tab whose
-  expansion straddles it; a snap request landing inside each.
+  expansion straddles it.
+- **A multi-line fixture whose glyph widths DIFFER at the same column**
+  — the case (c′) exists for, and the one a single-line sweep cannot
+  reach. At one `view_left`, one line must take the straddle path and
+  another the ordinary path, with the (d) invariant holding on both.
+  A test that fixes one line and sweeps offsets passes against the
+  withdrawn setter-time snap, which is what makes this the
+  discriminating fixture rather than an extra one.
 - **A PTY acceptance test for reachability**, following
   `tests/long_line_readable_acceptance.rs`. That file's `truncate`
   control currently asserts the tail is **absent** — Stage 4 must

@@ -435,13 +435,21 @@ Whether `docs/ci-red-signatures.md` should grow a short non-row section
 for this class is an open question for its owner, not something this
 lane decided.
 
-## Long lines (QoL arc) — Stage 3 MERGED as #221; Stage 4 is framing
+## Long lines (QoL arc) — Stage 3 MERGED as #221; Stages 4 AND 5 ahead
 
 **Rewritten, not removed.** Rule 4 removes a lane when its ARC is done;
 this one has Stage 4 ahead. Stage 3's durable facts are absorbed into
 `docs/agent-handoff.md` §1 — rule 4's precondition, satisfied rather
 than deferred — so what remains here is the Stage 4 plan and only the
 Stage 3 residue that constrains it.
+
+> **RULE 4 DOES NOT APPLY AT STAGE 4's MERGE.** The arc closes at
+> **Stage 5** (GPU horizontal scroll), not Stage 4. Q#HS1 split the GPU
+> out deliberately and time-boxed it; retiring this lane when the TUI
+> half merges would orphan exactly the half the time box exists to
+> guarantee, and would do so while `truncate` is still a dead end in
+> the GUI. **Do not remove this block until Stage 5 has merged**, and
+> read Q#HS1's four time-box items before concluding otherwise.
 
 **Branch `horizontal-scroll`**, based on `githubsucks/main` @ `02f3ec3`
 (the #221 merge). `githubsucks/horizontal-scroll` is the authoritative
@@ -450,7 +458,7 @@ whatever SHA it records. Recover:
 `git fetch githubsucks && git checkout horizontal-scroll`.
 
 **Status: framing, NOT approved.** `docs/horizontal-scroll-framing.md`
-revision 2. No implementation may begin.
+revision 3. No implementation may begin.
 
 **Answered by the user 2026-08-07:**
 
@@ -472,17 +480,36 @@ revision 2. No implementation may begin.
 
 - **Q#HS7 (NEW) — what IS `view_left`?** Revision 1 decided what moves
   the viewport without saying what its offset *is* — the same omission
-  as shipping `WrapMode` with no `DisplayCoord`. Four coupled parts:
-  the unit; which columns may be a left edge; the snap rule for an
-  invalid one; and the invariant rendering and coordinate mapping
-  share. Without the last, **a painter that clips where the mapper does
-  not puts clicks on the wrong character**, silently, only on lines
-  wide enough to scroll. §4's sketch has no oracle until this is
-  answered.
-- **Q#HS5 — does `view_left` survive a restart?** Vote: yes, defaulted,
-  no `DESKTOP_VERSION` bump — *after* confirming `SavedLeaf`'s
-  deserializer tolerates a missing field, which is a claim about serde
-  and not about the struct shape §1.4 cites.
+  as shipping `WrapMode` with no `DisplayCoord`. Without part (d), **a
+  painter that clips where the mapper does not puts clicks on the wrong
+  character**, silently, only on lines wide enough to scroll.
+
+  **Revision 2's part (c) is WITHDRAWN.** It voted to snap `view_left`
+  to a valid boundary when set. That cannot exist: `view_left` is one
+  per-window display column, but *"does column N bisect a wide
+  glyph?"* is a **per-line** question — column 11 can be a wide glyph's
+  trailing cell on one line and ordinary ASCII on the next. No
+  setter-time value is canonical for every visible line, and snapping
+  per line instead would break vertical alignment.
+
+  Replaced by a **per-line effective edge**: `view_left` stored
+  unsnapped, each line deriving its own edge in the walk it already
+  performs from column 0. Where the edge bisects a wide glyph, that
+  glyph's trailing cell **paints blank and the mapping designates it to
+  the glyph's start byte** — which keeps `byte_at_place` total and
+  preserves the round trip. The invariant is therefore a property of
+  **`(view_left, line)`**, not of `view_left` alone, so the oracle must
+  sweep lines whose glyph widths differ at the same column.
+- **Q#HS5 — does `view_left` survive a restart?** Vote: yes, no
+  `DESKTOP_VERSION` bump — **conditional on two things, now concrete.**
+  Verified: `SavedLeaf` carries **no `#[serde(default)]` anywhere in
+  `src/desktop.rs`**, so serde would **reject** a version-1 desktop
+  JSON omitting a new `view_left`. Sound only with (1)
+  `#[serde(default)]` on the field and (2) a regression fixture — a
+  literal v1 desktop JSON without `view_left`, asserting restore at
+  offset 0 rather than an error. The reverse direction already works:
+  an old binary meets an unknown field, which serde ignores absent
+  `deny_unknown_fields` (none in that file).
 - **Q#HS3** is re-confirmed rather than open (per-window, per Q#LL2);
   **Q#HS4** is deferred, live only if explicit commands arrive.
 
@@ -506,9 +533,13 @@ amending the description is now a Stage 4 deliverable (framing §6).
   this and it is survivable — but Stage 3 signed up for it as *a
   decision*, and Stage 4 is where the bill arrives.
 - **`truncate` is the mode Stage 4 makes navigable.** Today text past
-  the right edge is not merely off-screen but **unreachable**; that is
-  stated in the setting's description and in `ui.toggle-line-wrap`'s
-  status message, both of which should be revisited when scroll lands.
+  the right edge is not merely off-screen but **unreachable** — and
+  that is stated **only** in `ui.toggle-line-wrap`'s status message and
+  a source comment, **not** in the setting's description
+  (`builtin/runtime/linewrap.lua:23` says just "truncate at the edge").
+  A user who sets the mode in `init.lua` and never invokes the toggle
+  is told nothing. Amending the description is a Stage 4 deliverable
+  (framing §6); the status message is revisited when scroll lands.
 - **Under `wrap`, horizontal scroll is meaningless.** Stage 4's surface
   is therefore conditional on the mode, which is a coherence question
   (one concept, two behaviors) and not only an implementation one.
