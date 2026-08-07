@@ -1713,6 +1713,10 @@ struct State {
     /// to cosmic-text so caret/wash byte offsets can be rebased onto
     /// it.
     scroll_top: usize,
+    /// The document buffer's wrap mode, explicit since protocol v22.
+    /// `Wrap::None` until the daemon says otherwise, so an unwrapped
+    /// frontend never silently inherits a library default again.
+    code_wrap: Wrap,
     /// Whole-file byte range `[vstart, vend)` of the slice the
     /// cosmic-text `buffer` currently holds (session S1). Everything
     /// the buffer renders is in slice coordinates (`file_byte -
@@ -4023,6 +4027,7 @@ impl State {
             peer_presences: HashMap::new(),
             own_cursor: None,
             scroll_top: 0,
+            code_wrap: Wrap::None,
             view_range: (0, 0),
             last_viewport_sent: None,
             local_frontend_id: None,
@@ -5149,6 +5154,10 @@ impl State {
             }
             InstanceMessage::TerminalFrame(frame) => {
                 self.apply_terminal_frame(frame);
+                None
+            }
+            InstanceMessage::LineWrapFacts { buffer_id, wrap } => {
+                self.apply_line_wrap(buffer_id, wrap);
                 None
             }
             InstanceMessage::PanelFrame(payload) => {
@@ -7978,6 +7987,38 @@ impl State {
         }
     }
 
+    /// Honor a wrap mode for `buffer_id` (protocol v22).
+    ///
+    /// The document buffer has never set a wrap mode, so it has been
+    /// running on cosmic-text's constructor default,
+    /// `Wrap::WordOrGlyph` — word wrap that nobody chose. This makes the
+    /// mode explicit in both directions and settles it on
+    /// **`Wrap::Glyph`**: character wrap is what the grid renderer can
+    /// implement identically without pulling UAX #14 into it, and it is
+    /// what Emacs does by default. GUI users lose word wrap; that is a
+    /// deliberate, documented trade for the two frontends agreeing.
+    ///
+    /// Changing wrap reflows the whole document, exactly like a font
+    /// change, so the retained scroll anchor is repaired through
+    /// `normalize_code_scroll` rather than left pointing at a row that
+    /// no longer exists.
+    fn apply_line_wrap(&mut self, buffer_id: BufferId, wrap: bool) {
+        // Only the buffer on screen can be reflowed; the mode is
+        // buffer-local, so a message for anything else is not ours to
+        // apply. The daemon resends on buffer switch precisely so this
+        // stays correct rather than needing a per-buffer cache here.
+        if self.current_buffer_id != Some(buffer_id) {
+            return;
+        }
+        let want = if wrap { Wrap::Glyph } else { Wrap::None };
+        if self.code_wrap == want {
+            return;
+        }
+        self.code_wrap = want;
+        self.buffer.set_wrap(&mut self.font_system, want);
+        self.reshape();
+    }
+
     fn reshape(&mut self) {
         self.rebuild_code_slice();
         self.normalize_code_scroll();
@@ -10484,6 +10525,7 @@ fn debug_apply() -> bool {
 fn instance_message_label(msg: &InstanceMessage) -> &'static str {
     match msg {
         InstanceMessage::CellDelta { .. } => "CellDelta",
+        InstanceMessage::LineWrapFacts { .. } => "LineWrapFacts",
         InstanceMessage::Cursor(_) => "Cursor",
         InstanceMessage::ModeLine(_) => "ModeLine",
         InstanceMessage::Signal(_) => "Signal",
@@ -15847,6 +15889,57 @@ mod tests {
 
     /// Acceptance 11 — a caret painted on a wrapped visual run
     /// survives 16px → 72px → 6px re-wraps, with the normalized
+    /// The discriminating witness framing §7 asked for.
+    ///
+    /// `wrapped_caret_survives_size_changes` passes today against a wrap
+    /// nobody configured — cosmic-text's constructor default — so it
+    /// cannot tell "honors the setting" from "the default happened to
+    /// match". The other value is what discriminates: with wrap OFF, an
+    /// overlong line must NOT occupy a second row.
+    #[test]
+    fn the_gpu_honors_an_explicit_non_wrap_mode() {
+        let long = "x".repeat(400);
+        let Some(mut state) = headless_or_skip(320, 400, &format!("{long}\nsecond\n")) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+
+        state.apply_line_wrap(bid, true);
+        state.reshape();
+        let wrapped_rows = state.buffer.layout_runs().count();
+
+        state.apply_line_wrap(bid, false);
+        state.reshape();
+        let truncated_rows = state.buffer.layout_runs().count();
+
+        assert!(
+            wrapped_rows > truncated_rows,
+            "wrap must produce more visual rows than truncate \
+             (wrapped={wrapped_rows}, truncated={truncated_rows}); equal counts \
+             would mean the mode reached nothing"
+        );
+    }
+
+    /// A mode for a buffer that is not on screen is not ours to apply.
+    /// The daemon resends on buffer switch precisely so this holds.
+    #[test]
+    fn a_wrap_message_for_another_buffer_is_ignored() {
+        let Some(mut state) = headless_or_skip(320, 200, "hello\n") else {
+            return;
+        };
+        let mine = BufferId::next();
+        let other = BufferId::next();
+        state.current_buffer_id = Some(mine);
+        state.apply_line_wrap(mine, true);
+        let after_mine = state.code_wrap;
+        state.apply_line_wrap(other, false);
+        assert_eq!(
+            state.code_wrap, after_mine,
+            "another buffer's mode must not reflow this one"
+        );
+    }
+
     /// scroll invariant intact throughout.
     #[test]
     #[allow(clippy::float_cmp)] // exact: assigned constants, not computed sums

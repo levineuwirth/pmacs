@@ -1265,6 +1265,40 @@ pub enum InstanceMessage {
     /// Appended after [`Self::InitialTargetResult`], the final v20
     /// variant, so no existing postcard discriminant moves.
     PanelFrame(crate::panel::PanelFramePayload),
+    /// Long lines (protocol v22): how the receiving frontend should show
+    /// a line wider than its viewport, for one buffer.
+    ///
+    /// # Why a message exists at all
+    ///
+    /// `ui.line-wrap` reaches the grid renderer through the viewport,
+    /// but `pmacs-gpu` is not a grid consumer — it ignores the
+    /// `CellDelta` family and lays out locally. Without this, setting
+    /// the mode would change the TUI and leave the GPU wrapping,
+    /// which is the cross-frontend disagreement the long-lines stage
+    /// exists to remove.
+    ///
+    /// # Why it names a buffer
+    ///
+    /// The setting is **buffer-local**, so "the current mode" is
+    /// meaningless without saying whose. It follows that the daemon
+    /// must resend on a **buffer switch** as well as on attach and on
+    /// config change: font size is global, but wrap mode is not, so
+    /// moving from a `Truncate` buffer to a `Wrap` one changes the
+    /// effective mode with no config event at all. A design that only
+    /// listens for config changes is silently wrong here and looks
+    /// correct in every single-buffer test.
+    ///
+    /// A v21-or-older frontend never receives this and keeps its own
+    /// behavior; that divergence is documented rather than silent.
+    ///
+    /// Appended after [`Self::PanelFrame`], the final v21 variant, so no
+    /// existing postcard discriminant moves. Daemon-gated `>= 22`.
+    LineWrapFacts {
+        /// Buffer the mode applies to.
+        buffer_id: crate::BufferId,
+        /// Whether that buffer's long lines wrap.
+        wrap: bool,
+    },
 }
 
 /// One resolved UI face for [`InstanceMessage::ThemeFacts`]: a full
@@ -1697,7 +1731,7 @@ pub enum ResourceBody {
 /// directions: a v20 peer neither receives `PanelFrame` nor is placed in
 /// a side window, because denying only the events would leave its
 /// window invisible.
-pub const PROTOCOL_VERSION: u32 = 21;
+pub const PROTOCOL_VERSION: u32 = 22;
 
 /// Protocol version placed in the daemon's server-first [`Hello`].
 ///
@@ -1865,8 +1899,15 @@ pub fn negotiated_session_version(frontend_offer: u32) -> u32 {
 /// [`Hello`]. The later capability-activation slice owns moving production
 /// negotiation to v21 without making existing v20 frontends reject the
 /// handshake.
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] =
-    &[6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21];
+///
+/// Long lines (framing Q#LL7): extended to `[6, ..., 22]` for
+/// [`InstanceMessage::LineWrapFacts`]. Additive and daemon-gated, so
+/// [`ADVERTISED_PROTOCOL_VERSION`] does not move — a v21 frontend
+/// negotiates v21, never receives the variant, and keeps its own
+/// behavior.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[
+    6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if
 /// `peer_version` is in [`SUPPORTED_PROTOCOL_VERSIONS`].
