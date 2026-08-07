@@ -1,7 +1,7 @@
 # Long lines — QoL Stage 3
 
-**Status: revision 19 — APPROVED (2026-08-06). All eight questions
-answered; §5d.6 resolved. Implementation begun.**
+**Status: revision 20 — APPROVED (2026-08-06). All eight questions
+answered; §5d.6 resolved. Implementation complete; PR pending.**
 
 **Revision 2** corrected a load-bearing error in revision 1: it claimed
 both frontends render from the same `CellGrid`. They do not — the GPU
@@ -182,11 +182,12 @@ and moves the document to APPROVED.
 
 **Q#LL2** (§4): buffer-local, with `Viewport` carrying the *resolved*
 mode as it already carries `folds`, so `TextView` stays
-config-agnostic. **Q#LL4** (§6): do not adopt `editing.fill-column` —
-it is orphaned because its consumer (`M-q` / auto-fill) does not exist,
-which is a different defect from `full_grid`'s and §1.1 should not be
-read as equating them; sharpen its description and name ours
-`ui.line-wrap`. **Q#LL5** (§5a): character wrap in **both** frontends,
+config-agnostic. **Q#LL4** (§6): do not adopt `editing.fill-column`;
+name ours `ui.line-wrap`. *(Revision 20 corrects the stated reason:
+the setting is a `#[cfg(test)]` fixture name, not an orphaned
+definition — see §1.1, withdrawn. The answer is unchanged, the
+"sharpen its description" deliverable is void, and naming the fixtures
+as fixtures replaces it.)* **Q#LL5** (§5a): character wrap in **both** frontends,
 accepting that GUI users lose word wrap — the analysis changed on
 discovering that a whitespace-based grid wrap would give only
 *approximate* parity against cosmic-text's UAX #14 line breaking, which
@@ -302,7 +303,21 @@ condition that produced §5d.3's defect; sharing it via
 `pmacs-protocol` makes agreement structural but widens that crate
 toward presentation — a §16 layering call I am not taking alone.
 
-**Revision 19 — the current one.** §5d.6 answered as **(b)**:
+**Revision 20 — the current one.** Written *during* implementation
+rather than before it, because that is when the error surfaced: §1.1's
+"orphaned setting" does not exist. `editing.fill-column` is a
+`#[cfg(test)]` fixture name at both cited sites, so the Q#LL4
+deliverable "sharpen its description" had no object. §1.1 is withdrawn
+in place with the original text and the reasoning that produced it;
+§6's answer is unchanged and its premise corrected.
+
+The approval is not reopened by this. Q#LL4's answer was *do not adopt
+it*, and a setting that turns out not to exist is a stronger reason not
+to adopt it than the one recorded. Nothing else in the document
+depended on §1.1 — it argued for a display setting separate from
+`fill-column`, which is what shipped.
+
+**Revision 19.** §5d.6 answered as **(b)**:
 `ScrollPosition` and `classify` go in `pmacs-protocol`, string
 rendering stays per-frontend. The §16 reading that decides it — each
 frontend computes its own local layout facts, the shared crate owns the
@@ -382,25 +397,47 @@ What does **not** exist:
   The walk always starts at the line's first character. There is no
   mode, no flag, and no caller that can ask for anything else.
 
-### 1.1 An orphaned setting, of the exact shape Stage 1 just fixed
+### 1.1 ~~An orphaned setting, of the exact shape Stage 1 just fixed~~ **WITHDRAWN (revision 20)**
 
-`editing.fill-column` is defined in the registry --- *"Preferred wrap
-column."*, `ConfigKind::Number`, min 1, max 1000
-(`src/config_registry.rs:1191`) --- and is **read by nothing**. It
-appears only in its own definition and in tests of the registry and the
-Lua binding.
+> **This section was wrong, and the error survived nineteen revisions
+> and three rounds of review.** It is kept rather than deleted because
+> the failure mode is reusable: a grep hit that *reads* like production
+> code.
+>
+> `editing.fill-column` is **not defined in the registry**. Both
+> occurrences are inside `#[cfg(test)] mod tests` ---
+> `src/config_registry.rs:1191` and `src/lua_bindings/config.rs:898`
+> --- where they are fixture names in round-trip tests that exercise
+> one setting per `ConfigKind`. Two of the five names in those fixtures
+> are real (`editing.auto-pair`, `autosave.interval-ms`); the other
+> three, including this one, are defined nowhere else in the tree.
+>
+> So there is no shipped setting. No user can get it, set it, or
+> discover it, and **there is no description to sharpen** --- which was
+> the one Q#LL4 deliverable this document still owed. What Stage 3 does
+> instead is name the fixtures as fixtures at both sites, so the next
+> reader is not sent down the same path.
+>
+> The original claim, for the record: *"`editing.fill-column` is
+> defined in the registry --- 'Preferred wrap column.',
+> `ConfigKind::Number`, min 1, max 1000 --- and is read by nothing.
+> This is the same shape as the `full_grid` defect Stage 1 closed."*
+>
+> **How it happened.** I grepped for prior art on line width, found the
+> name at a `src/` path, read the `r.define(...)` call --- which is
+> genuine API usage, not a mock --- and never checked the enclosing
+> module. `#[cfg(test)]` sat about fifty lines above. Every later
+> revision inherited the conclusion instead of the evidence, and each
+> round of review reasoned about the *consequences* of an orphaned
+> setting rather than re-checking that it existed. A file:line citation
+> is not a substitute for reading the scope it sits in.
 
-This is the same shape as the `full_grid` defect Stage 1 closed: a
-declared contract with full definition-side coverage and zero
-consumers. **Stage 3 must either give it a consumer or explicitly say
-why it does not deserve one.** Leaving it orphaned a second time, in
-the very lane about line width, would be the worse outcome.
-
-My reading: `fill-column` is a *fill* concept (where `M-q` reflows
-text, editing the buffer), not a *display wrap* concept (where a long
-line is shown across rows, buffer unchanged). Conflating them is a
-known Emacs papercut. That argues for a separate display setting and a
-note here --- but it is Q#LL4 below, not my call.
+The surviving observation, which needed none of the above: `fill-column`
+is a *fill* concept (where `M-q` reflows text, editing the buffer), not
+a *display wrap* concept (where a long line is shown across rows, buffer
+unchanged). Conflating them is a known Emacs papercut, and it is why
+this lane's setting is `ui.line-wrap` rather than a reuse of that name
+--- see Q#LL4 (§6).
 
 ### 1.2 The two frontends already disagree, and that is the defect
 
@@ -1513,31 +1550,40 @@ correct fix in one place that looks complete.
 
 ## 6. Q#LL4 --- `editing.fill-column` **ANSWERED**
 
-> **Answered 2026-08-06: do not adopt it** --- but the reason is
-> sharper than "a different concept", and §1.1 overstated the finding.
+> **Answered 2026-08-06: do not adopt it.** *(Revised 2026-08-07 --- the
+> premise was wrong; the answer was not.)*
 >
-> `editing.fill-column` is orphaned because **its consumer does not
-> exist yet**: there is no `M-q`, no auto-fill, and no reflow command
-> anywhere in this codebase. It is a setting ahead of its feature.
-> That is a *different* defect from `full_grid`'s, which was a flag
-> with a live consumer that ignored it, and §1.1 should not be read as
-> equating them.
+> The 2026-08-06 answer said the setting was orphaned because **its
+> consumer does not exist yet**: no `M-q`, no auto-fill, no reflow
+> command anywhere in the tree. That much is true. But the setting does
+> not exist either --- it is a **test fixture name**, not a definition
+> (§1.1, withdrawn). So the framing of "a setting ahead of its feature"
+> described nothing real, and the `full_grid` comparison it was already
+> walking back was doubly inapt: `full_grid` was a wire flag with a
+> live consumer that ignored it, and this is a string in two
+> `#[cfg(test)]` blocks.
 >
-> Two things Stage 3 does owe it:
+> **What changed in the deliverables.** One of the two evaporated:
 >
-> - **Sharpen its description.** Once a wrap setting ships,
->   `"Preferred wrap column."` actively invites the wrong conclusion.
->   It must say it governs reflow commands, not display.
+> - ~~**Sharpen its description.**~~ There is no shipped description.
+>   Replaced by: **name the fixtures as fixtures** at
+>   `src/config_registry.rs` and `src/lua_bindings/config.rs`, so the
+>   next reader does not repeat §1.1. That is the entire remaining cost,
+>   and it is a comment.
 > - **Name ours so confusion is impossible: `ui.line-wrap`**,
 >   `ConfigKind::Enum { choices: ["wrap", "truncate"] }`, default
->   `"wrap"`. `editing.*` is buffer-editing behavior, `ui.*` is
->   display; both existing `ui.*` settings carry a `gpu-` prefix to
->   mark frontend-specificity, so its **absence** here is what signals
->   "both frontends".
-
-
-Give it a consumer, or state why display wrap is a separate concept and
-leave it orphaned with that reasoning recorded. See §1.1.
+>   `"wrap"`. Unchanged, and it never depended on the bad premise ---
+>   `editing.*` is buffer-editing behavior, `ui.*` is display; both
+>   existing `ui.*` settings carry a `gpu-` prefix to mark
+>   frontend-specificity, so its **absence** here is what signals "both
+>   frontends". The naming discipline stands on the concept split, which
+>   a real `fill-column` would only have made more urgent, not less.
+>
+> **The one place this could have bitten.** Had the premise gone
+> unchecked into implementation, Stage 3 would have shipped an edit to a
+> unit-test fixture believing it was rewording a user-visible setting
+> --- a no-op change with a misleading commit message, and a lane
+> closing on a deliverable it had not delivered.
 
 ---
 
@@ -1718,14 +1764,48 @@ Not final --- it depends on Q#LL1.
   backwards --- it proves only that an explicit non-wrap mode reaches
   the GPU's layout.
 
+### 7.1 What the sketch did not anticipate (revision 20)
+
+Three witnesses exist that §7 never asked for, each because review or
+implementation found a defect the sketch had no reason to predict.
+Recorded so the gap between sketch and suite is deliberate:
+
+- **Rendered-output witnesses**
+  (`the_default_actually_wraps_the_painted_text` and its `truncate`
+  control, `tests/line_wrap_acceptance.rs`). Every test §7 sketched
+  asks a *component* a question. The defect review found lived in the
+  **driver**: `src/editor.rs` resolved the mode, recorded it on the
+  window, and fed it to coordinate mapping and the indicator --- while
+  the `Viewport` literal it built still carried a hard-coded
+  `Truncate`. A test constructing its own viewport passes against that.
+  These read the grid reconstructed from emitted `CellDelta` spans
+  instead.
+- **Two-buffer toggle witnesses** (same file). `ui.line-wrap` is
+  buffer-local, so the toggle's failure mode --- reading and writing
+  the *global* layer --- is invisible in any single-buffer test, and
+  wrong in both directions at once: it leaves a pinned buffer alone
+  while silently moving every unpinned one.
+- **GPU scroll-endpoint witnesses** (`pmacs-gpu/src/main.rs`). §5d.6
+  settled *what* the classifier consumes; it did not settle how the GPU
+  decides `first_visible` / `last_visible`, and the two cheap answers
+  are both wrong (`view_range` includes overscan; `scroll_top` ignores
+  the sub-line residual). The trailing-empty-line case
+  (`an_empty_final_line_still_counts_as_bot`) was found *by* these
+  tests, not confirmed by them --- it made every newline-terminated
+  file report a percentage instead of `Bot` at the bottom.
+
 ---
 
 ## 8. Coherence impact (§20 requirement)
 
 - **Scorecard row 11, "Config layering + provenance --- Partial
-  (foundation only), 5 settings live in it."** This lane adds registry
-  settings against that row, and either adopts or explicitly declines
-  the orphaned `editing.fill-column`.
+  (foundation only), 5 settings live in it."** This lane adds
+  `ui.line-wrap` against that row --- registry-defined, enum-validated,
+  buffer-local, and consumed by both frontends. *(Revision 20: this
+  bullet previously also promised to adopt or decline "the orphaned
+  `editing.fill-column`". It is not orphaned and not a setting; see
+  §1.1, withdrawn. The count in that scorecard row was never affected
+  by it either way.)*
 - **Journey step 4, "Understand interface --- Partial."** A line that
   cannot be read in full is a direct hit on this step; the scorecard
   does not currently name it, and should.

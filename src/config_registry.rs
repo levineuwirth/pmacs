@@ -1187,6 +1187,16 @@ mod tests {
             src(2),
         )
         .unwrap();
+        // The names here are ILLUSTRATIVE — one per `ConfigKind`, chosen
+        // to read plausibly. Only `editing.auto-pair` and
+        // `autosave.interval-ms` are real settings (`builtin/runtime/`);
+        // the other three are defined nowhere but this test.
+        //
+        // Worth saying out loud because `editing.fill-column` fooled the
+        // long-lines framing into three paragraphs about an "orphaned
+        // setting of the same shape as the `full_grid` defect". It is not
+        // orphaned and not a defect: it has never shipped, so no user can
+        // get it, set it, or discover it.
         r.define(
             "editing.fill-column".into(),
             "Preferred wrap column.".into(),

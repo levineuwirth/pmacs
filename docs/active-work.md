@@ -434,7 +434,7 @@ a job executed — **the log is**.
 Whether `docs/ci-red-signatures.md` should grow a short non-row section
 for this class is an open question for its owner, not something this
 lane decided.
-## Long lines (QoL Stage 3) — APPROVED, implementing; no PR yet
+## Long lines (QoL Stage 3) — IMPLEMENTED, gates green; PR not yet open
 
 **Branch `long-lines`**, originally based on `githubsucks/main` @
 `218d2e7` (the #219 merge); **main merged in at #220's landing**, so
@@ -447,12 +447,13 @@ records. Recover: `git fetch githubsucks && git checkout long-lines`.
 **This block was written with the lane's first commit, before any PR
 exists** — the standing correction from #171, #215 and #220.
 
-- **Framing `docs/long-lines-framing.md` revision 19, APPROVED.** Q#LL1-LL7
-  settled; **Q#LL8 not yet approved** --- implementation is blocked on
-  it, because it changes what gets built rather than how.
-- **Independent of #220.** Stage 2 (GUI zoom) and Stage 3 share no
-  code, so this branch does not wait on that merge — which matters,
-  because #220 is blocked on a GitHub Actions outage, not on itself.
+- **Framing `docs/long-lines-framing.md` revision 20, APPROVED.** All
+  eight questions settled, §5d.6 resolved. Revision 20 **withdraws
+  §1.1** — see "The framing error" below.
+- **Independent of #220** (now merged). Stage 2 and Stage 3 share no
+  code; the merge in this branch is currency, not dependency.
+- **Implementation complete.** Seven commits, `937544c..840a338`.
+  Every gate green locally, macOS unverifiable here as always.
 
 ### The defect
 
@@ -472,9 +473,9 @@ for the user to express a preference in either.
 - **Q#LL2** — the mode is **buffer-local**; `Viewport` carries the
   *resolved* mode as it already carries `folds`, so `TextView` stays
   config-agnostic.
-- **Q#LL4** — do **not** adopt `editing.fill-column`; it is orphaned
-  because its consumer (`M-q` / auto-fill) does not exist. Sharpen its
-  description, and name ours `ui.line-wrap` (`ConfigKind::Enum`).
+- **Q#LL4** — do **not** adopt `editing.fill-column`; name ours
+  `ui.line-wrap` (`ConfigKind::Enum`). *(The recorded reason was wrong;
+  the answer was not. See "The framing error".)*
 - **Q#LL5** — **character wrap in both frontends**; the GPU document
   buffer gets its first explicit `set_wrap`, `Wrap::Glyph`.
 - **Q#LL6** — no global map (every vertical consumer is local, so
@@ -534,6 +535,60 @@ for the user to express a preference in either.
   **No wire message, no version bump**, and the one-copy-fixed defect
   becomes unrepresentable rather than reviewer-guarded.
 
+### The framing error, and the four defects review found in the code
+
+**`editing.fill-column` does not exist.** Framing §1.1 called it an
+orphaned registry setting "of the exact shape Stage 1 just fixed" and
+carried a deliverable to sharpen its description. Both cited
+occurrences are inside `#[cfg(test)] mod tests` —
+`src/config_registry.rs` and `src/lua_bindings/config.rs` — fixture
+names in round-trip tests covering one setting per `ConfigKind`. Two of
+those five names are real; three, including this one, are defined
+nowhere else.
+
+Nineteen revisions and three review rounds inherited it. The mechanism
+is worth keeping: a grep hit at a `src/` path, a genuine `r.define(...)`
+call that is real API usage rather than a mock, and `#[cfg(test)]` about
+fifty lines above the citation. **A file:line citation is not a
+substitute for reading the scope it sits in** — and once a conclusion is
+in a document, later rounds reason about its consequences rather than
+re-check it. Cost: three paragraphs of framing and one carried
+deliverable that had no object. Stage 3 ships a comment at both fixture
+sites instead.
+
+The four code defects, each caught by user review or by the tests
+written for it:
+
+1. **The toggle wrote the global layer.** `ui.line-wrap` is
+   buffer-local, so `config.get(name)`/`config.set(name, ...)` reported
+   and flipped the *global* value — leaving a pinned buffer untouched
+   while silently moving every unpinned one. Invisible in any
+   single-buffer test. Fixed in `4a26f00`; witnesses use two buffers.
+2. **The renderer never got the mode.** The frame resolved
+   `ui.line-wrap`, stored it on the window, and fed it to coordinate
+   mapping and the indicator — while the `Viewport` literal still
+   carried a hard-coded `Truncate`. Every "is the mode right?" test
+   passed and the text stayed clipped. Fixed in `aa3cd4d`; the new
+   witnesses read the **grid**, not the resolved value.
+3. **The GPU indicator reckoned in source lines.** Pre-existing (the
+   GPU has always wrapped), but nameable only once `ui.line-wrap`
+   decided which formula applies. Fixed in `840a338` via
+   `code_byte_painted` — layout decides, not arithmetic over it. The
+   two cheap predicates are both wrong: `view_range` includes
+   `SCROLL_OVERSCAN`, `scroll_top` ignores the sub-line residual.
+4. **An empty `view_range` is not an empty layout.** Found *by* the
+   tests in 3, not confirmed by them: a file ending in a newline has a
+   final empty line, and a viewport parked on it is `(len, len)` with
+   one real row. The guard borrowed from the caret path made **every
+   newline-terminated file report a percentage instead of `Bot`** at
+   the bottom.
+
+**A process note that earned itself twice.** Two edits in this lane
+were silently lost to `str.replace` calls that matched nothing (once
+after an unrelated exception aborted the write). Both times the code
+looked edited and was not — defect 2 above is one of them. Use the
+Edit tool, which errors on mismatch, for anything load-bearing.
+
 ### The two decisions most likely to be questioned later
 
 - **GUI users lose word wrap.** Character-wrap parity is cheap and
@@ -547,17 +602,51 @@ for the user to express a preference in either.
   findable. Compiler-enforced where possible, correct-by-default where
   not.
 
-### Verification (planned, from framing §7)
+### Verification (delivered)
 
-Cell-level tests at several **window widths** (not offsets — offsets
-are Stage 4). Wrapped visual-row mapping with identity on cursor
-boundaries and projection elsewhere. The **wrap-point** case: the
-position at a soft break belongs to `(k+1, 0)`, while a **hard** line
-end filling the row exactly keeps `(k, max_cols)` — a control that the
-wrap work did not move it. A `truncate` control for every mapping
-claim. A GPU witness that `truncate` is *honored*, since the existing
-`wrapped_caret_survives_size_changes` passes against a wrap nobody
-configured.
+Everything framing §7 sketched, plus three groups it did not anticipate
+(framing §7.1). The exact gate run, all green on this machine:
+
+```
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --lib                                   # 1917 / 0
+cargo test --lib --features crdt                   # 2102 / 0
+cargo test --test line_wrap_acceptance             # 6 / 0
+cargo test --test long_line_readable_acceptance    # 2 / 0
+cargo test --test folding_acceptance               # 21 / 0
+cargo test --test full_grid_resync_acceptance      # 1 / 0
+cargo test --test m4_acceptance -- --skip basedpyright
+PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu        # 228 / 0
+git diff --check
+```
+
+`tests/long_line_readable_acceptance.rs` is the one that answers the
+**report** rather than a mechanism: the shipped binary, a real PTY, a
+line 200 columns wide in an 80-column terminal, and an assertion that
+the tail marker reaches the host. It bites —
+`scripts/bite HEAD~2 src/editor.rs --test long_line_readable_acceptance`
+against the pre-`aa3cd4d` editor never paints `TAILZQX` in 20s. Its
+`truncate` control (an isolated `init.lua` pinning the mode) is what
+makes that marker discriminating.
+
+**What the PTY test does not prove.** The vterm suites assert on raw
+output bytes; there is no screen model and no `vt100`/`termwiz`/`vte`
+in the workspace. It proves the tail was *written to the terminal*, not
+that it occupies the row a human would point at. That is nonetheless
+the whole of the original report — under truncation those bytes are
+never emitted at all.
+
+**One caveat on the GPU line, stated rather than smoothed over.** One
+`-p pmacs-gpu` run went `227 passed; 1 failed` before every run since
+went 228/0. **The failing test name was not captured** — that command
+was piped through `tail -3`, which kept the summary and discarded the
+failure block. 36 later full runs are clean, 6 under deliberate
+concurrent load. Per `docs/ci-red-signatures.md`'s rerun rule that
+establishes intermittence only, and without a selector it does not even
+establish that. Logged there as **U1**, explicitly *not* matched
+against A1 (also GPU-headless-under-load) because matching requires a
+selector and fragments this occurrence does not have.
 
 ### Not in scope
 

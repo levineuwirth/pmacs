@@ -393,6 +393,36 @@ process test contributed two, and only one of them is a test bug.
 |---|---|---|
 | 2026-08-05 | R2, R4 | **retired** — mechanism removed, discriminating witness added; see "Retired rows" |
 
+### U1 — an unclassifiable local red (long-lines lane, 2026-08-07)
+
+Recorded because the alternative is to not record it. It is **not** a
+row, cannot be matched, and excuses nothing.
+
+| field | value |
+|---|---|
+| **selector** | `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu` — **test name not captured** |
+| **job / flavor** | local (Linux), immediately after a 60s `m4_acceptance` run |
+| **required fragments** | **none captured** |
+| **status** | **unclassifiable — evidence destroyed at capture time** |
+| **what IS established** | `test result: FAILED. 227 passed; 1 failed` was emitted once |
+| **what is NOT** | which test, why, and whether the lane caused it |
+| **cause of the gap** | the command piped through `tail -3`, which kept the summary line and discarded the failure block above it |
+
+**Not matched against A1** despite A1 also being GPU-headless-under-load.
+Matching needs an exact selector and every required fragment; this has
+neither, and treating a shapeless red as "probably the known one" is
+precisely the reputation-by-adjacency this file exists to deny.
+
+Follow-up: 36 subsequent full runs clean, 6 of them under deliberate
+concurrent load (`m4_acceptance` in parallel). Per the rerun rule that
+establishes **intermittence only** — and here not even that, since
+without a name there is nothing to call intermittent.
+
+**The lesson is mechanical, not analytical: never pipe a gate through
+`tail`/`head` on the run whose result you intend to report.** Filter
+with `grep -E "FAILED|panicked|test result"`, which keeps failure
+context, or capture the full log to a file and summarize from it.
+
 **The retirements are not occurrences and do not close the log.** R1 and
 R3 stay live, and each retired row keeps its signature so a later red
 matching one reopens it.

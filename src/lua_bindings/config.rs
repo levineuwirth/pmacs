@@ -887,6 +887,12 @@ mod tests {
 
     // ---- acceptance 1: round-trip every kind, via Lua ----------------------
 
+    /// The names below are ILLUSTRATIVE — one per `ConfigKind`, chosen
+    /// to read plausibly. Only `editing.auto-pair` and
+    /// `autosave.interval-ms` are real settings (`builtin/runtime/`); the
+    /// other three are defined nowhere but this test and its twin in
+    /// `config_registry.rs`. `editing.fill-column` in particular has
+    /// never shipped, so no user can get it, set it, or discover it.
     #[test]
     fn define_then_get_round_trips_every_kind_via_lua() {
         let (lua, _reg) = fresh();
