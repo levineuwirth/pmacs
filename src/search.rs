@@ -443,7 +443,6 @@ impl View for SearchView {
         // the line is collapsed away (the wash then paints nothing).
         let row_of = |line: u32| viewport.row_offset_of(start_line_buf as usize, line as usize);
         let max_rows = viewport.cell_size.rows;
-        let max_cols = viewport.cell_size.cols;
         let cell_origin = viewport.cell_origin;
 
         // Themes Q#TH5: a set wash face replaces the default overlay
@@ -523,12 +522,14 @@ impl View for SearchView {
                 let within_end = (paint_end - line_start) as usize;
                 let (start_col, end_col) =
                     byte_range_to_columns(line_bytes, within_start, within_end);
-                if end_col <= start_col {
+                // `visible_cols` returns `None` for an empty range too, so the
+                // old `end_col <= start_col` guard is subsumed rather than
+                // dropped.
+                let Some((clamped_start, clamped_end)) = viewport.visible_cols(start_col, end_col)
+                else {
                     continue;
-                }
+                };
                 let cell_row = cell_origin.row + row_offset;
-                let clamped_start = start_col.min(max_cols);
-                let clamped_end = end_col.min(max_cols);
                 for col in clamped_start..clamped_end {
                     let cell = cells.at(CellCoord::new(cell_row, cell_origin.col + col));
                     cell.style = merge_styles(cell.style, style);
@@ -761,6 +762,7 @@ mod tests {
                 gutter_w: 0,
                 folds: None,
                 wrap: WrapMode::Truncate,
+                view_left: 0,
             },
             &mut grid,
         );
@@ -791,6 +793,7 @@ mod tests {
                 gutter_w: 0,
                 folds: None,
                 wrap: WrapMode::Truncate,
+                view_left: 0,
             },
             &mut grid2,
         );
@@ -834,6 +837,7 @@ mod tests {
                 gutter_w: 0,
                 folds: None,
                 wrap: WrapMode::Truncate,
+                view_left: 0,
             },
             &mut grid,
         );

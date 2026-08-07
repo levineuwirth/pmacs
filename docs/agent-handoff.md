@@ -83,7 +83,66 @@ reads it the way you just did.
 For volatile branches, checkpoints, verification, and recovery
 commands, read `docs/active-work.md` immediately after this file.
 
-## 1. Where the project stands (2026-08-06)
+## 1. Where the project stands (2026-08-07)
+
+- **QoL arc — Stages 1-3 merged (#219, #220, #221); Stages 4 AND 5
+  remain, and the arc closes at Stage 5.** From one daily-driver
+  report: terminal zoom broke TUI rendering and did nothing in the GUI,
+  and a long line was unreadable past the edge.
+  - **#219** made the grid TUI honor `full_grid`, so a post-resize
+    resync blanks the host before repainting.
+  - **#220** gave the GUI native zoom over the font preference that
+    already existed, quantizing the step so the round-trip guarantee is
+    exact rather than approximately true.
+  - **#221** added **`ui.line-wrap`** — `ConfigKind::Enum`
+    (`wrap`/`truncate`), default `wrap`, **buffer-local**, with
+    `ui.toggle-line-wrap`. Both frontends honor it: the grid renderer
+    through `Viewport`, the GPU through
+    **`InstanceMessage::LineWrapFacts` at protocol v22**, resent on
+    attach, config change, **and buffer switch** (the mode is per
+    buffer, so a `FontFacts`-shaped global design is silently wrong).
+    `ADVERTISED_PROTOCOL_VERSION` stays pinned at 20.
+
+    Three durable consequences:
+    - **GUI users lost word wrap.** The GPU document buffer's first
+      explicit `set_wrap` is `Wrap::Glyph`. Character wrap is what the
+      grid can implement identically without UAX #14; a whitespace
+      approximation of cosmic-text's real breaking was judged worse
+      than honest divergence. Word wrap is a clean additive third
+      choice.
+    - **`pmacs-protocol::scroll`** owns `ScrollPosition` and a pure
+      `classify(first_visible, last_visible, byte_pos, byte_len)`.
+      `pmacs-gpu` depends on `pmacs-protocol` and never on the `pmacs`
+      lib, so the status readout had been duplicated *structurally* —
+      and during this lane's own review a fix landed in one copy while
+      the other kept reporting `All` for a wrapped one-line buffer.
+      Each frontend supplies local layout facts and renders the string;
+      the shared crate owns the decision. No wire message, no version
+      bump. **Under `truncate` the old line-space formatter is
+      untouched**, so its output is identical by construction.
+    - **The GPU answers "is this byte on screen?" with
+      `code_byte_painted`** — `code_byte_px` intersected with the
+      drawable clip. Neither `view_range` (it carries
+      `SCROLL_OVERSCAN` past the window) nor `scroll_top` (it ignores
+      `code_scroll_residual`) can answer it.
+  - **Stage 4 is horizontal scroll in the TUI; Stage 5 is the GPU**, a
+    split decided rather than inherited (framing Q#HS1) and time-boxed:
+    Stage 5 is the immediately-next QoL lane after Stage 4 merges, and
+    `wrap` stays the default until it lands — which is what keeps the
+    divergence invisible to anyone who has not opted in.
+
+    `truncate` is incomplete without scroll: text past the right edge is
+    currently *unreachable*. **That caveat is NOT in the setting's
+    description** — `builtin/runtime/linewrap.lua:23` says only
+    "truncate at the edge", and the word appears in
+    `ui.toggle-line-wrap`'s status message and a source comment, which
+    a user who sets the mode in `init.lua` never sees. A small
+    user-facing gap shipped in #221; amending the description is a
+    Stage 4 deliverable.
+
+    **Rule 4 must not retire the long-lines lane when Stage 4 merges** —
+    the arc closes at Stage 5. Framing in
+    `docs/horizontal-scroll-framing.md`.
 
 - **`main` @ `db1bbe9`.** The **tree primitive #217** — `listview` rows
   take optional `depth`/`id`, collapse is primitive-owned, folding is
@@ -405,20 +464,31 @@ someone forgot.
   failure, so **check `pgrep -f "pmacs --daemon"` before trusting a
   local red**. Lane recorded in `docs/active-work.md`.
 - **A `PROTOCOL_VERSION` bump's blast radius is every version-sensitive
-  test, and NONE of them appear in the diff.** "The touched acceptance
-  suites" is the standing gate, and for a protocol bump it is the wrong
-  selector: long-lines Stage 3 bumped v21→v22, ran the suites it had
-  edited, and broke **eight** version assertions across six suites. CI
-  showed exactly **one**, because **cargo stops at the first failing
-  target**; the rest surfaced only afterwards, and one at a time would
-  have cost four more red rounds.
+  test, and NONE of them appear in the diff.** Long-lines Stage 3
+  bumped v21→v22 and broke **eight** version assertions across six
+  suites. CI showed exactly **one**, because **cargo stops at the first
+  failing target**; the rest surfaced only afterwards, and one at a
+  time would have cost four more red rounds.
 
-  **On any protocol bump run `cargo test --tests --no-fail-fast` in
-  BOTH feature configurations.** `--no-fail-fast` because of the
-  stop-at-first-target behavior above, and `--features crdt` because
-  three of the eight were in crdt-gated real-daemon tests that assert
-  on a live socket's negotiated version — invisible to a default sweep,
-  which is the blindness the bullet below already names.
+  **The first thing to say is that §3's gate list would have caught
+  it.** `cargo test --workspace -- --skip basedpyright` is in that list
+  and was not run — `CLAUDE.md` carries a shorter list ending at "the
+  touched acceptance suites", and that shorter list is what the lane
+  followed. **When the two disagree, §3 is the authority**; the short
+  form is a summary, and a summary of a gate suite is not a gate suite.
+
+  **But §3's sweep alone would still have understated it**, which is
+  why this bullet exists rather than just a pointer. Plain
+  `--workspace` stops at the first failing target and builds one
+  feature configuration, so it would have shown one or two of the
+  eight. §3 now carries the strengthened form: **`--workspace
+  --no-fail-fast -- --skip basedpyright` in BOTH configurations.**
+
+  **Note `--workspace`, not `--tests`** — the lane's own remediation
+  sweep used `--tests`, which silently drops the `pmacs_protocol` and
+  `pmacs_gpu` targets. On a *protocol* bump that omits the protocol
+  crate's tests, which is how a correction can reproduce the shape of
+  the mistake it is correcting.
 
   **Sort the failures before fixing them.** A *tripwire*
   (`assert_eq!(PROTOCOL_VERSION, N)`) is meant to fire and takes a
@@ -2064,6 +2134,40 @@ PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu             # 58
 cargo test --workspace -- --skip basedpyright           # full sweep
 git diff --check
 ```
+
+**The full sweep is not optional, and `CLAUDE.md`'s shorter list is not
+a substitute.** That list stops at "the touched acceptance suites";
+this one continues. Long-lines Stage 3 followed the short form and put
+eight broken version assertions on CI. When the two disagree, **this
+list wins**.
+
+**Touching `PROTOCOL_VERSION` STRENGTHENS the sweep line. It does not
+replace it:**
+
+```
+cargo test --workspace --no-fail-fast -- --skip basedpyright
+cargo test --workspace --features crdt --no-fail-fast -- --skip basedpyright
+```
+
+Every part is load-bearing:
+
+- **`--workspace`, never `--tests`.** `--tests` selects 108 targets
+  where `--workspace` selects 110, and the two it drops are
+  **`pmacs_protocol` and `pmacs_gpu`**. On a protocol bump, dropping
+  the protocol crate's own unit tests is precisely the wrong loss.
+  Long-lines Stage 3 swept with `--tests` and so never ran
+  `pmacs-protocol`'s 25 tests — including the `scroll::classify` tests
+  that same lane had just written. They passed, but by luck.
+- **`--no-fail-fast`**, because cargo stops at the first failing
+  target: without it a bump that breaks eight assertions reports one.
+- **`--features crdt`**, because crdt-gated real-daemon tests assert on
+  a live socket's negotiated version and are invisible otherwise.
+- **`-- --skip basedpyright`** for the same reason the line above
+  carries it.
+
+See §5's protocol-bump bullet for how to sort the failures this finds —
+some are tripwires doing their job, and one pin
+(`ADVERTISED_PROTOCOL_VERSION`) must never be edited at all.
 
 Machine-specific caveats — re-verify on a machine you haven't used
 before trusting them:

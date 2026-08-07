@@ -290,6 +290,7 @@ fn render_active_window_to_grid(
         gutter_w: 0,
         folds: None,
         wrap: WrapMode::Truncate,
+        view_left: 0,
     };
     let mut grid = CellGrid {
         cells: &mut backing,

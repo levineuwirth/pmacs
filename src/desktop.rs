@@ -90,6 +90,20 @@ pub struct SavedLeaf {
     pub cursor: u64,
     /// First visible source line.
     pub view_top: usize,
+    /// First visible display column — horizontal scroll (Stage 4).
+    ///
+    /// **`#[serde(default)]` is load-bearing, not tidiness.** Nothing
+    /// else in this file carries it, so without it serde would REJECT
+    /// every desktop written before this field existed: a missing field
+    /// is a deserialization error, not a zero. That is why no
+    /// `DESKTOP_VERSION` bump is needed — and why removing this
+    /// attribute would silently orphan every user's saved desktop.
+    ///
+    /// The reverse direction needs nothing: an older binary meets an
+    /// unknown field, which serde ignores absent `deny_unknown_fields`
+    /// (this file sets none).
+    #[serde(default)]
+    pub view_left: u32,
 }
 
 /// Serde mirror of [`Orientation`] (which is not itself serde).
@@ -277,6 +291,7 @@ pub fn snapshot(core: &EditorCore, session_key: String) -> Option<SavedDesktop> 
             path: path.display().to_string(),
             cursor: win.cursor,
             view_top: win.view_top,
+            view_left: win.view_left,
         })
     };
 
@@ -384,6 +399,7 @@ struct RestoreLeaf {
     window: WindowId,
     cursor: u64,
     view_top: usize,
+    view_left: u32,
 }
 
 /// Do the structural rebuild: open buffers, prune the old LOCAL layout,
@@ -476,6 +492,11 @@ pub fn restore_into(
         if let Some(win) = c.windows.get_mut(&leaf.window) {
             win.cursor = leaf.cursor;
             win.view_top = leaf.view_top;
+            // Re-applied for the same reason `cursor` and `view_top`
+            // are: `buffer.after-load` can move the window, and the
+            // desktop is authoritative over whatever a hook (saveplace)
+            // did (Q#DS3).
+            win.view_left = leaf.view_left;
         }
     }
     core.borrow_mut().set_active_window_id(active_wid);
@@ -514,11 +535,19 @@ fn build_restore_node(
             let mut win = Window::new(wid, buffer_id, text_view);
             win.cursor = cursor;
             win.view_top = view_top;
+            // Not clamped, unlike `view_top` against the line count.
+            // There is no cheap column bound (it would mean measuring
+            // the widest visible line), and none is needed: the
+            // horizontal follow pass moves the offset to the cursor on
+            // the first frame, so a stale value from a since-shortened
+            // file corrects itself rather than persisting.
+            win.view_left = leaf.view_left;
             core.windows.insert(wid, win);
             leaves.push(RestoreLeaf {
                 window: wid,
                 cursor,
                 view_top,
+                view_left: leaf.view_left,
             });
             save_slots.push(Some(wid));
             Some(LayoutNode::Leaf(wid))
@@ -597,11 +626,13 @@ mod tests {
                         path: "/a.rs".into(),
                         cursor: 10,
                         view_top: 2,
+                        view_left: 0,
                     }),
                     SavedNode::Leaf(SavedLeaf {
                         path: "/b.rs".into(),
                         cursor: 0,
                         view_top: 0,
+                        view_left: 0,
                     }),
                 ],
             },
@@ -611,11 +642,45 @@ mod tests {
         assert_eq!(serde_json::from_str::<SavedDesktop>(&json).unwrap(), d);
     }
 
+    /// A desktop written **before** `view_left` existed must still load
+    /// (Stage 4, framing Q#HS5 — a condition of that approval, not a
+    /// nicety).
+    ///
+    /// This is a literal v1 document, not one produced by serializing
+    /// the current struct: a generated fixture would gain the field and
+    /// prove nothing. `SavedLeaf` carries no other `#[serde(default)]`,
+    /// so without that attribute serde treats the missing field as an
+    /// **error** and every saved desktop in the wild stops loading —
+    /// which is exactly why no `DESKTOP_VERSION` bump was needed and why
+    /// deleting the attribute must fail here rather than in the field.
+    #[test]
+    fn a_desktop_saved_before_horizontal_scroll_still_loads() {
+        let v1 = r#"{
+            "version": 1,
+            "session_key": "cwd.abc",
+            "buffers": [{"path": "/a.rs", "modified": false}],
+            "root": {"Leaf": {"path": "/a.rs", "cursor": 7, "view_top": 3}},
+            "active_leaf": 0
+        }"#;
+        let saved: SavedDesktop = serde_json::from_str(v1)
+            .expect("a pre-Stage-4 desktop must load, not error on a missing field");
+        let SavedNode::Leaf(leaf) = &saved.root else {
+            panic!("expected a single leaf");
+        };
+        assert_eq!(leaf.cursor, 7, "the fields that existed are unchanged");
+        assert_eq!(leaf.view_top, 3);
+        assert_eq!(
+            leaf.view_left, 0,
+            "and the new one restores unscrolled rather than erroring"
+        );
+    }
+
     fn leaf(path: &str) -> SavedLeaf {
         SavedLeaf {
             path: path.into(),
             cursor: 0,
             view_top: 0,
+            view_left: 0,
         }
     }
 

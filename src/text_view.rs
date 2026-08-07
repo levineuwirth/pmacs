@@ -217,6 +217,52 @@ impl TextView {
         }
     }
 
+    /// Translate a LINE column to a SCREEN column at horizontal offset
+    /// `left`, or `None` when the byte is not visible (framing
+    /// Q#HS7(c′)).
+    ///
+    /// The straddle case is why this is not a bare subtraction, and it
+    /// was the first version's bug. A wide glyph starting at `left - 1`
+    /// has its **trailing** cell on screen at column 0, so its start
+    /// byte must designate that cell — otherwise the character the user
+    /// scrolled toward has no visible cell mapping to it at all, and the
+    /// round trip against `display_to_pos` breaks.
+    ///
+    /// A **tab** is deliberately excluded. Its expansion cells map
+    /// FORWARD to the byte after it (Q#HS7(c″), the pre-Stage-4
+    /// behavior), so the tab byte itself is simply off-screen; letting
+    /// it claim cell 0 would put two bytes on one cell.
+    fn screen_col(buf: &Buffer, pos: Position, col: u32, left: u32) -> Option<u32> {
+        if col >= left {
+            return Some(col - left);
+        }
+        // Left of the edge — visible only if the glyph *starting* here
+        // reaches past it.
+        let mut probe = [0u8; 4];
+        let end = (pos + 4).min(buf.len());
+        let n = (end - pos) as usize;
+        if n == 0 {
+            return None;
+        }
+        buf.snapshot_rope().slice(pos, end, &mut probe[..n]);
+        let ch = std::str::from_utf8(&probe[..n])
+            .ok()
+            .and_then(|s| s.chars().next())
+            .or_else(|| {
+                // A truncated read can split the final codepoint; decode
+                // the longest valid prefix instead of giving up.
+                std::str::from_utf8(&probe[..n])
+                    .err()
+                    .map(|e| e.valid_up_to())
+                    .and_then(|v| std::str::from_utf8(&probe[..v]).ok())
+                    .and_then(|s| s.chars().next())
+            })?;
+        if ch == '\t' {
+            return None;
+        }
+        (advance_char(col, ch) > left).then_some(0)
+    }
+
     /// Byte offset (relative to `line`'s start) at visual row `sub_row`,
     /// column `col`, under character wrap — the inverse of
     /// [`Self::place_of_byte`].
@@ -301,9 +347,26 @@ impl TextView {
             let r = first_row.checked_add(sub.checked_sub(skip_rows)?)?;
             (r < max_rows).then_some(origin.row + r)
         };
+        // The walk stays in LINE-absolute columns and only `put`
+        // translates to the screen (framing Q#HS7(a)). Tab expansion
+        // depends on the absolute column from the line start, so a walk
+        // that began at the edge would put tab stops in the wrong place;
+        // starting at 0 and translating on output preserves them for
+        // free, at the cost `paint_line` already pays under wrapping.
+        //
+        // `left` is 0 whenever this line wraps, so the wrap path below is
+        // byte-identical to Stage 3.
+        let left = viewport.left_edge();
         let put = |cells: &mut CellGrid<'_>, sub: u32, col: u32, glyph: Glyph| {
+            // Entirely left of the edge: not this viewport's cell.
+            let Some(screen) = col.checked_sub(left) else {
+                return;
+            };
+            if screen >= max_cols {
+                return;
+            }
             if let Some(row) = grid_row(sub) {
-                let cell = cells.at(CellCoord::new(row, origin.col + col));
+                let cell = cells.at(CellCoord::new(row, origin.col + screen));
                 cell.glyph = glyph;
                 cell.style = Style::default();
                 cell.attachment = None;
@@ -312,7 +375,7 @@ impl TextView {
 
         let (mut sub_row, mut col) = (0u32, 0u32);
         for ch in s.chars() {
-            if !wrapping && col >= max_cols {
+            if !wrapping && col >= max_cols.saturating_add(left) {
                 break;
             }
             let (start_row, start_col, end_row, end_col) =
@@ -327,8 +390,23 @@ impl TextView {
                 }
             } else if end_col > start_col || start_row > sub_row {
                 put(cells, start_row, start_col, Glyph::Char(ch));
-                if end_col.saturating_sub(start_col) == 2 && start_col + 1 < max_cols {
-                    put(cells, start_row, start_col + 1, Glyph::Continuation);
+                if end_col.saturating_sub(start_col) == 2
+                    && start_col + 1 < max_cols.saturating_add(left)
+                {
+                    // A wide glyph the left edge BISECTS cannot draw its
+                    // leading cell, so its trailing cell shows a blank
+                    // rather than a `Continuation` — which is a marker
+                    // meaning "the cell before me is a wide glyph's
+                    // head", and here that cell is off-screen. Emitting
+                    // it would name a cell nobody painted (framing
+                    // Q#HS7(c′)).
+                    let bisected = start_col < left;
+                    let trailing = if bisected {
+                        Glyph::Char(' ')
+                    } else {
+                        Glyph::Continuation
+                    };
+                    put(cells, start_row, start_col + 1, trailing);
                 }
             }
             sub_row = end_row;
@@ -465,7 +543,14 @@ impl View for TextView {
         // answer, which means trimming the in-progress bytes).
         let take = (pos - line_start) as usize;
         if take == 0 {
-            return Some(DisplayCoord::new(row_idx as u32, 0));
+            // Still translated: at a non-zero offset the line's first
+            // byte is off-screen (or straddling), and returning column 0
+            // unconditionally was the first version's bug — it made byte
+            // 0 look visible at every offset.
+            return Some(DisplayCoord::new(
+                row_idx as u32,
+                Self::screen_col(buf, pos, 0, ctx.effective_left())?,
+            ));
         }
         // Copy [line_start, pos) into a stack buffer for the common short-line
         // case, hitting the heap only for unusually long prefixes. This removes
@@ -480,7 +565,21 @@ impl View for TextView {
         };
         buf.snapshot_rope().slice(line_start, pos, bytes);
         let col = valid_prefix_width(bytes);
-        Some(DisplayCoord::new(row_idx as u32, col))
+        // Translate to the screen. A caret sits BETWEEN characters, so it
+        // never lands inside a glyph — the straddle case belongs to
+        // `display_to_pos` and the painter, not here.
+        //
+        // `None` for a position left of the edge is deliberate and is the
+        // contract in framing Q#HS7(c′): clamping to column 0 instead
+        // would make arbitrarily many positions share one cell and
+        // destroy the round trip. Callers already handle `None` (it is
+        // what an out-of-range `pos` returns), and the horizontal
+        // visibility pass keeps the cursor on screen so this is not
+        // reachable for the caret itself.
+        Some(DisplayCoord::new(
+            row_idx as u32,
+            Self::screen_col(buf, pos, col, ctx.effective_left())?,
+        ))
     }
 
     fn display_to_pos(
@@ -502,14 +601,38 @@ impl View for TextView {
         let line_bytes = self.read_line_bytes(buf, row);
         let s = std::str::from_utf8(&line_bytes).ok()?;
 
+        // Screen column back to line column. The walk below is otherwise
+        // unchanged, so tab stops stay right (framing Q#HS7(a)).
+        let left = ctx.effective_left();
+        let target = coord.col.saturating_add(left);
+
         let mut walked_cols: u32 = 0;
         let mut walked_bytes: usize = 0;
         for (byte_idx, ch) in s.char_indices() {
-            if walked_cols >= coord.col {
+            if walked_cols >= target {
                 walked_bytes = byte_idx;
                 return Some(line_start + walked_bytes as u64);
             }
-            walked_cols = advance_char(walked_cols, ch);
+            let next = advance_char(walked_cols, ch);
+            // The bisected wide glyph, and ONLY at the leftmost visible
+            // cell (framing Q#HS7(c′)). Its trailing cell is screen
+            // column 0, and it is designated to the glyph's START byte:
+            // the cell belongs to that character, so a click there must
+            // select it, and nothing else can — its leading cell is off
+            // screen.
+            //
+            // Deliberately narrow. Everywhere else a column landing
+            // inside a glyph keeps rounding FORWARD, which is the
+            // pre-Stage-4 behavior and what `byte_at_place` documents;
+            // widening this would change unscrolled mappings. Tabs keep
+            // forward rounding here too — their expansion is whitespace
+            // BETWEEN the tab byte and the next character, so landing
+            // after it is what clicking indentation should do
+            // (Q#HS7(c″)).
+            if coord.col == 0 && left > 0 && ch != '\t' && walked_cols < target && next > target {
+                return Some(line_start + byte_idx as u64);
+            }
+            walked_cols = next;
             walked_bytes = byte_idx + ch.len_utf8();
         }
         // Past the line's last codepoint: clamp to the line's visible end.
@@ -954,6 +1077,7 @@ mod tests {
         let ctx = LayoutCtx {
             cols: 4,
             wrap: WrapMode::Wrap,
+            view_left: 0,
         };
         // 'e' is byte 4: line 0, second visual row, column 0.
         assert_eq!(
@@ -976,6 +1100,7 @@ mod tests {
         let ctx = LayoutCtx {
             cols: 4,
             wrap: WrapMode::Wrap,
+            view_left: 0,
         };
         assert_eq!(
             view.pos_to_display(&buf, 4, ctx),
@@ -1001,6 +1126,7 @@ mod tests {
             let ctx = LayoutCtx {
                 cols,
                 wrap: WrapMode::Wrap,
+                view_left: 0,
             };
             for (byte, _) in text.char_indices() {
                 let coord = view
@@ -1024,6 +1150,7 @@ mod tests {
         let ctx = LayoutCtx {
             cols: 4,
             wrap: WrapMode::Wrap,
+            view_left: 0,
         };
         // '中' starts at byte 2 and is three bytes long.
         let at_start = view.pos_to_display(&buf, 2, ctx);
@@ -1060,7 +1187,7 @@ mod tests {
     /// Render `text` into a `rows` x `cols` grid and return the glyph of
     /// every cell, row-major.
     fn render_grid(text: &[u8], rows: u32, cols: u32, wrap: WrapMode) -> Vec<Glyph> {
-        render_grid_from(text, rows, cols, wrap, 0)
+        render_grid_from(text, rows, cols, wrap, 0, 0)
     }
 
     /// As [`render_grid`], but starting the viewport at byte `start` —
@@ -1070,6 +1197,7 @@ mod tests {
         rows: u32,
         cols: u32,
         wrap: WrapMode,
+        view_left: u32,
         start: u64,
     ) -> Vec<Glyph> {
         let (buf, mut view) = attached(text);
@@ -1090,6 +1218,7 @@ mod tests {
                 gutter_w: 0,
                 folds: None,
                 wrap,
+                view_left,
             },
             &mut grid,
         );
@@ -1132,6 +1261,7 @@ mod tests {
             gutter_w: 0,
             folds: None,
             wrap: WrapMode::Wrap,
+            view_left: 0,
         };
         view.render(&buf, vp, &mut grid);
         assert!(
@@ -1202,6 +1332,7 @@ mod tests {
                 gutter_w: 0,
                 folds: None,
                 wrap: WrapMode::Wrap,
+                view_left: 0,
             },
             &mut grid,
         );
@@ -1286,7 +1417,7 @@ xy",
     #[test]
     fn the_viewport_can_start_partway_down_a_wrapped_line() {
         // Byte 4 is 'e', the first character of the second visual row.
-        let g = render_grid_from(b"abcdefghij", 2, 4, WrapMode::Wrap, 4);
+        let g = render_grid_from(b"abcdefghij", 2, 4, WrapMode::Wrap, 0, 4);
         assert_eq!(row_text(&g, 4, 0), "efgh", "the first row is skipped");
         assert_eq!(row_text(&g, 4, 1), "ij  ");
     }
@@ -1303,7 +1434,7 @@ xy",
                 let row = view.row_of_byte(&buf, 0, byte as u64, cols);
                 // Anchoring the viewport at that byte must put the
                 // character on the viewport's FIRST row.
-                let g = render_grid_from(text.as_bytes(), 3, cols, WrapMode::Wrap, byte as u64);
+                let g = render_grid_from(text.as_bytes(), 3, cols, WrapMode::Wrap, 0, byte as u64);
                 let full = render_grid(text.as_bytes(), 12, cols, WrapMode::Wrap);
                 let expect = row_text(&full, cols, row);
                 assert_eq!(
@@ -1334,6 +1465,7 @@ xy",
                 gutter_w: 0,
                 folds: None,
                 wrap: WrapMode::Truncate,
+                view_left: 0,
             },
             &mut grid,
         );
@@ -1364,6 +1496,7 @@ xy",
                 gutter_w: 0,
                 folds: None,
                 wrap: WrapMode::Truncate,
+                view_left: 0,
             },
             &mut grid,
         );
@@ -1397,6 +1530,7 @@ xy",
                 gutter_w: 0,
                 folds: None,
                 wrap: WrapMode::Truncate,
+                view_left: 0,
             },
             &mut grid,
         );
@@ -1431,6 +1565,7 @@ xy",
                 gutter_w: 0,
                 folds: None,
                 wrap: WrapMode::Truncate,
+                view_left: 0,
             },
             &mut grid,
         );

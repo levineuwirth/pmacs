@@ -372,6 +372,18 @@ pub struct Window {
     pub selection: Option<Selection>,
     /// First buffer line shown at the top of this window's viewport.
     pub view_top: usize,
+    /// First display column shown at the left of this window's viewport
+    /// — the horizontal scroll offset (Stage 4, framing Q#HS7).
+    ///
+    /// **Per window**, exactly as `view_top` is: two panes on one buffer
+    /// must scroll independently. Note the deliberate asymmetry with
+    /// `ui.line-wrap`, which is **buffer**-local — the two halves of one
+    /// user-facing concept live at different scopes, accepted in Stage
+    /// 3's Q#LL2 as a decision rather than discovered here.
+    ///
+    /// Always `0` while this window's buffer wraps; see
+    /// [`LayoutCtx::effective_left`](crate::view::LayoutCtx::effective_left).
+    pub view_left: u32,
     /// Sticky display column for vertical motion.
     pub goal_col: Option<u32>,
     /// Number of text rows that fit in this window's viewport at last
@@ -426,6 +438,7 @@ impl Window {
             cursor: 0,
             selection: None,
             view_top: 0,
+            view_left: 0,
             goal_col: None,
             last_visible_rows: 0,
             last_content_cols: 0,
@@ -450,6 +463,7 @@ impl Window {
         crate::view::LayoutCtx {
             cols: self.last_content_cols,
             wrap: self.last_wrap,
+            view_left: self.view_left,
         }
     }
 

@@ -17,6 +17,7 @@ fn viewport(rows: u32, cols: u32, buffer_end: u64) -> Viewport<'static> {
         gutter_w: 0,
         folds: None,
         wrap: WrapMode::Truncate,
+        view_left: 0,
     }
 }
 
