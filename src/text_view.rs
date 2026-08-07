@@ -23,7 +23,7 @@ use crate::buffer::{Buffer, BufferError};
 use crate::cell::{Cell, CellCoord, CellGrid, Glyph, Style};
 use crate::display_width::{advance_char, valid_prefix_width};
 use crate::rope::{Edit, Position};
-use crate::view::{DisplayCoord, View, Viewport};
+use crate::view::{DisplayCoord, View, Viewport, WrapMode};
 
 // ---------------------------------------------------------------------------
 // Tuning
@@ -144,6 +144,203 @@ impl TextView {
         }
         out
     }
+
+    /// Which visual row of `line` holds byte `within` (relative to the
+    /// line's start), at `max_cols` columns under character wrap.
+    ///
+    /// Total: any offset is legal, and one past the line's end lands on
+    /// its last row. `max_cols == 0` yields row 0 rather than looping.
+    fn row_of_byte(&self, buf: &Buffer, line: usize, within: u64, max_cols: u32) -> u32 {
+        if max_cols == 0 || within == 0 {
+            return 0;
+        }
+        let bytes = self.read_line_bytes(buf, line);
+        let Ok(s) = std::str::from_utf8(&bytes) else {
+            return 0;
+        };
+        let (mut row, mut col, mut seen) = (0u32, 0u32, 0u64);
+        for ch in s.chars() {
+            let (start_row, _, end_row, end_col) = advance_wrapped(row, col, ch, max_cols, true);
+            seen += ch.len_utf8() as u64;
+            if seen > within {
+                // `within` falls inside this character, so the answer is
+                // the row the character is DRAWN on — a glyph pushed to
+                // the next row takes its bytes with it.
+                return start_row;
+            }
+            row = end_row;
+            col = end_col;
+        }
+        row
+    }
+
+    /// Paint one source line and report how many grid rows it used.
+    ///
+    /// `first_row` is where the line begins in the viewport; `skip_rows`
+    /// drops that many of the line's own leading visual rows, which is
+    /// non-zero only for the first line when the byte anchor sits partway
+    /// down it (framing Q#LL6).
+    ///
+    /// Under [`WrapMode::Truncate`] this returns 1 and walks exactly as
+    /// the pre-wrap renderer did — the identity case the staging rests on.
+    fn paint_line(
+        &self,
+        buf: &Buffer,
+        line: usize,
+        viewport: Viewport<'_>,
+        cells: &mut CellGrid<'_>,
+        place: LinePlacement,
+    ) -> u32 {
+        let LinePlacement {
+            first_row,
+            skip_rows,
+            is_fold_head,
+        } = place;
+        let max_rows = viewport.cell_size.rows;
+        let max_cols = viewport.cell_size.cols;
+        let origin = viewport.cell_origin;
+        let wrapping = viewport.wrap == WrapMode::Wrap;
+
+        let line_bytes = self.read_line_bytes(buf, line);
+        let Ok(s) = std::str::from_utf8(&line_bytes) else {
+            return 1;
+        };
+
+        // `sub_row` counts this line's own visual rows. The grid row is
+        // derived and is `None` while still skipping, or once past the
+        // viewport's bottom.
+        let grid_row = |sub: u32| -> Option<u32> {
+            let r = first_row.checked_add(sub.checked_sub(skip_rows)?)?;
+            (r < max_rows).then_some(origin.row + r)
+        };
+        let put = |cells: &mut CellGrid<'_>, sub: u32, col: u32, glyph: Glyph| {
+            if let Some(row) = grid_row(sub) {
+                let cell = cells.at(CellCoord::new(row, origin.col + col));
+                cell.glyph = glyph;
+                cell.style = Style::default();
+                cell.attachment = None;
+            }
+        };
+
+        let (mut sub_row, mut col) = (0u32, 0u32);
+        for ch in s.chars() {
+            if !wrapping && col >= max_cols {
+                break;
+            }
+            let (start_row, start_col, end_row, end_col) =
+                advance_wrapped(sub_row, col, ch, max_cols, wrapping);
+            if start_row >= skip_rows && grid_row(start_row).is_none() {
+                sub_row = start_row;
+                break;
+            }
+            if ch == '\t' {
+                for c in start_col..end_col {
+                    put(cells, start_row, c, Glyph::Char(' '));
+                }
+            } else if end_col > start_col || start_row > sub_row {
+                put(cells, start_row, start_col, Glyph::Char(ch));
+                if end_col.saturating_sub(start_col) == 2 && start_col + 1 < max_cols {
+                    put(cells, start_row, start_col + 1, Glyph::Continuation);
+                }
+            }
+            sub_row = end_row;
+            col = end_col;
+        }
+
+        // The head of a collapsed region carries a trailing ellipsis in
+        // the CONTENT area (Q#FD13/FD20): the authoritative,
+        // layout-neutral fold indicator, present in every gutter state,
+        // clipped like any long line.
+        if is_fold_head {
+            for marker in [' ', FOLD_ELLIPSIS] {
+                if col >= max_cols {
+                    if !wrapping {
+                        break;
+                    }
+                    sub_row += 1;
+                    col = 0;
+                    if sub_row >= skip_rows && grid_row(sub_row).is_none() {
+                        break;
+                    }
+                }
+                put(cells, sub_row, col, Glyph::Char(marker));
+                col += 1;
+            }
+        }
+
+        sub_row.saturating_sub(skip_rows) + 1
+    }
+}
+
+/// Where a line goes in the viewport, for [`TextView::paint_line`].
+#[derive(Copy, Clone, Debug)]
+struct LinePlacement {
+    /// Grid row (viewport-relative) where this line begins.
+    first_row: u32,
+    /// Leading visual rows of the line to drop, non-zero only for the
+    /// first line when the byte anchor sits partway down it.
+    skip_rows: u32,
+    /// Whether the line heads a collapsed region and owes an ellipsis.
+    is_fold_head: bool,
+}
+
+/// Where a character is drawn, and where it leaves the cursor, under
+/// character wrap.
+///
+/// **This is the wrap rule and it exists exactly once.** Both
+/// [`TextView::row_of_byte`] and [`TextView::paint_line`] go through it,
+/// because they must agree perfectly: the first decides which visual row
+/// the viewport's byte anchor sits on, the second decides which row the
+/// text is drawn on. Two copies that drifted by one row would scroll the
+/// buffer to a position it does not render — a defect with no local
+/// symptom, and the exact shape this lane keeps finding.
+///
+/// Returns `(start_row, start_col, end_row, end_col)`: where the
+/// character itself goes (it may already have moved to the next row),
+/// and where the following character resumes.
+///
+/// With `wrapping == false` the row never advances and the column
+/// arithmetic is the pre-wrap walk's own, unchanged.
+fn advance_wrapped(
+    row: u32,
+    col: u32,
+    ch: char,
+    max_cols: u32,
+    wrapping: bool,
+) -> (u32, u32, u32, u32) {
+    // The break belongs to the character that could not fit, so it is
+    // taken before drawing rather than after the previous glyph.
+    let (row, col) = if wrapping && col >= max_cols {
+        (row.saturating_add(1), 0)
+    } else {
+        (row, col)
+    };
+    if ch == '\t' {
+        // A tab fills to the row's end and stops; it never spans a wrap.
+        // Column 0 of the next row is itself a tab stop, so alignment
+        // survives the break rather than being approximated — carrying
+        // the remaining pad across would put the next character at a
+        // column the tab-stop arithmetic never chose.
+        return (row, col, row, advance_char(col, ch).min(max_cols));
+    }
+    let width = advance_char(col, ch) - col;
+    if width == 0 {
+        // Combining mark or other zero-width control: M1.5 skips; M2+
+        // will attach it to the previous cell as `Glyph::Cluster`.
+        return (row, col, row, col);
+    }
+    if wrapping && width == 2 && col + 1 >= max_cols {
+        // A double-width glyph with a single cell left moves to the next
+        // row whole rather than being split across the break.
+        //
+        // `Truncate` keeps its existing behavior instead — lead cell
+        // painted, continuation omitted. That is arguably worse, and
+        // changing it is not this lane's to make: `Truncate` must stay
+        // byte-identical.
+        let r = row.saturating_add(1);
+        return (r, 0, r, 2.min(max_cols));
+    }
+    (row, col, row, col + width)
 }
 
 impl View for TextView {
@@ -226,82 +423,56 @@ impl View for TextView {
         let max_cols = viewport.cell_size.cols;
         let origin = viewport.cell_origin;
 
-        let mut line = start_line;
+        // Under `Wrap` one source line can own several rows, so the row
+        // walk is no longer the line walk and `row_offset` is carried
+        // rather than iterated. Clearing moves up front for the same
+        // reason — a row's occupant is not known until the line reaching
+        // it has been laid out — and every row is still blanked exactly
+        // once, as before.
         for row_offset in 0..max_rows {
             let cell_row = origin.row + row_offset;
-
-            // Always clear the visible row first so previous content does
-            // not bleed when the buffer shrinks past this row.
             for col in 0..max_cols {
                 *cells.at(CellCoord::new(cell_row, origin.col + col)) = Cell::default();
             }
-            if line >= self.line_count() {
-                continue;
-            }
+        }
+
+        // Visual rows of the first line to skip. `buffer_start` may sit
+        // partway down a wrapped line — the reason the anchor is a byte
+        // and not a row index (framing Q#LL6). Always 0 under `Truncate`,
+        // where a line owns exactly one row.
+        let mut skip_rows = if viewport.wrap == WrapMode::Wrap {
+            let line_start = self.line_offsets.get(start_line).copied().unwrap_or(0);
+            self.row_of_byte(
+                buf,
+                start_line,
+                viewport.buffer_start.saturating_sub(line_start),
+                max_cols,
+            )
+        } else {
+            0
+        };
+
+        let mut row_offset: u32 = 0;
+        let mut line = start_line;
+        while row_offset < max_rows && line < self.line_count() {
             let this_line = line;
             line = folds.map_or(this_line + 1, |m| m.next_visible(this_line));
-
-            let line_bytes = self.read_line_bytes(buf, this_line);
-            let Ok(s) = std::str::from_utf8(&line_bytes) else {
-                continue;
-            };
-
-            let mut col: u32 = 0;
-            for ch in s.chars() {
-                if col >= max_cols {
-                    break;
-                }
-                if ch == '\t' {
-                    // Expand to the next protocol-wide tab stop with spaces.
-                    let pad = advance_char(col, ch) - col;
-                    for _ in 0..pad {
-                        if col >= max_cols {
-                            break;
-                        }
-                        let cell = cells.at(CellCoord::new(cell_row, origin.col + col));
-                        cell.glyph = Glyph::Char(' ');
-                        cell.style = Style::default();
-                        cell.attachment = None;
-                        col += 1;
-                    }
-                    continue;
-                }
-                let width = advance_char(col, ch) - col;
-                if width == 0 {
-                    // Combining mark or other zero-width control: M1.5
-                    // skips; M2+ will attach to the previous cell as
-                    // Glyph::Cluster.
-                    continue;
-                }
-                let cell = cells.at(CellCoord::new(cell_row, origin.col + col));
-                cell.glyph = Glyph::Char(ch);
-                cell.style = Style::default();
-                cell.attachment = None;
-                if width == 2 && col + 1 < max_cols {
-                    let cont = cells.at(CellCoord::new(cell_row, origin.col + col + 1));
-                    cont.glyph = Glyph::Continuation;
-                    cont.style = Style::default();
-                    cont.attachment = None;
-                }
-                col += width;
-            }
-
-            // The head of a collapsed region carries a trailing ellipsis
-            // in the CONTENT area (Q#FD13/FD20): the authoritative,
-            // layout-neutral fold indicator, present in every gutter
-            // state, clipped like any long line.
-            if folds.is_some_and(|m| m.is_head(this_line)) {
-                for marker in [' ', FOLD_ELLIPSIS] {
-                    if col >= max_cols {
-                        break;
-                    }
-                    let cell = cells.at(CellCoord::new(cell_row, origin.col + col));
-                    cell.glyph = Glyph::Char(marker);
-                    cell.style = Style::default();
-                    cell.attachment = None;
-                    col += 1;
-                }
-            }
+            let used = self.paint_line(
+                buf,
+                this_line,
+                viewport,
+                cells,
+                LinePlacement {
+                    first_row: row_offset,
+                    skip_rows,
+                    is_fold_head: folds.is_some_and(|m| m.is_head(this_line)),
+                },
+            );
+            skip_rows = 0;
+            // A line always advances the row cursor, even when it painted
+            // nothing (invalid UTF-8, an empty line): otherwise the walk
+            // would re-enter the same grid row forever.
+            row_offset += used.max(1);
         }
     }
 }
@@ -551,6 +722,168 @@ mod tests {
         assert_eq!(view.display_to_pos(&buf, DisplayCoord::new(0, 5)), Some(1));
         assert_eq!(view.display_to_pos(&buf, DisplayCoord::new(0, 8)), Some(1));
         assert_eq!(view.display_to_pos(&buf, DisplayCoord::new(0, 9)), Some(2));
+    }
+
+    // -----------------------------------------------------------------
+    // Line wrapping (QoL Stage 3, docs/long-lines-framing.md)
+    // -----------------------------------------------------------------
+
+    /// Render `text` into a `rows` x `cols` grid and return the glyph of
+    /// every cell, row-major.
+    fn render_grid(text: &[u8], rows: u32, cols: u32, wrap: WrapMode) -> Vec<Glyph> {
+        render_grid_from(text, rows, cols, wrap, 0)
+    }
+
+    /// As [`render_grid`], but starting the viewport at byte `start` —
+    /// which under `Wrap` may sit partway down a wrapped line.
+    fn render_grid_from(
+        text: &[u8],
+        rows: u32,
+        cols: u32,
+        wrap: WrapMode,
+        start: u64,
+    ) -> Vec<Glyph> {
+        let (buf, mut view) = attached(text);
+        let n = (rows * cols) as usize;
+        let mut storage = vec![Cell::default(); n];
+        let mut grid = CellGrid {
+            cells: &mut storage,
+            stride: cols,
+            size: CellSize::new(rows, cols),
+        };
+        view.render(
+            &buf,
+            Viewport {
+                buffer_start: start,
+                buffer_end: buf.len(),
+                cell_origin: CellCoord::new(0, 0),
+                cell_size: CellSize::new(rows, cols),
+                gutter_w: 0,
+                folds: None,
+                wrap,
+            },
+            &mut grid,
+        );
+        storage.iter().map(|c| c.glyph.clone()).collect()
+    }
+
+    fn row_text(glyphs: &[Glyph], cols: u32, row: u32) -> String {
+        glyphs
+            .iter()
+            .skip((row * cols) as usize)
+            .take(cols as usize)
+            .map(|g| match g {
+                Glyph::Char(c) => *c,
+                _ => ' ',
+            })
+            .collect()
+    }
+
+    /// The reported defect: a line wider than the window is readable.
+    #[test]
+    fn a_long_line_continues_on_the_following_rows() {
+        let g = render_grid(b"abcdefghij", 4, 4, WrapMode::Wrap);
+        assert_eq!(row_text(&g, 4, 0), "abcd");
+        assert_eq!(row_text(&g, 4, 1), "efgh");
+        assert_eq!(row_text(&g, 4, 2), "ij  ");
+        assert_eq!(
+            row_text(&g, 4, 3),
+            "    ",
+            "no fifth row of a ten-char line"
+        );
+    }
+
+    /// The identity control: the same input under `Truncate` is exactly
+    /// what the pre-wrap renderer produced.
+    #[test]
+    fn truncate_still_clips_at_the_edge() {
+        let g = render_grid(b"abcdefghij", 4, 4, WrapMode::Truncate);
+        assert_eq!(row_text(&g, 4, 0), "abcd");
+        assert_eq!(
+            row_text(&g, 4, 1),
+            "    ",
+            "one row per line, remainder clipped"
+        );
+    }
+
+    /// Wrapping is per source line: a second line starts a new row
+    /// rather than continuing the first.
+    #[test]
+    fn each_source_line_starts_its_own_row() {
+        let g = render_grid(
+            b"abcde
+xy",
+            4,
+            4,
+            WrapMode::Wrap,
+        );
+        assert_eq!(row_text(&g, 4, 0), "abcd");
+        assert_eq!(row_text(&g, 4, 1), "e   ");
+        assert_eq!(row_text(&g, 4, 2), "xy  ");
+    }
+
+    /// A double-width glyph with one cell left moves to the next row
+    /// whole, rather than being split or half-painted.
+    #[test]
+    fn a_wide_char_that_does_not_fit_moves_down_whole() {
+        // 3 columns: "ab" fills 0..2, leaving one cell — too narrow for
+        // the 2-column CJK glyph.
+        let g = render_grid("ab中".as_bytes(), 3, 3, WrapMode::Wrap);
+        assert_eq!(row_text(&g, 3, 0), "ab ", "the odd cell stays blank");
+        assert_eq!(
+            g[3],
+            Glyph::Char('中'),
+            "the glyph starts the next row instead of straddling"
+        );
+        assert_eq!(g[4], Glyph::Continuation, "and keeps its continuation cell");
+    }
+
+    /// A tab fills to the row's end and stops; it never spans a wrap.
+    /// Column 0 of the next row is itself a tab stop, so alignment
+    /// survives the break.
+    #[test]
+    fn a_tab_fills_to_the_row_end_and_stops() {
+        let g = render_grid(b"ab	z", 4, 4, WrapMode::Wrap);
+        assert_eq!(row_text(&g, 4, 0), "ab  ", "tab pads to the edge");
+        assert_eq!(
+            row_text(&g, 4, 1),
+            "z   ",
+            "and the next char resumes at col 0"
+        );
+    }
+
+    /// The byte anchor may sit partway down a wrapped line, which is
+    /// why `view_top`'s sub-line component is a byte (framing Q#LL6).
+    #[test]
+    fn the_viewport_can_start_partway_down_a_wrapped_line() {
+        // Byte 4 is 'e', the first character of the second visual row.
+        let g = render_grid_from(b"abcdefghij", 2, 4, WrapMode::Wrap, 4);
+        assert_eq!(row_text(&g, 4, 0), "efgh", "the first row is skipped");
+        assert_eq!(row_text(&g, 4, 1), "ij  ");
+    }
+
+    /// `row_of_byte` and the painter must agree, or the viewport scrolls
+    /// to a row the renderer does not draw. They share `advance_wrapped`
+    /// precisely so this cannot drift; the witness pins it anyway.
+    #[test]
+    fn the_anchor_row_matches_where_the_text_is_painted() {
+        let text = "ab	cd中efghij";
+        let (buf, view) = attached(text.as_bytes());
+        for cols in [3_u32, 4, 5, 8] {
+            for (byte, _) in text.char_indices() {
+                let row = view.row_of_byte(&buf, 0, byte as u64, cols);
+                // Anchoring the viewport at that byte must put the
+                // character on the viewport's FIRST row.
+                let g = render_grid_from(text.as_bytes(), 3, cols, WrapMode::Wrap, byte as u64);
+                let full = render_grid(text.as_bytes(), 12, cols, WrapMode::Wrap);
+                let expect = row_text(&full, cols, row);
+                assert_eq!(
+                    row_text(&g, cols, 0),
+                    expect,
+                    "cols={cols} byte={byte}: anchor row {row} is not the row painted first"
+                );
+            }
+        }
     }
 
     #[test]
