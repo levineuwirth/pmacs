@@ -14,7 +14,7 @@ use pmacs_protocol::message::{
     AttachRequest, FrontendEvent, Hello, InstanceMessage, Modifiers, MouseButton, MouseKind,
 };
 use pmacs_protocol::panel::{
-    MAX_PANEL_VISIBLE_CELLS, PanelFrame, PanelFrameError, PanelFramePayload,
+    MAX_PANEL_VISIBLE_CELLS, PANEL_MIN_VERSION, PanelFrame, PanelFrameError, PanelFramePayload,
 };
 use pmacs_protocol::terminal::{
     MAX_TERMINAL_COLS, TerminalFrame, TerminalFrameError, TerminalProcessState,
@@ -107,8 +107,18 @@ fn terminal_frame(rows: u32, cols: u32) -> TerminalFrame {
 
 #[test]
 fn the_panel_stage_takes_protocol_v21() {
-    assert_eq!(PROTOCOL_VERSION, 21);
+    // The panel stage's own version, which does not move when a later
+    // feature appends to the wire.
+    //
+    // This was `assert_eq!(PROTOCOL_VERSION, 21)` — the CURRENT wire
+    // used as a proxy for the panel stage's version. The two were equal
+    // only until the next feature landed (v22, `LineWrapFacts`), and the
+    // proxy then failed in a test whose own name says what it means to
+    // pin. `PANEL_MIN_VERSION` is that constant.
+    assert_eq!(PANEL_MIN_VERSION, 21);
     assert!(SUPPORTED_PROTOCOL_VERSIONS.contains(&21));
+    // This binary must be able to speak the stage it implements.
+    const { assert!(PROTOCOL_VERSION >= PANEL_MIN_VERSION) };
     // The advertised version is a compatibility BASELINE, and Stage 2B-3
     // made that permanent rather than temporary: the server-first Hello
     // reaches an already-shipped frontend before that frontend can send

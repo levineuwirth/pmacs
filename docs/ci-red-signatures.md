@@ -423,6 +423,21 @@ without a name there is nothing to call intermittent.
 with `grep -E "FAILED|panicked|test result"`, which keeps failure
 context, or capture the full log to a file and summarize from it.
 
+### U2 — `m6_1_pty_raw_mode_disables_kernel_echo`, one local occurrence
+
+Has a selector, which U1 lacks — but still no fragments, so it cannot
+be matched either. Recorded so a recurrence is recognisable.
+
+| field | value |
+|---|---|
+| **selector** | `--lib process::tests::m6_1_pty_raw_mode_disables_kernel_echo` |
+| **job / flavor** | local (Linux), during `cargo test --tests --no-fail-fast` — the lib target alongside a full PTY-heavy corpus |
+| **required fragments** | **none captured** — output was filtered to the `FAILED` line |
+| **status** | **new incident, unreproduced** |
+| **what IS established** | it failed once (`1916 passed; 1 failed`), in no registry row, under a full-corpus run |
+| **what is NOT** | any mechanism. Not reproduced in a later full `--tests --no-fail-fast` sweep (108 targets, exit 0) nor in 3 isolated `--lib` runs (1917/0 each) |
+| **rival explanation not excluded** | leaked `pmacs --daemon` processes, which the handoff names as a standing confound for any load-sensitive local red |
+
 **The retirements are not occurrences and do not close the log.** R1 and
 R3 stay live, and each retired row keeps its signature so a later red
 matching one reopens it.

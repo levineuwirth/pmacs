@@ -404,6 +404,35 @@ someone forgot.
   old. They are a rival explanation for any load-sensitive local
   failure, so **check `pgrep -f "pmacs --daemon"` before trusting a
   local red**. Lane recorded in `docs/active-work.md`.
+- **A `PROTOCOL_VERSION` bump's blast radius is every version-sensitive
+  test, and NONE of them appear in the diff.** "The touched acceptance
+  suites" is the standing gate, and for a protocol bump it is the wrong
+  selector: long-lines Stage 3 bumped v21→v22, ran the suites it had
+  edited, and broke **eight** version assertions across six suites. CI
+  showed exactly **one**, because **cargo stops at the first failing
+  target**; the rest surfaced only afterwards, and one at a time would
+  have cost four more red rounds.
+
+  **On any protocol bump run `cargo test --tests --no-fail-fast` in
+  BOTH feature configurations.** `--no-fail-fast` because of the
+  stop-at-first-target behavior above, and `--features crdt` because
+  three of the eight were in crdt-gated real-daemon tests that assert
+  on a live socket's negotiated version — invisible to a default sweep,
+  which is the blindness the bullet below already names.
+
+  **Sort the failures before fixing them.** A *tripwire*
+  (`assert_eq!(PROTOCOL_VERSION, N)`) is meant to fire and takes a
+  deliberate edit; three of the eight were these, and the one pin that
+  must NEVER be edited — `ADVERTISED_PROTOCOL_VERSION == 20` — did not
+  fire. The other five were defects sharing one shape: **an absolute
+  contract expressed as arithmetic on, or equality with, a moving
+  constant.** `PROTOCOL_VERSION - 1` for "below the panel version";
+  `PANEL_MIN_VERSION == PROTOCOL_VERSION` for a coincidence true only
+  while panels were newest; `PROTOCOL_VERSION == 21` standing in for
+  the panel stage's own version; `"21"` for a negotiated session
+  version. Anchor on the constant the contract *names* — `src/` already
+  spelled it `PANEL_MIN_VERSION - 1` in five places, and every outlier
+  was in `tests/`.
 - **A local sweep is blind to whichever feature configuration it does
   not build.** Stage 3's census and every verification sweep ran
   `--features luajit` WITHOUT `crdt`, so no crdt-gated suite was

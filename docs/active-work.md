@@ -607,21 +607,65 @@ Edit tool, which errors on mismatch, for anything load-bearing.
 ### Verification (delivered)
 
 Everything framing §7 sketched, plus three groups it did not anticipate
-(framing §7.1). The exact gate run, all green on this machine:
+(framing §7.1).
+
+**The gate list below is the one that FAILED to catch this lane's CI
+red, and it is kept only to show the hole.** "The touched acceptance
+suites" is selected from the diff, and a `PROTOCOL_VERSION` bump breaks
+version-assertion tests that appear nowhere in it. Five failed on CI's
+first round. Use **`cargo test --tests --no-fail-fast`** on any
+protocol bump — `--no-fail-fast` because cargo stops at the first
+failing target, which is why CI showed one failure and the local
+full-corpus run then found three more. Recorded in
+`docs/agent-handoff.md`.
 
 ```
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --features crdt -- -D warnings
 cargo test --lib                                   # 1917 / 0
 cargo test --lib --features crdt                   # 2102 / 0
-cargo test --test line_wrap_acceptance             # 6 / 0
-cargo test --test long_line_readable_acceptance    # 2 / 0
-cargo test --test folding_acceptance               # 21 / 0
-cargo test --test full_grid_resync_acceptance      # 1 / 0
-cargo test --test m4_acceptance -- --skip basedpyright
+cargo test --tests --no-fail-fast                  # 108 targets, exit 0
+cargo test --tests --features crdt --no-fail-fast  # 108 targets, exit 0
 PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu        # 228 / 0
 git diff --check
 ```
+
+**Both configurations, and that mattered.** The default sweep went
+clean while `--features crdt` still had **three** failures, in
+crdt-gated real-daemon tests (`vterm_stage3_acceptance` ×2,
+`bottom_panel_stage2b_gpu_acceptance` ×1) that assert on a real
+socket's negotiated version. This is the handoff's existing "a local
+sweep is blind to whichever feature configuration it does not build"
+lesson, hit again by a different lane — so **eight** version
+assertions broke in total, not five.
+
+The eight version-assertion failures, and what each one was:
+
+| test | was | why it broke |
+|---|---|---|
+| `acc51_a_v20_peer_..._even_when_capable` (×5 jobs) | `PROTOCOL_VERSION - 1` | **bug** — an absolute contract ("below the panel version") as arithmetic on a moving constant. Now `PANEL_MIN_VERSION - 1`, the idiom `src/` already used in five places |
+| `the_baseline_stays_and_the_counter_offer_activates` | `PANEL_MIN_VERSION == PROTOCOL_VERSION` | **bug** — asserted a coincidence true only while panels were the newest feature. Now the two durable bounds |
+| `the_panel_stage_takes_protocol_v21` | `PROTOCOL_VERSION == 21` | **bug** — the current wire as a proxy for the panel stage's own version, in a test whose name says which it means |
+| `a54_real_daemon_..._panel_hosted_terminal` *(crdt)* | `session_protocol_version == "21"` | **bug** — the negotiated session version is *this binary's* wire, so the literal held only while panels were newest. Now `PROTOCOL_VERSION`, plus an explicit `>= PANEL_MIN_VERSION` for the capability the literal carried implicitly |
+| `a37_real_daemon_..._one_terminal_session` *(crdt)* | `session_protocol_version == "21"` | **bug** — same |
+| `a13_17_26_..._version_cost` | `PROTOCOL_VERSION == 21`, `6..=21`, `!supported(22)` | **tripwire working as designed** — it says in its own comment that it tracks the current wire. Took the conscious edit |
+| `the_baseline_stays_...` (same test) | `PROTOCOL_VERSION == 21` | **tripwire working as designed** |
+| `terminal_mode_keeps_reporting_presence_...` *(crdt)* | `PROTOCOL_VERSION == 21` | **tripwire working as designed** |
+
+**Five bugs and three tripwires.** The distinction is the useful part.
+A tripwire that fires on a bump is doing its job, and "fixing" it means
+editing it deliberately — the baseline pin `ADVERTISED_PROTOCOL_VERSION
+== 20` is the one that must *never* be edited, and it never fired.
+
+The five bugs share one shape: **an absolute contract expressed as
+arithmetic on, or equality with, a moving constant.** `PROTOCOL_VERSION
+- 1` for "below the panel version"; `PANEL_MIN_VERSION ==
+PROTOCOL_VERSION` for a coincidence; `PROTOCOL_VERSION == 21` standing
+in for the panel stage's own version; `"21"` for a negotiated session
+version. Each was true when written and silently false afterwards.
+`src/` already had the right idiom — `PANEL_MIN_VERSION - 1`, five
+occurrences — and every outlier was in `tests/`.
 
 `tests/long_line_readable_acceptance.rs` is the one that answers the
 **report** rather than a mechanism: the shipped binary, a real PTY, a
@@ -649,6 +693,13 @@ establishes intermittence only, and without a selector it does not even
 establish that. Logged there as **U1**, explicitly *not* matched
 against A1 (also GPU-headless-under-load) because matching requires a
 selector and fragments this occurrence does not have.
+
+**And one more, logged as U2.**
+`process::tests::m6_1_pty_raw_mode_disables_kernel_echo` failed once
+during a full `--tests --no-fail-fast` run and did not reproduce in a
+later full sweep (108 targets, exit 0) or 3 isolated `--lib` runs. It
+is in no registry row, so it is a new incident; leaked
+`pmacs --daemon` processes remain an unexcluded rival explanation.
 
 ### Not in scope
 
