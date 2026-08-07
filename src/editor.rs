@@ -752,6 +752,17 @@ impl EditorState {
                 include_str!("../builtin/runtime/help.lua"),
             )
             .expect("load help builtin chunk");
+        // GUI zoom (QoL Stage 2). Defines `ui.gpu-font-size-base` /
+        // `ui.gpu-zoom-step` and the `gpu.zoom-*` commands, and exposes
+        // `pmacs.zoom.restore` for `install_state_dirs` to call once
+        // `pmacs.state` is readable. Deliberately binds NO keys: the
+        // keymap cannot express "GPU frontends only" (framing Q#Z3).
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/zoom.lua"),
+                include_str!("../builtin/runtime/zoom.lua"),
+            )
+            .expect("load zoom builtin chunk");
         // T M7.11 bundled-package bootstrap. Through M7.10 the REPL
         // was loaded directly via `eval(include_str!(...))`; the
         // M7.11 deliverable migrates it to the package system so it
@@ -987,6 +998,30 @@ impl EditorState {
             self.lua_host
                 .lua()
                 .set_app_data(crate::lua_bindings::StateDir(dir));
+        }
+        // Restore a saved GUI zoom (QoL Stage 2, framing §5.2). HERE and
+        // not in a runtime module: builtins and `init.lua` both run
+        // during construction, BEFORE this function, so a
+        // `pmacs.state.read` at module load returns nothing every time.
+        // `saveplace` and `recentf` never meet that because both read
+        // lazily inside functions; zoom must apply with no user action,
+        // which makes it the first eager state consumer.
+        //
+        // Inside `install_state_dirs` rather than beside its two call
+        // sites (`prepare_startup` and the daemon) because this is by
+        // definition the moment state becomes readable — so it cannot be
+        // ordered wrongly, and a future third startup path gets it
+        // without knowing it had to ask.
+        //
+        // Best-effort: a failure here must not stop a session from
+        // starting over a font size.
+        if let Err(error) = self
+            .lua_host
+            .lua()
+            .load("if pmacs.zoom then pmacs.zoom.restore() end")
+            .exec()
+        {
+            eprintln!("pmacs: could not restore saved zoom: {error}");
         }
     }
 
