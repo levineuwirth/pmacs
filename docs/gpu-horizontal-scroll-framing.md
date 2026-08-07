@@ -1,6 +1,6 @@
 # GPU horizontal scroll — QoL Stage 5
 
-**Status: revision 3 — NOT APPROVED. Q#G3 ANSWERED from the existing
+**Status: revision 4 — NOT APPROVED. Q#G3 ANSWERED from the existing
 font contract; Q#G1/G2/G4 stand with votes; Q#G5 expanded. No
 implementation may begin.**
 
@@ -261,6 +261,22 @@ Sketch, pending Q#G1/G2/G4:
   `truncate`, toggle to `wrap`, toggle back, and assert the offset is 0
   **before any cursor motion**. An inertness-only implementation passes
   a "wrap looks right" test and fails this one.
+- **The buffer snapshot resets to zero** (Q#G2, second lifecycle rule).
+  Revision 3 added the requirement and left it untested, which is how a
+  lifecycle rule quietly becomes a comment. Scroll to a non-zero offset
+  in buffer A, install a **buffer B snapshot**, and assert the offset is
+  0 **and B renders at its code origin — before any `CursorByte`
+  arrives**. The pre-cursor scoping is the whole test: a later cursor
+  motion repairs the offset anyway, so a witness that waits for one
+  cannot distinguish "reset on snapshot" from "repaired on first
+  motion", which is precisely the bug.
+- **The minimap does not move** (Q#G4). The implementation already
+  supports the vote — the minimap derives from the summary, the surface
+  dimensions and `scroll_top`, with no horizontal input — so this pins
+  an existing property rather than asking for new work, and that is the
+  reason to write it: an offset threaded one seam too far would break
+  it silently. Assert **equal minimap vertices (or pixels) before and
+  after a non-zero horizontal offset**, with vertical state unchanged.
 - **A TUI-parity witness**, now **unconditional** (Q#G3): the same
   buffer and the same column offset yield the same first visible
   character in both frontends. This is what makes "the frontends agree"

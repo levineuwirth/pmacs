@@ -465,7 +465,7 @@ whatever SHA it records. Recover:
 — the ref, not a SHA. Recover:
 `git fetch githubsucks && git checkout gpu-horizontal-scroll`.
 
-**Status: `docs/gpu-horizontal-scroll-framing.md` revision 3 — NOT
+**Status: `docs/gpu-horizontal-scroll-framing.md` revision 4 — NOT
 APPROVED. Q#G3 is ANSWERED (monospace-only, by the font contract that
 already exists — `family_is_monospace_everywhere` gates it and an
 acceptance test requires the fallback, so revision 1's proposed
