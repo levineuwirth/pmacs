@@ -1493,6 +1493,14 @@ fn dispatcher_loop(
                     if !peer_knows_font_facts && matches!(msg, InstanceMessage::FontFacts { .. }) {
                         continue;
                     }
+                    // Long lines — LineWrapFacts gated at v22. A v21 peer
+                    // keeps whatever it does today; the semantic producer
+                    // also skips it, so this is the belt-and-braces half.
+                    if negotiated_protocol_version < 22
+                        && matches!(msg, InstanceMessage::LineWrapFacts { .. })
+                    {
+                        continue;
+                    }
                     // Vterm Stage 3 — TerminalFrame gated at v19. A v18
                     // semantic peer keeps the empty identity snapshot and
                     // no terminal surface; a v18 grid peer is unaffected

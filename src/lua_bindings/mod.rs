@@ -672,6 +672,31 @@ pub fn config_u32(lua: &Lua, name: &str, buffer_id: Option<BufferId>, fallback: 
     }
 }
 
+/// Resolve `ui.line-wrap` for `buffer_id`.
+///
+/// The registry has no ambient current buffer by design, so the caller
+/// names the buffer; passing `None` reads the global layer.
+///
+/// Falls back to [`WrapMode::Wrap`] rather than `Truncate`, and the
+/// direction matters: the fallback covers a bare core whose runtime
+/// never loaded the builtin, and it must agree with the setting's own
+/// default or a test-constructed editor would silently render in the
+/// mode nobody chose — which is the defect this whole stage exists to
+/// remove.
+#[must_use]
+pub fn config_line_wrap(lua: &Lua, buffer_id: Option<BufferId>) -> crate::view::WrapMode {
+    let Some(registry) = lua.app_data_ref::<config::SharedConfigRegistry>() else {
+        return crate::view::WrapMode::Wrap;
+    };
+    let borrowed = registry.borrow();
+    match borrowed.get("ui.line-wrap", buffer_id) {
+        Ok(crate::config_registry::ConfigValue::Str(v)) if v == "truncate" => {
+            crate::view::WrapMode::Truncate
+        }
+        _ => crate::view::WrapMode::Wrap,
+    }
+}
+
 /// Read a `String` setting plus the registry epoch that keys any cache
 /// built from it (Q#TC4c).
 ///

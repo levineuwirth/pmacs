@@ -763,6 +763,12 @@ impl EditorState {
                 include_str!("../builtin/runtime/zoom.lua"),
             )
             .expect("load zoom builtin chunk");
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/linewrap.lua"),
+                include_str!("../builtin/runtime/linewrap.lua"),
+            )
+            .expect("load linewrap builtin chunk");
         // T M7.11 bundled-package bootstrap. Through M7.10 the REPL
         // was loaded directly via `eval(include_str!(...))`; the
         // M7.11 deliverable migrates it to the package system so it
@@ -4376,8 +4382,10 @@ fn paint_window_content(
     // viewport itself rather than recomputed: a second derivation could
     // disagree with the one the renderer used, and the disagreement
     // would only show as a cursor on the wrong row.
+    // Width only: `last_wrap` was resolved before the viewport was
+    // built and is what the viewport was built FROM, so writing it back
+    // here would be circular.
     window.last_content_cols = viewport.cell_size.cols;
-    window.last_wrap = viewport.wrap;
     window.text_view.render(buf, viewport, grid);
     if gutter_w > 0 {
         paint_line_number_gutter(grid, window, &rect, inner_rows, gutter_w, folds, theme);
@@ -4574,6 +4582,13 @@ pub fn paint_frame(
         // Record viewport height for page motion (cursor.page-down /
         // cursor.page-up consume this).
         window.last_visible_rows = inner_rows;
+        // Resolve the buffer's wrap mode once per window per frame and
+        // record it here. Every later consumer — the viewport below,
+        // and the coordinate callers via `Window::layout_ctx` — reads
+        // this one answer, so nothing re-resolves and two callers
+        // cannot disagree about one buffer.
+        window.last_wrap =
+            crate::lua_bindings::config_line_wrap(state.lua_host.lua(), Some(window.buffer_id));
         if inner_rows == 0 || rect.size.cols == 0 {
             continue;
         }

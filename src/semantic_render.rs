@@ -279,6 +279,12 @@ pub struct SemanticRenderState {
     /// font state, so this gate has no summary-style companion
     /// filter.
     peer_knows_font_facts: bool,
+    /// `LineWrapFacts` is v22; a v21 peer keeps its own behavior.
+    peer_knows_line_wrap: bool,
+    /// Last `(buffer, wrap)` pair sent. Keyed on the PAIR, not the
+    /// mode: that is what makes a BUFFER SWITCH re-emit without a
+    /// config event, which a value-keyed cache would miss entirely.
+    last_line_wrap: Option<(crate::buffer::BufferId, bool)>,
     /// Whether the peer negotiated protocol >= 18 (Q#SL7). This gates
     /// callback evaluation in the producer, independently of the daemon's
     /// write-loop gate.
@@ -471,6 +477,7 @@ impl SemanticRenderState {
         let mut s = Self::new(frontend_id);
         s.peer_knows_theme_facts = negotiated_protocol_version >= 16;
         s.peer_knows_font_facts = negotiated_protocol_version >= 17;
+        s.peer_knows_line_wrap = negotiated_protocol_version >= 22;
         s.peer_knows_statusline_segments = negotiated_protocol_version >= 18;
         s.peer_knows_terminal_frames = negotiated_protocol_version >= 19;
         s.peer_knows_panel_frames = negotiated_protocol_version >= PANEL_MIN_VERSION;
@@ -517,6 +524,8 @@ impl SemanticRenderState {
             last_font_epoch: None,
             last_font_facts: None,
             peer_knows_font_facts: true,
+            peer_knows_line_wrap: true,
+            last_line_wrap: None,
             peer_knows_statusline_segments: true,
             last_statusline: HashMap::new(),
             diag_line_cache: HashMap::new(),
@@ -952,6 +961,7 @@ impl SemanticRenderState {
         // --- ThemeFacts (UI faces; themes arc Q#TH7, protocol v16) ---
         out.extend(self.theme_facts_msg(state));
         out.extend(self.font_facts_msg(state));
+        out.extend(self.line_wrap_msg(state, vp.buffer_id));
         // Q#SL6/Q#SL8: face inventory must precede segment text.
         // Parent acceptance 45: ONE provider invocation supplies both the
         // primary-document wire segments and the panel mode line, so the
@@ -1100,6 +1110,7 @@ impl SemanticRenderState {
         out.extend(self.minibuffer_prompt_msg(state, buffer_id));
         out.extend(self.theme_facts_msg(state));
         out.extend(self.font_facts_msg(state));
+        out.extend(self.line_wrap_msg(state, buffer_id));
         // Q#SL6/Q#SL8: face inventory must precede segment text.
         // The band rides the terminal path too: a frontend whose DOCUMENT
         // surface is a full-window terminal can still hold a side window,
@@ -2034,6 +2045,38 @@ impl SemanticRenderState {
             family: facts.0,
             size_centi_px: facts.1,
         })
+    }
+
+    /// The wrap mode for the buffer this session is showing (v22).
+    ///
+    /// `pmacs-gpu` lays out locally and ignores the grid family, so
+    /// without this it would never hear `ui.line-wrap` at all and would
+    /// keep wrapping while the TUI truncated — the cross-frontend
+    /// disagreement the long-lines stage exists to close.
+    ///
+    /// Deduped on the `(buffer, wrap)` PAIR. That is not a
+    /// micro-optimisation: the mode is buffer-local, so switching from a
+    /// truncating buffer to a wrapping one changes the effective mode
+    /// with **no config event at all**. A cache keyed on the mode alone
+    /// would stay silent through exactly that transition — and would
+    /// look correct in every single-buffer test.
+    fn line_wrap_msg(
+        &mut self,
+        state: &EditorState,
+        buffer_id: crate::buffer::BufferId,
+    ) -> Option<InstanceMessage> {
+        if !self.peer_knows_line_wrap {
+            return None;
+        }
+        let wrap = matches!(
+            crate::lua_bindings::config_line_wrap(state.lua_host.lua(), Some(buffer_id)),
+            crate::view::WrapMode::Wrap
+        );
+        if self.last_line_wrap == Some((buffer_id, wrap)) {
+            return None;
+        }
+        self.last_line_wrap = Some((buffer_id, wrap));
+        Some(InstanceMessage::LineWrapFacts { buffer_id, wrap })
     }
 
     /// Project the [`Decoration`] set intersecting the declared
@@ -3738,6 +3781,7 @@ mod tests {
                         | InstanceMessage::LineNumbers { .. }
                         | InstanceMessage::ThemeFacts { .. }
                         | InstanceMessage::FontFacts { .. }
+                        | InstanceMessage::LineWrapFacts { .. }
                         | InstanceMessage::StatuslineSegments { .. }
                 ),
                 "semantic projection emitted an unexpected variant: {m:?}"
@@ -3911,13 +3955,17 @@ mod tests {
         // StatusFacts (Q#S1, cached-compare), the authoritative
         // ThemeFacts table (Q#TH7 — empty for an unthemed daemon), and
         // the authoritative FontFacts preference (Q#F5 — all-default), and
-        // authoritative empty statusline segments (Q#SL8).
+        // authoritative empty statusline segments (Q#SL8), and the
+        // buffer's authoritative wrap mode (v22 — a semantic frontend
+        // lays out locally, so it has to be told on the first frame or
+        // it never learns the setting at all).
         let first = s.render_frame(&state);
         assert_eq!(
             first.len(),
-            7,
+            8,
             "first frame ships StyleSpans + Decorations + FileStyleSummary \
-             + StatusFacts + ThemeFacts + FontFacts + StatuslineSegments"
+             + StatusFacts + ThemeFacts + FontFacts + StatuslineSegments \
+             + LineWrapFacts"
         );
         assert_semantic_only(&first);
         let (style_full, _) = style_segments(&first).expect("StyleSpans present");
@@ -4604,6 +4652,56 @@ mod tests {
                 "no inlay hints ⇒ no InlineAdornments message"
             );
         }
+    }
+
+    /// A buffer switch re-emits the wrap mode, with no config event.
+    ///
+    /// This is the trigger a `FontFacts`-shaped design misses. Font size
+    /// is global, so caching it by value is right; wrap mode is
+    /// **buffer-local**, so a value-keyed cache stays silent when the
+    /// user moves from one buffer to another with a different mode —
+    /// and looks perfectly correct in every single-buffer test.
+    ///
+    /// Keying the cache on the `(buffer, wrap)` pair is what makes the
+    /// switch re-emit, so that is what this pins.
+    #[test]
+    fn a_buffer_switch_re_emits_the_wrap_mode() {
+        let state = empty_state();
+        let mut sem = local();
+        let first = active_buffer(&state);
+        let second = crate::buffer::BufferId::from_raw(first.raw() + 1);
+
+        let a = sem
+            .line_wrap_msg(&state, first)
+            .expect("the first buffer's mode is authoritative");
+        assert!(matches!(
+            a,
+            InstanceMessage::LineWrapFacts { buffer_id, .. } if buffer_id == first
+        ));
+        assert!(
+            sem.line_wrap_msg(&state, first).is_none(),
+            "the same pair is suppressed"
+        );
+
+        let b = sem
+            .line_wrap_msg(&state, second)
+            .expect("a different buffer must be told, even at the same mode");
+        assert!(matches!(
+            b,
+            InstanceMessage::LineWrapFacts { buffer_id, .. } if buffer_id == second
+        ));
+    }
+
+    /// A pre-v22 peer is never sent the variant.
+    #[test]
+    fn a_v21_peer_is_not_told_about_wrapping() {
+        let state = empty_state();
+        let mut sem = local();
+        sem.peer_knows_line_wrap = false;
+        assert!(
+            sem.line_wrap_msg(&state, active_buffer(&state)).is_none(),
+            "gated at v22; an older peer keeps its own behavior"
+        );
     }
 
     #[test]
