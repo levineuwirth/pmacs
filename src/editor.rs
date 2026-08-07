@@ -2351,6 +2351,7 @@ impl EditorState {
                 None
             };
             window.last_visible_rows = content.size.rows;
+            window.last_content_cols = content.size.cols;
             // A2A-3 / parent 48: the auto-scroll clamp belongs to the
             // FOCUSED window only. Running it for a passive panel would
             // move a `view_top` the user is not driving.
@@ -3603,7 +3604,9 @@ impl EditorState {
             let Ok(buf) = reg.get(buffer_id) else {
                 return;
             };
-            core.windows[&win_id].text_view.display_to_pos(buf, target)
+            core.windows[&win_id]
+                .text_view
+                .display_to_pos(buf, target, core.layout_ctx(win_id))
         };
         if let Some(p) = pos {
             let aw = core
@@ -3662,7 +3665,9 @@ impl EditorState {
             let reg = registry.borrow();
             reg.get(buffer_id).ok().and_then(|buf| {
                 let aw = &core.windows[&win_id];
-                let cur = aw.text_view.pos_to_display(buf, aw.cursor)?;
+                let cur = aw
+                    .text_view
+                    .pos_to_display(buf, aw.cursor, aw.layout_ctx())?;
                 let cur_row = cur.row as usize;
                 let target_row_usize = match folds.as_ref() {
                     Some(map) if scroll_up => map.nth_visible_back(cur_row, view_shift),
@@ -3674,7 +3679,11 @@ impl EditorState {
                 };
                 let target_row = u32::try_from(target_row_usize).ok()?;
                 aw.text_view
-                    .display_to_pos(buf, crate::view::DisplayCoord::new(target_row, cur.col))
+                    .display_to_pos(
+                        buf,
+                        crate::view::DisplayCoord::new(target_row, cur.col),
+                        aw.layout_ctx(),
+                    )
                     .or_else(|| aw.text_view.line_offset(target_row_usize))
             })
         };
@@ -4270,7 +4279,7 @@ fn prepare_window_cursor_visible(
 ) {
     let cursor_row = window
         .text_view
-        .pos_to_display(buf, window.cursor)
+        .pos_to_display(buf, window.cursor, window.layout_ctx())
         .map_or(0, |d| d.row as usize);
     match folds {
         // The logical cursor may sit on a hidden line (a shared fold, or
@@ -4363,6 +4372,12 @@ fn paint_window_content(
     // can draw its severity sign into the gutter's leading column
     // without the gutter's own blank pass erasing it — then each
     // overlay in attach order. See [`crate::view::View`].
+    // Record the width text actually wrapped at, taken from the
+    // viewport itself rather than recomputed: a second derivation could
+    // disagree with the one the renderer used, and the disagreement
+    // would only show as a cursor on the wrong row.
+    window.last_content_cols = viewport.cell_size.cols;
+    window.last_wrap = viewport.wrap;
     window.text_view.render(buf, viewport, grid);
     if gutter_w > 0 {
         paint_line_number_gutter(grid, window, &rect, inner_rows, gutter_w, folds, theme);
@@ -4375,7 +4390,7 @@ fn paint_window_content(
     // itself is always visible regardless of overlay activity.
     let coord = window
         .text_view
-        .pos_to_display(buf, window.cursor)
+        .pos_to_display(buf, window.cursor, window.layout_ctx())
         .unwrap_or_default();
     // Arc 6 Stage 2 (Q#FD18): All/Top/Bot/% are reckoned in
     // VISIBLE-line space — a buffer whose remainder is collapsed
@@ -4685,7 +4700,9 @@ fn window_cursor_cell(
         ),
         None => window.cursor,
     };
-    let disp = window.text_view.pos_to_display(buf, cursor)?;
+    let disp = window
+        .text_view
+        .pos_to_display(buf, cursor, window.layout_ctx())?;
     let row_offset = match folds {
         Some(map) => {
             let top = map.clamp_view_top(window.view_top);
@@ -5012,10 +5029,17 @@ fn paint_local_selection(
             continue;
         }
 
-        let Some(start_coord) = window.text_view.pos_to_display(buf, paint_start) else {
+        let Some(start_coord) =
+            window
+                .text_view
+                .pos_to_display(buf, paint_start, window.layout_ctx())
+        else {
             continue;
         };
-        let Some(end_coord) = window.text_view.pos_to_display(buf, paint_end) else {
+        let Some(end_coord) = window
+            .text_view
+            .pos_to_display(buf, paint_end, window.layout_ctx())
+        else {
             continue;
         };
         if start_coord.row as usize != display_row || end_coord.row as usize != display_row {

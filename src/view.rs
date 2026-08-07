@@ -108,17 +108,89 @@ impl InterceptContext {
 /// and inline expansions appear.
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
 pub struct DisplayCoord {
-    /// 0-based row.
+    /// 0-based **source line** index.
+    ///
+    /// Deliberately still the source line under wrapping, not a visual
+    /// row. Redefining it would have broken every existing consumer —
+    /// `overlay_paint`'s `row - view_top`, vertical motion's bounds
+    /// check — with no compile error. Adding [`Self::sub_row`] beside it
+    /// instead leaves those consumers *correct*, not merely findable.
     pub row: u32,
-    /// 0-based column.
+    /// Which visual row **within** `row`, when the line wraps.
+    ///
+    /// `0` for every unwrapped line and under
+    /// [`WrapMode::Truncate`](crate::view::WrapMode::Truncate), which is
+    /// what makes this field additive: code that has never heard of
+    /// wrapping keeps computing the right answer.
+    pub sub_row: u32,
+    /// 0-based column, within the visual row named by `sub_row`.
     pub col: u32,
 }
 
 impl DisplayCoord {
-    /// Construct a display coordinate.
+    /// Construct a display coordinate on a line's first visual row.
     #[must_use]
     pub const fn new(row: u32, col: u32) -> Self {
-        Self { row, col }
+        Self {
+            row,
+            sub_row: 0,
+            col,
+        }
+    }
+
+    /// Construct a display coordinate on a specific visual row of a
+    /// wrapped line.
+    #[must_use]
+    pub const fn wrapped(row: u32, sub_row: u32, col: u32) -> Self {
+        Self { row, sub_row, col }
+    }
+}
+
+/// The layout facts a coordinate mapping needs, which the mapping
+/// itself cannot know.
+///
+/// # Why this is a required parameter
+///
+/// `pos_to_display` took `(&self, buf, pos)` and had no notion of the
+/// grid at all — so under wrapping it could not compute a visual row,
+/// and `display_to_pos` could not invert one. Passing the missing
+/// facts as a required argument is deliberate: it makes the compiler
+/// enumerate every call site rather than leaving an audit to grep.
+///
+/// That is the opposite choice from [`DisplayCoord::sub_row`], and for
+/// the opposite reason. Enforcement is possible on the way in, so it is
+/// taken; it is not possible on the way out, so the output is made
+/// correct-by-default instead.
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
+pub struct LayoutCtx {
+    /// Width in cells of the content area the text wraps within.
+    ///
+    /// `0` means "not rendered yet" — the same convention
+    /// `Window::last_visible_rows` uses — and is treated as unwrapped,
+    /// since a viewport with no columns has no rows to distinguish.
+    pub cols: u32,
+    /// The window's resolved wrap mode.
+    pub wrap: WrapMode,
+}
+
+impl LayoutCtx {
+    /// The identity context: no wrapping, width irrelevant.
+    ///
+    /// Every pre-wrap caller means this, and saying so explicitly is
+    /// what makes those call sites readable as decisions rather than
+    /// oversights.
+    #[must_use]
+    pub const fn truncated() -> Self {
+        Self {
+            cols: 0,
+            wrap: WrapMode::Truncate,
+        }
+    }
+
+    /// Whether this context actually wraps.
+    #[must_use]
+    pub const fn wrapping(self) -> bool {
+        matches!(self.wrap, WrapMode::Wrap) && self.cols > 0
     }
 }
 
@@ -309,14 +381,24 @@ pub trait View {
     /// view holds a meaningful mapping for that position.
     ///
     /// Default: returns `None` (view has no opinion).
-    fn pos_to_display(&self, _buf: &Buffer, _pos: Position) -> Option<DisplayCoord> {
+    fn pos_to_display(
+        &self,
+        _buf: &Buffer,
+        _pos: Position,
+        _ctx: LayoutCtx,
+    ) -> Option<DisplayCoord> {
         None
     }
 
     /// Translate a display coordinate back to a buffer byte position.
     ///
     /// Default: returns `None`.
-    fn display_to_pos(&self, _buf: &Buffer, _coord: DisplayCoord) -> Option<Position> {
+    fn display_to_pos(
+        &self,
+        _buf: &Buffer,
+        _coord: DisplayCoord,
+        _ctx: LayoutCtx,
+    ) -> Option<Position> {
         None
     }
 

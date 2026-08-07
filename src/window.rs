@@ -378,6 +378,33 @@ pub struct Window {
     /// render. Updated by the renderer; consumed by `cursor.page-down`
     /// / `cursor.page-up`. `0` until the first render lands.
     pub last_visible_rows: u32,
+    /// Width in cells of this window's **content** area at last render
+    /// — the text columns, with the line-number gutter already
+    /// subtracted. Updated by the renderer alongside
+    /// [`Self::last_visible_rows`]; `0` until the first render lands.
+    ///
+    /// Content, not window, width: the gutter grows at the line-count
+    /// digit boundary (9 -> 10, 99 -> 100), so the two differ and only
+    /// this one is where text actually wraps.
+    ///
+    /// Needed because line wrapping makes the cursor's display
+    /// coordinate width-dependent, and the callers that ask for it —
+    /// vertical motion, paging, overlay placement — hold a window but
+    /// not the frame's geometry. `last_visible_rows` established this
+    /// pattern for rows; wrapping needs the other axis.
+    pub last_content_cols: u32,
+    /// Wrap mode this window's buffer resolved to at last render.
+    ///
+    /// Recorded by the driver beside [`Self::last_content_cols`], for
+    /// the same reason: the mode is **buffer-local** config and the
+    /// registry has no ambient buffer, so only the driver can resolve
+    /// it — but vertical motion, paging and overlay placement all need
+    /// it and hold a window rather than a registry.
+    ///
+    /// One resolution, recorded once, consumed everywhere. The
+    /// alternative — each consumer resolving for itself — is how two
+    /// callers end up disagreeing about the same buffer.
+    pub last_wrap: crate::view::WrapMode,
     /// Line-number gutter mode for this window (UX gutter arc). `Off` by
     /// default → no gutter, no coordinate change.
     pub line_numbers: LineNumberMode,
@@ -401,6 +428,8 @@ impl Window {
             view_top: 0,
             goal_col: None,
             last_visible_rows: 0,
+            last_content_cols: 0,
+            last_wrap: crate::view::WrapMode::Truncate,
             line_numbers: LineNumberMode::Off,
             params: WindowParams::default(),
         }
@@ -410,6 +439,18 @@ impl Window {
     #[must_use]
     pub fn is_side(&self) -> bool {
         self.params.is_side()
+    }
+
+    /// The layout facts a coordinate mapping needs for this window.
+    ///
+    /// Reads what the last render recorded, so every consumer sees the
+    /// same answer the renderer used rather than deriving its own.
+    #[must_use]
+    pub fn layout_ctx(&self) -> crate::view::LayoutCtx {
+        crate::view::LayoutCtx {
+            cols: self.last_content_cols,
+            wrap: self.last_wrap,
+        }
     }
 
     /// Width in cells this window's line-number gutter occupies, or `0`

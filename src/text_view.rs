@@ -23,7 +23,7 @@ use crate::buffer::{Buffer, BufferError};
 use crate::cell::{Cell, CellCoord, CellGrid, Glyph, Style};
 use crate::display_width::{advance_char, valid_prefix_width};
 use crate::rope::{Edit, Position};
-use crate::view::{DisplayCoord, View, Viewport, WrapMode};
+use crate::view::{DisplayCoord, LayoutCtx, View, Viewport, WrapMode};
 
 // ---------------------------------------------------------------------------
 // Tuning
@@ -150,28 +150,90 @@ impl TextView {
     ///
     /// Total: any offset is legal, and one past the line's end lands on
     /// its last row. `max_cols == 0` yields row 0 rather than looping.
+    /// Which visual row of `line` holds byte `within`, discarding the
+    /// column. Thin wrapper over [`Self::place_of_byte`].
     fn row_of_byte(&self, buf: &Buffer, line: usize, within: u64, max_cols: u32) -> u32 {
-        if max_cols == 0 || within == 0 {
-            return 0;
+        self.place_of_byte(buf, line, within, max_cols).0
+    }
+
+    /// Where byte `within` (relative to `line`'s start) sits under
+    /// character wrap, as `(visual row, column)`.
+    ///
+    /// Total: any offset is legal, and one past the line's end lands
+    /// just after its last character. A byte **inside** a multi-byte
+    /// codepoint yields that codepoint's own place — the same
+    /// projection `valid_prefix_width` performs on the unwrapped path,
+    /// so the interior-byte contract is unchanged by wrapping.
+    fn place_of_byte(&self, buf: &Buffer, line: usize, within: u64, max_cols: u32) -> (u32, u32) {
+        if max_cols == 0 {
+            return (0, 0);
         }
         let bytes = self.read_line_bytes(buf, line);
         let Ok(s) = std::str::from_utf8(&bytes) else {
-            return 0;
+            return (0, 0);
         };
         let (mut row, mut col, mut seen) = (0u32, 0u32, 0u64);
         for ch in s.chars() {
-            let (start_row, _, end_row, end_col) = advance_wrapped(row, col, ch, max_cols, true);
+            if seen >= within {
+                break;
+            }
+            let (start_row, start_col, end_row, end_col) =
+                advance_wrapped(row, col, ch, max_cols, true);
             seen += ch.len_utf8() as u64;
             if seen > within {
-                // `within` falls inside this character, so the answer is
-                // the row the character is DRAWN on — a glyph pushed to
-                // the next row takes its bytes with it.
-                return start_row;
+                // `within` fell inside this character: project to the
+                // character's own start, which is where it is drawn.
+                return (start_row, start_col);
             }
             row = end_row;
             col = end_col;
         }
-        row
+        // A position that lands exactly on a row boundary belongs to
+        // column 0 of the NEXT row, not one past the end of the last
+        // one (framing §7: the wrap position is owned downstream). The
+        // downstream cell always exists; `(row, max_cols)` does not.
+        if col >= max_cols {
+            (row.saturating_add(1), 0)
+        } else {
+            (row, col)
+        }
+    }
+
+    /// Byte offset (relative to `line`'s start) at visual row `sub_row`,
+    /// column `col`, under character wrap — the inverse of
+    /// [`Self::place_of_byte`].
+    ///
+    /// Rounds forward to the next character boundary when the column
+    /// lands inside a wide glyph, matching the unwrapped
+    /// `display_to_pos`. A row past the line's height clamps to the
+    /// line's end.
+    fn byte_at_place(
+        &self,
+        buf: &Buffer,
+        line: usize,
+        sub_row: u32,
+        col: u32,
+        max_cols: u32,
+    ) -> u64 {
+        let bytes = self.read_line_bytes(buf, line);
+        let Ok(s) = std::str::from_utf8(&bytes) else {
+            return 0;
+        };
+        if max_cols == 0 {
+            return 0;
+        }
+        let (mut row, mut c, mut walked) = (0u32, 0u32, 0u64);
+        for ch in s.chars() {
+            let (start_row, start_col, end_row, end_col) =
+                advance_wrapped(row, c, ch, max_cols, true);
+            if start_row > sub_row || (start_row == sub_row && start_col >= col) {
+                return walked;
+            }
+            walked += ch.len_utf8() as u64;
+            row = end_row;
+            c = end_col;
+        }
+        walked
     }
 
     /// Paint one source line and report how many grid rows it used.
@@ -350,12 +412,17 @@ impl View for TextView {
         Ok(())
     }
 
-    fn pos_to_display(&self, buf: &Buffer, pos: Position) -> Option<DisplayCoord> {
+    fn pos_to_display(&self, buf: &Buffer, pos: Position, ctx: LayoutCtx) -> Option<DisplayCoord> {
         if pos > buf.len() {
             return None;
         }
         let row_idx = self.line_at_offset(pos);
         let line_start = self.line_offsets[row_idx];
+        if ctx.wrapping() {
+            let (sub_row, col) = self.place_of_byte(buf, row_idx, pos - line_start, ctx.cols);
+            return Some(DisplayCoord::wrapped(row_idx as u32, sub_row, col));
+        }
+        // Everything below is the pre-wrap path, unchanged.
 
         // Slice [line_start, pos) and sum the display widths of any complete
         // codepoints inside. Bytes that look like UTF-8 continuation bytes
@@ -382,12 +449,22 @@ impl View for TextView {
         Some(DisplayCoord::new(row_idx as u32, col))
     }
 
-    fn display_to_pos(&self, buf: &Buffer, coord: DisplayCoord) -> Option<Position> {
+    fn display_to_pos(
+        &self,
+        buf: &Buffer,
+        coord: DisplayCoord,
+        ctx: LayoutCtx,
+    ) -> Option<Position> {
         let row = coord.row as usize;
         if row >= self.line_count() {
             return None;
         }
         let line_start = self.line_offsets[row];
+        if ctx.wrapping() {
+            let within = self.byte_at_place(buf, row, coord.sub_row, coord.col, ctx.cols);
+            return Some(line_start + within);
+        }
+        // Everything below is the pre-wrap path, unchanged.
         let line_bytes = self.read_line_bytes(buf, row);
         let s = std::str::from_utf8(&line_bytes).ok()?;
 
@@ -609,24 +686,54 @@ mod tests {
     #[test]
     fn ascii_pos_to_display_basic() {
         let (buf, view) = attached(b"hello\nworld");
-        assert_eq!(view.pos_to_display(&buf, 0), Some(DisplayCoord::new(0, 0)));
-        assert_eq!(view.pos_to_display(&buf, 5), Some(DisplayCoord::new(0, 5)));
-        assert_eq!(view.pos_to_display(&buf, 6), Some(DisplayCoord::new(1, 0)));
-        assert_eq!(view.pos_to_display(&buf, 11), Some(DisplayCoord::new(1, 5)));
-        assert_eq!(view.pos_to_display(&buf, 12), None);
+        assert_eq!(
+            view.pos_to_display(&buf, 0, LayoutCtx::truncated()),
+            Some(DisplayCoord::new(0, 0))
+        );
+        assert_eq!(
+            view.pos_to_display(&buf, 5, LayoutCtx::truncated()),
+            Some(DisplayCoord::new(0, 5))
+        );
+        assert_eq!(
+            view.pos_to_display(&buf, 6, LayoutCtx::truncated()),
+            Some(DisplayCoord::new(1, 0))
+        );
+        assert_eq!(
+            view.pos_to_display(&buf, 11, LayoutCtx::truncated()),
+            Some(DisplayCoord::new(1, 5))
+        );
+        assert_eq!(view.pos_to_display(&buf, 12, LayoutCtx::truncated()), None);
     }
 
     #[test]
     fn ascii_display_to_pos_basic() {
         let (buf, view) = attached(b"hello\nworld");
-        assert_eq!(view.display_to_pos(&buf, DisplayCoord::new(0, 0)), Some(0));
-        assert_eq!(view.display_to_pos(&buf, DisplayCoord::new(0, 5)), Some(5));
-        assert_eq!(view.display_to_pos(&buf, DisplayCoord::new(1, 0)), Some(6));
-        assert_eq!(view.display_to_pos(&buf, DisplayCoord::new(1, 5)), Some(11));
+        assert_eq!(
+            view.display_to_pos(&buf, DisplayCoord::new(0, 0), LayoutCtx::truncated()),
+            Some(0)
+        );
+        assert_eq!(
+            view.display_to_pos(&buf, DisplayCoord::new(0, 5), LayoutCtx::truncated()),
+            Some(5)
+        );
+        assert_eq!(
+            view.display_to_pos(&buf, DisplayCoord::new(1, 0), LayoutCtx::truncated()),
+            Some(6)
+        );
+        assert_eq!(
+            view.display_to_pos(&buf, DisplayCoord::new(1, 5), LayoutCtx::truncated()),
+            Some(11)
+        );
         // Past the visible end of a line: clamps.
-        assert_eq!(view.display_to_pos(&buf, DisplayCoord::new(0, 10)), Some(5));
+        assert_eq!(
+            view.display_to_pos(&buf, DisplayCoord::new(0, 10), LayoutCtx::truncated()),
+            Some(5)
+        );
         // Past the last line: None.
-        assert_eq!(view.display_to_pos(&buf, DisplayCoord::new(2, 0)), None);
+        assert_eq!(
+            view.display_to_pos(&buf, DisplayCoord::new(2, 0), LayoutCtx::truncated()),
+            None
+        );
     }
 
     #[test]
@@ -636,13 +743,25 @@ mod tests {
         let (buf, view) = attached("héllo".as_bytes());
         assert_eq!(buf.len(), 6);
         // Position 0 -> col 0
-        assert_eq!(view.pos_to_display(&buf, 0), Some(DisplayCoord::new(0, 0)));
+        assert_eq!(
+            view.pos_to_display(&buf, 0, LayoutCtx::truncated()),
+            Some(DisplayCoord::new(0, 0))
+        );
         // Position 1 (just after 'h') -> col 1
-        assert_eq!(view.pos_to_display(&buf, 1), Some(DisplayCoord::new(0, 1)));
+        assert_eq!(
+            view.pos_to_display(&buf, 1, LayoutCtx::truncated()),
+            Some(DisplayCoord::new(0, 1))
+        );
         // Position 3 (just after 'é') -> col 2
-        assert_eq!(view.pos_to_display(&buf, 3), Some(DisplayCoord::new(0, 2)));
+        assert_eq!(
+            view.pos_to_display(&buf, 3, LayoutCtx::truncated()),
+            Some(DisplayCoord::new(0, 2))
+        );
         // Position 6 (end) -> col 5
-        assert_eq!(view.pos_to_display(&buf, 6), Some(DisplayCoord::new(0, 5)));
+        assert_eq!(
+            view.pos_to_display(&buf, 6, LayoutCtx::truncated()),
+            Some(DisplayCoord::new(0, 5))
+        );
     }
 
     #[test]
@@ -650,20 +769,38 @@ mod tests {
         // "中文" each codepoint is 3 bytes UTF-8 and 2 columns wide.
         let (buf, view) = attached("中文".as_bytes());
         assert_eq!(buf.len(), 6);
-        assert_eq!(view.pos_to_display(&buf, 0), Some(DisplayCoord::new(0, 0)));
-        assert_eq!(view.pos_to_display(&buf, 3), Some(DisplayCoord::new(0, 2)));
-        assert_eq!(view.pos_to_display(&buf, 6), Some(DisplayCoord::new(0, 4)));
+        assert_eq!(
+            view.pos_to_display(&buf, 0, LayoutCtx::truncated()),
+            Some(DisplayCoord::new(0, 0))
+        );
+        assert_eq!(
+            view.pos_to_display(&buf, 3, LayoutCtx::truncated()),
+            Some(DisplayCoord::new(0, 2))
+        );
+        assert_eq!(
+            view.pos_to_display(&buf, 6, LayoutCtx::truncated()),
+            Some(DisplayCoord::new(0, 4))
+        );
     }
 
     #[test]
     fn display_to_pos_jumps_over_wide_chars() {
         let (buf, view) = attached("中a".as_bytes());
         // "中" is 2 cols wide, 3 bytes. "a" is 1 col, 1 byte. Total 4 bytes, 3 cols.
-        assert_eq!(view.display_to_pos(&buf, DisplayCoord::new(0, 0)), Some(0));
+        assert_eq!(
+            view.display_to_pos(&buf, DisplayCoord::new(0, 0), LayoutCtx::truncated()),
+            Some(0)
+        );
         // Asking for col 1 lands inside the wide char; we round to the next
         // codepoint boundary (col 2's start position).
-        assert_eq!(view.display_to_pos(&buf, DisplayCoord::new(0, 2)), Some(3));
-        assert_eq!(view.display_to_pos(&buf, DisplayCoord::new(0, 3)), Some(4));
+        assert_eq!(
+            view.display_to_pos(&buf, DisplayCoord::new(0, 2), LayoutCtx::truncated()),
+            Some(3)
+        );
+        assert_eq!(
+            view.display_to_pos(&buf, DisplayCoord::new(0, 3), LayoutCtx::truncated()),
+            Some(4)
+        );
     }
 
     proptest! {
@@ -674,8 +811,8 @@ mod tests {
             let buf = buf_with(content.as_bytes());
             let view = TextView::new(&buf);
             let pos = (offset as u64).min(buf.len());
-            if let Some(disp) = view.pos_to_display(&buf, pos) {
-                let back = view.display_to_pos(&buf, disp);
+            if let Some(disp) = view.pos_to_display(&buf, pos, LayoutCtx::truncated()) {
+                let back = view.display_to_pos(&buf, disp, LayoutCtx::truncated());
                 prop_assert_eq!(back, Some(pos));
             }
         }
@@ -687,30 +824,60 @@ mod tests {
     fn tab_at_start_advances_to_column_8() {
         let (buf, view) = attached(b"\tx");
         // Position 0 (before tab) -> col 0
-        assert_eq!(view.pos_to_display(&buf, 0), Some(DisplayCoord::new(0, 0)));
+        assert_eq!(
+            view.pos_to_display(&buf, 0, LayoutCtx::truncated()),
+            Some(DisplayCoord::new(0, 0))
+        );
         // Position 1 (after tab) -> col 8
-        assert_eq!(view.pos_to_display(&buf, 1), Some(DisplayCoord::new(0, 8)));
+        assert_eq!(
+            view.pos_to_display(&buf, 1, LayoutCtx::truncated()),
+            Some(DisplayCoord::new(0, 8))
+        );
         // Position 2 (after 'x') -> col 9
-        assert_eq!(view.pos_to_display(&buf, 2), Some(DisplayCoord::new(0, 9)));
+        assert_eq!(
+            view.pos_to_display(&buf, 2, LayoutCtx::truncated()),
+            Some(DisplayCoord::new(0, 9))
+        );
     }
 
     #[test]
     fn tab_in_middle_pads_to_next_stop() {
         // "ab\tcd": after 'b' col is 2, tab pads to col 8, 'c' at col 8.
         let (buf, view) = attached(b"ab\tcd");
-        assert_eq!(view.pos_to_display(&buf, 0), Some(DisplayCoord::new(0, 0)));
-        assert_eq!(view.pos_to_display(&buf, 2), Some(DisplayCoord::new(0, 2)));
-        assert_eq!(view.pos_to_display(&buf, 3), Some(DisplayCoord::new(0, 8)));
-        assert_eq!(view.pos_to_display(&buf, 4), Some(DisplayCoord::new(0, 9)));
-        assert_eq!(view.pos_to_display(&buf, 5), Some(DisplayCoord::new(0, 10)));
+        assert_eq!(
+            view.pos_to_display(&buf, 0, LayoutCtx::truncated()),
+            Some(DisplayCoord::new(0, 0))
+        );
+        assert_eq!(
+            view.pos_to_display(&buf, 2, LayoutCtx::truncated()),
+            Some(DisplayCoord::new(0, 2))
+        );
+        assert_eq!(
+            view.pos_to_display(&buf, 3, LayoutCtx::truncated()),
+            Some(DisplayCoord::new(0, 8))
+        );
+        assert_eq!(
+            view.pos_to_display(&buf, 4, LayoutCtx::truncated()),
+            Some(DisplayCoord::new(0, 9))
+        );
+        assert_eq!(
+            view.pos_to_display(&buf, 5, LayoutCtx::truncated()),
+            Some(DisplayCoord::new(0, 10))
+        );
     }
 
     #[test]
     fn tab_aligned_input_advances_full_width() {
         // 8 chars then tab: the protocol tab stop advances col 8 to col 16.
         let (buf, view) = attached(b"01234567\tx");
-        assert_eq!(view.pos_to_display(&buf, 8), Some(DisplayCoord::new(0, 8)));
-        assert_eq!(view.pos_to_display(&buf, 9), Some(DisplayCoord::new(0, 16)));
+        assert_eq!(
+            view.pos_to_display(&buf, 8, LayoutCtx::truncated()),
+            Some(DisplayCoord::new(0, 8))
+        );
+        assert_eq!(
+            view.pos_to_display(&buf, 9, LayoutCtx::truncated()),
+            Some(DisplayCoord::new(0, 16))
+        );
     }
 
     #[test]
@@ -718,10 +885,129 @@ mod tests {
         // "\tx": col 0..8 are the tab; col 5 (inside the tab) should
         // round to byte 1 (the start of 'x').
         let (buf, view) = attached(b"\tx");
-        assert_eq!(view.display_to_pos(&buf, DisplayCoord::new(0, 0)), Some(0));
-        assert_eq!(view.display_to_pos(&buf, DisplayCoord::new(0, 5)), Some(1));
-        assert_eq!(view.display_to_pos(&buf, DisplayCoord::new(0, 8)), Some(1));
-        assert_eq!(view.display_to_pos(&buf, DisplayCoord::new(0, 9)), Some(2));
+        assert_eq!(
+            view.display_to_pos(&buf, DisplayCoord::new(0, 0), LayoutCtx::truncated()),
+            Some(0)
+        );
+        assert_eq!(
+            view.display_to_pos(&buf, DisplayCoord::new(0, 5), LayoutCtx::truncated()),
+            Some(1)
+        );
+        assert_eq!(
+            view.display_to_pos(&buf, DisplayCoord::new(0, 8), LayoutCtx::truncated()),
+            Some(1)
+        );
+        assert_eq!(
+            view.display_to_pos(&buf, DisplayCoord::new(0, 9), LayoutCtx::truncated()),
+            Some(2)
+        );
+    }
+
+    /// Under `wrap`, `pos_to_display` reports the visual row **within**
+    /// the source line, and `row` stays the source line.
+    #[test]
+    fn wrapped_coords_keep_row_as_the_source_line() {
+        let (buf, view) = attached(b"abcdefghij\nzz");
+        let ctx = LayoutCtx {
+            cols: 4,
+            wrap: WrapMode::Wrap,
+        };
+        // 'e' is byte 4: line 0, second visual row, column 0.
+        assert_eq!(
+            view.pos_to_display(&buf, 4, ctx),
+            Some(DisplayCoord::wrapped(0, 1, 0))
+        );
+        // The second SOURCE line is still row 1, not a visual row index.
+        assert_eq!(
+            view.pos_to_display(&buf, 11, ctx),
+            Some(DisplayCoord::wrapped(1, 0, 0)),
+            "row is the source line; a redefinition would have made this 3"
+        );
+    }
+
+    /// The wrap point belongs to column 0 of the next visual row, never
+    /// one past the end of the previous one (framing §7).
+    #[test]
+    fn the_wrap_point_is_owned_by_the_next_row() {
+        let (buf, view) = attached(b"abcdefgh");
+        let ctx = LayoutCtx {
+            cols: 4,
+            wrap: WrapMode::Wrap,
+        };
+        assert_eq!(
+            view.pos_to_display(&buf, 4, ctx),
+            Some(DisplayCoord::wrapped(0, 1, 0)),
+            "byte 4 is the start of row 1, not (row 0, col 4)"
+        );
+        // The two DISTINCT adjacent codepoints across the break map
+        // distinctly: 'd' at (0,0,3) and 'e' at (0,1,0).
+        assert_eq!(
+            view.pos_to_display(&buf, 3, ctx),
+            Some(DisplayCoord::wrapped(0, 0, 3))
+        );
+    }
+
+    /// Round trip is identity on every cursor boundary of a wrapped
+    /// line, and projection inside a multi-byte codepoint — the
+    /// contract framing §7 settled.
+    #[test]
+    fn wrapped_round_trip_is_identity_on_boundaries() {
+        let text = "abc\tde中fghijklmno";
+        let (buf, view) = attached(text.as_bytes());
+        for cols in [3_u32, 4, 5, 9] {
+            let ctx = LayoutCtx {
+                cols,
+                wrap: WrapMode::Wrap,
+            };
+            for (byte, _) in text.char_indices() {
+                let coord = view
+                    .pos_to_display(&buf, byte as u64, ctx)
+                    .expect("in range");
+                let back = view.display_to_pos(&buf, coord, ctx).expect("in range");
+                assert_eq!(
+                    back, byte as u64,
+                    "cols={cols}: boundary {byte} did not round trip (via {coord:?})"
+                );
+            }
+        }
+    }
+
+    /// An interior byte projects to its codepoint's start, exactly as on
+    /// the unwrapped path — wrapping does not change that contract.
+    #[test]
+    fn wrapped_interior_bytes_project_to_the_codepoint_start() {
+        let text = "ab中cd";
+        let (buf, view) = attached(text.as_bytes());
+        let ctx = LayoutCtx {
+            cols: 4,
+            wrap: WrapMode::Wrap,
+        };
+        // '中' starts at byte 2 and is three bytes long.
+        let at_start = view.pos_to_display(&buf, 2, ctx);
+        for interior in [3_u64, 4] {
+            assert_eq!(
+                view.pos_to_display(&buf, interior, ctx),
+                at_start,
+                "byte {interior} is inside the codepoint starting at 2"
+            );
+        }
+        // ...and the projection is idempotent.
+        let coord = at_start.expect("in range");
+        let back = view.display_to_pos(&buf, coord, ctx).expect("in range");
+        assert_eq!(back, 2);
+        assert_eq!(view.pos_to_display(&buf, back, ctx), at_start);
+    }
+
+    /// The identity control: with `truncated()` the mapping is exactly
+    /// what it was before wrapping existed.
+    #[test]
+    fn truncate_coords_are_unchanged() {
+        let (buf, view) = attached(b"abcdefghij");
+        assert_eq!(
+            view.pos_to_display(&buf, 6, LayoutCtx::truncated()),
+            Some(DisplayCoord::new(0, 6)),
+            "no sub_row, and the column is the whole prefix width"
+        );
     }
 
     // -----------------------------------------------------------------
