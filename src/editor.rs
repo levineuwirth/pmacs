@@ -4363,15 +4363,18 @@ fn paint_window_content(
         cell_size: crate::cell::CellSize::new(inner_rows, rect.size.cols - gutter_w),
         gutter_w,
         folds,
-        // QoL Stage 3: the resolved mode belongs here, beside `folds`,
-        // for the same reason — the driver holds the registry and the
-        // buffer, the view holds neither. Pinned to the identity case
-        // until `ui.line-wrap` is registered; the wrap path is built
-        // and tested beneath this, but nothing can reach it yet, which
-        // is deliberate. Exposing a mode before the cursor mapping
-        // honors it would ship a setting that renders one thing and
-        // navigates another.
-        wrap: crate::view::WrapMode::Truncate,
+        // The resolved mode belongs here beside `folds`, for the same
+        // reason: the driver holds the registry and the buffer, the view
+        // holds neither.
+        //
+        // It reads `last_wrap` rather than resolving again. The render
+        // loop already resolved it for this window this frame, and the
+        // coordinate callers read that same field through
+        // `Window::layout_ctx` — so a second resolution here could
+        // disagree with the one the cursor is placed against, which is
+        // the failure this whole one-resolution arrangement exists to
+        // prevent.
+        wrap: window.last_wrap,
     };
     // Composition (T M2.9): base text_view paints first, then the
     // gutter numbers — before the overlays, so a diagnostic overlay

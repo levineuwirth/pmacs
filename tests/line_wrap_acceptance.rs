@@ -57,6 +57,53 @@ fn mode_global(s: &EditorState) -> String {
     eval(s, "return pmacs.config.get('ui.line-wrap')")
 }
 
+/// Put `text` in the window's current buffer by typing it, which is the
+/// only path Lua exposes and also the one a user takes.
+fn fill_active(s: &EditorState, text: &str) {
+    for ch in text.chars() {
+        exec(
+            s,
+            &format!("pmacs.editor.insert_char_over_region({})", ch as u32),
+        );
+    }
+}
+
+/// Render one frame and return the text of the first `rows` grid rows,
+/// reconstructed from the emitted `CellDelta` spans.
+///
+/// Two reasons for going through `RenderState` and the wire rather than
+/// calling `TextView::render` with a hand-built viewport. The defect
+/// this guards against lived in the *driver*, between the resolved mode
+/// and the viewport it built — a test that constructed its own viewport
+/// would have passed against it. And the spans are what the TUI
+/// actually consumes, so this asserts on the bytes that reach a screen.
+fn render_rows(s: &EditorState, rows: u32, cols: u32) -> Vec<String> {
+    use std::collections::HashMap;
+
+    let size = pmacs::cell::CellSize::new(rows, cols);
+    let mut rs = pmacs::instance_render::RenderState::new(size);
+    let msgs = rs.render_frame(s, pmacs::protocol::FrontendId::LOCAL, &HashMap::new(), &[]);
+
+    let mut grid = vec![vec![' '; cols as usize]; rows as usize];
+    for msg in &msgs {
+        if let pmacs_protocol::InstanceMessage::CellDelta { spans, .. } = msg {
+            for span in spans {
+                for (i, cell) in span.cells.iter().enumerate() {
+                    let r = span.start.row as usize;
+                    let c = span.start.col as usize + i;
+                    if r < rows as usize
+                        && c < cols as usize
+                        && let pmacs::cell::Glyph::Char(ch) = cell.glyph
+                    {
+                        grid[r][c] = ch;
+                    }
+                }
+            }
+        }
+    }
+    grid.into_iter().map(|r| r.into_iter().collect()).collect()
+}
+
 #[test]
 fn the_default_is_wrap() {
     let s = session("default");
@@ -136,4 +183,41 @@ fn a_pinned_buffer_toggles_from_its_own_value() {
         "wrap",
         "the toggle read this buffer's value, not the global one"
     );
+}
+
+/// The default must reach the **rendered cells**, not merely the
+/// resolved value.
+///
+/// This is the gap review found: the frame resolved `ui.line-wrap`,
+/// recorded it on the window, and fed it to the coordinate mapping and
+/// the scroll indicator — while the viewport handed the renderer a
+/// hard-coded `Truncate`. Every "is the mode right?" assertion passed
+/// and the text was still clipped. So this test reads the grid.
+#[test]
+fn the_default_actually_wraps_the_painted_text() {
+    let s = session("rendered_default");
+    // Wider than the viewport below, and distinctive.
+    fill_active(&s, "ABCDEFGHIJKLMNOP");
+    let rows = render_rows(&s, 4, 4);
+    assert_eq!(rows[0], "ABCD");
+    assert_eq!(
+        rows[1], "EFGH",
+        "the default is `wrap`, so the remainder continues on the next row \
+         — a hard-coded Truncate in the viewport leaves this blank"
+    );
+}
+
+/// And `truncate` still clips, so the witness above is discriminating
+/// rather than merely true.
+#[test]
+fn truncate_clips_the_painted_text() {
+    let s = session("rendered_truncate");
+    fill_active(&s, "ABCDEFGHIJKLMNOP");
+    exec(
+        &s,
+        "pmacs.config.set_local(pmacs.window.buffer(), 'ui.line-wrap', 'truncate')",
+    );
+    let rows = render_rows(&s, 4, 4);
+    assert_eq!(rows[0], "ABCD");
+    assert_eq!(rows[1], "    ", "truncate keeps one row per source line");
 }
