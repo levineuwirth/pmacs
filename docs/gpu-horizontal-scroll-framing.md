@@ -1,14 +1,22 @@
 # GPU horizontal scroll — QoL Stage 5
 
-**Status: revision 2 — NOT APPROVED. Q#G3 is now ANSWERED from the
-existing font contract; Q#G1/G2/G4 stand with votes; Q#G5 is expanded.
-No implementation may begin.**
+**Status: revision 3 — NOT APPROVED. Q#G3 ANSWERED from the existing
+font contract; Q#G1/G2/G4 stand with votes; Q#G5 expanded. No
+implementation may begin.**
 
-Revision 2 answers two review findings that were functional, not
-editorial: §1.1's "three consumers" was incomplete because the manual
-quad/squiggle renderers have **no code-area scissor at all**, and
-Q#G2's "inert under wrap" was too weak — the offset must be **reset to
-zero** on the wrap transition, as the TUI already does.
+Revision 3 fixes four things review found in revision 2: Q#G1 still
+carried two claims Q#G3 had already falsified; Q#G2 was missing the
+**buffer-snapshot** reset; Q#G5's "nothing paints into the gutter" is
+**impossible** as written, because the gutter legitimately holds line
+numbers and diagnostic signs; and an off-left completion anchor
+**hides** the popup rather than closing it, which is a protocol
+distinction this lane must not blur.
+
+Revision 2 had answered two functional findings: §1.1's "three
+consumers" was incomplete because the manual quad/squiggle renderers
+have **no code-area scissor at all**, and Q#G2's "inert under wrap" was
+too weak — the offset must be **reset to zero**, as the TUI already
+does.
 
 **This closes the QoL arc.** Stage 1 (#219) made the TUI survive
 terminal zoom; Stage 2 (#220) gave the GUI native zoom; Stage 3 (#221)
@@ -90,7 +98,7 @@ The paths that need both:
 | caret-painted predicate | `:9734` | same missing left-edge test. **So revision 1's claim that the scroll indicator "inherits the fix" is FALSE** — `code_byte_painted` reuses this and would call an off-left byte painted |
 | glyph extent rects | `:9766` | washes, squiggles and selection extents must be **cropped** at the gutter edge, not merely offset |
 | inline math origins | `:9434` | math boxes derive from the code origin and would render into the gutter |
-| completion anchor | `:7606` | anchors off-left must close the popup, exactly as anchors below the band already do |
+| completion anchor | `:7606` | an off-left anchor must **hide** the popup — it already returns `None` when scrolled out, and closure is the daemon's `CompletionPopup { anchor: None }`, not this lane's |
 
 The two caret sites are the sharpest: `:9698` does not merely lack a
 check, it **documents the absence as safe** (*"right of the gutter isn't
@@ -116,22 +124,31 @@ v22, but the *offset* is viewport state and needs nothing.
 ### Q#G1 — is the stored offset a column or a pixel count?
 
 The TUI stores a display **column** (`view_left`). The GPU paints in
-**pixels** and its font need not be monospace.
+**pixels**.
 
-There is already a measured per-cell advance (the `ADVANCE_PROBE`
-helper at `:336`), so columns convert to pixels.
+**Revision 2 left two claims here that its own Q#G3 answer had already
+falsified**: that the GPU's font "need not be monospace", and that Q#G3
+makes "column" ill-defined. Neither is true — the code font is
+monospace by contract, so a column has one well-defined width, measured
+by the existing `ADVANCE_PROBE` helper.
 
-*My vote: store **pixels**, and convert only where a column is the
-honest unit (parity assertions against the TUI).* The GPU's other
-viewport state is already pixel-flavoured (`code_scroll_residual` is a
-float), a pixel offset composes with the clip without rounding, and
-Q#G3 makes "column" ill-defined anyway.
+*My vote is unchanged — store **pixels** — but the reasons narrow to
+the ones that survive:* the GPU's other viewport state is already
+pixel-flavoured (`code_scroll_residual` is a float), and a pixel offset
+composes with the clip rectangle without rounding at every frame.
+
+**Conversion is therefore exact, not approximate.** `columns × the
+supported monospace advance` is the definition, and it is what makes
+the unconditional TUI-parity witness in Q#G5 checkable at all. A
+proportional font would have made this a lossy conversion; the font
+contract means it never is.
 
 ### Q#G2 — how is the offset moved?
 
 Stage 4 chose **automatic only**: the cursor-visibility pass gains a
-horizontal component. The GPU has the analogous pass
-(`ensure_caret_painted` / `follow_cursor`).
+horizontal component. The GPU's analogous pass is
+**`ensure_caret_painted`** — named rather than cited by line, since
+revision 2 also invented a `follow_cursor` that does not exist.
 
 *My vote: mirror it exactly*, so the two frontends agree on when the
 view moves. A GUI is also the place a horizontal **wheel/trackpad**
@@ -147,9 +164,20 @@ rely on inertness — `horizontal_follow` (`src/editor.rs`) assigns
 `view_left = 0` on the wrap branch and returns.
 
 The GPU must specify the **identical lifecycle**, and `apply_line_wrap`
-is where it belongs, beside the reflow it already performs. This is a
-lifecycle requirement with its own witness (Q#G5), not a property that
-falls out of the transform.
+is where it belongs, beside the reflow it already performs.
+
+**And a second reset the TUI has no analogue for: the buffer
+snapshot.** The GPU zeroes `scroll_top` and `code_scroll_residual`
+whenever a snapshot installs a new buffer — the offset is viewport
+state tied to the document being shown, and it must reset there for the
+same reason they do. Without it a buffer switch **inherits the previous
+document's leftward viewport**, showing the new buffer scrolled
+sideways until a cursor motion repairs it.
+
+That is a worse symptom than the wrap case, because nothing about the
+new buffer explains it. Both resets are lifecycle requirements with
+their own witnesses (Q#G5), not properties that fall out of the
+transform.
 
 ### Q#G3 — proportional fonts **ANSWERED: they do not occur**
 
@@ -197,21 +225,33 @@ skip.
 
 Sketch, pending Q#G1/G2/G4:
 
-- **Nothing paints into the gutter.** The strongest available
-  formulation of §1.1's clip obligation, and it covers paths a
-  per-consumer test would miss: at a non-zero offset, **no** quad,
-  squiggle, glyph or math box may occupy a pixel left of
-  `gutter_clip_left`. A whole-frame assertion rather than five
-  per-painter ones, because the failure mode is a painter nobody
-  remembered.
+- **The gutter is unchanged by scrolling.** Revision 2 proposed
+  asserting that *nothing* paints left of `gutter_clip_left`, which is
+  **impossible**: with line numbers on, the gutter deliberately holds
+  digit glyphs and diagnostic-sign quads. The assertion would fail on a
+  correct implementation.
+
+  The checkable form of the same intent: **the gutter rectangle is
+  byte-identical before and after a horizontal scroll**, and separately,
+  only *code-relative* output geometry is inspected for the left-edge
+  rule. That still catches the failure a per-painter test would miss —
+  a code painter bleeding into the gutter changes those pixels — while
+  remaining true of a working build.
 - **A left-clipped caret predicate.** `code_caret_rect_in_clip` and
   `caret_painted_in_code_clip` must both report *not painted* for a
   caret scrolled off-left. This is what makes the scroll indicator
   correct; revision 1 wrongly assumed it came for free.
 - **Math and rule clipping**: an inline math box and a decoration rule
   whose origins are left of the edge are cropped or culled, not drawn.
-- **An off-left completion anchor** closes the popup, exactly as an
-  anchor below the band already does.
+- **An off-left completion anchor HIDES the popup; it does not close
+  it.** The distinction is a protocol one and revision 2 got it wrong.
+  `completion_anchor_px` returns `None`, so nothing draws — but the
+  daemon-owned completion state and its key handling are retained.
+  Actual closure is `CompletionPopup { anchor: None }`, which is the
+  daemon's to send. So the witness is: **no completion paint while the
+  anchor is off-left, and the popup reappears when it scrolls back into
+  view** — session semantics unchanged. A lane about viewport geometry
+  must not quietly redefine when a completion ends.
 - **The three consumers agree with the shifted origin** — caret,
   decoration rect, and hit test at one non-zero offset, since a partial
   fix shows up as disagreement between them.
