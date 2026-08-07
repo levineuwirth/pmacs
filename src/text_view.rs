@@ -316,6 +316,7 @@ mod tests {
     use crate::buffer::{BufferId, EditOp};
     use crate::cell::CellSize;
     use crate::rope::Range;
+    use crate::view::WrapMode;
     use proptest::prelude::*;
 
     fn buf_with(content: &[u8]) -> Buffer {
@@ -570,6 +571,7 @@ mod tests {
                 cell_size: CellSize::new(1, 16),
                 gutter_w: 0,
                 folds: None,
+                wrap: WrapMode::Truncate,
             },
             &mut grid,
         );
@@ -599,6 +601,7 @@ mod tests {
                 cell_size: CellSize::new(1, 16),
                 gutter_w: 0,
                 folds: None,
+                wrap: WrapMode::Truncate,
             },
             &mut grid,
         );
@@ -631,6 +634,7 @@ mod tests {
                 cell_size: CellSize::new(5, 5),
                 gutter_w: 0,
                 folds: None,
+                wrap: WrapMode::Truncate,
             },
             &mut grid,
         );
@@ -664,6 +668,7 @@ mod tests {
                 cell_size: CellSize::new(1, 5),
                 gutter_w: 0,
                 folds: None,
+                wrap: WrapMode::Truncate,
             },
             &mut grid,
         );

@@ -6,7 +6,7 @@ use pmacs::buffer::{Buffer, BufferId};
 use pmacs::cell::{Cell, CellCoord, CellGrid, CellSize, Glyph, Style};
 use pmacs::overlay::{BufferStyleOverlay, BufferStyleSpan, SharedBufferStyleSpans};
 use pmacs::text_view::TextView;
-use pmacs::view::{DisplayCoord, View, Viewport};
+use pmacs::view::{DisplayCoord, View, Viewport, WrapMode};
 
 fn viewport(rows: u32, cols: u32, buffer_end: u64) -> Viewport<'static> {
     Viewport {
@@ -16,6 +16,7 @@ fn viewport(rows: u32, cols: u32, buffer_end: u64) -> Viewport<'static> {
         cell_size: CellSize::new(rows, cols),
         gutter_w: 0,
         folds: None,
+        wrap: WrapMode::Truncate,
     }
 }
 

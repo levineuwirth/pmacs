@@ -122,6 +122,39 @@ impl DisplayCoord {
     }
 }
 
+/// How a line wider than the viewport is shown --- the long-lines
+/// stage, `docs/long-lines-framing.md`.
+///
+/// # Why the renderer is told, rather than asking
+///
+/// This is the *resolved* mode, not the setting's name. `ui.line-wrap`
+/// is **buffer-local** (framing Q#LL2), and the config registry has no
+/// ambient current buffer by design (`config_registry.rs`, Q#CR4) — a
+/// caller wanting buffer-aware behavior must pass the `BufferId`. The
+/// render driver holds both the registry and the buffer, resolves once
+/// per window per frame, and puts the answer here. Views stay
+/// config-agnostic, exactly as they do for folds.
+///
+/// # `Truncate` is the identity case, deliberately
+///
+/// Every behavior predating this type is `Truncate`, and it must stay
+/// byte-identical under it — which is what lets the wrap work be
+/// verified against the existing suite rather than against new
+/// assertions.
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Default, Hash)]
+pub enum WrapMode {
+    /// One source line per row; the remainder is clipped at the right
+    /// edge. What every pre-Stage-3 caller did.
+    #[default]
+    Truncate,
+    /// A line longer than the viewport continues on the following rows.
+    ///
+    /// Character wrap, not word wrap (framing Q#LL5): it matches
+    /// Emacs's default, and it is the only break rule both frontends
+    /// can implement identically without pulling UAX #14 into the grid.
+    Wrap,
+}
+
 /// What to render and where.
 ///
 /// The frontend computes the viewport (which buffer range maps to which
@@ -152,6 +185,14 @@ pub struct Viewport<'a> {
     /// split may show different buffers) and hands the same shared
     /// reference to every painter of that window.
     pub folds: Option<&'a VisibleLineMap>,
+    /// How lines wider than `cell_size.cols` are shown, already
+    /// resolved for this window's buffer (see [`WrapMode`]).
+    ///
+    /// A required field rather than a defaulted one on purpose: every
+    /// construction site has to state which behavior it means, so the
+    /// pre-Stage-3 sites read as *deliberately* unwrapped rather than
+    /// merely untouched.
+    pub wrap: WrapMode,
 }
 
 impl Viewport<'_> {
@@ -360,6 +401,7 @@ mod tests {
             cell_size: CellSize::new(10, 10),
             gutter_w: 0,
             folds: None,
+            wrap: WrapMode::Truncate,
         };
         assert_eq!(vp.row_offset_of(4, 4), Some(0));
         assert_eq!(vp.row_offset_of(4, 9), Some(5));
@@ -380,6 +422,7 @@ mod tests {
             cell_size: CellSize::new(10, 10),
             gutter_w: 0,
             folds: Some(&map),
+            wrap: WrapMode::Truncate,
         };
         assert_eq!(vp.row_offset_of(0, 1), Some(1), "the head keeps its row");
         assert_eq!(vp.row_offset_of(0, 3), None, "hidden lines have no row");

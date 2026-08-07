@@ -4313,6 +4313,15 @@ fn paint_window_content(
         cell_size: crate::cell::CellSize::new(inner_rows, rect.size.cols - gutter_w),
         gutter_w,
         folds,
+        // QoL Stage 3: the resolved mode belongs here, beside `folds`,
+        // for the same reason — the driver holds the registry and the
+        // buffer, the view holds neither. Pinned to the identity case
+        // until `ui.line-wrap` is registered; the wrap path is built
+        // and tested beneath this, but nothing can reach it yet, which
+        // is deliberate. Exposing a mode before the cursor mapping
+        // honors it would ship a setting that renders one thing and
+        // navigates another.
+        wrap: crate::view::WrapMode::Truncate,
     };
     // Composition (T M2.9): base text_view paints first, then the
     // gutter numbers — before the overlays, so a diagnostic overlay
@@ -5618,6 +5627,7 @@ fn printable_char(seq: &[Chord]) -> Option<char> {
 
 #[cfg(test)]
 mod tests {
+    use crate::view::WrapMode;
     // Acceptance home for T M5.4 (FrontendId on input events) — the
     // `m5_4_*`-prefixed tests verify the FrontendId field threads from
     // synthetic event construction through `dispatch_key` /
@@ -8415,6 +8425,7 @@ mod tests {
             cell_size: CellSize::new(rect.size.rows, rect.size.cols),
             gutter_w: 0,
             folds: None,
+            wrap: WrapMode::Truncate,
         };
         let mut grid = CellGrid {
             cells: &mut backing,
@@ -8550,6 +8561,7 @@ mod tests {
                 cell_size: CellSize::new(24, 80),
                 gutter_w: 0,
                 folds: None,
+                wrap: WrapMode::Truncate,
             };
 
             // Two no-op overlays: probe the dispatch cost only.

@@ -468,7 +468,7 @@ fn render_active_window_to_grid(
     cols: u32,
 ) -> Vec<pmacs::cell::Cell> {
     use pmacs::cell::{Cell, CellGrid};
-    use pmacs::view::{View, Viewport};
+    use pmacs::view::{View, Viewport, WrapMode};
     use pmacs::window::Rect;
 
     let mut core = state.core.borrow_mut();
@@ -486,6 +486,7 @@ fn render_active_window_to_grid(
         cell_size: CellSize::new(rows, cols),
         gutter_w: 0,
         folds: None,
+        wrap: WrapMode::Truncate,
     };
     let mut grid = CellGrid {
         cells: &mut backing,

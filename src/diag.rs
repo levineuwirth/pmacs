@@ -757,6 +757,7 @@ fn underline_cols_for_line(line_bytes: &[u8], byte_start: u32, byte_end: u32) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::view::WrapMode;
     use serde_json::json;
 
     fn diag(line: u32, sev: DiagnosticSeverity, msg: &str) -> Diagnostic {
@@ -1139,6 +1140,7 @@ mod tests {
                 cell_size: CellSize::new(1, 10),
                 gutter_w: 0,
                 folds: None,
+                wrap: WrapMode::Truncate,
             },
             &mut grid,
         );
@@ -1204,6 +1206,7 @@ mod tests {
                 cell_size: CellSize::new(3, 10),
                 gutter_w: 0,
                 folds: None,
+                wrap: WrapMode::Truncate,
             },
             &mut grid,
         );
@@ -1280,6 +1283,7 @@ mod tests {
                 cell_size: CellSize::new(3, 8),
                 gutter_w: 2,
                 folds: None,
+                wrap: WrapMode::Truncate,
             },
             &mut grid,
         );
@@ -1349,6 +1353,7 @@ mod tests {
                 cell_size: CellSize::new(2, 10),
                 gutter_w: 0,
                 folds: None,
+                wrap: WrapMode::Truncate,
             },
             &mut grid,
         );
