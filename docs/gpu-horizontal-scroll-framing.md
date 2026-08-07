@@ -1,8 +1,21 @@
 # GPU horizontal scroll — QoL Stage 5
 
-**Status: revision 4 — NOT APPROVED. Q#G3 ANSWERED from the existing
-font contract; Q#G1/G2/G4 stand with votes; Q#G5 expanded. No
-implementation may begin.**
+**Status: revision 4 — APPROVED 2026-08-07. All five questions
+resolved. Implementation may begin within this scope.**
+
+- **Q#G1** — the GPU-local offset is stored in **pixels**; parity
+  conversion is exact via the supported monospace advance.
+- **Q#G2** — **automatic cursor-follow only**; reset on **both** the
+  wrap transition and `BufferSnapshot`, with the specified pre-motion
+  witnesses.
+- **Q#G3** — monospace-only, by the font contract that already exists.
+- **Q#G4** — the minimap does not move.
+- **Q#G5** — the complete verification set is accepted, including the
+  snapshot-reset and minimap-stability witnesses.
+
+**Scope boundary, restated because it is what makes this lane small:**
+local GPU viewport state only. **No wire message, no protocol bump, no
+command surface, no minimap movement.**
 
 Revision 3 fixes four things review found in revision 2: Q#G1 still
 carried two claims Q#G3 had already falsified; Q#G2 was missing the

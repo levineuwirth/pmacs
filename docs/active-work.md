@@ -465,13 +465,14 @@ whatever SHA it records. Recover:
 — the ref, not a SHA. Recover:
 `git fetch githubsucks && git checkout gpu-horizontal-scroll`.
 
-**Status: `docs/gpu-horizontal-scroll-framing.md` revision 4 — NOT
-APPROVED. Q#G3 is ANSWERED (monospace-only, by the font contract that
-already exists — `family_is_monospace_everywhere` gates it and an
-acceptance test requires the fallback, so revision 1's proposed
-proportional-font divergence described a case that cannot arise).
-Q#G1/G2/G4 stand with votes; Q#G5 is expanded. No implementation may
-begin.**
+**Status: `docs/gpu-horizontal-scroll-framing.md` revision 4 —
+APPROVED 2026-08-07. Implementing.** G1 pixels (exact conversion via the
+supported monospace advance); G2 automatic cursor-follow only, zeroing
+on **both** wrap transition and `BufferSnapshot`; G3 monospace-only by
+the existing font contract; G4 minimap unchanged; G5 accepted whole.
+
+**Scope: local GPU viewport state.** No wire message, no protocol bump,
+no command surface, no minimap movement.
 
 **Its first finding corrects Stage 4's framing.** §1.3 there said the
 GPU "needs a mechanism that does not exist", and I endorsed the
