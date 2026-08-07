@@ -163,6 +163,7 @@ fn paint_active_window(s: &EditorState, rows: u32, cols: u32) -> Vec<pmacs::cell
         gutter_w: 0,
         folds: None,
         wrap: WrapMode::Truncate,
+        view_left: 0,
     };
     let mut grid = CellGrid {
         cells: &mut backing,

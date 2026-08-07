@@ -171,6 +171,19 @@ pub struct LayoutCtx {
     pub cols: u32,
     /// The window's resolved wrap mode.
     pub wrap: WrapMode,
+    /// First visible display column — the window's horizontal scroll
+    /// offset (Stage 4, framing Q#HS7).
+    ///
+    /// **Stored unsnapped.** It is one per-window column, while "does
+    /// this column bisect a wide glyph?" is a *per-line* question, so no
+    /// single snapped value could be canonical for every visible line.
+    /// Each line derives its own **effective edge** during the walk it
+    /// already performs from column 0 (framing Q#HS7(c′)).
+    ///
+    /// Inert under [`WrapMode::Wrap`]: a wrapped line has nothing past
+    /// the right edge to scroll toward, so the wrap path ignores this
+    /// entirely and stays byte-identical to Stage 3.
+    pub view_left: u32,
 }
 
 impl LayoutCtx {
@@ -184,6 +197,7 @@ impl LayoutCtx {
         Self {
             cols: 0,
             wrap: WrapMode::Truncate,
+            view_left: 0,
         }
     }
 
@@ -191,6 +205,18 @@ impl LayoutCtx {
     #[must_use]
     pub const fn wrapping(self) -> bool {
         matches!(self.wrap, WrapMode::Wrap) && self.cols > 0
+    }
+
+    /// The horizontal offset that actually applies.
+    ///
+    /// Always `0` when wrapping, which is what makes `view_left` inert
+    /// under `wrap` **by construction** rather than by every caller
+    /// remembering to check. A wrapped line has no content past the
+    /// right edge, so a non-zero offset there could only hide text that
+    /// nothing would ever scroll back to.
+    #[must_use]
+    pub const fn effective_left(self) -> u32 {
+        if self.wrapping() { 0 } else { self.view_left }
     }
 }
 
@@ -265,9 +291,68 @@ pub struct Viewport<'a> {
     /// pre-Stage-3 sites read as *deliberately* unwrapped rather than
     /// merely untouched.
     pub wrap: WrapMode,
+    /// First visible display column (Stage 4). See
+    /// [`LayoutCtx::view_left`]; required rather than defaulted for the
+    /// same reason `wrap` is.
+    pub view_left: u32,
 }
 
 impl Viewport<'_> {
+    /// The horizontal offset that actually applies — `0` when wrapping,
+    /// for the reason [`LayoutCtx::effective_left`] gives.
+    #[must_use]
+    pub const fn left_edge(&self) -> u32 {
+        if matches!(self.wrap, WrapMode::Wrap) {
+            0
+        } else {
+            self.view_left
+        }
+    }
+
+    /// Clip a **line**-column range to what is on screen, returning
+    /// **screen** columns — or `None` when none of it is visible.
+    ///
+    /// # Why every buffer-coordinate decorator must use this
+    ///
+    /// Stage 4 translated the base text walk and nothing else, which
+    /// split the frame in half: at `view_left = 10` a glyph at source
+    /// column 10 painted at screen column 0 while its syntax style,
+    /// diagnostic underline, search wash and selection painted at screen
+    /// column 10 — or vanished. Decorations drifted off the characters
+    /// they describe, silently, and only once a window was scrolled.
+    ///
+    /// Every such site had the same two lines (`start_col.min(max_cols)`,
+    /// `end_col.min(max_cols)`) — correct only while the left edge was
+    /// pinned at zero. One helper replaces all of them so a future
+    /// decorator inherits the translation instead of re-deriving it.
+    ///
+    /// **Five adopters**, and the count is the point: syntax/LSP
+    /// styling, diagnostic underlines, search washes,
+    /// [`crate::overlay::BufferStyleOverlay`], and the selection
+    /// painter. The selection was nearly the exception — Stage 4's first
+    /// version duplicated the rule there, justified by a width this
+    /// painter supposedly needed and the viewport lacked. That was
+    /// false: the render viewport's `cell_size.cols` is already
+    /// `rect.size.cols - gutter_w`, and its origin already sits past the
+    /// gutter. A canonical rule with one honest exception is not
+    /// canonical, so the exception went.
+    ///
+    /// **Not for [`crate::overlay::StyleSpanOverlay`] or
+    /// [`crate::overlay::VirtualCellOverlay`]**: those are documented as
+    /// viewport-relative, so their columns are already screen columns
+    /// and translating them twice would be the mirror defect.
+    #[must_use]
+    pub fn visible_cols(&self, start_col: u32, end_col: u32) -> Option<(u32, u32)> {
+        let left = self.left_edge();
+        let right = left.saturating_add(self.cell_size.cols);
+        let start = start_col.max(left);
+        let end = end_col.min(right);
+        // A range that begins off-screen left and reaches past the edge
+        // is CLIPPED, not skipped — that is the selection defect this
+        // returns `Some` for.
+        (end > start).then(|| (start - left, end - left))
+    }
+
     /// Row offset within this viewport for source `line`, given the
     /// viewport's first (visible) source line.
     ///
@@ -484,6 +569,7 @@ mod tests {
             gutter_w: 0,
             folds: None,
             wrap: WrapMode::Truncate,
+            view_left: 0,
         };
         assert_eq!(vp.row_offset_of(4, 4), Some(0));
         assert_eq!(vp.row_offset_of(4, 9), Some(5));
@@ -505,6 +591,7 @@ mod tests {
             gutter_w: 0,
             folds: Some(&map),
             wrap: WrapMode::Truncate,
+            view_left: 0,
         };
         assert_eq!(vp.row_offset_of(0, 1), Some(1), "the head keeps its row");
         assert_eq!(vp.row_offset_of(0, 3), None, "hidden lines have no row");

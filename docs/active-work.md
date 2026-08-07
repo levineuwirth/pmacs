@@ -457,9 +457,8 @@ tip — the ref, not a SHA, since any edit to this block advances past
 whatever SHA it records. Recover:
 `git fetch githubsucks && git checkout horizontal-scroll`.
 
-**Status: `docs/horizontal-scroll-framing.md` revision 4 — every
-question answered, APPROVAL NOT YET RECORDED. No implementation may
-begin until it is.**
+**Status: `docs/horizontal-scroll-framing.md` revision 4 — APPROVED
+2026-08-07. Implementing.**
 
 **Answered by the user 2026-08-07:**
 

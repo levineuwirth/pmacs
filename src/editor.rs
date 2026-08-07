@@ -4263,6 +4263,36 @@ impl CompletionPopupKey {
     }
 }
 
+/// Move `view_left` so the cursor's column is on screen (Stage 4,
+/// framing Q#HS2 — automatic only).
+///
+/// The horizontal mirror of the `view_top` rule below, and deliberately
+/// the same shape: scroll only as far as it takes to bring the cursor
+/// back inside, so a cursor already visible never moves the view. That
+/// is what makes this the whole of Stage 4's navigation — there are no
+/// explicit scroll commands, so every viewport move originates here,
+/// and Q#HS4's snap-back hazard cannot arise.
+///
+/// A no-op under `wrap`: there is nothing past the right edge to reach,
+/// so the offset is pinned to 0 rather than merely ignored. Leaving a
+/// stale non-zero value would surface the moment the buffer toggled
+/// back to `truncate`.
+fn horizontal_follow(window: &mut crate::window::Window, cursor_col: u32) {
+    if window.last_wrap == crate::view::WrapMode::Wrap {
+        window.view_left = 0;
+        return;
+    }
+    let cols = window.last_content_cols;
+    if cols == 0 {
+        return; // not rendered yet; nothing to be visible within
+    }
+    if cursor_col < window.view_left {
+        window.view_left = cursor_col;
+    } else if cursor_col >= window.view_left.saturating_add(cols) {
+        window.view_left = cursor_col + 1 - cols;
+    }
+}
+
 /// Scroll one window so its cursor stays visible, reckoning in
 /// **visible** lines when a fold map is supplied (Arc 6 Q#FD18).
 ///
@@ -4283,10 +4313,22 @@ fn prepare_window_cursor_visible(
     inner_rows: u32,
     folds: Option<&crate::fold_view::VisibleLineMap>,
 ) {
-    let cursor_row = window
+    // Ask in LINE-absolute columns by pinning `view_left` to 0 — this
+    // pass decides what the offset should BE, so consulting the current
+    // one would make it self-referential. `pos_to_display` returns
+    // `None` for a position left of the edge (framing Q#HS7(c′)), which
+    // is exactly the case this pass exists to fix; reading it through
+    // the live context would report row 0 and scroll the window to the
+    // top instead.
+    let unscrolled = crate::view::LayoutCtx {
+        view_left: 0,
+        ..window.layout_ctx()
+    };
+    let coord = window
         .text_view
-        .pos_to_display(buf, window.cursor, window.layout_ctx())
-        .map_or(0, |d| d.row as usize);
+        .pos_to_display(buf, window.cursor, unscrolled);
+    let cursor_row = coord.map_or(0, |d| d.row as usize);
+    horizontal_follow(window, coord.map_or(0, |d| d.col));
     match folds {
         // The logical cursor may sit on a hidden line (a shared fold, or
         // goto-line into one); the row that actually renders — and so
@@ -4375,6 +4417,14 @@ fn paint_window_content(
         // the failure this whole one-resolution arrangement exists to
         // prevent.
         wrap: window.last_wrap,
+        // Same discipline as `wrap` directly above, and for the same
+        // reason it was needed: `aa3cd4d` shipped a hard-coded
+        // `Truncate` here while every other consumer read the resolved
+        // value, so the cursor was placed for wrapped text over text
+        // that was still clipped. A literal `0` here would reproduce it
+        // exactly — coordinates and the indicator would follow the
+        // scroll while the painter stayed pinned at column 0.
+        view_left: window.view_left,
     };
     // Composition (T M2.9): base text_view paints first, then the
     // gutter numbers — before the overlays, so a diagnostic overlay
@@ -4396,7 +4446,7 @@ fn paint_window_content(
     for overlay in &mut window.overlays {
         overlay.render(buf, viewport, grid);
     }
-    paint_local_selection(grid, buf, window, &rect, inner_rows, gutter_w, folds, theme);
+    paint_local_selection(grid, buf, window, viewport, inner_rows, folds, theme);
     // Mode line for this window. Painted last so the line
     // itself is always visible regardless of overlay activity.
     let coord = window
@@ -5009,12 +5059,16 @@ fn paint_local_selection(
     grid: &mut crate::cell::CellGrid<'_>,
     buf: &crate::buffer::Buffer,
     window: &crate::window::Window,
-    rect: &crate::window::Rect,
+    // The SAME viewport the text and every decorator were painted
+    // through. It already carries the gutter-adjusted width
+    // (`rect.size.cols - gutter_w`) and an origin shifted past the
+    // gutter, so the selection shares one clip rule with them rather
+    // than re-deriving it — the first version of Stage 4 duplicated the
+    // rule here on the false premise that this painter needed a
+    // different width (Q#UX2 handled it via `gutter_w`, which the
+    // viewport has already applied).
+    viewport: crate::view::Viewport<'_>,
     inner_rows: u32,
-    // UX gutter: the reserved left-strip width; selection cells are the
-    // text-relative display column shifted right by this (Q#UX2). 0 when
-    // the gutter is off, so this is a no-op then.
-    gutter_w: u32,
     // Arc 6 Stage 2: this window's collapsed regions, or `None`.
     folds: Option<&crate::fold_view::VisibleLineMap>,
     theme: &crate::highlight::Theme,
@@ -5047,10 +5101,9 @@ fn paint_local_selection(
             ..crate::cell::Style::default()
         },
     );
-    if inner_rows == 0 || rect.size.cols == 0 || sel_start >= sel_end {
+    if inner_rows == 0 || viewport.cell_size.cols == 0 || sel_start >= sel_end {
         return;
     }
-    let text_cols = rect.size.cols.saturating_sub(gutter_w);
 
     // Row `r` shows the `r`-th VISIBLE line at or after `view_top`.
     let mut next_line = folds.map_or(window.view_top, |map| map.visible_head_of(window.view_top));
@@ -5070,32 +5123,42 @@ fn paint_local_selection(
             continue;
         }
 
-        let Some(start_coord) =
-            window
-                .text_view
-                .pos_to_display(buf, paint_start, window.layout_ctx())
+        // Asked in LINE-absolute columns, then clipped below.
+        //
+        // Through the live context this dropped whole visible segments:
+        // `pos_to_display` returns `None` for a position left of the
+        // edge (framing Q#HS7(c′)), so a selection beginning off-screen
+        // and reaching well into view took the `continue` and painted
+        // nothing — the most common shape there is, since selecting
+        // rightward from column 0 then scrolling produces exactly it.
+        let unscrolled = crate::view::LayoutCtx {
+            view_left: 0,
+            ..window.layout_ctx()
+        };
+        let Some(start_coord) = window
+            .text_view
+            .pos_to_display(buf, paint_start, unscrolled)
         else {
             continue;
         };
-        let Some(end_coord) = window
-            .text_view
-            .pos_to_display(buf, paint_end, window.layout_ctx())
-        else {
+        let Some(end_coord) = window.text_view.pos_to_display(buf, paint_end, unscrolled) else {
             continue;
         };
         if start_coord.row as usize != display_row || end_coord.row as usize != display_row {
             continue;
         }
 
-        let start_col = start_coord.col.min(text_cols);
-        let end_col = end_coord.col.min(text_cols);
-        if start_col >= end_col {
+        // The one shared clip rule (Stage 4). Five adopters now read it:
+        // syntax/LSP styling, diagnostic underlines, search washes,
+        // `BufferStyleOverlay`, and this.
+        let Some((start_col, end_col)) = viewport.visible_cols(start_coord.col, end_coord.col)
+        else {
             continue;
-        }
+        };
         for col in start_col..end_col {
             let cell = grid.at(CellCoord::new(
-                rect.origin.row + row_offset,
-                rect.origin.col + gutter_w + col,
+                viewport.cell_origin.row + row_offset,
+                viewport.cell_origin.col + col,
             ));
             cell.style = crate::overlay::merge_styles(cell.style, overlay);
         }
@@ -8543,6 +8606,7 @@ mod tests {
             gutter_w: 0,
             folds: None,
             wrap: WrapMode::Truncate,
+            view_left: 0,
         };
         let mut grid = CellGrid {
             cells: &mut backing,
@@ -8679,6 +8743,7 @@ mod tests {
                 gutter_w: 0,
                 folds: None,
                 wrap: WrapMode::Truncate,
+                view_left: 0,
             };
 
             // Two no-op overlays: probe the dispatch cost only.
@@ -11426,6 +11491,115 @@ mod tests {
         assert!(
             !body.contains("beta.txt"),
             "non-matching file should not appear: {body}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod horizontal_scroll_selection_tests {
+    use super::*;
+    use crate::cell::{Cell, CellCoord, CellGrid, CellSize, Style};
+    use crate::view::WrapMode;
+    use crate::window::{Selection, Window, WindowId};
+
+    /// A selection that begins LEFT of the horizontal edge and reaches
+    /// into view must paint its visible tail (Stage 4 review P1).
+    ///
+    /// The selection painter asked `pos_to_display` through the live
+    /// layout context, which returns `None` for a position left of the
+    /// edge (framing Q#HS7(c′)) — so the whole segment took `continue`
+    /// and painted nothing. That is the *common* shape, not an edge
+    /// case: select rightward from column 0, keep going past the window
+    /// width, and the view scrolls with the cursor.
+    #[test]
+    fn a_selection_starting_off_screen_paints_its_visible_tail() {
+        let buf = crate::buffer::Buffer::from_bytes(
+            crate::buffer::BufferId::next(),
+            "t",
+            b"ABCDEFGHIJKL",
+        );
+        let text_view = crate::text_view::TextView::new(&buf);
+        let mut window = Window::new(WindowId::next(), buf.id(), text_view);
+        window.last_wrap = WrapMode::Truncate;
+        window.last_content_cols = 4;
+        // Scrolled so screen column 0 shows source column 4.
+        window.view_left = 4;
+        // Selected from the line start through byte 6 — bytes 0..4 are
+        // off-screen left, bytes 4..6 ("EF") are the visible tail.
+        // `Selection` holds only the anchor; the other end is the
+        // window's cursor.
+        window.selection = Some(Selection { anchor: 0 });
+        window.cursor = 6;
+
+        let mut storage = vec![Cell::default(); 4];
+        let mut grid = CellGrid {
+            cells: &mut storage,
+            stride: 4,
+            size: CellSize::new(1, 4),
+        };
+        let viewport = crate::view::Viewport {
+            buffer_start: 0,
+            buffer_end: buf.len(),
+            cell_origin: CellCoord::new(0, 0),
+            cell_size: CellSize::new(1, 4),
+            gutter_w: 0,
+            folds: None,
+            wrap: WrapMode::Truncate,
+            view_left: 4,
+        };
+        let theme = crate::highlight::Theme::default_dark();
+        paint_local_selection(&mut grid, &buf, &window, viewport, 1, None, &theme);
+
+        let washed: Vec<bool> = (0..4)
+            .map(|c| storage[c].style != Style::default())
+            .collect();
+        assert_eq!(
+            washed,
+            vec![true, true, false, false],
+            "the visible tail (E, F) must carry the selection wash; \
+             painting nothing at all is the defect, and painting at \
+             absolute columns 0..6 would wash the whole window"
+        );
+    }
+
+    /// The control: a selection entirely left of the edge paints nothing.
+    #[test]
+    fn a_selection_entirely_off_screen_paints_nothing() {
+        let buf = crate::buffer::Buffer::from_bytes(
+            crate::buffer::BufferId::next(),
+            "t",
+            b"ABCDEFGHIJKL",
+        );
+        let text_view = crate::text_view::TextView::new(&buf);
+        let mut window = Window::new(WindowId::next(), buf.id(), text_view);
+        window.last_wrap = WrapMode::Truncate;
+        window.last_content_cols = 4;
+        window.view_left = 4;
+        window.selection = Some(Selection { anchor: 0 });
+        window.cursor = 3;
+
+        let mut storage = vec![Cell::default(); 4];
+        let mut grid = CellGrid {
+            cells: &mut storage,
+            stride: 4,
+            size: CellSize::new(1, 4),
+        };
+        let viewport = crate::view::Viewport {
+            buffer_start: 0,
+            buffer_end: buf.len(),
+            cell_origin: CellCoord::new(0, 0),
+            cell_size: CellSize::new(1, 4),
+            gutter_w: 0,
+            folds: None,
+            wrap: WrapMode::Truncate,
+            view_left: 4,
+        };
+        let theme = crate::highlight::Theme::default_dark();
+        paint_local_selection(&mut grid, &buf, &window, viewport, 1, None, &theme);
+
+        assert!(
+            (0..4).all(|c| storage[c].style == Style::default()),
+            "a selection ending before the edge must not wash anything"
         );
     }
 }

@@ -471,7 +471,6 @@ impl View for SyntaxHighlightView {
 
         let start_line = line_at_offset(&self.cache.line_offsets, viewport.buffer_start as u32);
         let max_rows = viewport.cell_size.rows;
-        let max_cols = viewport.cell_size.cols;
         let cell_origin = viewport.cell_origin;
         let total_lines = self.cache.line_offsets.len() as u32;
 
@@ -531,8 +530,11 @@ impl View for SyntaxHighlightView {
                         continue;
                     }
                     let cell_row = cell_origin.row + row_offset;
-                    let clamped_start = start_col.min(max_cols);
-                    let clamped_end = end_col.min(max_cols);
+                    let Some((clamped_start, clamped_end)) =
+                        viewport.visible_cols(start_col, end_col)
+                    else {
+                        continue;
+                    };
                     for col in clamped_start..clamped_end {
                         let cell = cells.at(CellCoord::new(cell_row, cell_origin.col + col));
                         cell.style = merge_styles(cell.style, style);
@@ -688,7 +690,6 @@ impl View for LspStyleView {
 
         let start_line = line_at_offset(&line_offsets, viewport.buffer_start as u32);
         let max_rows = viewport.cell_size.rows;
-        let max_cols = viewport.cell_size.cols;
         let cell_origin = viewport.cell_origin;
         let total_lines = line_offsets.len() as u32;
 
@@ -751,12 +752,14 @@ impl View for LspStyleView {
                     continue;
                 }
                 let (start_col, end_col) = byte_range_to_columns(line_bytes, start_b, end_b);
-                if end_col <= start_col {
+                // `visible_cols` returns `None` for an empty range too, so the
+                // old `end_col <= start_col` guard is subsumed rather than
+                // dropped.
+                let Some((clamped_start, clamped_end)) = viewport.visible_cols(start_col, end_col)
+                else {
                     continue;
-                }
+                };
                 let cell_row = cell_origin.row + row_offset;
-                let clamped_start = start_col.min(max_cols);
-                let clamped_end = end_col.min(max_cols);
                 for col in clamped_start..clamped_end {
                     let cell = cells.at(CellCoord::new(cell_row, cell_origin.col + col));
                     cell.style = merge_styles(cell.style, style);
@@ -1113,6 +1116,7 @@ mod tests {
             gutter_w: 0,
             folds: None,
             wrap: WrapMode::Truncate,
+            view_left: 0,
         };
         let registry = state.core.borrow().registry.clone();
         let reg = registry.borrow();
@@ -1212,6 +1216,7 @@ mod tests {
             gutter_w: 0,
             folds: None,
             wrap: WrapMode::Truncate,
+            view_left: 0,
         };
         let registry = state.core.borrow().registry.clone();
         let reg = registry.borrow();
@@ -1333,6 +1338,7 @@ mod tests {
             gutter_w: 0,
             folds: None,
             wrap: WrapMode::Truncate,
+            view_left: 0,
         };
         let registry = state.core.borrow().registry.clone();
         let reg = registry.borrow();
@@ -1394,6 +1400,7 @@ mod tests {
             gutter_w: 0,
             folds: None,
             wrap: WrapMode::Truncate,
+            view_left: 0,
         };
         let registry = buf; // keep buf alive
         hv.render(&registry, viewport, &mut grid);
@@ -1452,6 +1459,7 @@ mod tests {
             gutter_w: 0,
             folds: None,
             wrap: WrapMode::Truncate,
+            view_left: 0,
         };
         let registry = buf; // keep buf alive
         hv.render(&registry, viewport, &mut grid);
@@ -1518,6 +1526,7 @@ mod tests {
             gutter_w: 0,
             folds: None,
             wrap: WrapMode::Truncate,
+            view_left: 0,
         };
         let registry = buf;
         hv.render(&registry, viewport, &mut grid);
@@ -1586,6 +1595,7 @@ mod tests {
             gutter_w: 0,
             folds: None,
             wrap: WrapMode::Truncate,
+            view_left: 0,
         };
         hv.render(&buf, viewport, &mut grid);
         grid.get(CellCoord::new(0, col)).style
@@ -1829,6 +1839,7 @@ mod tests {
             gutter_w: 0,
             folds: None,
             wrap: WrapMode::Truncate,
+            view_left: 0,
         };
         let registry = buf;
         hv.render(&registry, viewport, &mut grid);
@@ -1893,6 +1904,7 @@ mod tests {
             gutter_w: 0,
             folds: None,
             wrap: WrapMode::Truncate,
+            view_left: 0,
         };
         let registry = buf;
         hv.render(&registry, viewport, &mut grid);

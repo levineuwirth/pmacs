@@ -20,7 +20,15 @@
 
 pmacs.config.define {
   name = "ui.line-wrap",
-  description = "How a line wider than the window is shown: wrap onto following rows, or truncate at the edge.",
+  -- The description names what `truncate` COSTS, because the toggle's
+  -- status message is not enough: a user who sets this in `init.lua`
+  -- never invokes the toggle and so never sees it. #221 shipped that
+  -- gap (framing §6).
+  --
+  -- In the TUI the cost is now only the GUI's, because Stage 4 gave the
+  -- grid renderer horizontal scrolling. Stage 5 closes the rest, and
+  -- this sentence shrinks back when it lands.
+  description = "How a line wider than the window is shown: wrap onto following rows, or truncate at the edge. Truncated text is reachable by moving the cursor past the edge in the terminal UI; in the GUI it is not yet reachable at all.",
   -- A closed set, so an unknown value is impossible rather than
   -- handled. Adding "word" later is a clean additive change --- which
   -- is the plan, since character wrap is what both frontends can do
@@ -65,7 +73,7 @@ pmacs.command.define {
     local next_mode = current == "wrap" and "truncate" or "wrap"
     pmacs.config.set_local(buf, "ui.line-wrap", next_mode)
     if next_mode == "truncate" then
-      pmacs.editor.set_status("line wrap off — text past the edge is unreachable until horizontal scrolling lands")
+      pmacs.editor.set_status("line wrap off — move the cursor past the edge to scroll (GUI: not yet)")
     else
       pmacs.editor.set_status("line wrap on")
     end

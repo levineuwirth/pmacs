@@ -423,6 +423,28 @@ without a name there is nothing to call intermittent.
 with `grep -E "FAILED|panicked|test result"`, which keeps failure
 context, or capture the full log to a file and summarize from it.
 
+### R7 — managed-retry attach hits a broken pipe under full-sweep load
+
+The first incident this session with a **complete** signature, so it is
+a matchable row rather than a `U` note. Recorded during long-lines
+Stage 4; the lane touches no `pmacs-gpu` code at all.
+
+| field | value |
+|---|---|
+| **selector** | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
+| **job / flavor** | local (Linux), `cargo test --workspace --features crdt --no-fail-fast`, i.e. under full-sweep load |
+| **required fragments** | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
+| **status** | **new incident, unreproduced — causal status UNRESOLVED** |
+| **what IS established** | one occurrence at `pmacs-gpu/src/attach.rs:1680`; the test drives a scripted transient-then-success sequence over a real socket pair |
+| **what is NOT** | whether the broken pipe is the *fixture's* writer closing early or a real retry-path defect. **This row is not a claim that it is harmless** |
+| **rerun evidence** | 6 isolated runs green, plus a full `--workspace --features crdt` sweep green (113 targets). Per the rerun rule this establishes **intermittence only** |
+| **retirement** | hardening that removes the named mechanism plus a discriminating witness — or a diagnosis showing the fixture, not the code, closes the pipe |
+
+**Not attributed to this lane**, and the reasoning is not merely "my
+diff looks unrelated": Stage 4 adds no wire surface, no protocol
+version change, and touches no file in `pmacs-gpu`. A merge-base
+control would settle it if this recurs.
+
 ### U2 — `m6_1_pty_raw_mode_disables_kernel_echo`, one local occurrence
 
 Has a selector, which U1 lacks — but still no fragments, so it cannot

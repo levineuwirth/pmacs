@@ -120,16 +120,17 @@ fn the_end_of_a_long_line_reaches_the_terminal() {
     quit(&mut pty);
 }
 
-/// The control that makes the marker above mean something: pinned to
-/// `truncate`, the same fixture in the same terminal never emits the
-/// tail.
+/// `truncate` clips at the edge — the control that makes the marker
+/// above discriminating.
 ///
-/// This is also the honest statement of what `truncate` costs today.
-/// Those bytes are not merely off-screen, they are unreachable — there
-/// is no horizontal scrolling yet, which is why `wrap` is the default
-/// and why `ui.toggle-line-wrap` says so when it turns wrapping off.
+/// **Scoped to the initial frame on purpose.** Before Stage 4 this
+/// asserted the tail was never emitted *at all*, which was true because
+/// the text was unreachable. It is no longer: moving the cursor now
+/// scrolls the view. So the claim narrows to what `truncate` still
+/// means — the tail is not on screen until something moves — and the
+/// test below is what proves the rest.
 #[test]
-fn truncate_leaves_the_end_of_the_line_unreachable() {
+fn truncate_clips_the_end_of_the_line_until_something_moves() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut pty = spawn(
         dir.path(),
@@ -145,11 +146,43 @@ fn truncate_leaves_the_end_of_the_line_unreachable() {
 
     assert!(
         !contains(&pty.output(), TAIL),
-        "truncate must clip at the edge — emitting the tail would mean \
-         the mode reached the resolver but not the renderer, which is \
-         exactly the defect the rendered witnesses in \
+        "truncate must clip at the edge on the initial frame — emitting \
+         the tail here would mean the mode reached the resolver but not \
+         the renderer, the defect the rendered witnesses in \
          line_wrap_acceptance.rs guard from the other side"
     );
+
+    quit(&mut pty);
+}
+
+/// **Stage 4, and the point of the lane**: under `truncate`, moving the
+/// cursor toward the end of a long line brings the end into view.
+///
+/// This test is the reason the control above had to be rewritten. Its
+/// predecessor asserted the tail is *never* emitted, and that assertion
+/// was a statement of the defect, not of the design — so updating it is
+/// itself the proof the caveat is gone (framing §4).
+///
+/// `C-e` (end of line) is the motion, because it is one keystroke and
+/// it is what a user reaching for the end of a line actually presses.
+#[test]
+fn moving_the_cursor_past_the_edge_scrolls_the_view() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut pty = spawn(
+        dir.path(),
+        Some("pmacs.config.set('ui.line-wrap', 'truncate')\n"),
+    );
+
+    wait_for(&pty, HEAD, Duration::from_secs(20));
+    assert!(
+        !contains(&pty.output(), TAIL),
+        "precondition: the tail is off-screen before the motion, or this \
+         test would pass without scrolling anything"
+    );
+
+    pty.write_input(b"\x05").expect("C-e: end of line");
+
+    wait_for(&pty, TAIL, Duration::from_secs(20));
 
     quit(&mut pty);
 }

@@ -1,7 +1,13 @@
 # Horizontal scroll — QoL Stage 4
 
-**Status: revision 4 — every question answered; APPROVAL NOT YET
-RECORDED. No implementation may begin until it is.**
+**Status: revision 4 — APPROVED 2026-08-07. Every question answered.
+Implementation may begin within this scope.**
+
+> *"Q#HS7's per-line effective edge and preserved tab-forward mapping
+> are coherent and fully specified. Q#HS5 is approved with the required
+> serde default and literal-v1-fixture conditions. The Stage 4/Stage 5
+> split and Rule 4 protection are now durably reflected in the handoff
+> and ledger."*
 
 | question | state |
 |---|---|

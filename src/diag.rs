@@ -553,7 +553,6 @@ impl View for DiagnosticView {
         let start_line_buf = line_at_offset(&line_offsets, viewport.buffer_start as u32);
 
         let max_rows = viewport.cell_size.rows;
-        let max_cols = viewport.cell_size.cols;
         let cell_origin = viewport.cell_origin;
 
         // Column-0 line markers (gutter signs, T M4.6): most severe
@@ -629,12 +628,14 @@ impl View for DiagnosticView {
                 };
                 let (start_col, end_col) =
                     underline_cols_for_line(line_bytes, byte_start, byte_end);
-                if end_col <= start_col {
+                // `visible_cols` returns `None` for an empty range too, so the
+                // old `end_col <= start_col` guard is subsumed rather than
+                // dropped.
+                let Some((clamped_start, clamped_end)) = viewport.visible_cols(start_col, end_col)
+                else {
                     continue;
-                }
+                };
                 let cell_row = cell_origin.row + row_offset;
-                let clamped_start = start_col.min(max_cols);
-                let clamped_end = end_col.min(max_cols);
                 for col in clamped_start..clamped_end {
                     let cell = cells.at(CellCoord::new(cell_row, cell_origin.col + col));
                     cell.style = merge_styles(cell.style, style);
@@ -648,7 +649,9 @@ impl View for DiagnosticView {
             cells,
             cell_origin,
             viewport.gutter_w,
-            max_cols,
+            // Gutter-anchored, so unaffected by the horizontal offset:
+            // a sign lives left of the text area, not in it.
+            viewport.cell_size.cols,
             &line_markers,
             theme.as_ref(),
         );
@@ -1141,6 +1144,7 @@ mod tests {
                 gutter_w: 0,
                 folds: None,
                 wrap: WrapMode::Truncate,
+                view_left: 0,
             },
             &mut grid,
         );
@@ -1207,6 +1211,7 @@ mod tests {
                 gutter_w: 0,
                 folds: None,
                 wrap: WrapMode::Truncate,
+                view_left: 0,
             },
             &mut grid,
         );
@@ -1284,6 +1289,7 @@ mod tests {
                 gutter_w: 2,
                 folds: None,
                 wrap: WrapMode::Truncate,
+                view_left: 0,
             },
             &mut grid,
         );
@@ -1354,6 +1360,7 @@ mod tests {
                 gutter_w: 0,
                 folds: None,
                 wrap: WrapMode::Truncate,
+                view_left: 0,
             },
             &mut grid,
         );

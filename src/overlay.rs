@@ -402,8 +402,12 @@ fn render_buffer_style_span(
             (style_start - line_start) as usize,
             line_prefix.len(),
         );
-        let start_col = start_col.min(viewport.cell_size.cols);
-        let end_col = end_col.min(viewport.cell_size.cols);
+        // Buffer coordinates, so they translate (Stage 4). Its siblings
+        // `StyleSpanOverlay` and `VirtualCellOverlay` are documented as
+        // viewport-relative and deliberately do NOT.
+        let Some((start_col, end_col)) = viewport.visible_cols(start_col, end_col) else {
+            continue;
+        };
         for col in start_col..end_col {
             let coord = CellCoord::new(
                 viewport.cell_origin.row + row_offset,
@@ -498,6 +502,7 @@ mod tests {
             gutter_w: 0,
             folds: None,
             wrap: WrapMode::Truncate,
+            view_left: 0,
         }
     }
 
