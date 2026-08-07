@@ -457,8 +457,9 @@ tip — the ref, not a SHA, since any edit to this block advances past
 whatever SHA it records. Recover:
 `git fetch githubsucks && git checkout horizontal-scroll`.
 
-**Status: framing, NOT approved.** `docs/horizontal-scroll-framing.md`
-revision 3. No implementation may begin.
+**Status: `docs/horizontal-scroll-framing.md` revision 4 — every
+question answered, APPROVAL NOT YET RECORDED. No implementation may
+begin until it is.**
 
 **Answered by the user 2026-08-07:**
 
@@ -476,42 +477,31 @@ revision 3. No implementation may begin.
   the TUI and a **dead end in the GUI** for anyone who never opened the
   setting. Revisit after Stage 5, on use evidence.
 
-**Still blocking:**
+- **Q#HS7 — ACCEPTED.** `view_left` is an unsnapped window display
+  column; the effective edge is derived **per line**; a bisected wide
+  glyph's trailing cell renders as styled blank and is designated to
+  the **glyph's start** byte; a straddling tab's surviving cells keep
+  the **existing** forward rounding to the byte after the tab
+  (`src/text_view.rs:224` — preserved, not chosen). Together these make
+  the mapping **total over visible cells**, which is the (d) invariant.
+  The discriminating witness is multi-line, with glyph widths differing
+  at the same column.
+- **Q#HS5 — APPROVED: yes, persist, no `DESKTOP_VERSION` bump** —
+  conditional on `#[serde(default)]` **and** a literal v1 JSON fixture
+  omitting the field, asserting restore at zero. Both conditions are
+  part of the approval.
 
-- **Q#HS7 (NEW) — what IS `view_left`?** Revision 1 decided what moves
-  the viewport without saying what its offset *is* — the same omission
-  as shipping `WrapMode` with no `DisplayCoord`. Without part (d), **a
-  painter that clips where the mapper does not puts clicks on the wrong
-  character**, silently, only on lines wide enough to scroll.
-
-  **Revision 2's part (c) is WITHDRAWN.** It voted to snap `view_left`
-  to a valid boundary when set. That cannot exist: `view_left` is one
-  per-window display column, but *"does column N bisect a wide
-  glyph?"* is a **per-line** question — column 11 can be a wide glyph's
-  trailing cell on one line and ordinary ASCII on the next. No
-  setter-time value is canonical for every visible line, and snapping
-  per line instead would break vertical alignment.
-
-  Replaced by a **per-line effective edge**: `view_left` stored
-  unsnapped, each line deriving its own edge in the walk it already
-  performs from column 0. Where the edge bisects a wide glyph, that
-  glyph's trailing cell **paints blank and the mapping designates it to
-  the glyph's start byte** — which keeps `byte_at_place` total and
-  preserves the round trip. The invariant is therefore a property of
-  **`(view_left, line)`**, not of `view_left` alone, so the oracle must
-  sweep lines whose glyph widths differ at the same column.
-- **Q#HS5 — does `view_left` survive a restart?** Vote: yes, no
-  `DESKTOP_VERSION` bump — **conditional on two things, now concrete.**
-  Verified: `SavedLeaf` carries **no `#[serde(default)]` anywhere in
-  `src/desktop.rs`**, so serde would **reject** a version-1 desktop
-  JSON omitting a new `view_left`. Sound only with (1)
-  `#[serde(default)]` on the field and (2) a regression fixture — a
-  literal v1 desktop JSON without `view_left`, asserting restore at
-  offset 0 rather than an error. The reverse direction already works:
-  an old binary meets an unknown field, which serde ignores absent
-  `deny_unknown_fields` (none in that file).
 - **Q#HS3** is re-confirmed rather than open (per-window, per Q#LL2);
   **Q#HS4** is deferred, live only if explicit commands arrive.
+
+**The reasoning worth keeping from the withdrawn Q#HS7(c).** Revision
+2 voted to snap `view_left` to a valid boundary when set. That cannot
+exist, and the reason generalizes: `view_left` is ONE per-window
+column, but *"does column N bisect a wide glyph?"* is a **per-line**
+question. No setter-time value is canonical for every visible line,
+and snapping per line instead would break the vertical alignment a
+column-oriented view exists to provide. Recorded because the same trap
+waits for any future window-wide value derived from per-line content.
 
 **One correction carried into revision 2.** Revision 1 claimed the
 "unreachable past the edge" caveat is recorded in the setting's

@@ -85,10 +85,10 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-08-07)
 
-- **QoL arc — Stages 1-3 merged (#219, #220, #221); Stage 4 is the
-  remainder.** From one daily-driver report: terminal zoom broke TUI
-  rendering and did nothing in the GUI, and a long line was unreadable
-  past the edge.
+- **QoL arc — Stages 1-3 merged (#219, #220, #221); Stages 4 AND 5
+  remain, and the arc closes at Stage 5.** From one daily-driver
+  report: terminal zoom broke TUI rendering and did nothing in the GUI,
+  and a long line was unreadable past the edge.
   - **#219** made the grid TUI honor `full_grid`, so a post-resize
     resync blanks the host before repainting.
   - **#220** gave the GUI native zoom over the font preference that
@@ -125,10 +125,24 @@ commands, read `docs/active-work.md` immediately after this file.
       drawable clip. Neither `view_range` (it carries
       `SCROLL_OVERSCAN` past the window) nor `scroll_top` (it ignores
       `code_scroll_residual`) can answer it.
-  - **Stage 4 is horizontal scroll**, and `truncate` is incomplete
-    without it: text past the right edge is currently *unreachable*,
-    which is why `wrap` is the default and why the toggle says so.
-    Framing in `docs/horizontal-scroll-framing.md`.
+  - **Stage 4 is horizontal scroll in the TUI; Stage 5 is the GPU**, a
+    split decided rather than inherited (framing Q#HS1) and time-boxed:
+    Stage 5 is the immediately-next QoL lane after Stage 4 merges, and
+    `wrap` stays the default until it lands — which is what keeps the
+    divergence invisible to anyone who has not opted in.
+
+    `truncate` is incomplete without scroll: text past the right edge is
+    currently *unreachable*. **That caveat is NOT in the setting's
+    description** — `builtin/runtime/linewrap.lua:23` says only
+    "truncate at the edge", and the word appears in
+    `ui.toggle-line-wrap`'s status message and a source comment, which
+    a user who sets the mode in `init.lua` never sees. A small
+    user-facing gap shipped in #221; amending the description is a
+    Stage 4 deliverable.
+
+    **Rule 4 must not retire the long-lines lane when Stage 4 merges** —
+    the arc closes at Stage 5. Framing in
+    `docs/horizontal-scroll-framing.md`.
 
 - **`main` @ `db1bbe9`.** The **tree primitive #217** — `listview` rows
   take optional `depth`/`id`, collapse is primitive-owned, folding is

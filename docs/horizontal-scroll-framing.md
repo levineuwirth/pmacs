@@ -1,10 +1,20 @@
 # Horizontal scroll — QoL Stage 4
 
-**Status: revision 3 — NOT APPROVED. Q#HS1, HS2 and HS6 answered by the
-user (2026-08-07). Q#HS7 remains BLOCKING and its part (c) is
-**withdrawn and replaced** — a setter-time snap cannot exist for a
-window-wide offset. Q#HS5's condition is now concrete. No
-implementation may begin.**
+**Status: revision 4 — every question answered; APPROVAL NOT YET
+RECORDED. No implementation may begin until it is.**
+
+| question | state |
+|---|---|
+| Q#HS1 — GPU in scope? | **answered**: no, Stage 5, time-boxed (§3) |
+| Q#HS2 — what moves the viewport? | **answered**: automatic only |
+| Q#HS3 — window or buffer? | re-confirmed: per window |
+| Q#HS4 — cursor follows explicit scroll? | **deferred** — not live under HS2 |
+| Q#HS5 — persist `view_left`? | **approved**: yes, no version bump, on two conditions |
+| Q#HS6 — the default | **answered**: `wrap` stays |
+| Q#HS7 — what IS `view_left`? | **accepted**: (a), (b), (c′), (c″), (d) |
+
+Revision 4 adds only Q#HS7(c″) — the tab-straddle mapping — and fixes
+the handoff's "Stage 4 is the remainder" to name Stages 4–5.
 
 **Stage 4 does NOT close the QoL arc.** Revision 1 said it did, and
 that was written before Q#HS1 moved GPU horizontal scroll to Stage 5.
@@ -192,7 +202,13 @@ hazard for whenever explicit commands arrive.
 Deferring rather than deleting, because the hazard is real and
 rediscovering it costs more than carrying the paragraph.
 
-### Q#HS5 — does `view_left` survive a restart? **OPEN, with the condition now concrete**
+### Q#HS5 — does `view_left` survive a restart? **APPROVED: yes**
+
+> **Approved 2026-08-07 (user):** persist `view_left` **without** a
+> desktop-version bump, **provided implementation adds
+> `#[serde(default)]` and a literal v1 JSON fixture omitting the field,
+> asserting restoration at zero.** Both conditions are part of the
+> approval, not advice attached to it.
 
 `view_top` does (§1.4). Consistency argues yes.
 
@@ -240,7 +256,13 @@ default does not move.
 
 Revisit after Stage 5, on use evidence, not before.
 
-### Q#HS7 — what IS `view_left`? **NEW, BLOCKING**
+### Q#HS7 — what IS `view_left`? **ACCEPTED (revision 4)**
+
+> **Accepted 2026-08-07 (user):** *"keep `view_left` as an unsnapped
+> window display column; derive the effective edge per line; render a
+> bisected wide glyph's trailing cell as styled blank and designate it
+> to the glyph start. The multi-line discriminating witness is exactly
+> right."* Plus (c″) below, on the user's recommendation.
 
 **Revision 1 decided what moves the viewport without ever saying what
 the viewport offset is.** That is the same omission Stage 3 would have
@@ -327,6 +349,37 @@ pushed to the next row **entirely** (`advance_wrapped`, with its
 next row to push to, so the blank-plus-designation rule is what the
 same intent requires here.
 
+**(c″) A tab whose expansion straddles the edge — PRESERVED, not
+chosen.**
+
+Each visible tab-expansion cell maps to **the byte immediately after
+the tab**. This is not a new rule: it is what `byte_at_place` already
+does, and its doc comment says so — *"Rounds forward to the next
+character boundary… matching the unwrapped `display_to_pos`"*
+(`src/text_view.rs:224`). The walk accumulates `walked` past the tab
+byte and returns on the *next* character's `start_col`, so every column
+inside the expansion already yields the post-tab offset
+(`src/text_view.rs:243-254`).
+
+So the requirement on Stage 4 is **that horizontal scroll not perturb
+it**: with the expansion's leading cells scrolled off, the surviving
+cells must still map post-tab, exactly as they do at offset 0.
+
+**Why this direction differs from (c′)'s, which is the obvious
+objection.** A wide glyph's two cells belong to **one character**;
+forward-rounding its trailing cell would designate it to the *next*
+character and leave the straddling glyph with **no visible cell mapping
+to it at all** — unreachable by click precisely when it is the thing
+the user scrolled toward. A tab's expansion cells are whitespace
+*between* the tab byte and the next character, and forward-rounding
+them is already how clicking in indentation lands at the start of the
+text. Different directions, one principle: **every visible cell is
+designated to the byte a user would mean by clicking it.**
+
+With (c′) and (c″) together, the (d) contract is total over visible
+cells: ordinary character → its own start byte; bisected wide glyph →
+the glyph's start byte; tab expansion → the byte after the tab.
+
 **(d) The invariant rendering and coordinate mapping share.** For a
 given `view_left` **and line**, `byte_at_place` must invert
 `place_of_byte` on every canonical input, and `paint_line` must place
@@ -357,9 +410,16 @@ and it is why Q#HS7 blocks: §4 cannot be written until it exists.
 - Round-trip identity for `place_of_byte` / `byte_at_place` at non-zero
   offset — the Q#HS7(d) invariant, walked exhaustively over a short
   line rather than sampled, as Stage 3 established.
-- **The Q#HS7(b)/(c′) cases, which have no oracle until it is
-  answered**: a wide glyph straddling the left edge; a tab whose
-  expansion straddles it.
+- **The Q#HS7(c′) case**: a wide glyph straddling the left edge — the
+  trailing cell blank, and `byte_at_place` on it returning the glyph's
+  **start** byte.
+- **The Q#HS7(c″) case**: a tab whose expansion straddles the edge,
+  with every surviving cell still mapping to the byte **after** the
+  tab. This one is a **regression** witness rather than a new claim —
+  `byte_at_place` already behaves this way at offset 0
+  (`src/text_view.rs:224`), so the test asserts scroll did not perturb
+  it, and it should fail if the walk is "optimized" to start at the
+  effective edge instead of column 0.
 - **A multi-line fixture whose glyph widths DIFFER at the same column**
   — the case (c′) exists for, and the one a single-line sweep cannot
   reach. At one `view_left`, one line must take the straddle path and
