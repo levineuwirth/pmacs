@@ -246,10 +246,15 @@ fn round_trip_is_identity_at_a_non_zero_offset() {
 // or vanished: decorations drifting off the characters they describe,
 // silently, and only once a window had been scrolled.
 //
-// `Viewport::visible_cols` is the one rule they now share. These
-// witnesses pin it from three directions, because the four call sites
-// were identical and a single test would have let a missed adopter
-// through.
+// `Viewport::visible_cols` is the one rule they now share, across FIVE
+// adopters: four decorator families — syntax/LSP styling, diagnostic
+// underlines, search washes, `BufferStyleOverlay` — plus the selection
+// painter, whose own witnesses live in `src/editor.rs` because
+// `paint_local_selection` is private.
+//
+// These witnesses pin the rule from three directions, because the
+// decorator sites were textually identical and a single test would have
+// let a missed adopter through.
 // ---------------------------------------------------------------------------
 
 use std::sync::{Arc, Mutex};
