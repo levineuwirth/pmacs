@@ -434,278 +434,93 @@ a job executed — **the log is**.
 Whether `docs/ci-red-signatures.md` should grow a short non-row section
 for this class is an open question for its owner, not something this
 lane decided.
-## Long lines (QoL Stage 3) — PR #221 OPEN, awaiting review
 
-**Branch `long-lines`**, originally based on `githubsucks/main` @
-`218d2e7` (the #219 merge); **main merged in at #220's landing**, so
-the branch now carries Stage 2. The two share no code — that merge is
-currency, not dependency, taken so the Stage 3 PR opens against a base
-it has already been tested on. `githubsucks/long-lines` is the authoritative tip — the ref,
-not a SHA, since any edit to this block advances past whatever SHA it
-records. Recover: `git fetch githubsucks && git checkout long-lines`.
+## Long lines (QoL arc) — Stage 3 MERGED as #221; Stage 4 is framing
 
-**This block was written with the lane's first commit, before any PR
-existed** — the standing correction from #171, #215 and #220. **PR
-#221** opened 2026-08-07 against `main` @ `912bf57`; the number is
-recorded here rather than left to be reconstructed from the branch.
+**Rewritten, not removed.** Rule 4 removes a lane when its ARC is done;
+this one has Stage 4 ahead. Stage 3's durable facts are absorbed into
+`docs/agent-handoff.md` §1 — rule 4's precondition, satisfied rather
+than deferred — so what remains here is the Stage 4 plan and only the
+Stage 3 residue that constrains it.
 
-- **Framing `docs/long-lines-framing.md` revision 20, APPROVED.** All
-  eight questions settled, §5d.6 resolved. Revision 20 **withdraws
-  §1.1** — see "The framing error" below.
-- **Independent of #220** (now merged). Stage 2 and Stage 3 share no
-  code; the merge in this branch is currency, not dependency.
-- **Implementation complete.** Seven commits, `937544c..840a338`.
-  Every gate green locally, macOS unverifiable here as always.
+**Branch `horizontal-scroll`**, based on `githubsucks/main` @ `02f3ec3`
+(the #221 merge). `githubsucks/horizontal-scroll` is the authoritative
+tip — the ref, not a SHA, since any edit to this block advances past
+whatever SHA it records. Recover:
+`git fetch githubsucks && git checkout horizontal-scroll`.
 
-### The defect
+**Status: framing, not approved.** `docs/horizontal-scroll-framing.md`
+revision 1. No implementation may begin until its questions are
+answered.
 
-A line wider than the window is unreadable past the edge **in the
-TUI**. The GPU is not in that state: it already wraps. So the
-cross-frontend defect is **not** unreadability — it is that *neither
-behavior was chosen*. The TUI truncates because a cell walk breaks at
-`max_cols`; the GPU wraps because cosmic-text's `Wrap::WordOrGlyph`
-default was never overridden. Two accidents that disagree, with no way
-for the user to express a preference in either.
+### What Stage 3 shipped that Stage 4 must live with
 
-### The six answers
+- **`ui.line-wrap` is BUFFER-local** (`ConfigKind::Enum`,
+  `wrap`/`truncate`, default `wrap`). Q#LL2 recorded the consequence
+  and deliberately deferred it: `view_left` is unambiguously
+  **per-window**, because two panes on one buffer must scroll
+  independently exactly as they already hold independent `view_top`s
+  (`src/desktop.rs:92`, `src/window.rs:374`). So the two halves of one
+  user-facing concept land at different scopes. Emacs effectively does
+  this and it is survivable — but Stage 3 signed up for it as *a
+  decision*, and Stage 4 is where the bill arrives.
+- **`truncate` is the mode Stage 4 makes navigable.** Today text past
+  the right edge is not merely off-screen but **unreachable**; that is
+  stated in the setting's description and in `ui.toggle-line-wrap`'s
+  status message, both of which should be revisited when scroll lands.
+- **Under `wrap`, horizontal scroll is meaningless.** Stage 4's surface
+  is therefore conditional on the mode, which is a coherence question
+  (one concept, two behaviors) and not only an implementation one.
+- **The scroll indicator's `wrap` path takes byte percentages** from
+  `pmacs-protocol::scroll`. It is vertical-only and Stage 4 does not
+  change it — recorded because "scroll" in this lane means horizontal
+  and the two must not be conflated in review.
 
-- **Q#LL1** — ships `wrap` + `truncate`, **default `wrap`**; horizontal
-  scroll is **Stage 4**. No default preserves both frontends, so this
-  knowingly changes the TUI's behavior and leaves the GPU's alone.
-- **Q#LL2** — the mode is **buffer-local**; `Viewport` carries the
-  *resolved* mode as it already carries `folds`, so `TextView` stays
-  config-agnostic.
-- **Q#LL4** — do **not** adopt `editing.fill-column`; name ours
-  `ui.line-wrap` (`ConfigKind::Enum`). *(The recorded reason was wrong;
-  the answer was not. See "The framing error".)*
-- **Q#LL5** — **character wrap in both frontends**; the GPU document
-  buffer gets its first explicit `set_wrap`, `Wrap::Glyph`.
-- **Q#LL6** — no global map (every vertical consumer is local, so
-  layout is per-line); `view_top`'s sub-line component is a **byte**;
-  `DisplayCoord` gains `sub_row` rather than redefining `row`.
+### Ground truth gathered for the framing (verify before trusting)
 
-### The two holes review found in the first commit
+- **There is no horizontal scroll anywhere in the tree.** No
+  `view_left`, `scroll_left`, or `hscroll` in `src/` or `builtin/`.
+  This is greenfield, not an extension.
+- **`paint_line` starts every walk at column 0** (`src/text_view.rs`),
+  which is the same walk Stage 3 rewrote for wrapping. A `view_left`
+  enters here, and the wrap rule (`advance_wrapped`) must stay written
+  exactly once.
+- **The GPU cannot honor horizontal scroll through cosmic-text.**
+  `Scroll::horizontal` is discarded throughout, because **glyphon 0.11
+  never applies it when placing glyphs** — documented at
+  `pmacs-gpu/src/main.rs:1611`, `:6316`, `:8020` and asserted by tests
+  at `:16266`, `:16337`, `:16737`. The GPU's Stage 4 half needs a
+  different mechanism entirely. **This is the fact most likely to
+  invert the cost estimate**, exactly as the "both frontends consume
+  the same `CellGrid`" error did in Stage 3 revision 1.
+- **`view_top` is persisted per leaf** in `SavedLeaf` alongside
+  `cursor`, at `DESKTOP_VERSION = 1` (`src/desktop.rs:33`). A
+  `view_left` that survives a restart needs either a defaulted field or
+  a version bump — a decision, not an afterthought.
+- **`scroll_window` carries the cursor with the scroll** to defeat the
+  renderer's "auto-scroll to keep cursor visible" pass, whose comment
+  already records the hazard: an unconditional snap-back makes explicit
+  scrolling feel stuck (`src/editor.rs:3624-3628`). A horizontal analog
+  faces the identical problem, and Q#LL3 deferred the choice — drag the
+  cursor, or let the next motion snap back — to this stage.
+- **`goal_col` is the existing column-memory field**
+  (`src/window.rs:376`, cleared at seven sites in `src/editor.rs`). Its
+  relationship to a horizontal offset is unexamined and is a framing
+  question, not an implementation detail.
 
-- **Q#LL7 --- the GPU had no wire.** The mode resolved into `Viewport`,
-  which reaches only the *grid* renderer; the GPU lays out locally and
-  no message expresses a wrap mode. `truncate` would have changed the
-  TUI and left the GPU wrapping --- the exact disagreement this lane
-  exists to close. Now specified as an additive v22 variant carrying
-  `buffer_id`, resent on attach, config change, **and buffer switch**.
-  That third trigger is the subtle one: font size is global, wrap mode
-  is per buffer, so a `FontFacts`-shaped design is silently wrong and
-  looks right in every single-buffer test.
-- **Q#LL8 --- "every vertical consumer is local" was false.** The
-  scroll indicator needs a total. A one-line buffer wrapping to fifty
-  rows has `total_lines == 1`, so the indicator reports `All` while
-  forty-nine rows sit off-screen. The bounded distinction survives: a
-  *total* is one lazily-computed number; an *index* is `O(N)` resident
-  storage, still ruled out.
+### Gate note this lane inherits
 
-  **Two further corrections, from review of the second commit.**
-  `format_scroll_indicator` is **duplicated, not shared**
-  (`src/editor.rs:5509`, `pmacs-gpu/src/main.rs:10114`), and the GPU
-  passes a source-line count --- so the first fix would have corrected
-  one frontend and left the other wrong, *this lane's own defect
-  reproduced by the section meant to close it*. And the lazy total's
-  cache key omitted **fold state**, which changes per window with no
-  edit, resize or mode change; now keyed on the fold projection's own
-  contents, which cannot be forgotten, rather than a maintained
-  revision counter that can.
-
-  **Then the aggregate was abandoned entirely (revision 17).** The GPU
-  shapes **only the viewport slice** — Session S1 found the whole rope
-  made large-file editing `O(file)` per keystroke — so its layout
-  cannot yield a total, and re-shaping the document for a status-line
-  readout would reintroduce that cost. `NN%` is now **byte-based in
-  both frontends**; `All`/`Top`/`Bot` stay exact because they are local
-  predicates. This retires the cache *and* the fold-key fix above,
-  which is kept in the framing marked superseded so a reader can tell
-  "the key was fixed" from "there is no key".
-
-  **Then the retained formatter turned out unable to express the new
-  contract (revision 18).** Every branch of `format_scroll_indicator`
-  derives from `total_lines`, so a byte total would compare rows
-  against bytes and a fake total restores the false `All`. Resolved by
-  keeping the existing formatter **untouched for `truncate`** — output
-  identical by construction — and adding a `classify(first_visible,
-  last_visible, byte_pos, byte_len)` for `wrap` that never sees a row
-  count. **Resolved: the classifier lives in `pmacs-protocol`** —
-  `ScrollPosition` plus a pure `classify`, with string rendering left
-  in each frontend. Per §16: each frontend computes its own local
-  layout facts, the shared crate owns the semantic decision they feed.
-  **No wire message, no version bump**, and the one-copy-fixed defect
-  becomes unrepresentable rather than reviewer-guarded.
-
-### The framing error, and the four defects review found in the code
-
-**`editing.fill-column` does not exist.** Framing §1.1 called it an
-orphaned registry setting "of the exact shape Stage 1 just fixed" and
-carried a deliverable to sharpen its description. Both cited
-occurrences are inside `#[cfg(test)] mod tests` —
-`src/config_registry.rs` and `src/lua_bindings/config.rs` — fixture
-names in round-trip tests covering one setting per `ConfigKind`. Two of
-those five names are real; three, including this one, are defined
-nowhere else.
-
-Nineteen revisions and three review rounds inherited it. The mechanism
-is worth keeping: a grep hit at a `src/` path, a genuine `r.define(...)`
-call that is real API usage rather than a mock, and `#[cfg(test)]` about
-fifty lines above the citation. **A file:line citation is not a
-substitute for reading the scope it sits in** — and once a conclusion is
-in a document, later rounds reason about its consequences rather than
-re-check it. Cost: three paragraphs of framing and one carried
-deliverable that had no object. Stage 3 ships a comment at both fixture
-sites instead.
-
-The four code defects, each caught by user review or by the tests
-written for it:
-
-1. **The toggle wrote the global layer.** `ui.line-wrap` is
-   buffer-local, so `config.get(name)`/`config.set(name, ...)` reported
-   and flipped the *global* value — leaving a pinned buffer untouched
-   while silently moving every unpinned one. Invisible in any
-   single-buffer test. Fixed in `4a26f00`; witnesses use two buffers.
-2. **The renderer never got the mode.** The frame resolved
-   `ui.line-wrap`, stored it on the window, and fed it to coordinate
-   mapping and the indicator — while the `Viewport` literal still
-   carried a hard-coded `Truncate`. Every "is the mode right?" test
-   passed and the text stayed clipped. Fixed in `aa3cd4d`; the new
-   witnesses read the **grid**, not the resolved value.
-3. **The GPU indicator reckoned in source lines.** Pre-existing (the
-   GPU has always wrapped), but nameable only once `ui.line-wrap`
-   decided which formula applies. Fixed in `840a338` via
-   `code_byte_painted` — layout decides, not arithmetic over it. The
-   two cheap predicates are both wrong: `view_range` includes
-   `SCROLL_OVERSCAN`, `scroll_top` ignores the sub-line residual.
-4. **An empty `view_range` is not an empty layout.** Found *by* the
-   tests in 3, not confirmed by them: a file ending in a newline has a
-   final empty line, and a viewport parked on it is `(len, len)` with
-   one real row. The guard borrowed from the caret path made **every
-   newline-terminated file report a percentage instead of `Bot`** at
-   the bottom.
-
-**A process note that earned itself twice.** Two edits in this lane
-were silently lost to `str.replace` calls that matched nothing (once
-after an unrelated exception aborted the write). Both times the code
-looked edited and was not — defect 2 above is one of them. Use the
-Edit tool, which errors on mismatch, for anything load-bearing.
-
-### The two decisions most likely to be questioned later
-
-- **GUI users lose word wrap.** Character-wrap parity is cheap and
-  Emacs-consistent, but the GPU has word-wrapped since it existed.
-  Accepted deliberately (user, 2026-08-06). **Must appear in the PR
-  description and release notes**, not only in the framing.
-- **The audit strategy is asymmetric on purpose.** The coordinate
-  functions gain a required context parameter so the **compiler
-  enumerates** every call site; `DisplayCoord` gains an **additive**
-  field so untouched consumers stay *correct* rather than merely
-  findable. Compiler-enforced where possible, correct-by-default where
-  not.
-
-### Verification (delivered)
-
-Everything framing §7 sketched, plus three groups it did not anticipate
-(framing §7.1).
-
-**The gate list below is the one that FAILED to catch this lane's CI
-red, and it is kept only to show the hole.** "The touched acceptance
-suites" is selected from the diff, and a `PROTOCOL_VERSION` bump breaks
-version-assertion tests that appear nowhere in it. Five failed on CI's
-first round. Use **`cargo test --tests --no-fail-fast`** on any
-protocol bump — `--no-fail-fast` because cargo stops at the first
-failing target, which is why CI showed one failure and the local
-full-corpus run then found three more. Recorded in
-`docs/agent-handoff.md`.
-
-```
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo clippy --workspace --all-targets --features crdt -- -D warnings
-cargo test --lib                                   # 1917 / 0
-cargo test --lib --features crdt                   # 2102 / 0
-cargo test --tests --no-fail-fast                  # 108 targets, exit 0
-cargo test --tests --features crdt --no-fail-fast  # 108 targets, exit 0
-PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu        # 228 / 0
-git diff --check
-```
-
-**Both configurations, and that mattered.** The default sweep went
-clean while `--features crdt` still had **three** failures, in
-crdt-gated real-daemon tests (`vterm_stage3_acceptance` ×2,
-`bottom_panel_stage2b_gpu_acceptance` ×1) that assert on a real
-socket's negotiated version. This is the handoff's existing "a local
-sweep is blind to whichever feature configuration it does not build"
-lesson, hit again by a different lane — so **eight** version
-assertions broke in total, not five.
-
-The eight version-assertion failures, and what each one was:
-
-| test | was | why it broke |
-|---|---|---|
-| `acc51_a_v20_peer_..._even_when_capable` (×5 jobs) | `PROTOCOL_VERSION - 1` | **bug** — an absolute contract ("below the panel version") as arithmetic on a moving constant. Now `PANEL_MIN_VERSION - 1`, the idiom `src/` already used in five places |
-| `the_baseline_stays_and_the_counter_offer_activates` | `PANEL_MIN_VERSION == PROTOCOL_VERSION` | **bug** — asserted a coincidence true only while panels were the newest feature. Now the two durable bounds |
-| `the_panel_stage_takes_protocol_v21` | `PROTOCOL_VERSION == 21` | **bug** — the current wire as a proxy for the panel stage's own version, in a test whose name says which it means |
-| `a54_real_daemon_..._panel_hosted_terminal` *(crdt)* | `session_protocol_version == "21"` | **bug** — the negotiated session version is *this binary's* wire, so the literal held only while panels were newest. Now `PROTOCOL_VERSION`, plus an explicit `>= PANEL_MIN_VERSION` for the capability the literal carried implicitly |
-| `a37_real_daemon_..._one_terminal_session` *(crdt)* | `session_protocol_version == "21"` | **bug** — same |
-| `a13_17_26_..._version_cost` | `PROTOCOL_VERSION == 21`, `6..=21`, `!supported(22)` | **tripwire working as designed** — it says in its own comment that it tracks the current wire. Took the conscious edit |
-| `the_baseline_stays_...` (same test) | `PROTOCOL_VERSION == 21` | **tripwire working as designed** |
-| `terminal_mode_keeps_reporting_presence_...` *(crdt)* | `PROTOCOL_VERSION == 21` | **tripwire working as designed** |
-
-**Five bugs and three tripwires.** The distinction is the useful part.
-A tripwire that fires on a bump is doing its job, and "fixing" it means
-editing it deliberately — the baseline pin `ADVERTISED_PROTOCOL_VERSION
-== 20` is the one that must *never* be edited, and it never fired.
-
-The five bugs share one shape: **an absolute contract expressed as
-arithmetic on, or equality with, a moving constant.** `PROTOCOL_VERSION
-- 1` for "below the panel version"; `PANEL_MIN_VERSION ==
-PROTOCOL_VERSION` for a coincidence; `PROTOCOL_VERSION == 21` standing
-in for the panel stage's own version; `"21"` for a negotiated session
-version. Each was true when written and silently false afterwards.
-`src/` already had the right idiom — `PANEL_MIN_VERSION - 1`, five
-occurrences — and every outlier was in `tests/`.
-
-`tests/long_line_readable_acceptance.rs` is the one that answers the
-**report** rather than a mechanism: the shipped binary, a real PTY, a
-line 200 columns wide in an 80-column terminal, and an assertion that
-the tail marker reaches the host. It bites —
-`scripts/bite HEAD~2 src/editor.rs --test long_line_readable_acceptance`
-against the pre-`aa3cd4d` editor never paints `TAILZQX` in 20s. Its
-`truncate` control (an isolated `init.lua` pinning the mode) is what
-makes that marker discriminating.
-
-**What the PTY test does not prove.** The vterm suites assert on raw
-output bytes; there is no screen model and no `vt100`/`termwiz`/`vte`
-in the workspace. It proves the tail was *written to the terminal*, not
-that it occupies the row a human would point at. That is nonetheless
-the whole of the original report — under truncation those bytes are
-never emitted at all.
-
-**One caveat on the GPU line, stated rather than smoothed over.** One
-`-p pmacs-gpu` run went `227 passed; 1 failed` before every run since
-went 228/0. **The failing test name was not captured** — that command
-was piped through `tail -3`, which kept the summary and discarded the
-failure block. 36 later full runs are clean, 6 under deliberate
-concurrent load. Per `docs/ci-red-signatures.md`'s rerun rule that
-establishes intermittence only, and without a selector it does not even
-establish that. Logged there as **U1**, explicitly *not* matched
-against A1 (also GPU-headless-under-load) because matching requires a
-selector and fragments this occurrence does not have.
-
-**And one more, logged as U2.**
-`process::tests::m6_1_pty_raw_mode_disables_kernel_echo` failed once
-during a full `--tests --no-fail-fast` run and did not reproduce in a
-later full sweep (108 targets, exit 0) or 3 isolated `--lib` runs. It
-is in no registry row, so it is a new incident; leaked
-`pmacs --daemon` processes remain an unexcluded rival explanation.
+Stage 3 put eight broken version assertions on CI by running
+`CLAUDE.md`'s short gate list instead of `docs/agent-handoff.md` §3's,
+which includes a full sweep. **§3 is the authority.** If Stage 4 touches
+`PROTOCOL_VERSION` — an open question, since the GPU may need a wire —
+the sweep must be `cargo test --tests --no-fail-fast` in **both**
+feature configurations. See §3 and §5's protocol-bump bullet.
 
 ### Not in scope
 
-Horizontal scroll in full (Stage 4). `M-q` / auto-fill / reflow. Word
-wrap as a mode value — a named future third choice, not this stage.
-Bidi/RTL. Soft-wrap gutter indicators.
+`M-q` / auto-fill / reflow. Word wrap as a mode value — a named future
+third choice. Bidi/RTL. Soft-wrap gutter indicators.
 
 ## Tree primitive (P5) — MERGED as #217; adoption is the open work
 
