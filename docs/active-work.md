@@ -435,7 +435,7 @@ Whether `docs/ci-red-signatures.md` should grow a short non-row section
 for this class is an open question for its owner, not something this
 lane decided.
 
-## Long lines (QoL arc) — Stage 3 MERGED as #221; Stages 4 AND 5 ahead
+## Long lines (QoL arc) — Stage 3 MERGED as #221; Stage 4 is PR #222 OPEN; Stage 5 ahead
 
 **Rewritten, not removed.** Rule 4 removes a lane when its ARC is done;
 this one has Stage 4 ahead. Stage 3's durable facts are absorbed into
@@ -458,7 +458,33 @@ whatever SHA it records. Recover:
 `git fetch githubsucks && git checkout horizontal-scroll`.
 
 **Status: `docs/horizontal-scroll-framing.md` revision 4 — APPROVED
-2026-08-07. Implementing.**
+2026-08-07. Stage 4 implemented; **PR #222 OPEN**, awaiting review. Do
+not merge unprompted.**
+
+**What Stage 4 shipped**, beyond the `view_left` contract below:
+
+- **`Viewport::visible_cols` — one clip rule, five adopters.** Review
+  found the first version had translated the base glyph walk and
+  nothing else, so syntax styling, diagnostic underlines, search
+  washes, `BufferStyleOverlay` and the selection painter all kept
+  painting at absolute columns: decorations drifting off the characters
+  they describe, only once a window had been scrolled. The selection
+  painter was worst — it asked `pos_to_display` through the live
+  context, which returns `None` left of the edge, so a selection
+  starting off-screen painted **nothing at all**.
+
+  A second review round caught that my reason for letting selection
+  keep its own copy of the rule (a width the viewport supposedly
+  lacked) was **false**: the render viewport is already
+  `rect.size.cols - gutter_w` with an origin past the gutter. It now
+  takes that viewport. `StyleSpanOverlay` / `VirtualCellOverlay` stay
+  untouched — viewport-relative by contract.
+- **The `ui.line-wrap` description now names what `truncate` costs**,
+  closing the #221 gap where only the toggle's status message said it.
+- **`R7`** in `docs/ci-red-signatures.md` — an unrelated, unreproduced
+  `pmacs-gpu` managed-retry `BrokenPipe` under full-sweep load. First
+  incident this session with a complete signature, so a matchable row
+  rather than a `U` note.
 
 **Answered by the user 2026-08-07:**
 
