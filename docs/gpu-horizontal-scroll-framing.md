@@ -1,7 +1,14 @@
 # GPU horizontal scroll — QoL Stage 5
 
-**Status: revision 1 — NOT APPROVED. Five questions open (Q#G1–G5). No
-implementation may begin.**
+**Status: revision 2 — NOT APPROVED. Q#G3 is now ANSWERED from the
+existing font contract; Q#G1/G2/G4 stand with votes; Q#G5 is expanded.
+No implementation may begin.**
+
+Revision 2 answers two review findings that were functional, not
+editorial: §1.1's "three consumers" was incomplete because the manual
+quad/squiggle renderers have **no code-area scissor at all**, and
+Q#G2's "inert under wrap" was too weak — the offset must be **reset to
+zero** on the wrap transition, as the TUI already does.
 
 **This closes the QoL arc.** Stage 1 (#219) made the TUI survive
 terminal zoom; Stage 2 (#220) gave the GUI native zoom; Stage 3 (#221)
@@ -56,21 +63,40 @@ change into two unreviewable ones — but it was justified partly by a
 claim that overstated the difficulty. Recorded here rather than quietly
 dropped.
 
-### 1.1 The real work is the three consumers, exactly as named
+### 1.1 The real work is a shared transform AND a shared clip
 
-Each produces an x relative to `text_left()`, so each needs the same
-offset applied — and the offset must be applied **once**, in one place,
-or they will disagree:
+**Revision 1 said "three consumers" and that was wrong in a way that
+would have shipped a defect.** Shifting the `TextArea` clips *glyphon's*
+text, because glyphon honors `TextBounds`. **The manual quad and
+squiggle renderers have no code-area scissor at all** — nothing stops
+them painting into the gutter, and today nothing needs to, because no
+code-relative x can be negative. Scrolling makes that false.
 
-- **Caret**: `code_byte_px` → `caret_rect` → `code_caret_rect_in_clip`
-  (`:9586`, `:9623`, `:9649`).
-- **Decoration geometry**: `push_glyph_extent_rects` (`:9672`) —
-  washes, squiggles, selection extents.
-- **Hit testing**: `gutter_aware_rel_x` (`:6469`) and the byte-at-pixel
-  path, which must invert the offset.
+So Stage 5 needs **two** shared things, not one offset:
 
-`code_byte_painted` (Stage 3) already intersects with the drawable clip,
-so the scroll indicator inherits the fix rather than needing its own.
+1. **One screen↔code transform.** `code_x → screen_x` is
+   `text_left() - offset_px + code_x`, and hit testing is its exact
+   inverse. Applied once, in one place, or the consumers disagree.
+2. **One code clip rectangle.** `[gutter_clip_left, text_bounds_right)`
+   — the same bounds the `TextArea` gets, expressed for the paths
+   glyphon does not clip. **Every code-relative painter must intersect
+   with it**, and that is a new obligation, not a threading exercise.
+
+The paths that need both:
+
+| path | site | what breaks without the clip |
+|---|---|---|
+| caret rect in clip | `:9698` | **asserts the caret cannot precede `text_left`** — its comment says so explicitly. False after scrolling; the caret paints over the gutter |
+| caret-painted predicate | `:9734` | same missing left-edge test. **So revision 1's claim that the scroll indicator "inherits the fix" is FALSE** — `code_byte_painted` reuses this and would call an off-left byte painted |
+| glyph extent rects | `:9766` | washes, squiggles and selection extents must be **cropped** at the gutter edge, not merely offset |
+| inline math origins | `:9434` | math boxes derive from the code origin and would render into the gutter |
+| completion anchor | `:7606` | anchors off-left must close the popup, exactly as anchors below the band already do |
+
+The two caret sites are the sharpest: `:9698` does not merely lack a
+check, it **documents the absence as safe** (*"right of the gutter isn't
+needed: the caret x can't precede `text_left`"*). A comment asserting an
+invariant this lane deletes is worse than silence, so it must be
+rewritten rather than merely joined by a new test.
 
 ### 1.2 No wire, and that is not an accident
 
@@ -113,19 +139,47 @@ gesture exists — but that is an explicit-scroll surface, which Stage 4
 deliberately deferred, and adding it here would make the frontends
 disagree again in the lane that exists to stop that.
 
-### Q#G3 — what happens under a proportional font?
+**And the wrap transition must RESET the offset to zero, not merely
+ignore it.** Revision 1 said "inert under wrap", which is too weak:
+inertness hides a stale value that reappears the moment the buffer
+toggles back to `truncate`, before any cursor motion. The TUI does not
+rely on inertness — `horizontal_follow` (`src/editor.rs`) assigns
+`view_left = 0` on the wrap branch and returns.
 
-The GPU can resolve a non-monospace family (there is a fallback path
-and `unresolvable_and_proportional_families_fall_back` covers it). With
-a proportional font, "column" has no fixed pixel width, so column↔pixel
-parity with the TUI is not achievable.
+The GPU must specify the **identical lifecycle**, and `apply_line_wrap`
+is where it belongs, beside the reflow it already performs. This is a
+lifecycle requirement with its own witness (Q#G5), not a property that
+falls out of the transform.
 
-*My vote: the offset is pixels and the behavior is defined in pixels*,
-so a proportional font scrolls correctly and simply does not match the
-TUI column-for-column. **Q#G3 asks whether that divergence is
-acceptable, or whether horizontal scroll should be gated to monospace
-families.** I lean to the former; gating a navigation feature on a font
-choice is a worse surprise than an imprecise correspondence.
+### Q#G3 — proportional fonts **ANSWERED: they do not occur**
+
+> **Revision 1 asked the wrong question, from a false premise.** It said
+> "the GPU can resolve a non-monospace family" and proposed accepting a
+> new TUI/GPU divergence to accommodate it.
+>
+> **The GPU does not resolve proportional code fonts.**
+> `family_is_monospace_everywhere` (`pmacs-gpu/src/main.rs:8199`) gates
+> the family across all four weight/style combinations, `apply_font_facts`
+> (`:8235`) falls back when it fails, and
+> `unresolvable_and_proportional_families_fall_back` **requires** that
+> fallback. A proportional family cannot become the code font.
+>
+> So the answer is **monospace-only, by the font contract that already
+> exists** — not a new constraint this lane imposes, and not a
+> divergence to negotiate. Revision 1 would have introduced a
+> font-dependent behavior difference to solve a problem the codebase had
+> already solved, in the lane whose entire purpose is removing
+> unchosen divergence.
+>
+> **The consequence for Q#G5**: the monospace TUI-parity witness is
+> **unconditional** for every font the GPU supports, rather than gated
+> on a font check. That is a stronger test, and it exists only because
+> the premise was corrected.
+
+Pixel storage (Q#G1) is unaffected and still preferred — but its
+column↔pixel conversion is now defined against **the supported
+monospace advance**, which is a well-defined quantity rather than an
+approximation.
 
 ### Q#G4 — does the minimap move?
 
@@ -141,28 +195,57 @@ The GPU suite is headless-render based (`headless_or_skip`), and
 `PMACS_REQUIRE_GPU=1` makes a missing adapter a failure rather than a
 skip.
 
-Sketch, pending Q#G1–G3:
+Sketch, pending Q#G1/G2/G4:
 
-- **The three consumers agree with the shifted origin** — a caret, a
-  decoration rect, and a hit test at a non-zero offset, which is the
-  triple §1.1 names and the one a partial fix would break.
+- **Nothing paints into the gutter.** The strongest available
+  formulation of §1.1's clip obligation, and it covers paths a
+  per-consumer test would miss: at a non-zero offset, **no** quad,
+  squiggle, glyph or math box may occupy a pixel left of
+  `gutter_clip_left`. A whole-frame assertion rather than five
+  per-painter ones, because the failure mode is a painter nobody
+  remembered.
+- **A left-clipped caret predicate.** `code_caret_rect_in_clip` and
+  `caret_painted_in_code_clip` must both report *not painted* for a
+  caret scrolled off-left. This is what makes the scroll indicator
+  correct; revision 1 wrongly assumed it came for free.
+- **Math and rule clipping**: an inline math box and a decoration rule
+  whose origins are left of the edge are cropped or culled, not drawn.
+- **An off-left completion anchor** closes the popup, exactly as an
+  anchor below the band already does.
+- **The three consumers agree with the shifted origin** — caret,
+  decoration rect, and hit test at one non-zero offset, since a partial
+  fix shows up as disagreement between them.
 - **Round-trip hit testing**: pixel → byte → pixel at a non-zero
   offset.
-- **Inert under `wrap`**, mirroring Stage 4's control.
-- **A TUI-parity witness** at a monospace font: the same buffer, the
-  same offset in columns, the same first visible character. This is the
-  test that makes "the frontends agree" checkable rather than asserted
-  — and Q#G3 decides whether it is conditional on the font.
+- **The wrap transition resets to zero** (Q#G2): scroll right under
+  `truncate`, toggle to `wrap`, toggle back, and assert the offset is 0
+  **before any cursor motion**. An inertness-only implementation passes
+  a "wrap looks right" test and fails this one.
+- **A TUI-parity witness**, now **unconditional** (Q#G3): the same
+  buffer and the same column offset yield the same first visible
+  character in both frontends. This is what makes "the frontends agree"
+  checkable rather than asserted.
 
 ---
 
 ## 3. Coherence impact (§20)
 
-- **§16 Semantic Frontend Architecture.** This lane *closes* the
-  divergence Stage 4 opened deliberately. The release notes should say
-  the gap is closed, since Stage 4's said it existed.
-- **Journey step 4, "Understand interface."** Completed for `truncate`
-  in both frontends, which is what the scorecard row should then say.
+- **§16 Semantic Frontend Architecture — the direct target.** This lane
+  *closes* the divergence Stage 4 opened deliberately. The release notes
+  should say the gap is closed, since Stage 4's said it existed.
+- **Journey step 4 is NOT completed by this lane, and revision 1
+  claimed it was.** Step 4 ("Understand interface") is scored on
+  **welcome / help / tutorial discoverability**, and `COHERENCE.md:395`
+  holds it **Partial** for reasons this lane does not touch: `C-h`
+  deletes a word (deliberately, §18) and there is no tutorial.
+  Long-line reachability is interface *comprehension*, which the step
+  benefits from without being scored on.
+
+  So the honest claim is **preserving and improving interface
+  comprehension**, with no scorecard movement — and a scorecard edit
+  here would need new journey evidence, which this lane does not
+  produce. Recorded because writing an unearned ✔ into a scorecard is
+  how a coherence document stops being ground truth.
 - **After this merges, Q#HS6 becomes live**: whether `wrap` remains the
   default is revisitable on use evidence once parity exists. Not part
   of this stage.

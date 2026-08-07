@@ -85,10 +85,10 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-08-07)
 
-- **QoL arc — Stages 1-3 merged (#219, #220, #221); Stages 4 AND 5
-  remain, and the arc closes at Stage 5.** From one daily-driver
-  report: terminal zoom broke TUI rendering and did nothing in the GUI,
-  and a long line was unreadable past the edge.
+- **QoL arc — Stages 1-4 merged (#219, #220, #221, #222); Stage 5
+  remains, and the arc closes there.** From one daily-driver report:
+  terminal zoom broke TUI rendering and did nothing in the GUI, and a
+  long line was unreadable past the edge.
   - **#219** made the grid TUI honor `full_grid`, so a post-resize
     resync blanks the host before repainting.
   - **#220** gave the GUI native zoom over the font preference that
@@ -125,24 +125,54 @@ commands, read `docs/active-work.md` immediately after this file.
       drawable clip. Neither `view_range` (it carries
       `SCROLL_OVERSCAN` past the window) nor `scroll_top` (it ignores
       `code_scroll_residual`) can answer it.
-  - **Stage 4 is horizontal scroll in the TUI; Stage 5 is the GPU**, a
-    split decided rather than inherited (framing Q#HS1) and time-boxed:
-    Stage 5 is the immediately-next QoL lane after Stage 4 merges, and
-    `wrap` stays the default until it lands — which is what keeps the
-    divergence invisible to anyone who has not opted in.
+  - **#222 made `truncate` navigable in the TUI**: moving the cursor
+    past the right edge scrolls the view. **Automatic only** — no
+    commands, no bindings (framing Q#HS2). Durable facts:
+    - **`view_left` is an UNSNAPPED per-window display column, and each
+      line derives its own effective edge.** A setter-time snap cannot
+      exist: one column can bisect a wide glyph on one line and be an
+      ordinary boundary on the next, so no single snapped value is
+      canonical for every visible line, and snapping per line would
+      break vertical alignment. Per-window (not buffer, unlike
+      `ui.line-wrap`) because two panes on one buffer scroll
+      independently.
+    - **The walk stays LINE-absolute; only the emit translates.** Tab
+      expansion depends on the absolute column from the line start, so
+      a walk beginning at the edge puts tab stops in the wrong place.
+    - **Every visible cell has a designated byte**: ordinary character →
+      its own start; bisected wide glyph → the **glyph's start** (its
+      trailing cell paints a styled blank, never a `Continuation`, which
+      would name an off-screen cell); tab expansion → the byte **after**
+      the tab (pre-existing, preserved). The wide glyph rounds backward
+      and the tab forward, on one principle: every cell maps to the byte
+      a user would mean by clicking it.
+    - **`Viewport::visible_cols` is the single clip rule, with five
+      adopters** — syntax/LSP styling, diagnostic underlines, search
+      washes, `BufferStyleOverlay`, and the selection painter. Review
+      found the first version had translated only the base glyph walk,
+      leaving decorations painting at absolute columns; a second round
+      found the selection painter keeping its own copy on a false
+      premise about needing a different width.
+      `StyleSpanOverlay`/`VirtualCellOverlay` are **excluded** by
+      contract: viewport-relative already.
+    - **`view_left` is reset to 0 on the wrap branch**, not merely
+      ignored — inertness would leave a stale offset that reappears on
+      the next toggle back to `truncate`.
+    - **Persisted per leaf at `DESKTOP_VERSION = 1`** via
+      `#[serde(default)]`. Nothing else in `src/desktop.rs` carries that
+      attribute, so removing it makes serde reject every desktop saved
+      before the field existed. A literal v1 JSON fixture guards it.
+    - **No wire.** `view_left` is per-window viewport state, so no
+      protocol message and no version bump.
+  - **Stage 5 is the GPU half** — a split decided rather than inherited
+    (framing Q#HS1), time-boxed: it is the immediately-next QoL lane,
+    and **`wrap` stays the default until it lands**, which keeps the
+    divergence invisible to anyone who has not opted in. Framing in
+    `docs/gpu-horizontal-scroll-framing.md`.
 
-    `truncate` is incomplete without scroll: text past the right edge is
-    currently *unreachable*. **That caveat is NOT in the setting's
-    description** — `builtin/runtime/linewrap.lua:23` says only
-    "truncate at the edge", and the word appears in
-    `ui.toggle-line-wrap`'s status message and a source comment, which
-    a user who sets the mode in `init.lua` never sees. A small
-    user-facing gap shipped in #221; amending the description is a
-    Stage 4 deliverable.
-
-    **Rule 4 must not retire the long-lines lane when Stage 4 merges** —
-    the arc closes at Stage 5. Framing in
-    `docs/horizontal-scroll-framing.md`.
+    **Rule 4 removes the long-lines lane when Stage 5 merges** — the
+    arc closes there, and these bullets are the precondition it depends
+    on.
 
 - **`main` @ `db1bbe9`.** The **tree primitive #217** — `listview` rows
   take optional `depth`/`id`, collapse is primitive-owned, folding is

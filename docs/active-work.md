@@ -438,18 +438,18 @@ lane decided.
 ## Long lines (QoL arc) — Stages 3 and 4 MERGED (#221, #222); Stage 5 closes it
 
 **Rewritten, not removed.** Rule 4 removes a lane when its ARC is done;
-this one has Stage 4 ahead. Stage 3's durable facts are absorbed into
-`docs/agent-handoff.md` §1 — rule 4's precondition, satisfied rather
-than deferred — so what remains here is the Stage 4 plan and only the
-Stage 3 residue that constrains it.
+this one has **Stage 5** ahead. The durable facts of Stages 3 AND 4 are
+both in `docs/agent-handoff.md` §1 — rule 4's precondition, satisfied
+rather than deferred — so what remains here is the Stage 5 plan and
+only the residue from earlier stages that constrains it.
 
-> **RULE 4 DOES NOT APPLY AT STAGE 4's MERGE.** The arc closes at
-> **Stage 5** (GPU horizontal scroll), not Stage 4. Q#HS1 split the GPU
-> out deliberately and time-boxed it; retiring this lane when the TUI
-> half merges would orphan exactly the half the time box exists to
-> guarantee, and would do so while `truncate` is still a dead end in
-> the GUI. **Do not remove this block until Stage 5 has merged**, and
-> read Q#HS1's four time-box items before concluding otherwise.
+> **RULE 4 APPLIES AT STAGE 5's MERGE, AND NOT BEFORE.** The arc closes
+> at Stage 5 (GPU horizontal scroll). Q#HS1 split the GPU out
+> deliberately and time-boxed it; retiring this lane at Stage 4's merge
+> would have orphaned exactly the half the time box exists to
+> guarantee, while `truncate` was still a dead end in the GUI. **Do not
+> remove this block until Stage 5 has merged** — and when it does, the
+> handoff bullets are what makes removal legitimate rather than lossy.
 
 **Branch `horizontal-scroll`**, based on `githubsucks/main` @ `02f3ec3`
 (the #221 merge). `githubsucks/horizontal-scroll` is the authoritative
@@ -559,7 +559,7 @@ and a source comment, neither of which a user sees if they set the mode
 in `init.lua`. **A real, small user-facing gap shipped in #221**;
 amending the description is now a Stage 4 deliverable (framing §6).
 
-### What Stage 3 shipped that Stage 4 must live with
+### What Stages 3 and 4 shipped that Stage 5 must live with
 
 - **`ui.line-wrap` is BUFFER-local** (`ConfigKind::Enum`,
   `wrap`/`truncate`, default `wrap`). Q#LL2 recorded the consequence
