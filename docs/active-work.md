@@ -435,7 +435,7 @@ Whether `docs/ci-red-signatures.md` should grow a short non-row section
 for this class is an open question for its owner, not something this
 lane decided.
 
-## Long lines (QoL arc) — Stage 3 MERGED as #221; Stage 4 is PR #222 OPEN; Stage 5 ahead
+## Long lines (QoL arc) — Stages 3 and 4 MERGED (#221, #222); Stage 5 closes it
 
 **Rewritten, not removed.** Rule 4 removes a lane when its ARC is done;
 this one has Stage 4 ahead. Stage 3's durable facts are absorbed into
@@ -457,9 +457,32 @@ tip — the ref, not a SHA, since any edit to this block advances past
 whatever SHA it records. Recover:
 `git fetch githubsucks && git checkout horizontal-scroll`.
 
-**Status: `docs/horizontal-scroll-framing.md` revision 4 — APPROVED
-2026-08-07. Stage 4 implemented; **PR #222 OPEN**, awaiting review. Do
-not merge unprompted.**
+**Stage 4 MERGED as #222** (`2b56d16`). Long lines are now reachable
+**in the TUI**; the GUI half is Stage 5.
+
+**Branch `gpu-horizontal-scroll`**, based on `githubsucks/main` @
+`2b56d16`. `githubsucks/gpu-horizontal-scroll` is the authoritative tip
+— the ref, not a SHA. Recover:
+`git fetch githubsucks && git checkout gpu-horizontal-scroll`.
+
+**Status: `docs/gpu-horizontal-scroll-framing.md` revision 1 — NOT
+APPROVED, five questions open (Q#G1–G5). No implementation may begin.**
+
+**Its first finding corrects Stage 4's framing.** §1.3 there said the
+GPU "needs a mechanism that does not exist", and I endorsed the
+Stage 4/5 split partly on that basis. Half of it was right —
+`Scroll::horizontal` really is discarded, because glyphon 0.11 never
+applies it — but the document `TextArea` already carries an explicit
+`left` origin and a `TextBounds` clip, and shifting that origin is the
+same "paint from 0, clip at the edge" shape the grid uses. The split
+stays right (the three consumers below are real work), but it was
+justified partly by an overstatement.
+
+The real work is applying **one** offset to the three consumers Stage
+4's framing did name correctly: the caret (`code_byte_px`), decoration
+geometry (`push_glyph_extent_rects`), and hit testing
+(`gutter_aware_rel_x`). **No wire and no version bump** — the GPU owns
+its viewport locally, exactly as it owns `scroll_top`.
 
 **What Stage 4 shipped**, beyond the `view_left` contract below:
 
