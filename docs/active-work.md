@@ -434,7 +434,7 @@ a job executed — **the log is**.
 Whether `docs/ci-red-signatures.md` should grow a short non-row section
 for this class is an open question for its owner, not something this
 lane decided.
-## Long lines (QoL Stage 3) — IMPLEMENTED, gates green; PR not yet open
+## Long lines (QoL Stage 3) — PR #221 OPEN, awaiting review
 
 **Branch `long-lines`**, originally based on `githubsucks/main` @
 `218d2e7` (the #219 merge); **main merged in at #220's landing**, so
@@ -445,7 +445,9 @@ not a SHA, since any edit to this block advances past whatever SHA it
 records. Recover: `git fetch githubsucks && git checkout long-lines`.
 
 **This block was written with the lane's first commit, before any PR
-exists** — the standing correction from #171, #215 and #220.
+existed** — the standing correction from #171, #215 and #220. **PR
+#221** opened 2026-08-07 against `main` @ `912bf57`; the number is
+recorded here rather than left to be reconstructed from the branch.
 
 - **Framing `docs/long-lines-framing.md` revision 20, APPROVED.** All
   eight questions settled, §5d.6 resolved. Revision 20 **withdraws
