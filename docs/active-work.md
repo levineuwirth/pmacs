@@ -449,9 +449,50 @@ tip — the ref, not a SHA, since any edit to this block advances past
 whatever SHA it records. Recover:
 `git fetch githubsucks && git checkout horizontal-scroll`.
 
-**Status: framing, not approved.** `docs/horizontal-scroll-framing.md`
-revision 1. No implementation may begin until its questions are
-answered.
+**Status: framing, NOT approved.** `docs/horizontal-scroll-framing.md`
+revision 2. No implementation may begin.
+
+**Answered by the user 2026-08-07:**
+
+- **Q#HS1 — the GPU is Stage 5, not Stage 4.** A conscious, bounded
+  divergence rather than a repeat of Stage 3's accidental one. The time
+  box is concrete: Stage 5 is the *immediately-next* QoL lane after
+  Stage 4 merges, `wrap` stays the default until it lands, Stage 4's
+  release notes state the asymmetry, and the `truncate` affordances
+  name the GUI gap while it exists.
+- **Q#HS2 — automatic only.** The cursor-visibility pass gains a
+  horizontal component; no commands, no bindings, no new interaction
+  island. Explicit `ui.scroll-*` is deliberately out.
+- **Q#HS6 — `wrap` stays the default.** Coupled to Q#HS1: with the GPU
+  deferred, a `truncate` default would ship a mode that is navigable in
+  the TUI and a **dead end in the GUI** for anyone who never opened the
+  setting. Revisit after Stage 5, on use evidence.
+
+**Still blocking:**
+
+- **Q#HS7 (NEW) — what IS `view_left`?** Revision 1 decided what moves
+  the viewport without saying what its offset *is* — the same omission
+  as shipping `WrapMode` with no `DisplayCoord`. Four coupled parts:
+  the unit; which columns may be a left edge; the snap rule for an
+  invalid one; and the invariant rendering and coordinate mapping
+  share. Without the last, **a painter that clips where the mapper does
+  not puts clicks on the wrong character**, silently, only on lines
+  wide enough to scroll. §4's sketch has no oracle until this is
+  answered.
+- **Q#HS5 — does `view_left` survive a restart?** Vote: yes, defaulted,
+  no `DESKTOP_VERSION` bump — *after* confirming `SavedLeaf`'s
+  deserializer tolerates a missing field, which is a claim about serde
+  and not about the struct shape §1.4 cites.
+- **Q#HS3** is re-confirmed rather than open (per-window, per Q#LL2);
+  **Q#HS4** is deferred, live only if explicit commands arrive.
+
+**One correction carried into revision 2.** Revision 1 claimed the
+"unreachable past the edge" caveat is recorded in the setting's
+description. It is not — `builtin/runtime/linewrap.lua:23` says only
+"truncate at the edge"; the word appears in the toggle's status message
+and a source comment, neither of which a user sees if they set the mode
+in `init.lua`. **A real, small user-facing gap shipped in #221**;
+amending the description is now a Stage 4 deliverable (framing §6).
 
 ### What Stage 3 shipped that Stage 4 must live with
 
@@ -512,10 +553,21 @@ answered.
 
 Stage 3 put eight broken version assertions on CI by running
 `CLAUDE.md`'s short gate list instead of `docs/agent-handoff.md` §3's,
-which includes a full sweep. **§3 is the authority.** If Stage 4 touches
-`PROTOCOL_VERSION` — an open question, since the GPU may need a wire —
-the sweep must be `cargo test --tests --no-fail-fast` in **both**
-feature configurations. See §3 and §5's protocol-bump bullet.
+which includes a full sweep. **§3 is the authority.**
+
+**Stage 4 should not need a protocol bump at all** — Q#HS1 puts the GPU
+in Stage 5, and `view_left` is per-window TUI state with no wire. If
+that changes, §3's protocol-bump form is
+`cargo test --workspace --no-fail-fast -- --skip basedpyright` in
+**both** feature configurations.
+
+**`--workspace`, not `--tests`**, and the distinction is not cosmetic:
+`--tests` selects 108 targets where `--workspace` selects 110, and the
+two it drops are **`pmacs_protocol` and `pmacs_gpu`**. Stage 3's own
+*remediation* sweep used `--tests`, so it never ran `pmacs-protocol`'s
+25 tests — including the `scroll::classify` tests that lane had just
+written. They passed, but by luck, and a correction that reproduces the
+shape of its own mistake is worth naming.
 
 ### Not in scope
 

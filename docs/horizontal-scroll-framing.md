@@ -1,7 +1,8 @@
 # Horizontal scroll — QoL Stage 4
 
-**Status: revision 1 — NOT APPROVED. Six questions open (Q#HS1–HS6).
-No implementation may begin.**
+**Status: revision 2 — NOT APPROVED. Q#HS1, HS2 and HS6 answered by the
+user (2026-08-07); Q#HS3–HS5 stand; Q#HS7 is NEW and BLOCKING. No
+implementation may begin.**
 
 This closes the QoL arc opened by one daily-driver report. Stage 1
 (#219) made the TUI survive terminal zoom; Stage 2 (#220) gave the GUI
@@ -12,11 +13,20 @@ default. Stage 4 is the other half of the user's own sentence:
 > should also be something that the user can configure, whether to wrap
 > or scrollable.
 
-Stage 3 shipped the *mode*. It did not ship the *navigation*, and said
-so: under `truncate`, text past the right edge is not merely off-screen
-but **unreachable**. That is recorded in the setting's description and
-in `ui.toggle-line-wrap`'s status message. Stage 4 removes that caveat
-or the caveat stands permanently.
+Stage 3 shipped the *mode*. It did not ship the *navigation*: under
+`truncate`, text past the right edge is not merely off-screen but
+**unreachable**.
+
+**Revision 1 claimed that caveat "is recorded in the setting's
+description". It is not.** `builtin/runtime/linewrap.lua:23` says only
+*"How a line wider than the window is shown: wrap onto following rows,
+or truncate at the edge."* The word "unreachable" appears in
+`ui.toggle-line-wrap`'s status message and in a source comment — neither
+of which a user sees if they set `ui.line-wrap = "truncate"` in
+`init.lua` and never invoke the toggle. **That is a real, if small,
+user-facing gap shipped in #221**, and §6 makes amending the
+description a Stage 4 deliverable rather than leaving the false claim
+standing.
 
 ---
 
@@ -29,28 +39,26 @@ same `CellGrid`; every claim below carries a citation for that reason.
 ### 1.1 There is no horizontal scroll anywhere
 
 No `view_left`, `scroll_left`, or `hscroll` in `src/` or `builtin/`.
-This is greenfield. The window carries `view_top`, `cursor`, and
-`goal_col` (`src/window.rs:374-376`) and nothing horizontal.
-
-That matters for estimating: this is not "extend the vertical
-mechanism sideways". There is no shared abstraction to extend.
+The window carries `view_top`, `cursor`, and `goal_col`
+(`src/window.rs:374-376`) and nothing horizontal. This is greenfield —
+not "extend the vertical mechanism sideways", because there is no
+shared abstraction to extend.
 
 ### 1.2 The grid walk starts every line at column 0
 
 `paint_line` (`src/text_view.rs:266`) walks from the line's first
-character with no offset parameter, exactly as it did before Stage 3 —
+character with no offset parameter, exactly as before Stage 3 —
 wrapping changed *where rows break*, not *where the walk starts*.
 `place_of_byte` and `byte_at_place` have the same shape.
 
-So `view_left` enters the same functions Stage 3 just rewrote. **The
-wrap rule must stay written exactly once** (`advance_wrapped`,
-`src/text_view.rs:396`); a second copy differing by an offset is the
+So `view_left` enters the same functions Stage 3 just rewrote, and
+**the wrap rule must stay written exactly once** (`advance_wrapped`,
+`src/text_view.rs:396`). A second copy differing by an offset is the
 defect Stage 3 spent its review budget avoiding.
 
 ### 1.3 The GPU cannot use cosmic-text's horizontal scroll
 
-**This is the finding most likely to invert the cost estimate, and it
-is the Stage 4 analog of revision 1's error — so it leads.**
+**The finding most likely to invert the cost estimate, so it leads.**
 
 `Scroll::horizontal` is discarded throughout the GPU, and not by
 oversight: **glyphon 0.11 never applies it when placing glyphs.**
@@ -58,191 +66,260 @@ Documented at `pmacs-gpu/src/main.rs:1611`, `:6316`, `:8020`, and
 *asserted* by tests at `:16266` (`"horizontal is discarded"`), `:16337`,
 `:16737`.
 
-So the GPU's half of Stage 4 cannot be "set the scroll and reshape". It
-needs a different mechanism — a shifted text origin at paint time,
-adjusted clip bounds, or something else — and that mechanism has to
-interact correctly with the gutter, the caret (`code_byte_px`),
-decoration geometry (`push_glyph_extent_rects`), and hit testing
-(`gutter_aware_rel_x`), each of which currently assumes x starts at
-`text_left()`.
+The GPU's half therefore cannot be "set the scroll and reshape". It
+needs a mechanism that does not exist — a shifted text origin at paint
+time, adjusted clip bounds, or something else — interacting correctly
+with the gutter, the caret (`code_byte_px`), decoration geometry
+(`push_glyph_extent_rects`), and hit testing (`gutter_aware_rel_x`),
+each of which assumes x starts at `text_left()`.
 
-**Q#HS1 asks whether the GPU is in scope for Stage 4 at all.**
+**Answered in Q#HS1: the GPU is Stage 5.**
 
 ### 1.4 `view_top` is persisted; a `view_left` would want to be
 
 `SavedLeaf` carries `path`, `cursor`, and `view_top` at
-`DESKTOP_VERSION = 1` (`src/desktop.rs:33`, `:276-280`). The restore
-path clamps `view_top` against the line count (`:512`).
-
-A horizontal offset that does not survive restart is defensible; one
-that does needs a defaulted field or a version bump. **Q#HS5.**
+`DESKTOP_VERSION = 1` (`src/desktop.rs:33`, `:276-280`); the restore
+path clamps `view_top` against the line count (`:512`). **Q#HS5.**
 
 ### 1.5 The cursor-follow hazard is already documented
 
 `scroll_window` (`src/editor.rs:3628`) carries the cursor with a
-vertical scroll, and its comment says exactly why:
+vertical scroll, and its comment says why:
 
 > The cursor must follow the scroll: the renderer has an "auto-scroll
 > to keep cursor visible" pass that would otherwise snap `view_top`
 > straight back to wherever the cursor sits, so the user's mouse-wheel
 > scroll would feel stuck after one notch.
 
-A horizontal analog hits the identical problem. Stage 3's Q#LL3
-deferred the choice here deliberately: **does explicit horizontal
-scroll drag the cursor, or does the next motion snap back?** That is
-**Q#HS4**.
+Under Q#HS2's answer (automatic-only) this pass is not a hazard but
+**the entire mechanism** — Stage 4 adds its horizontal component. The
+hazard returns with explicit commands, which is why Q#HS4 is deferred
+rather than closed.
 
 ### 1.6 `goal_col` exists and its relationship to `view_left` is unexamined
 
 `goal_col` (`src/window.rs:376`) remembers a target column across
-vertical motion and is cleared at seven sites in `src/editor.rs`. It is
-a *column within the line*, not a viewport offset — but both are
-"horizontal position" state on the same window, and a design that
-ignores the interaction will produce a cursor that jumps on the first
-vertical motion after a horizontal scroll. Called out so it is designed
-rather than discovered.
+vertical motion, cleared at seven sites in `src/editor.rs`. It is a
+*column within the line*; `view_left` is a *viewport offset*. Both are
+horizontal state on the same window, and a design ignoring the
+interaction produces a cursor that jumps on the first vertical motion
+after a horizontal scroll. Feeds **Q#HS7**.
 
 ---
 
-## 2. The scope question, stated before the answers
+## 2. The scope fact, stated before the answers
 
-Stage 3 ended with `wrap` as the default. **Under `wrap`, horizontal
-scroll is meaningless** — there is nothing past the right edge. So
-Stage 4's entire surface is conditional on a buffer-local mode.
-
-That is a coherence fact, not only an implementation one: one
-user-facing concept ("how do I see the rest of this line?") now has two
-disjoint answers depending on a setting, and the commands, key
-bindings, and status affordances for the `truncate` half do not exist
-under `wrap`. `COHERENCE.md` §20 requires this be stated. **Q#HS6.**
+**Under `wrap`, horizontal scroll is meaningless** — nothing sits past
+the right edge. So Stage 4's entire surface is conditional on a
+buffer-local mode: one user-facing question ("how do I see the rest of
+this line?") gets two disjoint answers depending on a setting. Stated
+here because `COHERENCE.md` §20 requires it, and answered in Q#HS6.
 
 ---
 
-## 3. Open questions
+## 3. Questions
 
-### Q#HS1 — is the GPU in scope for Stage 4?
+### Q#HS1 — is the GPU in scope? **ANSWERED: no — Stage 5**
 
-The strongest argument for **yes**: Stage 3's entire thesis was that
-the two frontends should stop disagreeing by accident. Shipping
-horizontal scroll in the TUI only would recreate exactly the divergence
-`ui.line-wrap` was built to close — a `truncate` buffer would be
-navigable in one frontend and not the other.
+> **Answered 2026-08-07 (user):** split the GPU work into Stage 5.
+> *"This is a conscious, bounded divergence, not a repeat of Stage 3's
+> accidental one. Make the time box concrete and keep `wrap` default
+> until parity lands."*
 
-The strongest argument for **no, name it Stage 5**: §1.3. The GPU needs
-a mechanism that does not exist yet, touching caret placement,
-decoration geometry, and hit testing. That is plausibly larger than the
-TUI half, and bundling them makes one reviewable change into two
-unreviewable ones.
+The distinction is the load-bearing part. Stage 3's defect was never
+"the frontends differ" — it was "the frontends differ and **nobody
+chose that**". A divergence that is decided, recorded, and bounded is a
+different object from one inherited from a library default.
 
-**My vote: split it, and say so in the setting's description.** Ship
-the TUI half as Stage 4 and the GPU half as Stage 5, with the
-divergence *documented and time-boxed* rather than accidental — which
-is the distinction Stage 3 actually drew. Stage 3's defect was never
-"the frontends differ"; it was "the frontends differ and nobody chose
-that". But this is a product call about shipping a known asymmetry, and
-it is not mine to make.
+**The time box, concrete** (the user's requirement, and the part that
+makes this a decision rather than a deferral):
 
-### Q#HS2 — what moves the viewport?
+1. **Stage 5 is the immediately-next QoL lane after Stage 4 merges** —
+   not backlogged behind another arc. If something displaces it, that
+   displacement is itself a decision to record here.
+2. **`wrap` stays the default until Stage 5 lands** (independently
+   reaffirmed in Q#HS6). This is what keeps the divergence invisible to
+   anyone who has not opted in: a default-configuration user is never
+   exposed to it.
+3. **Stage 4's release notes must state the asymmetry** — horizontal
+   scroll works in the TUI and not yet the GUI — in the same way #221's
+   had to state the word-wrap loss.
+4. **While the gap exists, the `truncate` affordances must name it.**
+   §6's description amendment is where that lands, so a GUI user
+   choosing `truncate` learns the limitation from the setting rather
+   than from the behavior.
 
-Options, not mutually exclusive:
+### Q#HS2 — what moves the viewport? **ANSWERED: automatic only**
 
-- **Automatic only** — the cursor-visibility pass gains a horizontal
-  component, so moving the cursor past the edge scrolls the view. No
-  new commands, no new bindings. Smallest surface; makes a long line
-  readable by arrowing along it.
-- **Explicit commands** — `ui.scroll-left` / `ui.scroll-right`, bound
-  or not, plus the `goal_col` and cursor-follow questions.
-- **Both**, which is what every editor with this feature ships.
+> **Answered 2026-08-07 (user):** *"Automatic-only first. It makes the
+> report's text reachable with no new command surface."*
 
-**My vote: automatic first, as its own stage-within-a-stage.** It is
-the smallest change that makes the reported text *reachable*, and it
-needs no binding decisions. Explicit commands can follow with the
-evidence of use.
+The cursor-visibility pass gains a horizontal component, so moving the
+cursor past the edge scrolls the view. No new commands, no binding
+decisions, no new interaction island.
 
-### Q#HS3 — per window or per buffer?
+Explicit `ui.scroll-left` / `ui.scroll-right` are **not** in Stage 4.
+They can follow with evidence of use, and they are what re-opens Q#HS4.
+
+### Q#HS3 — per window or per buffer? **NOT ACTUALLY OPEN**
 
 `view_left` is **per window**, unambiguously: two panes on one buffer
 must scroll independently, exactly as they already hold independent
-`view_top`s (`src/desktop.rs:92`). Stage 3's Q#LL2 already recorded
-this and accepted the consequence — the *mode* is buffer-local while
-the *offset* is per-window, so one user-facing concept spans two
-scopes.
+`view_top`s (`src/desktop.rs:92`). Stage 3's Q#LL2 recorded this and
+accepted the consequence — the *mode* is buffer-local while the
+*offset* is per-window, so one user-facing concept spans two scopes.
 
-**This is not really open**; it is listed so the accepted split is
-re-confirmed at the moment it takes effect rather than inherited
-silently.
+Listed so the accepted split is re-confirmed where it takes effect
+rather than inherited silently.
 
-### Q#HS4 — does the cursor follow an explicit scroll?
+### Q#HS4 — does the cursor follow an explicit scroll? **DEFERRED, not answered**
 
-Only live if Q#HS2 includes explicit commands. §1.5 has the precedent
-and the hazard. **My vote: follow, matching `scroll_window`** — the
-existing snap-back pass makes the alternative feel broken, and the
-vertical behavior is already the answer users have been trained on
-*in this editor*.
+Not live under Q#HS2's answer: automatic-only means every viewport move
+already originates from a cursor move. §1.5 holds the precedent and the
+hazard for whenever explicit commands arrive.
 
-### Q#HS5 — does `view_left` survive a restart?
+Deferring rather than deleting, because the hazard is real and
+rediscovering it costs more than carrying the paragraph.
+
+### Q#HS5 — does `view_left` survive a restart? **OPEN**
 
 `view_top` does (§1.4). Consistency argues yes; a defaulted field
 avoids a `DESKTOP_VERSION` bump.
 
-**My vote: yes, defaulted, no version bump** — but confirm that
+**My vote: yes, defaulted, no version bump** — but **confirm
 `SavedLeaf`'s deserializer tolerates a missing field before relying on
-it, because §1.4 is a citation of the *shape*, not of serde's
-behavior on it.
+it.** §1.4 cites the struct's *shape*, not serde's behavior on it, and
+that gap is exactly the kind §1.3 exists to warn about.
 
-### Q#HS6 — what does the coherence statement say?
+### Q#HS6 — the coherence statement **ANSWERED: keep `wrap` default**
 
-Per `COHERENCE.md` §20 this framing must state its coherence impact.
-The honest version is uncomfortable: Stage 4 adds capability that
-exists **only under a non-default mode**, which is a new conditional
-surface rather than a uniform improvement. Journey step 4 ("Understand
-interface") is the row it serves.
+> **Answered 2026-08-07 (user):** *"Keep `wrap` as default for now.
+> Revisit only after GPU parity and use evidence; changing to
+> `truncate` before Stage 5 would make the default unreachable in the
+> GUI."*
 
-**Q#HS6 is whether that is acceptable, or whether the arc should
-instead reconsider the default.** Naming the alternative honestly: if
-horizontal scroll makes `truncate` genuinely good, `wrap` being the
-default is a choice worth re-examining rather than treating as settled
-— and Stage 3 chose it partly *because* scroll did not exist.
+That last clause is the argument revision 1 missed. I had framed this
+as "if scroll makes `truncate` good, the default deserves
+re-examination" — but with the GPU deferred to Stage 5, a `truncate`
+default would ship a mode that is **navigable in the TUI and a dead end
+in the GUI**, for every user who never opened the setting. Q#HS1 and
+Q#HS6 are therefore coupled: the split is only safe *because* the
+default does not move.
+
+Revisit after Stage 5, on use evidence, not before.
+
+### Q#HS7 — what IS `view_left`? **NEW, BLOCKING**
+
+**Revision 1 decided what moves the viewport without ever saying what
+the viewport offset is.** That is the same omission Stage 3 would have
+made had it shipped `WrapMode` without `DisplayCoord`: the mode is
+useless until the coordinate contract is written down, and the contract
+is where every sharp edge lives.
+
+Revision 1's verification sketch named tabs and wide characters. **It
+had no oracle for either**, because nothing defined what a left edge
+is. Four things must be settled together:
+
+**(a) The unit.** Candidates: a source byte offset within the line; a
+display column (cells from the line start, after tab expansion); or a
+cell boundary with an explicit validity rule.
+
+*My vote: display column.* Tab expansion depends on the absolute column
+from the line start, so the walk must begin at column 0 and compute
+forward **regardless** of the offset — which makes a byte offset buy
+nothing and lose tab correctness. Starting at 0 and suppressing paint
+until `col >= view_left` preserves tab stops **for free**, and costs no
+more than `paint_line` already pays under wrapping.
+
+**(b) Which columns may be a left edge.** A tab straddling the edge is
+unambiguous: its expansion is width-1 spaces, so the remaining ones
+paint. **A wide (width-2) glyph is not** — a grid cannot paint half of
+one.
+
+*My vote: a left edge may not fall inside a wide glyph's cells.*
+
+**(c) The snap rule when an invalid edge is requested.** Stage 3's
+coordinate contract is *"identity on canonical inputs; otherwise
+projection to the contract's **designated** canonical representative"* —
+designated, not nearest, because the direction differs per function and
+"nearest" hides that.
+
+*My vote: snap toward the line start.* Snapping left can only reveal a
+character, never hide one that was visible; snapping right can hide the
+very glyph the user scrolled to reach. And snapping at the moment
+`view_left` is **set** — rather than clipping in the painter — keeps
+one canonical value that both painter and mapper read, instead of two
+that can disagree.
+
+**(d) The invariant rendering and coordinate mapping share.** For a
+given `view_left`, `byte_at_place` must invert `place_of_byte` on every
+canonical input, and `paint_line` must place exactly the bytes
+`place_of_byte` claims. If the painter clips where the mapper does not,
+**clicks land on the wrong character** — silently, and only for lines
+wide enough to scroll.
+
+*This is the invariant the verification sketch needs as its oracle*,
+and it is why Q#HS7 blocks: §4 cannot be written until it exists.
 
 ---
 
-## 4. Verification sketch (not final — depends on Q#HS1/HS2)
+## 4. Verification sketch (depends on Q#HS7)
 
-- Cell-level tests at several window widths with a non-zero offset —
-  which is the Stage 4 case Stage 3's sketch explicitly refused to
-  write, because "at non-zero offset" was a `view_left` requirement
-  smuggled into a wrap lane.
+- Cell-level tests at several window widths **at non-zero offset** —
+  the case Stage 3's sketch explicitly refused, because "at non-zero
+  offset" was a `view_left` requirement smuggled into a wrap lane.
 - **A `wrap` control for every claim**, asserting the wrap path is
-  byte-identical with a horizontal offset present, since under `wrap`
-  the offset must be inert.
+  byte-identical with a horizontal offset present. Under `wrap` the
+  offset must be **inert**, not merely harmless.
 - Round-trip identity for `place_of_byte` / `byte_at_place` at non-zero
-  offset, including the wide-character and tab cases Stage 3 settled at
-  offset 0.
+  offset — the Q#HS7(d) invariant, walked exhaustively over a short
+  line rather than sampled, as Stage 3 established.
+- **The Q#HS7(b)/(c) cases, which have no oracle until it is
+  answered**: a wide glyph straddling the left edge; a tab whose
+  expansion straddles it; a snap request landing inside each.
 - **A PTY acceptance test for reachability**, following
-  `tests/long_line_readable_acceptance.rs`: in `truncate`, the tail of
-  a long line must reach the terminal *after* whatever Q#HS2 chooses
-  moves the view. That file's `truncate` control currently asserts the
-  tail is **absent** — Stage 4 must update it, and that update is
-  itself the proof the caveat is gone.
-- If the GPU is in scope: a headless witness that the caret, a
-  decoration, and a hit test all agree with the shifted origin — the
-  three consumers §1.3 names.
+  `tests/long_line_readable_acceptance.rs`. That file's `truncate`
+  control currently asserts the tail is **absent** — Stage 4 must
+  update it, and **that update is itself the proof the caveat is
+  gone**.
+- **No GPU witness in Stage 4** (Q#HS1). Stage 5 owes one that the
+  caret, a decoration, and a hit test all agree with the shifted
+  origin — the three consumers §1.3 names.
 
 ---
 
 ## 5. Coherence impact (§20 requirement)
 
-- **Journey step 4, "Understand interface — Partial."** Stage 3's
-  framing said the scorecard should name "a line that cannot be read in
-  full" against this step. Stage 4 completes that only for `truncate`.
-- **§16 Semantic Frontend Architecture.** Q#HS1 decides whether this
-  lane *narrows* or *widens* frontend divergence. If the GPU is
-  deferred, the divergence is deliberate and time-boxed — which is
-  materially different from Stage 3's inherited accident, and the
-  release notes must say which kind it is.
-- **No new interaction island** if Q#HS2 lands automatic-only.
-  Explicit commands would go in the ordinary command registry, not a
-  new surface.
-- **Config registry adoption**: none new expected. Stage 4 navigates
-  the mode Stage 3 declared; if it needs a setting, that is a signal
-  the design has drifted.
+- **Journey step 4, "Understand interface — Partial."** Stage 4
+  completes "a line that cannot be read in full" for `truncate` **in
+  the TUI only**. The scorecard row should say so rather than reading
+  as closed.
+- **§16 Semantic Frontend Architecture.** Q#HS1 *widens* frontend
+  divergence for the duration of the Stage 4→5 gap. Per the answer,
+  this is deliberate and time-boxed, and materially different from
+  Stage 3's inherited accident — but the release notes must say which
+  kind it is, or a reader cannot tell them apart.
+- **No new interaction island** — automatic-only adds no command
+  surface (Q#HS2).
+- **Config registry: no new settings expected.** Stage 4 navigates the
+  mode Stage 3 declared. If it needs a setting, that is a signal the
+  design has drifted, not a feature.
+
+---
+
+## 6. A Stage 4 deliverable that is not scroll
+
+**Amend `ui.line-wrap`'s description** (`builtin/runtime/linewrap.lua`).
+Today it says only *"…or truncate at the edge"*, which does not tell a
+user that the edge is a wall. The honest text depends on where Stage 4
+lands:
+
+- **Before Stage 4**, `truncate` means unreachable in both frontends.
+- **After Stage 4**, it means reachable in the TUI and unreachable in
+  the GUI until Stage 5 (Q#HS1's time box, item 4).
+- **After Stage 5**, the caveat is gone and the sentence should shrink
+  back.
+
+Carried here rather than filed elsewhere because it is the one place
+the arc's user-visible honesty is currently wrong, and revision 1
+asserted it was already right.

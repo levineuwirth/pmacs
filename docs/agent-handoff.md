@@ -467,11 +467,14 @@ someone forgot.
   why this bullet exists rather than just a pointer. Plain
   `--workspace` stops at the first failing target and builds one
   feature configuration, so it would have shown one or two of the
-  eight. **On any protocol bump run `cargo test --tests --no-fail-fast`
-  in BOTH configurations** — `--no-fail-fast` for the stop-at-first
-  behavior, `--features crdt` because three of the eight were
-  crdt-gated real-daemon tests asserting on a live socket's negotiated
-  version, which is the blindness the bullet below already names.
+  eight. §3 now carries the strengthened form: **`--workspace
+  --no-fail-fast -- --skip basedpyright` in BOTH configurations.**
+
+  **Note `--workspace`, not `--tests`** — the lane's own remediation
+  sweep used `--tests`, which silently drops the `pmacs_protocol` and
+  `pmacs_gpu` targets. On a *protocol* bump that omits the protocol
+  crate's tests, which is how a correction can reproduce the shape of
+  the mistake it is correcting.
 
   **Sort the failures before fixing them.** A *tripwire*
   (`assert_eq!(PROTOCOL_VERSION, N)`) is meant to fire and takes a
@@ -2124,17 +2127,33 @@ this one continues. Long-lines Stage 3 followed the short form and put
 eight broken version assertions on CI. When the two disagree, **this
 list wins**.
 
-**Touching `PROTOCOL_VERSION` replaces the sweep line with:**
+**Touching `PROTOCOL_VERSION` STRENGTHENS the sweep line. It does not
+replace it:**
 
 ```
-cargo test --tests --no-fail-fast
-cargo test --tests --features crdt --no-fail-fast
+cargo test --workspace --no-fail-fast -- --skip basedpyright
+cargo test --workspace --features crdt --no-fail-fast -- --skip basedpyright
 ```
 
-Plain `--workspace` stops at the first failing target and builds one
-feature configuration, so on a version bump it reports one or two of
-what may be many. See §5's protocol-bump bullet for how to sort the
-failures it finds — some are tripwires doing their job.
+Every part is load-bearing:
+
+- **`--workspace`, never `--tests`.** `--tests` selects 108 targets
+  where `--workspace` selects 110, and the two it drops are
+  **`pmacs_protocol` and `pmacs_gpu`**. On a protocol bump, dropping
+  the protocol crate's own unit tests is precisely the wrong loss.
+  Long-lines Stage 3 swept with `--tests` and so never ran
+  `pmacs-protocol`'s 25 tests — including the `scroll::classify` tests
+  that same lane had just written. They passed, but by luck.
+- **`--no-fail-fast`**, because cargo stops at the first failing
+  target: without it a bump that breaks eight assertions reports one.
+- **`--features crdt`**, because crdt-gated real-daemon tests assert on
+  a live socket's negotiated version and are invisible otherwise.
+- **`-- --skip basedpyright`** for the same reason the line above
+  carries it.
+
+See §5's protocol-bump bullet for how to sort the failures this finds —
+some are tripwires doing their job, and one pin
+(`ADVERTISED_PROTOCOL_VERSION`) must never be edited at all.
 
 Machine-specific caveats — re-verify on a machine you haven't used
 before trusting them:
