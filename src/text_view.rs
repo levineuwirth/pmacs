@@ -263,6 +263,14 @@ impl TextView {
         let origin = viewport.cell_origin;
         let wrapping = viewport.wrap == WrapMode::Wrap;
 
+        // A zero-width content area has no cell to paint into. Bail
+        // before the walk rather than inside it: under `Wrap` the first
+        // `col >= max_cols` test is true immediately, so the walk would
+        // advance a row and then index column 0 of a zero-width grid.
+        // Reachable whenever the gutter consumes the window's width.
+        if max_cols == 0 {
+            return 1;
+        }
         let line_bytes = self.read_line_bytes(buf, line);
         let Ok(s) = std::str::from_utf8(&line_bytes) else {
             return 1;
@@ -391,7 +399,15 @@ fn advance_wrapped(
         // will attach it to the previous cell as `Glyph::Cluster`.
         return (row, col, row, col);
     }
-    if wrapping && width == 2 && col + 1 >= max_cols {
+    // `max_cols >= 2` is the whole of the narrow-viewport policy: a
+    // double-width glyph moves to the next row only when the next row
+    // could actually hold it. At one column it never can, so moving
+    // would insert a blank row before every wide character and paint it
+    // clipped anyway — a single CJK glyph would render on row 1 with
+    // row 0 left empty. Below two columns a wide glyph is clipped in
+    // place, which is what `Truncate` does at the edge for the same
+    // reason: there is no better row to move it to.
+    if wrapping && width == 2 && max_cols >= 2 && col + 1 >= max_cols {
         // A double-width glyph with a single cell left moves to the next
         // row whole rather than being split across the break.
         //
@@ -1063,6 +1079,54 @@ mod tests {
                 _ => ' ',
             })
             .collect()
+    }
+
+    /// A viewport too narrow to hold a wide glyph must not insert a
+    /// blank row before it.
+    ///
+    /// The wrap rule moves a double-width glyph to the next row when it
+    /// will not fit in the cells left. At one column it never fits
+    /// there either, so moving would leave row 0 empty and paint the
+    /// glyph clipped on row 1 — worse than clipping it in place.
+    #[test]
+    fn a_one_column_viewport_does_not_shove_wide_glyphs_down() {
+        let g = render_grid("中x".as_bytes(), 3, 1, WrapMode::Wrap);
+        assert_eq!(
+            g[0],
+            Glyph::Char('中'),
+            "the wide glyph belongs on row 0, clipped, not row 1"
+        );
+    }
+
+    /// A zero-width content area paints nothing and does not panic.
+    ///
+    /// Reachable when the line-number gutter consumes the whole window.
+    /// Under `Wrap` the walk's first `col >= max_cols` test is true
+    /// immediately, so without an explicit bail it advances a row and
+    /// then indexes column 0 of a zero-width grid.
+    #[test]
+    fn a_zero_width_viewport_paints_nothing() {
+        let (buf, mut view) = attached(b"abc\ndef");
+        let mut storage: Vec<Cell> = Vec::new();
+        let mut grid = CellGrid {
+            cells: &mut storage,
+            stride: 0,
+            size: CellSize::new(4, 0),
+        };
+        view.render(
+            &buf,
+            Viewport {
+                buffer_start: 0,
+                buffer_end: buf.len(),
+                cell_origin: CellCoord::new(0, 0),
+                cell_size: CellSize::new(4, 0),
+                gutter_w: 0,
+                folds: None,
+                wrap: WrapMode::Wrap,
+            },
+            &mut grid,
+        );
+        assert!(storage.is_empty(), "nothing to paint, and nothing painted");
     }
 
     /// The reported defect: a line wider than the window is readable.

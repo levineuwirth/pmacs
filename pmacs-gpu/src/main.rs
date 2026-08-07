@@ -1713,10 +1713,6 @@ struct State {
     /// to cosmic-text so caret/wash byte offsets can be rebased onto
     /// it.
     scroll_top: usize,
-    /// The document buffer's wrap mode, explicit since protocol v22.
-    /// `Wrap::None` until the daemon says otherwise, so an unwrapped
-    /// frontend never silently inherits a library default again.
-    code_wrap: Wrap,
     /// Whole-file byte range `[vstart, vend)` of the slice the
     /// cosmic-text `buffer` currently holds (session S1). Everything
     /// the buffer renders is in slice coordinates (`file_byte -
@@ -3917,6 +3913,21 @@ impl State {
             &mut font_system,
             Metrics::new(fm.code_font_size(), fm.code_line_height()),
         );
+        // Declare the document's wrap mode instead of inheriting
+        // cosmic-text's constructor default (`Wrap::WordOrGlyph`).
+        //
+        // `Glyph`, not `None`: `ui.line-wrap` defaults to `wrap`, so a
+        // frontend that has not yet been told anything — or is talking
+        // to a pre-v22 daemon that never will be — should already be in
+        // the default mode. What changes versus the inherited default is
+        // only the break rule, word to character, which is the
+        // cross-frontend parity this stage buys.
+        //
+        // Declaring it is load-bearing rather than tidy: without it the
+        // document runs on `WordOrGlyph` until some message happens to
+        // change it, so a frontend talking to a pre-v22 daemon word
+        // wraps forever while the grid renderer character wraps.
+        buffer.set_wrap(&mut font_system, Wrap::Glyph);
         buffer.set_size(
             &mut font_system,
             Some(config.width as f32),
@@ -4027,7 +4038,6 @@ impl State {
             peer_presences: HashMap::new(),
             own_cursor: None,
             scroll_top: 0,
-            code_wrap: Wrap::None,
             view_range: (0, 0),
             last_viewport_sent: None,
             local_frontend_id: None,
@@ -8011,10 +8021,13 @@ impl State {
             return;
         }
         let want = if wrap { Wrap::Glyph } else { Wrap::None };
-        if self.code_wrap == want {
+        // Compare against the BUFFER, not a shadow field. A cached copy
+        // can disagree with what cosmic-text actually holds — and when
+        // it does, the short-circuit turns a real mode change into a
+        // silent no-op. Reading the authority cannot drift from it.
+        if self.buffer.wrap() == want {
             return;
         }
-        self.code_wrap = want;
         self.buffer.set_wrap(&mut self.font_system, want);
         self.reshape();
     }
@@ -15889,6 +15902,37 @@ mod tests {
 
     /// Acceptance 11 — a caret painted on a wrapped visual run
     /// survives 16px → 72px → 6px re-wraps, with the normalized
+    /// A fresh frontend must already be CHARACTER wrapping, not word
+    /// wrapping.
+    ///
+    /// The subtle failure this catches: `apply_line_wrap` short-circuits
+    /// when the request matches `code_wrap`, so if the field said
+    /// `Glyph` while the buffer was still on cosmic-text's inherited
+    /// `WordOrGlyph`, the first `wrap: true` message would be a no-op
+    /// and the document would keep **word** wrapping — the exact
+    /// divergence from the grid renderer that framing Q#LL5 exists to
+    /// close, surviving invisibly.
+    ///
+    /// Wrap-versus-truncate cannot see it, because both modes differ
+    /// from each other either way. Word-versus-character can: with
+    /// character wrap, spaces are just glyphs, so a spaced line and an
+    /// unspaced line of the same length occupy the same number of rows.
+    /// Word wrap breaks early at the spaces and needs more.
+    #[test]
+    fn a_fresh_frontend_wraps_by_character_not_by_word() {
+        let Some(state) = headless_or_skip(320, 400, "hello world\n") else {
+            return;
+        };
+        assert_eq!(
+            state.buffer.wrap(),
+            Wrap::Glyph,
+            "a frontend told nothing must already be in the DEFAULT mode \
+             and wrapping by CHARACTER. Inheriting cosmic-text's \
+             WordOrGlyph would word-wrap the document forever against a \
+             pre-v22 daemon, diverging from the grid renderer"
+        );
+    }
+
     /// The discriminating witness framing §7 asked for.
     ///
     /// `wrapped_caret_survives_size_changes` passes today against a wrap
@@ -15932,10 +15976,11 @@ mod tests {
         let other = BufferId::next();
         state.current_buffer_id = Some(mine);
         state.apply_line_wrap(mine, true);
-        let after_mine = state.code_wrap;
+        let after_mine = state.buffer.wrap();
         state.apply_line_wrap(other, false);
         assert_eq!(
-            state.code_wrap, after_mine,
+            state.buffer.wrap(),
+            after_mine,
             "another buffer's mode must not reflow this one"
         );
     }
