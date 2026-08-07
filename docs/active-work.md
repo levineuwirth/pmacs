@@ -296,6 +296,145 @@ change to *when* `needs_full_grid` is set — the producer's triggers
 were verified correct, along with per-frame geometry sync and
 `view_top` reconciliation on shrink.
 
+## GUI zoom (QoL Stage 2) — PR #220 OPEN
+
+**PR #220** — https://github.com/levineuwirth/pmacs/pull/220. **Written
+with the lane's first commit, before the PR existed** — the standing
+correction from #171 and #215 — so the row below was filled in rather
+than invented.
+
+- **Branch `gui-zoom`**, base `githubsucks/main` @ `218d2e7` (the #219
+  merge). Pushed; **`githubsucks/gui-zoom` is the authoritative tip** —
+  the ref, deliberately not a SHA, since writing one into the commit
+  that updates this lane makes it stale in that same commit.
+  Recover: `git fetch githubsucks && git checkout gui-zoom`.
+- **Framing `docs/gui-zoom-framing.md` revision 5**, approved after
+  four review rounds; revision 5 adds §3.2 for a finding raised against
+  the implementation. **Q#Z1 = (c)** configured base with `None`
+  preserved; **Q#Z2 = additive**; **Q#Z3 = (C)** commands only, no
+  default bindings; **Q#Z4** eager restore inside `install_state_dirs`.
+
+### What it ships
+
+`builtin/runtime/zoom.lua`: two settings (`ui.gpu-font-size-base`,
+`ui.gpu-zoom-step`), three commands (`gpu.zoom-in` / `-out` /
+`-reset`), and `pmacs.zoom.restore` called from `install_state_dirs`.
+**No rendering work** — `FontMetrics::scale` already derived every GUI
+dimension and `apply_font_facts` already re-metriced everything; this
+drives the preference that existed.
+
+### The findings review caught, none of which was in revision 1
+
+- **Q#Z3 was not implementable.** `keymap_stack::Scope` is
+  `Buffer | Mode | Global` with no frontend identity, and
+  `FrontendEvent` has no command-invocation variant — so neither "bind
+  on GPU only" nor "the GPU asks for a command" exists. Commands ship;
+  the binding waits on **capability-aware keymap resolution**, now a
+  named follow-on.
+- **The restore seam did not exist.** Builtins and `init.lua` both run
+  *before* `install_state_dirs`, so a `pmacs.state.read` at module load
+  returns nothing, always. `saveplace` and `recentf` never meet this
+  because **both read lazily**; zoom must apply with no user action,
+  making it the **first eager state consumer**. Restore lives at the
+  end of `install_state_dirs` — by definition when state becomes
+  readable, so it cannot be mis-ordered or missed by a future third
+  startup path.
+- **Every size write clobbered the family.** `set_font` replaces both
+  fields unconditionally, so `{ size = n }` alone silently cleared a
+  configured family until restart.
+- **The bounds could not carry the round-trip guarantee** (raised
+  against the implementation, not the framing). `ConfigKind::Number`
+  validates finiteness and bounds and *nothing else*, and `on_change`
+  is notified after the value is stored — so it cannot veto. A step of
+  `0.015` is therefore settable, and used raw it broke the framed
+  exact round trip: `16.00 -> 16.02 -> 16.01`. Fixed by quantizing the
+  step **and** the base at the point of use, which is the operation
+  `validate_font_size` already applies to sizes, one level up.
+  Set-time enforcement was rejected: the registry cannot express
+  precision, and a validating wrapper is bypassed by a direct
+  `pmacs.config.set` — the seam `autosave` documents about
+  `interval_ms`.
+
+A fifth, documentation-only: the explanation of *why* `0.015` broke
+said the two intermediates rounded in opposite directions. They do not.
+`16.015` and `16.005` are exactly `1601.5` and `1600.5` centi-pixels —
+both exact ties, and half-up sends **both up**. The mechanism is that
+half-up is not symmetric under negation, so the two roundings
+accumulate rather than cancel. Corrected in all three copies; no
+behavior change.
+
+### Verification
+
+15 acceptance tests, four bitten: dropping family preservation fails
+3; reverting to the framing's first parser `^(%d+)$` fails 4 including
+the seam restore (it anchors to end-of-subject and rejects the
+newline-terminated file the writer emits); hardcoding the 16.0 origin
+fails the base test; **using the raw step instead of the quantized one
+fails the unrepresentable-step witness** with
+`left: Some(16.01) / right: Some(16.0)` **while the pre-existing 0.37
+test still passes** — which is exactly why the new case had to be its
+own test rather than another parameter of that one.
+
+### Not in scope
+
+Stage 3 (long lines). Capability-aware keymap resolution — Q#Z3's
+option (A), deliberately deferred rather than half-built. Per-buffer
+zoom. Any change to `FontFacts` or the wire.
+
+## Empty-content readiness, a fourth and fifth instance — FOR THE R6 AUDIT
+
+Found 2026-08-06 while gating this lane, recorded here because it
+widens an existing lane's scope rather than starting one.
+
+A loaded `--features crdt` run failed `m6_1_pty_raw_mode_disables_kernel_echo`
+and `m6_1_pty_canonical_mode_keeps_kernel_echo` with
+**`stty -a output was: ""`** — read-before-write on the child's output.
+That is the **same family as R4** (readiness predicate satisfied by an
+empty file) and **R6** (readiness file never published), and it means
+the readiness-helper audit's scope is not just three `wait_for_file`
+copies under `tests/`: `src/process.rs`'s own tests carry the shape
+too.
+
+Both passed isolated and the full suite was green on a quiet machine,
+so this is load-sensitive and **undiagnosed** — recorded as a scope
+note for the audit, not as a registry row: these were local, and the
+registry judges red **CI** runs.
+
+## Pre-checkout CI reds — a class the registry has no row shape for
+
+Seen 2026-08-06 on #220, three times across two runs (`M4`+`M5`, then
+`M5` again on the rerun):
+
+```
+Prepare all required actions
+Getting action download info
+Failed to resolve action download info. Error: Internal Server Error
+##[error]Failed to resolve action download info.
+```
+
+**This is not a flake and not a test failure.** The job dies inside
+`Set up job`, before `actions/checkout` — a `grep` for
+`checkout|cargo|test result:` over the full job log returns **0**. No
+repo code is fetched, so the red carries *zero* information about the
+commit, in either direction.
+
+Two things follow, and both matter for signal integrity:
+
+- **Re-running is a first execution, not a retry-to-green.** The rerun
+  rule governs a test that ran and failed; nothing ran here. The
+  discriminator is objective and cheap — did the job reach checkout?
+- **It cannot be a registry row as the registry is written.** Matching
+  requires an *exact test selector* plus fragments, and there is no
+  test. Recorded here rather than forced into a shape it does not fit.
+
+The second `M5` failure took **4m52s**, which read like a real run;
+the duration was entirely retry backoff. Duration is not evidence that
+a job executed — **the log is**.
+
+Whether `docs/ci-red-signatures.md` should grow a short non-row section
+for this class is an open question for its owner, not something this
+lane decided.
+
 ## Tree primitive (P5) — MERGED as #217; adoption is the open work
 
 **The lane is gone, not the work.** Rule 4 removes a lane after merge,
