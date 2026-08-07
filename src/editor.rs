@@ -4416,7 +4416,30 @@ fn paint_window_content(
             coord.row as usize,
         ),
     };
-    let scroll = format_scroll_indicator(ind_top, inner_rows as usize, ind_total, ind_cursor);
+    let scroll = if window.last_wrap == crate::view::WrapMode::Wrap {
+        // Under wrapping the line-space formatter is not merely
+        // imprecise, it is wrong: a one-line buffer wrapping to fifty
+        // rows has `total_lines == 1`, so its first branch reports
+        // "All" while forty-nine rows sit below the viewport.
+        //
+        // There is no row total to give it instead. The GPU shapes only
+        // its viewport slice, so it cannot count rows it never laid out,
+        // and computing a total arithmetically would disagree with the
+        // break points actually rendered. So `All`/`Top`/`Bot` come from
+        // LOCAL predicates — which the render walk already knows — and
+        // the percentage comes from byte position. Both frontends use
+        // the same rule, from `pmacs_protocol::scroll`.
+        let first_visible = viewport_buffer_start == 0;
+        let last_visible = window.text_view.reached_buffer_end();
+        render_scroll_position(pmacs_protocol::scroll::classify(
+            first_visible,
+            last_visible,
+            window.cursor,
+            buf.len(),
+        ))
+    } else {
+        format_scroll_indicator(ind_top, inner_rows as usize, ind_total, ind_cursor)
+    };
     // Lock scoped to the summary computation only: the overlay
     // renders above include `DiagnosticView`, which takes this
     // same mutex — holding the guard across the loop deadlocked
@@ -5589,6 +5612,23 @@ fn first_line(s: &str) -> &str {
 /// `visible` may be 0 in tests that never rendered (so
 /// `last_visible_rows` was never populated); in that case we fall
 /// back to cursor-row-based percent without the All/Top/Bot caps.
+/// Render a [`pmacs_protocol::scroll::ScrollPosition`] for the status
+/// line.
+///
+/// The classification is shared with the GPU frontend; only this
+/// rendering is per-frontend, which is the split framing §5d.6 settled:
+/// each frontend answers its own layout questions, the shared crate owns
+/// the decision they feed.
+fn render_scroll_position(pos: pmacs_protocol::scroll::ScrollPosition) -> String {
+    use pmacs_protocol::scroll::ScrollPosition;
+    match pos {
+        ScrollPosition::All => "All".to_owned(),
+        ScrollPosition::Top => "Top".to_owned(),
+        ScrollPosition::Bot => "Bot".to_owned(),
+        ScrollPosition::Percent(p) => format!("{p}%"),
+    }
+}
+
 fn format_scroll_indicator(
     view_top: usize,
     visible: usize,

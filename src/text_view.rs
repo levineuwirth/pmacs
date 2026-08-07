@@ -43,6 +43,16 @@ pub const FOLD_ELLIPSIS: char = '…';
 
 /// View that renders a buffer as plain UTF-8 text, one buffer line per row.
 pub struct TextView {
+    /// Whether the last [`View::render`] ran out of BUFFER before it ran
+    /// out of rows — i.e. the buffer's final visual row was on screen.
+    ///
+    /// Recorded by the walk rather than recomputed, for the same reason
+    /// `Window::last_content_cols` is taken from the viewport: under
+    /// wrapping this cannot be derived from line counts, and a second
+    /// derivation could disagree with what was actually painted. The
+    /// scroll indicator reads it as a local predicate, which is what
+    /// lets `All`/`Top`/`Bot` stay exact with no row total in existence.
+    reached_buffer_end: bool,
     /// Byte offsets of each line's first byte. `line_offsets[0] == 0`
     /// always; `line_offsets.last()` is the start of the final line.
     /// `line_offsets.len()` equals the number of lines (not the number of
@@ -57,9 +67,17 @@ impl TextView {
     pub fn new(buf: &Buffer) -> Self {
         let mut v = Self {
             line_offsets: vec![0],
+            reached_buffer_end: false,
         };
         v.rebuild_lines_from(buf, 0);
         v
+    }
+
+    /// Whether the last render reached the buffer's end — see
+    /// [`Self::reached_buffer_end`]. `false` before the first render.
+    #[must_use]
+    pub fn reached_buffer_end(&self) -> bool {
+        self.reached_buffer_end
     }
 
     /// Number of lines in the buffer, as understood by this view.
@@ -567,6 +585,15 @@ impl View for TextView {
             // would re-enter the same grid row forever.
             row_offset += used.max(1);
         }
+        // Ran out of buffer before running out of rows.
+        //
+        // BOTH halves are needed. `line >= line_count` alone is true
+        // whenever the last line was *started*, which under wrapping
+        // happens while its remaining rows sit below the viewport — a
+        // fifty-row line begun on the last visible row would report the
+        // buffer end as on screen. `row_offset <= max_rows` is what says
+        // the rows it needed actually fit.
+        self.reached_buffer_end = line >= self.line_count() && row_offset <= max_rows;
     }
 }
 
@@ -1079,6 +1106,58 @@ mod tests {
                 _ => ' ',
             })
             .collect()
+    }
+
+    /// `reached_buffer_end` is a local predicate, recorded by the walk.
+    ///
+    /// The scroll indicator needs `All`/`Top`/`Bot` without a row total
+    /// — which under wrapping does not exist — so it asks the walk
+    /// instead of counting.
+    #[test]
+    fn the_walk_reports_whether_it_reached_the_buffer_end() {
+        // Ten characters at four columns is three visual rows; a
+        // four-row viewport outruns the buffer.
+        let (buf, mut view) = attached(b"abcdefghij");
+        let mut storage = vec![Cell::default(); 16];
+        let mut grid = CellGrid {
+            cells: &mut storage,
+            stride: 4,
+            size: CellSize::new(4, 4),
+        };
+        let vp = Viewport {
+            buffer_start: 0,
+            buffer_end: buf.len(),
+            cell_origin: CellCoord::new(0, 0),
+            cell_size: CellSize::new(4, 4),
+            gutter_w: 0,
+            folds: None,
+            wrap: WrapMode::Wrap,
+        };
+        view.render(&buf, vp, &mut grid);
+        assert!(
+            view.reached_buffer_end(),
+            "three rows of content in four rows of viewport: the end is on screen"
+        );
+
+        // Two rows of viewport cannot hold three rows of content.
+        let mut small = vec![Cell::default(); 8];
+        let mut small_grid = CellGrid {
+            cells: &mut small,
+            stride: 4,
+            size: CellSize::new(2, 4),
+        };
+        view.render(
+            &buf,
+            Viewport {
+                cell_size: CellSize::new(2, 4),
+                ..vp
+            },
+            &mut small_grid,
+        );
+        assert!(
+            !view.reached_buffer_end(),
+            "the wrapped remainder is below the viewport"
+        );
     }
 
     /// A viewport too narrow to hold a wide glyph must not insert a
