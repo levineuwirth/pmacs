@@ -43,13 +43,27 @@ pmacs.config.define {
 -- rather than left for a user to discover, and it is why `truncate` is
 -- not the default despite being the TUI's historical behavior.
 
+-- Buffer-local on BOTH sides, and the pairing matters.
+--
+-- `pmacs.config.get(name)` reads the global chain and
+-- `pmacs.config.set(name, ...)` writes the global layer, so a toggle
+-- built from those two would be wrong in the case the setting exists
+-- for: a buffer pinned to `truncate` would report the GLOBAL value,
+-- flip the GLOBAL value, and leave that buffer exactly as it was ---
+-- while silently changing every buffer that had not been pinned.
+--
+-- So: read with `get(name, buf)`, write with `set_local(buf, ...)`,
+-- and resolve the buffer ONCE for both. Resolving twice would be a
+-- narrower version of the same bug, since the active buffer can change
+-- between two calls.
 pmacs.command.define {
   name = "ui.toggle-line-wrap",
   description = "Toggle line wrapping for the current buffer",
   fn = function()
-    local current = pmacs.config.get("ui.line-wrap")
+    local buf = pmacs.window.buffer()
+    local current = pmacs.config.get("ui.line-wrap", buf)
     local next_mode = current == "wrap" and "truncate" or "wrap"
-    pmacs.config.set("ui.line-wrap", next_mode)
+    pmacs.config.set_local(buf, "ui.line-wrap", next_mode)
     if next_mode == "truncate" then
       pmacs.editor.set_status("line wrap off — text past the edge is unreachable until horizontal scrolling lands")
     else
