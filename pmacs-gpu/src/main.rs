@@ -1614,6 +1614,23 @@ struct State {
     /// resets it (buffer-scoped view state), and every full reshape
     /// reapplies it instead of installing `Scroll::default`.
     code_scroll_residual: f32,
+    /// Horizontal scroll offset of the code area, in **pixels** (Stage
+    /// 5, framing Q#G1).
+    ///
+    /// Pixels rather than columns because the GPU's other viewport
+    /// state already is (`code_scroll_residual` above), and a pixel
+    /// offset composes with the clip rectangle without per-frame
+    /// rounding. Column parity with the TUI is still exact: the code
+    /// font is monospace by contract
+    /// (`family_is_monospace_everywhere`), so `columns × advance` is a
+    /// definition rather than an approximation.
+    ///
+    /// **Local viewport state, never sent.** Same category as
+    /// `scroll_top`: no wire message and no protocol bump (§1.2).
+    ///
+    /// Reset to 0 on BOTH the wrap transition and a buffer snapshot
+    /// (Q#G2) — inertness alone would let a stale offset reappear.
+    code_scroll_left: f32,
     swash_cache: SwashCache,
     viewport: Viewport,
     atlas: TextAtlas,
@@ -4016,6 +4033,7 @@ impl State {
             resolved_family: DEFAULT_FONT_FAMILY.to_owned(),
             measured_mono_advance: None,
             code_scroll_residual: 0.0,
+            code_scroll_left: 0.0,
             swash_cache,
             viewport,
             atlas,
@@ -4634,6 +4652,14 @@ impl State {
                 // preference/metrics survive (framing Q#F6).
                 self.scroll_top = 0;
                 self.code_scroll_residual = 0.0;
+                // Stage 5 (Q#G2): the horizontal offset is viewport
+                // state tied to the document being shown, so it resets
+                // with the other two. Without this a buffer switch
+                // inherits the PREVIOUS document's leftward viewport
+                // and renders the new buffer scrolled sideways until a
+                // cursor motion repairs it — a symptom nothing about
+                // the new buffer explains.
+                self.code_scroll_left = 0.0;
                 self.last_viewport_sent = None;
                 // Vterm Stage 3 — a snapshot ALWAYS leaves terminal
                 // mode, including a terminal→terminal switch. The prior
@@ -6337,7 +6363,43 @@ impl State {
                 .shape_until_cursor(&mut self.font_system, cursor, false);
         }
         self.normalize_code_scroll();
+        self.horizontal_follow(byte);
         self.request_redraw();
+    }
+
+    /// Move `code_scroll_left` so the caret's column is on screen
+    /// (Stage 5, framing Q#G2 — automatic only).
+    ///
+    /// The horizontal mirror of `scroll_to_cursor`, and deliberately
+    /// the same shape as the TUI's `horizontal_follow`: scroll only far
+    /// enough to bring the caret back inside, so a caret already
+    /// visible never moves the view. With no explicit scroll commands,
+    /// every horizontal viewport move originates here.
+    ///
+    /// Runs AFTER `normalize_code_scroll` because it reads the caret's
+    /// laid-out x, which the vertical normalization can change.
+    fn horizontal_follow(&mut self, byte: u64) {
+        // A wrapped buffer has nothing past the right edge; the offset
+        // is pinned to 0 by `apply_line_wrap` and must stay there.
+        if self.buffer.wrap() != Wrap::None {
+            self.code_scroll_left = 0.0;
+            return;
+        }
+        let Some((code_x, _top, _h)) = self.code_byte_px(byte) else {
+            return;
+        };
+        let left = self.code_scroll_left;
+        let width = self.text_bounds_right() as f32 - self.text_left();
+        if width <= 0.0 {
+            return;
+        }
+        if code_x < left {
+            self.code_scroll_left = code_x;
+        } else if code_x >= left + width {
+            // One advance of slack so the caret is not flush against
+            // the right edge, matching the grid's `col + 1 - cols`.
+            self.code_scroll_left = code_x - width + self.mono_advance();
+        }
     }
 
     /// Monospace glyph advance in px, used to size the line-number
@@ -6386,6 +6448,45 @@ impl State {
     /// and the pixel→byte hit-test subtracts it.
     fn text_left(&self) -> f32 {
         TEXT_LEFT + self.gutter_width_px()
+    }
+
+    /// **The** screen↔code transform (Stage 5, framing §1.1).
+    ///
+    /// A code-relative x — what `code_byte_px`, the decoration geometry
+    /// and the math/completion origins all produce — becomes a screen x
+    /// here and nowhere else. Written once because the alternative is
+    /// five call sites that can disagree, and a disagreement between
+    /// the caret and the glyphs it sits among is invisible until
+    /// somebody scrolls.
+    fn code_x_to_screen(&self, code_x: f32) -> f32 {
+        self.text_left() - self.code_scroll_left + code_x
+    }
+
+    /// The exact inverse, for hit testing.
+    fn screen_x_to_code(&self, screen_x: f32) -> f32 {
+        screen_x - self.text_left() + self.code_scroll_left
+    }
+
+    /// **The** code clip rectangle's left edge (Stage 5, framing §1.1).
+    ///
+    /// glyphon honors `TextBounds`, so the document `TextArea` clips
+    /// itself. **The manual quad and squiggle renderers do not** —
+    /// nothing stopped them painting into the gutter, and nothing
+    /// needed to, because before this stage no code-relative x could be
+    /// negative. Every code-relative painter must now intersect with
+    /// this.
+    fn code_clip_left(&self) -> f32 {
+        if self.line_numbers.is_on() {
+            self.text_left().floor()
+        } else {
+            0.0
+        }
+    }
+
+    /// Whether a code-relative rect `[x, x + w)` in SCREEN coordinates
+    /// survives the code clip's left edge.
+    fn survives_code_clip_left(&self, screen_x: f32, w: f32) -> bool {
+        screen_x + w > self.code_clip_left()
     }
 
     /// The GPU's own cursor's 0-based buffer line, or `0` when there's no
@@ -6467,12 +6568,15 @@ impl State {
     /// seam a future gutter marker would branch on instead of relying on
     /// glyphon's negative-x edge behavior.
     fn gutter_aware_rel_x(&self, x: f64) -> f32 {
-        let raw_x = x as f32 - self.text_left();
-        if self.line_numbers.is_on() && raw_x < 0.0 {
-            0.0
-        } else {
-            raw_x
+        // Stage 5: the EXACT inverse of `code_x_to_screen`, so a click
+        // lands on the glyph under the pointer at any offset. The
+        // gutter clamp stays in SCREEN space and is applied first — a
+        // click in the gutter band means "the first visible column",
+        // which after scrolling is the offset, not column 0.
+        if self.line_numbers.is_on() && (x as f32) < self.text_left() {
+            return self.code_scroll_left;
         }
+        self.screen_x_to_code(x as f32)
     }
 
     /// The shaped slice's math substitutions, read back from the
@@ -7622,7 +7726,18 @@ impl State {
         if y >= bottom || y + line_height <= TEXT_TOP {
             return None;
         }
-        Some((self.text_left() + x, y, line_height))
+        // Stage 5: an anchor scrolled off the LEFT is out of view the
+        // same way one below the band is. Returning `None` HIDES the
+        // popup — it does not close it. The daemon owns completion
+        // state and its key handling; closure is `CompletionPopup {
+        // anchor: None }`, which is the daemon's to send. Scrolling
+        // back brings the popup straight back, and a viewport lane must
+        // not quietly redefine when a completion ends.
+        let screen_x = self.code_x_to_screen(x);
+        if !self.survives_code_clip_left(screen_x, line_height) {
+            return None;
+        }
+        Some((screen_x, y, line_height))
     }
 
     /// Layout of the completion dropdown: `(first_row, row_count,
@@ -8078,6 +8193,13 @@ impl State {
             return;
         }
         self.buffer.set_wrap(&mut self.font_system, want);
+        // Stage 5 (Q#G2): RESET, not merely ignore. A wrapped buffer has
+        // nothing past the right edge, so an offset is meaningless here
+        // — but leaving it parked would surface a stale viewport the
+        // instant the buffer toggled back to `truncate`, before any
+        // cursor motion. The TUI's `horizontal_follow` zeroes it on the
+        // same branch for the same reason.
+        self.code_scroll_left = 0.0;
         self.reshape();
     }
 
@@ -8711,7 +8833,11 @@ impl State {
         } else {
             vec![TextArea {
                 buffer: &self.buffer,
-                left: text_left,
+                // Stage 5: the whole of the glyph-side mechanism.
+                // glyphon clips to `bounds`, whose `left` stays at the
+                // gutter, so shifting the origin scrolls the text and
+                // the gutter keeps its own pixels.
+                left: text_left - self.code_scroll_left,
                 top: TEXT_TOP,
                 scale: 1.0,
                 bounds: TextBounds {
@@ -9681,8 +9807,10 @@ impl State {
         }
         let (x, top, line_height) = self.code_byte_px(cursor)?;
         Some(MinimapRect {
-            // UX gutter: the caret sits in the code area, past the gutter.
-            x: self.text_left() + x,
+            // UX gutter: the caret sits in the code area, past the
+            // gutter — and past the horizontal offset (Stage 5), which
+            // is why this goes through the one transform.
+            x: self.code_x_to_screen(x),
             y: TEXT_TOP + top,
             w: CARET_WIDTH,
             h: line_height,
@@ -9691,15 +9819,24 @@ impl State {
     }
 
     /// [`Self::caret_rect`] intersected with the drawable code clip —
-    /// the painter's own bounds (right of the gutter isn't needed:
-    /// the caret x can't precede `text_left`), NOT `view_range`, so
-    /// the two-line source overscan and wrapped runs clipped below
-    /// the band don't count as painted (framing Q#F6).
+    /// the painter's own bounds, NOT `view_range`, so the two-line
+    /// source overscan and wrapped runs clipped below the band don't
+    /// count as painted (framing Q#F6).
+    ///
+    /// **The left edge is now tested too.** This comment used to say
+    /// "right of the gutter isn't needed: the caret x can't precede
+    /// `text_left`" — an invariant Stage 5 deletes. A comment asserting
+    /// something a later stage falsifies is worse than silence, so it
+    /// is rewritten rather than merely joined by a new condition.
     fn code_caret_rect_in_clip(&mut self) -> Option<MinimapRect> {
         let rect = self.caret_rect()?;
         let bottom = document_text_bottom(self.config.height, self.fm, self.band_inset());
         let right = self.text_bounds_right() as f32;
-        (rect.y < bottom && rect.y + rect.h > TEXT_TOP && rect.x < right).then_some(rect)
+        (rect.y < bottom
+            && rect.y + rect.h > TEXT_TOP
+            && rect.x < right
+            && self.survives_code_clip_left(rect.x, rect.w))
+        .then_some(rect)
     }
 
     /// The pre-change follow decision (framing Q#F6): whether the own
