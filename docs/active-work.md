@@ -465,9 +465,10 @@ whatever SHA it records. Recover:
 — the ref, not a SHA. Recover:
 `git fetch githubsucks && git checkout gpu-horizontal-scroll`.
 
-**Status: `docs/gpu-horizontal-scroll-framing.md` revision 4 —
-APPROVED 2026-08-07. Implementation COMPLETE and gated 2026-08-08,
-awaiting review; no PR opened yet.** G1 pixels (exact conversion via the
+**Status: PR #223 OPEN, head `55faa45`, awaiting CI. DO NOT MERGE until
+the user says so.** Framing revision 4 approved 2026-08-07; review round
+1 answered 2026-08-08 (the completion point-predicate defect below).
+`https://github.com/levineuwirth/pmacs/pull/223`. G1 pixels (exact conversion via the
 supported monospace advance); G2 automatic cursor-follow only, zeroing
 on **both** wrap transition and `BufferSnapshot`; G3 monospace-only by
 the existing font contract; G4 minimap unchanged; G5 accepted whole —
