@@ -210,6 +210,58 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
+## `scripts/gate` — PR #225 OPEN (build tooling)
+
+**PR #225** — https://github.com/levineuwirth/pmacs/pull/225. Written
+**after** the PR existed, again, and again because review asked. Two
+lanes in a row have now been added late; the correction from #171 and
+#215 is not sticking, and recording that is more useful than a
+back-dated block that pretends it did.
+
+- **Branch `gate-script`**, base `githubsucks/main` @ `b833b13` (the
+  #224 merge). **`githubsucks/gate-script` is the authoritative tip** —
+  the ref, not a SHA. Recover with
+  `git fetch githubsucks && git checkout gate-script`.
+- **Framing `docs/gate-script-framing.md`**, approved at revision 4
+  after four review rounds; revision 5 records two safety defects found
+  against the implementation, not the design.
+- **Scope:** `scripts/gate` (per-worktree `CARGO_TARGET_DIR`, five
+  ambient roots, durable per-gate logs, the fixed gate suite),
+  `tests/gate_script_acceptance.rs`, and a handoff §3 rewrite pointing
+  at the script while §3 keeps policy and acceptance-suite selection.
+  No `src/`, no crate, no manifest, no protocol.
+- **Verification:** 15 acceptance tests over the no-gates paths, each
+  isolated by `PMACS_GATE_TARGET_ROOT`. Mutation-tested; the two prune
+  guards are redundant by design and only fail the test when **both**
+  are removed, which is recorded in the test itself. Observed real runs
+  confirm failed-gate naming, log paths, ambient creation and reaping,
+  and distinct log directories per run.
+
+**GATE STATUS: NOT GREEN, AND KNOWINGLY SO.** `scripts/gate` exits 1 on
+this branch and on a clean `main`, because **R8** fails `m4_acceptance`
+and therefore the workspace sweep. CI is green; the local full suite is
+not.
+
+**That is a merge blocker under the standing rule**, not a footnote.
+"All gates green before any PR" does not carry an implicit "except the
+ones that were already failing", and #225 is the worst possible lane to
+grant a silent exception to — it is the lane that makes the gate suite
+authoritative. A tool that ships with its own gate red teaches the
+opposite of what it exists to teach.
+
+**The coherent path, in order:** diagnose R8 in the lane below, resolve
+it, then rebase #225 and re-gate. The alternative is an explicit,
+documented exception from the user; there is no third option where this
+merges quietly.
+
+**Update 2026-08-08 — R8 is now diagnosed and is environmental**, so
+this is no longer blocked behind an open investigation. The gate goes
+green on this tree the moment the stray `/tmp/.git` is gone. What
+remains genuinely open is the *durable* fix — bounding the fixture's
+project detection — which is the R8 lane's, not this one's. **Whether
+#225 merges before or after that is the user's call**, and either way
+it should be recorded here rather than assumed.
+
 ## R8 — the listview path failure that blocks every local gate run — NEEDS A LANE
 
 **Promoted 2026-08-08**, not discovered then: the row has been in
@@ -225,15 +277,29 @@ makes that command **exit non-zero on a clean tree, every time**.
   nobody reads. Parallel lanes are about to multiply how often it runs,
   and the first thing an agent learns from a permanently-failing gate
   is to ignore gate failures.
-- **What is NOT known**, and the lane starts here: the mechanism. The
-  row renders with a leading directory stripped — a **prefix strip, not
-  width truncation**; the fixture declares `CellSize::new(40, 100)`, so
-  the string fits. The `TMPDIR`-dependent relativization reading is a
-  hypothesis and has not been tested. **Why CI is green is equally
-  unestablished.**
-- **Scope discipline:** diagnose before fixing. A change that makes the
-  assertion pass without explaining the prefix strip would convert a
-  visible failure into an invisible one.
+- **DIAGNOSED 2026-08-08 — mechanism established, see the R8 row.**
+  `display_path` (`builtin/runtime/lsp.lua:2397`) shortens against the
+  detected project root; `project.detect` walks up from
+  `/tmp/.tmpXXXX/r.rs` and finds a **stray empty `/tmp/.git`** on this
+  machine, so the root resolves to `/tmp` and the prefix is stripped.
+  Controlled: the same test with `TMPDIR` outside `/tmp` **passes**.
+- **Two different fixes, and only one of them is this lane's.**
+  - *Environmental*: removing `/tmp/.git` makes the gate green
+    immediately. Nothing about pmacs is wrong when a real project root
+    sits above a file — that is the feature.
+  - *Real defect*: the fixture is **environment-dependent**, and
+    `src/project.rs:208` already provides `detect_project_within` with
+    a `stop_root` documented for exactly this hazard — *"a developer's
+    `/tmp/.git`"*, in those words. The test does not use it. **That is
+    what this lane fixes, and what retires the row.**
+- **Provenance unresolved:** `/tmp/.git` is dated 2026-08-07 23:17,
+  inside this session's window, and **may have been created by this
+  session's own work**. The merge-base control remains valid as "this
+  tree has it" but says nothing about when the environment acquired the
+  marker.
+- **Scope discipline:** fix the fixture's boundary, not the assertion. A
+  change that made it pass without bounding detection would convert a
+  visible environment-dependence into an invisible one.
 
 ## QoL arc retirement — PR #224 OPEN (docs only)
 
