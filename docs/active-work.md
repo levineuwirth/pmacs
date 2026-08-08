@@ -465,10 +465,18 @@ whatever SHA it records. Recover:
 — the ref, not a SHA. Recover:
 `git fetch githubsucks && git checkout gpu-horizontal-scroll`.
 
-**Status: PR #223 OPEN, head `55faa45`, awaiting CI. DO NOT MERGE until
-the user says so.** Framing revision 4 approved 2026-08-07; review round
-1 answered 2026-08-08 (the completion point-predicate defect below).
-`https://github.com/levineuwirth/pmacs/pull/223`. G1 pixels (exact conversion via the
+**Status: PR #223 OPEN, awaiting CI. DO NOT MERGE until the user says
+so.** `https://github.com/levineuwirth/pmacs/pull/223`. Framing revision
+4 approved 2026-08-07; review round 1 answered 2026-08-08 (the
+completion point-predicate defect below).
+
+**The tip is the ref, `githubsucks/gpu-horizontal-scroll`, not a SHA
+written here.** The first version of this line pinned `55faa45` — which
+the very commit that wrote it invalidated, because recording the PR
+moved the head. Verify CI against the PR's live `headRefOid`, never
+against a SHA quoted in a document.
+
+G1 pixels (exact conversion via the
 supported monospace advance); G2 automatic cursor-follow only, zeroing
 on **both** wrap transition and `BufferSnapshot`; G3 monospace-only by
 the existing font contract; G4 minimap unchanged; G5 accepted whole —
