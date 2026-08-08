@@ -1,0 +1,377 @@
+#!/bin/sh
+# scripts/gate --- run the fixed gate suite in a per-worktree build
+# directory, with isolated ambient roots and durable logs.
+#
+#   scripts/gate [--acceptance SUITE]... [--protocol] [--print-plan]
+#   scripts/gate --print-target-dir
+#   scripts/gate --init
+#   scripts/gate --prune [--force]
+#
+# Framing: docs/gate-script-framing.md (revision 4, approved).
+#
+# WHY A PER-WORKTREE TARGET DIRECTORY. This machine exports one
+# CARGO_TARGET_DIR for every checkout, and cargo takes an EXCLUSIVE LOCK
+# on it. Two worktrees building at once do not run in parallel --- the
+# second blocks --- and they invalidate each other's artifacts, so
+# alternating between lanes recompiles from scratch each time. Parallel
+# worktree development under that arrangement is slower than serial.
+# Measured cost of the fix: a cold `cargo test --workspace --no-run` is
+# 80s and 19G, so per-lane directories are cheap and there is no shared
+# cache worth preserving.
+#
+# NOTE ON PRECEDENCE, because the obvious alternative silently fails.
+# CARGO_TARGET_DIR (the environment) OVERRIDES `build.target-dir` in any
+# config.toml. A per-worktree `.cargo/config.toml` therefore does
+# nothing at all while that variable is exported --- which is worse than
+# doing nothing visibly, because it looks configured. Only a
+# per-invocation value beats the environment, which is why this exists
+# as a script rather than a config file.
+#
+# THIS IS A CONVENTION, NOT AN ENFORCEMENT. A bare `cargo test` still
+# uses the shared directory and still takes the lock. Nothing in-repo
+# can prevent that while the variable is exported globally; real
+# enforcement would mean dropping the export or adopting direnv, both
+# machine-config changes outside this repository.
+set -eu
+
+usage() {
+    cat >&2 <<'EOF'
+usage: scripts/gate [--acceptance SUITE]... [--protocol] [--print-plan]
+       scripts/gate --print-target-dir
+       scripts/gate --init
+       scripts/gate --prune [--force]
+
+  --acceptance SUITE  a touched acceptance suite to run (repeatable).
+                      docs/agent-handoff.md section 3 stays authoritative
+                      for CHOOSING these; this script only runs what it
+                      is handed. A script cannot infer them from a
+                      working tree, and one that guessed would report
+                      coverage it does not have.
+  --protocol          the change touches PROTOCOL_VERSION; adds the CRDT
+                      workspace sweep on top of the default one.
+  --print-plan        print the exact gate commands and exit.
+  --print-target-dir  print this worktree's build directory and exit.
+                      Creates nothing.
+  --init              create the build directory and ownership marker,
+                      print it, exit. Runs no gates.
+  --prune             list managed directories whose worktree is gone.
+                      Deletes NOTHING without --force.
+  --force             with --prune, actually delete.
+EOF
+    exit 2
+}
+
+# ---------------------------------------------------------------------
+# One canonical path representation.
+#
+# `pwd -P` semantics: physical, symlinks resolved. Used at ALL THREE
+# points that compare or derive from a worktree path --- directory
+# derivation, marker creation, and prune comparison. Using it at only
+# some of them is a real bug and not a tidiness point: a symlinked
+# invocation would then derive a DIFFERENT directory whose marker
+# records the CANONICAL path, producing a second build directory for a
+# live worktree that is indistinguishable from an orphan.
+#
+# A path that cannot be entered yields the empty string, which never
+# matches a marker --- correct, since a directory that is gone is not a
+# live worktree.
+#
+# HONEST NOTE ON HOW MUCH THIS CURRENTLY DOES. Measured on the git in
+# use here, BOTH `git rev-parse --show-toplevel` and
+# `git worktree list --porcelain` already report resolved physical
+# paths, including when a worktree was registered through a symlinked
+# parent. So on this git, canon() is defence in depth rather than
+# load-bearing, and the acceptance test for symlinked spellings passes
+# with or without it --- recorded so nobody reads a mutation-test
+# "vacuous" result as a hole in the suite.
+#
+# It stays because the property it guarantees is one this script's
+# correctness rests on, that guarantee is not contractual in git, and
+# a marker can also be written by hand. The cost is one subshell.
+# ---------------------------------------------------------------------
+canon() {
+    ( cd "$1" 2>/dev/null && pwd -P ) || true
+}
+
+# Short digest of a string. sha256sum on Linux, shasum on macOS, and
+# cksum as the POSIX floor so this degrades rather than failing.
+digest8() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        printf '%s' "$1" | sha256sum | cut -c1-8
+    elif command -v shasum >/dev/null 2>&1; then
+        printf '%s' "$1" | shasum -a 256 | cut -c1-8
+    else
+        printf '%s' "$1" | cksum | awk '{printf "%08x", $1}'
+    fi
+}
+
+MARKER_NAME='.pmacs-gate-target'
+
+# The managed root. PMACS_GATE_TARGET_ROOT exists for the behaviour
+# tests and is documented test-only: it is what keeps them from being
+# able to reach the real root.
+gate_root() {
+    if [ -n "${PMACS_GATE_TARGET_ROOT:-}" ]; then
+        printf '%s' "$PMACS_GATE_TARGET_ROOT"
+    else
+        printf '%s' "${HOME}/build/pmacs-gate-targets"
+    fi
+}
+
+worktree_root() {
+    git rev-parse --show-toplevel 2>/dev/null || {
+        echo "gate: not inside a git worktree" >&2
+        exit 2
+    }
+}
+
+# The derived build directory for this worktree. Pure: creates nothing.
+target_dir_for() {
+    _wt=$1
+    _base=$(basename "$_wt")
+    printf '%s/%s-%s' "$(gate_root)" "$_base" "$(digest8 "$_wt")"
+}
+
+# Create the directory and its ownership marker. Idempotent. The gate
+# path calls this too, so --init is not a second implementation.
+ensure_target_dir() {
+    _wt=$1
+    _dir=$(target_dir_for "$_wt")
+    mkdir -p "$_dir"
+    printf '%s\n' "$_wt" > "$_dir/$MARKER_NAME"
+    printf '%s' "$_dir"
+}
+
+# ---------------------------------------------------------------------
+# The plan.
+#
+# Emits one `name<TAB>command` line per gate. docs/agent-handoff.md
+# section 3 owns the REASONING for each of these --- why --workspace and
+# never --tests, why --no-fail-fast, why --skip basedpyright, when
+# --protocol applies. What lives here is the executable form, so it
+# cannot be retyped differently each time.
+#
+# --print-plan renders this without running anything, which is what
+# makes drift from section 3 testable.
+# ---------------------------------------------------------------------
+emit_plan() {
+    printf 'fmt\tcargo fmt --check\n'
+    printf 'clippy\tcargo clippy --workspace --all-targets -- -D warnings\n'
+    printf 'lib\tcargo test --lib\n'
+    printf 'lib-crdt\tcargo test --lib --features crdt\n'
+    for _s in $ACCEPTANCE; do
+        printf 'acceptance-%s\tcargo test --test %s\n' "$_s" "$_s"
+    done
+    printf 'm4\tcargo test --test m4_acceptance -- --skip basedpyright\n'
+    printf 'gpu\tPMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu\n'
+    printf 'sweep\tcargo test --workspace --no-fail-fast -- --skip basedpyright\n'
+    if [ "$PROTOCOL" = 1 ]; then
+        # Section 3: touching PROTOCOL_VERSION STRENGTHENS the sweep
+        # line, it does not replace it. Both sweeps run.
+        printf 'sweep-crdt\tcargo test --workspace --features crdt --no-fail-fast -- --skip basedpyright\n'
+    fi
+    printf 'diff-check\tgit diff --check\n'
+}
+
+# ---------------------------------------------------------------------
+# Pruning.
+#
+# Dry run by default; --force to delete. Never automatic, never on the
+# gate path.
+#
+# "LIVE" IS NARROWER THAN "LISTED", and that difference is the whole
+# correctness of this. `git worktree list --porcelain` keeps reporting a
+# worktree that was administratively registered but whose directory was
+# manually deleted --- it adds a `prunable <reason>` line to that
+# record. Treating every listed path as live would make exactly the
+# directories most worth reclaiming permanently ineligible.
+# ---------------------------------------------------------------------
+live_worktrees() {
+    # Records are blank-line separated. Emit the canonical path of every
+    # record that carries NO `prunable` line.
+    git worktree list --porcelain 2>/dev/null | awk '
+        /^worktree /  { path = substr($0, 10); prunable = 0; next }
+        /^prunable/   { prunable = 1; next }
+        /^$/          { if (path != "" && !prunable) print path; path = ""; next }
+        END           { if (path != "" && !prunable) print path }
+    ' | while IFS= read -r p; do
+        c=$(canon "$p")
+        [ -n "$c" ] && printf '%s\n' "$c"
+    done
+}
+
+do_prune() {
+    _root=$(gate_root)
+    if [ ! -d "$_root" ]; then
+        echo "gate: no managed root at $_root; nothing to prune"
+        return 0
+    fi
+    _live=$(live_worktrees || true)
+    _found=0
+    for _d in "$_root"/*; do
+        [ -d "$_d" ] || continue
+        _found=1
+        if [ ! -r "$_d/$MARKER_NAME" ]; then
+            # The protection that matters: a directory that merely
+            # RESEMBLES a managed one is never touched.
+            echo "gate: skip $_d --- no readable $MARKER_NAME"
+            continue
+        fi
+        _owner=$(head -n 1 "$_d/$MARKER_NAME" 2>/dev/null || true)
+        case $_owner in
+            /*) ;;
+            *)  echo "gate: skip $_d --- marker is not an absolute path"
+                continue ;;
+        esac
+        if printf '%s\n' "$_live" | grep -qxF "$_owner"; then
+            echo "gate: skip $_d --- worktree is live ($_owner)"
+            continue
+        fi
+        if [ "$FORCE" = 1 ]; then
+            rm -rf "$_d"
+            echo "gate: deleted $_d (worktree gone: $_owner)"
+        else
+            echo "gate: WOULD delete $_d (worktree gone: $_owner)"
+        fi
+    done
+    [ "$_found" = 1 ] || echo "gate: managed root is empty"
+    if [ "$FORCE" != 1 ]; then
+        echo "gate: dry run --- nothing was deleted. Re-run with --force."
+    fi
+}
+
+# ---------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------
+ACCEPTANCE=''
+PROTOCOL=0
+FORCE=0
+MODE=run
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        --acceptance)
+            [ $# -ge 2 ] || usage
+            ACCEPTANCE="$ACCEPTANCE $2"
+            shift 2 ;;
+        --protocol)          PROTOCOL=1; shift ;;
+        --print-plan)        MODE=plan; shift ;;
+        --print-target-dir)  MODE=printdir; shift ;;
+        --init)              MODE=init; shift ;;
+        --prune)             MODE=prune; shift ;;
+        --force)             FORCE=1; shift ;;
+        -h|--help)           usage ;;
+        *)                   echo "gate: unknown argument: $1" >&2; usage ;;
+    esac
+done
+
+case $MODE in
+    plan)
+        emit_plan | cut -f2-
+        exit 0 ;;
+    printdir)
+        target_dir_for "$(canon "$(worktree_root)")"
+        echo
+        exit 0 ;;
+    init)
+        ensure_target_dir "$(canon "$(worktree_root)")"
+        echo
+        exit 0 ;;
+    prune)
+        do_prune
+        exit 0 ;;
+esac
+
+# ---------------------------------------------------------------------
+# Run
+# ---------------------------------------------------------------------
+WT=$(canon "$(worktree_root)")
+cd "$WT"
+
+TARGET=$(ensure_target_dir "$WT")
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+LOGDIR="$TARGET/gate-logs/$STAMP"
+mkdir -p "$LOGDIR"
+
+# Ambient roots: all five, one fresh directory, reaped on exit.
+#
+# THE FIFTH IS NOT REDUNDANT. PMACS_STATE_HOME outranks XDG_STATE_HOME
+# (src/state.rs), so redirecting only the four XDG variables leaves the
+# real state root live on a machine that exports it.
+#
+# Belt and braces rather than a workaround: ambient-root isolation
+# merged as #206 and the in-crate paths resolve roots explicitly. What
+# this covers is everything OUTSIDE that guarantee --- integration
+# suites that spawn the real binary, PTY and daemon fixtures, anything
+# reaching a production resolution path --- where the process under test
+# reads the environment it was handed. HOME is deliberately left alone.
+AMBIENT="$TARGET/gate-ambient/$STAMP-$$"
+mkdir -p "$AMBIENT"
+cleanup() { rm -rf "$AMBIENT"; }
+trap cleanup EXIT INT TERM
+
+export CARGO_TARGET_DIR="$TARGET"
+export XDG_CONFIG_HOME="$AMBIENT" XDG_DATA_HOME="$AMBIENT" \
+       XDG_STATE_HOME="$AMBIENT" XDG_CACHE_HOME="$AMBIENT" \
+       PMACS_STATE_HOME="$AMBIENT"
+
+echo "gate: worktree   $WT"
+echo "gate: target dir $TARGET"
+echo "gate: logs       $LOGDIR"
+# Printed so the isolation is OBSERVABLE rather than merely asserted:
+# this is the directory all five ambient roots point at, and the exit
+# trap removes it, so it should be gone once the run finishes.
+echo "gate: ambient    $AMBIENT"
+[ -n "$ACCEPTANCE" ] && echo "gate: acceptance $ACCEPTANCE"
+[ "$PROTOCOL" = 1 ] && echo "gate: protocol   yes (CRDT workspace sweep added)"
+echo
+
+PLAN_FILE="$LOGDIR/plan.txt"
+emit_plan > "$PLAN_FILE"
+
+N=0
+FAILED=''
+while IFS="$(printf '\t')" read -r name cmd; do
+    N=$((N + 1))
+    log=$(printf '%s/%02d-%s.log' "$LOGDIR" "$N" "$name")
+    printf 'gate: [%02d] %-14s ' "$N" "$name"
+    # THE RUNNER MUST SURVIVE `set -e`, and the obvious forms do not.
+    #
+    #   cmd | tee log        --- reports TEE's status, so a failing gate
+    #                            exits 0 and the suite reads green.
+    #                            `set -o pipefail` is not POSIX; dash
+    #                            lacks it and this script targets sh.
+    #   cmd > log; rc=$?     --- under `set -e` the shell exits AT the
+    #                            failing command, so `rc=$?` never runs
+    #                            and nothing prints which gate failed or
+    #                            where its log is --- destroying the
+    #                            entire point of capturing it.
+    #
+    # A failing command is exempt from `set -e` only as an `if`
+    # condition. Hence this shape: no pipeline, so no status is lost to
+    # tee; no bare failing command, so no status is lost to set -e.
+    if eval "$cmd" > "$log" 2>&1; then
+        echo "ok"
+    else
+        rc=$?
+        echo "FAILED (exit $rc)"
+        echo "gate:      log: $log" >&2
+        FAILED="$FAILED $name"
+    fi
+done < "$PLAN_FILE"
+
+echo
+echo "gate: sweep logs (the U2/U3 remedy --- read these, do not re-run and grep):"
+for f in "$LOGDIR"/*-sweep.log "$LOGDIR"/*-sweep-crdt.log; do
+    [ -f "$f" ] && echo "gate:   $f"
+done
+
+if [ -n "$FAILED" ]; then
+    echo >&2
+    echo "gate: FAILED:$FAILED" >&2
+    echo "gate: logs in $LOGDIR" >&2
+    exit 1
+fi
+
+echo
+echo "gate: all gates passed"
