@@ -1,12 +1,15 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-08-06.** `main` is **`db1bbe9`** — the tree
-primitive **#217**, atop **#216**, which completed the macOS CI
-signal-integrity arc by retiring R2 and R4 with discriminating
-witnesses, atop **#215**, which built the registry. **That arc is
-retired**; its live residue (R1, R3, and the newer R5 and R6) is
-re-homed to the async-runtime, reap-ledger, and readiness-helper-audit
-lanes in `docs/active-work.md`.
+**Last updated: 2026-08-08.** `main` is **`9a26ac8`** — GPU horizontal
+scroll **#223**, which **closes the QoL arc** (§1). Beneath it the arc's
+other four: **#222** TUI horizontal scroll, **#221** `ui.line-wrap` at
+protocol v22, **#220** GUI zoom, **#219** `full_grid` honored by the
+grid consumer. Beneath those, `db1bbe9` — the tree primitive **#217**,
+atop **#216**, which completed the macOS CI signal-integrity arc by
+retiring R2 and R4 with discriminating witnesses, atop **#215**, which
+built the registry. **That arc is retired**; its live residue (R1, R3,
+and the newer R5 and R6) is re-homed to the async-runtime, reap-ledger,
+and readiness-helper-audit lanes in `docs/active-work.md`.
 
 The live CI-triage rule in §5 points at `docs/ci-red-signatures.md`,
 which keys on **signature, not test name** — and, since 2026-08-06,
@@ -83,7 +86,7 @@ reads it the way you just did.
 For volatile branches, checkpoints, verification, and recovery
 commands, read `docs/active-work.md` immediately after this file.
 
-## 1. Where the project stands (2026-08-07)
+## 1. Where the project stands (2026-08-08)
 
 - **QoL arc — CLOSED. All five stages merged (#219, #220, #221, #222,
   #223).** From one daily-driver report: terminal zoom broke TUI
@@ -91,9 +94,40 @@ commands, read `docs/active-work.md` immediately after this file.
   past the edge. Both complaints are answered on both frontends.
   - **#219** made the grid TUI honor `full_grid`, so a post-resize
     resync blanks the host before repainting.
+    - **`FG-INV` is a CONSUMER contract and lives on the protocol
+      type.** A `full_grid: true` delta carries only the frame's
+      **non-default** cells, so a consumer MUST blank its surface
+      before applying them. The rule already existed — in the doc
+      comment of a **private field on the producer's struct** — which
+      is exactly why the one consumer never honored it. An invariant a
+      consumer must satisfy belongs where consumer authors read it.
+    - **Seven tests covered the flag and all seven tested the
+      producer.** Every one asserted the producer *sets* it; none
+      asserted a consumer *acts* on it, and no runtime reader existed
+      anywhere in the workspace. "Add a test for the flag" had already
+      been done. §5's *enforcement and documentation drift apart
+      silently*, in a second register — and the reason a fix ships the
+      contract and its consumer together.
   - **#220** gave the GUI native zoom over the font preference that
     already existed, quantizing the step so the round-trip guarantee is
     exact rather than approximately true.
+    - **`install_state_dirs` is the eager-state-consumer seam.**
+      Builtins and `init.lua` both run *before* it, so a
+      `pmacs.state.read` at module load returns nothing, **always**.
+      `saveplace` and `recentf` never meet this because **both read
+      lazily**; zoom must apply with no user action, making it the
+      **first eager state consumer**. Restore therefore lives at the
+      end of `install_state_dirs` — by definition the moment state
+      becomes readable, so a future third startup path cannot
+      mis-order or miss it. **Any future eager consumer belongs at the
+      same seam.**
+    - **A GPU-only key binding cannot be expressed today.**
+      `keymap_stack::Scope` is `Buffer | Mode | Global` with **no
+      frontend identity**, and `FrontendEvent` has no
+      command-invocation variant — so neither "bind on the GPU only"
+      nor "the GPU asks for a command" exists. #220 shipped commands
+      and no default bindings for that reason, not by preference. See
+      the capability-aware keymap resolution backlog item in §6.
   - **#221** added **`ui.line-wrap`** — `ConfigKind::Enum`
     (`wrap`/`truncate`), default `wrap`, **buffer-local**, with
     `ui.toggle-line-wrap`. Both frontends honor it: the grid renderer
@@ -205,7 +239,8 @@ commands, read `docs/active-work.md` immediately after this file.
       **Test a boundary AT the boundary**; the replacements straddle by
       ±0.05px.
 
-- **`main` @ `db1bbe9`.** The **tree primitive #217** — `listview` rows
+- **Beneath the QoL arc, at `db1bbe9`** (it was `main` until #219).
+  The **tree primitive #217** — `listview` rows
   take optional `depth`/`id`, collapse is primitive-owned, folding is
   **local projection state and not a refresh protocol**, and the LSP
   outline is the sole adopter (`COHERENCE.md` §14 ◐; §20 says adoption,
@@ -2875,6 +2910,23 @@ round-trip cannot detect a discriminant shift.
 
 
 ## 6. Named deferrals (the standing backlog, consolidated)
+
+**Capability-aware keymap resolution — CROSS-CUTTING, NOT STARTED,
+needs its own framing.** Named here because #220 hit its absence and
+worked around it, not because any of it is designed. Today
+`keymap_stack::Scope` is `Buffer | Mode | Global` with **no frontend
+identity**, and `FrontendEvent` carries no command-invocation variant.
+Two consequences already paid for: **#220 could ship no default zoom
+bindings** (`gpu.zoom-in` / `-out` / `-reset` are commands only), and
+nothing can express "this binding exists only where a GPU is
+attached".
+
+It is genuinely cross-cutting — it touches the keymap stack, the
+frontend event vocabulary, and what a capability *is* — so it is a
+framing round before it is a lane. **Do not start it as a half-lane
+attached to some other stage's branch**, which is how it would arrive
+by accident; the workaround (commands without bindings) is stable and
+costs nothing while it waits.
 
 Editing: word kills (`M-d`/`M-BS` — need bytes-returning deleters +
 prepend-on-backward append), `C-SPC` set-mark, `C-u C-y` / `C-M-w`,
