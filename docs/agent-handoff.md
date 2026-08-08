@@ -2328,15 +2328,24 @@ some are tripwires doing their job, and one pin
 Machine-specific caveats — re-verify on a machine you haven't used
 before trusting them:
 
-- **Ambient storage roots: control all FIVE, not four.** Until the
-  ambient-root isolation lane lands
-  (`docs/test-ambient-config-isolation-framing.md`), the ~96 integration
-  suites read the developer's real `~/.config/pmacs/init.lua` and
-  **write** bundled packages into the real data root:
-  `#[cfg(not(test))]` guards the crate's own unit tests only, and
-  `EditorState::new` materializes packages outside every `cfg` guard.
-  A local full-suite run therefore needs, all pointed at a fresh
-  directory:
+- **Ambient storage roots: control all FIVE, not four.**
+  **`scripts/gate` does this for you** — it is only stated here because
+  the reasoning has to live somewhere, and because a run done by hand
+  still needs it.
+
+  **The ambient-root isolation implementation MERGED as #206**, so the
+  in-crate paths resolve roots explicitly rather than from the caller's
+  environment; the earlier text here still said "until the lane lands",
+  which stopped being true at that merge. What the five variables cover
+  now is everything *outside* that guarantee — integration suites that
+  spawn the real binary, PTY and daemon fixtures, anything reaching a
+  production resolution path — where the process under test reads the
+  environment it was handed. Belt and braces: a gate run that scribbles
+  in the developer's real config or data root is a bad failure mode
+  whether or not the crate promises not to.
+
+  A local full-suite run done by hand therefore needs, all pointed at a
+  fresh directory:
 
   ```
   XDG_CONFIG_HOME  XDG_DATA_HOME  XDG_STATE_HOME  XDG_CACHE_HOME

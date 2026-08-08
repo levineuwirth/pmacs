@@ -210,6 +210,31 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
+## R8 — the listview path failure that blocks every local gate run — NEEDS A LANE
+
+**Promoted 2026-08-08**, not discovered then: the row has been in
+`docs/ci-red-signatures.md` since the QoL arc. What changed is that
+`scripts/gate` (#225) turns the gate suite into one command, and R8
+makes that command **exit non-zero on a clean tree, every time**.
+
+- **Signature, control, and evidence: `docs/ci-red-signatures.md` R8.**
+  Not duplicated here. It is deterministic, and a merge-base control
+  confirms it fails identically on `main` — it is not a regression from
+  #223 or #225.
+- **Why it needs a lane now.** A gate that is always red is a gate
+  nobody reads. Parallel lanes are about to multiply how often it runs,
+  and the first thing an agent learns from a permanently-failing gate
+  is to ignore gate failures.
+- **What is NOT known**, and the lane starts here: the mechanism. The
+  row renders with a leading directory stripped — a **prefix strip, not
+  width truncation**; the fixture declares `CellSize::new(40, 100)`, so
+  the string fits. The `TMPDIR`-dependent relativization reading is a
+  hypothesis and has not been tested. **Why CI is green is equally
+  unestablished.**
+- **Scope discipline:** diagnose before fixing. A change that makes the
+  assertion pass without explaining the prefix strip would convert a
+  visible failure into an invisible one.
+
 ## QoL arc retirement — PR #224 OPEN (docs only)
 
 **PR #224** — https://github.com/levineuwirth/pmacs/pull/224. Written

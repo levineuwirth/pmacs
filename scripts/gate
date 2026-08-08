@@ -107,6 +107,36 @@ digest8() {
 
 MARKER_NAME='.pmacs-gate-target'
 
+# ---------------------------------------------------------------------
+# Acceptance suite names are INTERPOLATED INTO A COMMAND that the runner
+# evaluates, so they are an injection surface and are validated as one.
+# `--acceptance 'x; rm -rf ~'` must be refused, not executed.
+#
+# The allowlist is what a cargo test target can actually be named:
+# letters, digits, underscore, hyphen. That excludes every shell
+# metacharacter, whitespace, and path separators, so nothing reaching
+# the plan can be anything but a bare target name. A leading hyphen is
+# refused separately --- it is not dangerous, it would just become a
+# stray flag to cargo and fail confusingly.
+# ---------------------------------------------------------------------
+validate_suite() {
+    case $1 in
+        '')
+            echo "gate: --acceptance needs a suite name" >&2
+            exit 2 ;;
+        -*)
+            echo "gate: acceptance suite may not start with '-': $1" >&2
+            exit 2 ;;
+        *[!A-Za-z0-9_-]*)
+            echo "gate: refusing acceptance suite name: $1" >&2
+            echo "gate: names are cargo test targets --- letters, digits," >&2
+            echo "gate: underscore and hyphen only. The name is interpolated" >&2
+            echo "gate: into a command, so anything else is rejected rather" >&2
+            echo "gate: than escaped." >&2
+            exit 2 ;;
+    esac
+}
+
 # The managed root. PMACS_GATE_TARGET_ROOT exists for the behaviour
 # tests and is documented test-only: it is what keeps them from being
 # able to reach the real root.
@@ -186,10 +216,22 @@ emit_plan() {
 # record. Treating every listed path as live would make exactly the
 # directories most worth reclaiming permanently ineligible.
 # ---------------------------------------------------------------------
+#
+# FAILS LOUDLY RATHER THAN RETURNING NOTHING. An empty live set means
+# "every managed directory is an orphan", so a silent failure here is a
+# command to delete all of them. The first version piped git straight
+# into awk and the caller masked the result with `|| true`; run from
+# outside any repository that produced an empty set and
+# `--prune --force` would have deleted every marked directory. The
+# capture-then-check shape below is what makes that unrepresentable.
 live_worktrees() {
+    _porc=$(git worktree list --porcelain 2>/dev/null) || return 1
+    # A repository always has at least its own worktree, so empty output
+    # is a failure, not an answer.
+    [ -n "$_porc" ] || return 1
     # Records are blank-line separated. Emit the canonical path of every
     # record that carries NO `prunable` line.
-    git worktree list --porcelain 2>/dev/null | awk '
+    printf '%s\n' "$_porc" | awk '
         /^worktree /  { path = substr($0, 10); prunable = 0; next }
         /^prunable/   { prunable = 1; next }
         /^$/          { if (path != "" && !prunable) print path; path = ""; next }
@@ -201,12 +243,28 @@ live_worktrees() {
 }
 
 do_prune() {
+    # SAFETY GATE, and it is the most important thing in this file.
+    # Pruning decides what to DELETE by subtracting the live worktree
+    # set from the managed root. If that set cannot be established, the
+    # correct answer is not "nothing is live" --- it is "refuse".
+    if ! git rev-parse --show-toplevel >/dev/null 2>&1; then
+        echo "gate: refusing to prune --- not inside a git worktree." >&2
+        echo "gate: the live-worktree set cannot be established from here," >&2
+        echo "gate: and an empty one would mark every managed directory an" >&2
+        echo "gate: orphan. Run --prune from inside a checkout." >&2
+        exit 2
+    fi
+    if ! _live=$(live_worktrees); then
+        echo "gate: refusing to prune --- could not enumerate git worktrees." >&2
+        echo "gate: nothing was examined and nothing was deleted." >&2
+        exit 2
+    fi
+
     _root=$(gate_root)
     if [ ! -d "$_root" ]; then
         echo "gate: no managed root at $_root; nothing to prune"
         return 0
     fi
-    _live=$(live_worktrees || true)
     _found=0
     for _d in "$_root"/*; do
         [ -d "$_d" ] || continue
@@ -217,7 +275,18 @@ do_prune() {
             echo "gate: skip $_d --- no readable $MARKER_NAME"
             continue
         fi
-        _owner=$(head -n 1 "$_d/$MARKER_NAME" 2>/dev/null || true)
+        # The marker is DOCUMENTED as one line, so enforce that rather
+        # than reading the first line of whatever is there. Reading only
+        # line 1 would accept a multi-line file and act on its head ---
+        # which is exactly the shape a corrupted or hand-edited marker
+        # takes, and acting on it means deleting a directory on the
+        # strength of a file we did not understand.
+        _lines=$(wc -l < "$_d/$MARKER_NAME" 2>/dev/null || echo 0)
+        if [ "$_lines" -ne 1 ]; then
+            echo "gate: skip $_d --- marker is not exactly one line ($_lines)"
+            continue
+        fi
+        _owner=$(cat "$_d/$MARKER_NAME" 2>/dev/null || true)
         case $_owner in
             /*) ;;
             *)  echo "gate: skip $_d --- marker is not an absolute path"
@@ -252,6 +321,7 @@ while [ $# -gt 0 ]; do
     case $1 in
         --acceptance)
             [ $# -ge 2 ] || usage
+            validate_suite "$2"
             ACCEPTANCE="$ACCEPTANCE $2"
             shift 2 ;;
         --protocol)          PROTOCOL=1; shift ;;
@@ -290,7 +360,11 @@ cd "$WT"
 
 TARGET=$(ensure_target_dir "$WT")
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-LOGDIR="$TARGET/gate-logs/$STAMP"
+# $$ as well as the timestamp: two invocations in the same worktree
+# within one second would otherwise share a log directory and overwrite
+# each other's evidence --- which is precisely the U2/U3 failure this
+# logging exists to prevent, reintroduced by a naming choice.
+LOGDIR="$TARGET/gate-logs/$STAMP-$$"
 mkdir -p "$LOGDIR"
 
 # Ambient roots: all five, one fresh directory, reaped on exit.

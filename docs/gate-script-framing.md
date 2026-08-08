@@ -1,7 +1,32 @@
 # `scripts/gate` — per-worktree build isolation, and one gate suite
 
-**Status: framing pass, revision 4. Pre-implementation. Awaiting
-approval.**
+**Status: revision 5. Approved at revision 4 and IMPLEMENTED; revision
+5 records two safety defects review found in the implementation.**
+
+**Neither was a design gap — both were the implementation failing to
+honour this document, which is worth stating because it is the case a
+framing doc cannot prevent by itself:**
+
+- **`--prune` could delete every managed directory.** §2.6 requires
+  liveness to be *established*; the code masked
+  `git worktree list` failure with `|| true`, so running from outside
+  any repository produced an **empty** live set — under which every
+  marked directory is an orphan and `--prune --force` deletes all of
+  them, live lanes included. Now: two refusals (not in a worktree; the
+  enumeration failed), and an outside-repo survivor test.
+- **`--acceptance` was shell-injectable.** §2.3 hands the name into a
+  command the runner evaluates; nothing validated it, so
+  `--acceptance 'x; rm -rf ~'` would have executed. Now: an allowlist
+  of what a cargo target can be named, refused at parse time, with a
+  metacharacter rejection test and a canary.
+
+Also fixed: log directories now carry the PID as well as a
+whole-second timestamp (two runs in one second shared a directory and
+could overwrite each other's evidence — reintroducing U2/U3 through a
+naming choice); the ownership marker is enforced as exactly one line
+rather than read head-first; and the `prunable` test fails loudly
+instead of returning green when `git worktree add` fails, with cleanup
+through a `Drop` guard that survives a panicking assertion.
 
 Developer tooling. **Not coherence-affecting** — it touches no journey
 step, adds no interaction island, adopts no config-registry setting, and

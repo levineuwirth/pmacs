@@ -298,6 +298,20 @@ fn force_deletes_only_the_orphan() {
 /// does not fail this test. The check stays because `prunable` is
 /// reported for causes *other* than a missing directory (a gitdir file
 /// pointing elsewhere, for one), and those the path filter would miss.
+/// Deregisters probe worktrees on the way out **even if an assertion
+/// panics**. Cleanup written after the asserts would be skipped by the
+/// unwind, leaving the real repository carrying a stale record.
+struct WorktreePruneGuard;
+
+impl Drop for WorktreePruneGuard {
+    fn drop(&mut self) {
+        let _ = Command::new("git")
+            .args(["worktree", "prune"])
+            .current_dir(repo_root())
+            .output();
+    }
+}
+
 #[test]
 fn a_registered_worktree_whose_directory_was_deleted_is_prunable() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -311,9 +325,16 @@ fn a_registered_worktree_whose_directory_was_deleted_is_prunable() {
         .current_dir(repo_root())
         .output()
         .expect("git worktree add");
-    if !added.status.success() {
-        return; // cannot register a worktree here; nothing to assert
-    }
+    // A HARD failure, not a silent return. Skipping here would make the
+    // one test that covers `prunable` handling report green on a machine
+    // where it never ran — the failure mode this whole suite exists to
+    // avoid.
+    assert!(
+        added.status.success(),
+        "could not register a probe worktree, so this test proved nothing:\n{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let _guard = WorktreePruneGuard;
 
     let (dir, _, ok) = run_in(&wt, root.path(), &["--init"]);
     let dir = PathBuf::from(dir.trim());
@@ -324,20 +345,143 @@ fn a_registered_worktree_whose_directory_was_deleted_is_prunable() {
     std::fs::remove_dir_all(&wt).expect("remove the worktree directory");
 
     let (out, _, ok) = run(root.path(), &["--prune", "--force"]);
-    let pruned = !dir.exists();
-
-    // Deregister before asserting, so a failure cannot leave the real
-    // repository carrying a stale worktree record.
-    let _ = Command::new("git")
-        .args(["worktree", "prune"])
-        .current_dir(repo_root())
-        .output();
-
     assert!(ok, "prune must succeed; output was:\n{out}");
     assert!(
-        pruned,
+        !dir.exists(),
         "a `prunable` record is not a live worktree — its build directory \
          must be reclaimable, or orphans accumulate forever. Output was:\n{out}"
+    );
+}
+
+// --- Refusals: the two ways prune and the plan could do harm -----------
+
+/// **The data-loss case.** Pruning decides what to delete by subtracting
+/// the live worktree set from the managed root. Run from outside any
+/// repository, that set cannot be established — and the first version of
+/// this script masked the failure with `|| true`, making the set *empty*,
+/// which marks **every** managed directory an orphan. `--prune --force`
+/// would then have deleted all of them, including live lanes' artifacts.
+///
+/// The correct answer to "I cannot tell what is live" is to refuse.
+///
+/// **Two guards, deliberately redundant.** The script refuses both when
+/// `git rev-parse --show-toplevel` fails and when `live_worktrees`
+/// cannot enumerate — either alone satisfies this test, so mutating
+/// away one at a time reads as "vacuous". Removing **both** fails it.
+/// Recorded so a later reader does not delete one of them on the
+/// grounds that no test noticed.
+#[test]
+fn prune_outside_a_repository_refuses_and_every_directory_survives() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (orphan, lookalike, live) = prune_fixture(root.path());
+    let outside = tempfile::tempdir().expect("tempdir");
+
+    // Sanity: the fixture's orphan really is eligible from inside a repo.
+    let (inside, _, _) = run(root.path(), &["--prune"]);
+    assert!(
+        inside.contains("WOULD delete"),
+        "fixture is not discriminating — nothing was eligible:\n{inside}"
+    );
+
+    let (out, err, ok) = run_in(outside.path(), root.path(), &["--prune", "--force"]);
+    assert!(
+        !ok,
+        "pruning from outside a repository must FAIL, not proceed:\n{out}{err}"
+    );
+    assert!(
+        err.contains("refusing to prune"),
+        "the refusal must say why; stderr was:\n{err}"
+    );
+    assert!(
+        orphan.exists() && lookalike.exists() && live.exists(),
+        "nothing may be deleted when the live set is unknown"
+    );
+}
+
+/// `--acceptance` is interpolated into a command the runner evaluates,
+/// so a name carrying shell metacharacters is an injection. It must be
+/// refused rather than escaped, and refused at parse time — before any
+/// gate runs.
+#[test]
+fn acceptance_names_with_shell_metacharacters_are_refused() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let canary = root.path().join("canary");
+    std::fs::write(&canary, "intact").expect("write canary");
+
+    let hostile = [
+        format!("x; rm -f {}", canary.display()),
+        format!("x$(rm -f {})", canary.display()),
+        "x`id`".to_string(),
+        "x && id".to_string(),
+        "../escape".to_string(),
+        "x y".to_string(),
+        "-flag".to_string(),
+    ];
+
+    for name in &hostile {
+        let (out, err, ok) = run(root.path(), &["--acceptance", name, "--print-plan"]);
+        assert!(
+            !ok,
+            "must refuse acceptance name {name:?}; stdout was:\n{out}"
+        );
+        assert!(
+            err.contains("refusing acceptance suite name") || err.contains("may not start with"),
+            "refusal for {name:?} must say why; stderr was:\n{err}"
+        );
+        assert!(
+            !out.contains("rm -f") && !out.contains("id"),
+            "a hostile name must never reach the plan; stdout was:\n{out}"
+        );
+    }
+
+    assert_eq!(
+        std::fs::read_to_string(&canary).expect("read canary"),
+        "intact",
+        "no injected command may have executed"
+    );
+}
+
+/// A well-formed name still works — otherwise the validator could pass
+/// the test above by rejecting everything.
+#[test]
+fn ordinary_acceptance_names_are_accepted() {
+    let root = tempfile::tempdir().expect("tempdir");
+    for name in ["m4_acceptance", "gate-script", "abc123_x"] {
+        let (plan, err, ok) = run(root.path(), &["--acceptance", name, "--print-plan"]);
+        assert!(ok, "{name} must be accepted; stderr was:\n{err}");
+        assert!(
+            plan.contains(&format!("cargo test --test {name}")),
+            "plan was:\n{plan}"
+        );
+    }
+}
+
+/// The marker is documented as one line. Reading only its first line
+/// would accept a corrupted or hand-edited file and then delete a
+/// directory on the strength of a file the script did not understand.
+#[test]
+fn a_multi_line_marker_is_refused_rather_than_read_head_first() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let bad = root.path().join("bad-00000000");
+    std::fs::create_dir_all(&bad).expect("mkdir");
+    std::fs::write(
+        bad.join(".pmacs-gate-target"),
+        format!(
+            "{}\nstray second line\n",
+            root.path().join("gone").display()
+        ),
+    )
+    .expect("write marker");
+
+    let (out, _, ok) = run(root.path(), &["--prune", "--force"]);
+    assert!(ok, "output was:\n{out}");
+    assert!(
+        bad.exists(),
+        "a malformed marker must not authorise deletion"
+    );
+    assert!(
+        out.contains("not exactly one line"),
+        "the skip reason must name the problem; output was:\n{out}"
     );
 }
 
