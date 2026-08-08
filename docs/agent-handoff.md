@@ -2922,6 +2922,18 @@ round-trip cannot detect a discriminant shift.
 
 ## 6. Named deferrals (the standing backlog, consolidated)
 
+**Fixture project-detection census — NOT STARTED, follow-on from R8.**
+`tests/m4_acceptance.rs` alone constructs state through
+`EditorState::new_with_roots` **113 times**, and an unknown number of
+those never call `pmacs.project.set_search_boundary`. Unbounded
+detection is harmless *only while the assertion does not render a
+path* — which is why exactly one of them (R8) ever failed, and why the
+next one will look like a fresh mystery rather than a known class. The
+work is a census across the suites, not a rewrite: find the unbounded
+constructions whose assertions are path-sensitive, and bound those.
+`src/project.rs:208` documents the hazard and `detect_project_within`
+is the mechanism; eight test files already use it.
+
 **Capability-aware keymap resolution — CROSS-CUTTING, NOT STARTED,
 needs its own framing.** Named here because #220 hit its absence and
 worked around it, not because any of it is designed. Today

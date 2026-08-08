@@ -7997,11 +7997,36 @@ fn open_against_fake(path: &std::path::Path) -> pmacs::editor::EditorState {
         pmacs::protocol::FrontendId::LOCAL,
         pmacs::protocol::CellSize::new(40, 100),
     );
+    // Clamp the marker walk to the fixture directory so a stray
+    // ancestor marker (a developer's /tmp/.git, say) can't masquerade
+    // as the root — the same guard the `go`/`rooturi` fixture above
+    // already applies, and the hazard `src/project.rs` names in
+    // `detect_project_within`'s own doc comment.
+    //
+    // Without this, `display_path` in lsp.lua shortens rendered
+    // locations against whatever root detection finds ABOVE the
+    // tempdir, so an assertion that spells a path out passes or fails
+    // according to what is in the developer's /tmp. That is registry
+    // row R8, and it is why this line exists.
+    //
+    // The file's PARENT is the boundary, which is correct while
+    // fixtures put the file as a direct child of the fixture root — all
+    // three callers do. A future nested fixture that wants detection to
+    // reach an outer root needs an explicit argument, not a deeper
+    // path: the boundary is derived from the parent, so a deeper path
+    // clamps the walk sooner, never later.
+    let boundary = path
+        .parent()
+        .expect("the fixture file has a parent directory");
     let fake = fake_lsp_path();
     state
         .lua_host
         .lua()
-        .load(format!("pmacs.lsp.config.rust = {{ command = '{fake}' }}"))
+        .load(format!(
+            "pmacs.project.set_search_boundary('{}')
+             pmacs.lsp.config.rust = {{ command = '{fake}' }}",
+            boundary.display()
+        ))
         .exec()
         .expect("override rust config");
     state
@@ -8040,6 +8065,84 @@ fn open_against_fake(path: &std::path::Path) -> pmacs::editor::EditorState {
 ///
 /// So the assertion is on the **exact rendered bytes**, through the
 /// real entry points, against the fake language server.
+/// **R8's portable witness: a planted ancestor marker must not reach a
+/// rendered path.**
+///
+/// The row above renders a location verbatim, so it is only meaningful
+/// if project detection is bounded by the fixture. It was not, and the
+/// consequence was registry row **R8** — the assertion passed or failed
+/// according to whether the developer's `/tmp` happened to contain a
+/// `.git`, which is a property of the machine rather than of pmacs.
+///
+/// This test refuses to depend on that. **It plants the hazard itself:**
+///
+/// ```text
+/// <tempdir>/          <- an empty `.git` is created HERE
+///   proj/             <- the file's parent; `open_against_fake` bounds to it
+///     r.rs
+/// ```
+///
+/// With the boundary, detection examines `proj`, finds no marker, and
+/// stops — the planted marker one level up is out of reach, so
+/// `display_path` finds no root and falls back to the absolute path.
+/// **Remove the boundary from `open_against_fake` and this fails
+/// deterministically on every machine**, including CI, where no
+/// `/tmp/.git` exists. That is the bite; the machine's own stray
+/// directory is corroboration, not proof.
+///
+/// The product behaviour is deliberately NOT under test here — a file
+/// that really is inside a project really should render relative to it.
+/// What is under test is that a fixture's rendering cannot be steered
+/// by whatever sits above its tempdir.
+#[test]
+fn a_planted_ancestor_marker_does_not_reach_the_rendered_row() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // The hazard, planted: an EMPTY `.git` directory, which is exactly
+    // what the machine that first exhibited R8 had in /tmp. The `.git`
+    // marker is directory-only, so emptiness does not save us.
+    std::fs::create_dir_all(dir.path().join(".git")).expect("plant ancestor marker");
+
+    let proj = dir.path().join("proj");
+    std::fs::create_dir_all(&proj).expect("create fixture root");
+    let a_path = proj.join("r.rs");
+    std::fs::write(&a_path, b"fn main() {}\n").expect("write r");
+
+    let mut state = open_against_fake(&a_path);
+    let body = |state: &pmacs::editor::EditorState| -> String {
+        state
+            .lua_host
+            .lua()
+            .load("local b = pmacs.window.buffer() return b:slice(0, b:len())")
+            .eval()
+            .expect("panel text")
+    };
+
+    state
+        .lua_host
+        .lua()
+        .load("pmacs.lsp.find_references()")
+        .exec()
+        .expect("invoke find_references");
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "pmacs.describe.buffer(pmacs.window.buffer()).name == '*references*'",
+            5,
+        ),
+        "the references panel opened"
+    );
+
+    let refs = body(&state);
+    let (_header, rows) = refs.split_once('\n').expect("header then rows");
+    assert_eq!(
+        rows,
+        format!("{}:12:3", a_path.display()),
+        "the planted `.git` one level above the fixture root must not \
+         shorten the rendered path; an unbounded walk would render this \
+         as `proj/r.rs:12:3`"
+    );
+}
+
 #[test]
 fn flat_listview_consumers_render_byte_identically_after_the_tree_extension() {
     let dir = tempfile::tempdir().expect("tempdir");

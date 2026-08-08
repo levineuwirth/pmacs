@@ -245,6 +245,48 @@ the PR that retires other lanes.
 - **Retire this block in the next absorption after #224 merges.** It
   describes a docs PR; once merged there is nothing volatile left.
 
+## R8 fixture boundary — PR PENDING (test hermeticity)
+
+**Branch `r8-fixture-boundary`**, base `githubsucks/main` @ `b833b13`
+(the #224 merge). **`githubsucks/r8-fixture-boundary` is the
+authoritative tip** — the ref, not a SHA. Recover with
+`git fetch githubsucks && git checkout r8-fixture-boundary`.
+
+**Written with the lane's first commit, before the PR existed** — the
+standing correction from #171 and #215, which the previous two lanes
+both missed and review both caught.
+
+- **Framing `docs/r8-fixture-boundary-framing.md`**, revision 2,
+  approved 2026-08-08.
+- **Scope:** `tests/m4_acceptance.rs` only — `open_against_fake` sets
+  `pmacs.project.set_search_boundary` to the fixture directory, plus a
+  portable planted-marker witness. **No `src/`, no runtime, no
+  product-behaviour change.** `display_path` and project detection are
+  deliberately untouched: shortening a location against its project
+  root is the feature.
+- **Deliberately NOT branched from `gate-script`.** `scripts/gate` does
+  not exist on `main`, so naming it as a criterion would have made this
+  lane depend on an artifact absent from its own base.
+- **Verification (all run):** the R8 test passes **with `/tmp/.git`
+  still present**, i.e. on the machine that reproduces it; the planted
+  marker witness passes, and also passes with `TMPDIR` outside `/tmp`
+  (the CI shape); reverting the boundary fails **both**, the witness
+  with `proj/r.rs:12:3` — relative to the *planted* marker, which is
+  what makes the bite portable; full `m4_acceptance` 151/0; `--lib`
+  1920 and `--lib --features crdt` 2105; `-p pmacs-gpu` 241; fmt,
+  clippy, `git diff --check`; and the **full workspace sweep exit 0
+  across 113 targets** — the first fully green local sweep of this
+  session.
+- **`/tmp/.git` was NOT removed**, deliberately: deleting it would hide
+  the hermeticity defect, its provenance is unresolved, and it is the
+  only thing on this machine that reproduces the row.
+
+**Sequencing:** this lands first, on its own merits. **Then #225 rebases
+onto it** and takes "`scripts/gate` runs green" as *its* re-gate
+criterion. On that rebase, **the R8 documentation here is authoritative**
+— #225 carries an earlier, pre-fix copy of the R8 registry row and lane
+text from when it was still an open investigation, and those must lose.
+
 ## Docs absorption after #217 — MERGED as #218 (2026-08-06 09:59Z)
 
 **PR #218** — https://github.com/levineuwirth/pmacs/pull/218. **This
