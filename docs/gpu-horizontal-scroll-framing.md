@@ -130,6 +130,34 @@ This is worth stating because the parallel with `ui.line-wrap` is
 misleading: the *mode* is buffer state and needed `LineWrapFacts` at
 v22, but the *offset* is viewport state and needs nothing.
 
+### 1.2a The one approved exception to "local GPU viewport state"
+
+**Approved by the user 2026-08-08**, after implementation raised it.
+The scope line for this stage is *local GPU viewport state — no wire
+message, protocol bump, command surface, or minimap movement*. One
+change lands outside it, and only one:
+
+**`pmacs_protocol::scroll::follow_left`.** The follow rule — *scroll the
+minimum distance that puts the cursor back inside* — now lives in the
+protocol crate beside `classify`, and **both** frontends call it:
+`src/editor.rs::horizontal_follow` delegates, and the GPU converts
+px ↔ columns around it (exact, per Q#G1/Q#G3).
+
+*Why it is not scope creep.* Q#G5 requires a TUI-parity witness that is
+"checkable rather than asserted". Two tests in two crates asserting the
+same literal is not that — it is the structural duplication
+`pmacs-protocol::scroll`'s own module docs condemn, and **that module
+exists because this arc already shipped exactly that defect**: the
+scroll indicator, fixed in one copy and left wrong in the other. Without
+a shared rule there is no way to make the witness real.
+
+*What it does not do*, which is what keeps it narrow and is the basis of
+the approval: it moves **no viewport state** (the TUI still owns
+`view_left`, the GPU still owns `code_scroll_left`), adds **no wire
+message**, and needs **no protocol-version bump**. `follow_left` is a
+pure function over values each side already holds — the identical
+argument `classify`'s module docs already make for living there.
+
 ---
 
 ## 2. Open questions
@@ -257,7 +285,24 @@ Sketch, pending Q#G1/G2/G4:
 - **Math and rule clipping**: an inline math box and a decoration rule
   whose origins are left of the edge are cropped or culled, not drawn.
 - **An off-left completion anchor HIDES the popup; it does not close
-  it.** The distinction is a protocol one and revision 2 got it wrong.
+  it** — and the boundary is a **point**, tested at the edge.
+
+  *Added after review found the first implementation wrong here.* It
+  reused `survives_code_clip_left` and passed `line_height` as the
+  horizontal extent: a vertical dimension standing in for a horizontal
+  one. An anchor up to a line-height left of the gutter therefore
+  survived, and `completion_dropdown_rect` bounds `ax` against the right
+  margin only — so the popup painted over the line numbers. An anchor is
+  a position between glyphs with no width of its own, so the predicate
+  is `screen_x < code_clip_left()`.
+
+  **The far-off-left witness cannot catch this**, which is why it stayed
+  green: 200px off-left fails a width-based predicate too. The witness
+  must **straddle** the edge — the same anchor a fraction of a pixel
+  either side — and assert the popup's own left edge stays out of the
+  gutter on the visible side.
+
+  The distinction is a protocol one and revision 2 got it wrong.
   `completion_anchor_px` returns `None`, so nothing draws — but the
   daemon-owned completion state and its key handling are retained.
   Actual closure is `CompletionPopup { anchor: None }`, which is the

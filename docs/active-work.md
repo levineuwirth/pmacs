@@ -476,7 +476,8 @@ the existing font contract; G4 minimap unchanged; G5 accepted whole —
 **Scope: local GPU viewport state.** No wire message, no protocol bump,
 no command surface, no minimap movement.
 
-**ONE DELIBERATE STEP OUTSIDE THAT SCOPE, flagged for review.** Q#G5's
+**ONE APPROVED EXCEPTION TO THAT SCOPE** (user, 2026-08-08; recorded in
+the framing doc at §1.2a). Q#G5's
 TUI-parity witness asks for agreement that is "checkable rather than
 asserted". Two tests in two crates asserting the same literal is not
 that — it is exactly the structural duplication
@@ -487,13 +488,29 @@ rule moved to `pmacs_protocol::scroll::follow_left`, beside `classify`,
 and **both** frontends call it: `src/editor.rs::horizontal_follow`
 delegates, and the GPU converts px ↔ columns around it (exact by Q#G3).
 
-What this costs: Stage 5 now touches `src/editor.rs`, which the scope
-line above does not cover. What it buys: the two frontends *cannot*
-choose different edges. No wire message and no version bump — the same
-argument `classify`'s module docs already make. **If the user rejects
-it, reverting is a small, local change**: restore the four-line
-conditional in `horizontal_follow`, drop `follow_left` and its four
-protocol tests, and rewrite the parity witness as a two-sided pin.
+What it costs: Stage 5 touches `src/editor.rs`, which the scope line
+above does not cover. What it buys: the two frontends *cannot* choose
+different edges. The approval turned on what it does **not** do — it
+moves no viewport state, adds no wire message, and needs no
+protocol-version bump.
+
+**Review round 1 (2026-08-08) — one non-zero-offset defect, fixed.**
+`completion_anchor_px` reused `survives_code_clip_left` and passed
+`line_height` as the horizontal extent: **a vertical dimension standing
+in for a horizontal one**. An anchor up to a line-height left of the
+gutter survived, and `completion_dropdown_rect` clamps `ax` against the
+right margin only — so the popup painted over the line numbers. Now a
+point predicate, `screen_x < code_clip_left()`.
+
+**The lesson is about the witness, not the predicate.** The existing
+test placed the anchor 200px off-left, which fails a width-based
+predicate too — it stayed green straight through the defect and the
+mutation battery agreed with it, because the battery only ever asked
+whether *removing* the check was caught. **A boundary this stage cares
+about must be tested AT the boundary**: the replacement straddles the
+edge by ±0.05px and additionally asserts the popup's own left edge stays
+out of the gutter, which is what makes "`completion_dropdown_rect` needs
+no left clamp" a checked claim rather than a comment.
 
 **Its first finding corrects Stage 4's framing.** §1.3 there said the
 GPU "needs a mechanism that does not exist", and I endorsed the

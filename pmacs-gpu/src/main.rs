@@ -7768,8 +7768,26 @@ impl State {
         // anchor: None }`, which is the daemon's to send. Scrolling
         // back brings the popup straight back, and a viewport lane must
         // not quietly redefine when a completion ends.
+        //
+        // **A POINT predicate, not `survives_code_clip_left`.** An
+        // anchor is a position between glyphs — it has no horizontal
+        // extent of its own, and the popup it places is drawn to its
+        // RIGHT. The first version of this passed `line_height` as the
+        // width, which is a vertical dimension standing in for a
+        // horizontal one: an anchor up to a line-height left of the
+        // gutter then "survived", and `completion_dropdown_rect` has no
+        // left clamp (it bounds `ax` against the right margin only), so
+        // that x reached the popup's left edge and painted over the
+        // line numbers.
+        //
+        // That absent clamp stays absent deliberately. This predicate
+        // is what guarantees `ax >= code_clip_left()`, and a second
+        // clamp downstream would be a duplicate of the same rule — the
+        // failure mode this stage's whole shared-transform design
+        // exists to avoid. `completion_dropdown_rect` is witnessed
+        // against it instead.
         let screen_x = self.code_x_to_screen(x);
-        if !self.survives_code_clip_left(screen_x, line_height) {
+        if screen_x < self.code_clip_left() {
             return None;
         }
         Some((screen_x, y, line_height))
@@ -19139,6 +19157,75 @@ mod tests {
         );
     }
 
+    /// The caret's left-edge predicate, tested **at** the edge — the
+    /// audit the completion defect prompted.
+    ///
+    /// The caret's use of `survives_code_clip_left` is correct where the
+    /// completion anchor's was not: a caret quad is `CARET_WIDTH` wide,
+    /// so that IS its horizontal extent. What this pins is the
+    /// consequence, which is otherwise only derivable: because
+    /// `horizontal_follow` snaps the offset to whole columns, a caret is
+    /// never *partly* behind the gutter. It is either at a visible
+    /// column or a whole advance left of one, and `CARET_WIDTH` (2px) is
+    /// far smaller than any code advance — so the straddle case the
+    /// completion path got wrong cannot arise here at all.
+    ///
+    /// Written because that argument is load-bearing and invisible. A
+    /// future change to the snap, or a font whose advance approached
+    /// 2px, would break it silently.
+    ///
+    /// Mutation-checked: substituting `rect.h` for `rect.w` — the exact
+    /// error the completion path shipped — fails this test. An
+    /// over-width *smaller than one advance* does not, and that is the
+    /// invariant rather than a gap: under column snapping an extent
+    /// error too small to cross a column cannot put the caret in the
+    /// gutter, which is why only the height-sized error is visible.
+    #[test]
+    fn the_caret_never_straddles_the_gutter_edge_under_column_snapping() {
+        let text = long_line();
+        let Some((mut state, bid)) = truncating_state(320, 240, &text) else {
+            return;
+        };
+        let advance = state.mono_advance();
+        assert!(
+            advance > CARET_WIDTH,
+            "the no-straddle argument needs an advance wider than the caret"
+        );
+        let clip = state.code_clip_left();
+
+        // Walk the caret across the boundary one column at a time and
+        // check every frame: painted carets are wholly inside the code
+        // area, hidden ones are wholly outside it.
+        assert!(follow_to(&mut state, bid, text.len() as u64) > 0.0);
+        let scrolled = state.code_scroll_left;
+        for col in 0..text.len() as u64 {
+            state.own_cursor = Some(OwnCursor {
+                buffer_id: bid,
+                byte: col,
+            });
+            state.code_scroll_left = scrolled; // no follow: hold the view
+            let Some(rect) = state.caret_rect() else {
+                continue;
+            };
+            if state.code_caret_rect_in_clip().is_some() {
+                assert!(
+                    rect.x >= clip,
+                    "a PAINTED caret at column {col} starts at {}, inside \
+                     the gutter edge {clip}",
+                    rect.x
+                );
+            } else {
+                assert!(
+                    rect.x + rect.w <= clip || rect.x >= state.text_bounds_right() as f32,
+                    "a HIDDEN caret at column {col} spans [{}, {}) — it \
+                     overlaps the code area, so hiding it loses the cursor",
+                    rect.x,
+                    rect.x + rect.w
+                );
+            }
+        }
+    }
+
     /// Q#G5 — **math boxes and their rules obey the same clip.**
     ///
     /// The glyph mini-buffers are clipped by their layer's `TextBounds`;
@@ -19234,6 +19321,83 @@ mod tests {
         assert!(
             state.completion_anchor_px().is_some(),
             "scrolling back must bring the same popup back"
+        );
+    }
+
+    /// Review finding — **the completion boundary is a POINT, and it is
+    /// exact to within a fraction of a pixel.**
+    ///
+    /// The far-off-left test above cannot catch this. The first version
+    /// of the predicate passed `line_height` as the horizontal extent —
+    /// a vertical dimension standing in for a horizontal one — so an
+    /// anchor anywhere within a line-height left of the gutter survived,
+    /// and `completion_dropdown_rect` clamps `ax` against the right
+    /// margin only. The popup painted over the line numbers. An anchor
+    /// 200px off-left survives neither predicate, which is exactly why
+    /// that test stayed green through the defect.
+    ///
+    /// So this straddles the edge instead: the same anchor a twentieth
+    /// of a pixel either side of it, which no width-based predicate can
+    /// separate.
+    #[test]
+    fn a_completion_anchor_a_hair_left_of_the_gutter_hides() {
+        let text = long_line();
+        let Some((mut state, bid)) = truncating_state(480, 240, &text) else {
+            return;
+        };
+        state.view_range = (0, text.len() as u64);
+        state.completion = Some(CompletionLocal {
+            buffer_id: bid,
+            anchor: 0,
+            prefix_len: 0,
+            rows: vec![CompletionPopupRow {
+                label: "candidate".into(),
+                kind: 3,
+                detail: None,
+            }],
+            selected: Some(0),
+            total: 1,
+        });
+        let (code_x, _, _) = state.code_byte_px(0).expect("the anchor has geometry");
+        // Offset that puts the anchor exactly on the clip edge. Set
+        // directly: this witnesses the PREDICATE, not the follow, and
+        // the follow cannot land on a fractional boundary by design.
+        let flush = state.text_left() + code_x - state.code_clip_left();
+
+        state.code_scroll_left = flush + 0.05; // a hair LEFT of the edge
+        assert!(
+            state.completion_anchor_px().is_none(),
+            "an anchor {:.2}px left of the gutter must hide — a width-based \
+             predicate lets it through by most of a line height",
+            0.05
+        );
+        assert!(
+            state.completion.is_some(),
+            "still HIDDEN, not closed, at the boundary too"
+        );
+        assert!(
+            state.completion_dropdown_rect().is_none(),
+            "and nothing downstream may resurrect a hidden anchor"
+        );
+
+        state.code_scroll_left = flush - 0.05; // a hair RIGHT of the edge
+        let (ax, _, _) = state.completion_anchor_px().expect(
+            "a hair right of the edge is visible — the predicate is \
+                     a boundary, not a margin",
+        );
+        assert!(
+            ax >= state.code_clip_left(),
+            "the anchor the popup is placed at must be inside the code area"
+        );
+        // The claim that `completion_dropdown_rect` needs no left clamp
+        // of its own, checked rather than asserted in a comment.
+        let (left, _, _) = state
+            .completion_dropdown_rect()
+            .expect("the visible anchor places a popup");
+        assert!(
+            left >= state.code_clip_left(),
+            "the popup's left edge must not enter the gutter ({left} vs {})",
+            state.code_clip_left()
         );
     }
 
