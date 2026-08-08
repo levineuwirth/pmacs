@@ -111,7 +111,11 @@ lesson, §1 for the two framings).
   are identical on every machine. Remote names are otherwise
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
-- Canonical base at this snapshot: **`githubsucks/main` @ `db1bbe9`** —
+- Canonical base at this snapshot: **`githubsucks/main` @ `9a26ac8`** —
+  GPU horizontal scroll **#223**, which **closes the QoL arc**, atop
+  `2b56d16` TUI horizontal scroll **#222**, `02f3ec3` `ui.line-wrap`
+  **#221** (protocol v22), `218d2e7` GUI zoom **#220** and `da56bec`
+  `full_grid` **#219**. Beneath those, `db1bbe9`:
   the tree primitive **#217**, atop `2657568` the macOS CI
   signal-integrity **Stage 2 #216** (which retired R2 and R4), atop
   `12f2970` its Stage 1 registry **#215**, atop `f186253`:
@@ -123,13 +127,20 @@ lesson, §1 for the two framings).
   #206, Journey Stage 1b-3 #205, 1b-2 #204 and 1b-1 #203, the
   reap-ledger diagnostic #202, the isolation framing #201, the
   process-signal diagnostic #200 and the ledger absorption #199.
-  **Protocol schema support is `v6..=v21`; the production server-first
+  **Protocol schema support is `v6..=v22`; the production server-first
   `Hello` still advertises v20** — two different facts, and #184 landed
-  only the first.
+  only the first. The upper bound moved to **v22 at #221**, which added
+  `InstanceMessage::LineWrapFacts`; `ADVERTISED_PROTOCOL_VERSION` did
+  not move and must not be edited to chase it. Verified against
+  `pmacs-protocol/src/message.rs`, not carried forward: this line said
+  `v6..=v21` for two merges after that stopped being true.
+  **Historical `v21` statements elsewhere in this file are correct
+  where they describe a stage as it landed** — only this
+  current-state paragraph tracks the live range.
   **The recovery floor advances with the base**, so the check below
-  now requires `db1bbe9` or newer; a tree at `12f2970` no longer
-  passes — it would lack #216 and #217, both of which this file
-  describes as complete. That is deliberate — a check accepting an older commit than
+  now requires `9a26ac8` or newer; a tree at `db1bbe9` no longer
+  passes — it would lack the entire QoL arc, which this file and the
+  handoff both describe as complete. That is deliberate — a check accepting an older commit than
   the declared base passes on a tree the rest of this file does not
   describe.
   **Lanes below that name an older base have not been re-based; derive
@@ -167,7 +178,7 @@ git worktree list
 git status --short --branch
 ```
 
-The `git log` command must expose `db1bbe9` — the base named above — or a
+The `git log` command must expose `9a26ac8` — the base named above — or a
 newer intentional main. Keep this threshold and the canonical-base line in
 step: a recovery check that accepts an older commit than the base it
 declares canonical will pass on a tree the rest of this file does not
@@ -175,12 +186,15 @@ describe.
 If it does not, stop and repair the remote/fetch configuration.
 
 **This path was exercised, not asserted, at this snapshot** — re-run
-from an empty directory on 2026-08-06 when the base advanced to
-`db1bbe9`, rather than having its SHA swapped. `git clone` the
-canonical URL, add the `githubsucks` alias, `git fetch githubsucks
---prune`, confirm `db1bbe9` is an ancestor of `githubsucks/main`, and
-recover a lane with the three-argument `git worktree add <path> -b
-<local> githubsucks/<branch>` form. All four steps ran clean.
+from an empty directory on 2026-08-08 when the base advanced to
+`9a26ac8`, rather than having its SHA swapped. That distinction is the
+whole point of this paragraph: advancing the base is exactly when the
+recovery commands are most likely to have rotted, and a swapped SHA
+reads identically to a verified one. `git clone` the canonical URL, add
+the `githubsucks` alias, `git fetch githubsucks --prune`, confirm
+`9a26ac8` is an ancestor of `githubsucks/main`, and recover with the
+three-argument `git worktree add <path> -b <local> githubsucks/<branch>`
+form. All four steps ran clean.
 
 **Correction, found by re-running it.** This file claimed the
 two-argument form fails for a remote-only branch with `fatal: invalid
@@ -195,6 +209,41 @@ bare `git push`, and is exactly the "uncommitted work does not travel"
 hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
+
+## QoL arc retirement — PR #224 OPEN (docs only)
+
+**PR #224** — https://github.com/levineuwirth/pmacs/pull/224. Written
+**after** the PR existed rather than with the lane's first commit —
+which is the standing correction from #171 and #215 being missed again,
+and it took review asking. Recorded that way rather than quietly
+back-dated: this file requires a lane for **every open PR**, including
+the PR that retires other lanes.
+
+- **Branch `retire-long-lines-lane`**, base `githubsucks/main` @
+  `9a26ac8` (the #223 merge). **`githubsucks/retire-long-lines-lane` is
+  the authoritative tip** — the ref, not a SHA, since any edit to this
+  block advances past whatever SHA it records. Recover with
+  `git fetch githubsucks && git checkout retire-long-lines-lane`.
+- **Docs only.** Two files, `docs/active-work.md` and
+  `docs/agent-handoff.md`. No `src/`, no crate, no manifest, no test
+  changes.
+- **Scope:** Rule 4 for the QoL arc, closed at #223. Remove the three
+  merged lane blocks (long lines, Stage 1 #219, Stage 2 #220) **after**
+  re-homing their durable residue to the handoff; advance the handoff's
+  date and `main` anchor and this file's canonical-base record and
+  recovery floor; add capability-aware keymap resolution as a named
+  handoff §6 backlog item — cross-cutting, **not started**, needs its
+  own framing.
+- **Verification:** `git diff --check` clean. **The recovery path was
+  re-exercised, not SHA-swapped** — fresh clone into an empty
+  directory, `githubsucks` alias, `--prune` fetch, `9a26ac8` confirmed
+  an ancestor of `githubsucks/main`, worktree recovered with the
+  three-argument form; all four steps clean. Swept for dangling
+  references to the removed lanes and their branches. The full gate
+  suite is **not** re-run for a change that cannot reach it, and that
+  is stated rather than left as a gap.
+- **Retire this block in the next absorption after #224 merges.** It
+  describes a docs PR; once merged there is nothing volatile left.
 
 ## Docs absorption after #217 — MERGED as #218 (2026-08-06 09:59Z)
 
@@ -224,162 +273,6 @@ Diagnosing R5 or R6, or auditing the three readiness helpers — those
 are the lanes this one creates, not work it does. Retiring the
 CI-CRDT, Distribution, or reap-ledger lanes: each still owns undone
 work and rule 4 does not apply to them.
-
-## Honoring `full_grid` (QoL Stage 1) — MERGED as #219 (2026-08-06 13:41Z)
-
-**PR #219** — https://github.com/levineuwirth/pmacs/pull/219. **This
-block was written with the lane's first commit, before the PR
-existed** — the standing correction from #171 and #215 — so the row
-below was filled in rather than invented.
-
-- **Branch `full-grid-resync`**, base `githubsucks/main` @ `da56bec`
-  (the #218 merge). `githubsucks/full-grid-resync` is the
-  authoritative tip; any edit to this block advances past whatever SHA
-  it records. Recover with `git fetch githubsucks && git checkout
-  full-grid-resync`.
-- **Framing `docs/full-grid-resync-framing.md` revision 2**, approved
-  with **Q#FG1 = A**: the sole grid consumer honors the flag by
-  resetting style, clearing, then applying spans.
-- **First of three QoL stages**, from daily-driver use. Stage 2 is GUI
-  zoom (the machinery exists — `FontMetrics::scale` already derives
-  every dimension and is driven by an attach message in centi-pixels;
-  it is unbound and unpersisted). Stage 3 is long-line wrap/scroll,
-  which is a design round: **no horizontal viewport exists at all**
-  (`view_left` / `col_offset` / `hscroll` match nothing in `src/` or
-  `pmacs-gpu/src/`). Separate branches on purpose — Stage 1 is a
-  contained fix and must not wait behind Stage 3's design.
-
-### What it ships
-
-`FG-INV` moves onto the protocol type, where consumer authors read it:
-a `full_grid: true` delta carries only the frame's **non-default**
-cells, so a consumer MUST blank its surface first. The rule already
-existed — in the doc comment of a **private field** on the producer's
-struct (`src/instance_render.rs:36`), which is why the one consumer
-never honored it.
-
-`emit_cell_delta` joins the existing pure escape-sequence helpers in
-`src/frontend.rs` (`emit_span`, `emit_status_overlay`, …), and
-`apply_message` routes through it.
-
-### Why a green suite missed it for so long
-
-Seven tests cover the flag. Every one asserts the **producer sets it**;
-none asserted a **consumer acts on it**, and no runtime reader existed
-anywhere in the workspace. "Add a test for the flag" had already been
-done. This is handoff §5's *enforcement and documentation drift apart
-silently* in a second register, and it is why the fix ships the
-contract and the consumer together.
-
-### Verification
-
-- Three unit witnesses, all bitten: order (reset → clear → spans),
-  **empty spans still clear**, and a differential frame clears never.
-  The empty-spans case discriminates on its own — under the plausible
-  `spans.is_empty()` early return the order test still passes and only
-  that one fails.
-- PTY acceptance (`tests/full_grid_resync_acceptance.rs`) drives a real
-  `SIGWINCH`. **The mark is anchored to content, not time**: a
-  time-based settle cannot work because a settled pmacs screen emits
-  per-frame bytes forever. Bitten against the original defect: 34,831
-  bytes after the first painted frame with no `CSI 2 J`.
-- **What it does not prove:** the suites assert on raw bytes; there is
-  no screen model and no `vt100`/`termwiz`/`vte` dependency. This shows
-  pmacs *emitted* a blank at the right moment, not that the screen
-  ended correct. A terminal emulator in test deps is a candidate, not
-  smuggled in here.
-
-### Not in scope
-
-Stages 2 and 3. The `pmacs.terminal` child-PTY `SIGWINCH` path. Any
-change to *when* `needs_full_grid` is set — the producer's triggers
-were verified correct, along with per-frame geometry sync and
-`view_top` reconciliation on shrink.
-
-## GUI zoom (QoL Stage 2) — MERGED as #220 (2026-08-07 08:25Z)
-
-**PR #220** — https://github.com/levineuwirth/pmacs/pull/220. **Written
-with the lane's first commit, before the PR existed** — the standing
-correction from #171 and #215 — so the row below was filled in rather
-than invented.
-
-- **Branch `gui-zoom`**, base `githubsucks/main` @ `218d2e7` (the #219
-  merge). Pushed; **`githubsucks/gui-zoom` is the authoritative tip** —
-  the ref, deliberately not a SHA, since writing one into the commit
-  that updates this lane makes it stale in that same commit.
-  Recover: `git fetch githubsucks && git checkout gui-zoom`.
-- **Framing `docs/gui-zoom-framing.md` revision 5**, approved after
-  four review rounds; revision 5 adds §3.2 for a finding raised against
-  the implementation. **Q#Z1 = (c)** configured base with `None`
-  preserved; **Q#Z2 = additive**; **Q#Z3 = (C)** commands only, no
-  default bindings; **Q#Z4** eager restore inside `install_state_dirs`.
-
-### What it ships
-
-`builtin/runtime/zoom.lua`: two settings (`ui.gpu-font-size-base`,
-`ui.gpu-zoom-step`), three commands (`gpu.zoom-in` / `-out` /
-`-reset`), and `pmacs.zoom.restore` called from `install_state_dirs`.
-**No rendering work** — `FontMetrics::scale` already derived every GUI
-dimension and `apply_font_facts` already re-metriced everything; this
-drives the preference that existed.
-
-### The findings review caught, none of which was in revision 1
-
-- **Q#Z3 was not implementable.** `keymap_stack::Scope` is
-  `Buffer | Mode | Global` with no frontend identity, and
-  `FrontendEvent` has no command-invocation variant — so neither "bind
-  on GPU only" nor "the GPU asks for a command" exists. Commands ship;
-  the binding waits on **capability-aware keymap resolution**, now a
-  named follow-on.
-- **The restore seam did not exist.** Builtins and `init.lua` both run
-  *before* `install_state_dirs`, so a `pmacs.state.read` at module load
-  returns nothing, always. `saveplace` and `recentf` never meet this
-  because **both read lazily**; zoom must apply with no user action,
-  making it the **first eager state consumer**. Restore lives at the
-  end of `install_state_dirs` — by definition when state becomes
-  readable, so it cannot be mis-ordered or missed by a future third
-  startup path.
-- **Every size write clobbered the family.** `set_font` replaces both
-  fields unconditionally, so `{ size = n }` alone silently cleared a
-  configured family until restart.
-- **The bounds could not carry the round-trip guarantee** (raised
-  against the implementation, not the framing). `ConfigKind::Number`
-  validates finiteness and bounds and *nothing else*, and `on_change`
-  is notified after the value is stored — so it cannot veto. A step of
-  `0.015` is therefore settable, and used raw it broke the framed
-  exact round trip: `16.00 -> 16.02 -> 16.01`. Fixed by quantizing the
-  step **and** the base at the point of use, which is the operation
-  `validate_font_size` already applies to sizes, one level up.
-  Set-time enforcement was rejected: the registry cannot express
-  precision, and a validating wrapper is bypassed by a direct
-  `pmacs.config.set` — the seam `autosave` documents about
-  `interval_ms`.
-
-A fifth, documentation-only: the explanation of *why* `0.015` broke
-said the two intermediates rounded in opposite directions. They do not.
-`16.015` and `16.005` are exactly `1601.5` and `1600.5` centi-pixels —
-both exact ties, and half-up sends **both up**. The mechanism is that
-half-up is not symmetric under negation, so the two roundings
-accumulate rather than cancel. Corrected in all three copies; no
-behavior change.
-
-### Verification
-
-15 acceptance tests, four bitten: dropping family preservation fails
-3; reverting to the framing's first parser `^(%d+)$` fails 4 including
-the seam restore (it anchors to end-of-subject and rejects the
-newline-terminated file the writer emits); hardcoding the 16.0 origin
-fails the base test; **using the raw step instead of the quantized one
-fails the unrepresentable-step witness** with
-`left: Some(16.01) / right: Some(16.0)` **while the pre-existing 0.37
-test still passes** — which is exactly why the new case had to be its
-own test rather than another parameter of that one.
-
-### Not in scope
-
-Stage 3 (long lines). Capability-aware keymap resolution — Q#Z3's
-option (A), deliberately deferred rather than half-built. Per-buffer
-zoom. Any change to `FontFacts` or the wire.
 
 ## Empty-content readiness, a fourth and fifth instance — FOR THE R6 AUDIT
 
@@ -434,293 +327,6 @@ a job executed — **the log is**.
 Whether `docs/ci-red-signatures.md` should grow a short non-row section
 for this class is an open question for its owner, not something this
 lane decided.
-
-## Long lines (QoL arc) — Stages 3 and 4 MERGED (#221, #222); Stage 5 closes it
-
-**Rewritten, not removed.** Rule 4 removes a lane when its ARC is done;
-this one has **Stage 5** ahead. The durable facts of Stages 3 AND 4 are
-both in `docs/agent-handoff.md` §1 — rule 4's precondition, satisfied
-rather than deferred — so what remains here is the Stage 5 plan and
-only the residue from earlier stages that constrains it.
-
-> **RULE 4 APPLIES AT STAGE 5's MERGE, AND NOT BEFORE.** The arc closes
-> at Stage 5 (GPU horizontal scroll). Q#HS1 split the GPU out
-> deliberately and time-boxed it; retiring this lane at Stage 4's merge
-> would have orphaned exactly the half the time box exists to
-> guarantee, while `truncate` was still a dead end in the GUI. **Do not
-> remove this block until Stage 5 has merged** — and when it does, the
-> handoff bullets are what makes removal legitimate rather than lossy.
-
-**Branch `horizontal-scroll`**, based on `githubsucks/main` @ `02f3ec3`
-(the #221 merge). `githubsucks/horizontal-scroll` is the authoritative
-tip — the ref, not a SHA, since any edit to this block advances past
-whatever SHA it records. Recover:
-`git fetch githubsucks && git checkout horizontal-scroll`.
-
-**Stage 4 MERGED as #222** (`2b56d16`). Long lines are now reachable
-**in the TUI**; the GUI half is Stage 5.
-
-**Branch `gpu-horizontal-scroll`**, based on `githubsucks/main` @
-`2b56d16`. `githubsucks/gpu-horizontal-scroll` is the authoritative tip
-— the ref, not a SHA. Recover:
-`git fetch githubsucks && git checkout gpu-horizontal-scroll`.
-
-**Status: PR #223 OPEN, awaiting CI. DO NOT MERGE until the user says
-so.** `https://github.com/levineuwirth/pmacs/pull/223`. Framing revision
-4 approved 2026-08-07; review round 1 answered 2026-08-08 (the
-completion point-predicate defect below).
-
-**The tip is the ref, `githubsucks/gpu-horizontal-scroll`, not a SHA
-written here.** The first version of this line pinned `55faa45` — which
-the very commit that wrote it invalidated, because recording the PR
-moved the head. Verify CI against the PR's live `headRefOid`, never
-against a SHA quoted in a document.
-
-G1 pixels (exact conversion via the
-supported monospace advance); G2 automatic cursor-follow only, zeroing
-on **both** wrap transition and `BufferSnapshot`; G3 monospace-only by
-the existing font contract; G4 minimap unchanged; G5 accepted whole —
-**all twelve witnesses written and mutation-tested** (see below).
-
-**Scope: local GPU viewport state.** No wire message, no protocol bump,
-no command surface, no minimap movement.
-
-**ONE APPROVED EXCEPTION TO THAT SCOPE** (user, 2026-08-08; recorded in
-the framing doc at §1.2a). Q#G5's
-TUI-parity witness asks for agreement that is "checkable rather than
-asserted". Two tests in two crates asserting the same literal is not
-that — it is exactly the structural duplication
-`pmacs-protocol::scroll`'s own module docs condemn, and that module
-exists because **this arc already shipped that defect** (the scroll
-indicator, fixed in one copy and left wrong in the other). So the follow
-rule moved to `pmacs_protocol::scroll::follow_left`, beside `classify`,
-and **both** frontends call it: `src/editor.rs::horizontal_follow`
-delegates, and the GPU converts px ↔ columns around it (exact by Q#G3).
-
-What it costs: Stage 5 touches `src/editor.rs`, which the scope line
-above does not cover. What it buys: the two frontends *cannot* choose
-different edges. The approval turned on what it does **not** do — it
-moves no viewport state, adds no wire message, and needs no
-protocol-version bump.
-
-**Review round 1 (2026-08-08) — one non-zero-offset defect, fixed.**
-`completion_anchor_px` reused `survives_code_clip_left` and passed
-`line_height` as the horizontal extent: **a vertical dimension standing
-in for a horizontal one**. An anchor up to a line-height left of the
-gutter survived, and `completion_dropdown_rect` clamps `ax` against the
-right margin only — so the popup painted over the line numbers. Now a
-point predicate, `screen_x < code_clip_left()`.
-
-**The lesson is about the witness, not the predicate.** The existing
-test placed the anchor 200px off-left, which fails a width-based
-predicate too — it stayed green straight through the defect and the
-mutation battery agreed with it, because the battery only ever asked
-whether *removing* the check was caught. **A boundary this stage cares
-about must be tested AT the boundary**: the replacement straddles the
-edge by ±0.05px and additionally asserts the popup's own left edge stays
-out of the gutter, which is what makes "`completion_dropdown_rect` needs
-no left clamp" a checked claim rather than a comment.
-
-**Its first finding corrects Stage 4's framing.** §1.3 there said the
-GPU "needs a mechanism that does not exist", and I endorsed the
-Stage 4/5 split partly on that basis. Half of it was right —
-`Scroll::horizontal` really is discarded, because glyphon 0.11 never
-applies it — but the document `TextArea` already carries an explicit
-`left` origin and a `TextBounds` clip, and shifting that origin is the
-same "paint from 0, clip at the edge" shape the grid uses. The split
-stays right (the three consumers below are real work), but it was
-justified partly by an overstatement.
-
-The real work is applying **one** offset to the three consumers Stage
-4's framing did name correctly: the caret (`code_byte_px`), decoration
-geometry (`push_glyph_extent_rects`), and hit testing
-(`gutter_aware_rel_x`). **No wire and no version bump** — the GPU owns
-its viewport locally, exactly as it owns `scroll_top`.
-
-**What Stage 4 shipped**, beyond the `view_left` contract below:
-
-- **`Viewport::visible_cols` — one clip rule, five adopters.** Review
-  found the first version had translated the base glyph walk and
-  nothing else, so syntax styling, diagnostic underlines, search
-  washes, `BufferStyleOverlay` and the selection painter all kept
-  painting at absolute columns: decorations drifting off the characters
-  they describe, only once a window had been scrolled. The selection
-  painter was worst — it asked `pos_to_display` through the live
-  context, which returns `None` left of the edge, so a selection
-  starting off-screen painted **nothing at all**.
-
-  A second review round caught that my reason for letting selection
-  keep its own copy of the rule (a width the viewport supposedly
-  lacked) was **false**: the render viewport is already
-  `rect.size.cols - gutter_w` with an origin past the gutter. It now
-  takes that viewport. `StyleSpanOverlay` / `VirtualCellOverlay` stay
-  untouched — viewport-relative by contract.
-- **The `ui.line-wrap` description now names what `truncate` costs**,
-  closing the #221 gap where only the toggle's status message said it.
-- **`R7`** in `docs/ci-red-signatures.md` — an unrelated, unreproduced
-  `pmacs-gpu` managed-retry `BrokenPipe` under full-sweep load. First
-  incident this session with a complete signature, so a matchable row
-  rather than a `U` note.
-
-**What Stage 5 shipped, beyond the offset itself:**
-
-- **`crop_to_code_clip_left`, and `survives_code_clip_left` delegating
-  to it.** One boundary rule, so a caret the crop would discard is never
-  painted. The washes **crop** rather than drop — a selection running in
-  from off the left edge must paint the part that IS visible, which is
-  the same boundary Stage 4's review caught the TUI painter getting
-  wrong.
-- **Twelve witnesses, each mutation-tested.** Eleven production
-  mutations (unshifted wash x, uncropped wash, unshifted math origin,
-  uncropped math rule, untested caret left edge, missing snapshot reset,
-  missing wrap reset, unhidden completion anchor, unscrolled glyphs,
-  inverted hit-test sign, pixel-instead-of-column snap) each fail the
-  intended witness as an **assertion** failure, not a compile error.
-  The minimap-stability witness was mutation-tested separately by
-  threading the offset into `minimap_vertex_bytes`.
-- **The glyph-motion witness exists because the first pass lacked it.**
-  The gutter byte-identity test's "the code area must actually have
-  moved" assertion is satisfied by a decoration wash and the caret
-  alone: it **passed with `TextArea.left` pinned to `text_left`**. The
-  mutation battery caught that, not review. Its replacement isolates the
-  glyph layer — no decorations, and a source line carrying no caret.
-- **`R8`** in `docs/ci-red-signatures.md` — a **deterministic**,
-  pre-existing `m4_acceptance` listview failure, confirmed on `main` by
-  merge-base control. Not this lane's, and deliberately not fixed here.
-
-**Answered by the user 2026-08-07:**
-
-- **Q#HS1 — the GPU is Stage 5, not Stage 4.** A conscious, bounded
-  divergence rather than a repeat of Stage 3's accidental one. The time
-  box is concrete: Stage 5 is the *immediately-next* QoL lane after
-  Stage 4 merges, `wrap` stays the default until it lands, Stage 4's
-  release notes state the asymmetry, and the `truncate` affordances
-  name the GUI gap while it exists.
-- **Q#HS2 — automatic only.** The cursor-visibility pass gains a
-  horizontal component; no commands, no bindings, no new interaction
-  island. Explicit `ui.scroll-*` is deliberately out.
-- **Q#HS6 — `wrap` stays the default.** Coupled to Q#HS1: with the GPU
-  deferred, a `truncate` default would ship a mode that is navigable in
-  the TUI and a **dead end in the GUI** for anyone who never opened the
-  setting. Revisit after Stage 5, on use evidence.
-
-- **Q#HS7 — ACCEPTED.** `view_left` is an unsnapped window display
-  column; the effective edge is derived **per line**; a bisected wide
-  glyph's trailing cell renders as styled blank and is designated to
-  the **glyph's start** byte; a straddling tab's surviving cells keep
-  the **existing** forward rounding to the byte after the tab
-  (`src/text_view.rs:224` — preserved, not chosen). Together these make
-  the mapping **total over visible cells**, which is the (d) invariant.
-  The discriminating witness is multi-line, with glyph widths differing
-  at the same column.
-- **Q#HS5 — APPROVED: yes, persist, no `DESKTOP_VERSION` bump** —
-  conditional on `#[serde(default)]` **and** a literal v1 JSON fixture
-  omitting the field, asserting restore at zero. Both conditions are
-  part of the approval.
-
-- **Q#HS3** is re-confirmed rather than open (per-window, per Q#LL2);
-  **Q#HS4** is deferred, live only if explicit commands arrive.
-
-**The reasoning worth keeping from the withdrawn Q#HS7(c).** Revision
-2 voted to snap `view_left` to a valid boundary when set. That cannot
-exist, and the reason generalizes: `view_left` is ONE per-window
-column, but *"does column N bisect a wide glyph?"* is a **per-line**
-question. No setter-time value is canonical for every visible line,
-and snapping per line instead would break the vertical alignment a
-column-oriented view exists to provide. Recorded because the same trap
-waits for any future window-wide value derived from per-line content.
-
-**One correction carried into revision 2.** Revision 1 claimed the
-"unreachable past the edge" caveat is recorded in the setting's
-description. It is not — `builtin/runtime/linewrap.lua:23` says only
-"truncate at the edge"; the word appears in the toggle's status message
-and a source comment, neither of which a user sees if they set the mode
-in `init.lua`. **A real, small user-facing gap shipped in #221**;
-amending the description is now a Stage 4 deliverable (framing §6).
-
-### What Stages 3 and 4 shipped that Stage 5 must live with
-
-- **`ui.line-wrap` is BUFFER-local** (`ConfigKind::Enum`,
-  `wrap`/`truncate`, default `wrap`). Q#LL2 recorded the consequence
-  and deliberately deferred it: `view_left` is unambiguously
-  **per-window**, because two panes on one buffer must scroll
-  independently exactly as they already hold independent `view_top`s
-  (`src/desktop.rs:92`, `src/window.rs:374`). So the two halves of one
-  user-facing concept land at different scopes. Emacs effectively does
-  this and it is survivable — but Stage 3 signed up for it as *a
-  decision*, and Stage 4 is where the bill arrives.
-- **`truncate` is the mode Stage 4 makes navigable.** Today text past
-  the right edge is not merely off-screen but **unreachable** — and
-  that is stated **only** in `ui.toggle-line-wrap`'s status message and
-  a source comment, **not** in the setting's description
-  (`builtin/runtime/linewrap.lua:23` says just "truncate at the edge").
-  A user who sets the mode in `init.lua` and never invokes the toggle
-  is told nothing. Amending the description is a Stage 4 deliverable
-  (framing §6); the status message is revisited when scroll lands.
-- **Under `wrap`, horizontal scroll is meaningless.** Stage 4's surface
-  is therefore conditional on the mode, which is a coherence question
-  (one concept, two behaviors) and not only an implementation one.
-- **The scroll indicator's `wrap` path takes byte percentages** from
-  `pmacs-protocol::scroll`. It is vertical-only and Stage 4 does not
-  change it — recorded because "scroll" in this lane means horizontal
-  and the two must not be conflated in review.
-
-### Ground truth gathered for the framing (verify before trusting)
-
-- **There is no horizontal scroll anywhere in the tree.** No
-  `view_left`, `scroll_left`, or `hscroll` in `src/` or `builtin/`.
-  This is greenfield, not an extension.
-- **`paint_line` starts every walk at column 0** (`src/text_view.rs`),
-  which is the same walk Stage 3 rewrote for wrapping. A `view_left`
-  enters here, and the wrap rule (`advance_wrapped`) must stay written
-  exactly once.
-- **The GPU cannot honor horizontal scroll through cosmic-text.**
-  `Scroll::horizontal` is discarded throughout, because **glyphon 0.11
-  never applies it when placing glyphs** — documented at
-  `pmacs-gpu/src/main.rs:1611`, `:6316`, `:8020` and asserted by tests
-  at `:16266`, `:16337`, `:16737`. The GPU's Stage 4 half needs a
-  different mechanism entirely. **This is the fact most likely to
-  invert the cost estimate**, exactly as the "both frontends consume
-  the same `CellGrid`" error did in Stage 3 revision 1.
-- **`view_top` is persisted per leaf** in `SavedLeaf` alongside
-  `cursor`, at `DESKTOP_VERSION = 1` (`src/desktop.rs:33`). A
-  `view_left` that survives a restart needs either a defaulted field or
-  a version bump — a decision, not an afterthought.
-- **`scroll_window` carries the cursor with the scroll** to defeat the
-  renderer's "auto-scroll to keep cursor visible" pass, whose comment
-  already records the hazard: an unconditional snap-back makes explicit
-  scrolling feel stuck (`src/editor.rs:3624-3628`). A horizontal analog
-  faces the identical problem, and Q#LL3 deferred the choice — drag the
-  cursor, or let the next motion snap back — to this stage.
-- **`goal_col` is the existing column-memory field**
-  (`src/window.rs:376`, cleared at seven sites in `src/editor.rs`). Its
-  relationship to a horizontal offset is unexamined and is a framing
-  question, not an implementation detail.
-
-### Gate note this lane inherits
-
-Stage 3 put eight broken version assertions on CI by running
-`CLAUDE.md`'s short gate list instead of `docs/agent-handoff.md` §3's,
-which includes a full sweep. **§3 is the authority.**
-
-**Stage 4 should not need a protocol bump at all** — Q#HS1 puts the GPU
-in Stage 5, and `view_left` is per-window TUI state with no wire. If
-that changes, §3's protocol-bump form is
-`cargo test --workspace --no-fail-fast -- --skip basedpyright` in
-**both** feature configurations.
-
-**`--workspace`, not `--tests`**, and the distinction is not cosmetic:
-`--tests` selects 108 targets where `--workspace` selects 110, and the
-two it drops are **`pmacs_protocol` and `pmacs_gpu`**. Stage 3's own
-*remediation* sweep used `--tests`, so it never ran `pmacs-protocol`'s
-25 tests — including the `scroll::classify` tests that lane had just
-written. They passed, but by luck, and a correction that reproduces the
-shape of its own mistake is worth naming.
-
-### Not in scope
-
-`M-q` / auto-fill / reflow. Word wrap as a mode value — a named future
-third choice. Bidi/RTL. Soft-wrap gutter indicators.
 
 ## Tree primitive (P5) — MERGED as #217; adoption is the open work
 

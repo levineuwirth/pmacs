@@ -1,12 +1,15 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-08-06.** `main` is **`db1bbe9`** — the tree
-primitive **#217**, atop **#216**, which completed the macOS CI
-signal-integrity arc by retiring R2 and R4 with discriminating
-witnesses, atop **#215**, which built the registry. **That arc is
-retired**; its live residue (R1, R3, and the newer R5 and R6) is
-re-homed to the async-runtime, reap-ledger, and readiness-helper-audit
-lanes in `docs/active-work.md`.
+**Last updated: 2026-08-08.** `main` is **`9a26ac8`** — GPU horizontal
+scroll **#223**, which **closes the QoL arc** (§1). Beneath it the arc's
+other four: **#222** TUI horizontal scroll, **#221** `ui.line-wrap` at
+protocol v22, **#220** GUI zoom, **#219** `full_grid` honored by the
+grid consumer. Beneath those, `db1bbe9` — the tree primitive **#217**,
+atop **#216**, which completed the macOS CI signal-integrity arc by
+retiring R2 and R4 with discriminating witnesses, atop **#215**, which
+built the registry. **That arc is retired**; its live residue (R1, R3,
+and the newer R5 and R6) is re-homed to the async-runtime, reap-ledger,
+and readiness-helper-audit lanes in `docs/active-work.md`.
 
 The live CI-triage rule in §5 points at `docs/ci-red-signatures.md`,
 which keys on **signature, not test name** — and, since 2026-08-06,
@@ -83,17 +86,48 @@ reads it the way you just did.
 For volatile branches, checkpoints, verification, and recovery
 commands, read `docs/active-work.md` immediately after this file.
 
-## 1. Where the project stands (2026-08-07)
+## 1. Where the project stands (2026-08-08)
 
-- **QoL arc — Stages 1-4 merged (#219, #220, #221, #222); Stage 5
-  remains, and the arc closes there.** From one daily-driver report:
-  terminal zoom broke TUI rendering and did nothing in the GUI, and a
-  long line was unreadable past the edge.
+- **QoL arc — CLOSED. All five stages merged (#219, #220, #221, #222,
+  #223).** From one daily-driver report: terminal zoom broke TUI
+  rendering and did nothing in the GUI, and a long line was unreadable
+  past the edge. Both complaints are answered on both frontends.
   - **#219** made the grid TUI honor `full_grid`, so a post-resize
     resync blanks the host before repainting.
+    - **`FG-INV` is a CONSUMER contract and lives on the protocol
+      type.** A `full_grid: true` delta carries only the frame's
+      **non-default** cells, so a consumer MUST blank its surface
+      before applying them. The rule already existed — in the doc
+      comment of a **private field on the producer's struct** — which
+      is exactly why the one consumer never honored it. An invariant a
+      consumer must satisfy belongs where consumer authors read it.
+    - **Seven tests covered the flag and all seven tested the
+      producer.** Every one asserted the producer *sets* it; none
+      asserted a consumer *acts* on it, and no runtime reader existed
+      anywhere in the workspace. "Add a test for the flag" had already
+      been done. §5's *enforcement and documentation drift apart
+      silently*, in a second register — and the reason a fix ships the
+      contract and its consumer together.
   - **#220** gave the GUI native zoom over the font preference that
     already existed, quantizing the step so the round-trip guarantee is
     exact rather than approximately true.
+    - **`install_state_dirs` is the eager-state-consumer seam.**
+      Builtins and `init.lua` both run *before* it, so a
+      `pmacs.state.read` at module load returns nothing, **always**.
+      `saveplace` and `recentf` never meet this because **both read
+      lazily**; zoom must apply with no user action, making it the
+      **first eager state consumer**. Restore therefore lives at the
+      end of `install_state_dirs` — by definition the moment state
+      becomes readable, so a future third startup path cannot
+      mis-order or miss it. **Any future eager consumer belongs at the
+      same seam.**
+    - **A GPU-only key binding cannot be expressed today.**
+      `keymap_stack::Scope` is `Buffer | Mode | Global` with **no
+      frontend identity**, and `FrontendEvent` has no
+      command-invocation variant — so neither "bind on the GPU only"
+      nor "the GPU asks for a command" exists. #220 shipped commands
+      and no default bindings for that reason, not by preference. See
+      the capability-aware keymap resolution backlog item in §6.
   - **#221** added **`ui.line-wrap`** — `ConfigKind::Enum`
     (`wrap`/`truncate`), default `wrap`, **buffer-local**, with
     `ui.toggle-line-wrap`. Both frontends honor it: the grid renderer
@@ -164,17 +198,49 @@ commands, read `docs/active-work.md` immediately after this file.
       before the field existed. A literal v1 JSON fixture guards it.
     - **No wire.** `view_left` is per-window viewport state, so no
       protocol message and no version bump.
-  - **Stage 5 is the GPU half** — a split decided rather than inherited
-    (framing Q#HS1), time-boxed: it is the immediately-next QoL lane,
-    and **`wrap` stays the default until it lands**, which keeps the
-    divergence invisible to anyone who has not opted in. Framing in
-    `docs/gpu-horizontal-scroll-framing.md`.
+  - **Stage 5 (#223) is the GPU half, and it closed the arc.** A split
+    decided rather than inherited (framing Q#HS1). Framing in
+    `docs/gpu-horizontal-scroll-framing.md`. The GPU is not a grid
+    consumer, so it could not inherit `view_left`; it has its own
+    `code_scroll_left`, in **pixels**, local viewport state with no
+    wire and no version bump.
+    - **The work was one transform and one clip, written before any
+      consumer moved.** `code_x_to_screen` / `screen_x_to_code` (exact
+      inverses) and `code_clip_left` / `crop_to_code_clip_left`.
+      **glyphon honors `TextBounds`, so the text layers clip
+      themselves; the manual quad and squiggle renderers do not** — and
+      nothing needed them to before this stage, because no
+      code-relative x could be negative. Five call sites deriving the
+      offset independently is how the caret and its glyphs come to
+      disagree.
+    - **Washes crop, they do not drop.** A selection running in from
+      off the left edge must paint the visible part — the same boundary
+      Stage 4's review caught the TUI painter getting wrong.
+    - **Two lifecycle resets, both observed pre-motion**: the wrap
+      transition and the `BufferSnapshot`. A later cursor motion
+      repairs the offset anyway, so a witness that waits for one cannot
+      tell "reset on snapshot" from "repaired on first motion".
+    - **`pmacs_protocol::scroll::follow_left`** — the follow rule now
+      lives beside `classify` and **both frontends call it**;
+      `src/editor.rs::horizontal_follow` delegates, and the GPU
+      converts px ↔ columns around it (exact, because non-monospace
+      code fonts are rejected). An approved exception to the stage's
+      "local GPU viewport state" scope, recorded in the framing doc
+      §1.2a. It moves no viewport state, adds no wire message, needs no
+      version bump.
+    - **Two witnesses exist because mutation testing found the TESTS
+      wrong, not the code.** The gutter byte-identity test's "the code
+      area must have moved" assertion is satisfied by a wash and the
+      caret alone, so it **passed with `TextArea.left` pinned to the
+      code origin** — the whole glyph-side mechanism was unwitnessed.
+      And the completion predicate passed `line_height` as a
+      *horizontal* extent, which the far-off-left test could not catch
+      because 200px off-left fails a width-based predicate too.
+      **Test a boundary AT the boundary**; the replacements straddle by
+      ±0.05px.
 
-    **Rule 4 removes the long-lines lane when Stage 5 merges** — the
-    arc closes there, and these bullets are the precondition it depends
-    on.
-
-- **`main` @ `db1bbe9`.** The **tree primitive #217** — `listview` rows
+- **Beneath the QoL arc, at `db1bbe9`** (it was `main` until #219).
+  The **tree primitive #217** — `listview` rows
   take optional `depth`/`id`, collapse is primitive-owned, folding is
   **local projection state and not a refresh protocol**, and the LSP
   outline is the sole adopter (`COHERENCE.md` §14 ◐; §20 says adoption,
@@ -191,7 +257,9 @@ commands, read `docs/active-work.md` immediately after this file.
   reap-ledger diagnostic #202, Journey Stage **1b-1** #203, **1b-2**
   #204 and **1b-3** #205, the ambient-root isolation **implementation**
   #206, and discovery Stage 1 #207. Each has its own bullet below; this
-  line is the head-of-`main` anchor and nothing else.
+  line is the `db1bbe9` ancestry chain and nothing else. **The
+  head-of-`main` anchor is at the top of this file** — it moved to
+  `9a26ac8` at #223, and this bullet's own opening says so.
 - **Bottom panel Arc 7 COMPLETE — Stage 3 (#213), the adopter default
   flip.**
   Omitting `display` now means the panel for listview, compile and
@@ -588,12 +656,21 @@ someone forgot.
   framing #164, COHERENCE.md #163, find-file #162, Lean 4 Stage 1 #160,
   minimap blank-slab #159, bottom-panel Stage 1 #155).
   **Protocol schema support is `v6..=v21`, the production server-first
-  `Hello` advertises v20, and a current session nevertheless negotiates
-  v21.** All three are true at once, and Stage 2B-3 is what made them
-  compatible: the advertised version is a permanent **baseline** and the
-  session's real version is settled one message later by the frontend's
-  `AttachRequest` counter-offer. The bullets below describe the arcs in
-  their own terms; this line is the head-of-`main` anchor.
+  `Hello` advertises v20, and a session at that anchor nevertheless
+  negotiates v21.** All three are true at once, and Stage 2B-3 is what
+  made them compatible: the advertised version is a permanent
+  **baseline** and the session's real version is settled one message
+  later by the frontend's `AttachRequest` counter-offer — a mechanism
+  that is still current, independent of which numbers it carries. The
+  bullets below describe the arcs in their own terms.
+
+  **These statements describe the historical `6c9e765` anchor; the live
+  protocol range is recorded under "Repository authority" in
+  `docs/active-work.md`** (`v6..=v22` since #221 added `LineWrapFacts`;
+  the advertised baseline is still v20). This line previously called
+  itself "the head-of-`main` anchor", which stopped being true at #219
+  — so a provenance note read as a current-state claim, and disagreed
+  with the anchor at the top of this file.
 - **`COHERENCE.md` is now required reading and a required framing input
   — #163.** It carries the product-coherence thesis, an audited
   scorecard, per-concern gaps, and §20's priority order, and it is the
@@ -2844,6 +2921,23 @@ round-trip cannot detect a discriminant shift.
 
 
 ## 6. Named deferrals (the standing backlog, consolidated)
+
+**Capability-aware keymap resolution — CROSS-CUTTING, NOT STARTED,
+needs its own framing.** Named here because #220 hit its absence and
+worked around it, not because any of it is designed. Today
+`keymap_stack::Scope` is `Buffer | Mode | Global` with **no frontend
+identity**, and `FrontendEvent` carries no command-invocation variant.
+Two consequences already paid for: **#220 could ship no default zoom
+bindings** (`gpu.zoom-in` / `-out` / `-reset` are commands only), and
+nothing can express "this binding exists only where a GPU is
+attached".
+
+It is genuinely cross-cutting — it touches the keymap stack, the
+frontend event vocabulary, and what a capability *is* — so it is a
+framing round before it is a lane. **Do not start it as a half-lane
+attached to some other stage's branch**, which is how it would arrive
+by accident; the workaround (commands without bindings) is stable and
+costs nothing while it waits.
 
 Editing: word kills (`M-d`/`M-BS` — need bytes-returning deleters +
 prepend-on-backward append), `C-SPC` set-mark, `C-u C-y` / `C-M-w`,
