@@ -435,21 +435,21 @@ Whether `docs/ci-red-signatures.md` should grow a short non-row section
 for this class is an open question for its owner, not something this
 lane decided.
 
-## Long lines (QoL arc) — Stage 3 MERGED as #221; Stage 4 is PR #222 OPEN; Stage 5 ahead
+## Long lines (QoL arc) — Stages 3 and 4 MERGED (#221, #222); Stage 5 closes it
 
 **Rewritten, not removed.** Rule 4 removes a lane when its ARC is done;
-this one has Stage 4 ahead. Stage 3's durable facts are absorbed into
-`docs/agent-handoff.md` §1 — rule 4's precondition, satisfied rather
-than deferred — so what remains here is the Stage 4 plan and only the
-Stage 3 residue that constrains it.
+this one has **Stage 5** ahead. The durable facts of Stages 3 AND 4 are
+both in `docs/agent-handoff.md` §1 — rule 4's precondition, satisfied
+rather than deferred — so what remains here is the Stage 5 plan and
+only the residue from earlier stages that constrains it.
 
-> **RULE 4 DOES NOT APPLY AT STAGE 4's MERGE.** The arc closes at
-> **Stage 5** (GPU horizontal scroll), not Stage 4. Q#HS1 split the GPU
-> out deliberately and time-boxed it; retiring this lane when the TUI
-> half merges would orphan exactly the half the time box exists to
-> guarantee, and would do so while `truncate` is still a dead end in
-> the GUI. **Do not remove this block until Stage 5 has merged**, and
-> read Q#HS1's four time-box items before concluding otherwise.
+> **RULE 4 APPLIES AT STAGE 5's MERGE, AND NOT BEFORE.** The arc closes
+> at Stage 5 (GPU horizontal scroll). Q#HS1 split the GPU out
+> deliberately and time-boxed it; retiring this lane at Stage 4's merge
+> would have orphaned exactly the half the time box exists to
+> guarantee, while `truncate` was still a dead end in the GUI. **Do not
+> remove this block until Stage 5 has merged** — and when it does, the
+> handoff bullets are what makes removal legitimate rather than lossy.
 
 **Branch `horizontal-scroll`**, based on `githubsucks/main` @ `02f3ec3`
 (the #221 merge). `githubsucks/horizontal-scroll` is the authoritative
@@ -457,9 +457,85 @@ tip — the ref, not a SHA, since any edit to this block advances past
 whatever SHA it records. Recover:
 `git fetch githubsucks && git checkout horizontal-scroll`.
 
-**Status: `docs/horizontal-scroll-framing.md` revision 4 — APPROVED
-2026-08-07. Stage 4 implemented; **PR #222 OPEN**, awaiting review. Do
-not merge unprompted.**
+**Stage 4 MERGED as #222** (`2b56d16`). Long lines are now reachable
+**in the TUI**; the GUI half is Stage 5.
+
+**Branch `gpu-horizontal-scroll`**, based on `githubsucks/main` @
+`2b56d16`. `githubsucks/gpu-horizontal-scroll` is the authoritative tip
+— the ref, not a SHA. Recover:
+`git fetch githubsucks && git checkout gpu-horizontal-scroll`.
+
+**Status: PR #223 OPEN, awaiting CI. DO NOT MERGE until the user says
+so.** `https://github.com/levineuwirth/pmacs/pull/223`. Framing revision
+4 approved 2026-08-07; review round 1 answered 2026-08-08 (the
+completion point-predicate defect below).
+
+**The tip is the ref, `githubsucks/gpu-horizontal-scroll`, not a SHA
+written here.** The first version of this line pinned `55faa45` — which
+the very commit that wrote it invalidated, because recording the PR
+moved the head. Verify CI against the PR's live `headRefOid`, never
+against a SHA quoted in a document.
+
+G1 pixels (exact conversion via the
+supported monospace advance); G2 automatic cursor-follow only, zeroing
+on **both** wrap transition and `BufferSnapshot`; G3 monospace-only by
+the existing font contract; G4 minimap unchanged; G5 accepted whole —
+**all twelve witnesses written and mutation-tested** (see below).
+
+**Scope: local GPU viewport state.** No wire message, no protocol bump,
+no command surface, no minimap movement.
+
+**ONE APPROVED EXCEPTION TO THAT SCOPE** (user, 2026-08-08; recorded in
+the framing doc at §1.2a). Q#G5's
+TUI-parity witness asks for agreement that is "checkable rather than
+asserted". Two tests in two crates asserting the same literal is not
+that — it is exactly the structural duplication
+`pmacs-protocol::scroll`'s own module docs condemn, and that module
+exists because **this arc already shipped that defect** (the scroll
+indicator, fixed in one copy and left wrong in the other). So the follow
+rule moved to `pmacs_protocol::scroll::follow_left`, beside `classify`,
+and **both** frontends call it: `src/editor.rs::horizontal_follow`
+delegates, and the GPU converts px ↔ columns around it (exact by Q#G3).
+
+What it costs: Stage 5 touches `src/editor.rs`, which the scope line
+above does not cover. What it buys: the two frontends *cannot* choose
+different edges. The approval turned on what it does **not** do — it
+moves no viewport state, adds no wire message, and needs no
+protocol-version bump.
+
+**Review round 1 (2026-08-08) — one non-zero-offset defect, fixed.**
+`completion_anchor_px` reused `survives_code_clip_left` and passed
+`line_height` as the horizontal extent: **a vertical dimension standing
+in for a horizontal one**. An anchor up to a line-height left of the
+gutter survived, and `completion_dropdown_rect` clamps `ax` against the
+right margin only — so the popup painted over the line numbers. Now a
+point predicate, `screen_x < code_clip_left()`.
+
+**The lesson is about the witness, not the predicate.** The existing
+test placed the anchor 200px off-left, which fails a width-based
+predicate too — it stayed green straight through the defect and the
+mutation battery agreed with it, because the battery only ever asked
+whether *removing* the check was caught. **A boundary this stage cares
+about must be tested AT the boundary**: the replacement straddles the
+edge by ±0.05px and additionally asserts the popup's own left edge stays
+out of the gutter, which is what makes "`completion_dropdown_rect` needs
+no left clamp" a checked claim rather than a comment.
+
+**Its first finding corrects Stage 4's framing.** §1.3 there said the
+GPU "needs a mechanism that does not exist", and I endorsed the
+Stage 4/5 split partly on that basis. Half of it was right —
+`Scroll::horizontal` really is discarded, because glyphon 0.11 never
+applies it — but the document `TextArea` already carries an explicit
+`left` origin and a `TextBounds` clip, and shifting that origin is the
+same "paint from 0, clip at the edge" shape the grid uses. The split
+stays right (the three consumers below are real work), but it was
+justified partly by an overstatement.
+
+The real work is applying **one** offset to the three consumers Stage
+4's framing did name correctly: the caret (`code_byte_px`), decoration
+geometry (`push_glyph_extent_rects`), and hit testing
+(`gutter_aware_rel_x`). **No wire and no version bump** — the GPU owns
+its viewport locally, exactly as it owns `scroll_top`.
 
 **What Stage 4 shipped**, beyond the `view_left` contract below:
 
@@ -485,6 +561,32 @@ not merge unprompted.**
   `pmacs-gpu` managed-retry `BrokenPipe` under full-sweep load. First
   incident this session with a complete signature, so a matchable row
   rather than a `U` note.
+
+**What Stage 5 shipped, beyond the offset itself:**
+
+- **`crop_to_code_clip_left`, and `survives_code_clip_left` delegating
+  to it.** One boundary rule, so a caret the crop would discard is never
+  painted. The washes **crop** rather than drop — a selection running in
+  from off the left edge must paint the part that IS visible, which is
+  the same boundary Stage 4's review caught the TUI painter getting
+  wrong.
+- **Twelve witnesses, each mutation-tested.** Eleven production
+  mutations (unshifted wash x, uncropped wash, unshifted math origin,
+  uncropped math rule, untested caret left edge, missing snapshot reset,
+  missing wrap reset, unhidden completion anchor, unscrolled glyphs,
+  inverted hit-test sign, pixel-instead-of-column snap) each fail the
+  intended witness as an **assertion** failure, not a compile error.
+  The minimap-stability witness was mutation-tested separately by
+  threading the offset into `minimap_vertex_bytes`.
+- **The glyph-motion witness exists because the first pass lacked it.**
+  The gutter byte-identity test's "the code area must actually have
+  moved" assertion is satisfied by a decoration wash and the caret
+  alone: it **passed with `TextArea.left` pinned to `text_left`**. The
+  mutation battery caught that, not review. Its replacement isolates the
+  glyph layer — no decorations, and a source line carrying no caret.
+- **`R8`** in `docs/ci-red-signatures.md` — a **deterministic**,
+  pre-existing `m4_acceptance` listview failure, confirmed on `main` by
+  merge-base control. Not this lane's, and deliberately not fixed here.
 
 **Answered by the user 2026-08-07:**
 
@@ -536,7 +638,7 @@ and a source comment, neither of which a user sees if they set the mode
 in `init.lua`. **A real, small user-facing gap shipped in #221**;
 amending the description is now a Stage 4 deliverable (framing §6).
 
-### What Stage 3 shipped that Stage 4 must live with
+### What Stages 3 and 4 shipped that Stage 5 must live with
 
 - **`ui.line-wrap` is BUFFER-local** (`ConfigKind::Enum`,
   `wrap`/`truncate`, default `wrap`). Q#LL2 recorded the consequence

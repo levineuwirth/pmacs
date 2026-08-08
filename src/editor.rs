@@ -4277,20 +4277,21 @@ impl CompletionPopupKey {
 /// so the offset is pinned to 0 rather than merely ignored. Leaving a
 /// stale non-zero value would surface the moment the buffer toggled
 /// back to `truncate`.
+///
+/// **The arithmetic itself lives in `pmacs_protocol::scroll`** (Stage 5,
+/// Q#G5), beside `classify`, and for the same reason its module docs
+/// give: `pmacs-gpu` needs the identical rule and cannot see this crate.
+/// Held twice, the two copies drift — which is not hypothetical, it is
+/// what happened to the scroll indicator earlier in this very arc. What
+/// stays here is the part that is genuinely the TUI's: which window,
+/// which wrap mode, and which width.
 fn horizontal_follow(window: &mut crate::window::Window, cursor_col: u32) {
     if window.last_wrap == crate::view::WrapMode::Wrap {
         window.view_left = 0;
         return;
     }
-    let cols = window.last_content_cols;
-    if cols == 0 {
-        return; // not rendered yet; nothing to be visible within
-    }
-    if cursor_col < window.view_left {
-        window.view_left = cursor_col;
-    } else if cursor_col >= window.view_left.saturating_add(cols) {
-        window.view_left = cursor_col + 1 - cols;
-    }
+    window.view_left =
+        pmacs_protocol::scroll::follow_left(window.view_left, cursor_col, window.last_content_cols);
 }
 
 /// Scroll one window so its cursor stays visible, reckoning in

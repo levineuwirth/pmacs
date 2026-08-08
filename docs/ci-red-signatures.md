@@ -226,6 +226,30 @@ readiness helpers exist, whether they can be one, and what each
 promises. Patching this call site alone would leave the same question
 open under a fourth selector.
 
+### R8 — LSP listview row renders a path relative to a root the test does not expect
+
+The first row here that is **not intermittent**. It reproduces on every
+run, and the merge-base control has already been done — so the one
+question this registry exists to answer is settled for it, and settled
+against the branch that found it.
+
+| field | value |
+|---|---|
+| **selector** | `--test m4_acceptance flat_listview_consumers_render_byte_identically_after_the_tree_extension` |
+| **job / flavor** | local (Linux), any invocation — isolated single-test runs included. Not load-sensitive |
+| **required fragments** | `the flat references row renders verbatim` **and** a `left` value that is the `right` value with a **leading directory removed** |
+| **status** | **deterministic locally, NOT attributed to the long-lines arc** |
+| **what IS established** | it fails identically on `main` and on `gpu-horizontal-scroll` with the working tree stashed — a merge-base control, not an inference from "my diff looks unrelated". The rendered row is the expected path with `/tmp/` stripped: `.tmpPZsycN/r.rs:12:3` vs `/tmp/.tmpPZsycN/r.rs:12:3` |
+| **what is NOT** | the mechanism. **This is a prefix strip, not a width truncation** — the fixture declares `CellSize::new(40, 100)`, so 25 characters fit with room to spare, and the missing text is at the front. The likeliest reading is that the row is rendered relative to a workspace root that resolves to `/tmp` on this machine, which would make it depend on `TMPDIR`. **Not verified**, and the alternative — that the renderer relativizes against something else entirely — is not excluded |
+| **why CI is green** | unestablished. If the `TMPDIR` reading is right, a runner whose temp dir is not directly under the relativization root would never see it. That is a hypothesis, not a finding |
+| **retirement** | a diagnosis of what the row is rendered relative to, then either fixing the renderer or making the assertion state the relativization it expects. A green run on a machine with a different `TMPDIR` retires nothing |
+
+**Not this lane's to fix, and deliberately not fixed here.** Stage 5
+touches `pmacs-gpu`, `pmacs-protocol::scroll`, and `horizontal_follow`
+in `src/editor.rs`; it has no path to the LSP listview renderer. Fixing
+it inside this branch would put an unrelated, undiagnosed change in a
+viewport PR.
+
 ## Retired rows
 
 **These stay here on purpose.** A retirement is a claim that a mechanism
@@ -459,6 +483,36 @@ be matched either. Recorded so a recurrence is recognisable.
 | **what IS established** | it failed once (`1916 passed; 1 failed`), in no registry row, under a full-corpus run |
 | **what is NOT** | any mechanism. Not reproduced in a later full `--tests --no-fail-fast` sweep (108 targets, exit 0) nor in 3 isolated `--lib` runs (1917/0 each) |
 | **rival explanation not excluded** | leaked `pmacs --daemon` processes, which the handoff names as a standing confound for any load-sensitive local red |
+
+### U3 — the R7 selector again, fragments lost the same way U2's were
+
+`attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream`
+failed once during long-lines Stage 5's default-features sweep and
+passed on the recaptured rerun.
+
+**This is not recorded as an R7 match, and the distinction is the
+point.** R7's job/flavor is `--features crdt`; this was
+default-features. More importantly its three required fragments
+(`transient sequence must attach`, `Handshake(Io(`, `BrokenPipe` /
+`code: 32`) are **unverified**, because the run's output was filtered to
+the failing test names before it was read. By this file's own matching
+rule that makes it a new incident, not a recurrence.
+
+| field | value |
+|---|---|
+| **selector** | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
+| **job / flavor** | local (Linux), `cargo test --workspace --no-fail-fast` — **default features**, unlike R7 |
+| **required fragments** | **none captured** |
+| **status** | **new incident, not reproduced** |
+| **what IS established** | one failure; a recaptured rerun of the same command was green for this test, and the `--features crdt` sweep was green for it too. Per the rerun rule: **intermittence only** |
+| **what is NOT** | whether it is R7's mechanism. It may well be. Nothing in hand shows it |
+
+**The recurring mistake is mine, and it is now twice.** U2 records the
+identical loss — "output was filtered to the `FAILED` line" — and I did
+it again here by piping a sweep through `grep`. The fix is mechanical:
+**redirect a full sweep to a file and grep the file**, never the live
+stream. A signature that is cheap to capture and impossible to
+reconstruct should never be traded for terminal brevity.
 
 **The retirements are not occurrences and do not close the log.** R1 and
 R3 stay live, and each retired row keeps its signature so a later red
