@@ -102,6 +102,51 @@ pub fn classify(
     }
 }
 
+/// Move a horizontal viewport's left edge so `cursor_col` is visible,
+/// returning the new edge. All three arguments and the result are
+/// **columns**.
+///
+/// # Why this is shared, and why in columns
+///
+/// This is the horizontal twin of [`classify`], and it is here for the
+/// same reason spelled out in the module docs: the two frontends were
+/// about to hold one rule twice. The TUI stores its edge as a column
+/// (`Window::view_left`); `pmacs-gpu` stores pixels, because its
+/// geometry comes from cosmic-text advances. Long-lines Stage 5 Q#G1
+/// settles that difference as a **conversion, not a second rule** — the
+/// GPU rejects non-monospace code fonts (Q#G3), so px ↔ column is exact
+/// through the resolved advance, and the GPU divides on the way in and
+/// multiplies on the way out.
+///
+/// Columns, not pixels, is the shared unit because it is the one both
+/// sides can name. A pixel rule would force the TUI into float
+/// arithmetic over a quantity that is integral by construction, and an
+/// off-by-one from rounding there is a character the user cannot read —
+/// the whole complaint this arc answers.
+///
+/// # The rule
+///
+/// Scroll the minimum distance that puts the cursor back inside, so a
+/// cursor already visible never moves the view. `width == 0` means
+/// nothing has been laid out yet: no column is visible, so no edge is
+/// better than another and the current one stands.
+#[must_use]
+pub fn follow_left(left: u32, cursor_col: u32, width: u32) -> u32 {
+    if width == 0 {
+        return left;
+    }
+    if cursor_col < left {
+        cursor_col
+    } else if cursor_col >= left.saturating_add(width) {
+        // `+ 1` puts the cursor's own column at the right edge rather
+        // than one past it. No underflow: this arm implies
+        // `cursor_col >= width`.
+        cursor_col.saturating_add(1) - width
+    } else {
+        left
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,5 +259,53 @@ mod tests {
             ScrollPosition::Percent(1),
             "correct by arithmetic here, not by saturation"
         );
+    }
+
+    /// A cursor already inside the window never moves the edge — the
+    /// property that separates "follow" from "center".
+    #[test]
+    fn a_visible_cursor_leaves_the_edge_alone() {
+        for col in 10..90 {
+            assert_eq!(follow_left(10, col, 80), 10, "column {col} is visible");
+        }
+    }
+
+    /// Both edges, minimally.
+    #[test]
+    fn the_edge_moves_the_minimum_distance_in_each_direction() {
+        // Left: the cursor's own column becomes the first visible one.
+        assert_eq!(follow_left(10, 4, 80), 4);
+        // Right: the cursor's own column becomes the LAST visible one,
+        // which is `+ 1 - width`, not `- width`. Dropping the `+ 1`
+        // parks the caret one column off the right edge — invisible,
+        // and the exact defect this arc reports.
+        assert_eq!(follow_left(10, 90, 80), 11);
+        assert_eq!(follow_left(0, 79, 80), 0, "the last column still fits");
+        assert_eq!(follow_left(0, 80, 80), 1, "one past it scrolls by one");
+    }
+
+    /// Nothing laid out yet: no column is visible, so the edge stands
+    /// rather than snapping to a cursor whose geometry is unknown.
+    #[test]
+    fn a_zero_width_viewport_holds_its_edge() {
+        assert_eq!(follow_left(7, 0, 0), 7);
+        assert_eq!(follow_left(7, 9999, 0), 7);
+    }
+
+    /// The saturating arms are reachable arithmetic, not decoration.
+    ///
+    /// At `cursor_col == u32::MAX` the saturation absorbs the `+ 1`, so
+    /// the edge lands one column short of showing that column. Asserted
+    /// as the value it actually produces rather than the value the rule
+    /// would like: a line 4·10⁹ columns wide does not occur, and a test
+    /// that lied about this arm to look tidy would be worse than the
+    /// one-column imprecision it hid.
+    #[test]
+    fn extreme_columns_do_not_panic() {
+        assert_eq!(follow_left(0, u32::MAX, 80), u32::MAX - 80);
+        assert_eq!(follow_left(u32::MAX, 0, 80), 0);
+        // `left + width` overflows; the cursor is nonetheless left of
+        // the edge, so the first arm decides and nothing wraps.
+        assert_eq!(follow_left(u32::MAX - 1, 5, 80), 5);
     }
 }

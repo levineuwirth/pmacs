@@ -466,13 +466,34 @@ whatever SHA it records. Recover:
 `git fetch githubsucks && git checkout gpu-horizontal-scroll`.
 
 **Status: `docs/gpu-horizontal-scroll-framing.md` revision 4 —
-APPROVED 2026-08-07. Implementing.** G1 pixels (exact conversion via the
+APPROVED 2026-08-07. Implementation COMPLETE and gated 2026-08-08,
+awaiting review; no PR opened yet.** G1 pixels (exact conversion via the
 supported monospace advance); G2 automatic cursor-follow only, zeroing
 on **both** wrap transition and `BufferSnapshot`; G3 monospace-only by
-the existing font contract; G4 minimap unchanged; G5 accepted whole.
+the existing font contract; G4 minimap unchanged; G5 accepted whole —
+**all twelve witnesses written and mutation-tested** (see below).
 
 **Scope: local GPU viewport state.** No wire message, no protocol bump,
 no command surface, no minimap movement.
+
+**ONE DELIBERATE STEP OUTSIDE THAT SCOPE, flagged for review.** Q#G5's
+TUI-parity witness asks for agreement that is "checkable rather than
+asserted". Two tests in two crates asserting the same literal is not
+that — it is exactly the structural duplication
+`pmacs-protocol::scroll`'s own module docs condemn, and that module
+exists because **this arc already shipped that defect** (the scroll
+indicator, fixed in one copy and left wrong in the other). So the follow
+rule moved to `pmacs_protocol::scroll::follow_left`, beside `classify`,
+and **both** frontends call it: `src/editor.rs::horizontal_follow`
+delegates, and the GPU converts px ↔ columns around it (exact by Q#G3).
+
+What this costs: Stage 5 now touches `src/editor.rs`, which the scope
+line above does not cover. What it buys: the two frontends *cannot*
+choose different edges. No wire message and no version bump — the same
+argument `classify`'s module docs already make. **If the user rejects
+it, reverting is a small, local change**: restore the four-line
+conditional in `horizontal_follow`, drop `follow_left` and its four
+protocol tests, and rewrite the parity witness as a two-sided pin.
 
 **Its first finding corrects Stage 4's framing.** §1.3 there said the
 GPU "needs a mechanism that does not exist", and I endorsed the
@@ -514,6 +535,32 @@ its viewport locally, exactly as it owns `scroll_top`.
   `pmacs-gpu` managed-retry `BrokenPipe` under full-sweep load. First
   incident this session with a complete signature, so a matchable row
   rather than a `U` note.
+
+**What Stage 5 shipped, beyond the offset itself:**
+
+- **`crop_to_code_clip_left`, and `survives_code_clip_left` delegating
+  to it.** One boundary rule, so a caret the crop would discard is never
+  painted. The washes **crop** rather than drop — a selection running in
+  from off the left edge must paint the part that IS visible, which is
+  the same boundary Stage 4's review caught the TUI painter getting
+  wrong.
+- **Twelve witnesses, each mutation-tested.** Eleven production
+  mutations (unshifted wash x, uncropped wash, unshifted math origin,
+  uncropped math rule, untested caret left edge, missing snapshot reset,
+  missing wrap reset, unhidden completion anchor, unscrolled glyphs,
+  inverted hit-test sign, pixel-instead-of-column snap) each fail the
+  intended witness as an **assertion** failure, not a compile error.
+  The minimap-stability witness was mutation-tested separately by
+  threading the offset into `minimap_vertex_bytes`.
+- **The glyph-motion witness exists because the first pass lacked it.**
+  The gutter byte-identity test's "the code area must actually have
+  moved" assertion is satisfied by a decoration wash and the caret
+  alone: it **passed with `TextArea.left` pinned to `text_left`**. The
+  mutation battery caught that, not review. Its replacement isolates the
+  glyph layer — no decorations, and a source line carrying no caret.
+- **`R8`** in `docs/ci-red-signatures.md` — a **deterministic**,
+  pre-existing `m4_acceptance` listview failure, confirmed on `main` by
+  merge-base control. Not this lane's, and deliberately not fixed here.
 
 **Answered by the user 2026-08-07:**
 
