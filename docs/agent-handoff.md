@@ -85,10 +85,10 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-08-07)
 
-- **QoL arc — Stages 1-4 merged (#219, #220, #221, #222); Stage 5
-  remains, and the arc closes there.** From one daily-driver report:
-  terminal zoom broke TUI rendering and did nothing in the GUI, and a
-  long line was unreadable past the edge.
+- **QoL arc — CLOSED. All five stages merged (#219, #220, #221, #222,
+  #223).** From one daily-driver report: terminal zoom broke TUI
+  rendering and did nothing in the GUI, and a long line was unreadable
+  past the edge. Both complaints are answered on both frontends.
   - **#219** made the grid TUI honor `full_grid`, so a post-resize
     resync blanks the host before repainting.
   - **#220** gave the GUI native zoom over the font preference that
@@ -164,15 +164,46 @@ commands, read `docs/active-work.md` immediately after this file.
       before the field existed. A literal v1 JSON fixture guards it.
     - **No wire.** `view_left` is per-window viewport state, so no
       protocol message and no version bump.
-  - **Stage 5 is the GPU half** — a split decided rather than inherited
-    (framing Q#HS1), time-boxed: it is the immediately-next QoL lane,
-    and **`wrap` stays the default until it lands**, which keeps the
-    divergence invisible to anyone who has not opted in. Framing in
-    `docs/gpu-horizontal-scroll-framing.md`.
-
-    **Rule 4 removes the long-lines lane when Stage 5 merges** — the
-    arc closes there, and these bullets are the precondition it depends
-    on.
+  - **Stage 5 (#223) is the GPU half, and it closed the arc.** A split
+    decided rather than inherited (framing Q#HS1). Framing in
+    `docs/gpu-horizontal-scroll-framing.md`. The GPU is not a grid
+    consumer, so it could not inherit `view_left`; it has its own
+    `code_scroll_left`, in **pixels**, local viewport state with no
+    wire and no version bump.
+    - **The work was one transform and one clip, written before any
+      consumer moved.** `code_x_to_screen` / `screen_x_to_code` (exact
+      inverses) and `code_clip_left` / `crop_to_code_clip_left`.
+      **glyphon honors `TextBounds`, so the text layers clip
+      themselves; the manual quad and squiggle renderers do not** — and
+      nothing needed them to before this stage, because no
+      code-relative x could be negative. Five call sites deriving the
+      offset independently is how the caret and its glyphs come to
+      disagree.
+    - **Washes crop, they do not drop.** A selection running in from
+      off the left edge must paint the visible part — the same boundary
+      Stage 4's review caught the TUI painter getting wrong.
+    - **Two lifecycle resets, both observed pre-motion**: the wrap
+      transition and the `BufferSnapshot`. A later cursor motion
+      repairs the offset anyway, so a witness that waits for one cannot
+      tell "reset on snapshot" from "repaired on first motion".
+    - **`pmacs_protocol::scroll::follow_left`** — the follow rule now
+      lives beside `classify` and **both frontends call it**;
+      `src/editor.rs::horizontal_follow` delegates, and the GPU
+      converts px ↔ columns around it (exact, because non-monospace
+      code fonts are rejected). An approved exception to the stage's
+      "local GPU viewport state" scope, recorded in the framing doc
+      §1.2a. It moves no viewport state, adds no wire message, needs no
+      version bump.
+    - **Two witnesses exist because mutation testing found the TESTS
+      wrong, not the code.** The gutter byte-identity test's "the code
+      area must have moved" assertion is satisfied by a wash and the
+      caret alone, so it **passed with `TextArea.left` pinned to the
+      code origin** — the whole glyph-side mechanism was unwitnessed.
+      And the completion predicate passed `line_height` as a
+      *horizontal* extent, which the far-off-left test could not catch
+      because 200px off-left fails a width-based predicate too.
+      **Test a boundary AT the boundary**; the replacements straddle by
+      ±0.05px.
 
 - **`main` @ `db1bbe9`.** The **tree primitive #217** — `listview` rows
   take optional `depth`/`id`, collapse is primitive-owned, folding is
