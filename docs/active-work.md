@@ -127,9 +127,16 @@ lesson, §1 for the two framings).
   #206, Journey Stage 1b-3 #205, 1b-2 #204 and 1b-1 #203, the
   reap-ledger diagnostic #202, the isolation framing #201, the
   process-signal diagnostic #200 and the ledger absorption #199.
-  **Protocol schema support is `v6..=v21`; the production server-first
+  **Protocol schema support is `v6..=v22`; the production server-first
   `Hello` still advertises v20** — two different facts, and #184 landed
-  only the first.
+  only the first. The upper bound moved to **v22 at #221**, which added
+  `InstanceMessage::LineWrapFacts`; `ADVERTISED_PROTOCOL_VERSION` did
+  not move and must not be edited to chase it. Verified against
+  `pmacs-protocol/src/message.rs`, not carried forward: this line said
+  `v6..=v21` for two merges after that stopped being true.
+  **Historical `v21` statements elsewhere in this file are correct
+  where they describe a stage as it landed** — only this
+  current-state paragraph tracks the live range.
   **The recovery floor advances with the base**, so the check below
   now requires `9a26ac8` or newer; a tree at `db1bbe9` no longer
   passes — it would lack the entire QoL arc, which this file and the
@@ -202,6 +209,41 @@ bare `git push`, and is exactly the "uncommitted work does not travel"
 hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
+
+## QoL arc retirement — PR #224 OPEN (docs only)
+
+**PR #224** — https://github.com/levineuwirth/pmacs/pull/224. Written
+**after** the PR existed rather than with the lane's first commit —
+which is the standing correction from #171 and #215 being missed again,
+and it took review asking. Recorded that way rather than quietly
+back-dated: this file requires a lane for **every open PR**, including
+the PR that retires other lanes.
+
+- **Branch `retire-long-lines-lane`**, base `githubsucks/main` @
+  `9a26ac8` (the #223 merge). **`githubsucks/retire-long-lines-lane` is
+  the authoritative tip** — the ref, not a SHA, since any edit to this
+  block advances past whatever SHA it records. Recover with
+  `git fetch githubsucks && git checkout retire-long-lines-lane`.
+- **Docs only.** Two files, `docs/active-work.md` and
+  `docs/agent-handoff.md`. No `src/`, no crate, no manifest, no test
+  changes.
+- **Scope:** Rule 4 for the QoL arc, closed at #223. Remove the three
+  merged lane blocks (long lines, Stage 1 #219, Stage 2 #220) **after**
+  re-homing their durable residue to the handoff; advance the handoff's
+  date and `main` anchor and this file's canonical-base record and
+  recovery floor; add capability-aware keymap resolution as a named
+  handoff §6 backlog item — cross-cutting, **not started**, needs its
+  own framing.
+- **Verification:** `git diff --check` clean. **The recovery path was
+  re-exercised, not SHA-swapped** — fresh clone into an empty
+  directory, `githubsucks` alias, `--prune` fetch, `9a26ac8` confirmed
+  an ancestor of `githubsucks/main`, worktree recovered with the
+  three-argument form; all four steps clean. Swept for dangling
+  references to the removed lanes and their branches. The full gate
+  suite is **not** re-run for a change that cannot reach it, and that
+  is stated rather than left as a gap.
+- **Retire this block in the next absorption after #224 merges.** It
+  describes a docs PR; once merged there is nothing volatile left.
 
 ## Docs absorption after #217 — MERGED as #218 (2026-08-06 09:59Z)
 
