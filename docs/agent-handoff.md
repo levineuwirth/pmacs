@@ -257,7 +257,9 @@ commands, read `docs/active-work.md` immediately after this file.
   reap-ledger diagnostic #202, Journey Stage **1b-1** #203, **1b-2**
   #204 and **1b-3** #205, the ambient-root isolation **implementation**
   #206, and discovery Stage 1 #207. Each has its own bullet below; this
-  line is the head-of-`main` anchor and nothing else.
+  line is the `db1bbe9` ancestry chain and nothing else. **The
+  head-of-`main` anchor is at the top of this file** — it moved to
+  `9a26ac8` at #223, and this bullet's own opening says so.
 - **Bottom panel Arc 7 COMPLETE — Stage 3 (#213), the adopter default
   flip.**
   Omitting `display` now means the panel for listview, compile and
@@ -654,12 +656,21 @@ someone forgot.
   framing #164, COHERENCE.md #163, find-file #162, Lean 4 Stage 1 #160,
   minimap blank-slab #159, bottom-panel Stage 1 #155).
   **Protocol schema support is `v6..=v21`, the production server-first
-  `Hello` advertises v20, and a current session nevertheless negotiates
-  v21.** All three are true at once, and Stage 2B-3 is what made them
-  compatible: the advertised version is a permanent **baseline** and the
-  session's real version is settled one message later by the frontend's
-  `AttachRequest` counter-offer. The bullets below describe the arcs in
-  their own terms; this line is the head-of-`main` anchor.
+  `Hello` advertises v20, and a session at that anchor nevertheless
+  negotiates v21.** All three are true at once, and Stage 2B-3 is what
+  made them compatible: the advertised version is a permanent
+  **baseline** and the session's real version is settled one message
+  later by the frontend's `AttachRequest` counter-offer — a mechanism
+  that is still current, independent of which numbers it carries. The
+  bullets below describe the arcs in their own terms.
+
+  **These statements describe the historical `6c9e765` anchor; the live
+  protocol range is recorded under "Repository authority" in
+  `docs/active-work.md`** (`v6..=v22` since #221 added `LineWrapFacts`;
+  the advertised baseline is still v20). This line previously called
+  itself "the head-of-`main` anchor", which stopped being true at #219
+  — so a provenance note read as a current-state claim, and disagreed
+  with the anchor at the top of this file.
 - **`COHERENCE.md` is now required reading and a required framing input
   — #163.** It carries the product-coherence thesis, an audited
   scorecard, per-concern gaps, and §20's priority order, and it is the
