@@ -1,13 +1,24 @@
 # A destination capture any async continuation can use
 
-**Status: revision 6. APPROVED and IMPLEMENTED at `0efc8c0`; revision 6
-carries a correctness blocker found in review of that implementation
-and is NOT yet implemented.**
+**Status: revision 7. The mechanism is implemented at `0efc8c0`;
+revisions 6 and 7 carry an OPEN correctness blocker that is NOT yet
+implemented.**
 
 *(Revisions 2–5 said "Pre-implementation. Awaiting approval" while the
 ledger recorded the lane as approved and implemented. Same
 contradiction class this document keeps correcting elsewhere, left
 standing in its own header.)*
+
+**Revision 7 replaces revision 6's fix, which was unsound for the same
+reason revision 6's target was.** Revision 6 moved the panel/document
+decision to a **preflight prediction**, arguing nothing could change
+before placement because the body cannot `await`. The await refusal
+stops *concurrent interleaving*; it does not stop the body — arbitrary
+synchronous Lua — from dedicating the side slot itself and causing the
+very fallback the preflight just ruled out. **Enforcement moves to the
+placement boundary**, where the fallback is a fact rather than a
+forecast, and §7 gains the inside-the-body test that the two
+pre-established-state tests could never catch.
 
 **Revision 6 fixes an UNSOUND matrix, not a preference.** Q#DC-2 gave
 the panel profile only check 1, on the claim that a panel result never
@@ -277,17 +288,42 @@ on the placement actually being a panel. Whenever placement **can**
 fall back to a document window, the panel profile runs the **full
 document preflight**.
 
-**Both fallback causes are predictable at preflight**, which is what
-makes this implementable rather than a race:
+**ENFORCEMENT IS AT THE PLACEMENT BOUNDARY, NOT AT PREFLIGHT —
+revision 6 got this wrong too, and the reason is worth stating because
+it is a whole class of mistake.**
 
-1. `view.panel_capable` is false — a property of the frontend.
-2. The frontend's single side slot is dedicated elsewhere — readable
-   from core state.
+Revision 6 said the two fallback causes are "predictable at preflight",
+because `commit_to` refuses `await` so "nothing can change between
+preflight and placement". **The await refusal prevents *concurrent
+interleaving* — another coroutine mutating state while this one is
+parked. It says nothing about the body itself**, which is arbitrary
+Lua running synchronously and perfectly able to change the state the
+preflight just measured:
 
-And nothing can change between preflight and placement: `commit_to`
-runs its body synchronously inside a scope that **refuses `await`**
-(`async.lua:87-90`), so the prediction cannot go stale under the
-commit it guards.
+> obtain the existing panel → set it `dedicated = true` → request panel
+> display
+
+Preflight sees a reusable panel and relaxes checks 2–4; the body then
+causes the fallback; the result replaces a stale document. **No
+preflight predicate can close this**, however it is phrased — the
+measurement is simply taken before the thing it measures is decided.
+
+**So the check moves to where the fact is known.** Placement resolving
+to `PlacementKind::Ordinary` for a request that asked for a side *is*
+the fallback (`editor_core.rs:4138-4148`). At that point, under an
+active panel-profile commit, the document preconditions are evaluated
+against the captured destination and refused if they fail. The commit
+scope is already Rust-side app data (`CommitScopeActive`), so the
+profile and the destination can ride there for the placement path to
+consult.
+
+**And the tempting non-fix, named so nobody reaches for it:** widening
+the preflight predicate from "will it fall back" to "*could* it ever".
+Since the body can always dedicate the side slot, that predicate is
+always true, the panel profile collapses into the document profile, and
+the parameterization buys nothing. If collapsing them is genuinely
+right, that is a design decision needing its own approval — not a way
+to make a broken predicate safe.
 
 **What is NOT the fix: refusing a panel commit that would fall back.**
 Falling back to an ordinary window is existing, deliberate behaviour
@@ -456,12 +492,19 @@ incidental: no arguments is what keeps capture profile-blind.
   a stale-buffer refusal. Asserting merely that it does not error would
   pass on a call silently downgraded to the panel profile, which is the
   regression that would quietly void Journey Stage 1a's guarantees.
-- **A `"panel"` commit that FALLS BACK to a document window runs the
-  document preflight**, witnessed for **both** causes separately —
-  a non-panel-capable frontend, and a dedicated side slot. Each asserts
-  the stale-intent refusal fires: capture A, make B newer, commit
-  `"panel"`, and observe the refusal rather than B being replaced.
-  This is the defect revision 5's matrix admitted.
+- **A `"panel"` commit that FALLS BACK to a document window is checked
+  against the document preconditions**, witnessed for **both** causes
+  separately — a non-panel-capable frontend, and a dedicated side slot.
+  Each asserts the stale-intent refusal fires: capture A, make B newer,
+  commit `"panel"`, observe the refusal rather than B being replaced.
+- **THE FALLBACK STATE IS ALSO ESTABLISHED FROM INSIDE THE BODY**, in
+  its own test: the callback dedicates the side slot **mid-commit** and
+  then requests panel display. This is the case that distinguishes
+  placement-time enforcement from preflight prediction, and **the two
+  bullets above cannot catch it** — both set up their fallback state
+  *before* `commit_to` is entered, so a preflight-snapshot design
+  passes them. A design that passes only those two has not been shown
+  to work.
 - **A `"panel"` commit that really lands in the panel still skips
   checks 2–4** — otherwise the fix has quietly collapsed the two
   profiles into one and the parameterization buys nothing.

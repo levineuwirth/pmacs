@@ -265,7 +265,33 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
-## Destination capture (Q#JR14 generalization) — IMPLEMENTED, gate green, no PR yet
+## Destination capture (Q#JR14 generalization) — IMPLEMENTED at `0efc8c0`, then RE-OPENED by review
+
+**DO NOT PREPARE A PR FROM THIS LANE'S CURRENT STATE.** The mechanism
+landed at `0efc8c0` with 8 pins green — and review of that
+implementation found a **correctness blocker** that is still open.
+Framing revisions 6 and 7 carry it; neither is implemented yet.
+
+**The blocker:** the panel profile skips checks 2–4 on the claim that a
+panel result never touches a document window. **Panel placement falls
+back to an ordinary document window** when the frontend is not
+panel-capable or its side slot is dedicated
+(`src/editor_core.rs:4138-4148`), so a `"panel"` commit could replace a
+**newer** document with every stale-intent guard skipped. Reproduced in
+review.
+
+**Revision 6's fix was itself unsound and revision 7 replaces it.**
+Revision 6 predicted the fallback at preflight, arguing the body cannot
+`await`. That stops concurrent interleaving, not the body: arbitrary
+synchronous Lua can dedicate the side slot *inside the callback* and
+cause the fallback the preflight just ruled out. **Enforcement belongs
+at the placement boundary**, and §7 now requires an
+inside-the-body test that no preflight-snapshot design can pass.
+
+**Also open:** an invalid-UTF-8 profile (`string.char(255)`) reaches
+`to_str()` and surfaces mlua's generic conversion error instead of the
+documented message naming the accepted values — the same reachability
+class as revision 5's `Option<String>` defect, one layer down.
 
 **Written with the lane's first commit**, per the standing correction
 from #171 and #215.
@@ -275,15 +301,25 @@ from #171 and #215.
 authoritative tip** — the ref, not a SHA. Recover with
 `git fetch githubsucks && git checkout destination-capture`.
 
-- **Framing `docs/destination-capture-framing.md`, revision 6**,
-  APPROVED after four review rounds.
-- **Implemented in two commits.** `779bb02` is the mechanism
-  (`pmacs.window.capture_destination()`, the `ViewDestination` rename,
-  the profile argument); `d5a6170` is
-  `tests/destination_capture_acceptance.rs`, eight pins covering §7.
-  The full gate line below is green, and both preservation suites pass
-  **unchanged** (journey 47, dired 31) — no edit to either, which is
-  §7's stop signal not firing rather than being suppressed.
+- **Framing `docs/destination-capture-framing.md`, revision 7.**
+  Revisions 1–5 were approved over four review rounds; **revisions 6
+  and 7 are corrections carrying the open blocker above** and have not
+  been implemented.
+- **Implemented in two commits, and superseded in part.** `779bb02` is
+  the mechanism (`pmacs.window.capture_destination()`, the
+  `ViewDestination` rename, the profile argument); `d5a6170` is
+  `tests/destination_capture_acceptance.rs`. The gate line below was
+  green at `0efc8c0` and both preservation suites passed **unchanged**
+  (journey 47, dired 31) — §7's stop signal not firing rather than
+  being suppressed.
+
+  **But those eight pins do NOT cover §7 as it now reads.** They were
+  written against revision 5's matrix, which review disproved: none of
+  them exercises a fallback placement, and none could — the two
+  fallback tests revision 6 asked for did not exist yet, and revision
+  7 adds a third (the inside-the-body transition) that no
+  preflight-snapshot design can pass. Reading "eight pins covering §7"
+  off this entry is exactly the mistake it now exists to prevent.
 - **TWO FRAMING CLAIMS THE TREE DID NOT MATCH.** Neither changed a
   decision; both are recorded because the framing says "counted, not
   estimated" and a reader will check.
