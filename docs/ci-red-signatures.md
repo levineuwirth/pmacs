@@ -104,10 +104,11 @@ evidence is macOS / lua54 and that one is macOS / luajit.
 
 ## Live rows
 
-**Four of the six evidenced rows are live.** R2 and R4 were retired on
-2026-08-05 and are below, under "Retired rows", with their dispositions.
-R5 and R6 were added on 2026-08-06 from an occurrence scan and a live
-red; neither is diagnosed.
+**Four of the seven evidenced rows are live.** R2 and R4 were retired
+on 2026-08-05 and **R8 on 2026-08-08**; all three are below, under
+"Retired rows", with their dispositions. R5 and R6 were added on
+2026-08-06 from an occurrence scan and a live red; neither is
+diagnosed.
 
 **Rate, as of 2026-08-06.** Of the last 25 `main` runs, **23 green and
 2 red** — the two reds being R2's second occurrence (30710662474) and
@@ -226,30 +227,6 @@ readiness helpers exist, whether they can be one, and what each
 promises. Patching this call site alone would leave the same question
 open under a fourth selector.
 
-### R8 — LSP listview row renders a path relative to a root the test does not expect
-
-The first row here that is **not intermittent**. It reproduces on every
-run, and the merge-base control has already been done — so the one
-question this registry exists to answer is settled for it, and settled
-against the branch that found it.
-
-| field | value |
-|---|---|
-| **selector** | `--test m4_acceptance flat_listview_consumers_render_byte_identically_after_the_tree_extension` |
-| **job / flavor** | local (Linux), any invocation — isolated single-test runs included. Not load-sensitive |
-| **required fragments** | `the flat references row renders verbatim` **and** a `left` value that is the `right` value with a **leading directory removed** |
-| **status** | **deterministic locally, NOT attributed to the long-lines arc** |
-| **what IS established** | it fails identically on `main` and on `gpu-horizontal-scroll` with the working tree stashed — a merge-base control, not an inference from "my diff looks unrelated". The rendered row is the expected path with `/tmp/` stripped: `.tmpPZsycN/r.rs:12:3` vs `/tmp/.tmpPZsycN/r.rs:12:3` |
-| **what is NOT** | the mechanism. **This is a prefix strip, not a width truncation** — the fixture declares `CellSize::new(40, 100)`, so 25 characters fit with room to spare, and the missing text is at the front. The likeliest reading is that the row is rendered relative to a workspace root that resolves to `/tmp` on this machine, which would make it depend on `TMPDIR`. **Not verified**, and the alternative — that the renderer relativizes against something else entirely — is not excluded |
-| **why CI is green** | unestablished. If the `TMPDIR` reading is right, a runner whose temp dir is not directly under the relativization root would never see it. That is a hypothesis, not a finding |
-| **retirement** | a diagnosis of what the row is rendered relative to, then either fixing the renderer or making the assertion state the relativization it expects. A green run on a machine with a different `TMPDIR` retires nothing |
-
-**Not this lane's to fix, and deliberately not fixed here.** Stage 5
-touches `pmacs-gpu`, `pmacs-protocol::scroll`, and `horizontal_follow`
-in `src/editor.rs`; it has no path to the LSP listview renderer. Fixing
-it inside this branch would put an unrelated, undiagnosed change in a
-viewport PR.
-
 ## Retired rows
 
 **These stay here on purpose.** A retirement is a claim that a mechanism
@@ -257,6 +234,67 @@ is gone; keeping the signature is what makes a recurrence recognisable
 as a falsification of that claim rather than as a fresh mystery. Both
 were retired **causally** — the mechanism removed, plus a discriminating
 witness that fails without the fix — never by a count of green runs.
+**R8 joined them on 2026-08-08**, and unlike the other two it was never
+intermittent — it was deterministic, and the "flake" reading was never
+available to it.
+
+### R8 — LSP listview row rendered relative to a stray ancestor marker — RETIRED 2026-08-08
+
+| field | value |
+|---|---|
+| **selector** | `--test m4_acceptance flat_listview_consumers_render_byte_identically_after_the_tree_extension` |
+| **job / flavor** | local (Linux), any invocation — isolated single-test runs included. Not load-sensitive |
+| **required fragments** | `the flat references row renders verbatim` **and** a `left` value that is the `right` value with a **leading directory removed** |
+| **causal status** | **DIAGNOSED and FIXED — test hermeticity** |
+| **evidence** | reproduced deterministically on one Linux workstation; merge-base control confirmed it on `main` |
+| **disposition** | `tests/m4_acceptance.rs::open_against_fake` now sets `pmacs.project.set_search_boundary` to the fixture directory. `docs/r8-fixture-boundary-framing.md` |
+
+**Mechanism, established rather than guessed:**
+
+1. `builtin/runtime/lsp.lua:2397` `display_path` shortens a location
+   against the **detected project root** before rendering it.
+2. `pmacs.project.detect` walks **upward** for a marker. From
+   `/tmp/.tmpXXXXXX/r.rs` it reached `/tmp`.
+3. That machine had a stray **`/tmp/.git`** — an *empty directory*, not
+   a repository. The `.git` marker is directory-only, so an empty
+   directory still matched.
+4. Root resolved to `/tmp`, the prefix was stripped, and the row
+   rendered as observed.
+
+Control at diagnosis time: the same test with `TMPDIR` outside `/tmp`
+passed.
+
+**The product behaviour was never wrong and was not changed.**
+Shortening a location against its project root is the feature. The
+defect was that the fixture did not bound its own project detection, so
+its assertion depended on what the developer's `/tmp` contained.
+`src/project.rs:208` had documented this exact hazard — *"a developer's
+`/tmp/.git`"*, in those words — and provided
+`detect_project_within`; `open_against_fake` was one helper that missed
+the pattern the same file already used five times.
+
+**Retired causally, and the witness is portable.** A new test,
+`a_planted_ancestor_marker_does_not_reach_the_rendered_row`, **plants
+an empty `.git` in a temporary ancestor** and asserts the rendered row
+stays absolute. Removing the boundary fails it *deterministically on
+every machine* — including CI, where no `/tmp/.git` exists — because
+the planted marker is nearer than any real one. **The original
+machine's stray directory was corroboration, never the proof**, and it
+was deliberately left in place: deleting it would have hidden the
+hermeticity defect.
+
+**Provenance of that `/tmp/.git` remains unresolved and is not needed.**
+Observations of its timestamps disagreed, and `/tmp` is a tmpfs whose
+entries are touched by inspection, so no timestamp is authoritative
+here. It may have been created by the session that found the row. The
+fix does not depend on the answer.
+
+**What this retirement does NOT claim:** that the rest of the suite is
+hermetic. `EditorState::new_with_roots` is called **113 times** in
+`m4_acceptance` alone, an unknown number of them equally unbounded —
+harmless only while their assertions do not render a path. That census
+is a named follow-on in `docs/agent-handoff.md` §6, not a completed
+audit.
 
 ### R2 — USR1 delivered before the trap is installed — RETIRED 2026-08-05
 
