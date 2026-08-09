@@ -275,7 +275,7 @@ from #171 and #215.
 the authoritative tip** — the ref, not a SHA. Recover with
 `git fetch githubsucks && git checkout worker-identity-stage1`.
 
-- **Framing `docs/worker-identity-framing.md`, revision 2**, in review.
+- **Framing `docs/worker-identity-framing.md`, revision 3**, in review.
   Scope: `COHERENCE.md` §9's "mechanism without identity", and journey
   step 11 — the last of Priority 1's own work, sitting in another
   section's arc.
@@ -289,6 +289,20 @@ the authoritative tip** — the ref, not a SHA. Recover with
   hand at the one place that throws it away", which was wrong about the
   call chain (`dispatch` → arbitrary handler → Lua wrapper → Rust
   binding, with the wrapper layer documented as bypassable).
+- **Revision 3 took a third blocker: the ambient's extent is not
+  synchronous.** A handler may `Handle:await()` and park with the name
+  still pushed, leaking attribution to unrelated later work. Rule 1 now
+  **enforces** non-yieldability, modelled on the existing
+  `_in_commit_scope()` refusal in `Handle:await`
+  (`builtin/runtime/async.lua:87-90`) — rejecting before the park,
+  unconditionally rather than only when a yield would occur, and
+  covering **both** yield points.
+- **Q#W-7 — a pre-existing defect found while scouting that guard, and
+  reported rather than patched.** `pmacs.async.yield_to_next_tick()`
+  (`async.lua:243-245`) is public, yields, and carries **no**
+  `_in_commit_scope` refusal — so Journey Stage 1a's Q#JR14b invariant
+  has a second entrance. Reachability by a real caller is **unproven**.
+  Awaiting the user's call on whether this lane fixes it.
 - **NO WIRE CHANGE**, which is what lets this run beside the two lanes
   already in flight. The statusline activity indicator is a **fourth**
   `pmacs.statusline.register` provider (terminal/syntax/lsp are the

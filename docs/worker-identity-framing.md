@@ -5,8 +5,18 @@ removed that title overclaimed the lane: it answers **what**, and —
 under `pmacs.workers.dispatch` — **under which registered handler**.
 Neither is who owns it.)*
 
-**Status: framing pass, revision 2. Pre-implementation. Awaiting
+**Status: framing pass, revision 3. Pre-implementation. Awaiting
 approval.**
+
+**Revision 3 closes a hole in revision 2's ambient: the extent it
+called "synchronous" is not.** A registered handler is arbitrary Lua
+and may `Handle:await()`, parking the coroutine with the name still
+pushed so that unrelated later work inherits it. Rule 1 now **enforces**
+non-yieldability rather than assuming it, following the guard this file
+already carries for `pmacs.window.commit_to`. Scouting that guard
+turned up a second yield point it does not cover — Q#W-7, a
+pre-existing defect in another lane's invariant, reported rather than
+patched in silence.
 
 **Revision 2 removes `owner` and respecifies the handler-name path,
 after review found the first dishonest and the second unbuildable as
@@ -128,6 +138,22 @@ drifted in one place, recorded below.
   "human-readable ... surfaced in events and the `pmacs.process.list`
   output". No owner, no purpose, no parent. Callers spell it however
   they like (`lsp:{name}`, a terminal buffer name).
+
+- **A dynamic scope that must not be yielded out of ALREADY EXISTS
+  here, guard and rationale included.** `Handle:await()` refuses to run
+  inside `pmacs.window.commit_to` (`builtin/runtime/async.lua:87-90`),
+  raising *"await: cannot await inside pmacs.window.commit_to; await
+  first, then commit"*. Its comment states the hazard in general terms:
+  yielding out of the extent "would restore the scope while this
+  coroutine is still parked, so the rest of the commit would resume
+  ambient". `commit_to` itself is "an RAII guard on the Rust stack" —
+  the same shape this lane needs.
+
+- **There are TWO yield points, not one.** `Handle:await()` yields at
+  `async.lua:95`; **`pmacs.async.yield_to_next_tick()` yields at
+  `async.lua:244`** and is public (`pmacs.async` is `async_public`,
+  `:247`). Any rule about a non-yieldable extent has to cover both. The
+  `commit_to` guard covers only the first — see Q#W-7.
 
 And the two findings that actually shape the design:
 
@@ -290,12 +316,25 @@ ask for. **If review prefers the minimal edit**, the alternative is one
 more parameter on the existing pair, and the collapse becomes its own
 small lane. I would rather be told than assume.
 
-### Q#W-2 — the dispatch identity path **(rewritten in rev 2)**
+### Q#W-2 — the dispatch identity path **(rewritten in rev 2, rule 1 added in rev 3)**
 
 Revision 1 treated this as a parameter-passing detail. §2 shows it is
 not: `name` dies at `pmacs.workers.dispatch` and nothing below it takes
 a name, so the value must be carried *out of band* across an arbitrary
 handler.
+
+**Revision 2 then called the extent "synchronous" and assumed it.
+Review found that it is not.** A registered handler is arbitrary Lua
+running inside `pmacs.async`, and it may call `Handle:await()` — a
+legal, yieldable path that the existing tests already exercise inside
+`pcall`. While a handler is parked, its pushed name **stays on the
+stack**, and every tick callback and every other coroutine that
+allocates a job in the meantime inherits it. That is not a corner case;
+it is the ordinary shape of a handler that awaits.
+
+So rule 1 below is no longer an observation about how handlers happen
+to behave. It is an **enforced** property, and the enforcement already
+has a precedent in this exact file (§2a).
 
 **The capture point is Rust, not Lua**, and the reason is the bypass in
 §2. If the ambient lived in the Lua wrapper layer, a handler calling
@@ -311,9 +350,35 @@ runtime-internal bindings (`_push_dispatch_name` / `_pop_dispatch_name`).
 
 **The contract, in full:**
 
-1. **Extent is the SYNCHRONOUS handler call, and nothing more.** Push
-   before, pop after. Every job reaching `allocate` during that window
-   carries the name.
+1. **THE EXTENT IS NON-YIELDABLE, AND THAT IS ENFORCED, NOT ASSUMED.**
+   Awaiting inside a dispatch-name scope is **refused**, because
+   yielding would park the coroutine with the name still pushed and
+   hand it to whatever allocates next.
+
+   The guard is modelled on the one already in the file (§2):
+   `_in_dispatch_name_scope()` joins `_in_commit_scope()` as a refusal
+   in the same place, with the same shape of message and the same
+   remedy — **await first, then dispatch**.
+
+   Three details that decide whether the guard actually holds:
+
+   - **It rejects BEFORE parking.** The `commit_to` guard is the first
+     thing in `await`, ahead of the `_is_complete` check and the
+     `coroutine.yield`. The new one sits beside it, for the same
+     reason: a guard that fires after the yield has already happened
+     guards nothing.
+   - **It rejects UNCONDITIONALLY, not only when the handle is
+     incomplete.** A guard that fires only when a yield would really
+     occur has behaviour depending on whether the job happened to
+     finish first — it would pass under test and fail in production,
+     intermittently. `commit_to`'s guard is unconditional and this one
+     matches it.
+   - **`await` is NOT the only yield point.**
+     `pmacs.async.yield_to_next_tick()` (`async.lua:243-245`) yields
+     too, and is public. It gets the same refusal. Guarding only
+     `await` would leave the hole open through a second door — see
+     Q#W-7, because the existing `commit_to` guard has exactly that
+     gap today.
 2. **Work dispatched later is NOT covered, deliberately.** A job
    dispatched from an `on_complete` callback or a resumed coroutine
    runs ticks later, outside the extent, and carries only its own
@@ -343,22 +408,29 @@ runtime-internal bindings (`_push_dispatch_name` / `_pop_dispatch_name`).
 
 **A known and accepted property, stated rather than discovered later:**
 the ambient captures *causal* extent, not *intent*. If a handler
-synchronously triggers unrelated work — an edit that schedules a parse
-— that job is inside the window and takes the name. Within a
-synchronous extent I think that is the honest reading ("this ran
-because that handler ran"), and it is the only definition enforceable
-at a single funnel. **If review disagrees, the alternative is
+triggers unrelated work within its extent — an edit that schedules a
+parse — that job takes the name. Because rule 1 makes the extent
+non-yieldable, that window is bounded by a single un-parked call, and
+within such a window I think "this ran because that handler ran" is the
+honest reading. It is also the only definition enforceable at a single
+funnel. **If review disagrees, the alternative is
 capture-at-the-Lua-wrapper**, which is narrower and misses the raw
 `_dispatch_*` callers — a trade of false positives for false negatives,
-and I would rather over-attribute inside a synchronous call than
-silently drop the third-party case.
+and I would rather over-attribute inside a bounded call than silently
+drop the third-party case.
 
 **Why this ambient is admissible while Q#W-5's is not.** They are not
-the same mechanism. This one is a synchronous, single-threaded, bounded
-dynamic extent with a deterministic pop — a `let` binding in disguise.
-A `parent` ambient must span a job's *asynchronous* lifetime, across
-ticks, through callbacks that run after the parent settled. The first
-is a stack; the second is a lifetime model.
+the same mechanism — **and revision 2 was entitled to that claim only
+after rule 1 made it true.** As written in revision 2 the extent could
+be parked by any awaiting handler, which is most of the way to the
+asynchronous lifetime I used as the reason for deferring `parent`.
+With rule 1 the difference is real and enforced: this is a
+single-threaded dynamic extent that **cannot** be suspended, with a
+deterministic pop on both the normal and the error path. A `parent`
+ambient must span a job's asynchronous lifetime by design — across
+ticks, through callbacks that run after the parent settled — and cannot
+be fixed by refusing to yield, because yielding is the whole point. The
+first is a stack; the second is a lifetime model.
 
 ### Q#W-3 — what does the indicator actually show?
 
@@ -412,20 +484,53 @@ child is dispatched. A `parent` field that nothing populates is worse
 than no field: it renders as `None` everywhere and reads as "this job
 has no parent" rather than "this system does not track parents".
 
-**And the objection revision 2 has to answer, since it now builds an
+**And the objection this has to answer, since the lane now builds an
 ambient of its own (Q#W-2):** why is one admissible and not the other?
-Because they are not the same mechanism. Q#W-2's extent is
-synchronous, single-threaded, and bounded by one function call, with a
-deterministic pop on both the normal and the error path. A `parent`
+Because Q#W-2's extent **cannot be suspended** — rule 1 refuses both
+yield points, so it is bounded by one un-parked call with a
+deterministic pop on the normal and the error path.
+
+**That distinction is only load-bearing because rule 1 exists.**
+Revision 2 asserted this same paragraph while its ambient *could* be
+parked by any awaiting handler, which made the two mechanisms far more
+alike than the argument admitted. The honest version: a `parent`
 ambient must identify the running job *across ticks* — a job dispatched
 from an `on_complete` callback should name the job whose completion
-fired it, and that callback runs after the parent settled, on the main
-thread, outside any dispatch call. That is a lifetime model, not a
-stack, and it is Stage 3's subject rather than a field this lane can
-add cheaply.
+fired it, and that callback runs after the parent settled, outside any
+dispatch call. Refusing to yield cannot rescue it, because yielding is
+the mechanism it needs. That is a lifetime model, not a stack, and it
+is Stage 3's subject rather than a field this lane can add cheaply.
 
 Stage 3 builds the lifetime model and the field together, where the
 field can be tested by a populated case.
+
+### Q#W-7 — the same hole exists in `commit_to` today **(new in rev 3)**
+
+Found while scouting rule 1, and reported rather than quietly patched.
+
+`Handle:await()` refuses to run inside `pmacs.window.commit_to`
+(`async.lua:87-90`) precisely so a coroutine cannot park with the
+frontend scope pushed. **But `pmacs.async.yield_to_next_tick()`
+(`async.lua:243-245`) also yields, is public, and carries no such
+refusal.** A coroutine inside `commit_to` can therefore park through
+that door and produce exactly the misrouting the `await` guard exists
+to prevent. Journey Stage 1a's Q#JR14b invariant has a second entrance.
+
+I have **not** verified that a real caller does this — the reachability
+of the bug is unproven, and I would rather say so than dress a
+code-reading up as a repro.
+
+*My vote: **fix it in this lane, in the same commit as rule 1.*** It is
+one refusal in a function this lane is already editing, in the same
+family, for the same reason. The alternative — ship a document that
+explains the hazard in detail, add the guard for the new scope, and
+leave the identical gap open beside it — is how a codebase teaches its
+next reader that the rule is optional.
+
+**But it is another lane's invariant**, so it is a question rather than
+an assumption. If review prefers it separate, it should be its own
+small lane *before* this one, and this framing should say so; what it
+should not be is discovered a third time.
 
 ### Q#W-6 — is any of this configurable?
 
@@ -459,6 +564,19 @@ preference.
   dispatcher** — not a synthetic funnel test. A test that pushes the
   ambient by hand proves the stack works and leaves the actual defect
   (`name` dying in an arbitrary handler) unwitnessed.
+- **Awaiting inside a handler is REFUSED, and the scope restores after
+  the refusal** (Q#W-2 rule 1). Two assertions, and the second is the
+  load-bearing one: a guard that raises but leaves the name pushed has
+  converted a silent misattribution into a silent misattribution plus
+  an error. The witness dispatches again after the rejection and
+  asserts the new job carries **no** stale name.
+- **`pmacs.async.yield_to_next_tick()` inside a handler is refused
+  too**, with the same restore-after assertion. Guarding one yield
+  point and not the other leaves the hole open through a second door
+  (§2).
+- **The refusal fires even when the awaited handle is already
+  complete** (rule 1) — the case that separates an unconditional guard
+  from one whose behaviour depends on a race.
 - **The ambient survives a failing handler** (Q#W-2 rule 5): a handler
   that errors, then a subsequent unrelated dispatch, asserting the
   second job does **not** carry the first's name. This is the
