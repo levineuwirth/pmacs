@@ -1654,32 +1654,27 @@ fn g6_14_the_root_rule_works_where_project_kind_is_not_git() {
     );
 }
 
-/// A repository root containing a **newline** resolves **whole**, and
-/// the status command really runs there.
-///
-/// A newline is a legal byte in a POSIX path — the fixture below builds
-/// one and `git rev-parse --show-toplevel` prints it, terminator and
-/// all — so parsing that output with a first-line match truncates
-/// `/tmp/…/nl\nroot` to `/tmp/…/nl`, and every command this module runs
-/// afterwards gets a `-C` and a cwd naming a directory that does not
-/// exist. The right answer is to strip git's final terminator and
-/// nothing else.
+/// A repository rooted at a directory literally named `leaf` resolves
+/// **whole**, and the status command really runs there.
 ///
 /// End to end, not at the parser: the directory really is created, the
 /// real `git` really resolves it, and the assertion is on the cwd of the
 /// spawn the module actually made. `_last_spawn` is the status
 /// invocation here, since `rev-parse` runs first and carries no cwd of
-/// its own.
+/// its own. A root that lost a byte would still SPAWN — with a `-C` and
+/// a cwd naming a directory that does not exist — so the panel is
+/// checked for a failure row as well as for real ones.
 ///
-/// It rides beside the one-line-status rule rather than replacing it:
-/// the helper this uses is deliberately **separate** from `first_line`,
-/// whose other three callers all feed the single-line status band and
-/// would be corrupted by a multi-line message.
-#[test]
-fn g6_14c_a_root_containing_a_newline_is_not_truncated() {
+/// `open_panel` binds `pmacs.project.set_search_boundary` to the fixture
+/// (R8's lesson), which matters most here: these leaf names are exactly
+/// the shape that makes a detection walk out of the tempdir hard to
+/// read when it goes wrong.
+fn assert_root_resolves_whole(leaf: &str) {
     let (_dir, base) = tempdir();
-    let root = base.join("nl\nroot");
-    std::fs::create_dir_all(&root).expect("a newline is a legal POSIX path byte");
+    let root = base.join(leaf);
+    std::fs::create_dir_all(&root).unwrap_or_else(|e| {
+        panic!("a root named {leaf:?} must be creatable — every byte in it is a legal POSIX path byte: {e}")
+    });
     mixed_repo(&root);
 
     let mut s = editor();
@@ -1689,7 +1684,7 @@ fn g6_14c_a_root_containing_a_newline_is_not_truncated() {
     assert_eq!(
         cwd,
         root.display().to_string(),
-        "the resolved root must be the WHOLE path, newline included"
+        "the resolved root must be the WHOLE path, every byte of {leaf:?} included"
     );
 
     let text = panel_text(&s);
@@ -1712,6 +1707,47 @@ fn g6_14c_a_root_containing_a_newline_is_not_truncated() {
         "RET resolves against the untruncated root; status was {:?}",
         status(&s)
     );
+}
+
+/// A repository root containing a **newline** resolves **whole**, and
+/// the status command really runs there.
+///
+/// A newline is a legal byte in a POSIX path — the fixture builds one
+/// and `git rev-parse --show-toplevel` prints it, terminator and all —
+/// so parsing that output with a first-line match truncates
+/// `/tmp/…/nl\nroot` to `/tmp/…/nl`, and every command this module runs
+/// afterwards gets a `-C` and a cwd naming a directory that does not
+/// exist. The right answer is to strip git's final terminator and
+/// nothing else.
+///
+/// It rides beside the one-line-status rule rather than replacing it:
+/// the helper this uses is deliberately **separate** from `first_line`,
+/// whose other three callers all feed the single-line status band and
+/// would be corrupted by a multi-line message.
+#[test]
+fn g6_14c_a_root_containing_a_newline_is_not_truncated() {
+    assert_root_resolves_whole("nl\nroot");
+}
+
+/// A repository root ending in a **carriage return** resolves whole too
+/// — the byte the newline fix's own strip still ate.
+///
+/// `\r` is as legal in a POSIX directory name as `\n` is, and it is the
+/// byte that makes `\r?\n$` ambiguous: for a root named `trailing\r`,
+/// git prints `…/trailing` `0d` `0a`, where the `0d` is the PATH and
+/// only the `0a` is the terminator. A strip tolerant of an optional
+/// preceding carriage return cannot tell those apart and takes both,
+/// resolving the root as `…/trailing` — a directory that does not
+/// exist. Only git's final `\n` may be removed.
+///
+/// The second case sends the two hazards in together, because a root may
+/// hold both and neither fix may mask the other: an embedded newline
+/// (which forbids a first-line read) ahead of a trailing carriage return
+/// (which forbids an over-eager terminator strip).
+#[test]
+fn g6_14d_a_root_ending_in_a_carriage_return_is_not_truncated() {
+    assert_root_resolves_whole("trailing\r");
+    assert_root_resolves_whole("nl\nand-trailing\r");
 }
 
 /// A directory outside any repository reports it, rather than opening

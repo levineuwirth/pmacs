@@ -314,11 +314,33 @@ end
 --- has three other callers, all of them status-band text, and folding
 --- the two together would fix this one and break those.
 ---
---- Exactly one trailing newline is stripped, with an optional preceding
---- carriage return, because that is what git emits. A second newline
---- would be output, not a terminator.
+--- Exactly ONE trailing `\n` is stripped, and NOTHING may ride along
+--- with it --- not a carriage return, not a second newline. A carriage
+--- return is as legal a POSIX path byte as a newline is, so a repository
+--- rooted at `/tmp/a\r` makes git print `/tmp/a` `0d` `0a`: the path's
+--- own CR, then git's LF terminator. A strip tolerant of `\r?\n$` cannot
+--- tell those two bytes apart and takes both, resolving the root as
+--- `/tmp/a` --- the same defect this function was written to fix, one
+--- byte over. A second newline is output, not a terminator, for the same
+--- reason.
+---
+--- There is no unambiguous output representation to prefer instead,
+--- which was CHECKED against git 2.55 rather than assumed: `-z` is not
+--- an option of `git rev-parse` at all. It is absent from the manual,
+--- `--parseopt -z` errors with "unknown switch", and in ordinary mode
+--- `rev-parse` treats `-z` as an unrecognized FLAG ARGUMENT and echoes a
+--- literal `-z\n` onto stdout AHEAD of the toplevel --- so asking for it
+--- would corrupt the very output it was meant to disambiguate, silently
+--- and with exit code 0. `--show-toplevel` applies no C quoting either,
+--- not even under `core.quotePath=true`. Removing the one byte git
+--- appended is therefore the whole of the correct answer.
+---
+--- Written as an explicit last-byte test rather than a pattern: an
+--- anchored Lua pattern is where both of this function's bugs lived.
 local function strip_output_terminator(text)
-  return ((text or ""):gsub("\r?\n$", ""))
+  text = text or ""
+  if text:sub(-1) == "\n" then return text:sub(1, -2) end
+  return text
 end
 
 --- A one-line description of why a git invocation failed.
@@ -815,9 +837,11 @@ function pmacs.git._deliver_root(request, res)
     end
     return
   end
-  -- The WHOLE output, minus its terminator --- never the first line. A
-  -- repository root may contain a newline, and truncating one here would
-  -- point every command that follows at a directory that does not exist.
+  -- The WHOLE output, minus its terminator --- never the first line, and
+  -- never a byte more than git appended. A repository root may contain a
+  -- newline and may END in a carriage return, and losing either here
+  -- would point every command that follows at a directory that does not
+  -- exist.
   local root = strip_output_terminator(res.stdout)
   if root == "" then
     pmacs.editor.set_status("git: rev-parse returned no worktree root")
