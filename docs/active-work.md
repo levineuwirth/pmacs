@@ -265,6 +265,38 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
+## Discovery Stage 2 — BRANCHED, framing in review
+
+**Written with the lane's first commit**, per the standing correction
+from #171 and #215.
+
+**Branch `discovery-stage2`**, base `githubsucks/main` @ `4bc55e8`
+(the #225 merge). **`githubsucks/discovery-stage2` is the authoritative
+tip** — the ref, not a SHA. Recover with
+`git fetch githubsucks && git checkout discovery-stage2`.
+
+- **Framing `docs/discovery-stage2-framing.md`, revision 2**, in
+  review. Scope: `COHERENCE.md` §5's "M-x rows are still bare names".
+  Descriptions already exist on `Command` and are already rendered by
+  `help.list-commands`; they are missing at the one moment they would
+  change a decision.
+- **PROTOCOL BUMP v22 → v23, and this lane HOLDS THE BUMP SLOT.**
+  Additive: a new `MinibufferPromptRows` variant **appended** to the
+  enum, with `MinibufferPrompt` **frozen** for v12–v22. An in-place
+  field change is a wire break — postcard encodes positionally, and
+  that variant is sent to every peer `>= 12` (`src/daemon.rs:1472`).
+- **Git Stage 2 (gutter markers) also needs a bump and must wait for
+  this to land.** Git Stage 1 is no-wire and runs beside it.
+- **Two halves, only one of which is wire work.** `pmacs-gpu` renders
+  the new variant. **The grid TUI never reads `MinibufferPrompt` at
+  all** — it paints from `core.minibuffer` and renders
+  `format!("  [{cand}]")` (`src/editor.rs:5484`), so its half is a
+  local formatting change reading the registry directly. A multi-row
+  TUI chooser is explicitly NOT this lane.
+- **Gates:** `scripts/gate --protocol --acceptance <the new suite>` —
+  the strengthened two-configuration sweep, which is what `--protocol`
+  exists for.
+
 ## LSP LaTeX coverage — IMPLEMENTED, gates green, no PR yet
 
 **Written with the lane's first commit**, per the standing correction
@@ -603,6 +635,7 @@ authoritative tip** — the ref, not a SHA. Recover with
   — added in the second round — a **rename of either** the build or the
   sweep step each fail the suite.
 ||||||| parent of 72bbb96 (docs: LSP LaTeX coverage framing revision 2, on a branch at last)
+||||||| parent of 312ec7a (docs: frame Discovery Stage 2 (revision 2) — M-x rows)
 
 ## QoL arc retirement — PR #224 OPEN (docs only)
 
