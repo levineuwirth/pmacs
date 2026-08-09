@@ -20,17 +20,20 @@
 //! * **A refusal is asserted on its reason**, never on the mere fact
 //!   that something failed. `commit_to` has five distinct refusals and a
 //!   raise; "it errored" would pass on any of the wrong ones.
-//! * **The panel profile's relaxation is pinned at BOTH of its
-//!   evaluation sites** (revision 7). The preflight is an early refusal
-//!   that spares the body; the guarantee is enforced where placement
-//!   resolves, because the body is arbitrary synchronous Lua and can
-//!   create the fallback *after* any snapshot was taken — refusing
-//!   `await` stops a second coroutine interleaving, not the body's own
-//!   statements. Three tests carry that split and none subsumes another:
+//! * **The panel profile's relaxation is pinned as a preflight PLUS the
+//!   refusal that keeps it true** (revision 8). The preflight measures
+//!   whether this frontend places side requests in the panel; the body is
+//!   arbitrary *synchronous* Lua, so refusing `await` — which only stops
+//!   another coroutine interleaving — does not stop it invalidating that
+//!   measurement. The answer is neither to predict the body nor to catch
+//!   it late at placement (by then it has created buffers, handles and
+//!   paint, which is "four mutations too late" all over again) but to
+//!   **refuse the mutation at the attempt**, exactly as `await` is
+//!   refused. Three tests carry it and none subsumes another:
 //!   `a_panel_commit_that_falls_back_runs_the_document_preflight` (the
-//!   body must not run),
-//!   `a_panel_commit_whose_body_creates_the_fallback_is_refused_at_placement`
-//!   (the result must not land), and
+//!   body must not run at all when the fallback already holds),
+//!   `a_body_that_tries_to_create_the_fallback_is_refused_at_the_attempt`
+//!   (the mutation is refused, and nothing partial is left behind), and
 //!   `a_panel_commit_that_falls_back_with_a_valid_destination_still_lands`
 //!   (falling back is still graceful degradation, not an error).
 //!
@@ -88,6 +91,32 @@ fn name_in(s: &EditorState, window: WindowId) -> String {
     let core = s.core.borrow();
     let registry = core.registry.borrow();
     registry.get(buffer).expect("buffer").name().to_string()
+}
+
+/// Whether `window` is pinned to its buffer (Q#BP2c `dedicated`).
+fn dedicated(s: &EditorState, window: WindowId) -> bool {
+    s.core
+        .borrow()
+        .windows
+        .get(&window)
+        .is_some_and(|w| w.params.dedicated)
+}
+
+/// Whether a buffer by this name exists at all.
+///
+/// The "nothing partial was installed" assertion needs to see a side
+/// effect the body would have left *before* reaching any display, and a
+/// created-but-never-shown buffer is exactly that.
+fn buffer_exists(s: &EditorState, name: &str) -> bool {
+    eval(
+        s,
+        &format!(
+            "for _, id in ipairs(pmacs.buffer.list()) do
+               if pmacs.describe.buffer(id).name == {name:?} then return true end
+             end
+             return false"
+        ),
+    )
 }
 
 fn local_window(s: &EditorState) -> WindowId {
@@ -454,6 +483,13 @@ fn the_preflight_matrix_holds_in_both_profiles() {
 const PANEL_BODY: &str = "pmacs.window.display(pmacs.buffer.create('*result*'), \
                           { side = 'bottom' })";
 
+/// A reusable panel: present and **undedicated**, so the preflight
+/// measures "this frontend places side requests in the panel" and the
+/// relaxation applies. Every mutation row starts from here except the
+/// one whose whole point is that no panel exists yet.
+const PANEL_ARRANGED: &str = "pmacs.window.display(pmacs.buffer.create('*pinned*'), \
+                              { side = 'bottom', dedicated = false, select = false })";
+
 /// Arrange one of the two reasons a side request falls back into a
 /// document window, and assert the arrangement took.
 ///
@@ -578,95 +614,185 @@ fn a_panel_commit_that_falls_back_runs_the_document_preflight() {
     }
 }
 
-/// **N** — the case no preflight snapshot can catch: the **body itself**
-/// creates the fallback, and the refusal still fires.
+/// **N** — a body that tries to **create** the fallback is refused **at
+/// the attempt**, and the refusal lands on the mutation rather than on
+/// the outcome.
 ///
-/// This is why the guarantee moved to the placement boundary. Revision 6
-/// argued that a prediction taken at preflight could not go stale,
-/// because `commit_to`'s body cannot `await`. Refusing `await` prevents
-/// another *coroutine* interleaving; it places no restriction on the body
-/// itself, which is arbitrary Lua running synchronously:
+/// This is the case no preflight snapshot can catch, and the two rows
+/// above cannot reach it: both establish their fallback state *before*
+/// `commit_to` is entered. The body is arbitrary **synchronous** Lua, so
+/// refusing `await` — which stops another coroutine interleaving —
+/// places no restriction on it:
 ///
 /// ```lua
 /// pmacs.window.set_params(pmacs.window.panel(), { dedicated = true })
 /// pmacs.window.display(result, { side = "bottom" })
 /// ```
 ///
-/// Two statements. The first invalidates the prediction, the second cashes
-/// it in. The arrangement here is deliberately the **inverse** of the
-/// preflight rows: an undedicated panel exists, so the prediction says
-/// "this will land in the panel", the relaxation applies, and the body
-/// runs. Only when placement resolves is the fallback a fact.
+/// Two statements: the first invalidates the preflight, the second cashes
+/// it in. The arrangement is deliberately the **inverse** of the rows
+/// above — the preflight says "this lands in the panel", the relaxation
+/// applies, and the body runs.
 ///
-/// What it asserts, and why each is load-bearing:
+/// **Asserting only "document B was not replaced" is insufficient**, and
+/// an earlier version of this test made exactly that mistake: it passes
+/// on a design that lets the body mutate freely and merely declines the
+/// final installation, leaving every other side effect behind. So the
+/// three assertions that matter are that the **dedication call itself is
+/// refused**, the slot is **still undedicated afterwards**, and **nothing
+/// partial was installed**.
 ///
-/// * the body **did** run — otherwise the test would be re-proving the
-///   preflight and this whole case would be untested;
-/// * the refusal arrives as a **raise** from `display`, since the body was
-///   already running and there is no `(false, reason)` left to return —
-///   asserted on content, and it names both the fallback and the
-///   stale-intent reason;
-/// * `*newer*` is **still in the document window**. That is the actual
-///   user-visible guarantee; everything above it is mechanism.
+/// # One row per WRITE SITE, not per call spelling
 ///
-/// *Mutation:* delete the `fallback_commit_refusal` call from
-/// `display_buffer`. This test fails on all three; every other test in
-/// this file still passes, which is precisely the hole revision 6 left.
+/// A single row is exactly what would let a second route keep the
+/// defect — which is not hypothetical: review found the
+/// `display{side, dedicated}` route *after* `set_params` was specified.
+/// So the rows are chosen to hit each distinct write to
+/// `Window::params.dedicated` that a side window can receive, rather
+/// than each way of phrasing the call:
+///
+/// | row | reaches |
+/// |---|---|
+/// | `set_params` | the direct write in the binding (Q#BP2c) |
+/// | `display{side, dedicated}` replacing | `apply_placement`'s **replacing** arm |
+/// | `display{side, dedicated}` same buffer | its **non-replacing** arm |
+/// | `display{side, dedicated}` with no panel | its **created** arm |
+///
+/// The three `display` rows converge on one guard, in `display_buffer` —
+/// `apply_placement` has exactly one caller, so every request-driven
+/// dedication passes through it. They are still separate rows because
+/// that convergence is a property of today's call graph, and a row per
+/// arm fails loudly if it stops holding.
+///
+/// The rest of the enumeration is **unreachable rather than refused**
+/// and is recorded in `EditorCore::panel_commit_dedication_refusal`,
+/// because a test cannot express it: `panel_capable` has no Lua binding;
+/// **losing** the side window is not a fallback route at all
+/// (`resolve_placement` creates a fresh panel instead); and `quit`
+/// restoring a `dedicated: true` presentation cannot be constructed,
+/// since `QuitAction::Restore` only captures that flag on a *replacing*
+/// side placement and a dedicated slot can never be the target of one.
+///
+/// *Mutation:* delete the `panel_commit_dedication_refusal` call from
+/// either guarded site — `set_params` drops row 1, `display_buffer`
+/// drops rows 2–4 — and every other test in this file still passes.
 #[test]
-fn a_panel_commit_whose_body_creates_the_fallback_is_refused_at_placement() {
-    let s = editor();
-
-    // A REUSABLE panel: undedicated, so the preflight prediction says
-    // this frontend places side requests in the panel.
-    exec(
-        &s,
-        "pmacs.window.display(pmacs.buffer.create('*pinned*'),
-           { side = 'bottom', dedicated = false, select = false })",
-    );
-    capture(&s);
-    let doc = local_window(&s);
-    exec(
-        &s,
-        "pmacs.window.switch_buffer(pmacs.buffer.create('*newer*'))",
-    );
-    assert_eq!(
-        name_in(&s, doc),
-        "*newer*",
-        "the arrangement must make the captured window stale"
-    );
-
-    commit_body(
-        &s,
-        Some("'panel'"),
-        &format!(
-            "pmacs.window.set_params(pmacs.window.panel(), {{ dedicated = true }})
-             {PANEL_BODY}"
+fn a_body_that_tries_to_create_the_fallback_is_refused_at_the_attempt() {
+    // (label, panel arrangement before the capture, attempted mutation)
+    let routes: [(&str, &str, &str); 4] = [
+        (
+            "set_params",
+            PANEL_ARRANGED,
+            "pmacs.window.set_params(pmacs.window.panel(), { dedicated = true })",
         ),
-    );
+        (
+            "display{side, dedicated} replacing",
+            PANEL_ARRANGED,
+            "pmacs.window.display(pmacs.buffer.create('*usurp*'),
+               { side = 'bottom', dedicated = true, select = false })",
+        ),
+        (
+            // The same buffer the panel already shows: `replacing` is
+            // false, so this lands in a DIFFERENT arm of the same
+            // function, which a row against the replacing arm alone
+            // would not exercise.
+            "display{side, dedicated} same buffer",
+            PANEL_ARRANGED,
+            "pmacs.window.display(pmacs.window.buffer(pmacs.window.panel()),
+               { side = 'bottom', dedicated = true, select = false })",
+        ),
+        (
+            // NO panel at capture time: the preflight relaxes because
+            // `side_window_for` is None (a side request would CREATE a
+            // panel, never fall back). The body then creates one
+            // dedicated, which makes the next side request fall back.
+            "display{side, dedicated} creating the panel",
+            "",
+            "pmacs.window.display(pmacs.buffer.create('*usurp*'),
+               { side = 'bottom', dedicated = true, select = false })",
+        ),
+    ];
 
-    assert!(
-        ran(&s),
-        "the body must have run -- the preflight could not have known, and a test where \
-         it did not run would be re-proving the preflight"
-    );
-    let raised = raised(&s).expect(
-        "the refusal arrives as a raise: the body was already running, so there is no \
-         (false, reason) return left to make",
-    );
-    assert!(
-        raised.contains("fell back to a document window"),
-        "the message must name what happened; got {raised:?}"
-    );
-    assert!(
-        raised.contains("now shows another buffer"),
-        "and which document precondition failed; got {raised:?}"
-    );
-    assert_eq!(
-        name_in(&s, doc),
-        "*newer*",
-        "the user's newer buffer must survive -- this is the guarantee, and it is what a \
-         preflight-only design cannot provide"
-    );
+    for (label, arrange, attempt) in routes {
+        let s = editor();
+        exec(&s, arrange);
+
+        let panel_before = s.core.borrow().side_window_for(FrontendId::LOCAL);
+        if let Some(panel) = panel_before {
+            assert!(
+                !dedicated(&s, panel),
+                "{label}: the slot must start UNDEDICATED, or the preflight would have \
+                 refused and this row would be re-proving the preflight"
+            );
+        }
+        let panel_buffer_before = panel_before.map(|panel| name_in(&s, panel));
+
+        capture(&s);
+        let doc = local_window(&s);
+        exec(
+            &s,
+            "pmacs.window.switch_buffer(pmacs.buffer.create('*newer*'))",
+        );
+
+        commit_body(&s, Some("'panel'"), &format!("{attempt}\n{PANEL_BODY}"));
+
+        assert!(
+            ran(&s),
+            "{label}: the body must have run -- the preflight could not have known"
+        );
+
+        // 1. THE MUTATION ITSELF IS REFUSED, on content.
+        let raised = raised(&s).unwrap_or_else(|| {
+            panic!("{label}: the attempted mutation must be refused, not merely declined later")
+        });
+        assert!(
+            raised.contains("cannot dedicate the side window"),
+            "{label}: the refusal must name the operation it is refusing; got {raised:?}"
+        );
+        assert!(
+            raised.contains("\"panel\" commit_to"),
+            "{label}: and why it is refused here specifically; got {raised:?}"
+        );
+
+        // 2. THE SLOT IS STILL UNDEDICATED -- including the row where
+        //    the slot would have been created dedicated, which must
+        //    leave no slot at all rather than an undedicated one.
+        let panel_after = s.core.borrow().side_window_for(FrontendId::LOCAL);
+        assert_eq!(
+            panel_after, panel_before,
+            "{label}: a refused mutation must not have created or removed the side slot"
+        );
+        if let Some(panel) = panel_after {
+            assert!(
+                !dedicated(&s, panel),
+                "{label}: a refused mutation must not have happened -- the whole design \
+                 rests on the preflight's measurement still being true afterwards"
+            );
+        }
+
+        // 3. NOTHING PARTIAL WAS INSTALLED.
+        if let (Some(panel), Some(before)) = (panel_after, panel_buffer_before.as_ref()) {
+            assert_eq!(
+                &name_in(&s, panel),
+                before,
+                "{label}: the panel must still show what it showed"
+            );
+        }
+        assert_eq!(
+            name_in(&s, doc),
+            "*newer*",
+            "{label}: and the user's newer buffer must survive"
+        );
+        assert!(
+            !buffer_exists(&s, "*result*"),
+            "{label}: the refusal must land BEFORE the body's own display -- a `*result*` \
+             buffer means the commit got partway and then stopped"
+        );
+        assert!(
+            !buffer_exists(&s, "*usurp*") || panel_after == panel_before,
+            "{label}: no usurping presentation may have been installed"
+        );
+    }
 }
 
 /// **P** — a `"panel"` commit that falls back with a **still-valid**

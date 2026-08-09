@@ -1,8 +1,11 @@
 # A destination capture any async continuation can use
 
-**Status: revision 8. The mechanism is implemented at `0efc8c0`;
-revisions 6–8 carry an OPEN correctness blocker that is NOT yet
-implemented.**
+**Status: revision 8. The mechanism is implemented at `0efc8c0`; the
+correctness blocker revisions 6–8 carry is IMPLEMENTED, in revision 8's
+shape, with §3's enumeration performed and recorded below.** Revisions
+6 and 7 proposed fixes that review rejected; **neither is in the tree**,
+and the two paragraphs describing them are kept as the record of why
+this shape and not those.
 
 *(Revisions 2–5 said "Pre-implementation. Awaiting approval" while the
 ledger recorded the lane as approved and implemented. Same
@@ -12,13 +15,14 @@ standing in its own header.)*
 **Revision 8 rejects BOTH of the previous two fixes and takes a third
 shape.** Revision 6 predicted the fallback at preflight (the body can
 change it). Revision 7 moved enforcement to the placement boundary —
-which **breaks the invariant `commit_to` exists for**: handoff §748
-says it preflights *before* the callback because "validating at display
-time is four mutations too late", so a placement-time refusal arrives
-after arbitrary Lua has created buffers, handles and paint. Revision 8
-keeps the preflight and **refuses the mutations that would invalidate
-it**, the same shape as the existing await refusal. Refusal stays
-mutation-free on the `(false, reason)` path.
+which **breaks the invariant `commit_to` exists for**:
+`docs/agent-handoff.md:748` says it preflights *before* the callback
+because "validating at display time is four mutations too late", so a
+placement-time refusal arrives after arbitrary Lua has created buffers,
+handles and paint. Revision 8 keeps the preflight and **refuses the
+mutations that would invalidate it**, the same shape as the existing
+await refusal. Refusal stays mutation-free on the `(false, reason)`
+path.
 
 **Revision 6 fixes an UNSOUND matrix, not a preference.** Q#DC-2 gave
 the panel profile only check 1, on the claim that a panel result never
@@ -137,8 +141,11 @@ that was declined for the `scripts/gate` repair, for the same reason.
   the finding that shapes the design:
   - `*git-status*` goes through `listview.open`, which resolves
     `display` with a **`"panel"`** default
-    (`builtin/runtime/listview.lua:550`). It lands in the bottom
-    panel, **not** in a document window.
+    (`builtin/runtime/listview.lua:550`). It **requests** the bottom
+    panel rather than a document window — *requests*, because a side
+    request FALLS BACK into a document window on a frontend that is not
+    `panel_capable` or whose one slot is dedicated elsewhere. That
+    fallback is this lane's blocker; §3 and Q#DC-2 carry it.
   - `*git-diff*` calls `pmacs.window.display(buf, { select = true })`
     — the **document** target, deliberately, "so the status panel it
     was invoked from stays visible beside it"
@@ -152,11 +159,25 @@ loses to the user**"* — a user who replaced the buffer while work was
 in flight is newer information than the request.
 
 **That predicate is right for a document replacement and wrong for a
-panel.** The git status panel does not replace the captured window's
-buffer; it opens in the bottom panel beside it. Refusing to show it
-because the user switched files in the document window would be a
-refusal with no relationship to what the continuation actually does —
-the panel case would inherit a check about a window it never touches.
+panel — WHILE THE PANEL REALLY IS A PANEL, which is the qualification
+the rest of this document exists to add.** A git status panel that
+lands in the bottom panel does not replace the captured window's
+buffer; it opens beside it. Refusing to show it because the user
+switched files in the document window would be a refusal with no
+relationship to what the continuation actually does, and that case
+would inherit a check about a window it never touches.
+
+**Read the previous paragraph with its condition attached, not as a
+standing fact.** Panel placement **falls back** into an ordinary
+document window when the frontend is not `panel_capable` or its one
+side slot is dedicated elsewhere — and then the panel case *does* touch
+the captured window, replacing whatever the user put there. That
+fallback is this lane's correctness blocker, and the unqualified
+version of this claim is precisely what made revision 5's matrix
+unsound. The resolution is below, at the end of Q#DC-2: the preflight
+measures whether this frontend places side requests in the panel, and
+the mutations that would falsify that measurement mid-commit are
+refused.
 
 Meanwhile the diff case *is* a document replacement, and wants exactly
 the dired semantics.
@@ -298,7 +319,7 @@ dedicate the side slot itself.
 
 Revision 7 then moved enforcement to the placement boundary. **That
 breaks the invariant `commit_to` exists for.** `docs/agent-handoff.md`
-§748 states it without qualification:
+`docs/agent-handoff.md:748` states it without qualification:
 
 > [`commit_to`] preflights every precondition *before* invoking the
 > callback — dired mutates handle state, `prev`, and paint long before
@@ -326,9 +347,11 @@ than aspirational:**
 - `panel_capable` has **no Lua binding at all** — checked across
   `src/lua_bindings/`. A body cannot make a frontend panel-incapable.
 
-**AT LEAST TWO ROUTES REACH DEDICATION, and the second was found in
-review after the first was specified — which is the evidence that
-guarding one named call site is not a design:**
+**FIVE WRITES REACH DEDICATION.** Review found the second *after* the
+first was specified, which is the evidence that guarding one named call
+site is not a design — and the enumeration below, performed against the
+tree rather than by recall, found three more. The two review named
+first are:
 
 1. **`set_params`** — the writable-field path (`window_panel.rs:888`).
 2. **`display(buf, { side = …, dedicated = true })`** — writes
@@ -338,21 +361,82 @@ guarding one named call site is not a design:**
    guarding only route 1 passes revision 8's test while keeping the
    original defect.**
 
-**The implementation must ENUMERATE every body-reachable transition,
-record each one here, and give each reachable route its own acceptance
-row.** Closing the side window, or any other path to "no usable side
-slot", counts. The two above are what review has found so far and are
-**not** asserted to be exhaustive — a third would not be surprising,
-and finding it is part of the work rather than a later review's job.
-This is the discipline `gate-protocol-build` applied to Q#GR-1: the
-fact the design rests on gets observed, not assumed.
+**THE ENUMERATION, PERFORMED. It is CLOSED, and it is closed for a
+structural reason rather than by inspection stopping when it ran out of
+ideas.** Recorded here as the framing required, with what was looked
+for, what was found, and what cannot be ruled out.
 
-**If the enumeration turns out to be open-ended**, the fallback is to
+*Step 1 — how few pieces of state can matter.* `resolve_placement`
+reaches `Ordinary` from a side request through exactly two branches, so
+only two pieces of state are levers at all: `FrontendView::panel_capable`,
+and the one side window's `Window::params.dedicated`. Everything else a
+body can touch is irrelevant by construction, which is what makes the
+enumeration finite instead of "every mutation in the editor".
+
+*Step 2 — `panel_capable` is unreachable, not merely unguarded.* It is
+written **only** where a `FrontendView` is constructed, and no
+`FrontendView` is constructed, registered or unregistered anywhere in
+`src/lua_bindings/` — `register_frontend_view` and
+`unregister_frontend_view` have callers only in `daemon.rs` (attach and
+detach) and in core unit tests. A body cannot reach it.
+
+*Step 3 — every write to `dedicated`, from `rg 'params\.dedicated\s*='
+src/`, classified.* Eight sites, no exceptions:
+
+| # | site | verdict |
+|---|---|---|
+| 1 | `apply_placement`, `Side` **created** | reachable — `display{side, dedicated}` with no panel yet |
+| 2 | `apply_placement`, `Side` **replacing** | reachable — `display{side, dedicated}`, different buffer |
+| 3 | `apply_placement`, `Side` **non-replacing** | reachable — `display{side, dedicated}`, same buffer |
+| 4 | `apply_placement`, `Ordinary` (`!fell_back`) | harmless — every `Ordinary` target is filtered `!is_side`, so it is never the slot |
+| 5 | `apply_placement`, `Ordinary` (clear) | harmless — only ever writes `false` |
+| 6 | `set_params` | reachable — the direct write (Q#BP2c) |
+| 7 | `quit_window`, `QuitAction::Restore` | **unreachable**, see below |
+| 8 | an `EditorCore` unit test | not Lua-reachable |
+
+*Step 4 — the guards, sited where the property converges rather than at
+each caller.* Sites 1, 2, 3 (and 4, 5) are all reached through
+`apply_placement`, which has **exactly one caller**, `display_buffer`.
+So one guard there covers every request-driven dedication, including
+routes that do not exist yet. `set_params` is a genuinely separate write
+and is guarded separately — dedication does *not* converge before the
+field itself, and that is stated rather than papered over. Two live
+guards, five reachable sites.
+
+*Step 5 — what was looked for and found NOT to be a route.* Closing the
+side window is **not** one: with no side leaf `side_window_for` returns
+`None` and `resolve_placement` **creates** a fresh panel rather than
+falling back, so quitting or hiding the panel mid-commit is safe, and
+`panel_hidden` is not consulted by placement at all. `params.side` is
+likewise unreachable — `set_params` refuses it and only
+`apply_placement`'s created branch writes it, so a body cannot promote
+an already-dedicated document window into the slot.
+
+*Step 6 — site 7 is unreachable, and this is the one finding that
+surprised.* `QuitAction::Restore` carries the outgoing `dedicated` flag,
+so quitting the panel looked like a route with no `dedicated` argument
+at the call site at all. It cannot be constructed: `Restore` is only
+ever *stored* on a **replacing** side placement, and a dedicated slot
+can never be the target of one — a side request with a different buffer
+falls through to `Ordinary`, and an exact-target request is refused by
+`window_accepts_buffer`. So `Restore { dedicated: true }` has no
+producer. It is guarded anyway, defensively and labelled as such,
+because its unreachability is an emergent property of two rules in a
+different function.
+
+**What this does NOT rule out.** The enumeration is closed over the
+current tree, not over future edits: relaxing `resolve_placement`'s
+dedicated arm, or adding a binding that writes `params.dedicated`
+directly, reopens it. `Window::params.dedicated` is a public field, so
+the compiler does not enforce the funnel — the acceptance rows are what
+would catch a regression, one per reachable site.
+
+**If the enumeration had turned out open-ended**, the fallback was to
 **collapse the two profiles** — run all four checks always, losing the
 panel relaxation. That is safe, simple, and honest; it is not the
 preferred answer only because it makes the parameterization pointless.
 Choosing it is a design decision needing its own approval, not a
-silent retreat.
+silent retreat. **It was not needed.**
 
 **What is NOT the fix: refusing a panel commit that would fall back.**
 Falling back to an ordinary window is existing, deliberate behaviour
@@ -531,9 +615,12 @@ incidental: no arguments is what keeps capture profile-blind.
   Three assertions, and the second and third are the ones that matter:
   the dedication call itself is **refused**; the side slot is **still
   undedicated afterwards**; and no partial result was installed.
-  **One row per route** (§3): `set_params`, and the
-  `display{side, dedicated = true}` option path. A single row against
-  one route is what would let the other keep the defect. The
+  **One row per reachable WRITE SITE** (§3), which is four and not two:
+  `set_params`, and `display{side, dedicated}` in each of
+  `apply_placement`'s **created**, **replacing** and **non-replacing**
+  arms. A single row against one route is what would let another keep
+  the defect — and rows per *call spelling* would have missed that one
+  spelling reaches three different writes. The
   two bullets above cannot catch this — both establish their fallback
   state *before* `commit_to` is entered, so a preflight-snapshot design
   passes them.

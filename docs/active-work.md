@@ -265,13 +265,13 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
-## Destination capture (Q#JR14 generalization) — revision 8 OPEN; the shipped code implements the REJECTED revision 7
+## Destination capture (Q#JR14 generalization) — revision 8 IMPLEMENTED, gate green, no PR yet
 
-**DO NOT PREPARE A PR, AND DO NOT READ THE SHIPPED DESIGN AS CORRECT.**
 The mechanism landed at `0efc8c0`; review found a correctness blocker;
-`ca72461` implements **revision 7**, which review then **also
-rejected**. Framing **revision 8** is the current design and is **not
-implemented**.
+`ca72461` implemented **revision 7**, which review then **also**
+rejected; the commit below replaces it with **revision 8** and its
+§3 enumeration is **performed and recorded in the framing**. No PR — the
+lane was told not to open one.
 
 **The original blocker:** the panel profile skipped checks 2–4 on the
 claim that a panel result never touches a document window. **Panel
@@ -297,14 +297,42 @@ re-learning:**
    refused inside a commit scope: the fallback never comes into
    existence, and refusal stays mutation-free on `(false, reason)`.
 
-**The enumeration is the load-bearing part, and it is NOT complete.**
-Dedication is reachable by at least two routes — `set_params`, and
-`display(buf, { side = …, dedicated = true })`, which writes
-`request.dedicated` into the side window (`src/editor_core.rs:4535`).
-The second was found in review *after* the first was specified, which
-is the evidence that guarding one named call site is not a design.
-**Every discovered route must be recorded here and carry its own
-acceptance row.**
+**THE ENUMERATION IS THE LOAD-BEARING PART, AND IT IS NOW CLOSED — for
+a structural reason, not because inspection ran out of ideas.** Full
+working in the framing §3; the short form:
+
+- **Only two pieces of state can matter**, because `resolve_placement`
+  reaches `Ordinary` from a side request through exactly two branches:
+  `panel_capable`, and the one side window's `dedicated`.
+- **`panel_capable` is unreachable from a body.** It is written only
+  where a `FrontendView` is constructed, and nothing in
+  `src/lua_bindings/` constructs, registers or unregisters one —
+  `register_frontend_view` has callers only in `daemon.rs` and core
+  unit tests.
+- **Eight writes to `dedicated` exist** (`rg 'params\.dedicated\s*='
+  src/`); **five are reachable**: `apply_placement`'s `Side` created /
+  replacing / non-replacing arms, and `set_params`. Two `Ordinary` arms
+  are harmless (their target is never a side window; one only ever
+  clears the flag) and one is a unit test.
+- **The guards are sited where the property converges, not per caller.**
+  All three `Side` arms are reached through `apply_placement`, which has
+  **exactly one caller** — so one guard in `display_buffer` covers every
+  request-driven dedication, including spellings that do not exist yet.
+  `set_params` is a genuinely separate write and is guarded separately;
+  dedication does **not** converge before the field itself, and that is
+  stated rather than papered over.
+- **Closing the side window is NOT a route**, checked rather than
+  assumed: with no side leaf `side_window_for` returns `None` and
+  placement **creates** a fresh panel instead of falling back. Hiding is
+  likewise irrelevant — `panel_hidden` is not consulted by placement.
+- **`quit_window`'s `QuitAction::Restore { dedicated: true }` is
+  UNREACHABLE**, and this was the surprise. `Restore` is stored only on
+  a *replacing* side placement, and a dedicated slot can never be the
+  target of one. Guarded anyway, labelled defensive, because its
+  unreachability is emergent from two rules in another function.
+- **What this does not rule out:** the enumeration is closed over the
+  current tree, not future edits. `params.dedicated` is a public field,
+  so nothing but the acceptance rows would catch a new direct writer.
 
 **Also closed:** an invalid-UTF-8 profile (`string.char(255)`) reached
 `to_str()` and surfaced mlua's generic conversion error instead of the
@@ -320,53 +348,61 @@ from #171 and #215.
 authoritative tip** — the ref, not a SHA. Recover with
 `git fetch githubsucks && git checkout destination-capture`.
 
-- **Framing `docs/destination-capture-framing.md`, revision 7.**
-  Revisions 1–5 were approved over four review rounds; revisions 6 and 7
-  are corrections carrying the blocker above, and **revision 7's design
-  is what the tree implements** — revision 6's preflight prediction is
-  NOT the shipped mechanism and must not be restored from that document.
+- **Framing `docs/destination-capture-framing.md`, revision 8.**
+  Revisions 1–5 were approved over four review rounds; revisions 6, 7
+  and 8 are corrections carrying the blocker above, and **revision 8's
+  design is what the tree implements**. Revisions 6 and 7 are described
+  in that document as the record of why *not* those; neither is in the
+  tree and neither should be restored from it.
 - **Implemented in three commits.** `779bb02` is the mechanism
   (`pmacs.window.capture_destination()`, the `ViewDestination` rename,
   the profile argument); `d5a6170` is
-  `tests/destination_capture_acceptance.rs`; the revision-7 commit is
+  `tests/destination_capture_acceptance.rs`; the revision-8 commit is
   the panel-profile correction plus the invalid-UTF-8 hole. **12 pins**,
   and both preservation suites pass **unchanged** (journey 47, dired 31)
   — §7's stop signal not firing rather than being suppressed.
-- **HOW THE PANEL PROFILE IS ENFORCED, so revision 6's version does not
-  get reinstated by someone reading only that document.**
-  - `EditorCore::display_buffer` refuses **between** `resolve_placement`
-    and `apply_placement` when a side request resolved to
-    `PlacementKind::Ordinary` under an active `"panel"` contract whose
-    destination fails the document preconditions
-    (`fallback_commit_refusal`). Refusing there means a refused fallback
-    mutates nothing.
+- **HOW THE PANEL PROFILE IS ENFORCED, in one sentence so no earlier
+  revision gets reinstated by someone reading only that document:** the
+  preflight stays exactly where it was, and the mutations that would
+  invalidate it are **refused at the attempt**.
+  - `EditorCore::panel_commit_dedication_refusal` is the one rule. It
+    fires while a `"panel"` `CommitContract` is on the core for this
+    frontend, and is consulted from `display_buffer` (before
+    `apply_placement`, so a refused attempt mutates nothing),
+    `pmacs.window.set_params` (before its borrow, so `fixed_rows` in the
+    same table is not applied either), and `quit_window`.
+  - **This is the same shape as `Handle:await` being refused inside a
+    commit scope**, and for the identical reason: something that would
+    invalidate the scope's guarantee is rejected outright rather than
+    predicted around or caught late.
   - The contract (`CommitContract { destination, profile }`) rides on
     the core, installed and restored by the **same** `ScopedFrontendGuard`
     that scopes the frontend, so a `"panel"` profile can never outlive
     the body that declared it. The field is private to the crate — Lua
     cannot claim a profile for a placement it did not commit to.
-  - **The preflight predicate survives as an EARLY REFUSAL, not as the
-    guarantee.** `panel_placement_can_fall_back` still gates the
-    relaxation in `commit_destination_refusal`, so the statically
-    knowable case — a frontend that cannot render a panel at all, and
-    will not acquire the capability mid-body — refuses *before* the body
-    allocates a buffer, registers a handle and paints. That is the same
-    reason `commit_to` preflights at all. Both layers are pinned
-    separately and neither test subsumes the other.
+  - **`panel_placement_can_fall_back` remains the preflight**, unchanged
+    in role: it measures whether this frontend places side requests in
+    the panel *right now*. With the invalidating mutations refused, that
+    measurement stays true for the life of the body, which is what makes
+    it a guarantee rather than a forecast.
   - The four document checks live once, in
-    `EditorCore::document_destination_refusal`, because they are now
-    evaluated from two sites and two hand-written copies is how a
-    backstop ends up weaker than the thing it backs.
+    `EditorCore::document_destination_refusal`.
   - **Three deliberate limits**, each a different decision rather than a
     stricter version of this one: the **document profile is untouched**
-    (re-running its checks at placement would newly refuse dired's own
-    documented panel path — a preservation-suite stop signal); only a
-    **fallback** is guarded, not every `Ordinary` placement (a `"panel"`
-    body calling `display_file` is pinned as succeeding by
-    `a_captured_destination_survives_a_frontend_switch`); and the
-    refusal is of the **placement**, not of falling back — a `"panel"`
-    commit with an intact destination still degrades gracefully into the
-    document window.
+    (constraining its body would newly refuse dired's own documented
+    panel path — a preservation-suite stop signal); **dedicating a
+    document window is still allowed** (it cannot change which of
+    panel-or-document a side request resolves to); and **falling back is
+    still allowed** — a frontend that cannot render a panel degrades
+    gracefully exactly as today, because this refuses the mutation that
+    *manufactures* a fallback, never the fallback itself.
+- **Mutation-checked per guard, and the pattern is the evidence the rows
+  are independent rather than one assertion repeated.** Deleting the
+  `display_buffer` guard fails the three `display{side, dedicated}` rows
+  — verified **individually**, by rotating each to the front of the
+  table, since the first failure otherwise masks the rest. Deleting the
+  `set_params` guard fails only that row and leaves the display rows
+  passing. Both leave every other test in the file green.
 - **Audit: nothing else relied on "a panel never touches a document".**
   Four doc sites repeated the claim (`ViewDestination`'s own doc twice,
   `capture_view_destination`, `ViewDestinationLua`) and were corrected;
@@ -409,23 +445,26 @@ authoritative tip** — the ref, not a SHA. Recover with
   frontend scope for the panel profile fails the survives-a-switch pin's
   panel row; dropping the no-document-window arm fails the Q#DC-4 pair.
 
-  **Revision 7's four, each isolating a different way to get it wrong** —
-  and the pattern of *which* rows survive each is the evidence the layers
+  **Revision 8's four, each isolating a different way to get it wrong** —
+  and the pattern of *which* rows survive each is the evidence the parts
   are independent rather than redundant:
-  1. delete the `fallback_commit_refusal` call from `display_buffer` →
-     **only** the inside-the-body pin fails. Every other test passes,
-     which is exactly the hole revision 6 would have shipped.
-  2. delete the `panel_placement_can_fall_back` arm from
+  1. delete the `panel_commit_dedication_refusal` call from
+     `display_buffer` → the three `display{side, dedicated}` rows fail,
+     **verified individually** by rotating each to the front of the
+     table so the first failure cannot mask the rest. Every other test
+     passes — which is exactly the hole an implementation guarding only
+     `set_params` would ship.
+  2. delete it from `set_params` → **only** that row fails; the three
+     display rows still pass.
+  3. delete the `panel_placement_can_fall_back` arm from
      `commit_destination_refusal` → **only** the two pre-established
-     fallback rows fail, and they fail on shape (a raise from the
-     backstop, with the body having run) rather than on outcome.
-  3. make `panel_placement_can_fall_back` unconditionally `true` (the
+     fallback rows fail, which is the preflight half.
+  4. make `panel_placement_can_fall_back` unconditionally `true` (the
      "widen the predicate" non-fix) → the really-lands-in-the-panel pin,
      the Q#DC-4 panel pin and the matrix's three panel rows all fail.
-     That is the profiles collapsing into one, made visible.
-  4. make `fallback_commit_refusal` refuse *every* panel fallback → only
-     the graceful-degradation pin fails, which is the guard
-     over-reaching.
+     That is the two profiles collapsing into one, made visible — the
+     named fallback design, showing up as a test diff rather than
+     silently.
 
   And reverting the byte comparison to `to_str()?` fails the
   `invalid utf-8` row with mlua's conversion error, on content.

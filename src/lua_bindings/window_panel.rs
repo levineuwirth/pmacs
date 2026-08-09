@@ -908,6 +908,24 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
                         None => None,
                     };
                     let dedicated = opts.get::<Option<bool>>("dedicated")?;
+                    // Q#DC-2 (revision 8). The direct route to the one
+                    // mutation that could make a `"panel"` commit's
+                    // relaxed preflight wrong. Refused BEFORE the borrow
+                    // below, so the attempt changes nothing --- including
+                    // `fixed_rows`, which is in the same option table.
+                    if dedicated == Some(true) {
+                        let core = cc.borrow();
+                        if core
+                            .windows
+                            .get(&id)
+                            .is_some_and(crate::window::Window::is_side)
+                            && let Some(reason) = core.panel_commit_dedication_refusal(fid)
+                        {
+                            return Err(mlua::Error::runtime(format!(
+                                "pmacs.window.set_params: {reason}"
+                            )));
+                        }
+                    }
                     {
                         let mut core = cc.borrow_mut();
                         let window = core.windows.get_mut(&id).ok_or_else(|| {
