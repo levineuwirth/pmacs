@@ -275,21 +275,33 @@ from #171 and #215.
 the authoritative tip** — the ref, not a SHA. Recover with
 `git fetch githubsucks && git checkout worker-identity-stage1`.
 
-- **Framing `docs/worker-identity-framing.md`, revision 1**, in review.
+- **Framing `docs/worker-identity-framing.md`, revision 2**, in review.
   Scope: `COHERENCE.md` §9's "mechanism without identity", and journey
   step 11 — the last of Priority 1's own work, sitting in another
   section's arc.
+- **Revision 2 took two blockers.** `owner` is **removed entirely**:
+  populated from static per-subsystem constants it is an origin, not an
+  owner, and would misattribute third-party work at the exact point §9
+  wants attribution. It is not retained under a safer name either —
+  `origin`/`subsystem` would be adopted as ownership by use and would
+  squat on the slot P3 must fill. And the handler-name recovery was
+  **respecified as a mechanism**: revision 1 claimed the name was "in
+  hand at the one place that throws it away", which was wrong about the
+  call chain (`dispatch` → arbitrary handler → Lua wrapper → Rust
+  binding, with the wrapper layer documented as bypassable).
 - **NO WIRE CHANGE**, which is what lets this run beside the two lanes
   already in flight. The statusline activity indicator is a **fourth**
   `pmacs.statusline.register` provider (terminal/syntax/lsp are the
   three existing adopters), evaluated per frame inside `paint_frame`
   (`src/editor.rs:4560`) and riding the existing `StatuslineSegments`
   vector. No variant, no bump.
-- **Scope:** `owner`/`purpose` on `PendingJob` and `ProcessSpec`
+- **Scope:** a **required** `purpose` on `PendingJob` and `ProcessSpec`
   through the single allocation funnel (`src/async_runtime.rs:746`,
-  which every dispatcher and `register_external` passes through), the
-  handler name that `pmacs.workers.dispatch` currently discards, the
-  `*workers*` rendering, and the indicator.
+  which every dispatcher and `register_external` passes through), a
+  runtime-owned dispatch-name ambient recovering the handler name that
+  `pmacs.workers.dispatch` currently discards, the `*workers*`
+  rendering, and the indicator. Non-optional so the **compiler**, not a
+  test, proves every caller supplied one.
 - **Two scouting findings that shaped the design**, both verified:
   `PendingJob` carries **eight** fields, not the audit's seven, and the
   eighth's doc comment **cites §9 by name** as the reason identity

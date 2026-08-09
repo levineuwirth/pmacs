@@ -1,7 +1,21 @@
-# Worker identity — Stage 1: what is running, and who asked for it
+# Worker identity — Stage 1: what is running, and what it is doing
 
-**Status: framing pass, revision 1. Pre-implementation. Awaiting
+*(Revision 1 was subtitled "and who asked for it". With `owner`
+removed that title overclaimed the lane: it answers **what**, and —
+under `pmacs.workers.dispatch` — **under which registered handler**.
+Neither is who owns it.)*
+
+**Status: framing pass, revision 2. Pre-implementation. Awaiting
 approval.**
+
+**Revision 2 removes `owner` and respecifies the handler-name path,
+after review found the first dishonest and the second unbuildable as
+described.** `owner` populated from static per-subsystem constants is
+an *origin*, not an owner, and would misattribute third-party work at
+exactly the point §9 wants attribution. And "the name is in hand at the
+one place that throws it away" was **wrong about the call chain** — it
+is thrown away across three layers, one of which callers are documented
+to bypass. Both re-scouted in the tree.
 
 ---
 
@@ -78,14 +92,36 @@ drifted in one place, recorded below.
   Parse, FsReadDir, FsStat, FsRename, FsChmod, FsRemove, McpRequest,
   LspRequest. Confirmed unchanged since the audit.
 
-- **A third-party job's own name is retained nowhere.**
-  `pmacs.workers.dispatch(name, args, opts)`
-  (`builtin/runtime/async.lua:369`) looks `name` up in a `handlers`
-  table and calls it; the handler must itself call one of the builtin
-  dispatchers, so the job records that builtin's `JobKind` and **`name`
-  is discarded at the call**. The audit's "every third-party job renders
-  under a builtin's label" is exact, and the fix is cheap: the name is
-  in hand at the one place that throws it away.
+- **A third-party job's own name is retained nowhere, and recovering it
+  is NOT cheap. Revision 1 said it was, and was wrong about the call
+  chain.** The full path, read rather than assumed:
+
+  ```
+  pmacs.workers.dispatch(name, args, opts)   -- async.lua:369
+    → handlers[name](args, opts)             -- arbitrary Lua
+      → dispatch_grep(spec, opts)            -- Lua wrapper, :312
+        → async_mod._dispatch_grep(spec, supersede_key(opts), max_batch)
+          → the Rust binding → allocate()
+  ```
+
+  **`name` is not a parameter of any layer below the first.** The Rust
+  dispatchers accept job arguments, a supersede key and stream data —
+  nothing else. So revision 1's "change the allocation funnel and the
+  name is recovered" is false: changing `allocate` gives the name
+  nowhere to arrive *from*.
+
+  **And the wrapper layer cannot be the capture point either.**
+  `async.lua:337-345` deliberately exposes `pmacs.workers._new_handle` /
+  `_new_stream` so that "other builtin runtime files (`pmacs.fs` in
+  M8.1, future siblings) can construct handles for ids dispatched
+  through **their own raw `_dispatch_*` primitives**". A handler that
+  goes straight to `async_mod._dispatch_*` bypasses `dispatch_grep` and
+  friends entirely — and those are precisely the callers doing
+  non-standard work, i.e. the ones attribution is for.
+
+  The audit's "every third-party job renders under a builtin's label"
+  is exact. The mechanism that fixes it is Q#W-2, and it is a real
+  mechanism, not a parameter.
 
 - **`ProcessSpec` has one identity field and it is a convention**
   (`src/process.rs:193-235`): `label: String`, documented as
@@ -138,16 +174,35 @@ all right now**: `Workspace` is §7, graded *missing*, and `Location` is
 `workspace: Option<WorkspaceId>` would be adding a field typed on a
 thing that does not exist.
 
-**Stage 1 (this lane): identity on the job and the process, and the
-first indicator. NO WIRE CHANGE.**
+**Stage 1 (this lane): a required `purpose` on the job and the process,
+and the first indicator. NO WIRE CHANGE. NO `owner`.**
 
-- `owner` and `purpose` on `PendingJob`, carried through the single
-  allocation funnel, and on `ProcessSpec` alongside the existing
+- **`purpose`, non-optional**, on `PendingJob`, carried through the
+  single allocation funnel, and on `ProcessSpec` alongside the existing
   `label`.
-- `pmacs.workers.dispatch` stops discarding the registered handler name.
-- `*workers*` renders owner and purpose.
+- **A dispatch-identity ambient** so `pmacs.workers.dispatch` stops
+  discarding the registered handler name (Q#W-2).
+- `*workers*` renders `purpose`.
 - **A statusline activity indicator** — the fourth provider
   registration, and the part a user feels on day one.
+
+**`owner` is deliberately absent, and revision 1 was wrong to include
+it.** The proposal was `owner = "lsp"` populated from a static
+per-subsystem constant at each dispatcher. But a generic dispatcher has
+no trustworthy knowledge of who invoked it, and `pmacs.process.spawn`
+is callable by any package — so a static subsystem label is an
+**origin or category, not an owner**, and it would confidently
+misattribute third-party work to a builtin at exactly the point §9
+wants attribution. A field that asserts a falsehood is worse than an
+absent one: `*workers*` would *look* attributed while naming the wrong
+party.
+
+**Nor is it retained under a safer name.** Calling it `origin` or
+`subsystem` would be honest, but a second string field sitting beside
+`purpose` and grouping the view would be *adopted* as ownership by the
+next reader regardless of its name — and it would squat on the slot
+P3's real package signal has to fill. Stage 2 needs a grouping key; it
+should get a real one, not a placeholder promoted by use.
 
 **Stage 2 (separate lane): join the planes.** One activity view over
 jobs, processes, LSP servers and terminals. This is what Stage 1's
@@ -177,7 +232,11 @@ beside both.
 - **§9 worker ownership — the direct target**, and specifically the
   audit's named prerequisite: *"Owner/purpose/parent fields on the job
   and process specs are the prerequisite; the unified view and the
-  ownership tree fall out of them."* Stage 1 takes owner and purpose.
+  ownership tree fall out of them."* **Stage 1 takes ONE of the three
+  — `purpose`.** `owner` waits for P3 to supply a package signal worth
+  recording (§3); `parent` waits for Stage 3 (Q#W-5). Taking one of
+  three named prerequisites is a deviation from the audit, and it is
+  stated here rather than left to be noticed.
 - **Journey step 11 — the direct target.** §0 names background-work
   ownership as one of two remaining thin ends. This does not close the
   step (Stage 2's unified view is most of that) but it is the first
@@ -195,8 +254,12 @@ beside both.
 - **The debt this repays is named and dated.** `git-integration-framing.md`
   Q#G-5 recorded a deliberate negative §9 impact. This lane does not
   fully discharge it — a labelled process is still not in `*workers*`
-  until Stage 2 — but it makes the label structured rather than
-  conventional, which is the prerequisite.
+  until Stage 2 — but it makes the process state *what it is doing* in
+  a required field rather than a caller-spelled convention.
+- **No P3 alignment is claimed.** Revision 1 argued this lane aligned
+  with P3's ownership arc. With `owner` removed, it does not: P3 stays
+  entirely ahead of it, and this lane deliberately leaves that slot
+  empty rather than filling it with something P3 would have to displace.
 
 ## 5. Open questions
 
@@ -208,11 +271,18 @@ more positional parameters gives a five-argument function and a
 six-argument variant, and the next lane adds a seventh.
 
 *My vote: **collapse the pair into one funnel taking a struct***, e.g.
-`allocate(JobSpec { kind, supersede, stream, resource, identity })`,
-with `JobSpec` carrying a `Default`-derived constructor so the ten
-dispatchers read as named-field literals rather than positional soup.
-Ten call sites plus `register_external` is a bounded, mechanical edit,
-and it removes the `_with_resource` wart rather than adding beside it.
+`allocate(JobSpec { kind, supersede, stream, resource, purpose })`, so
+the ten dispatchers read as named-field literals rather than positional
+soup. Ten call sites plus `register_external` is a bounded, mechanical
+edit, and it removes the `_with_resource` wart rather than adding
+beside it.
+
+**`JobSpec` is private, and `purpose` is non-optional.** Private
+because the public dispatcher APIs should not grow a parameter every
+time this arc adds a field; non-optional because that is what makes the
+compiler, rather than a test, the thing that proves every caller
+supplied one (§6). A `Default` impl would defeat exactly that, so
+`purpose` is not defaulted even if other fields are.
 
 **The counter-argument, which is real:** this touches every dispatcher
 in a lane whose subject is identity, which is scope the reviewer did not
@@ -220,42 +290,88 @@ ask for. **If review prefers the minimal edit**, the alternative is one
 more parameter on the existing pair, and the collapse becomes its own
 small lane. I would rather be told than assume.
 
-### Q#W-2 — what IS an owner? **(the hard one)**
+### Q#W-2 — the dispatch identity path **(rewritten in rev 2)**
 
-This is the question that decides whether the field is useful or
-decorative, and I do not think it should be answered by whatever is
-convenient at the call site.
+Revision 1 treated this as a parameter-passing detail. §2 shows it is
+not: `name` dies at `pmacs.workers.dispatch` and nothing below it takes
+a name, so the value must be carried *out of band* across an arbitrary
+handler.
 
-Candidates: the **package** that registered the code (P3's
-`CurrentlyLoadingPackage` signal already exists and §20 P3 names
-owner-carrying registrations as its work unit); the **command** that
-the user invoked; or the **subsystem** (lsp, syntax, git, compile).
+**The capture point is Rust, not Lua**, and the reason is the bypass in
+§2. If the ambient lived in the Lua wrapper layer, a handler calling
+`async_mod._dispatch_*` directly — the documented pattern for runtime
+files with their own primitives — would produce an unattributed job,
+and those are the callers attribution exists for. Putting it in the
+runtime means it is read at `allocate`, **the same single funnel Q#W-1
+is already collapsing**. One mechanism, one site, no path around it.
 
-*My vote: **`owner` is a package-or-builtin identity, `purpose` is the
-human sentence.*** Concretely: `owner = "lsp"` / `purpose = "indexing
-src/editor.rs"`. The reasons:
+*My vote: **a dispatch-name stack owned by the async runtime***, with
+`pmacs.workers.dispatch` bracketing its handler call through two
+runtime-internal bindings (`_push_dispatch_name` / `_pop_dispatch_name`).
 
-- It is the only one of the three that a **third party** can be
-  attributed by, which is the whole point of attribution — a user
-  wanting to know why their editor is busy is usually asking *whose
-  code* is doing it.
-- It aligns this arc with P3 rather than duplicating it. §20 says P3's
-  ownership arc "unblocks ... package-scoped task cancellation in §9",
-  so the two are meant to share a notion of owner.
+**The contract, in full:**
 
-**Named risk, stated rather than hidden:** P3 has not been built, so
-Stage 1 populates `owner` from a **static per-subsystem constant** at
-each dispatcher, not from a live package signal. That is honest for
-builtins and gives third-party Lua nothing better than today until P3
-lands. **If review thinks a field that third parties cannot populate is
-premature, deferring `owner` and shipping only `purpose` is a coherent
-smaller lane** — and it would still fix the indicator, which is the felt
-part.
+1. **Extent is the SYNCHRONOUS handler call, and nothing more.** Push
+   before, pop after. Every job reaching `allocate` during that window
+   carries the name.
+2. **Work dispatched later is NOT covered, deliberately.** A job
+   dispatched from an `on_complete` callback or a resumed coroutine
+   runs ticks later, outside the extent, and carries only its own
+   `purpose`. Pretending otherwise would need the asynchronous
+   lifetime mechanism this lane defers (Q#W-5).
+3. **Nesting is a stack; innermost wins.** Handler `a` calling
+   `pmacs.workers.dispatch("b", …)` gives jobs allocated inside `b` the
+   name `b`, and restores `a` on return.
+4. **Fan-out shares the name.** A handler dispatching five jobs
+   produces five jobs named alike. They *were* all dispatched under it;
+   that is the fact being recorded, not a collision.
+5. **Unwind-safe, and this is the one that makes a naive version worse
+   than none.** A handler that errors must still pop — otherwise one
+   failure poisons every subsequent dispatch in the session with a
+   stale name, and the feature silently starts lying. `pmacs.workers.
+   dispatch` runs the handler under `pcall`, pops, and rethrows.
+6. **Precedence over a caller-supplied purpose: COMPOSE, do not
+   replace.** Where the dispatch site supplied its own purpose, the
+   recorded value is `"<name>: <purpose>"`; where it did not, the
+   recorded value is `"<name>"`. Replacing would recreate blocker 1 in
+   a new place — `dispatch_grep` supplies `"grep: …"`, and letting that
+   win would lose the third party again, while letting the name win
+   would discard the only description of the actual work. Composition
+   is capped at the innermost name by rule 3, so no unbounded chain.
+7. **Outside any extent, nothing changes.** A builtin invoked directly
+   records its own `purpose`.
+
+**A known and accepted property, stated rather than discovered later:**
+the ambient captures *causal* extent, not *intent*. If a handler
+synchronously triggers unrelated work — an edit that schedules a parse
+— that job is inside the window and takes the name. Within a
+synchronous extent I think that is the honest reading ("this ran
+because that handler ran"), and it is the only definition enforceable
+at a single funnel. **If review disagrees, the alternative is
+capture-at-the-Lua-wrapper**, which is narrower and misses the raw
+`_dispatch_*` callers — a trade of false positives for false negatives,
+and I would rather over-attribute inside a synchronous call than
+silently drop the third-party case.
+
+**Why this ambient is admissible while Q#W-5's is not.** They are not
+the same mechanism. This one is a synchronous, single-threaded, bounded
+dynamic extent with a deterministic pop — a `let` binding in disguise.
+A `parent` ambient must span a job's *asynchronous* lifetime, across
+ticks, through callbacks that run after the parent settled. The first
+is a stack; the second is a lifetime model.
 
 ### Q#W-3 — what does the indicator actually show?
 
-*My vote: **a count with the busiest purpose, and nothing when idle***
-— e.g. `⋯2 lsp: indexing`, absent entirely at zero.
+*My vote: **a count plus the oldest in-flight job's `purpose`, and
+nothing when idle*** — e.g. `⋯2 lsp: indexing`, absent entirely at
+zero. With `owner` gone (§3) `purpose` is the only identity there is,
+which is also why it is required rather than optional.
+
+**Oldest, not newest or "busiest".** Revision 1 said "busiest", which
+is not a defined quantity — jobs carry no cost estimate. Oldest is
+computable from `dispatched_at`, which `PendingJob` already has, and it
+answers the question a user actually asks of a stuck editor: *what is
+taking so long?*
 
 - **Absent at zero, not `0 jobs`.** A statusline segment that is always
   present costs width forever to say "nothing is happening". The
@@ -285,21 +401,31 @@ under its existing callers.
 
 ### Q#W-5 — does `parent` belong in Stage 1?
 
-*My vote: **no**, and this is where I would most expect to be
-overruled.* The audit names owner/purpose/**parent** together as the
-prerequisite, so leaving one out is a deviation I should justify.
+*My vote: **no.*** The audit names owner/purpose/**parent** together as
+the prerequisite, and after revision 2 this lane takes only `purpose` —
+so both omissions need justifying, not just this one. `owner`'s is in
+§3; `parent`'s is here.
 
-The justification: owner and purpose are **values a dispatcher already
-knows** at the call site. A parent is not — it is whatever job is
-*currently running* when a child is dispatched, which means either an
-ambient context (a mechanism, with re-entrancy and cleanup failure
-modes) or threading a parameter through every intermediate layer. A
-`parent` field that nothing populates is worse than no field: it renders
-as `None` everywhere and reads as "this job has no parent" rather than
-"this system does not track parents".
+`purpose` is a **value the dispatcher already knows** at the call site.
+A parent is not — it is whatever job is *currently running* when a
+child is dispatched. A `parent` field that nothing populates is worse
+than no field: it renders as `None` everywhere and reads as "this job
+has no parent" rather than "this system does not track parents".
 
-Stage 3 builds the ambient and the field together, where the field can
-be tested by a populated case.
+**And the objection revision 2 has to answer, since it now builds an
+ambient of its own (Q#W-2):** why is one admissible and not the other?
+Because they are not the same mechanism. Q#W-2's extent is
+synchronous, single-threaded, and bounded by one function call, with a
+deterministic pop on both the normal and the error path. A `parent`
+ambient must identify the running job *across ticks* — a job dispatched
+from an `on_complete` callback should name the job whose completion
+fired it, and that callback runs after the parent settled, on the main
+thread, outside any dispatch call. That is a lifetime model, not a
+stack, and it is Stage 3's subject rather than a field this lane can
+add cheaply.
+
+Stage 3 builds the lifetime model and the field together, where the
+field can be tested by a populated case.
 
 ### Q#W-6 — is any of this configurable?
 
@@ -312,22 +438,42 @@ on every frame, and "I do not want this in my modeline" is a
 preference someone will genuinely hold on day one rather than a
 hypothetical. `git.enabled` and `ui.line-wrap` are the precedent shape.
 
-No setting for owner/purpose capture itself — that is substrate, not
+No setting for `purpose` capture itself — that is substrate, not
 preference.
 
 ## 6. Verification
 
-- **Every job carries an identity, asserted at the funnel, not per
-  dispatcher.** The point of a single allocation site is that one
-  assertion covers all ten dispatchers plus `register_external`; a test
-  that checks three dispatchers individually would pass while a
-  fourteenth added later carries nothing.
-- **A `pmacs.workers.dispatch("name", ...)` job reports `"name"`**, not
-  the builtin `JobKind` label underneath it — the exact defect §9 names,
-  witnessed on a handler registered from Lua.
-- **`register_external` jobs carry identity too** (MCP and LSP), since
-  they bypass the worker pool entirely and are the ones most likely to
-  be missed.
+- **Presence is enforced by the COMPILER, not by a test.** `purpose` is
+  non-optional in `JobSpec`, so a dispatcher that supplies none does not
+  build. Revision 1 claimed a single funnel assertion proved "every job
+  carries an identity"; **it does not** — a funnel test proves the
+  funnel stores what it was handed, and says nothing about whether
+  fourteen callers handed it anything meaningful. Presence is a type
+  obligation; the tests below are for *semantics*.
+- **Representative entry paths assert the semantics**, one per distinct
+  shape rather than one per dispatcher: a pool dispatcher, an
+  `register_external` job (MCP/LSP bypass the worker pool entirely and
+  are the likeliest to be missed), and a spawned process.
+- **A `pmacs.workers.dispatch("name", …)` job reports `"name"`**, and
+  the witness is **a handler registered from Lua that calls a real
+  dispatcher** — not a synthetic funnel test. A test that pushes the
+  ambient by hand proves the stack works and leaves the actual defect
+  (`name` dying in an arbitrary handler) unwitnessed.
+- **The ambient survives a failing handler** (Q#W-2 rule 5): a handler
+  that errors, then a subsequent unrelated dispatch, asserting the
+  second job does **not** carry the first's name. This is the
+  regression that would otherwise appear as intermittent
+  misattribution long after the lane lands.
+- **Nesting and fan-out** (rules 3–4): a handler dispatching two jobs
+  gives both its name; a handler dispatching through another registered
+  handler gives the inner jobs the inner name and restores the outer.
+- **Composition, not replacement** (rule 6): a handler calling a
+  dispatcher that supplies its own purpose yields `"<name>: <purpose>"`
+  — asserted for both halves, since a test on the prefix alone passes
+  when the description is dropped.
+- **Work dispatched from an `on_complete` callback carries no handler
+  name** (rule 2) — the boundary of the extent, asserted deliberately
+  so it reads as designed rather than broken.
 - **The statusline shows nothing at idle**, asserted as *absent
   segment*, not as empty string — a zero-width segment still consumes a
   separator.
@@ -344,7 +490,7 @@ preference.
   `lean4_stage1_acceptance`) are the assertion, and they must pass
   untouched. **If any of them needs editing, the design is wrong**, and
   that is the signal to stop rather than to adjust a baseline.
-- **A spawned process carries structured owner/purpose alongside its
+- **A spawned process carries a required `purpose` alongside its
   existing `label`**, and **`label`'s current callers keep working
   unchanged** — `lsp:{name}` and terminal buffer names are live
   conventions with existing consumers.
@@ -356,9 +502,11 @@ preference.
 **What this will NOT prove:** that background work is attributable from
 one place (that is Stage 2's unified view — this lane makes it
 *possible*, not *done*), that a terminal PTY is visible anywhere
-(Q#W-4), that cancellation can range over an owner (Stage 3), or that a
-third-party package's own identity flows through (Q#W-2 — blocked on
-P3).
+(Q#W-4), that cancellation can range over an owner (Stage 3), or **that
+any job is attributed to the PACKAGE responsible for it** — `purpose`
+records what work is being done and, under `pmacs.workers.dispatch`,
+which registered handler it ran under. Neither is package ownership,
+which waits for P3 (§3).
 
 Gates via `scripts/gate --acceptance <the new suite>`. **No
 `--protocol`**: this lane has no wire change, which is the property that
@@ -366,15 +514,19 @@ lets it run beside the two lanes already in flight.
 
 ## 7. Not in scope
 
+**`owner`, in any spelling** — including `origin` or `subsystem` (§3).
+The slot stays empty until P3 can fill it with a package signal;
+nothing in this lane may be promoted into it later by use.
 `Workspace` and `Location` fields (§7/§8 — the entities do not exist).
 `parent`/`children` and the ownership tree (Stage 3, Q#W-5). Scoped
 cancellation of any kind — cancel-all, by-kind, by-buffer, by-owner,
 by-subtree (Stage 3; there is nothing to range over until identity
 exists). The unified activity view joining the four planes (Stage 2).
 Making terminal PTYs visible (Stage 2, Q#W-4). Widening `JobKind` or
-making it open — third-party jobs are attributed by `owner`/`purpose`,
-which is the point, and reopening a closed wire-adjacent enum is a
-separate decision. Latency classes and resource budgets (§9 names them;
+making it open — third-party jobs are described by `purpose`, which is
+the point, and reopening a closed wire-adjacent enum is a separate
+decision. Latency classes and resource budgets (§9 names them;
 neither has a consumer yet). Supersession coverage — §9 notes parse jobs
 and MCP requests pass `None`, which is a real defect and a **different**
-one. P3's package-ownership signal (Q#W-2 depends on it and says so).
+one. P3's package-ownership signal — §3 defers `owner` to it and makes
+no claim of alignment with it.
