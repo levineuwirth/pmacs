@@ -42,6 +42,12 @@
 //! `Status` right rather than being truncated: losing the end of a path
 //! is a worse failure than an uneven column.
 //!
+//! This table is **one row per job**, and the purpose is the only free
+//! text in it, so every row goes through
+//! [`crate::async_runtime::purpose_for_one_row`]: a row must not be able
+//! to forge another row. See that function for why the escaping lives
+//! here rather than as a rule on the purpose itself.
+//!
 //! Lua reads the snapshot via `pmacs.workers.snapshot()`; the
 //! `pmacs.workers.show()` builtin invokes [`render`] on it and
 //! returns the buffer id. Auto-refresh hooks into
@@ -50,7 +56,7 @@
 use std::fmt::Write;
 
 use crate::async_runtime::{
-    ActiveJobInfo, CompletedJobInfo, JobOutcome, JobResult, WorkersSnapshot,
+    ActiveJobInfo, CompletedJobInfo, JobOutcome, JobResult, WorkersSnapshot, purpose_for_one_row,
 };
 use crate::buffer::{Buffer, BufferId, EditOp};
 use crate::buffer_registry::BufferRegistry;
@@ -197,7 +203,7 @@ fn write_active_row(text: &mut String, job: &ActiveJobInfo) {
     if job.is_stream {
         status.push_str(" [stream]");
     }
-    let purpose = &job.purpose;
+    let purpose = purpose_for_one_row(&job.purpose);
     let _ = writeln!(
         text,
         "{id:<7} {kind:<11} {age:>9} {key:<11} {purpose:<PURPOSE_WIDTH$} {status}"
@@ -211,7 +217,7 @@ fn write_completed_row(text: &mut String, job: &CompletedJobInfo) {
     let key = job.supersede_key.as_deref().unwrap_or("");
     let outcome = format_outcome(&job.outcome);
     let age = format_duration_ms(job.settled_age_ms);
-    let purpose = &job.purpose;
+    let purpose = purpose_for_one_row(&job.purpose);
     let _ = writeln!(
         text,
         "{id:<7} {kind:<11} {duration:>9} {key:<11} {purpose:<PURPOSE_WIDTH$} {outcome} ({age} ago)"

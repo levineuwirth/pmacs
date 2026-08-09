@@ -339,10 +339,16 @@ the authoritative tip** — the ref, not a SHA. Recover with
   so making terminal PTYs visible is deferred to Stage 2 with a
   separate accessor rather than by widening this one.
 - **Deliberate deviation from the audit, flagged for review:** §9 names
-  owner/purpose/**parent** together as the prerequisite; Stage 1 takes
-  only the first two. A parent needs an ambient "currently-running job"
-  context, and an unpopulated `parent` reads as "no parent" rather than
-  "not tracked" (Q#W-5).
+  owner/**purpose**/parent together as the prerequisite; Stage 1 takes
+  **only `purpose`** — one of the three, not two. `owner` was removed in
+  revision 2: nothing in the runtime knows which package asked for a
+  job, so an `owner` field could only have been filled with the same
+  handler name `purpose` already carries, and an empty one reads as
+  "unowned" rather than "not tracked". `parent` is out for the matching
+  reason — it needs an ambient "currently-running job" context, and an
+  unpopulated `parent` reads as "no parent" rather than "not tracked"
+  (Q#W-5). The package-ownership slot stays **deliberately empty** until
+  P3 can fill it with a real signal (framing §3, §7).
 - **Gates:** `scripts/gate --acceptance worker_identity_acceptance
   --acceptance journey_acceptance --acceptance
   statusline_segments_acceptance --acceptance compile_mode_acceptance

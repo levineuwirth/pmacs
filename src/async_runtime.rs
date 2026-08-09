@@ -58,8 +58,10 @@
 //! search with cooperative cancellation and frame-boundary coalescing.
 //! Tree-sitter and LSP land in M4 on the same dispatch shape.
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -607,13 +609,85 @@ pub struct ActivitySummary {
     /// is always present costs modeline width forever to say "nothing
     /// is happening".
     pub in_flight: usize,
-    /// The **oldest** in-flight job's purpose.
+    /// The **oldest** in-flight job's purpose, already passed through
+    /// [`purpose_for_one_row`].
     ///
     /// Oldest, not newest and not "busiest": jobs carry no cost
     /// estimate, so "busiest" is not a defined quantity, while oldest
     /// is computable from `dispatched_at` and answers the question a
     /// user actually asks of a stuck editor.
+    ///
+    /// Escaped here rather than at the Lua provider because this struct
+    /// **is** the indicator's read surface — it exists for one consumer,
+    /// and that consumer has exactly one row. `workers_snapshot` is the
+    /// free-form path and stays raw.
     pub oldest_purpose: String,
+}
+
+/// A `purpose` rendered for a surface that gives it exactly **one row**.
+///
+/// # A row must not be able to forge another row
+///
+/// That is the property, and it is the only reason this exists. A
+/// purpose is free-form text supplied by whoever dispatched the work,
+/// and it is legitimately multi-line: a filesystem path may contain a
+/// newline, and `pmacs-magit`'s spawn purpose is a whole argv. Rendered
+/// raw into a row-per-job table, one such purpose becomes two physical
+/// lines — the second of which the reader has no way to tell from a real
+/// job row, because a real job row is just text in the same buffer.
+/// The same applies to `\r`, which rewrites a rendered line in place on
+/// a terminal, and to `\u{1b}`, which starts an escape sequence in one.
+///
+/// # Escape, do not reject, and do not clip
+///
+/// This follows the `#228` decision recorded on
+/// [`crate::command::Command::description`]: the one-line constraint
+/// belongs to the **surface that has it**, not to the registry that does
+/// not. There, a free-form description is clipped by
+/// `Command::description_first_line` at the two single-row consumers
+/// while the registry keeps every line. Here the equivalent is escaping
+/// rather than clipping, because a purpose's later lines are not
+/// decoration — an argv's second word is as load-bearing as its first,
+/// and a clip would silently drop the part that says which file.
+///
+/// `pmacs.workers.snapshot()` is this lane's `describe-command`: it
+/// hands Lua the raw purpose, so nothing is lost, only made safe where
+/// a row boundary means something.
+///
+/// # What is not escaped
+///
+/// A backslash. Escaping it would make a purpose containing no control
+/// characters **not** byte-identical after this call, and byte-identity
+/// for ordinary text is a property worth more than distinguishing a
+/// literal `\n` from an escaped newline — the ambiguity is cosmetic,
+/// while forging a row is not, and no amount of literal backslashes
+/// produces a second row.
+#[must_use]
+pub fn purpose_for_one_row(purpose: &str) -> Cow<'_, str> {
+    // `char::is_control` is the Unicode `Cc` category: C0 (`\0`–`\x1f`),
+    // `\x7f`, and C1 (`\u{80}`–`\u{9f}`, which includes NEL). Borrowing
+    // when there is nothing to do keeps the common path allocation-free
+    // AND makes the byte-identity property structural rather than
+    // asserted.
+    if !purpose.contains(char::is_control) {
+        return Cow::Borrowed(purpose);
+    }
+    let mut out = String::with_capacity(purpose.len() + 8);
+    for ch in purpose.chars() {
+        match ch {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other if other.is_control() => {
+                // `\u{1b}`, the same spelling Rust's own `escape_debug`
+                // uses, so the rendered form is one a reader can paste
+                // back into either language and get the byte returned.
+                let _ = write!(out, "\\u{{{:x}}}", other as u32);
+            }
+            other => out.push(other),
+        }
+    }
+    Cow::Owned(out)
 }
 
 /// One frame's worth of streamed items for a single stream id,
@@ -1514,7 +1588,10 @@ impl AsyncRuntime {
         let (_, purpose) = oldest?;
         Some(ActivitySummary {
             in_flight,
-            oldest_purpose: purpose.to_owned(),
+            // The modeline is one row and a segment is one line;
+            // `purpose_for_one_row` is what keeps a purpose carrying a
+            // newline (a path, an argv) from breaking it.
+            oldest_purpose: purpose_for_one_row(purpose).into_owned(),
         })
     }
 

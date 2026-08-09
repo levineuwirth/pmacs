@@ -274,16 +274,24 @@ fn every_entry_shape_records_what_its_work_is() {
 /// purpose defaulting to the label hands every caller back the
 /// convention this lane exists to replace.
 ///
-/// Four refusals, each asserted the same way — the call raises, the
-/// message names the field, and **the process list is unchanged**,
-/// because a validation that rejects after spawning has already done the
-/// thing it was rejecting:
+/// Six refusals, each asserted the same way — the call raises, **the
+/// message names the field and the rule**, and the process list is
+/// unchanged, because a validation that rejects after spawning has
+/// already done the thing it was rejecting:
 ///
 ///  * absent;
 ///  * empty, and whitespace-only — these satisfy the type and defeat the
 ///    point exactly as copying the label would (R42 rejects
 ///    whitespace-only config descriptions for the same reason);
 ///  * wrong type;
+///  * **not valid UTF-8**. Lua strings are BYTE strings, so
+///    `purpose = string.char(255)` is a value a caller can write, and
+///    converting it with `?` would surface mlua's generic conversion
+///    error before this lane's own diagnostic was ever constructed. The
+///    refusal is not the interesting part — it refuses either way, and
+///    nothing spawns either way — the MESSAGE is, which is why the
+///    assertion is on content. Retyping this read as a bare `?` breaks
+///    the row rather than silently degrading the error;
 ///  * **metatable-provided**, which is the `stdin`/`group` raw-read
 ///    posture: a spec table is plain data, so a purpose cannot be
 ///    smuggled in through `__index`.
@@ -312,6 +320,12 @@ fn spawning_without_a_real_purpose_is_refused_and_starts_nothing() {
             "wrong type",
             r#"{ label = "x", purpose = 7, command = "/bin/sh", args = { "-c", "sleep 5" } }"#,
             "purpose must be a string",
+        ),
+        (
+            "invalid UTF-8",
+            r#"{ label = "x", purpose = "run " .. string.char(255),
+                 command = "/bin/sh", args = { "-c", "sleep 5" } }"#,
+            "purpose must be valid UTF-8",
         ),
         (
             "metatable-provided",
@@ -378,6 +392,147 @@ fn process_list_still_hides_terminal_ptys() {
 // ---------------------------------------------------------------------------
 // 2 — the dispatch-name ambient (Q#W-2)
 // ---------------------------------------------------------------------------
+
+/// **A registered handler name is DISPLAY TEXT, and gets `purpose`'s
+/// meaningful-value standard.**
+///
+/// Before this lane the name died inside `dispatch` and a type check was
+/// the whole of what it needed. It no longer dies there: the ambient
+/// carries it into every job the handler allocates and composes it into
+/// `purpose`, which `*workers*` and the modeline both render. So empty
+/// and whitespace-only are refused here for the reason they are refused
+/// in `required_purpose` — they satisfy the type and say nothing.
+///
+/// **Refused at `register`, and asserted twice**: the call raises with a
+/// message naming the rule, *and* nothing is installed under the name —
+/// a validation that stored the handler first would have registered the
+/// thing it was rejecting.
+#[test]
+fn a_handler_name_that_says_nothing_is_refused_at_registration() {
+    let mut state = editor();
+    for (label, name_expr) in [("empty", r#""""#), ("whitespace-only", r#""  \t ""#)] {
+        let (ok, err): (bool, String) = eval(
+            &state,
+            &format!(
+                "local ok, err = pcall(pmacs.workers.register, {name_expr}, function() end)
+                 return ok, tostring(err)"
+            ),
+        );
+        assert!(!ok, "{label}: register must refuse");
+        assert!(
+            err.contains("must not be empty or whitespace-only"),
+            "{label}: the refusal must name the rule; got {err:?}"
+        );
+        let (dispatched, dispatch_err): (bool, String) = eval(
+            &state,
+            &format!(
+                "local ok, err = pcall(pmacs.workers.dispatch, {name_expr})
+                 return ok, tostring(err)"
+            ),
+        );
+        assert!(!dispatched, "{label}: a refused name must install nothing");
+        assert!(
+            dispatch_err.contains("unknown handler"),
+            "{label}: and the name must be genuinely absent from the table; \
+             got {dispatch_err:?}"
+        );
+    }
+    pump(&mut state);
+}
+
+/// **Control characters in a handler name are refused at the source —
+/// and this is the one rule `purpose` deliberately does NOT get.**
+///
+/// The asymmetry is the design (`#228`'s shape). A purpose may
+/// legitimately contain a newline: a filesystem path can, and
+/// `pmacs-magit`'s spawn purpose is a whole argv — so its one-line
+/// constraint is enforced by escaping at the surfaces that have one row.
+/// A handler name is an identifier a package chooses for itself and
+/// hands back to `dispatch`; a control character in one is a mistake or
+/// an attempt at one, and refusing costs nobody anything.
+///
+/// The rows are chosen to be **not** whitespace-only, so this test
+/// cannot pass on the previous guard: a newline mid-word, an ESC (which
+/// starts a terminal escape sequence), and a NUL.
+#[test]
+fn a_handler_name_with_control_characters_is_refused_at_registration() {
+    let mut state = editor();
+    for (label, name_expr) in [
+        ("newline", r#""index\ner""#),
+        ("escape", r#""index" .. string.char(27) .. "[31mer""#),
+        ("nul", r#""index" .. string.char(0) .. "er""#),
+    ] {
+        let (ok, err): (bool, String) = eval(
+            &state,
+            &format!(
+                "local ok, err = pcall(pmacs.workers.register, {name_expr}, function() end)
+                 return ok, tostring(err)"
+            ),
+        );
+        assert!(!ok, "{label}: register must refuse");
+        assert!(
+            err.contains("must not contain control characters"),
+            "{label}: the refusal must name the rule; got {err:?}"
+        );
+        let (dispatched, dispatch_err): (bool, String) = eval(
+            &state,
+            &format!(
+                "local ok, err = pcall(pmacs.workers.dispatch, {name_expr})
+                 return ok, tostring(err)"
+            ),
+        );
+        assert!(!dispatched, "{label}: a refused name must install nothing");
+        assert!(
+            dispatch_err.contains("unknown handler"),
+            "{label}: and the name must be genuinely absent from the table; \
+             got {dispatch_err:?}"
+        );
+    }
+    pump(&mut state);
+}
+
+/// **The third rule a display-text name needs, enforced at the one
+/// place that can see it.**
+///
+/// Lua strings are BYTE strings and Lua 5.1 has no `utf8` library, so
+/// `register` cannot tell a valid name from arbitrary bytes —
+/// `string.char(255)` is neither whitespace nor a control character by
+/// `%c`. The name crosses into Rust exactly once, at
+/// `_push_dispatch_name`, and that is where the byte-level rule is
+/// enforced. **This is the P2a class again**: an `mlua`-driven
+/// conversion there would refuse with a generic message naming neither
+/// the argument nor the rule, so the conversion failure is mapped onto
+/// an owned diagnostic instead.
+///
+/// The refusal lands at `dispatch` rather than at `register`, which is
+/// later than ideal and is asserted as such — but it is still **before
+/// the handler runs**, so a name that cannot be displayed never reaches
+/// a job's purpose.
+#[test]
+fn a_handler_name_that_is_not_valid_utf8_is_refused_before_the_handler_runs() {
+    let mut state = editor();
+    let (ok, err): (bool, String) = eval(
+        &state,
+        "RAN = false
+         pmacs.workers.register('bad' .. string.char(255), function() RAN = true end)
+         local ok, err = pcall(pmacs.workers.dispatch, 'bad' .. string.char(255))
+         return ok, tostring(err)",
+    );
+    assert!(!ok, "dispatch must refuse a name it cannot display");
+    assert!(
+        err.contains("handler name must be valid UTF-8"),
+        "the refusal must name the argument and the rule; got {err:?}"
+    );
+    assert!(
+        !eval::<bool>(&state, "return RAN"),
+        "and it must refuse BEFORE running the handler"
+    );
+    assert!(
+        !eval::<bool>(&state, "return pmacs._async._in_dispatch_name_scope()"),
+        "a push that failed must leave no name on the stack"
+    );
+    pump(&mut state);
+}
 
 /// **Rule 7 + the defect itself.** A job dispatched through
 /// `pmacs.workers.dispatch("name", …)` reports `"name"`.
@@ -896,5 +1051,147 @@ fn the_workers_buffer_renders_the_purpose_column() {
         "and the row must render it:\n{text}"
     );
     exec(&state, "pmacs.workers.hide()");
+    pump(&mut state);
+}
+
+// ---------------------------------------------------------------------------
+// 7 — the display-text boundary: a row must not forge another row
+// ---------------------------------------------------------------------------
+//
+// A purpose is free-form caller text and is legitimately multi-line — a
+// filesystem path may contain a newline and `pmacs-magit`'s spawn
+// purpose is a whole argv — so the one-line constraint belongs to the
+// surfaces that have one line, not to the purpose. That is `#228`'s
+// decision on `Command.description`, applied here as escaping rather
+// than clipping, because a purpose's later words are load-bearing.
+//
+// Every test below drives the REAL rendering path. Calling
+// `purpose_for_one_row` directly would prove the escaper escapes and say
+// nothing about whether either surface calls it.
+//
+// `register_external` is the witness in all three because it is the one
+// entry shape whose purpose is verbatim caller text: the pool
+// dispatchers all `format!` their own, and `{:?}` in those formats
+// already escapes, so a hostile purpose cannot reach a row through them.
+
+/// **The spoofing property, and the whole reason the escaping exists.**
+///
+/// A purpose crafted to look like a row boundary followed by a plausible
+/// job row does not produce a second row. Asserted by COUNTING the rows,
+/// not by looking for the escape sequence: a renderer that dropped the
+/// purpose entirely would satisfy "no forged row" while destroying the
+/// feature, so the escaped text is asserted present in the surviving row
+/// as well.
+#[test]
+fn a_purpose_shaped_like_a_row_boundary_does_not_produce_a_second_row() {
+    let mut state = editor();
+    let (job_id, _token) = state.async_runtime.register_external(
+        JobKind::LspRequest,
+        None,
+        "lsp definition\n#99     grep               0ms  forged      \
+         cancelled by nobody",
+    );
+    exec(&state, "BUF = pmacs.workers.show()");
+    let text: String = eval(&state, "return BUF:slice(0, BUF:len())");
+
+    let job_rows: Vec<&str> = text.lines().filter(|line| line.starts_with('#')).collect();
+    assert_eq!(
+        job_rows.len(),
+        1,
+        "one job must render as exactly ONE row:\n{text}"
+    );
+    assert!(
+        job_rows[0].contains("lsp definition\\n#99"),
+        "and the break must be rendered, escaped, INSIDE that row:\n{text}"
+    );
+    assert!(
+        !text.contains("\n#99"),
+        "no line may begin with the forged id:\n{text}"
+    );
+
+    // `#228`'s other half, and what makes this a rendering decision
+    // rather than data loss: the free-form surface still hands Lua every
+    // byte, unescaped.
+    let raw = active_purposes(&state);
+    assert!(
+        raw.iter().any(|purpose| purpose.contains('\n')),
+        "pmacs.workers.snapshot() is the raw path and must stay raw: {raw:?}"
+    );
+
+    exec(&state, "pmacs.workers.hide()");
+    state.async_runtime.complete_external_cancelled(job_id);
+    pump(&mut state);
+}
+
+/// **The modeline is one line, and that is enforced where the modeline
+/// reads.**
+///
+/// Two assertions, because they exclude different failures: the segment
+/// carries no break at all (a composed modeline splicing one would
+/// misplace every segment after it), and the escaped text survives the
+/// real per-frame paint rather than only the evaluator.
+#[test]
+fn a_purpose_that_spans_lines_reaches_the_modeline_as_one_line() {
+    let mut state = editor();
+    let (job_id, _token) = state.async_runtime.register_external(
+        JobKind::LspRequest,
+        None,
+        "lsp didOpen\nfile:///tmp/x.rs",
+    );
+
+    let segment = activity_segment(&state).expect("work is in flight, so a segment exists");
+    assert!(
+        !segment.contains(['\n', '\r']),
+        "a modeline segment is ONE line: {segment:?}"
+    );
+    assert_eq!(
+        segment, "⋯1 lsp didOpen\\nfile:///tmp/x.rs",
+        "and the break is escaped in place, not clipped away"
+    );
+
+    let cells = paint(&state, 24, 160);
+    let modeline = row_text(&cells, 160, 22);
+    assert!(
+        modeline.contains("⋯1 lsp didOpen\\nfile:///tmp/x.rs"),
+        "the painted modeline must carry it too; got {modeline:?}"
+    );
+
+    state.async_runtime.complete_external_cancelled(job_id);
+    pump(&mut state);
+}
+
+/// **A purpose with no control characters is byte-identical after
+/// escaping** — on both surfaces.
+///
+/// The fixture is chosen to break a careless escaper: a literal
+/// backslash (which a JSON-style escaper would double, and which is
+/// deliberately NOT escaped here — no number of backslashes produces a
+/// second row), a `\v` that is text rather than a vertical tab, quotes,
+/// and a non-ASCII character.
+#[test]
+fn a_purpose_with_no_control_characters_is_unchanged_by_the_boundary() {
+    const PURPOSE: &str = r#"grep "fn \d+" in /tmp/pro—ject\v2"#;
+
+    let mut state = editor();
+    let (job_id, _token) =
+        state
+            .async_runtime
+            .register_external(JobKind::LspRequest, None, PURPOSE);
+
+    exec(&state, "BUF = pmacs.workers.show()");
+    let text: String = eval(&state, "return BUF:slice(0, BUF:len())");
+    assert!(
+        text.contains(PURPOSE),
+        "the *workers* row must reproduce an ordinary purpose byte for byte:\n{text}"
+    );
+
+    assert_eq!(
+        activity_segment(&state).as_deref(),
+        Some(format!("⋯1 {PURPOSE}").as_str()),
+        "and so must the modeline segment"
+    );
+
+    exec(&state, "pmacs.workers.hide()");
+    state.async_runtime.complete_external_cancelled(job_id);
     pump(&mut state);
 }

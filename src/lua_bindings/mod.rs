@@ -7580,12 +7580,27 @@ pub fn install_async(
     // `pmacs.workers.dispatch`, which brackets these itself under
     // `pcall`. A package pushing by hand and failing to pop would poison
     // every later dispatch in the session with a stale name.
+    //
+    // `mlua::String`, not `String`: the parameter is a Lua BYTE string,
+    // so an `mlua`-driven `String` conversion would refuse a non-UTF-8
+    // name with a generic message naming neither the argument nor the
+    // rule. `pmacs.workers.register` enforces the rest of the
+    // display-text standard (non-empty, no control characters) but
+    // cannot see UTF-8 validity from Lua 5.1, so the byte-level half is
+    // enforced here — the one point where Rust sees the name — with a
+    // message that names both.
     {
         let rt = runtime.clone();
         async_mod.set(
             "_push_dispatch_name",
-            lua.create_function(move |_, name: String| {
-                rt.push_dispatch_name(name);
+            lua.create_function(move |_, name: mlua::String| {
+                let Ok(text) = name.to_str() else {
+                    return Err(mlua::Error::external(
+                        "pmacs.workers.dispatch: handler name must be valid UTF-8 — it is \
+                         displayed to the user as part of every job's purpose.",
+                    ));
+                };
+                rt.push_dispatch_name(&*text);
                 Ok(())
             })?,
         )?;
@@ -8766,18 +8781,35 @@ fn parse_restart(name: &str) -> mlua::Result<RestartPolicy> {
 ///
 /// # Errors
 ///
-/// Absent, empty, whitespace-only, or non-string. Empty and
-/// whitespace-only are rejected because they satisfy the type and defeat
-/// the point exactly as copying the label across would — R42 already
-/// rejects whitespace-only `description`s in the config registry for the
-/// same reason.
+/// Absent, empty, whitespace-only, non-string, or **not valid UTF-8**.
+/// Empty and whitespace-only are rejected because they satisfy the type
+/// and defeat the point exactly as copying the label across would — R42
+/// already rejects whitespace-only `description`s in the config registry
+/// for the same reason.
+///
+/// The UTF-8 case is a **reachable input class, not an internal
+/// invariant**: Lua strings are byte strings, so `purpose =
+/// string.char(255)` is a value a caller can write. Converting it with
+/// `?` would surface mlua's generic conversion error *before* any of the
+/// diagnostics below is constructed, and the caller would be told
+/// neither the field nor the rule — so the conversion failure is mapped
+/// onto this function's own message instead.
 ///
 /// The read is **raw**, matching the posture `stdin` and `group` already
 /// document in [`lua_to_spec`]: a spec table is plain data, so a
 /// metatable cannot smuggle a purpose in through `__index`.
 fn required_purpose(table: &Table) -> mlua::Result<String> {
     let purpose = match table.raw_get::<mlua::Value>("purpose") {
-        Ok(mlua::Value::String(value)) => value.to_str()?.to_owned(),
+        Ok(mlua::Value::String(value)) => match value.to_str() {
+            Ok(text) => text.to_owned(),
+            Err(_) => {
+                return Err(mlua::Error::external(
+                    "pmacs.process.spawn: purpose must be valid UTF-8 — it is displayed \
+                     to the user in *workers* and in the modeline, and arbitrary bytes \
+                     have no display form there.",
+                ));
+            }
+        },
         Ok(mlua::Value::Nil) => {
             return Err(mlua::Error::external(
                 "pmacs.process.spawn: purpose is required — a short description of what \

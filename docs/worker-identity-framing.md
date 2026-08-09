@@ -5,8 +5,9 @@ removed that title overclaimed the lane: it answers **what**, and —
 under `pmacs.workers.dispatch` — **under which registered handler**.
 Neither is who owns it.)*
 
-**Status: revision 4, APPROVED 2026-08-09. Implementation may
-proceed.**
+**Status: revision 4, APPROVED 2026-08-09. IMPLEMENTED — see
+`docs/active-work.md` for the commits, the gate outcome and the review
+rounds.**
 
 **Revision 4 scopes rule 1's claim to what it can actually enforce, and
 takes Q#W-7 into this lane.** Revision 3 said the rule covered "all

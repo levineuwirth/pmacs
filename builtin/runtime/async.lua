@@ -468,12 +468,46 @@ function pmacs.workers.dispatch(name, args, opts)
   return finish_dispatch(pcall(handler, args, opts))
 end
 
+-- Worker identity Stage 1: the name registered here is DISPLAY TEXT.
+--
+-- It used to be type-checked and nothing more, which was defensible
+-- while it died inside `dispatch`. It no longer dies there: the ambient
+-- carries it into every job the handler allocates, and it is composed
+-- into `purpose` as `"<name>: <purpose>"`, which the `*workers*` table
+-- and the modeline indicator both render. So it gets the same
+-- meaningful-value standard `purpose` already gets in
+-- `required_purpose` (`src/lua_bindings/mod.rs`) --- and one rule
+-- `purpose` deliberately does NOT get.
+--
+-- The asymmetry is the point. A purpose may legitimately contain a
+-- newline: a filesystem path can, and `pmacs-magit`'s spawn purpose is a
+-- whole argv --- so its one-line constraint is enforced by ESCAPING at
+-- the surfaces that have one row (`purpose_for_one_row`), following the
+-- `#228` decision on `Command.description`. A registered handler NAME
+-- has no such case. It is an identifier a package chooses for itself and
+-- passes back to `dispatch`, so a control character in it is a mistake
+-- or an attempt at one, and refusing at the source costs nobody
+-- anything.
 function pmacs.workers.register(name, handler)
   -- Allows future Rust-side modules (or test harnesses) to register
   -- additional dispatchable names. v0.1 has no plugin loader but the
   -- shape is here so M4 builders use it consistently.
   if type(name) ~= "string" then
     error("pmacs.workers.register: name must be a string")
+  end
+  -- Empty and whitespace-only satisfy the type and say nothing --- the
+  -- exact pair `required_purpose` rejects, and the exact pair R42
+  -- rejects for config descriptions.
+  if name:match("^%s*$") ~= nil then
+    error("pmacs.workers.register: name must not be empty or whitespace-only")
+  end
+  -- `%c` is the C control class: NUL, the C0 range, DEL. A newline
+  -- forges a row in `*workers*`, a CR rewrites one on a terminal and an
+  -- ESC starts a sequence in one. Checked AFTER the whitespace rule so
+  -- a name that is only "\n" reports the emptier problem, which is the
+  -- one the caller can act on.
+  if name:find("%c") ~= nil then
+    error("pmacs.workers.register: name must not contain control characters")
   end
   if type(handler) ~= "function" then
     error("pmacs.workers.register: handler must be a function")
