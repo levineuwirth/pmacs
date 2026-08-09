@@ -14939,6 +14939,95 @@ mod tests {
         assert_eq!(after[2].1, Color::rgb(20, 220, 40));
     }
 
+    /// Worker identity Stage 1 (`docs/worker-identity-framing.md` §6):
+    /// the GPU half of "both frontends render the segment".
+    ///
+    /// The activity indicator adds no wire message — it rides the
+    /// existing `StatuslineSegments` vector as a fourth provider's
+    /// element. But that is a claim about the **producer**, and says
+    /// nothing about whether a consumer draws it, which is why this
+    /// exists on the consumer side.
+    ///
+    /// Two properties specific to this segment, neither of which the
+    /// existing rich-runs test covers:
+    ///
+    ///  * its face (`ui.modeline.activity`) is **deliberately absent
+    ///    from `ThemeFacts`** — no theme sets it, and `theme_facts_msg`
+    ///    ships only faces that resolve — so a consumer that dropped
+    ///    segments with an unknown face would silently lose the one
+    ///    thing telling the user the editor is busy;
+    ///  * its text leads with a non-ASCII `⋯`, which a byte-oriented
+    ///    composition step would mangle.
+    #[test]
+    fn the_activity_segment_survives_an_unthemed_face_and_a_non_ascii_lead() {
+        let Some(mut state) = headless_or_skip(500, 280, "text") else {
+            return;
+        };
+        let buffer_id = BufferId::next();
+        state.current_buffer_id = Some(buffer_id);
+        state.status_facts = Some(status_facts(buffer_id, None));
+        state.own_cursor = Some(OwnCursor { buffer_id, byte: 0 });
+        // One themed face, and NOT the activity one: the point is that
+        // the theme has an opinion about some segments and none about
+        // this one.
+        apply_faces(
+            &mut state,
+            vec![theme_face(
+                "ui.modeline.lsp",
+                CellStyle {
+                    fg: CellColor::Rgb(20, 220, 40),
+                    ..CellStyle::default()
+                },
+            )],
+        );
+        apply_statusline(
+            &mut state,
+            buffer_id,
+            Vec::new(),
+            vec![
+                statusline_segment("LSP:rust", "ui.modeline.lsp"),
+                statusline_segment("⋯2 lsp textDocument/definition", "ui.modeline.activity"),
+            ],
+        );
+
+        let right = state.compose_status_runs();
+        let text: String = right.iter().map(|(text, _)| text.as_str()).collect();
+        assert!(
+            text.contains("⋯2 lsp textDocument/definition"),
+            "the activity segment must reach the composed right runs \
+             intact: {text:?}"
+        );
+        let activity = right
+            .iter()
+            .find(|(run, _)| run.contains('⋯'))
+            .expect("activity run");
+        assert_eq!(
+            activity.1,
+            state.status_right_base_color(),
+            "an unthemed modeline face falls back to the base colour \
+             rather than dropping the segment"
+        );
+        assert_eq!(
+            right[0].1,
+            Color::rgb(20, 220, 40),
+            "and its themed neighbour still takes its own colour"
+        );
+
+        // And it survives the real shaping pass, not only composition.
+        let _ = state.render_offscreen();
+        let shaped: String = state
+            .status_runs
+            .as_ref()
+            .expect("right shaped")
+            .iter()
+            .map(|(text, _)| text.as_str())
+            .collect();
+        assert!(
+            shaped.contains("⋯2 lsp textDocument/definition"),
+            "{shaped:?}"
+        );
+    }
+
     #[test]
     fn modal_left_precedence_suppresses_custom_left_but_preserves_right() {
         let Some(mut state) = headless_or_skip(420, 260, "text") else {

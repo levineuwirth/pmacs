@@ -167,7 +167,11 @@ impl LspServerSpec {
     }
 
     fn to_process_spec(&self) -> ProcessSpec {
-        let mut p = ProcessSpec::new(format!("lsp:{}", self.label), &self.command);
+        let mut p = ProcessSpec::new(
+            format!("lsp:{}", self.label),
+            &self.command,
+            format!("language server for {}", self.label),
+        );
         p.args.clone_from(&self.args);
         p.cwd.clone_from(&self.cwd);
         p.env.clone_from(&self.env);
@@ -1587,9 +1591,15 @@ impl LspManager {
         uri: &str,
     ) -> JobId {
         let supersede = format!("lsp:{method}:{}:{uri}", sid.raw());
-        let (job_id, token) = self
-            .runtime
-            .register_external(JobKind::LspRequest, Some(&supersede));
+        // Worker identity Stage 1: `register_external` bypasses the
+        // worker pool, so its `JobKind` is the undifferentiated
+        // `LspRequest` for every method. The method and the document are
+        // the only thing that makes one row distinguishable from another
+        // in `*workers*`.
+        let purpose = format!("lsp {method} {uri}");
+        let (job_id, token) =
+            self.runtime
+                .register_external(JobKind::LspRequest, Some(&supersede), purpose);
         self.pending_external.insert(
             (sid, req_id),
             PendingExternal {
@@ -4538,7 +4548,8 @@ mod resource_reconciliation_tests {
         let runtime = mgr.runtime.clone();
 
         let mut register = |rid: u64, uri: &str| {
-            let (job_id, token) = runtime.register_external(JobKind::LspRequest, None);
+            let (job_id, token) =
+                runtime.register_external(JobKind::LspRequest, None, format!("lsp hover {uri}"));
             mgr.pending_routes.insert(
                 (a, rid),
                 ResponseRoute::Hover {

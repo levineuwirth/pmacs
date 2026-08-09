@@ -408,6 +408,47 @@ struct PendingJob {
     /// job→buffer link already lives in a side map and §9 names that as
     /// the defect.
     resource: Option<ResourceOp>,
+    /// What this job is doing, in words a user can read (worker
+    /// identity Stage 1, `COHERENCE.md` §9).
+    ///
+    /// **Not an owner.** It records *what work* is running and — when
+    /// the job was born inside a `pmacs.workers.dispatch` extent — the
+    /// registered handler name it ran under. Neither is the package
+    /// responsible for it; that slot is deliberately empty until P3 can
+    /// fill it with a real package signal (framing §3).
+    ///
+    /// Non-optional by construction: [`JobSpec`] has no `Default`, so a
+    /// dispatcher that supplies none does not compile.
+    purpose: String,
+}
+
+/// Everything one job is born with.
+///
+/// **Private, and deliberately so** (framing Q#W-1). The two-function
+/// `allocate` / `allocate_with_resource` split existed only because one
+/// prior lane needed one extra parameter; a second lane doing the same
+/// produces `allocate_with_resource_and_identity`. Collapsing the pair
+/// into a struct means the next field is a named literal at each of the
+/// eleven construction sites rather than another positional parameter on
+/// a public signature.
+///
+/// **There is no `Default` impl, and that is the point.** `purpose` is
+/// what makes the compiler — not a test — the thing that proves every
+/// dispatcher supplied one (framing §6). A `Default` would let a new
+/// dispatcher write `..Default::default()` and silently ship an empty
+/// identity.
+struct JobSpec<'a> {
+    /// Which builtin handler this job runs.
+    kind: JobKind,
+    /// Supersede key, if the dispatch opted into supersession.
+    supersede: Option<&'a str>,
+    /// `Some(max_batch)` marks this as a streaming dispatch.
+    stream: Option<usize>,
+    /// Filesystem mutation this job performs, for the settle-time
+    /// reconcile (dired Stage 2a).
+    resource: Option<ResourceOp>,
+    /// What the job is doing. See [`PendingJob::purpose`].
+    purpose: String,
 }
 
 /// A settled filesystem mutation, with the paths the worker consumed
@@ -490,6 +531,9 @@ pub struct ActiveJobInfo {
     /// True if this is a streaming dispatch (`emit_n`, `grep`, ...);
     /// false if it's request/reply (`sleep`, `compute_sum`).
     pub is_stream: bool,
+    /// What this job is doing (worker identity Stage 1). Rendered by
+    /// `*workers*` and by the statusline activity indicator.
+    pub purpose: String,
 }
 
 /// One row in the `*workers*` buffer's "completed" section: a job
@@ -507,6 +551,8 @@ pub struct CompletedJobInfo {
     pub settled_age_ms: u64,
     /// Supersede key (if any) the job was dispatched under.
     pub supersede_key: Option<String>,
+    /// What this job was doing (worker identity Stage 1).
+    pub purpose: String,
     /// Terminal outcome. `None` is unreachable here --- only
     /// settled jobs land in the completed ring.
     pub outcome: JobOutcome,
@@ -543,7 +589,31 @@ struct CompletedSlot {
     dispatched_at: Instant,
     settled_at: Instant,
     supersede_key: Option<String>,
+    purpose: String,
     outcome: JobOutcome,
+}
+
+/// What the statusline activity indicator needs, and nothing more
+/// (framing Q#W-3).
+///
+/// A dedicated read surface rather than [`WorkersSnapshot`]: the
+/// indicator is evaluated once per visible window per frame, and a
+/// snapshot clones the whole completed ring (up to
+/// [`COMPLETED_RING_CAP`] entries) that the indicator never looks at.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActivitySummary {
+    /// How many jobs are in flight. Always ≥ 1 — an idle runtime
+    /// returns `None` rather than a zero count, because a segment that
+    /// is always present costs modeline width forever to say "nothing
+    /// is happening".
+    pub in_flight: usize,
+    /// The **oldest** in-flight job's purpose.
+    ///
+    /// Oldest, not newest and not "busiest": jobs carry no cost
+    /// estimate, so "busiest" is not a defined quantity, while oldest
+    /// is computable from `dispatched_at` and answers the question a
+    /// user actually asks of a stuck editor.
+    pub oldest_purpose: String,
 }
 
 /// One frame's worth of streamed items for a single stream id,
@@ -610,6 +680,29 @@ pub struct AsyncRuntime {
     /// only contended at parse settle/take time --- never inside the
     /// editor's hot path. T M4.1.
     parse_handoff: Arc<Mutex<HashMap<JobId, Arc<ParseTreeBundle>>>>,
+    /// Registered handler names of the `pmacs.workers.dispatch` calls
+    /// currently on the stack (worker identity Stage 1, Q#W-2).
+    ///
+    /// `pmacs.workers.dispatch(name, …)` looks `name` up, calls the
+    /// handler, and returns whatever it returns — **`name` is not a
+    /// parameter of any layer below that call**, and a handler that
+    /// reaches straight for `pmacs._async._dispatch_*` bypasses the Lua
+    /// wrapper layer entirely. So the name has to travel out of band, and
+    /// it is read here, at the one allocation funnel every job passes
+    /// through.
+    ///
+    /// A stack, not a slot: nesting is real (a handler may dispatch
+    /// through another registered handler) and innermost wins.
+    ///
+    /// **The extent is non-yieldable, and `async.lua` enforces it** —
+    /// both supported yield APIs refuse inside it, because parking a
+    /// coroutine with a name still pushed hands that name to whatever
+    /// allocates next. The one hole is a raw `coroutine.yield`, which
+    /// violates R46 and which no refusal sited in a yield helper can
+    /// intercept (the scheduler only sees the yielded value after the
+    /// coroutine has already suspended). That residual is recorded in
+    /// `docs/worker-identity-framing.md` §2, not claimed closed.
+    dispatch_names: RefCell<Vec<String>>,
 }
 
 /// Default cap on stream items delivered in a single drain. 1024
@@ -650,6 +743,7 @@ impl AsyncRuntime {
             frame_target_ms: Cell::new(DEFAULT_FRAME_TARGET_MS),
             completed: RefCell::new(VecDeque::with_capacity(COMPLETED_RING_CAP)),
             parse_handoff: Arc::new(Mutex::new(HashMap::new())),
+            dispatch_names: RefCell::new(Vec::new()),
         }
     }
 
@@ -733,34 +827,83 @@ impl AsyncRuntime {
         self.default_max_batch.set(n.clamp(1, 1_000_000));
     }
 
+    /// Push a `pmacs.workers.dispatch` handler name for the dynamic
+    /// extent of that handler's call (worker identity Stage 1, Q#W-2).
+    ///
+    /// Paired with [`Self::pop_dispatch_name`] by
+    /// `pmacs.workers.dispatch`, which brackets the handler call under
+    /// `pcall` so a raising handler still pops. An unpaired push is the
+    /// failure mode that matters: it would poison every later dispatch
+    /// in the session with a stale name, and the feature would start
+    /// lying silently rather than loudly.
+    pub fn push_dispatch_name(&self, name: impl Into<String>) {
+        self.dispatch_names.borrow_mut().push(name.into());
+    }
+
+    /// Pop the innermost dispatch-handler name. No-op when the stack is
+    /// already empty — an unbalanced pop is a Lua-side bug, and
+    /// panicking here would turn it into a torn editor rather than a
+    /// missing label.
+    pub fn pop_dispatch_name(&self) {
+        self.dispatch_names.borrow_mut().pop();
+    }
+
+    /// Whether a `pmacs.workers.dispatch` handler is on the stack.
+    ///
+    /// Read from Lua as `pmacs._async._in_dispatch_name_scope()`. Both
+    /// supported yield APIs refuse while it is set (Q#W-2 rule 1), for
+    /// the same reason `Handle:await` refuses inside
+    /// `pmacs.window.commit_to`: yielding would park the coroutine with
+    /// the name still pushed, and the next allocation — in any
+    /// coroutine, on any later tick — would inherit it.
+    #[must_use]
+    pub fn in_dispatch_name_scope(&self) -> bool {
+        !self.dispatch_names.borrow().is_empty()
+    }
+
+    /// The innermost dispatch-handler name, if any. Nesting is a stack
+    /// and innermost wins (Q#W-2 rule 3).
+    #[must_use]
+    pub fn current_dispatch_name(&self) -> Option<String> {
+        self.dispatch_names.borrow().last().cloned()
+    }
+
     /// Register a fresh pending entry and return its id + cancel
     /// token. The token is what the worker closure polls; the entry
     /// is what `tick` updates on reply.
     ///
-    /// If `supersede_key` is `Some(key)`, any in-flight predecessor
+    /// **This is the single allocation funnel**: every job in the
+    /// system — the ten `dispatch_*` methods and
+    /// [`Self::register_external`] alike — is born here, which is what
+    /// makes the identity field reachable by construction rather than by
+    /// audit.
+    ///
+    /// If `spec.supersede` is `Some(key)`, any in-flight predecessor
     /// under the same key has its cancel token flipped *before* this
     /// allocation returns, and the `key → id` table is updated to
     /// point at the new id. The predecessor's pending entry is
     /// retained --- its worker will produce a `Cancelled` reply that
     /// `tick` then surfaces.
-    fn allocate(
-        &self,
-        kind: JobKind,
-        supersede_key: Option<&str>,
-        stream: Option<usize>,
-    ) -> (JobId, CancellationToken) {
-        self.allocate_with_resource(kind, supersede_key, stream, None)
-    }
-
-    /// [`Self::allocate`], plus the filesystem mutation this job
-    /// performs. Only the two mutating fs dispatchers pass `resource`.
-    fn allocate_with_resource(
-        &self,
-        kind: JobKind,
-        supersede_key: Option<&str>,
-        stream: Option<usize>,
-        resource: Option<ResourceOp>,
-    ) -> (JobId, CancellationToken) {
+    ///
+    /// The recorded purpose **composes** with any dispatch-name ambient
+    /// rather than replacing it (Q#W-2 rule 6): `"<name>: <purpose>"`
+    /// where the dispatcher described its own work, `"<name>"` where it
+    /// did not. Letting the dispatcher's purpose win would lose the
+    /// third-party caller all over again; letting the name win would
+    /// discard the only description of the actual work.
+    fn allocate(&self, spec: JobSpec<'_>) -> (JobId, CancellationToken) {
+        let JobSpec {
+            kind,
+            supersede: supersede_key,
+            stream,
+            resource,
+            purpose,
+        } = spec;
+        let purpose = match self.current_dispatch_name() {
+            Some(name) if purpose.is_empty() => name,
+            Some(name) => format!("{name}: {purpose}"),
+            None => purpose,
+        };
         let id = self.next_job_id.fetch_add(1, Ordering::Relaxed);
         let cancel = CancellationToken::new();
         if let Some(key) = supersede_key {
@@ -788,6 +931,7 @@ impl AsyncRuntime {
                 kind,
                 dispatched_at: Instant::now(),
                 resource,
+                purpose,
             },
         );
         (id, cancel)
@@ -801,7 +945,13 @@ impl AsyncRuntime {
     /// dispatched under `key` is cancelled before this dispatch
     /// returns. T M3.4 / [spec §6.3].
     pub fn dispatch_sleep(&self, ms: i64, supersede: Option<&str>) -> JobId {
-        let (id, cancel) = self.allocate(JobKind::Sleep, supersede, None);
+        let (id, cancel) = self.allocate(JobSpec {
+            kind: JobKind::Sleep,
+            supersede,
+            stream: None,
+            resource: None,
+            purpose: format!("sleep {}ms", ms.max(0)),
+        });
         let bus = self.workers.clone();
         let total = Duration::from_millis(ms.max(0).unsigned_abs());
         self.pool.dispatch(move |_pool| {
@@ -816,7 +966,13 @@ impl AsyncRuntime {
     /// the granular cancel boundary. `supersede` follows the same
     /// rule as [`Self::dispatch_sleep`].
     pub fn dispatch_compute_sum(&self, n: u64, supersede: Option<&str>) -> JobId {
-        let (id, cancel) = self.allocate(JobKind::ComputeSum, supersede, None);
+        let (id, cancel) = self.allocate(JobSpec {
+            kind: JobKind::ComputeSum,
+            supersede,
+            stream: None,
+            resource: None,
+            purpose: format!("sum 1..{n}"),
+        });
         let bus = self.workers.clone();
         self.pool.dispatch(move |_pool| {
             let kind = run_compute_sum(&cancel, n);
@@ -842,7 +998,13 @@ impl AsyncRuntime {
         max_batch: Option<usize>,
     ) -> JobId {
         let cap = max_batch.map_or_else(|| self.default_max_batch.get(), |n| n.clamp(1, 1_000_000));
-        let (id, cancel) = self.allocate(JobKind::EmitN, supersede, Some(cap));
+        let (id, cancel) = self.allocate(JobSpec {
+            kind: JobKind::EmitN,
+            supersede,
+            stream: Some(cap),
+            resource: None,
+            purpose: format!("emit {count} items"),
+        });
         let bus = self.workers.clone();
         self.pool.dispatch(move |_pool| {
             run_emit_n(&cancel, &bus, id, count);
@@ -870,7 +1032,13 @@ impl AsyncRuntime {
         max_batch: Option<usize>,
     ) -> JobId {
         let cap = max_batch.map_or_else(|| self.default_max_batch.get(), |n| n.clamp(1, 1_000_000));
-        let (id, cancel) = self.allocate(JobKind::Grep, supersede, Some(cap));
+        let (id, cancel) = self.allocate(JobSpec {
+            kind: JobKind::Grep,
+            supersede,
+            stream: Some(cap),
+            resource: None,
+            purpose: format!("grep {:?} in {}", spec.pattern, spec.root.display()),
+        });
         let bus = self.workers.clone();
         self.pool.dispatch(move |_pool| {
             run_grep(&cancel, &bus, id, spec);
@@ -897,7 +1065,13 @@ impl AsyncRuntime {
     /// in-flight predecessor under the same key has its cancel token
     /// flipped synchronously. T M4.1 / [spec §6.3].
     pub fn dispatch_parse(&self, spec: ParseRequest, supersede: Option<&str>) -> JobId {
-        let (id, cancel) = self.allocate(JobKind::Parse, supersede, None);
+        let (id, cancel) = self.allocate(JobSpec {
+            kind: JobKind::Parse,
+            supersede,
+            stream: None,
+            resource: None,
+            purpose: format!("parse {}", spec.language_name),
+        });
         let bus = self.workers.clone();
         let handoff = self.parse_handoff.clone();
         self.pool.dispatch(move |_pool| {
@@ -922,7 +1096,13 @@ impl AsyncRuntime {
         tolerance: ReadDirTolerance,
         supersede: Option<&str>,
     ) -> JobId {
-        let (id, cancel) = self.allocate(JobKind::FsReadDir, supersede, None);
+        let (id, cancel) = self.allocate(JobSpec {
+            kind: JobKind::FsReadDir,
+            supersede,
+            stream: None,
+            resource: None,
+            purpose: format!("read_dir {}", path.display()),
+        });
         let bus = self.workers.clone();
         self.pool.dispatch(move |_pool| {
             let kind = run_fs_read_dir(&cancel, &path, tolerance);
@@ -934,7 +1114,13 @@ impl AsyncRuntime {
     /// Dispatch a `stat(path)` job. Returns one [`FsDirEntry`] of
     /// metadata for `path`. T M8.1.
     pub fn dispatch_fs_stat(&self, path: PathBuf, supersede: Option<&str>) -> JobId {
-        let (id, cancel) = self.allocate(JobKind::FsStat, supersede, None);
+        let (id, cancel) = self.allocate(JobSpec {
+            kind: JobKind::FsStat,
+            supersede,
+            stream: None,
+            resource: None,
+            purpose: format!("stat {}", path.display()),
+        });
         let bus = self.workers.clone();
         self.pool.dispatch(move |_pool| {
             let kind = run_fs_stat(&cancel, &path);
@@ -948,15 +1134,16 @@ impl AsyncRuntime {
     pub fn dispatch_fs_rename(&self, from: PathBuf, to: PathBuf, supersede: Option<&str>) -> JobId {
         // The closure below MOVES both paths; the pending entry is the
         // only thing that still knows them when the reply lands.
-        let (id, cancel) = self.allocate_with_resource(
-            JobKind::FsRename,
+        let (id, cancel) = self.allocate(JobSpec {
+            kind: JobKind::FsRename,
             supersede,
-            None,
-            Some(ResourceOp::Rename {
+            stream: None,
+            resource: Some(ResourceOp::Rename {
                 from: from.clone(),
                 to: to.clone(),
             }),
-        );
+            purpose: format!("rename {} -> {}", from.display(), to.display()),
+        });
         let bus = self.workers.clone();
         self.pool.dispatch(move |_pool| {
             let kind = run_fs_rename(&cancel, &from, &to);
@@ -967,7 +1154,13 @@ impl AsyncRuntime {
 
     /// Dispatch a `chmod(path, mode)` job. T M8.1.
     pub fn dispatch_fs_chmod(&self, path: PathBuf, mode: u32, supersede: Option<&str>) -> JobId {
-        let (id, cancel) = self.allocate(JobKind::FsChmod, supersede, None);
+        let (id, cancel) = self.allocate(JobSpec {
+            kind: JobKind::FsChmod,
+            supersede,
+            stream: None,
+            resource: None,
+            purpose: format!("chmod {mode:o} {}", path.display()),
+        });
         let bus = self.workers.clone();
         self.pool.dispatch(move |_pool| {
             let kind = run_fs_chmod(&cancel, &path, mode);
@@ -978,12 +1171,13 @@ impl AsyncRuntime {
 
     /// Dispatch a `remove(path)` job. T M8.1.
     pub fn dispatch_fs_remove(&self, path: PathBuf, supersede: Option<&str>) -> JobId {
-        let (id, cancel) = self.allocate_with_resource(
-            JobKind::FsRemove,
+        let (id, cancel) = self.allocate(JobSpec {
+            kind: JobKind::FsRemove,
             supersede,
-            None,
-            Some(ResourceOp::Remove { path: path.clone() }),
-        );
+            stream: None,
+            resource: Some(ResourceOp::Remove { path: path.clone() }),
+            purpose: format!("remove {}", path.display()),
+        });
         let bus = self.workers.clone();
         self.pool.dispatch(move |_pool| {
             let kind = run_fs_remove(&cancel, &path);
@@ -1008,12 +1202,27 @@ impl AsyncRuntime {
     /// same supervisor (DAP, etc.) reuse this surface.
     ///
     /// `supersede` follows the same rule as the worker dispatchers.
+    ///
+    /// `purpose` is **required and has no derivable fallback** here,
+    /// which is why it is a parameter rather than something this method
+    /// composes for itself. The ten pool dispatchers each know what
+    /// their own job does; `register_external` knows only a `JobKind`
+    /// that is `McpRequest` or `LspRequest` — a category, not a
+    /// description. The caller is the only party that can say
+    /// `"lsp textDocument/definition"`.
     pub fn register_external(
         &self,
         kind: JobKind,
         supersede: Option<&str>,
+        purpose: impl Into<String>,
     ) -> (JobId, CancellationToken) {
-        self.allocate(kind, supersede, None)
+        self.allocate(JobSpec {
+            kind,
+            supersede,
+            stream: None,
+            resource: None,
+            purpose: purpose.into(),
+        })
     }
 
     /// Settle an externally-registered job with a JSON value. Wakes
@@ -1206,6 +1415,7 @@ impl AsyncRuntime {
                         dispatched_at: job.dispatched_at,
                         settled_at: now,
                         supersede_key: job.supersede_key.clone(),
+                        purpose: job.purpose.clone(),
                         outcome,
                     });
                 }
@@ -1243,6 +1453,7 @@ impl AsyncRuntime {
                 supersede_key: j.supersede_key.clone(),
                 cancel_requested: j.cancel.is_cancelled(),
                 is_stream: j.stream_buffer.is_some(),
+                purpose: j.purpose.clone(),
             })
             .collect();
         // Stable order: oldest first. The buffer renderer renders in
@@ -1262,10 +1473,49 @@ impl AsyncRuntime {
                     .as_millis() as u64,
                 settled_age_ms: now.saturating_duration_since(c.settled_at).as_millis() as u64,
                 supersede_key: c.supersede_key.clone(),
+                purpose: c.purpose.clone(),
                 outcome: c.outcome.clone(),
             })
             .collect();
         WorkersSnapshot { active, completed }
+    }
+
+    /// What the statusline activity indicator shows, or `None` when
+    /// nothing is in flight (worker identity Stage 1, Q#W-3).
+    ///
+    /// `None` at zero is the contract, not an optimization: the
+    /// indicator renders **no segment at all** when idle, because a
+    /// statusline element that is always present costs modeline width
+    /// forever to say "nothing is happening".
+    ///
+    /// Scans the pending table rather than reusing
+    /// [`Self::workers_snapshot`]: this runs once per visible window per
+    /// frame, and a snapshot would clone the whole completed ring that
+    /// the indicator never reads.
+    #[must_use]
+    pub fn activity_summary(&self) -> Option<ActivitySummary> {
+        let pending = self.pending.borrow();
+        let mut in_flight = 0usize;
+        let mut oldest: Option<(&Instant, &str)> = None;
+        for job in pending.values() {
+            if !matches!(job.state, PendingState::Running) {
+                continue;
+            }
+            in_flight += 1;
+            // Strictly-earlier wins, so the first job seen holds the
+            // slot against later ties. `HashMap` iteration order is
+            // arbitrary, so two jobs dispatched in the same `Instant`
+            // resolve arbitrarily — a tie between simultaneous jobs has
+            // no right answer to lose.
+            if oldest.is_none_or(|(seen, _)| job.dispatched_at < *seen) {
+                oldest = Some((&job.dispatched_at, job.purpose.as_str()));
+            }
+        }
+        let (_, purpose) = oldest?;
+        Some(ActivitySummary {
+            in_flight,
+            oldest_purpose: purpose.to_owned(),
+        })
     }
 
     /// Drain the per-stream accumulators into one batch each. Each
@@ -1876,23 +2126,25 @@ mod tests {
     fn tick_reports_resources_in_bus_arrival_order_not_allocation_order() {
         fn run(reverse: bool) -> Vec<ResourceOp> {
             let rt = AsyncRuntime::with_pool_size(1);
-            let (a, _) = rt.allocate_with_resource(
-                JobKind::FsRename,
-                None,
-                None,
-                Some(ResourceOp::Rename {
+            let (a, _) = rt.allocate(JobSpec {
+                kind: JobKind::FsRename,
+                supersede: None,
+                stream: None,
+                resource: Some(ResourceOp::Rename {
                     from: PathBuf::from("/tmp/a-from"),
                     to: PathBuf::from("/tmp/a-to"),
                 }),
-            );
-            let (b, _) = rt.allocate_with_resource(
-                JobKind::FsRemove,
-                None,
-                None,
-                Some(ResourceOp::Remove {
+                purpose: "rename a".to_owned(),
+            });
+            let (b, _) = rt.allocate(JobSpec {
+                kind: JobKind::FsRemove,
+                supersede: None,
+                stream: None,
+                resource: Some(ResourceOp::Remove {
                     path: PathBuf::from("/tmp/b-gone"),
                 }),
-            );
+                purpose: "remove b".to_owned(),
+            });
             let order = if reverse { [b, a] } else { [a, b] };
             for id in order {
                 rt.workers
@@ -1936,23 +2188,25 @@ mod tests {
     #[test]
     fn a_failed_or_cancelled_resource_job_is_not_harvested() {
         let rt = AsyncRuntime::with_pool_size(1);
-        let (failed, _) = rt.allocate_with_resource(
-            JobKind::FsRename,
-            None,
-            None,
-            Some(ResourceOp::Rename {
+        let (failed, _) = rt.allocate(JobSpec {
+            kind: JobKind::FsRename,
+            supersede: None,
+            stream: None,
+            resource: Some(ResourceOp::Rename {
                 from: PathBuf::from("/tmp/nope"),
                 to: PathBuf::from("/tmp/also-nope"),
             }),
-        );
-        let (cancelled, _) = rt.allocate_with_resource(
-            JobKind::FsRemove,
-            None,
-            None,
-            Some(ResourceOp::Remove {
+            purpose: "rename nope".to_owned(),
+        });
+        let (cancelled, _) = rt.allocate(JobSpec {
+            kind: JobKind::FsRemove,
+            supersede: None,
+            stream: None,
+            resource: Some(ResourceOp::Remove {
                 path: PathBuf::from("/tmp/never"),
             }),
-        );
+            purpose: "remove never".to_owned(),
+        });
         rt.workers
             .send(
                 ASYNC_REPLY_TOPIC,

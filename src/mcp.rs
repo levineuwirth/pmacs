@@ -175,7 +175,11 @@ impl McpServerSpec {
     }
 
     fn to_process_spec(&self) -> ProcessSpec {
-        let mut p = ProcessSpec::new(format!("mcp:{}", self.label), &self.command);
+        let mut p = ProcessSpec::new(
+            format!("mcp:{}", self.label),
+            &self.command,
+            format!("MCP server {}", self.label),
+        );
         p.args.clone_from(&self.args);
         p.cwd.clone_from(&self.cwd);
         p.env.clone_from(&self.env);
@@ -873,7 +877,9 @@ impl McpManager {
         }
         let req_id = next_request_id(client);
         let body = make_request(req_id, &method, params);
-        let (job_id, token) = self.runtime.register_external(JobKind::McpRequest, None);
+        let (job_id, token) =
+            self.runtime
+                .register_external(JobKind::McpRequest, None, format!("mcp {method}"));
         client.pending_external.insert(
             req_id,
             PendingExternal {
@@ -948,7 +954,11 @@ impl McpManager {
         // (1) Cache hit.
         if let Some(ResourceCacheState::Cached { result }) = self.resource_cache.get(&key).cloned()
         {
-            let (job_id, _token) = self.runtime.register_external(JobKind::McpRequest, None);
+            let (job_id, _token) = self.runtime.register_external(
+                JobKind::McpRequest,
+                None,
+                format!("mcp resources/read {uri} (cached)"),
+            );
             self.runtime.complete_external_ok(job_id, result);
             return Ok(job_id);
         }
@@ -959,7 +969,11 @@ impl McpManager {
         // independently.
         if let Some(ResourceCacheState::InFlight { request_id }) = self.resource_cache.get(&key) {
             let in_flight_rid = *request_id;
-            let (job_id, token) = self.runtime.register_external(JobKind::McpRequest, None);
+            let (job_id, token) = self.runtime.register_external(
+                JobKind::McpRequest,
+                None,
+                format!("mcp resources/read {uri}"),
+            );
             if let Some(p) = client.pending_external.get_mut(&in_flight_rid) {
                 p.awaiters.push(Awaiter { job_id, token });
                 return Ok(job_id);
@@ -974,7 +988,11 @@ impl McpManager {
         // (3) Cache miss: dispatch.
         let req_id = next_request_id(client);
         let body = make_request(req_id, "resources/read", json!({ "uri": uri }));
-        let (job_id, token) = self.runtime.register_external(JobKind::McpRequest, None);
+        let (job_id, token) = self.runtime.register_external(
+            JobKind::McpRequest,
+            None,
+            format!("mcp resources/read {uri}"),
+        );
         client.pending_external.insert(
             req_id,
             PendingExternal {
@@ -1063,10 +1081,13 @@ impl McpManager {
         // than referenced by `json!`); avoids a needless-pass-by-
         // value clippy complaint and matches `send_request`'s shape.
         let mut params_map = Map::new();
+        let purpose = format!("mcp tools/call {name}");
         params_map.insert("name".into(), Value::String(name));
         params_map.insert("arguments".into(), arguments);
         let body = make_request(req_id, "tools/call", Value::Object(params_map));
-        let (job_id, token) = self.runtime.register_external(JobKind::McpRequest, None);
+        let (job_id, token) = self
+            .runtime
+            .register_external(JobKind::McpRequest, None, purpose);
         client.pending_external.insert(
             req_id,
             PendingExternal {
@@ -1125,10 +1146,13 @@ impl McpManager {
         }
         let req_id = next_request_id(client);
         let mut params_map = Map::new();
+        let purpose = format!("mcp prompts/get {name}");
         params_map.insert("name".into(), Value::String(name));
         params_map.insert("arguments".into(), arguments);
         let body = make_request(req_id, "prompts/get", Value::Object(params_map));
-        let (job_id, token) = self.runtime.register_external(JobKind::McpRequest, None);
+        let (job_id, token) = self
+            .runtime
+            .register_external(JobKind::McpRequest, None, purpose);
         client.pending_external.insert(
             req_id,
             PendingExternal {
