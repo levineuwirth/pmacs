@@ -534,6 +534,61 @@ Linux stayed green.
   are valid UTF-8 and legal on APFS, which is why they were green on
   macOS all along.
 
+**Review round 4: a COPY was being reported as a RENAME.**
+
+- **Fixed at presentation, not in `kind`.** Porcelain v2's `2` record
+  covers renames **and** copies — `<Xscore>` leads with `R` or `C` —
+  and the parser already retained `score`. The diff header now reads
+  that byte and says `copied from` or `renamed from`; nothing new is
+  parsed.
+
+  **`kind` stays `"rename"` for both, deliberately.** Every *behaviour*
+  keyed on it is identical, including the two-path
+  `git diff HEAD -- <orig> <current>`, which is correct for a copy as
+  much as for a rename. Splitting the kind would force every consumer
+  present and future to spell `kind == "rename" or kind == "copy"`, and
+  an arm forgotten anywhere silently drops copies back to the one-path
+  diff — the exact regression the fix exists to avoid. Consumers
+  checked, and there are few: `diff_plan` (the only `kind == "rename"`
+  branch in the tree), `status_line_text` (keys off `row.orig`, not
+  `kind`), `g6_1`'s corpus assertion and `g6_8`'s unborn-unreachability
+  assertion. `score` has no other reader anywhere.
+
+- **Read from `score`, not from `row.x`.** The score field names
+  rename-vs-copy whichever side detected the change; `X` carries the
+  letter only for an index-side one, a worktree-side detection leaving
+  `X` a `.`.
+
+- **The status ROW is unchanged, and that is a decision.** Its `XY`
+  prefix already reads `R.` against `C.`, out of the same byte, in the
+  porcelain vocabulary every other row is read in — so the distinction
+  is already on screen and a second vocabulary beside it would be the
+  wider surface for no new fact. `g6_4b` asserts both prefixes, so the
+  claim is checked rather than asserted here.
+
+- **Parser-level coverage, stated plainly rather than implied.** Real
+  `git` emits no `2 C` record — the test MEASURES that, under
+  `-c status.renames=copies`, rather than recalling it — so the copy
+  ROW is supplied through `_deliver_status`, the seam `g6_2b`/`g6_17`/
+  `g6_21` already use. Everything downstream is real: repository,
+  panel, `d` dispatch, spawned `git diff`, rendered buffer. Both
+  crafted rows name paths that exist in the fixture, so each drives a
+  real two-path diff.
+
+- **Unborn `HEAD` needed nothing, confirmed rather than assumed.**
+  `diff_plan`'s rename branch is inside `if not unborn`, and `g6_8`
+  already pins that no `2` record can occur there — over
+  `kind == 'rename'`, which under this choice covers copies too.
+
+**Re-gated:** all steps green, acceptance now **34 tests**. Three
+mutations, each caught: header always `renamed` fails only the copy
+half; header always `copied` fails only the rename half; dropping
+`row.orig` from the steps fails the argv equality. The two `--lib`
+failures seen on an earlier run (`composition_overhead_under_ten_percent`,
+`setsid_escapee_…`, plus two perf tests) were **machine load from
+sibling worktrees** — load average 15–27 — and pass in isolation and on
+a re-run; nothing in this change touches `src/`.
+
 **Written with the lane's first commit, before the PR exists** — the
 standing correction from #171 and #215. This session it was missed on
 #224 and again on #225, both caught by review; writing it now is the

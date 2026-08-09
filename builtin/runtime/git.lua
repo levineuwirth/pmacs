@@ -409,6 +409,14 @@ end
 --- `path` is the CURRENT path --- what the panel shows and what RET
 --- visits --- and `orig` remembers where a rename or copy came from.
 --- Both are raw bytes; nothing here assumes they are text.
+---
+--- **`kind = "rename"` covers copies too, deliberately.** A `2` record
+--- is porcelain-v2's ONE two-path record and every behaviour keyed on
+--- it is the same for both classes --- notably the two-path
+--- `git diff HEAD -- <orig> <current>`. What differs is only what the
+--- user is TOLD, and that fact is already carried: `score` leads with
+--- `R` or `C` (and `xy` carries the same letter on whichever side
+--- detected it). See `is_copy` for where the two are told apart.
 function pmacs.git.parse_status(text)
   local branch = { unborn = false }
   local rows = {}
@@ -543,6 +551,12 @@ local state = {
   failure = nil,
 }
 
+-- A copy and a rename are already TOLD APART here, and by the field
+-- that tells every other row class apart: the `XY` prefix reads `R.`
+-- for one and `C.` for the other, out of the same byte `score` leads
+-- with. So this renders both the same way on purpose --- `<-` reads
+-- "came from", which is true of a copy --- rather than growing a second
+-- vocabulary beside the porcelain codes the whole panel is built on.
 local function status_line_text(row)
   local shown = pmacs.git.display_path(row.path)
   if row.orig then
@@ -906,6 +920,18 @@ pmacs.command.define {
 local SPLIT_HEADER =
   "no commits yet --- split view: staged (index) above, unstaged (worktree) below"
 
+-- True when a `2` record is a COPY rather than a rename.
+--
+-- Read from `score`, not from `row.x`. The `<Xscore>` field names
+-- rename-vs-copy whichever side detected the change, while `X` carries
+-- the letter only for an index-side one --- a worktree-side detection
+-- puts it in `Y` and leaves `X` a `.`. Absent or malformed, this says
+-- "not a copy", so the header falls back to the commoner of the two
+-- rather than to a claim it cannot support.
+local function is_copy(row)
+  return (row.score or ""):sub(1, 1) == "C"
+end
+
 -- The invocations `d` runs for `row`, as
 -- `{ { label = string|nil, args = {...}, no_index = bool }, ... }`,
 -- plus the header describing what the result shows.
@@ -924,9 +950,13 @@ local function diff_plan(row, unborn)
   if not unborn then
     if row.kind == "rename" and row.orig then
       -- Both paths, which is what lets rename detection render this as
-      -- a rename rather than an unrelated add plus delete.
+      -- a rename rather than an unrelated add plus delete. Identical for
+      -- a copy, which is why the two share a `kind` --- only the WORD
+      -- differs, because a copy left the origin where it was and saying
+      -- "renamed" of it states a different fact about the user's tree.
       return {
-        header = string.format("against HEAD (renamed from %s)",
+        header = string.format("against HEAD (%s from %s)",
+          is_copy(row) and "copied" or "renamed",
           pmacs.git.display_path(row.orig)),
         steps = { { args = { "diff", "--no-color", "HEAD", "--", row.orig, path } } },
       }

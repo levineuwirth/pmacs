@@ -599,6 +599,20 @@ So, stated plainly rather than dressed up:
   both, deleted, renamed, and **untracked** — the last because a normal
   `git diff` shows nothing there, so a missing `--no-index` case makes
   `d` silently dead exactly where it is most used.
+- **A copy is reported as a COPY, not a rename** (Q#G-7). Porcelain v2
+  folds both into the one `2` record, so `kind` stays `"rename"` for
+  both — every *behaviour* keyed on it is the same — and the
+  distinction is made where it is a distinction: the diff header reads
+  the `<Xscore>` field's leading `R`/`C` and says which one happened.
+  The status row is left alone, because its `XY` prefix already reads
+  `R.` against `C.`. Both classes are asserted, and so is the **argv**:
+  the two-path `git diff HEAD -- <orig> <current>` is right for a copy
+  and a rename alike, so a fix to what the user is *told* must not
+  reach what runs. **Parser-level, deliberately** — see the corpus
+  bullet above: real `git` emits no `2 C` record even under
+  `status.renames=copies`, so the copy ROW is supplied through
+  `_deliver_status` while the repository, the panel, the `d` dispatch
+  and the spawned diff around it are real.
 - **The untracked diff renders on exit 1**, not a failure row (Q#G-7a)
   — the case `--exit-code` semantics would otherwise break, and the
   one most likely to be "fixed" later by someone who reads exit 1 as an

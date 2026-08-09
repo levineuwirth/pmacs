@@ -200,6 +200,35 @@ fn mixed_repo(root: &Path) {
     write(root, "untracked.txt", "untracked body\n");
 }
 
+/// A repository holding **a real rename and a real copy**: `orig.txt`
+/// is `git mv`d to `moved.txt`, and `copy_src.txt` is copied to a
+/// staged `copy_dst.txt`.
+///
+/// Both are real on disk, and that is what the copy fixture is FOR:
+/// real `git` classifies the copy as an ordinary `1 A.` add (see
+/// `g6_4b`), so the `2 C.` row has to be supplied — but because both of
+/// its paths exist here, the two-path diff that row drives is a real
+/// invocation rendering a real patch.
+fn rename_and_copy_repo(root: &Path) {
+    init_repo(root);
+    write(root, "Cargo.toml", "[package]\nname = \"fixture\"\n");
+    write(
+        root,
+        "orig.txt",
+        "a line of content long enough for rename detection to score it\n",
+    );
+    write(
+        root,
+        "copy_src.txt",
+        "a line of content long enough for copy detection to score it\n",
+    );
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-qm", "init"]);
+    git(root, &["mv", "orig.txt", "moved.txt"]);
+    std::fs::copy(root.join("copy_src.txt"), root.join("copy_dst.txt")).expect("cp");
+    git(root, &["add", "copy_dst.txt"]);
+}
+
 /// The unborn fixture, enumerated from a real unborn repository rather
 /// than reasoned about: `git init`, stage three files, then edit one
 /// (`AM`), delete one (`AD`), and `git mv` one — which produces an
@@ -908,6 +937,170 @@ fn refocus_panel(s: &mut EditorState) {
         active_name(s),
         "*git-status*",
         "the panel must be focused again before the next gesture"
+    );
+}
+
+/// A **copy** row's diff header says *copied*, a **rename** row's says
+/// *renamed*, and both run the SAME two-path invocation.
+///
+/// **This is a parser/presentation test, not end-to-end copy coverage,
+/// and no test here could be.** Porcelain v2 folds renames and copies
+/// into one `2` record whose `<Xscore>` field leads with `R` or `C`, but
+/// real `git` will not emit a `2 C` record for a plain copy — not even
+/// under `status.renames=copies`, which the premise below MEASURES
+/// rather than recalls. The framing scopes "copied" to the parser level
+/// for exactly that reason (§6's witness corpus), so the copy ROW is
+/// supplied as payload bytes through `_deliver_status` — the seam
+/// `g6_2b`, `g6_17` and `g6_21` already use for rows no fixture can
+/// produce.
+///
+/// Everything downstream of the row is real: the repository, the panel,
+/// the `d` dispatch, the spawned `git diff`, and the rendered buffer.
+/// Both crafted rows name paths that EXIST in the fixture, so each one's
+/// two-path diff really runs and really renders.
+///
+/// BOTH classes are asserted. A header that said "copied" for every `2`
+/// record would satisfy the copy half on its own, so the rename half is
+/// what makes this a distinction rather than a relabelling. The argv is
+/// asserted for both as well: the two-path `git diff HEAD -- <orig>
+/// <current>` is correct for a copy and a rename alike, so a fix to what
+/// the user is TOLD must not reach what the module DOES.
+#[test]
+fn g6_4b_a_copy_says_copied_and_a_rename_says_renamed() {
+    let (_dir, root) = tempdir();
+    rename_and_copy_repo(&root);
+
+    let mut s = editor();
+    open_panel(&mut s, &root, "copy_src.txt");
+
+    // The premise, measured: even asked for copy detection explicitly,
+    // real `git` reports the copy as `1 A.` and emits no `2 C` record.
+    // Pinned here so a future reader can see WHY the row below is
+    // crafted, instead of taking it on trust.
+    let raw = git(
+        &root,
+        &[
+            "--no-optional-locks",
+            "-c",
+            "status.renames=copies",
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "-z",
+        ],
+    );
+    assert!(
+        !raw.contains("2 C"),
+        "fixture premise: real git emits no `2 C` record for a plain copy, \
+         even under status.renames=copies; it emitted:\n{raw:?}"
+    );
+    assert!(
+        panel_text(&s).contains("A.  copy_dst.txt"),
+        "…and the panel shows the real run's ordinary ADD: {}",
+        panel_text(&s)
+    );
+
+    // Now the crafted pair, delivered at the current generation.
+    let fields = [
+        "# branch.oid 16fa4d708a09af0c96212f66395c3e204049534a".to_string(),
+        "# branch.head main".to_string(),
+        format!("2 R. N... 100644 100644 100644 {H} {H} R100 moved.txt"),
+        "orig.txt".to_string(),
+        format!("2 C. N... 100644 100644 100644 {H} {H} C100 copy_dst.txt"),
+        "copy_src.txt".to_string(),
+    ];
+    let refs: Vec<&str> = fields.iter().map(String::as_str).collect();
+    exec(
+        &s,
+        &format!(
+            "pmacs.git._deliver_status(\n\
+               {{ generation = pmacs.git._generation() }},\n\
+               {{ ok = true, code = 0, stdout = {}, stderr = '' }})",
+            z_payload(&refs)
+        ),
+    );
+
+    // The ROW rendering is deliberately the same for both, because the
+    // `XY` prefix ALREADY tells them apart — `R.` against `C.`, out of
+    // the same byte the score leads with, in the porcelain vocabulary
+    // every other row in the panel is read in. Pinned so the decision
+    // not to widen row rendering is a checked claim rather than a note.
+    let text = panel_text(&s);
+    assert!(
+        text.contains("R.  moved.txt  <- orig.txt"),
+        "the rename row keeps its `R.` prefix and both paths: {text}"
+    );
+    assert!(
+        text.contains("C.  copy_dst.txt  <- copy_src.txt"),
+        "and the copy row is distinguished by its `C.` prefix: {text}"
+    );
+
+    assert_two_path_diff(&mut s, &root, "moved.txt", "orig.txt", "renamed", "copied");
+    refocus_panel(&mut s);
+    assert_two_path_diff(
+        &mut s,
+        &root,
+        "copy_dst.txt",
+        "copy_src.txt",
+        "copied",
+        "renamed",
+    );
+}
+
+/// Press `d` on the `path` row and assert its header says
+/// `"<said> from <orig>"` and never `"<not_said> from"` — over the
+/// two-path `git diff HEAD -- <orig> <path>`, asserted argv and all.
+///
+/// One helper for both classes on purpose: a copy and a rename differ
+/// in exactly one word, and everything else about them — the
+/// invocation, the patch, the buffer — has to stay identical, which is
+/// easiest to keep honest when the same code asserts it twice.
+fn assert_two_path_diff(
+    s: &mut EditorState,
+    root: &Path,
+    path: &str,
+    orig: &str,
+    said: &str,
+    not_said: &str,
+) {
+    seat_on(s, path);
+    let diff = press_d_and_wait(s, path);
+    assert!(
+        diff.contains(&format!("against HEAD ({said} from {orig})")),
+        "the {path:?} row's header must say {said:?} of {orig:?} — a copy \
+         left its origin where it was, and saying \"renamed\" of it states \
+         a different fact about the user's tree: {diff}"
+    );
+    assert!(
+        !diff.contains(&format!("{not_said} from")),
+        "…and must never say {not_said:?}: {diff}"
+    );
+    assert!(
+        !diff.contains("exited with code"),
+        "…over a diff that really ran: {diff}"
+    );
+
+    let last: Vec<String> = eval(s, "return pmacs.git._last_spawn.args");
+    let want: Vec<String> = [
+        "--no-optional-locks",
+        "-C",
+        &root.display().to_string(),
+        "diff",
+        "--no-color",
+        "HEAD",
+        "--",
+        orig,
+        path,
+    ]
+    .iter()
+    .map(|a| (*a).to_string())
+    .collect();
+    assert_eq!(
+        last, want,
+        "and the two-path invocation is the SAME for both classes — \
+         passing both paths is what makes git render the relationship \
+         rather than an unrelated add, so a fix to what the user is TOLD \
+         must not reach what the module DOES"
     );
 }
 
