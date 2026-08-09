@@ -566,11 +566,18 @@ Linux stayed green.
   wider surface for no new fact. `g6_4b` asserts both prefixes, so the
   claim is checked rather than asserted here.
 
-- **Parser-level coverage, stated plainly rather than implied.** Real
-  `git` emits no `2 C` record — the test MEASURES that, under
-  `-c status.renames=copies`, rather than recalling it — so the copy
-  ROW is supplied through `_deliver_status`, the seam `g6_2b`/`g6_17`/
-  `g6_21` already use. Everything downstream is real: repository,
+- **Parser-level coverage, stated plainly rather than implied.** The
+  copy ROW is supplied through `_deliver_status`, the seam
+  `g6_2b`/`g6_17`/`g6_21` already use.
+
+  **Scope corrected in review round 5.** This entry claimed real `git`
+  emits no `2 C` record at all, measured under
+  `-c status.renames=copies`. **The measurement was real; the claim
+  drawn from it was too broad.** `git-status(1)` documents `C` as
+  "copied (if config option status.renames is set to `copies`)", so
+  git does emit it. What the test establishes is that **this fixture**
+  — whose copy source is unchanged — yields `1 A.`. That is enough to
+  justify crafting the row and nothing more. Everything downstream is real: repository,
   panel, `d` dispatch, spawned `git diff`, rendered buffer. Both
   crafted rows name paths that exist in the fixture, so each drives a
   real two-path diff.

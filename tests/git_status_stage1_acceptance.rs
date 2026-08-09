@@ -205,10 +205,11 @@ fn mixed_repo(root: &Path) {
 /// staged `copy_dst.txt`.
 ///
 /// Both are real on disk, and that is what the copy fixture is FOR:
-/// real `git` classifies the copy as an ordinary `1 A.` add (see
-/// `g6_4b`), so the `2 C.` row has to be supplied — but because both of
-/// its paths exist here, the two-path diff that row drives is a real
-/// invocation rendering a real patch.
+/// **with this fixture's source left unchanged**, git classifies the
+/// copy as an ordinary `1 A.` add (measured in `g6_4b`; not a claim
+/// about git in general), so the `2 C.` row has to be supplied — but
+/// because both of its paths exist here, the two-path diff that row
+/// drives is a real invocation rendering a real patch.
 fn rename_and_copy_repo(root: &Path) {
     init_repo(root);
     write(root, "Cargo.toml", "[package]\nname = \"fixture\"\n");
@@ -943,16 +944,28 @@ fn refocus_panel(s: &mut EditorState) {
 /// A **copy** row's diff header says *copied*, a **rename** row's says
 /// *renamed*, and both run the SAME two-path invocation.
 ///
-/// **This is a parser/presentation test, not end-to-end copy coverage,
-/// and no test here could be.** Porcelain v2 folds renames and copies
-/// into one `2` record whose `<Xscore>` field leads with `R` or `C`, but
-/// real `git` will not emit a `2 C` record for a plain copy — not even
-/// under `status.renames=copies`, which the premise below MEASURES
-/// rather than recalls. The framing scopes "copied" to the parser level
-/// for exactly that reason (§6's witness corpus), so the copy ROW is
-/// supplied as payload bytes through `_deliver_status` — the seam
-/// `g6_2b`, `g6_17` and `g6_21` already use for rows no fixture can
-/// produce.
+/// **This is a parser/presentation test, not end-to-end copy coverage.**
+/// Porcelain v2 folds renames and copies into one `2` record whose
+/// `<Xscore>` field leads with `R` or `C`.
+///
+/// **Scope of the premise, narrowed after review.** An earlier version
+/// of this comment said real `git` "will not emit a `2 C` record — not
+/// even under `status.renames=copies`". **That is too strong and git's
+/// own documentation contradicts it**: `git-status(1)` lists `C` as
+/// "copied (if config option status.renames is set to `copies`)".
+///
+/// What the premise below actually MEASURES is narrower and is all it
+/// claims: **for THIS fixture — a copy whose source is left unchanged —
+/// git reports `1 A.` and emits no `2 C` record**, under
+/// `-c status.renames=copies`. It is measured rather than recalled, but
+/// it is a fact about this fixture, not about `git` in general. No
+/// mechanism is asserted here for *why* an unchanged source is not
+/// offered as a copy candidate; that was not established.
+///
+/// So the copy ROW is supplied as payload bytes through
+/// `_deliver_status` — the seam `g6_2b`, `g6_17` and `g6_21` already use
+/// — because this fixture cannot produce one, which is a weaker and
+/// true reason than the one first given.
 ///
 /// Everything downstream of the row is real: the repository, the panel,
 /// the `d` dispatch, the spawned `git diff`, and the rendered buffer.
@@ -973,10 +986,15 @@ fn g6_4b_a_copy_says_copied_and_a_rename_says_renamed() {
     let mut s = editor();
     open_panel(&mut s, &root, "copy_src.txt");
 
-    // The premise, measured: even asked for copy detection explicitly,
-    // real `git` reports the copy as `1 A.` and emits no `2 C` record.
-    // Pinned here so a future reader can see WHY the row below is
-    // crafted, instead of taking it on trust.
+    // The premise, measured — and note what it does and does not say.
+    // For THIS fixture, whose copy source is left unchanged, git reports
+    // `1 A.` and emits no `2 C` record even when asked for copy
+    // detection explicitly. That is a fact about this fixture. `git`
+    // DOES emit `C` in general — `git-status(1)` documents it as
+    // "copied (if config option status.renames is set to `copies`)" —
+    // so this assertion must not be read as proving otherwise.
+    // Pinned so a future reader can see WHY the row below is crafted,
+    // instead of taking it on trust.
     let raw = git(
         &root,
         &[
@@ -991,8 +1009,10 @@ fn g6_4b_a_copy_says_copied_and_a_rename_says_renamed() {
     );
     assert!(
         !raw.contains("2 C"),
-        "fixture premise: real git emits no `2 C` record for a plain copy, \
-         even under status.renames=copies; it emitted:\n{raw:?}"
+        "fixture premise: for THIS fixture (copy source unchanged), git \
+         emits no `2 C` record even under status.renames=copies. This is \
+         a claim about the fixture, not about git in general — git does \
+         document `C` as copied under that setting. It emitted:\n{raw:?}"
     );
     assert!(
         panel_text(&s).contains("A.  copy_dst.txt"),

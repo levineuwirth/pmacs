@@ -608,11 +608,21 @@ So, stated plainly rather than dressed up:
   `R.` against `C.`. Both classes are asserted, and so is the **argv**:
   the two-path `git diff HEAD -- <orig> <current>` is right for a copy
   and a rename alike, so a fix to what the user is *told* must not
-  reach what runs. **Parser-level, deliberately** — see the corpus
-  bullet above: real `git` emits no `2 C` record even under
-  `status.renames=copies`, so the copy ROW is supplied through
-  `_deliver_status` while the repository, the panel, the `d` dispatch
-  and the spawned diff around it are real.
+  reach what runs. **Parser-level, deliberately** — the copy ROW is
+  supplied through `_deliver_status` while the repository, the panel,
+  the `d` dispatch and the spawned diff around it are real.
+
+  **The reason, narrowed after review.** This bullet used to say real
+  `git` emits no `2 C` record "even under `status.renames=copies`".
+  **That is too strong, and git's own documentation contradicts it** —
+  `git-status(1)` lists `C` as *"copied (if config option
+  status.renames is set to `copies`)"*. What the test measures is
+  narrower: **for its fixture, whose copy source is left unchanged**,
+  git reports `1 A.`. That is a fact about the fixture, and it is
+  sufficient reason to craft the row — a weaker and true justification
+  in place of a stronger false one. No mechanism is claimed for why an
+  unchanged source is not offered as a candidate; that was never
+  established.
 - **The untracked diff renders on exit 1**, not a failure row (Q#G-7a)
   — the case `--exit-code` semantics would otherwise break, and the
   one most likely to be "fixed" later by someone who reads exit 1 as an
