@@ -265,7 +265,7 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
-## `scripts/gate --protocol` build step — IMPLEMENTED, no PR yet
+## `scripts/gate --protocol` build step — IMPLEMENTED at `49bc141`, then RE-OPENED by review
 
 **Written with the lane's first commit**, per the standing correction
 from #171 and #215.
@@ -275,10 +275,24 @@ from #171 and #215.
 authoritative tip** — the ref, not a SHA. Recover with
 `git fetch githubsucks && git checkout gate-protocol-build`.
 
-- **Framing `docs/gate-protocol-build-framing.md`, revision 3,
-  APPROVED and implemented.** Narrow by design: one missing step in one
-  script, plus the boundary question that let it go missing. No `src/`,
-  no protocol, no feature work.
+- **Framing `docs/gate-protocol-build-framing.md`, revision 5.** The
+  fix itself is implemented and green at `49bc141`; **the regression
+  witness is NOT, and that is an open blocker.** Narrow by design: one
+  missing step in one script, plus the boundary question that let it go
+  missing. No `src/`, no protocol, no feature work.
+- **OPEN BLOCKER — the witnesses do not reach the step they name.**
+  `--print-plan` **strips names** before printing, so the ordering
+  assertion sees only commands; `--self-test` **hardcodes**
+  `build-crdt` inside its own synthetic plan. Review demonstrated the
+  consequence: **renaming the real build step to `sweep-crdt` left both
+  tests passing.** So this lane currently ships without the regression
+  guard it was created to provide. §7 now requires **both** real
+  emitter pairs — `build-crdt` and `sweep-crdt`, name *and* exact
+  command — because the hole is symmetric and revision 4 closed only
+  half of it. The synthetic `--self-test` stays: it witnesses the
+  *runner* (failure naming, `FAILED:` list, log paths, non-zero exit,
+  and continuation via the sentinel), which is a different thing from
+  attributing the real step, and it may no longer stand in for it.
 - **The defect, as found.** `--protocol` adds the CRDT workspace sweep,
   whose documented precondition is `cargo build --workspace
   --no-default-features --features luajit,crdt` — documented in handoff
@@ -340,11 +354,59 @@ authoritative tip** — the ref, not a SHA. Recover with
   cargo test …` reports a *build* failure under the name `sweep-crdt`.
   Plus **`--self-test`** (Q#GR-5): a hardcoded three-line synthetic plan
   — pass, fail-named-`build-crdt`, **pass sentinel** — driven through
-  the *real* runner loop, which is what makes attribution *and*
-  continuation observable at all. `PLAN_FILE` is deliberately **not**
+  the *real* runner loop, which is what makes the **runner's** failure
+  naming *and* continuation observable at all. (It does **not** witness
+  the real step's name — see the round-two entry below, which is where
+  that gap was found and closed.) `PLAN_FILE` is deliberately **not**
   injectable: that would turn the runner's `eval` into a general command
   executor, the same defect this script's review caught in
   `--acceptance`.
+- **THE WITNESS DID NOT REACH THE STEP — found in review of the
+  implementation, closed at `677fd25`.** The lane shipped without the
+  regression guard it was created to provide, because **neither witness
+  could see a name**: `--print-plan` renders `emit_plan | cut -f2-`, so
+  the ordering test compared *commands* with the names cut off, and
+  `--self-test` hardcodes the string `build-crdt` in its **own
+  synthetic** plan, so it proves things about the runner and nothing
+  about the real emitter. Review demonstrated it directly: **renaming
+  the real build step to `sweep-crdt` left both tests passing** — a plan
+  that would report a build failure under the sweep's name, sitting
+  green, which is the exact misattribution the separate step exists to
+  prevent.
+
+  **The fix is `--print-plan-named`**: a second *rendering* of the same
+  `emit_plan`, printing the `name<TAB>command` text the runner reads
+  back from `PLAN_FILE`, asserted by **whole-line equality** so name and
+  command are pinned together, and `sweep-crdt`'s pair asserted too
+  (asserting only the build's name leaves the identical hole open in the
+  other direction). **`PLAN_FILE` remains uninjectable** — a test that
+  supplied the runner's plan would turn its `eval` into a general
+  command executor, the defect the `--acceptance` refusal exists to
+  prevent — and **`--self-test` stays**, witnessing the *runner* (failure
+  naming, `FAILED:`, log paths, non-zero exit, continuation via the
+  sentinel), which it may no longer *stand in for* attribution of the
+  real step. A companion test pins `--print-plan` as that rendering
+  minus its names, so the two cannot drift into asserting a name the
+  runner never uses. Both new tests are on the **no-gates** paths.
+
+  **Mutated individually, each now red** (the first is the one the
+  previous round passed): build renamed `build-crdt` → `sweep-crdt`;
+  sweep renamed `sweep-crdt` → `crdt-sweep`; build features
+  `luajit,crdt` → `luajit`; build emitted **after** the sweep. Suite is
+  20 tests.
+- **AUDITED FOR THE SAME DEFECT ELSEWHERE, and one instance is left
+  open deliberately.** Renaming **every other** plan step — `fmt`,
+  `clippy`, `lib`, `m4`, `gpu`, `sweep`, `diff-check`,
+  `acceptance-<suite>` — leaves all 20 tests green: no test asserts any
+  step name but `build-crdt` and `sweep-crdt`. For most that is only a
+  log filename and a `FAILED:` entry. **`sweep` is not**: the runner's
+  end-of-run listing globs `"$LOGDIR"/*-sweep.log` and
+  `*-sweep-crdt.log`, so renaming that step silently empties the *"read
+  these, do not re-run and grep"* listing that is the U2/U3 remedy, with
+  the suite still green. **Not closed here**: the listing only exists on
+  the *run* path, and every test in this file is deliberately no-gates,
+  so there is no cheap witness for it — recorded rather than papered
+  over.
 - **Blocks PR #228 (discovery Stage 2).** That lane's `--protocol`
   result needs re-establishing on a fresh target dir under the repaired
   script. Deliberately **not** folded into that feature branch, and it
@@ -378,12 +440,13 @@ authoritative tip** — the ref, not a SHA. Recover with
   registry row; noted here for whoever sees it next.
 - **Gates:** `scripts/gate --acceptance gate_script_acceptance`. Note
   the recursion — this lane edits the script that runs its own gates,
-  so `--print-plan`, `--help` and `--self-test` were also checked by
-  hand after each edit: a change that breaks the script cannot be
-  reported honestly by the script. The assertions were **mutation
-  tested**: wrong features, wrong position, unconditional emission,
-  an aborting runner, and the build folded into `sweep-crdt` each fail
-  the suite.
+  so `--print-plan`, `--print-plan-named`, `--help` and `--self-test`
+  were also checked by hand after each edit: a change that breaks the
+  script cannot be reported honestly by the script. The assertions were
+  **mutation tested**: wrong features, wrong position, unconditional
+  emission, an aborting runner, the build folded into `sweep-crdt`, and
+  — added in the second round — a **rename of either** the build or the
+  sweep step each fail the suite.
 
 ## QoL arc retirement — PR #224 OPEN (docs only)
 

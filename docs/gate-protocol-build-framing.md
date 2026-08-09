@@ -1,8 +1,9 @@
 # `scripts/gate --protocol` — the build its sweep depends on
 
-**Status: revision 4. APPROVED and IMPLEMENTED at `49bc141`; one
-regression-witness gap found in review of that implementation remains
-open (Q#GR-5).**
+**Status: revision 5. APPROVED and IMPLEMENTED at `49bc141`. The
+regression-witness gap found in review of that implementation is
+CLOSED at `677fd25` — Q#GR-5's criterion is now witnessed against the
+REAL emitter rather than around it.**
 
 *(Revisions 1-3 read "Pre-implementation. Awaiting approval" while the
 ledger recorded this lane as approved and implemented — the exact
@@ -96,9 +97,10 @@ rather than an assumption the fix rests on.
 `sweep-crdt` and only under `--protocol`***, running the invocation
 handoff §5 names.
 
-- **A named step, not a silent prelude.** It appears in
-  `--print-plan`, gets its own numbered log alongside the others, and
-  fails the suite with its own name if the build fails.
+- **A named step, not a silent prelude.** It gets its own numbered log
+  alongside the others and fails the suite under its own name.
+  (It does **not** "appear in `--print-plan`" — that mode prints
+  commands only. §7 says what witnesses the name.)
 - **Not folded into the `sweep-crdt` command.** `cargo build … && cargo
   test …` would make a *build* failure appear under the name `sweep-crdt`
   in the failure list — a wrong attribution in the one place the script
@@ -254,15 +256,25 @@ named so it is not mistaken for an oversight.
 
 ## 7. Verification
 
-- **`--print-plan --protocol` emits `build-crdt` immediately before
-  `sweep-crdt`, carrying the EXACT command.** All three asserted —
-  presence, position, and the literal
-  `cargo build --workspace --no-default-features --features luajit,crdt`.
-  Name and position alone would pass on a step that builds the wrong
-  feature set, which is the failure this lane is fixing: the crdt sweep
-  needs *those* features, and a `build-crdt` that ran plain
-  `cargo build` would leave the gate exactly as unsound while looking
-  repaired.
+- **`--print-plan --protocol` witnesses COMMAND and ORDER only** — it
+  strips names before printing, so it can show that the build command
+  appears immediately before the crdt sweep command and nothing about
+  which step is called what. Earlier revisions of this section said
+  named steps "appear in `--print-plan`"; they do not, and that wording
+  is what let the attribution witness drift away from the step it
+  names.
+- **BOTH real emitter pairs are asserted, explicitly and separately:**
+  - `("build-crdt", "cargo build --workspace --no-default-features --features luajit,crdt")`
+  - `("sweep-crdt", "cargo test --workspace --features crdt --no-fail-fast -- --skip basedpyright")`
+
+  Both, because the rename hole is symmetric: revision 4 closed it for
+  the build and left the sweep able to be renamed just as invisibly.
+  Asserted from the emitter, where the name still exists.
+
+  The **command** half matters as much as the name: a `build-crdt`
+  running plain `cargo build` would leave the gate exactly as unsound
+  while looking repaired, because the crdt sweep needs *those*
+  features.
 - **`--print-plan` WITHOUT `--protocol` does not emit it** (subject to
   Q#GR-1 — if the default sweep turns out to need the binary too, this
   assertion inverts and §4 changes with it).
@@ -285,6 +297,20 @@ named so it is not mistaken for an oversight.
   The synthetic failure/continuation test stays — it tests the runner,
   which is a different thing — but it can no longer stand in for
   attribution of the actual step.
+
+  **Landed at `677fd25` as `--print-plan-named`**: a second *rendering*
+  of the same `emit_plan`, printing the `name<TAB>command` text the
+  runner reads back from `PLAN_FILE`, asserted by **whole-line
+  equality** so the name and the command are pinned together.
+  **`sweep-crdt`'s own pair is asserted too** — asserting only the
+  build's name leaves the identical hole open in the other direction.
+  `PLAN_FILE` stays uninjectable, and a companion test pins that
+  `--print-plan` *is* that rendering minus its names, so the two cannot
+  drift and the assertion cannot come to pin a name the runner never
+  uses. **Mutation tested, each individually red:** the build renamed
+  to `sweep-crdt` (**the one the previous round passed**), the sweep
+  renamed, the build's features changed, the build emitted after the
+  sweep.
 - **The suite CONTINUES past a failed gate** (Q#GR-2) — the sentinel
   step after `build-crdt` in the synthetic plan has its own log.
   **Revision 2's two-line plan could not assert this**: with the
