@@ -265,6 +265,51 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
+## Destination capture (Q#JR14 generalization) — BRANCHED, framing in review
+
+**Written with the lane's first commit**, per the standing correction
+from #171 and #215.
+
+**Branch `destination-capture`**, base `githubsucks/main` @ `4bc55e8`
+(the #225 merge). **`githubsucks/destination-capture` is the
+authoritative tip** — the ref, not a SHA. Recover with
+`git fetch githubsucks && git checkout destination-capture`.
+
+- **Framing `docs/destination-capture-framing.md`, revision 1**, in
+  review.
+- **A PREREQUISITE LANE. PR #227 (git Stage 1) blocks on it.** #227's
+  P1a review finding is why it exists: git's async completions mutate
+  and display UI without capturing the initiating frontend
+  (`builtin/runtime/git.lua:609`, `:854`), so a result surfaces in
+  whichever frontend is active when git exits.
+- **The mechanism exists but is not Lua-reachable.**
+  `pmacs.window.commit_to` takes a `DirectoryDestinationLua`, which is
+  **nonconstructible from Lua** by design
+  (`src/lua_bindings/mod.rs:4256`) and minted only inside the
+  `path.open-directory` listener dispatch (`src/editor.rs:1311`) from a
+  `pub(crate)` capture (`:1241`). So no async Lua continuation outside
+  a directory open can say where its result belongs.
+- **Scope:** a Lua-reachable capture, a generic rename
+  (`DirectoryDestination` → `ViewDestination`, 8 references across 4
+  files — counted, not estimated), and the preflight question below.
+  **No adopter**: git's adoption is #227's work after this lands, since
+  a prerequisite that converts its own first consumer cannot be
+  reviewed separately from it.
+- **The substantive question (Q#DC-2)** is that git's two continuations
+  differ in kind. `*git-status*` goes to the **bottom panel**
+  (`listview.open` defaults `display` to `"panel"`,
+  `builtin/runtime/listview.lua:550`); `*git-diff*` replaces a
+  **document** window. `commit_to`'s stale-intent check (Q#JR14c) is
+  right for the second and wrong for the first — the panel never
+  touches the captured window's buffer, so refusing on its change is a
+  refusal unrelated to what the continuation does. One shape
+  over-refuses the panel or under-checks the document.
+- **Stop signal recorded in the framing:** if any existing dired test
+  needs editing, the generalization changed Journey Stage 1a's
+  semantics, and that is cause to stop rather than to adjust the test.
+- **Gates:** `scripts/gate --acceptance <the new suite>` plus dired's.
+  No `--protocol` — core and Lua bindings only.
+
 ## LSP LaTeX coverage — IMPLEMENTED, gates green, no PR yet
 
 **Written with the lane's first commit**, per the standing correction
@@ -603,6 +648,7 @@ authoritative tip** — the ref, not a SHA. Recover with
   — added in the second round — a **rename of either** the build or the
   sweep step each fail the suite.
 ||||||| parent of 72bbb96 (docs: LSP LaTeX coverage framing revision 2, on a branch at last)
+||||||| parent of ac1d6cc (docs: frame a general destination capture (revision 1))
 
 ## QoL arc retirement — PR #224 OPEN (docs only)
 
