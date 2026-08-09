@@ -570,19 +570,24 @@ the lane's only `pmacs-gpu` addition is the arm that went red.
 The next agent to touch this row should reproduce at 1-in-10 and
 instrument which side closes the pipe, rather than re-running for green.
 
-### U2 — `m6_1_pty_raw_mode_disables_kernel_echo`, one local occurrence
+### U2 — `m6_1_pty_raw_mode_disables_kernel_echo`, SECOND occurrence; fragments captured
 
-Has a selector, which U1 lacks — but still no fragments, so it cannot
-be matched either. Recorded so a recurrence is recognisable.
+Recorded first with a selector but **no fragments**, so it could not be
+matched. The second occurrence (2026-08-09, worker-identity lane) was
+read from the durable gate log rather than a filtered rerun, so the row
+is now matchable — and the fragment changes what the failure looks
+like.
 
 | field | value |
 |---|---|
 | **selector** | `--lib process::tests::m6_1_pty_raw_mode_disables_kernel_echo` |
 | **job / flavor** | local (Linux), during `cargo test --tests --no-fail-fast` — the lib target alongside a full PTY-heavy corpus |
-| **required fragments** | **none captured** — output was filtered to the `FAILED` line |
-| **status** | **new incident, unreproduced** |
-| **what IS established** | it failed once (`1916 passed; 1 failed`), in no registry row, under a full-corpus run |
-| **what is NOT** | any mechanism. Not reproduced in a later full `--tests --no-fail-fast` sweep (108 targets, exit 0) nor in 3 isolated `--lib` runs (1917/0 each) |
+| **required fragments** | `panicked at src/process.rs:3953` · `raw mode should disable echo; stty -a output was: ""` — **captured on occurrence 2** |
+| **status** | **two occurrences, load-correlated; the diff is EXCLUDED on occurrence 2** |
+| **what IS established** | Occurrence 1: failed once (`1916 passed; 1 failed`) under a full-corpus run. Occurrence 2: `1919 passed; 1 failed` in `scripts/gate` step `03-lib` at load ~21, and **the tree contained ZERO code change since a 13/13 green run on the same lane** — the only delta was three lines of `docs/active-work.md`. A markdown edit cannot break a PTY test, so the change under test is ruled out as a cause rather than merely doubted. Passes isolated (`1 passed`, 0.01s) |
+| **what the fragment REFRAMES** | `stty -a` returned the **empty string**, not a wrong mode. So this is not "raw mode failed to disable echo" — it is `stty` producing **no output at all**, which points at PTY/spawn readiness under load rather than at termios handling. The assertion's own message is misleading on this point, and anyone diagnosing it from the message alone will look in the wrong place |
+| **what is NOT** | any mechanism, still. Not reproduced in a later full sweep (108 targets, exit 0), nor in 3 isolated `--lib` runs (1917/0 each), nor in the isolated rerun after occurrence 2. Two occurrences establish intermittence and a load correlation; neither establishes cause |
+| **discriminating control if a third lands** | run the selector in a loop under synthetic load with `stty -a` output logged on every iteration — the open question is whether `stty` is empty *every* time it fails, which would separate a readiness race from a termios one |
 | **rival explanation not excluded** | leaked `pmacs --daemon` processes, which the handoff names as a standing confound for any load-sensitive local red |
 
 ### U3 — the R7 selector again, fragments lost the same way U2's were
