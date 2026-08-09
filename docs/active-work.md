@@ -269,7 +269,7 @@ census.
 
 **PR #227** — https://github.com/levineuwirth/pmacs/pull/227. Opened
 2026-08-09 at `4002734`, after the framing was approved at revision 5
-and the full gate suite went green. **Now at `39ad43d`, MERGE-BLOCKED.**
+and the full gate suite went green. **Now at `4b82d1e`, MERGE-BLOCKED.**
 
 **Review round 1 found three blockers. Two are fixed; the third is why
 this lane is blocked.**
@@ -446,6 +446,84 @@ chain through `assert_root_resolves_whole` rather than keeping a second
 copy of it. Mutation-verified: restoring `\r?\n$` fails `g6_14d` at
 `<tmp>/trailing` against `<tmp>/trailing\r` while `g6_14c` still passes,
 which is exactly the byte separating the two fixes.
+
+**CI round: a DETERMINISTIC macOS failure, in the FIXTURE rather than in
+the product.** Both macOS legs of the matrix (LuaJIT and Lua 5.4) failed
+`g6_2` identically at
+https://github.com/levineuwirth/pmacs/actions/runs/31324683235 while
+Linux stayed green.
+
+- **DURABLE PORTABILITY FACT, and this project will hit it again:
+  macOS cannot hold a non-UTF-8 filename.** APFS and HFS+ validate
+  pathnames as UTF-8 and reject an invalid one at the syscall with
+  **errno 92, `EILSEQ`, "Illegal byte sequence"**. Linux's VFS treats a
+  filename as opaque bytes and accepts it. So `std::fs::write` on
+  `bad\xFF.txt` is a Linux-only fixture, and any test that builds one is
+  red on macOS by construction, not by flake.
+
+  It goes further than creation: the name cannot be reached *around* the
+  filesystem either. Putting it only in the index (`update-index
+  --index-info` plus `write-tree`, never touching the worktree) does not
+  help, because `git status` lstats every index entry and on macOS that
+  lstat fails with `EILSEQ` rather than `ENOENT` — which git reports on
+  stderr and **skips**, so the row would be absent rather than
+  unrepresentable. **There is no macOS arrangement in which real `git
+  status` names a non-UTF-8 path at all.**
+
+- **Fixed (`4b82d1e`) by splitting the coverage along the line the
+  platform actually draws, NOT by `#[cfg]`-skipping the behaviour.**
+  A behaviour that vanishes on one platform is how a boundary stops
+  being tested; the behaviour now runs everywhere and only the
+  *provenance* is gated.
+
+  | test | what it witnesses | where it runs |
+  |---|---|---|
+  | `g6_2` | parse + display, driven from the **payload bytes** — no repository, no filesystem | every platform |
+  | `g6_2b` | RET and `d` **refusing with a message**, over a real repository, with the row delivered through `_deliver_status` | every platform |
+  | `g6_2c` | that real `git` emits those bytes at all | **Linux only**, loudly named and commented |
+
+  The gestures are exercised against a **real** repository, panel,
+  keymap and dispatch; only the row bytes are supplied, through the same
+  `_deliver_status` seam `g6_17` and `g6_21` already use because a
+  chosen completion is not otherwise expressible. `g6_2b` also gained
+  the **rename-ORIGIN** case, which the old single test never had: `d`
+  passes the origin to `git diff` as an argument too, so a check written
+  on `row.path` alone would let it through.
+
+  The one link no payload can witness — that the spawn pipe carries
+  bytes rather than text — is **structural**: `event_to_lua` in
+  `src/lua_bindings/mod.rs` builds the stdout chunk with
+  `lua.create_string(bytes)`, and `git.lua` only concatenates chunks.
+
+- **New fixture mechanism: `lua_bytes` / `z_payload_bytes`.** A `-z`
+  payload whose paths are not UTF-8 **cannot be spelled as a Rust
+  `&str`**, so it is assembled as raw bytes and handed to Lua as one
+  literal, with every non-printable byte spelled as a **three-digit**
+  decimal escape. Three digits always: Lua's decimal escape consumes up
+  to three, so a shorter one swallows the digit after it — the same
+  hazard the `{:?}`-on-NUL note above records, removed rather than
+  worked around.
+
+- **Verified here vs. reasoned about.** Verified locally: the full gate
+  suite green; 33/33 under **both** LuaJIT and Lua 5.4; the two portable
+  tests still green with `g6_2c` compiled out (a stand-in for the macOS
+  build, with no dead-code warnings left behind); three mutations each
+  caught by `g6_2b` — removing the RET check, removing the `d` check,
+  and removing only the origin clause. Reasoned about, not executed: the
+  macOS `EILSEQ` behaviour itself and the `lstat`-vs-`ENOENT` argument
+  above. What is *no longer* reasoned about is the important part —
+  after this change nothing macOS runs depends on a filesystem accepting
+  such a name.
+
+- **LATENT SIBLING, out of scope and NOT red today:**
+  `tests/gpu_invocation_acceptance.rs:621` writes
+  `OsString::from_vec(vec![b'r', b'a', b'w', 0xff])` to disk. It sits
+  inside `#[cfg(feature = "crdt")] mod crdt`, and the `crdt-test` job is
+  **ubuntu-only**, so it never runs on macOS. It would fail the same way
+  the day that job gains a macOS leg. No other test in the tree builds a
+  platform-hostile path: `g6_14c`/`g6_14d`'s `nl\nroot` and `trailing\r`
+  are valid UTF-8 and legal on APFS, which is why they were green on
+  macOS all along.
 
 **Written with the lane's first commit, before the PR exists** — the
 standing correction from #171 and #215. This session it was missed on
