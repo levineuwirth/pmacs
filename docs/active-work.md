@@ -265,10 +265,61 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
-## `scripts/gate --protocol` build step — IMPLEMENTED at `49bc141`, RE-OPENED by review, witness CLOSED at `677fd25`. No PR yet
+## LSP LaTeX coverage — BRANCHED, framing in review
 
-**PR #229 OPEN** — https://github.com/levineuwirth/pmacs/pull/229,
-opened at `93d557a`. **Held, not merged.** Its first CI run went red on
+**Written with the lane's first commit**, per the standing correction
+from #171 and #215.
+
+**Branch `lsp-latex-coverage`**, base `githubsucks/main` @ `4bc55e8`
+(the #225 merge). **`githubsucks/lsp-latex-coverage` is the
+authoritative tip** — the ref, not a SHA. Recover with
+`git fetch githubsucks && git checkout lsp-latex-coverage`.
+
+- **Framing `docs/lsp-language-coverage-framing.md`, revision 2**, in
+  review. **Revision 1 was UNTRACKED on `main` in one checkout** and
+  therefore did not travel; committing it here is the fix.
+- **Scope: one `pmacs.lsp.config.latex` entry plus its root resolver.**
+  `texlab` 5.25.1 is installed and unused; a `.tex` buffer highlights
+  correctly and offers no completion, diagnostics, or go-to-definition.
+- **Revision 2 found Slice 1 is SMALLER than revision 1 framed.** The
+  proposed `.tex`/`.latex`/`.sty`/`.cls` filetype mappings are
+  redundant: the grammar already carries exactly those extensions
+  (`src/syntax.rs:1111`), grammar-extension detection sits **ahead** of
+  the LSP filetype map in the precedence chain
+  (`docs/latex-grammar-math-substrate-framing.md:166-171`), and
+  `lsp.lua:267-270` calls that map "mainly the LSP-only fallback". The
+  two systems cannot disagree, because the grammar's extension list is
+  what drives detection.
+- **Two other corrections.** `haskell-language-server` **is** installed
+  on this machine — revision 1 said it was not, which was the whole
+  basis of its Slice 1 / Slice 2 split. And Q#LX3's deferral argument
+  read `COHERENCE.md:1669` ("first slice in flight") when `:124` and
+  `:867` both record multi-root affinity as **merged (#161)**; that
+  line contradicts the same document twice and wants a separate fix.
+- **Q#LX2 (the LaTeX root) is answered, with a caveat that must be
+  discharged first.** An upward marker walk — `.texlabroot`,
+  `latexmkrc`/`.latexmkrc`, `Tectonic.toml`, then the file's own
+  directory — through `config.latex.root`, which already accepts a
+  resolver function (`lsp.lua:543`). **`.git` is deliberately excluded**:
+  a repo root is the wrong answer for LaTeX, and it is the one place
+  copying the other fourteen entries' instinct is actively wrong.
+  **Whether texlab honours `.texlabroot` is UNVERIFIED** — only its
+  version and CLI were checked, and the CLI exposes no such surface.
+  Confirm against a live session before implementing; if it is not a
+  real marker, the walk starts at `latexmkrc`.
+- **Gates:** `scripts/gate --acceptance <the new suite>`. No
+  `--protocol` — a config entry, no wire.
+
+## `scripts/gate --protocol` build step — **MERGED as #229** (`7cf4653`)
+
+**MERGED as PR #229** — https://github.com/levineuwirth/pmacs/pull/229,
+at `3b10f9d`, 14/14 CI green including both macOS legs. `main` is now
+`7cf4653`. *(This lane still awaits Rule 4 retirement — its durable
+facts belong in the handoff before the entry is removed. Corrected here
+only because the previous text said "Held, not merged", which the merge
+falsified; the retirement itself is not this lane's work.)*
+
+**History, retained:** opened at `93d557a`. Its first CI run went red on
 `Test (macos-latest / lua54)`; the rerun turned that selector green and
 went red on a **different** one. Both are recorded as **U4** and **U5**
 in `docs/ci-red-signatures.md`, as separate incidents per the matching
@@ -466,6 +517,7 @@ authoritative tip** — the ref, not a SHA. Recover with
   emission, an aborting runner, the build folded into `sweep-crdt`, and
   — added in the second round — a **rename of either** the build or the
   sweep step each fail the suite.
+||||||| parent of 72bbb96 (docs: LSP LaTeX coverage framing revision 2, on a branch at last)
 
 ## QoL arc retirement — PR #224 OPEN (docs only)
 
