@@ -265,7 +265,7 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
-## `scripts/gate --protocol` build step — BRANCHED, framing in review
+## `scripts/gate --protocol` build step — IMPLEMENTED, no PR yet
 
 **Written with the lane's first commit**, per the standing correction
 from #171 and #215.
@@ -275,15 +275,15 @@ from #171 and #215.
 authoritative tip** — the ref, not a SHA. Recover with
 `git fetch githubsucks && git checkout gate-protocol-build`.
 
-- **Framing `docs/gate-protocol-build-framing.md`, revision 3**, in
-  review. Narrow by design: one missing step in one script, plus the
-  boundary question that let it go missing. No `src/`, no protocol, no
-  feature work.
-- **The defect.** `--protocol` adds the CRDT workspace sweep, whose
-  documented precondition is `cargo build --workspace
-  --no-default-features --features luajit,crdt` (handoff §5:532-535).
-  The plan emitter (`scripts/gate:187-204`) has **no build step at
-  all** — read from the source, not inferred from the failure.
+- **Framing `docs/gate-protocol-build-framing.md`, revision 3,
+  APPROVED and implemented.** Narrow by design: one missing step in one
+  script, plus the boundary question that let it go missing. No `src/`,
+  no protocol, no feature work.
+- **The defect, as found.** `--protocol` adds the CRDT workspace sweep,
+  whose documented precondition is `cargo build --workspace
+  --no-default-features --features luajit,crdt` — documented in handoff
+  **§5** at the time, **§3** now. The plan emitter had **no build step
+  at all** — read from the source, not inferred from the failure.
 - **Why it was latent, and why that makes it urgent rather than tidy.**
   Before #225 every worktree shared one `CARGO_TARGET_DIR`, which
   almost always already held a `pmacs-gpu` binary, so the precondition
@@ -308,14 +308,52 @@ authoritative tip** — the ref, not a SHA. Recover with
   build any automated check for prose drift. This entry recorded that
   superseded decision until now; a recovering machine reading the stale
   version would have rebuilt revision 1's wrong boundary.
-- **Q#GR-1 must be settled by OBSERVATION before implementation** —
-  whether the default sweep needs the binary too. The entire defect is
-  a precondition nobody checked; establishing its replacement by
-  reading would repeat the error at one remove.
+- **Q#GR-1 — SETTLED BY OBSERVATION, 2026-08-09, before any fix was
+  written.** On a **disposable** target directory (never a live lane's),
+  with `debug/pmacs-gpu` asserted **absent before each run** as a
+  recorded precondition, each sweep run **alone** from that same cold
+  state so neither could have built the binary for the other:
+
+  | sweep | exit | result | `pmacs-gpu` after |
+  |---|---|---|---|
+  | default | **0** | green, 114 test targets | **still absent** |
+  | crdt | **101** | exactly **12** failures, all `gpu_invocation_acceptance::crdt::*`, all *"build pmacs-gpu before this acceptance suite"* | still absent |
+
+  So framing §3's inference **holds** and §4's *"only under
+  `--protocol`"* is correct — the default sweep never builds the binary
+  and never needs it. **Mechanism, now established rather than
+  guessed:** `pmacs-gpu` has no `tests/` directory, so cargo never
+  uplifts its bin to `debug/pmacs-gpu`; only an explicit `cargo build`
+  produces it.
+
+  **Found while doing it, and worse than the twelve:**
+  `bottom_panel_stage2b_gpu` a54 reported **`ok`** in that cold crdt
+  sweep. Its only path that does not spawn `pmacs-gpu` is its skip
+  branch, so a test whose whole purpose is real wgpu rendering passed
+  having rendered nothing. The missing build does not merely fail
+  twelve tests — it voids coverage in tests that report green.
+  (`vterm_stage3` a37 has the same shape by source read; cargo captures
+  passing tests' output, so the skip is invisible in the log.)
+- **What landed.** A named `build-crdt` step emitted immediately before
+  `sweep-crdt` under `--protocol`, carrying the exact §5 invocation —
+  **not** folded into the sweep command, because `cargo build … &&
+  cargo test …` reports a *build* failure under the name `sweep-crdt`.
+  Plus **`--self-test`** (Q#GR-5): a hardcoded three-line synthetic plan
+  — pass, fail-named-`build-crdt`, **pass sentinel** — driven through
+  the *real* runner loop, which is what makes attribution *and*
+  continuation observable at all. `PLAN_FILE` is deliberately **not**
+  injectable: that would turn the runner's `eval` into a general command
+  executor, the same defect this script's review caught in
+  `--acceptance`.
 - **Blocks PR #228 (discovery Stage 2).** That lane's `--protocol`
   result needs re-establishing on a fresh target dir under the repaired
-  script. Deliberately **not** folded into that feature branch.
-- **Gates:** `scripts/gate --acceptance gate_script_acceptance`.
+  script. Deliberately **not** folded into that feature branch, and it
+  happens **after** this lands, not inside it.
+- **Gates:** `scripts/gate --acceptance gate_script_acceptance`. Note
+  the recursion — this lane edits the script that runs its own gates,
+  so `--print-plan`, `--help` and `--self-test` were also checked by
+  hand after each edit: a change that breaks the script cannot be
+  reported honestly by the script.
 
 ## QoL arc retirement — PR #224 OPEN (docs only)
 
