@@ -38,7 +38,7 @@ use crate::cell::{CellSize, Style};
 use crate::editor::EditorState;
 use crate::protocol::{
     AdornmentContent, AdornmentPlacement, ByteRange, Decoration, DecorationKind, DecorationSegment,
-    FrontendId, InlineAdornment, InstanceMessage, MenuPromptRow, PANEL_MIN_VERSION,
+    FrontendId, InlineAdornment, InstanceMessage, MenuPromptRow, MinibufferRow, PANEL_MIN_VERSION,
     StatuslineSegment, StyleSegment, StyleSpan,
 };
 use crate::statusline::{
@@ -95,10 +95,26 @@ type SearchPromptFacts = (Option<String>, Option<u32>, u32, bool, bool);
 /// menu.
 type MenuPromptFacts = (Vec<MenuPromptRow>, Option<u32>);
 
-/// Cached `MinibufferPrompt` payload for cached-compare suppression
-/// (Q#MB1): `(prompt, input, cursor, candidates-window, selected, total)`.
-/// A `None` prompt means the minibuffer is closed.
-type MinibufferFacts = (Option<String>, String, u32, Vec<String>, Option<u32>, u32);
+/// Cached minibuffer payload for cached-compare suppression (Q#MB1):
+/// `(prompt, input, cursor, rows-window, selected, total)`. A `None`
+/// prompt means the minibuffer is closed.
+///
+/// **ONE cache per peer, not one per variant.** [`SemanticRenderState`]
+/// is constructed by [`SemanticRenderState::for_peer`] with the
+/// session's negotiated version baked in on attach and dropped on
+/// detach, so a cache can never span two negotiated versions and a
+/// per-variant key would guard nothing. The rows are the cached form
+/// either way: for a `12..=22` peer every `detail` is `None` (the
+/// producer does not resolve details it cannot ship), so the cache
+/// describes exactly what that peer received.
+type MinibufferFacts = (
+    Option<String>,
+    String,
+    u32,
+    Vec<MinibufferRow>,
+    Option<u32>,
+    u32,
+);
 
 /// Cached `CompletionPopup` payload for cached-compare suppression
 /// (Arc 1a Q#C5): `(anchor, prefix_len, rows-window, selected, total)`.
@@ -115,10 +131,20 @@ type CompletionPopupFacts = (
 /// scrolled window around the selection, not the full (≤1024) list.
 const MB_VISIBLE: usize = 10;
 
+/// The first protocol version that carries
+/// [`InstanceMessage::MinibufferPromptRows`] (Discovery Stage 2).
+///
+/// Named rather than written as a literal `23` at each site, and NOT
+/// derived from `PROTOCOL_VERSION`: the contract is "the version this
+/// variant was introduced at", which is an absolute fact, while
+/// `PROTOCOL_VERSION` moves with every later bump. Handoff §5 records
+/// five defects of exactly that shape from one previous bump.
+pub const MINIBUFFER_ROWS_MIN_VERSION: u32 = 23;
+
 /// A window of up to [`MB_VISIBLE`] candidates around `selected`, plus
 /// the selection's index *within* that window. Keeps the selected row
 /// visible as the user cycles a long list.
-fn minibuffer_window(candidates: &[String], selected: Option<usize>) -> (Vec<String>, Option<u32>) {
+fn minibuffer_window<T: Clone>(candidates: &[T], selected: Option<usize>) -> (Vec<T>, Option<u32>) {
     if candidates.is_empty() {
         return (Vec::new(), None);
     }
@@ -216,10 +242,18 @@ pub struct SemanticRenderState {
     /// Last emitted `MenuPrompt` payload per buffer (Q#CM1), for
     /// cached-compare suppression (see [`MenuPromptFacts`]).
     last_menu_prompt: HashMap<BufferId, MenuPromptFacts>,
-    /// Last emitted `MinibufferPrompt` payload (Q#MB1) — a single value,
-    /// not per-buffer, because the minibuffer is one global core
-    /// instance.
+    /// Last emitted minibuffer payload (Q#MB1) — a single value, not
+    /// per-buffer, because the minibuffer is one global core instance,
+    /// and a single value across both wire variants, because this state
+    /// belongs to one peer at one negotiated version (see
+    /// [`MinibufferFacts`]).
     last_minibuffer: Option<MinibufferFacts>,
+    /// Whether the peer negotiated protocol >= 23 (Discovery Stage 2).
+    /// `true` ⇒ it receives `MinibufferPromptRows` and never the legacy
+    /// variant; `false` ⇒ the frozen `MinibufferPrompt` and never the
+    /// rows form. Also gates the per-row detail lookup: a peer that
+    /// cannot carry a detail does not pay to resolve one.
+    peer_knows_minibuffer_rows: bool,
     /// Last emitted `CompletionPopup` payload per buffer (Arc 1a
     /// Q#C5), for cached-compare suppression (see
     /// [`CompletionPopupFacts`]).
@@ -478,6 +512,7 @@ impl SemanticRenderState {
         s.peer_knows_theme_facts = negotiated_protocol_version >= 16;
         s.peer_knows_font_facts = negotiated_protocol_version >= 17;
         s.peer_knows_line_wrap = negotiated_protocol_version >= 22;
+        s.peer_knows_minibuffer_rows = negotiated_protocol_version >= MINIBUFFER_ROWS_MIN_VERSION;
         s.peer_knows_statusline_segments = negotiated_protocol_version >= 18;
         s.peer_knows_terminal_frames = negotiated_protocol_version >= 19;
         s.peer_knows_panel_frames = negotiated_protocol_version >= PANEL_MIN_VERSION;
@@ -500,6 +535,7 @@ impl SemanticRenderState {
             last_search_prompt: HashMap::new(),
             last_menu_prompt: HashMap::new(),
             last_minibuffer: None,
+            peer_knows_minibuffer_rows: true,
             last_completion_popup: HashMap::new(),
             last_summary: HashMap::new(),
             last_status: HashMap::new(),
@@ -1637,11 +1673,20 @@ impl SemanticRenderState {
         Some(msg)
     }
 
-    /// The `MinibufferPrompt` message for this frame, or `None` when the
+    /// The minibuffer message for this frame, or `None` when the
     /// (global) minibuffer state is unchanged (Q#MB1). Emitted only from
     /// the active buffer's viewport so the bufferless message ships once
     /// per frame. Closed = `prompt: None`; first sight while closed stays
-    /// silent. The daemon keeps the variant off wires negotiated `< 12`.
+    /// silent.
+    ///
+    /// **Exactly one variant, chosen by the peer's negotiated version**
+    /// (Discovery Stage 2). `>= 23` gets `MinibufferPromptRows` with
+    /// per-row details; `12..=22` gets the frozen `MinibufferPrompt`
+    /// carrying bare labels. Because the choice is made here, the CLOSE
+    /// necessarily uses the same family as the OPEN — a rows session
+    /// closed by a legacy clear would leave a popup on screen forever.
+    /// The daemon's write loop gates both directions again as
+    /// belt-and-braces.
     fn minibuffer_prompt_msg(
         &mut self,
         state: &EditorState,
@@ -1662,13 +1707,44 @@ impl SemanticRenderState {
                         .take_while(|(i, _)| *i < cursor_byte)
                         .count() as u32;
                     let total = session.candidates.len() as u32;
-                    let (candidates, selected) =
+                    let (labels, selected) =
                         minibuffer_window(&session.candidates, session.selected);
+                    // Q#D2-2: the detail is per row and optional. Only
+                    // the command source has one today; a file-path or
+                    // buffer-name prompt leaves it `None` and renders
+                    // exactly as it did before v23. Resolved only for a
+                    // peer that can carry it, so the cached facts
+                    // describe what that peer actually received.
+                    let detail_source = self.peer_knows_minibuffer_rows
+                        && matches!(
+                            session.source,
+                            crate::minibuffer::CompletionSource::Commands
+                        );
+                    let rows = if detail_source {
+                        let commands = state.lua_host.commands().borrow();
+                        labels
+                            .into_iter()
+                            .map(|label| {
+                                let detail = commands
+                                    .get(&label)
+                                    .map(|command| command.description.clone());
+                                MinibufferRow { label, detail }
+                            })
+                            .collect()
+                    } else {
+                        labels
+                            .into_iter()
+                            .map(|label| MinibufferRow {
+                                label,
+                                detail: None,
+                            })
+                            .collect()
+                    };
                     (
                         Some(session.prompt.clone()),
                         input,
                         cursor,
-                        candidates,
+                        rows,
                         selected,
                         total,
                     )
@@ -1684,13 +1760,24 @@ impl SemanticRenderState {
             self.last_minibuffer = Some(facts);
             return None;
         }
-        let msg = InstanceMessage::MinibufferPrompt {
-            prompt: facts.0.clone(),
-            input: facts.1.clone(),
-            cursor: facts.2,
-            candidates: facts.3.clone(),
-            selected: facts.4,
-            total: facts.5,
+        let msg = if self.peer_knows_minibuffer_rows {
+            InstanceMessage::MinibufferPromptRows {
+                prompt: facts.0.clone(),
+                input: facts.1.clone(),
+                cursor: facts.2,
+                rows: facts.3.clone(),
+                selected: facts.4,
+                total: facts.5,
+            }
+        } else {
+            InstanceMessage::MinibufferPrompt {
+                prompt: facts.0.clone(),
+                input: facts.1.clone(),
+                cursor: facts.2,
+                candidates: facts.3.iter().map(|row| row.label.clone()).collect(),
+                selected: facts.4,
+                total: facts.5,
+            }
         };
         self.last_minibuffer = Some(facts);
         Some(msg)
@@ -5773,9 +5860,28 @@ mod tests {
         let short: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
         assert_eq!(minibuffer_window(&short, Some(2)), (short.clone(), Some(2)));
         // Empty.
-        assert_eq!(minibuffer_window(&[], Some(0)), (Vec::new(), None));
+        assert_eq!(
+            minibuffer_window::<String>(&[], Some(0)),
+            (Vec::new(), None)
+        );
     }
 
+    /// The v23 rows form: `(prompt, input, rows)`.
+    fn minibuffer_rows_of(
+        msgs: &[InstanceMessage],
+    ) -> Option<(Option<String>, String, Vec<MinibufferRow>)> {
+        msgs.iter().find_map(|m| match m {
+            InstanceMessage::MinibufferPromptRows {
+                prompt,
+                input,
+                rows,
+                ..
+            } => Some((prompt.clone(), input.clone(), rows.clone())),
+            _ => None,
+        })
+    }
+
+    /// The frozen `12..=22` form: `(prompt, input, candidates)`.
     fn minibuffer_prompt_of(
         msgs: &[InstanceMessage],
     ) -> Option<(Option<String>, String, Vec<String>)> {
@@ -5798,7 +5904,7 @@ mod tests {
         s.set_viewport(bid, ByteRange { start: 0, end: 64 }, 0);
 
         // No minibuffer: the producer stays silent on first sight.
-        assert!(minibuffer_prompt_of(&s.render_frame(&state)).is_none());
+        assert!(minibuffer_rows_of(&s.render_frame(&state)).is_none());
 
         // Open an `M-x` prompt (command completion) via the Lua API.
         state
@@ -5807,26 +5913,131 @@ mod tests {
             .load("pmacs.minibuffer.read{ prompt = 'M-x ', source = 'commands', on_accept = function() end }")
             .exec()
             .expect("open minibuffer");
-        let (prompt, input, cands) =
-            minibuffer_prompt_of(&s.render_frame(&state)).expect("minibuffer prompt emitted");
+        let (prompt, input, rows) =
+            minibuffer_rows_of(&s.render_frame(&state)).expect("minibuffer prompt emitted");
         assert_eq!(prompt.as_deref(), Some("M-x "));
         assert_eq!(input, "");
         // Empty input matches every command; the wire carries a window.
-        assert!(!cands.is_empty(), "M-x seeds command candidates");
-        assert!(cands.len() <= MB_VISIBLE, "candidates ship windowed");
+        assert!(!rows.is_empty(), "M-x seeds command candidates");
+        assert!(rows.len() <= MB_VISIBLE, "candidates ship windowed");
 
         // Unchanged → suppressed (cached-compare).
-        assert!(minibuffer_prompt_of(&s.render_frame(&state)).is_none());
+        assert!(minibuffer_rows_of(&s.render_frame(&state)).is_none());
 
-        // Cancel: the prompt clears (None).
+        // Cancel: the prompt clears (None), in the SAME family as the
+        // open — a rows session closed by a legacy clear would leave the
+        // dropdown on screen forever.
         state
             .lua_host
             .lua()
             .load("pmacs.minibuffer.cancel()")
             .exec()
             .expect("cancel");
-        let (prompt, _, _) = minibuffer_prompt_of(&s.render_frame(&state)).expect("clear emitted");
+        let frame = s.render_frame(&state);
+        assert!(
+            minibuffer_prompt_of(&frame).is_none(),
+            "a v23 peer must never see the legacy variant, not even to close"
+        );
+        let (prompt, _, _) = minibuffer_rows_of(&frame).expect("clear emitted");
         assert!(prompt.is_none(), "cancel clears the minibuffer band");
+    }
+
+    #[test]
+    fn a_v22_peer_gets_the_frozen_variant_and_a_v23_peer_gets_rows_with_details() {
+        // The producer half of the exclusivity guarantee, at the two
+        // versions that straddle the boundary. The real-daemon half —
+        // two sessions negotiating simultaneously — is in
+        // `tests/discovery_stage2_acceptance.rs`.
+        let state = empty_state();
+        let bid = active_buffer(&state);
+        state
+            .lua_host
+            .lua()
+            .load(
+                "pmacs.command.define{ name = 'mb.probe', description = 'Probe the row detail.', \
+                 fn = function() end }",
+            )
+            .exec()
+            .expect("define probe command");
+
+        let mut v22 = SemanticRenderState::for_peer(FrontendId::LOCAL, 22);
+        let mut v23 = SemanticRenderState::for_peer(FrontendId::LOCAL, 23);
+        for s in [&mut v22, &mut v23] {
+            s.set_viewport(bid, ByteRange { start: 0, end: 64 }, 0);
+            let _ = s.render_frame(&state);
+        }
+
+        state
+            .lua_host
+            .lua()
+            .load(
+                "pmacs.minibuffer.read{ prompt = 'M-x ', source = 'commands', \
+                 on_accept = function() end }",
+            )
+            .exec()
+            .expect("open minibuffer");
+        state
+            .lua_host
+            .lua()
+            .load("pmacs.minibuffer.set_contents('mb.probe')")
+            .exec()
+            .expect("narrow to the probe command");
+
+        let v22_frame = v22.render_frame(&state);
+        assert!(
+            minibuffer_rows_of(&v22_frame).is_none(),
+            "a v22 peer must never receive the v23 rows variant"
+        );
+        let (_, _, candidates) =
+            minibuffer_prompt_of(&v22_frame).expect("v22 gets the frozen variant");
+        assert!(
+            candidates.iter().any(|c| c == "mb.probe"),
+            "the frozen variant still carries the candidate names: {candidates:?}"
+        );
+
+        let v23_frame = v23.render_frame(&state);
+        assert!(
+            minibuffer_prompt_of(&v23_frame).is_none(),
+            "a v23 peer must never receive the frozen variant"
+        );
+        let (_, _, rows) = minibuffer_rows_of(&v23_frame).expect("v23 gets the rows variant");
+        let probe = rows
+            .iter()
+            .find(|r| r.label == "mb.probe")
+            .expect("the probe command is a candidate");
+        assert_eq!(
+            probe.detail.as_deref(),
+            Some("Probe the row detail."),
+            "the row carries the command's registered description"
+        );
+    }
+
+    #[test]
+    fn a_source_with_no_detail_ships_rows_with_none() {
+        // Q#D2-2: only the command source has a detail today. A
+        // buffer-name prompt leaves it `None`, and the GPU then renders
+        // exactly what it rendered before v23.
+        let state = empty_state();
+        let mut s = local();
+        let bid = active_buffer(&state);
+        s.set_viewport(bid, ByteRange { start: 0, end: 64 }, 0);
+        let _ = s.render_frame(&state);
+
+        state
+            .lua_host
+            .lua()
+            .load(
+                "pmacs.minibuffer.read{ prompt = 'Buffer: ', source = 'buffers', \
+                 on_accept = function() end }",
+            )
+            .exec()
+            .expect("open buffer prompt");
+        let (_, _, rows) = minibuffer_rows_of(&s.render_frame(&state)).expect("prompt emitted");
+        assert!(!rows.is_empty(), "the buffer registry seeds candidates");
+        assert!(
+            rows.iter().all(|r| r.detail.is_none()),
+            "a source with no detail leaves every row's detail None: {rows:?}"
+        );
     }
 
     #[test]

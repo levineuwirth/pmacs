@@ -789,7 +789,8 @@ fn a13_17_26_protocol_semantic_init_late_join_and_version_cost() {
     // Vterm Stage 3 appended the terminal family as v19; GPU initial targets
     // appended the semantic bootstrap family as v20; bottom-panel Stage 2B-1
     // appended the panel family as v21; long-lines Stage 3 appended
-    // `LineWrapFacts` as v22. This acceptance owns the STATUSLINE
+    // `LineWrapFacts` as v22; Discovery Stage 2 appended
+    // `MinibufferPromptRows` as v23. This acceptance owns the STATUSLINE
     // variant's placement and gate, so it tracks the current wire version
     // rather than pinning 18: the v18 floor it actually cares about is asserted
     // below and in `peer_accepts_statusline_message`.
@@ -798,11 +799,11 @@ fn a13_17_26_protocol_semantic_init_late_join_and_version_cost() {
     // three lines on purpose. The ceiling assertion is the load-bearing
     // one — it says the supported set ENDS here, which is what makes an
     // accidentally-widened set a failure rather than a silent pass.
-    assert_eq!(PROTOCOL_VERSION, 22);
-    for version in 6..=22 {
+    assert_eq!(PROTOCOL_VERSION, 23);
+    for version in 6..=23 {
         assert!(is_supported_protocol_version(version));
     }
-    assert!(!is_supported_protocol_version(23));
+    assert!(!is_supported_protocol_version(24));
     let sample = InstanceMessage::StatuslineSegments {
         buffer_id: BufferId::from_raw(9),
         left: vec![StatuslineSegment {

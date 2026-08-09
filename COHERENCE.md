@@ -570,9 +570,11 @@ descriptions, indexed by `M-x help`. It needed **no Rust** — the data
 was all reachable from Lua, and even the settings completion source is a
 Lua function through `CompletionSource::Custom`.
 
-**What is still missing** is itemized below and unchanged by that stage:
-`Command` has no title/category/aliases/flags/arg-schema; the predicate
-is still never evaluated; M-x rows are still bare name strings; the Rust
+**What is still missing** is itemized below. Discovery Stage 2 took one
+item — **M-x rows now carry each command's description** — and the rest
+is unchanged by both stages: `Command` has no
+title/category/aliases/flags/arg-schema; the predicate
+is still never evaluated; the Rust
 help layer is still orphaned (Stage 1 funnels every command through one
 Lua seam so the eventual migration is enumerated per subject rather than
 per call site); **packages** have no discovery surface, and workers,
@@ -621,12 +623,21 @@ the sharpest instance of §1.1.**
   M-x filtering, or the menu. The doc comment's claim that "the command
   palette (T M2.7) uses it to gray out unavailable entries" describes
   something that never shipped.
-- **M-x shows bare name strings.** `CompletionSource::Commands` returns
-  `Vec<String>` of names; the wire type `MinibufferPrompt.candidates`
-  is `Vec<String>` (`pmacs-protocol/src/message.rs:994-1006`). No
-  description, no keybinding, no category alongside candidates — while
-  `CompletionPopupRow` (`:1231`) already carries `kind` and `detail`,
-  proving richer rows are a solved wire problem in this codebase.
+- **M-x rows carry a description — Discovery Stage 2 (protocol v23).**
+  `CompletionSource::Commands` still returns `Vec<String>` of names, but
+  the row the user reads is no longer one. The GPU receives
+  `InstanceMessage::MinibufferPromptRows` — `MinibufferRow { label,
+  detail }`, a new type rather than a borrowed `CompletionPopupRow`,
+  whose `kind` is an LSP code with no honest value for a command — and
+  the grid TUI renders `[name — description]` inline from the registry
+  **in-process**, since `src/editor.rs` never consumed the wire variant
+  at all. The bump is additive: `MinibufferPrompt` is FROZEN and still
+  sent to every `12..=22` peer (postcard is positional, so widening it
+  would mis-decode there rather than be ignored), and exactly one of the
+  two variants reaches any peer.
+  **What is still missing here:** no keybinding and no category
+  alongside the candidate — those wait on `Command` gaining the fields
+  at all.
 - **The entire Rust help layer is orphaned** (§1.1). Consequence: two
   parallel `*help*` implementations exist — `help.rs`'s
   cross-referenced renderer and the Lua `show_help_text` in
@@ -684,6 +695,8 @@ the sharpest instance of §1.1.**
 provenance in the config registry, (c) a dozen interactive commands and
 richer M-x candidate rows over introspection that **already exists**.
 This is the highest payoff-per-effort concern in the document.
+*(c) is done: Stage 1 shipped the command family, Stage 2 the richer
+rows. (a) and (b) remain.*
 
 ---
 

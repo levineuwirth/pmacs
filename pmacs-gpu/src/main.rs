@@ -44,9 +44,10 @@ use pmacs_protocol::{
     CompletionPopupRow, CrdtOp, Decoration, DecorationKind, DecorationSegment, FrontendId,
     InlineAdornment, InstanceMessage, InstanceSignal, Key as ProtocolKey, LineNumberMode,
     MAX_STATUSLINE_FACE_BYTES, MAX_STATUSLINE_PROVIDERS, MAX_STATUSLINE_SEGMENT_BYTES,
-    MAX_STATUSLINE_TOTAL_TEXT_BYTES, MenuPromptRow, Modifiers, MouseButton as ProtocolMouseButton,
-    MouseKind as ProtocolMouseKind, PointerKind, SelectionSnapshot, StatuslineSegment,
-    StyleSegment, StyleSpan, TAB_STOP_COLUMNS, TerminalFrame, UnderlineStyle,
+    MAX_STATUSLINE_TOTAL_TEXT_BYTES, MenuPromptRow, MinibufferRow, Modifiers,
+    MouseButton as ProtocolMouseButton, MouseKind as ProtocolMouseKind, PointerKind,
+    SelectionSnapshot, StatuslineSegment, StyleSegment, StyleSpan, TAB_STOP_COLUMNS, TerminalFrame,
+    UnderlineStyle,
     cell::{Color as CellColor, Style as CellStyle},
     is_builtin_pair_char, is_modeline_face_name,
     panel::{PANEL_MIN_VERSION, PanelFrame, PanelFramePayload},
@@ -2259,16 +2260,25 @@ struct SearchPromptLocal {
     invalid: bool,
 }
 
-/// The live minibuffer (Q#MB1, protocol v12), mirrored from a
-/// `MinibufferPrompt` whose `prompt` was `Some`. The prompt+input draw
-/// in the bottom band with a caret; `candidates` (a windowed slice) feed
-/// the dropdown.
+/// The live minibuffer (Q#MB1, protocol v12), mirrored from whichever
+/// minibuffer variant this session's negotiated version carries, when
+/// its `prompt` was `Some`. The prompt+input draw in the bottom band
+/// with a caret; `rows` (a windowed slice) feed the dropdown.
+///
+/// **One local shape for two wire variants.** A `>= 23` daemon sends
+/// `MinibufferPromptRows` with per-row details; a `12..=22` daemon sends
+/// the frozen `MinibufferPrompt` with bare strings, which land here as
+/// rows whose `detail` is `None`. Both are live: this binary offers its
+/// own `PROTOCOL_VERSION` only when the daemon advertises the current
+/// baseline, and echoes an older baseline verbatim — so an older daemon
+/// still negotiates an older session, and the legacy arm is reachable
+/// rather than dead code.
 #[derive(Clone, Debug, PartialEq)]
 struct MinibufferLocal {
     prompt: String,
     input: String,
     cursor: u32,
-    candidates: Vec<String>,
+    rows: Vec<MinibufferRow>,
     selected: Option<u32>,
     total: u32,
 }
@@ -5085,7 +5095,10 @@ impl State {
                 None
             }
             // Q#MB1 — the minibuffer prompt/input/candidates. `prompt:
-            // None` closes it.
+            // None` closes it. This is the FROZEN legacy variant, which
+            // only a `12..=22` daemon sends; its candidates carry no
+            // detail, so they become rows with `detail: None` and render
+            // exactly as they did before v23.
             InstanceMessage::MinibufferPrompt {
                 prompt,
                 input,
@@ -5098,7 +5111,38 @@ impl State {
                     prompt,
                     input,
                     cursor,
-                    candidates,
+                    rows: candidates
+                        .into_iter()
+                        .map(|label| MinibufferRow {
+                            label,
+                            detail: None,
+                        })
+                        .collect(),
+                    selected,
+                    total,
+                });
+                self.request_redraw();
+                None
+            }
+            // Discovery Stage 2 — the v23 rows form of the same surface,
+            // carrying an optional per-row detail (a command's
+            // description). `prompt: None` closes it, and the close
+            // arrives in THIS family because the daemon picks the family
+            // per peer: a rows session closed by a legacy clear would
+            // leave the dropdown on screen forever.
+            InstanceMessage::MinibufferPromptRows {
+                prompt,
+                input,
+                cursor,
+                rows,
+                selected,
+                total,
+            } => {
+                self.minibuffer = prompt.map(|prompt| MinibufferLocal {
+                    prompt,
+                    input,
+                    cursor,
+                    rows,
                     selected,
                     total,
                 });
@@ -7619,11 +7663,22 @@ impl State {
 
     /// Re-shape the minibuffer dropdown candidates (Q#MB1), one line per
     /// candidate, best match first. Empty when there are no candidates.
+    ///
+    /// Discovery Stage 2: a row with a `detail` renders `label  detail`,
+    /// the same two-space form the completion dropdown already uses. A
+    /// row without one renders the bare label, so a file-path or
+    /// buffer-name prompt looks exactly as it did before v23.
     fn refresh_mb_buffer(&mut self) {
-        let text = self
-            .minibuffer
-            .as_ref()
-            .map_or_else(String::new, |mb| mb.candidates.join("\n"));
+        let text = self.minibuffer.as_ref().map_or_else(String::new, |mb| {
+            mb.rows
+                .iter()
+                .map(|row| match row.detail.as_deref() {
+                    Some(detail) => format!("{}  {detail}", row.label),
+                    None => row.label.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
         let family = self.resolved_family.clone();
         self.mb_buffer.set_text(
             &mut self.font_system,
@@ -7644,7 +7699,7 @@ impl State {
         let mb = self.minibuffer.as_ref()?;
         let band_top = status_band_top(self.config.height, self.fm);
         mb_dropdown_window(
-            mb.candidates.len(),
+            mb.rows.len(),
             mb.selected.map_or(0, |s| s as usize),
             band_top,
             self.fm,
@@ -10868,6 +10923,7 @@ fn instance_message_label(msg: &InstanceMessage) -> &'static str {
         InstanceMessage::SearchPrompt { .. } => "SearchPrompt",
         InstanceMessage::MenuPrompt { .. } => "MenuPrompt",
         InstanceMessage::MinibufferPrompt { .. } => "MinibufferPrompt",
+        InstanceMessage::MinibufferPromptRows { .. } => "MinibufferPromptRows",
         InstanceMessage::BlockAdornments { .. } => "BlockAdornments",
         InstanceMessage::FoldState { .. } => "FoldState",
         InstanceMessage::ResourceOffer { .. } => "ResourceOffer",
@@ -13766,6 +13822,22 @@ mod tests {
     // They skip (not fail) when no wgpu adapter is available — a dev box
     // without working Vulkan, or CI without lavapipe.
 
+    /// Detail-free minibuffer rows from bare labels — what a `12..=22`
+    /// daemon's frozen `MinibufferPrompt` lands as.
+    fn detailless_rows<I, S>(labels: I) -> Vec<MinibufferRow>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        labels
+            .into_iter()
+            .map(|label| MinibufferRow {
+                label: label.into(),
+                detail: None,
+            })
+            .collect()
+    }
+
     /// Build a headless `State`, or return `None` and log when there's no
     /// adapter so the caller can skip. When `PMACS_REQUIRE_GPU` is set
     /// (CI, where lavapipe is installed) a missing adapter is a hard
@@ -14888,7 +14960,7 @@ mod tests {
             prompt: "M-x ".to_owned(),
             input: "find".to_owned(),
             cursor: 4,
-            candidates: Vec::new(),
+            rows: Vec::new(),
             selected: None,
             total: 0,
         });
@@ -15291,7 +15363,7 @@ mod tests {
             prompt: "M-x ".into(),
             input: "theme".into(),
             cursor: 5,
-            candidates: Vec::new(),
+            rows: Vec::new(),
             selected: None,
             total: 0,
         });
@@ -15335,7 +15407,7 @@ mod tests {
             prompt: "M-x ".into(),
             input: "the".into(),
             cursor: 3,
-            candidates: vec!["theme-set".into(), "theme-clear".into()],
+            rows: detailless_rows(["theme-set", "theme-clear"]),
             selected: Some(0),
             total: 2,
         });
@@ -15354,6 +15426,101 @@ mod tests {
             base,
             state.render_offscreen(),
             "the candidate glyphs must recolor"
+        );
+    }
+
+    /// Discovery Stage 2: a row's `detail` reaches the shaped dropdown
+    /// line, and BOTH wire families land in the same local shape.
+    ///
+    /// Driven through `apply_attach_message` rather than by assigning
+    /// `state.minibuffer` — the mapping from wire variant to local row
+    /// is exactly what this asserts, so constructing the local value
+    /// would skip the thing under test. The shaped `layout_runs()` text
+    /// is what glyphon rasterizes, so a description present there is a
+    /// description on screen.
+    #[test]
+    fn a_minibuffer_row_detail_reaches_the_shaped_dropdown_line() {
+        let Some(mut state) = headless_or_skip(600, 400, "hello") else {
+            return;
+        };
+
+        // The v23 rows form: a row with a detail, and a row without.
+        let _ = state.apply_attach_message(InstanceMessage::MinibufferPromptRows {
+            prompt: Some("M-x ".into()),
+            input: "buf".into(),
+            cursor: 3,
+            rows: vec![
+                MinibufferRow {
+                    label: "buffer.save".into(),
+                    detail: Some("Write the buffer to its file".into()),
+                },
+                MinibufferRow {
+                    label: "buffer.kill".into(),
+                    detail: None,
+                },
+            ],
+            selected: Some(0),
+            total: 2,
+        });
+        state.refresh_mb_buffer();
+        let lines: Vec<String> = state
+            .mb_buffer
+            .layout_runs()
+            .map(|run| run.text.to_owned())
+            .collect();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("buffer.save") && l.contains("Write the buffer to its file")),
+            "the detail must be shaped into the row: {lines:?}"
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .find(|l| l.contains("buffer.kill"))
+                .map(String::as_str),
+            Some("buffer.kill"),
+            "a row with no detail renders the bare label, exactly as before v23: {lines:?}"
+        );
+
+        // The frozen `12..=22` form, which an older daemon still sends:
+        // bare strings become detail-free rows.
+        let _ = state.apply_attach_message(InstanceMessage::MinibufferPrompt {
+            prompt: Some("M-x ".into()),
+            input: "buf".into(),
+            cursor: 3,
+            candidates: vec!["buffer.save".into()],
+            selected: Some(0),
+            total: 1,
+        });
+        assert_eq!(
+            state.minibuffer.as_ref().map(|mb| mb.rows.clone()),
+            Some(vec![MinibufferRow {
+                label: "buffer.save".into(),
+                detail: None,
+            }]),
+            "the legacy variant lands as a detail-free row"
+        );
+        state.refresh_mb_buffer();
+        let legacy: Vec<String> = state
+            .mb_buffer
+            .layout_runs()
+            .map(|run| run.text.to_owned())
+            .collect();
+        assert_eq!(legacy, vec!["buffer.save".to_owned()]);
+
+        // Either family closes the surface with `prompt: None`.
+        let _ = state.apply_attach_message(InstanceMessage::MinibufferPromptRows {
+            prompt: None,
+            input: String::new(),
+            cursor: 0,
+            rows: Vec::new(),
+            selected: None,
+            total: 0,
+        });
+        assert!(
+            state.minibuffer.is_none(),
+            "a rows clear closes the surface"
         );
     }
 
@@ -15954,7 +16121,7 @@ mod tests {
                 prompt: "P: ".into(),
                 input: String::new(),
                 cursor: 0,
-                candidates: vec![long.clone(), long.clone()],
+                rows: detailless_rows([long.clone(), long.clone()]),
                 selected: Some(1),
                 total: 2,
             });
@@ -16172,7 +16339,7 @@ mod tests {
                 prompt: "M-x ".into(),
                 input: String::new(),
                 cursor: 0,
-                candidates: (0..30).map(|i| format!("candidate-{i}")).collect(),
+                rows: detailless_rows((0..30).map(|i| format!("candidate-{i}"))),
                 selected: Some(1),
                 total: 30,
             });
@@ -17095,7 +17262,7 @@ mod tests {
             prompt: ":".into(),
             input: String::new(),
             cursor: 0,
-            candidates: Vec::new(),
+            rows: Vec::new(),
             selected: None,
             total: 0,
         });

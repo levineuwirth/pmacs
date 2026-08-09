@@ -265,7 +265,7 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
-## Discovery Stage 2 — BRANCHED, pre-implementation
+## Discovery Stage 2 — IMPLEMENTED, no PR yet
 
 **Written with the lane's first commit**, per the standing correction
 from #171 and #215.
@@ -299,9 +299,34 @@ tip** — the ref, not a SHA. Recover with
   `format!("  [{cand}]")` (`src/editor.rs:5484`), so its half is a
   local formatting change reading the registry directly. A multi-row
   TUI chooser is explicitly NOT this lane.
-- **Gates:** `scripts/gate --protocol --acceptance <the new suite>` —
-  the strengthened two-configuration sweep, which is what `--protocol`
-  exists for.
+- **Gates:** `scripts/gate --protocol --acceptance
+  discovery_stage2_acceptance` — the strengthened two-configuration
+  sweep, which is what `--protocol` exists for.
+- **IMPLEMENTED.** `PROTOCOL_VERSION` is 23,
+  `ADVERTISED_PROTOCOL_VERSION` is untouched at 20. New suite
+  `tests/discovery_stage2_acceptance.rs`; the daemon half is
+  `crdt`-gated (a semantic session is necessarily a text replica) and
+  runs one daemon serving a v22 and a v23 session simultaneously.
+- **The freeze is enforced by LITERAL byte fixtures**, not a round-trip
+  — `minibuffer_prompt_v12_wire_bytes_are_frozen` in `src/protocol.rs`,
+  the first such fixture in this repo. Bite-verified: reordering two
+  fields of `MinibufferPrompt` leaves
+  `minibuffer_prompt_round_trips_through_postcard` **passing** and fails
+  the fixture, which is exactly the hazard a round-trip cannot see.
+- **Version assertions updated (five, each read before editing):**
+  `src/protocol.rs` — the `PROTOCOL_VERSION == 22` tripwire (renamed
+  `protocol_version_is_twenty_three_for_minibuffer_prompt_rows`) and
+  `supported_protocol_versions_resume_ladder_on_v6_floor`'s
+  accepted/rejected ranges; `tests/statusline_segments_acceptance.rs`
+  (version + supported range + the `!supported` ceiling);
+  `tests/bottom_panel_stage2b_gpu_acceptance.rs`;
+  `tests/vterm_stage3_acceptance.rs`. **No `ADVERTISED_PROTOCOL_VERSION`
+  assertion fired**, which is the pin doing its job.
+- **No cross-version cache test, deliberately** (framing §3.2/§6):
+  `SemanticRenderState::for_peer` bakes the negotiated version in at
+  attach and is dropped at detach, so a cache cannot span two versions.
+  A test for an impossible condition passes forever while teaching the
+  next reader that the hazard is real.
 
 ## LSP LaTeX coverage — IMPLEMENTED, gates green, no PR yet
 

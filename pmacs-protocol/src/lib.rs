@@ -65,11 +65,12 @@ pub use message::{
     InstanceMessage, InstanceSignal, Key, KeyEvent, LineNumberMode, MAX_INITIAL_TARGET_ERROR_BYTES,
     MAX_INITIAL_TARGET_PATH_BYTES, MAX_STATUSLINE_FACE_BYTES, MAX_STATUSLINE_PROVIDER_NAME_BYTES,
     MAX_STATUSLINE_PROVIDERS, MAX_STATUSLINE_SEGMENT_BYTES, MAX_STATUSLINE_TOTAL_TEXT_BYTES,
-    MenuPromptRow, Modifiers, MouseButton, MouseEvent, MouseKind, NegotiatedCapabilities,
-    PROTOCOL_VERSION, PointerKind, ResourceBody, SUPPORTED_PROTOCOL_VERSIONS, SelectionSnapshot,
-    SessionBootstrapRequest, StatuslineSegment, StyleSegment, StyleSpan, ThemeFace,
-    is_builtin_pair_char, is_modeline_face_name, is_supported_protocol_version, is_ui_face_name,
-    negotiate_capabilities, negotiated_session_version, requested_protocol_version,
+    MenuPromptRow, MinibufferRow, Modifiers, MouseButton, MouseEvent, MouseKind,
+    NegotiatedCapabilities, PROTOCOL_VERSION, PointerKind, ResourceBody,
+    SUPPORTED_PROTOCOL_VERSIONS, SelectionSnapshot, SessionBootstrapRequest, StatuslineSegment,
+    StyleSegment, StyleSpan, ThemeFace, is_builtin_pair_char, is_modeline_face_name,
+    is_supported_protocol_version, is_ui_face_name, negotiate_capabilities,
+    negotiated_session_version, requested_protocol_version,
 };
 pub use panel::{
     MAX_PANEL_VISIBLE_CELLS, PANEL_MIN_VERSION, PanelFrame, PanelFrameError, PanelFramePayload,

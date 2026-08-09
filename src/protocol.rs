@@ -1683,7 +1683,7 @@ mod tests {
     // --- M5.5a handshake & postcard round-trips ---
 
     #[test]
-    fn protocol_version_is_twenty_two_for_line_wrap_facts() {
+    fn protocol_version_is_twenty_three_for_minibuffer_prompt_rows() {
         // Pin the value: T M10.5 bumped 1→2 (v1.0 wire: CrdtOp /
         // PresenceUpdate). T M11.1 bumped 2→3 (v1.1 wire: the
         // SemanticFrame family + FrontendEvent::Viewport). T M11.6
@@ -1732,7 +1732,15 @@ mod tests {
         // daemon-gated, appended after the final v21 variant). The
         // GPU lays out locally and would otherwise never hear the wrap
         // setting; the advertised baseline is deliberately unmoved.
-        assert_eq!(PROTOCOL_VERSION, 22);
+        // Discovery Stage 2 bumps 22→23 (`InstanceMessage::
+        // MinibufferPromptRows`, daemon-gated, appended after the final
+        // v22 variant). The first bump to leave the SUPERSEDED variant
+        // live rather than widening it: postcard is positional, so
+        // widening `MinibufferPrompt` would break every v12–v22 peer,
+        // and gating the wider form would have left them with no
+        // minibuffer at all. `MinibufferPrompt` is therefore frozen and
+        // pinned by literal bytes below.
+        assert_eq!(PROTOCOL_VERSION, 23);
     }
 
     #[test]
@@ -1809,17 +1817,18 @@ mod tests {
         // (`CompletionPopup`), v16 (`ThemeFacts`), v17 (`FontFacts`),
         // v18 (`StatuslineSegments`), v19 (the vterm terminal family),
         // v20 (semantic initial-target bootstrap), v21 (the bottom
-        // panel band), and v22 (`LineWrapFacts`) all interoperate.
-        for accepted in 6..=22 {
+        // panel band), v22 (`LineWrapFacts`), and v23
+        // (`MinibufferPromptRows`) all interoperate.
+        for accepted in 6..=23 {
             assert!(
                 is_supported_protocol_version(accepted),
                 "v{accepted} must be accepted"
             );
         }
-        for rejected in [0, 1, 2, 3, 4, 5, 23, u32::MAX] {
+        for rejected in [0, 1, 2, 3, 4, 5, 24, u32::MAX] {
             assert!(
                 !is_supported_protocol_version(rejected),
-                "v{rejected} must be rejected by a v22 binary"
+                "v{rejected} must be rejected by a v23 binary"
             );
         }
     }
@@ -2403,6 +2412,130 @@ mod tests {
                 }
                 other => panic!("expected MinibufferPrompt, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn minibuffer_prompt_v12_wire_bytes_are_frozen() {
+        // Discovery Stage 2 (v23) froze `MinibufferPrompt` and put the
+        // richer shape in an appended `MinibufferPromptRows`. THIS is
+        // what makes the freeze real, and the round-trip above is not:
+        // a round-trip encodes and decodes with the SAME types, so
+        // adding a field to `MinibufferPrompt` leaves it passing while
+        // every v12–v22 peer in the field mis-decodes the bytes. Only a
+        // comparison against bytes captured now can fail when the
+        // encoding changes.
+        //
+        // Two fixtures, the two shapes the producer emits: an open
+        // prompt with a windowed candidate list and a selection, and a
+        // cleared band. Discriminant 20, then the fields positionally
+        // (postcard is not self-describing).
+        let open = InstanceMessage::MinibufferPrompt {
+            prompt: Some("M-x ".to_owned()),
+            input: "ed".to_owned(),
+            cursor: 2,
+            candidates: vec!["edit.copy".to_owned(), "edit.cut".to_owned()],
+            selected: Some(1),
+            total: 7,
+        };
+        assert_eq!(
+            postcard::to_allocvec(&open).expect("encode open"),
+            [
+                20, // InstanceMessage::MinibufferPrompt
+                1, 4, b'M', b'-', b'x', b' ', // prompt: Some("M-x ")
+                2, b'e', b'd', // input: "ed"
+                2,    // cursor
+                2, 9, b'e', b'd', b'i', b't', b'.', b'c', b'o', b'p', b'y', 8, b'e', b'd', b'i',
+                b't', b'.', b'c', b'u', b't', // candidates
+                1, 1, // selected: Some(1)
+                7, // total
+            ],
+            "MinibufferPrompt's v12 wire bytes changed. It is FROZEN for \
+             v12..=22 — a widening here mis-decodes on every already-shipped \
+             frontend rather than being ignored. Richer minibuffer rows \
+             belong in MinibufferPromptRows."
+        );
+
+        let clear = InstanceMessage::MinibufferPrompt {
+            prompt: None,
+            input: String::new(),
+            cursor: 0,
+            candidates: Vec::new(),
+            selected: None,
+            total: 0,
+        };
+        assert_eq!(
+            postcard::to_allocvec(&clear).expect("encode clear"),
+            [20, 0, 0, 0, 0, 0, 0],
+            "MinibufferPrompt's cleared-band v12 wire bytes changed — see the \
+             open-prompt fixture above"
+        );
+    }
+
+    #[test]
+    fn line_wrap_facts_encoding_is_unchanged_by_the_v23_build() {
+        // Discovery Stage 2 placement pin: `MinibufferPromptRows` must
+        // be APPENDED after `LineWrapFacts` — the final v22 variant,
+        // whose ordinal moves if anything is inserted before any v22
+        // variant. The new variant's own round-trip cannot detect a
+        // shift, which is why the pin sits on the PREVIOUS final variant
+        // (handoff §4).
+        let msg = InstanceMessage::LineWrapFacts {
+            buffer_id: pmacs_protocol::BufferId::from_raw(4),
+            wrap: true,
+        };
+        let bytes = postcard::to_allocvec(&msg).expect("encode");
+        assert_eq!(
+            bytes,
+            [29, 4, 1],
+            "LineWrapFacts' v22 wire bytes changed — a variant was \
+             inserted before it; append new InstanceMessage variants \
+             at the end"
+        );
+    }
+
+    #[test]
+    fn minibuffer_prompt_rows_round_trips_and_appends_after_line_wrap_facts() {
+        // The v23 variant itself: both shapes, a detail present and a
+        // detail absent (Q#D2-2 — a source with no detail leaves it
+        // `None` and renders as it always did), plus the cleared band.
+        let cases = [
+            (
+                Some("M-x ".to_owned()),
+                "ed".to_owned(),
+                2u32,
+                vec![
+                    MinibufferRow {
+                        label: "edit.copy".to_owned(),
+                        detail: Some("Copy the region".to_owned()),
+                    },
+                    MinibufferRow {
+                        label: "notes.txt".to_owned(),
+                        detail: None,
+                    },
+                ],
+                Some(1u32),
+                7u32,
+            ),
+            (None, String::new(), 0, Vec::new(), None, 0),
+        ];
+        for (prompt, input, cursor, rows, selected, total) in cases {
+            let msg = InstanceMessage::MinibufferPromptRows {
+                prompt: prompt.clone(),
+                input: input.clone(),
+                cursor,
+                rows: rows.clone(),
+                selected,
+                total,
+            };
+            let bytes = postcard::to_allocvec(&msg).expect("encode");
+            assert_eq!(
+                bytes.first(),
+                Some(&30),
+                "MinibufferPromptRows must be appended after v22 LineWrapFacts"
+            );
+            let decoded: InstanceMessage = postcard::from_bytes(&bytes).expect("decode");
+            assert_eq!(decoded, msg);
         }
     }
 

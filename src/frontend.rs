@@ -406,6 +406,10 @@ impl Frontend {
             // surface; the TUI paints the minibuffer via its own bottom
             // row, so it drops this silently too.
             | InstanceMessage::MinibufferPrompt { .. }
+            // Discovery Stage 2 — the v23 rows form of the same surface.
+            // The TUI reads `Command.description` from the registry
+            // in-process instead, so this reaches it not at all.
+            | InstanceMessage::MinibufferPromptRows { .. }
             // UX gutter — LineNumbers is the semantic-frontend gutter
             // toggle; the cell-grid TUI reads its window's mode directly,
             // so it drops this silently like the other semantic families.
