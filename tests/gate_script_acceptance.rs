@@ -146,6 +146,13 @@ fn the_crdt_workspace_sweep_is_added_by_protocol_and_absent_without_it() {
 /// the right place under the right name and leave the gate exactly as
 /// unsound: the crdt sweep needs *those* features, and the wrong ones
 /// produce a binary the sweep cannot use.
+///
+/// **What this test cannot see: the names.** `--print-plan` strips them
+/// (`emit_plan | cut -f2-`), so everything below is an assertion about
+/// *commands in an order* — renaming the real build step to `sweep-crdt`
+/// leaves it green. The step's **name** is asserted by
+/// `the_crdt_build_step_carries_its_own_name_and_its_exact_command`
+/// below, which reads the plan in the form the runner reads it.
 #[test]
 fn the_crdt_sweep_is_immediately_preceded_by_the_build_that_produces_its_binary() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -181,6 +188,139 @@ fn the_crdt_sweep_is_immediately_preceded_by_the_build_that_produces_its_binary(
         "\n",
         "the build must run IMMEDIATELY before the crdt sweep; plan was:\n{plan}"
     );
+}
+
+/// **The witness that reaches the step it names**, and the reason this
+/// lane needed a second round.
+///
+/// This lane exists to guarantee two things: that the crdt sweep is
+/// preceded by the build producing its binary, and that a build failure
+/// is attributed to **`build-crdt`** rather than to `sweep-crdt`. The
+/// first round shipped with neither guaranteed, because **neither
+/// witness could see a name**:
+///
+/// - `--print-plan` renders `emit_plan | cut -f2-`, so the ordering test
+///   above compares commands and never sees the names beside them.
+/// - `--self-test` hardcodes the string `build-crdt` inside its **own
+///   synthetic** plan, so it proves things about the *runner* and
+///   nothing about the real emitter.
+///
+/// Review demonstrated the consequence directly: **renaming the real
+/// build step to `sweep-crdt` left both tests passing** — a plan that
+/// reports a build failure under the sweep's name, which is exactly the
+/// misattribution the separate step exists to prevent, sitting green.
+///
+/// So the pair is asserted **together, as one emitted line**, against
+/// `--print-plan-named` — the plan in the form the runner reads it back
+/// from `PLAN_FILE`. Name and command in the same `assert`, from the
+/// real emitter, is what makes a rename unable to pass; either half
+/// alone lets the other drift.
+///
+/// The mode is a *rendering*, not a seam: `PLAN_FILE` stays
+/// uninjectable, because a test that supplied the runner's plan would
+/// turn its `eval` into a general command executor — the defect the
+/// `--acceptance` refusal below exists to prevent.
+#[test]
+fn the_crdt_build_step_carries_its_own_name_and_its_exact_command() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let build = "build-crdt\tcargo build --workspace --no-default-features --features luajit,crdt";
+    let sweep =
+        "sweep-crdt\tcargo test --workspace --features crdt --no-fail-fast -- --skip basedpyright";
+
+    let (plan, err, ok) = run(root.path(), &["--protocol", "--print-plan-named"]);
+    assert!(
+        ok,
+        "--protocol --print-plan-named must succeed; stderr:\n{err}"
+    );
+    let lines: Vec<&str> = plan.lines().collect();
+
+    // Whole-line equality, not `contains`: the name, the tab, and the
+    // command with nothing appended. A step is its (name, command) pair
+    // and the plan is where both are decided.
+    let b = lines.iter().position(|l| *l == build).unwrap_or_else(|| {
+        panic!(
+            "no plan line is exactly:\n  {build}\nA build step under a \
+             different NAME misattributes its own failure; a build step \
+             with different FEATURES hands the sweep a binary it cannot \
+             use. Plan was:\n{plan}"
+        )
+    });
+    // The sweep's own pair, for the same reason in the other direction:
+    // asserting only the build's name lets a rename of the SWEEP slip
+    // through the identical hole.
+    let s = lines
+        .iter()
+        .position(|l| *l == sweep)
+        .unwrap_or_else(|| panic!("no plan line is exactly:\n  {sweep}\nPlan was:\n{plan}"));
+
+    assert_eq!(
+        s,
+        b + 1,
+        "the build must be the step IMMEDIATELY before the crdt sweep — a \
+         build merely somewhere earlier could be separated from it by a \
+         step that rewrites the same target directory. Plan was:\n{plan}"
+    );
+
+    // Conditionality, on this rendering too: an ordinary lane must not
+    // carry the step at all, not merely not carry its command.
+    let (default_plan, _, ok) = run(root.path(), &["--print-plan-named"]);
+    assert!(ok, "--print-plan-named must succeed");
+    assert!(
+        !default_plan.contains("build-crdt"),
+        "the default sweep never builds pmacs-gpu and never needs it, so no \
+         ordinary lane may pay for a workspace build; plan was:\n{default_plan}"
+    );
+}
+
+/// **The new rendering must be the same plan, or the assertion above
+/// pins a string only the test ever reads.**
+///
+/// `--print-plan-named` and `--print-plan` both call one emitter, and
+/// the runner writes that same emitter to `PLAN_FILE` — so today they
+/// cannot disagree. This pins that from outside, where a later edit
+/// giving either mode its own plan text would be caught rather than
+/// producing a witness that asserts a name the runner never uses.
+///
+/// It also pins the **shape** the runner depends on: the loop reads each
+/// line with `IFS=<tab> read -r name cmd`, so a plan line without its
+/// tab would silently run under an empty command.
+#[test]
+fn the_named_plan_is_the_printed_plan_with_its_names_removed() {
+    let root = tempfile::tempdir().expect("tempdir");
+
+    for flags in [
+        vec![],
+        vec!["--protocol"],
+        vec!["--acceptance", "m4_acceptance"],
+    ] {
+        let mut named_args = flags.clone();
+        named_args.push("--print-plan-named");
+        let mut plain_args = flags.clone();
+        plain_args.push("--print-plan");
+
+        let (named, err, ok_named) = run(root.path(), &named_args);
+        assert!(ok_named, "{named_args:?} must succeed; stderr:\n{err}");
+        let (plain, err, ok_plain) = run(root.path(), &plain_args);
+        assert!(ok_plain, "{plain_args:?} must succeed; stderr:\n{err}");
+
+        let mut stripped = String::new();
+        for l in named.lines() {
+            let (_name, cmd) = l.split_once('\t').unwrap_or_else(|| {
+                panic!(
+                    "every plan line must be `name<TAB>command` — the runner \
+                     splits on that tab, so a line without one runs an empty \
+                     command under the whole line's name. Line was:\n  {l:?}"
+                )
+            });
+            stripped.push_str(cmd);
+            stripped.push('\n');
+        }
+
+        assert_eq!(
+            stripped, plain,
+            "the two renderings must be one plan; with {flags:?} they diverged"
+        );
+    }
 }
 
 /// **Conditionality, settled by measurement rather than by reading** —
