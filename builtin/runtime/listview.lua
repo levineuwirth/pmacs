@@ -362,8 +362,28 @@ local function normalized_keys(keys)
   return out
 end
 
--- Reject collisions BEFORE anything is created or bound, so a bad
--- `keys` table leaves no half-built panel behind.
+-- A FIRST-PASS collision check, for a better message than the keymap's.
+--
+-- It compares RAW TOKENS, and that is deliberately not sufficient: the
+-- key parser canonicalizes aliases before it ever reaches the trie
+-- (`parse_key_code`, src/key.rs, uppercases and folds `RET`/`RETURN`/
+-- `ENTER`, `SPC`/`SPACE`, `ESC`/`ESCAPE`, `BS`/`BACKSPACE`,
+-- `DEL`/`DELETE`), so `keys = { RETURN = ... }` is a collision this
+-- function cannot see.
+--
+-- **`Keymap::bind` is the authority, and `ensure_panel` tears the panel
+-- down when it refuses.** That is not a fallback for a check that
+-- happens to be weak --- it is the only version that cannot go stale. A
+-- Lua-side canonicalizer would be a second copy of `parse_key_code`'s
+-- alias table, and the day the Rust one gains a name the Lua one would
+-- silently stop seeing that alias, reintroducing exactly this bug for
+-- it. (There is also no way to canonicalize an arbitrary sequence from
+-- Lua today: `display_sequence` is reachable only through
+-- `describe.key` and `keymap.list`, which both require the sequence to
+-- be BOUND already.)
+--
+-- So what this buys is diagnosis, not safety: a named "that is the
+-- panel's own `g`" instead of a raw `DuplicateBinding`.
 local function check_key_collisions(entries)
   for i, entry in ipairs(entries) do
     local mine = chords_of(entry.sequence)
@@ -392,25 +412,25 @@ local function check_key_collisions(entries)
   end
 end
 
--- Bind the validated entries, rolling back on failure so a refusal the
--- structural check above could not predict (an alias spelling of a
--- chord, say) still leaves nothing half-installed.
+-- Bind the entries, naming which one the keymap refused.
+--
+-- It does NOT roll back the keys it already bound: its caller owns
+-- teardown, and the caller's teardown is killing the whole buffer,
+-- which takes the buffer's entire keymap scope with it
+-- (`after_buffer_removed` -> `KeymapStack::remove_buffer`). Unbinding
+-- here as well would be a second, weaker cleanup mechanism for the same
+-- failure --- and the weaker one is what let a half-built panel survive.
 local function install_keys(buf, entries)
-  local bound = {}
   for _, entry in ipairs(entries) do
     local ok, err = pcall(pmacs.keymap.bind, {
       scope = "buffer", buffer = buf,
       sequence = entry.sequence, command = entry.command,
     })
     if not ok then
-      for _, sequence in ipairs(bound) do
-        pcall(pmacs.keymap.unbind, { scope = "buffer", buffer = buf, sequence = sequence })
-      end
       error(string.format(
         "listview: cannot bind %q to %q: %s",
         entry.sequence, entry.command, tostring(err)))
     end
-    bound[#bound + 1] = entry.sequence
   end
 end
 
@@ -486,25 +506,48 @@ local function ensure_panel(name, key_entries)
   p = { requested_name = name, buffer = buf, line_to_item = {},
         line_to_row = {}, collapsed = {}, rows = {}, visible = 0,
         keys = key_entries }
-  -- Read-only (Q#P3): every non-bypass edit is rejected, with a NAMED
-  -- error. Kept beside the rope lock, not replaced by it: the layering
-  -- at terminal.lua:351-366 --- the rope lock protects the daemon copy,
-  -- this and the round-trip mark protect a semantic frontend's own
-  -- mirror, and neither substitutes for the other. The intercept lives
-  -- as long as the buffer; no teardown (the buffer-list precedent for
-  -- its keymap).
-  pmacs.buffer.add_intercept(buf, function()
-    error(actual .. " is read-only")
+  -- ALL-OR-NOTHING from here. Everything below mutates a buffer that
+  -- does not yet belong to a panel, and `install_keys` can genuinely
+  -- fail: the raw-token preflight cannot see an alias spelling of a
+  -- fixed key (`RETURN` for `RET`), so `Keymap::bind` is the first thing
+  -- to notice, and by then the buffer exists, carries a read-only
+  -- intercept and a round-trip mark, and holds the fixed keymap.
+  --
+  -- Leaving it behind is worse than it sounds: it is read-only, it is in
+  -- no `panels` record so nothing owns or can reach it, and the next
+  -- `open` for the same name finds it by name and disambiguates itself
+  -- to `<2>` --- so a rejected `keys` table silently renames the panel.
+  local built, err = pcall(function()
+    -- Read-only (Q#P3): every non-bypass edit is rejected, with a NAMED
+    -- error. Kept beside the rope lock, not replaced by it: the layering
+    -- at terminal.lua:351-366 --- the rope lock protects the daemon copy,
+    -- this and the round-trip mark protect a semantic frontend's own
+    -- mirror, and neither substitutes for the other. The intercept lives
+    -- as long as the buffer; no teardown (the buffer-list precedent for
+    -- its keymap).
+    pmacs.buffer.add_intercept(buf, function()
+      error(actual .. " is read-only")
+    end)
+    -- Q#P6: semantic frontends must round-trip keys while this panel
+    -- is focused (RET = visit, not an optimistic newline).
+    pmacs.buffer.set_round_trip_input(buf, true)
+    bind_local_keymap(buf)
+    install_keys(buf, key_entries)
   end)
-  -- Q#P6: semantic frontends must round-trip keys while this panel
-  -- is focused (RET = visit, not an optimistic newline).
-  pmacs.buffer.set_round_trip_input(buf, true)
-  bind_local_keymap(buf)
-  install_keys(buf, key_entries)
-  -- Registered LAST, deliberately: an `install_keys` failure must leave
-  -- no record claiming keys it did not bind. Nothing above needs the
-  -- panel to be in `panels` --- the intercept, the round-trip mark and
-  -- the keymap all address the buffer directly.
+  if not built then
+    -- `kill` is the whole teardown, not a convenience: it removes the
+    -- buffer AND, through `after_buffer_removed`, prunes the buffer's
+    -- keymap scope, its config locals and its folds. Unbinding key by
+    -- key would leave the buffer itself --- which is the defect.
+    pcall(pmacs.buffer.kill, buf)
+    -- Level 0: re-raise the inner message verbatim rather than stacking
+    -- this line's position onto it.
+    error(err, 0)
+  end
+  -- Registered LAST, deliberately: a failure above must leave no record
+  -- claiming keys it did not bind. Nothing above needs the panel to be
+  -- in `panels` --- the intercept, the round-trip mark and the keymap
+  -- all address the buffer directly.
   panels[#panels + 1] = p
   return p
 end
@@ -512,8 +555,10 @@ end
 function pmacs.listview.open(spec)
   assert(type(spec) == "table" and type(spec.name) == "string",
     "listview.open: spec.name (string) required")
-  -- Validated BEFORE `ensure_panel`, so a colliding `keys` table never
-  -- reaches buffer creation (Q#G-7: rejected at install time).
+  -- The cheap checks first, so the common mistakes are named before
+  -- anything is created. The ones this pass cannot see --- alias
+  -- spellings --- are caught by `Keymap::bind` inside `ensure_panel`,
+  -- which tears the panel down rather than leaving it half-built.
   local key_entries = normalized_keys(spec.keys)
   check_key_collisions(key_entries)
   local p = ensure_panel(spec.name, key_entries)

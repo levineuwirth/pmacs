@@ -940,6 +940,65 @@ fn g6_10_a_colliding_or_prefixing_keys_table_is_rejected() {
     }
 }
 
+/// An ALIAS spelling of a fixed key is rejected too — and rejecting it
+/// leaves **no orphan buffer**.
+///
+/// The raw-token preflight cannot see these: `parse_key_code`
+/// (`src/key.rs`) uppercases and then folds `RET`/`RETURN`/`ENTER`,
+/// `SPC`/`SPACE`, `TAB` onto the same `KeyCode`, so `keys = { RETURN =
+/// … }` compares unequal to every fixed token and sails through, only
+/// for `Keymap::bind` to refuse it later — *after* the buffer has been
+/// created, made read-only, marked round-trip and given the fixed
+/// keymap, and *before* the panel is registered. The buffer then
+/// survives owned by nothing, and the next `open` for that name finds it
+/// and silently disambiguates itself to `<2>`.
+///
+/// So the error message is the weaker half of this test. Asserting only
+/// that would pass on the broken code, because the broken code does
+/// raise — it just leaves wreckage behind. The buffer count and the
+/// undisambiguated reopen are what actually bite.
+#[test]
+fn g6_10c_an_alias_spelling_is_rejected_and_leaves_no_orphan_buffer() {
+    let s = editor();
+    let before: i64 = eval(&s, "return #pmacs.buffer.list()");
+
+    // Every alias the parser folds onto a key the panel already owns.
+    for alias in ["RETURN", "ENTER", "ret", "enter", "SPACE", "space", "tab"] {
+        let err: String = eval(
+            &s,
+            &format!(
+                "local ok, e = pcall(pmacs.listview.open, {{\n\
+                   name = '*alias*', rows = {{}}, keys = {{ [{alias:?}] = 'git.status' }} }})\n\
+                 return tostring(e)"
+            ),
+        );
+        assert!(
+            err.contains("listview:"),
+            "{alias:?} must be refused by the primitive, with its own \
+             message rather than a bare keymap error: {err}"
+        );
+        let now: i64 = eval(&s, "return #pmacs.buffer.list()");
+        assert_eq!(
+            now, before,
+            "refusing {alias:?} must leave no buffer behind (this is the \
+             half that bites: the broken code raises too)"
+        );
+    }
+
+    // …and the name is genuinely still free: a subsequent legitimate
+    // open gets the plain name, not `*alias*<2>`.
+    exec(
+        &s,
+        "pmacs.listview.open { name = '*alias*', rows = { { text = 'x', item = 1 } },\n\
+                               keys = { d = 'git.diff-file' } }",
+    );
+    assert_eq!(
+        active_name(&s),
+        "*alias*",
+        "a rejected `keys` table must not have consumed the panel's name"
+    );
+}
+
 /// Reopening a live panel with a DIFFERENT `keys` table errors rather
 /// than silently keeping the old binding.
 ///
