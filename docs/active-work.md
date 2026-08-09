@@ -515,6 +515,15 @@ Linux stayed green.
   after this change nothing macOS runs depends on a filesystem accepting
   such a name.
 
+- **CONFIRMED ON THE REAL MATRIX.** Run
+  https://github.com/levineuwirth/pmacs/actions/runs/31330601204 at
+  `e816812`: **all 14 jobs green**, including
+  `Test (macos-latest / luajit)` and `Test (macos-latest / lua54)` — the
+  two that were red. So the macOS half is now OBSERVED rather than
+  reasoned about; what stays reasoned about is only the *explanation*
+  (`EILSEQ`, and the `lstat`-vs-`ENOENT` argument for why `g6_2c` cannot
+  be made portable), which nothing in CI can confirm or refute.
+
 - **LATENT SIBLING, out of scope and NOT red today:**
   `tests/gpu_invocation_acceptance.rs:621` writes
   `OsString::from_vec(vec![b'r', b'a', b'w', 0xff])` to disk. It sits
