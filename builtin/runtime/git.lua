@@ -646,10 +646,31 @@ local function selected_path()
   return row and row.path or nil
 end
 
-local function start_status(root, expect_buffer, want_selection)
+--- Claim the newest generation, and return it.
+---
+--- Called at the point a user ASKS for something, never at the point
+--- some subprocess happens to answer. That distinction is the whole
+--- rule: the generation counter exists to make the newest INVOCATION
+--- win, and minting it from a completion callback instead makes the
+--- slowest subprocess win.
+local function reserve_generation()
   state.generation = state.generation + 1
+  return state.generation
+end
+
+--- Spawn `git status` under an ALREADY-RESERVED generation.
+---
+--- The generation is a parameter rather than something minted here,
+--- because this runs from the root-resolution callback: two `git.status`
+--- invocations against different repositories resolve their roots
+--- concurrently, and if the generation were minted on arrival then the
+--- invocation whose `rev-parse` returned LAST would claim the newest
+--- generation and replace the newer request. Reserving at the command
+--- and carrying it through is what makes the ordering the user's, not
+--- the filesystem's.
+local function start_status(root, expect_buffer, want_selection, generation)
   local request = {
-    generation = state.generation,
+    generation = generation,
     expect_buffer = expect_buffer,
     selected_path = want_selection and selected_path() or nil,
   }
@@ -671,7 +692,10 @@ function pmacs.git._on_refresh()
   if not state.root then
     return listview_rows("(no repository --- run M-x git.status)")
   end
-  start_status(state.root, state.buffer, true)
+  -- Reserved HERE, at the keypress, for the same reason `git.status`
+  -- reserves at the command: `g` needs no root lookup, so this is
+  -- already the moment of invocation.
+  start_status(state.root, state.buffer, true, reserve_generation())
   return listview_rows("(refreshing...)")
 end
 
@@ -706,6 +730,41 @@ local function active_directory()
   return nil
 end
 
+--- Deliver a completed root lookup for the invocation in `request`.
+---
+--- Exposed for the same reason `_deliver_status` is: the contract is
+--- about completions arriving in an order the CALLER did not choose, and
+--- no arrangement of real subprocess timing can guarantee that two
+--- `rev-parse` runs finish in a chosen order.
+function pmacs.git._deliver_root(request, res)
+  -- A root lookup that returns after a newer invocation has superseded
+  -- it must not proceed: not to a status spawn, not to `state.root`, and
+  -- not even to a status-line message. Everything below this line is an
+  -- effect belonging to an invocation the user has already replaced.
+  if request.generation ~= state.generation then return end
+
+  if not (res.ok and res.code == 0) then
+    if res.spawn_error then
+      pmacs.editor.set_status("git: " .. failure_reason(res))
+    else
+      pmacs.editor.set_status(
+        string.format("git: %s is not inside a repository", request.dir))
+    end
+    return
+  end
+  local root = first_line(res.stdout)
+  if root == "" then
+    pmacs.editor.set_status("git: rev-parse returned no worktree root")
+    return
+  end
+  state.root = root
+  -- A fresh open carries no buffer expectation, so a panel the user
+  -- killed earlier does not make this run drop its own first result.
+  state.buffer = nil
+  -- The generation reserved at the command, NOT a fresh one.
+  start_status(root, nil, false, request.generation)
+end
+
 --- Open (or re-open) `*git-status*` for the repository containing the
 --- active file.
 function pmacs.git.status()
@@ -718,29 +777,15 @@ function pmacs.git.status()
     pmacs.editor.set_status("git: no directory to resolve a repository from")
     return
   end
+  -- Reserved AFTER the early returns and BEFORE the spawn: an
+  -- invocation that starts no work must not invalidate one that is
+  -- already in flight, and an invocation that does start work must own
+  -- the newest generation from that moment on.
+  local request = { generation = reserve_generation(), dir = dir }
   -- The root rule (Q#G-2): ask git, and let a non-zero exit BE the
   -- "not a repository" answer. `-C <dir>` with no root of our own.
   run_git("git rev-parse", nil, { "-C", dir, "rev-parse", "--show-toplevel" },
-    function(res)
-      if not (res.ok and res.code == 0) then
-        if res.spawn_error then
-          pmacs.editor.set_status("git: " .. failure_reason(res))
-        else
-          pmacs.editor.set_status(string.format("git: %s is not inside a repository", dir))
-        end
-        return
-      end
-      local root = first_line(res.stdout)
-      if root == "" then
-        pmacs.editor.set_status("git: rev-parse returned no worktree root")
-        return
-      end
-      state.root = root
-      -- A fresh open carries no buffer expectation, so a panel the user
-      -- killed earlier does not make this run drop its own first result.
-      state.buffer = nil
-      start_status(root, nil, false)
-    end)
+    function(res) pmacs.git._deliver_root(request, res) end)
 end
 
 pmacs.command.define {

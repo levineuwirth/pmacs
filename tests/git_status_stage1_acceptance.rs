@@ -1108,6 +1108,136 @@ fn g6_17_a_stale_completion_discards_its_rows() {
     );
 }
 
+/// Two `git.status` invocations against DIFFERENT repositories, where
+/// the **first** invocation's root lookup completes **second**. The
+/// second invocation must win.
+///
+/// This is the ordering `g6_17` cannot see. That test drives the STATUS
+/// completions out of order, and the generation each of those carries
+/// was already fixed; this one drives the **root lookups** out of order,
+/// which is where the generation used to be minted. `git.status` started
+/// an unversioned `rev-parse` and the generation was claimed later, from
+/// the callback — so whichever `rev-parse` returned last claimed the
+/// newest generation and replaced the newer request. The counter that is
+/// supposed to make the newest INVOCATION win instead made the slowest
+/// SUBPROCESS win.
+///
+/// Driven through `_deliver_root` for the same reason `g6_17` uses
+/// `_deliver_status`: no arrangement of real subprocess timing can
+/// guarantee that two `rev-parse` runs finish in a chosen order, and a
+/// test that merely hoped for the bad order would pass on the broken
+/// code roughly half the time.
+///
+/// The assertion is on the argv of the last spawn, because the contract
+/// is precisely that the superseded lookup "must not proceed to spawn a
+/// status" — and that is observable without pumping, so the real
+/// `rev-parse` children still in flight cannot muddy it.
+#[test]
+fn g6_21_a_superseded_root_lookup_does_not_spawn_its_status() {
+    let (_dir_a, root_a) = tempdir();
+    mixed_repo(&root_a);
+    let (_dir_b, root_b) = tempdir();
+    mixed_repo(&root_b);
+
+    let mut s = editor();
+    // Invocation 1 (repo A), then invocation 2 (repo B). Neither is
+    // pumped, so both root lookups are genuinely in flight and each has
+    // reserved its generation at the command.
+    for root in [&root_a, &root_b] {
+        let root_str = root.display().to_string();
+        let seed = root.join("staged.txt").display().to_string();
+        exec(
+            &s,
+            &format!(
+                "pmacs.project.set_search_boundary({root_str:?})\n\
+                 pmacs.buffer.find_or_open({seed:?})"
+            ),
+        );
+        exec(&s, "pmacs.git.status()");
+    }
+
+    let gen_b: i64 = eval(&s, "return pmacs.git._generation()");
+    let gen_a = gen_b - 1;
+    assert!(
+        gen_a >= 1,
+        "premise: each invocation reserved its own generation at the \
+         command, so the two differ"
+    );
+
+    let a = root_a.display().to_string();
+    let b = root_b.display().to_string();
+
+    // The NEWER invocation's root lands first…
+    exec(
+        &s,
+        &format!(
+            "pmacs.git._deliver_root(\n\
+               {{ generation = {gen_b}, dir = {b:?} }},\n\
+               {{ ok = true, code = 0, stdout = {b:?}, stderr = '' }})"
+        ),
+    );
+    let after_b: Vec<String> = eval(&s, "return pmacs.git._last_spawn.args");
+    assert!(
+        after_b.contains(&b),
+        "premise: the newer invocation spawned its status against B: {after_b:?}"
+    );
+    let statuses_after_b: i64 = eval(
+        &s,
+        "local n = 0\n\
+         for _, args in ipairs(pmacs.git._spawn_log) do\n\
+           for _, a in ipairs(args) do if a == 'status' then n = n + 1 end end\n\
+         end\n\
+         return n",
+    );
+
+    // …and the OLDER invocation's root lands second, superseded.
+    exec(
+        &s,
+        &format!(
+            "pmacs.git._deliver_root(\n\
+               {{ generation = {gen_a}, dir = {a:?} }},\n\
+               {{ ok = true, code = 0, stdout = {a:?}, stderr = '' }})"
+        ),
+    );
+
+    let after_a: Vec<String> = eval(&s, "return pmacs.git._last_spawn.args");
+    assert!(
+        !after_a.contains(&a),
+        "the superseded root lookup must NOT spawn a status against A; \
+         last argv was {after_a:?}"
+    );
+    assert_eq!(
+        after_a, after_b,
+        "…so the last spawn is still the newer invocation's"
+    );
+    let statuses_after_a: i64 = eval(
+        &s,
+        "local n = 0\n\
+         for _, args in ipairs(pmacs.git._spawn_log) do\n\
+           for _, a in ipairs(args) do if a == 'status' then n = n + 1 end end\n\
+         end\n\
+         return n",
+    );
+    assert_eq!(
+        statuses_after_a, statuses_after_b,
+        "and it spawned nothing at all — one status invocation, not two"
+    );
+
+    // The user-visible half: pumping settles on B's repository, whatever
+    // order the two real `rev-parse` children happen to finish in.
+    assert!(
+        pump_until(&mut s, 15_000, |s| !panel_text(s).is_empty()
+            && !panel_text(s).contains("refreshing")),
+        "the winning invocation's panel must render; status was {:?}",
+        status(&s)
+    );
+    let last: Vec<String> = eval(&s, "return pmacs.git._last_spawn.args");
+    assert!(
+        last.contains(&b) && !last.contains(&a),
+        "the settled panel belongs to the second invocation: {last:?}"
+    );
+}
+
 /// Selection is re-seated **by the completion handler**, across a
 /// refresh that reorders rows.
 ///
