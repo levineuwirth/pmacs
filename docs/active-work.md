@@ -269,7 +269,7 @@ census.
 
 **PR #227** — https://github.com/levineuwirth/pmacs/pull/227. Opened
 2026-08-09 at `4002734`, after the framing was approved at revision 5
-and the full gate suite went green. **Now at `6c1631e`, MERGE-BLOCKED.**
+and the full gate suite went green. **Now at `842ec61`, MERGE-BLOCKED.**
 
 **Review round 1 found three blockers. Two are fixed; the third is why
 this lane is blocked.**
@@ -301,16 +301,63 @@ this lane is blocked.**
   already. Verified; no binding was added for this.
 - **P1a NOT fixed, and deliberately — it blocks this PR.** The async
   completions display UI without capturing the initiating frontend
-  (`builtin/runtime/git.lua:609`, `:854`), so a result surfaces in
-  whichever frontend is active when git exits. `commit_to` is the right
-  mechanism and is **not Lua-reachable** outside a directory open, so
-  the fix lives in the **`destination-capture`** lane. This lane adopts
-  it after that lands. Verified untouched: no diff line in `ffe5ae2` or
-  `6c1631e` reaches `open_status_panel`, `show_diff_buffer`,
-  `pmacs.window.display` or `commit_to`.
+  (`builtin/runtime/git.lua:635` and `:928` at `842ec61`), so a result
+  surfaces in whichever frontend is active when git exits. `commit_to`
+  is the right mechanism and is **not Lua-reachable** outside a
+  directory open, so the fix lives in the **`destination-capture`**
+  lane. This lane adopts it after that lands. Verified untouched: no
+  diff line in `ffe5ae2`, `6c1631e`, `3eca5e8` or `842ec61` reaches
+  `open_status_panel`, `show_diff_buffer`, `pmacs.window.display` or
+  `commit_to`.
+
+  **The second citation written here in round 1 was wrong** — `:854`
+  pointed at `local unstaged = …` inside `diff_plan`, not at a display
+  call. The site was always `show_diff_buffer`'s `pmacs.window.display`.
+  Corrected rather than silently re-numbered, because a stale pointer in
+  a block whose whole purpose is "do not touch these two lines" is worse
+  than none.
 
 **Re-gated at `6c1631e`:** all 11 steps green, acceptance now 27 tests.
 Both fixes mutation-verified.
+
+**Review round 2 found two more P2s, both the SAME SHAPE as the round-1
+P1: module-level mutable state read at CONTINUATION time instead of
+captured at INVOCATION time.** Both fixed here; the P1a block above is
+unchanged and still the reason this lane cannot merge.
+
+- **P2 fixed (`3eca5e8`) — an unborn-repository diff could switch
+  repositories mid-plan.** `run_diff_plan`'s `next_step` read
+  `state.root` each time it started a step, and an unborn `AM`/`AD` row
+  produces a **two-step** plan. A concurrent `git.status` for another
+  repository reassigns `state.root` from its own root-resolution
+  callback, so a diff started in A ran its second step with B as cwd and
+  A's path — git there matches nothing, so the unstaged half silently
+  rendered `(no changes)` instead of the worktree delta it exists to
+  show. The root is now captured at the keypress and threaded through as
+  a parameter; `state.root` is not read inside the plan at all.
+- **P2 fixed (`842ec61`) — a repository root containing a newline was
+  truncated.** `rev-parse --show-toplevel` was parsed with `first_line`,
+  so a root at `/tmp/a\nb` became `/tmp/a` and every command after it ran
+  with a nonexistent cwd. Fixed with a **separate** helper,
+  `strip_output_terminator`, at that one call site. `first_line` is
+  deliberately untouched: its other three callers all feed the
+  **single-line status band**, where truncating is right, so folding the
+  two together would fix one caller and break three.
+
+**A THIRD instance of the shape is still open and was NOT fixed** (not
+in this round's scope, and no review finding covers it): **the diff path
+has no generation counter at all.** `run_diff_plan` has no in-flight
+guard, and `show_diff_buffer` writes the single `state.diff_buffer` at
+completion — so two `d` presses in flight together are last-writer-wins,
+and a slow first diff overwrites a fast second one. Reachable: `d`
+displays into the document window, the user refocuses the panel, `d`
+again. The status path solved exactly this with `reserve_generation`;
+the diff path never got one.
+
+**Re-gated at `842ec61`:** all steps green, acceptance now 29 tests.
+Both round-2 fixes mutation-verified — `g6_22` fails on the second
+spawned diff argv when the `state.root` read is restored, and `g6_14c`
+resolves `<tmp>/nl` instead of `<tmp>/nl\nroot` when `first_line` is.
 
 **Written with the lane's first commit, before the PR exists** — the
 standing correction from #171 and #215. This session it was missed on
