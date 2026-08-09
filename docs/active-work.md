@@ -265,7 +265,7 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
-## Git integration Stage 1 — BRANCHED, pre-implementation
+## Git integration Stage 1 — IMPLEMENTED, gates green, PR not opened
 
 **Written with the lane's first commit, before the PR exists** — the
 standing correction from #171 and #215. This session it was missed on
@@ -300,7 +300,52 @@ authoritative tip** — the ref, not a SHA. Recover with
   refreshes not raising `DuplicateBinding`, and a non-UTF-8 path that
   parses and displays but **refuses** its gestures at the
   `String`-typed binding boundary.
-- **Gates:** `scripts/gate --acceptance <the new suite>`.
+- **Gates:** `scripts/gate --acceptance git_status_stage1_acceptance`.
+
+**Implemented.** `builtin/runtime/git.lua` (new, loaded after
+`linewrap.lua`), the `keys` extension in `builtin/runtime/listview.lua`,
+one chunk-load line in `src/editor.rs`, and
+`tests/git_status_stage1_acceptance.rs` (25 tests, one per §6 bullet).
+No `pmacs-protocol` change, no `PROTOCOL_VERSION` change, no
+`DecorationKind` change — the no-wire property held.
+
+Five things worth carrying, all found by biting the suite rather than by
+reading:
+
+- **`listview.open`'s `seat_cursor` walks DOWN from wherever the cursor
+  is**, on the premise that a fresh `switch_active_buffer` zeroed it.
+  Re-opening an already-displayed panel — which is exactly what the
+  async completion model does — zeroes nothing, so the walk lands one
+  row *below* the previous cursor. The completion handler seats
+  unconditionally from line 0 instead of trusting `open`.
+- **A selection test that inserts ONE row above the selection is
+  vacuous**, because that accidental off-by-one lands on the right row.
+  The fixture inserts two.
+- **`{:?}` on a Rust string containing NUL cannot build a `-z` fixture.**
+  Debug renders NUL as `\0`, and Lua's decimal escape swallows the
+  digits after it — so `\0` before a `1` record becomes
+  `string.char(1)` and the record merges into its predecessor. One test
+  passed while parsing nothing: the merged text landed in
+  `# branch.head`, the panel header rendered it, and a `contains`
+  assertion on the panel text was satisfied by the header. Payloads are
+  joined in Lua with `string.char(0)`.
+- **A path may contain a newline, so a panel row must escape it.**
+  Parsing the bytes correctly and then writing them raw into a
+  one-row-per-line buffer desynchronizes every line-to-row map — and the
+  rope is UTF-8 by project invariant, so non-UTF-8 path bytes cannot go
+  in at all. Rows render `\xNN` escapes; the raw bytes stay on the
+  record, where the refusal check reads them.
+- **Untracked rows sort AFTER every tracked row** in porcelain v2, so an
+  untracked file cannot be used to reorder a list above a selection.
+
+Two deliberate deviations from the framing's letter, both narrow:
+`--no-color` on every diff invocation (a user with `color.ui = always`
+would otherwise get escape sequences in a buffer with no ANSI parser
+behind it), and `pmacs.git._program`, a module-local that the
+missing-binary witness points at a name not on `PATH`. There is no other
+in-process route to that branch: Rust's `Command` resolves the program
+against the **parent** process's `PATH`, so a child `env` cannot hide
+git, and `std::env::set_var` is `unsafe` in edition 2024.
 
 ## QoL arc retirement — PR #224 OPEN (docs only)
 

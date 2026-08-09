@@ -1,0 +1,925 @@
+-- git.lua --- Git integration Stage 1: read-only status and diff.
+-- Framing: docs/git-integration-framing.md (revision 5).
+--
+-- Two surfaces and nothing else:
+--
+--   *git-status*  a `pmacs.listview` panel over
+--                 `git --no-optional-locks -C <root> status
+--                  --porcelain=v2 --branch -z`. RET visits the file,
+--                 `d` shows its diff, `g` refreshes.
+--   *git-diff*    the diff for the FILE under point, in a generated
+--                 buffer rendered as plain text. There is no bundled
+--                 `diff` grammar (checked: `BUILTIN_LANGUAGES` in
+--                 src/syntax.rs has no entry), and there is no hunk
+--                 model anywhere in the tree --- hunks are what gutter
+--                 markers need, and that is Stage 2's protocol work.
+--
+-- NO WIRE CHANGE. Stage 2 (gutter markers) needs new `DecorationKind`
+-- variants and a `PROTOCOL_VERSION` bump, and must be scheduled alone.
+--
+-- Three facts this module is built on, each measured rather than
+-- reasoned about:
+--
+--  * `ProjectKind::Git` means a BARE repository ("no language marker
+--    found inside", src/project.rs), and a language marker beside
+--    `.git` WINS --- so pmacs reports `kind = "rust"` for its own
+--    repository. This module therefore never asks pmacs whether
+--    something is a git repo: it runs `git -C <dir> rev-parse
+--    --show-toplevel` and lets a non-zero exit be the answer. Git's own
+--    resolution handles submodules, worktrees, `GIT_DIR` and `.git`
+--    files; a marker walk reimplements a subset and gets it wrong.
+--  * `git diff --no-index` implies `--exit-code`: it exits 1 when it
+--    SUCCESSFULLY finds differences. For the untracked path the success
+--    predicate is therefore exit in {0, 1}; only >= 2 is a failure.
+--    That asymmetry is confined to `--no-index`.
+--  * An unborn `HEAD` makes `git diff HEAD` exit 128 with
+--    `fatal: bad revision 'HEAD'`. It is detected from
+--    `# branch.oid (initial)` in the `--branch` output this module
+--    already parses --- NOT from a second `rev-parse` process for a
+--    fact the first one hands over.
+--
+-- Background-work attribution is a NEGATIVE (COHERENCE.md §9): a
+-- spawned process does not appear in `*workers*` at all --- that buffer
+-- is `async.lua`'s job list, while processes live under
+-- `pmacs.process.list`. Every spawn here is labelled, which is strictly
+-- better than an anonymous `git`, but a label is not attribution and
+-- this module does not pretend otherwise. Accepted because these are
+-- short-lived reads.
+
+pmacs.git = pmacs.git or {}
+
+local STATUS_PANEL = "*git-status*"
+local DIFF_BUFFER = "*git-diff*"
+
+--- The git program name.
+---
+--- A module-local rather than a setting: Q#G-4 defines exactly one
+--- setting and says to resist more until there is use evidence. It is
+--- reachable from Lua because the missing-binary path (Q#G-2's named
+--- risk) has to be WITNESSED, and there is no other way to reach it in
+--- process: Rust's `Command` resolves the program against the PARENT
+--- process's `PATH`, so a child `env` cannot hide git, and
+--- `std::env::set_var` is `unsafe` in edition 2024, which this project
+--- forbids. Pointing this at a name that is not on `PATH` produces
+--- exactly the ENOENT a missing git produces.
+pmacs.git._program = "git"
+
+--- The most recent spawn's `{ command, args, cwd, label }`.
+---
+--- Public because the `--no-optional-locks` contract is witnessed
+--- STRUCTURALLY: a lock that was not taken cannot be observed directly,
+--- so the assembled invocation is what gets pinned (Q#G-6).
+pmacs.git._last_spawn = nil
+
+--- The last few spawns' argv, oldest first.
+---
+--- A bounded diagnostic ring rather than an unbounded log. It exists
+--- because one of this module's contracts is about a process that must
+--- NOT be spawned: unborn `HEAD` is detected from `# branch.oid
+--- (initial)` in output already in hand, and nobody should later
+--- reintroduce a `rev-parse --verify HEAD` for it. "Which processes did
+--- that open run?" is not answerable from `_last_spawn` alone.
+pmacs.git._spawn_log = {}
+
+local SPAWN_LOG_LIMIT = 16
+
+-- ---------------------------------------------------------------------
+-- Configuration (Q#G-4)
+-- ---------------------------------------------------------------------
+
+pmacs.config.define {
+  name = "git.enabled",
+  description = "Whether the Git commands (*git-status*, *git-diff*) run git at all. Turning this off makes them report that they are disabled rather than spawning anything.",
+  type = "boolean",
+  default = true,
+  mutability = "live",
+}
+
+local function git_enabled()
+  local ok, value = pcall(pmacs.config.get, "git.enabled")
+  if not ok then return true end
+  return value ~= false
+end
+
+-- ---------------------------------------------------------------------
+-- Text safety at the binding boundary (Q#G-8)
+-- ---------------------------------------------------------------------
+--
+-- Git hands back PATH BYTES. `pmacs.process.spawn` takes
+-- `args: Vec<String>` and `pmacs.buffer.find_or_open` takes
+-- `path: String` --- both Rust `String`, i.e. UTF-8 by construction ---
+-- and the rope is UTF-8 by project invariant, so a path that is valid
+-- bytes but not valid UTF-8 can be READ and DISPLAYED and cannot be
+-- passed back for a diff, nor opened. The honest boundary is: parse it,
+-- show it (escaped, since the raw bytes cannot enter a rope), and
+-- REFUSE the gesture with a message.
+
+-- Length of the valid UTF-8 sequence starting at byte `i`, or nil.
+-- Rejects overlongs, surrogates and anything past U+10FFFF, so
+-- "displayable" means the same thing here as it does to Rust.
+local function utf8_seq_len(s, i)
+  local b1 = s:byte(i)
+  if not b1 then return nil end
+  if b1 < 0x80 then return 1 end
+  local n, cp
+  if b1 >= 0xC2 and b1 <= 0xDF then
+    n, cp = 2, b1 - 0xC0
+  elseif b1 >= 0xE0 and b1 <= 0xEF then
+    n, cp = 3, b1 - 0xE0
+  elseif b1 >= 0xF0 and b1 <= 0xF4 then
+    n, cp = 4, b1 - 0xF0
+  else
+    return nil
+  end
+  if i + n - 1 > #s then return nil end
+  for k = 1, n - 1 do
+    local b = s:byte(i + k)
+    if b < 0x80 or b > 0xBF then return nil end
+    cp = cp * 64 + (b - 0x80)
+  end
+  if n == 3 and cp < 0x800 then return nil end
+  if n == 4 and cp < 0x10000 then return nil end
+  if cp >= 0xD800 and cp <= 0xDFFF then return nil end
+  if cp > 0x10FFFF then return nil end
+  return n
+end
+
+--- True when `s` is valid UTF-8, i.e. when it can cross the binding
+--- boundary at all.
+function pmacs.git.is_text(s)
+  if type(s) ~= "string" then return false end
+  local i, n = 1, #s
+  while i <= n do
+    local len = utf8_seq_len(s, i)
+    if not len then return false end
+    i = i + len
+  end
+  return true
+end
+
+--- `s` rendered for a ONE-LINE panel row: invalid UTF-8 bytes and every
+--- control byte become `\xNN`.
+---
+--- Escaping controls is not cosmetic. A path may contain a newline ---
+--- that is exactly what `-z` buys and what a quoted parser gets wrong
+--- --- and a raw newline in a row would split it across two lines and
+--- desynchronize every line-to-row mapping in the panel.
+function pmacs.git.display_path(s)
+  if type(s) ~= "string" then return "" end
+  local out = {}
+  local i, n = 1, #s
+  while i <= n do
+    local len = utf8_seq_len(s, i)
+    local b = s:byte(i)
+    if len and not (len == 1 and (b < 0x20 or b == 0x7F)) then
+      out[#out + 1] = s:sub(i, i + len - 1)
+      i = i + len
+    else
+      out[#out + 1] = string.format("\\x%02X", b)
+      i = i + 1
+    end
+  end
+  return table.concat(out)
+end
+
+--- `s` with invalid UTF-8 bytes replaced by U+FFFD, controls left
+--- alone. For MULTI-LINE bodies (a patch), where newlines and tabs are
+--- content rather than a hazard.
+local function utf8_clean(s)
+  if pmacs.git.is_text(s) then return s end
+  local out = {}
+  local i, n = 1, #s
+  while i <= n do
+    local len = utf8_seq_len(s, i)
+    if len then
+      out[#out + 1] = s:sub(i, i + len - 1)
+      i = i + len
+    else
+      out[#out + 1] = "\239\191\189" -- U+FFFD
+      i = i + 1
+    end
+  end
+  return table.concat(out)
+end
+
+-- ---------------------------------------------------------------------
+-- Running git (Q#G-2)
+-- ---------------------------------------------------------------------
+
+--- The argv for a git invocation rooted at `root`.
+---
+--- Every call site goes through here, so `--no-optional-locks` cannot
+--- be dropped by one of them. The flag is part of the contract, not a
+--- nicety (Q#G-6): `git status` is not strictly read-only --- it may
+--- refresh and write the index --- and this module runs it
+--- asynchronously from an editor while the user may be running git in a
+--- terminal, which is the exact scenario the flag exists for.
+function pmacs.git.argv(root, rest)
+  local args = { "--no-optional-locks" }
+  if root then
+    args[#args + 1] = "-C"
+    args[#args + 1] = root
+  end
+  for _, a in ipairs(rest) do args[#args + 1] = a end
+  return args
+end
+
+-- proc raw id -> { procid, out, err, on_done }
+local pump = {}
+
+-- Spawn git and call `on_done { ok, code, kind, stdout, stderr }` once
+-- it terminates. A spawn failure calls `on_done` too, with
+-- `spawn_error` set --- §1.2's silence asymmetry: the failure must be
+-- surfaced with guidance, never swallowed.
+local function run_git(label, root, rest, on_done)
+  local spec = {
+    label = label,
+    command = pmacs.git._program,
+    args = pmacs.git.argv(root, rest),
+    stdin = "null",
+  }
+  if root then spec.cwd = root end
+  pmacs.git._last_spawn = {
+    command = spec.command, args = spec.args, cwd = spec.cwd, label = spec.label,
+  }
+  local log = pmacs.git._spawn_log
+  log[#log + 1] = spec.args
+  while #log > SPAWN_LOG_LIMIT do table.remove(log, 1) end
+  local ok, proc = pcall(pmacs.process.spawn, spec)
+  if not ok then
+    on_done {
+      ok = false, kind = "spawn_failed", spawn_error = tostring(proc),
+      stdout = "", stderr = "",
+    }
+    return nil
+  end
+  pump[proc:raw()] = { procid = proc, out = {}, err = {}, on_done = on_done }
+  return proc
+end
+
+pmacs.hook.add("process.after-tick", function()
+  for raw, entry in pairs(pump) do
+    for _, ev in ipairs(pmacs.process.events_take(entry.procid)) do
+      local kind = ev.kind
+      if kind == "stdout" then
+        entry.out[#entry.out + 1] = ev.bytes
+      elseif kind == "stderr" then
+        entry.err[#entry.err + 1] = ev.bytes
+      elseif kind == "exited" or kind == "signaled" or kind == "crashed" then
+        -- The supervisor drains all remaining output BEFORE pushing the
+        -- terminal event (`final_drain_runtime`, src/process.rs), so one
+        -- pass in event order captures everything.
+        pump[raw] = nil
+        pcall(pmacs.process.forget, entry.procid)
+        local result = {
+          ok = (kind == "exited"),
+          code = (kind == "exited") and (ev.code or 0) or nil,
+          kind = kind,
+          signal = ev.signal,
+          error = ev.error,
+          stdout = table.concat(entry.out),
+          stderr = table.concat(entry.err),
+        }
+        local called, err = pcall(entry.on_done, result)
+        if not called then
+          pmacs.editor.set_status("git: " .. tostring(err))
+        end
+      end
+    end
+  end
+end)
+
+--- The first line of `text`, trimmed, or `""`.
+local function first_line(text)
+  local line = (text or ""):match("^[^\r\n]*") or ""
+  return (line:gsub("%s+$", ""))
+end
+
+--- A one-line description of why a git invocation failed.
+local function failure_reason(res)
+  if res.spawn_error then
+    return string.format(
+      "cannot run %q (%s) --- is git installed and on PATH?",
+      pmacs.git._program, first_line(res.spawn_error))
+  end
+  local detail = first_line(utf8_clean(res.stderr))
+  if res.kind == "signaled" then
+    return string.format("git was killed by %s%s",
+      res.signal or "a signal", detail ~= "" and (": " .. detail) or "")
+  end
+  if res.kind == "crashed" then
+    return string.format("git crashed: %s", res.error or detail)
+  end
+  return string.format("git exited with code %d%s",
+    res.code or -1, detail ~= "" and (": " .. detail) or "")
+end
+
+-- ---------------------------------------------------------------------
+-- Porcelain v2 parsing (Q#G-6)
+-- ---------------------------------------------------------------------
+--
+-- The SEPARATION here --- pure `parse_*` functions that take a string
+-- and return structure, testable with no repository --- is ported from
+-- `tests/fixtures/pmacs-magit/status.lua`, whose 32-test suite proves
+-- the shape works. The record TOKENIZER is deliberately NOT ported: the
+-- fixture reads newline-delimited v2 and this reads `-z`, and those are
+-- different grammars. Under `-z` a record's fields are NUL-terminated,
+-- so a rename carries its two paths as SEPARATE fields rather than
+-- tab-joined inside one, and C quoting is removed from the problem
+-- entirely rather than obliging a hand-written unquoter.
+--
+-- The fixture is left untouched (Q#G-0): its purpose is to prove the
+-- PACKAGE SYSTEM can host this, and bundled code becoming its
+-- dependency would make `tests/m8_6_acceptance.rs` test less than it
+-- claims. The duplication is deliberate and stated rather than quiet.
+
+-- Split NUL-terminated fields. A trailing empty fragment after the last
+-- NUL is dropped; an empty payload yields no fields.
+local function nul_fields(text)
+  local out = {}
+  if type(text) ~= "string" or text == "" then return out end
+  local i = 1
+  while true do
+    local nul = text:find("\0", i, true)
+    if not nul then
+      if i <= #text then out[#out + 1] = text:sub(i) end
+      break
+    end
+    out[#out + 1] = text:sub(i, nul - 1)
+    i = nul + 1
+  end
+  return out
+end
+
+--- Parse `git status --porcelain=v2 --branch -z` output.
+---
+--- Returns `{ branch = {...}, rows = {...} }` where each row is
+---
+---   { kind = "ordinary"|"rename"|"unmerged"|"untracked"|"ignored",
+---     xy, x, y, path, orig, score }
+---
+--- `path` is the CURRENT path --- what the panel shows and what RET
+--- visits --- and `orig` remembers where a rename or copy came from.
+--- Both are raw bytes; nothing here assumes they are text.
+function pmacs.git.parse_status(text)
+  local branch = { unborn = false }
+  local rows = {}
+  local fields = nul_fields(text)
+  local i = 1
+  while i <= #fields do
+    local field = fields[i]
+    local tag = field:sub(1, 1)
+    if tag == "#" then
+      local key, value = field:match("^# (%S+) (.*)$")
+      if key == "branch.oid" then
+        branch.oid = value
+        -- Unborn HEAD, from the output already being parsed. A second
+        -- `rev-parse --verify HEAD` would be a whole extra process for
+        -- a fact this line hands over.
+        branch.unborn = (value == "(initial)")
+      elseif key == "branch.head" then
+        branch.head = value
+      elseif key == "branch.upstream" then
+        branch.upstream = value
+      elseif key == "branch.ab" then
+        branch.ahead = tonumber(value:match("^%+(%d+)") or "")
+        branch.behind = tonumber(value:match("%-(%d+)$") or "")
+      end
+    elseif tag == "1" then
+      -- 1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>
+      local xy, path = field:match("^1 (%S%S) %S+ %S+ %S+ %S+ %S+ %S+ (.+)$")
+      if xy then
+        rows[#rows + 1] = {
+          kind = "ordinary", xy = xy, x = xy:sub(1, 1), y = xy:sub(2, 2), path = path,
+        }
+      end
+    elseif tag == "2" then
+      -- 2 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <Xscore> <path>\0<origPath>
+      --
+      -- The origin is the NEXT field, not a tab-joined suffix. That is
+      -- the whole reason this tokenizer is not the fixture's.
+      local xy, score, path =
+        field:match("^2 (%S%S) %S+ %S+ %S+ %S+ %S+ %S+ (%S+) (.+)$")
+      if xy then
+        i = i + 1
+        rows[#rows + 1] = {
+          kind = "rename", xy = xy, x = xy:sub(1, 1), y = xy:sub(2, 2),
+          path = path, orig = fields[i], score = score,
+        }
+      end
+    elseif tag == "u" then
+      -- u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>
+      local xy, path =
+        field:match("^u (%S%S) %S+ %S+ %S+ %S+ %S+ %S+ %S+ %S+ (.+)$")
+      if xy then
+        rows[#rows + 1] = {
+          kind = "unmerged", xy = xy, x = xy:sub(1, 1), y = xy:sub(2, 2), path = path,
+        }
+      end
+    elseif tag == "?" then
+      local path = field:match("^%? (.+)$")
+      if path then
+        rows[#rows + 1] = { kind = "untracked", xy = "??", x = "?", y = "?", path = path }
+      end
+    elseif tag == "!" then
+      local path = field:match("^! (.+)$")
+      if path then
+        rows[#rows + 1] = { kind = "ignored", xy = "!!", x = "!", y = "!", path = path }
+      end
+    end
+    i = i + 1
+  end
+  return { branch = branch, rows = rows }
+end
+
+-- ---------------------------------------------------------------------
+-- Panel state
+-- ---------------------------------------------------------------------
+
+-- `display` maps a panel DATA LINE (1-based; the header is line 0) to
+-- the git row rendered there. It is this module's own copy because
+-- listview's line map is private, and `d` needs the row under the
+-- cursor. `rows` is the same information as an array, for re-seating.
+local state = {
+  root = nil,
+  branch = nil,
+  rows = {},
+  display = {},
+  buffer = nil,
+  diff_buffer = nil,
+  failure = nil,
+  generation = 0,
+}
+
+local function status_line_text(row)
+  local shown = pmacs.git.display_path(row.path)
+  if row.orig then
+    shown = string.format("%s  <- %s", shown, pmacs.git.display_path(row.orig))
+  end
+  return string.format("%s  %s", row.xy, shown)
+end
+
+local function status_header()
+  -- A failed run has no branch and no rows, and rendering "0 changes"
+  -- above a failure row would be a small lie in the one place the panel
+  -- most needs to be honest.
+  if state.failure then
+    return "git: status failed   g retry  q quit"
+  end
+  local branch = state.branch or {}
+  local where
+  if branch.unborn then
+    where = string.format("%s (no commits yet)", branch.head or "HEAD")
+  elseif branch.head == "(detached)" or branch.head == nil then
+    where = string.format("detached at %s", (branch.oid or "?"):sub(1, 8))
+  else
+    where = branch.head
+  end
+  local n = #state.rows
+  return string.format(
+    "git: %s --- %d change%s   RET visit  d diff  n/p move  g refresh  q quit",
+    where, n, n == 1 and "" or "s")
+end
+
+-- Build the listview rows and (re)build `state.display` alongside them,
+-- so the two can never drift.
+local function listview_rows(extra_text)
+  state.failure = nil
+  state.display = {}
+  local out = {}
+  for _, row in ipairs(state.rows) do
+    out[#out + 1] = { text = status_line_text(row), item = row }
+    state.display[#out] = row
+  end
+  if extra_text then
+    out[#out + 1] = { text = extra_text }
+  end
+  return out
+end
+
+-- Row-level failure (Q#G-1 item 4): a failure is a ROW, not a silence.
+local function failure_rows(reason)
+  state.failure = reason
+  state.rows = {}
+  state.display = {}
+  return { { text = "! " .. reason } }
+end
+
+-- ---------------------------------------------------------------------
+-- Visiting (RET)
+-- ---------------------------------------------------------------------
+
+local function join_root(path)
+  if path:sub(1, 1) == "/" then return path end
+  return (state.root or ".") .. "/" .. path
+end
+
+local function refuse_unrepresentable(row)
+  pmacs.editor.set_status(string.format(
+    "git: %s is not valid UTF-8, so pmacs cannot open or diff it",
+    pmacs.git.display_path(row.path)))
+end
+
+local function visit_row(row)
+  if type(row) ~= "table" or not row.path then return end
+  if not pmacs.git.is_text(row.path) then
+    refuse_unrepresentable(row)
+    return
+  end
+  local target = join_root(row.path)
+  pmacs.editor.push_jump()
+  -- A visit FROM a panel lands in the DOCUMENT target and leaves the
+  -- panel where it is (Q#BP11b) --- `display_file`, never the raw
+  -- switch, which would clobber the panel with the source.
+  local ok, err = pcall(pmacs.window.display_file, target, { select = true })
+  if not ok then
+    pmacs.editor.jump_back()
+    pmacs.editor.set_status(string.format("git: cannot open %s: %s",
+      pmacs.git.display_path(row.path), first_line(tostring(err))))
+  end
+end
+
+-- ---------------------------------------------------------------------
+-- The status refresh (Q#G-1)
+-- ---------------------------------------------------------------------
+
+local function open_status_panel(rows)
+  pmacs.listview.open {
+    name = STATUS_PANEL,
+    header = status_header(),
+    rows = rows,
+    -- `d` is not on listview's key surface (RET SPC n <down> p <up> TAB
+    -- g q), and it cannot be bound from outside the primitive safely:
+    -- a name collision disambiguates to `<2>`, so the name passed here
+    -- is not necessarily the buffer that came back. The `keys` table
+    -- binds it through the primitive's own buffer-local path, so no key
+    -- is intercepted and COHERENCE.md §6 stays at six shadows.
+    keys = { d = "git.diff-file" },
+    on_visit = visit_row,
+    on_refresh = function() return pmacs.git._on_refresh() end,
+  }
+  -- `listview.open` takes `select = true`, so the panel is the active
+  -- buffer here. Captured rather than looked up by name, because the
+  -- name may have been disambiguated.
+  state.buffer = pmacs.window.buffer()
+end
+
+--- The refresh generation currently in force.
+---
+--- Exposed alongside `_deliver_status` below, and for the same reason:
+--- the discard rule is about a completion arriving LATE, and a caller
+--- cannot construct a stale request without knowing what "current"
+--- means.
+function pmacs.git._generation()
+  return state.generation
+end
+
+--- Deliver a completed `git status`.
+---
+--- Exposed because concurrent refresh is asserted by DRIVING two
+--- refreshes and completing them out of order, which no arrangement of
+--- real subprocess timing can guarantee.
+function pmacs.git._deliver_status(request, res)
+  -- Generation (Q#G-1 item 3): a second `g` while one is in flight
+  -- bumps the generation, and the older completion DISCARDS its rows
+  -- rather than racing. It does not terminate the first process ---
+  -- reaping is `process.forget`'s job and killing git mid-read buys
+  -- nothing.
+  if request.generation ~= state.generation then return end
+  -- Panel lifetime (Q#G-1 item 5): if the buffer this refresh belongs
+  -- to is gone, drop the result. A FIRST open carries no expectation.
+  if request.expect_buffer ~= nil then
+    local live, valid = pcall(request.expect_buffer.is_valid, request.expect_buffer)
+    if not (live and valid) then return end
+  end
+
+  local rows
+  if res.ok and res.code == 0 then
+    local parsed = pmacs.git.parse_status(res.stdout)
+    state.branch = parsed.branch
+    state.rows = parsed.rows
+    rows = listview_rows(nil)
+  else
+    local reason = failure_reason(res)
+    state.branch = state.branch or {}
+    rows = failure_rows(reason)
+    pmacs.editor.set_status("git status: " .. reason)
+  end
+
+  open_status_panel(rows)
+  -- `listview.open` resets collapse and does NOT preserve selection ---
+  -- only `listview.refresh` does, and that is the synchronous path this
+  -- model cannot use. So re-seating is owned here.
+  --
+  -- And `open`'s own `seat_cursor(p, 1)` cannot be relied on either: it
+  -- walks DOWN from wherever the cursor is, on the premise that a fresh
+  -- `switch_active_buffer` zeroed it. Re-opening a panel that is
+  -- already displayed does not zero anything, so that walk would land
+  -- one row below the previous cursor instead of on row 1. The handler
+  -- therefore seats unconditionally, from line 0.
+  local target = 1
+  if request.selected_path then
+    for i, row in ipairs(state.rows) do
+      if row.path == request.selected_path then
+        target = i
+        break
+      end
+    end
+  end
+  -- If the captured path is gone --- the commonest case, since a file
+  -- that stopped being modified drops out of status --- `target` stays
+  -- 1 and nothing is said about it. That is the correct answer, not a
+  -- failure.
+  pmacs.editor.clear_selection()
+  pmacs.editor.set_view_top(0)
+  pmacs.editor.move_to_line(0)
+  -- Walked with `move_down` rather than a single `move_to_line(target)`
+  -- because motion is what drags the viewport along; a bare cursor set
+  -- would leave a long status list scrolled to the top with the cursor
+  -- off screen. This is `listview.refresh`'s own idiom.
+  for _ = 1, target do pmacs.editor.move_down() end
+end
+
+-- The path of the row under the cursor right now, or nil.
+local function selected_path()
+  local row = state.display[pmacs.editor.cursor_line()]
+  return row and row.path or nil
+end
+
+local function start_status(root, expect_buffer, want_selection)
+  state.generation = state.generation + 1
+  local request = {
+    generation = state.generation,
+    expect_buffer = expect_buffer,
+    selected_path = want_selection and selected_path() or nil,
+  }
+  run_git("git status", root,
+    { "status", "--porcelain=v2", "--branch", "-z" },
+    function(res) pmacs.git._deliver_status(request, res) end)
+end
+
+--- `g` inside the panel.
+---
+--- `on_refresh` stays SYNCHRONOUS and honest: it returns the current
+--- rows immediately with a marker appended and KICKS OFF the spawn, so
+--- `g` always re-renders and always shows that work started. A `g` that
+--- silently does nothing is a defect this primitive already names.
+function pmacs.git._on_refresh()
+  if not git_enabled() then
+    return listview_rows("(git.enabled is false --- nothing was run)")
+  end
+  if not state.root then
+    return listview_rows("(no repository --- run M-x git.status)")
+  end
+  start_status(state.root, state.buffer, true)
+  return listview_rows("(refreshing...)")
+end
+
+-- ---------------------------------------------------------------------
+-- Entry point
+-- ---------------------------------------------------------------------
+
+local function directory_of(path)
+  local dir = path:match("^(.*)/[^/]*$")
+  if dir == nil or dir == "" then return "/" end
+  return dir
+end
+
+--- The directory a status run should resolve its repository from.
+---
+--- The ACTIVE FILE's directory, falling back to the daemon's working
+--- directory when the active buffer is pathless (a dired listing, the
+--- scratch buffer). Deliberately not a project-marker walk: git resolves
+--- its own worktree, and `ProjectKind` cannot answer the question at all.
+local function active_directory()
+  local buf = pmacs.window.buffer()
+  if buf then
+    local ok, path = pcall(function() return buf:path() end)
+    if ok and type(path) == "string" and path ~= "" then
+      return directory_of(path)
+    end
+  end
+  local ok, id = pcall(pmacs.instance.identity)
+  if ok and type(id) == "table" and type(id.working_directory) == "string" then
+    return id.working_directory
+  end
+  return nil
+end
+
+--- Open (or re-open) `*git-status*` for the repository containing the
+--- active file.
+function pmacs.git.status()
+  if not git_enabled() then
+    pmacs.editor.set_status("git: disabled by the `git.enabled` setting")
+    return
+  end
+  local dir = active_directory()
+  if not dir then
+    pmacs.editor.set_status("git: no directory to resolve a repository from")
+    return
+  end
+  -- The root rule (Q#G-2): ask git, and let a non-zero exit BE the
+  -- "not a repository" answer. `-C <dir>` with no root of our own.
+  run_git("git rev-parse", nil, { "-C", dir, "rev-parse", "--show-toplevel" },
+    function(res)
+      if not (res.ok and res.code == 0) then
+        if res.spawn_error then
+          pmacs.editor.set_status("git: " .. failure_reason(res))
+        else
+          pmacs.editor.set_status(string.format("git: %s is not inside a repository", dir))
+        end
+        return
+      end
+      local root = first_line(res.stdout)
+      if root == "" then
+        pmacs.editor.set_status("git: rev-parse returned no worktree root")
+        return
+      end
+      state.root = root
+      -- A fresh open carries no buffer expectation, so a panel the user
+      -- killed earlier does not make this run drop its own first result.
+      state.buffer = nil
+      start_status(root, nil, false)
+    end)
+end
+
+pmacs.command.define {
+  name = "git.status",
+  description = "Show the working tree's Git status in a *git-status* panel.",
+  fn = pmacs.git.status,
+}
+
+-- ---------------------------------------------------------------------
+-- The diff gesture (Q#G-7)
+-- ---------------------------------------------------------------------
+--
+-- RET visits the file --- the behaviour a list of files should have ---
+-- so the diff needs its own key, and `d` is it.
+--
+-- What `d` shows answers the lane's own question, "what have I
+-- changed?", against HEAD. A porcelain-v2 row carries an XY pair (X
+-- staged, Y unstaged) and the three plausible diffs answer three
+-- different questions: `git diff` shows only Y, `--cached` only X, and
+-- neither shows an untracked file at all. One view of the TOTAL change
+-- is right for reading; splitting X from Y is a staging UI, which is
+-- Stage 3.
+--
+-- `--no-color` because this renders as plain text and a user with
+-- `color.ui = always` would otherwise get escape sequences in a buffer
+-- with no ANSI parser behind it.
+
+local SPLIT_HEADER =
+  "no commits yet --- split view: staged (index) above, unstaged (worktree) below"
+
+-- The invocations `d` runs for `row`, as
+-- `{ { label = string|nil, args = {...}, no_index = bool }, ... }`,
+-- plus the header describing what the result shows.
+local function diff_plan(row, unborn)
+  local path = row.path
+  if row.kind == "untracked" or row.kind == "ignored" then
+    -- A normal diff shows NOTHING for an untracked file. Without this
+    -- case `d` is silently dead on the rows a user is most likely to
+    -- press it on.
+    return {
+      header = "untracked --- shown against /dev/null",
+      steps = { { args = { "diff", "--no-color", "--no-index", "--", "/dev/null", path },
+                  no_index = true } },
+    }
+  end
+  if not unborn then
+    if row.kind == "rename" and row.orig then
+      -- Both paths, which is what lets rename detection render this as
+      -- a rename rather than an unrelated add plus delete.
+      return {
+        header = string.format("against HEAD (renamed from %s)",
+          pmacs.git.display_path(row.orig)),
+        steps = { { args = { "diff", "--no-color", "HEAD", "--", row.orig, path } } },
+      }
+    end
+    return {
+      header = "against HEAD",
+      steps = { { args = { "diff", "--no-color", "HEAD", "--", path } } },
+    }
+  end
+  -- Unborn HEAD: there is nothing to total AGAINST, so the split
+  -- appears here and only here. `AM` and `AD` carry BOTH states at
+  -- once, which is exactly the gap: `--cached` alone loses the worktree
+  -- delta and plain `git diff` alone loses the staged base.
+  local staged = row.x ~= "." and row.x ~= " "
+  local unstaged = row.y ~= "." and row.y ~= " "
+  local cached = { label = "staged (index)",
+                   args = { "diff", "--no-color", "--cached", "--", path } }
+  local worktree = { label = "unstaged (worktree)",
+                     args = { "diff", "--no-color", "--", path } }
+  if staged and unstaged then
+    return { header = SPLIT_HEADER, steps = { cached, worktree } }
+  end
+  if staged then
+    return { header = "no commits yet --- staged (index) only", steps = { cached } }
+  end
+  return { header = "no commits yet --- unstaged (worktree) only", steps = { worktree } }
+end
+
+local function diff_step_ok(step, res)
+  if not res.ok then return false end
+  -- `--no-index` implies `--exit-code`: exit 1 means it SUCCESSFULLY
+  -- found differences, which is the whole point of running it. Under a
+  -- plain "non-zero is failure" predicate every untracked diff would
+  -- render a failure row instead of the diff it just produced. The
+  -- asymmetry is confined to this invocation.
+  if step.no_index then return (res.code or 0) <= 1 end
+  return (res.code or 0) == 0
+end
+
+-- Ownership is the HANDLE this module holds, never a name match ---
+-- listview's Q#GB13 rule and dired's F7 rule, for the same reason.
+-- `pmacs.buffer.create` takes any caller-chosen name, so a user may
+-- already have a buffer called `*git-diff*`; adopting it would clobber
+-- their bytes and then lock the rope. A fresh create leaves theirs
+-- untouched, and this module writes only to the handle it made.
+local function show_diff_buffer(title, body)
+  local buf = state.diff_buffer
+  local live = buf ~= nil and select(2, pcall(buf.is_valid, buf)) == true
+  if not live then
+    buf = pmacs.buffer.create(DIFF_BUFFER)
+    pmacs.buffer.add_intercept(buf, function()
+      error(DIFF_BUFFER .. " is read-only")
+    end)
+    pmacs.buffer.set_round_trip_input(buf, true)
+    state.diff_buffer = buf
+  end
+  pmacs.buffer.set_generated_contents(buf, title .. "\n\n" .. body)
+  -- The DOCUMENT target, so the status panel it was invoked from stays
+  -- visible beside it.
+  pcall(pmacs.window.display, buf, { select = true })
+end
+
+-- Run the plan's steps in order, then render.
+local function run_diff_plan(row, plan)
+  local pieces = {}
+  local index = 0
+  local step_done
+  local function next_step()
+    index = index + 1
+    local step = plan.steps[index]
+    if not step then
+      local body = table.concat(pieces, "\n")
+      if body:gsub("%s", "") == "" then
+        body = "(no differences)"
+      end
+      show_diff_buffer(string.format("git diff --- %s\n%s",
+        pmacs.git.display_path(row.path), plan.header), body)
+      return
+    end
+    run_git("git diff", state.root, step.args, function(res) step_done(step, res) end)
+  end
+  step_done = function(step, res)
+    if not diff_step_ok(step, res) then
+      local reason = failure_reason(res)
+      show_diff_buffer(string.format("git diff --- %s",
+        pmacs.git.display_path(row.path)), reason)
+      pmacs.editor.set_status("git diff: " .. reason)
+      return
+    end
+    local text = utf8_clean(res.stdout)
+    if step.label then
+      pieces[#pieces + 1] = string.format("=== %s ===\n%s", step.label,
+        text ~= "" and text or "(no changes)\n")
+    else
+      pieces[#pieces + 1] = text
+    end
+    next_step()
+  end
+  next_step()
+end
+
+pmacs.command.define {
+  name = "git.diff-file",
+  description = "Show the diff for the file under the cursor in *git-status*.",
+  fn = function()
+    -- Bound buffer-locally on the panel, so `d` can only reach this
+    -- there; the identity check is for the `M-x` path. Compared against
+    -- the CAPTURED handle, never a name lookup: listview disambiguates
+    -- a collision to `<2>`, so the name is not the identity.
+    local active = pmacs.window.buffer()
+    if not (state.buffer and active and active == state.buffer) then
+      pmacs.editor.set_status("git: no *git-status* row here")
+      return
+    end
+    local row = state.display[pmacs.editor.cursor_line()]
+    if not (type(row) == "table" and row.path) then
+      pmacs.editor.set_status("git: no file on this line")
+      return
+    end
+    if not pmacs.git.is_text(row.path)
+      or (row.orig and not pmacs.git.is_text(row.orig)) then
+      refuse_unrepresentable(row)
+      return
+    end
+    if not git_enabled() then
+      pmacs.editor.set_status("git: disabled by the `git.enabled` setting")
+      return
+    end
+    run_diff_plan(row, diff_plan(row, (state.branch or {}).unborn == true))
+  end,
+}

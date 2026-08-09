@@ -1293,6 +1293,17 @@ Primitive-by-primitive against the list above:
   that found it (§25). All four remain in `lsp.lua`; per §25 the
   symbols are authoritative and the `ad41cf1` line numbers have drifted.
 
+  **Updated again: FIVE, and the fifth is the first outside
+  `lsp.lua`.** Git Stage 1's `*git-status*`
+  (`builtin/runtime/git.lua`) is the concrete evidence P5 asked for
+  that the primitive generalizes past its first consumer — the
+  remediation here was always adoption, not construction. It also
+  added the primitive's one extension: an optional **`keys`** table on
+  the open spec, installed once with the panel's buffer and compared
+  (not re-bound) on reopen, because `Keymap::bind` refuses duplicates
+  and an async consumer re-opens on every refresh. `*buffer-list*` and
+  project-search remain the un-migrated hand-rolled pair.
+
   **`*lsp*` is the only one of the four with a working refresh** — it is
   the only one supplying `on_refresh`. `g` is bound on all four
   unconditionally by `bind_local_keymap`, so the other three carry a
@@ -1422,10 +1433,25 @@ What does not:
 
 - **Code actions apply the first action blindly** — no picker (a
   roadmap "dark matter" item still true at audit).
-- **There is no Git integration at all** — no status, stage, diff,
-  blame, or gutter markers anywhere in the tree (gutter git riders and
-  the `ResourceOffer` diff/blame family are named deferrals). The Git
-  affordance list above has nothing to attach to yet.
+- **Git integration reaches status and diff, and no further.** Stage 1
+  (`docs/git-integration-framing.md`) ships `*git-status*` — a
+  `listview` panel over `git status --porcelain=v2 --branch -z`, with
+  RET visiting the file and `d` showing its file-level diff. There is
+  still **no stage, revert, blame, or gutter marker** anywhere in the
+  tree; gutter git riders need new `DecorationKind` variants (Stage 2,
+  which must be scheduled alone), and the `ResourceOffer` diff/blame
+  family remains a named deferral. The Git affordance list above now has
+  something to attach to; the affordances themselves are unbuilt, and
+  the menu's context vocabulary (`src/menu.rs`) has no `git` context to
+  host them.
+
+  The original audit said "there is no Git integration at all … anywhere
+  in the tree", and that was **literally false when it was written**:
+  `tests/fixtures/pmacs-magit/` is a tracked, installable package that
+  spawns git and parses porcelain v2, with a 32-test acceptance suite
+  (`tests/m8_6_acceptance.rs`). The **product** gap it described was
+  real; the sentence overstated it, and the framing that found the
+  overstatement is the one that closed the gap.
 - No test run/debug affordances (DAP is a future arc,
   `docs/dap-debugging-framing.md`).
 - No missing-tool guidance affordances (§1.2 — the diagnostic that
