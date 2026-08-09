@@ -349,11 +349,41 @@ authoritative tip** — the ref, not a SHA. Recover with
   result needs re-establishing on a fresh target dir under the repaired
   script. Deliberately **not** folded into that feature branch, and it
   happens **after** this lands, not inside it.
+- **Acceptance criterion, witnessed 2026-08-09.**
+  `scripts/gate --acceptance gate_script_acceptance --protocol` on a
+  target root that **did not exist** (precondition recorded, not
+  assumed): all eleven steps green, `09 build-crdt ok` producing
+  `debug/pmacs-gpu`, and `gpu_invocation_acceptance` at **15 passed /
+  0 failed** where the same suite was 3/12 without the build step.
+  Zero occurrences of the *"build pmacs-gpu"* signature in the sweep
+  log, and a54/a37 ran for real rather than taking their skip branches.
+  **No manual build anywhere** — which is the thing that was false.
+- **UNEXPLAINED RED, recorded rather than swept up.** An earlier
+  attempt at the same cold run failed step 10 with **36 + 4 + 6 + 4
+  failures across `m5_5`/`m5_6`/`m5_7`/`m5_8`**, all real-daemon
+  suites, all with signature *"daemon exited with exit status: 101
+  before socket appeared; socket=/tmp/.tmpXXXX/pmacs.sock — `<stderr
+  empty>`"*. **Not** the `pmacs-gpu` signature, and no row in
+  `docs/ci-red-signatures.md` matches it. Re-running the same test
+  binary from the same target directory gave 36/36 green, which by
+  that registry's own rule establishes **intermittence only, never
+  environmental cause** — so this stays open rather than being
+  attributed to the load (~25–30 across four concurrent lanes' gates).
+  **De-implicated from `build-crdt` by construction, not by the green
+  rerun:** the root crate's `default = ["luajit"]`, so
+  `--no-default-features --features luajit,crdt` enables *exactly* the
+  same feature set as the sweep's `--features crdt`. The build step
+  cannot hand the sweep a differently-featured binary, so it has no
+  mechanism by which to break a daemon suite. Local, not CI, so not a
+  registry row; noted here for whoever sees it next.
 - **Gates:** `scripts/gate --acceptance gate_script_acceptance`. Note
   the recursion — this lane edits the script that runs its own gates,
   so `--print-plan`, `--help` and `--self-test` were also checked by
   hand after each edit: a change that breaks the script cannot be
-  reported honestly by the script.
+  reported honestly by the script. The assertions were **mutation
+  tested**: wrong features, wrong position, unconditional emission,
+  an aborting runner, and the build folded into `sweep-crdt` each fail
+  the suite.
 
 ## QoL arc retirement — PR #224 OPEN (docs only)
 
