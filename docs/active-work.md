@@ -237,69 +237,33 @@ back-dated block that pretends it did.
   confirm failed-gate naming, log paths, ambient creation and reaping,
   and distinct log directories per run.
 
-**GATE STATUS: NOT GREEN, AND KNOWINGLY SO.** `scripts/gate` exits 1 on
-this branch and on a clean `main`, because **R8** fails `m4_acceptance`
-and therefore the workspace sweep. CI is green; the local full suite is
-not.
+**GATE STATUS — R8 RESOLVED.** This lane was blocked because
+`scripts/gate` exited 1 on a clean tree: **R8** failed `m4_acceptance`
+and therefore the sweep. That was never a footnote — #225 is the lane
+that makes the gate suite authoritative, and a tool shipping with its
+own gate red teaches the opposite of what it exists to teach.
 
-**That is a merge blocker under the standing rule**, not a footnote.
-"All gates green before any PR" does not carry an implicit "except the
-ones that were already failing", and #225 is the worst possible lane to
-grant a silent exception to — it is the lane that makes the gate suite
-authoritative. A tool that ships with its own gate red teaches the
-opposite of what it exists to teach.
+**R8 was fixed and retired in #226** (`dcb852e`), which bounded the LSP
+fixture's project detection. This branch is rebased onto it.
 
-**The coherent path, in order:** diagnose R8 in the lane below, resolve
-it, then rebase #225 and re-gate. The alternative is an explicit,
-documented exception from the user; there is no third option where this
-merges quietly.
+**RE-GATED 2026-08-09: `scripts/gate` exits 0.** All nine gates green in
+one command — fmt, clippy, `--lib`, `--lib --features crdt`, both named
+acceptance suites, `m4_acceptance`, `-p pmacs-gpu`, and the full
+workspace sweep. That is #225's own acceptance criterion, and it is the
+first time the tool has passed the suite it exists to run.
 
-**Update 2026-08-08 — R8 is now diagnosed and is environmental**, so
-this is no longer blocked behind an open investigation. The gate goes
-green on this tree the moment the stray `/tmp/.git` is gone. What
-remains genuinely open is the *durable* fix — bounding the fixture's
-project detection — which is the R8 lane's, not this one's. **Whether
-#225 merges before or after that is the user's call**, and either way
-it should be recorded here rather than assumed.
-
-## R8 — the listview path failure that blocks every local gate run — NEEDS A LANE
-
-**Promoted 2026-08-08**, not discovered then: the row has been in
-`docs/ci-red-signatures.md` since the QoL arc. What changed is that
-`scripts/gate` (#225) turns the gate suite into one command, and R8
-makes that command **exit non-zero on a clean tree, every time**.
-
-- **Signature, control, and evidence: `docs/ci-red-signatures.md` R8.**
-  Not duplicated here. It is deterministic, and a merge-base control
-  confirms it fails identically on `main` — it is not a regression from
-  #223 or #225.
-- **Why it needs a lane now.** A gate that is always red is a gate
-  nobody reads. Parallel lanes are about to multiply how often it runs,
-  and the first thing an agent learns from a permanently-failing gate
-  is to ignore gate failures.
-- **DIAGNOSED 2026-08-08 — mechanism established, see the R8 row.**
-  `display_path` (`builtin/runtime/lsp.lua:2397`) shortens against the
-  detected project root; `project.detect` walks up from
-  `/tmp/.tmpXXXX/r.rs` and finds a **stray empty `/tmp/.git`** on this
-  machine, so the root resolves to `/tmp` and the prefix is stripped.
-  Controlled: the same test with `TMPDIR` outside `/tmp` **passes**.
-- **Two different fixes, and only one of them is this lane's.**
-  - *Environmental*: removing `/tmp/.git` makes the gate green
-    immediately. Nothing about pmacs is wrong when a real project root
-    sits above a file — that is the feature.
-  - *Real defect*: the fixture is **environment-dependent**, and
-    `src/project.rs:208` already provides `detect_project_within` with
-    a `stop_root` documented for exactly this hazard — *"a developer's
-    `/tmp/.git`"*, in those words. The test does not use it. **That is
-    what this lane fixes, and what retires the row.**
-- **Provenance unresolved:** `/tmp/.git` is dated 2026-08-07 23:17,
-  inside this session's window, and **may have been created by this
-  session's own work**. The merge-base control remains valid as "this
-  tree has it" but says nothing about when the environment acquired the
-  marker.
-- **Scope discipline:** fix the fixture's boundary, not the assertion. A
-  change that made it pass without bounding detection would convert a
-  visible environment-dependence into an invisible one.
+**Rebase resolution, per the standing rule that #226's R8 documentation
+wins.** Three conflicts, all in R8 text this branch had written while
+the row was still an open investigation: two in
+`docs/ci-red-signatures.md` (both resolved to #226's retired row, this
+branch's pre-fix copy dropped), and the framing-doc pair
+(`e71e1bd` added it, `7cfba73` removed it — both **skipped**, since they
+are net-zero here and `main` owns the file authoritatively; replaying
+the second would have deleted `main`'s copy). Two now-stale lanes were
+also removed: this branch's "R8 NEEDS A LANE" investigation block, and
+#226's own lane, which Rule 4 retires now that it has merged — its
+durable facts are in the retired registry row and the handoff §6
+census.
 
 ## QoL arc retirement — PR #224 OPEN (docs only)
 
@@ -335,51 +299,6 @@ the PR that retires other lanes.
   is stated rather than left as a gap.
 - **Retire this block in the next absorption after #224 merges.** It
   describes a docs PR; once merged there is nothing volatile left.
-
-## R8 fixture boundary — PR #226 OPEN, HELD FOR REVIEW (test hermeticity)
-
-**PR #226** — https://github.com/levineuwirth/pmacs/pull/226. **Open,
-awaiting review; no merge authorization.**
-
-**Branch `r8-fixture-boundary`**, base `githubsucks/main` @ `b833b13`
-(the #224 merge). **`githubsucks/r8-fixture-boundary` is the
-authoritative tip** — the ref, not a SHA. Recover with
-`git fetch githubsucks && git checkout r8-fixture-boundary`.
-
-**Written with the lane's first commit, before the PR existed** — the
-standing correction from #171 and #215, which the previous two lanes
-both missed and review both caught.
-
-- **Framing `docs/r8-fixture-boundary-framing.md`**, revision 2,
-  approved 2026-08-08.
-- **Scope:** `tests/m4_acceptance.rs` only — `open_against_fake` sets
-  `pmacs.project.set_search_boundary` to the fixture directory, plus a
-  portable planted-marker witness. **No `src/`, no runtime, no
-  product-behaviour change.** `display_path` and project detection are
-  deliberately untouched: shortening a location against its project
-  root is the feature.
-- **Deliberately NOT branched from `gate-script`.** `scripts/gate` does
-  not exist on `main`, so naming it as a criterion would have made this
-  lane depend on an artifact absent from its own base.
-- **Verification (all run):** the R8 test passes **with `/tmp/.git`
-  still present**, i.e. on the machine that reproduces it; the planted
-  marker witness passes, and also passes with `TMPDIR` outside `/tmp`
-  (the CI shape); reverting the boundary fails **both**, the witness
-  with `proj/r.rs:12:3` — relative to the *planted* marker, which is
-  what makes the bite portable; full `m4_acceptance` 151/0; `--lib`
-  1920 and `--lib --features crdt` 2105; `-p pmacs-gpu` 241; fmt,
-  clippy, `git diff --check`; and the **full workspace sweep exit 0
-  across 113 targets** — the first fully green local sweep of this
-  session.
-- **`/tmp/.git` was NOT removed**, deliberately: deleting it would hide
-  the hermeticity defect, its provenance is unresolved, and it is the
-  only thing on this machine that reproduces the row.
-
-**Sequencing:** this lands first, on its own merits. **Then #225 rebases
-onto it** and takes "`scripts/gate` runs green" as *its* re-gate
-criterion. On that rebase, **the R8 documentation here is authoritative**
-— #225 carries an earlier, pre-fix copy of the R8 registry row and lane
-text from when it was still an open investigation, and those must lose.
 
 ## Docs absorption after #217 — MERGED as #218 (2026-08-06 09:59Z)
 
