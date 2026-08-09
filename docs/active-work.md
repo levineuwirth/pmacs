@@ -265,6 +265,50 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
+## `scripts/gate --protocol` build step — BRANCHED, framing in review
+
+**Written with the lane's first commit**, per the standing correction
+from #171 and #215.
+
+**Branch `gate-protocol-build`**, base `githubsucks/main` @ `4bc55e8`
+(the #225 merge). **`githubsucks/gate-protocol-build` is the
+authoritative tip** — the ref, not a SHA. Recover with
+`git fetch githubsucks && git checkout gate-protocol-build`.
+
+- **Framing `docs/gate-protocol-build-framing.md`, revision 1**, in
+  review. Narrow by design: one missing step in one script, plus the
+  boundary question that let it go missing. No `src/`, no protocol, no
+  feature work.
+- **The defect.** `--protocol` adds the CRDT workspace sweep, whose
+  documented precondition is `cargo build --workspace
+  --no-default-features --features luajit,crdt` (handoff §5:532-535).
+  The plan emitter (`scripts/gate:187-204`) has **no build step at
+  all** — read from the source, not inferred from the failure.
+- **Why it was latent, and why that makes it urgent rather than tidy.**
+  Before #225 every worktree shared one `CARGO_TARGET_DIR`, which
+  almost always already held a `pmacs-gpu` binary, so the precondition
+  was satisfied **by accident**. Per-worktree target dirs start empty.
+  The hazard is not the red gate that stops you — it is a **green**
+  `--protocol` run whose crdt sweep was decided by the state of the
+  build directory rather than by the diff. That is a gate reporting
+  coverage it does not have, which is what #225 exists to prevent.
+- **Observed on PR #228's first gate run:** twelve
+  `gpu_invocation_acceptance::crdt::*` failures, all *"build pmacs-gpu
+  before this acceptance suite"*, with `debug/pmacs-gpu` absent.
+- **The durable half is a boundary question.** `scripts/gate`'s header
+  names handoff **§3** as the owner of its reasoning, and this
+  precondition lives in **§5** — a coherent cause for the omission, not
+  mere oversight. Q#GR-3 proposes §3 gains it, §5 keeps the incident,
+  and the script cites both.
+- **Q#GR-1 must be settled by OBSERVATION before implementation** —
+  whether the default sweep needs the binary too. The entire defect is
+  a precondition nobody checked; establishing its replacement by
+  reading would repeat the error at one remove.
+- **Blocks PR #228 (discovery Stage 2).** That lane's `--protocol`
+  result needs re-establishing on a fresh target dir under the repaired
+  script. Deliberately **not** folded into that feature branch.
+- **Gates:** `scripts/gate --acceptance gate_script_acceptance`.
+
 ## QoL arc retirement — PR #224 OPEN (docs only)
 
 **PR #224** — https://github.com/levineuwirth/pmacs/pull/224. Written
