@@ -5575,13 +5575,22 @@ fn paint_minibuffer(
     //
     // Q#D2-2: only the command source has a detail. A file-path or
     // buffer-name prompt renders exactly as it did before.
+    //
+    // FIRST LINE ONLY: this band is a single row, and
+    // `Command.description` is free-form — MCP registration renders a
+    // whole schema block into it. The full text stays reachable through
+    // `describe-command`.
     let suffix = match session.selected.and_then(|idx| session.candidates.get(idx)) {
         Some(cand) => {
             let detail = matches!(
                 session.source,
                 crate::minibuffer::CompletionSource::Commands
             )
-            .then(|| commands.get(cand).map(|c| c.description.as_str()))
+            .then(|| {
+                commands
+                    .get(cand)
+                    .map(crate::command::Command::description_first_line)
+            })
             .flatten();
             minibuffer_candidate_suffix(cand, detail, max.saturating_sub(col))
         }

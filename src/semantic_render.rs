@@ -1725,9 +1725,26 @@ impl SemanticRenderState {
                         labels
                             .into_iter()
                             .map(|label| {
+                                // FIRST LINE ONLY. `Command.description`
+                                // is free-form and MCP registration puts
+                                // a whole schema block in it, while the
+                                // dropdown sizes itself from
+                                // `rows.len()` — one logical row per
+                                // candidate. Shipping the block would
+                                // shape into more physical lines than
+                                // the geometry accounts for and
+                                // misalign every row below it. The full
+                                // text stays reachable through
+                                // `describe-command`.
                                 let detail = commands
                                     .get(&label)
-                                    .map(|command| command.description.clone());
+                                    .map(|command| command.description_first_line().to_owned())
+                                    // A description whose first line is
+                                    // empty (`"\nArguments:…"`) carries
+                                    // nothing to render, so it ships as
+                                    // absent rather than as `Some("")`,
+                                    // which would draw trailing padding.
+                                    .filter(|detail| !detail.is_empty());
                                 MinibufferRow { label, detail }
                             })
                             .collect()

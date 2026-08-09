@@ -34,7 +34,8 @@ use std::path::Path;
 use pmacs::bootstrap::BootstrapRoots;
 use pmacs::editor::EditorState;
 use pmacs_protocol::{
-    ADVERTISED_PROTOCOL_VERSION, PROTOCOL_VERSION, is_supported_protocol_version,
+    ADVERTISED_PROTOCOL_VERSION, ByteRange, InstanceMessage, MinibufferRow, PROTOCOL_VERSION,
+    is_supported_protocol_version,
 };
 
 #[cfg(feature = "crdt")]
@@ -46,13 +47,11 @@ use std::time::{Duration, Instant};
 use pmacs_protocol::cell::CellSize;
 #[cfg(feature = "crdt")]
 use pmacs_protocol::message::{
-    AttachRequest, FrontendCapabilities, FrontendEvent, Hello, InstanceMessage, Key, KeyEvent,
-    Modifiers, SessionBootstrapRequest,
+    AttachRequest, FrontendCapabilities, FrontendEvent, Hello, Key, KeyEvent, Modifiers,
+    SessionBootstrapRequest,
 };
 #[cfg(feature = "crdt")]
 use pmacs_protocol::transport::{read_message, write_message};
-#[cfg(feature = "crdt")]
-use pmacs_protocol::{ByteRange, MinibufferRow};
 
 #[cfg(feature = "crdt")]
 use common::daemon::{TestDaemon, build_default_caps};
@@ -146,6 +145,36 @@ fn bottom_row(s: &EditorState, rows: u32, cols: u32) -> String {
         }
     }
     row.into_iter().collect::<String>().trim_end().to_owned()
+}
+
+/// Open `M-x` narrowed to `zzprobe` and return the candidate rows the
+/// semantic producer ships to a current-wire peer.
+///
+/// Through `SemanticRenderState` and the real minibuffer session rather
+/// than by constructing a message: the clip lives in the producer, so a
+/// hand-built row would skip the thing under test.
+fn mx_rows(s: &EditorState) -> Vec<MinibufferRow> {
+    let bid = s.core.borrow().active_buffer_id();
+    let mut render = pmacs::semantic_render::SemanticRenderState::for_peer(
+        pmacs::protocol::FrontendId::LOCAL,
+        PROTOCOL_VERSION,
+    );
+    render.set_viewport(bid, ByteRange { start: 0, end: 64 }, 0);
+    let _ = render.render_frame(s);
+
+    exec(
+        s,
+        "pmacs.minibuffer.read{ prompt = 'M-x ', source = 'commands', on_accept = function() end }",
+    );
+    exec(s, "pmacs.minibuffer.set_contents('zzprobe')");
+    render
+        .render_frame(s)
+        .into_iter()
+        .find_map(|msg| match msg {
+            InstanceMessage::MinibufferPromptRows { rows, .. } => Some(rows),
+            _ => None,
+        })
+        .expect("the producer ships a rows prompt")
 }
 
 /// Open `M-x`, narrowed to exactly one command with a known
@@ -252,6 +281,124 @@ fn a_source_with_no_detail_renders_exactly_as_before_in_the_tui() {
         !row.contains('—'),
         "a source with no detail gains no separator: {row:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Multi-line descriptions reach single-row surfaces as ONE line
+// ---------------------------------------------------------------------------
+
+/// An MCP-shaped description: tool text, blank line, `Arguments:`, then
+/// one line per argument.
+///
+/// This is the real shape, not an invented one —
+/// `tests/fixtures/pmacs-mcp-tools/init.lua:272` builds it with
+/// `table.concat(lines, "\n")` and `m9_6_acceptance.rs:583-598` asserts
+/// four of its lines, which is why registration accepts it and the
+/// SURFACES clip instead.
+const MCP_SHAPED: &str = "Greet someone.\\n\\nArguments:\\n  name (string, required)";
+
+fn define_multiline_probe(s: &EditorState, name: &str, description: &str) {
+    exec(
+        s,
+        &format!(
+            "pmacs.command.define{{ name = '{name}', description = \"{description}\", \
+             fn = function() end }}"
+        ),
+    );
+}
+
+#[test]
+fn a_multi_line_description_reaches_the_tui_band_as_one_line() {
+    let s = session("tui-multiline");
+    define_multiline_probe(&s, "zzprobe", MCP_SHAPED);
+    let row = mx_bottom_row(&s, 200);
+    assert!(
+        row.contains("[zzprobe — Greet someone.]"),
+        "the band shows the first line only: {row:?}"
+    );
+    assert!(
+        !row.contains("Arguments:"),
+        "the schema block must not reach a single-row band: {row:?}"
+    );
+    // `bottom_row` reads one grid row, so anything below would be lost
+    // rather than visibly wrong — assert on the registry-side clip too,
+    // which is what the painter consumed.
+    let clipped: String = eval(&s, "return pmacs.describe.command('zzprobe').description");
+    assert!(
+        clipped.contains("Arguments:"),
+        "describe-command must still see the WHOLE description, or the clip \
+         silently deleted the schema block everywhere: {clipped:?}"
+    );
+}
+
+#[test]
+fn a_multi_line_description_reaches_the_gpu_row_as_one_physical_line() {
+    // The geometry hazard, through the real prompt path: the dropdown
+    // sizes itself from `rows.len()` — one logical row per candidate —
+    // so a detail carrying a break would shape into more physical lines
+    // than the geometry accounts for.
+    //
+    // All three break forms, since a clip handling only LF would pass a
+    // bare CR through to the same surface.
+    for (label, description, tail) in [
+        ("LF", MCP_SHAPED, "Arguments:"),
+        (
+            "CR",
+            "Greet someone.\\r\\rArguments:\\r  name (string, required)",
+            "Arguments:",
+        ),
+        (
+            "CRLF",
+            "Greet someone.\\r\\n\\r\\nArguments:\\r\\n  name (string, required)",
+            "Arguments:",
+        ),
+    ] {
+        let s = session(&format!("gpu-multiline-{label}"));
+        define_multiline_probe(&s, "zzprobe", description);
+        let rows = mx_rows(&s);
+        let probe = rows
+            .iter()
+            .find(|row| row.label == "zzprobe")
+            .unwrap_or_else(|| panic!("{label}: the probe command is a candidate"));
+        let detail = probe
+            .detail
+            .as_deref()
+            .unwrap_or_else(|| panic!("{label}: the row carries a detail"));
+        assert_eq!(
+            detail, "Greet someone.",
+            "{label}: the wire row carries the first line only"
+        );
+        assert!(
+            !detail.contains(['\n', '\r']),
+            "{label}: a row detail must carry no line break: {detail:?}"
+        );
+        assert!(
+            !detail.contains(tail),
+            "{label}: the schema block must not reach the dropdown"
+        );
+
+        // And the full text is still there for the discoverability
+        // path, which is what makes this a rendering decision.
+        let full: String = eval(&s, "return pmacs.describe.command('zzprobe').description");
+        assert!(
+            full.contains("name (string, required)"),
+            "{label}: describe-command must still report every line: {full:?}"
+        );
+    }
+}
+
+#[test]
+fn a_single_line_description_is_unchanged_on_the_wire() {
+    // The clip did not tighten past its purpose: a description with no
+    // break reaches the row byte-identical, with no truncation marker.
+    let s = session("wire-single-line");
+    define_probe(&s);
+    let rows = mx_rows(&s);
+    let probe = rows
+        .iter()
+        .find(|row| row.label == "zzprobe")
+        .expect("the probe command is a candidate");
+    assert_eq!(probe.detail.as_deref(), Some(PROBE_DESCRIPTION));
 }
 
 #[test]

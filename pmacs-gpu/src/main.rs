@@ -15482,6 +15482,17 @@ mod tests {
             Some("buffer.kill"),
             "a row with no detail renders the bare label, exactly as before v23: {lines:?}"
         );
+        // The geometry invariant the dropdown depends on: it derives
+        // its height, its visible window and its selection-highlight
+        // offset from `rows.len()`, so ONE physical line per logical
+        // row is what keeps those aligned. The daemon clips a detail to
+        // its first line (`Command::description_first_line`) precisely
+        // so this holds for an MCP schema block.
+        assert_eq!(
+            lines.len(),
+            state.minibuffer.as_ref().map_or(0, |mb| mb.rows.len()),
+            "one physical line per candidate row: {lines:?}"
+        );
 
         // The frozen `12..=22` form, which an older daemon still sends:
         // bare strings become detail-free rows.

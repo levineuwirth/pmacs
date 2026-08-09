@@ -322,13 +322,50 @@ tip** — the ref, not a SHA. Recover with
   local formatting change reading the registry directly. A multi-row
   TUI chooser is explicitly NOT this lane.
 - **Gates:** `scripts/gate --protocol --acceptance
-  discovery_stage2_acceptance` — the strengthened two-configuration
-  sweep, which is what `--protocol` exists for.
+  discovery_stage2_acceptance --acceptance m9_6_acceptance --acceptance
+  m9_7_acceptance --acceptance m9_8_acceptance` — the strengthened
+  two-configuration sweep, which is what `--protocol` exists for. The
+  three m9 suites are named because the PR #228 review round measured
+  them as this change's blast radius (see the description-clip bullet);
+  their continued passing is on the record rather than assumed.
+  **`--protocol` does NOT run its own documented precondition**
+  (`cargo build --workspace --no-default-features --features
+  luajit,crdt`, handoff §5) — run it by hand first or twelve
+  `gpu_invocation_acceptance` tests fail on a missing `pmacs-gpu`
+  binary. That omission is the `gate-protocol-build` lane's, not this
+  one's.
 - **IMPLEMENTED.** `PROTOCOL_VERSION` is 23,
   `ADVERTISED_PROTOCOL_VERSION` is untouched at 20. New suite
   `tests/discovery_stage2_acceptance.rs`; the daemon half is
   `crdt`-gated (a semantic session is necessarily a text replica) and
   runs one daemon serving a v22 and a v23 session simultaneously.
+- **Multi-line descriptions are clipped AT THE SURFACE, and
+  registration-level rejection was investigated and REJECTED ON
+  EVIDENCE — do not re-propose it.** PR #228 review found the real
+  hazard: the GPU dropdown derives its height, visible window and
+  highlight offset from `rows.len()` (one logical row per candidate),
+  so a detail carrying a line break misaligns every row below it; the
+  TUI writes into a single-row band. The obvious fix — reject CR/LF in
+  `CommandRegistry::define` — was implemented and measured, and it
+  **fails 36 tests across `m9_6`/`m9_7`/`m9_8`**, because MCP tool
+  registration renders a whole schema block into `description`
+  (`tests/fixtures/pmacs-mcp-tools/init.lua:272`,
+  `table.concat(lines, "\n")`, used at `:496`) and
+  **`tests/m9_6_acceptance.rs:583-598` asserts four separate lines of
+  it** — tool text, `Arguments:`, and two per-argument lines. No
+  single-line rendering satisfies those assertions, so a registry guard
+  could only go green by deleting a shipped acceptance criterion.
+  The one-line constraint belongs to the surfaces that have it:
+  `Command::description_first_line` clips, both single-row consumers
+  call it, and the full text still reaches `describe-command` /
+  `help.list-commands` untouched. Precedent already in-tree — the same
+  MCP fixture clips a tool RESULT to its first line because *"a
+  multi-line set_status would corrupt the row layout"* (`:277-285`).
+  **A startup census is not a corpus census**: booting an
+  `EditorState` and scanning all 180 registered descriptions found zero
+  offenders, because MCP registers at RUNTIME and builds the string by
+  concatenation — invisible to both that census and a grep for literals.
+  The workspace sweep is what caught it.
 - **The freeze is enforced by LITERAL byte fixtures**, not a round-trip
   — `minibuffer_prompt_v12_wire_bytes_are_frozen` in `src/protocol.rs`,
   the first such fixture in this repo. Bite-verified: reordering two
