@@ -485,6 +485,51 @@ the authoritative tip** — the ref, not a SHA. Recover with
     them was this diff's** — R7 for the third time plus two wall-clock
     budget tests; recorded in `docs/ci-red-signatures.md` rather than
     re-run away silently.
+- **Review round 3 — a diagnostic that named the wrong surface, fixed
+  at `b2e8efd`.** `required_purpose`'s invalid-UTF-8 refusal told the
+  caller their process purpose "is displayed to the user in `*workers*`
+  and in the modeline". **Neither is a process surface.** Stage 1
+  deliberately keeps processes out of both (Q#W-4, framing §3) — a
+  process's purpose is exposed through `pmacs.process.list` and nothing
+  else — so the message sent the reader looking for their process in two
+  places it will never appear. The refusal itself is correct and stays:
+  a purpose with no display form anywhere is still refused.
+  - **The two UTF-8 refusals now name different surfaces, because they
+    reach different ones.** The job-side twin (`_push_dispatch_name`)
+    legitimately names `*workers*` and the modeline — a handler name is
+    composed into a job's purpose, and a job does render in both — so it
+    was made to say so explicitly rather than left at the vaguer "as
+    part of every job's purpose", which named no surface at all and
+    would have made the divergence unassertable.
+  - **A new test asserts both directions, positive and negative**
+    (`the_two_utf8_refusals_each_name_the_surface_their_own_text_reaches`,
+    26 in the suite): the process message contains `pmacs.process.list`
+    and **not** `*workers*`/`modeline`; the job message contains both of
+    those and **not** `pmacs.process.list`. The existing row-table
+    assertion in `spawning_without_a_real_purpose_is_refused_and_starts_nothing`
+    now runs as far as the surface name too. Without the negative half a
+    later "unify the wording" edit reintroduces exactly one wrong
+    sentence and passes everything else.
+  - **Three mutation checks, each red on its own claim:** restoring the
+    old process wording fails both content assertions; collapsing the
+    job message onto the process wording fails only the new test (which
+    is the point — the old job test asserted the prefix alone); and
+    restoring the job message's original vague wording fails it too.
+  - **The rustdoc carried the same defect risk and was fixed with it** —
+    `required_purpose` now states which surface it names and why not the
+    other two, and the `_push_dispatch_name` comment states the
+    converse. A string literal corrected while its doc comment still
+    argues the other way is one refactor from reverting itself.
+  - **Gate: 12 of 13 steps green; step `12-sweep` red on a wall-clock
+    render-budget test, twice, on a DIFFERENT test each run** (logs
+    `20260809T195332Z-2113672` and `20260809T200120Z-2427128`, load
+    average 12.9/23.9 with sibling lanes building). All three pass in
+    isolated reruns; the diff is two string literals, their doc comments
+    and one test, and touches no render path. Recorded as **U5** in
+    `docs/ci-red-signatures.md` rather than re-run away silently.
+    `journey_acceptance` **47/47 UNTOUCHED** and the three
+    `#pmacs.process.list()` leak detectors unedited — the stop signals
+    did not fire.
 - **Surfaces that changed shape, for anyone rebasing onto this:**
   `AsyncRuntime::allocate`/`allocate_with_resource` collapsed into one
   private `JobSpec`-taking funnel; `register_external` grew a third

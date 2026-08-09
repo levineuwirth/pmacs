@@ -639,6 +639,28 @@ regression in two unrelated subsystems at once is far less likely than
 one loaded machine. If a future run reds **one** of these without the
 other, that is a different incident and should be judged as one.
 
+### U5 — a *different* wall-clock render-budget test reds each sweep
+
+Recorded during worker identity Stage 1 review round 3, 2026-08-09.
+**Two consecutive `scripts/gate` runs of the same command, on the same
+tree, red on step `12-sweep` with a different test each time** — which
+is the signature, and it is a stronger one than any single selector.
+
+| field | value |
+|---|---|
+| **selector** | run 1: `--test m8_2_acceptance dired_open_renders_10k_entries_under_200ms` **and** `--test m8_9_acceptance outline_5_level_100_entry_renders_within_100ms`; run 2: `--test dired_acceptance dired_renders_10k_entries_within_200ms` |
+| **job / flavor** | local (Linux), `scripts/gate` step `12-sweep` (`cargo test --workspace --no-fail-fast`), **load average 12.9 / 23.9** with sibling worktrees building concurrently |
+| **required fragments** | `must render within 200ms; took ` / `open() (parse + render) took ` + `spec budget is 100ms` |
+| **status** | **new incident, three selectors, none reproduced** |
+| **what IS established** | all three are **wall-clock render-budget assertions** (224ms and 258ms against a 200ms budget; 114ms against a 100ms budget), so all three are load-sensitive by construction. Each was green in an isolated rerun of its own selector, and no selector reds twice. The observing diff is **two string literals, their doc comments and one test** — it touches no render path at all, and cannot |
+| **what is NOT** | that load caused it. The one-shared-`CARGO_TARGET_DIR` confound is real and again **unmeasured**, so it stays a rival explanation rather than a finding |
+| **relation to U4** | same shape, different step and different tests: U4 is two budget tests in `04-lib-crdt` failing **together**; this is three render-budget tests in `12-sweep` failing **one per run**. Kept separate rather than merged, because merging would assert a shared mechanism nothing here shows |
+
+**The rotating selector is the thing to match.** A regression that
+moved between three unrelated render paths on an unchanged tree is far
+less likely than one loaded machine; a future run that reds the *same*
+one of these twice is a different incident and should be judged as one.
+
 **The retirements are not occurrences and do not close the log.** R1 and
 R3 stay live, and each retired row keeps its signature so a later red
 matching one reopens it.
