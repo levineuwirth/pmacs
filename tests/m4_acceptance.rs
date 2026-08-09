@@ -1173,6 +1173,7 @@ fn m4_4_lua_surface_drives_lifecycle() {
             r#"
             local id = pmacs.process.spawn {
                 label = "lua-hello",
+                purpose = "greeting the Lua surface end to end",
                 command = "/bin/sh",
                 args = { "-c", "printf hi-from-lua && exit 0" },
             }

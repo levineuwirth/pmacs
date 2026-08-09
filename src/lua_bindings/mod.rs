@@ -8746,24 +8746,66 @@ fn parse_restart(name: &str) -> mlua::Result<RestartPolicy> {
     })
 }
 
+/// Read the **required** `purpose` out of a `pmacs.process.spawn` spec
+/// (worker identity Stage 1, `COHERENCE.md` §9).
+///
+/// An earlier revision of this lane defaulted the field to `label` so
+/// that existing callers kept working. That preserved compatibility and
+/// delivered nothing: §9's complaint about `ProcessSpec` is precisely
+/// that `label` is "caller-supplied, unvalidated convention", so a
+/// purpose defaulting to the label hands every caller back the
+/// convention this lane exists to replace.
+///
+/// The two fields answer different questions and neither substitutes for
+/// the other. `label` **identifies** — `lsp:rust-analyzer`, a terminal's
+/// buffer name — so that two processes running the same binary can be
+/// told apart. `purpose` **describes**: it answers "what is happening",
+/// which is the question §3's promise of visible asynchronous work is
+/// about, and which a label chosen for uniqueness routinely does not
+/// answer.
+///
+/// # Errors
+///
+/// Absent, empty, whitespace-only, or non-string. Empty and
+/// whitespace-only are rejected because they satisfy the type and defeat
+/// the point exactly as copying the label across would — R42 already
+/// rejects whitespace-only `description`s in the config registry for the
+/// same reason.
+///
+/// The read is **raw**, matching the posture `stdin` and `group` already
+/// document in [`lua_to_spec`]: a spec table is plain data, so a
+/// metatable cannot smuggle a purpose in through `__index`.
+fn required_purpose(table: &Table) -> mlua::Result<String> {
+    let purpose = match table.raw_get::<mlua::Value>("purpose") {
+        Ok(mlua::Value::String(value)) => value.to_str()?.to_owned(),
+        Ok(mlua::Value::Nil) => {
+            return Err(mlua::Error::external(
+                "pmacs.process.spawn: purpose is required — a short description of what \
+                 this process is DOING, e.g. purpose = \"running the project's test suite\". \
+                 It is not the label: the label identifies the process, the purpose says \
+                 what it is for.",
+            ));
+        }
+        Ok(other) => {
+            return Err(mlua::Error::external(format!(
+                "pmacs.process.spawn: purpose must be a string; got {}",
+                other.type_name()
+            )));
+        }
+        Err(error) => return Err(error),
+    };
+    if purpose.trim().is_empty() {
+        return Err(mlua::Error::external(
+            "pmacs.process.spawn: purpose must not be empty or whitespace-only",
+        ));
+    }
+    Ok(purpose)
+}
+
 fn lua_to_spec(table: &Table) -> mlua::Result<ProcessSpec> {
     let label: String = table.get("label").unwrap_or_else(|_| "unnamed".to_owned());
     let command: String = table.get("command")?;
-    // Worker identity Stage 1: required on the Rust struct, optional at
-    // this surface, falling back to the label.
-    //
-    // Requiring it here would break every existing `pmacs.process.spawn`
-    // caller, and the compiler obligation this lane is buying is on the
-    // *Rust* construction sites — the ones a future field would silently
-    // skip. A Lua caller that supplies nothing gets its own label back,
-    // which is what the caller already chose to call this work; it is
-    // less informative than a real description but it is not a
-    // fabrication, which is the bar `owner` failed (framing §3).
-    let purpose: String = table
-        .get::<Option<String>>("purpose")
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| label.clone());
+    let purpose = required_purpose(table)?;
     let args: Vec<String> = table.get("args").unwrap_or_default();
     let cwd: Option<String> = table.get("cwd").ok().flatten();
     let env_table: Option<Table> = table.get("env").ok().flatten();

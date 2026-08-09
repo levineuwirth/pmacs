@@ -264,33 +264,84 @@ fn every_entry_shape_records_what_its_work_is() {
     pump(&mut state);
 }
 
-/// A `pmacs.process.spawn` caller that supplies no purpose keeps
-/// working, and gets its own label back rather than an empty field.
+/// **`pmacs.process.spawn` REFUSES a spec with no purpose, and spawns
+/// nothing.**
 ///
-/// The Rust struct's field is required — the compiler enforces that at
-/// every construction site. This surface is deliberately lenient,
-/// because requiring it here would break every existing caller for no
-/// coverage the compiler is not already providing.
+/// An earlier revision of this lane defaulted the field to `label` so
+/// that existing callers kept working. That preserved compatibility and
+/// delivered nothing: §9's complaint about `ProcessSpec` is precisely
+/// that `label` is "caller-supplied, unvalidated convention", so a
+/// purpose defaulting to the label hands every caller back the
+/// convention this lane exists to replace.
+///
+/// Four refusals, each asserted the same way — the call raises, the
+/// message names the field, and **the process list is unchanged**,
+/// because a validation that rejects after spawning has already done the
+/// thing it was rejecting:
+///
+///  * absent;
+///  * empty, and whitespace-only — these satisfy the type and defeat the
+///    point exactly as copying the label would (R42 rejects
+///    whitespace-only config descriptions for the same reason);
+///  * wrong type;
+///  * **metatable-provided**, which is the `stdin`/`group` raw-read
+///    posture: a spec table is plain data, so a purpose cannot be
+///    smuggled in through `__index`.
 #[test]
-fn a_process_spawned_without_a_purpose_falls_back_to_its_label() {
+fn spawning_without_a_real_purpose_is_refused_and_starts_nothing() {
     let mut state = editor();
-    exec(
-        &state,
-        r#"P = pmacs.process.spawn {
-             label = "legacy-caller",
-             command = "/bin/sh",
-             args = { "-c", "sleep 5" },
-           }"#,
-    );
-    let purpose: String = eval(
-        &state,
-        "for _, row in ipairs(pmacs.process.list()) do
-           if row.label == 'legacy-caller' then return row.purpose end
-         end
-         return '<absent>'",
-    );
-    assert_eq!(purpose, "legacy-caller");
-    exec(&state, "pmacs.process.terminate(P)");
+    let baseline: usize = eval(&state, "return #pmacs.process.list()");
+
+    for (label, spec, expected) in [
+        (
+            "absent",
+            r#"{ label = "x", command = "/bin/sh", args = { "-c", "sleep 5" } }"#,
+            "purpose is required",
+        ),
+        (
+            "empty",
+            r#"{ label = "x", purpose = "", command = "/bin/sh", args = { "-c", "sleep 5" } }"#,
+            "must not be empty",
+        ),
+        (
+            "whitespace-only",
+            r#"{ label = "x", purpose = "   ", command = "/bin/sh", args = { "-c", "sleep 5" } }"#,
+            "must not be empty",
+        ),
+        (
+            "wrong type",
+            r#"{ label = "x", purpose = 7, command = "/bin/sh", args = { "-c", "sleep 5" } }"#,
+            "purpose must be a string",
+        ),
+        (
+            "metatable-provided",
+            r#"setmetatable(
+                 { label = "x", command = "/bin/sh", args = { "-c", "sleep 5" } },
+                 { __index = function(_, k)
+                     if k == "purpose" then return "smuggled" end
+                     return nil
+                   end })"#,
+            "purpose is required",
+        ),
+    ] {
+        let (ok, err): (bool, String) = eval(
+            &state,
+            &format!(
+                "local ok, err = pcall(pmacs.process.spawn, {spec})
+                 return ok, tostring(err)"
+            ),
+        );
+        assert!(!ok, "{label}: spawn must refuse");
+        assert!(
+            err.contains(expected),
+            "{label}: the refusal must name the field and the rule; got {err:?}"
+        );
+        assert_eq!(
+            eval::<usize>(&state, "return #pmacs.process.list()"),
+            baseline,
+            "{label}: a refused spawn must start no process"
+        );
+    }
     pump(&mut state);
 }
 
