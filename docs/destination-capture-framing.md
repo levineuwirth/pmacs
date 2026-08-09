@@ -1,7 +1,18 @@
 # A destination capture any async continuation can use
 
-**Status: framing pass, revision 3. Pre-implementation. Awaiting
+**Status: framing pass, revision 4. Pre-implementation. Awaiting
 approval.**
+
+**Revision 4 specifies the call shape the last two revisions kept
+referring to without defining.** "The profile is declared at
+`commit_to`" named no signature, no value set, no invalid-profile
+behaviour, and nothing about the existing two-argument callers — so
+#227 had no stable API to adopt and the Journey preservation promise
+rested on care rather than contract. Q#DC-5 fixes that:
+`commit_to(dest, body [, profile])`, a **closed** two-value set,
+**omitted means `"document"`** so every existing call keeps all four
+preflight checks by definition, and an unrecognized profile **errors**
+rather than falling back.
 
 **Revision 3 decides Q#DC-4, which revision 2 left contradicting
 Q#DC-2 — on the primary panel API.** Q#DC-2 concluded a panel needs
@@ -250,6 +261,53 @@ buffer kind.
 The Q#JR14 doc comments should keep their references intact; a rename
 that orphans the rationale is worse than a slightly stale name.
 
+### Q#DC-5 — the exact Lua call shape for the profile **(new in rev 4)**
+
+Revisions 2 and 3 said "the profile is declared at `commit_to`" and
+never said **how**. That is not a detail: today's binding accepts
+exactly `(dest, body)` (`window_panel.rs:453-456`), so without a
+specified form #227 has no stable API to adopt against, and the
+promise that existing callers keep their semantics is a hope rather
+than a contract.
+
+**The signature:**
+
+```lua
+pmacs.window.commit_to(dest, body)             -- document profile
+pmacs.window.commit_to(dest, body, "panel")    -- panel profile
+```
+
+- **`profile` is an OPTIONAL THIRD argument**, a string, typed
+  `Option<String>` at the binding. No arity sniffing, no
+  table-or-function dispatch on argument 2 — the existing binding
+  chose `Value` over `AnyUserData` specifically so its error message
+  would stay *reachable* and name the rule, and a polymorphic second
+  argument would undo that.
+- **Trailing, and readable in practice.** A profile after a long inline
+  closure would read badly, but that is not the call shape in use:
+  dired defines `local function commit() … end` and calls
+  `commit_to(opts.dest, commit)` (`builtin/runtime/dired.lua:670,717`).
+  Against a named body, `commit_to(dest, commit, "panel")` reads fine.
+- **The value set is CLOSED: `"document"` and `"panel"`.** Exactly the
+  two profiles in Q#DC-2's matrix. Not an open string namespace — a
+  third profile is a decision, not a spelling.
+- **Omitted means `"document"`.** This is the load-bearing part: every
+  existing `commit_to(dest, fn)` call keeps **all four** preflight
+  checks, unchanged, by definition of the signature. `journey_acceptance`
+  passing untouched (§7) then follows from the API shape rather than
+  from care.
+- **An unrecognized profile is an ERROR**, naming the accepted values —
+  **not** a silent fall back to `"document"`. A fallback would hand a
+  caller stricter or looser checks than it asked for, which is the
+  failure mode the whole parameterization exists to prevent. A
+  non-string profile errors the same way.
+
+**Which profile each of git's continuations takes**, so #227's adoption
+is decided here rather than rediscovered: `*git-status*` → **panel**
+(it lands in the bottom panel, `listview.lua:550`); `*git-diff*` →
+**document** (it replaces a document window deliberately,
+`git.lua:852-854`).
+
 ### Q#DC-4 — what happens when there is no document window? **(DECIDED in rev 3)**
 
 **Revision 2 left this contradicting Q#DC-2 and it is the primary panel
@@ -274,7 +332,8 @@ lane exists to remove.
   whole point is to freeze the truth early and decide later.
 - **The profile is declared at `commit_to`**, which is where Q#DC-2's
   parameterization already lives. One place makes the decision, and it
-  is the place that knows.
+  is the place that knows. **Its exact call shape is Q#DC-5**, which
+  revisions 2 and 3 left unspecified.
 - **A document-profile commit on a destination with no document pair is
   REFUSED**, with a reason naming that, joining the four preflight
   refusals rather than being a separate failure mode.
@@ -307,6 +366,14 @@ incidental: no arguments is what keeps capture profile-blind.
   asserted to **NOT refuse** under the panel profile. A deliberately
   omitted check that has no test is indistinguishable from a check
   someone forgot, and the next reader will restore it.
+- **A legacy two-argument `commit_to(dest, body)` gets the DOCUMENT
+  profile** (Q#DC-5), witnessed by a check the panel profile omits —
+  a stale-buffer refusal. Asserting merely that it does not error would
+  pass on a call silently downgraded to the panel profile, which is the
+  regression that would quietly void Journey Stage 1a's guarantees.
+- **An unrecognized profile string is REFUSED**, with a message naming
+  the accepted values — not silently treated as `"document"`.
+- **A non-string profile is refused** the same way.
 - **Capture SUCCEEDS with no document window** (Q#DC-4), returning a
   destination whose document pair is absent — asserted as a successful
   capture, not as `nil`.

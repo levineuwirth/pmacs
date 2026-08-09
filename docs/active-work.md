@@ -275,8 +275,21 @@ from #171 and #215.
 authoritative tip** — the ref, not a SHA. Recover with
 `git fetch githubsucks && git checkout destination-capture`.
 
-- **Framing `docs/destination-capture-framing.md`, revision 3**, in
-  review. Revision 2 took three findings: Q#DC-2's parameterization was
+- **Framing `docs/destination-capture-framing.md`, revision 4**, in
+  review.
+- **The public API #227 adopts against (Q#DC-5), pinned so it is a
+  contract rather than an intention:**
+  `pmacs.window.commit_to(dest, body [, profile])`. Profile is an
+  optional trailing string from a **closed** set — `"document"` and
+  `"panel"`. **Omitted means `"document"`**, so every existing
+  two-argument caller keeps all four preflight checks *by definition of
+  the signature*, which is what makes `journey_acceptance` passing
+  untouched a consequence rather than a hope. An unrecognized or
+  non-string profile **errors**, naming the accepted values — a silent
+  fallback would hand a caller different checks than it asked for,
+  which is the exact failure the parameterization exists to prevent.
+  Git's mapping is settled here too: `*git-status*` → panel,
+  `*git-diff*` → document. Revision 2 took three findings: Q#DC-2's parameterization was
   incomplete (a panel depends on **none** of checks 2–4, not just check
   3, so the question now carries a full preflight matrix with every
   omission testable); `tests/journey_acceptance.rs` joins dired as a
