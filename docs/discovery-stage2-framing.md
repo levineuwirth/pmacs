@@ -248,14 +248,19 @@ later.
 has yet asked to disable is how a registry becomes noise. If somebody
 wants it off, that is use evidence and a later one-line addition.
 
-### Q#D2-4 — older frontends — **RESOLVED in rev 2, in §3.1–3.2**
+### Q#D2-4 — older frontends — **RESOLVED, in §3.1–3.2**
 
 No longer open, and the revision-1 answer was wrong. "Gate the richer
 form at `>= 23`" would have **removed the minibuffer entirely** from
 every v12–v22 peer, because there would have been only one variant to
 gate. Compatibility requires the legacy shape to still exist and still
-be sent — hence the additive `MinibufferPromptRows` variant, per-peer
-selection, per-variant cache keys, and matched open/close families.
+be sent — hence the additive `MinibufferPromptRows` variant, a
+per-peer `peer_knows_minibuffer_rows` producer gate, **one per-peer
+minibuffer cache**, and matched open/close families.
+
+*(Revision 2 said "per-variant cache keys" here. §3.2 corrected that in
+revision 3 — the render state is per peer with its version baked in, so
+a cache cannot span two versions — and this sentence was left stale.)*
 
 The `CompletionPopup` gate I proposed copying (`daemon-gated >= 15`)
 **is** the right precedent for *how to select per peer*; it is not a
@@ -300,9 +305,12 @@ the temptation arrives with the feature.
   encoding changes. Two fixtures: an open prompt with candidates and a
   selection, and a cleared band — the two shapes the existing semantic
   test already covers, so the corpus is not a new judgement call.
-- **The cache key is per variant**: a session that opens for a v23 peer
-  and a later one for a v22 peer are not suppressed as duplicates of
-  each other (§3.2).
+- **No cross-version cache test.** Revision 2 required one; it asserts
+  a condition this architecture makes impossible (§3.2), and a test
+  that cannot fail passes forever while teaching the next reader that
+  the hazard is real. What *is* asserted is the producer gate: a v22
+  peer and a v23 peer attached simultaneously each receive their own
+  variant and only their own.
 - **Close matches open**: a `MinibufferPromptRows` session is closed by
   its own family, witnessed by the popup actually clearing.
 - **The TUI renders `name — description` for the selected candidate**
