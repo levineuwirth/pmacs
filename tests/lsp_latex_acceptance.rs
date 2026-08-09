@@ -489,6 +489,54 @@ fn two_chapters_of_one_thesis_share_a_single_server() {
 }
 
 #[test]
+fn two_chapters_share_one_server_under_a_root_search_boundary() {
+    // A `/` boundary is "clamp nothing", spelled as a path — and it used
+    // to disable the marker walk OUTRIGHT. The containment test was
+    // string arithmetic (`dir:sub(1, #boundary + 1) == boundary .. "/"`),
+    // so a `/` boundary asked whether each ancestor began with `"//"`,
+    // which no canonical path does. Every ancestor was judged out of
+    // bounds, no marker was ever examined, and each chapter got its own
+    // root — the lane's headline behaviour, silently off, with the
+    // predicate's unit-level answers all still looking plausible.
+    //
+    // Pinned through ATTACH because that is where the symptom lives: two
+    // texlab processes for one thesis, not a wrong string.
+    //
+    // Still hermetic despite the unclamped boundary: innermost marker
+    // wins, and `thesis/` has one, so no `latexmkrc` above the tempdir
+    // can change the answer.
+    let fx = Fixture::new();
+    let mut state = editor();
+    exec(&state, "pmacs.project.set_search_boundary(\"/\")");
+    let seen: String = eval(&state, "return pmacs.project.search_boundary() or \"\"");
+    assert_eq!(
+        seen, "/",
+        "fixture precondition: the boundary must be the filesystem root"
+    );
+    point_command_at(&state, &fake_lsp_path());
+    fx.write("thesis/latexmkrc", "");
+    let one = fx.write("thesis/chapters/one.tex", "\\section{One}\n");
+    let two = fx.write("thesis/appendix/two.tex", "\\section{Two}\n");
+    open(&state, &one);
+    settle(&mut state);
+    open(&state, &two);
+    settle(&mut state);
+
+    let rows = rows(&state);
+    assert_eq!(
+        rows.len(),
+        1,
+        "a root boundary must behave like any other boundary: both \
+         chapters resolve to the thesis root, so ONE server: {rows:?}"
+    );
+    assert_eq!(
+        rows[0].split('|').nth(1).unwrap(),
+        file_uri(&fx.dir("thesis")),
+        "and that one server is rooted at the marker directory"
+    );
+}
+
+#[test]
 fn two_markerless_documents_in_different_directories_do_not_share_a_server() {
     // The complement of the pin above: the fallback is the file's own
     // directory, so unrelated loose documents keep separate scopes
@@ -603,6 +651,47 @@ fn latex_root_walk_stops_at_the_search_boundary() {
         Some(fx.dir("inner/chapters").display().to_string().as_str()),
         "the walk must not climb past the search boundary to reach the \
          marker above it"
+    );
+
+    // The other direction, and it is not decoration: "stops at the
+    // boundary" is also satisfied by a walk that never runs at all —
+    // which is precisely what a `/` boundary used to produce. So assert
+    // that within the boundary the walk still CLIMBS, and that the
+    // boundary directory itself is a candidate (inclusive, matching
+    // `set_search_boundary`'s documented contract).
+    fx.write("inner/.texlabroot", "");
+    assert_eq!(
+        resolve_root(&state, &doc).as_deref(),
+        Some(inner.display().to_string().as_str()),
+        "a marker AT the boundary directory is found, and the walk \
+         climbs out of `chapters/` to reach it"
+    );
+}
+
+#[test]
+fn latex_root_for_a_document_at_the_filesystem_root_is_the_root() {
+    // The same root-is-special trap one level up: `/paper.tex` slices to
+    // an EMPTY directory string, which canonicalizes to nothing, so the
+    // resolver DECLINED — and a decline is the one path that falls
+    // through to `pmacs.project.detect`, whose walk includes `.git`.
+    // Hermetic: the boundary is this fixture's tempdir, so `/` is out of
+    // bounds, no marker is examined, and the answer is the directory
+    // itself regardless of what sits at the filesystem root.
+    let fx = Fixture::new();
+    let state = editor();
+    fx.bind(&state);
+    let doc = Path::new("/pmacs-lsp-latex-no-such-document.tex");
+    assert!(
+        !doc.exists(),
+        "fixture precondition: {} must not exist",
+        doc.display()
+    );
+
+    assert_eq!(
+        resolve_root(&state, doc).as_deref(),
+        Some("/"),
+        "a document at the filesystem root roots at `/`; it must not \
+         decline into the shared `.git`-aware detector"
     );
 }
 

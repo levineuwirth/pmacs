@@ -333,11 +333,12 @@ authoritative tip** — the ref, not a SHA. Recover with
   - **`args = {}` is also observed**, not assumed: bare `texlab`
     answers `initialize` with `TexLab 5.25.1` over stdio, so the `run`
     subcommand is not needed.
-  - **§3 therefore reads slightly stale** — it frames marker 1 as
-    conditional on texlab honouring the file, when the operative fact
-    is that texlab honours the *client-supplied root*. Worth a revision
-    3 by whoever next touches the document; not smuggled into this
-    lane's commit.
+  - **§3 said the wrong thing and has been corrected — `b5eaf27` IS
+    revision 3.** It framed marker 1 as conditional on texlab honouring
+    the `.texlabroot` *file*, when the operative fact is that texlab
+    honours the *client-supplied root* and never widens it. The caveat
+    was discharged by observation, and revision 3 records what that
+    established. Nothing about §3 is outstanding.
 - **`.git` exclusion needed more than omitting it from the list.**
   `project_root_for` falls through to `pmacs.project.detect` when a
   resolver returns nil, and **that** walk includes `.git` — so a
@@ -360,6 +361,31 @@ authoritative tip** — the ref, not a SHA. Recover with
   (1), boundary ignored (1), `io.open` truthiness so a directory counts
   as a marker (1), marker set narrowed (4), command renamed with
   opinionated settings added (1).
+- **The boundary has now been the interesting part twice, and the
+  second time it was a real defect (fixed in review).** First it was
+  hermeticity — every fixture sets `set_search_boundary` at its own
+  tempdir because R8's shape (a stray `latexmkrc` above the tempdir)
+  would make the markerless assertions pass while testing nothing.
+  Then review found `latex_within_boundary` answering a PATH question
+  with string arithmetic: `dir:sub(1, #boundary + 1) == boundary .. "/"`
+  compares against `"//"` when the boundary is `/`, which no canonical
+  path matches, so a root boundary judged **every** ancestor out of
+  bounds, ran no marker walk at all, and gave each chapter of a thesis
+  its own server — the lane's headline behaviour silently off, with
+  every shipped test still green because each one clamps to a tempdir.
+  The same trap sat at the other end (`/` was never a walk candidate,
+  and `/paper.tex` sliced to an empty directory and declined into the
+  `.git`-aware detector). Now segment comparison throughout: the root
+  is a boundary with zero segments, contained by construction rather
+  than by a special case. Pinned by an ATTACH-level test under a `/`
+  boundary — two chapters, one server, marker root — and the
+  hermeticity property asserts **both** directions, since "stops at the
+  boundary" is also satisfied by a walk that never runs. Suite is 16
+  tests. **A reader
+  deciding whether to trust this resolver should read it as: the marker
+  set and the `.git` exclusion were settled by observation and are
+  solid; the boundary arithmetic around them was not, and is the place
+  to look first if roots come back wrong.**
 - **Trap for the next agent in this worktree:** this machine exports a
   shared `CARGO_TARGET_DIR`, so a bare `cargo test` compiles against a
   sibling worktree's artifacts and fails with errors from code that is
