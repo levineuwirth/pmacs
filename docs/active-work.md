@@ -358,8 +358,9 @@ the authoritative tip** — the ref, not a SHA. Recover with
   required field is exactly the kind of change that breaks a package
   fixture quietly.
 - **IMPLEMENTED at `1aca0ee`**, with review round 1's blocker fixed at
-  `2162737`. `tests/worker_identity_acceptance.rs` is the new suite: 18
-  tests, plus one consumer-side witness beside the private renderer in
+  `2162737` and review round 2's three findings at `6661125`.
+  `tests/worker_identity_acceptance.rs` is the new suite: **24 tests**,
+  plus one consumer-side witness beside the private renderer in
   `pmacs-gpu`.
 - **`journey_acceptance` passed UNTOUCHED (47/47)** — the stop signal
   did not fire. Q#W-7 edits the `commit_to` guard family, so any of its
@@ -426,6 +427,64 @@ the authoritative tip** — the ref, not a SHA. Recover with
   `pmacs.process.spawn("ls")` occurrences in `src/audit/mod.rs` and
   `tests/m7_9_acceptance.rs` are **audit fixture source text** — lexed,
   never executed — and are deliberately untouched.
+- **Review round 2 — the display-text boundary, fixed at `6661125`.**
+  Three findings, and the fix is deliberately different in each place
+  because the constraint is.
+  - **P2a: invalid UTF-8 bypassed the `purpose` diagnostic.**
+    `required_purpose` read the field with `value.to_str()?`; Lua strings
+    are BYTE strings, so `purpose = string.char(255)` surfaced mlua's
+    generic conversion error before this lane's own message existed. It
+    refused before spawning, so nothing leaked — the defect was the
+    message. **Third occurrence of this class in the project** (the
+    destination-capture lane corrected the same shape two rounds ago), so
+    the whole diff was audited for it: exactly one more,
+    `_push_dispatch_name` taking `name: String`, now `mlua::String` with
+    an owned diagnostic. Those two are the only Lua-string reads this
+    lane added; every other binding it adds takes `()`. The remaining
+    `pmacs.process.spawn` fields (`label`, `command`, `args`, `env`,
+    `cwd`) still convert generically — **pre-existing, untouched, and
+    named here rather than silently inherited.**
+  - **P2b, half one: handler names are refused at the source.**
+    `pmacs.workers.register` type-checked and nothing more, which was
+    fine while the name died inside `dispatch`. It no longer dies there,
+    so the name now gets `purpose`'s meaningful-value standard plus
+    control characters.
+  - **P2b, half two: purposes are ESCAPED at presentation, not rejected
+    at the registry — consistent with the `#228` decision.** A purpose
+    may legitimately contain a newline (a path can; `pmacs-magit`'s spawn
+    purpose is an argv), so the one-line constraint belongs to the
+    surface that has one row. `purpose_for_one_row` states the property
+    it exists for — **a row must not be able to forge another row** —
+    escapes the Unicode `Cc` class (so ESC cannot open a terminal
+    sequence either), borrows unchanged when there is nothing to escape
+    (byte-identity is structural, not asserted), and does **not** escape
+    backslashes: no number of them makes a second row, and doubling them
+    would cost byte-identity for ordinary text. Two callers: the
+    `*workers*` rows and `ActivitySummary`, which exists for one consumer
+    with exactly one row. `pmacs.workers.snapshot()` is the
+    `describe-command` of this lane and stays raw — asserted, so a clip
+    that deleted the text everywhere would fail rather than pass.
+  - **P3: two stale recovery summaries**, both fixed section-locally —
+    the framing doc's "Implementation may proceed", and this file's claim
+    that Stage 1 took the "first two" of owner/purpose/parent. It takes
+    **one**: `owner` was removed in revision 2, and the claim that
+    argument overturned was still standing here.
+  - **Seven more mutation checks, each failing its own test and no
+    other** (30 for the lane): the two UTF-8 diagnostics, the two
+    register guards, the two escaping call sites, and
+    `purpose_for_one_row` neutered to the identity — which fails both
+    surfaces' tests and nothing else, since it is the shared helper.
+  - **All 13 gate steps green at `6661125`** (log
+    `20260809T173314Z-1552101`): lib 1920, lib-crdt 2105,
+    worker_identity 24, journey **47/47 UNTOUCHED**, statusline 7,
+    compile_mode 73, m8_6 12, m4 151, gpu 242. The three
+    `#pmacs.process.list()` leak detectors and `journey_acceptance` are
+    **byte-identical to `main`** in round 2 — the stop signals did not
+    fire, and round 2 edited no test outside its own suite. **The
+    preceding run of the same command was red on three tests and none of
+    them was this diff's** — R7 for the third time plus two wall-clock
+    budget tests; recorded in `docs/ci-red-signatures.md` rather than
+    re-run away silently.
 - **Surfaces that changed shape, for anyone rebasing onto this:**
   `AsyncRuntime::allocate`/`allocate_with_resource` collapsed into one
   private `JobSpec`-taking funnel; `register_external` grew a third

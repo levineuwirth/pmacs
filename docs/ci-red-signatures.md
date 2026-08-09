@@ -496,10 +496,10 @@ Stage 4; the lane touches no `pmacs-gpu` code at all.
 | **selector** | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
 | **job / flavor** | local (Linux), `cargo test --workspace --features crdt --no-fail-fast`, i.e. under full-sweep load |
 | **required fragments** | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
-| **status** | **SECOND OCCURRENCE 2026-08-09 — causal status still UNRESOLVED** |
-| **what IS established** | **two** occurrences at `pmacs-gpu/src/attach.rs:1680`, the second with all three fragments **verified** rather than inferred; the test drives a scripted transient-then-success sequence over a real socket pair |
+| **status** | **THIRD OCCURRENCE 2026-08-09 — causal status still UNRESOLVED, but one candidate mechanism is now EXCLUDED** |
+| **what IS established** | **three** occurrences at `pmacs-gpu/src/attach.rs:1680`, the second and third with all three fragments **verified** rather than inferred; the test drives a scripted transient-then-success sequence over a real socket pair. **The added GPU test is not the mechanism** — see the third-occurrence control below |
 | **what is NOT** | whether the broken pipe is the *fixture's* writer closing early or a real retry-path defect. **This row is not a claim that it is harmless** |
-| **rerun evidence** | occurrence 1: 6 isolated runs green, plus a full `--workspace --features crdt` sweep green (113 targets). Occurrence 2: **30 green on the observing branch** (15 isolated selector, 15 full `-p pmacs-gpu`) **plus a 15-run merge-base control, also green**. Per the rerun rule all of this establishes **intermittence only** |
+| **rerun evidence** | occurrence 1: 6 isolated runs green, plus a full `--workspace --features crdt` sweep green (113 targets). Occurrence 2: **30 green on the observing branch** (15 isolated selector, 15 full `-p pmacs-gpu`) **plus a 15-run merge-base control, also green**. Occurrence 3: 5 isolated selector runs green, 10 full `-p pmacs-gpu` runs green **with** the added test, and **1 failure in 10 with the added test `#[ignore]`d** — the first rerun in this row's history that reproduced anything. Per the rerun rule the green runs establish intermittence only; the red control run is what carries the exclusion |
 | **retirement** | hardening that removes the named mechanism plus a discriminating witness — or a diagnosis showing the fixture, not the code, closes the pipe |
 
 **Not attributed to the observing lane**, and in neither case is the
@@ -536,6 +536,39 @@ one-second deadline. Contention is a plausible mechanism for a
 `BrokenPipe`, and 30 green runs do not rule it out. If a third occurrence
 lands, **run the control with the added test removed** rather than at the
 merge base — that is the discriminating comparison this one was not.
+
+**Third occurrence — worker identity Stage 1 review round 2,
+2026-08-09, local (Linux). Same selector, same `gpu`-step flavor, all
+three fragments verified** against the durable gate log
+(`20260809T172606Z-1387979/11-gpu.log`): `transient sequence must
+attach: Attach(Handshake(Io(Os { code: 32, kind: BrokenPipe, message:
+"Broken pipe" })))`. A match on this file's own rule, not a `U` note.
+
+**The control the second-occurrence note prescribed was run, and this
+time it discriminated — against the hypothesis.** Ten full
+`PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu` runs with the added
+`render_offscreen` test present: **10/10 green**. Ten more with that
+test `#[ignore]`d, changing nothing else: **1 failure in 10**, carrying
+all three required fragments
+(`without/run-6.log`, `pmacs-gpu/src/attach.rs:1680`).
+
+So the concurrent-GPU-test path named above is **excluded**: removing
+the suspect made the failure *more* frequent, not less, which no
+contention story from that test survives. What the run does establish is
+that **the failure reproduces on demand at roughly 1-in-10 under
+ordinary `-p pmacs-gpu` load** — the first time any rerun in this row's
+history has reproduced it at all. That is a materially better starting
+point than three isolated sightings, and it is the fact a diagnosis
+should be built on: the rate makes a bisect of `attach.rs`'s handshake
+path affordable, where before it was not.
+
+**It is still not attributed to the observing lane**, and now for a
+measured reason rather than an argument from diff shape: the arm without
+the lane's only `pmacs-gpu` addition is the arm that went red.
+
+**What would retire it is unchanged** — the mechanism, not the rate.
+The next agent to touch this row should reproduce at 1-in-10 and
+instrument which side closes the pipe, rather than re-running for green.
 
 ### U2 — `m6_1_pty_raw_mode_disables_kernel_echo`, one local occurrence
 
@@ -581,6 +614,30 @@ it again here by piping a sweep through `grep`. The fix is mechanical:
 **redirect a full sweep to a file and grep the file**, never the live
 stream. A signature that is cheap to capture and impossible to
 reconstruct should never be traded for terminal brevity.
+
+### U4 — two wall-clock budget tests fail together in one `lib-crdt` step
+
+Recorded during worker identity Stage 1 review round 2, 2026-08-09, in
+the same gate run that produced R7's third occurrence. **Fragments were
+captured**, so unlike U1–U3 this one is matchable — it is a `U` row
+because it has one occurrence and no mechanism, not because the evidence
+was lost.
+
+| field | value |
+|---|---|
+| **selector** | `--lib --features crdt optimistic::tests::criterion_1_end_of_line_typing_completes_sub_frame_per_keystroke` **and** `editor::tests::composition_overhead_under_ten_percent`, failing in the same run |
+| **job / flavor** | local (Linux), `scripts/gate` step `04-lib-crdt`, with sibling worktrees building concurrently |
+| **required fragments** | `criterion 1: per-keystroke orchestrator time` + `exceeds 1ms`; and `composition machinery added more than 10% overhead` |
+| **status** | **new incident, one occurrence, not reproduced** |
+| **what IS established** | both are **wall-clock budget assertions** — 1.264ms against a 1ms budget, and 1.297× against a 1.10× budget — so both are load-sensitive by construction. Both green in an isolated rerun of exactly those two selectors, and both green in the next full gate run of the same command (2105 passed) |
+| **what is NOT** | whether the machine's concurrent load caused it. The confound is real (this machine runs one shared `CARGO_TARGET_DIR` and several worktrees) but **was not measured**, so it is a rival explanation, not a finding |
+| **rival explanation not excluded** | a genuine regression in either path. Nothing in the observing diff touches the optimistic-echo orchestrator or the composition pipeline, but "my diff looks unrelated" is not evidence, and this row does not treat it as such |
+
+**Two budget tests failing in one run and neither in the next is the
+signature worth matching**, more than either name alone: a real
+regression in two unrelated subsystems at once is far less likely than
+one loaded machine. If a future run reds **one** of these without the
+other, that is a different incident and should be judged as one.
 
 **The retirements are not occurrences and do not close the log.** R1 and
 R3 stay live, and each retired row keeps its signature so a later red
