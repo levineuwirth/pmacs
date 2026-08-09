@@ -269,7 +269,7 @@ census.
 
 **PR #227** — https://github.com/levineuwirth/pmacs/pull/227. Opened
 2026-08-09 at `4002734`, after the framing was approved at revision 5
-and the full gate suite went green. **Now at `842ec61`, MERGE-BLOCKED.**
+and the full gate suite went green. **Now at `723afa7`, MERGE-BLOCKED.**
 
 **Review round 1 found three blockers. Two are fixed; the third is why
 this lane is blocked.**
@@ -301,14 +301,15 @@ this lane is blocked.**
   already. Verified; no binding was added for this.
 - **P1a NOT fixed, and deliberately — it blocks this PR.** The async
   completions display UI without capturing the initiating frontend
-  (`builtin/runtime/git.lua:635` and `:928` at `842ec61`), so a result
+  (`builtin/runtime/git.lua:684` and `:965` at `723afa7`), so a result
   surfaces in whichever frontend is active when git exits. `commit_to`
   is the right mechanism and is **not Lua-reachable** outside a
   directory open, so the fix lives in the **`destination-capture`**
-  lane. This lane adopts it after that lands. Verified untouched: no
-  diff line in `ffe5ae2`, `6c1631e`, `3eca5e8` or `842ec61` reaches
-  `open_status_panel`, `show_diff_buffer`, `pmacs.window.display` or
-  `commit_to`.
+  lane — approved and in implementation. This lane adopts it after that
+  lands. Verified untouched: `show_diff_buffer`'s body and
+  `open_status_panel`'s `listview.open` are byte-identical to `4002734`,
+  and no commit on this branch adds a `commit_to` call or a frontend
+  capture anywhere.
 
   **The second citation written here in round 1 was wrong** — `:854`
   pointed at `local unstaged = …` inside `diff_plan`, not at a display
@@ -320,10 +321,12 @@ this lane is blocked.**
 **Re-gated at `6c1631e`:** all 11 steps green, acceptance now 27 tests.
 Both fixes mutation-verified.
 
-**Review round 2 found two more P2s, both the SAME SHAPE as the round-1
-P1: module-level mutable state read at CONTINUATION time instead of
-captured at INVOCATION time.** Both fixed here; the P1a block above is
-unchanged and still the reason this lane cannot merge.
+**Review round 2 found three more P2s, all the SAME SHAPE as the round-1
+P1: module-level mutable state read or written at CONTINUATION time
+instead of captured at INVOCATION time.** All three fixed here; the P1a
+block above is unchanged and still the reason this lane cannot merge.
+The fourth recurrence is why the last fix generalizes the rule instead
+of adding another counter, and why the census below exists.
 
 - **P2 fixed (`3eca5e8`) — an unborn-repository diff could switch
   repositories mid-plan.** `run_diff_plan`'s `next_step` read
@@ -344,20 +347,66 @@ unchanged and still the reason this lane cannot merge.
   **single-line status band**, where truncating is right, so folding the
   two together would fix one caller and break three.
 
-**A THIRD instance of the shape is still open and was NOT fixed** (not
-in this round's scope, and no review finding covers it): **the diff path
-has no generation counter at all.** `run_diff_plan` has no in-flight
-guard, and `show_diff_buffer` writes the single `state.diff_buffer` at
-completion — so two `d` presses in flight together are last-writer-wins,
-and a slow first diff overwrites a fast second one. Reachable: `d`
-displays into the document window, the user refocuses the panel, `d`
-again. The status path solved exactly this with `reserve_generation`;
-the diff path never got one.
+**A third instance of the shape was found in the same pass and reported
+rather than fixed silently:** the diff path had no generation counter at
+all. Review independently raised it as **P2 #3**, and it is fixed below.
 
-**Re-gated at `842ec61`:** all steps green, acceptance now 29 tests.
-Both round-2 fixes mutation-verified — `g6_22` fails on the second
-spawned diff argv when the `state.root` read is restored, and `g6_14c`
-resolves `<tmp>/nl` instead of `<tmp>/nl\nroot` when `first_line` is.
+- **P2 fixed (`723afa7`) — concurrent `d` requests were
+  last-writer-wins.** `git.diff-file` started a plan with **no request
+  generation** while every plan writes the **singleton** `*git-diff*`
+  buffer through `show_diff_buffer`. `d` on A, then `d` on B before A
+  finishes: if A completed last, A's diff replaced B's. Reachable
+  without contrivance — `d` renders into the document window only at
+  completion, so the panel is still focused for a second press.
+
+  **Fixed by giving the rule ONE implementation instead of a fourth
+  hand-rolled counter.** `new_channel()` hands out a ticket at the
+  command and answers "is this still the request in force?" at the
+  completion; `state.generation` and `reserve_generation` are gone.
+
+  **Two channels, not one, and that is a design decision.** A single
+  module-wide counter would make `d` cancel an in-flight `g` and vice
+  versa. The status panel and the diff view are independent things a
+  user asks for, so each gets its own ordering; what is shared is the
+  **mechanism**, not the counter. A channel spans a whole **request**
+  rather than one process — a status open is `rev-parse` then `status` —
+  so `_deliver_root` and `_deliver_status` correctly share one ticket
+  while a diff plan gets its own. `g6_23` asserts the separation: two
+  `d` presses leave `_generation()` untouched.
+
+  The plan is restructured into the request shape the other two
+  continuations already use: `step_done`'s closure becomes
+  `pmacs.git._deliver_diff(request, step, res)`, exposed for the same
+  reason `_deliver_status` and `_deliver_root` are.
+
+**The async-continuation census, so the next round is not another
+instance hunt.** `git.lua` has **exactly three** async continuations,
+plus one dispatcher and one synchronous impostor:
+
+| continuation | invocation-time ticket? | needs one? | shared state written |
+|---|---|---|---|
+| `_deliver_root` (`rev-parse`) | yes, `status_requests`, reserved in `git.status()` | yes | `state.root`, `state.buffer`, spawns the status |
+| `_deliver_status` (`git status`) | yes, `status_requests`, reserved at the command or the `g` keypress | yes | `state.branch`, `.rows`, `.display`, `.failure`, `.buffer`, the panel, the cursor |
+| `_deliver_diff` (`git diff`, 1–2 steps) | **now yes**, `diff_requests`, reserved at the `d` keypress | yes | `state.diff_buffer`, the `*git-diff*` contents, the status band |
+| `process.after-tick` pump | no | **no** — it is the dispatcher, not a request; it owns only the module-local `pump` table and calls each `on_done` once | `pump` |
+| `run_git`'s spawn-failure path | n/a | **no** — it calls `on_done` **synchronously**, at invocation time, and that `on_done` carries the ticket anyway | none |
+
+Everything else that looks like a callback is synchronous at the
+keypress: `on_visit`/`on_refresh` on the listview spec, the `*git-diff*`
+read-only intercept, and the two `pmacs.command.define` bodies.
+
+`state.diff_buffer` is deliberately still read at continuation time and
+that is correct: "do I already have a live diff buffer?" is a question
+about *now*, not about the invocation. It is the state `_deliver_diff`
+guards, not a second instance of the bug.
+
+**Re-gated at `723afa7`:** all steps green, acceptance now 30 tests. All
+three round-2 fixes mutation-verified — `g6_22` fails on the second
+spawned diff argv when the `state.root` read is restored; `g6_14c`
+resolves `<tmp>/nl` instead of `<tmp>/nl\nroot` when `first_line` is;
+and `g6_23` fails when the ticket check is removed, at its **real**
+half, the older plan having overwritten the newer one's patch before the
+driven delivery was reached.
 
 **Written with the lane's first commit, before the PR exists** — the
 standing correction from #171 and #215. This session it was missed on
