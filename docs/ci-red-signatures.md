@@ -630,6 +630,22 @@ it again here by piping a sweep through `grep`. The fix is mechanical:
 stream. A signature that is cheap to capture and impossible to
 reconstruct should never be traded for terminal brevity.
 
+> [!IMPORTANT]
+> **RENUMBER THESE TO U6 AND U7 WHEN THIS LANE REBASES.** The
+> `gate-protocol-build` lane independently defines its own **U4** and
+> **U5** (a macOS `lua54` PTY-resize failure and a Ctrl-C-as-`SIGINT`
+> failure), and it merges **first** — so on `main` those ids are taken.
+>
+> A rebase that resolves the textual conflict without renumbering leaves
+> **two different incidents sharing an id**, which is exactly the
+> failure this file's matching rule exists to prevent.
+>
+> **Every site, so none is missed:**
+> 1. this heading (`### U4 …`)
+> 2. `### U5 …` below
+> 3. U5's **relation to U4** field, which names it in prose
+> 4. `docs/active-work.md` — "Recorded as **U5**" in the worker lane entry
+
 ### U4 — two wall-clock budget tests fail together in one `lib-crdt` step
 
 Recorded during worker identity Stage 1 review round 2, 2026-08-09, in
