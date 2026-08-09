@@ -265,33 +265,36 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
-## Destination capture (Q#JR14 generalization) — IMPLEMENTED at `0efc8c0`, then RE-OPENED by review
+## Destination capture (Q#JR14 generalization) — revision 7 IMPLEMENTED, gate green, no PR yet
 
-**DO NOT PREPARE A PR FROM THIS LANE'S CURRENT STATE.** The mechanism
-landed at `0efc8c0` with 8 pins green — and review of that
-implementation found a **correctness blocker** that is still open.
-Framing revisions 6 and 7 carry it; neither is implemented yet.
+**The blocker review re-opened this lane for is CLOSED.** The mechanism
+landed at `0efc8c0` with 8 pins green; review of that implementation
+found a correctness blocker, framing revisions 6 and 7 carried it, and
+revision 7's design is implemented in the commit named below with 12
+pins green. No PR yet — the lane was told not to open one.
 
-**The blocker:** the panel profile skips checks 2–4 on the claim that a
-panel result never touches a document window. **Panel placement falls
-back to an ordinary document window** when the frontend is not
+**The blocker was:** the panel profile skipped checks 2–4 on the claim
+that a panel result never touches a document window. **Panel placement
+falls back to an ordinary document window** when the frontend is not
 panel-capable or its side slot is dedicated
-(`src/editor_core.rs:4138-4148`), so a `"panel"` commit could replace a
-**newer** document with every stale-intent guard skipped. Reproduced in
-review.
+(`src/editor_core.rs`, `apply_placement`), so a `"panel"` commit could
+replace a **newer** document with every stale-intent guard skipped.
+Reproduced in review.
 
-**Revision 6's fix was itself unsound and revision 7 replaces it.**
-Revision 6 predicted the fallback at preflight, arguing the body cannot
-`await`. That stops concurrent interleaving, not the body: arbitrary
-synchronous Lua can dedicate the side slot *inside the callback* and
-cause the fallback the preflight just ruled out. **Enforcement belongs
-at the placement boundary**, and §7 now requires an
-inside-the-body test that no preflight-snapshot design can pass.
+**Revision 6's fix was itself unsound and revision 7 replaced it, which
+is the part most worth not re-learning.** Revision 6 predicted the
+fallback at preflight, arguing the body cannot `await`. That stops
+concurrent interleaving, not the body: arbitrary synchronous Lua can
+dedicate the side slot *inside the callback* and cause the fallback the
+preflight just ruled out. **No preflight snapshot can carry this
+invariant.** Enforcement is therefore at the **placement boundary**, and
+§7's inside-the-body test is what no preflight-snapshot design passes.
 
-**Also open:** an invalid-UTF-8 profile (`string.char(255)`) reaches
-`to_str()` and surfaces mlua's generic conversion error instead of the
+**Also closed:** an invalid-UTF-8 profile (`string.char(255)`) reached
+`to_str()` and surfaced mlua's generic conversion error instead of the
 documented message naming the accepted values — the same reachability
-class as revision 5's `Option<String>` defect, one layer down.
+class as revision 5's `Option<String>` defect, one layer down. The
+comparison is on bytes now.
 
 **Written with the lane's first commit**, per the standing correction
 from #171 and #215.
@@ -302,24 +305,62 @@ authoritative tip** — the ref, not a SHA. Recover with
 `git fetch githubsucks && git checkout destination-capture`.
 
 - **Framing `docs/destination-capture-framing.md`, revision 7.**
-  Revisions 1–5 were approved over four review rounds; **revisions 6
-  and 7 are corrections carrying the open blocker above** and have not
-  been implemented.
-- **Implemented in two commits, and superseded in part.** `779bb02` is
-  the mechanism (`pmacs.window.capture_destination()`, the
-  `ViewDestination` rename, the profile argument); `d5a6170` is
-  `tests/destination_capture_acceptance.rs`. The gate line below was
-  green at `0efc8c0` and both preservation suites passed **unchanged**
-  (journey 47, dired 31) — §7's stop signal not firing rather than
-  being suppressed.
-
-  **But those eight pins do NOT cover §7 as it now reads.** They were
-  written against revision 5's matrix, which review disproved: none of
-  them exercises a fallback placement, and none could — the two
-  fallback tests revision 6 asked for did not exist yet, and revision
-  7 adds a third (the inside-the-body transition) that no
-  preflight-snapshot design can pass. Reading "eight pins covering §7"
-  off this entry is exactly the mistake it now exists to prevent.
+  Revisions 1–5 were approved over four review rounds; revisions 6 and 7
+  are corrections carrying the blocker above, and **revision 7's design
+  is what the tree implements** — revision 6's preflight prediction is
+  NOT the shipped mechanism and must not be restored from that document.
+- **Implemented in three commits.** `779bb02` is the mechanism
+  (`pmacs.window.capture_destination()`, the `ViewDestination` rename,
+  the profile argument); `d5a6170` is
+  `tests/destination_capture_acceptance.rs`; the revision-7 commit is
+  the panel-profile correction plus the invalid-UTF-8 hole. **12 pins**,
+  and both preservation suites pass **unchanged** (journey 47, dired 31)
+  — §7's stop signal not firing rather than being suppressed.
+- **HOW THE PANEL PROFILE IS ENFORCED, so revision 6's version does not
+  get reinstated by someone reading only that document.**
+  - `EditorCore::display_buffer` refuses **between** `resolve_placement`
+    and `apply_placement` when a side request resolved to
+    `PlacementKind::Ordinary` under an active `"panel"` contract whose
+    destination fails the document preconditions
+    (`fallback_commit_refusal`). Refusing there means a refused fallback
+    mutates nothing.
+  - The contract (`CommitContract { destination, profile }`) rides on
+    the core, installed and restored by the **same** `ScopedFrontendGuard`
+    that scopes the frontend, so a `"panel"` profile can never outlive
+    the body that declared it. The field is private to the crate — Lua
+    cannot claim a profile for a placement it did not commit to.
+  - **The preflight predicate survives as an EARLY REFUSAL, not as the
+    guarantee.** `panel_placement_can_fall_back` still gates the
+    relaxation in `commit_destination_refusal`, so the statically
+    knowable case — a frontend that cannot render a panel at all, and
+    will not acquire the capability mid-body — refuses *before* the body
+    allocates a buffer, registers a handle and paints. That is the same
+    reason `commit_to` preflights at all. Both layers are pinned
+    separately and neither test subsumes the other.
+  - The four document checks live once, in
+    `EditorCore::document_destination_refusal`, because they are now
+    evaluated from two sites and two hand-written copies is how a
+    backstop ends up weaker than the thing it backs.
+  - **Three deliberate limits**, each a different decision rather than a
+    stricter version of this one: the **document profile is untouched**
+    (re-running its checks at placement would newly refuse dired's own
+    documented panel path — a preservation-suite stop signal); only a
+    **fallback** is guarded, not every `Ordinary` placement (a `"panel"`
+    body calling `display_file` is pinned as succeeding by
+    `a_captured_destination_survives_a_frontend_switch`); and the
+    refusal is of the **placement**, not of falling back — a `"panel"`
+    commit with an intact destination still degrades gracefully into the
+    document window.
+- **Audit: nothing else relied on "a panel never touches a document".**
+  Four doc sites repeated the claim (`ViewDestination`'s own doc twice,
+  `capture_view_destination`, `ViewDestinationLua`) and were corrected;
+  no other code depended on it. Dired — the only Lua `commit_to`
+  consumer — takes the **two-argument document profile**, so all four
+  checks already applied to it, and it separately documents and accepts
+  the side-slot fallback (`builtin/runtime/dired.lua`).
+  `compile.lua`'s `already_in_panel` queries live state rather than
+  assuming, and the terminal adopter's rollback keys off
+  `DisplayOutcome::created_side`, already false on a fallback.
 - **TWO FRAMING CLAIMS THE TREE DID NOT MATCH.** Neither changed a
   decision; both are recorded because the framing says "counted, not
   estimated" and a reader will check.
@@ -351,6 +392,27 @@ authoritative tip** — the ref, not a SHA. Recover with
   contract claim being executable rather than asserted. Dropping the
   frontend scope for the panel profile fails the survives-a-switch pin's
   panel row; dropping the no-document-window arm fails the Q#DC-4 pair.
+
+  **Revision 7's four, each isolating a different way to get it wrong** —
+  and the pattern of *which* rows survive each is the evidence the layers
+  are independent rather than redundant:
+  1. delete the `fallback_commit_refusal` call from `display_buffer` →
+     **only** the inside-the-body pin fails. Every other test passes,
+     which is exactly the hole revision 6 would have shipped.
+  2. delete the `panel_placement_can_fall_back` arm from
+     `commit_destination_refusal` → **only** the two pre-established
+     fallback rows fail, and they fail on shape (a raise from the
+     backstop, with the body having run) rather than on outcome.
+  3. make `panel_placement_can_fall_back` unconditionally `true` (the
+     "widen the predicate" non-fix) → the really-lands-in-the-panel pin,
+     the Q#DC-4 panel pin and the matrix's three panel rows all fail.
+     That is the profiles collapsing into one, made visible.
+  4. make `fallback_commit_refusal` refuse *every* panel fallback → only
+     the graceful-degradation pin fails, which is the guard
+     over-reaching.
+
+  And reverting the byte comparison to `to_str()?` fails the
+  `invalid utf-8` row with mlua's conversion error, on content.
 - **The public API #227 adopts against (Q#DC-5), pinned so it is a
   contract rather than an intention:**
   `pmacs.window.commit_to(dest, body [, profile])`. Profile is an

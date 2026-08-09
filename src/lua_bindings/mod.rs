@@ -4258,8 +4258,9 @@ fn install_path_module(lua: &Lua) -> mlua::Result<Table> {
 ///
 /// `window()` returns **nil** when the capturing frontend had no
 /// document window (Q#DC-4) — such a destination is still commitable
-/// under the panel profile, so the accessor reports the absence rather
-/// than inventing an id.
+/// under the panel profile wherever that profile's relaxation actually
+/// applies, so the accessor reports the absence rather than inventing an
+/// id.
 pub(crate) struct ViewDestinationLua(pub(crate) crate::editor_core::ViewDestination);
 
 impl mlua::UserData for ViewDestinationLua {

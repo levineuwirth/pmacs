@@ -34,7 +34,9 @@
 use mlua::{Lua, Table, Value};
 
 use super::{BufferIdLua, SharedCore, config_u32, run_hook_if_defined};
-use crate::editor_core::{DisplayOutcome, DisplayRequest, HookKind, QuitOutcome};
+use crate::editor_core::{
+    CommitContract, CommitProfile, DisplayOutcome, DisplayRequest, HookKind, QuitOutcome,
+};
 use crate::protocol::FrontendId;
 use crate::window::{DEFAULT_PANEL_ROWS, MIN_WINDOW_OUTER_ROWS, Side, WindowId};
 
@@ -63,27 +65,6 @@ pub(crate) fn acting_frontend(lua: &Lua, core: &SharedCore) -> FrontendId {
         .unwrap_or_else(|| core.borrow().active_frontend_key())
 }
 
-/// Which of `commit_to`'s preconditions a body actually depends on
-/// (Q#DC-2).
-///
-/// A **closed** set of two, not an open string namespace: a third
-/// profile is a decision about what a continuation may depend on, not a
-/// spelling. Chosen at `commit_to` rather than at capture, because the
-/// caller knows what it is about to do only then.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CommitProfile {
-    /// The body replaces the captured window's buffer: **all four**
-    /// preflight checks apply. This is what an omitted profile means,
-    /// so every caller written before the profile existed keeps exactly
-    /// the guarantees it was written against.
-    Document,
-    /// The body puts its result somewhere that is not the captured
-    /// document window — a bottom panel, typically. Only the "requesting
-    /// frontend still has a layout" check applies; see the preflight for
-    /// why each of the other three is *deliberately* omitted.
-    Panel,
-}
-
 /// One message for every bad profile — an unrecognized string and a
 /// non-string alike (Q#DC-5).
 ///
@@ -106,12 +87,19 @@ const BAD_COMMIT_PROFILE: &str = "pmacs.window.commit_to: profile must be the st
 /// threading an optional variable produces `commit_to(dest, body, nil)`,
 /// and a third behaviour there would stay invisible until someone hit
 /// it.
+///
+/// The comparison is on **bytes**, for the same reachability reason one
+/// layer down. A Lua string is a byte string, not UTF-8, so
+/// `commit_to(dest, body, string.char(255))` fails a `to_str()`
+/// conversion and surfaces mlua's generic UTF-8 error *before* the
+/// message below is ever constructed. An invalid-UTF-8 profile is a bad
+/// profile like any other and gets the documented refusal.
 fn commit_profile(value: &Value) -> mlua::Result<CommitProfile> {
     match value {
         Value::Nil => Ok(CommitProfile::Document),
-        Value::String(name) => match &*name.to_str()? {
-            "document" => Ok(CommitProfile::Document),
-            "panel" => Ok(CommitProfile::Panel),
+        Value::String(name) => match name.as_bytes().as_ref() {
+            b"document" => Ok(CommitProfile::Document),
+            b"panel" => Ok(CommitProfile::Panel),
             // An unrecognized profile ERRORS rather than falling back to
             // the document one: a fallback would silently hand a caller
             // stricter or looser checks than it asked for, which is the
@@ -549,70 +537,22 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
                     // by reading this signature.
                     let profile = commit_profile(&profile)?;
 
-                    let refusal = {
-                        let core = cc.borrow();
-                        // 1. The requesting frontend still has a layout.
-                        //    Required by BOTH profiles: it is the whole
-                        //    of the panel profile (Q#DC-2), because a
-                        //    frontend that is gone can host nothing.
-                        if !core.views.contains_key(&dest.frontend) {
-                            Some("requesting frontend is gone".to_string())
-                        } else if profile == CommitProfile::Panel {
-                            // 2, 3 and 4 are DELIBERATELY OMITTED here,
-                            // not overlooked (Q#DC-2). A panel result
-                            // does not occupy the captured document
-                            // window, does not replace its buffer, and
-                            // does not need it to exist --- so each of
-                            // those checks would refuse for a reason
-                            // unrelated to what the continuation does,
-                            // and a refusal a user cannot explain is how
-                            // a mechanism gets worked around. Every one
-                            // of the three is pinned as NOT refusing
-                            // under this profile.
-                            None
-                        } else if let Some(window) = dest.window {
-                            if !core
-                                .views
-                                .get(&dest.frontend)
-                                .is_some_and(|view| view.layout.iter_ids().contains(&window))
-                            {
-                                // 2. The destination window is still live in it.
-                                Some(format!("window {} is gone", window.raw()))
-                            } else if core
-                                .windows
-                                .get(&window)
-                                .is_some_and(|w| Some(w.buffer_id) != dest.buffer)
-                            {
-                                // 3. Stale intent (Q#JR14c): the user
-                                //    replaced the buffer while the work was
-                                //    in flight. Their action is newer
-                                //    information than the request, so the
-                                //    request loses.
-                                Some(format!("window {} now shows another buffer", window.raw()))
-                            } else if !core.window_accepts_buffer(window, None) {
-                                // 4. Replaceability (Q#JR14f). `None`
-                                //    because the replacement does not exist
-                                //    yet — passing the captured buffer would
-                                //    approve a window dedicated to *it*, and
-                                //    the handler's different buffer would be
-                                //    refused later, after mutating.
-                                Some(format!("window {} is dedicated", window.raw()))
-                            } else {
-                                None
-                            }
-                        } else {
-                            // The capture found no document window
-                            // (Q#DC-4). A refusal rather than a raise, so
-                            // it joins the four above as one more thing
-                            // the destination can fail to satisfy and an
-                            // adopter handles it the same way.
-                            Some(
-                                "destination has no document window (capture it from a frontend \
-                                 that has one, or commit with the \"panel\" profile)"
-                                    .to_string(),
-                            )
-                        }
-                    };
+                    // The preflight itself lives on the core
+                    // (`commit_destination_refusal`), because the panel
+                    // profile's relaxation now has a SECOND evaluation
+                    // site --- the placement boundary, where a fallback
+                    // into a document window stops being a prediction and
+                    // becomes a fact --- and two hand-written copies of
+                    // the same three checks is how the backstop ends up
+                    // weaker than the thing it backs.
+                    //
+                    // What survives here, and only here: an early refusal
+                    // costs the body nothing, so the statically knowable
+                    // case (a frontend that cannot render a panel at all)
+                    // never reaches the body's buffer creation. The
+                    // GUARANTEE is not this call; see
+                    // `EditorCore::fallback_commit_refusal`.
+                    let refusal = cc.borrow().commit_destination_refusal(&dest, profile);
                     if let Some(reason) = refusal {
                         let mut out = mlua::MultiValue::new();
                         out.push_back(mlua::Value::String(lua.create_string(reason.as_bytes())?));
@@ -636,13 +576,24 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
                             )
                         })?
                         .clone();
-                    // Both the override and the core's ambient
-                    // `active_frontend` are restored when this guard
-                    // drops -- on the normal return AND on a raising
-                    // callback, which is why the result is captured
-                    // rather than `?`-propagated through the drop.
+                    // The override, the core's ambient `active_frontend`,
+                    // and the CONTRACT below are all restored when this
+                    // guard drops -- on the normal return AND on a
+                    // raising callback, which is why the result is
+                    // captured rather than `?`-propagated through the
+                    // drop. The contract rides with the scope because the
+                    // placement boundary needs to know, for every display
+                    // this body performs, which destination and which
+                    // profile it is running under.
                     let result = {
-                        let _guard = scope.enter(&cc, &commit, dest.frontend);
+                        let _guard = scope.enter(
+                            &cc,
+                            &commit,
+                            CommitContract {
+                                destination: dest,
+                                profile,
+                            },
+                        );
                         body.call::<mlua::MultiValue>(())
                     };
                     let mut out = result?;

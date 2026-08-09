@@ -11,7 +11,7 @@
 //! it lands (§8). Every test here therefore drives the Lua surface
 //! directly rather than through a consumer.
 //!
-//! Two disciplines it keeps:
+//! Three disciplines it keeps:
 //!
 //! * **Every "not applicable" cell in Q#DC-2's preflight matrix is
 //!   asserted as NOT refusing**, not merely left untested. A check
@@ -20,6 +20,19 @@
 //! * **A refusal is asserted on its reason**, never on the mere fact
 //!   that something failed. `commit_to` has five distinct refusals and a
 //!   raise; "it errored" would pass on any of the wrong ones.
+//! * **The panel profile's relaxation is pinned at BOTH of its
+//!   evaluation sites** (revision 7). The preflight is an early refusal
+//!   that spares the body; the guarantee is enforced where placement
+//!   resolves, because the body is arbitrary synchronous Lua and can
+//!   create the fallback *after* any snapshot was taken — refusing
+//!   `await` stops a second coroutine interleaving, not the body's own
+//!   statements. Three tests carry that split and none subsumes another:
+//!   `a_panel_commit_that_falls_back_runs_the_document_preflight` (the
+//!   body must not run),
+//!   `a_panel_commit_whose_body_creates_the_fallback_is_refused_at_placement`
+//!   (the result must not land), and
+//!   `a_panel_commit_that_falls_back_with_a_valid_destination_still_lands`
+//!   (falling back is still graceful degradation, not an error).
 //!
 //! `tests/journey_acceptance.rs` and `tests/dired_acceptance.rs` are the
 //! preservation half of the same §7 and are run alongside this suite:
@@ -66,6 +79,15 @@ fn active_name(s: &EditorState) -> String {
 
 fn buffer_in(s: &EditorState, window: WindowId) -> Option<BufferId> {
     s.core.borrow().windows.get(&window).map(|w| w.buffer_id)
+}
+
+/// A window's buffer **by name**, so a placement assertion reads as
+/// "`*result*` went to the panel" rather than as two opaque ids.
+fn name_in(s: &EditorState, window: WindowId) -> String {
+    let buffer = buffer_in(s, window).expect("window is live");
+    let core = s.core.borrow();
+    let registry = core.registry.borrow();
+    registry.get(buffer).expect("buffer").name().to_string()
 }
 
 fn local_window(s: &EditorState) -> WindowId {
@@ -151,12 +173,15 @@ fn capture(s: &EditorState) {
     );
 }
 
-/// Run `body` under `profile` and report `(ok, reason)`.
+/// Run a body that also executes `also` under `profile`, reporting
+/// `(ok, reason)`.
 ///
 /// `profile` is spliced as a Lua expression, so a caller can pass
 /// `"nil"`, `"'panel'"`, `"42"` — the argument-shape distinctions
-/// Q#DC-5 turns on are exactly what this suite has to vary.
-fn commit(s: &EditorState, profile: Option<&str>) {
+/// Q#DC-5 turns on are exactly what this suite has to vary. `also` is
+/// spliced as Lua statements, for the rows that must observe *where* an
+/// accepted commit put its result and not merely that it was accepted.
+fn commit_body(s: &EditorState, profile: Option<&str>, also: &str) {
     let call = match profile {
         Some(profile) => format!("pmacs.window.commit_to(dest, body, {profile})"),
         None => "pmacs.window.commit_to(dest, body)".to_string(),
@@ -165,13 +190,18 @@ fn commit(s: &EditorState, profile: Option<&str>) {
         s,
         &format!(
             "ran = false
-             local body = function() ran = true end
+             local body = function() ran = true; {also} end
              raised = nil
              local caught, a, b = pcall(function() return {call} end)
              if caught then ok, reason = a, b
              else ok, reason, raised = false, nil, tostring(a) end"
         ),
     );
+}
+
+/// Run an inert body under `profile` and report `(ok, reason)`.
+fn commit(s: &EditorState, profile: Option<&str>) {
+    commit_body(s, profile, "");
 }
 
 fn ok(s: &EditorState) -> bool {
@@ -414,6 +444,342 @@ fn the_preflight_matrix_holds_in_both_profiles() {
 }
 
 // ---------------------------------------------------------------------------
+// §7 — the panel profile's relaxation is CONDITIONAL (Q#DC-2, revision 7)
+// ---------------------------------------------------------------------------
+
+/// The Lua a `"panel"` continuation runs: put a result buffer in the
+/// bottom panel. It is the shape `listview.open` resolves to by default
+/// (`builtin/runtime/listview.lua`), and the shape git's `*git-status*`
+/// adoption will take.
+const PANEL_BODY: &str = "pmacs.window.display(pmacs.buffer.create('*result*'), \
+                          { side = 'bottom' })";
+
+/// Arrange one of the two reasons a side request falls back into a
+/// document window, and assert the arrangement took.
+///
+/// The two arms are independent branches of
+/// `EditorCore::resolve_placement`, so a fix that handled only one would
+/// leave the other live. Every fallback test below drives both.
+fn arrange_fallback(s: &EditorState, cause: &str) {
+    if cause == "not panel-capable" {
+        // Q#BP13's capability gate: `side` is honoured only on a
+        // panel-capable frontend.
+        s.core
+            .borrow_mut()
+            .views
+            .get_mut(&FrontendId::LOCAL)
+            .expect("LOCAL view")
+            .panel_capable = false;
+    } else {
+        // Q#BP3 2.iii: the one side slot is dedicated to another buffer,
+        // and a second panel is never created.
+        exec(
+            s,
+            "pmacs.window.display(pmacs.buffer.create('*pinned*'),
+               { side = 'bottom', dedicated = true, select = false })",
+        );
+        assert!(
+            s.core.borrow().side_window_for(FrontendId::LOCAL).is_some(),
+            "{cause}: the arrangement must actually create the side slot"
+        );
+    }
+}
+
+/// **N** — a `"panel"` commit whose placement *already* falls back is
+/// refused **before its body runs**, on the stale-intent reason.
+///
+/// The defect: the panel column dropped checks 2–4 on the claim that a
+/// panel result never touches a document window — but panel placement
+/// falls back to an ordinary document window and then *installs the
+/// result there* (`EditorCore::apply_placement` says so in its own
+/// comment). The relaxation therefore handed a `"panel"` commit
+/// permission to overwrite a document view with no stale-intent guard:
+/// capture A, the user opens B, the continuation lands and B is gone.
+///
+/// **This is the EARLY half, not the guarantee.** It is served by
+/// `EditorCore::commit_destination_refusal` consulting
+/// `panel_placement_can_fall_back`, which can only read the state that
+/// holds *now*. The reason that is worth having anyway is the same reason
+/// `commit_to` preflights at all: a body allocates a buffer, registers a
+/// handle and paints long before it reaches any call that could refuse,
+/// so refusing here leaves no debris. A frontend that cannot render a
+/// panel will not acquire the capability mid-body, which is exactly the
+/// case this catches.
+///
+/// The guarantee — for the case a snapshot **cannot** catch, where the
+/// body creates the fallback itself — is
+/// `a_panel_commit_whose_body_creates_the_fallback_is_refused_at_placement`.
+/// Neither test subsumes the other: this one pins that nothing runs, that
+/// one pins that nothing lands.
+///
+/// Each row asserts four things: the commit **refuses**, it refuses for
+/// the stale-intent reason (not incidentally), the body never ran, and
+/// the newer buffer is still there.
+///
+/// *Mutation:* delete the `panel_placement_can_fall_back` arm from
+/// `commit_destination_refusal`. Both rows fail — the body runs, and the
+/// placement backstop then refuses as a *raise*, so `ok`/`ran`/`reason`
+/// all move.
+#[test]
+fn a_panel_commit_that_falls_back_runs_the_document_preflight() {
+    for cause in ["not panel-capable", "side slot dedicated elsewhere"] {
+        let s = editor();
+
+        // Arrange the fallback cause BEFORE capturing, so the preflight
+        // can see it — which is exactly what distinguishes this test from
+        // the body-induced one below.
+        arrange_fallback(&s, cause);
+
+        capture(&s);
+        let doc = local_window(&s);
+        assert_eq!(
+            eval::<Option<u64>>(&s, "return dest:window()"),
+            Some(doc.raw()),
+            "{cause}: the capture must name the document window, not the panel"
+        );
+
+        // The user replaces the captured buffer while the work is in
+        // flight: `*newer*` is newer information than the request.
+        exec(
+            &s,
+            "pmacs.window.switch_buffer(pmacs.buffer.create('*newer*'))",
+        );
+        assert_eq!(
+            name_in(&s, doc),
+            "*newer*",
+            "{cause}: the arrangement must make the captured window stale"
+        );
+
+        commit_body(&s, Some("'panel'"), PANEL_BODY);
+
+        assert_eq!(
+            raised(&s),
+            None,
+            "{cause}: a precondition is a refusal, not a raise"
+        );
+        assert!(
+            !ok(&s),
+            "{cause}: a \"panel\" commit that lands in a DOCUMENT window must run the \
+             document preflight -- the relaxation is conditional on the placement really \
+             being a panel"
+        );
+        assert!(
+            reason(&s).contains("now shows another buffer"),
+            "{cause}: and refuse on stale intent; got {:?}",
+            reason(&s)
+        );
+        assert!(!ran(&s), "{cause}: the callback must not run");
+        assert_eq!(
+            name_in(&s, doc),
+            "*newer*",
+            "{cause}: the user's newer buffer must survive -- this is the assertion that \
+             fails loudest when the guard is removed"
+        );
+    }
+}
+
+/// **N** — the case no preflight snapshot can catch: the **body itself**
+/// creates the fallback, and the refusal still fires.
+///
+/// This is why the guarantee moved to the placement boundary. Revision 6
+/// argued that a prediction taken at preflight could not go stale,
+/// because `commit_to`'s body cannot `await`. Refusing `await` prevents
+/// another *coroutine* interleaving; it places no restriction on the body
+/// itself, which is arbitrary Lua running synchronously:
+///
+/// ```lua
+/// pmacs.window.set_params(pmacs.window.panel(), { dedicated = true })
+/// pmacs.window.display(result, { side = "bottom" })
+/// ```
+///
+/// Two statements. The first invalidates the prediction, the second cashes
+/// it in. The arrangement here is deliberately the **inverse** of the
+/// preflight rows: an undedicated panel exists, so the prediction says
+/// "this will land in the panel", the relaxation applies, and the body
+/// runs. Only when placement resolves is the fallback a fact.
+///
+/// What it asserts, and why each is load-bearing:
+///
+/// * the body **did** run — otherwise the test would be re-proving the
+///   preflight and this whole case would be untested;
+/// * the refusal arrives as a **raise** from `display`, since the body was
+///   already running and there is no `(false, reason)` left to return —
+///   asserted on content, and it names both the fallback and the
+///   stale-intent reason;
+/// * `*newer*` is **still in the document window**. That is the actual
+///   user-visible guarantee; everything above it is mechanism.
+///
+/// *Mutation:* delete the `fallback_commit_refusal` call from
+/// `display_buffer`. This test fails on all three; every other test in
+/// this file still passes, which is precisely the hole revision 6 left.
+#[test]
+fn a_panel_commit_whose_body_creates_the_fallback_is_refused_at_placement() {
+    let s = editor();
+
+    // A REUSABLE panel: undedicated, so the preflight prediction says
+    // this frontend places side requests in the panel.
+    exec(
+        &s,
+        "pmacs.window.display(pmacs.buffer.create('*pinned*'),
+           { side = 'bottom', dedicated = false, select = false })",
+    );
+    capture(&s);
+    let doc = local_window(&s);
+    exec(
+        &s,
+        "pmacs.window.switch_buffer(pmacs.buffer.create('*newer*'))",
+    );
+    assert_eq!(
+        name_in(&s, doc),
+        "*newer*",
+        "the arrangement must make the captured window stale"
+    );
+
+    commit_body(
+        &s,
+        Some("'panel'"),
+        &format!(
+            "pmacs.window.set_params(pmacs.window.panel(), {{ dedicated = true }})
+             {PANEL_BODY}"
+        ),
+    );
+
+    assert!(
+        ran(&s),
+        "the body must have run -- the preflight could not have known, and a test where \
+         it did not run would be re-proving the preflight"
+    );
+    let raised = raised(&s).expect(
+        "the refusal arrives as a raise: the body was already running, so there is no \
+         (false, reason) return left to make",
+    );
+    assert!(
+        raised.contains("fell back to a document window"),
+        "the message must name what happened; got {raised:?}"
+    );
+    assert!(
+        raised.contains("now shows another buffer"),
+        "and which document precondition failed; got {raised:?}"
+    );
+    assert_eq!(
+        name_in(&s, doc),
+        "*newer*",
+        "the user's newer buffer must survive -- this is the guarantee, and it is what a \
+         preflight-only design cannot provide"
+    );
+}
+
+/// **P** — a `"panel"` commit that falls back with a **still-valid**
+/// destination lands in the document window, exactly as it does today.
+///
+/// The guard refuses on *staleness*, not on *falling back*. Falling back
+/// is deliberate graceful degradation for a frontend that cannot render a
+/// panel (`EditorCore::apply_placement`), and turning it into an error
+/// would regress every consumer that works today on such a frontend — a
+/// much bigger behaviour change than the defect being fixed.
+///
+/// Both causes, and asserted on **where the result landed** rather than
+/// on the commit merely being accepted: a design that accepted the commit
+/// and then dropped the display on the floor would pass a weaker version
+/// of this.
+///
+/// *Mutation:* make `fallback_commit_refusal` refuse whenever a `"panel"`
+/// commit falls back, instead of only when a document precondition fails.
+/// Both rows fail here; every refusal test still passes, which is what
+/// makes this the pin that stops the fix over-reaching.
+#[test]
+fn a_panel_commit_that_falls_back_with_a_valid_destination_still_lands() {
+    for cause in ["not panel-capable", "side slot dedicated elsewhere"] {
+        let s = editor();
+        arrange_fallback(&s, cause);
+        capture(&s);
+        let doc = local_window(&s);
+
+        // No staleness: the captured window still holds what it held.
+        commit_body(&s, Some("'panel'"), PANEL_BODY);
+
+        assert_eq!(raised(&s), None, "{cause}: the commit must not raise");
+        assert!(
+            ok(&s),
+            "{cause}: a fallback with an intact destination is graceful degradation, not \
+             an error; got refusal {:?}",
+            reason(&s)
+        );
+        assert!(ran(&s), "{cause}: the callback must run");
+        assert_eq!(
+            name_in(&s, doc),
+            "*result*",
+            "{cause}: and the result really must land in the document window it fell \
+             back to"
+        );
+    }
+}
+
+/// **P** — a `"panel"` commit that really lands in the panel still skips
+/// checks 2–4.
+///
+/// The other half of the correction, and it is not optional coverage.
+/// The cheapest way to close the fallback hole is to make the panel
+/// profile run the document preflight unconditionally — which passes
+/// every fallback row above while quietly collapsing the two profiles
+/// into one, leaving the whole parameterization buying nothing and
+/// `git.status` refused for a document-window change unrelated to where
+/// its panel goes.
+///
+/// Deliberately arranged in the **same stale-intent state** the fallback
+/// rows refuse on, so the only difference between this test and those is
+/// whether the placement is really a panel. And it asserts *where* the
+/// result went, not merely that the commit was accepted: an accepted
+/// commit that still overwrote the document window would be the same
+/// defect wearing a `true`.
+///
+/// *Mutation:* widen the relaxation's condition back — i.e. make
+/// `panel_placement_can_fall_back` return `true` unconditionally, or run
+/// the document preflight for every `"panel"` commit. This fails on the
+/// refusal; the fallback rows above still pass. **This is the pin that
+/// makes "collapse the two profiles into one" a visible design change
+/// rather than a quiet implementation choice.**
+#[test]
+fn a_panel_commit_that_really_lands_in_the_panel_keeps_its_relaxation() {
+    let s = editor();
+    capture(&s);
+    let doc = local_window(&s);
+
+    // Exactly the state the fallback rows refuse on.
+    exec(
+        &s,
+        "pmacs.window.switch_buffer(pmacs.buffer.create('*newer*'))",
+    );
+
+    commit_body(&s, Some("'panel'"), PANEL_BODY);
+
+    assert!(
+        ok(&s),
+        "a panel-capable frontend with no dedicated side slot really places in the \
+         panel, so checks 2-4 stay omitted; got refusal {:?}",
+        reason(&s)
+    );
+    assert!(ran(&s), "and the callback must run");
+
+    let panel = s
+        .core
+        .borrow()
+        .side_window_for(FrontendId::LOCAL)
+        .expect("the commit must have created the side window");
+    assert_eq!(
+        name_in(&s, panel),
+        "*result*",
+        "the result must land in the PANEL -- an accepted commit that fell back would \
+         be the same defect with a `true` in front of it"
+    );
+    assert_eq!(
+        name_in(&s, doc),
+        "*newer*",
+        "and the captured document window must be untouched"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // §7 — the profile argument (Q#DC-5)
 // ---------------------------------------------------------------------------
 
@@ -507,8 +873,16 @@ fn an_explicit_nil_profile_is_the_document_profile() {
 ///   against the string case's message, not merely on "an error
 ///   occurred".
 ///
+/// **The `invalid utf-8` row is the same reachability class one layer
+/// down.** A Lua string is a *byte* string, so `string.char(255)` is a
+/// perfectly ordinary `Value::String` that a `to_str()` inside the body
+/// still fails to convert — surfacing mlua's generic UTF-8 error before
+/// the documented message is ever constructed. Accepting `Value` is not
+/// enough on its own; the comparison has to be on bytes.
+///
 /// *Mutation:* retype the argument to `Option<String>`. The number and
-/// table rows fail.
+/// table rows fail. *Second mutation:* compare via `name.to_str()?`. The
+/// `invalid utf-8` row fails.
 #[test]
 fn a_bad_profile_is_refused_by_one_message_that_names_the_accepted_values() {
     let mut messages = Vec::new();
@@ -517,6 +891,7 @@ fn a_bad_profile_is_refused_by_one_message_that_names_the_accepted_values() {
         ("number", "42"),
         ("table", "{}"),
         ("boolean", "true"),
+        ("invalid utf-8", "string.char(255)"),
     ] {
         let s = editor();
         capture(&s);

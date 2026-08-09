@@ -25,7 +25,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::async_runtime::SharedAsyncRuntime;
 use crate::cell::{CellCoord, CellSize};
-use crate::editor_core::{EditorCore, GeometryUpdate};
+use crate::editor_core::{CommitContract, EditorCore, GeometryUpdate};
 use crate::frontend::{Event, Frontend, KeyEvent, KeyEventKind, MouseEvent, install_panic_hook};
 use crate::key::{Chord, display_sequence};
 use crate::keymap_stack::{Action, KeyDispatcher};
@@ -119,20 +119,26 @@ impl ScopedFrontend {
     }
 
     /// Enter a background frontend scope, also swapping the core's
-    /// ambient `active_frontend`. Both are restored on drop, on every
-    /// exit path including a raising callback.
+    /// ambient `active_frontend` and publishing `contract`. All three are
+    /// restored on drop, on every exit path including a raising callback.
+    ///
+    /// The frontend comes from `contract.destination` rather than being
+    /// passed separately: a scope entered for one frontend while carrying
+    /// another's destination would let the placement guard check the
+    /// wrong window, and there is no caller that wants them to differ.
     pub(crate) fn enter(
         &self,
         core: &SharedCore,
         commit_scope: &CommitScopeActive,
-        frontend_id: FrontendId,
+        contract: CommitContract,
     ) -> ScopedFrontendGuard {
+        let frontend_id = contract.destination.frontend;
         let previous = self.0.replace(Some(frontend_id));
-        let previous_active = {
+        let (previous_active, previous_contract) = {
             let mut core = core.borrow_mut();
             let was = core.active_frontend;
             core.active_frontend = frontend_id;
-            was
+            (was, core.enter_commit_contract(Some(contract)))
         };
         let previous_commit = commit_scope.0.replace(true);
         ScopedFrontendGuard {
@@ -140,6 +146,7 @@ impl ScopedFrontend {
             core: core.clone(),
             previous,
             previous_active,
+            previous_contract,
             commit_scope: commit_scope.clone(),
             previous_commit,
         }
@@ -151,6 +158,11 @@ pub(crate) struct ScopedFrontendGuard {
     core: SharedCore,
     previous: Option<FrontendId>,
     previous_active: FrontendId,
+    /// The contract in force before this commit, restored with the rest
+    /// (Q#DC-2). Held here rather than on a separate guard so a
+    /// `"panel"` profile can never outlive the body that declared it and
+    /// govern an unrelated later display.
+    previous_contract: Option<CommitContract>,
     /// Cleared together with the scope, so an awaiting callback cannot
     /// leave `await` refused after the commit ends (Q#JR14b).
     commit_scope: CommitScopeActive,
@@ -160,7 +172,11 @@ pub(crate) struct ScopedFrontendGuard {
 impl Drop for ScopedFrontendGuard {
     fn drop(&mut self) {
         self.scope.0.set(self.previous);
-        self.core.borrow_mut().active_frontend = self.previous_active;
+        {
+            let mut core = self.core.borrow_mut();
+            core.active_frontend = self.previous_active;
+            core.enter_commit_contract(self.previous_contract);
+        }
         self.commit_scope.0.set(self.previous_commit);
     }
 }
