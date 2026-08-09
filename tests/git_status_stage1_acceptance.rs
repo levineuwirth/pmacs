@@ -786,6 +786,103 @@ fn g6_6c_a_single_state_unborn_row_takes_one_patch_and_says_so() {
     );
 }
 
+/// A two-step plan runs **every** step against the repository the user
+/// was looking at when they pressed `d`.
+///
+/// An unborn `AM` row is the only shape that makes this observable: it
+/// produces a **two-step** plan (staged patch, then unstaged patch), and
+/// the second step used to be spawned from the first one's completion
+/// callback against whatever `state.root` held **by then**. So a
+/// `git.status` for another repository, whose root lookup lands while
+/// the first patch is still in flight, moved the plan's second step into
+/// a different repository — carrying the first repository's path, which
+/// git there resolves to nothing at all.
+///
+/// Driven through `_deliver_root` for the same reason `g6_21` is: no
+/// arrangement of real subprocess timing can guarantee that the
+/// interleaving happens, and a test that merely hoped for it would pass
+/// on the broken code most of the time. Nothing is pumped between the
+/// keypress and the reassignment, so step 1 is genuinely in flight.
+///
+/// The argv assertion is the load-bearing one. A test that checked only
+/// the FIRST step — or only that a diff rendered — passes on the broken
+/// code, since step 1 is spawned synchronously from the keypress and
+/// step 2 against the wrong repository merely produces an empty patch.
+#[test]
+fn g6_22_a_two_step_plan_keeps_the_root_it_started_with() {
+    let (_dir_a, root_a) = tempdir();
+    unborn_repo(&root_a);
+    // An unrelated repository, with no `am.txt` in it: a step that
+    // escaped into B would find nothing and render "(no changes)".
+    let (_dir_b, root_b) = tempdir();
+    mixed_repo(&root_b);
+
+    let mut s = editor();
+    open_panel(&mut s, &root_a, "am.txt");
+    seat_on(&mut s, "am.txt");
+
+    let a = root_a.display().to_string();
+    let b = root_b.display().to_string();
+
+    // `d` spawns step 1 synchronously against A…
+    press(&mut s, KeyCode::Char('d'));
+    // …and now, before a single frame is pumped, a `git.status` for B
+    // resolves its root and reassigns `state.root`.
+    exec(
+        &s,
+        &format!(
+            "pmacs.git._deliver_root(\n\
+               {{ generation = pmacs.git._generation(), dir = {b:?} }},\n\
+               {{ ok = true, code = 0, stdout = {b:?}, stderr = '' }})"
+        ),
+    );
+    assert!(
+        pump_until(&mut s, 15_000, |s| diff_text(s)
+            .contains("=== unstaged (worktree) ===")),
+        "the plan must run to completion; diff was:\n{}\nstatus: {:?}",
+        diff_text(&s),
+        status(&s)
+    );
+
+    let diffs: Vec<String> = eval(
+        &s,
+        "local out = {}\n\
+         for _, args in ipairs(pmacs.git._spawn_log) do\n\
+           for _, a in ipairs(args) do\n\
+             if a == 'diff' then\n\
+               out[#out + 1] = table.concat(args, ' ')\n\
+               break\n\
+             end\n\
+           end\n\
+         end\n\
+         return out",
+    );
+    assert_eq!(
+        diffs.len(),
+        2,
+        "premise: the AM row's plan really is two steps: {diffs:?}"
+    );
+    for argv in &diffs {
+        assert!(
+            argv.contains(&format!("-C {a}")),
+            "every step of one plan runs against the captured root: {argv:?}"
+        );
+        assert!(
+            !argv.contains(&b),
+            "and none of them may follow `state.root` into another \
+             repository: {argv:?}"
+        );
+    }
+
+    // The user-visible half: the second patch is still A's worktree
+    // delta, not the empty answer B would have given.
+    let diff = diff_text(&s);
+    assert!(
+        diff.contains("+worktree edit"),
+        "the unstaged half must still carry A's worktree delta: {diff}"
+    );
+}
+
 /// Rename/copy under an unborn `HEAD` is **unreachable**.
 ///
 /// The fixture `git mv`s a staged-but-uncommitted file and the parser

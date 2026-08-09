@@ -900,7 +900,18 @@ local function show_diff_buffer(title, body)
 end
 
 -- Run the plan's steps in order, then render.
-local function run_diff_plan(row, plan)
+--
+-- `root` is a PARAMETER, captured at the keypress, and `state.root` is
+-- deliberately not read anywhere below. An unborn `AM`/`AD` row produces
+-- a TWO-STEP plan, and `state.root` is module-level mutable state that a
+-- concurrent `git.status` against another repository reassigns from its
+-- own root-resolution callback. Reading it per step would let one plan's
+-- second step run in a different repository than its first --- with the
+-- first repository's path --- so every step of one plan runs against the
+-- repository the user was looking at when they pressed `d`. Same shape
+-- as the generation counter: capture at the INVOCATION, never at the
+-- continuation.
+local function run_diff_plan(row, plan, root)
   local pieces = {}
   local index = 0
   local step_done
@@ -916,7 +927,7 @@ local function run_diff_plan(row, plan)
         pmacs.git.display_path(row.path), plan.header), body)
       return
     end
-    run_git("git diff", state.root, step.args, function(res) step_done(step, res) end)
+    run_git("git diff", root, step.args, function(res) step_done(step, res) end)
   end
   step_done = function(step, res)
     if not diff_step_ok(step, res) then
@@ -965,6 +976,11 @@ pmacs.command.define {
       pmacs.editor.set_status("git: disabled by the `git.enabled` setting")
       return
     end
-    run_diff_plan(row, diff_plan(row, (state.branch or {}).unborn == true))
+    -- The root is captured HERE, at the keypress, and threaded through
+    -- every step of the plan. `state.branch` is read here for the same
+    -- reason: both describe the repository the user is looking at right
+    -- now, and both are replaced wholesale by a `git.status` against
+    -- another repository.
+    run_diff_plan(row, diff_plan(row, (state.branch or {}).unborn == true), state.root)
   end,
 }
