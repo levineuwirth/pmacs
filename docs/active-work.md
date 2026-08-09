@@ -269,7 +269,7 @@ census.
 
 **PR #227** — https://github.com/levineuwirth/pmacs/pull/227. Opened
 2026-08-09 at `4002734`, after the framing was approved at revision 5
-and the full gate suite went green. **Now at `723afa7`, MERGE-BLOCKED.**
+and the full gate suite went green. **Now at `39ad43d`, MERGE-BLOCKED.**
 
 **Review round 1 found three blockers. Two are fixed; the third is why
 this lane is blocked.**
@@ -407,6 +407,45 @@ resolves `<tmp>/nl` instead of `<tmp>/nl\nroot` when `first_line` is;
 and `g6_23` fails when the ticket check is removed, at its **real**
 half, the older plan having overwritten the newer one's patch before the
 driven delivery was reached.
+
+**Review round 3 found a FOURTH instance of the byte/lifetime shape, and
+it was one byte inside round 2's own fix.**
+
+- **P2 fixed (`39ad43d`) — a repository root ENDING IN A CARRIAGE RETURN
+  was truncated.** `strip_output_terminator` stripped `\r?\n$`, and `\r`
+  is as legal a byte in a POSIX directory name as `\n` is. For a root
+  named `trailing\r`, `git rev-parse --show-toplevel` prints
+  `…/trailing` `0d` `0a` — the path's own CR, then git's LF terminator —
+  and a pattern tolerant of an optional preceding carriage return cannot
+  tell those apart, so it took both. The root resolved as `…/trailing`
+  and every command after it ran with that as its `-C` and cwd: a
+  directory that does not exist. Now **exactly one trailing `\n`** is
+  removed, by an explicit last-byte test rather than an anchored pattern
+  — both of this function's bugs lived in a pattern.
+
+  **`-z` was CHECKED against the installed git, not assumed, and must
+  NOT be used.** `git rev-parse` has no `-z` option at all on git 2.55:
+  it is absent from the manual, `--parseopt -z` errors with "unknown
+  switch", and in ordinary mode `rev-parse` treats `-z` as an
+  unrecognized **flag argument** and echoes a literal `-z\n` onto stdout
+  **ahead of** the toplevel — exit code 0, corrupted output, silent.
+  `--show-toplevel` applies no C quoting either, not even under
+  `core.quotePath=true`. So there is no unambiguous representation to
+  prefer over a correct strip, and removing the one byte git appended is
+  the whole of the right answer.
+
+  `first_line` is untouched again, for the reason `842ec61` recorded: its
+  three callers all feed the single-line status band.
+
+**Re-gated at `39ad43d`:** all steps green, acceptance now 31 tests.
+`g6_14d` is end to end — real directories, the real `git`, asserted on
+the cwd of the spawn the module actually made — and covers both
+`trailing\r` and `nl\nand-trailing\r`, the second because the two hazards
+compose and neither fix may mask the other. `g6_14c` now shares that
+chain through `assert_root_resolves_whole` rather than keeping a second
+copy of it. Mutation-verified: restoring `\r?\n$` fails `g6_14d` at
+`<tmp>/trailing` against `<tmp>/trailing\r` while `g6_14c` still passes,
+which is exactly the byte separating the two fixes.
 
 **Written with the lane's first commit, before the PR exists** — the
 standing correction from #171 and #215. This session it was missed on
