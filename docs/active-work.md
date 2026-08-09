@@ -265,7 +265,7 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
-## Worker identity Stage 1 (§9) — BRANCHED, pre-implementation
+## Worker identity Stage 1 (§9) — IMPLEMENTED, no PR yet
 
 **Written with the lane's first commit**, per the standing correction
 from #171 and #215.
@@ -343,8 +343,57 @@ the authoritative tip** — the ref, not a SHA. Recover with
   only the first two. A parent needs an ambient "currently-running job"
   context, and an unpopulated `parent` reads as "no parent" rather than
   "not tracked" (Q#W-5).
-- **Gates:** `scripts/gate --acceptance <the new suite>`. No
-  `--protocol`.
+- **Gates:** `scripts/gate --acceptance worker_identity_acceptance
+  --acceptance journey_acceptance --acceptance
+  statusline_segments_acceptance`. No `--protocol` — no wire change.
+- **IMPLEMENTED at `1aca0ee`**, one commit on top of the four framing
+  revisions. `tests/worker_identity_acceptance.rs` is the new suite: 18
+  tests, plus one consumer-side witness beside the private renderer in
+  `pmacs-gpu`.
+- **`journey_acceptance` passed UNTOUCHED (47/47)** — the stop signal
+  did not fire. Q#W-7 edits the `commit_to` guard family, so any of its
+  established pins needing an edit would have meant this altered Journey
+  Stage 1a's semantics rather than closing a gap in them. Its diff
+  versus `main` is empty, and so is the diff for all three
+  `#pmacs.process.list()` leak-detector suites
+  (`m6_8_multi_repl_acceptance`, `compile_mode_acceptance`,
+  `lean4_stage1_acceptance`) — Q#W-4's preservation claim, checked the
+  way the framing asked.
+- **One pre-existing assertion did change, and it is an inventory
+  rather than a contract**: `statusline_segments_acceptance`'s builtin
+  provider list becomes `["activity", "mode", "terminal", "lsp"]`.
+  `activity` sorts first because `async.lua` is loaded before
+  `syntax.lua`, `terminal.lua` and `lsp.lua`. That assertion exists to
+  grow when a builtin provider is added; it is listed here so the change
+  is not mistaken for an accommodation.
+- **20 mutation checks, each test falsified by removing its own fix.**
+  The ones worth naming: siting the `await` guard *inside* the
+  `_is_complete` branch (the already-complete case then slips through —
+  which is the whole reason the guard is unconditional); replacing
+  `pcall`/pop/rethrow with a bare handler call (a raising handler leaves
+  the name pushed and the *next* dispatch inherits it); composing
+  `"<name>"` instead of `"<name>: <purpose>"` and vice versa (each half
+  passes the other's test); `first()` instead of `last()` on the name
+  stack; oldest→newest in `activity_summary`; and, on the GPU side,
+  painting an unthemed modeline face as the band colour, which would
+  have made the indicator invisible without failing anything else.
+  One of the twenty is a **preservation** check rather than a new
+  claim: bracketing `pmacs.workers.dispatch` with
+  `local ok, result = pcall(...)` truncates a handler that returns more
+  than one value, which every other test in the suite tolerates.
+- **Two residuals, stated rather than tested around.** Raw
+  `coroutine.yield` inside either dynamic scope still leaks the scope —
+  loudly, through `pmacs.error`, but it leaks; no refusal sited in a
+  yield helper can intercept it (framing §2). And Q#W-7's reachability
+  by a real caller stays **unproven**: the commit message says so, and
+  the test pins the guard rather than reproducing a fault.
+- **Surfaces that changed shape, for anyone rebasing onto this:**
+  `AsyncRuntime::allocate`/`allocate_with_resource` collapsed into one
+  private `JobSpec`-taking funnel; `register_external` grew a third
+  parameter; `ProcessSpec::new` grew a third parameter (~40 call sites,
+  nearly all tests); `ActiveJobInfo`/`CompletedJobInfo`/`ProcessSpec`
+  each grew a required `purpose` field. `pmacs.process.spawn`'s Lua
+  surface keeps `purpose` optional, falling back to the label.
 
 ## Discovery Stage 2 — PR #228 OPEN, **MERGE-BLOCKED**
 
