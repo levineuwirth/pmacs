@@ -191,6 +191,18 @@ And the two findings that actually shape the design:
   `nil`. An activity indicator is a **fourth registration**, not a new
   mechanism.
 
+  **The three are named by FILE above and by NAME in the registry, and
+  the two do not line up.** `syntax.lua` registers its provider as
+  **`"mode"`** (it projects the major mode, `syntax.lua:552`), so the
+  registry inventory reads `["mode", "terminal", "lsp"]` — which is what
+  `tests/statusline_segments_acceptance.rs` asserts. Recorded because it
+  is genuinely surprising: a reader looking for the syntax adopter by
+  name does not find one. A fourth registration therefore changes that
+  assertion, and where the new name sorts depends on **load order**, not
+  on the name: `async.lua` is evaluated before `syntax.lua`,
+  `terminal.lua` and `lsp.lua` (`src/editor.rs`), so a provider
+  registered there lands first.
+
   **And it is evaluated per frame**: `evaluate_statusline` is called
   inside `paint_frame` (`src/editor.rs:4560`), before the long mutable
   core borrow. So an indicator updates while work is in flight without

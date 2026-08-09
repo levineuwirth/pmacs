@@ -345,9 +345,14 @@ the authoritative tip** — the ref, not a SHA. Recover with
   "not tracked" (Q#W-5).
 - **Gates:** `scripts/gate --acceptance worker_identity_acceptance
   --acceptance journey_acceptance --acceptance
-  statusline_segments_acceptance`. No `--protocol` — no wire change.
-- **IMPLEMENTED at `1aca0ee`**, one commit on top of the four framing
-  revisions. `tests/worker_identity_acceptance.rs` is the new suite: 18
+  statusline_segments_acceptance --acceptance compile_mode_acceptance
+  --acceptance m8_6_acceptance`. No `--protocol` — no wire change.
+  `compile_mode` and `m8_6` joined at review round 1, which moved their
+  spawn call sites; `m8_6` covers the `pmacs-magit` fixture, and a newly
+  required field is exactly the kind of change that breaks a package
+  fixture quietly.
+- **IMPLEMENTED at `1aca0ee`**, with review round 1's blocker fixed at
+  `2162737`. `tests/worker_identity_acceptance.rs` is the new suite: 18
   tests, plus one consumer-side witness beside the private renderer in
   `pmacs-gpu`.
 - **`journey_acceptance` passed UNTOUCHED (47/47)** — the stop signal
@@ -366,7 +371,7 @@ the authoritative tip** — the ref, not a SHA. Recover with
   `syntax.lua`, `terminal.lua` and `lsp.lua`. That assertion exists to
   grow when a builtin provider is added; it is listed here so the change
   is not mistaken for an accommodation.
-- **20 mutation checks, each test falsified by removing its own fix.**
+- **23 mutation checks, each test falsified by removing its own fix.**
   The ones worth naming: siting the `await` guard *inside* the
   `_is_complete` branch (the already-complete case then slips through —
   which is the whole reason the guard is unconditional); replacing
@@ -380,20 +385,48 @@ the authoritative tip** — the ref, not a SHA. Recover with
   One of the twenty is a **preservation** check rather than a new
   claim: bracketing `pmacs.workers.dispatch` with
   `local ok, result = pcall(...)` truncates a handler that returns more
-  than one value, which every other test in the suite tolerates.
+  than one value, which every other test in the suite tolerates. Round
+  1 added three more against the spawn refusal: restoring the
+  label fallback, accepting an empty/whitespace-only purpose, and
+  reading the field non-raw so a metatable can smuggle one in.
 - **Two residuals, stated rather than tested around.** Raw
   `coroutine.yield` inside either dynamic scope still leaks the scope —
   loudly, through `pmacs.error`, but it leaks; no refusal sited in a
   yield helper can intercept it (framing §2). And Q#W-7's reachability
   by a real caller stays **unproven**: the commit message says so, and
   the test pins the guard rather than reproducing a fault.
+- **Review round 1 blocker — `pmacs.process.spawn` now REQUIRES
+  `purpose`.** The first implementation made it optional at the Lua
+  surface, falling back to `label`. That preserved compatibility and
+  delivered nothing: §9's complaint about `ProcessSpec` is exactly that
+  `label` is "caller-supplied, unvalidated convention", so a purpose
+  defaulting to it hands every caller back the convention the lane exists
+  to replace. Refused on five shapes — absent, empty, whitespace-only,
+  wrong type, metatable-provided — each asserting the process list is
+  unchanged, since a validation that rejects after spawning has already
+  done the thing it rejected.
+- **That is a BREAKING CHANGE to a public Lua API, taken now on
+  purpose.** §10 grades extension trust "missing (one class)" and P7
+  package lifecycle has not started, so the third-party population is
+  ~zero and the cost only rises later. Checked for a reason that would be
+  wrong and found none: `pmacs.process.spawn` has no API-reference
+  documentation and no stability promise in `docs/` (the package-author
+  guide's only mentions are an audit-rule classification and a pointer to
+  the bundled REPL; its semver language governs packages' own versioning,
+  not pmacs's Lua surface), and `lua_to_spec` has exactly one caller.
+  **Eleven executable call sites updated**, each with a real description
+  rather than the label copied across: `repl/init.lua`, `compile.lua`,
+  `lean.lua`, the `pmacs-magit` fixture, and seven in tests. The two
+  `pmacs.process.spawn("ls")` occurrences in `src/audit/mod.rs` and
+  `tests/m7_9_acceptance.rs` are **audit fixture source text** — lexed,
+  never executed — and are deliberately untouched.
 - **Surfaces that changed shape, for anyone rebasing onto this:**
   `AsyncRuntime::allocate`/`allocate_with_resource` collapsed into one
   private `JobSpec`-taking funnel; `register_external` grew a third
   parameter; `ProcessSpec::new` grew a third parameter (~40 call sites,
   nearly all tests); `ActiveJobInfo`/`CompletedJobInfo`/`ProcessSpec`
-  each grew a required `purpose` field. `pmacs.process.spawn`'s Lua
-  surface keeps `purpose` optional, falling back to the label.
+  each grew a required `purpose` field, and `pmacs.process.spawn`
+  requires `purpose` in its spec table.
 
 ## Discovery Stage 2 — PR #228 OPEN, **MERGE-BLOCKED**
 
