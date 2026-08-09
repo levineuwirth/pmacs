@@ -265,6 +265,48 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
+## Worker identity Stage 1 (§9) — BRANCHED, framing in review
+
+**Written with the lane's first commit**, per the standing correction
+from #171 and #215.
+
+**Branch `worker-identity-stage1`**, base `githubsucks/main` @
+`4bc55e8` (the #225 merge). **`githubsucks/worker-identity-stage1` is
+the authoritative tip** — the ref, not a SHA. Recover with
+`git fetch githubsucks && git checkout worker-identity-stage1`.
+
+- **Framing `docs/worker-identity-framing.md`, revision 1**, in review.
+  Scope: `COHERENCE.md` §9's "mechanism without identity", and journey
+  step 11 — the last of Priority 1's own work, sitting in another
+  section's arc.
+- **NO WIRE CHANGE**, which is what lets this run beside the two lanes
+  already in flight. The statusline activity indicator is a **fourth**
+  `pmacs.statusline.register` provider (terminal/syntax/lsp are the
+  three existing adopters), evaluated per frame inside `paint_frame`
+  (`src/editor.rs:4560`) and riding the existing `StatuslineSegments`
+  vector. No variant, no bump.
+- **Scope:** `owner`/`purpose` on `PendingJob` and `ProcessSpec`
+  through the single allocation funnel (`src/async_runtime.rs:746`,
+  which every dispatcher and `register_external` passes through), the
+  handler name that `pmacs.workers.dispatch` currently discards, the
+  `*workers*` rendering, and the indicator.
+- **Two scouting findings that shaped the design**, both verified:
+  `PendingJob` carries **eight** fields, not the audit's seven, and the
+  eighth's doc comment **cites §9 by name** as the reason identity
+  belongs on the job rather than in a side map — so this extends a
+  merged decision. And **`pmacs.process.list` filters to
+  `LineOriented`** (`src/lua_bindings/mod.rs:8980`), with **three
+  acceptance suites using `#pmacs.process.list()` as a leak detector**,
+  so making terminal PTYs visible is deferred to Stage 2 with a
+  separate accessor rather than by widening this one.
+- **Deliberate deviation from the audit, flagged for review:** §9 names
+  owner/purpose/**parent** together as the prerequisite; Stage 1 takes
+  only the first two. A parent needs an ambient "currently-running job"
+  context, and an unpopulated `parent` reads as "no parent" rather than
+  "not tracked" (Q#W-5).
+- **Gates:** `scripts/gate --acceptance <the new suite>`. No
+  `--protocol`.
+
 ## Discovery Stage 2 — PR #228 OPEN, **MERGE-BLOCKED**
 
 **PR #228** — https://github.com/levineuwirth/pmacs/pull/228. Opened
@@ -726,6 +768,7 @@ authoritative tip** — the ref, not a SHA. Recover with
   sweep step each fail the suite.
 ||||||| parent of 72bbb96 (docs: LSP LaTeX coverage framing revision 2, on a branch at last)
 ||||||| parent of 312ec7a (docs: frame Discovery Stage 2 (revision 2) — M-x rows)
+||||||| parent of 8f86908 (docs: frame worker identity Stage 1 (revision 1))
 
 ## QoL arc retirement — PR #224 OPEN (docs only)
 
