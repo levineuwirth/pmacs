@@ -265,6 +265,43 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
+## Git integration Stage 1 — BRANCHED, pre-implementation
+
+**Written with the lane's first commit, before the PR exists** — the
+standing correction from #171 and #215. This session it was missed on
+#224 and again on #225, both caught by review; writing it now is the
+only thing that stops a third.
+
+**Branch `git-status-stage1`**, base `githubsucks/main` @ `4bc55e8`
+(the #225 merge). **`githubsucks/git-status-stage1` is the
+authoritative tip** — the ref, not a SHA. Recover with
+`git fetch githubsucks && git checkout git-status-stage1`.
+
+- **Framing `docs/git-integration-framing.md`, revision 5, APPROVED
+  2026-08-09** after four review rounds. Every round found something
+  the previous one had asserted without reading; the doc records which.
+- **Scope:** `*git-status*` (a `listview` panel over
+  `git --no-optional-locks -C <dir> status --porcelain=v2 --branch -z`)
+  and `*git-diff*` (plain generated text, file-level, no hunk model).
+  Plus **one additive `listview` change**: an optional `keys` table,
+  install-once with match-on-reopen, because `Keymap::bind` refuses
+  duplicates and the refresh path re-opens.
+- **NO WIRE CHANGE**, and that is load-bearing for scheduling:
+  `PROTOCOL_VERSION` is a strict serialization point, so this lane can
+  run concurrently with other work. **Stage 2 (gutter markers) needs
+  new `DecorationKind` variants and must be scheduled alone.**
+- **Known negative coherence impact (§9):** git runs as a spawned
+  process, and spawned processes do not appear in `*workers*` — that is
+  `async.lua`'s job list. This adds a fifth unattributable background
+  thing. Labelled honestly; a label is not attribution.
+- **Verification plan** in framing §6. The load-bearing cases: an `AM`
+  unborn fixture (two labelled patches), untracked diff rendering on
+  **exit 1** (`--no-index` implies `--exit-code`), two successive
+  refreshes not raising `DuplicateBinding`, and a non-UTF-8 path that
+  parses and displays but **refuses** its gestures at the
+  `String`-typed binding boundary.
+- **Gates:** `scripts/gate --acceptance <the new suite>`.
+
 ## QoL arc retirement — PR #224 OPEN (docs only)
 
 **PR #224** — https://github.com/levineuwirth/pmacs/pull/224. Written
