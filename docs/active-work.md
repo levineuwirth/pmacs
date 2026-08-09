@@ -520,12 +520,14 @@ the authoritative tip** — the ref, not a SHA. Recover with
     other two, and the `_push_dispatch_name` comment states the
     converse. A string literal corrected while its doc comment still
     argues the other way is one refactor from reverting itself.
-  - **Gate: 12 of 13 steps green; step `12-sweep` red on a wall-clock
-    render-budget test, twice, on a DIFFERENT test each run** (logs
-    `20260809T195332Z-2113672` and `20260809T200120Z-2427128`, load
-    average 12.9/23.9 with sibling lanes building). All three pass in
-    isolated reruns; the diff is two string literals, their doc comments
-    and one test, and touches no render path. Recorded as **U5** in
+  - **Gate: all 13 steps green at `cb7730d`** (log
+    `20260809T200907Z-2672209`). **The two preceding runs of the same
+    command were red on step `12-sweep`, on a DIFFERENT wall-clock
+    render-budget test each time** (`20260809T195332Z-2113672`,
+    `20260809T200120Z-2427128`; load average 12.9/23.9 with sibling
+    lanes building). All three pass in isolated reruns, none reds twice,
+    and the diff is two string literals, their doc comments and one
+    test — no render path is touched. Recorded as **U5** in
     `docs/ci-red-signatures.md` rather than re-run away silently.
     `journey_acceptance` **47/47 UNTOUCHED** and the three
     `#pmacs.process.list()` leak detectors unedited — the stop signals
