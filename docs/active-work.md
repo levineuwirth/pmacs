@@ -265,7 +265,7 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
-## Worker identity Stage 1 (§9) — BRANCHED, framing in review
+## Worker identity Stage 1 (§9) — BRANCHED, pre-implementation
 
 **Written with the lane's first commit**, per the standing correction
 from #171 and #215.
@@ -275,7 +275,8 @@ from #171 and #215.
 the authoritative tip** — the ref, not a SHA. Recover with
 `git fetch githubsucks && git checkout worker-identity-stage1`.
 
-- **Framing `docs/worker-identity-framing.md`, revision 3**, in review.
+- **Framing `docs/worker-identity-framing.md`, revision 4, APPROVED
+  2026-08-09** after four review rounds.
   Scope: `COHERENCE.md` §9's "mechanism without identity", and journey
   step 11 — the last of Priority 1's own work, sitting in another
   section's arc.
@@ -298,11 +299,23 @@ the authoritative tip** — the ref, not a SHA. Recover with
   unconditionally rather than only when a yield would occur, and
   covering **both** yield points.
 - **Q#W-7 — a pre-existing defect found while scouting that guard, and
-  reported rather than patched.** `pmacs.async.yield_to_next_tick()`
+  APPROVED for repair in this lane.** `pmacs.async.yield_to_next_tick()`
   (`async.lua:243-245`) is public, yields, and carries **no**
   `_in_commit_scope` refusal — so Journey Stage 1a's Q#JR14b invariant
-  has a second entrance. Reachability by a real caller is **unproven**.
-  Awaiting the user's call on whether this lane fixes it.
+  has a second entrance. Same helper, same invariant, same edit family,
+  so splitting it would have preserved a known hole without reducing
+  integration risk. **Reachability by a real caller is UNPROVEN** — the
+  defect was found by reading, and the tests pin the guard rather than
+  reproducing a user-visible bug. That belongs in the commit message so
+  nobody later cites this as an observed failure.
+- **Revision 4 also scoped rule 1's claim to what it enforces.**
+  Revision 3 said "all yield points"; it covers **the two supported
+  pmacs yield APIs**. Raw `coroutine.yield` stays reachable — R46 is a
+  convention, and the scheduler diagnoses a non-Handle yield only after
+  the coroutine has suspended (`async.lua:197` resumes, `:212`
+  inspects), so no refusal in a yield helper can intercept it. Recorded
+  as a residual, and explicitly **not** covered by a test that would
+  imply otherwise.
 - **NO WIRE CHANGE**, which is what lets this run beside the two lanes
   already in flight. The statusline activity indicator is a **fourth**
   `pmacs.statusline.register` provider (terminal/syntax/lsp are the

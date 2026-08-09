@@ -5,8 +5,17 @@ removed that title overclaimed the lane: it answers **what**, and —
 under `pmacs.workers.dispatch` — **under which registered handler**.
 Neither is who owns it.)*
 
-**Status: framing pass, revision 3. Pre-implementation. Awaiting
-approval.**
+**Status: revision 4, APPROVED 2026-08-09. Implementation may
+proceed.**
+
+**Revision 4 scopes rule 1's claim to what it can actually enforce, and
+takes Q#W-7 into this lane.** Revision 3 said the rule covered "all
+yield points"; it covers **the two supported pmacs yield APIs**. Raw
+`coroutine.yield` stays reachable — R46 is a convention, and the
+scheduler diagnoses a non-Handle yield only *after* the coroutine has
+suspended (`async.lua:197` resumes, `:212` inspects), so no refusal
+sited in a yield helper can intercept it. The residual is named in §2
+rather than papered over.
 
 **Revision 3 closes a hole in revision 2's ambient: the extent it
 called "synchronous" is not.** A registered handler is arbitrary Lua
@@ -14,9 +23,11 @@ and may `Handle:await()`, parking the coroutine with the name still
 pushed so that unrelated later work inherits it. Rule 1 now **enforces**
 non-yieldability rather than assuming it, following the guard this file
 already carries for `pmacs.window.commit_to`. Scouting that guard
-turned up a second yield point it does not cover — Q#W-7, a
-pre-existing defect in another lane's invariant, reported rather than
-patched in silence.
+turned up a second supported yield API it does not cover — Q#W-7, a
+pre-existing defect in another lane's invariant. Revision 3 reported it
+rather than patching it in silence; **revision 4 fixes it here, on
+approval**, since it is the same helper, the same invariant and the
+same edit family.
 
 **Revision 2 removes `owner` and respecifies the handler-name path,
 after review found the first dishonest and the second unbuildable as
@@ -149,11 +160,27 @@ drifted in one place, recorded below.
   ambient". `commit_to` itself is "an RAII guard on the Rust stack" —
   the same shape this lane needs.
 
-- **There are TWO yield points, not one.** `Handle:await()` yields at
-  `async.lua:95`; **`pmacs.async.yield_to_next_tick()` yields at
-  `async.lua:244`** and is public (`pmacs.async` is `async_public`,
+- **There are TWO SUPPORTED yield APIs, not one.** `Handle:await()`
+  yields at `async.lua:95`; **`pmacs.async.yield_to_next_tick()` yields
+  at `async.lua:244`** and is public (`pmacs.async` is `async_public`,
   `:247`). Any rule about a non-yieldable extent has to cover both. The
   `commit_to` guard covers only the first — see Q#W-7.
+
+- **Raw `coroutine.yield` remains reachable, and NO guard of this shape
+  can cover it.** R46 is a convention — *"package code uses `:await()`
+  rather than `coroutine.yield`"* (`async.lua:26-27`) — not an
+  enforcement. The scheduler does diagnose a non-Handle yield
+  (`async.lua:217-223`, *"use Handle:await() per R46"*), **but only
+  after the fact**: `step` calls `coroutine.resume(co)` at `:197` and
+  inspects what came back at `:212`, by which point the coroutine has
+  already suspended. A refusal placed in a yield helper is never
+  consulted, and the enclosing `pmacs.workers.dispatch` never returns
+  to run its pop.
+
+  So the honest bound is: a package that violates R46 *inside* a
+  dispatch-name scope can leak the name. It is not silent — the
+  scheduler raises it through `pmacs.error` into `*errors*` — but the
+  scope is not restored, and this framing does not claim otherwise.
 
 And the two findings that actually shape the design:
 
@@ -373,12 +400,20 @@ runtime-internal bindings (`_push_dispatch_name` / `_pop_dispatch_name`).
      finish first — it would pass under test and fail in production,
      intermittently. `commit_to`'s guard is unconditional and this one
      matches it.
-   - **`await` is NOT the only yield point.**
-     `pmacs.async.yield_to_next_tick()` (`async.lua:243-245`) yields
-     too, and is public. It gets the same refusal. Guarding only
-     `await` would leave the hole open through a second door — see
-     Q#W-7, because the existing `commit_to` guard has exactly that
-     gap today.
+   - **It covers BOTH SUPPORTED YIELD APIs — and that is the exact
+     extent of the claim.** `pmacs.async.yield_to_next_tick()`
+     (`async.lua:243-245`) yields too, and is public, so it gets the
+     same refusal; guarding only `await` would leave the hole open
+     through a second door (and Q#W-7 is the proof that this happens,
+     because `commit_to` has exactly that gap today).
+
+     **What rule 1 does NOT cover is raw `coroutine.yield`** (§2).
+     R46 forbids it to package code by convention only, and the
+     scheduler's diagnostic fires *after* suspension, so no refusal
+     sited in a yield helper can intercept it. Revision 3 said "all
+     yield points" and was overclaiming. The property is: **the
+     supported ways to yield are refused inside the scope; an R46
+     violation can still leak the name, loudly.**
 2. **Work dispatched later is NOT covered, deliberately.** A job
    dispatched from an `on_complete` callback or a resumed coroutine
    runs ticks later, outside the extent, and carries only its own
@@ -409,10 +444,11 @@ runtime-internal bindings (`_push_dispatch_name` / `_pop_dispatch_name`).
 **A known and accepted property, stated rather than discovered later:**
 the ambient captures *causal* extent, not *intent*. If a handler
 triggers unrelated work within its extent — an edit that schedules a
-parse — that job takes the name. Because rule 1 makes the extent
-non-yieldable, that window is bounded by a single un-parked call, and
-within such a window I think "this ran because that handler ran" is the
-honest reading. It is also the only definition enforceable at a single
+parse — that job takes the name. Because rule 1 refuses both supported
+yield APIs, that window is bounded by a single un-parked call for any
+caller obeying R46, and within such a window I think "this ran because
+that handler ran" is the honest reading. (A caller violating R46 is
+outside this property, and outside rule 1 — §2.) It is also the only definition enforceable at a single
 funnel. **If review disagrees, the alternative is
 capture-at-the-Lua-wrapper**, which is narrower and misses the raw
 `_dispatch_*` callers — a trade of false positives for false negatives,
@@ -504,7 +540,7 @@ is Stage 3's subject rather than a field this lane can add cheaply.
 Stage 3 builds the lifetime model and the field together, where the
 field can be tested by a populated case.
 
-### Q#W-7 — the same hole exists in `commit_to` today **(new in rev 3)**
+### Q#W-7 — the same hole exists in `commit_to` today — **RESOLVED, fixed here (rev 4)**
 
 Found while scouting rule 1, and reported rather than quietly patched.
 
@@ -520,17 +556,22 @@ I have **not** verified that a real caller does this — the reachability
 of the bug is unproven, and I would rather say so than dress a
 code-reading up as a repro.
 
-*My vote: **fix it in this lane, in the same commit as rule 1.*** It is
-one refusal in a function this lane is already editing, in the same
-family, for the same reason. The alternative — ship a document that
-explains the hazard in detail, add the guard for the new scope, and
-leave the identical gap open beside it — is how a codebase teaches its
-next reader that the rule is optional.
+**RESOLVED — approved for this lane.** It is the same supported yield
+helper, the same invariant, and the same `async.lua` edit family;
+splitting it would preserve a known hole without reducing integration
+risk. So `yield_to_next_tick` gains **both** refusals — the new
+`_in_dispatch_name_scope()` and the missing `_in_commit_scope()` — and
+the `commit_to` gap closes in the same commit as rule 1.
 
-**But it is another lane's invariant**, so it is a question rather than
-an assumption. If review prefers it separate, it should be its own
-small lane *before* this one, and this framing should say so; what it
-should not be is discovered a third time.
+**Its witnesses are the same pair as rule 1's, not a smoke test:** the
+refusal fires, **and** the commit scope is restored afterwards. A guard
+that raises while leaving the scope pushed converts a silent misrouting
+into a noisy one and fixes nothing.
+
+Reachability by a real caller stays **unproven** — this is a defect
+found by reading, and the tests pin the guard rather than reproducing a
+user-visible bug. That distinction belongs in the commit message too,
+so nobody later cites this as evidence the bug was observed.
 
 ### Q#W-6 — is any of this configurable?
 
@@ -571,9 +612,18 @@ preference.
   an error. The witness dispatches again after the rejection and
   asserts the new job carries **no** stale name.
 - **`pmacs.async.yield_to_next_tick()` inside a handler is refused
-  too**, with the same restore-after assertion. Guarding one yield
-  point and not the other leaves the hole open through a second door
-  (§2).
+  too**, with the same restore-after assertion. Guarding one supported
+  yield API and not the other leaves the hole open through a second
+  door (§2).
+- **`yield_to_next_tick` inside `pmacs.window.commit_to` is refused,
+  and the commit scope restores after the refusal** (Q#W-7) — the
+  pre-existing gap, closed here. Both halves asserted, for the same
+  reason as rule 1's: a refusal that leaves the scope pushed has
+  swapped a silent fault for a loud one.
+- **NOT asserted, and deliberately: that a raw `coroutine.yield`
+  inside either scope is prevented.** It is not (§2). Writing a test
+  that "proves" coverage this design does not have would be worse than
+  the gap, and the gap is recorded instead.
 - **The refusal fires even when the awaited handle is already
   complete** (rule 1) — the case that separates an unconditional guard
   from one whose behaviour depends on a race.
@@ -632,6 +682,10 @@ lets it run beside the two lanes already in flight.
 
 ## 7. Not in scope
 
+**Making raw `coroutine.yield` safe inside either dynamic scope** (§2,
+rule 1). R46 forbids it by convention and the scheduler diagnoses it
+after the fact; closing it properly means enforcement the runtime does
+not have, and this lane claims only the two supported yield APIs.
 **`owner`, in any spelling** — including `origin` or `subsystem` (§3).
 The slot stays empty until P3 can fill it with a package signal;
 nothing in this lane may be promoted into it later by use.
