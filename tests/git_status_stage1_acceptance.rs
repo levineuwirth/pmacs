@@ -320,6 +320,61 @@ fn z_payload(fields: &[&str]) -> String {
     )
 }
 
+/// A path whose bytes are a legal POSIX filename but **not** valid
+/// UTF-8 — the Q#G-8 subject. `0xFF` can begin no UTF-8 sequence at all.
+const BAD_PATH: &[u8] = b"bad\xFF.txt";
+
+/// A second one, for the ORIGIN side of a rename.
+const BAD_ORIG: &[u8] = b"was\xFE.txt";
+
+/// A Lua string LITERAL for the raw bytes `b`.
+///
+/// Every byte outside printable ASCII is spelled as a **three-digit**
+/// decimal escape, never fewer digits. Lua's decimal escape consumes up
+/// to three digits, so a shorter one silently absorbs whatever digit
+/// follows it — `"\0"` written before a `1` becomes the single byte
+/// `0x01`. That is the exact swallowing `z_payload` documents above, and
+/// a fixed width removes it rather than working around it.
+///
+/// This exists because the paths Q#G-8 is about **cannot be spelled as a
+/// Rust `&str` at all**: `bad\xFF.txt` is not UTF-8, so the payload has
+/// to be assembled from bytes rather than from `&str` fields.
+fn lua_bytes(b: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::from("\"");
+    for &byte in b {
+        match byte {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            0x20..=0x7E => out.push(char::from(byte)),
+            _ => write!(out, "\\{byte:03}").expect("writing to a String cannot fail"),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// `z_payload`'s counterpart for rows whose paths are **raw bytes**: the
+/// `-z` payload is assembled here as bytes, NUL terminators and all,
+/// exactly the way `git status --porcelain=v2 -z` writes them, and
+/// handed to Lua as one literal.
+fn z_payload_bytes(fields: &[&[u8]]) -> String {
+    let mut raw = Vec::new();
+    for field in fields {
+        raw.extend_from_slice(field);
+        raw.push(0);
+    }
+    lua_bytes(&raw)
+}
+
+/// One porcelain field: an ASCII `prefix` followed by raw `path` bytes.
+fn field(prefix: &str, path: &[u8]) -> Vec<u8> {
+    let mut out = prefix.as_bytes().to_vec();
+    out.extend_from_slice(path);
+    out
+}
+
 fn tempdir() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
     // Canonicalize: `git rev-parse --show-toplevel` reports a physical
@@ -445,32 +500,168 @@ fn g6_7_unborn_is_read_from_the_branch_oid_header() {
 // ---------------------------------------------------------------------------
 // §6 — the non-UTF-8 boundary (Q#G-8)
 // ---------------------------------------------------------------------------
+//
+// THE CLAIM, unchanged from the framing: a non-UTF-8 path is PARSED and
+// DISPLAYED — so the user is not lied to about what is modified — and
+// RET and `d` REFUSE it with a message, because `pmacs.process.spawn`
+// takes `args: Vec<String>` and `pmacs.buffer.find_or_open` takes
+// `path: String`, both Rust `String` and so UTF-8 by construction. The
+// witness is parse-and-display PLUS a witnessed refusal — never a stack
+// trace and never a silent no-op.
+//
+// THE SPLIT, and why it is where it is. The first form of this coverage
+// was one test that built `bad\xFF.txt` ON DISK with `std::fs::write`.
+// It was green on Linux and red on BOTH macOS legs of the matrix:
+// APFS/HFS+ validate pathnames as UTF-8 and reject that name at the
+// syscall with errno 92, EILSEQ, "Illegal byte sequence". Linux's VFS
+// treats a filename as opaque bytes and does not.
+//
+// So the coverage is split along the line the PLATFORM draws, not along
+// a `#[cfg]` that would make the behaviour stop being tested somewhere:
+//
+//   g6_2   parse + display, driven from the PAYLOAD BYTES directly.
+//          No repository, no filesystem, runs everywhere. This is the
+//          larger half of the claim, and it never needed a file: git
+//          hands this module bytes and `parse_status` takes a string.
+//   g6_2b  the gestures refusing, over a REAL repository the platform
+//          can actually create, with the unrepresentable row delivered
+//          through `_deliver_status` — the seam g6_17 and g6_21 already
+//          use, for the same reason: it is the only way to put a chosen
+//          completion in front of the panel. Runs everywhere.
+//   g6_2c  the one thing a payload cannot witness — that real `git`
+//          emits these bytes at all. LINUX-ONLY and loudly so; see its
+//          own comment for exactly what is not covered on macOS and why
+//          nothing there could cover it.
 
-/// A non-UTF-8 path is **parsed and displayed**, and its gestures
-/// **refuse with a message**.
+/// A non-UTF-8 path is **parsed** and **displayed**, from the payload
+/// bytes, with no repository and no filesystem.
 ///
-/// Not an end-to-end visit, and the framing does not claim one:
-/// `pmacs.process.spawn` takes `args: Vec<String>` and
-/// `pmacs.buffer.find_or_open` takes `path: String`, both UTF-8 by
-/// construction, and the rope is UTF-8 by project invariant. So the
-/// witness is parse-and-display **plus the refusal** — a witnessed
-/// refusal, not a stack trace and not a silent no-op.
+/// Portable by construction, which is the point: the bytes git would
+/// emit are supplied directly, so the assertion does not depend on a
+/// host filesystem being willing to hold such a name. Both sides of a
+/// rename are covered, because `d` passes the ORIGIN to `git diff` as an
+/// argument too and it crosses the same `Vec<String>` boundary.
 #[test]
-fn g6_2_a_non_utf8_path_parses_displays_and_refuses_its_gestures() {
-    use std::os::unix::ffi::OsStrExt;
+fn g6_2_a_non_utf8_path_parses_and_displays() {
+    let s = editor();
+    let fields: Vec<Vec<u8>> = vec![
+        b"# branch.oid deadbeef".to_vec(),
+        b"# branch.head main".to_vec(),
+        field(
+            &format!("1 .M N... 100644 100644 100644 {H} {H} "),
+            BAD_PATH,
+        ),
+        field(
+            &format!("2 R. N... 100644 100644 100644 {H} {H} R100 "),
+            b"kept.txt",
+        ),
+        BAD_ORIG.to_vec(),
+    ];
+    let refs: Vec<&[u8]> = fields.iter().map(Vec::as_slice).collect();
+    let payload = z_payload_bytes(&refs);
+    exec(
+        &s,
+        &format!("_G.PARSED = pmacs.git.parse_status({payload})"),
+    );
 
+    // Parsed: the bytes survive whole. Compared as BYTES in Rust rather
+    // than as text, because a lossy conversion anywhere along the way
+    // would turn `0xFF` into U+FFFD and a text comparison would then
+    // agree with the corruption.
+    let path: mlua::String = eval(&s, "return _G.PARSED.rows[1].path");
+    assert_eq!(
+        &*path.as_bytes(),
+        BAD_PATH,
+        "the parser must hand back the path BYTES, unmodified"
+    );
+    let orig: mlua::String = eval(&s, "return _G.PARSED.rows[2].orig");
+    assert_eq!(
+        &*orig.as_bytes(),
+        BAD_ORIG,
+        "…including a rename's origin, which is the NEXT -z field"
+    );
+
+    // Classified: this is the fact both refusals are built on, so it is
+    // asserted rather than assumed, on each side of the rename.
+    let (bad, orig_bad, kept_ok): (bool, bool, bool) = eval(
+        &s,
+        "return pmacs.git.is_text(_G.PARSED.rows[1].path),\n\
+                pmacs.git.is_text(_G.PARSED.rows[2].orig),\n\
+                pmacs.git.is_text(_G.PARSED.rows[2].path)",
+    );
+    assert!(!bad, "`bad\\xFF.txt` cannot cross the binding boundary");
+    assert!(!orig_bad, "nor can the rename's origin");
+    assert!(kept_ok, "…while its representable current path can");
+
+    // Displayed: escaped, one line, and no raw byte in the result — the
+    // rope is UTF-8 by project invariant, so an unescaped byte here is
+    // not a cosmetic defect but a value that cannot be stored at all.
+    let shown: mlua::String = eval(&s, "return pmacs.git.display_path(_G.PARSED.rows[1].path)");
+    assert_eq!(
+        &*shown.as_bytes(),
+        b"bad\\xFF.txt",
+        "the unrepresentable byte is displayed as an escape"
+    );
+    assert!(
+        shown.as_bytes().iter().all(u8::is_ascii),
+        "and nothing raw survives into what gets rendered"
+    );
+}
+
+/// RET and `d` **refuse** an unrepresentable row, each with a message,
+/// over a **real repository** — and an ordinary neighbour still works.
+///
+/// The repository, the panel, the keymap and the dispatch are all real;
+/// the only thing supplied rather than observed is the ROW BYTES, which
+/// arrive through `_deliver_status` at the current generation. That seam
+/// is not a shortcut invented here: `g6_17` and `g6_21` already drive
+/// completions through it, because a chosen completion is not otherwise
+/// expressible. And it is what makes this test portable — no filesystem
+/// anywhere has to hold `bad\xFF.txt` for the refusal to be exercised.
+#[test]
+fn g6_2b_a_non_utf8_row_refuses_both_gestures_with_a_message() {
     let (_dir, root) = tempdir();
     init_repo(&root);
     write(&root, "ok.txt", "ok base\n");
-    let bad = root.join(std::ffi::OsStr::from_bytes(b"bad\xff.txt"));
-    std::fs::write(&bad, b"bad base\n").expect("write non-utf8 path");
     git(&root, &["add", "-A"]);
     git(&root, &["commit", "-qm", "init"]);
     write(&root, "ok.txt", "ok base\nedit\n");
-    std::fs::write(&bad, b"bad base\nedit\n").expect("edit non-utf8 path");
 
     let mut s = editor();
+    // Real `git`, real root resolution, and `set_search_boundary` bounds
+    // detection to the fixture (R8's lesson).
     open_panel(&mut s, &root, "ok.txt");
+
+    // Rows in this order deliberately: `seat_on` only ever walks DOWN,
+    // and the representable control has to be reachable after both
+    // refusals.
+    let fields: Vec<Vec<u8>> = vec![
+        b"# branch.oid deadbeef".to_vec(),
+        b"# branch.head main".to_vec(),
+        field(
+            &format!("1 .M N... 100644 100644 100644 {H} {H} "),
+            BAD_PATH,
+        ),
+        field(
+            &format!("2 R. N... 100644 100644 100644 {H} {H} R100 "),
+            b"kept.txt",
+        ),
+        BAD_ORIG.to_vec(),
+        field(
+            &format!("1 .M N... 100644 100644 100644 {H} {H} "),
+            b"ok.txt",
+        ),
+    ];
+    let refs: Vec<&[u8]> = fields.iter().map(Vec::as_slice).collect();
+    let payload = z_payload_bytes(&refs);
+    exec(
+        &s,
+        &format!(
+            "pmacs.git._deliver_status(\n\
+               {{ generation = pmacs.git._generation() }},\n\
+               {{ ok = true, code = 0, stdout = {payload}, stderr = '' }})"
+        ),
+    );
 
     // Displayed: the row is there, escaped, so the user is not lied to
     // about what is modified.
@@ -510,11 +701,98 @@ fn g6_2_a_non_utf8_path_parses_displays_and_refuses_its_gestures() {
         diff_text(&s)
     );
 
-    // The positive control: an ordinary neighbour still works, so the
-    // refusal above is about the path and not about the panel.
+    // The ORIGIN side of a rename refuses as well. `d` on a rename runs
+    // `git diff HEAD -- <orig> <path>`, so the origin crosses the same
+    // `Vec<String>` boundary the current path does — and a row whose
+    // current path is perfectly representable is exactly where a check
+    // written on `row.path` alone would let it through.
+    exec(&s, "pmacs.editor.set_status('')");
+    seat_on(&mut s, "kept.txt");
+    press(&mut s, KeyCode::Char('d'));
+    assert!(
+        status(&s).contains("not valid UTF-8"),
+        "d must refuse a rename whose ORIGIN is unrepresentable; status was {:?}",
+        status(&s)
+    );
+    pump_for(&mut s, 300);
+    assert!(
+        diff_text(&s).is_empty(),
+        "and render no diff for it: {:?}",
+        diff_text(&s)
+    );
+
+    // The positive controls: an ordinary neighbour in the same panel
+    // still visits and still diffs, so the refusals above are about the
+    // path and not about a panel that stopped working.
+    seat_on(&mut s, "ok.txt");
+    press(&mut s, KeyCode::Enter);
+    assert_eq!(
+        active_name(&s),
+        root.join("ok.txt").display().to_string(),
+        "RET really does navigate when the path is representable; \
+         status was {:?}",
+        status(&s)
+    );
+    refocus_panel(&mut s);
     seat_on(&mut s, "ok.txt");
     let diff = press_d_and_wait(&mut s, "ok.txt");
     assert!(diff.contains("diff --git"), "control diff: {diff}");
+}
+
+/// Real `git` really does emit **raw non-UTF-8 path bytes**, and they
+/// reach `parse_status` and the panel unmangled.
+///
+/// **LINUX-ONLY, and this gate is the whole point of the split above.**
+///
+/// WHAT IS NOT COVERED WHERE, AND WHY NOTHING COULD COVER IT THERE.
+/// This is the one part of Q#G-8 that genuinely requires a non-UTF-8
+/// filename to exist on disk, and macOS cannot host one: APFS and HFS+
+/// validate pathnames as UTF-8 and fail the syscall with errno 92,
+/// EILSEQ. Nor can the fixture be built around the filesystem by putting
+/// the name only in the index (`update-index --index-info` plus
+/// `write-tree`): `git status` lstats every index entry, and on macOS
+/// that lstat fails with EILSEQ rather than ENOENT, which git reports on
+/// stderr and SKIPS — so the row would be absent rather than
+/// unrepresentable, and the test would assert a different thing while
+/// looking the same. There is therefore no macOS arrangement in which
+/// real `git status` names a non-UTF-8 path at all.
+///
+/// What this leaves uncovered on macOS is exactly the PROVENANCE of the
+/// bytes — that git emits them — and nothing else. The BEHAVIOUR built
+/// on them (parse, display, refuse) is covered on every platform by
+/// `g6_2` and `g6_2b`, which is why this gate is narrow enough to be
+/// honest. The remaining link, that the spawn pipe carries bytes rather
+/// than text, is structural: `event_to_lua` in `src/lua_bindings/mod.rs`
+/// builds the stdout chunk with `lua.create_string(bytes)`, and
+/// `git.lua` only concatenates the chunks.
+#[cfg(target_os = "linux")]
+#[test]
+fn g6_2c_real_git_emits_non_utf8_path_bytes_on_a_filesystem_that_allows_the_name() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let (_dir, root) = tempdir();
+    init_repo(&root);
+    write(&root, "ok.txt", "ok base\n");
+    let bad = root.join(std::ffi::OsStr::from_bytes(BAD_PATH));
+    std::fs::write(&bad, b"bad base\n").unwrap_or_else(|e| {
+        panic!(
+            "this test is gated to the platforms whose filesystem accepts \
+             a non-UTF-8 filename; creating {BAD_PATH:?} failed with: {e}"
+        )
+    });
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "init"]);
+    std::fs::write(&bad, b"bad base\nedit\n").expect("edit non-utf8 path");
+
+    let mut s = editor();
+    open_panel(&mut s, &root, "ok.txt");
+
+    let text = panel_text(&s);
+    assert!(
+        text.contains("bad\\xFF.txt"),
+        "real `git status --porcelain=v2 -z` names the path in raw bytes, \
+         and they survive the spawn pipe into the panel: {text}"
+    );
 }
 
 // ---------------------------------------------------------------------------
