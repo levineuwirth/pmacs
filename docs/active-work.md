@@ -265,7 +265,7 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
-## Destination capture (Q#JR14 generalization) — BRANCHED, framing in review
+## Destination capture (Q#JR14 generalization) — IMPLEMENTED, gate green, no PR yet
 
 **Written with the lane's first commit**, per the standing correction
 from #171 and #215.
@@ -275,8 +275,46 @@ from #171 and #215.
 authoritative tip** — the ref, not a SHA. Recover with
 `git fetch githubsucks && git checkout destination-capture`.
 
-- **Framing `docs/destination-capture-framing.md`, revision 5**, in
-  review.
+- **Framing `docs/destination-capture-framing.md`, revision 5**,
+  APPROVED after four review rounds.
+- **Implemented in two commits.** `779bb02` is the mechanism
+  (`pmacs.window.capture_destination()`, the `ViewDestination` rename,
+  the profile argument); `d5a6170` is
+  `tests/destination_capture_acceptance.rs`, eight pins covering §7.
+  The full gate line below is green, and both preservation suites pass
+  **unchanged** (journey 47, dired 31) — no edit to either, which is
+  §7's stop signal not firing rather than being suppressed.
+- **TWO FRAMING CLAIMS THE TREE DID NOT MATCH.** Neither changed a
+  decision; both are recorded because the framing says "counted, not
+  estimated" and a reader will check.
+  1. **The rename was 11 references across 5 files, not 8 across 4.**
+     `src/daemon.rs:1804` also calls the capture (the attaching
+     frontend's directory open), and `editor.rs` holds six references
+     rather than the counted total. Mechanical either way.
+  2. **Q#DC-4's "a frontend with no document window" is a DEFENSIVE
+     branch, not a routine one.** The obvious spelling — a frontend
+     showing only a bottom panel — is asserted impossible: Q#BP6 says a
+     layout always retains at least one non-side window, and
+     `EditorCore::non_side_target` carries a `debug_assert!` that fires
+     under `cargo test` when one does. So with Q#BP6 held a *registered*
+     frontend always has a live document window. The decision still
+     stands (capture stays total; an adopter with nowhere to land gets a
+     refusal naming that rather than permission to fall back to ambient
+     state), and the two Q#DC-4 pins drive the reachable spelling of the
+     same condition — a layout whose document window has gone while the
+     view remains. **#227 should not expect to hit this refusal**; it is
+     insurance, not a path.
+- **Mutation-tested, since a matrix of deliberate omissions is exactly
+  what passes vacuously.** Retyping the profile to `Option<String>`
+  fails the table and boolean rows with mlua's conversion error (the
+  number row survives — Lua coerces it — which is why the closed set is
+  witnessed by more than one non-string). Applying all four checks in
+  both profiles fails the panel column; applying only check 1 in both
+  fails the document column. Defaulting an omitted profile to `"panel"`
+  fails **`journey_acceptance`'s two preservation pins**, which is the
+  contract claim being executable rather than asserted. Dropping the
+  frontend scope for the panel profile fails the survives-a-switch pin's
+  panel row; dropping the no-document-window arm fails the Q#DC-4 pair.
 - **The public API #227 adopts against (Q#DC-5), pinned so it is a
   contract rather than an intention:**
   `pmacs.window.commit_to(dest, body [, profile])`. Profile is an
@@ -307,16 +345,19 @@ authoritative tip** — the ref, not a SHA. Recover with
   and display UI without capturing the initiating frontend
   (`builtin/runtime/git.lua:609`, `:854`), so a result surfaces in
   whichever frontend is active when git exits.
-- **The mechanism exists but is not Lua-reachable.**
-  `pmacs.window.commit_to` takes a `DirectoryDestinationLua`, which is
+- **The mechanism existed but was not Lua-reachable** until `779bb02`.
+  `pmacs.window.commit_to` took a `DirectoryDestinationLua`, which is
   **nonconstructible from Lua** by design
   (`src/lua_bindings/mod.rs:4256`) and minted only inside the
   `path.open-directory` listener dispatch (`src/editor.rs:1311`) from a
   `pub(crate)` capture (`:1241`). So no async Lua continuation outside
-  a directory open can say where its result belongs.
+  a directory open could say where its result belongs. Line numbers are
+  the pre-lane ones, kept because they are what the finding was written
+  against.
 - **Scope:** a Lua-reachable capture, a generic rename
-  (`DirectoryDestination` → `ViewDestination`, 8 references across 4
-  files — counted, not estimated), and the preflight question below.
+  (`DirectoryDestination` → `ViewDestination`; the framing counted 8
+  references across 4 files, the tree held **11 across 5** — see the
+  finding above), and the preflight question below.
   **No adopter**: git's adoption is #227's work after this lands, since
   a prerequisite that converts its own first consumer cannot be
   reviewed separately from it.
@@ -335,7 +376,7 @@ authoritative tip** — the ref, not a SHA. Recover with
 - **Gates, as the executable line rather than a description:**
 
   ```
-  scripts/gate --acceptance <the new suite> \
+  scripts/gate --acceptance destination_capture_acceptance \
                --acceptance journey_acceptance \
                --acceptance dired_acceptance
   ```

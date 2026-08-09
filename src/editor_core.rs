@@ -144,8 +144,8 @@ pub enum ResolvedTarget {
 /// result.
 ///
 /// The fields are load-bearing, and the document pair is **optional**
-/// (Q#DC-4) because a frontend showing only a side window can still host
-/// a panel result:
+/// (Q#DC-4) because a panel result needs only a live frontend, so a
+/// frontend whose document window has gone can still host one:
 ///
 /// * `frontend` — the scope the commit must run in. Always present.
 /// * `window` — the exact destination; the ambient selected window is
@@ -3073,6 +3073,16 @@ impl EditorCore {
     /// The document pair is set or cleared **together**: a window whose
     /// entry has gone yields neither half, so no consumer has to handle
     /// a window without its captured buffer.
+    ///
+    /// **How reachable the empty pair is, stated because the framing
+    /// implies more than the tree does.** Q#BP6 says a frontend layout
+    /// always retains at least one non-side window, and
+    /// [`Self::non_side_target`] carries a `debug_assert!` that fires
+    /// when one does not — so with that invariant held, a *registered*
+    /// frontend always has a live document window and this branch is
+    /// **defensive** rather than routine. It stays because the
+    /// alternative is a capture that can fail, and a caller that can
+    /// fail is a caller that falls back to ambient state.
     #[must_use]
     pub fn capture_view_destination(&self, fid: FrontendId) -> ViewDestination {
         let pair = self
