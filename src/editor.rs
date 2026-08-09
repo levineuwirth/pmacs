@@ -119,13 +119,21 @@ impl ScopedFrontend {
     }
 
     /// Enter a background frontend scope, also swapping the core's
-    /// ambient `active_frontend` and publishing `contract`. All three are
+    /// ambient `active_frontend` and **pushing** `contract`. All three are
     /// restored on drop, on every exit path including a raising callback.
     ///
     /// The frontend comes from `contract.destination` rather than being
     /// passed separately: a scope entered for one frontend while carrying
     /// another's destination would let the placement guard check the
     /// wrong window, and there is no caller that wants them to differ.
+    ///
+    /// **The contract is pushed, not swapped (Q#DC-2, revision 9).** The
+    /// frontend override and the ambient frontend are *substitutions* —
+    /// an inner scope means what it says and the outer one resumes
+    /// afterwards — but a contract is a *restriction*, and a nested scope
+    /// masking one would suspend it for the extent of the inner body
+    /// while the outer commit's relaxed preflight still depended on it.
+    /// See [`crate::editor_core::EditorCore::push_commit_contract`].
     pub(crate) fn enter(
         &self,
         core: &SharedCore,
@@ -134,11 +142,11 @@ impl ScopedFrontend {
     ) -> ScopedFrontendGuard {
         let frontend_id = contract.destination.frontend;
         let previous = self.0.replace(Some(frontend_id));
-        let (previous_active, previous_contract) = {
+        let (previous_active, contract_depth) = {
             let mut core = core.borrow_mut();
             let was = core.active_frontend;
             core.active_frontend = frontend_id;
-            (was, core.enter_commit_contract(Some(contract)))
+            (was, core.push_commit_contract(contract))
         };
         let previous_commit = commit_scope.0.replace(true);
         ScopedFrontendGuard {
@@ -146,7 +154,7 @@ impl ScopedFrontend {
             core: core.clone(),
             previous,
             previous_active,
-            previous_contract,
+            contract_depth,
             commit_scope: commit_scope.clone(),
             previous_commit,
         }
@@ -158,11 +166,15 @@ pub(crate) struct ScopedFrontendGuard {
     core: SharedCore,
     previous: Option<FrontendId>,
     previous_active: FrontendId,
-    /// The contract in force before this commit, restored with the rest
-    /// (Q#DC-2). Held here rather than on a separate guard so a
-    /// `"panel"` profile can never outlive the body that declared it and
-    /// govern an unrelated later display.
-    previous_contract: Option<CommitContract>,
+    /// Contract-stack depth to truncate back to (Q#DC-2). Held here
+    /// rather than on a separate guard so a `"panel"` profile can never
+    /// outlive the body that declared it and govern an unrelated later
+    /// display.
+    ///
+    /// A depth rather than a saved contract because nesting **composes**
+    /// (revision 9): this scope adds one restriction and removes exactly
+    /// that one, leaving every enclosing commit's still in force.
+    contract_depth: usize,
     /// Cleared together with the scope, so an awaiting callback cannot
     /// leave `await` refused after the commit ends (Q#JR14b).
     commit_scope: CommitScopeActive,
@@ -175,7 +187,7 @@ impl Drop for ScopedFrontendGuard {
         {
             let mut core = self.core.borrow_mut();
             core.active_frontend = self.previous_active;
-            core.enter_commit_contract(self.previous_contract);
+            core.exit_commit_contract(self.contract_depth);
         }
         self.commit_scope.0.set(self.previous_commit);
     }

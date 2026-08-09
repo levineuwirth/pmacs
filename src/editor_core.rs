@@ -167,8 +167,10 @@ pub enum ResolvedTarget {
 /// the document profile requires all of them, and the panel profile
 /// requires only a live `frontend` **while its result really lands in a
 /// panel**. A side request that falls back into a document window *is* a
-/// document replacement, and is held to all of them at the placement
-/// boundary ([`EditorCore::fallback_commit_refusal`]). Capture stays
+/// document replacement, so the panel profile's relaxed preflight is
+/// taken only when the fallback cannot happen, and the mutations that
+/// would manufacture one mid-commit are refused at the attempt
+/// (`EditorCore::panel_commit_dedication_refusal`). Capture stays
 /// profile-blind so a caller does not have to know at capture time what
 /// it will do at commit time.
 ///
@@ -202,16 +204,19 @@ pub enum CommitProfile {
     Document,
     /// The body puts its result in a bottom panel rather than in the
     /// captured document window, and so does not depend on checks 2–4 —
-    /// **for as long as its result really lands in a panel**. When a side
-    /// request falls back into a document window the relaxation is
-    /// withdrawn at the placement boundary, which is the only place the
-    /// fallback is a fact rather than a guess
-    /// ([`EditorCore::display_buffer`]).
+    /// **for as long as its result really lands in a panel**. The
+    /// preflight grants the relaxation only when a fallback into a
+    /// document window is impossible ([`EditorCore::commit_destination_refusal`]),
+    /// and what keeps that measurement true for the body's whole extent
+    /// is that the mutations which would manufacture a fallback are
+    /// refused at the attempt
+    /// (`EditorCore::panel_commit_dedication_refusal`).
     Panel,
 }
 
 /// The contract a `commit_to` body is running under, published on the
-/// core for the placement path to consult (Q#DC-2, revision 7).
+/// core so the mutations that could invalidate it can consult it
+/// (Q#DC-2, revisions 8 and 9).
 ///
 /// **Why this exists rather than a preflight prediction.** Revision 6
 /// tried to decide at preflight whether a `"panel"` commit's placement
@@ -221,12 +226,17 @@ pub enum CommitProfile {
 /// the body itself, which is arbitrary Lua running synchronously and can
 /// change the very state the snapshot measured — obtain the panel, set
 /// it `dedicated`, then request a side display. A snapshot cannot bind
-/// that. The fact "this asked for a side and landed in a document
-/// window" is only ever known where placement resolves, so that is where
-/// the document preconditions are enforced.
+/// that. So the preflight stays where it is and the contract is what
+/// lets those mutations be **refused at the attempt**, which is the only
+/// point early enough to leave nothing behind
+/// (`EditorCore::panel_commit_dedication_refusal`).
 ///
-/// Installed and restored by the same guard that scopes the frontend, so
-/// the two can never disagree about whether a commit is on the stack.
+/// Pushed and popped by the same guard that scopes the frontend, so the
+/// two can never disagree about whether a commit is on the stack.
+/// **Pushed** rather than swapped: a contract is a restriction, and a
+/// nested `commit_to` must add to the ones in force rather than mask
+/// them for the extent of its body
+/// (`EditorCore::push_commit_contract`, revision 9).
 #[derive(Clone, Copy, Debug)]
 pub struct CommitContract {
     /// The destination the continuation captured.
@@ -690,14 +700,34 @@ pub struct EditorCore {
     /// slot; the producer clears any untaken record when the fan-out
     /// returns.
     typed_edit_armed: Option<(FrontendId, TypedEditRecord)>,
-    /// The `commit_to` contract currently on the stack, if any (Q#DC-2).
+    /// Every `commit_to` contract currently on the stack, outermost
+    /// first (Q#DC-2, revision 9).
     ///
-    /// Private and `pub(crate)`-free on purpose: it is installed only by
-    /// [`crate::editor::ScopedFrontend::enter`]'s guard, which restores
-    /// the previous value on every exit path including a raising body.
-    /// Nothing outside this crate can set it, so a `"panel"` profile is
-    /// not something Lua can claim for a placement it did not commit to.
-    commit_contract: Option<CommitContract>,
+    /// **A STACK, NOT A SLOT, and that is the whole of revision 9's
+    /// fix.** Revision 8 held one contract and had a nested `commit_to`
+    /// replace it for the inner body's extent. That MASKED the enclosing
+    /// contract: an outer `"panel"` commit took the relaxed preflight,
+    /// its body opened a nested `"document"` commit, and inside that
+    /// nested body the very mutation the outer commit's relaxation
+    /// depends on — dedicating the one side slot — was no longer refused,
+    /// because the guard consulted only the innermost contract. The outer
+    /// commit then resumed and fell back into the document window,
+    /// overwriting a newer buffer, which is exactly the defect the panel
+    /// profile's relaxation was made safe against.
+    ///
+    /// So restrictions **compose** rather than replace: a contract is
+    /// pushed for its body and popped after, and every restriction
+    /// pushed by an enclosing commit stays in force for the whole of it,
+    /// nested scopes included. See
+    /// [`Self::panel_commit_dedication_refusal`], the one reader.
+    ///
+    /// Private and `pub(crate)`-free on purpose: entries are pushed only
+    /// by [`crate::editor::ScopedFrontend::enter`]'s guard, which
+    /// truncates back to its own depth on every exit path including a
+    /// raising body. Nothing outside this crate can push one, so a
+    /// `"panel"` profile is not something Lua can claim for a placement
+    /// it did not commit to.
+    commit_contracts: Vec<CommitContract>,
 }
 
 impl EditorCore {
@@ -752,22 +782,40 @@ impl EditorCore {
             query_replace: None,
             typed_edit_pending: None,
             typed_edit_armed: None,
-            commit_contract: None,
+            commit_contracts: Vec::new(),
         }
     }
 
-    /// Install `contract` for the duration of a `commit_to` body,
-    /// returning the previous one for the guard to restore.
+    /// Push `contract` for the duration of a `commit_to` body, returning
+    /// the depth [`Self::exit_commit_contract`] must truncate back to.
+    ///
+    /// **Pushes rather than replaces (revision 9).** A nested `commit_to`
+    /// adds its contract to the ones already in force instead of masking
+    /// them, so an enclosing `"panel"` commit's mutation refusal covers
+    /// its *whole* body — including the part that runs inside a nested
+    /// commit of a different profile. Replacing was revision 8's defect:
+    /// the guard read only the innermost contract, so a nested
+    /// `"document"` commit was a hole through which the body could
+    /// dedicate the side slot the outer relaxation rests on.
     ///
     /// Crate-private and paired with the frontend scope rather than a
     /// standalone setter: a contract that could be installed without
-    /// being restored would outlive its body and silently govern the
-    /// next unrelated display.
-    pub(crate) fn enter_commit_contract(
-        &mut self,
-        contract: Option<CommitContract>,
-    ) -> Option<CommitContract> {
-        std::mem::replace(&mut self.commit_contract, contract)
+    /// being popped would outlive its body and silently govern the next
+    /// unrelated display.
+    pub(crate) fn push_commit_contract(&mut self, contract: CommitContract) -> usize {
+        let depth = self.commit_contracts.len();
+        self.commit_contracts.push(contract);
+        depth
+    }
+
+    /// Drop every contract pushed at or above `depth`.
+    ///
+    /// Truncation rather than a bare `pop` so the guard restores exactly
+    /// the set that was in force when it was entered, whatever happened
+    /// in between — the same reason the frontend scope saves a value
+    /// rather than assuming it can invert its own change.
+    pub(crate) fn exit_commit_contract(&mut self, depth: usize) {
+        self.commit_contracts.truncate(depth);
     }
 
     /// Build a core from raw bytes under `name`. Used by tests.
@@ -3143,8 +3191,9 @@ impl EditorCore {
     /// frontend id exists. A frontend with no document window yields a
     /// destination carrying only `frontend` — enough for a panel commit
     /// that really places in the panel, and refused by a document commit
-    /// (or by a panel commit that falls back into a document window, see
-    /// [`Self::fallback_commit_refusal`]) with a reason naming the
+    /// (or by a panel commit on a frontend where a side request would
+    /// fall back into a document window, see
+    /// [`Self::commit_destination_refusal`]) with a reason naming the
     /// missing window. Returning `None` here instead would push the
     /// caller back onto ambient state, which is the misrouting the
     /// capture exists to remove.
@@ -3237,15 +3286,16 @@ impl EditorCore {
     /// buffer, registers a handle, paints) long before it reaches any
     /// call that could refuse, so a late refusal leaves debris behind.
     ///
-    /// **This is an early refusal, NOT the guarantee.** For the panel
-    /// profile it can only read the state that holds *now*, and the body
-    /// is arbitrary synchronous Lua that may change it — dedicate the
-    /// side slot, then request a side display. The guarantee that a
-    /// `"panel"` commit never replaces a newer document therefore lives
-    /// at the placement boundary in [`Self::display_buffer`], where the
-    /// fallback is a fact. What this buys is that the common case — a
-    /// frontend that simply cannot render a panel — refuses **before**
-    /// the body allocates anything.
+    /// **This measurement is only half the guarantee.** For the panel
+    /// profile it can read only the state that holds *now*, and the body
+    /// is arbitrary synchronous Lua that could change it — dedicate the
+    /// side slot, then request a side display. What keeps the
+    /// measurement true is that those mutations are **refused at the
+    /// attempt**, for the body's whole extent including any nested
+    /// `commit_to` (`Self::panel_commit_dedication_refusal`). Refusing
+    /// at the placement boundary instead was revision 7, and it was
+    /// rejected: by then the body has allocated buffers, handles and
+    /// paint, which is the debris this preflight exists to avoid.
     #[must_use]
     pub fn commit_destination_refusal(
         &self,
@@ -4199,17 +4249,18 @@ impl EditorCore {
     ///    dedicated, and a second one is never created, so a different
     ///    buffer falls through instead (Q#BP3 2.iii).
     ///
-    /// **A PREDICTION, AND ONLY USED AS ONE.** This is consulted by
+    /// **A MEASUREMENT, AND NOT SELF-SUPPORTING.** This is consulted by
     /// [`Self::commit_destination_refusal`] to refuse the statically
     /// knowable case *before* a body allocates anything — a frontend that
     /// cannot render a panel at all will not acquire the capability
-    /// mid-body. It is **not** what makes the panel profile safe. A
-    /// `commit_to` body is arbitrary synchronous Lua and can dedicate the
-    /// side slot itself between this answer and the placement it
-    /// describes; refusing `await` prevents another coroutine
+    /// mid-body. On its own it would **not** make the panel profile safe:
+    /// a `commit_to` body is arbitrary synchronous Lua and could dedicate
+    /// the side slot itself between this answer and the placement it
+    /// describes, and refusing `await` prevents another coroutine
     /// interleaving, not the body rewriting the state it was measured
-    /// against. The guarantee is enforced where the fallback is a fact,
-    /// in [`Self::fallback_commit_refusal`].
+    /// against. What holds the measurement true is
+    /// `Self::panel_commit_dedication_refusal`, which refuses exactly
+    /// those mutations for the body's whole extent.
     ///
     /// Arm 2 is answered **conservatively**: `resolve_placement` falls
     /// back only when the arriving buffer differs from the dedicated one,
@@ -4233,9 +4284,9 @@ impl EditorCore {
     }
 
     /// **The guarantee** behind the `"panel"` commit profile (Q#DC-2,
-    /// revision 8): inside such a commit, the operations that would make
-    /// this frontend's side request fall back are **refused at the
-    /// attempt**.
+    /// revisions 8 and 9): anywhere inside such a commit — nested
+    /// `commit_to` scopes included — the operations that would make this
+    /// frontend's side request fall back are **refused at the attempt**.
     ///
     /// # The defect this closes
     ///
@@ -4269,6 +4320,25 @@ impl EditorCore {
     /// With these refused, the preflight measurement cannot go stale, the
     /// fallback never comes into existence, and nothing needs refusing
     /// late.
+    ///
+    /// # Every enclosing contract, not just the innermost (revision 9)
+    ///
+    /// This scans the whole contract stack. Revision 8 read a single
+    /// slot, and a nested `commit_to` replaced it — so an outer
+    /// `"panel"` commit whose body opened a nested `"document"` commit
+    /// had its restriction **masked** for that body's extent, and the
+    /// nested callback could dedicate the side slot the outer relaxation
+    /// rests on. The outer commit then resumed and fell back into the
+    /// document window, overwriting a newer buffer: the original defect,
+    /// reachable through one extra call. Detecting it when the outer
+    /// commit resumed would have been a late refusal, which revision 7
+    /// was already rejected for. The restriction has to hold for the
+    /// whole body, so **the strictest active restriction wins** and
+    /// nesting is otherwise untouched.
+    ///
+    /// Matching is per **frontend**, not per stack: a nested commit for a
+    /// *different* frontend may dedicate *its* side slot, because that
+    /// cannot change where this frontend's side request lands.
     ///
     /// # The enumeration this rests on
     ///
@@ -4312,9 +4382,18 @@ impl EditorCore {
     ///   a panel degrades gracefully exactly as it does today; this
     ///   refuses the *mutation that manufactures* a fallback, never the
     ///   fallback itself.
+    /// * **Nesting is untouched.** Only the mutation is refused, not the
+    ///   nested `commit_to` that reaches it, so a nested commit that does
+    ///   not dedicate this frontend's side slot runs exactly as before.
+    ///   Prohibiting nesting outright would have closed the hole by
+    ///   forbidding a shape no rule objects to (revision 9).
     pub(crate) fn panel_commit_dedication_refusal(&self, fid: FrontendId) -> Option<String> {
-        let contract = self.commit_contract.as_ref()?;
-        if contract.profile != CommitProfile::Panel || contract.destination.frontend != fid {
+        // ANY enclosing contract, not the innermost one: a nested commit
+        // composes with the restrictions already in force rather than
+        // masking them (revision 9).
+        if !self.commit_contracts.iter().any(|contract| {
+            contract.profile == CommitProfile::Panel && contract.destination.frontend == fid
+        }) {
             return None;
         }
         Some(

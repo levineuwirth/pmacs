@@ -538,20 +538,19 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
                     let profile = commit_profile(&profile)?;
 
                     // The preflight itself lives on the core
-                    // (`commit_destination_refusal`), because the panel
-                    // profile's relaxation now has a SECOND evaluation
-                    // site --- the placement boundary, where a fallback
-                    // into a document window stops being a prediction and
-                    // becomes a fact --- and two hand-written copies of
-                    // the same three checks is how the backstop ends up
-                    // weaker than the thing it backs.
+                    // (`commit_destination_refusal`) rather than being
+                    // hand-written here, so the panel profile's
+                    // relaxation is decided in one place: two copies of
+                    // the same three checks is how one of them ends up
+                    // weaker than the other.
                     //
-                    // What survives here, and only here: an early refusal
-                    // costs the body nothing, so the statically knowable
-                    // case (a frontend that cannot render a panel at all)
-                    // never reaches the body's buffer creation. The
-                    // GUARANTEE is not this call; see
-                    // `EditorCore::fallback_commit_refusal`.
+                    // This call is only HALF the panel guarantee. It
+                    // measures whether this frontend places side requests
+                    // in the panel; what keeps that measurement true
+                    // while the body runs --- nested `commit_to` scopes
+                    // included --- is
+                    // `EditorCore::panel_commit_dedication_refusal`,
+                    // which refuses the mutations that would falsify it.
                     let refusal = cc.borrow().commit_destination_refusal(&dest, profile);
                     if let Some(reason) = refusal {
                         let mut out = mlua::MultiValue::new();
@@ -581,10 +580,18 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
                     // guard drops -- on the normal return AND on a
                     // raising callback, which is why the result is
                     // captured rather than `?`-propagated through the
-                    // drop. The contract rides with the scope because the
-                    // placement boundary needs to know, for every display
-                    // this body performs, which destination and which
-                    // profile it is running under.
+                    // drop. The contract rides with the scope because
+                    // every mutation this body reaches has to know which
+                    // destination and which profile it is running under.
+                    //
+                    // A NESTED `commit_to` PUSHES its contract onto the
+                    // ones already in force rather than replacing them
+                    // (Q#DC-2, revision 9). Replacing was a hole: an
+                    // outer `"panel"` commit's mutation refusal went out
+                    // of force for the extent of a nested body, which is
+                    // long enough to dedicate the side slot its relaxed
+                    // preflight depends on. Nesting itself is allowed --
+                    // only the mutation is refused.
                     let result = {
                         let _guard = scope.enter(
                             &cc,

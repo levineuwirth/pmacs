@@ -265,13 +265,14 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
-## Destination capture (Q#JR14 generalization) — revision 8 IMPLEMENTED, gate green, no PR yet
+## Destination capture (Q#JR14 generalization) — revision 9 IMPLEMENTED, gate green, no PR yet
 
 The mechanism landed at `0efc8c0`; review found a correctness blocker;
 `ca72461` implemented **revision 7**, which review then **also**
-rejected; the commit below replaces it with **revision 8** and its
-§3 enumeration is **performed and recorded in the framing**. No PR — the
-lane was told not to open one.
+rejected; `469d5c8` replaced it with **revision 8** and its §3
+enumeration is **performed and recorded in the framing**; review then
+found a hole in revision 8's guard **scope** and the commit below closes
+it as **revision 9**. No PR — the lane was told not to open one.
 
 **The original blocker:** the panel profile skipped checks 2–4 on the
 claim that a panel result never touches a document window. **Panel
@@ -280,8 +281,8 @@ is not panel-capable or its side slot is dedicated, so a `"panel"`
 commit could replace a **newer** document with every stale-intent guard
 skipped. Reproduced in review.
 
-**Three designs, two rejected — the sequence is the part worth not
-re-learning:**
+**Four designs, two rejected outright and one corrected — the sequence
+is the part worth not re-learning:**
 
 1. **Revision 6 — predict at preflight.** Rejected: the `await` refusal
    stops concurrent interleaving, not the body, which is arbitrary
@@ -293,13 +294,37 @@ re-learning:**
    already created buffers, handles and paint by then, so a
    placement-time refusal is a partial commit with an error return.
 3. **Revision 8 — keep the preflight, REFUSE the scope-invalidating
-   mutation.** Current design. Same shape as `Handle:await` being
-   refused inside a commit scope: the fallback never comes into
+   mutation.** The shape the tree implements. Same as `Handle:await`
+   being refused inside a commit scope: the fallback never comes into
    existence, and refusal stays mutation-free on `(false, reason)`.
+4. **Revision 9 — make the refusal hold for the WHOLE body.** Not a new
+   shape; a correction to revision 8's scope. A nested `commit_to`
+   **replaced** the enclosing contract and restored it afterwards, so
+   an outer `"panel"` commit's restriction went out of force for the
+   inner body's extent: nested `"document"` commit → callback dedicates
+   the side slot, unrefused → outer commit resumes, falls back,
+   overwrites a newer document. Reproduced in review. Contracts now
+   **compose** — the core holds a stack, `commit_to` pushes and pops
+   rather than swapping, and the guard consults every contract in force,
+   so the strictest active restriction wins. Nesting itself is **not**
+   forbidden: only the mutation is refused, so a nested commit that
+   touches no dedication runs exactly as before. Detecting the
+   dedication when the outer commit resumed was not available — that is
+   a late refusal, which is what revision 7 was rejected for.
 
-**THE ENUMERATION IS THE LOAD-BEARING PART, AND IT IS NOW CLOSED — for
-a structural reason, not because inspection ran out of ideas.** Full
-working in the framing §3; the short form:
+**WHAT REVISION 9 DID *NOT* INVALIDATE — read this before re-opening the
+enumeration.** The write-site enumeration below survived intact: every
+site is real, every one is still guarded, and review of the nesting
+defect found no missing route. What was wrong was the *surrounding*
+claim — that the guard was in force for the whole outer body. A complete
+list of write sites is not a complete argument until the guard's extent
+is stated too. The acceptance suite now drives the same rows at **two
+depths**, directly and through a nested `commit_to`.
+
+**THE ENUMERATION IS THE LOAD-BEARING PART, AND IT IS CLOSED AS AN
+ENUMERATION OF WRITE SITES — for a structural reason, not because
+inspection ran out of ideas.** Full working in the framing §3; the short
+form:
 
 - **Only two pieces of state can matter**, because `resolve_placement`
   reaches `Ordinary` from a side request through exactly two branches:
@@ -348,38 +373,60 @@ from #171 and #215.
 authoritative tip** — the ref, not a SHA. Recover with
 `git fetch githubsucks && git checkout destination-capture`.
 
-- **Framing `docs/destination-capture-framing.md`, revision 8.**
-  Revisions 1–5 were approved over four review rounds; revisions 6, 7
-  and 8 are corrections carrying the blocker above, and **revision 8's
-  design is what the tree implements**. Revisions 6 and 7 are described
-  in that document as the record of why *not* those; neither is in the
-  tree and neither should be restored from it.
-- **Implemented in three commits.** `779bb02` is the mechanism
+- **Framing `docs/destination-capture-framing.md`, revision 9.**
+  Revisions 1–5 were approved over four review rounds; revisions 6–9 are
+  corrections carrying the blocker above, and **revision 8's design as
+  scoped by revision 9 is what the tree implements**. Revisions 6 and 7
+  are described in that document as the record of why *not* those;
+  neither is in the tree and neither should be restored from it.
+- **Implemented in four commits.** `779bb02` is the mechanism
   (`pmacs.window.capture_destination()`, the `ViewDestination` rename,
   the profile argument); `d5a6170` is
-  `tests/destination_capture_acceptance.rs`; the revision-8 commit is
-  the panel-profile correction plus the invalid-UTF-8 hole. **12 pins**,
-  and both preservation suites pass **unchanged** (journey 47, dired 31)
-  — §7's stop signal not firing rather than being suppressed.
+  `tests/destination_capture_acceptance.rs`; `469d5c8` is the
+  revision-8 panel-profile correction plus the invalid-UTF-8 hole; the
+  commit below is revision 9's contract stack. **14 pins**, and both
+  preservation suites pass **unchanged** (journey 47, dired 31) — §7's
+  stop signal not firing rather than being suppressed.
 - **HOW THE PANEL PROFILE IS ENFORCED, in one sentence so no earlier
   revision gets reinstated by someone reading only that document:** the
   preflight stays exactly where it was, and the mutations that would
   invalidate it are **refused at the attempt**.
   - `EditorCore::panel_commit_dedication_refusal` is the one rule. It
-    fires while a `"panel"` `CommitContract` is on the core for this
-    frontend, and is consulted from `display_buffer` (before
-    `apply_placement`, so a refused attempt mutates nothing),
-    `pmacs.window.set_params` (before its borrow, so `fixed_rows` in the
-    same table is not applied either), and `quit_window`.
+    fires while **any** `"panel"` `CommitContract` for this frontend is
+    in force — every contract on the stack, not the innermost — and is
+    consulted from `display_buffer` (before `apply_placement`, so a
+    refused attempt mutates nothing), `pmacs.window.set_params` (before
+    its borrow, so `fixed_rows` in the same table is not applied
+    either), and `quit_window`.
   - **This is the same shape as `Handle:await` being refused inside a
     commit scope**, and for the identical reason: something that would
     invalidate the scope's guarantee is rejected outright rather than
     predicted around or caught late.
   - The contract (`CommitContract { destination, profile }`) rides on
-    the core, installed and restored by the **same** `ScopedFrontendGuard`
-    that scopes the frontend, so a `"panel"` profile can never outlive
-    the body that declared it. The field is private to the crate — Lua
-    cannot claim a profile for a placement it did not commit to.
+    the core in a **stack**, pushed and popped by the **same**
+    `ScopedFrontendGuard` that scopes the frontend, so a `"panel"`
+    profile can never outlive the body that declared it. The field is
+    private to the crate — Lua cannot claim a profile for a placement it
+    did not commit to.
+  - **A stack, not a slot, and the distinction is revision 9 (above).**
+    The frontend override and the ambient frontend are *substitutions*,
+    so a nested scope rightly replaces them; a contract is a
+    *restriction*, and replacing one suspends it. The guard stores a
+    depth and truncates back to it, so an inner exit removes exactly the
+    contract it added and leaves every enclosing one in force. Matching
+    is per **frontend**: a nested commit for a different frontend may
+    dedicate *its* side slot, which cannot change where this frontend's
+    side request lands.
+  - **Prohibiting nested `commit_to` was the other candidate and was
+    rejected.** It closes the hole by forbidding a construction no rule
+    objects to — `commit_to` is public Lua API for saying where a
+    continuation's result belongs, and a body committing to a second
+    destination (a diff beside a status panel) is where #227's adoption
+    is heading. Only the restriction needed preserving. **No Lua in the
+    tree nests today** — `builtin/runtime/dired.lua` is the only
+    `commit_to` consumer and it does not — so this is a decision about
+    the API's future rather than about a live consumer, which is why it
+    is recorded rather than left implicit.
   - **`panel_placement_can_fall_back` remains the preflight**, unchanged
     in role: it measures whether this frontend places side requests in
     the panel *right now*. With the invalidating mutations refused, that
@@ -468,6 +515,18 @@ authoritative tip** — the ref, not a SHA. Recover with
 
   And reverting the byte comparison to `to_str()?` fails the
   `invalid utf-8` row with mlua's conversion error, on content.
+
+  **Revision 9's, run across all three suites and the lib:** restore
+  `panel_commit_dedication_refusal` to reading only the innermost
+  contract (`.last()`, which is exactly revision 8's swapped slot) →
+  **only** `a_nested_commit_cannot_mask_an_outer_panel_restriction`
+  fails. The other 13 pins, `journey_acceptance` (31),
+  `dired_acceptance` (47) and `cargo test --lib` (1920) all stay green,
+  which is what makes the new test the pin for this defect and not a
+  restatement of the depth-1 one. Note the ordinary-nesting pin
+  deliberately survives that mutation — it exists to fail the *other*
+  candidate fix (prohibit nesting), so the two are a pair rather than
+  one test written twice.
 - **The public API #227 adopts against (Q#DC-5), pinned so it is a
   contract rather than an intention:**
   `pmacs.window.commit_to(dest, body [, profile])`. Profile is an

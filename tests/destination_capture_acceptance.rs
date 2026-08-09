@@ -473,7 +473,7 @@ fn the_preflight_matrix_holds_in_both_profiles() {
 }
 
 // ---------------------------------------------------------------------------
-// §7 — the panel profile's relaxation is CONDITIONAL (Q#DC-2, revision 7)
+// §7 — the panel profile's relaxation is CONDITIONAL (Q#DC-2, rev 6–9)
 // ---------------------------------------------------------------------------
 
 /// The Lua a `"panel"` continuation runs: put a result buffer in the
@@ -489,6 +489,65 @@ const PANEL_BODY: &str = "pmacs.window.display(pmacs.buffer.create('*result*'), 
 /// one whose whole point is that no panel exists yet.
 const PANEL_ARRANGED: &str = "pmacs.window.display(pmacs.buffer.create('*pinned*'), \
                               { side = 'bottom', dedicated = false, select = false })";
+
+/// Every route by which a `commit_to` body can reach a write to a **side**
+/// window's `Window::params.dedicated`, as `(label, arrangement before the
+/// capture, the attempted mutation)`.
+///
+/// **One row per WRITE SITE, not per call spelling** (§3's enumeration). A
+/// single row is exactly what would let a second route keep the defect —
+/// which is not hypothetical: review found the `display{side, dedicated}`
+/// route *after* `set_params` was specified, and one spelling of it
+/// reaches three different writes.
+///
+/// | row | reaches |
+/// |---|---|
+/// | `set_params` | the direct write in the binding (Q#BP2c) |
+/// | `display{side, dedicated}` replacing | `apply_placement`'s **replacing** arm |
+/// | `display{side, dedicated}` same buffer | its **non-replacing** arm |
+/// | `display{side, dedicated}` with no panel | its **created** arm |
+///
+/// The three `display` rows converge on one guard, in `display_buffer` —
+/// `apply_placement` has exactly one caller, so every request-driven
+/// dedication passes through it. They are still separate rows because that
+/// convergence is a property of today's call graph, and a row per arm
+/// fails loudly if it stops holding.
+///
+/// Shared by the two tests that drive them, at commit depth 1 and through
+/// a nested commit: a route guarded at one depth and not the other is the
+/// defect revision 9 fixes, and a table each would let the two drift.
+const DEDICATION_ROUTES: [(&str, &str, &str); 4] = [
+    (
+        "set_params",
+        PANEL_ARRANGED,
+        "pmacs.window.set_params(pmacs.window.panel(), { dedicated = true })",
+    ),
+    (
+        "display{side, dedicated} replacing",
+        PANEL_ARRANGED,
+        "pmacs.window.display(pmacs.buffer.create('*usurp*'),
+           { side = 'bottom', dedicated = true, select = false })",
+    ),
+    (
+        // The same buffer the panel already shows: `replacing` is false,
+        // so this lands in a DIFFERENT arm of the same function, which a
+        // row against the replacing arm alone would not exercise.
+        "display{side, dedicated} same buffer",
+        PANEL_ARRANGED,
+        "pmacs.window.display(pmacs.window.buffer(pmacs.window.panel()),
+           { side = 'bottom', dedicated = true, select = false })",
+    ),
+    (
+        // NO panel at capture time: the preflight relaxes because
+        // `side_window_for` is None (a side request would CREATE a panel,
+        // never fall back). The body then creates one dedicated, which
+        // makes the next side request fall back.
+        "display{side, dedicated} creating the panel",
+        "",
+        "pmacs.window.display(pmacs.buffer.create('*usurp*'),
+           { side = 'bottom', dedicated = true, select = false })",
+    ),
+];
 
 /// Arrange one of the two reasons a side request falls back into a
 /// document window, and assert the arrangement took.
@@ -644,25 +703,8 @@ fn a_panel_commit_that_falls_back_runs_the_document_preflight() {
 ///
 /// # One row per WRITE SITE, not per call spelling
 ///
-/// A single row is exactly what would let a second route keep the
-/// defect — which is not hypothetical: review found the
-/// `display{side, dedicated}` route *after* `set_params` was specified.
-/// So the rows are chosen to hit each distinct write to
-/// `Window::params.dedicated` that a side window can receive, rather
-/// than each way of phrasing the call:
-///
-/// | row | reaches |
-/// |---|---|
-/// | `set_params` | the direct write in the binding (Q#BP2c) |
-/// | `display{side, dedicated}` replacing | `apply_placement`'s **replacing** arm |
-/// | `display{side, dedicated}` same buffer | its **non-replacing** arm |
-/// | `display{side, dedicated}` with no panel | its **created** arm |
-///
-/// The three `display` rows converge on one guard, in `display_buffer` —
-/// `apply_placement` has exactly one caller, so every request-driven
-/// dedication passes through it. They are still separate rows because
-/// that convergence is a property of today's call graph, and a row per
-/// arm fails loudly if it stops holding.
+/// The rows are `DEDICATION_ROUTES`, which documents why it is a write-site
+/// enumeration rather than a list of call spellings.
 ///
 /// The rest of the enumeration is **unreachable rather than refused**
 /// and is recorded in `EditorCore::panel_commit_dedication_refusal`,
@@ -678,42 +720,7 @@ fn a_panel_commit_that_falls_back_runs_the_document_preflight() {
 /// drops rows 2–4 — and every other test in this file still passes.
 #[test]
 fn a_body_that_tries_to_create_the_fallback_is_refused_at_the_attempt() {
-    // (label, panel arrangement before the capture, attempted mutation)
-    let routes: [(&str, &str, &str); 4] = [
-        (
-            "set_params",
-            PANEL_ARRANGED,
-            "pmacs.window.set_params(pmacs.window.panel(), { dedicated = true })",
-        ),
-        (
-            "display{side, dedicated} replacing",
-            PANEL_ARRANGED,
-            "pmacs.window.display(pmacs.buffer.create('*usurp*'),
-               { side = 'bottom', dedicated = true, select = false })",
-        ),
-        (
-            // The same buffer the panel already shows: `replacing` is
-            // false, so this lands in a DIFFERENT arm of the same
-            // function, which a row against the replacing arm alone
-            // would not exercise.
-            "display{side, dedicated} same buffer",
-            PANEL_ARRANGED,
-            "pmacs.window.display(pmacs.window.buffer(pmacs.window.panel()),
-               { side = 'bottom', dedicated = true, select = false })",
-        ),
-        (
-            // NO panel at capture time: the preflight relaxes because
-            // `side_window_for` is None (a side request would CREATE a
-            // panel, never fall back). The body then creates one
-            // dedicated, which makes the next side request fall back.
-            "display{side, dedicated} creating the panel",
-            "",
-            "pmacs.window.display(pmacs.buffer.create('*usurp*'),
-               { side = 'bottom', dedicated = true, select = false })",
-        ),
-    ];
-
-    for (label, arrange, attempt) in routes {
+    for (label, arrange, attempt) in DEDICATION_ROUTES {
         let s = editor();
         exec(&s, arrange);
 
@@ -795,6 +802,266 @@ fn a_body_that_tries_to_create_the_fallback_is_refused_at_the_attempt() {
     }
 }
 
+/// **N** — a **nested** `commit_to` cannot mask the restriction an
+/// enclosing `"panel"` commit is relying on (revision 9).
+///
+/// # The defect
+///
+/// Revision 8 held **one** contract on the core, and entering a commit
+/// *replaced* it for the inner body's extent, restoring it afterwards
+/// (`ScopedFrontend::enter`). So the guarantee above had a hole exactly
+/// one call wide:
+///
+/// ```lua
+/// pmacs.window.commit_to(outer, function()          -- "panel": relaxed preflight
+///   pmacs.window.commit_to(inner, function()        -- "document": MASKS the outer contract
+///     pmacs.window.set_params(pmacs.window.panel(), { dedicated = true })
+///   end)                                            -- ...and succeeds
+///   pmacs.window.display(result, { side = "bottom" })
+/// end, "panel")                                     -- ...which now FALLS BACK
+/// ```
+///
+/// Every step is legal on its own. The outer commit's relaxed preflight
+/// was granted because this frontend places side requests in the panel;
+/// the nested commit put the refusal that keeps that true out of force;
+/// and the outer commit then resumed and overwrote the user's newer
+/// document buffer — the original P1a failure, reached through one extra
+/// call rather than through a route the write-site enumeration missed.
+///
+/// **What this invalidated, precisely.** Not §3's enumeration of
+/// dedication write sites: all four rows below are the same writes, and
+/// each is still guarded. What was wrong was the claim that the guard was
+/// **in force for the whole outer body**. So the fix composes contracts
+/// instead of replacing them — the strictest active restriction wins —
+/// and the enumeration is inherited unchanged.
+///
+/// **A late refusal would not have been a fix**, and revision 7 was
+/// already rejected for being one: by the time the outer commit resumes,
+/// the nested callback has already dedicated the slot. The dedication has
+/// to be *prevented*, which is why this asserts on the nested attempt and
+/// on the slot's state, not merely on where the outer result landed.
+///
+/// # Why the rows are the same four
+///
+/// A fix that reinstated the outer contract for only one write site would
+/// pass a single-row version of this. `DEDICATION_ROUTES` therefore drives
+/// both depths, so a route guarded at depth 1 and not through a nested
+/// scope fails loudly.
+///
+/// *Mutation:* restore `push_commit_contract`/`exit_commit_contract` to a
+/// single swapped slot (revision 8's `enter_commit_contract`) and only
+/// this test fails.
+#[test]
+fn a_nested_commit_cannot_mask_an_outer_panel_restriction() {
+    for (label, arrange, attempt) in DEDICATION_ROUTES {
+        let s = editor();
+        exec(&s, arrange);
+
+        let panel_before = s.core.borrow().side_window_for(FrontendId::LOCAL);
+        if let Some(panel) = panel_before {
+            assert!(
+                !dedicated(&s, panel),
+                "{label}: the slot must start UNDEDICATED, or the outer preflight would \
+                 have refused and this row would be re-proving the preflight"
+            );
+        }
+
+        capture(&s);
+        let doc = local_window(&s);
+        // The user's newer buffer: what the outer commit overwrites if its
+        // side request is made to fall back.
+        exec(
+            &s,
+            "pmacs.window.switch_buffer(pmacs.buffer.create('*newer*'))",
+        );
+
+        // The nested commit is a plain, valid, DOCUMENT-profile commit —
+        // its destination is captured fresh inside the outer body, so it
+        // passes all four checks on its own account and its callback
+        // really runs. Nothing about it is malformed; that is the point.
+        commit_body(
+            &s,
+            Some("'panel'"),
+            &format!(
+                "local inner = pmacs.window.capture_destination()
+                 nested_ran = false
+                 local caught, a = pcall(pmacs.window.commit_to, inner, function()
+                   nested_ran = true
+                   {attempt}
+                 end)
+                 nested_raised = (not caught) and tostring(a) or nil
+                 {PANEL_BODY}"
+            ),
+        );
+
+        assert!(
+            ran(&s),
+            "{label}: the outer body must have run -- its preflight could not have known"
+        );
+        assert!(
+            eval::<bool>(&s, "return nested_ran"),
+            "{label}: the nested callback must have run -- a nested commit refused at its \
+             own preflight would prove nothing about masking"
+        );
+
+        // 1. THE MUTATION IS STILL REFUSED, inside the nested scope.
+        let nested_raised: Option<String> = eval(&s, "return nested_raised");
+        let nested_raised = nested_raised.unwrap_or_else(|| {
+            panic!(
+                "{label}: the enclosing \"panel\" restriction must survive the nested \
+                 commit -- masking it is revision 9's defect"
+            )
+        });
+        assert!(
+            nested_raised.contains("cannot dedicate the side window"),
+            "{label}: the refusal must name the operation it is refusing; got \
+             {nested_raised:?}"
+        );
+        assert!(
+            nested_raised.contains("\"panel\" commit_to"),
+            "{label}: and why it is refused here specifically; got {nested_raised:?}"
+        );
+
+        // 2. THE SLOT IS STILL UNDEDICATED. Prevention, not detection:
+        //    the outer commit resumes after the nested one returns, so a
+        //    refusal that arrived then would already be too late.
+        let panel_after = s.core.borrow().side_window_for(FrontendId::LOCAL);
+        let panel_after = panel_after.unwrap_or_else(|| {
+            panic!("{label}: the outer body's own side display must have found a panel")
+        });
+        assert!(
+            !dedicated(&s, panel_after),
+            "{label}: a refused mutation must not have happened -- the outer commit's \
+             relaxed preflight rests on the slot still being free"
+        );
+        if let Some(before) = panel_before {
+            assert_eq!(
+                panel_after, before,
+                "{label}: the refusal must not have replaced the side slot"
+            );
+        }
+
+        // 3. THE OUTER COMMIT'S DESTINATION IS INTACT: its result went to
+        //    the PANEL, and the user's newer document buffer survived.
+        //    This is the assertion that fails loudest on the unfixed
+        //    tree — the outer side request falls back and `*result*`
+        //    lands on top of `*newer*`.
+        assert!(
+            ok(&s),
+            "{label}: the outer commit must still be accepted; got {:?}",
+            reason(&s)
+        );
+        assert_eq!(raised(&s), None, "{label}: the outer commit must not raise");
+        assert_eq!(
+            name_in(&s, panel_after),
+            "*result*",
+            "{label}: the outer \"panel\" commit's result belongs in the panel"
+        );
+        assert_eq!(
+            name_in(&s, doc),
+            "*newer*",
+            "{label}: and the user's newer buffer must survive"
+        );
+    }
+}
+
+/// **P** — nesting itself is **not** forbidden: a nested `commit_to` that
+/// touches no dedication runs, returns its value, and leaves the enclosing
+/// restriction exactly as it found it.
+///
+/// The other acceptable shape for revision 9's fix was to refuse a nested
+/// `commit_to` outright. That closes the hole by forbidding a construction
+/// no rule objects to — `commit_to` is public Lua API whose whole purpose
+/// is to let a continuation say where its result belongs, and a body that
+/// commits to a *second* destination (a diff beside a status panel, say)
+/// is the shape #227's adoption is heading for. Only the **restriction**
+/// needed preserving, so only the mutation is refused.
+///
+/// Three things are pinned, and the third is the one a `Vec::pop`-shaped
+/// fix would get wrong:
+///
+/// 1. the nested commit is accepted, its body runs, and its result value
+///    comes back through both frames;
+/// 2. the enclosing restriction is back in force **after** the nested
+///    commit returns — not cleared with it;
+/// 3. **outside** every commit, dedication is ordinary and allowed —
+///    otherwise the fix would have leaked a permanent restriction onto the
+///    editor.
+///
+/// *Mutation:* refuse nested `commit_to` at the attempt, and this fails
+/// while the masking test above still passes — which is what makes the two
+/// a pair rather than one test written twice.
+#[test]
+fn an_ordinary_nested_commit_still_runs_and_restores_the_outer_restriction() {
+    let s = editor();
+    exec(&s, PANEL_ARRANGED);
+    let panel = s
+        .core
+        .borrow()
+        .side_window_for(FrontendId::LOCAL)
+        .expect("the arrangement creates the panel");
+    capture(&s);
+
+    commit_body(
+        &s,
+        Some("'panel'"),
+        "local inner = pmacs.window.capture_destination()
+         -- A nested commit doing ordinary work: no dedication anywhere.
+         nested_ok, nested_value = pmacs.window.commit_to(inner, function()
+           pmacs.window.display(pmacs.buffer.create('*nested*'), { select = false })
+           return 'inner-result'
+         end)
+         -- And the enclosing restriction is back afterwards.
+         local caught, a = pcall(pmacs.window.set_params,
+                                 pmacs.window.panel(), { dedicated = true })
+         after_nested_raised = (not caught) and tostring(a) or nil",
+    );
+
+    assert_eq!(raised(&s), None, "the outer commit must not raise");
+    assert!(ok(&s), "the outer commit must be accepted: {}", reason(&s));
+
+    // 1. The nested commit ran and its value came back through both frames.
+    assert!(
+        eval::<bool>(&s, "return nested_ok"),
+        "a nested commit that touches no dedication must be accepted -- forbidding all \
+         nesting when only the restriction needed preserving is a behaviour regression"
+    );
+    assert_eq!(
+        eval::<String>(&s, "return tostring(nested_value)"),
+        "inner-result",
+        "the nested body's return value must come back through both commit frames"
+    );
+    assert!(
+        buffer_exists(&s, "*nested*"),
+        "the nested body's own work must have happened"
+    );
+
+    // 2. The enclosing restriction is back in force after the nested
+    //    commit returned -- popped, not cleared.
+    let after: Option<String> = eval(&s, "return after_nested_raised");
+    let after = after.expect(
+        "the enclosing \"panel\" restriction must be back in force once the nested commit \
+         returns -- a fix that cleared the stack on the inner exit would leave the rest of \
+         the outer body unguarded",
+    );
+    assert!(
+        after.contains("cannot dedicate the side window"),
+        "and it must be the same refusal; got {after:?}"
+    );
+    assert!(!dedicated(&s, panel), "the slot must still be undedicated");
+
+    // 3. OUTSIDE every commit, dedication is ordinary again: the guard
+    //    must not have leaked a permanent restriction onto the editor.
+    exec(
+        &s,
+        "pmacs.window.set_params(pmacs.window.panel(), { dedicated = true })",
+    );
+    assert!(
+        dedicated(&s, panel),
+        "outside a commit the field is writable as it always was (Q#BP2c)"
+    );
+}
+
 /// **P** — a `"panel"` commit that falls back with a **still-valid**
 /// destination lands in the document window, exactly as it does today.
 ///
@@ -809,10 +1076,11 @@ fn a_body_that_tries_to_create_the_fallback_is_refused_at_the_attempt() {
 /// and then dropped the display on the floor would pass a weaker version
 /// of this.
 ///
-/// *Mutation:* make `fallback_commit_refusal` refuse whenever a `"panel"`
-/// commit falls back, instead of only when a document precondition fails.
-/// Both rows fail here; every refusal test still passes, which is what
-/// makes this the pin that stops the fix over-reaching.
+/// *Mutation:* make `commit_destination_refusal` refuse outright whenever
+/// a `"panel"` commit could fall back, instead of holding it to the
+/// document preconditions. Both rows fail here; every refusal test still
+/// passes, which is what makes this the pin that stops the fix
+/// over-reaching.
 #[test]
 fn a_panel_commit_that_falls_back_with_a_valid_destination_still_lands() {
     for cause in ["not panel-capable", "side slot dedicated elsewhere"] {

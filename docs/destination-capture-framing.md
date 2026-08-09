@@ -1,16 +1,53 @@
 # A destination capture any async continuation can use
 
-**Status: revision 8. The mechanism is implemented at `0efc8c0`; the
-correctness blocker revisions 6–8 carry is IMPLEMENTED, in revision 8's
-shape, with §3's enumeration performed and recorded below.** Revisions
-6 and 7 proposed fixes that review rejected; **neither is in the tree**,
-and the two paragraphs describing them are kept as the record of why
-this shape and not those.
+**Status: revision 9. The mechanism is implemented at `0efc8c0`; the
+correctness blocker revisions 6–9 carry is IMPLEMENTED, in revision 8's
+shape with revision 9's scope correction, and §3's enumeration is
+performed and recorded below.** Revisions 6 and 7 proposed fixes that
+review rejected; **neither is in the tree**, and the two paragraphs
+describing them are kept as the record of why this shape and not those.
 
 *(Revisions 2–5 said "Pre-implementation. Awaiting approval" while the
 ledger recorded the lane as approved and implemented. Same
 contradiction class this document keeps correcting elsewhere, left
 standing in its own header.)*
+
+**Revision 9 fixes a hole in revision 8's guard — one that is about the
+guard's SCOPE, not about which mutations it names.** Revision 8 refuses,
+inside a `"panel"` commit, the mutations that would make its relaxed
+preflight wrong. But a **nested `commit_to` REPLACED** the enclosing
+contract with its own and restored it afterwards (`src/editor.rs:129`,
+`src/lua_bindings/window_panel.rs`), so the outer restriction went out of
+force for the whole of the inner body. Review reproduced the sequence:
+an outer `"panel"` commit passes the relaxed preflight; a nested
+`"document"` commit masks its contract; the nested callback dedicates the
+side slot and **is not refused**; the outer commit resumes, its side
+request falls back, and it overwrites a newer document — the original
+P1a failure, reached through one extra call.
+
+**What this invalidated, precisely.** *Not* §3's enumeration of
+dedication write sites. That enumeration was performed against the tree,
+it is still complete, and every site in it is still guarded. What was
+wrong was the surrounding claim — that the guard was **in force for the
+whole outer body**. §3's "PREFLIGHT STAYS WHERE IT IS" paragraph and the
+enumeration that follows it are therefore kept and **qualified**, not
+withdrawn.
+
+**The fix: contracts COMPOSE across nested scopes; the strictest active
+restriction wins.** The core holds a *stack* of contracts rather than one
+slot: `commit_to` pushes and pops rather than swapping, and the
+dedication guard consults **every** contract in force rather than the
+innermost. Matching stays per frontend, so a nested commit for a
+different frontend may still dedicate *its* side slot — that cannot
+change where this frontend's side request lands. The alternative shape,
+**prohibiting nested `commit_to` outright**, was rejected: it closes the
+hole by forbidding a construction no rule objects to. `commit_to` is
+public Lua API for saying where a continuation's result belongs, and a
+body that commits to a second destination (a diff beside a status panel)
+is where #227's adoption is heading. Only the *restriction* needed
+preserving. **Detecting the dedication when the outer commit resumed was
+not available**: by then the mutation has happened, which is a late
+refusal, which is what revision 7 was rejected for.
 
 **Revision 8 rejects BOTH of the previous two fixes and takes a third
 shape.** Revision 6 predicted the fallback at preflight (the body can
@@ -338,6 +375,15 @@ invalidate the scope's guarantee is rejected rather than predicted
 around. With them refused, the preflight measurement cannot go stale,
 and refusal stays mutation-free on the normal `(false, reason)` path.
 
+**"Inside a panel-profile commit" MEANS THE WHOLE BODY, INCLUDING ANY
+NESTED `commit_to` (revision 9), and the unqualified version of that
+phrase is what revision 8 got wrong.** Contracts **compose**: the core
+holds a stack, `commit_to` pushes and pops rather than swapping, and the
+guard consults every contract in force rather than the innermost. Read
+every "inside a `\"panel\"` commit" below with that scope attached.
+Nesting itself is *not* refused — only the mutation is, so a nested
+commit that touches no dedication runs exactly as it did.
+
 **The mutation surface is narrow, which is what makes this tight rather
 than aspirational:**
 
@@ -361,10 +407,21 @@ first are:
    guarding only route 1 passes revision 8's test while keeping the
    original defect.**
 
-**THE ENUMERATION, PERFORMED. It is CLOSED, and it is closed for a
-structural reason rather than by inspection stopping when it ran out of
-ideas.** Recorded here as the framing required, with what was looked
-for, what was found, and what cannot be ruled out.
+**THE ENUMERATION, PERFORMED. It is CLOSED as an enumeration of WRITE
+SITES, and it is closed for a structural reason rather than by inspection
+stopping when it ran out of ideas.** Recorded here as the framing
+required, with what was looked for, what was found, and what cannot be
+ruled out.
+
+**Read "closed" as scoped to the question it answers (revision 9).** It
+answers *which writes can dedicate the side slot*, and that answer
+survived review of the nesting defect intact — every site below is real
+and every one is still guarded. It says nothing about *when the guard is
+in force*, and that is the axis revision 8 got wrong: a nested
+`commit_to` used to mask the enclosing contract, so all five reachable
+sites were momentarily unguarded together. A complete list of write sites
+is not a complete argument until the guard's extent is stated too, which
+is what the composing-contracts paragraph above now does.
 
 *Step 1 — how few pieces of state can matter.* `resolve_placement`
 reaches `Ordinary` from a side request through exactly two branches, so
@@ -430,6 +487,15 @@ dedicated arm, or adding a binding that writes `params.dedicated`
 directly, reopens it. `Window::params.dedicated` is a public field, so
 the compiler does not enforce the funnel — the acceptance rows are what
 would catch a regression, one per reachable site.
+
+**And it never ruled out a defect in the guard's EXTENT, which is what
+revision 9 found.** Nothing above is about *when*
+`panel_commit_dedication_refusal` answers; a list of write sites cannot
+notice that the contract it reads was masked by a nested scope. The
+acceptance suite now drives the same write-site rows at **two depths** —
+directly in a `"panel"` body, and through a nested `commit_to` — so a
+route guarded at one depth and not the other fails loudly rather than
+being covered by the enumeration's word "closed".
 
 **If the enumeration had turned out open-ended**, the fallback was to
 **collapse the two profiles** — run all four checks always, losing the
@@ -630,6 +696,29 @@ incidental: no arguments is what keeps capture profile-blind.
   passes on a design that lets the body mutate freely and merely
   declines the final installation, leaving every other side effect
   behind. The refusal must land on the mutation, not on the outcome.
+- **THE SAME WRITE-SITE ROWS, DRIVEN THROUGH A NESTED `commit_to`**
+  (revision 9), in their own test: an outer `"panel"` commit whose body
+  opens a nested **`"document"`** commit — a perfectly valid one, whose
+  destination is captured fresh inside the outer body so it passes all
+  four of its own checks and its callback really runs — and *that*
+  callback attempts the dedication. Asserted: the attempt is **refused**,
+  the slot is **still undedicated** afterwards, and the outer commit's
+  destination is **intact** (its result lands in the panel; the user's
+  newer document buffer survives). The bullet above cannot catch this —
+  its mutation runs at commit depth 1, where revision 8's single-slot
+  contract was the right one to read. Rows per write site rather than one
+  row, because a fix that reinstated the outer contract for only one site
+  would pass a single-row version.
+- **ORDINARY NESTING STILL WORKS**, asserted rather than assumed: a
+  nested `commit_to` that touches no dedication is accepted, its body
+  runs, and its return value comes back through both frames. This is the
+  pin against the other candidate fix — prohibiting nested `commit_to`
+  outright — which would close the hole by forbidding a shape no rule
+  objects to. Two further assertions, and the second is the one a
+  `pop`-shaped fix gets wrong: the enclosing restriction is **back in
+  force after the nested commit returns** (popped, not cleared), and
+  **outside every commit dedication is ordinary again**, so the fix
+  leaked no permanent restriction onto the editor.
 - **A `"panel"` commit that really lands in the panel still skips
   checks 2–4** — otherwise the fix has quietly collapsed the two
   profiles into one and the parameterization buys nothing.
