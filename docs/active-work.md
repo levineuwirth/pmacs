@@ -275,7 +275,7 @@ from #171 and #215.
 authoritative tip** — the ref, not a SHA. Recover with
 `git fetch githubsucks && git checkout lsp-latex-coverage`.
 
-- **Framing `docs/lsp-language-coverage-framing.md`, revision 2 —
+- **Framing `docs/lsp-language-coverage-framing.md`, revision 3 —
   IMPLEMENTATION AUTHORIZED 2026-08-09**, after a summary of its four
   corrections rather than a findings round on the document itself.
   Recorded that way deliberately: the §3 `.texlabroot` verification

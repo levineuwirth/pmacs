@@ -1,6 +1,6 @@
 # LSP language coverage: LaTeX (and the Haskell/OCaml question)
 
-**Status: revision 2, IMPLEMENTATION AUTHORIZED 2026-08-09.**
+**Status: revision 3. Implemented at `d79afdc`; step zero discharged by observation, and its result corrected two things this document had wrong.**
 
 *Recorded precisely: the user authorized dispatch after a summary of
 revision 2's four corrections, rather than returning findings on the
@@ -119,22 +119,53 @@ inside a monorepo would otherwise get the monorepo. This is the one
 place where copying the other fourteen entries' instinct would be
 actively wrong.
 
+**And omitting it is NOT sufficient — revision 2 stopped one step
+short.** `project_root_for` falls through to `pmacs.project.detect`
+when a resolver returns `nil`, and **that** walk lists `.git` among its
+markers (`src/project.rs:184`). So a resolver that politely declined on
+a markerless file would hand texlab the monorepo **by the back door**,
+with the exclusion looking correct at every line you would think to
+read. The resolver therefore **never declines** for a file with a
+directory, and the pin is end-to-end through attach — with the same
+fixture asserting the shared detector really would have answered the
+repository root, so the test cannot pass vacuously.
+
 **Deliberately NOT proposed: scanning for `\documentclass`.** That is
 the semantically correct notion of a root document, and it is a
 directory scan on every resolve, with its own caching and invalidation
 questions. If the marker walk proves insufficient in use, that is the
 next increment — with evidence.
 
-**VERIFICATION CAVEAT, stated rather than buried.** `texlab 5.25.1` is
-installed and its version and CLI surface were checked directly. Its
-**LSP-level** behaviour — whether it honours `.texlabroot`, and how it
-resolves multi-file projects from a root URI — was **not** verified
-here; the CLI exposes only `run` / `inverse-search`, so this needs a
-live session. **Marker 1 is provisional and must be confirmed against a
-running texlab before implementation**, exactly as the sibling
-`gate-protocol-build` lane requires its precondition to be observed
-rather than reasoned about. If `.texlabroot` is not a real marker, it
-drops and the walk starts at `latexmkrc`.
+**CAVEAT DISCHARGED (revision 3), and the premise behind it was wrong
+in a way that raises the lane's stakes.**
+
+Established by driving a hand-written LSP client against `texlab run`
+and reading texlab's source at the exact installed tag `v5.25.1`:
+
+- **`.texlabroot` is real**, and so is a wider marker set than this
+  document listed. `crates/distro/src/language.rs` maps
+  `.texlabroot`/**`texlabroot`** → Root, `Tectonic.toml` → Tectonic,
+  `.latexmkrc`/**`latexmkrc`** → Latexmkrc, and
+  `ProjectRoot::walk_and_find` walks ancestors testing all three,
+  **innermost winning**. The implementation ships texlab's own set,
+  including the bare spellings §3 omitted.
+- **But texlab cannot rescue a root we get wrong.** Every arm of that
+  walk searches `workspace.iter()` — documents *already loaded* — and
+  the workspace is built from the folders **the client supplies**.
+  Observed directly: with `rootUri` at `chapters/`, no ancestor marker
+  (`.texlabroot` included) widened texlab's view, and its dependency
+  graph never reached the parent document; with `rootUri` at the marker
+  directory, the parent resolved whether or not a marker was present.
+
+**So `config.latex.root` IS the project scope.** Revision 2 framed the
+resolver as choosing between plausible roots that texlab might refine.
+It does not refine. The resolver is the whole value of the lane for a
+multi-file thesis, not a nicety — which is the opposite of how §2's
+"Slice 1 is one config entry" reads, and worth stating plainly.
+
+*(Also observed rather than assumed: bare `texlab` answers `initialize`
+over stdio, so `args = {}` is correct and the `run` subcommand is
+unnecessary.)*
 
 ## 4. Open questions
 
