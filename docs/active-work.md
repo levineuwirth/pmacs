@@ -245,7 +245,10 @@ the PR that retires other lanes.
 - **Retire this block in the next absorption after #224 merges.** It
   describes a docs PR; once merged there is nothing volatile left.
 
-## R8 fixture boundary — PR PENDING (test hermeticity)
+## R8 fixture boundary — PR #226 OPEN, HELD FOR REVIEW (test hermeticity)
+
+**PR #226** — https://github.com/levineuwirth/pmacs/pull/226. **Open,
+awaiting review; no merge authorization.**
 
 **Branch `r8-fixture-boundary`**, base `githubsucks/main` @ `b833b13`
 (the #224 merge). **`githubsucks/r8-fixture-boundary` is the

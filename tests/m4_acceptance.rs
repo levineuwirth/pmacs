@@ -8048,23 +8048,6 @@ fn open_against_fake(path: &std::path::Path) -> pmacs::editor::EditorState {
     state
 }
 
-/// The *outline* panel end-to-end against the fake server's
-/// hierarchical documentSymbol response ("Outer" class > "inner"
-/// method): open, depth-indented rows, RET jump-ring visit to the
-/// symbol's selectionRange, M-, back to the outline row, q restore.
-/// Tree primitive, acceptance 5 — the FLAT listview consumers render
-/// **byte-identically** after the depth/collapse extension.
-///
-/// This exists because the weaker claim was not true. `listview_
-/// acceptance` says in its own header that the references panel "needs
-/// a live LSP and is validated manually / via the m4 harness", so it
-/// does not exercise `*references*` at all; and the hover test asserts
-/// content *presence*, not exact output. Neither would notice a flat
-/// consumer silently gaining an indent column — which is precisely the
-/// regression a tree extension can introduce.
-///
-/// So the assertion is on the **exact rendered bytes**, through the
-/// real entry points, against the fake language server.
 /// **R8's portable witness: a planted ancestor marker must not reach a
 /// rendered path.**
 ///
@@ -8143,6 +8126,23 @@ fn a_planted_ancestor_marker_does_not_reach_the_rendered_row() {
     );
 }
 
+/// The *outline* panel end-to-end against the fake server's
+/// hierarchical documentSymbol response ("Outer" class > "inner"
+/// method): open, depth-indented rows, RET jump-ring visit to the
+/// symbol's selectionRange, M-, back to the outline row, q restore.
+/// Tree primitive, acceptance 5 — the FLAT listview consumers render
+/// **byte-identically** after the depth/collapse extension.
+///
+/// This exists because the weaker claim was not true. `listview_
+/// acceptance` says in its own header that the references panel "needs
+/// a live LSP and is validated manually / via the m4 harness", so it
+/// does not exercise `*references*` at all; and the hover test asserts
+/// content *presence*, not exact output. Neither would notice a flat
+/// consumer silently gaining an indent column — which is precisely the
+/// regression a tree extension can introduce.
+///
+/// So the assertion is on the **exact rendered bytes**, through the
+/// real entry points, against the fake language server.
 #[test]
 fn flat_listview_consumers_render_byte_identically_after_the_tree_extension() {
     let dir = tempfile::tempdir().expect("tempdir");

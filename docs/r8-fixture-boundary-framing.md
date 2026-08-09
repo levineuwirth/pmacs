@@ -1,7 +1,11 @@
 # R8 — the fixture boundary the LSP panel tests never set
 
-**Status: framing pass, revision 2. Pre-implementation. Awaiting
-approval.**
+**Status: revision 2 — APPROVED 2026-08-08 and IMPLEMENTED. PR #226
+open (`https://github.com/levineuwirth/pmacs/pull/226`), held for
+review; not merged.** The verification in §5 is no longer a plan: every
+item was run, and the results are recorded in the lane in
+`docs/active-work.md` and in the retired R8 row of
+`docs/ci-red-signatures.md`.
 
 **Revision 2 corrects two counts I got wrong by miscounting, adds the
 portable witness revision 1 lacked, and bounds Q#R8-1's answer.** The
