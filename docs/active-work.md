@@ -335,10 +335,15 @@ form:
   `register_frontend_view` has callers only in `daemon.rs` and core
   unit tests.
 - **Eight writes to `dedicated` exist** (`rg 'params\.dedicated\s*='
-  src/`); **five are reachable**: `apply_placement`'s `Side` created /
-  replacing / non-replacing arms, and `set_params`. Two `Ordinary` arms
-  are harmless (their target is never a side window; one only ever
-  clears the flag) and one is a unit test.
+  src/`); **four are reachable and a fifth is guarded defensively** —
+  `apply_placement`'s `Side` created / replacing / non-replacing arms
+  and `set_params` are the reachable four, and `quit_window`'s
+  `QuitAction::Restore` is the fifth, proved unreachable below and
+  guarded anyway. **All five are guarded**, which is the count that
+  matters; listing four under the word "five" is what an earlier version
+  of this bullet did. Two `Ordinary` arms are harmless (their target is
+  never a side window; one only ever clears the flag) and one is a unit
+  test.
 - **The guards are sited where the property converges, not per caller.**
   All three `Side` arms are reached through `apply_placement`, which has
   **exactly one caller** — so one guard in `display_buffer` covers every
@@ -383,10 +388,11 @@ authoritative tip** — the ref, not a SHA. Recover with
   (`pmacs.window.capture_destination()`, the `ViewDestination` rename,
   the profile argument); `d5a6170` is
   `tests/destination_capture_acceptance.rs`; `469d5c8` is the
-  revision-8 panel-profile correction plus the invalid-UTF-8 hole; the
-  commit below is revision 9's contract stack. **14 pins**, and both
-  preservation suites pass **unchanged** (journey 47, dired 31) — §7's
-  stop signal not firing rather than being suppressed.
+  revision-8 panel-profile correction plus the invalid-UTF-8 hole;
+  `394fa43` is revision 9's contract stack and the commit below adds its
+  cross-frontend pin. **15 pins**, and both preservation suites pass
+  **unchanged** (journey 47, dired 31) — §7's stop signal not firing
+  rather than being suppressed.
 - **HOW THE PANEL PROFILE IS ENFORCED, in one sentence so no earlier
   revision gets reinstated by someone reading only that document:** the
   preflight stays exactly where it was, and the mutations that would
@@ -413,10 +419,17 @@ authoritative tip** — the ref, not a SHA. Recover with
     so a nested scope rightly replaces them; a contract is a
     *restriction*, and replacing one suspends it. The guard stores a
     depth and truncates back to it, so an inner exit removes exactly the
-    contract it added and leaves every enclosing one in force. Matching
-    is per **frontend**: a nested commit for a different frontend may
-    dedicate *its* side slot, which cannot change where this frontend's
-    side request lands.
+    contract it added and leaves every enclosing one in force.
+  - **Matching is per FRONTEND as well as per profile, and that is a
+    deliberate exception with its own positive pin.** A nested commit for
+    a different frontend may dedicate *its* side slot: `resolve_placement`
+    consults only the requesting frontend's `panel_capable` and its own
+    one side window, so nothing done to B can change where A's side
+    request lands. Pinned by
+    `a_nested_commit_for_another_frontend_may_dedicate_its_own_slot`,
+    which is the file's only row asserting that something is **allowed**
+    — every other asserts a refusal, and an exception only the doc
+    comment knows about is one review round from being simplified out.
   - **Prohibiting nested `commit_to` was the other candidate and was
     rejected.** It closes the hole by forbidding a construction no rule
     objects to — `commit_to` is public Lua API for saying where a
@@ -516,17 +529,35 @@ authoritative tip** — the ref, not a SHA. Recover with
   And reverting the byte comparison to `to_str()?` fails the
   `invalid utf-8` row with mlua's conversion error, on content.
 
-  **Revision 9's, run across all three suites and the lib:** restore
-  `panel_commit_dedication_refusal` to reading only the innermost
-  contract (`.last()`, which is exactly revision 8's swapped slot) →
-  **only** `a_nested_commit_cannot_mask_an_outer_panel_restriction`
-  fails. The other 13 pins, `journey_acceptance` (31),
-  `dired_acceptance` (47) and `cargo test --lib` (1920) all stay green,
-  which is what makes the new test the pin for this defect and not a
-  restatement of the depth-1 one. Note the ordinary-nesting pin
-  deliberately survives that mutation — it exists to fail the *other*
-  candidate fix (prohibit nesting), so the two are a pair rather than
-  one test written twice.
+  **Revision 9's two, each isolating a different half of the rule:**
+  1. restore `panel_commit_dedication_refusal` to reading only the
+     innermost contract (`.last()`, which is exactly revision 8's
+     swapped slot) → **only**
+     `a_nested_commit_cannot_mask_an_outer_panel_restriction` fails.
+     Note the ordinary-nesting pin deliberately survives this — it
+     exists to fail the *other* candidate fix (prohibit nesting), so the
+     two are a pair rather than one test written twice.
+  2. delete `&& contract.destination.frontend == fid` from the same
+     scan, making any outer `"panel"` contract **globally** restrictive
+     → **only**
+     `a_nested_commit_for_another_frontend_may_dedicate_its_own_slot`
+     fails. Both single-frontend nesting tests pass under it, which is
+     the evidence they are independent of the frontend match rather than
+     merely looking so; the cross-frontend exception had no pin at all
+     before this row, since every other test in the file drives one
+     frontend.
+
+  Both were run across all three acceptance suites and the lib: in each
+  case `journey_acceptance` (47), `dired_acceptance` (31) and
+  `cargo test --lib` (1920) stay green, along with every other pin in
+  this file.
+
+  **The counts above are journey 47 / dired 31**, matching the bullet
+  further up. The mutation paragraph committed at `394fa43` had them
+  **reversed** in both the ledger and that commit's message; the ledger
+  is corrected here and the message is left as written, since rewriting
+  a pushed commit is worse than a footnote. A reader following that SHA
+  should take these numbers, not those.
 - **The public API #227 adopts against (Q#DC-5), pinned so it is a
   contract rather than an intention:**
   `pmacs.window.commit_to(dest, body [, profile])`. Profile is an

@@ -719,6 +719,21 @@ incidental: no arguments is what keeps capture profile-blind.
   force after the nested commit returns** (popped, not cleared), and
   **outside every commit dedication is ordinary again**, so the fix
   leaked no permanent restriction onto the editor.
+- **THE CROSS-FRONTEND EXCEPTION IS PINNED POSITIVELY**, over **two**
+  frontends: while an outer `"panel"` commit for A is in force, a nested
+  commit for **B** dedicates **B's** side slot and is **allowed** — and
+  B's slot is asserted really dedicated afterwards, not merely
+  unrefused. The far side runs in the same test: A's slot is still
+  undedicated and A's result still lands in A's panel, so this cannot
+  pass by having weakened the restriction generally. **This is the one
+  row asserting that something is permitted**; every other in the suite
+  asserts a refusal, and without it, deleting the `fid` comparison —
+  making any outer panel contract *globally* restrictive — passes the
+  whole file, because both nesting rows above drive a single frontend.
+  The exception is real and not a convenience: `resolve_placement`
+  consults only the requesting frontend's `panel_capable` and its own
+  one side window, so nothing done to B can change where A's side
+  request lands.
 - **A `"panel"` commit that really lands in the panel still skips
   checks 2–4** — otherwise the fix has quietly collapsed the two
   profiles into one and the parameterization buys nothing.

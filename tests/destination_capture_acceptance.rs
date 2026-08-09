@@ -1062,6 +1062,121 @@ fn an_ordinary_nested_commit_still_runs_and_restores_the_outer_restriction() {
     );
 }
 
+/// **P** — the restriction is scoped to its **frontend**: a nested commit
+/// for a *different* frontend may still dedicate that frontend's own side
+/// slot (revision 9).
+///
+/// `panel_commit_dedication_refusal` scans every contract in force, but it
+/// matches on `fid` as well as on the profile, and that comparison is a
+/// deliberate exception rather than an oversight: frontend B's side slot
+/// has no bearing on where **A's** side request lands. `resolve_placement`
+/// consults only the requesting frontend's `panel_capable` and its own one
+/// side window, so a contract for A cannot be invalidated by anything done
+/// to B.
+///
+/// **This is a POSITIVE pin, which is the shape this suite is thinnest
+/// on** — every other row asserts a refusal. Without it, deleting the
+/// `fid` comparison and making any outer `"panel"` contract *globally*
+/// restrictive passes the whole file: the two nesting tests above use one
+/// frontend, so the comparison is trivially true throughout them. An
+/// exception that only the doc comment knows about is one review round
+/// away from being "simplified" out.
+///
+/// The far side is still asserted in the same run: A's slot stays
+/// undedicated and A's commit still lands in A's panel, so this cannot
+/// pass by having weakened the restriction generally.
+///
+/// *Mutation:* delete `&& contract.destination.frontend == fid` from
+/// `panel_commit_dedication_refusal` and only this test fails.
+#[test]
+fn a_nested_commit_for_another_frontend_may_dedicate_its_own_slot() {
+    let s = editor();
+
+    // Frontend B: its own layout, its own undedicated panel, and a
+    // destination captured while it is the acting frontend.
+    attach_frontend(&s, COMPETITOR);
+    s.core.borrow_mut().active_frontend = COMPETITOR;
+    exec(
+        &s,
+        "pmacs.window.display(pmacs.buffer.create('*b-panel*'),
+           { side = 'bottom', select = false })
+         dest_b = pmacs.window.capture_destination()",
+    );
+    let b_panel = s
+        .core
+        .borrow()
+        .side_window_for(COMPETITOR)
+        .expect("the competitor gets its own side slot");
+    assert!(
+        !dedicated(&s, b_panel),
+        "B's slot must start undedicated, or the row would prove nothing"
+    );
+    s.core.borrow_mut().active_frontend = FrontendId::LOCAL;
+
+    // Frontend A: an undedicated panel, so its `"panel"` commit takes the
+    // relaxed preflight and the restriction is really in force.
+    exec(&s, PANEL_ARRANGED);
+    let a_panel = s
+        .core
+        .borrow()
+        .side_window_for(FrontendId::LOCAL)
+        .expect("the arrangement creates A's side slot");
+    capture(&s);
+    let doc = local_window(&s);
+    exec(
+        &s,
+        "pmacs.window.switch_buffer(pmacs.buffer.create('*newer*'))",
+    );
+
+    commit_body(
+        &s,
+        Some("'panel'"),
+        &format!(
+            "b_ok, b_reason = pmacs.window.commit_to(dest_b, function()
+               pmacs.window.set_params(pmacs.window.panel(), {{ dedicated = true }})
+             end)
+             {PANEL_BODY}"
+        ),
+    );
+
+    // 1. THE CROSS-FRONTEND DEDICATION IS ALLOWED.
+    assert_eq!(
+        raised(&s),
+        None,
+        "dedicating ANOTHER frontend's side slot must not be refused -- it cannot change \
+         where this frontend's side request lands"
+    );
+    assert!(
+        eval::<bool>(&s, "return b_ok == true"),
+        "the nested commit for B must be accepted: {}",
+        eval::<String>(&s, "return tostring(b_reason)")
+    );
+    assert!(
+        dedicated(&s, b_panel),
+        "B's slot must really be dedicated -- asserting only that nothing was refused \
+         would pass on a call that was silently dropped"
+    );
+
+    // 2. AND A'S RESTRICTION IS UNWEAKENED: its slot is untouched and its
+    //    commit still lands in its own panel rather than falling back.
+    assert!(ok(&s), "A's commit must be accepted: {}", reason(&s));
+    assert!(
+        !dedicated(&s, a_panel),
+        "A's own slot must be untouched -- this row must not pass by having relaxed the \
+         restriction for everyone"
+    );
+    assert_eq!(
+        name_in(&s, a_panel),
+        "*result*",
+        "A's \"panel\" commit still belongs in A's panel"
+    );
+    assert_eq!(
+        name_in(&s, doc),
+        "*newer*",
+        "and A's newer document buffer must survive"
+    );
+}
+
 /// **P** — a `"panel"` commit that falls back with a **still-valid**
 /// destination lands in the document window, exactly as it does today.
 ///
