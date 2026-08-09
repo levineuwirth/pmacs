@@ -2230,17 +2230,66 @@ its own step, never `&&`-chained.
 
 ## 3. Gate suite (all green before any PR)
 
+**Run it with `scripts/gate`. Do not retype it.**
+
+```
+scripts/gate [--acceptance SUITE]... [--protocol]
+```
+
+The script is **authoritative for the fixed executable gates** — the
+list below is what it runs. **This section stays authoritative for
+policy** (everything under "Every part is load-bearing", the
+protocol-bump rule, the machine-specific caveats) **and for CHOOSING
+the touched acceptance suites**, which reach the script only through
+`--acceptance`. No script can infer those from a working tree, and one
+that guessed would report coverage it does not have.
+
+Three things it does that a retyped command line kept failing to do:
+
+- **A per-worktree `CARGO_TARGET_DIR`.** This machine exports one
+  globally, and cargo locks it exclusively — two worktrees building at
+  once serialize and thrash each other's artifacts, making parallel
+  lanes *slower* than serial. Note the trap: the environment variable
+  **overrides** `build.target-dir` in any `config.toml`, so a
+  per-worktree config file silently does nothing.
+- **All five ambient roots** (§ the caveat below), fresh per run.
+- **Every gate's full output to a durable log**, with the sweep paths
+  printed. This is the U2/U3 remedy: both registry notes exist because
+  a sweep was piped through `grep` before anyone read it, and the
+  fragments a `docs/ci-red-signatures.md` row needs were gone. **Read
+  the log; do not re-run and filter.**
+
+`scripts/gate --print-plan` prints the commands without running them;
+`tests/gate_script_acceptance.rs` asserts that plan still matches this
+section, so the two cannot drift silently. `--init` prepares a
+worktree's build directory; `--prune` reclaims directories whose
+worktree is gone (dry-run unless given `--force`). Framing:
+`docs/gate-script-framing.md`.
+
+It is a **convention, not an enforcement** — a bare `cargo test` still
+takes the shared lock. Nothing in-repo can change that while the
+variable is exported globally.
+
+What it runs:
+
 ```
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings   # own step
 cargo test --lib                                        # ~1500
 cargo test --lib --features crdt                        # ~1672
-cargo test --test <the new/touched acceptance suites>
+cargo test --test <the new/touched acceptance suites>   # --acceptance
 cargo test --test m4_acceptance -- --skip basedpyright
 PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu             # 58
-cargo test --workspace -- --skip basedpyright           # full sweep
+cargo test --workspace --no-fail-fast -- --skip basedpyright   # sweep
 git diff --check
 ```
+
+**`--no-fail-fast` is now on the normal sweep too**, not only the
+protocol-bump form below. The reason given there — *"cargo stops at the
+first failing target: without it a bump that breaks eight assertions
+reports one"* — was never specific to bumps; a lane that breaks three
+unrelated targets has the same problem. The cost is paid **only on
+red**: a green sweep is byte-for-byte the same work.
 
 **The full sweep is not optional, and `CLAUDE.md`'s shorter list is not
 a substitute.** That list stops at "the touched acceptance suites";
@@ -2279,15 +2328,24 @@ some are tripwires doing their job, and one pin
 Machine-specific caveats — re-verify on a machine you haven't used
 before trusting them:
 
-- **Ambient storage roots: control all FIVE, not four.** Until the
-  ambient-root isolation lane lands
-  (`docs/test-ambient-config-isolation-framing.md`), the ~96 integration
-  suites read the developer's real `~/.config/pmacs/init.lua` and
-  **write** bundled packages into the real data root:
-  `#[cfg(not(test))]` guards the crate's own unit tests only, and
-  `EditorState::new` materializes packages outside every `cfg` guard.
-  A local full-suite run therefore needs, all pointed at a fresh
-  directory:
+- **Ambient storage roots: control all FIVE, not four.**
+  **`scripts/gate` does this for you** — it is only stated here because
+  the reasoning has to live somewhere, and because a run done by hand
+  still needs it.
+
+  **The ambient-root isolation implementation MERGED as #206**, so the
+  in-crate paths resolve roots explicitly rather than from the caller's
+  environment; the earlier text here still said "until the lane lands",
+  which stopped being true at that merge. What the five variables cover
+  now is everything *outside* that guarantee — integration suites that
+  spawn the real binary, PTY and daemon fixtures, anything reaching a
+  production resolution path — where the process under test reads the
+  environment it was handed. Belt and braces: a gate run that scribbles
+  in the developer's real config or data root is a bad failure mode
+  whether or not the crate promises not to.
+
+  A local full-suite run done by hand therefore needs, all pointed at a
+  fresh directory:
 
   ```
   XDG_CONFIG_HOME  XDG_DATA_HOME  XDG_STATE_HOME  XDG_CACHE_HOME

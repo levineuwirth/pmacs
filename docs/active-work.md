@@ -210,6 +210,61 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
+## `scripts/gate` — PR #225 OPEN (build tooling)
+
+**PR #225** — https://github.com/levineuwirth/pmacs/pull/225. Written
+**after** the PR existed, again, and again because review asked. Two
+lanes in a row have now been added late; the correction from #171 and
+#215 is not sticking, and recording that is more useful than a
+back-dated block that pretends it did.
+
+- **Branch `gate-script`**, base `githubsucks/main` @ `b833b13` (the
+  #224 merge). **`githubsucks/gate-script` is the authoritative tip** —
+  the ref, not a SHA. Recover with
+  `git fetch githubsucks && git checkout gate-script`.
+- **Framing `docs/gate-script-framing.md`**, approved at revision 4
+  after four review rounds; revision 5 records two safety defects found
+  against the implementation, not the design.
+- **Scope:** `scripts/gate` (per-worktree `CARGO_TARGET_DIR`, five
+  ambient roots, durable per-gate logs, the fixed gate suite),
+  `tests/gate_script_acceptance.rs`, and a handoff §3 rewrite pointing
+  at the script while §3 keeps policy and acceptance-suite selection.
+  No `src/`, no crate, no manifest, no protocol.
+- **Verification:** 15 acceptance tests over the no-gates paths, each
+  isolated by `PMACS_GATE_TARGET_ROOT`. Mutation-tested; the two prune
+  guards are redundant by design and only fail the test when **both**
+  are removed, which is recorded in the test itself. Observed real runs
+  confirm failed-gate naming, log paths, ambient creation and reaping,
+  and distinct log directories per run.
+
+**GATE STATUS — R8 RESOLVED.** This lane was blocked because
+`scripts/gate` exited 1 on a clean tree: **R8** failed `m4_acceptance`
+and therefore the sweep. That was never a footnote — #225 is the lane
+that makes the gate suite authoritative, and a tool shipping with its
+own gate red teaches the opposite of what it exists to teach.
+
+**R8 was fixed and retired in #226** (`dcb852e`), which bounded the LSP
+fixture's project detection. This branch is rebased onto it.
+
+**RE-GATED 2026-08-09: `scripts/gate` exits 0.** All nine gates green in
+one command — fmt, clippy, `--lib`, `--lib --features crdt`, both named
+acceptance suites, `m4_acceptance`, `-p pmacs-gpu`, and the full
+workspace sweep. That is #225's own acceptance criterion, and it is the
+first time the tool has passed the suite it exists to run.
+
+**Rebase resolution, per the standing rule that #226's R8 documentation
+wins.** Three conflicts, all in R8 text this branch had written while
+the row was still an open investigation: two in
+`docs/ci-red-signatures.md` (both resolved to #226's retired row, this
+branch's pre-fix copy dropped), and the framing-doc pair
+(`e71e1bd` added it, `7cfba73` removed it — both **skipped**, since they
+are net-zero here and `main` owns the file authoritatively; replaying
+the second would have deleted `main`'s copy). Two now-stale lanes were
+also removed: this branch's "R8 NEEDS A LANE" investigation block, and
+#226's own lane, which Rule 4 retires now that it has merged — its
+durable facts are in the retired registry row and the handoff §6
+census.
+
 ## QoL arc retirement — PR #224 OPEN (docs only)
 
 **PR #224** — https://github.com/levineuwirth/pmacs/pull/224. Written
@@ -244,51 +299,6 @@ the PR that retires other lanes.
   is stated rather than left as a gap.
 - **Retire this block in the next absorption after #224 merges.** It
   describes a docs PR; once merged there is nothing volatile left.
-
-## R8 fixture boundary — PR #226 OPEN, HELD FOR REVIEW (test hermeticity)
-
-**PR #226** — https://github.com/levineuwirth/pmacs/pull/226. **Open,
-awaiting review; no merge authorization.**
-
-**Branch `r8-fixture-boundary`**, base `githubsucks/main` @ `b833b13`
-(the #224 merge). **`githubsucks/r8-fixture-boundary` is the
-authoritative tip** — the ref, not a SHA. Recover with
-`git fetch githubsucks && git checkout r8-fixture-boundary`.
-
-**Written with the lane's first commit, before the PR existed** — the
-standing correction from #171 and #215, which the previous two lanes
-both missed and review both caught.
-
-- **Framing `docs/r8-fixture-boundary-framing.md`**, revision 2,
-  approved 2026-08-08.
-- **Scope:** `tests/m4_acceptance.rs` only — `open_against_fake` sets
-  `pmacs.project.set_search_boundary` to the fixture directory, plus a
-  portable planted-marker witness. **No `src/`, no runtime, no
-  product-behaviour change.** `display_path` and project detection are
-  deliberately untouched: shortening a location against its project
-  root is the feature.
-- **Deliberately NOT branched from `gate-script`.** `scripts/gate` does
-  not exist on `main`, so naming it as a criterion would have made this
-  lane depend on an artifact absent from its own base.
-- **Verification (all run):** the R8 test passes **with `/tmp/.git`
-  still present**, i.e. on the machine that reproduces it; the planted
-  marker witness passes, and also passes with `TMPDIR` outside `/tmp`
-  (the CI shape); reverting the boundary fails **both**, the witness
-  with `proj/r.rs:12:3` — relative to the *planted* marker, which is
-  what makes the bite portable; full `m4_acceptance` 151/0; `--lib`
-  1920 and `--lib --features crdt` 2105; `-p pmacs-gpu` 241; fmt,
-  clippy, `git diff --check`; and the **full workspace sweep exit 0
-  across 113 targets** — the first fully green local sweep of this
-  session.
-- **`/tmp/.git` was NOT removed**, deliberately: deleting it would hide
-  the hermeticity defect, its provenance is unresolved, and it is the
-  only thing on this machine that reproduces the row.
-
-**Sequencing:** this lands first, on its own merits. **Then #225 rebases
-onto it** and takes "`scripts/gate` runs green" as *its* re-gate
-criterion. On that rebase, **the R8 documentation here is authoritative**
-— #225 carries an earlier, pre-fix copy of the R8 registry row and lane
-text from when it was still an open investigation, and those must lose.
 
 ## Docs absorption after #217 — MERGED as #218 (2026-08-06 09:59Z)
 
