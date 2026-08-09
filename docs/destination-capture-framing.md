@@ -27,11 +27,11 @@ P1a failure, reached through one extra call.
 
 **What this invalidated, precisely.** *Not* §3's enumeration of
 dedication write sites. That enumeration was performed against the tree,
-it is still complete, and every site in it is still guarded. What was
-wrong was the surrounding claim — that the guard was **in force for the
-whole outer body**. §3's "PREFLIGHT STAYS WHERE IT IS" paragraph and the
-enumeration that follows it are therefore kept and **qualified**, not
-withdrawn.
+it is still complete, and every site in it that can dedicate the slot is
+still guarded. What was wrong was the surrounding claim — that the guard
+was **in force for the whole outer body**. §3's "PREFLIGHT STAYS WHERE
+IT IS" paragraph and the enumeration that follows it are therefore kept
+and **qualified**, not withdrawn.
 
 **The fix: contracts COMPOSE across nested scopes; the strictest active
 restriction wins.** The core holds a *stack* of contracts rather than one
@@ -393,10 +393,18 @@ than aspirational:**
 - `panel_capable` has **no Lua binding at all** — checked across
   `src/lua_bindings/`. A body cannot make a frontend panel-incapable.
 
-**FIVE WRITES REACH DEDICATION.** Review found the second *after* the
-first was specified, which is the evidence that guarding one named call
-site is not a design — and the enumeration below, performed against the
-tree rather than by recall, found three more. The two review named
+**FOUR WRITES REACH DEDICATION, AND A FIFTH IS GUARDED DEFENSIVELY.**
+Review found the second *after* the first was specified, which is the
+evidence that guarding one named call site is not a design — and the
+enumeration below, performed against the tree rather than by recall,
+found three more: two further `apply_placement` arms, plus
+`quit_window`'s `QuitAction::Restore`, which step 6 proves *unreachable*
+and which is guarded anyway. So **four are reachable, a fifth is guarded
+defensively, and all five are guarded** — the last is the count the
+safety argument actually runs on. (Historical note, not the current
+count: earlier revisions of this section counted all five as
+*reachable*. The table below has always said four; the ledger was
+corrected in `fb3974b` and this section with it.) The two review named
 first are:
 
 1. **`set_params`** — the writable-field path (`window_panel.rs:888`).
@@ -416,12 +424,14 @@ ruled out.
 **Read "closed" as scoped to the question it answers (revision 9).** It
 answers *which writes can dedicate the side slot*, and that answer
 survived review of the nesting defect intact — every site below is real
-and every one is still guarded. It says nothing about *when the guard is
-in force*, and that is the axis revision 8 got wrong: a nested
-`commit_to` used to mask the enclosing contract, so all five reachable
-sites were momentarily unguarded together. A complete list of write sites
-is not a complete argument until the guard's extent is stated too, which
-is what the composing-contracts paragraph above now does.
+and every one that can dedicate the slot is still guarded. It says
+nothing about *when the guard is in force*, and that is the axis
+revision 8 got wrong: a nested `commit_to` used to mask the enclosing
+contract, so all five guarded sites — the four reachable ones and the
+defensive fifth — were momentarily unguarded together. A complete list
+of write sites is not a complete argument until the guard's extent is
+stated too, which is what the composing-contracts paragraph above now
+does.
 
 *Step 1 — how few pieces of state can matter.* `resolve_placement`
 reaches `Ordinary` from a side request through exactly two branches, so
@@ -448,7 +458,7 @@ src/`, classified.* Eight sites, no exceptions:
 | 4 | `apply_placement`, `Ordinary` (`!fell_back`) | harmless — every `Ordinary` target is filtered `!is_side`, so it is never the slot |
 | 5 | `apply_placement`, `Ordinary` (clear) | harmless — only ever writes `false` |
 | 6 | `set_params` | reachable — the direct write (Q#BP2c) |
-| 7 | `quit_window`, `QuitAction::Restore` | **unreachable**, see below |
+| 7 | `quit_window`, `QuitAction::Restore` | **unreachable** — guarded anyway, defensively; see below |
 | 8 | an `EditorCore` unit test | not Lua-reachable |
 
 *Step 4 — the guards, sited where the property converges rather than at
@@ -458,7 +468,9 @@ So one guard there covers every request-driven dedication, including
 routes that do not exist yet. `set_params` is a genuinely separate write
 and is guarded separately — dedication does *not* converge before the
 field itself, and that is stated rather than papered over. Two live
-guards, five reachable sites.
+guards over the four reachable sites; site 7 carries a third guard,
+defensive because the site is unreachable (step 6), so **all five are
+guarded**.
 
 *Step 5 — what was looked for and found NOT to be a route.* Closing the
 side window is **not** one: with no side leaf `side_window_for` returns
