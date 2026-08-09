@@ -1,7 +1,13 @@
 # Discovery Stage 2 — M-x rows stop being bare names
 
-**Status: framing pass, revision 2. Pre-implementation. Awaiting
+**Status: framing pass, revision 3. Pre-implementation. Awaiting
 approval.**
+
+**Revision 3 fixes three things revision 2 asserted without checking
+the mechanism it was reasoning about**: a "frozen-shape" test that
+freezes nothing, a cache hazard that this architecture makes
+impossible, and a clipping rule that is unachievable at narrow enough
+widths. All three verified in the tree.
 
 **Revision 2 fixes two claims revision 1 made about compatibility and
 about the TUI, both wrong, both checkable.** An in-place field change
@@ -107,13 +113,27 @@ So:
 - **Exactly one of the two is sent to any given peer, ever.** Sending
   both to a v23 peer would double-render; sending neither is the bug
   gating alone would have caused.
-- **Close and cache ordering.** The prompt is cached-compare
-  suppressed, so the cache key must be **per variant**, or a v23 peer
-  that reconnects at v22 (or vice versa across a restart) can have its
-  first message suppressed as a duplicate of one it never received.
-  **The close message must use the same variant family as the open** —
-  a `MinibufferPromptRows` session closed by a legacy clear is exactly
-  the kind of mismatch that leaves a popup on screen forever.
+- **The selection is a producer gate**, named
+  `peer_knows_minibuffer_rows`, alongside the existing
+  `peer_knows_minibuffer_prompt` / `peer_knows_menu_prompt` /
+  `peer_knows_completion_popup` (`src/daemon.rs:1410-1435`). One new
+  gate in an established pattern, not a new mechanism.
+- **ONE per-peer minibuffer cache, not a per-variant key.**
+
+  **Revision 2's rationale for a per-variant key was false**, and the
+  architecture is why: `SemanticRenderState::for_peer(frontend_id,
+  negotiated_protocol_version)` is created **per peer, with its version
+  baked in, on attach** (`src/daemon.rs:2080`) and **removed on
+  detach** (`:1591`). A cache therefore never spans two negotiated
+  versions — the v23→v22 reconnect suppression I described **cannot
+  occur**, because reconnecting creates a fresh state. The
+  corresponding test is removed rather than written; a test for an
+  impossible condition passes forever and teaches the next reader that
+  the hazard is real.
+- **The close message must still use the same variant family as the
+  open** — a `MinibufferPromptRows` session closed by a legacy clear is
+  the mismatch that leaves a popup on screen forever. That one is
+  independent of caching and stands.
 
 ### 3.3 What each frontend does
 
@@ -140,13 +160,22 @@ M-x buffer.sa    [buffer.save — Write the buffer to its file]
   the bump.
 - **Only the selected candidate**, as today. This is a formatting
   change to an existing suffix, not a new surface.
-- **Clipping is explicit**: the suffix is already written against
-  `max = term_size.cols` with a running `written` count. The **name
-  must survive clipping and the description is what gets truncated** —
-  a row that clips to `[buffer.sa…]` would be strictly worse than
-  today. If the terminal is too narrow for `name — ` plus one
-  character of description, **the description is dropped entirely**
-  rather than shown as an ellipsis stub.
+- **Clipping, in three ordered steps.** The suffix is already written
+  against `max = term_size.cols` with a running `written` count, and
+  the prompt plus typed input consume that budget first — so the
+  remaining width can be **too small even for the bare name**.
+  Revision 2 said "the name must survive", which is not achievable at
+  arbitrary widths and would have forced a partial name. The rule:
+
+  1. **If the remaining suffix width cannot fit the WHOLE name, omit
+     the suffix entirely.** Never emit a partial name — `[buffer.sa…]`
+     is worse than nothing, because it reads as a different command.
+  2. **Only once the whole name fits** is a description attempted.
+  3. **If the description does not fit whole, drop the description**,
+     leaving today's `[name]`. No ellipsis stub.
+
+  So the guarantee is *"never a partial name"*, which is achievable,
+  rather than *"the name always survives"*, which is not.
 - **The `ui.minibuffer.candidate` face already exists** and continues
   to cover the suffix.
 
@@ -255,9 +284,22 @@ the temptation arrives with the feature.
   observing "no error".
 - **A v23 peer receives `MinibufferPromptRows` and NOT the legacy
   variant** — the double-render guard.
-- **A round-trip encode/decode of the frozen `MinibufferPrompt`**
-  pins its shape, so a later field addition to it fails a test rather
-  than silently breaking v12–v22.
+- **LITERAL POSTCARD BYTE FIXTURES for the legacy variant**, open and
+  clear: `assert_eq!(encoded, LEGACY_BYTES)` against a constant.
+
+  **Revision 2 proposed a round-trip and that freezes nothing.** A
+  round-trip encodes and decodes with the *same* types, so adding a
+  field to `MinibufferPrompt` leaves it passing — both sides simply
+  learn the new shape, while every v12–v22 peer in the field breaks.
+  The existing `minibuffer_prompt_round_trips_through_postcard`
+  (`src/protocol.rs:2363`) is exactly that kind of test, and **there
+  are no literal byte fixtures anywhere in the protocol tests today** —
+  checked, not assumed.
+
+  Only comparing against bytes captured *now* can fail when the
+  encoding changes. Two fixtures: an open prompt with candidates and a
+  selection, and a cleared band — the two shapes the existing semantic
+  test already covers, so the corpus is not a new judgement call.
 - **The cache key is per variant**: a session that opens for a v23 peer
   and a later one for a v22 peer are not suppressed as duplicates of
   each other (§3.2).
@@ -265,9 +307,12 @@ the temptation arrives with the feature.
   its own family, witnessed by the popup actually clearing.
 - **The TUI renders `name — description` for the selected candidate**
   (§3.4), from the local registry, with **no wire involvement**.
-- **TUI clipping preserves the NAME and drops the description** at
-  narrow widths — witnessed at a width where both cannot fit, because
-  a clipped name is worse than today's bare name.
+- **TUI clipping is witnessed at THREE widths** (§3.4): wide enough
+  for name + description; wide enough for the name only (description
+  dropped, `[name]` as today); and **too narrow for even the whole
+  name — the suffix vanishes entirely**. The last is the case revision
+  2's rule could not express, and the assertion is that no *prefix* of
+  a name is ever emitted.
 - **A source with no detail renders exactly as before** — the
   file-path prompt is the witness (Q#D2-2).
 - **Typed-but-unmatched input is still accepted** (Q#D2-5) — the
