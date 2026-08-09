@@ -265,7 +265,12 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
-## Git integration Stage 1 — IMPLEMENTED, gates green, PR not opened
+## Git integration Stage 1 — PR #227 OPEN
+
+**PR #227** — https://github.com/levineuwirth/pmacs/pull/227. Opened
+2026-08-09 at `4002734`, after the framing was approved at revision 5
+and the full gate suite went green. Normal review; no merge
+authorization.
 
 **Written with the lane's first commit, before the PR exists** — the
 standing correction from #171 and #215. This session it was missed on
