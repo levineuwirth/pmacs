@@ -265,7 +265,29 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
-## Discovery Stage 2 — IMPLEMENTED, no PR yet
+## Discovery Stage 2 — PR #228 OPEN, **MERGE-BLOCKED**
+
+**PR #228** — https://github.com/levineuwirth/pmacs/pull/228. Opened
+2026-08-09 at `2d298dd`. **Open for review, not for merge.**
+
+**The block is a gate-integrity problem, not backlog hygiene.** This
+lane's gate is `scripts/gate --protocol`, which promises the CRDT
+workspace sweep. That sweep's documented precondition is
+`cargo build --workspace --no-default-features --features luajit,crdt`
+(handoff §5), and **the script does not run it** — confirmed by reading
+its plan emitter. On a fresh per-worktree target directory the sweep
+fails on twelve `gpu_invocation_acceptance` tests missing the
+`pmacs-gpu` binary, so a `--protocol` result can be decided by the
+state of the build directory rather than by the diff.
+
+Latent until #225 gave each worktree its own target dir — a shared one
+usually already had `pmacs-gpu` built, satisfying the precondition by
+accident. It surfaced on this branch's first gate run.
+
+**Unblocking requires both:** the `scripts/gate` repair, in its own
+narrow framing and its own PR (explicitly **not** folded into this
+feature branch), and then a **fresh-target rerun of this branch's
+protocol gate** under the repaired script.
 
 **Written with the lane's first commit**, per the standing correction
 from #171 and #215.
