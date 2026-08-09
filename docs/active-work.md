@@ -275,7 +275,7 @@ from #171 and #215.
 authoritative tip** — the ref, not a SHA. Recover with
 `git fetch githubsucks && git checkout gate-protocol-build`.
 
-- **Framing `docs/gate-protocol-build-framing.md`, revision 2**, in
+- **Framing `docs/gate-protocol-build-framing.md`, revision 3**, in
   review. Narrow by design: one missing step in one script, plus the
   boundary question that let it go missing. No `src/`, no protocol, no
   feature work.
@@ -298,8 +298,16 @@ authoritative tip** — the ref, not a SHA. Recover with
 - **The durable half is a boundary question.** `scripts/gate`'s header
   names handoff **§3** as the owner of its reasoning, and this
   precondition lives in **§5** — a coherent cause for the omission, not
-  mere oversight. Q#GR-3 proposes §3 gains it, §5 keeps the incident,
-  and the script cites both.
+  mere oversight.
+
+  **Resolved in framing revision 2: §3 becomes the SOLE normative home,
+  §5 keeps the incident and its signature as history, and the script's
+  header keeps citing §3 ALONE.** Revision 1 proposed citing both,
+  which splits one executable contract across two homes and weakens the
+  script's only clean boundary at the same time as Q#GR-4 declines to
+  build any automated check for prose drift. This entry recorded that
+  superseded decision until now; a recovering machine reading the stale
+  version would have rebuilt revision 1's wrong boundary.
 - **Q#GR-1 must be settled by OBSERVATION before implementation** —
   whether the default sweep needs the binary too. The entire defect is
   a precondition nobody checked; establishing its replacement by

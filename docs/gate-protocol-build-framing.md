@@ -1,7 +1,17 @@
 # `scripts/gate --protocol` — the build its sweep depends on
 
-**Status: framing pass, revision 2. Pre-implementation. Awaiting
+**Status: framing pass, revision 3. Pre-implementation. Awaiting
 approval.**
+
+**Revision 3 fixes a witness that could not fail.** Revision 2's
+`--self-test` plan put the failing step **last**, so an aborting runner
+and a continuing one produce identical output — the witness for
+Q#GR-2's "the suite keeps going" policy would have passed on a runner
+doing the opposite. A passing **sentinel after** the failure, asserted
+to have written its log, is what separates them. §7 also now pins the
+**exact** build command rather than only the step's name and position,
+since a `build-crdt` running plain `cargo build` would leave the gate
+just as unsound while looking repaired.
 
 **Revision 2 takes three review findings.** The normative requirement
 goes **entirely** into handoff §3 rather than being split across §3 and
@@ -201,10 +211,20 @@ parse time. Reintroducing it one lane later, in the tool whose purpose
 is to be trustworthy, is not a trade worth making.
 
 *My vote: **a `--self-test` mode running a HARDCODED synthetic plan***
-— two lines, `true` and `false`, with the failing one named
-`build-crdt`. It asserts what actually needs asserting: the runner
-prints the failing gate's name, lists it under `FAILED:`, writes its
-log where it says it does, and exits non-zero.
+— **three** lines: a passing step, a failing one named `build-crdt`,
+and **a passing SENTINEL after it**.
+
+**The third line is not padding, and revision 2's two-line plan was
+broken without it.** With the failure last, a runner that **aborts** on
+failure and one that **continues** produce identical output, so the
+witness passes either way — and Q#GR-2's whole answer is that the suite
+keeps going. A sentinel *after* the failing step, asserted to have run
+and written its log, is the only thing that distinguishes them.
+
+So it asserts: the runner names the failing gate, lists it under
+`FAILED:`, writes its log where it says it does, exits non-zero, **and
+the sentinel after the failure has its own log** — which is Q#GR-2's
+policy made observable rather than declared.
 
 - **No injection.** The synthetic plan is a literal inside the script;
   nothing external supplies a command.
@@ -230,8 +250,14 @@ named so it is not mistaken for an oversight.
 ## 7. Verification
 
 - **`--print-plan --protocol` emits `build-crdt` immediately before
-  `sweep-crdt`.** Order asserted, not just presence: a build after the
-  sweep it feeds is the same defect with an extra line.
+  `sweep-crdt`, carrying the EXACT command.** All three asserted —
+  presence, position, and the literal
+  `cargo build --workspace --no-default-features --features luajit,crdt`.
+  Name and position alone would pass on a step that builds the wrong
+  feature set, which is the failure this lane is fixing: the crdt sweep
+  needs *those* features, and a `build-crdt` that ran plain
+  `cargo build` would leave the gate exactly as unsound while looking
+  repaired.
 - **`--print-plan` WITHOUT `--protocol` does not emit it** (subject to
   Q#GR-1 — if the default sweep turns out to need the binary too, this
   assertion inverts and §4 changes with it).
@@ -243,6 +269,12 @@ named so it is not mistaken for an oversight.
   prints `build-crdt` as the failing step, lists it under `FAILED:`,
   and writes the log path it claims. This is the criterion revision 1
   stated with no way to observe it.
+- **The suite CONTINUES past a failed gate** (Q#GR-2) — the sentinel
+  step after `build-crdt` in the synthetic plan has its own log.
+  **Revision 2's two-line plan could not assert this**: with the
+  failure last, an aborting runner and a continuing one are
+  indistinguishable, so the witness would have passed on a runner that
+  does the opposite of the stated policy.
 - **The existing 15 `tests/gate_script_acceptance.rs` tests still
   pass**, and the new assertions join them on the **no-gates paths**
   (`--print-plan` runs nothing), keeping the suite cheap.
