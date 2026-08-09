@@ -1,7 +1,24 @@
 # A destination capture any async continuation can use
 
-**Status: framing pass, revision 5. Pre-implementation. Awaiting
-approval.**
+**Status: revision 6. APPROVED and IMPLEMENTED at `0efc8c0`; revision 6
+carries a correctness blocker found in review of that implementation
+and is NOT yet implemented.**
+
+*(Revisions 2–5 said "Pre-implementation. Awaiting approval" while the
+ledger recorded the lane as approved and implemented. Same
+contradiction class this document keeps correcting elsewhere, left
+standing in its own header.)*
+
+**Revision 6 fixes an UNSOUND matrix, not a preference.** Q#DC-2 gave
+the panel profile only check 1, on the claim that a panel result never
+touches a document window. **Panel placement falls back to an ordinary
+document window** when the frontend is not panel-capable or its side
+slot is dedicated — so a `"panel"` commit could replace a *newer*
+document while skipping every stale-intent guard. Reproduced in review.
+The relaxation is now conditional on the placement really being a
+panel. Revision 6 also closes an invalid-UTF-8 hole in the profile
+diagnostic — the same reachability class as revision 5's, one layer
+down.
 
 **Revision 5 fixes a binding-level contradiction in revision 4's own
 API spec.** It required `profile: Option<String>` *and* a pointed error
@@ -240,10 +257,44 @@ replacement quietly loses its guarantees.
 | 3 | Window still shows the captured buffer (Q#JR14c stale intent) | **required** | not applicable |
 | 4 | Window is not dedicated (Q#JR14f) | **required** | not applicable |
 
-**Check 1 is the entire panel profile**, and that is the honest reading
-of what a panel continuation actually depends on: the frontend it was
-launched from still exists. Everything else in the capture is document
-state the panel never touches.
+**Check 1 is the entire panel profile ONLY WHEN THE PLACEMENT REALLY IS
+A PANEL — revision 5's matrix was unsound, and this is the correction.**
+
+The matrix rested on "the panel never touches the captured window's
+buffer". **That is false when panel placement falls back.**
+`editor_core.rs:4138-4148` says so in its own comment: *"Reaching
+`Ordinary` while a side was REQUESTED means the request fell back (not
+panel-capable, or the one slot is dedicated elsewhere)"* — and the
+result is then installed into an ordinary **document** window. So a
+`"panel"` commit on a non-panel-capable frontend replaces a document
+view while skipping every check that exists to stop it replacing a
+*newer* one. That reintroduces exactly the stale-intent failure the
+API was built to prevent, which makes it a correctness defect and not
+a strictness preference.
+
+**The rule, restated:** the panel profile's relaxation is conditional
+on the placement actually being a panel. Whenever placement **can**
+fall back to a document window, the panel profile runs the **full
+document preflight**.
+
+**Both fallback causes are predictable at preflight**, which is what
+makes this implementable rather than a race:
+
+1. `view.panel_capable` is false — a property of the frontend.
+2. The frontend's single side slot is dedicated elsewhere — readable
+   from core state.
+
+And nothing can change between preflight and placement: `commit_to`
+runs its body synchronously inside a scope that **refuses `await`**
+(`async.lua:87-90`), so the prediction cannot go stale under the
+commit it guards.
+
+**What is NOT the fix: refusing a panel commit that would fall back.**
+Falling back to an ordinary window is existing, deliberate behaviour
+for a frontend without panel capability; refusing would turn a
+graceful degradation into an error and regress consumers that work
+today. The panel profile relaxes checks; it does not get to change
+where things land.
 
 **Consequence for the capture, which follows and should not be
 discovered later:** if the panel profile needs only the frontend, then
@@ -405,8 +456,24 @@ incidental: no arguments is what keeps capture profile-blind.
   a stale-buffer refusal. Asserting merely that it does not error would
   pass on a call silently downgraded to the panel profile, which is the
   regression that would quietly void Journey Stage 1a's guarantees.
+- **A `"panel"` commit that FALLS BACK to a document window runs the
+  document preflight**, witnessed for **both** causes separately —
+  a non-panel-capable frontend, and a dedicated side slot. Each asserts
+  the stale-intent refusal fires: capture A, make B newer, commit
+  `"panel"`, and observe the refusal rather than B being replaced.
+  This is the defect revision 5's matrix admitted.
+- **A `"panel"` commit that really lands in the panel still skips
+  checks 2–4** — otherwise the fix has quietly collapsed the two
+  profiles into one and the parameterization buys nothing.
 - **An unrecognized profile string is REFUSED**, with a message naming
   the accepted values — not silently treated as `"document"`.
+- **An invalid-UTF-8 profile is refused by that SAME message.** Lua
+  strings are byte strings, so a `string.char(255)` profile reaches
+  `to_str()` and produces mlua's generic conversion error *before*
+  the documented message is ever constructed — the same reachability
+  class as the `Option<String>` defect, one layer deeper. Compare
+  bytes, or map the conversion failure onto the message; asserted on
+  content, in the bad-profile matrix beside the number and table rows.
 - **A non-string profile (a number, a table) is refused by that SAME
   message**, asserted **on its content**, not merely that an error
   occurred. This is the bullet that fails if the argument is ever

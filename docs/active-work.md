@@ -275,7 +275,7 @@ from #171 and #215.
 authoritative tip** — the ref, not a SHA. Recover with
 `git fetch githubsucks && git checkout destination-capture`.
 
-- **Framing `docs/destination-capture-framing.md`, revision 5**,
+- **Framing `docs/destination-capture-framing.md`, revision 6**,
   APPROVED after four review rounds.
 - **Implemented in two commits.** `779bb02` is the mechanism
   (`pmacs.window.capture_destination()`, the `ViewDestination` rename,
