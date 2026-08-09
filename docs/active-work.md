@@ -265,30 +265,46 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
-## Destination capture (Q#JR14 generalization) — revision 7 IMPLEMENTED, gate green, no PR yet
+## Destination capture (Q#JR14 generalization) — revision 8 OPEN; the shipped code implements the REJECTED revision 7
 
-**The blocker review re-opened this lane for is CLOSED.** The mechanism
-landed at `0efc8c0` with 8 pins green; review of that implementation
-found a correctness blocker, framing revisions 6 and 7 carried it, and
-revision 7's design is implemented in the commit named below with 12
-pins green. No PR yet — the lane was told not to open one.
+**DO NOT PREPARE A PR, AND DO NOT READ THE SHIPPED DESIGN AS CORRECT.**
+The mechanism landed at `0efc8c0`; review found a correctness blocker;
+`ca72461` implements **revision 7**, which review then **also
+rejected**. Framing **revision 8** is the current design and is **not
+implemented**.
 
-**The blocker was:** the panel profile skipped checks 2–4 on the claim
-that a panel result never touches a document window. **Panel placement
-falls back to an ordinary document window** when the frontend is not
-panel-capable or its side slot is dedicated
-(`src/editor_core.rs`, `apply_placement`), so a `"panel"` commit could
-replace a **newer** document with every stale-intent guard skipped.
-Reproduced in review.
+**The original blocker:** the panel profile skipped checks 2–4 on the
+claim that a panel result never touches a document window. **Panel
+placement falls back to an ordinary document window** when the frontend
+is not panel-capable or its side slot is dedicated, so a `"panel"`
+commit could replace a **newer** document with every stale-intent guard
+skipped. Reproduced in review.
 
-**Revision 6's fix was itself unsound and revision 7 replaced it, which
-is the part most worth not re-learning.** Revision 6 predicted the
-fallback at preflight, arguing the body cannot `await`. That stops
-concurrent interleaving, not the body: arbitrary synchronous Lua can
-dedicate the side slot *inside the callback* and cause the fallback the
-preflight just ruled out. **No preflight snapshot can carry this
-invariant.** Enforcement is therefore at the **placement boundary**, and
-§7's inside-the-body test is what no preflight-snapshot design passes.
+**Three designs, two rejected — the sequence is the part worth not
+re-learning:**
+
+1. **Revision 6 — predict at preflight.** Rejected: the `await` refusal
+   stops concurrent interleaving, not the body, which is arbitrary
+   synchronous Lua and can create the fallback itself.
+2. **Revision 7 — enforce at the placement boundary.** Implemented at
+   `ca72461`, then rejected: `docs/agent-handoff.md:748` requires
+   `commit_to` to preflight **before** the callback, because
+   "validating at display time is four mutations too late". A body has
+   already created buffers, handles and paint by then, so a
+   placement-time refusal is a partial commit with an error return.
+3. **Revision 8 — keep the preflight, REFUSE the scope-invalidating
+   mutation.** Current design. Same shape as `Handle:await` being
+   refused inside a commit scope: the fallback never comes into
+   existence, and refusal stays mutation-free on `(false, reason)`.
+
+**The enumeration is the load-bearing part, and it is NOT complete.**
+Dedication is reachable by at least two routes — `set_params`, and
+`display(buf, { side = …, dedicated = true })`, which writes
+`request.dedicated` into the side window (`src/editor_core.rs:4535`).
+The second was found in review *after* the first was specified, which
+is the evidence that guarding one named call site is not a design.
+**Every discovered route must be recorded here and carry its own
+acceptance row.**
 
 **Also closed:** an invalid-UTF-8 profile (`string.char(255)`) reached
 `to_str()` and surfaced mlua's generic conversion error instead of the

@@ -326,12 +326,26 @@ than aspirational:**
 - `panel_capable` has **no Lua binding at all** — checked across
   `src/lua_bindings/`. A body cannot make a frontend panel-incapable.
 
-**The implementation must ENUMERATE the body-reachable transitions
-rather than trust that list**, and report the enumeration — closing the
-side window, or any other route to "no usable side slot", counts and I
-have not proven the two above are exhaustive. This is the same
-discipline `gate-protocol-build` applied to Q#GR-1: the fact the design
-rests on gets observed.
+**AT LEAST TWO ROUTES REACH DEDICATION, and the second was found in
+review after the first was specified — which is the evidence that
+guarding one named call site is not a design:**
+
+1. **`set_params`** — the writable-field path (`window_panel.rs:888`).
+2. **`display(buf, { side = …, dedicated = true })`** — writes
+   `request.dedicated` straight into the side window
+   (`editor_core.rs:4535`). A body can take this route, then request a
+   second panel buffer and cause the fallback. **An implementation
+   guarding only route 1 passes revision 8's test while keeping the
+   original defect.**
+
+**The implementation must ENUMERATE every body-reachable transition,
+record each one here, and give each reachable route its own acceptance
+row.** Closing the side window, or any other path to "no usable side
+slot", counts. The two above are what review has found so far and are
+**not** asserted to be exhaustive — a third would not be surprising,
+and finding it is part of the work rather than a later review's job.
+This is the discipline `gate-protocol-build` applied to Q#GR-1: the
+fact the design rests on gets observed, not assumed.
 
 **If the enumeration turns out to be open-ended**, the fallback is to
 **collapse the two profiles** — run all four checks always, losing the
@@ -516,7 +530,10 @@ incidental: no arguments is what keeps capture profile-blind.
   in its own test: the callback dedicates the side slot **mid-commit**.
   Three assertions, and the second and third are the ones that matter:
   the dedication call itself is **refused**; the side slot is **still
-  undedicated afterwards**; and no partial result was installed. The
+  undedicated afterwards**; and no partial result was installed.
+  **One row per route** (§3): `set_params`, and the
+  `display{side, dedicated = true}` option path. A single row against
+  one route is what would let the other keep the defect. The
   two bullets above cannot catch this — both establish their fallback
   state *before* `commit_to` is entered, so a preflight-snapshot design
   passes them.
