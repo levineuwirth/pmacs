@@ -1394,6 +1394,132 @@ fn g6_21_a_superseded_root_lookup_does_not_spawn_its_status() {
     );
 }
 
+/// Two `d` requests in flight: the **newer** one wins, even when the
+/// older one completes **last**.
+///
+/// `*git-diff*` is a singleton buffer, so a diff plan that finishes
+/// after a newer one would otherwise overwrite it — the newest
+/// invocation losing to the slowest subprocess, which is exactly the
+/// defect the status channel was fixed for. The diff channel now
+/// reserves its own ticket at the keypress and discards a superseded
+/// completion **before any effect**.
+///
+/// Two halves, and both are needed:
+///
+/// * the **real** half presses `d` twice with nothing pumped between,
+///   so two plans are genuinely in flight and each really did reserve
+///   its own ticket at the command;
+/// * the **driven** half then completes the OLDER request, after the
+///   newer one has already rendered. That ordering is the whole
+///   contract and no arrangement of real subprocess timing can produce
+///   it on demand — both diffs take milliseconds, and the first one
+///   spawned normally finishes first, which is the order that passes on
+///   the broken code. Same reason `g6_17` and `g6_21` drive their own
+///   completions.
+///
+/// The positive control at the end is what makes the discard
+/// attributable to the ticket rather than to the payload.
+#[test]
+fn g6_23_a_superseded_diff_does_not_replace_the_newer_one() {
+    let (_dir, root) = tempdir();
+    mixed_repo(&root);
+    let mut s = editor();
+    open_panel(&mut s, &root, "staged.txt");
+
+    // Request A, then request B, with no frame pumped between them. `d`
+    // renders into the DOCUMENT window only at completion, so the panel
+    // is still focused for the second press.
+    let status_gen_before: i64 = eval(&s, "return pmacs.git._generation()");
+    seat_on(&mut s, "staged.txt");
+    press(&mut s, KeyCode::Char('d'));
+    let gen_a: i64 = eval(&s, "return pmacs.git._diff_generation()");
+    seat_on(&mut s, "unstaged.txt");
+    press(&mut s, KeyCode::Char('d'));
+    let gen_b: i64 = eval(&s, "return pmacs.git._diff_generation()");
+    assert_eq!(
+        gen_b,
+        gen_a + 1,
+        "premise: each `d` reserves its own ticket at the keypress"
+    );
+    // …and the diff channel is its OWN: two `d` presses must not have
+    // touched the status channel, which a single module-wide counter
+    // would have done — making `d` cancel an in-flight `g`.
+    let status_gen_after: i64 = eval(&s, "return pmacs.git._generation()");
+    assert_eq!(
+        status_gen_before, status_gen_after,
+        "a diff must not consume the status channel's ticket"
+    );
+
+    assert!(
+        pump_until(&mut s, 15_000, |s| diff_text(s).contains("+worktree edit")),
+        "the newest request must render; diff was:\n{}\nstatus: {:?}",
+        diff_text(&s),
+        status(&s)
+    );
+    let settled = diff_text(&s);
+    assert!(
+        settled.contains("git diff --- unstaged.txt"),
+        "…and it is the row `d` was last pressed on: {settled}"
+    );
+
+    // The older request finally answers. It must change nothing.
+    let stale = format!(
+        "pmacs.git._deliver_diff(\n\
+           {{ generation = {gen_a}, row = {{ path = 'staged.txt' }},\n\
+             plan = {{ header = 'against HEAD', steps = {{}} }},\n\
+             root = '/', pieces = {{}}, index = 0 }},\n\
+           {{}},\n\
+           {{ ok = true, code = 0, stdout = 'STALE-DIFF-SENTINEL\\n', stderr = '' }})"
+    );
+    exec(&s, &stale);
+    assert_eq!(
+        diff_text(&s),
+        settled,
+        "a superseded diff must not replace the newer one"
+    );
+
+    // …and it must not reach the status band either, which is the half a
+    // buffer-only check would miss.
+    exec(&s, "pmacs.editor.set_status('')");
+    exec(
+        &s,
+        &format!(
+            "pmacs.git._deliver_diff(\n\
+               {{ generation = {gen_a}, row = {{ path = 'staged.txt' }},\n\
+                 plan = {{ header = 'against HEAD', steps = {{}} }},\n\
+                 root = '/', pieces = {{}}, index = 0 }},\n\
+               {{}},\n\
+               {{ ok = true, code = 128, stdout = '',\n\
+                 stderr = 'fatal: STALE-FAILURE' }})"
+        ),
+    );
+    assert_eq!(
+        status(&s),
+        "",
+        "a superseded FAILURE is as wrong as a superseded patch"
+    );
+    assert_eq!(
+        diff_text(&s),
+        settled,
+        "and it wrote no failure body either"
+    );
+
+    // The positive control: the same delivery at the CURRENT ticket does
+    // land, so the two discards above were about the ticket.
+    exec(
+        &s,
+        &stale.replace(
+            &format!("generation = {gen_a}"),
+            &format!("generation = {gen_b}"),
+        ),
+    );
+    let now = diff_text(&s);
+    assert!(
+        now.contains("STALE-DIFF-SENTINEL"),
+        "the current ticket must be delivered: {now}"
+    );
+}
+
 /// Selection is re-seated **by the completion handler**, across a
 /// refresh that reorders rows.
 ///

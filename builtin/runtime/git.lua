@@ -459,6 +459,51 @@ function pmacs.git.parse_status(text)
 end
 
 -- ---------------------------------------------------------------------
+-- Request channels: "the newest INVOCATION wins"
+-- ---------------------------------------------------------------------
+--
+-- EVERY defect review found on this module was one shape: module-level
+-- mutable state read or written at CONTINUATION time without an
+-- invocation-time ticket. So the rule gets one implementation instead of
+-- a bespoke counter per call site.
+--
+-- A channel hands out a ticket when the user ASKS for something and
+-- answers "is this still the request in force?" when a subprocess
+-- finally replies. A continuation holding a stale ticket must discard
+-- BEFORE ANY EFFECT --- no spawn, no shared-state write, and no status
+-- message either, since a message from a replaced invocation is as wrong
+-- as a panel from one.
+--
+-- There are TWO channels, and that is deliberate rather than an
+-- oversight: a single module-wide counter would make pressing `d` cancel
+-- an in-flight `g`, and vice versa. The status panel and the diff view
+-- are independent things a user can ask for, so each gets its own "newest
+-- wins" ordering. What is shared is the MECHANISM, not the counter.
+--
+-- A channel spans a whole request, not one process: a status open is
+-- `rev-parse` then `status`, and a diff is one or two `git diff` runs.
+-- Every stage of one request carries the ticket reserved at the command.
+local function new_channel()
+  local ch = { current = 0 }
+  --- Claim the newest ticket, and return it. Called at the point a user
+  --- ASKS for something, never at the point some subprocess answers ---
+  --- minting on arrival makes the SLOWEST subprocess win instead of the
+  --- newest invocation, which is exactly the bug this exists to stop.
+  function ch.reserve()
+    ch.current = ch.current + 1
+    return ch.current
+  end
+  --- True while `ticket` is still the request in force.
+  function ch.is_current(ticket)
+    return ticket == ch.current
+  end
+  return ch
+end
+
+local status_requests = new_channel()
+local diff_requests = new_channel()
+
+-- ---------------------------------------------------------------------
 -- Panel state
 -- ---------------------------------------------------------------------
 
@@ -474,7 +519,6 @@ local state = {
   buffer = nil,
   diff_buffer = nil,
   failure = nil,
-  generation = 0,
 }
 
 local function status_line_text(row)
@@ -590,14 +634,20 @@ local function open_status_panel(rows)
   state.buffer = pmacs.window.buffer()
 end
 
---- The refresh generation currently in force.
+--- The status-refresh ticket currently in force.
 ---
 --- Exposed alongside `_deliver_status` below, and for the same reason:
 --- the discard rule is about a completion arriving LATE, and a caller
 --- cannot construct a stale request without knowing what "current"
 --- means.
 function pmacs.git._generation()
-  return state.generation
+  return status_requests.current
+end
+
+--- The diff ticket currently in force. `_generation`'s counterpart, on
+--- the other channel; see `new_channel` for why they are two.
+function pmacs.git._diff_generation()
+  return diff_requests.current
 end
 
 --- Deliver a completed `git status`.
@@ -607,11 +657,10 @@ end
 --- real subprocess timing can guarantee.
 function pmacs.git._deliver_status(request, res)
   -- Generation (Q#G-1 item 3): a second `g` while one is in flight
-  -- bumps the generation, and the older completion DISCARDS its rows
-  -- rather than racing. It does not terminate the first process ---
-  -- reaping is `process.forget`'s job and killing git mid-read buys
-  -- nothing.
-  if request.generation ~= state.generation then return end
+  -- bumps the ticket, and the older completion DISCARDS its rows rather
+  -- than racing. It does not terminate the first process --- reaping is
+  -- `process.forget`'s job and killing git mid-read buys nothing.
+  if not status_requests.is_current(request.generation) then return end
   -- Panel lifetime (Q#G-1 item 5): if the buffer this refresh belongs
   -- to is gone, drop the result. A FIRST open carries no expectation.
   if request.expect_buffer ~= nil then
@@ -672,18 +721,6 @@ local function selected_path()
   return row and row.path or nil
 end
 
---- Claim the newest generation, and return it.
----
---- Called at the point a user ASKS for something, never at the point
---- some subprocess happens to answer. That distinction is the whole
---- rule: the generation counter exists to make the newest INVOCATION
---- win, and minting it from a completion callback instead makes the
---- slowest subprocess win.
-local function reserve_generation()
-  state.generation = state.generation + 1
-  return state.generation
-end
-
 --- Spawn `git status` under an ALREADY-RESERVED generation.
 ---
 --- The generation is a parameter rather than something minted here,
@@ -721,7 +758,7 @@ function pmacs.git._on_refresh()
   -- Reserved HERE, at the keypress, for the same reason `git.status`
   -- reserves at the command: `g` needs no root lookup, so this is
   -- already the moment of invocation.
-  start_status(state.root, state.buffer, true, reserve_generation())
+  start_status(state.root, state.buffer, true, status_requests.reserve())
   return listview_rows("(refreshing...)")
 end
 
@@ -767,7 +804,7 @@ function pmacs.git._deliver_root(request, res)
   -- it must not proceed: not to a status spawn, not to `state.root`, and
   -- not even to a status-line message. Everything below this line is an
   -- effect belonging to an invocation the user has already replaced.
-  if request.generation ~= state.generation then return end
+  if not status_requests.is_current(request.generation) then return end
 
   if not (res.ok and res.code == 0) then
     if res.spawn_error then
@@ -810,7 +847,7 @@ function pmacs.git.status()
   -- invocation that starts no work must not invalidate one that is
   -- already in flight, and an invocation that does start work must own
   -- the newest generation from that moment on.
-  local request = { generation = reserve_generation(), dir = dir }
+  local request = { generation = status_requests.reserve(), dir = dir }
   -- The root rule (Q#G-2): ask git, and let a non-zero exit BE the
   -- "not a repository" answer. `-C <dir>` with no root of our own.
   run_git("git rev-parse", nil, { "-C", dir, "rev-parse", "--show-toplevel" },
@@ -928,54 +965,77 @@ local function show_diff_buffer(title, body)
   pcall(pmacs.window.display, buf, { select = true })
 end
 
--- Run the plan's steps in order, then render.
+-- Start the request's next step, or render what the finished ones
+-- produced.
 --
--- `root` is a PARAMETER, captured at the keypress, and `state.root` is
--- deliberately not read anywhere below. An unborn `AM`/`AD` row produces
--- a TWO-STEP plan, and `state.root` is module-level mutable state that a
--- concurrent `git.status` against another repository reassigns from its
--- own root-resolution callback. Reading it per step would let one plan's
--- second step run in a different repository than its first --- with the
--- first repository's path --- so every step of one plan runs against the
--- repository the user was looking at when they pressed `d`. Same shape
--- as the generation counter: capture at the INVOCATION, never at the
--- continuation.
-local function run_diff_plan(row, plan, root)
-  local pieces = {}
-  local index = 0
-  local step_done
-  local function next_step()
-    index = index + 1
-    local step = plan.steps[index]
-    if not step then
-      local body = table.concat(pieces, "\n")
-      if body:gsub("%s", "") == "" then
-        body = "(no differences)"
-      end
-      show_diff_buffer(string.format("git diff --- %s\n%s",
-        pmacs.git.display_path(row.path), plan.header), body)
-      return
+-- Everything this needs lives on `request`, captured at the keypress:
+-- the diff ticket, the row, the plan, and the ROOT. `state.root` is
+-- deliberately not read anywhere in here. An unborn `AM`/`AD` row
+-- produces a TWO-STEP plan, and `state.root` is module-level mutable
+-- state that a concurrent `git.status` against another repository
+-- reassigns from its own root-resolution callback --- so reading it per
+-- step would let one plan's second step run in a different repository
+-- than its first, carrying the first repository's path.
+local function advance_diff(request)
+  request.index = request.index + 1
+  local step = request.plan.steps[request.index]
+  if not step then
+    local body = table.concat(request.pieces, "\n")
+    if body:gsub("%s", "") == "" then
+      body = "(no differences)"
     end
-    run_git("git diff", root, step.args, function(res) step_done(step, res) end)
+    show_diff_buffer(string.format("git diff --- %s\n%s",
+      pmacs.git.display_path(request.row.path), request.plan.header), body)
+    return
   end
-  step_done = function(step, res)
-    if not diff_step_ok(step, res) then
-      local reason = failure_reason(res)
-      show_diff_buffer(string.format("git diff --- %s",
-        pmacs.git.display_path(row.path)), reason)
-      pmacs.editor.set_status("git diff: " .. reason)
-      return
-    end
-    local text = utf8_clean(res.stdout)
-    if step.label then
-      pieces[#pieces + 1] = string.format("=== %s ===\n%s", step.label,
-        text ~= "" and text or "(no changes)\n")
-    else
-      pieces[#pieces + 1] = text
-    end
-    next_step()
+  run_git("git diff", request.root, step.args,
+    function(res) pmacs.git._deliver_diff(request, step, res) end)
+end
+
+--- Deliver a completed diff STEP for the plan in `request`.
+---
+--- Exposed for the same reason `_deliver_status` and `_deliver_root`
+--- are: the contract is about completions arriving in an order the
+--- CALLER did not choose, and no arrangement of real subprocess timing
+--- can guarantee that two `git diff` runs finish in a chosen order.
+function pmacs.git._deliver_diff(request, step, res)
+  -- Superseded by a newer `d`: discard BEFORE ANY EFFECT. `*git-diff*`
+  -- is a singleton buffer, so without this a slow first request
+  -- overwrites a fast second one --- the newest invocation loses to the
+  -- slowest subprocess, which is the same defect the status channel had.
+  --
+  -- This is the ONE place a diff plan re-enters from a continuation, so
+  -- one check covers all of it: no further spawn (`advance_diff` is
+  -- never reached), no buffer write, and no status message either, since
+  -- a status line from a replaced invocation is as wrong as a buffer
+  -- from one. The in-flight process is not terminated --- reaping is
+  -- `process.forget`'s job, exactly as on the status channel.
+  if not diff_requests.is_current(request.generation) then return end
+  if not diff_step_ok(step, res) then
+    local reason = failure_reason(res)
+    show_diff_buffer(string.format("git diff --- %s",
+      pmacs.git.display_path(request.row.path)), reason)
+    pmacs.editor.set_status("git diff: " .. reason)
+    return
   end
-  next_step()
+  local text = utf8_clean(res.stdout)
+  if step.label then
+    request.pieces[#request.pieces + 1] = string.format("=== %s ===\n%s", step.label,
+      text ~= "" and text or "(no changes)\n")
+  else
+    request.pieces[#request.pieces + 1] = text
+  end
+  advance_diff(request)
+end
+
+-- Run `plan`'s steps in order under an ALREADY-RESERVED diff ticket,
+-- then render. `generation` is a parameter for the same reason
+-- `start_status`'s is: it belongs to the keypress, not to this call.
+local function run_diff_plan(row, plan, root, generation)
+  advance_diff {
+    generation = generation, row = row, plan = plan, root = root,
+    pieces = {}, index = 0,
+  }
 end
 
 pmacs.command.define {
@@ -1005,11 +1065,13 @@ pmacs.command.define {
       pmacs.editor.set_status("git: disabled by the `git.enabled` setting")
       return
     end
-    -- The root is captured HERE, at the keypress, and threaded through
-    -- every step of the plan. `state.branch` is read here for the same
-    -- reason: both describe the repository the user is looking at right
-    -- now, and both are replaced wholesale by a `git.status` against
-    -- another repository.
-    run_diff_plan(row, diff_plan(row, (state.branch or {}).unborn == true), state.root)
+    -- Everything the plan runs on is captured HERE, at the keypress, and
+    -- threaded through every step: the ticket, reserved AFTER the early
+    -- returns above so a `d` that starts no work cannot supersede one
+    -- that is already in flight; the root; and the unborn flag. All three
+    -- describe the repository the user is looking at right now, and all
+    -- three are replaced wholesale by a `git.status` against another one.
+    run_diff_plan(row, diff_plan(row, (state.branch or {}).unborn == true),
+      state.root, diff_requests.reserve())
   end,
 }
