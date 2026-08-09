@@ -1801,7 +1801,7 @@ fn open_initial_target(
     let (buffer_id, fire) = match resolved {
         crate::editor_core::ResolvedTarget::Directory { path } => {
             let dest = editor
-                .capture_directory_destination(frontend_id, origin_window)
+                .capture_view_destination(frontend_id, origin_window)
                 .ok_or_else(|| format!("cannot open {}: no document window", path.display()))?;
             editor.dispatch_directory_open(&path, dest);
             editor.reconcile_panel_layout(frontend_id);

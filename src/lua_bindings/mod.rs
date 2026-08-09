@@ -4239,25 +4239,34 @@ fn install_path_module(lua: &Lua) -> mlua::Result<Table> {
     Ok(path)
 }
 
-/// Lua handle for a captured directory destination (Q#JR14d).
+/// Lua handle for a captured view destination (Q#JR14d).
 ///
-/// Deliberately **nonconstructible from Lua** and read-only. The same
-/// value is passed to every `path.open-directory` listener in turn: as a
-/// table, an earlier listener could mutate it and then decline,
-/// redirecting later listeners or the fallback to a window the user
-/// never asked for — and any Lua could fabricate a plausible
-/// frontend/window/buffer triple and hand it to `commit_to`. Userdata
-/// with no constructor and no setters makes both unrepresentable rather
-/// than merely discouraged.
+/// Deliberately **nonconstructible from Lua** and read-only, which the
+/// generalization to `pmacs.window.capture_destination()` preserves:
+/// capture mints one from editor state, and there is still no
+/// constructor and no setter. The same value is passed to every
+/// `path.open-directory` listener in turn: as a table, an earlier
+/// listener could mutate it and then decline, redirecting later
+/// listeners or the fallback to a window the user never asked for — and
+/// any Lua could fabricate a plausible frontend/window/buffer triple and
+/// hand it to `commit_to`. Userdata with no constructor and no setters
+/// makes both unrepresentable rather than merely discouraged.
 ///
 /// The single accessor exists because dired needs the exact window for
 /// its `display{window = …}` target; nothing needs the frontend or the
 /// captured buffer, which stay private to the preflight.
-pub(crate) struct DirectoryDestinationLua(pub(crate) crate::editor_core::DirectoryDestination);
+///
+/// `window()` returns **nil** when the capturing frontend had no
+/// document window (Q#DC-4) — such a destination is still commitable
+/// under the panel profile, so the accessor reports the absence rather
+/// than inventing an id.
+pub(crate) struct ViewDestinationLua(pub(crate) crate::editor_core::ViewDestination);
 
-impl mlua::UserData for DirectoryDestinationLua {
+impl mlua::UserData for ViewDestinationLua {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("window", |_, this, ()| Ok(this.0.window.raw()));
+        methods.add_method("window", |_, this, ()| {
+            Ok(this.0.window.map(crate::window::WindowId::raw))
+        });
     }
 }
 

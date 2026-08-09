@@ -63,6 +63,65 @@ pub(crate) fn acting_frontend(lua: &Lua, core: &SharedCore) -> FrontendId {
         .unwrap_or_else(|| core.borrow().active_frontend_key())
 }
 
+/// Which of `commit_to`'s preconditions a body actually depends on
+/// (Q#DC-2).
+///
+/// A **closed** set of two, not an open string namespace: a third
+/// profile is a decision about what a continuation may depend on, not a
+/// spelling. Chosen at `commit_to` rather than at capture, because the
+/// caller knows what it is about to do only then.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CommitProfile {
+    /// The body replaces the captured window's buffer: **all four**
+    /// preflight checks apply. This is what an omitted profile means,
+    /// so every caller written before the profile existed keeps exactly
+    /// the guarantees it was written against.
+    Document,
+    /// The body puts its result somewhere that is not the captured
+    /// document window — a bottom panel, typically. Only the "requesting
+    /// frontend still has a layout" check applies; see the preflight for
+    /// why each of the other three is *deliberately* omitted.
+    Panel,
+}
+
+/// One message for every bad profile — an unrecognized string and a
+/// non-string alike (Q#DC-5).
+///
+/// Stated once so the parser and the message cannot drift, and phrased
+/// to name the accepted values *and* the default, because a caller who
+/// gets this wrong is guessing at the vocabulary.
+const BAD_COMMIT_PROFILE: &str = "pmacs.window.commit_to: profile must be the string \"document\" \
+     or \"panel\" (omitting it, or passing nil, means \"document\")";
+
+/// Resolve the optional third argument of `commit_to`.
+///
+/// Takes a [`Value`] rather than an `Option<String>` **so this refusal
+/// is reachable**: with the narrower type mlua rejects a number or a
+/// table during argument conversion, before the closure body runs, and
+/// the caller gets a generic conversion error that names neither the
+/// accepted values nor the default. That is the same trap the `dest`
+/// argument documents at its own borrow site.
+///
+/// `Nil` and absence are the **same** answer, not two: a Lua caller
+/// threading an optional variable produces `commit_to(dest, body, nil)`,
+/// and a third behaviour there would stay invisible until someone hit
+/// it.
+fn commit_profile(value: &Value) -> mlua::Result<CommitProfile> {
+    match value {
+        Value::Nil => Ok(CommitProfile::Document),
+        Value::String(name) => match &*name.to_str()? {
+            "document" => Ok(CommitProfile::Document),
+            "panel" => Ok(CommitProfile::Panel),
+            // An unrecognized profile ERRORS rather than falling back to
+            // the document one: a fallback would silently hand a caller
+            // stricter or looser checks than it asked for, which is the
+            // failure the parameterization exists to prevent.
+            _ => Err(mlua::Error::runtime(BAD_COMMIT_PROFILE)),
+        },
+        _ => Err(mlua::Error::runtime(BAD_COMMIT_PROFILE)),
+    }
+}
+
 /// Run the panel-reconciliation transaction from a Lua-owning context
 /// (Q#BP2b).
 ///
@@ -452,7 +511,7 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
             "commit_to",
             lua.create_function(
                 move |lua,
-                      (dest, body): (mlua::Value, mlua::Function)|
+                      (dest, body, profile): (mlua::Value, mlua::Function, mlua::Value)|
                       -> mlua::Result<mlua::MultiValue> {
                     // Journey Stage 1a (Q#JR14). Preflight FIRST, then
                     // scope, then run. The ordering is the whole point:
@@ -472,7 +531,7 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
                     // rule nor how to get a real destination.
                     let dest = match &dest {
                         mlua::Value::UserData(userdata) => {
-                            userdata.borrow::<super::DirectoryDestinationLua>().ok()
+                            userdata.borrow::<super::ViewDestinationLua>().ok()
                         }
                         _ => None,
                     };
@@ -484,43 +543,74 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
                             )
                         })?
                         .0;
+                    // Q#DC-5. Resolved AFTER the destination so a caller
+                    // who got both wrong hears about the destination
+                    // first --- it is the argument that cannot be fixed
+                    // by reading this signature.
+                    let profile = commit_profile(&profile)?;
 
-                    // 1. The requesting frontend still has a layout.
                     let refusal = {
                         let core = cc.borrow();
+                        // 1. The requesting frontend still has a layout.
+                        //    Required by BOTH profiles: it is the whole
+                        //    of the panel profile (Q#DC-2), because a
+                        //    frontend that is gone can host nothing.
                         if !core.views.contains_key(&dest.frontend) {
                             Some("requesting frontend is gone".to_string())
-                        } else if !core
-                            .views
-                            .get(&dest.frontend)
-                            .is_some_and(|view| view.layout.iter_ids().contains(&dest.window))
-                        {
-                            // 2. The destination window is still live in it.
-                            Some(format!("window {} is gone", dest.window.raw()))
-                        } else if core
-                            .windows
-                            .get(&dest.window)
-                            .is_some_and(|w| w.buffer_id != dest.buffer)
-                        {
-                            // 3. Stale intent (Q#JR14c): the user
-                            //    replaced the buffer while the work was
-                            //    in flight. Their action is newer
-                            //    information than the request, so the
-                            //    request loses.
-                            Some(format!(
-                                "window {} now shows another buffer",
-                                dest.window.raw()
-                            ))
-                        } else if !core.window_accepts_buffer(dest.window, None) {
-                            // 4. Replaceability (Q#JR14f). `None`
-                            //    because the replacement does not exist
-                            //    yet — passing the captured buffer would
-                            //    approve a window dedicated to *it*, and
-                            //    the handler's different buffer would be
-                            //    refused later, after mutating.
-                            Some(format!("window {} is dedicated", dest.window.raw()))
-                        } else {
+                        } else if profile == CommitProfile::Panel {
+                            // 2, 3 and 4 are DELIBERATELY OMITTED here,
+                            // not overlooked (Q#DC-2). A panel result
+                            // does not occupy the captured document
+                            // window, does not replace its buffer, and
+                            // does not need it to exist --- so each of
+                            // those checks would refuse for a reason
+                            // unrelated to what the continuation does,
+                            // and a refusal a user cannot explain is how
+                            // a mechanism gets worked around. Every one
+                            // of the three is pinned as NOT refusing
+                            // under this profile.
                             None
+                        } else if let Some(window) = dest.window {
+                            if !core
+                                .views
+                                .get(&dest.frontend)
+                                .is_some_and(|view| view.layout.iter_ids().contains(&window))
+                            {
+                                // 2. The destination window is still live in it.
+                                Some(format!("window {} is gone", window.raw()))
+                            } else if core
+                                .windows
+                                .get(&window)
+                                .is_some_and(|w| Some(w.buffer_id) != dest.buffer)
+                            {
+                                // 3. Stale intent (Q#JR14c): the user
+                                //    replaced the buffer while the work was
+                                //    in flight. Their action is newer
+                                //    information than the request, so the
+                                //    request loses.
+                                Some(format!("window {} now shows another buffer", window.raw()))
+                            } else if !core.window_accepts_buffer(window, None) {
+                                // 4. Replaceability (Q#JR14f). `None`
+                                //    because the replacement does not exist
+                                //    yet — passing the captured buffer would
+                                //    approve a window dedicated to *it*, and
+                                //    the handler's different buffer would be
+                                //    refused later, after mutating.
+                                Some(format!("window {} is dedicated", window.raw()))
+                            } else {
+                                None
+                            }
+                        } else {
+                            // The capture found no document window
+                            // (Q#DC-4). A refusal rather than a raise, so
+                            // it joins the four above as one more thing
+                            // the destination can fail to satisfy and an
+                            // adopter handles it the same way.
+                            Some(
+                                "destination has no document window (capture it from a frontend \
+                                 that has one, or commit with the \"panel\" profile)"
+                                    .to_string(),
+                            )
                         }
                     };
                     if let Some(reason) = refusal {
@@ -560,6 +650,39 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
                     Ok(out)
                 },
             )?,
+        )?;
+    }
+
+    {
+        // Q#DC-1 — the capture half, reachable from Lua at last.
+        //
+        // Journey Stage 1a built `commit_to` for the continuation
+        // boundary, but the only thing that could mint a destination was
+        // the `path.open-directory` dispatch, so every other async
+        // continuation had to resolve its target from ambient state a
+        // tick after the request --- which is a misrouting waiting for a
+        // second frontend to become active.
+        //
+        // NO ARGUMENTS, and that is load-bearing rather than
+        // minimalism. A Lua-supplied frontend id would reintroduce
+        // exactly the fabrication hole the nonconstructible userdata
+        // closes (Q#JR14d): the point of userdata is that Lua names a
+        // destination it was *given*, never one it composed.
+        //
+        // PROFILE-BLIND, likewise (Q#DC-4). Capture records what is
+        // there; what a commit depends on is declared at `commit_to`,
+        // because a caller knows what it is about to do only then.
+        // Making capture profile-aware would force it to know at capture
+        // time what it will do at commit time, which is the opposite of
+        // why capture exists --- freeze the truth early, decide later.
+        let cc = core.clone();
+        win.set(
+            "capture_destination",
+            lua.create_function(move |lua, ()| {
+                let fid = acting_frontend(lua, &cc);
+                let dest = cc.borrow().capture_view_destination(fid);
+                lua.create_userdata(super::ViewDestinationLua(dest))
+            })?,
         )?;
     }
 

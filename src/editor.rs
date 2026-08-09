@@ -1219,22 +1219,32 @@ impl EditorState {
     }
 
     /// Capture the destination a directory open must commit to
-    /// (Q#JR14), or `None` when `frontend` has no document window.
+    /// (Q#JR14), or `None` when `window` is gone.
     ///
     /// Synchronous by necessity: the listing settles a tick or more
     /// later, and by then the ambient frontend, selected window, and
     /// active buffer may all name something else.
-    pub(crate) fn capture_directory_destination(
+    ///
+    /// Takes the window **explicitly**, unlike
+    /// [`crate::editor_core::EditorCore::capture_view_destination`],
+    /// which reads the ambient one. Both directory callers already hold
+    /// the exact window the open was resolved against — the daemon's is
+    /// read before `resolve_target_buffer` runs (Q#BP11b) — and
+    /// recapturing it from ambient state here would discard that.
+    /// A directory open therefore always yields a full document pair,
+    /// which is why this keeps returning `Option` rather than the total
+    /// capture's `ViewDestination`.
+    pub(crate) fn capture_view_destination(
         &self,
         frontend: crate::protocol::FrontendId,
         window: crate::window::WindowId,
-    ) -> Option<crate::editor_core::DirectoryDestination> {
+    ) -> Option<crate::editor_core::ViewDestination> {
         let core = self.core.borrow();
         let buffer = core.windows.get(&window)?.buffer_id;
-        Some(crate::editor_core::DirectoryDestination {
+        Some(crate::editor_core::ViewDestination {
             frontend,
-            window,
-            buffer,
+            window: Some(window),
+            buffer: Some(buffer),
         })
     }
 
@@ -1258,7 +1268,7 @@ impl EditorState {
             .borrow()
             .primary_document_window(crate::protocol::FrontendId::LOCAL);
         let dest = window.and_then(|window| {
-            self.capture_directory_destination(crate::protocol::FrontendId::LOCAL, window)
+            self.capture_view_destination(crate::protocol::FrontendId::LOCAL, window)
         });
         let Some(dest) = dest else {
             self.core.borrow_mut().status =
@@ -1288,13 +1298,13 @@ impl EditorState {
     pub(crate) fn dispatch_directory_open(
         &mut self,
         path: &std::path::Path,
-        dest: crate::editor_core::DirectoryDestination,
+        dest: crate::editor_core::ViewDestination,
     ) {
         let display = path.display().to_string();
         let args = {
             let lua = self.lua_host.lua();
             let destination =
-                match lua.create_userdata(crate::lua_bindings::DirectoryDestinationLua(dest)) {
+                match lua.create_userdata(crate::lua_bindings::ViewDestinationLua(dest)) {
                     Ok(userdata) => mlua::Value::UserData(userdata),
                     Err(error) => {
                         self.core.borrow_mut().status = format!("cannot open {display}: {error}");

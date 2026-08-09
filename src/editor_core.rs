@@ -130,39 +130,55 @@ pub enum ResolvedTarget {
     },
 }
 
-/// Where a directory open was requested, captured **synchronously** at
-/// resolve time (Journey Stage 1a, Q#JR14).
+/// Where an asynchronous continuation's result belongs, captured
+/// **synchronously** at request time (Journey Stage 1a, Q#JR14;
+/// generalized by `docs/destination-capture-framing.md`).
 ///
-/// The listing that satisfies a directory open is asynchronous
-/// (`pmacs.fs.read_dir` is worker-dispatched and must be awaited), so the
-/// code that finally builds and displays the listing runs a tick or more
-/// later — outside interactive dispatch, where `pmacs.window.*` acts on
-/// the *ambient* frontend by documented design (`builtin/runtime/dired.lua`).
-/// Without a captured destination, a second frontend dispatching in the
-/// meantime silently redirects the listing.
+/// The work that satisfies such a request is asynchronous (a directory
+/// listing is worker-dispatched and must be awaited; so is a `git`
+/// invocation), so the code that finally builds and displays the result
+/// runs a tick or more later — outside interactive dispatch, where
+/// `pmacs.window.*` acts on the *ambient* frontend by documented design
+/// (`builtin/runtime/dired.lua`). Without a captured destination, a
+/// second frontend dispatching in the meantime silently redirects the
+/// result.
 ///
-/// All three fields are load-bearing:
+/// The fields are load-bearing, and the document pair is **optional**
+/// (Q#DC-4) because a frontend showing only a side window can still host
+/// a panel result:
 ///
-/// * `frontend` — the scope the commit must run in.
+/// * `frontend` — the scope the commit must run in. Always present.
 /// * `window` — the exact destination; the ambient selected window is
-///   not it.
+///   not it. Absent when the frontend had no document window at capture
+///   time.
 /// * `buffer` — what that window held at capture time, so **stale
 ///   intent loses to the user** (Q#JR14c). A user who replaced the
-///   buffer while the listing was in flight is newer information than
-///   the launch argument, and must not be overwritten.
+///   buffer while the work was in flight is newer information than the
+///   launch argument, and must not be overwritten. Present exactly when
+///   `window` is.
+///
+/// The pair is set or cleared together — see
+/// [`EditorCore::capture_view_destination`], which is the only place
+/// that reads them off ambient state.
+///
+/// Which of those a commit actually requires is the **profile**, chosen
+/// at `pmacs.window.commit_to` rather than at capture (Q#DC-2/Q#DC-5):
+/// the document profile requires all of them, the panel profile requires
+/// only a live `frontend`. Capture stays profile-blind so a caller does
+/// not have to know at capture time what it will do at commit time.
 ///
 /// Exposed to Lua only as nonconstructible userdata (Q#JR14d): as a
 /// table, the *same* value is handed to every resolver listener in turn,
 /// so one could mutate it and then decline — redirecting later listeners
 /// — and any Lua could fabricate a plausible triple.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DirectoryDestination {
-    /// Frontend that requested the directory.
+pub struct ViewDestination {
+    /// Frontend that requested the work.
     pub frontend: FrontendId,
-    /// Window the listing must land in.
-    pub window: WindowId,
+    /// Window the result must land in, when there is one.
+    pub window: Option<WindowId>,
     /// Buffer that window held at capture time (stale-intent check).
-    pub buffer: BufferId,
+    pub buffer: Option<BufferId>,
 }
 
 /// A `display_buffer` request (Q#BP3).
@@ -3040,6 +3056,33 @@ impl EditorCore {
             return Some(view.active);
         }
         self.non_side_target(fid).ok()
+    }
+
+    /// Capture where `fid`'s next asynchronous result belongs (Q#JR14,
+    /// generalized by Q#DC-1/Q#DC-4).
+    ///
+    /// **Profile-blind and total**: it records what is there rather than
+    /// what a caller intends to do later, and it never fails while a
+    /// frontend id exists. A frontend with no document window yields a
+    /// destination carrying only `frontend` — enough for a panel commit,
+    /// and refused by a document commit with a reason naming the missing
+    /// window. Returning `None` here instead would push the caller back
+    /// onto ambient state, which is the misrouting the capture exists to
+    /// remove.
+    ///
+    /// The document pair is set or cleared **together**: a window whose
+    /// entry has gone yields neither half, so no consumer has to handle
+    /// a window without its captured buffer.
+    #[must_use]
+    pub fn capture_view_destination(&self, fid: FrontendId) -> ViewDestination {
+        let pair = self
+            .primary_document_window(fid)
+            .and_then(|window| Some((window, self.windows.get(&window)?.buffer_id)));
+        ViewDestination {
+            frontend: fid,
+            window: pair.map(|(window, _)| window),
+            buffer: pair.map(|(_, buffer)| buffer),
+        }
     }
 
     /// [`Self::primary_document_window`]'s buffer, falling back to the
