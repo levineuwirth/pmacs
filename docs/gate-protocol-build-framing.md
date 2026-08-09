@@ -1,7 +1,12 @@
 # `scripts/gate --protocol` — the build its sweep depends on
 
-**Status: framing pass, revision 3. Pre-implementation. Awaiting
-approval.**
+**Status: revision 4. APPROVED and IMPLEMENTED at `49bc141`; one
+regression-witness gap found in review of that implementation remains
+open (Q#GR-5).**
+
+*(Revisions 1-3 read "Pre-implementation. Awaiting approval" while the
+ledger recorded this lane as approved and implemented — the exact
+contradiction class this project keeps correcting elsewhere.)*
 
 **Revision 3 fixes a witness that could not fail.** Revision 2's
 `--self-test` plan put the failing step **last**, so an aborting runner
@@ -269,6 +274,17 @@ named so it is not mistaken for an oversight.
   prints `build-crdt` as the failing step, lists it under `FAILED:`,
   and writes the log path it claims. This is the criterion revision 1
   stated with no way to observe it.
+- **THE REAL PLAN'S `(name, command)` PAIR IS ASSERTED** — added in
+  revision 4, because the two witnesses above **do not connect to the
+  step they describe**. `--print-plan` strips names before printing, so
+  the order assertion sees only commands; `--self-test` hardcodes the
+  string `build-crdt` in its own synthetic plan. Review demonstrated
+  the gap: **renaming the real build step to `sweep-crdt` left both
+  tests passing.** The plan's emitted name and its command must be
+  asserted together, from the real emitter, so a rename cannot pass.
+  The synthetic failure/continuation test stays — it tests the runner,
+  which is a different thing — but it can no longer stand in for
+  attribution of the actual step.
 - **The suite CONTINUES past a failed gate** (Q#GR-2) — the sentinel
   step after `build-crdt` in the synthetic plan has its own log.
   **Revision 2's two-line plan could not assert this**: with the
