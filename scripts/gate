@@ -10,7 +10,7 @@
 #   scripts/gate --self-test
 #
 # Framing: docs/gate-script-framing.md (revision 4, approved), and
-# docs/gate-protocol-build-framing.md (revision 4, approved) for the
+# docs/gate-protocol-build-framing.md (revision 5, approved) for the
 # crdt build step, --self-test and --print-plan-named.
 #
 # WHY A PER-WORKTREE TARGET DIRECTORY. This machine exports one

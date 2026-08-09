@@ -265,7 +265,7 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
-## `scripts/gate --protocol` build step — IMPLEMENTED at `49bc141`, then RE-OPENED by review
+## `scripts/gate --protocol` build step — IMPLEMENTED at `49bc141`, RE-OPENED by review, witness CLOSED at `677fd25`. No PR yet
 
 **Written with the lane's first commit**, per the standing correction
 from #171 and #215.
@@ -276,23 +276,27 @@ authoritative tip** — the ref, not a SHA. Recover with
 `git fetch githubsucks && git checkout gate-protocol-build`.
 
 - **Framing `docs/gate-protocol-build-framing.md`, revision 5.** The
-  fix itself is implemented and green at `49bc141`; **the regression
-  witness is NOT, and that is an open blocker.** Narrow by design: one
-  missing step in one script, plus the boundary question that let it go
-  missing. No `src/`, no protocol, no feature work.
-- **OPEN BLOCKER — the witnesses do not reach the step they name.**
-  `--print-plan` **strips names** before printing, so the ordering
-  assertion sees only commands; `--self-test` **hardcodes**
-  `build-crdt` inside its own synthetic plan. Review demonstrated the
-  consequence: **renaming the real build step to `sweep-crdt` left both
-  tests passing.** So this lane currently ships without the regression
-  guard it was created to provide. §7 now requires **both** real
-  emitter pairs — `build-crdt` and `sweep-crdt`, name *and* exact
-  command — because the hole is symmetric and revision 4 closed only
-  half of it. The synthetic `--self-test` stays: it witnesses the
-  *runner* (failure naming, `FAILED:` list, log paths, non-zero exit,
-  and continuation via the sentinel), which is a different thing from
-  attributing the real step, and it may no longer stand in for it.
+  fix itself is implemented and green at `49bc141`; **its regression
+  witness landed separately at `677fd25`**, after review found the
+  original witness did not reach the step it named. Narrow by design:
+  one missing step in one script, plus the boundary question that let
+  it go missing. No `src/`, no protocol, no feature work.
+- **WAS THE OPEN BLOCKER — the witnesses did not reach the step they
+  name. CLOSED at `677fd25`.** `--print-plan` **strips names** before
+  printing, so the ordering assertion saw only commands; `--self-test`
+  **hardcodes** `build-crdt` inside its own synthetic plan. Review
+  demonstrated the consequence: **renaming the real build step to
+  `sweep-crdt` left both tests passing.** So the lane had shipped
+  without the regression guard it was created to provide. §7 requires
+  **both** real emitter pairs — `build-crdt` and `sweep-crdt`, name
+  *and* exact command — because the hole is symmetric and revision 4
+  closed only half of it. The synthetic `--self-test` stays: it
+  witnesses the *runner* (failure naming, `FAILED:` list, log paths,
+  non-zero exit, and continuation via the sentinel), which is a
+  different thing from attributing the real step, and it may no longer
+  stand in for it. **What closed it is the "THE WITNESS DID NOT REACH
+  THE STEP" bullet further down** — `--print-plan-named`, with all four
+  renames and drifts mutated red.
 - **The defect, as found.** `--protocol` adds the CRDT workspace sweep,
   whose documented precondition is `cargo build --workspace
   --no-default-features --features luajit,crdt` — documented in handoff
