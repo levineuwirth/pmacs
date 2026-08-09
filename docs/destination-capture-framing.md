@@ -1,7 +1,20 @@
 # A destination capture any async continuation can use
 
-**Status: framing pass, revision 1. Pre-implementation. Awaiting
+**Status: framing pass, revision 2. Pre-implementation. Awaiting
 approval.**
+
+**Revision 2 takes three review findings.** Q#DC-2's parameterization
+was **incomplete** — a panel result does not depend on the captured
+document window being live or non-dedicated either, not just on its
+buffer, so the question now carries a full **preflight matrix** with
+every omission testable. `tests/journey_acceptance.rs` joins dired as a
+named **preservation suite and stop signal**; it carries the
+`commit_to` scope, forged-userdata, preflight and restoration pins this
+lane generalizes, and Journey Stage 1a's framing treats it as a
+required gate. And **§5 (coherence impact) was missing entirely**,
+which `CLAUDE.md` and `COHERENCE.md` §25 both require of
+coherence-affecting work — this lane adds Lua API surface and
+generalizes a Journey substrate, so it qualifies twice over.
 
 **A prerequisite lane. PR #227 (git Stage 1) blocks on it**, and its
 P1a review finding is the reason this exists.
@@ -107,7 +120,48 @@ decided, and it is the substance of this lane.
   lands. A prerequisite that also converts its first consumer makes the
   two impossible to review separately.
 
-## 5. Open questions
+## 5. Coherence impact (§20)
+
+**Revision 1 omitted this section entirely, and it is required.**
+`CLAUDE.md` and `COHERENCE.md` §25 both say a framing for
+coherence-affecting work must cite the section it serves and state its
+impact — and this lane adds **new Lua API surface** and generalizes a
+Journey-substrate mechanism, which is coherence-affecting on both
+counts. Recording the impacts as neutral where they are neutral is part
+of the requirement, not a way around it.
+
+- **§16 semantic frontend — the section this serves.** The defect it
+  removes is a continuation resolving its target from *ambient* state a
+  tick after the request, which is precisely the multi-frontend
+  correctness §16 exists to protect. A capture makes "which frontend
+  asked" a value rather than a guess.
+- **§14 workbench primitives — indirect, and the honest framing is
+  *enabling*.** This does not add a primitive. It removes the reason an
+  async adopter would hand-roll frontend tracking, which is the
+  mechanism by which primitives acquire per-consumer idiosyncrasies.
+- **Journey steps touched: none directly, one PROTECTED.** The golden
+  journey does not gain a step. But Journey Stage 1a's Q#JR14 substrate
+  is what this generalizes, and §7 makes `tests/journey_acceptance.rs`
+  a preservation suite precisely so a generalization cannot erode the
+  step it came from.
+- **Interaction islands (§6): none added.** No key interception, no
+  dispatch precedence rung. `dispatch_key` is untouched.
+- **Config registry: no setting.** Where a continuation lands is a
+  correctness property, not a preference, and a toggle would offer to
+  turn correctness off.
+- **Background-work attribution (§9): NEUTRAL, and worth stating
+  precisely rather than skipping.** This lane adds no background work
+  and no new unattributable surface. It also does **not** improve §9 —
+  knowing which frontend a result belongs to is not knowing who asked
+  for it or why. That is the worker-identity lane's arc, and the two
+  should not be confused because both concern async continuations.
+- **§10 extension trust — a small positive.** The capture keeps the
+  Q#JR14d property that a destination is **nonconstructible from Lua**,
+  so generalizing the mechanism does not widen what extension code can
+  fabricate. §7 re-asserts the forged-destination refusal after the
+  rename for exactly this reason.
+
+## 6. Open questions
 
 ### Q#DC-1 — what does the capture take as arguments?
 
@@ -129,15 +183,49 @@ fabrication hole the userdata design closes.
    buffer, and the stale-intent check applies only then.
 3. **Two capture kinds**, document and panel, with different preflights.
 
-*My vote: **(2)***. The four checks are not equally applicable, and
-which apply is a property of *what the continuation does*, which only
-the caller knows. (3) duplicates the liveness checks that both need;
-(1) ships a refusal that will read as a bug the first time a user hits
-it.
+*My vote: **(2)***, with the profiles spelled out below rather than
+left to implementation.
 
-**I hold this one loosely.** It is the design decision of the lane, and
-(1) has a real argument — a uniform rule is easier to reason about than
-a parameterized one, and over-refusal is at least *safe*.
+**Revision 1 said only "skip the stale-buffer check for a non-replacing
+continuation", and that was incomplete.** Review is right: a panel
+result does not depend on the captured **document window** at all. It
+does not replace that window's buffer, so check 3 is irrelevant; it
+does not occupy that window, so check 4 (dedicated) is irrelevant; and
+it does not need that specific window to exist, so check 2 is
+irrelevant. Retaining any of the three can reject `git.status` for a
+document-window change that has nothing to do with where the panel
+goes. But dropping them **without an explicit profile** is how document
+replacement quietly loses its guarantees.
+
+**The matrix, stated so every omission is deliberate and testable:**
+
+| # | Precondition (`window_panel.rs:488-525`) | Document replacement | Frontend/panel scope |
+|---|---|---|---|
+| 1 | Requesting frontend still has a layout | **required** | **required** |
+| 2 | Destination window still live in it | **required** | not applicable |
+| 3 | Window still shows the captured buffer (Q#JR14c stale intent) | **required** | not applicable |
+| 4 | Window is not dedicated (Q#JR14f) | **required** | not applicable |
+
+**Check 1 is the entire panel profile**, and that is the honest reading
+of what a panel continuation actually depends on: the frontend it was
+launched from still exists. Everything else in the capture is document
+state the panel never touches.
+
+**Consequence for the capture, which follows and should not be
+discovered later:** if the panel profile needs only the frontend, then
+a frontend with **no document window** can still host a panel — so
+Q#DC-4's "return `nil`" is right for the document profile and possibly
+wrong for the panel one. That interaction is settled as part of
+answering this, not after it.
+
+**I hold the *choice* loosely, not the matrix.** (1) has a real
+argument — a uniform rule is easier to reason about, and over-refusal
+is safe — but it would refuse the git panel for reasons unrelated to
+it, and "safe" refusals that users cannot explain are how a mechanism
+gets worked around. If review prefers (1) or (3), the matrix above is
+what changes, and **every cell marked "not applicable" must still be
+tested as deliberately omitted** (§7) so a future reader cannot mistake
+an omission for an oversight.
 
 ### Q#DC-3 — what is the type called?
 
@@ -158,7 +246,7 @@ inventing a fallback destination. A continuation with nowhere to land
 should say so, and #227's adopter should degrade to today's ambient
 behaviour with a status message rather than silently guessing.
 
-## 6. Verification
+## 7. Verification
 
 - **A captured destination survives a frontend switch**: capture in A,
   make B active, commit, and assert the result lands in **A**. This is
@@ -168,15 +256,36 @@ behaviour with a status message rather than silently guessing.
 - **A fabricated destination is still refused** — the existing Q#JR14d
   guarantee, re-asserted after the rename so the generalization cannot
   quietly open the hole it was built to close.
-- **Each preflight refusal is witnessed by its own case**: frontend
-  gone, window gone, stale buffer, dedicated window — and, under
-  Q#DC-2's answer, that the stale-buffer refusal does **not** fire for
-  a continuation that declared it is not replacing that buffer.
-- **`nil` when the frontend has no document window** (Q#DC-4).
+- **Every preflight refusal is witnessed by its own case, in BOTH
+  profiles** (Q#DC-2's matrix): frontend gone, window gone, stale
+  buffer, dedicated window — each asserted to **refuse** under the
+  document profile, and each of the three marked "not applicable"
+  asserted to **NOT refuse** under the panel profile. A deliberately
+  omitted check that has no test is indistinguishable from a check
+  someone forgot, and the next reader will restore it.
+- **`nil` when the frontend has no document window** (Q#DC-4) — for
+  the **document** profile. Whether the panel profile can capture
+  without one follows from Q#DC-2 and is asserted whichever way it is
+  answered.
 - **The directory path is unchanged** — dired's existing acceptance
-  coverage passes untouched. **If any dired test needs editing, the
-  generalization changed Journey Stage 1a's semantics** and that is a
-  stop signal, not a fixup.
+  coverage passes untouched.
+- **`tests/journey_acceptance.rs` passes UNCHANGED**, as a named
+  preservation suite. It carries the established contract this lane
+  generalizes — 27 `commit_to` references across nine named pins
+  including `commit_to_refuses_a_forged_destination`,
+  `commit_to_scopes_and_restores_on_a_normal_return`,
+  `commit_to_restores_when_the_callback_raises`,
+  `commit_to_refuses_an_await_and_restores`,
+  `commit_to_delivers_to_the_requesting_frontend_not_the_ambient_one`,
+  `a_declining_listener_cannot_redirect_the_destination`, and two
+  rows already named `preservation_*`. Journey Stage 1a's own framing
+  treats this suite as a required gate; a lane that generalizes its
+  substrate does not get to relax that.
+- **STOP SIGNAL, for both suites.** If any existing `dired` or
+  `journey_acceptance` test needs editing, the generalization changed
+  Journey Stage 1a's semantics. That is cause to stop and report, not
+  to adjust the test — a suite edited to accommodate the change under
+  test has stopped being evidence.
 - **`Handle:await` still refuses inside the scope**, including through
   `pmacs.async.yield_to_next_tick` if the worker-identity lane's Q#W-7
   has landed by then; if it has not, this lane does **not** add that
@@ -187,7 +296,7 @@ behaviour with a status message rather than silently guessing.
 that is #227's adoption, after this lands. This lane ships the
 mechanism and one set of tests for the mechanism.
 
-## 7. Not in scope
+## 8. Not in scope
 
 **Adopting the capture anywhere**, including git (#227 does that) and
 including migrating other async continuations that have the same latent

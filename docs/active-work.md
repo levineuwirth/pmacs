@@ -275,8 +275,15 @@ from #171 and #215.
 authoritative tip** — the ref, not a SHA. Recover with
 `git fetch githubsucks && git checkout destination-capture`.
 
-- **Framing `docs/destination-capture-framing.md`, revision 1**, in
-  review.
+- **Framing `docs/destination-capture-framing.md`, revision 2**, in
+  review. Revision 2 took three findings: Q#DC-2's parameterization was
+  incomplete (a panel depends on **none** of checks 2–4, not just check
+  3, so the question now carries a full preflight matrix with every
+  omission testable); `tests/journey_acceptance.rs` joins dired as a
+  **preservation suite and stop signal**, since it holds the
+  `commit_to` scope, forged-userdata, preflight and restoration pins
+  this lane generalizes; and the **coherence-impact section was missing
+  entirely**, which `CLAUDE.md` and `COHERENCE.md` §25 both require.
 - **A PREREQUISITE LANE. PR #227 (git Stage 1) blocks on it.** #227's
   P1a review finding is why it exists: git's async completions mutate
   and display UI without capturing the initiating frontend
