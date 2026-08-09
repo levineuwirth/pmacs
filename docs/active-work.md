@@ -269,8 +269,48 @@ census.
 
 **PR #227** — https://github.com/levineuwirth/pmacs/pull/227. Opened
 2026-08-09 at `4002734`, after the framing was approved at revision 5
-and the full gate suite went green. Normal review; no merge
-authorization.
+and the full gate suite went green. **Now at `6c1631e`, MERGE-BLOCKED.**
+
+**Review round 1 found three blockers. Two are fixed; the third is why
+this lane is blocked.**
+
+- **P1 fixed (`ffe5ae2`) — concurrent `status` opens were ordered by
+  `rev-parse` completion, not by invocation.** The generation was
+  minted on arrival, inside `start_status`, so the **slowest root
+  lookup won** rather than the newest invocation. It is now reserved at
+  the command and carried through the root-resolution callback, which
+  drops a superseded result **before any effect** — no spawn, no
+  `state.root` write, and no status message either, since a message
+  from a replaced invocation is as wrong as a panel from one.
+- **P2 fixed (`6c1631e`) — a refused `keys` bind left a live, unowned
+  buffer.** The preflight compared **raw tokens** while `parse_key_code`
+  folds `RET`/`RETURN`/`ENTER` (and `SPC`/`SPACE`, `ESC`/`ESCAPE`,
+  `BS`/`BACKSPACE`, `DEL`/`DELETE`, case-insensitively) onto one chord,
+  so an alias spelling passed preflight and failed at bind time —
+  *after* buffer creation and intercept install. The partial rollback
+  removed only new keys, so later opens silently got `<2>`.
+
+  **Fixed by full teardown, not by canonicalizing the preflight**, and
+  the reasoning is worth keeping: a Lua canonicalizer would be a second
+  copy of the Rust alias table and would go stale the day that table
+  gains a name, reintroducing this exact bug for the new alias.
+  `Keymap::bind` is the authority because it *is* what decides. There
+  is also **no Lua-reachable canonicalization** to build on —
+  `display_sequence` escapes only through `describe.key` and
+  `keymap.list`, both of which require the sequence to be bound
+  already. Verified; no binding was added for this.
+- **P1a NOT fixed, and deliberately — it blocks this PR.** The async
+  completions display UI without capturing the initiating frontend
+  (`builtin/runtime/git.lua:609`, `:854`), so a result surfaces in
+  whichever frontend is active when git exits. `commit_to` is the right
+  mechanism and is **not Lua-reachable** outside a directory open, so
+  the fix lives in the **`destination-capture`** lane. This lane adopts
+  it after that lands. Verified untouched: no diff line in `ffe5ae2` or
+  `6c1631e` reaches `open_status_panel`, `show_diff_buffer`,
+  `pmacs.window.display` or `commit_to`.
+
+**Re-gated at `6c1631e`:** all 11 steps green, acceptance now 27 tests.
+Both fixes mutation-verified.
 
 **Written with the lane's first commit, before the PR exists** — the
 standing correction from #171 and #215. This session it was missed on
