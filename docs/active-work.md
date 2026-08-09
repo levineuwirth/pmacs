@@ -267,6 +267,21 @@ census.
 
 ## `scripts/gate --protocol` build step — IMPLEMENTED at `49bc141`, RE-OPENED by review, witness CLOSED at `677fd25`. No PR yet
 
+**PR #229 OPEN** — https://github.com/levineuwirth/pmacs/pull/229,
+opened at `93d557a`. **Held, not merged.** Its first CI run went red on
+`Test (macos-latest / lua54)`; the rerun turned that selector green and
+went red on a **different** one. Both are recorded as **U4** and **U5**
+in `docs/ci-red-signatures.md`, as separate incidents per the matching
+rule rather than one signature twice.
+
+**Registry numbering conflict, expected at merge.**
+`worker-identity-stage1` independently defines its own **U4** and **U5**
+on its branch. This lane merges first, so on `main` the rows above are
+U4/U5 and **worker identity must renumber its pair on rebase**. Flagged
+here because a rebase that resolves the textual conflict without
+renumbering produces two different incidents sharing an id, which is
+exactly the failure the registry's matching rule exists to prevent.
+
 **Written with the lane's first commit**, per the standing correction
 from #171 and #215.
 

@@ -566,3 +566,39 @@ The #214 occurrence is the strongest available evidence that these are
 not caused by the PRs they appeared on — that PR is **docs-only and its
 tree is byte-identical to a green `main`**. It is not evidence that any
 of them is harmless.
+
+### U4 — `a_pty_resize_blanks_the_host_before_repainting`, macOS `lua54`, one occurrence
+
+Surfaced on PR #229's CI. **The diff is excluded on two independent
+structural grounds, neither of which is a rerun**: #229 touches no
+`src/` at all and no test but `tests/gate_script_acceptance.rs`, and the
+sibling `macos-latest / luajit` leg **passed on the same commit**. A
+deterministic platform defect fails both flavours — that is how #227's
+non-UTF-8 fixture presented.
+
+| field | value |
+|---|---|
+| **selector** | `--test full_grid_resync_acceptance a_pty_resize_blanks_the_host_before_repainting` |
+| **job / flavor** | GitHub Actions, `Test (macos-latest / lua54)`, `macos-26-arm64`. **NOT** seen on the `luajit` leg of the same commit |
+| **required fragments** | `FG-INV: the post-resize resync must blank the host` · `no CSI 2 J appeared in the 25362 bytes emitted after the first painted frame` · `panicked at tests/full_grid_resync_acceptance.rs:126` |
+| **status** | **one occurrence; INTERMITTENT — passed on rerun in 0.50s against 20.26s failing** |
+| **what IS established** | the assertion saw ~25 KB of post-frame output with no `CSI 2 J` in it, and the suffix head shows ordinary repaint traffic (`ZQXMARKERQZ` rows with SGR + CUP), so the host was *painting* — it just never emitted the blank. The rerun's 0.50s versus 20.26s is a 40× spread, which is itself the signal |
+| **what is NOT** | any mechanism. Whether the blank was never emitted, emitted before the capture window, or lost in transport is open. The green rerun establishes **intermittence only**, per this file's rerun rule |
+| **discriminating control for the next occurrence** | capture the **full** post-frame byte stream rather than the 25 KB window, with timestamps, so "never emitted" separates from "emitted outside the window". The 40× duration spread suggests a readiness/timing interaction worth timing directly |
+
+### U5 — `ctrl_c_during_reconnect_sleep_yields_clean_exit`, macOS `lua54`, one occurrence
+
+Surfaced on the **rerun** of PR #229's failed job — a *different*
+selector from U4, so by this file's matching rule it is a **new
+incident, not U4 occurring twice**.
+
+| field | value |
+|---|---|
+| **selector** | `--test m5_8_acceptance ctrl_c_during_reconnect_sleep_yields_clean_exit` |
+| **job / flavor** | GitHub Actions, `Test (macos-latest / lua54)`, rerun attempt 2 |
+| **required fragments** | `Ctrl-C during reconnect sleep should produce a clean exit` · `ExitStatus { code: 1, signal: Some("Interrupt: 2") }` · `panicked at tests/m5_8_acceptance.rs:546` |
+| **status** | **one occurrence, unresolved** |
+| **what IS established** | Ctrl-C reached the process **as `SIGINT`** rather than as the raw-mode key event the test drives. That is all the exit status shows |
+| **what is NOT** | whether injection preceded raw mode, raw mode was lost, or something else. Three mechanisms remain open and the fragment does not separate them |
+| **exclusion strength — WEAKER than U4's, deliberately** | #229's changed `gate_script_acceptance` ran **earlier in the same job**, and it creates worktrees and directories. No leaked child or persistent signal-state mutation was observed, but "the diff touches no `src/`" is **not** the same argument here as it is for U4, because cross-suite leaked state is a path that reasoning about reachability does not close. Recorded at this strength on purpose |
+| **discriminating control for the next occurrence** | run `m5_8_acceptance` **alone** on macOS `lua54`, without the gate suite ahead of it, before attributing anything to either |
