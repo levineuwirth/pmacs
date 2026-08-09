@@ -1,7 +1,17 @@
 # A destination capture any async continuation can use
 
-**Status: framing pass, revision 4. Pre-implementation. Awaiting
+**Status: framing pass, revision 5. Pre-implementation. Awaiting
 approval.**
+
+**Revision 5 fixes a binding-level contradiction in revision 4's own
+API spec.** It required `profile: Option<String>` *and* a pointed error
+naming the accepted values for a non-string — but mlua rejects a
+number or table during argument conversion, before the closure runs, so
+that message was unreachable. This is the exact trap the existing
+binding documents for `dest`, in a comment revision 4 quoted while
+repeating the mistake one argument to the right. The profile is now
+`mlua::Value`, validated in the body, with `nil` and absence both
+meaning `"document"`.
 
 **Revision 4 specifies the call shape the last two revisions kept
 referring to without defining.** "The profile is declared at
@@ -277,12 +287,36 @@ pmacs.window.commit_to(dest, body)             -- document profile
 pmacs.window.commit_to(dest, body, "panel")    -- panel profile
 ```
 
-- **`profile` is an OPTIONAL THIRD argument**, a string, typed
-  `Option<String>` at the binding. No arity sniffing, no
-  table-or-function dispatch on argument 2 — the existing binding
-  chose `Value` over `AnyUserData` specifically so its error message
-  would stay *reachable* and name the rule, and a polymorphic second
-  argument would undo that.
+- **`profile` is an OPTIONAL THIRD argument, typed `mlua::Value` at
+  the binding — NOT `Option<String>`.**
+
+  **Revision 4 said `Option<String>` and that contradicted its own
+  error requirement.** mlua rejects a number or table *during argument
+  conversion*, before the closure body runs, so the promised message
+  naming `"document"` and `"panel"` would be **unreachable** — a caller
+  passing `42` would get mlua's generic conversion error instead. This
+  is the identical trap the existing binding already documented for
+  `dest`, in a comment revision 4 cited while making the same mistake
+  one argument to the right:
+
+  > Typed as `Value` rather than `AnyUserData` so this message is
+  > REACHABLE: with the narrower type mlua rejects a table during
+  > argument conversion, and a caller who fabricated one got "error
+  > converting Lua table to userdata" — true, but it names neither the
+  > rule nor how to get a real destination.
+
+  So: accept `Value`, and validate in the body.
+  - **`Nil` or absent → `"document"`.** Both spellings, since
+    `commit_to(dest, body, nil)` is what a Lua caller threading an
+    optional variable produces, and it must not be a third behaviour.
+  - **`String` → must be `"document"` or `"panel"`**, else refused,
+    naming both accepted values.
+  - **Anything else → refused by the SAME message**, which now names
+    the accepted values *and* says a string was expected. That message
+    only exists if the type is `Value`.
+- No arity sniffing and no table-or-function dispatch on argument 2 —
+  a polymorphic second argument would put the *destination*'s error
+  message back at risk, which is what that comment was protecting.
 - **Trailing, and readable in practice.** A profile after a long inline
   closure would read badly, but that is not the call shape in use:
   dired defines `local function commit() … end` and calls
@@ -373,7 +407,17 @@ incidental: no arguments is what keeps capture profile-blind.
   regression that would quietly void Journey Stage 1a's guarantees.
 - **An unrecognized profile string is REFUSED**, with a message naming
   the accepted values — not silently treated as `"document"`.
-- **A non-string profile is refused** the same way.
+- **A non-string profile (a number, a table) is refused by that SAME
+  message**, asserted **on its content**, not merely that an error
+  occurred. This is the bullet that fails if the argument is ever
+  retyped to `Option<String>`: mlua would reject the value during
+  conversion and the assertion on the message would stop matching. The
+  test is therefore the guard on the type choice, not just on the
+  behaviour.
+- **An explicit `nil` profile takes the document profile**, identical
+  to omitting it — witnessed separately, because a Lua caller threading
+  an optional variable produces `nil` rather than absence, and a third
+  behaviour there would be invisible until someone hit it.
 - **Capture SUCCEEDS with no document window** (Q#DC-4), returning a
   destination whose document pair is absent — asserted as a successful
   capture, not as `nil`.

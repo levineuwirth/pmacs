@@ -275,12 +275,17 @@ from #171 and #215.
 authoritative tip** — the ref, not a SHA. Recover with
 `git fetch githubsucks && git checkout destination-capture`.
 
-- **Framing `docs/destination-capture-framing.md`, revision 4**, in
+- **Framing `docs/destination-capture-framing.md`, revision 5**, in
   review.
 - **The public API #227 adopts against (Q#DC-5), pinned so it is a
   contract rather than an intention:**
   `pmacs.window.commit_to(dest, body [, profile])`. Profile is an
-  optional trailing string from a **closed** set — `"document"` and
+  optional trailing argument typed **`mlua::Value`, not
+  `Option<String>`** — with `Option<String>` mlua rejects a number or
+  table during argument *conversion*, before the closure runs, making
+  the promised "accepted values are…" message unreachable. That is the
+  same trap the existing binding documents for `dest`. Validated in the
+  body against a **closed** set — `"document"` and
   `"panel"`. **Omitted means `"document"`**, so every existing
   two-argument caller keeps all four preflight checks *by definition of
   the signature*, which is what makes `journey_acceptance` passing
