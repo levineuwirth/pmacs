@@ -496,16 +496,46 @@ Stage 4; the lane touches no `pmacs-gpu` code at all.
 | **selector** | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
 | **job / flavor** | local (Linux), `cargo test --workspace --features crdt --no-fail-fast`, i.e. under full-sweep load |
 | **required fragments** | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
-| **status** | **new incident, unreproduced — causal status UNRESOLVED** |
-| **what IS established** | one occurrence at `pmacs-gpu/src/attach.rs:1680`; the test drives a scripted transient-then-success sequence over a real socket pair |
+| **status** | **SECOND OCCURRENCE 2026-08-09 — causal status still UNRESOLVED** |
+| **what IS established** | **two** occurrences at `pmacs-gpu/src/attach.rs:1680`, the second with all three fragments **verified** rather than inferred; the test drives a scripted transient-then-success sequence over a real socket pair |
 | **what is NOT** | whether the broken pipe is the *fixture's* writer closing early or a real retry-path defect. **This row is not a claim that it is harmless** |
-| **rerun evidence** | 6 isolated runs green, plus a full `--workspace --features crdt` sweep green (113 targets). Per the rerun rule this establishes **intermittence only** |
+| **rerun evidence** | occurrence 1: 6 isolated runs green, plus a full `--workspace --features crdt` sweep green (113 targets). Occurrence 2: **30 green on the observing branch** (15 isolated selector, 15 full `-p pmacs-gpu`) **plus a 15-run merge-base control, also green**. Per the rerun rule all of this establishes **intermittence only** |
 | **retirement** | hardening that removes the named mechanism plus a discriminating witness — or a diagnosis showing the fixture, not the code, closes the pipe |
 
-**Not attributed to this lane**, and the reasoning is not merely "my
-diff looks unrelated": Stage 4 adds no wire surface, no protocol
-version change, and touches no file in `pmacs-gpu`. A merge-base
-control would settle it if this recurs.
+**Not attributed to the observing lane**, and in neither case is the
+reasoning merely "my diff looks unrelated": long-lines Stage 4 added no
+wire surface, no protocol version change, and touched no file in
+`pmacs-gpu`.
+
+**Second occurrence — worker identity Stage 1, 2026-08-09, local
+(Linux).** Recorded at the `scripts/gate` **`gpu` step**
+(`PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`), which is a **third
+flavor**: not the `--features crdt` sweep of occurrence 1, and not U3's
+default-features workspace sweep. Two things make it a match rather than
+a `U` note:
+
+* **The fragments were captured this time.** `transient sequence must
+  attach: Attach(Handshake(Io(Os { code: 32, kind: BrokenPipe, message:
+  "Broken pipe" })))` — all three of the row's required fragments,
+  verified against the durable gate log rather than a filtered live
+  stream. **That is what U2 and U3 both lost**, and it is why U3 could
+  not be judged a recurrence. Reading the gate's own `NN-gpu.log` is the
+  mechanical fix U3 prescribed, and it worked.
+* **The merge-base control R7 asked for was run** — 15 runs at `4bc55e8`,
+  green. It is **non-discriminating**, not exculpatory: the observing
+  branch was equally green over 30 runs, so neither side reproduced and
+  the control separates nothing. Recorded as a null result rather than
+  as evidence.
+
+**One causal path is NOT excluded and is named here rather than
+dismissed.** The observing lane added a test to `pmacs-gpu`'s test module
+(`main.rs`) — a GPU-heavy `render_offscreen` case. It touches no
+`attach.rs`, no protocol, and no wire, but it does add a concurrent test
+to the same binary, and the failing test is a socket handshake with a
+one-second deadline. Contention is a plausible mechanism for a
+`BrokenPipe`, and 30 green runs do not rule it out. If a third occurrence
+lands, **run the control with the added test removed** rather than at the
+merge base — that is the discriminating comparison this one was not.
 
 ### U2 — `m6_1_pty_raw_mode_disables_kernel_echo`, one local occurrence
 
