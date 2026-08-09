@@ -275,8 +275,12 @@ from #171 and #215.
 authoritative tip** — the ref, not a SHA. Recover with
 `git fetch githubsucks && git checkout lsp-latex-coverage`.
 
-- **Framing `docs/lsp-language-coverage-framing.md`, revision 2**, in
-  review. **Revision 1 was UNTRACKED on `main` in one checkout** and
+- **Framing `docs/lsp-language-coverage-framing.md`, revision 2 —
+  IMPLEMENTATION AUTHORIZED 2026-08-09**, after a summary of its four
+  corrections rather than a findings round on the document itself.
+  Recorded that way deliberately: **the §3 `.texlabroot` verification
+  caveat is still live and binding**, and is step zero of the work, not
+  a footnote it can be read past. **Revision 1 was UNTRACKED on `main` in one checkout** and
   therefore did not travel; committing it here is the fix.
 - **Scope: one `pmacs.lsp.config.latex` entry plus its root resolver.**
   `texlab` 5.25.1 is installed and unused; a `.tex` buffer highlights

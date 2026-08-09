@@ -1,7 +1,11 @@
 # LSP language coverage: LaTeX (and the Haskell/OCaml question)
 
-**Status: framing pass, revision 2. Pre-implementation. Awaiting
-approval.**
+**Status: revision 2, IMPLEMENTATION AUTHORIZED 2026-08-09.**
+
+*Recorded precisely: the user authorized dispatch after a summary of
+revision 2's four corrections, rather than returning findings on the
+document as they did for the other lanes. The §3 verification caveat is
+therefore still live and binding — it is step zero, not a footnote.*
 
 **Revision 2 corrects three facts revision 1 got wrong or stale, and
 answers the question revision 1 named as most likely to make the entry
