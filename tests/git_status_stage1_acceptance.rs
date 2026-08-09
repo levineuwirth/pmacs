@@ -1528,6 +1528,66 @@ fn g6_14_the_root_rule_works_where_project_kind_is_not_git() {
     );
 }
 
+/// A repository root containing a **newline** resolves **whole**, and
+/// the status command really runs there.
+///
+/// A newline is a legal byte in a POSIX path — the fixture below builds
+/// one and `git rev-parse --show-toplevel` prints it, terminator and
+/// all — so parsing that output with a first-line match truncates
+/// `/tmp/…/nl\nroot` to `/tmp/…/nl`, and every command this module runs
+/// afterwards gets a `-C` and a cwd naming a directory that does not
+/// exist. The right answer is to strip git's final terminator and
+/// nothing else.
+///
+/// End to end, not at the parser: the directory really is created, the
+/// real `git` really resolves it, and the assertion is on the cwd of the
+/// spawn the module actually made. `_last_spawn` is the status
+/// invocation here, since `rev-parse` runs first and carries no cwd of
+/// its own.
+///
+/// It rides beside the one-line-status rule rather than replacing it:
+/// the helper this uses is deliberately **separate** from `first_line`,
+/// whose other three callers all feed the single-line status band and
+/// would be corrupted by a multi-line message.
+#[test]
+fn g6_14c_a_root_containing_a_newline_is_not_truncated() {
+    let (_dir, base) = tempdir();
+    let root = base.join("nl\nroot");
+    std::fs::create_dir_all(&root).expect("a newline is a legal POSIX path byte");
+    mixed_repo(&root);
+
+    let mut s = editor();
+    open_panel(&mut s, &root, "staged.txt");
+
+    let cwd: String = eval(&s, "return pmacs.git._last_spawn.cwd");
+    assert_eq!(
+        cwd,
+        root.display().to_string(),
+        "the resolved root must be the WHOLE path, newline included"
+    );
+
+    let text = panel_text(&s);
+    assert!(
+        !text.contains("exited with code"),
+        "…so the status command ran somewhere that exists: {text}"
+    );
+    assert!(
+        text.contains("staged.txt"),
+        "…and produced real rows: {text}"
+    );
+
+    // And the root is usable for the gestures built on it: a
+    // repository-relative row path resolves against it to a real file.
+    seat_on(&mut s, "unstaged.txt");
+    press(&mut s, KeyCode::Enter);
+    assert_eq!(
+        active_name(&s),
+        root.join("unstaged.txt").display().to_string(),
+        "RET resolves against the untruncated root; status was {:?}",
+        status(&s)
+    );
+}
+
 /// A directory outside any repository reports it, rather than opening
 /// an empty panel or saying nothing.
 #[test]

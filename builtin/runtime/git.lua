@@ -290,9 +290,35 @@ pmacs.hook.add("process.after-tick", function()
 end)
 
 --- The first line of `text`, trimmed, or `""`.
+---
+--- For text bound for the ONE-LINE STATUS BAND, and only for that: a
+--- spawn error, a stderr detail, an error string. A status message that
+--- carried a newline would corrupt the row layout of whatever is
+--- rendering it, so truncating to the first line is the right answer
+--- there.
 local function first_line(text)
   local line = (text or ""):match("^[^\r\n]*") or ""
   return (line:gsub("%s+$", ""))
+end
+
+--- `text` with git's final output terminator removed, and NOTHING else.
+---
+--- The counterpart to `first_line`, deliberately a SECOND function
+--- rather than a change to it, because the two answer opposite
+--- questions and each has callers that the other's answer would break.
+--- This one is for COMMAND OUTPUT that must survive whole: a POSIX path
+--- may legally contain a newline, so `git rev-parse --show-toplevel`
+--- prints one for a repository rooted at `/tmp/a\nb`, and taking the
+--- first line there truncates the root to `/tmp/a` --- after which every
+--- command this module runs has a wrong or nonexistent cwd. `first_line`
+--- has three other callers, all of them status-band text, and folding
+--- the two together would fix this one and break those.
+---
+--- Exactly one trailing newline is stripped, with an optional preceding
+--- carriage return, because that is what git emits. A second newline
+--- would be output, not a terminator.
+local function strip_output_terminator(text)
+  return ((text or ""):gsub("\r?\n$", ""))
 end
 
 --- A one-line description of why a git invocation failed.
@@ -752,7 +778,10 @@ function pmacs.git._deliver_root(request, res)
     end
     return
   end
-  local root = first_line(res.stdout)
+  -- The WHOLE output, minus its terminator --- never the first line. A
+  -- repository root may contain a newline, and truncating one here would
+  -- point every command that follows at a directory that does not exist.
+  local root = strip_output_terminator(res.stdout)
   if root == "" then
     pmacs.editor.set_status("git: rev-parse returned no worktree root")
     return
