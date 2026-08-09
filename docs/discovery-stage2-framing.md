@@ -1,7 +1,7 @@
 # Discovery Stage 2 — M-x rows stop being bare names
 
-**Status: framing pass, revision 3. Pre-implementation. Awaiting
-approval.**
+**Status: revision 3, APPROVED 2026-08-09. Implementation may
+proceed.**
 
 **Revision 3 fixes three things revision 2 asserted without checking
 the mechanism it was reasoning about**: a "frozen-shape" test that

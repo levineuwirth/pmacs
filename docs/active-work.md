@@ -265,7 +265,7 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
-## Discovery Stage 2 — BRANCHED, framing in review
+## Discovery Stage 2 — BRANCHED, pre-implementation
 
 **Written with the lane's first commit**, per the standing correction
 from #171 and #215.
@@ -275,8 +275,14 @@ from #171 and #215.
 tip** — the ref, not a SHA. Recover with
 `git fetch githubsucks && git checkout discovery-stage2`.
 
-- **Framing `docs/discovery-stage2-framing.md`, revision 3**, in
-  review. Scope: `COHERENCE.md` §5's "M-x rows are still bare names".
+- **Framing `docs/discovery-stage2-framing.md`, revision 3, APPROVED
+  2026-08-09** after three review rounds. Each round found the previous
+  one reasoning about a mechanism instead of reading it — an in-place
+  field change that postcard cannot make compatible, a TUI that never
+  reads the message at all, a round-trip test that freezes nothing, a
+  cache hazard the per-peer render state makes impossible, and a
+  clipping rule unachievable at narrow widths.
+  Scope: `COHERENCE.md` §5's "M-x rows are still bare names".
   Descriptions already exist on `Command` and are already rendered by
   `help.list-commands`; they are missing at the one moment they would
   change a decision.
