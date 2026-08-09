@@ -1,7 +1,7 @@
 # A destination capture any async continuation can use
 
-**Status: revision 7. The mechanism is implemented at `0efc8c0`;
-revisions 6 and 7 carry an OPEN correctness blocker that is NOT yet
+**Status: revision 8. The mechanism is implemented at `0efc8c0`;
+revisions 6–8 carry an OPEN correctness blocker that is NOT yet
 implemented.**
 
 *(Revisions 2–5 said "Pre-implementation. Awaiting approval" while the
@@ -9,16 +9,16 @@ ledger recorded the lane as approved and implemented. Same
 contradiction class this document keeps correcting elsewhere, left
 standing in its own header.)*
 
-**Revision 7 replaces revision 6's fix, which was unsound for the same
-reason revision 6's target was.** Revision 6 moved the panel/document
-decision to a **preflight prediction**, arguing nothing could change
-before placement because the body cannot `await`. The await refusal
-stops *concurrent interleaving*; it does not stop the body — arbitrary
-synchronous Lua — from dedicating the side slot itself and causing the
-very fallback the preflight just ruled out. **Enforcement moves to the
-placement boundary**, where the fallback is a fact rather than a
-forecast, and §7 gains the inside-the-body test that the two
-pre-established-state tests could never catch.
+**Revision 8 rejects BOTH of the previous two fixes and takes a third
+shape.** Revision 6 predicted the fallback at preflight (the body can
+change it). Revision 7 moved enforcement to the placement boundary —
+which **breaks the invariant `commit_to` exists for**: handoff §748
+says it preflights *before* the callback because "validating at display
+time is four mutations too late", so a placement-time refusal arrives
+after arbitrary Lua has created buffers, handles and paint. Revision 8
+keeps the preflight and **refuses the mutations that would invalidate
+it**, the same shape as the existing await refusal. Refusal stays
+mutation-free on the `(false, reason)` path.
 
 **Revision 6 fixes an UNSOUND matrix, not a preference.** Q#DC-2 gave
 the panel profile only check 1, on the claim that a panel result never
@@ -288,42 +288,57 @@ on the placement actually being a panel. Whenever placement **can**
 fall back to a document window, the panel profile runs the **full
 document preflight**.
 
-**ENFORCEMENT IS AT THE PLACEMENT BOUNDARY, NOT AT PREFLIGHT —
-revision 6 got this wrong too, and the reason is worth stating because
-it is a whole class of mistake.**
+**PREFLIGHT STAYS WHERE IT IS; THE MUTATION THAT WOULD INVALIDATE IT IS
+REFUSED. Revisions 6 and 7 were both wrong, in opposite directions.**
 
-Revision 6 said the two fallback causes are "predictable at preflight",
-because `commit_to` refuses `await` so "nothing can change between
-preflight and placement". **The await refusal prevents *concurrent
-interleaving* — another coroutine mutating state while this one is
-parked. It says nothing about the body itself**, which is arbitrary
-Lua running synchronously and perfectly able to change the state the
-preflight just measured:
+Revision 6 predicted the fallback at preflight and argued the body
+could not change it. **False**: the await refusal stops *concurrent
+interleaving*, not the body, which is arbitrary synchronous Lua and can
+dedicate the side slot itself.
 
-> obtain the existing panel → set it `dedicated = true` → request panel
-> display
+Revision 7 then moved enforcement to the placement boundary. **That
+breaks the invariant `commit_to` exists for.** `docs/agent-handoff.md`
+§748 states it without qualification:
 
-Preflight sees a reusable panel and relaxes checks 2–4; the body then
-causes the fallback; the result replaces a stale document. **No
-preflight predicate can close this**, however it is phrased — the
-measurement is simply taken before the thing it measures is decided.
+> [`commit_to`] preflights every precondition *before* invoking the
+> callback — dired mutates handle state, `prev`, and paint long before
+> it reaches anything that could refuse, so **validating at display
+> time is four mutations too late**.
 
-**So the check moves to where the fact is known.** Placement resolving
-to `PlacementKind::Ordinary` for a request that asked for a side *is*
-the fallback (`editor_core.rs:4138-4148`). At that point, under an
-active panel-profile commit, the document preconditions are evaluated
-against the captured destination and refused if they fail. The commit
-scope is already Rust-side app data (`CommitScopeActive`), so the
-profile and the destination can ride there for the placement path to
-consult.
+Refusing at placement means refusing *after* arbitrary callback code has
+created buffers, handles and paint. A late refusal is not a refusal; it
+is a partial commit with an error return.
 
-**And the tempting non-fix, named so nobody reaches for it:** widening
-the preflight predicate from "will it fall back" to "*could* it ever".
-Since the body can always dedicate the side slot, that predicate is
-always true, the panel profile collapses into the document profile, and
-the parameterization buys nothing. If collapsing them is genuinely
-right, that is a design decision needing its own approval — not a way
-to make a broken predicate safe.
+**So neither predict nor refuse late — forbid the mutation.** Inside a
+panel-profile commit, the operations that could change the placement
+outcome are **refused**, exactly as `Handle:await` is refused inside a
+commit scope and for the identical reason: something that would
+invalidate the scope's guarantee is rejected rather than predicted
+around. With them refused, the preflight measurement cannot go stale,
+and refusal stays mutation-free on the normal `(false, reason)` path.
+
+**The mutation surface is narrow, which is what makes this tight rather
+than aspirational:**
+
+- `dedicated` **is** writable from Lua — and it is one of only two
+  writable window fields (`window_panel.rs:888`, *"Only `fixed_rows`
+  and `dedicated` are writable (Q#BP2c)"*).
+- `panel_capable` has **no Lua binding at all** — checked across
+  `src/lua_bindings/`. A body cannot make a frontend panel-incapable.
+
+**The implementation must ENUMERATE the body-reachable transitions
+rather than trust that list**, and report the enumeration — closing the
+side window, or any other route to "no usable side slot", counts and I
+have not proven the two above are exhaustive. This is the same
+discipline `gate-protocol-build` applied to Q#GR-1: the fact the design
+rests on gets observed.
+
+**If the enumeration turns out to be open-ended**, the fallback is to
+**collapse the two profiles** — run all four checks always, losing the
+panel relaxation. That is safe, simple, and honest; it is not the
+preferred answer only because it makes the parameterization pointless.
+Choosing it is a design decision needing its own approval, not a
+silent retreat.
 
 **What is NOT the fix: refusing a panel commit that would fall back.**
 Falling back to an ordinary window is existing, deliberate behaviour
@@ -497,14 +512,20 @@ incidental: no arguments is what keeps capture profile-blind.
   separately — a non-panel-capable frontend, and a dedicated side slot.
   Each asserts the stale-intent refusal fires: capture A, make B newer,
   commit `"panel"`, observe the refusal rather than B being replaced.
-- **THE FALLBACK STATE IS ALSO ESTABLISHED FROM INSIDE THE BODY**, in
-  its own test: the callback dedicates the side slot **mid-commit** and
-  then requests panel display. This is the case that distinguishes
-  placement-time enforcement from preflight prediction, and **the two
-  bullets above cannot catch it** — both set up their fallback state
-  *before* `commit_to` is entered, so a preflight-snapshot design
-  passes them. A design that passes only those two has not been shown
-  to work.
+- **A BODY THAT TRIES TO CREATE THE FALLBACK IS REFUSED AT THE ATTEMPT**,
+  in its own test: the callback dedicates the side slot **mid-commit**.
+  Three assertions, and the second and third are the ones that matter:
+  the dedication call itself is **refused**; the side slot is **still
+  undedicated afterwards**; and no partial result was installed. The
+  two bullets above cannot catch this — both establish their fallback
+  state *before* `commit_to` is entered, so a preflight-snapshot design
+  passes them.
+
+  **Asserting only "document B was not replaced" is insufficient**, and
+  revision 7's version of this test made exactly that mistake: it
+  passes on a design that lets the body mutate freely and merely
+  declines the final installation, leaving every other side effect
+  behind. The refusal must land on the mutation, not on the outcome.
 - **A `"panel"` commit that really lands in the panel still skips
   checks 2–4** — otherwise the fix has quietly collapsed the two
   profiles into one and the parameterization buys nothing.

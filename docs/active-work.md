@@ -464,10 +464,19 @@ authoritative tip** — the ref, not a SHA. Recover with
   (`listview.open` defaults `display` to `"panel"`,
   `builtin/runtime/listview.lua:550`); `*git-diff*` replaces a
   **document** window. `commit_to`'s stale-intent check (Q#JR14c) is
-  right for the second and wrong for the first — the panel never
-  touches the captured window's buffer, so refusing on its change is a
-  refusal unrelated to what the continuation does. One shape
-  over-refuses the panel or under-checks the document.
+  right for the second and, *when the placement really is a panel*,
+  irrelevant to the first. One shape over-refuses the panel or
+  under-checks the document.
+
+  **DO NOT READ THE OLDER FORM OF THIS BULLET, WHICH SAID "the panel
+  never touches the captured window's buffer".** That is the claim
+  revisions 6–8 invalidate: panel placement **falls back** to an
+  ordinary document window when the frontend is not panel-capable or
+  its side slot is dedicated. The relaxation is conditional, and the
+  mutations that could make it fall back are refused inside a
+  panel-profile commit (revision 8) rather than predicted at preflight
+  (revision 6) or caught at placement (revision 7, which would refuse
+  after the callback had already mutated).
 - **Stop signal recorded in the framing:** if any existing dired test
   needs editing, the generalization changed Journey Stage 1a's
   semantics, and that is cause to stop rather than to adjust the test.
