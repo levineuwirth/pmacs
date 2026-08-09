@@ -275,7 +275,7 @@ from #171 and #215.
 authoritative tip** — the ref, not a SHA. Recover with
 `git fetch githubsucks && git checkout gate-protocol-build`.
 
-- **Framing `docs/gate-protocol-build-framing.md`, revision 1**, in
+- **Framing `docs/gate-protocol-build-framing.md`, revision 2**, in
   review. Narrow by design: one missing step in one script, plus the
   boundary question that let it go missing. No `src/`, no protocol, no
   feature work.

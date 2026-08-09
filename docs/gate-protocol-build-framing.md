@@ -1,7 +1,17 @@
 # `scripts/gate --protocol` — the build its sweep depends on
 
-**Status: framing pass, revision 1. Pre-implementation. Awaiting
+**Status: framing pass, revision 2. Pre-implementation. Awaiting
 approval.**
+
+**Revision 2 takes three review findings.** The normative requirement
+goes **entirely** into handoff §3 rather than being split across §3 and
+§5 (§5, Q#GR-3). Q#GR-1's observation procedure is respecified on a
+**disposable** target with the binary's absence asserted before each
+run, rather than by deleting a file from a live worktree. And the
+build-attribution criterion, which revision 1 stated with **no way to
+observe it**, gets a witness — via a hardcoded synthetic plan, not the
+plan-file injection that would reintroduce this script's own
+`--acceptance` defect (Q#GR-5).
 
 **A narrow lane, deliberately.** One missing step in one script, plus
 the boundary question that let it go missing. No feature work, no
@@ -77,7 +87,8 @@ handoff §5 names.
 - **Not folded into the `sweep-crdt` command.** `cargo build … && cargo
   test …` would make a *build* failure appear under the name `sweep-crdt`
   in the failure list — a wrong attribution in the one place the script
-  exists to be trustworthy about.
+  exists to be trustworthy about. **Q#GR-5 is how that is witnessed**,
+  which revision 1 asserted without supplying.
 - **Only under `--protocol`.** If §3's inference holds, the default
   sweep does not need it, and adding an unconditional workspace build
   to every gate run is a real cost paid for nothing.
@@ -96,11 +107,20 @@ against §3's gate policy; this precondition lives in §5's hazard
 register, which the script never claimed to encode.
 
 So the durable fix is not only the missing line. It is deciding where a
-requirement like this belongs, and making the script's stated contract
-match what it actually has to guarantee. *My vote: **§3 gains the
-precondition** (it is gate policy — it decides whether a gate's result
-means anything), §5 keeps the incident and its signature, and the
-script's header stops naming §3 as its only source.* Q#GR-3.
+requirement like this belongs.
+
+**The normative requirement moves ENTIRELY into §3.** It is gate policy
+— it decides whether a gate's result means anything — and §3 is already
+where such policy lives. §5 keeps the **incident and its signature**,
+which is history, not contract.
+
+**The script header keeps citing §3 and only §3.** Revision 1 also
+proposed citing §5, which was wrong twice over: it splits one
+executable contract across two sections, and it weakens the single
+clean boundary the script has (*"§3 owns the reasoning"*) at the same
+time as Q#GR-4 declines to build any automated check for prose drift.
+A boundary that is neither enforced nor singular is not a boundary.
+One normative home, one citation. Q#GR-3.
 
 ## 6. Open questions
 
@@ -111,11 +131,33 @@ luajit,crdt` and says it "produces both binaries". §3's inference says
 the default sweep is unaffected. **Neither is verified by this
 document.**
 
-*Required before implementation, by observation rather than reading:*
-delete `pmacs-gpu` from a target directory, run the **default** sweep,
-and record whether it passes; then repeat for the crdt sweep. If the
-default sweep also needs a binary, the step is unconditional and §4's
-"only under `--protocol`" is wrong.
+*Required before implementation, by observation rather than reading.*
+Revision 1 said "delete `pmacs-gpu` from a target directory", which is
+both unsafe and insufficient: it **mutates a durable worktree's build
+directory**, and removing one binary does not establish that the other
+artifacts and feature permutations are cold — a stale dependency graph
+can satisfy the run for reasons the experiment never sees.
+
+**The procedure:**
+
+1. A **disposable** target directory (a scratch `CARGO_TARGET_DIR`, or
+   a throwaway worktree), never a live lane's. Nothing under
+   `$HOME/build/pmacs-gate-targets/` belonging to a real branch is
+   touched.
+2. **Assert `debug/pmacs-gpu` is ABSENT before each run**, as a
+   recorded precondition rather than an assumption. A run whose
+   starting state was not checked proves nothing about a cold tree.
+3. Run the **default** sweep alone. Record pass/fail and, if it fails,
+   the failing test names.
+4. Reset to the same cold state, assert absence again, run the **crdt**
+   sweep alone. Record the same.
+
+Each sweep separately, so a result cannot be explained by the other
+having built the binary first — which is the exact accident (§2) that
+hid this defect for the entire life of the shared target directory.
+
+If the default sweep also needs the binary, the step is unconditional
+and §4's "only under `--protocol`" is wrong.
 
 **This is the one thing in this lane I would not accept on reasoning.**
 The whole defect is a precondition nobody checked; establishing its
@@ -136,10 +178,47 @@ allowed to see.
 
 ### Q#GR-3 — where does this requirement live?
 
-See §5. *My vote: §3 gains it, §5 keeps the incident, the script's
-header cites both.* The alternative — leave §5 as the only home and
-have the script silently encode it — reproduces exactly the condition
-that made this gap invisible.
+See §5. **§3 gains it normatively; §5 keeps the incident; the script's
+header keeps citing §3 alone.** Revision 1 proposed citing both, which
+would have split one executable contract across two sections while
+Q#GR-4 declines to build any check for prose drift.
+
+### Q#GR-5 — how is the attribution criterion witnessed at all? **(new in rev 2)**
+
+Revision 1 asserted that a build failure must be attributed to
+`build-crdt` rather than `sweep-crdt`, and gave no way to observe it.
+That criterion was unwitnessable as written: `tests/gate_script_acceptance.rs`
+deliberately exercises only **no-gates** paths, so plan assertions can
+prove a step's name and its order and **nothing about runtime
+behaviour**.
+
+**The obvious seam is a trap.** Making `PLAN_FILE` injectable — let a
+test hand the runner its own plan — would work, and it would turn the
+script into a general command executor via the `eval` at its runner
+loop. That is the **same class of defect this script's own review
+already caught in `--acceptance`**, which was fixed with a refusal at
+parse time. Reintroducing it one lane later, in the tool whose purpose
+is to be trustworthy, is not a trade worth making.
+
+*My vote: **a `--self-test` mode running a HARDCODED synthetic plan***
+— two lines, `true` and `false`, with the failing one named
+`build-crdt`. It asserts what actually needs asserting: the runner
+prints the failing gate's name, lists it under `FAILED:`, writes its
+log where it says it does, and exits non-zero.
+
+- **No injection.** The synthetic plan is a literal inside the script;
+  nothing external supplies a command.
+- **Runs no real gate**, so it stays on the cheap no-gates side of the
+  existing suite. `true`/`false` are the whole workload.
+- **It tests the runner, which is the thing under test.** Whether
+  `cargo build` really fails is `cargo`'s business; whether *this
+  script names the right gate when a command fails* is the criterion,
+  and it is orthogonal to which command failed.
+
+The alternative is a **documented manual witness** — break the build by
+hand, run the gate, record the output in the lane. Honest, and it rots:
+nothing re-runs it, so it decays into a claim about a past machine.
+Named as the fallback if review rejects a new mode.
 
 ### Q#GR-4 — should `--print-plan` be asserted against the handoff?
 
@@ -159,8 +238,11 @@ named so it is not mistaken for an oversight.
 - **A real fresh-target `--protocol` run goes green without a manual
   build**, which is the acceptance criterion and the thing that was
   false. Witnessed on a target directory with no `pmacs-gpu` in it.
-- **A failing build is attributed to `build-crdt`**, not to
-  `sweep-crdt` (Q#GR-2) — the wrong-name case §4 rejects.
+- **A failing gate is attributed to its own name**, witnessed through
+  `--self-test`'s synthetic plan (Q#GR-5): the run exits non-zero,
+  prints `build-crdt` as the failing step, lists it under `FAILED:`,
+  and writes the log path it claims. This is the criterion revision 1
+  stated with no way to observe it.
 - **The existing 15 `tests/gate_script_acceptance.rs` tests still
   pass**, and the new assertions join them on the **no-gates paths**
   (`--print-plan` runs nothing), keeping the suite cheap.
