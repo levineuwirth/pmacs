@@ -162,6 +162,17 @@ fn the_crdt_sweep_is_immediately_preceded_by_the_build_that_produces_its_binary(
         .find(crdt_sweep)
         .unwrap_or_else(|| panic!("the crdt sweep is missing; plan was:\n{plan}"));
 
+    // Ordering is asserted BEFORE the slice below, which would
+    // otherwise panic with a byte-offset message ("begin > end (427 >
+    // 282)") that names neither step. Mutation-tested: emitting the
+    // build *after* the sweep produced exactly that, and a gate test
+    // whose failure has to be decoded is a gate test nobody trusts.
+    assert!(
+        b < s,
+        "the build must run BEFORE the crdt sweep, not after it — a sweep \
+         that builds its own precondition afterwards has already failed; \
+         plan was:\n{plan}"
+    );
     // IMMEDIATELY before: one newline between them and nothing else. A
     // build that merely appears *somewhere* earlier could be separated
     // from the sweep by a step that rewrites the same target directory.
