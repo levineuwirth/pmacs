@@ -1,7 +1,7 @@
 # Git integration — Stage 1: seeing what changed
 
-**Status: framing pass, revision 5. Pre-implementation. Awaiting
-approval.**
+**Status: revision 5, APPROVED 2026-08-09. Implementation may
+proceed.**
 
 **Revision 5 completes the unborn-repository policy, which revision 4
 wrote as three disjoint rows when a single file can be in two states at
