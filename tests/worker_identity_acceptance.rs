@@ -290,8 +290,11 @@ fn every_entry_shape_records_what_its_work_is() {
 ///    error before this lane's own diagnostic was ever constructed. The
 ///    refusal is not the interesting part — it refuses either way, and
 ///    nothing spawns either way — the MESSAGE is, which is why the
-///    assertion is on content. Retyping this read as a bare `?` breaks
-///    the row rather than silently degrading the error;
+///    assertion is on content, and why the expected text now runs as far
+///    as the **surface** the message names. Retyping this read as a bare
+///    `?` breaks the row rather than silently degrading the error, and
+///    naming the wrong surface breaks it too — see
+///    `the_two_utf8_refusals_each_name_the_surface_their_own_text_reaches`;
 ///  * **metatable-provided**, which is the `stdin`/`group` raw-read
 ///    posture: a spec table is plain data, so a purpose cannot be
 ///    smuggled in through `__index`.
@@ -325,7 +328,8 @@ fn spawning_without_a_real_purpose_is_refused_and_starts_nothing() {
             "invalid UTF-8",
             r#"{ label = "x", purpose = "run " .. string.char(255),
                  command = "/bin/sh", args = { "-c", "sleep 5" } }"#,
-            "purpose must be valid UTF-8",
+            "purpose must be valid UTF-8 — it is displayed to the user in \
+             pmacs.process.list",
         ),
         (
             "metatable-provided",
@@ -531,6 +535,71 @@ fn a_handler_name_that_is_not_valid_utf8_is_refused_before_the_handler_runs() {
         !eval::<bool>(&state, "return pmacs._async._in_dispatch_name_scope()"),
         "a push that failed must leave no name on the stack"
     );
+    pump(&mut state);
+}
+
+/// **A diagnostic that names the wrong surface is worse than a terse
+/// one, and the two UTF-8 refusals do not name the same surface.**
+///
+/// Both messages tell the caller *why* their bytes are refused: the text
+/// gets displayed, and arbitrary bytes have no display form. But the two
+/// values reach **different** places, and Stage 1 makes that difference
+/// deliberately:
+///
+///  * a **job**'s purpose — which a handler name is composed into — is
+///    rendered by `*workers*` and by the modeline activity indicator;
+///  * a **process**'s purpose is exposed through `pmacs.process.list`
+///    and nothing else. Processes are kept out of `*workers*` and out of
+///    the indicator until Stage 2's unified view (framing §3, Q#W-4).
+///
+/// So the process-side message must not send a caller to `*workers*` to
+/// look for a process that will never be listed there, and the job-side
+/// message must not send them to an accessor that enumerates no jobs.
+/// **Both directions are asserted, positive and negative**, because a
+/// later edit that "unified the wording" would otherwise reintroduce
+/// exactly one wrong sentence in exactly one of the two places and pass
+/// every other test in this file.
+#[test]
+fn the_two_utf8_refusals_each_name_the_surface_their_own_text_reaches() {
+    let mut state = editor();
+
+    let (spawned, process_err): (bool, String) = eval(
+        &state,
+        r#"local ok, err = pcall(pmacs.process.spawn, {
+             label = "x", purpose = "run " .. string.char(255),
+             command = "/bin/sh", args = { "-c", "sleep 5" } })
+           return ok, tostring(err)"#,
+    );
+    assert!(!spawned, "precondition: the spawn must refuse");
+    assert!(
+        process_err.contains("pmacs.process.list"),
+        "a process purpose reaches pmacs.process.list, and the refusal must \
+         say so; got {process_err:?}"
+    );
+    assert!(
+        !process_err.contains("*workers*") && !process_err.contains("modeline"),
+        "and it must NOT name the job surfaces a process never reaches; \
+         got {process_err:?}"
+    );
+
+    let (dispatched, job_err): (bool, String) = eval(
+        &state,
+        "pmacs.workers.register('bad' .. string.char(255), function() end)
+         local ok, err = pcall(pmacs.workers.dispatch, 'bad' .. string.char(255))
+         return ok, tostring(err)",
+    );
+    assert!(!dispatched, "precondition: the dispatch must refuse");
+    assert!(
+        job_err.contains("*workers*") && job_err.contains("modeline"),
+        "a handler name reaches both job surfaces, and the refusal must name \
+         them; got {job_err:?}"
+    );
+    assert!(
+        !job_err.contains("pmacs.process.list"),
+        "and it must NOT name the process accessor, which enumerates no jobs; \
+         got {job_err:?}"
+    );
+
     pump(&mut state);
 }
 

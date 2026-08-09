@@ -7589,6 +7589,15 @@ pub fn install_async(
     // cannot see UTF-8 validity from Lua 5.1, so the byte-level half is
     // enforced here — the one point where Rust sees the name — with a
     // message that names both.
+    //
+    // And it names the surfaces a JOB reaches, which are `*workers*` and
+    // the modeline activity indicator. The sibling refusal in
+    // `required_purpose` deliberately names a different one
+    // (`pmacs.process.list`), because a spawned process reaches neither
+    // of these in Stage 1. The two must not converge on one sentence:
+    // whichever wording won would be wrong on the other side, and a
+    // diagnostic that misdescribes the system sends the reader looking
+    // in the wrong place.
     {
         let rt = runtime.clone();
         async_mod.set(
@@ -7597,7 +7606,9 @@ pub fn install_async(
                 let Ok(text) = name.to_str() else {
                     return Err(mlua::Error::external(
                         "pmacs.workers.dispatch: handler name must be valid UTF-8 — it is \
-                         displayed to the user as part of every job's purpose.",
+                         composed into every job's purpose, which is displayed to the user \
+                         in *workers* and in the modeline, and arbitrary bytes have no \
+                         display form there.",
                     ));
                 };
                 rt.push_dispatch_name(&*text);
@@ -8795,6 +8806,16 @@ fn parse_restart(name: &str) -> mlua::Result<RestartPolicy> {
 /// neither the field nor the rule — so the conversion failure is mapped
 /// onto this function's own message instead.
 ///
+/// That message names **`pmacs.process.list`**, which is the whole of
+/// where a process's purpose surfaces in Stage 1. It deliberately does
+/// *not* name `*workers*` or the modeline indicator: both are **job**
+/// surfaces, a spawned process appears in neither, and joining the two
+/// planes is Stage 2's work (framing §3, Q#W-4). A diagnostic that
+/// named them would send the reader looking for their process somewhere
+/// it will never appear — worse than a terse one. The job-side twin of
+/// this refusal, on `_push_dispatch_name`, names those two surfaces for
+/// the matching reason: a job really does reach them.
+///
 /// The read is **raw**, matching the posture `stdin` and `group` already
 /// document in [`lua_to_spec`]: a spec table is plain data, so a
 /// metatable cannot smuggle a purpose in through `__index`.
@@ -8805,8 +8826,8 @@ fn required_purpose(table: &Table) -> mlua::Result<String> {
             Err(_) => {
                 return Err(mlua::Error::external(
                     "pmacs.process.spawn: purpose must be valid UTF-8 — it is displayed \
-                     to the user in *workers* and in the modeline, and arbitrary bytes \
-                     have no display form there.",
+                     to the user in pmacs.process.list, and arbitrary bytes have no \
+                     display form there.",
                 ));
             }
         },
