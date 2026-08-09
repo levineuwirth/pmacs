@@ -1,7 +1,17 @@
 # A destination capture any async continuation can use
 
-**Status: framing pass, revision 2. Pre-implementation. Awaiting
+**Status: framing pass, revision 3. Pre-implementation. Awaiting
 approval.**
+
+**Revision 3 decides Q#DC-4, which revision 2 left contradicting
+Q#DC-2 — on the primary panel API.** Q#DC-2 concluded a panel needs
+only a live frontend; Q#DC-4 still returned `nil` without a document
+window and told git to fall back to ambient behaviour, which is the
+very bug this lane removes. Resolved: the destination's document pair
+is **optional**, `capture_destination()` is **profile-blind and
+argument-free**, the profile is declared at `commit_to`, and a
+document-profile commit without a document pair is refused. §4 and
+Q#DC-1 were updated to match rather than left to disagree.
 
 **Revision 2 takes three review findings.** Q#DC-2's parameterization
 was **incomplete** — a panel result does not depend on the captured
@@ -109,7 +119,10 @@ decided, and it is the substance of this lane.
 ## 4. The change, in outline
 
 - **A Lua-reachable capture**, returning the same nonconstructible
-  userdata for the *current* frontend and its document window.
+  userdata for the *current* frontend, **with** its document window and
+  buffer when it has one and without them when it does not (Q#DC-4).
+  The capture takes no arguments and is profile-blind; the profile is
+  declared at `commit_to`.
 - **Generic naming.** `DirectoryDestination` becomes something that
   does not lie about a git panel; `capture_directory_destination` and
   the userdata type follow. 8 references (§2).
@@ -237,14 +250,45 @@ buffer kind.
 The Q#JR14 doc comments should keep their references intact; a rename
 that orphans the rationale is worse than a slightly stale name.
 
-### Q#DC-4 — is the capture refused when there is no document window?
+### Q#DC-4 — what happens when there is no document window? **(DECIDED in rev 3)**
 
-`capture_directory_destination` already returns `None` when the
-frontend has no document window (`src/editor.rs:1236`). *My vote:
-**return `nil`, and require every adopter to handle it***, rather than
-inventing a fallback destination. A continuation with nowhere to land
-should say so, and #227's adopter should degrade to today's ambient
-behaviour with a status message rather than silently guessing.
+**Revision 2 left this contradicting Q#DC-2 and it is the primary panel
+API, so it is decided here rather than voted on.** Q#DC-2 concluded a
+panel profile depends only on a live frontend — so it can commit with
+no document window at all — while this question still said the capture
+returns `nil` in exactly that case, and told git to fall back to
+ambient behaviour. Those cannot both hold, and the fallback advice was
+independently wrong: falling back to ambient **is** the P1a bug this
+lane exists to remove.
+
+**The decision:**
+
+- **`ViewDestination { frontend, window: Option<WindowId>, buffer:
+  Option<BufferId> }`.** The frontend is always present; the document
+  pair is optional and absent exactly when the frontend has no document
+  window.
+- **`capture_destination()` is NOT profile-aware and takes no
+  arguments.** It records what is there. Making capture profile-aware
+  would force the caller to know at *capture* time what it will do at
+  *commit* time, which is the opposite of why capture exists — the
+  whole point is to freeze the truth early and decide later.
+- **The profile is declared at `commit_to`**, which is where Q#DC-2's
+  parameterization already lives. One place makes the decision, and it
+  is the place that knows.
+- **A document-profile commit on a destination with no document pair is
+  REFUSED**, with a reason naming that, joining the four preflight
+  refusals rather than being a separate failure mode.
+- **Capture therefore never returns `nil`** while a frontend exists,
+  and the "adopter degrades to ambient" advice is **withdrawn**. An
+  adopter with nowhere to land gets a refusal it can report; it does
+  not get permission to guess.
+
+**What this changes elsewhere, so the decision does not sit alone:**
+§4's outline says the capture returns userdata "for the *current*
+frontend and its document window" — it returns one for the current
+frontend, **with** its document window when there is one. Q#DC-1's "no
+arguments" answer is unchanged and now load-bearing rather than
+incidental: no arguments is what keeps capture profile-blind.
 
 ## 7. Verification
 
@@ -263,10 +307,13 @@ behaviour with a status message rather than silently guessing.
   asserted to **NOT refuse** under the panel profile. A deliberately
   omitted check that has no test is indistinguishable from a check
   someone forgot, and the next reader will restore it.
-- **`nil` when the frontend has no document window** (Q#DC-4) — for
-  the **document** profile. Whether the panel profile can capture
-  without one follows from Q#DC-2 and is asserted whichever way it is
-  answered.
+- **Capture SUCCEEDS with no document window** (Q#DC-4), returning a
+  destination whose document pair is absent — asserted as a successful
+  capture, not as `nil`.
+- **A panel-profile commit on that destination SUCCEEDS**, and a
+  **document-profile commit on it is REFUSED** with a reason naming the
+  missing document window. Both halves, because asserting only the
+  refusal would pass on a capture that refuses everything.
 - **The directory path is unchanged** — dired's existing acceptance
   coverage passes untouched.
 - **`tests/journey_acceptance.rs` passes UNCHANGED**, as a named

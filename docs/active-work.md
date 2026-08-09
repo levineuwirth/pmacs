@@ -275,7 +275,7 @@ from #171 and #215.
 authoritative tip** — the ref, not a SHA. Recover with
 `git fetch githubsucks && git checkout destination-capture`.
 
-- **Framing `docs/destination-capture-framing.md`, revision 2**, in
+- **Framing `docs/destination-capture-framing.md`, revision 3**, in
   review. Revision 2 took three findings: Q#DC-2's parameterization was
   incomplete (a panel depends on **none** of checks 2–4, not just check
   3, so the question now carries a full preflight matrix with every
@@ -314,8 +314,22 @@ authoritative tip** — the ref, not a SHA. Recover with
 - **Stop signal recorded in the framing:** if any existing dired test
   needs editing, the generalization changed Journey Stage 1a's
   semantics, and that is cause to stop rather than to adjust the test.
-- **Gates:** `scripts/gate --acceptance <the new suite>` plus dired's.
-  No `--protocol` — core and Lua bindings only.
+- **Gates, as the executable line rather than a description:**
+
+  ```
+  scripts/gate --acceptance <the new suite> \
+               --acceptance journey_acceptance \
+               --acceptance dired_acceptance
+  ```
+
+  `--acceptance` is repeatable, so there is no reason for this ledger
+  to say "plus dired's" and leave the reader to reconstruct it.
+  **`journey_acceptance` and `dired_acceptance` are preservation suites
+  and a STOP SIGNAL**: they carry the `commit_to` scope,
+  forged-userdata, preflight and restoration pins this lane
+  generalizes, and if either needs editing, the change altered Journey
+  Stage 1a's semantics rather than closing a gap in them. No
+  `--protocol` — core and Lua bindings only.
 
 ## LSP LaTeX coverage — IMPLEMENTED, gates green, no PR yet
 
