@@ -570,24 +570,34 @@ the lane's only `pmacs-gpu` addition is the arm that went red.
 The next agent to touch this row should reproduce at 1-in-10 and
 instrument which side closes the pipe, rather than re-running for green.
 
-### U2 — `m6_1_pty_raw_mode_disables_kernel_echo`, SECOND occurrence; fragments captured
+### U2 — `m6_1_pty_raw_mode_disables_kernel_echo`, THIRD known occurrence
 
-Recorded first with a selector but **no fragments**, so it could not be
-matched. The second occurrence (2026-08-09, worker-identity lane) was
-read from the durable gate log rather than a filtered rerun, so the row
-is now matchable — and the fragment changes what the failure looks
-like.
+**Corrected 2026-08-09 after review.** A previous edit of this row
+called the 2026-08-09 failure the *second* occurrence and claimed it
+captured the fragment for the first time. **Both were wrong**, and the
+evidence was already in this repository:
+`docs/active-work.md` records a **2026-08-06** loaded `--features crdt`
+run failing this selector *and* `m6_1_pty_canonical_mode_keeps_kernel_echo`
+with the same `stty -a output was: ""`, and it already proposed a
+mechanism family — **read-before-write on the child's output**, the
+shape of **R4** (readiness predicate satisfied by an empty file) and
+**R6** (readiness file never published).
+
+So the fragment was captured before, under another feature flavor, and
+this row's earlier "no mechanism has been proposed" was false of the
+tree it was written in.
 
 | field | value |
 |---|---|
 | **selector** | `--lib process::tests::m6_1_pty_raw_mode_disables_kernel_echo` |
 | **job / flavor** | local (Linux), during `cargo test --tests --no-fail-fast` — the lib target alongside a full PTY-heavy corpus |
-| **required fragments** | `panicked at src/process.rs:3953` · `raw mode should disable echo; stty -a output was: ""` — **captured on occurrence 2** |
-| **status** | **two occurrences, load-correlated; the diff is EXCLUDED on occurrence 2** |
+| **required fragments** | `panicked at src/process.rs:3953` · `raw mode should disable echo; stty -a output was: ""` |
+| **status** | **at least three occurrences, load-correlated; the diff is EXCLUDED on the 2026-08-09 one** |
 | **what IS established** | Occurrence 1: failed once (`1916 passed; 1 failed`) under a full-corpus run. Occurrence 2: `1919 passed; 1 failed` in `scripts/gate` step `03-lib` at load ~21, and **the tree contained ZERO code change since a 13/13 green run on the same lane** — the only delta was three lines of `docs/active-work.md`. A markdown edit cannot break a PTY test, so the change under test is ruled out as a cause rather than merely doubted. Passes isolated (`1 passed`, 0.01s) |
-| **what the fragment REFRAMES** | `stty -a` returned the **empty string**, not a wrong mode. So this is not "raw mode failed to disable echo" — it is `stty` producing **no output at all**, which points at PTY/spawn readiness under load rather than at termios handling. The assertion's own message is misleading on this point, and anyone diagnosing it from the message alone will look in the wrong place |
+| **what the fragment ACTUALLY shows** | **The supervisor collected empty stdout** — `drain_until` then `collect_stdout(&evs)` (`src/process.rs:3948-3951`); the assertion inspects that string. It does **NOT** establish that `stty` emitted nothing: the bytes could have been lost in PTY delivery or in event collection. An earlier edit of this row said "`stty` produced no output at all", which asserts a mechanism the test cannot see. What is true is narrower and still useful: this is not a *termios* failure — nothing shows echo being configured wrongly — but which of {child never wrote, PTY dropped it, collection missed it} is open. The assertion's message invites the wrong reading, since it prints an empty string as though it were `stty`'s answer |
 | **what is NOT** | any mechanism, still. Not reproduced in a later full sweep (108 targets, exit 0), nor in 3 isolated `--lib` runs (1917/0 each), nor in the isolated rerun after occurrence 2. Two occurrences establish intermittence and a load correlation; neither establishes cause |
-| **discriminating control if a third lands** | run the selector in a loop under synthetic load with `stty -a` output logged on every iteration — the open question is whether `stty` is empty *every* time it fails, which would separate a readiness race from a termios one |
+| **discriminating control for the next occurrence** | capture the **full process event stream and the child's exit disposition**, not only the collected string — that is what separates "child never wrote" from "delivery or collection lost it", and the collected string cannot distinguish them however many times it is sampled. Cross-check against R4/R6's readiness family, which `docs/active-work.md`'s 2026-08-06 entry already implicates |
+| **cross-reference** | `docs/active-work.md` — 2026-08-06 occurrence, `--features crdt`, **both** the raw and canonical selectors, same fragment, read-before-write hypothesis |
 | **rival explanation not excluded** | leaked `pmacs --daemon` processes, which the handoff names as a standing confound for any load-sensitive local red |
 
 ### U3 — the R7 selector again, fragments lost the same way U2's were
