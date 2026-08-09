@@ -503,7 +503,9 @@ the authoritative tip** — the ref, not a SHA. Recover with
     would have made the divergence unassertable.
   - **A new test asserts both directions, positive and negative**
     (`the_two_utf8_refusals_each_name_the_surface_their_own_text_reaches`,
-    26 in the suite): the process message contains `pmacs.process.list`
+    25 in the suite — 24 before this round, plus this one; an earlier
+    revision of this bullet said 26): the process message contains
+    `pmacs.process.list`
     and **not** `*workers*`/`modeline`; the job message contains both of
     those and **not** `pmacs.process.list`. The existing row-table
     assertion in `spawning_without_a_real_purpose_is_refused_and_starts_nothing`
