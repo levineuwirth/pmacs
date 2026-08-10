@@ -25,7 +25,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::async_runtime::SharedAsyncRuntime;
 use crate::cell::{CellCoord, CellSize};
-use crate::editor_core::{EditorCore, GeometryUpdate};
+use crate::editor_core::{CommitContract, EditorCore, GeometryUpdate};
 use crate::frontend::{Event, Frontend, KeyEvent, KeyEventKind, MouseEvent, install_panic_hook};
 use crate::key::{Chord, display_sequence};
 use crate::keymap_stack::{Action, KeyDispatcher};
@@ -119,20 +119,34 @@ impl ScopedFrontend {
     }
 
     /// Enter a background frontend scope, also swapping the core's
-    /// ambient `active_frontend`. Both are restored on drop, on every
-    /// exit path including a raising callback.
+    /// ambient `active_frontend` and **pushing** `contract`. All three are
+    /// restored on drop, on every exit path including a raising callback.
+    ///
+    /// The frontend comes from `contract.destination` rather than being
+    /// passed separately: a scope entered for one frontend while carrying
+    /// another's destination would let the placement guard check the
+    /// wrong window, and there is no caller that wants them to differ.
+    ///
+    /// **The contract is pushed, not swapped (Q#DC-2, revision 9).** The
+    /// frontend override and the ambient frontend are *substitutions* —
+    /// an inner scope means what it says and the outer one resumes
+    /// afterwards — but a contract is a *restriction*, and a nested scope
+    /// masking one would suspend it for the extent of the inner body
+    /// while the outer commit's relaxed preflight still depended on it.
+    /// See [`crate::editor_core::EditorCore::push_commit_contract`].
     pub(crate) fn enter(
         &self,
         core: &SharedCore,
         commit_scope: &CommitScopeActive,
-        frontend_id: FrontendId,
+        contract: CommitContract,
     ) -> ScopedFrontendGuard {
+        let frontend_id = contract.destination.frontend;
         let previous = self.0.replace(Some(frontend_id));
-        let previous_active = {
+        let (previous_active, contract_depth) = {
             let mut core = core.borrow_mut();
             let was = core.active_frontend;
             core.active_frontend = frontend_id;
-            was
+            (was, core.push_commit_contract(contract))
         };
         let previous_commit = commit_scope.0.replace(true);
         ScopedFrontendGuard {
@@ -140,6 +154,7 @@ impl ScopedFrontend {
             core: core.clone(),
             previous,
             previous_active,
+            contract_depth,
             commit_scope: commit_scope.clone(),
             previous_commit,
         }
@@ -151,6 +166,15 @@ pub(crate) struct ScopedFrontendGuard {
     core: SharedCore,
     previous: Option<FrontendId>,
     previous_active: FrontendId,
+    /// Contract-stack depth to truncate back to (Q#DC-2). Held here
+    /// rather than on a separate guard so a `"panel"` profile can never
+    /// outlive the body that declared it and govern an unrelated later
+    /// display.
+    ///
+    /// A depth rather than a saved contract because nesting **composes**
+    /// (revision 9): this scope adds one restriction and removes exactly
+    /// that one, leaving every enclosing commit's still in force.
+    contract_depth: usize,
     /// Cleared together with the scope, so an awaiting callback cannot
     /// leave `await` refused after the commit ends (Q#JR14b).
     commit_scope: CommitScopeActive,
@@ -160,7 +184,11 @@ pub(crate) struct ScopedFrontendGuard {
 impl Drop for ScopedFrontendGuard {
     fn drop(&mut self) {
         self.scope.0.set(self.previous);
-        self.core.borrow_mut().active_frontend = self.previous_active;
+        {
+            let mut core = self.core.borrow_mut();
+            core.active_frontend = self.previous_active;
+            core.exit_commit_contract(self.contract_depth);
+        }
         self.commit_scope.0.set(self.previous_commit);
     }
 }
@@ -1219,22 +1247,32 @@ impl EditorState {
     }
 
     /// Capture the destination a directory open must commit to
-    /// (Q#JR14), or `None` when `frontend` has no document window.
+    /// (Q#JR14), or `None` when `window` is gone.
     ///
     /// Synchronous by necessity: the listing settles a tick or more
     /// later, and by then the ambient frontend, selected window, and
     /// active buffer may all name something else.
-    pub(crate) fn capture_directory_destination(
+    ///
+    /// Takes the window **explicitly**, unlike
+    /// [`crate::editor_core::EditorCore::capture_view_destination`],
+    /// which reads the ambient one. Both directory callers already hold
+    /// the exact window the open was resolved against — the daemon's is
+    /// read before `resolve_target_buffer` runs (Q#BP11b) — and
+    /// recapturing it from ambient state here would discard that.
+    /// A directory open therefore always yields a full document pair,
+    /// which is why this keeps returning `Option` rather than the total
+    /// capture's `ViewDestination`.
+    pub(crate) fn capture_view_destination(
         &self,
         frontend: crate::protocol::FrontendId,
         window: crate::window::WindowId,
-    ) -> Option<crate::editor_core::DirectoryDestination> {
+    ) -> Option<crate::editor_core::ViewDestination> {
         let core = self.core.borrow();
         let buffer = core.windows.get(&window)?.buffer_id;
-        Some(crate::editor_core::DirectoryDestination {
+        Some(crate::editor_core::ViewDestination {
             frontend,
-            window,
-            buffer,
+            window: Some(window),
+            buffer: Some(buffer),
         })
     }
 
@@ -1258,7 +1296,7 @@ impl EditorState {
             .borrow()
             .primary_document_window(crate::protocol::FrontendId::LOCAL);
         let dest = window.and_then(|window| {
-            self.capture_directory_destination(crate::protocol::FrontendId::LOCAL, window)
+            self.capture_view_destination(crate::protocol::FrontendId::LOCAL, window)
         });
         let Some(dest) = dest else {
             self.core.borrow_mut().status =
@@ -1288,13 +1326,13 @@ impl EditorState {
     pub(crate) fn dispatch_directory_open(
         &mut self,
         path: &std::path::Path,
-        dest: crate::editor_core::DirectoryDestination,
+        dest: crate::editor_core::ViewDestination,
     ) {
         let display = path.display().to_string();
         let args = {
             let lua = self.lua_host.lua();
             let destination =
-                match lua.create_userdata(crate::lua_bindings::DirectoryDestinationLua(dest)) {
+                match lua.create_userdata(crate::lua_bindings::ViewDestinationLua(dest)) {
                     Ok(userdata) => mlua::Value::UserData(userdata),
                     Err(error) => {
                         self.core.borrow_mut().status = format!("cannot open {display}: {error}");

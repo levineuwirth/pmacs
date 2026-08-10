@@ -693,18 +693,40 @@ not caused by the PRs they appeared on — that PR is **docs-only and its
 tree is byte-identical to a green `main`**. It is not evidence that any
 of them is harmless.
 
-### U4 — `a_pty_resize_blanks_the_host_before_repainting`, macOS `lua54`, one occurrence
+### U4 — `a_pty_resize_blanks_the_host_before_repainting`, macOS **both flavours**, three occurrences
 
-Surfaced on PR #229's CI.
+Surfaced on PR #229's CI; twice more on PR #231's.
+
+**The `lua54` in this row's original title was wrong as a signature
+component, and matching on it would have missed two occurrences.** The
+row was filed from #229's single `lua54` red and recorded the flavour in
+the matching key. #231 then reddened the identical selector with the
+identical three fragments **twice on `luajit`** — so flavour is not part
+of this signature, and the row's own caution that "a deterministic
+defect *can* be Lua-flavour-specific" is now settled in the other
+direction: this one is not. Occurrence-keyed by suffix length, the three
+are `25 362` (#229, `lua54`), `25 222` (#231 attempt 1, `luajit`) and
+`25 054` (#231 attempt 2, `luajit`).
+
+**A fourth sighting of these fragments was NOT an occurrence and must
+not be counted as one.** It came from a deliberate bite during this
+test's own development — the defect reintroduced on purpose (`consumer
+ignores full_grid`), 34 831 bytes, failing in 20.09 s. It earns its
+place here for what it proves instead: **the genuine defect and these
+CI reds are signature-indistinguishable**, same message class and same
+full-timeout duration, so the fragments alone can never tell a real
+resync failure from whatever this is.
 
 | field | value |
 |---|---|
 | **selector** | `--test full_grid_resync_acceptance a_pty_resize_blanks_the_host_before_repainting` |
-| **job / flavor** | GitHub Actions, `Test (macos-latest / lua54)`, `macos-26-arm64` |
+| **job / flavor** | GitHub Actions, `Test (macos-latest / lua54)` **and** `Test (macos-latest / luajit)`, `macos-26-arm64`. **Flavour is not a matching key for this row** |
 | **required fragments** | `FG-INV: the post-resize resync must blank the host` · `no CSI 2 J appeared in the` · `bytes emitted after the first painted frame` |
 | **NOT fragments** | the byte count and the `:LINE` suffix are **occurrence-specific** and must not be matched on — the count is the collected suffix length, which varies per run, and the line moves with the file |
-| **status** | **one occurrence; INTERMITTENT — passed on rerun** |
-| **why the diff is excluded** | #229 changes only `scripts/gate`, `tests/gate_script_acceptance.rs` and documentation — **no `src/`, and the workflow never invokes `scripts/gate`**. Decisively, `full_grid_resync_acceptance` runs **before** the changed gate suite, so even a cross-suite leaked-state path is not available. The `luajit` leg passing on the same commit is **corroboration only** — a deterministic defect *can* be Lua-flavour-specific, so that observation must not be used as a structural exclusion |
+| **status** | **three occurrences on two branches; INTERMITTENT on #229 (passed on rerun), NOT observed to pass on #231 (0/2)** |
+| **the #231 control experiment, and what it does and does not license** | Five valid observations at #231's exact base `0190102` — `run_attempt` 1, 2, 3, 4 and 6 — **all green on both macOS flavours**, against #231's 0/2. Under an equal-rate model the chance both failures land on the two branch runs is 1/C(7,2) = **4.8%**. Two things bound that number. First, **attempt 5 was discarded** because it reddened a *different* selector (U8) — so the base leg is 5/5 green *for this signature* and 5/6 overall, and "the base never fails" is not what was observed. Second, three unrelated macOS selectors reddening in one session is **a background platform failure rate**, and the equal-rate model the 4.8% assumes is exactly what such a rate violates. **The branch side was never resampled**: 5-vs-2 is an asymmetric experiment, and rerunning #231's failing job three more times at `4654b94` was the outstanding discriminator when it merged |
+| **why #231's diff is excluded** | grepping its **entire** `src/` diff for `full_grid\|resize\|resync\|Geometry\|reconcile_panel_layout` matches **one import line** and nothing else; all 721 changed lines are placement, dedication and commit-contract logic. From the other side, `full_grid_resync_acceptance` (191 lines) contains no panel, side-window, dedication, display or directory surface — grep for those matches only a comment about CSI 2 J. #231 merged on this reading **over** the statistical signal above, which is a judgement recorded here so that a fourth occurrence can revisit it rather than re-derive it |
+| **why #229's diff is excluded** | #229 changes only `scripts/gate`, `tests/gate_script_acceptance.rs` and documentation — **no `src/`, and the workflow never invokes `scripts/gate`**. Decisively, `full_grid_resync_acceptance` runs **before** the changed gate suite, so even a cross-suite leaked-state path is not available. The `luajit` leg passing on the same commit is **corroboration only** — a deterministic defect *can* be Lua-flavour-specific, so that observation must not be used as a structural exclusion |
 | **what IS established** | **no blank was OBSERVED after the mark** within the test's fixed 20-second deadline. The collected suffix was the **entire** post-mark output (`suffix.len()`, 25 362 bytes on this occurrence — not a capped window; only the *displayed* head is truncated to 400 bytes), and that head shows ordinary repaint traffic (`ZQXMARKERQZ` rows with SGR + CUP), so the host was painting |
 | **what is NOT** | any mechanism. Whether the blank was never emitted, emitted after the deadline, or lost in transport is **open** — and "it never emitted the blank" is a claim this evidence does not support. **The failing run's ~20 s duration is the fixed `Duration::from_secs(20)` timeout**, so the spread against a fast passing run is mechanically determined and is **not** independent timing evidence |
 | **discriminating control — ASYMMETRIC, and only one direction concludes** | the suffix is already complete, so "capture more bytes" is not the gap — arrival time is. Extending the deadline and recording whether `CLEAR_ALL` arrives, and at what offset: **if it arrives, "emitted late" is established.** **If it does not, that establishes only "not observed by the longer deadline"** — *not* "never emitted", because transport loss produces the same absence. Separating non-emission from transport loss needs **producer-side emission evidence** (did pmacs write the clear?) cross-checked against the collected stream; no deadline, however long, can do it alone |
@@ -727,3 +749,53 @@ incident, not U4 occurring twice**.
 | **exclusion strength — WEAKER than U4's, deliberately** | the changed `gate_script_acceptance` ran **earlier in the same job**, and it creates worktrees and directories. No leaked child or persistent signal-state mutation was observed, but "the diff touches no `src/`" is **not** the argument here that it is for U4, because cross-suite leaked state is a path reachability reasoning does not close |
 | **control 1 — CROSS-SUITE ATTRIBUTION, and asymmetric** | run `m5_8_acceptance` alone on macOS `lua54`, without the gate suite ahead of it. **A matching isolated RED proves the gate suite is not necessary** for the failure. **An isolated GREEN proves nothing beyond that run** — the failure is intermittent, so absence under one run is not evidence of dependence. It also does **not** discriminate among the three mechanisms in either direction |
 | **control 2 — mechanism** | observe **readiness and raw-mode state at the moment of injection**. Another isolated pass, however many times repeated, cannot separate "injected before raw mode" from "raw mode lost" from a third cause |
+
+### U8 — `acc28_child_input_and_the_c_c_escape_work_unchanged_in_a_panel`, macOS `luajit`, one occurrence, **fragments destroyed**
+
+**Numbered U8 deliberately: U6 and U7 are reserved** for the two
+wall-clock rows on `worker-identity-stage1` (PR #232), which renumbered
+into that range when #229 took U4/U5. Taking U6 here would recreate the
+duplicate-id collision that rebase already produced once.
+
+**This row exists mostly as an admission.** It surfaced on attempt 5 of
+a merge-base control at `0190102`, and **I reran the job before reading
+its log**, which discarded it. GitHub keeps only the latest attempt's
+logs for a rerun job. So this is U2's original condition exactly — a
+selector with no fragments, unmatchable — and it was produced by the
+very mistake U3 is named for.
+
+| field | value |
+|---|---|
+| **selector** | `--test bottom_panel_stage1_acceptance acc28_child_input_and_the_c_c_escape_work_unchanged_in_a_panel` |
+| **job / flavor** | GitHub Actions, `Test (macos-latest / luajit)`, at base `0190102`, control attempt 5 |
+| **required fragments** | **NONE CAPTURED — destroyed by rerunning the job before reading its log.** Recovery attempted via the jobs API and the attempt-scoped jobs endpoint; the log is gone |
+| **what IS established** | it failed once (`46 passed; 1 failed`), panicking at `tests/bottom_panel_stage1_acceptance.rs:2454`, on the **exact merge base** — so it is not attributable to any open branch |
+| **what is NOT** | everything else. Without the assertion text this cannot be matched against a future occurrence, which is the whole purpose of a row here |
+| **why it matters anyway** | it is the **third distinct macOS selector** to red in one session, after U4 (`full_grid_resync`) and U5 (`ctrl_c_during_reconnect`). Three unrelated selectors failing on the macOS legs suggests a **background failure rate on that platform** rather than three independent test bugs — and that materially affects any equal-rate reasoning about which branch a failure "landed on" |
+| **next occurrence** | **read the log BEFORE rerunning anything.** That is U3's stated lesson and this row is its fourth violation |
+
+### U9 — a PTY test and a budget test red **together** in one `11-sweep`, with an in-run control
+
+Recorded on the `destination-capture` merge tree, 2026-08-10, in the
+gate run that was meant to clear PR #231.
+
+**This row's value is its control, not its selectors.** U6 and U7 could
+only compare a red run against a *different* run. Here both selectors
+ran green **inside the same gate invocation**, minutes earlier, on the
+same tree and machine — `03-lib` (1928 passed, 0 failed) and
+`04-lib-crdt` (2113 passed, 0 failed) — and then failed in `11-sweep`.
+Whatever this is, it is not the tree.
+
+| field | value |
+|---|---|
+| **selector** | `--lib process::tests::m6_1_pty_canonical_mode_keeps_kernel_echo` **and** `editor::tests::composition_overhead_under_ten_percent`, failing in the same `11-sweep` step |
+| **job / flavor** | local (Linux), `scripts/gate` step `11-sweep` (`cargo test --workspace --no-fail-fast -- --skip basedpyright`), fresh per-lane target dir, no sibling worktrees building |
+| **required fragments** | ``canonical mode should leave echo enabled (no `-echo` flag); stty -a output was: ""`` **and** `composition machinery added more than 10% overhead` |
+| **NOT fragments** | the measured numbers (`1.613`, `single=191935 ns`, `dispatch=309602 ns`) and every `:LINE` suffix — occurrence-specific |
+| **status** | **one occurrence; INTERMITTENT — the identical sweep command on the same tree was green (118 targets, 1928 passed, exit 0)** |
+| **what IS established** | intermittence, with the strongest available exclusion of the tree: green in two earlier steps of the **same run**, green isolated afterwards (`2 passed`, 1.70 s), green on a full sweep rerun. Both assertions are **timing-sensitive by construction** — one reads collected child output within a deadline, the other measures wall-clock composition overhead (observed 1.613× against a 1.10× budget; 61.3% dispatch and 124.6% realistic overhead) |
+| **what is NOT** | cause, and the load confound is **partially measured but NOT controlled**. The failing sweep ran inside a full gate; the green rerun started at load average 1.98 with the 5-minute figure still at 8.03 from that gate. Different conditions is not a measurement of the mechanism, and this row does not treat it as one |
+| **the structural difference worth testing next** | `cargo test --workspace` runs **many test binaries concurrently**; `--lib` runs **one**. That is a difference in kind between the passing steps and the failing one, not merely a difference in load average — and it is the first candidate this family has had that is checkable rather than atmospheric. **Discriminating control:** rerun the sweep with test-binary concurrency pinned to 1, and separately run the `--lib` binary alone under synthetic load. A red under synthetic load at low sweep concurrency implicates load; a red at high concurrency and low load implicates the concurrency itself |
+| **relation to U2 — a NEAR MISS, do not match it there** | the PTY fragment is U2's exact family (`stty -a output was: ""`), but U2's selector field names only `m6_1_pty_raw_mode_disables_kernel_echo`. U2's occurrence 2 saw raw **and** canonical fail together; here **canonical redded alone and raw passed**, which U2's evidence has never shown. It is recorded here rather than folded into U2 so that the "canonical alone" case stays visible |
+| **relation to U6 — its own instruction, honoured** | `composition_overhead_under_ten_percent` is one of U6's two selectors, and U6 says plainly: "If a future run reds **one** of these without the other, that is a different incident and should be judged as one." It redded without `criterion_1_end_of_line_typing…`, in a different step, at a far larger margin (1.613× here against U6's 1.297×). Judged as a different incident, as instructed |
+| **what this row does NOT assert** | that the two selectors share a mechanism. They failed together once; they belong to different subsystems; and U7 already refused this exact merge for U6. The **co-failure inside one step with an in-run green control** is the signature — not either name, and not a shared cause |

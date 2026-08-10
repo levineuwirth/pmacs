@@ -265,7 +265,402 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
-## Worker identity Stage 1 (§9) — IMPLEMENTED, no PR yet
+## Destination capture (Q#JR14 generalization) — PR #231 OPEN, revision 9, cleared to merge
+
+**PR #231** — https://github.com/levineuwirth/pmacs/pull/231. #227
+blocks on this lane.
+
+The mechanism landed at `0efc8c0`; review found a correctness blocker;
+`ca72461` implemented **revision 7**, which review then **also**
+rejected; `469d5c8` replaced it with **revision 8** and its §3
+enumeration is **performed and recorded in the framing**; review then
+found a hole in revision 8's guard **scope** and the commit below closes
+it as **revision 9**.
+
+**The macOS red that blocked this lane, and how it was cleared.** Both
+CI attempts at `4654b94` failed `a_pty_resize_blanks_the_host_before_repainting`
+on `Test (macos-latest / luajit)`. A control experiment was run at the
+exact base commit `0190102`: **five valid observations, all green on
+both macOS flavours**, against the branch's 0/2 — 1/C(7,2) = 4.8% under
+an equal-rate model. That implicates the branch statistically. **The
+diff exonerates it mechanically**: grepping this lane's entire `src/`
+diff for `full_grid|resize|resync|Geometry|reconcile_panel_layout`
+matches an **import line and nothing else**, and
+`full_grid_resync_acceptance` (191 lines) has no panel, side-window,
+dedication, display or directory surface at all. Merged on that reading,
+with the equal-rate model itself in doubt — see the U4 row, and note a
+sixth base attempt reddened on a *third, unrelated* macOS selector
+(U8), which is what a background platform failure rate looks like.
+
+**The original blocker:** the panel profile skipped checks 2–4 on the
+claim that a panel result never touches a document window. **Panel
+placement falls back to an ordinary document window** when the frontend
+is not panel-capable or its side slot is dedicated, so a `"panel"`
+commit could replace a **newer** document with every stale-intent guard
+skipped. Reproduced in review.
+
+**Four designs, two rejected outright and one corrected — the sequence
+is the part worth not re-learning:**
+
+1. **Revision 6 — predict at preflight.** Rejected: the `await` refusal
+   stops concurrent interleaving, not the body, which is arbitrary
+   synchronous Lua and can create the fallback itself.
+2. **Revision 7 — enforce at the placement boundary.** Implemented at
+   `ca72461`, then rejected: `docs/agent-handoff.md:748` requires
+   `commit_to` to preflight **before** the callback, because
+   "validating at display time is four mutations too late". A body has
+   already created buffers, handles and paint by then, so a
+   placement-time refusal is a partial commit with an error return.
+3. **Revision 8 — keep the preflight, REFUSE the scope-invalidating
+   mutation.** The shape the tree implements. Same as `Handle:await`
+   being refused inside a commit scope: the fallback never comes into
+   existence, and refusal stays mutation-free on `(false, reason)`.
+4. **Revision 9 — make the refusal hold for the WHOLE body.** Not a new
+   shape; a correction to revision 8's scope. A nested `commit_to`
+   **replaced** the enclosing contract and restored it afterwards, so
+   an outer `"panel"` commit's restriction went out of force for the
+   inner body's extent: nested `"document"` commit → callback dedicates
+   the side slot, unrefused → outer commit resumes, falls back,
+   overwrites a newer document. Reproduced in review. Contracts now
+   **compose** — the core holds a stack, `commit_to` pushes and pops
+   rather than swapping, and the guard consults every contract in force,
+   so the strictest active restriction wins. Nesting itself is **not**
+   forbidden: only the mutation is refused, so a nested commit that
+   touches no dedication runs exactly as before. Detecting the
+   dedication when the outer commit resumed was not available — that is
+   a late refusal, which is what revision 7 was rejected for.
+
+**WHAT REVISION 9 DID *NOT* INVALIDATE — read this before re-opening the
+enumeration.** The write-site enumeration below survived intact: every
+site is real, every one is still guarded, and review of the nesting
+defect found no missing route. What was wrong was the *surrounding*
+claim — that the guard was in force for the whole outer body. A complete
+list of write sites is not a complete argument until the guard's extent
+is stated too. The acceptance suite now drives the same rows at **two
+depths**, directly and through a nested `commit_to`.
+
+**THE ENUMERATION IS THE LOAD-BEARING PART, AND IT IS CLOSED AS AN
+ENUMERATION OF WRITE SITES — for a structural reason, not because
+inspection ran out of ideas.** Full working in the framing §3; the short
+form:
+
+- **Only two pieces of state can matter**, because `resolve_placement`
+  reaches `Ordinary` from a side request through exactly two branches:
+  `panel_capable`, and the one side window's `dedicated`.
+- **`panel_capable` is unreachable from a body.** It is written only
+  where a `FrontendView` is constructed, and nothing in
+  `src/lua_bindings/` constructs, registers or unregisters one —
+  `register_frontend_view` has callers only in `daemon.rs` and core
+  unit tests.
+- **Eight writes to `dedicated` exist** (`rg 'params\.dedicated\s*='
+  src/`); **four are reachable and a fifth is guarded defensively** —
+  `apply_placement`'s `Side` created / replacing / non-replacing arms
+  and `set_params` are the reachable four, and `quit_window`'s
+  `QuitAction::Restore` is the fifth, proved unreachable below and
+  guarded anyway. **All five are guarded**, which is the count that
+  matters; listing four under the word "five" is what an earlier version
+  of this bullet did. Two `Ordinary` arms are harmless (their target is
+  never a side window; one only ever clears the flag) and one is a unit
+  test.
+- **The guards are sited where the property converges, not per caller.**
+  All three `Side` arms are reached through `apply_placement`, which has
+  **exactly one caller** — so one guard in `display_buffer` covers every
+  request-driven dedication, including spellings that do not exist yet.
+  `set_params` is a genuinely separate write and is guarded separately;
+  dedication does **not** converge before the field itself, and that is
+  stated rather than papered over.
+- **Closing the side window is NOT a route**, checked rather than
+  assumed: with no side leaf `side_window_for` returns `None` and
+  placement **creates** a fresh panel instead of falling back. Hiding is
+  likewise irrelevant — `panel_hidden` is not consulted by placement.
+- **`quit_window`'s `QuitAction::Restore { dedicated: true }` is
+  UNREACHABLE**, and this was the surprise. `Restore` is stored only on
+  a *replacing* side placement, and a dedicated slot can never be the
+  target of one. Guarded anyway, labelled defensive, because its
+  unreachability is emergent from two rules in another function.
+- **What this does not rule out:** the enumeration is closed over the
+  current tree, not future edits. `params.dedicated` is a public field,
+  so nothing but the acceptance rows would catch a new direct writer.
+
+**Also closed:** an invalid-UTF-8 profile (`string.char(255)`) reached
+`to_str()` and surfaced mlua's generic conversion error instead of the
+documented message naming the accepted values — the same reachability
+class as revision 5's `Option<String>` defect, one layer down. The
+comparison is on bytes now.
+
+**Written with the lane's first commit**, per the standing correction
+from #171 and #215.
+
+**Branch `destination-capture`**, base `githubsucks/main` @ `4bc55e8`
+(the #225 merge). **`githubsucks/destination-capture` is the
+authoritative tip** — the ref, not a SHA. Recover with
+`git fetch githubsucks && git checkout destination-capture`.
+
+- **Framing `docs/destination-capture-framing.md`, revision 9.**
+  Revisions 1–5 were approved over four review rounds; revisions 6–9 are
+  corrections carrying the blocker above, and **revision 8's design as
+  scoped by revision 9 is what the tree implements**. Revisions 6 and 7
+  are described in that document as the record of why *not* those;
+  neither is in the tree and neither should be restored from it.
+- **Implemented in four commits.** `779bb02` is the mechanism
+  (`pmacs.window.capture_destination()`, the `ViewDestination` rename,
+  the profile argument); `d5a6170` is
+  `tests/destination_capture_acceptance.rs`; `469d5c8` is the
+  revision-8 panel-profile correction plus the invalid-UTF-8 hole;
+  `394fa43` is revision 9's contract stack and the commit below adds its
+  cross-frontend pin. **15 pins**, and both preservation suites pass
+  **unchanged** (journey 47, dired 31) — §7's stop signal not firing
+  rather than being suppressed.
+- **HOW THE PANEL PROFILE IS ENFORCED, in one sentence so no earlier
+  revision gets reinstated by someone reading only that document:** the
+  preflight stays exactly where it was, and the mutations that would
+  invalidate it are **refused at the attempt**.
+  - `EditorCore::panel_commit_dedication_refusal` is the one rule. It
+    fires while **any** `"panel"` `CommitContract` for this frontend is
+    in force — every contract on the stack, not the innermost — and is
+    consulted from `display_buffer` (before `apply_placement`, so a
+    refused attempt mutates nothing), `pmacs.window.set_params` (before
+    its borrow, so `fixed_rows` in the same table is not applied
+    either), and `quit_window`.
+  - **This is the same shape as `Handle:await` being refused inside a
+    commit scope**, and for the identical reason: something that would
+    invalidate the scope's guarantee is rejected outright rather than
+    predicted around or caught late.
+  - The contract (`CommitContract { destination, profile }`) rides on
+    the core in a **stack**, pushed and popped by the **same**
+    `ScopedFrontendGuard` that scopes the frontend, so a `"panel"`
+    profile can never outlive the body that declared it. The field is
+    private to the crate — Lua cannot claim a profile for a placement it
+    did not commit to.
+  - **A stack, not a slot, and the distinction is revision 9 (above).**
+    The frontend override and the ambient frontend are *substitutions*,
+    so a nested scope rightly replaces them; a contract is a
+    *restriction*, and replacing one suspends it. The guard stores a
+    depth and truncates back to it, so an inner exit removes exactly the
+    contract it added and leaves every enclosing one in force.
+  - **Matching is per FRONTEND as well as per profile, and that is a
+    deliberate exception with its own positive pin.** A nested commit for
+    a different frontend may dedicate *its* side slot: `resolve_placement`
+    consults only the requesting frontend's `panel_capable` and its own
+    one side window, so nothing done to B can change where A's side
+    request lands. Pinned by
+    `a_nested_commit_for_another_frontend_may_dedicate_its_own_slot`,
+    which is the file's only row asserting that something is **allowed**
+    — every other asserts a refusal, and an exception only the doc
+    comment knows about is one review round from being simplified out.
+  - **Prohibiting nested `commit_to` was the other candidate and was
+    rejected.** It closes the hole by forbidding a construction no rule
+    objects to — `commit_to` is public Lua API for saying where a
+    continuation's result belongs, and a body committing to a second
+    destination (a diff beside a status panel) is where #227's adoption
+    is heading. Only the restriction needed preserving. **No Lua in the
+    tree nests today** — `builtin/runtime/dired.lua` is the only
+    `commit_to` consumer and it does not — so this is a decision about
+    the API's future rather than about a live consumer, which is why it
+    is recorded rather than left implicit.
+  - **`panel_placement_can_fall_back` remains the preflight**, unchanged
+    in role: it measures whether this frontend places side requests in
+    the panel *right now*. With the invalidating mutations refused, that
+    measurement stays true for the life of the body, which is what makes
+    it a guarantee rather than a forecast.
+  - The four document checks live once, in
+    `EditorCore::document_destination_refusal`.
+  - **Three deliberate limits**, each a different decision rather than a
+    stricter version of this one: the **document profile is untouched**
+    (constraining its body would newly refuse dired's own documented
+    panel path — a preservation-suite stop signal); **dedicating a
+    document window is still allowed** (it cannot change which of
+    panel-or-document a side request resolves to); and **falling back is
+    still allowed** — a frontend that cannot render a panel degrades
+    gracefully exactly as today, because this refuses the mutation that
+    *manufactures* a fallback, never the fallback itself.
+- **Mutation-checked per guard, and the pattern is the evidence the rows
+  are independent rather than one assertion repeated.** Deleting the
+  `display_buffer` guard fails the three `display{side, dedicated}` rows
+  — verified **individually**, by rotating each to the front of the
+  table, since the first failure otherwise masks the rest. Deleting the
+  `set_params` guard fails only that row and leaves the display rows
+  passing. Both leave every other test in the file green.
+- **Audit: nothing else relied on "a panel never touches a document".**
+  Four doc sites repeated the claim (`ViewDestination`'s own doc twice,
+  `capture_view_destination`, `ViewDestinationLua`) and were corrected;
+  no other code depended on it. Dired — the only Lua `commit_to`
+  consumer — takes the **two-argument document profile**, so all four
+  checks already applied to it, and it separately documents and accepts
+  the side-slot fallback (`builtin/runtime/dired.lua`).
+  `compile.lua`'s `already_in_panel` queries live state rather than
+  assuming, and the terminal adopter's rollback keys off
+  `DisplayOutcome::created_side`, already false on a fallback.
+- **TWO FRAMING CLAIMS THE TREE DID NOT MATCH.** Neither changed a
+  decision; both are recorded because the framing says "counted, not
+  estimated" and a reader will check.
+  1. **The rename was 11 references across 5 files, not 8 across 4.**
+     `src/daemon.rs:1804` also calls the capture (the attaching
+     frontend's directory open), and `editor.rs` holds six references
+     rather than the counted total. Mechanical either way.
+  2. **Q#DC-4's "a frontend with no document window" is a DEFENSIVE
+     branch, not a routine one.** The obvious spelling — a frontend
+     showing only a bottom panel — is asserted impossible: Q#BP6 says a
+     layout always retains at least one non-side window, and
+     `EditorCore::non_side_target` carries a `debug_assert!` that fires
+     under `cargo test` when one does. So with Q#BP6 held a *registered*
+     frontend always has a live document window. The decision still
+     stands (capture stays total; an adopter with nowhere to land gets a
+     refusal naming that rather than permission to fall back to ambient
+     state), and the two Q#DC-4 pins drive the reachable spelling of the
+     same condition — a layout whose document window has gone while the
+     view remains. **#227 should not expect to hit this refusal**; it is
+     insurance, not a path.
+- **Mutation-tested, since a matrix of deliberate omissions is exactly
+  what passes vacuously.** Retyping the profile to `Option<String>`
+  fails the table and boolean rows with mlua's conversion error (the
+  number row survives — Lua coerces it — which is why the closed set is
+  witnessed by more than one non-string). Applying all four checks in
+  both profiles fails the panel column; applying only check 1 in both
+  fails the document column. Defaulting an omitted profile to `"panel"`
+  fails **`journey_acceptance`'s two preservation pins**, which is the
+  contract claim being executable rather than asserted. Dropping the
+  frontend scope for the panel profile fails the survives-a-switch pin's
+  panel row; dropping the no-document-window arm fails the Q#DC-4 pair.
+
+  **Revision 8's four, each isolating a different way to get it wrong** —
+  and the pattern of *which* rows survive each is the evidence the parts
+  are independent rather than redundant:
+  1. delete the `panel_commit_dedication_refusal` call from
+     `display_buffer` → the three `display{side, dedicated}` rows fail,
+     **verified individually** by rotating each to the front of the
+     table so the first failure cannot mask the rest. Every other test
+     passes — which is exactly the hole an implementation guarding only
+     `set_params` would ship.
+  2. delete it from `set_params` → **only** that row fails; the three
+     display rows still pass.
+  3. delete the `panel_placement_can_fall_back` arm from
+     `commit_destination_refusal` → **only** the two pre-established
+     fallback rows fail, which is the preflight half.
+  4. make `panel_placement_can_fall_back` unconditionally `true` (the
+     "widen the predicate" non-fix) → the really-lands-in-the-panel pin,
+     the Q#DC-4 panel pin and the matrix's three panel rows all fail.
+     That is the two profiles collapsing into one, made visible — the
+     named fallback design, showing up as a test diff rather than
+     silently.
+
+  And reverting the byte comparison to `to_str()?` fails the
+  `invalid utf-8` row with mlua's conversion error, on content.
+
+  **Revision 9's two, each isolating a different half of the rule:**
+  1. restore `panel_commit_dedication_refusal` to reading only the
+     innermost contract (`.last()`, which is exactly revision 8's
+     swapped slot) → **only**
+     `a_nested_commit_cannot_mask_an_outer_panel_restriction` fails.
+     Note the ordinary-nesting pin deliberately survives this — it
+     exists to fail the *other* candidate fix (prohibit nesting), so the
+     two are a pair rather than one test written twice.
+  2. delete `&& contract.destination.frontend == fid` from the same
+     scan, making any outer `"panel"` contract **globally** restrictive
+     → **only**
+     `a_nested_commit_for_another_frontend_may_dedicate_its_own_slot`
+     fails. Both single-frontend nesting tests pass under it, which is
+     the evidence they are independent of the frontend match rather than
+     merely looking so; the cross-frontend exception had no pin at all
+     before this row, since every other test in the file drives one
+     frontend.
+
+  Both were run across all three acceptance suites and the lib: in each
+  case `journey_acceptance` (47), `dired_acceptance` (31) and
+  `cargo test --lib` (1920) stay green, along with every other pin in
+  this file.
+
+  **The counts above are journey 47 / dired 31**, matching the bullet
+  further up. The mutation paragraph committed at `394fa43` had them
+  **reversed** in both the ledger and that commit's message; the ledger
+  is corrected here and the message is left as written, since rewriting
+  a pushed commit is worse than a footnote. A reader following that SHA
+  should take these numbers, not those.
+- **The public API #227 adopts against (Q#DC-5), pinned so it is a
+  contract rather than an intention:**
+  `pmacs.window.commit_to(dest, body [, profile])`. Profile is an
+  optional trailing argument typed **`mlua::Value`, not
+  `Option<String>`** — with `Option<String>` mlua rejects a number or
+  table during argument *conversion*, before the closure runs, making
+  the promised "accepted values are…" message unreachable. That is the
+  same trap the existing binding documents for `dest`. Validated in the
+  body against a **closed** set — `"document"` and
+  `"panel"`. **Omitted means `"document"`**, so every existing
+  two-argument caller keeps all four preflight checks *by definition of
+  the signature*, which is what makes `journey_acceptance` passing
+  untouched a consequence rather than a hope. An unrecognized or
+  non-string profile **errors**, naming the accepted values — a silent
+  fallback would hand a caller different checks than it asked for,
+  which is the exact failure the parameterization exists to prevent.
+  Git's mapping is settled here too: `*git-status*` → panel,
+  `*git-diff*` → document. Revision 2 took three findings: Q#DC-2's parameterization was
+  incomplete (a panel depends on **none** of checks 2–4, not just check
+  3, so the question now carries a full preflight matrix with every
+  omission testable); `tests/journey_acceptance.rs` joins dired as a
+  **preservation suite and stop signal**, since it holds the
+  `commit_to` scope, forged-userdata, preflight and restoration pins
+  this lane generalizes; and the **coherence-impact section was missing
+  entirely**, which `CLAUDE.md` and `COHERENCE.md` §25 both require.
+- **A PREREQUISITE LANE. PR #227 (git Stage 1) blocks on it.** #227's
+  P1a review finding is why it exists: git's async completions mutate
+  and display UI without capturing the initiating frontend
+  (`builtin/runtime/git.lua:609`, `:854`), so a result surfaces in
+  whichever frontend is active when git exits.
+- **The mechanism existed but was not Lua-reachable** until `779bb02`.
+  `pmacs.window.commit_to` took a `DirectoryDestinationLua`, which is
+  **nonconstructible from Lua** by design
+  (`src/lua_bindings/mod.rs:4256`) and minted only inside the
+  `path.open-directory` listener dispatch (`src/editor.rs:1311`) from a
+  `pub(crate)` capture (`:1241`). So no async Lua continuation outside
+  a directory open could say where its result belongs. Line numbers are
+  the pre-lane ones, kept because they are what the finding was written
+  against.
+- **Scope:** a Lua-reachable capture, a generic rename
+  (`DirectoryDestination` → `ViewDestination`; the framing counted 8
+  references across 4 files, the tree held **11 across 5** — see the
+  finding above), and the preflight question below.
+  **No adopter**: git's adoption is #227's work after this lands, since
+  a prerequisite that converts its own first consumer cannot be
+  reviewed separately from it.
+- **The substantive question (Q#DC-2)** is that git's two continuations
+  differ in kind. `*git-status*` goes to the **bottom panel**
+  (`listview.open` defaults `display` to `"panel"`,
+  `builtin/runtime/listview.lua:550`); `*git-diff*` replaces a
+  **document** window. `commit_to`'s stale-intent check (Q#JR14c) is
+  right for the second and, *when the placement really is a panel*,
+  irrelevant to the first. One shape over-refuses the panel or
+  under-checks the document.
+
+  **DO NOT READ THE OLDER FORM OF THIS BULLET, WHICH SAID "the panel
+  never touches the captured window's buffer".** That is the claim
+  revisions 6–8 invalidate: panel placement **falls back** to an
+  ordinary document window when the frontend is not panel-capable or
+  its side slot is dedicated. The relaxation is conditional, and the
+  mutations that could make it fall back are refused inside a
+  panel-profile commit (revision 8) rather than predicted at preflight
+  (revision 6) or caught at placement (revision 7, which would refuse
+  after the callback had already mutated).
+- **Stop signal recorded in the framing:** if any existing dired test
+  needs editing, the generalization changed Journey Stage 1a's
+  semantics, and that is cause to stop rather than to adjust the test.
+- **Gates, as the executable line rather than a description:**
+
+  ```
+  scripts/gate --acceptance destination_capture_acceptance \
+               --acceptance journey_acceptance \
+               --acceptance dired_acceptance
+  ```
+
+  `--acceptance` is repeatable, so there is no reason for this ledger
+  to say "plus dired's" and leave the reader to reconstruct it.
+  **`journey_acceptance` and `dired_acceptance` are preservation suites
+  and a STOP SIGNAL**: they carry the `commit_to` scope,
+  forged-userdata, preflight and restoration pins this lane
+  generalizes, and if either needs editing, the change altered Journey
+  Stage 1a's semantics rather than closing a gap in them. No
+  `--protocol` — core and Lua bindings only.
+
+## Worker identity Stage 1 (§9) — MERGED as #232 (`3cc1b85`)
 
 **Written with the lane's first commit**, per the standing correction
 from #171 and #215.
@@ -1001,9 +1396,6 @@ authoritative tip** — the ref, not a SHA. Recover with
   emission, an aborting runner, the build folded into `sweep-crdt`, and
   — added in the second round — a **rename of either** the build or the
   sweep step each fail the suite.
-||||||| parent of 72bbb96 (docs: LSP LaTeX coverage framing revision 2, on a branch at last)
-||||||| parent of 312ec7a (docs: frame Discovery Stage 2 (revision 2) — M-x rows)
-||||||| parent of 8f86908 (docs: frame worker identity Stage 1 (revision 1))
 
 ## QoL arc retirement — PR #224 OPEN (docs only)
 
