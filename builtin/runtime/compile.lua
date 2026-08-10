@@ -875,6 +875,11 @@ local function start_run(slot, cmdline, opts)
   -- stdin, own process group, TERM=dumb.
   local spec = {
     label = slot.label,
+    -- Worker identity Stage 1: the label distinguishes one compile slot
+    -- from another; the purpose is the command the user actually asked
+    -- for, which is what they want to see when they wonder why the
+    -- editor is busy.
+    purpose = "compiling: " .. cmdline,
     command = "/bin/sh",
     args = { "-c", "exec 2>&1; " .. cmdline },
     env = { TERM = "dumb" },

@@ -7566,6 +7566,99 @@ pub fn install_async(
         })?,
     )?;
 
+    // Worker identity Stage 1 (Q#W-2): the dispatch-name ambient.
+    //
+    // `pmacs.workers.dispatch(name, …)` is the one place a third-party
+    // job's own name exists, and nothing below it takes a name — the
+    // Rust dispatchers accept job arguments, a supersede key and stream
+    // data, and a handler reaching straight for `_dispatch_*` bypasses
+    // the Lua wrapper layer entirely. So the name travels out of band
+    // and is read at `allocate`, the single funnel every job passes
+    // through.
+    //
+    // Runtime-internal, underscore-prefixed: package code calls
+    // `pmacs.workers.dispatch`, which brackets these itself under
+    // `pcall`. A package pushing by hand and failing to pop would poison
+    // every later dispatch in the session with a stale name.
+    //
+    // `mlua::String`, not `String`: the parameter is a Lua BYTE string,
+    // so an `mlua`-driven `String` conversion would refuse a non-UTF-8
+    // name with a generic message naming neither the argument nor the
+    // rule. `pmacs.workers.register` enforces the rest of the
+    // display-text standard (non-empty, no control characters) but
+    // cannot see UTF-8 validity from Lua 5.1, so the byte-level half is
+    // enforced here — the one point where Rust sees the name — with a
+    // message that names both.
+    //
+    // And it names the surfaces a JOB reaches, which are `*workers*` and
+    // the modeline activity indicator. The sibling refusal in
+    // `required_purpose` deliberately names a different one
+    // (`pmacs.process.list`), because a spawned process reaches neither
+    // of these in Stage 1. The two must not converge on one sentence:
+    // whichever wording won would be wrong on the other side, and a
+    // diagnostic that misdescribes the system sends the reader looking
+    // in the wrong place.
+    {
+        let rt = runtime.clone();
+        async_mod.set(
+            "_push_dispatch_name",
+            lua.create_function(move |_, name: mlua::String| {
+                let Ok(text) = name.to_str() else {
+                    return Err(mlua::Error::external(
+                        "pmacs.workers.dispatch: handler name must be valid UTF-8 — it is \
+                         composed into every job's purpose, which is displayed to the user \
+                         in *workers* and in the modeline, and arbitrary bytes have no \
+                         display form there.",
+                    ));
+                };
+                rt.push_dispatch_name(&*text);
+                Ok(())
+            })?,
+        )?;
+    }
+
+    {
+        let rt = runtime.clone();
+        async_mod.set(
+            "_pop_dispatch_name",
+            lua.create_function(move |_, ()| {
+                rt.pop_dispatch_name();
+                Ok(())
+            })?,
+        )?;
+    }
+
+    // The refusal predicate, the sibling of `_in_commit_scope` above and
+    // enforced for the same reason: a coroutine that parks inside the
+    // extent leaves the name pushed, and every job allocated in the
+    // meantime — in any coroutine, on any later tick — inherits it.
+    {
+        let rt = runtime.clone();
+        async_mod.set(
+            "_in_dispatch_name_scope",
+            lua.create_function(move |_, ()| Ok(rt.in_dispatch_name_scope()))?,
+        )?;
+    }
+
+    // The statusline activity indicator's read surface (Q#W-3). Returns
+    // `nil` when nothing is in flight — the indicator renders no segment
+    // at all when idle, so "absent" has to be representable.
+    {
+        let rt = runtime.clone();
+        async_mod.set(
+            "_activity_summary",
+            lua.create_function(move |lua, ()| {
+                let Some(summary) = rt.activity_summary() else {
+                    return Ok(mlua::Value::Nil);
+                };
+                let t = lua.create_table_with_capacity(0, 2)?;
+                t.set("in_flight", summary.in_flight)?;
+                t.set("purpose", summary.oldest_purpose)?;
+                Ok(mlua::Value::Table(t))
+            })?,
+        )?;
+    }
+
     {
         let rt = runtime.clone();
         async_mod.set(
@@ -7728,7 +7821,7 @@ fn workers_snapshot_to_lua(lua: &Lua, runtime: &SharedAsyncRuntime) -> mlua::Res
     let out = lua.create_table()?;
     let active = lua.create_table_with_capacity(snap.active.len(), 0)?;
     for (i, job) in snap.active.iter().enumerate() {
-        let row = lua.create_table_with_capacity(0, 6)?;
+        let row = lua.create_table_with_capacity(0, 7)?;
         row.set("id", job.id)?;
         row.set("kind", job.kind.label())?;
         row.set("age_ms", job.age_ms)?;
@@ -7737,12 +7830,13 @@ fn workers_snapshot_to_lua(lua: &Lua, runtime: &SharedAsyncRuntime) -> mlua::Res
         }
         row.set("cancel_requested", job.cancel_requested)?;
         row.set("is_stream", job.is_stream)?;
+        row.set("purpose", job.purpose.as_str())?;
         active.set(i + 1, row)?;
     }
     out.set("active", active)?;
     let completed = lua.create_table_with_capacity(snap.completed.len(), 0)?;
     for (i, job) in snap.completed.iter().enumerate() {
-        let row = lua.create_table_with_capacity(0, 7)?;
+        let row = lua.create_table_with_capacity(0, 8)?;
         row.set("id", job.id)?;
         row.set("kind", job.kind.label())?;
         row.set("duration_ms", job.duration_ms)?;
@@ -7750,6 +7844,7 @@ fn workers_snapshot_to_lua(lua: &Lua, runtime: &SharedAsyncRuntime) -> mlua::Res
         if let Some(key) = &job.supersede_key {
             row.set("supersede", key.as_str())?;
         }
+        row.set("purpose", job.purpose.as_str())?;
         let (status, value): (&'static str, mlua::Value) = match &job.outcome {
             JobOutcome::Complete(JobResult::Unit) => ("ok", mlua::Value::Nil),
             JobOutcome::Complete(JobResult::Sum(v)) => (
@@ -8677,9 +8772,93 @@ fn parse_restart(name: &str) -> mlua::Result<RestartPolicy> {
     })
 }
 
+/// Read the **required** `purpose` out of a `pmacs.process.spawn` spec
+/// (worker identity Stage 1, `COHERENCE.md` §9).
+///
+/// An earlier revision of this lane defaulted the field to `label` so
+/// that existing callers kept working. That preserved compatibility and
+/// delivered nothing: §9's complaint about `ProcessSpec` is precisely
+/// that `label` is "caller-supplied, unvalidated convention", so a
+/// purpose defaulting to the label hands every caller back the
+/// convention this lane exists to replace.
+///
+/// The two fields answer different questions and neither substitutes for
+/// the other. `label` **identifies** — `lsp:rust-analyzer`, a terminal's
+/// buffer name — so that two processes running the same binary can be
+/// told apart. `purpose` **describes**: it answers "what is happening",
+/// which is the question §3's promise of visible asynchronous work is
+/// about, and which a label chosen for uniqueness routinely does not
+/// answer.
+///
+/// # Errors
+///
+/// Absent, empty, whitespace-only, non-string, or **not valid UTF-8**.
+/// Empty and whitespace-only are rejected because they satisfy the type
+/// and defeat the point exactly as copying the label across would — R42
+/// already rejects whitespace-only `description`s in the config registry
+/// for the same reason.
+///
+/// The UTF-8 case is a **reachable input class, not an internal
+/// invariant**: Lua strings are byte strings, so `purpose =
+/// string.char(255)` is a value a caller can write. Converting it with
+/// `?` would surface mlua's generic conversion error *before* any of the
+/// diagnostics below is constructed, and the caller would be told
+/// neither the field nor the rule — so the conversion failure is mapped
+/// onto this function's own message instead.
+///
+/// That message names **`pmacs.process.list`**, which is the whole of
+/// where a process's purpose surfaces in Stage 1. It deliberately does
+/// *not* name `*workers*` or the modeline indicator: both are **job**
+/// surfaces, a spawned process appears in neither, and joining the two
+/// planes is Stage 2's work (framing §3, Q#W-4). A diagnostic that
+/// named them would send the reader looking for their process somewhere
+/// it will never appear — worse than a terse one. The job-side twin of
+/// this refusal, on `_push_dispatch_name`, names those two surfaces for
+/// the matching reason: a job really does reach them.
+///
+/// The read is **raw**, matching the posture `stdin` and `group` already
+/// document in [`lua_to_spec`]: a spec table is plain data, so a
+/// metatable cannot smuggle a purpose in through `__index`.
+fn required_purpose(table: &Table) -> mlua::Result<String> {
+    let purpose = match table.raw_get::<mlua::Value>("purpose") {
+        Ok(mlua::Value::String(value)) => match value.to_str() {
+            Ok(text) => text.to_owned(),
+            Err(_) => {
+                return Err(mlua::Error::external(
+                    "pmacs.process.spawn: purpose must be valid UTF-8 — it is displayed \
+                     to the user in pmacs.process.list, and arbitrary bytes have no \
+                     display form there.",
+                ));
+            }
+        },
+        Ok(mlua::Value::Nil) => {
+            return Err(mlua::Error::external(
+                "pmacs.process.spawn: purpose is required — a short description of what \
+                 this process is DOING, e.g. purpose = \"running the project's test suite\". \
+                 It is not the label: the label identifies the process, the purpose says \
+                 what it is for.",
+            ));
+        }
+        Ok(other) => {
+            return Err(mlua::Error::external(format!(
+                "pmacs.process.spawn: purpose must be a string; got {}",
+                other.type_name()
+            )));
+        }
+        Err(error) => return Err(error),
+    };
+    if purpose.trim().is_empty() {
+        return Err(mlua::Error::external(
+            "pmacs.process.spawn: purpose must not be empty or whitespace-only",
+        ));
+    }
+    Ok(purpose)
+}
+
 fn lua_to_spec(table: &Table) -> mlua::Result<ProcessSpec> {
     let label: String = table.get("label").unwrap_or_else(|_| "unnamed".to_owned());
     let command: String = table.get("command")?;
+    let purpose = required_purpose(table)?;
     let args: Vec<String> = table.get("args").unwrap_or_default();
     let cwd: Option<String> = table.get("cwd").ok().flatten();
     let env_table: Option<Table> = table.get("env").ok().flatten();
@@ -8762,6 +8941,7 @@ fn lua_to_spec(table: &Table) -> mlua::Result<ProcessSpec> {
     };
     Ok(ProcessSpec {
         label,
+        purpose,
         command,
         args,
         cwd: cwd.map(std::path::PathBuf::from),
@@ -8985,11 +9165,18 @@ pub fn install_process(lua: &Lua, supervisor: &SharedProcessSupervisor) -> mlua:
                     .collect();
                 let out = lua.create_table_with_capacity(ids.len(), 0)?;
                 for (i, id) in ids.iter().enumerate() {
-                    let row = lua.create_table_with_capacity(0, 3)?;
+                    let row = lua.create_table_with_capacity(0, 4)?;
                     row.set("id", ProcessIdLua(*id))?;
                     if let Some(spec) = sup.spec(*id) {
                         row.set("label", spec.label.as_str())?;
                         row.set("command", spec.command.as_str())?;
+                        // Worker identity Stage 1: a new KEY on each
+                        // existing row. The row COUNT is deliberately
+                        // untouched — three acceptance suites assert on
+                        // `#pmacs.process.list()` as a leak detector
+                        // (framing Q#W-4), and widening what this
+                        // enumerates would inflate all three baselines.
+                        row.set("purpose", spec.purpose.as_str())?;
                     }
                     if let Some(state) = sup.state(*id) {
                         row.set("state", state_to_lua(lua, state)?)?;

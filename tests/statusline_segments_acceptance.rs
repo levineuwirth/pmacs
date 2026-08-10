@@ -136,7 +136,12 @@ fn a01_04_registry_contract_limits_epochs_and_results() {
             .iter()
             .map(|provider| provider.name.as_str())
             .collect::<Vec<_>>(),
-        ["mode", "terminal", "lsp"],
+        // `activity` is worker identity Stage 1's fourth adopter, and it
+        // sorts first because `async.lua` is loaded before `syntax.lua`,
+        // `terminal.lua` and `lsp.lua`. This is an INVENTORY assertion:
+        // it grows when a builtin provider is added, which is exactly
+        // what it is for.
+        ["activity", "mode", "terminal", "lsp"],
         "built-in providers are discoverable in registration order"
     );
     let before_epochs = {

@@ -88,6 +88,28 @@ function Handle:await()
     error("await: cannot await inside pmacs.window.commit_to; " ..
       "await first, then commit")
   end
+  -- Worker identity Stage 1 (Q#W-2 rule 1): `pmacs.workers.dispatch`
+  -- pushes the registered handler's name for the dynamic extent of the
+  -- handler call, so that jobs allocated inside it are attributable to
+  -- the third party that asked for them. Parking here would leave the
+  -- name pushed while this coroutine is suspended, and every job
+  -- allocated in the meantime --- in any coroutine, on any later tick
+  -- --- would inherit it. Same hazard, same shape, same remedy as the
+  -- commit-scope refusal above.
+  --
+  -- Two properties this placement buys, both load-bearing:
+  --
+  --  * it rejects BEFORE parking (ahead of the `_is_complete` check and
+  --    the `coroutine.yield`), because a guard consulted after the yield
+  --    has already happened guards nothing;
+  --  * it rejects UNCONDITIONALLY, not only when a yield would really
+  --    occur. A guard that fires only for an incomplete handle would
+  --    pass or fail depending on whether the job happened to settle
+  --    first --- green under test, intermittent in production.
+  if async_mod._in_dispatch_name_scope() then
+    error("await: cannot await inside pmacs.workers.dispatch; " ..
+      "await first, then dispatch")
+  end
   if not async_mod._is_complete(self._id) then
     -- Yield self so pmacs.async's step() can park us. R46 carve-out:
     -- this `coroutine.yield` is runtime code; package code uses
@@ -240,7 +262,28 @@ setmetatable(async_public, {
   end,
 })
 
+-- The SECOND supported yield API. `Handle:await()` is the first; any
+-- rule about a non-yieldable dynamic extent has to cover both, or the
+-- extent stays open through a second door.
+--
+-- Both refusals below are that rule. The commit-scope one is a
+-- **pre-existing gap being closed** (worker identity framing Q#W-7):
+-- Journey Stage 1a's Q#JR14b invariant was enforced on `:await()` only,
+-- so a coroutine inside `pmacs.window.commit_to` could park through here
+-- and produce exactly the misrouting that guard exists to prevent.
+--
+-- Placement is the whole point: both fire *before* the `coroutine.yield`
+-- below, and both fire unconditionally. A refusal sited after the yield
+-- would never run in the case it exists for.
 function async_public.yield_to_next_tick()
+  if async_mod._in_commit_scope() then
+    error("yield_to_next_tick: cannot yield inside pmacs.window.commit_to; " ..
+      "yield first, then commit")
+  end
+  if async_mod._in_dispatch_name_scope() then
+    error("yield_to_next_tick: cannot yield inside pmacs.workers.dispatch; " ..
+      "yield first, then dispatch")
+  end
   coroutine.yield({ _is_pmacs_next_tick = true })
 end
 
@@ -366,20 +409,105 @@ local handlers = {
   end,
 }
 
+-- Worker identity Stage 1 (Q#W-2): `name` used to die here.
+--
+-- The audit's "every third-party job renders under a builtin's label" is
+-- exact, and the reason is this function: the handler is arbitrary Lua,
+-- nothing below it takes a name, and a handler that reaches straight for
+-- `pmacs._async._dispatch_*` bypasses the wrapper layer entirely. So the
+-- name is pushed onto a runtime-owned stack for the dynamic extent of
+-- the handler call and read at `allocate`, the single funnel every job
+-- passes through. Seven rules govern it; five are visible here:
+--
+--   1. The extent is NON-YIELDABLE, and that is enforced rather than
+--      assumed --- see the refusals in `Handle:await` and
+--      `pmacs.async.yield_to_next_tick`.
+--   3. Nesting is a stack; innermost wins.
+--   4. Fan-out shares the name: five jobs dispatched by one handler are
+--      five jobs named alike. They *were* all dispatched under it.
+--   5. UNWIND-SAFE, and this is the one that makes a naive version worse
+--      than none. A handler that raises must still pop --- otherwise one
+--      failure poisons every subsequent dispatch in the session with a
+--      stale name, and the feature starts lying silently instead of
+--      failing loudly. Hence pcall, pop, rethrow.
+--   7. Outside any extent nothing changes: a builtin invoked directly
+--      records its own purpose.
+--
+-- Rule 2 (work dispatched later, from an `on_complete` callback or a
+-- resumed coroutine, is deliberately NOT covered) and rule 6
+-- (composition, `"<name>: <purpose>"`) live on the Rust side.
+--
+-- The pop/rethrow half, hoisted so it is written once and allocates
+-- nothing per dispatch.
+--
+-- Varargs across a function boundary, NOT `local ok, result = pcall(…)`:
+-- this function used to be `return handler(args, opts)`, which
+-- propagates EVERY return value, and bracketing it must not silently
+-- truncate a handler that returns more than one. `table.pack` /
+-- `table.unpack` would say the same thing but are Lua 5.2 surface, and
+-- LuaJIT is this project's default backend (`Cargo.toml`:
+-- `default = ["luajit"]`).
+local function finish_dispatch(ok, ...)
+  async_mod._pop_dispatch_name()
+  if not ok then
+    -- Level 0: the handler's error travels unchanged. R45's structured
+    -- errors are tables, and a re-raise that appended position info
+    -- would corrupt a plain-string error and be silently ignored for a
+    -- table one --- so neither shape is served by the default level.
+    error((...), 0)
+  end
+  return ...
+end
+
 function pmacs.workers.dispatch(name, args, opts)
   local handler = handlers[name]
   if handler == nil then
     error("pmacs.workers.dispatch: unknown handler '" .. tostring(name) .. "'")
   end
-  return handler(args, opts)
+  async_mod._push_dispatch_name(name)
+  return finish_dispatch(pcall(handler, args, opts))
 end
 
+-- Worker identity Stage 1: the name registered here is DISPLAY TEXT.
+--
+-- It used to be type-checked and nothing more, which was defensible
+-- while it died inside `dispatch`. It no longer dies there: the ambient
+-- carries it into every job the handler allocates, and it is composed
+-- into `purpose` as `"<name>: <purpose>"`, which the `*workers*` table
+-- and the modeline indicator both render. So it gets the same
+-- meaningful-value standard `purpose` already gets in
+-- `required_purpose` (`src/lua_bindings/mod.rs`) --- and one rule
+-- `purpose` deliberately does NOT get.
+--
+-- The asymmetry is the point. A purpose may legitimately contain a
+-- newline: a filesystem path can, and `pmacs-magit`'s spawn purpose is a
+-- whole argv --- so its one-line constraint is enforced by ESCAPING at
+-- the surfaces that have one row (`purpose_for_one_row`), following the
+-- `#228` decision on `Command.description`. A registered handler NAME
+-- has no such case. It is an identifier a package chooses for itself and
+-- passes back to `dispatch`, so a control character in it is a mistake
+-- or an attempt at one, and refusing at the source costs nobody
+-- anything.
 function pmacs.workers.register(name, handler)
   -- Allows future Rust-side modules (or test harnesses) to register
   -- additional dispatchable names. v0.1 has no plugin loader but the
   -- shape is here so M4 builders use it consistently.
   if type(name) ~= "string" then
     error("pmacs.workers.register: name must be a string")
+  end
+  -- Empty and whitespace-only satisfy the type and say nothing --- the
+  -- exact pair `required_purpose` rejects, and the exact pair R42
+  -- rejects for config descriptions.
+  if name:match("^%s*$") ~= nil then
+    error("pmacs.workers.register: name must not be empty or whitespace-only")
+  end
+  -- `%c` is the C control class: NUL, the C0 range, DEL. A newline
+  -- forges a row in `*workers*`, a CR rewrites one on a terminal and an
+  -- ESC starts a sequence in one. Checked AFTER the whitespace rule so
+  -- a name that is only "\n" reports the emptier problem, which is the
+  -- one the caller can act on.
+  if name:find("%c") ~= nil then
+    error("pmacs.workers.register: name must not contain control characters")
   end
   if type(handler) ~= "function" then
     error("pmacs.workers.register: handler must be a function")
@@ -580,6 +708,60 @@ function pmacs._async.tick()
     pcall(async_mod._show_workers_buffer)
   end
 end
+
+-- ---------------------------------------------------------------------------
+-- Statusline activity indicator (worker identity Stage 1, Q#W-3/Q#W-6).
+-- ---------------------------------------------------------------------------
+--
+-- `COHERENCE.md` §9 records that no progress indicator exists anywhere
+-- --- no spinner, no busy count --- which makes §3's promise of "visible
+-- asynchronous work" false unless the user knows to run
+-- `M-x editor.list-workers`. This is the fourth `pmacs.statusline.register`
+-- adopter (after `mode`, `terminal` and `lsp`) and the first thing that
+-- makes background work visible without a command.
+--
+-- No wire change: `pmacs.statusline.register` rides the existing
+-- `StatuslineSegments` vector, so a fourth provider adds an ELEMENT, not
+-- a variant. That is what lets this lane run beside the two holding the
+-- protocol-bump slot.
+
+-- A visibility toggle, and only that (Q#W-6). A permanently-visible
+-- statusline element is different in kind from an internal behaviour: it
+-- costs modeline width on every frame, and "I do not want this in my
+-- modeline" is a preference someone genuinely holds on day one. There is
+-- deliberately NO setting for purpose capture itself --- that is
+-- substrate, not preference.
+pmacs.config.define {
+  name = "ui.activity-indicator",
+  description = "Show a modeline count of in-flight background jobs, with the oldest job's purpose. Absent entirely when nothing is running.",
+  type = "boolean",
+  default = true,
+  mutability = "live",
+}
+
+pmacs.statusline.register {
+  name = "activity",
+  side = "right",
+  -- Above `terminal` (10) and `lsp` (0): when the modeline is too narrow
+  -- for everything, "the editor is busy, on this" is the segment worth
+  -- keeping. Right-side display order is priority-ascending, so it also
+  -- lands nearest the protected cursor/scroll group.
+  priority = 20,
+  face = "ui.modeline.activity",
+  fn = function(_ctx)
+    if pmacs.config.get("ui.activity-indicator") ~= true then return nil end
+    -- `_activity_summary` rather than `pmacs.workers.snapshot()`: this
+    -- runs once per visible window per frame, and a snapshot would clone
+    -- the whole 64-entry completed ring that the indicator never reads.
+    local summary = async_mod._activity_summary()
+    -- nil, not "" and not "0 jobs": the evaluator treats an empty string
+    -- as "no segment" too, but a zero-count string would be a segment
+    -- that costs width forever to say nothing is happening. Absence is
+    -- the design (Q#W-3), so absence is what this returns.
+    if summary == nil then return nil end
+    return "⋯" .. tostring(summary.in_flight) .. " " .. summary.purpose
+  end,
+}
 
 -- Diagnostic / test helpers: number of parked coroutines, number of
 -- pending Rust-side jobs. Used by Rust integration tests to drive the

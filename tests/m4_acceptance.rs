@@ -952,7 +952,7 @@ fn has_exit_event(events: &[ProcessEvent]) -> bool {
 #[test]
 fn m4_4_lifecycle_spawn_and_exit() {
     let mut sup = ProcessSupervisor::new();
-    let mut spec = ProcessSpec::new("hello", "/bin/sh");
+    let mut spec = ProcessSpec::new("hello", "/bin/sh", "test process");
     spec.args = vec!["-c".into(), "printf hi && exit 0".into()];
     let id = sup.spawn(spec).expect("spawn");
     let evs = drain_until(&mut sup, id, Duration::from_secs(5), has_exit_event);
@@ -983,7 +983,7 @@ fn m4_4_lifecycle_spawn_and_exit() {
 #[test]
 fn m4_4_lifecycle_signal_terminates() {
     let mut sup = ProcessSupervisor::new();
-    let mut spec = ProcessSpec::new("victim", "/bin/sh");
+    let mut spec = ProcessSpec::new("victim", "/bin/sh", "test process");
     spec.args = vec!["-c".into(), "sleep 30".into()];
     let id = sup.spawn(spec).expect("spawn");
     let _ = drain_until(&mut sup, id, Duration::from_secs(2), |evs| {
@@ -1020,7 +1020,11 @@ fn m4_4_lifecycle_signal_terminates() {
 fn m4_4_lifecycle_crash_surfaces_as_event() {
     let mut sup = ProcessSupervisor::new();
     // Path that will reliably not resolve.
-    let spec = ProcessSpec::new("ghost", "/this/binary/does/not/exist/pmacs-m4-4");
+    let spec = ProcessSpec::new(
+        "ghost",
+        "/this/binary/does/not/exist/pmacs-m4-4",
+        "test process",
+    );
     let _ = sup.spawn(spec); // spawn returns Err but the event is still emitted
     sup.tick();
     let evs = sup.take_all_events();
@@ -1037,7 +1041,7 @@ fn m4_4_lifecycle_crash_surfaces_as_event() {
 fn m4_4_restart_policy_on_crash_respawns() {
     let mut sup = ProcessSupervisor::new();
     sup.set_restart_backoff(Duration::from_millis(10));
-    let mut spec = ProcessSpec::new("flap", "/bin/sh");
+    let mut spec = ProcessSpec::new("flap", "/bin/sh", "test process");
     spec.args = vec!["-c".into(), "exit 9".into()];
     spec.restart = RestartPolicy::OnCrash;
     let id = sup.spawn(spec).expect("spawn");
@@ -1070,7 +1074,7 @@ fn m4_4_restart_policy_on_crash_respawns() {
 #[test]
 fn m4_4_restart_policy_never_does_not_respawn() {
     let mut sup = ProcessSupervisor::new();
-    let mut spec = ProcessSpec::new("oneshot", "/bin/sh");
+    let mut spec = ProcessSpec::new("oneshot", "/bin/sh", "test process");
     spec.args = vec!["-c".into(), "exit 0".into()];
     let id = sup.spawn(spec).expect("spawn");
     let _ = drain_until(&mut sup, id, Duration::from_secs(2), has_exit_event);
@@ -1099,7 +1103,7 @@ fn m4_4_no_zombies_after_editor_drop() {
     let pid: u32 = {
         let mut sup = ProcessSupervisor::new();
         sup.set_grace_period(Duration::from_millis(200));
-        let mut spec = ProcessSpec::new("zombie-test", "/bin/sh");
+        let mut spec = ProcessSpec::new("zombie-test", "/bin/sh", "test process");
         spec.args = vec!["-c".into(), "sleep 60".into()];
         let id = sup.spawn(spec).expect("spawn");
         let _ = drain_until(&mut sup, id, Duration::from_secs(2), |evs| {
@@ -1136,7 +1140,7 @@ fn m4_4_no_zombies_after_editor_drop() {
 #[test]
 fn m4_4_pty_mode_child_observes_a_tty() {
     let mut sup = ProcessSupervisor::new();
-    let mut spec = ProcessSpec::new("ttytest", "/bin/sh");
+    let mut spec = ProcessSpec::new("ttytest", "/bin/sh", "test process");
     spec.args = vec!["-c".into(), "tty".into()];
     spec.mode = ProcessMode::default_pty();
     let id = sup.spawn(spec).expect("spawn");
@@ -1169,6 +1173,7 @@ fn m4_4_lua_surface_drives_lifecycle() {
             r#"
             local id = pmacs.process.spawn {
                 label = "lua-hello",
+                purpose = "greeting the Lua surface end to end",
                 command = "/bin/sh",
                 args = { "-c", "printf hi-from-lua && exit 0" },
             }

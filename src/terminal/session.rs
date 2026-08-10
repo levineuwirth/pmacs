@@ -305,7 +305,8 @@ impl TerminalManager {
         buffer.set_read_only(true);
         core.registry.borrow_mut().insert(buffer);
 
-        let mut process_spec = ProcessSpec::new(buffer_name, spec.command);
+        let purpose = format!("terminal running {}", spec.command);
+        let mut process_spec = ProcessSpec::new(buffer_name, spec.command, purpose);
         process_spec.args = spec.args;
         process_spec.cwd = spec.cwd;
         process_spec.env = spec.env;

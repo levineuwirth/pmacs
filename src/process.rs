@@ -196,6 +196,23 @@ pub struct ProcessSpec {
     /// so multiple processes can run the same binary with
     /// distinguishable labels.
     pub label: String,
+    /// What this process is doing, in words a user can read (worker
+    /// identity Stage 1, `COHERENCE.md` §9).
+    ///
+    /// **Required, and not the same thing as [`Self::label`].** The
+    /// label is an *identity* — `lsp:rust-analyzer`, a terminal's buffer
+    /// name — spelled however the caller likes, so that two processes
+    /// running the same binary can be told apart. The purpose is a
+    /// *description*: it answers "what is happening", which is the
+    /// question §3's promise of visible asynchronous work is about and
+    /// which a label chosen for uniqueness routinely does not answer.
+    ///
+    /// **Not an owner**, in any spelling. It records what the process is
+    /// doing, not which package asked for it; `pmacs.process.spawn` is
+    /// callable by any package, so a value derived here would
+    /// misattribute third-party work to a builtin at exactly the point
+    /// §9 wants attribution (framing §3).
+    pub purpose: String,
     /// Program to execute. Looked up via the system PATH unless an
     /// absolute path is supplied.
     pub command: String,
@@ -237,10 +254,21 @@ pub struct ProcessSpec {
 impl ProcessSpec {
     /// Construct a spec with the bare-minimum fields. Convenience
     /// for tests and one-off scripts.
+    ///
+    /// `purpose` is a parameter rather than something derived from the
+    /// label because it is a required field with no honest default
+    /// (worker identity Stage 1): deriving it from the label would make
+    /// every process claim its identity *is* its description, which is
+    /// exactly the conflation the field exists to undo.
     #[must_use]
-    pub fn new(label: impl Into<String>, command: impl Into<String>) -> Self {
+    pub fn new(
+        label: impl Into<String>,
+        command: impl Into<String>,
+        purpose: impl Into<String>,
+    ) -> Self {
         Self {
             label: label.into(),
+            purpose: purpose.into(),
             command: command.into(),
             args: Vec::new(),
             cwd: None,
@@ -2722,6 +2750,7 @@ mod tests {
         let spec = ProcessSpec::new(
             "unpublished-terminal",
             "/definitely/not/a/real/pmacs-terminal-program",
+            "test process",
         );
         assert!(supervisor.spawn_terminal(spec).is_err());
         supervisor.tick();
@@ -2732,7 +2761,7 @@ mod tests {
     #[test]
     fn spawn_pipes_lifecycle_started_then_exited() {
         let mut sup = ProcessSupervisor::new();
-        let mut spec = ProcessSpec::new("echo-test", "/bin/sh");
+        let mut spec = ProcessSpec::new("echo-test", "/bin/sh", "test process");
         spec.args = vec!["-c".into(), "echo hello && exit 0".into()];
         let id = sup.spawn(spec).expect("spawn");
         let events = drain_until(&mut sup, id, Duration::from_secs(5), has_exited);
@@ -2892,7 +2921,7 @@ mod tests {
     /// A plain PTY child, for tests that care about the PTY *branch*
     /// rather than about job control.
     fn spawn_live_pty(sup: &mut ProcessSupervisor, name: &str) -> (ProcessId, u32) {
-        let mut spec = ProcessSpec::new(name, "/bin/sleep");
+        let mut spec = ProcessSpec::new(name, "/bin/sleep", "test process");
         spec.args = vec!["30".into()];
         spec.mode = ProcessMode::Pty {
             rows: 24,
@@ -2943,7 +2972,7 @@ mod tests {
         sup: &mut ProcessSupervisor,
         name: &str,
     ) -> (ProcessId, u32, i32) {
-        let mut spec = ProcessSpec::new(name, BASH);
+        let mut spec = ProcessSpec::new(name, BASH, "test process");
         spec.args = vec![
             "--noprofile".into(),
             "--norc".into(),
@@ -3194,7 +3223,7 @@ mod tests {
     #[test]
     fn a_pipe_child_still_renders_a_bare_leader_target() {
         let mut sup = ProcessSupervisor::new();
-        let mut spec = ProcessSpec::new("diag-pipe-leader", "/bin/sleep");
+        let mut spec = ProcessSpec::new("diag-pipe-leader", "/bin/sleep", "test process");
         spec.args = vec!["30".into()];
         let id = sup.spawn(spec).expect("spawn");
         let pid = spawn_started_pid(&mut sup, id);
@@ -3227,7 +3256,7 @@ mod tests {
         let mut reports = Vec::new();
         for signal in [Signal::SIGTERM, Signal::SIGUSR1] {
             let mut sup = ProcessSupervisor::new();
-            let mut spec = ProcessSpec::new("diag-signal-name", "/bin/sh");
+            let mut spec = ProcessSpec::new("diag-signal-name", "/bin/sh", "test process");
             spec.args = vec!["-c".into(), "sleep 30".into()];
             spec.group = true;
             let id = sup.spawn(spec).expect("spawn");
@@ -3280,7 +3309,7 @@ mod tests {
         let mut sup = ProcessSupervisor::new();
         let temp = tempfile::TempDir::new().expect("tempdir");
         let ready = temp.path().join("usr1-trapped");
-        let mut spec = ProcessSpec::new("diag-disposition-live", "/bin/sh");
+        let mut spec = ProcessSpec::new("diag-disposition-live", "/bin/sh", "test process");
         // Ignore USR1 so the successful non-fatal signal cannot end the
         // child and confuse the state assertion with a real exit — and
         // then WAIT for the child to say it has done so. `Started` is
@@ -3344,7 +3373,7 @@ mod tests {
         let mut sup = ProcessSupervisor::new();
         let temp = tempfile::TempDir::new().expect("tempdir");
         let ready = temp.path().join("usr1-trapped");
-        let mut spec = ProcessSpec::new("diag-trap-readiness", "/bin/sh");
+        let mut spec = ProcessSpec::new("diag-trap-readiness", "/bin/sh", "test process");
         spec.args = vec!["-c".into(), trapped_usr1_command(&ready, "sleep 1; ")];
         spec.group = true;
         let id = sup.spawn(spec).expect("spawn");
@@ -3435,7 +3464,7 @@ mod tests {
     #[test]
     fn a_leader_directed_kill_failure_reports_the_fallback_branch() {
         let mut sup = ProcessSupervisor::new();
-        let mut spec = ProcessSpec::new("diag-leader", "/bin/sleep");
+        let mut spec = ProcessSpec::new("diag-leader", "/bin/sleep", "test process");
         spec.args = vec!["30".into()];
         let id = sup.spawn(spec).expect("spawn");
         let pid = spawn_started_pid(&mut sup, id);
@@ -3484,7 +3513,7 @@ mod tests {
     #[test]
     fn a_failure_after_the_child_exits_reports_the_leader_as_exited() {
         let mut sup = ProcessSupervisor::new();
-        let mut spec = ProcessSpec::new("diag-exited", "/bin/sh");
+        let mut spec = ProcessSpec::new("diag-exited", "/bin/sh", "test process");
         spec.args = vec!["-c".into(), "exit 3".into()];
         let id = sup.spawn(spec).expect("spawn");
         // NOT `spawn_started_pid`: draining ticks, and this child exits
@@ -3512,7 +3541,7 @@ mod tests {
     #[test]
     fn an_injected_failure_changes_no_state_and_arms_no_ledger() {
         let mut sup = ProcessSupervisor::new();
-        let mut spec = ProcessSpec::new("diag-disposition", "/bin/sh");
+        let mut spec = ProcessSpec::new("diag-disposition", "/bin/sh", "test process");
         spec.args = vec!["-c".into(), "sleep 30".into()];
         spec.group = true;
         let id = sup.spawn(spec).expect("spawn");
@@ -3557,7 +3586,7 @@ mod tests {
     #[test]
     fn observing_the_leader_does_not_consume_the_exit_event() {
         let mut sup = ProcessSupervisor::new();
-        let mut spec = ProcessSpec::new("diag-one-event", "/bin/sh");
+        let mut spec = ProcessSpec::new("diag-one-event", "/bin/sh", "test process");
         spec.args = vec!["-c".into(), "exit 7".into()];
         spec.mode = ProcessMode::Pty {
             rows: 24,
@@ -3599,7 +3628,7 @@ mod tests {
         let mut sup = ProcessSupervisor::new();
         // `sleep 30` is long enough that the test definitely needs
         // to terminate it deliberately.
-        let mut spec = ProcessSpec::new("sleeper", "/bin/sh");
+        let mut spec = ProcessSpec::new("sleeper", "/bin/sh", "test process");
         spec.args = vec!["-c".into(), "sleep 30".into()];
         let id = sup.spawn(spec).expect("spawn");
         // Wait for Started so we have a pid.
@@ -3628,7 +3657,7 @@ mod tests {
         // implementation blocked the caller in `write_all` here —
         // which in the editor was the main thread, wedging the frame
         // loop whenever an LSP server fell behind on its stdin.
-        let mut spec = ProcessSpec::new("stdin-ignorer", "/bin/sh");
+        let mut spec = ProcessSpec::new("stdin-ignorer", "/bin/sh", "test process");
         spec.args = vec!["-c".into(), "sleep 30".into()];
         let id = sup.spawn(spec).expect("spawn");
         let _ = drain_until(&mut sup, id, Duration::from_secs(2), |evs| {
@@ -3654,7 +3683,7 @@ mod tests {
         // payload back followed by a clean exit proves the writer
         // thread drains its queue before dropping the pipe (the
         // flush-then-EOF contract `close_stdin` documents).
-        let mut spec = ProcessSpec::new("cat-echo", "/bin/sh");
+        let mut spec = ProcessSpec::new("cat-echo", "/bin/sh", "test process");
         spec.args = vec!["-c".into(), "cat".into()];
         let id = sup.spawn(spec).expect("spawn");
         let _ = drain_until(&mut sup, id, Duration::from_secs(2), |evs| {
@@ -3700,7 +3729,7 @@ mod tests {
     fn restart_on_crash_respawns_after_nonzero_exit() {
         let mut sup = ProcessSupervisor::new();
         sup.set_restart_backoff(Duration::from_millis(10));
-        let mut spec = ProcessSpec::new("crasher", "/bin/sh");
+        let mut spec = ProcessSpec::new("crasher", "/bin/sh", "test process");
         spec.args = vec!["-c".into(), "exit 7".into()];
         spec.restart = RestartPolicy::OnCrash;
         let id = sup.spawn(spec).expect("spawn");
@@ -3731,7 +3760,7 @@ mod tests {
     #[test]
     fn restart_never_does_not_respawn_after_clean_exit() {
         let mut sup = ProcessSupervisor::new();
-        let mut spec = ProcessSpec::new("oneshot", "/bin/sh");
+        let mut spec = ProcessSpec::new("oneshot", "/bin/sh", "test process");
         spec.args = vec!["-c".into(), "exit 0".into()];
         let id = sup.spawn(spec).expect("spawn");
         let _ = drain_until(&mut sup, id, Duration::from_secs(2), has_exited);
@@ -3760,7 +3789,7 @@ mod tests {
         let pid = {
             let mut sup = ProcessSupervisor::new();
             sup.set_grace_period(Duration::from_millis(200));
-            let mut spec = ProcessSpec::new("victim", "/bin/sh");
+            let mut spec = ProcessSpec::new("victim", "/bin/sh", "test process");
             spec.args = vec!["-c".into(), "sleep 30".into()];
             let id = sup.spawn(spec).expect("spawn");
             // Drain until Started so we know the pid.
@@ -3798,7 +3827,7 @@ mod tests {
     #[test]
     fn pty_mode_child_sees_a_tty() {
         let mut sup = ProcessSupervisor::new();
-        let mut spec = ProcessSpec::new("ttytest", "/bin/sh");
+        let mut spec = ProcessSpec::new("ttytest", "/bin/sh", "test process");
         spec.args = vec!["-c".into(), "tty".into()];
         spec.mode = ProcessMode::default_pty();
         let id = sup.spawn(spec).expect("spawn");
@@ -3835,7 +3864,7 @@ mod tests {
     #[test]
     fn m6_1_pty_resize_delivers_sigwinch_to_child() {
         let mut sup = ProcessSupervisor::new();
-        let mut spec = ProcessSpec::new("winch-watch", "/bin/sh");
+        let mut spec = ProcessSpec::new("winch-watch", "/bin/sh", "test process");
         // Trap WINCH, print READY for synchronization, then loop on
         // a short sleep so SIGWINCH can interrupt and fire the trap.
         spec.args = vec![
@@ -3880,7 +3909,7 @@ mod tests {
     #[test]
     fn m6_1_pty_mode_lifecycle_started_then_exited() {
         let mut sup = ProcessSupervisor::new();
-        let mut spec = ProcessSpec::new("pty-exit", "/bin/sh");
+        let mut spec = ProcessSpec::new("pty-exit", "/bin/sh", "test process");
         spec.args = vec!["-c".into(), "echo done && exit 0".into()];
         spec.mode = ProcessMode::default_pty();
         let id = sup.spawn(spec).expect("spawn");
@@ -3915,7 +3944,7 @@ mod tests {
     #[test]
     fn m6_1_pty_raw_mode_disables_kernel_echo() {
         let mut sup = ProcessSupervisor::new();
-        let mut spec = ProcessSpec::new("raw-stty", "/bin/sh");
+        let mut spec = ProcessSpec::new("raw-stty", "/bin/sh", "test process");
         spec.args = vec!["-c".into(), "stty -a".into()];
         spec.mode = ProcessMode::default_pty(); // Raw by default.
         let id = sup.spawn(spec).expect("spawn");
@@ -3937,7 +3966,7 @@ mod tests {
     #[test]
     fn m6_1_pty_canonical_mode_keeps_kernel_echo() {
         let mut sup = ProcessSupervisor::new();
-        let mut spec = ProcessSpec::new("canon-stty", "/bin/sh");
+        let mut spec = ProcessSpec::new("canon-stty", "/bin/sh", "test process");
         spec.args = vec!["-c".into(), "stty -a".into()];
         spec.mode = ProcessMode::Pty {
             rows: 24,
@@ -3991,7 +4020,7 @@ mod tests {
         // buffers.
         const TOTAL: usize = 10 * 1024 * 1024;
         let mut sup = ProcessSupervisor::new();
-        let mut spec = ProcessSpec::new("byte-flood", "/bin/sh");
+        let mut spec = ProcessSpec::new("byte-flood", "/bin/sh", "test process");
         spec.args = vec!["-c".into(), format!("head -c {TOTAL} /dev/zero")];
         let id = sup.spawn(spec).expect("spawn");
 
@@ -4067,7 +4096,7 @@ mod tests {
     #[test]
     fn m6_2_pty_streaming_coalesces_per_tick() {
         let mut sup = ProcessSupervisor::new();
-        let mut spec = ProcessSpec::new("chunky-stream", "/bin/sh");
+        let mut spec = ProcessSpec::new("chunky-stream", "/bin/sh", "test process");
         // 1 MiB of zeros from /dev/zero. The reader thread reads in
         // [`BYTE_CHUNK_SIZE`] (8 KiB) chunks --- ~128 reads --- all
         // queued onto the bounded channel within microseconds of
@@ -4116,7 +4145,7 @@ mod tests {
     #[test]
     fn m6_2_ansi_enabled_pty_emits_structured_events() {
         let mut sup = ProcessSupervisor::new();
-        let mut spec = ProcessSpec::new("ansi-stream", "/bin/sh");
+        let mut spec = ProcessSpec::new("ansi-stream", "/bin/sh", "test process");
         spec.args = vec!["-c".into(), "printf '\\033[31mhi\\033[0m\\n'".into()];
         spec.mode = ProcessMode::Pty {
             rows: 24,
@@ -4198,7 +4227,7 @@ mod tests {
         let handle = std::thread::spawn(move || {
             let mut sup = ProcessSupervisor::new();
             sup.set_grace_period(Duration::from_millis(300));
-            let mut spec = ProcessSpec::new("forever-flood", "/bin/sh");
+            let mut spec = ProcessSpec::new("forever-flood", "/bin/sh", "test process");
             // Continuous writer; SIGTERM kills it (no signal handler).
             spec.args = vec!["-c".into(), "while :; do printf 'X'; done".into()];
             let id = sup.spawn(spec).expect("spawn");
@@ -4324,7 +4353,7 @@ mod tests {
         let handle = std::thread::spawn(move || {
             let mut sup = ProcessSupervisor::new();
             sup.set_grace_period(Duration::from_millis(300));
-            let mut spec = ProcessSpec::new("orphan-holds-pipe", "setsid");
+            let mut spec = ProcessSpec::new("orphan-holds-pipe", "setsid", "test process");
             // `setsid --fork` forks and the parent exits, so the
             // *recorded* pid terminates promptly (letting `poll_one`
             // reach the teardown path) while `cat` survives holding the
@@ -4412,7 +4441,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     fn sh_group_spec(label: &str, script: &str) -> ProcessSpec {
-        let mut spec = ProcessSpec::new(label, "/bin/sh");
+        let mut spec = ProcessSpec::new(label, "/bin/sh", "test process");
         spec.args = vec!["-c".into(), script.to_owned()];
         spec.stdin = StdinMode::Null;
         spec.group = true;
@@ -4546,7 +4575,7 @@ mod tests {
         );
         // Control: a non-group child inherits the test process's
         // group instead of leading its own.
-        let mut plain = ProcessSpec::new("plain", "/bin/sh");
+        let mut plain = ProcessSpec::new("plain", "/bin/sh", "test process");
         plain.args = vec!["-c".into(), "sleep 30".into()];
         let plain_id = sup.spawn(plain).expect("spawn plain");
         let plain_events = drain_until(&mut sup, plain_id, Duration::from_secs(2), |evs| {
@@ -5017,7 +5046,7 @@ mod tests {
     fn maybe_restart_inert_once_shut_down() {
         let mut sup = ProcessSupervisor::new();
         sup.set_restart_backoff(Duration::from_millis(30));
-        let mut spec = ProcessSpec::new("restarter", "/bin/sh");
+        let mut spec = ProcessSpec::new("restarter", "/bin/sh", "test process");
         spec.args = vec!["-c".into(), "echo x".into()];
         spec.restart = RestartPolicy::Always;
         let id = sup.spawn(spec).expect("spawn");
@@ -5158,7 +5187,7 @@ mod tests {
     #[test]
     fn group_and_null_stdin_rejected_under_pty() {
         let mut sup = ProcessSupervisor::new();
-        let mut spec = ProcessSpec::new("pty-null", "/bin/sh");
+        let mut spec = ProcessSpec::new("pty-null", "/bin/sh", "test process");
         spec.mode = ProcessMode::default_pty();
         spec.stdin = StdinMode::Null;
         let err = sup
@@ -5169,7 +5198,7 @@ mod tests {
             "error points at pipe mode: {err}"
         );
 
-        let mut spec = ProcessSpec::new("pty-group", "/bin/sh");
+        let mut spec = ProcessSpec::new("pty-group", "/bin/sh", "test process");
         spec.mode = ProcessMode::default_pty();
         spec.group = true;
         let err = sup

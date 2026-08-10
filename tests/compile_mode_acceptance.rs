@@ -1836,7 +1836,8 @@ fn r1f6_wrong_spec_types_error_instead_of_defaulting() {
         &s,
         r#"
         local ok, err = pcall(pmacs.process.spawn,
-            { label = "t", command = "/bin/true", stdin = true })
+            { label = "t", purpose = "type-check probe", command = "/bin/true",
+              stdin = true })
         return ok, tostring(err)
         "#,
     );
@@ -1846,7 +1847,8 @@ fn r1f6_wrong_spec_types_error_instead_of_defaulting() {
         &s,
         r#"
         local ok, err = pcall(pmacs.process.spawn,
-            { label = "t", command = "/bin/true", group = "true" })
+            { label = "t", purpose = "type-check probe", command = "/bin/true",
+              group = "true" })
         return ok, tostring(err)
         "#,
     );
@@ -2234,7 +2236,8 @@ fn r3f3_spec_fields_are_raw_reads_metatables_not_honored() {
         &s,
         r#"
         local spec = setmetatable(
-            { label = "mt", command = "/bin/sh", args = { "-c", "sleep 30" } },
+            { label = "mt", purpose = "raw-read probe", command = "/bin/sh",
+              args = { "-c", "sleep 30" } },
             { __index = function(_, k)
                 if k == "group" then return true end
                 return nil
@@ -2265,7 +2268,8 @@ fn r3f3_spec_fields_are_raw_reads_metatables_not_honored() {
         &s,
         r#"
         local spec = setmetatable(
-            { label = "mt2", command = "/bin/sh", args = { "-c", "exit 0" } },
+            { label = "mt2", purpose = "raw-read probe", command = "/bin/sh",
+              args = { "-c", "exit 0" } },
             { __index = function() error("hostile spec metatable") end })
         local ok = pcall(pmacs.process.spawn, spec)
         return ok
