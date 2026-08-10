@@ -34,7 +34,9 @@
 use mlua::{Lua, Table, Value};
 
 use super::{BufferIdLua, SharedCore, config_u32, run_hook_if_defined};
-use crate::editor_core::{DisplayOutcome, DisplayRequest, HookKind, QuitOutcome};
+use crate::editor_core::{
+    CommitContract, CommitProfile, DisplayOutcome, DisplayRequest, HookKind, QuitOutcome,
+};
 use crate::protocol::FrontendId;
 use crate::window::{DEFAULT_PANEL_ROWS, MIN_WINDOW_OUTER_ROWS, Side, WindowId};
 
@@ -61,6 +63,51 @@ pub(crate) fn acting_frontend(lua: &Lua, core: &SharedCore) -> FrontendId {
                 .and_then(|origin| origin.current())
         })
         .unwrap_or_else(|| core.borrow().active_frontend_key())
+}
+
+/// One message for every bad profile — an unrecognized string and a
+/// non-string alike (Q#DC-5).
+///
+/// Stated once so the parser and the message cannot drift, and phrased
+/// to name the accepted values *and* the default, because a caller who
+/// gets this wrong is guessing at the vocabulary.
+const BAD_COMMIT_PROFILE: &str = "pmacs.window.commit_to: profile must be the string \"document\" \
+     or \"panel\" (omitting it, or passing nil, means \"document\")";
+
+/// Resolve the optional third argument of `commit_to`.
+///
+/// Takes a [`Value`] rather than an `Option<String>` **so this refusal
+/// is reachable**: with the narrower type mlua rejects a number or a
+/// table during argument conversion, before the closure body runs, and
+/// the caller gets a generic conversion error that names neither the
+/// accepted values nor the default. That is the same trap the `dest`
+/// argument documents at its own borrow site.
+///
+/// `Nil` and absence are the **same** answer, not two: a Lua caller
+/// threading an optional variable produces `commit_to(dest, body, nil)`,
+/// and a third behaviour there would stay invisible until someone hit
+/// it.
+///
+/// The comparison is on **bytes**, for the same reachability reason one
+/// layer down. A Lua string is a byte string, not UTF-8, so
+/// `commit_to(dest, body, string.char(255))` fails a `to_str()`
+/// conversion and surfaces mlua's generic UTF-8 error *before* the
+/// message below is ever constructed. An invalid-UTF-8 profile is a bad
+/// profile like any other and gets the documented refusal.
+fn commit_profile(value: &Value) -> mlua::Result<CommitProfile> {
+    match value {
+        Value::Nil => Ok(CommitProfile::Document),
+        Value::String(name) => match name.as_bytes().as_ref() {
+            b"document" => Ok(CommitProfile::Document),
+            b"panel" => Ok(CommitProfile::Panel),
+            // An unrecognized profile ERRORS rather than falling back to
+            // the document one: a fallback would silently hand a caller
+            // stricter or looser checks than it asked for, which is the
+            // failure the parameterization exists to prevent.
+            _ => Err(mlua::Error::runtime(BAD_COMMIT_PROFILE)),
+        },
+        _ => Err(mlua::Error::runtime(BAD_COMMIT_PROFILE)),
+    }
 }
 
 /// Run the panel-reconciliation transaction from a Lua-owning context
@@ -452,7 +499,7 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
             "commit_to",
             lua.create_function(
                 move |lua,
-                      (dest, body): (mlua::Value, mlua::Function)|
+                      (dest, body, profile): (mlua::Value, mlua::Function, mlua::Value)|
                       -> mlua::Result<mlua::MultiValue> {
                     // Journey Stage 1a (Q#JR14). Preflight FIRST, then
                     // scope, then run. The ordering is the whole point:
@@ -472,7 +519,7 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
                     // rule nor how to get a real destination.
                     let dest = match &dest {
                         mlua::Value::UserData(userdata) => {
-                            userdata.borrow::<super::DirectoryDestinationLua>().ok()
+                            userdata.borrow::<super::ViewDestinationLua>().ok()
                         }
                         _ => None,
                     };
@@ -484,45 +531,27 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
                             )
                         })?
                         .0;
+                    // Q#DC-5. Resolved AFTER the destination so a caller
+                    // who got both wrong hears about the destination
+                    // first --- it is the argument that cannot be fixed
+                    // by reading this signature.
+                    let profile = commit_profile(&profile)?;
 
-                    // 1. The requesting frontend still has a layout.
-                    let refusal = {
-                        let core = cc.borrow();
-                        if !core.views.contains_key(&dest.frontend) {
-                            Some("requesting frontend is gone".to_string())
-                        } else if !core
-                            .views
-                            .get(&dest.frontend)
-                            .is_some_and(|view| view.layout.iter_ids().contains(&dest.window))
-                        {
-                            // 2. The destination window is still live in it.
-                            Some(format!("window {} is gone", dest.window.raw()))
-                        } else if core
-                            .windows
-                            .get(&dest.window)
-                            .is_some_and(|w| w.buffer_id != dest.buffer)
-                        {
-                            // 3. Stale intent (Q#JR14c): the user
-                            //    replaced the buffer while the work was
-                            //    in flight. Their action is newer
-                            //    information than the request, so the
-                            //    request loses.
-                            Some(format!(
-                                "window {} now shows another buffer",
-                                dest.window.raw()
-                            ))
-                        } else if !core.window_accepts_buffer(dest.window, None) {
-                            // 4. Replaceability (Q#JR14f). `None`
-                            //    because the replacement does not exist
-                            //    yet — passing the captured buffer would
-                            //    approve a window dedicated to *it*, and
-                            //    the handler's different buffer would be
-                            //    refused later, after mutating.
-                            Some(format!("window {} is dedicated", dest.window.raw()))
-                        } else {
-                            None
-                        }
-                    };
+                    // The preflight itself lives on the core
+                    // (`commit_destination_refusal`) rather than being
+                    // hand-written here, so the panel profile's
+                    // relaxation is decided in one place: two copies of
+                    // the same three checks is how one of them ends up
+                    // weaker than the other.
+                    //
+                    // This call is only HALF the panel guarantee. It
+                    // measures whether this frontend places side requests
+                    // in the panel; what keeps that measurement true
+                    // while the body runs --- nested `commit_to` scopes
+                    // included --- is
+                    // `EditorCore::panel_commit_dedication_refusal`,
+                    // which refuses the mutations that would falsify it.
+                    let refusal = cc.borrow().commit_destination_refusal(&dest, profile);
                     if let Some(reason) = refusal {
                         let mut out = mlua::MultiValue::new();
                         out.push_back(mlua::Value::String(lua.create_string(reason.as_bytes())?));
@@ -546,13 +575,32 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
                             )
                         })?
                         .clone();
-                    // Both the override and the core's ambient
-                    // `active_frontend` are restored when this guard
-                    // drops -- on the normal return AND on a raising
-                    // callback, which is why the result is captured
-                    // rather than `?`-propagated through the drop.
+                    // The override, the core's ambient `active_frontend`,
+                    // and the CONTRACT below are all restored when this
+                    // guard drops -- on the normal return AND on a
+                    // raising callback, which is why the result is
+                    // captured rather than `?`-propagated through the
+                    // drop. The contract rides with the scope because
+                    // every mutation this body reaches has to know which
+                    // destination and which profile it is running under.
+                    //
+                    // A NESTED `commit_to` PUSHES its contract onto the
+                    // ones already in force rather than replacing them
+                    // (Q#DC-2, revision 9). Replacing was a hole: an
+                    // outer `"panel"` commit's mutation refusal went out
+                    // of force for the extent of a nested body, which is
+                    // long enough to dedicate the side slot its relaxed
+                    // preflight depends on. Nesting itself is allowed --
+                    // only the mutation is refused.
                     let result = {
-                        let _guard = scope.enter(&cc, &commit, dest.frontend);
+                        let _guard = scope.enter(
+                            &cc,
+                            &commit,
+                            CommitContract {
+                                destination: dest,
+                                profile,
+                            },
+                        );
                         body.call::<mlua::MultiValue>(())
                     };
                     let mut out = result?;
@@ -560,6 +608,39 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
                     Ok(out)
                 },
             )?,
+        )?;
+    }
+
+    {
+        // Q#DC-1 — the capture half, reachable from Lua at last.
+        //
+        // Journey Stage 1a built `commit_to` for the continuation
+        // boundary, but the only thing that could mint a destination was
+        // the `path.open-directory` dispatch, so every other async
+        // continuation had to resolve its target from ambient state a
+        // tick after the request --- which is a misrouting waiting for a
+        // second frontend to become active.
+        //
+        // NO ARGUMENTS, and that is load-bearing rather than
+        // minimalism. A Lua-supplied frontend id would reintroduce
+        // exactly the fabrication hole the nonconstructible userdata
+        // closes (Q#JR14d): the point of userdata is that Lua names a
+        // destination it was *given*, never one it composed.
+        //
+        // PROFILE-BLIND, likewise (Q#DC-4). Capture records what is
+        // there; what a commit depends on is declared at `commit_to`,
+        // because a caller knows what it is about to do only then.
+        // Making capture profile-aware would force it to know at capture
+        // time what it will do at commit time, which is the opposite of
+        // why capture exists --- freeze the truth early, decide later.
+        let cc = core.clone();
+        win.set(
+            "capture_destination",
+            lua.create_function(move |lua, ()| {
+                let fid = acting_frontend(lua, &cc);
+                let dest = cc.borrow().capture_view_destination(fid);
+                lua.create_userdata(super::ViewDestinationLua(dest))
+            })?,
         )?;
     }
 
@@ -834,6 +915,24 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
                         None => None,
                     };
                     let dedicated = opts.get::<Option<bool>>("dedicated")?;
+                    // Q#DC-2 (revision 8). The direct route to the one
+                    // mutation that could make a `"panel"` commit's
+                    // relaxed preflight wrong. Refused BEFORE the borrow
+                    // below, so the attempt changes nothing --- including
+                    // `fixed_rows`, which is in the same option table.
+                    if dedicated == Some(true) {
+                        let core = cc.borrow();
+                        if core
+                            .windows
+                            .get(&id)
+                            .is_some_and(crate::window::Window::is_side)
+                            && let Some(reason) = core.panel_commit_dedication_refusal(fid)
+                        {
+                            return Err(mlua::Error::runtime(format!(
+                                "pmacs.window.set_params: {reason}"
+                            )));
+                        }
+                    }
                     {
                         let mut core = cc.borrow_mut();
                         let window = core.windows.get_mut(&id).ok_or_else(|| {

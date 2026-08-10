@@ -529,10 +529,21 @@ someone forgot.
   which is why name-keyed lists are not trustworthy.
 - **`basedpyright` hangs forever** — always
   `cargo test --test m4_acceptance -- --skip basedpyright`.
-- **The crdt sweep needs `cargo build --workspace` first**, or twelve
-  `gpu_invocation_acceptance` tests fail on a missing `pmacs-gpu`
-  binary. `cargo build --workspace --no-default-features --features
-  luajit,crdt` is the invocation that produces both binaries.
+- **INCIDENT — the crdt sweep's missing build step. §3 now owns this
+  requirement; what stays here is the history and the signature.**
+  Signature: twelve `gpu_invocation_acceptance::crdt::*` failures, each
+  *"build pmacs-gpu before this acceptance suite"*, on a target
+  directory with no `debug/pmacs-gpu` in it. Seen on **PR #228's first
+  gate run** (2026-08-09) — the first `--protocol` run in a *fresh*
+  per-worktree target directory after #225. Latent for the whole life
+  of the shared `CARGO_TARGET_DIR`, which nearly always already held
+  the binary, so the precondition was met by accident. Reproduced
+  deliberately the same day on a disposable cold target: default sweep
+  exit 0, crdt sweep exit 101 with exactly those twelve.
+  **`scripts/gate --protocol` now runs the build as a named
+  `build-crdt` step**, so this signature appearing again means the
+  script was bypassed, not that the requirement moved. The invocation,
+  the measurement and the reasoning are in §3.
 - **A shared `CARGO_TARGET_DIR` makes concurrent sweeps unattributable.**
   Every worktree on this machine resolves to the same target directory,
   so `target/debug/pmacs` is a **shared mutable file**: a
@@ -2298,14 +2309,49 @@ eight broken version assertions on CI. When the two disagree, **this
 list wins**.
 
 **Touching `PROTOCOL_VERSION` STRENGTHENS the sweep line. It does not
-replace it:**
+replace it — and the crdt sweep has a BUILD PRECONDITION:**
 
 ```
 cargo test --workspace --no-fail-fast -- --skip basedpyright
+cargo build --workspace --no-default-features --features luajit,crdt
 cargo test --workspace --features crdt --no-fail-fast -- --skip basedpyright
 ```
 
 Every part is load-bearing:
+
+- **The build before the crdt sweep is a PRECONDITION, not a courtesy,
+  and it is gate policy rather than an ops tip.** The crdt sweep spawns
+  `pmacs-gpu` as a *process*, and no `cargo test` run produces that
+  binary: `pmacs-gpu` has no `tests/` directory, so cargo never uplifts
+  its bin to `debug/pmacs-gpu`. Omit the build on a cold target
+  directory and twelve `gpu_invocation_acceptance::crdt::*` tests fail
+  on *"build pmacs-gpu before this acceptance suite"* — and, worse,
+  crdt tests that drive the real binary (`vterm_stage3` a37,
+  `bottom_panel_stage2b_gpu` a54) take their skip branch and report
+  **`ok`**, so the missing build also voids coverage *silently*.
+  `scripts/gate --protocol` emits it as its own named `build-crdt`
+  step, never folded into the sweep command, so a build failure is
+  attributed to the build rather than to the sweep.
+
+  **Only the crdt sweep needs it, and that is MEASURED rather than
+  reasoned.** On 2026-08-09, on a disposable target directory with
+  `debug/pmacs-gpu` asserted **absent before each run** and each sweep
+  run alone from that cold state: the **default** sweep exited **0**
+  (114 test targets green) and left `debug/pmacs-gpu` **still absent**
+  — it never builds the binary and never needs it — while the **crdt**
+  sweep exited **101** with exactly those twelve failures. An
+  unconditional build would be a real cost paid for nothing on every
+  ordinary lane.
+
+  **Why this was latent for years.** Before per-worktree target
+  directories (#225) every worktree on this machine shared one, which
+  nearly always already held a `pmacs-gpu` from some earlier build, so
+  the precondition was satisfied **by accident** on essentially every
+  run. The hazard is not the red gate — a red gate stops you. It is a
+  **green** `--protocol` run whose crdt sweep was decided by what
+  happened to be in the build directory rather than by the diff, which
+  is a gate reporting coverage it does not have. §5 keeps the incident
+  and its signature as history; **this section owns the requirement.**
 
 - **`--workspace`, never `--tests`.** `--tests` selects 108 targets
   where `--workspace` selects 110, and the two it drops are
@@ -2552,10 +2598,29 @@ cannot advertise 21 without stranding existing v20 clients before
 `AttachRequest`. v15 = `CompletionPopup` + `StatusFacts.message`; v16 =
 `ThemeFacts`; v17 = `FontFacts`; v18 = `StatuslineSegments`; v19 = the vterm
 terminal family; v20 = semantic `SessionBootstrapRequest` plus appended
-`InitialTargetResult`; v21 reserves the panel frame/event family. New wire
+`InitialTargetResult`; v21 reserves the panel frame/event family;
+v22 = `LineWrapFacts`; v23 = `MinibufferPromptRows`. New wire
 surface ⇒ bump + both-frontends support + acceptance. An APPENDED variant
 must be guarded by a byte pin on the PREVIOUS final variant — its own
 round-trip cannot detect a discriminant shift.
+
+**A SUPERSEDED variant can be frozen rather than widened, and v23 is the
+first case.** Discovery Stage 2 needed richer minibuffer rows.
+Widening `MinibufferPrompt` in place was not an option — postcard
+encodes fields positionally, so every v12–v22 peer would **mis-decode**
+the bytes rather than ignore them — and gating the widened form at
+`>= 23` would have left those peers with **no minibuffer message at
+all**, because there would have been only one variant to gate.
+Compatibility requires the old shape to still exist *and still be sent*.
+So `MinibufferPrompt` is retained unchanged for `12..=22`,
+`MinibufferPromptRows` is appended for `>= 23`, and the daemon gate is a
+**range on both sides** so exactly one variant reaches any peer.
+Two consequences worth carrying forward: a frozen variant needs a
+**literal byte fixture** (`assert_eq!(encoded, LEGACY_BYTES)`), because a
+round-trip encodes and decodes with the same types and so freezes
+nothing; and the CLOSE message must use the same variant family as the
+OPEN, or a session closed by the other family's clear leaves its surface
+on screen forever.
 
 **Fake LSP** (`src/bin/pmacs_fake_lsp.rs`) modes: `fullonly`,
 `rangeonly`, `rangeonly16` (UTF-16 + fail-closed bounds validation),

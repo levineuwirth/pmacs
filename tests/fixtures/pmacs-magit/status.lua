@@ -54,6 +54,10 @@ function M.run_git(args, opts)
   opts = opts or {}
   local id = pmacs.process.spawn {
     label = "git " .. (args[1] or ""),
+    -- Worker identity Stage 1: `purpose` is required. The full argument
+    -- vector, not just the subcommand the label carries -- "git log" and
+    -- "git log --oneline -20" are the same label and different work.
+    purpose = "git " .. table.concat(args, " "),
     command = "git",
     args = args,
     cwd = opts.cwd,

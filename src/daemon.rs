@@ -1420,9 +1420,23 @@ fn dispatcher_loop(
                 let peer_knows_menu_prompt = session_registry
                     .session_state(*fid)
                     .is_some_and(|s| s.negotiated_protocol_version >= 11);
-                let peer_knows_minibuffer_prompt = session_registry
-                    .session_state(*fid)
-                    .is_some_and(|s| s.negotiated_protocol_version >= 12);
+                // Q#MB1 / Discovery Stage 2 — the minibuffer is the one
+                // surface with TWO live variants, and the gate is a
+                // RANGE on both sides rather than a floor. The legacy
+                // `MinibufferPrompt` is frozen and belongs to `12..=22`;
+                // `MinibufferPromptRows` belongs to `>= 23`. Writing the
+                // legacy gate as a bare `>= 12` would let a v23 peer
+                // receive both and double-render its dropdown.
+                let peer_knows_minibuffer_prompt =
+                    session_registry.session_state(*fid).is_some_and(|s| {
+                        (12..crate::semantic_render::MINIBUFFER_ROWS_MIN_VERSION)
+                            .contains(&s.negotiated_protocol_version)
+                    });
+                let peer_knows_minibuffer_rows =
+                    session_registry.session_state(*fid).is_some_and(|s| {
+                        s.negotiated_protocol_version
+                            >= crate::semantic_render::MINIBUFFER_ROWS_MIN_VERSION
+                    });
                 // UX gutter — `LineNumbers` carries a `LineNumberMode` since
                 // v14 (was `enabled: bool` in v13); a peer below 14 keeps
                 // its gutter off rather than mis-decoding the wider shape.
@@ -1470,9 +1484,21 @@ fn dispatcher_loop(
                         continue;
                     }
                     // Q#MB1 — MinibufferPrompt gated at v12; a v11 peer
-                    // simply can't render the GUI minibuffer.
+                    // simply can't render the GUI minibuffer. Discovery
+                    // Stage 2 closed the range at the top: a v23 peer
+                    // gets the rows form instead, never both.
                     if !peer_knows_minibuffer_prompt
                         && matches!(msg, InstanceMessage::MinibufferPrompt { .. })
+                    {
+                        continue;
+                    }
+                    // Discovery Stage 2 — MinibufferPromptRows gated at
+                    // v23. A `12..=22` peer keeps the frozen legacy
+                    // variant above, which is why gating alone was never
+                    // enough: with one variant it would have lost the
+                    // minibuffer entirely.
+                    if !peer_knows_minibuffer_rows
+                        && matches!(msg, InstanceMessage::MinibufferPromptRows { .. })
                     {
                         continue;
                     }
@@ -1801,7 +1827,7 @@ fn open_initial_target(
     let (buffer_id, fire) = match resolved {
         crate::editor_core::ResolvedTarget::Directory { path } => {
             let dest = editor
-                .capture_directory_destination(frontend_id, origin_window)
+                .capture_view_destination(frontend_id, origin_window)
                 .ok_or_else(|| format!("cannot open {}: no document window", path.display()))?;
             editor.dispatch_directory_open(&path, dest);
             editor.reconcile_panel_layout(frontend_id);

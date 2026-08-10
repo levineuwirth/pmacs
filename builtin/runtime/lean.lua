@@ -494,10 +494,14 @@ local function start_probe(root)
   -- "lake": a user pointing `command` at an absolute path to lake should
   -- have THAT probed, not whatever `lake` resolves to on PATH.
   local spec = {
-    -- COHERENCE §9: `ProcessSpec.label` is the only identity a process
-    -- carries, and it is what `pmacs.process.list` renders. A user
-    -- wondering why their editor touched `lake` finds an owner here.
+    -- COHERENCE §9: `ProcessSpec.label` identifies the process, and it
+    -- is what `pmacs.process.list` renders alongside the purpose. A user
+    -- wondering why their editor touched `lake` finds it here.
     label = "lean:lake-version-probe",
+    -- Worker identity Stage 1: the label was carrying both jobs — the
+    -- identity AND the explanation — which is the conflation the purpose
+    -- field exists to undo. The label stays a key; this is the sentence.
+    purpose = "checking the Lean toolchain version before starting a server",
     command = cfg.command,
     args = { "--version" },
     stdin = "null",

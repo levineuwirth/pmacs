@@ -130,39 +130,119 @@ pub enum ResolvedTarget {
     },
 }
 
-/// Where a directory open was requested, captured **synchronously** at
-/// resolve time (Journey Stage 1a, Q#JR14).
+/// Where an asynchronous continuation's result belongs, captured
+/// **synchronously** at request time (Journey Stage 1a, Q#JR14;
+/// generalized by `docs/destination-capture-framing.md`).
 ///
-/// The listing that satisfies a directory open is asynchronous
-/// (`pmacs.fs.read_dir` is worker-dispatched and must be awaited), so the
-/// code that finally builds and displays the listing runs a tick or more
-/// later — outside interactive dispatch, where `pmacs.window.*` acts on
-/// the *ambient* frontend by documented design (`builtin/runtime/dired.lua`).
-/// Without a captured destination, a second frontend dispatching in the
-/// meantime silently redirects the listing.
+/// The work that satisfies such a request is asynchronous (a directory
+/// listing is worker-dispatched and must be awaited; so is a `git`
+/// invocation), so the code that finally builds and displays the result
+/// runs a tick or more later — outside interactive dispatch, where
+/// `pmacs.window.*` acts on the *ambient* frontend by documented design
+/// (`builtin/runtime/dired.lua`). Without a captured destination, a
+/// second frontend dispatching in the meantime silently redirects the
+/// result.
 ///
-/// All three fields are load-bearing:
+/// The fields are load-bearing, and the document pair is **optional**
+/// (Q#DC-4) because a panel result needs only a live frontend *when it
+/// really lands in a panel*, so a frontend whose document window has
+/// gone can still host one:
 ///
-/// * `frontend` — the scope the commit must run in.
+/// * `frontend` — the scope the commit must run in. Always present.
 /// * `window` — the exact destination; the ambient selected window is
-///   not it.
+///   not it. Absent when the frontend had no document window at capture
+///   time.
 /// * `buffer` — what that window held at capture time, so **stale
 ///   intent loses to the user** (Q#JR14c). A user who replaced the
-///   buffer while the listing was in flight is newer information than
-///   the launch argument, and must not be overwritten.
+///   buffer while the work was in flight is newer information than the
+///   launch argument, and must not be overwritten. Present exactly when
+///   `window` is.
+///
+/// The pair is set or cleared together — see
+/// [`EditorCore::capture_view_destination`], which is the only place
+/// that reads them off ambient state.
+///
+/// Which of those a commit actually requires is the **profile**, chosen
+/// at `pmacs.window.commit_to` rather than at capture (Q#DC-2/Q#DC-5):
+/// the document profile requires all of them, and the panel profile
+/// requires only a live `frontend` **while its result really lands in a
+/// panel**. A side request that falls back into a document window *is* a
+/// document replacement, so the panel profile's relaxed preflight is
+/// taken only when the fallback cannot happen, and the mutations that
+/// would manufacture one mid-commit are refused at the attempt
+/// (`EditorCore::panel_commit_dedication_refusal`). Capture stays
+/// profile-blind so a caller does not have to know at capture time what
+/// it will do at commit time.
 ///
 /// Exposed to Lua only as nonconstructible userdata (Q#JR14d): as a
 /// table, the *same* value is handed to every resolver listener in turn,
 /// so one could mutate it and then decline — redirecting later listeners
 /// — and any Lua could fabricate a plausible triple.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DirectoryDestination {
-    /// Frontend that requested the directory.
+pub struct ViewDestination {
+    /// Frontend that requested the work.
     pub frontend: FrontendId,
-    /// Window the listing must land in.
-    pub window: WindowId,
+    /// Window the result must land in, when there is one.
+    pub window: Option<WindowId>,
     /// Buffer that window held at capture time (stale-intent check).
-    pub buffer: BufferId,
+    pub buffer: Option<BufferId>,
+}
+
+/// Which of `commit_to`'s preconditions a body actually depends on
+/// (Q#DC-2).
+///
+/// A **closed** set of two, not an open string namespace: a third
+/// profile is a decision about what a continuation may depend on, not a
+/// spelling. Chosen at `commit_to` rather than at capture, because the
+/// caller knows what it is about to do only then.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommitProfile {
+    /// The body replaces the captured window's buffer: **all four**
+    /// preflight checks apply. This is what an omitted profile means, so
+    /// every caller written before the profile existed keeps exactly the
+    /// guarantees it was written against.
+    Document,
+    /// The body puts its result in a bottom panel rather than in the
+    /// captured document window, and so does not depend on checks 2–4 —
+    /// **for as long as its result really lands in a panel**. The
+    /// preflight grants the relaxation only when a fallback into a
+    /// document window is impossible ([`EditorCore::commit_destination_refusal`]),
+    /// and what keeps that measurement true for the body's whole extent
+    /// is that the mutations which would manufacture a fallback are
+    /// refused at the attempt
+    /// (`EditorCore::panel_commit_dedication_refusal`).
+    Panel,
+}
+
+/// The contract a `commit_to` body is running under, published on the
+/// core so the mutations that could invalidate it can consult it
+/// (Q#DC-2, revisions 8 and 9).
+///
+/// **Why this exists rather than a preflight prediction.** Revision 6
+/// tried to decide at preflight whether a `"panel"` commit's placement
+/// could fall back into a document window, on the argument that nothing
+/// could change in between because the body cannot `await`. Refusing
+/// `await` stops another coroutine interleaving; it says nothing about
+/// the body itself, which is arbitrary Lua running synchronously and can
+/// change the very state the snapshot measured — obtain the panel, set
+/// it `dedicated`, then request a side display. A snapshot cannot bind
+/// that. So the preflight stays where it is and the contract is what
+/// lets those mutations be **refused at the attempt**, which is the only
+/// point early enough to leave nothing behind
+/// (`EditorCore::panel_commit_dedication_refusal`).
+///
+/// Pushed and popped by the same guard that scopes the frontend, so the
+/// two can never disagree about whether a commit is on the stack.
+/// **Pushed** rather than swapped: a contract is a restriction, and a
+/// nested `commit_to` must add to the ones in force rather than mask
+/// them for the extent of its body
+/// (`EditorCore::push_commit_contract`, revision 9).
+#[derive(Clone, Copy, Debug)]
+pub struct CommitContract {
+    /// The destination the continuation captured.
+    pub destination: ViewDestination,
+    /// What that continuation declared it depends on.
+    pub profile: CommitProfile,
 }
 
 /// A `display_buffer` request (Q#BP3).
@@ -620,6 +700,34 @@ pub struct EditorCore {
     /// slot; the producer clears any untaken record when the fan-out
     /// returns.
     typed_edit_armed: Option<(FrontendId, TypedEditRecord)>,
+    /// Every `commit_to` contract currently on the stack, outermost
+    /// first (Q#DC-2, revision 9).
+    ///
+    /// **A STACK, NOT A SLOT, and that is the whole of revision 9's
+    /// fix.** Revision 8 held one contract and had a nested `commit_to`
+    /// replace it for the inner body's extent. That MASKED the enclosing
+    /// contract: an outer `"panel"` commit took the relaxed preflight,
+    /// its body opened a nested `"document"` commit, and inside that
+    /// nested body the very mutation the outer commit's relaxation
+    /// depends on — dedicating the one side slot — was no longer refused,
+    /// because the guard consulted only the innermost contract. The outer
+    /// commit then resumed and fell back into the document window,
+    /// overwriting a newer buffer, which is exactly the defect the panel
+    /// profile's relaxation was made safe against.
+    ///
+    /// So restrictions **compose** rather than replace: a contract is
+    /// pushed for its body and popped after, and every restriction
+    /// pushed by an enclosing commit stays in force for the whole of it,
+    /// nested scopes included. See
+    /// [`Self::panel_commit_dedication_refusal`], the one reader.
+    ///
+    /// Private and `pub(crate)`-free on purpose: entries are pushed only
+    /// by [`crate::editor::ScopedFrontend::enter`]'s guard, which
+    /// truncates back to its own depth on every exit path including a
+    /// raising body. Nothing outside this crate can push one, so a
+    /// `"panel"` profile is not something Lua can claim for a placement
+    /// it did not commit to.
+    commit_contracts: Vec<CommitContract>,
 }
 
 impl EditorCore {
@@ -674,7 +782,40 @@ impl EditorCore {
             query_replace: None,
             typed_edit_pending: None,
             typed_edit_armed: None,
+            commit_contracts: Vec::new(),
         }
+    }
+
+    /// Push `contract` for the duration of a `commit_to` body, returning
+    /// the depth [`Self::exit_commit_contract`] must truncate back to.
+    ///
+    /// **Pushes rather than replaces (revision 9).** A nested `commit_to`
+    /// adds its contract to the ones already in force instead of masking
+    /// them, so an enclosing `"panel"` commit's mutation refusal covers
+    /// its *whole* body — including the part that runs inside a nested
+    /// commit of a different profile. Replacing was revision 8's defect:
+    /// the guard read only the innermost contract, so a nested
+    /// `"document"` commit was a hole through which the body could
+    /// dedicate the side slot the outer relaxation rests on.
+    ///
+    /// Crate-private and paired with the frontend scope rather than a
+    /// standalone setter: a contract that could be installed without
+    /// being popped would outlive its body and silently govern the next
+    /// unrelated display.
+    pub(crate) fn push_commit_contract(&mut self, contract: CommitContract) -> usize {
+        let depth = self.commit_contracts.len();
+        self.commit_contracts.push(contract);
+        depth
+    }
+
+    /// Drop every contract pushed at or above `depth`.
+    ///
+    /// Truncation rather than a bare `pop` so the guard restores exactly
+    /// the set that was in force when it was entered, whatever happened
+    /// in between — the same reason the frontend scope saves a value
+    /// rather than assuming it can invert its own change.
+    pub(crate) fn exit_commit_contract(&mut self, depth: usize) {
+        self.commit_contracts.truncate(depth);
     }
 
     /// Build a core from raw bytes under `name`. Used by tests.
@@ -3042,6 +3183,143 @@ impl EditorCore {
         self.non_side_target(fid).ok()
     }
 
+    /// Capture where `fid`'s next asynchronous result belongs (Q#JR14,
+    /// generalized by Q#DC-1/Q#DC-4).
+    ///
+    /// **Profile-blind and total**: it records what is there rather than
+    /// what a caller intends to do later, and it never fails while a
+    /// frontend id exists. A frontend with no document window yields a
+    /// destination carrying only `frontend` — enough for a panel commit
+    /// that really places in the panel, and refused by a document commit
+    /// (or by a panel commit on a frontend where a side request would
+    /// fall back into a document window, see
+    /// [`Self::commit_destination_refusal`]) with a reason naming the
+    /// missing window. Returning `None` here instead would push the
+    /// caller back onto ambient state, which is the misrouting the
+    /// capture exists to remove.
+    ///
+    /// The document pair is set or cleared **together**: a window whose
+    /// entry has gone yields neither half, so no consumer has to handle
+    /// a window without its captured buffer.
+    ///
+    /// **How reachable the empty pair is, stated because the framing
+    /// implies more than the tree does.** Q#BP6 says a frontend layout
+    /// always retains at least one non-side window, and
+    /// [`Self::non_side_target`] carries a `debug_assert!` that fires
+    /// when one does not — so with that invariant held, a *registered*
+    /// frontend always has a live document window and this branch is
+    /// **defensive** rather than routine. It stays because the
+    /// alternative is a capture that can fail, and a caller that can
+    /// fail is a caller that falls back to ambient state.
+    #[must_use]
+    pub fn capture_view_destination(&self, fid: FrontendId) -> ViewDestination {
+        let pair = self
+            .primary_document_window(fid)
+            .and_then(|window| Some((window, self.windows.get(&window)?.buffer_id)));
+        ViewDestination {
+            frontend: fid,
+            window: pair.map(|(window, _)| window),
+            buffer: pair.map(|(_, buffer)| buffer),
+        }
+    }
+
+    /// The document profile's preconditions on a captured destination —
+    /// Q#DC-2's checks 2, 3 and 4, plus Q#DC-4's missing-pair case.
+    ///
+    /// **One rule in one place**, because it is now evaluated from two
+    /// sites and they must not drift: `commit_to`'s preflight runs it
+    /// before the body, and [`Self::display_buffer`] runs it again when a
+    /// `"panel"` commit's side request actually falls back into a
+    /// document window. A second copy of these three checks is how the
+    /// backstop ends up subtly weaker than the thing it backs.
+    ///
+    /// Check 1 (the requesting frontend still has a layout) is
+    /// deliberately *not* here: it is shared by both profiles rather than
+    /// specific to the document one, and the placement path cannot fail
+    /// it — it is placing into that very frontend.
+    #[must_use]
+    pub fn document_destination_refusal(&self, dest: &ViewDestination) -> Option<String> {
+        let Some(window) = dest.window else {
+            // The capture found no document window (Q#DC-4). A refusal
+            // rather than a raise, so it joins the others as one more
+            // thing the destination can fail to satisfy and an adopter
+            // handles it the same way.
+            return Some(
+                "destination has no document window (capture it from a frontend that has \
+                 one, or commit with the \"panel\" profile)"
+                    .to_string(),
+            );
+        };
+        // 2. The destination window is still live in the frontend.
+        if !self
+            .views
+            .get(&dest.frontend)
+            .is_some_and(|view| view.layout.iter_ids().contains(&window))
+        {
+            return Some(format!("window {} is gone", window.raw()));
+        }
+        // 3. Stale intent (Q#JR14c): the user replaced the buffer while
+        //    the work was in flight. Their action is newer information
+        //    than the request, so the request loses.
+        if self
+            .windows
+            .get(&window)
+            .is_some_and(|w| Some(w.buffer_id) != dest.buffer)
+        {
+            return Some(format!("window {} now shows another buffer", window.raw()));
+        }
+        // 4. Replaceability (Q#JR14f). `None` because the replacement
+        //    does not exist yet — passing the captured buffer would
+        //    approve a window dedicated to *it*, and the handler's
+        //    different buffer would be refused later, after mutating.
+        if !self.window_accepts_buffer(window, None) {
+            return Some(format!("window {} is dedicated", window.raw()));
+        }
+        None
+    }
+
+    /// `commit_to`'s **preflight**: what a commit under `profile` can be
+    /// refused for before its body runs at all (Q#DC-2).
+    ///
+    /// Ordering is the whole point of preflighting rather than validating
+    /// at display time: an async body mutates real state (claims a
+    /// buffer, registers a handle, paints) long before it reaches any
+    /// call that could refuse, so a late refusal leaves debris behind.
+    ///
+    /// **This measurement is only half the guarantee.** For the panel
+    /// profile it can read only the state that holds *now*, and the body
+    /// is arbitrary synchronous Lua that could change it — dedicate the
+    /// side slot, then request a side display. What keeps the
+    /// measurement true is that those mutations are **refused at the
+    /// attempt**, for the body's whole extent including any nested
+    /// `commit_to` (`Self::panel_commit_dedication_refusal`). Refusing
+    /// at the placement boundary instead was revision 7, and it was
+    /// rejected: by then the body has allocated buffers, handles and
+    /// paint, which is the debris this preflight exists to avoid.
+    #[must_use]
+    pub fn commit_destination_refusal(
+        &self,
+        dest: &ViewDestination,
+        profile: CommitProfile,
+    ) -> Option<String> {
+        // 1. The requesting frontend still has a layout. Required by
+        //    BOTH profiles, because a frontend that is gone can host
+        //    nothing.
+        if !self.views.contains_key(&dest.frontend) {
+            return Some("requesting frontend is gone".to_string());
+        }
+        // 2, 3 and 4 are DELIBERATELY OMITTED for a panel result that
+        // really lands in a panel, not overlooked (Q#DC-2): it does not
+        // occupy the captured document window, does not replace its
+        // buffer, and does not need it to exist, so each would refuse for
+        // a reason unrelated to what the continuation does. Every one of
+        // the three is pinned as NOT refusing under this profile.
+        if profile == CommitProfile::Panel && !self.panel_placement_can_fall_back(dest.frontend) {
+            return None;
+        }
+        self.document_destination_refusal(dest)
+    }
+
     /// [`Self::primary_document_window`]'s buffer, falling back to the
     /// focused window's when the layout is degenerate.
     #[must_use]
@@ -3260,6 +3538,23 @@ impl EditorCore {
             }
             other => other,
         };
+        // Q#DC-2 (revision 8). A `Restore` carries the OUTGOING
+        // presentation's `dedicated` flag (see `apply_placement`), so
+        // quitting the panel can re-dedicate the one slot without any
+        // `dedicated` argument appearing at the call site. Refused for
+        // the same reason and at the same point as the other attempts —
+        // before `quit_window` has touched anything.
+        if let QuitAction::Restore {
+            dedicated: true, ..
+        } = action
+            && self
+                .windows
+                .get(&target)
+                .is_some_and(crate::window::Window::is_side)
+            && let Some(reason) = self.panel_commit_dedication_refusal(fid)
+        {
+            return Err(format!("window.quit: {reason}"));
+        }
         match action {
             QuitAction::Delete => {
                 // Capture the remembered origin BEFORE the window dies:
@@ -3801,6 +4096,20 @@ impl EditorCore {
             .ok_or_else(|| format!("frontend {fid:?} has no window layout"))?
             .active;
         let placement = self.resolve_placement(fid, request)?;
+        // Q#DC-2 (revision 8): dedicating the side slot inside a
+        // `"panel"` commit is refused AT THE ATTEMPT, so the preflight's
+        // measurement cannot go stale. `resolve_placement` is pure, so
+        // this still refuses before anything is mutated.
+        //
+        // Note the guard is on the DEDICATION, not on the display: the
+        // body's ordinary `display(buf, {side = "bottom"})` is exactly
+        // what a panel continuation is for and always proceeds.
+        if request.dedicated == Some(true)
+            && matches!(placement.kind, PlacementKind::Side { .. })
+            && let Some(reason) = self.panel_commit_dedication_refusal(fid)
+        {
+            return Err(format!("display: {reason}"));
+        }
         self.apply_placement(fid, request, &placement)?;
         let select = request
             .select
@@ -3924,6 +4233,176 @@ impl EditorCore {
             .into_iter()
             .find(|id| eligible(*id))
             .ok_or_else(|| "display_file: no eligible document window is available".into())
+    }
+
+    /// Whether a `{side = ...}` request in `fid` would fall back into an
+    /// ordinary document window **given the state right now** (Q#DC-2).
+    ///
+    /// Adjacent to [`Self::resolve_placement`] because that is the rule
+    /// it predicts, and a prediction that drifts from the rule is worse
+    /// than none. The two fallback arms, in that function's own order:
+    ///
+    /// 1. **step 2's capability guard** — `side` is honoured only on a
+    ///    `panel_capable` frontend; without the capability the request
+    ///    falls through to step 3's ordinary policy (Q#BP13).
+    /// 2. **step 2's dedicated arm** — the one side slot exists but is
+    ///    dedicated, and a second one is never created, so a different
+    ///    buffer falls through instead (Q#BP3 2.iii).
+    ///
+    /// **A MEASUREMENT, AND NOT SELF-SUPPORTING.** This is consulted by
+    /// [`Self::commit_destination_refusal`] to refuse the statically
+    /// knowable case *before* a body allocates anything — a frontend that
+    /// cannot render a panel at all will not acquire the capability
+    /// mid-body. On its own it would **not** make the panel profile safe:
+    /// a `commit_to` body is arbitrary synchronous Lua and could dedicate
+    /// the side slot itself between this answer and the placement it
+    /// describes, and refusing `await` prevents another coroutine
+    /// interleaving, not the body rewriting the state it was measured
+    /// against. What holds the measurement true is
+    /// `Self::panel_commit_dedication_refusal`, which refuses exactly
+    /// those mutations for the body's whole extent.
+    ///
+    /// Arm 2 is answered **conservatively**: `resolve_placement` falls
+    /// back only when the arriving buffer differs from the dedicated one,
+    /// and at preflight the body has not chosen a buffer yet.
+    ///
+    /// A frontend with no view answers `false`: where placement would
+    /// land is moot when there is nothing to place into, and
+    /// `commit_destination_refusal` has already refused that case by its
+    /// first check.
+    #[must_use]
+    pub fn panel_placement_can_fall_back(&self, fid: FrontendId) -> bool {
+        let Some(view) = self.views.get(&fid) else {
+            return false;
+        };
+        if !view.panel_capable {
+            return true;
+        }
+        self.side_window_for(fid)
+            .and_then(|side| self.windows.get(&side))
+            .is_some_and(|side| side.params.dedicated)
+    }
+
+    /// **The guarantee** behind the `"panel"` commit profile (Q#DC-2,
+    /// revisions 8 and 9): anywhere inside such a commit — nested
+    /// `commit_to` scopes included — the operations that would make this
+    /// frontend's side request fall back are **refused at the attempt**.
+    ///
+    /// # The defect this closes
+    ///
+    /// The panel profile skips preflight checks 2–4 on the strength of "a
+    /// panel result never touches a document window". Panel placement
+    /// **falls back** into an ordinary document window when the frontend
+    /// is not `panel_capable` or its one side slot is dedicated elsewhere
+    /// ([`Self::apply_placement`] says so in its own comment), and then
+    /// installs the result there. So a `"panel"` commit that reached a
+    /// fallback would replace a document view with no stale-intent guard:
+    /// capture A, the user opens B, the continuation lands, B is gone.
+    ///
+    /// # Why this shape, and not the two that were tried first
+    ///
+    /// * **Predicting the fallback at preflight is unsound.** The body is
+    ///   arbitrary *synchronous* Lua and can create the condition itself.
+    ///   Refusing `await` inside the commit scope stops a second
+    ///   coroutine interleaving; it places no restriction on the body's
+    ///   own statements.
+    /// * **Refusing at the placement boundary is too late.** `commit_to`
+    ///   preflights *before* invoking the callback precisely because a
+    ///   body creates buffers, registers handles and paints long before
+    ///   it asks to display anything — "validating at display time is
+    ///   four mutations too late" (`docs/agent-handoff.md`). A refusal
+    ///   arriving after all of that is not a refusal; it is a partial
+    ///   commit with an error return.
+    ///
+    /// So the preflight stays where it is and **the mutation that would
+    /// invalidate it is rejected** — the same shape as `Handle:await`
+    /// being refused inside a commit scope, for the identical reason.
+    /// With these refused, the preflight measurement cannot go stale, the
+    /// fallback never comes into existence, and nothing needs refusing
+    /// late.
+    ///
+    /// # Every enclosing contract, not just the innermost (revision 9)
+    ///
+    /// This scans the whole contract stack. Revision 8 read a single
+    /// slot, and a nested `commit_to` replaced it — so an outer
+    /// `"panel"` commit whose body opened a nested `"document"` commit
+    /// had its restriction **masked** for that body's extent, and the
+    /// nested callback could dedicate the side slot the outer relaxation
+    /// rests on. The outer commit then resumed and fell back into the
+    /// document window, overwriting a newer buffer: the original defect,
+    /// reachable through one extra call. Detecting it when the outer
+    /// commit resumed would have been a late refusal, which revision 7
+    /// was already rejected for. The restriction has to hold for the
+    /// whole body, so **the strictest active restriction wins** and
+    /// nesting is otherwise untouched.
+    ///
+    /// Matching is per **frontend**, not per stack: a nested commit for a
+    /// *different* frontend may dedicate *its* side slot, because that
+    /// cannot change where this frontend's side request lands.
+    ///
+    /// # The enumeration this rests on
+    ///
+    /// [`Self::resolve_placement`] can only reach
+    /// [`PlacementKind::Ordinary`] from a side request in two ways, so
+    /// only two pieces of state matter:
+    ///
+    /// 1. `FrontendView::panel_capable` is false. It is written **only**
+    ///    where a `FrontendView` is constructed, and no `FrontendView` is
+    ///    constructed, registered or unregistered anywhere in
+    ///    `src/lua_bindings/` — that is the daemon's attach path. **A
+    ///    body cannot reach it at all.**
+    /// 2. The frontend's one side slot exists **and is dedicated** to a
+    ///    different buffer. `Window::params.dedicated` is the only
+    ///    remaining lever, and every write to it is guarded or harmless:
+    ///    the two in `apply_placement`'s `Ordinary` arm target a document
+    ///    window (never a side one — every `Ordinary` target is filtered
+    ///    `!is_side`) and one of them only ever clears the flag; the
+    ///    three in its `Side` arm and the one in `pmacs.window.set_params`
+    ///    are the attempts refused here; and `quit_window` restoring a
+    ///    saved `dedicated: true` presentation is refused too.
+    ///
+    /// **Losing the side window is NOT a route** and was checked rather
+    /// than assumed: with no side leaf, `side_window_for` returns `None`
+    /// and `resolve_placement` **creates** a fresh panel instead of
+    /// falling back. Closing or hiding the panel mid-commit is therefore
+    /// safe, and `panel_hidden` is not consulted by placement at all.
+    /// `params.side` is likewise unreachable — `set_params` refuses it,
+    /// and only `apply_placement`'s created branch ever writes it, so a
+    /// body cannot turn an already-dedicated document window into the
+    /// side slot.
+    ///
+    /// # What is deliberately NOT refused
+    ///
+    /// * **The document profile is untouched.** Its preflight already
+    ///   checked the same destination, and constraining its body would
+    ///   newly refuse dired's own documented panel path.
+    /// * **Dedicating a *document* window is fine.** It cannot change
+    ///   which of panel-or-document a side request resolves to.
+    /// * **Falling back is still allowed.** A frontend that cannot render
+    ///   a panel degrades gracefully exactly as it does today; this
+    ///   refuses the *mutation that manufactures* a fallback, never the
+    ///   fallback itself.
+    /// * **Nesting is untouched.** Only the mutation is refused, not the
+    ///   nested `commit_to` that reaches it, so a nested commit that does
+    ///   not dedicate this frontend's side slot runs exactly as before.
+    ///   Prohibiting nesting outright would have closed the hole by
+    ///   forbidding a shape no rule objects to (revision 9).
+    pub(crate) fn panel_commit_dedication_refusal(&self, fid: FrontendId) -> Option<String> {
+        // ANY enclosing contract, not the innermost one: a nested commit
+        // composes with the restrictions already in force rather than
+        // masking them (revision 9).
+        if !self.commit_contracts.iter().any(|contract| {
+            contract.profile == CommitProfile::Panel && contract.destination.frontend == fid
+        }) {
+            return None;
+        }
+        Some(
+            "cannot dedicate the side window inside a \"panel\" commit_to --- the commit's \
+             preflight was relaxed because this frontend places side requests in the panel, \
+             and dedicating the one slot would silently redirect the result into a document \
+             window instead (dedicate outside the commit, or use the \"document\" profile)"
+                .to_string(),
+        )
     }
 
     /// Q#BP3's precedence: exact target, then side affinity, then

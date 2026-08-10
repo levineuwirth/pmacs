@@ -260,6 +260,197 @@ pmacs.lsp.config.yaml = pmacs.lsp.config.yaml or {
   },
 }
 
+-- LaTeX via `texlab`. Framing:
+-- `docs/lsp-language-coverage-framing.md` §3 (the root) and Q#LX1 (no
+-- settings).
+--
+-- **No `pmacs.lsp.filetypes` entries ship for `.tex`/`.latex`/`.sty`/
+-- `.cls`, deliberately.** The bundled grammar already declares exactly
+-- those extensions (`src/syntax.rs`, `name: "latex"`), and grammar
+-- extension detection sits AHEAD of this map in
+-- `detect_buffer_language` (`syntax.lua`) — modeline → grammar
+-- extension → LSP filetype map → filename → shebang. So a `.tex` buffer
+-- already resolves to `latex` and a map entry would be dead weight that
+-- a later reader could mistake for the thing that made attach work.
+--
+-- **No `settings` / `init_options` (Q#LX1).** texlab pulls its config
+-- through `workspace/configuration` under a `texlab` section, which
+-- pmacs answers; an absent section takes texlab's defaults. The two
+-- candidates — build-on-save and forward-search — are both opinionated,
+-- and forward-search additionally needs a configured viewer, so any
+-- default would be wrong for most machines. Users override through the
+-- same `init.lua` seam as every other entry here.
+--
+-- Q#LX2 — the root, and why it cannot be `pmacs.project.detect`.
+--
+-- **`.git` is deliberately NOT a marker.** texlab wants the *document*
+-- root, not the repository root: a thesis inside a monorepo would
+-- otherwise hand texlab the monorepo. This is the one entry where
+-- copying the other fourteen's instinct is actively wrong — which is
+-- also why this resolver must never return nil for a markerless file.
+-- `project_root_for` falls through to `pmacs.project.detect` on a nil,
+-- and that walk *does* include `.git`; returning the file's own
+-- directory is what keeps the repository root out.
+--
+-- The marker set is texlab's own, established by observation against
+-- texlab 5.25.1 rather than assumed — `crates/distro/src/language.rs`
+-- at that tag maps `.texlabroot`/`texlabroot` → `Root`,
+-- `Tectonic.toml` → `Tectonic`, `.latexmkrc`/`latexmkrc` → `Latexmkrc`,
+-- and `ProjectRoot::walk_and_find` (`crates/base-db/src/deps/root.rs`)
+-- tests all three per ancestor directory, innermost wins. Matching that
+-- set means pmacs hands texlab the directory texlab would itself pick.
+--
+-- **texlab cannot pick it alone, which is what makes this resolver
+-- load-bearing.** `walk_and_find` only sees markers belonging to
+-- documents already in the workspace, and the workspace is built from
+-- the folders the CLIENT supplies. Live LSP sessions confirmed it: with
+-- `rootUri` at a `chapters/` subdirectory, no marker above it —
+-- `.texlabroot` included — widened texlab's view, and its dependency
+-- graph never reached the parent document; with `rootUri` at the marker
+-- directory the parent resolved, marker or not. texlab honours the root
+-- it is given and never corrects a too-narrow one, so whatever this
+-- function returns *is* the project scope.
+--
+-- Intra-directory precedence is unobservable here on purpose: the walk
+-- returns a DIRECTORY, so two markers side by side yield the same
+-- answer in either order. Only the innermost-ancestor rule matters.
+--
+-- Scanning for `\documentclass` — the semantically correct notion of a
+-- root document — is deliberately not done: it is a directory scan per
+-- resolve with its own caching and invalidation questions. If the
+-- marker walk proves insufficient in use, that is the next increment,
+-- with evidence.
+local LATEX_ROOT_MARKERS = {
+  ".texlabroot", "texlabroot",
+  "Tectonic.toml",
+  ".latexmkrc", "latexmkrc",
+}
+
+-- Synchronous existence test. `pmacs.fs.stat` is unusable here: it
+-- returns an awaitable handle, and this runs inside `ensure_server` <-
+-- `attach_buffer` <- the `buffer.after-load` hook, where there is no
+-- coroutine to await on. `io.open` is the only synchronous check, and
+-- it is wrong in both directions on its own — it SUCCEEDS on a
+-- directory, and requiring a non-nil read would reject an empty
+-- `.texlabroot`, which is the normal way that marker is written. The
+-- discriminator is `read`'s second return, exactly as `lean.lua`
+-- establishes it: content -> no error; empty file -> nil, no error;
+-- directory -> nil, "Is a directory"; missing -> `io.open` nil.
+local function latex_marker_in(dir)
+  -- Joining, not testing: `/` is the one directory that already ends in
+  -- a separator, and `dir .. "/" .. name` would give `//name` — the
+  -- exactly-two-leading-slashes spelling POSIX leaves implementation-
+  -- defined. `/` became reachable here once the walk stopped treating
+  -- the filesystem root as off-limits, so the join has to say so.
+  local base = (dir == "/") and "" or dir
+  for _, name in ipairs(LATEX_ROOT_MARKERS) do
+    local f = io.open(base .. "/" .. name, "r")
+    if f then
+      local _, err = f:read(1)
+      f:close()
+      if err == nil then return true end
+    end
+  end
+  return false
+end
+
+-- `/` is a directory like any other. The pattern below yields the EMPTY
+-- string for a top-level directory (`/tmp` -> ``), and treating that as
+-- "no parent" would make the filesystem root the one directory this walk
+-- can never examine — the same root-is-special bug the boundary test
+-- below had, from the other end. `/` itself matches nothing (no
+-- non-separator component to strip), so the walk still terminates there.
+-- This matches `walk_for_marker`'s use of `Path::ancestors`
+-- (`src/project.rs`), which likewise ends at `/` inclusive.
+local function latex_parent_of(dir)
+  local up = dir:match("^(.*)/[^/]+$")
+  if up == nil or up == dir then return nil end
+  if up == "" then return "/" end
+  return up
+end
+
+-- The walk stops at `pmacs.project.search_boundary()`. Not politeness:
+-- `detect_project_within` (`src/project.rs`) exists so a stray marker
+-- above a temp fixture cannot leak into detection, and a Lua walk that
+-- ignored the boundary would break that contract — and make this
+-- resolver's own acceptance fixtures non-hermetic against any
+-- `latexmkrc` sitting above the test's tempdir (R8's shape exactly).
+--
+-- Containment is a question about PATH COMPONENTS, so it is answered by
+-- comparing components. The previous string-prefix form
+-- (`dir:sub(1, #boundary + 1) == boundary .. "/"`) silently disabled the
+-- entire walk for a `/` boundary: the needle became `"//"`, which no
+-- canonical path begins with, so every ancestor was judged out of
+-- bounds, no marker was ever examined, and each chapter of a thesis got
+-- its own server. Segment comparison makes the root boundary a boundary
+-- with zero segments — containing everything, by construction rather
+-- than by a special case — and absorbs a trailing separator for free.
+--
+-- Both arguments are canonical absolute paths (`latex_root_for`
+-- canonicalizes `dir`; `set_search_boundary` canonicalizes the boundary
+-- at set time), so a leading-separator mismatch cannot arise.
+local function latex_path_segments(path)
+  local segs = {}
+  for seg in path:gmatch("[^/]+") do
+    segs[#segs + 1] = seg
+  end
+  return segs
+end
+
+local function latex_within_boundary(dir, boundary)
+  if not boundary then return true end
+  local want = latex_path_segments(boundary)
+  local have = latex_path_segments(dir)
+  if #have < #want then return false end
+  for i = 1, #want do
+    if have[i] ~= want[i] then return false end
+  end
+  return true
+end
+
+-- Returns the INNERMOST ancestor holding a texlab root marker, or the
+-- file's own directory when there is none.
+--
+-- **The result is canonical, and must be.** A configured root reaches
+-- `file_uri_for` verbatim and that URI is the server-affinity key
+-- (#161); one document tree opened through a symlink and through its
+-- real path would otherwise spawn two texlab processes. Canonicalizing
+-- once up front suffices — every ancestor of a canonical path is itself
+-- canonical, because the walk only strips trailing components.
+--
+-- Declines (nil) only when there is no directory to vouch for: a
+-- pathless buffer, or a canonicalize failure on a deleted file or
+-- broken symlink.
+local function latex_root_for(path)
+  if type(path) ~= "string" then return nil end
+  local dir = path:match("^(.*)/[^/]*$")
+  if not dir then return nil end
+  -- Same root-is-special trap as `latex_parent_of`: `/paper.tex` slices
+  -- to an EMPTY directory, which canonicalizes to nothing and would make
+  -- the resolver DECLINE — and a decline is the one path that reaches
+  -- `pmacs.project.detect`, whose walk includes `.git`.
+  if dir == "" then dir = "/" end
+  dir = pmacs.fs.canonicalize(dir)
+  if not dir then return nil end
+  local boundary
+  local ok, b = pcall(pmacs.project.search_boundary)
+  if ok then boundary = b end
+  -- The boundary is canonicalized at set time (`set_search_boundary`),
+  -- so comparing it against a canonical `dir` is apples to apples.
+  local cur = dir
+  while cur and latex_within_boundary(cur, boundary) do
+    if latex_marker_in(cur) then return cur end
+    cur = latex_parent_of(cur)
+  end
+  return dir
+end
+
+pmacs.lsp.config.latex = pmacs.lsp.config.latex or {
+  command = "texlab",
+  args = {},
+  root = latex_root_for,
+}
+
 -- LSP-side extension → language map, deliberately independent of the
 -- tree-sitter detection in `pmacs.parse`. Consulted only when
 -- `pmacs.parse.language_for_path` finds nothing (an extension with a
