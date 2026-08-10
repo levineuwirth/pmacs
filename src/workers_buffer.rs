@@ -14,18 +14,39 @@
 //! ```text
 //! Workers (active: 2, completed: 5)
 //!
-//! ID      Kind         Age       Supersede   Status
-//! ------  -----------  --------  ----------  ----------
-//! #5      grep         412ms     search      running
-//! #6      sleep        18ms                  running (cancel pending)
+//! ID      Kind         Age       Supersede   Purpose                   Status
+//! ------  -----------  --------  ----------  ------------------------  ----------
+//! #5      grep         412ms     search      search: grep "fn" in /x   running
+//! #6      sleep        18ms                  sleep 18ms                running (cancel pending)
 //!
 //! Recent (newest first)
 //!
-//! ID      Kind         Duration  Supersede   Outcome
-//! ------  -----------  --------  ----------  ----------
-//! #4      grep         1242ms    search      cancelled (3s ago)
-//! #3      compute_sum  2ms                   ok (3s ago)
+//! ID      Kind         Duration  Supersede   Purpose                   Outcome
+//! ------  -----------  --------  ----------  ------------------------  ----------
+//! #4      grep         1242ms    search      search: grep "fn" in /x   cancelled (3s ago)
+//! #3      compute_sum  2ms                   sum 1..100                ok (3s ago)
 //! ```
+//!
+//! # Purpose (worker identity Stage 1, `COHERENCE.md` §9)
+//!
+//! The `Purpose` column is what turns "twelve rows named `lsp_request`"
+//! into a readable account of what the editor is doing. `Kind` names the
+//! builtin dispatcher a job funnelled through, which for every
+//! third-party job is a builtin's label rather than the caller's; the
+//! purpose carries the work's own description and, under
+//! `pmacs.workers.dispatch`, the registered handler name it ran under.
+//!
+//! It is placed **before** `Status` and padded, because `Status` is
+//! variable-width (`running (cancel pending) [stream]`) and two
+//! ragged trailing columns render as noise. An over-long purpose pushes
+//! `Status` right rather than being truncated: losing the end of a path
+//! is a worse failure than an uneven column.
+//!
+//! This table is **one row per job**, and the purpose is the only free
+//! text in it, so every row goes through
+//! [`crate::async_runtime::purpose_for_one_row`]: a row must not be able
+//! to forge another row. See that function for why the escaping lives
+//! here rather than as a rule on the purpose itself.
 //!
 //! Lua reads the snapshot via `pmacs.workers.snapshot()`; the
 //! `pmacs.workers.show()` builtin invokes [`render`] on it and
@@ -35,13 +56,18 @@
 use std::fmt::Write;
 
 use crate::async_runtime::{
-    ActiveJobInfo, CompletedJobInfo, JobOutcome, JobResult, WorkersSnapshot,
+    ActiveJobInfo, CompletedJobInfo, JobOutcome, JobResult, WorkersSnapshot, purpose_for_one_row,
 };
 use crate::buffer::{Buffer, BufferId, EditOp};
 use crate::buffer_registry::BufferRegistry;
 
 /// Canonical name for the workers observability buffer.
 pub const WORKERS_BUFFER_NAME: &str = "*workers*";
+
+/// Minimum column width the `Purpose` column is padded to. Purposes
+/// longer than this push the trailing column right rather than being
+/// truncated (see the module docs).
+const PURPOSE_WIDTH: usize = 24;
 
 /// Render `snapshot` into the `*workers*` buffer (creating it if
 /// absent), replacing its full contents. Returns the buffer id
@@ -119,13 +145,17 @@ fn format_snapshot(snapshot: &WorkersSnapshot) -> String {
     let _ = writeln!(text);
     let _ = writeln!(
         text,
-        "{:<7} {:<11} {:>9} {:<11} Status",
-        "ID", "Kind", "Age", "Supersede"
+        "{:<7} {:<11} {:>9} {:<11} {:<PURPOSE_WIDTH$} Status",
+        "ID", "Kind", "Age", "Supersede", "Purpose"
     );
     let _ = writeln!(
         text,
-        "{:<7} {:<11} {:>9} {:<11} ----------",
-        "------", "-----------", "---------", "-----------"
+        "{:<7} {:<11} {:>9} {:<11} {:<PURPOSE_WIDTH$} ----------",
+        "------",
+        "-----------",
+        "---------",
+        "-----------",
+        "-".repeat(PURPOSE_WIDTH)
     );
     if snapshot.active.is_empty() {
         let _ = writeln!(text, "(no active jobs)");
@@ -139,13 +169,17 @@ fn format_snapshot(snapshot: &WorkersSnapshot) -> String {
     let _ = writeln!(text);
     let _ = writeln!(
         text,
-        "{:<7} {:<11} {:>9} {:<11} Outcome",
-        "ID", "Kind", "Duration", "Supersede"
+        "{:<7} {:<11} {:>9} {:<11} {:<PURPOSE_WIDTH$} Outcome",
+        "ID", "Kind", "Duration", "Supersede", "Purpose"
     );
     let _ = writeln!(
         text,
-        "{:<7} {:<11} {:>9} {:<11} ----------",
-        "------", "-----------", "---------", "-----------"
+        "{:<7} {:<11} {:>9} {:<11} {:<PURPOSE_WIDTH$} ----------",
+        "------",
+        "-----------",
+        "---------",
+        "-----------",
+        "-".repeat(PURPOSE_WIDTH)
     );
     if snapshot.completed.is_empty() {
         let _ = writeln!(text, "(no recent completions)");
@@ -169,7 +203,11 @@ fn write_active_row(text: &mut String, job: &ActiveJobInfo) {
     if job.is_stream {
         status.push_str(" [stream]");
     }
-    let _ = writeln!(text, "{id:<7} {kind:<11} {age:>9} {key:<11} {status}");
+    let purpose = purpose_for_one_row(&job.purpose);
+    let _ = writeln!(
+        text,
+        "{id:<7} {kind:<11} {age:>9} {key:<11} {purpose:<PURPOSE_WIDTH$} {status}"
+    );
 }
 
 fn write_completed_row(text: &mut String, job: &CompletedJobInfo) {
@@ -179,9 +217,10 @@ fn write_completed_row(text: &mut String, job: &CompletedJobInfo) {
     let key = job.supersede_key.as_deref().unwrap_or("");
     let outcome = format_outcome(&job.outcome);
     let age = format_duration_ms(job.settled_age_ms);
+    let purpose = purpose_for_one_row(&job.purpose);
     let _ = writeln!(
         text,
-        "{id:<7} {kind:<11} {duration:>9} {key:<11} {outcome} ({age} ago)"
+        "{id:<7} {kind:<11} {duration:>9} {key:<11} {purpose:<PURPOSE_WIDTH$} {outcome} ({age} ago)"
     );
 }
 
@@ -287,6 +326,7 @@ mod tests {
                 supersede_key: Some("search".to_string()),
                 cancel_requested: false,
                 is_stream: true,
+                purpose: "grep pattern".to_string(),
             }],
             vec![],
         );
@@ -309,6 +349,7 @@ mod tests {
                 supersede_key: None,
                 cancel_requested: true,
                 is_stream: false,
+                purpose: "grep pattern".to_string(),
             }],
             vec![],
         );
@@ -326,6 +367,7 @@ mod tests {
                 duration_ms: 25,
                 settled_age_ms: 200,
                 supersede_key: None,
+                purpose: "sum 1..10".to_string(),
                 outcome: JobOutcome::Complete(JobResult::Sum(55)),
             }],
         );
@@ -368,6 +410,7 @@ mod tests {
                 supersede_key: None,
                 cancel_requested: false,
                 is_stream: true,
+                purpose: "grep pattern".to_string(),
             }],
             vec![],
         );

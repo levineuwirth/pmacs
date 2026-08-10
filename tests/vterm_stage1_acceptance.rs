@@ -398,7 +398,7 @@ fn editor_shutdown_kills_term_ignoring_terminal_child() {
 #[test]
 fn terminal_tick_does_not_take_non_terminal_process_events() {
     let mut state = EditorState::new_with_roots(&crate::iso::roots());
-    let mut process = pmacs::process::ProcessSpec::new("ordinary", "/bin/sh");
+    let mut process = pmacs::process::ProcessSpec::new("ordinary", "/bin/sh", "test process");
     process.args = vec!["-c".into(), "printf ordinary".into()];
     let ordinary_id = state
         .process_supervisor

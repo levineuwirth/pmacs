@@ -265,14 +265,32 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
-## Destination capture (Q#JR14 generalization) — revision 9 IMPLEMENTED, gate green, no PR yet
+## Destination capture (Q#JR14 generalization) — PR #231 OPEN, revision 9, cleared to merge
+
+**PR #231** — https://github.com/levineuwirth/pmacs/pull/231. #227
+blocks on this lane.
 
 The mechanism landed at `0efc8c0`; review found a correctness blocker;
 `ca72461` implemented **revision 7**, which review then **also**
 rejected; `469d5c8` replaced it with **revision 8** and its §3
 enumeration is **performed and recorded in the framing**; review then
 found a hole in revision 8's guard **scope** and the commit below closes
-it as **revision 9**. No PR — the lane was told not to open one.
+it as **revision 9**.
+
+**The macOS red that blocked this lane, and how it was cleared.** Both
+CI attempts at `4654b94` failed `a_pty_resize_blanks_the_host_before_repainting`
+on `Test (macos-latest / luajit)`. A control experiment was run at the
+exact base commit `0190102`: **five valid observations, all green on
+both macOS flavours**, against the branch's 0/2 — 1/C(7,2) = 4.8% under
+an equal-rate model. That implicates the branch statistically. **The
+diff exonerates it mechanically**: grepping this lane's entire `src/`
+diff for `full_grid|resize|resync|Geometry|reconcile_panel_layout`
+matches an **import line and nothing else**, and
+`full_grid_resync_acceptance` (191 lines) has no panel, side-window,
+dedication, display or directory surface at all. Merged on that reading,
+with the equal-rate model itself in doubt — see the U4 row, and note a
+sixth base attempt reddened on a *third, unrelated* macOS selector
+(U8), which is what a background platform failure rate looks like.
 
 **The original blocker:** the panel profile skipped checks 2–4 on the
 claim that a panel result never touches a document window. **Panel
@@ -642,6 +660,405 @@ authoritative tip** — the ref, not a SHA. Recover with
   Stage 1a's semantics rather than closing a gap in them. No
   `--protocol` — core and Lua bindings only.
 
+## Worker identity Stage 1 (§9) — MERGED as #232 (`3cc1b85`)
+
+**Written with the lane's first commit**, per the standing correction
+from #171 and #215.
+
+**Branch `worker-identity-stage1`**, base `githubsucks/main` @
+`4bc55e8` (the #225 merge). **`githubsucks/worker-identity-stage1` is
+the authoritative tip** — the ref, not a SHA. Recover with
+`git fetch githubsucks && git checkout worker-identity-stage1`.
+
+- **Framing `docs/worker-identity-framing.md`, revision 4, APPROVED
+  2026-08-09** after four review rounds.
+  Scope: `COHERENCE.md` §9's "mechanism without identity", and journey
+  step 11 — the last of Priority 1's own work, sitting in another
+  section's arc.
+- **Revision 2 took two blockers.** `owner` is **removed entirely**:
+  populated from static per-subsystem constants it is an origin, not an
+  owner, and would misattribute third-party work at the exact point §9
+  wants attribution. It is not retained under a safer name either —
+  `origin`/`subsystem` would be adopted as ownership by use and would
+  squat on the slot P3 must fill. And the handler-name recovery was
+  **respecified as a mechanism**: revision 1 claimed the name was "in
+  hand at the one place that throws it away", which was wrong about the
+  call chain (`dispatch` → arbitrary handler → Lua wrapper → Rust
+  binding, with the wrapper layer documented as bypassable).
+- **Revision 3 took a third blocker: the ambient's extent is not
+  synchronous.** A handler may `Handle:await()` and park with the name
+  still pushed, leaking attribution to unrelated later work. Rule 1 now
+  **enforces** non-yieldability, modelled on the existing
+  `_in_commit_scope()` refusal in `Handle:await`
+  (`builtin/runtime/async.lua:87-90`) — rejecting before the park,
+  unconditionally rather than only when a yield would occur, and
+  covering **both** yield points.
+- **Q#W-7 — a pre-existing defect found while scouting that guard, and
+  APPROVED for repair in this lane.** `pmacs.async.yield_to_next_tick()`
+  (`async.lua:243-245`) is public, yields, and carries **no**
+  `_in_commit_scope` refusal — so Journey Stage 1a's Q#JR14b invariant
+  has a second entrance. Same helper, same invariant, same edit family,
+  so splitting it would have preserved a known hole without reducing
+  integration risk. **Reachability by a real caller is UNPROVEN** — the
+  defect was found by reading, and the tests pin the guard rather than
+  reproducing a user-visible bug. That belongs in the commit message so
+  nobody later cites this as an observed failure.
+- **Revision 4 also scoped rule 1's claim to what it enforces.**
+  Revision 3 said "all yield points"; it covers **the two supported
+  pmacs yield APIs**. Raw `coroutine.yield` stays reachable — R46 is a
+  convention, and the scheduler diagnoses a non-Handle yield only after
+  the coroutine has suspended (`async.lua:197` resumes, `:212`
+  inspects), so no refusal in a yield helper can intercept it. Recorded
+  as a residual, and explicitly **not** covered by a test that would
+  imply otherwise.
+- **NO WIRE CHANGE**, which is what lets this run beside the two lanes
+  already in flight. The statusline activity indicator is a **fourth**
+  `pmacs.statusline.register` provider (terminal/syntax/lsp are the
+  three existing adopters), evaluated per frame inside `paint_frame`
+  (`src/editor.rs:4560`) and riding the existing `StatuslineSegments`
+  vector. No variant, no bump.
+- **Scope:** a **required** `purpose` on `PendingJob` and `ProcessSpec`
+  through the single allocation funnel (`src/async_runtime.rs:746`,
+  which every dispatcher and `register_external` passes through), a
+  runtime-owned dispatch-name ambient recovering the handler name that
+  `pmacs.workers.dispatch` currently discards, the `*workers*`
+  rendering, and the indicator. Non-optional so the **compiler**, not a
+  test, proves every caller supplied one.
+- **Two scouting findings that shaped the design**, both verified:
+  `PendingJob` carries **eight** fields, not the audit's seven, and the
+  eighth's doc comment **cites §9 by name** as the reason identity
+  belongs on the job rather than in a side map — so this extends a
+  merged decision. And **`pmacs.process.list` filters to
+  `LineOriented`** (`src/lua_bindings/mod.rs:8980`), with **three
+  acceptance suites using `#pmacs.process.list()` as a leak detector**,
+  so making terminal PTYs visible is deferred to Stage 2 with a
+  separate accessor rather than by widening this one.
+- **Deliberate deviation from the audit, flagged for review:** §9 names
+  owner/**purpose**/parent together as the prerequisite; Stage 1 takes
+  **only `purpose`** — one of the three, not two. `owner` was removed in
+  revision 2: nothing in the runtime knows which package asked for a
+  job, so an `owner` field could only have been filled with the same
+  handler name `purpose` already carries, and an empty one reads as
+  "unowned" rather than "not tracked". `parent` is out for the matching
+  reason — it needs an ambient "currently-running job" context, and an
+  unpopulated `parent` reads as "no parent" rather than "not tracked"
+  (Q#W-5). The package-ownership slot stays **deliberately empty** until
+  P3 can fill it with a real signal (framing §3, §7).
+- **Gates:** `scripts/gate --acceptance worker_identity_acceptance
+  --acceptance journey_acceptance --acceptance
+  statusline_segments_acceptance --acceptance compile_mode_acceptance
+  --acceptance m8_6_acceptance`. No `--protocol` — no wire change.
+  `compile_mode` and `m8_6` joined at review round 1, which moved their
+  spawn call sites; `m8_6` covers the `pmacs-magit` fixture, and a newly
+  required field is exactly the kind of change that breaks a package
+  fixture quietly.
+- **IMPLEMENTED at `1aca0ee`**, with review round 1's blocker fixed at
+  `2162737` and review round 2's three findings at `6661125`.
+  `tests/worker_identity_acceptance.rs` is the new suite: **24 tests**,
+  plus one consumer-side witness beside the private renderer in
+  `pmacs-gpu`.
+- **`journey_acceptance` passed UNTOUCHED (47/47)** — the stop signal
+  did not fire. Q#W-7 edits the `commit_to` guard family, so any of its
+  established pins needing an edit would have meant this altered Journey
+  Stage 1a's semantics rather than closing a gap in them. Its diff
+  versus `main` is empty, and so is the diff for all three
+  `#pmacs.process.list()` leak-detector suites
+  (`m6_8_multi_repl_acceptance`, `compile_mode_acceptance`,
+  `lean4_stage1_acceptance`) — Q#W-4's preservation claim, checked the
+  way the framing asked.
+- **One pre-existing assertion did change, and it is an inventory
+  rather than a contract**: `statusline_segments_acceptance`'s builtin
+  provider list becomes `["activity", "mode", "terminal", "lsp"]`.
+  `activity` sorts first because `async.lua` is loaded before
+  `syntax.lua`, `terminal.lua` and `lsp.lua`. That assertion exists to
+  grow when a builtin provider is added; it is listed here so the change
+  is not mistaken for an accommodation.
+- **23 mutation checks, each test falsified by removing its own fix.**
+  The ones worth naming: siting the `await` guard *inside* the
+  `_is_complete` branch (the already-complete case then slips through —
+  which is the whole reason the guard is unconditional); replacing
+  `pcall`/pop/rethrow with a bare handler call (a raising handler leaves
+  the name pushed and the *next* dispatch inherits it); composing
+  `"<name>"` instead of `"<name>: <purpose>"` and vice versa (each half
+  passes the other's test); `first()` instead of `last()` on the name
+  stack; oldest→newest in `activity_summary`; and, on the GPU side,
+  painting an unthemed modeline face as the band colour, which would
+  have made the indicator invisible without failing anything else.
+  One of the twenty is a **preservation** check rather than a new
+  claim: bracketing `pmacs.workers.dispatch` with
+  `local ok, result = pcall(...)` truncates a handler that returns more
+  than one value, which every other test in the suite tolerates. Round
+  1 added three more against the spawn refusal: restoring the
+  label fallback, accepting an empty/whitespace-only purpose, and
+  reading the field non-raw so a metatable can smuggle one in.
+- **Two residuals, stated rather than tested around.** Raw
+  `coroutine.yield` inside either dynamic scope still leaks the scope —
+  loudly, through `pmacs.error`, but it leaks; no refusal sited in a
+  yield helper can intercept it (framing §2). And Q#W-7's reachability
+  by a real caller stays **unproven**: the commit message says so, and
+  the test pins the guard rather than reproducing a fault.
+- **Review round 1 blocker — `pmacs.process.spawn` now REQUIRES
+  `purpose`.** The first implementation made it optional at the Lua
+  surface, falling back to `label`. That preserved compatibility and
+  delivered nothing: §9's complaint about `ProcessSpec` is exactly that
+  `label` is "caller-supplied, unvalidated convention", so a purpose
+  defaulting to it hands every caller back the convention the lane exists
+  to replace. Refused on five shapes — absent, empty, whitespace-only,
+  wrong type, metatable-provided — each asserting the process list is
+  unchanged, since a validation that rejects after spawning has already
+  done the thing it rejected.
+- **That is a BREAKING CHANGE to a public Lua API, taken now on
+  purpose.** §10 grades extension trust "missing (one class)" and P7
+  package lifecycle has not started, so the third-party population is
+  ~zero and the cost only rises later. Checked for a reason that would be
+  wrong and found none: `pmacs.process.spawn` has no API-reference
+  documentation and no stability promise in `docs/` (the package-author
+  guide's only mentions are an audit-rule classification and a pointer to
+  the bundled REPL; its semver language governs packages' own versioning,
+  not pmacs's Lua surface), and `lua_to_spec` has exactly one caller.
+  **Eleven executable call sites updated**, each with a real description
+  rather than the label copied across: `repl/init.lua`, `compile.lua`,
+  `lean.lua`, the `pmacs-magit` fixture, and seven in tests. The two
+  `pmacs.process.spawn("ls")` occurrences in `src/audit/mod.rs` and
+  `tests/m7_9_acceptance.rs` are **audit fixture source text** — lexed,
+  never executed — and are deliberately untouched.
+- **Review round 2 — the display-text boundary, fixed at `6661125`.**
+  Three findings, and the fix is deliberately different in each place
+  because the constraint is.
+  - **P2a: invalid UTF-8 bypassed the `purpose` diagnostic.**
+    `required_purpose` read the field with `value.to_str()?`; Lua strings
+    are BYTE strings, so `purpose = string.char(255)` surfaced mlua's
+    generic conversion error before this lane's own message existed. It
+    refused before spawning, so nothing leaked — the defect was the
+    message. **Third occurrence of this class in the project** (the
+    destination-capture lane corrected the same shape two rounds ago), so
+    the whole diff was audited for it: exactly one more,
+    `_push_dispatch_name` taking `name: String`, now `mlua::String` with
+    an owned diagnostic. Those two are the only Lua-string reads this
+    lane added; every other binding it adds takes `()`. The remaining
+    `pmacs.process.spawn` fields (`label`, `command`, `args`, `env`,
+    `cwd`) still convert generically — **pre-existing, untouched, and
+    named here rather than silently inherited.**
+  - **P2b, half one: handler names are refused at the source.**
+    `pmacs.workers.register` type-checked and nothing more, which was
+    fine while the name died inside `dispatch`. It no longer dies there,
+    so the name now gets `purpose`'s meaningful-value standard plus
+    control characters.
+  - **P2b, half two: purposes are ESCAPED at presentation, not rejected
+    at the registry — consistent with the `#228` decision.** A purpose
+    may legitimately contain a newline (a path can; `pmacs-magit`'s spawn
+    purpose is an argv), so the one-line constraint belongs to the
+    surface that has one row. `purpose_for_one_row` states the property
+    it exists for — **a row must not be able to forge another row** —
+    escapes the Unicode `Cc` class (so ESC cannot open a terminal
+    sequence either), borrows unchanged when there is nothing to escape
+    (byte-identity is structural, not asserted), and does **not** escape
+    backslashes: no number of them makes a second row, and doubling them
+    would cost byte-identity for ordinary text. Two callers: the
+    `*workers*` rows and `ActivitySummary`, which exists for one consumer
+    with exactly one row. `pmacs.workers.snapshot()` is the
+    `describe-command` of this lane and stays raw — asserted, so a clip
+    that deleted the text everywhere would fail rather than pass.
+  - **P3: two stale recovery summaries**, both fixed section-locally —
+    the framing doc's "Implementation may proceed", and this file's claim
+    that Stage 1 took the "first two" of owner/purpose/parent. It takes
+    **one**: `owner` was removed in revision 2, and the claim that
+    argument overturned was still standing here.
+  - **Seven more mutation checks, each failing its own test and no
+    other** (30 for the lane): the two UTF-8 diagnostics, the two
+    register guards, the two escaping call sites, and
+    `purpose_for_one_row` neutered to the identity — which fails both
+    surfaces' tests and nothing else, since it is the shared helper.
+  - **All 13 gate steps green at `6661125`** (log
+    `20260809T173314Z-1552101`): lib 1920, lib-crdt 2105,
+    worker_identity 24, journey **47/47 UNTOUCHED**, statusline 7,
+    compile_mode 73, m8_6 12, m4 151, gpu 242. The three
+    `#pmacs.process.list()` leak detectors and `journey_acceptance` are
+    **byte-identical to `main`** in round 2 — the stop signals did not
+    fire, and round 2 edited no test outside its own suite. **The
+    preceding run of the same command was red on three tests and none of
+    them was this diff's** — R7 for the third time plus two wall-clock
+    budget tests; recorded in `docs/ci-red-signatures.md` rather than
+    re-run away silently.
+- **Review round 3 — a diagnostic that named the wrong surface, fixed
+  at `b2e8efd`.** `required_purpose`'s invalid-UTF-8 refusal told the
+  caller their process purpose "is displayed to the user in `*workers*`
+  and in the modeline". **Neither is a process surface.** Stage 1
+  deliberately keeps processes out of both (Q#W-4, framing §3) — a
+  process's purpose is exposed through `pmacs.process.list` and nothing
+  else — so the message sent the reader looking for their process in two
+  places it will never appear. The refusal itself is correct and stays:
+  a purpose with no display form anywhere is still refused.
+  - **The two UTF-8 refusals now name different surfaces, because they
+    reach different ones.** The job-side twin (`_push_dispatch_name`)
+    legitimately names `*workers*` and the modeline — a handler name is
+    composed into a job's purpose, and a job does render in both — so it
+    was made to say so explicitly rather than left at the vaguer "as
+    part of every job's purpose", which named no surface at all and
+    would have made the divergence unassertable.
+  - **A new test asserts both directions, positive and negative**
+    (`the_two_utf8_refusals_each_name_the_surface_their_own_text_reaches`,
+    25 in the suite — 24 before this round, plus this one; an earlier
+    revision of this bullet said 26): the process message contains
+    `pmacs.process.list`
+    and **not** `*workers*`/`modeline`; the job message contains both of
+    those and **not** `pmacs.process.list`. The existing row-table
+    assertion in `spawning_without_a_real_purpose_is_refused_and_starts_nothing`
+    now runs as far as the surface name too. Without the negative half a
+    later "unify the wording" edit reintroduces exactly one wrong
+    sentence and passes everything else.
+  - **Three mutation checks, each red on its own claim:** restoring the
+    old process wording fails both content assertions; collapsing the
+    job message onto the process wording fails only the new test (which
+    is the point — the old job test asserted the prefix alone); and
+    restoring the job message's original vague wording fails it too.
+  - **The rustdoc carried the same defect risk and was fixed with it** —
+    `required_purpose` now states which surface it names and why not the
+    other two, and the `_push_dispatch_name` comment states the
+    converse. A string literal corrected while its doc comment still
+    argues the other way is one refactor from reverting itself.
+  - **Gate: all 13 steps green at `cb7730d`** (log
+    `20260809T200907Z-2672209`). **The two preceding runs of the same
+    command were red on step `12-sweep`, on a DIFFERENT wall-clock
+    render-budget test each time** (`20260809T195332Z-2113672`,
+    `20260809T200120Z-2427128`; load average 12.9/23.9 with sibling
+    lanes building). All three pass in isolated reruns, none reds twice,
+    and the diff is two string literals, their doc comments and one
+    test — no render path is touched. Recorded as **U7** in
+    `docs/ci-red-signatures.md` rather than re-run away silently.
+    `journey_acceptance` **47/47 UNTOUCHED** and the three
+    `#pmacs.process.list()` leak detectors unedited — the stop signals
+    did not fire.
+- **Surfaces that changed shape, for anyone rebasing onto this:**
+  `AsyncRuntime::allocate`/`allocate_with_resource` collapsed into one
+  private `JobSpec`-taking funnel; `register_external` grew a third
+  parameter; `ProcessSpec::new` grew a third parameter (~40 call sites,
+  nearly all tests); `ActiveJobInfo`/`CompletedJobInfo`/`ProcessSpec`
+  each grew a required `purpose` field, and `pmacs.process.spawn`
+  requires `purpose` in its spec table.
+
+## Discovery Stage 2 — PR #228 OPEN, **MERGE-BLOCKED**
+
+**PR #228** — https://github.com/levineuwirth/pmacs/pull/228. Opened
+2026-08-09 at `2d298dd`. **Open for review, not for merge.**
+
+**The block is a gate-integrity problem, not backlog hygiene.** This
+lane's gate is `scripts/gate --protocol`, which promises the CRDT
+workspace sweep. That sweep's documented precondition is
+`cargo build --workspace --no-default-features --features luajit,crdt`
+(handoff §5), and **the script does not run it** — confirmed by reading
+its plan emitter. On a fresh per-worktree target directory the sweep
+fails on twelve `gpu_invocation_acceptance` tests missing the
+`pmacs-gpu` binary, so a `--protocol` result can be decided by the
+state of the build directory rather than by the diff.
+
+Latent until #225 gave each worktree its own target dir — a shared one
+usually already had `pmacs-gpu` built, satisfying the precondition by
+accident. It surfaced on this branch's first gate run.
+
+**Unblocking requires both:** the `scripts/gate` repair, in its own
+narrow framing and its own PR (explicitly **not** folded into this
+feature branch), and then a **fresh-target rerun of this branch's
+protocol gate** under the repaired script.
+
+**Written with the lane's first commit**, per the standing correction
+from #171 and #215.
+
+**Branch `discovery-stage2`**, base `githubsucks/main` @ `4bc55e8`
+(the #225 merge). **`githubsucks/discovery-stage2` is the authoritative
+tip** — the ref, not a SHA. Recover with
+`git fetch githubsucks && git checkout discovery-stage2`.
+
+- **Framing `docs/discovery-stage2-framing.md`, revision 3, APPROVED
+  2026-08-09** after three review rounds. Each round found the previous
+  one reasoning about a mechanism instead of reading it — an in-place
+  field change that postcard cannot make compatible, a TUI that never
+  reads the message at all, a round-trip test that freezes nothing, a
+  cache hazard the per-peer render state makes impossible, and a
+  clipping rule unachievable at narrow widths.
+  Scope: `COHERENCE.md` §5's "M-x rows are still bare names".
+  Descriptions already exist on `Command` and are already rendered by
+  `help.list-commands`; they are missing at the one moment they would
+  change a decision.
+- **PROTOCOL BUMP v22 → v23, and this lane HOLDS THE BUMP SLOT.**
+  Additive: a new `MinibufferPromptRows` variant **appended** to the
+  enum, with `MinibufferPrompt` **frozen** for v12–v22. An in-place
+  field change is a wire break — postcard encodes positionally, and
+  that variant is sent to every peer `>= 12` (`src/daemon.rs:1472`).
+- **Git Stage 2 (gutter markers) also needs a bump and must wait for
+  this to land.** Git Stage 1 is no-wire and runs beside it.
+- **Two halves, only one of which is wire work.** `pmacs-gpu` renders
+  the new variant. **The grid TUI never reads `MinibufferPrompt` at
+  all** — it paints from `core.minibuffer` and renders
+  `format!("  [{cand}]")` (`src/editor.rs:5484`), so its half is a
+  local formatting change reading the registry directly. A multi-row
+  TUI chooser is explicitly NOT this lane.
+- **Gates:** `scripts/gate --protocol --acceptance
+  discovery_stage2_acceptance --acceptance m9_6_acceptance --acceptance
+  m9_7_acceptance --acceptance m9_8_acceptance` — the strengthened
+  two-configuration sweep, which is what `--protocol` exists for. The
+  three m9 suites are named because the PR #228 review round measured
+  them as this change's blast radius (see the description-clip bullet);
+  their continued passing is on the record rather than assumed.
+  **`--protocol` does NOT run its own documented precondition**
+  (`cargo build --workspace --no-default-features --features
+  luajit,crdt`, handoff §5) — run it by hand first or twelve
+  `gpu_invocation_acceptance` tests fail on a missing `pmacs-gpu`
+  binary. That omission is the `gate-protocol-build` lane's, not this
+  one's.
+- **IMPLEMENTED.** `PROTOCOL_VERSION` is 23,
+  `ADVERTISED_PROTOCOL_VERSION` is untouched at 20. New suite
+  `tests/discovery_stage2_acceptance.rs`; the daemon half is
+  `crdt`-gated (a semantic session is necessarily a text replica) and
+  runs one daemon serving a v22 and a v23 session simultaneously.
+- **Multi-line descriptions are clipped AT THE SURFACE, and
+  registration-level rejection was investigated and REJECTED ON
+  EVIDENCE — do not re-propose it.** PR #228 review found the real
+  hazard: the GPU dropdown derives its height, visible window and
+  highlight offset from `rows.len()` (one logical row per candidate),
+  so a detail carrying a line break misaligns every row below it; the
+  TUI writes into a single-row band. The obvious fix — reject CR/LF in
+  `CommandRegistry::define` — was implemented and measured, and it
+  **fails 36 tests across `m9_6`/`m9_7`/`m9_8`**, because MCP tool
+  registration renders a whole schema block into `description`
+  (`tests/fixtures/pmacs-mcp-tools/init.lua:272`,
+  `table.concat(lines, "\n")`, used at `:496`) and
+  **`tests/m9_6_acceptance.rs:583-598` asserts four separate lines of
+  it** — tool text, `Arguments:`, and two per-argument lines. No
+  single-line rendering satisfies those assertions, so a registry guard
+  could only go green by deleting a shipped acceptance criterion.
+  The one-line constraint belongs to the surfaces that have it:
+  `Command::description_first_line` clips, both single-row consumers
+  call it, and the full text still reaches `describe-command` /
+  `help.list-commands` untouched. Precedent already in-tree — the same
+  MCP fixture clips a tool RESULT to its first line because *"a
+  multi-line set_status would corrupt the row layout"* (`:277-285`).
+  **A startup census is not a corpus census**: booting an
+  `EditorState` and scanning all 180 registered descriptions found zero
+  offenders, because MCP registers at RUNTIME and builds the string by
+  concatenation — invisible to both that census and a grep for literals.
+  The workspace sweep is what caught it.
+- **The freeze is enforced by LITERAL byte fixtures**, not a round-trip
+  — `minibuffer_prompt_v12_wire_bytes_are_frozen` in `src/protocol.rs`,
+  the first such fixture in this repo. Bite-verified: reordering two
+  fields of `MinibufferPrompt` leaves
+  `minibuffer_prompt_round_trips_through_postcard` **passing** and fails
+  the fixture, which is exactly the hazard a round-trip cannot see.
+- **Version assertions updated (five, each read before editing):**
+  `src/protocol.rs` — the `PROTOCOL_VERSION == 22` tripwire (renamed
+  `protocol_version_is_twenty_three_for_minibuffer_prompt_rows`) and
+  `supported_protocol_versions_resume_ladder_on_v6_floor`'s
+  accepted/rejected ranges; `tests/statusline_segments_acceptance.rs`
+  (version + supported range + the `!supported` ceiling);
+  `tests/bottom_panel_stage2b_gpu_acceptance.rs`;
+  `tests/vterm_stage3_acceptance.rs`. **No `ADVERTISED_PROTOCOL_VERSION`
+  assertion fired**, which is the pin doing its job.
+- **No cross-version cache test, deliberately** (framing §3.2/§6):
+  `SemanticRenderState::for_peer` bakes the negotiated version in at
+  attach and is dropped at detach, so a cache cannot span two versions.
+  A test for an impossible condition passes forever while teaching the
+  next reader that the hazard is real.
+
 ## LSP LaTeX coverage — IMPLEMENTED, gates green, no PR yet
 
 **Written with the lane's first commit**, per the standing correction
@@ -979,8 +1396,6 @@ authoritative tip** — the ref, not a SHA. Recover with
   emission, an aborting runner, the build folded into `sweep-crdt`, and
   — added in the second round — a **rename of either** the build or the
   sweep step each fail the suite.
-||||||| parent of 72bbb96 (docs: LSP LaTeX coverage framing revision 2, on a branch at last)
-||||||| parent of ac1d6cc (docs: frame a general destination capture (revision 1))
 
 ## QoL arc retirement — PR #224 OPEN (docs only)
 

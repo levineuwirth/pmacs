@@ -259,6 +259,10 @@ function repl.spawn(opts)
 
   local spec = {
     label = name,
+    -- Worker identity Stage 1: the label is the REPL's session name,
+    -- which distinguishes two REPLs from each other and says nothing
+    -- about what is running. The purpose names the interpreter.
+    purpose = "interactive " .. h._display_name .. " session",
     command = argv[1],
     args = args,
     pty = { rows = rows, cols = cols, mode = "raw" },

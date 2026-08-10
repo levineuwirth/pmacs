@@ -4770,7 +4770,10 @@ pub fn paint_frame(
         paint_search_prompt(grid, core, term_size, &theme);
         None
     } else if core.minibuffer.is_active() {
-        Some(paint_minibuffer(grid, core, term_size, &theme))
+        // The command registry is a separate `RefCell` from the core, so
+        // this borrow does not contend with the one held above.
+        let commands = state.lua_host.commands().borrow();
+        Some(paint_minibuffer(grid, core, &commands, term_size, &theme))
     } else {
         None
     };
@@ -5502,9 +5505,42 @@ fn minibuffer_style(theme: &crate::highlight::Theme) -> crate::cell::Style {
         })
 }
 
+/// The inline candidate suffix for the minibuffer's bottom row, given
+/// the columns still free after the prompt and the typed input.
+///
+/// Discovery Stage 2 §3.4 — three ORDERED steps, and the guarantee is
+/// **"never a partial name"**, not "the name always survives". The
+/// latter is unachievable: the prompt and the typed input consume the
+/// budget first, so the remainder can be too small even for the bare
+/// name.
+///
+/// 1. If the whole name does not fit, emit **nothing**. A truncated
+///    `[buffer.sa…]` is worse than no suffix, because it reads as a
+///    different command.
+/// 2. Only once the whole name fits is a description attempted.
+/// 3. If the description does not fit whole, drop it — leaving exactly
+///    today's `[name]`. No ellipsis stub.
+///
+/// Measured in `char`s, matching the painter below: it writes one cell
+/// per `char`.
+fn minibuffer_candidate_suffix(name: &str, detail: Option<&str>, remaining: u32) -> String {
+    let bare = format!("  [{name}]");
+    if bare.chars().count() as u32 > remaining {
+        return String::new();
+    }
+    if let Some(detail) = detail.map(str::trim).filter(|d| !d.is_empty()) {
+        let full = format!("  [{name} — {detail}]");
+        if full.chars().count() as u32 <= remaining {
+            return full;
+        }
+    }
+    bare
+}
+
 fn paint_minibuffer(
     grid: &mut crate::cell::CellGrid<'_>,
     core: &EditorCore,
+    commands: &crate::command::CommandRegistry,
     term_size: crate::cell::CellSize,
     theme: &crate::highlight::Theme,
 ) -> u32 {
@@ -5515,12 +5551,6 @@ fn paint_minibuffer(
         .expect("called only when active");
     let prompt = &session.prompt;
     let contents = core.minibuffer.contents();
-    let mut suffix = String::new();
-    if let Some(idx) = session.selected
-        && let Some(cand) = session.candidates.get(idx)
-    {
-        suffix = format!("  [{cand}]");
-    }
     let row = term_size.rows - 1;
     let mut col: u32 = 0;
     let mut written: u32 = 0;
@@ -5575,6 +5605,35 @@ fn paint_minibuffer(
         cursor_col = prompt_end;
     }
 
+    // Discovery Stage 2 (§3.4): the selected candidate's suffix now
+    // carries the command's DESCRIPTION, read from the registry
+    // in-process. The grid TUI never consumes `MinibufferPrompt` — it
+    // paints from `core.minibuffer` — so this half of the lane involves
+    // no wire at all and is independent of the v23 bump.
+    //
+    // Q#D2-2: only the command source has a detail. A file-path or
+    // buffer-name prompt renders exactly as it did before.
+    //
+    // FIRST LINE ONLY: this band is a single row, and
+    // `Command.description` is free-form — MCP registration renders a
+    // whole schema block into it. The full text stays reachable through
+    // `describe-command`.
+    let suffix = match session.selected.and_then(|idx| session.candidates.get(idx)) {
+        Some(cand) => {
+            let detail = matches!(
+                session.source,
+                crate::minibuffer::CompletionSource::Commands
+            )
+            .then(|| {
+                commands
+                    .get(cand)
+                    .map(crate::command::Command::description_first_line)
+            })
+            .flatten();
+            minibuffer_candidate_suffix(cand, detail, max.saturating_sub(col))
+        }
+        None => String::new(),
+    };
     for ch in suffix.chars() {
         if col >= max {
             break;

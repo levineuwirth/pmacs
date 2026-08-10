@@ -888,9 +888,10 @@ fn terminal_mode_keeps_reporting_presence_so_peers_drop_the_stale_caret() {
         panic!("timed out waiting for {what}");
     }
 
-    // Tripwire: a wire bump must be a conscious edit here. v22 is
+    // Tripwire: a wire bump must be a conscious edit here. v23 is
+    // `MinibufferPromptRows` (Discovery Stage 2); v22 was
     // `LineWrapFacts` (long-lines Stage 3).
-    assert_eq!(PROTOCOL_VERSION, 22);
+    assert_eq!(PROTOCOL_VERSION, 23);
     let daemon = common::daemon::TestDaemon::spawn_with_env_and_init(
         &[
             ("PMACS_INSTANCE_SEMANTIC_RENDER", "1"),

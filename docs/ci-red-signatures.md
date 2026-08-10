@@ -496,30 +496,108 @@ Stage 4; the lane touches no `pmacs-gpu` code at all.
 | **selector** | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
 | **job / flavor** | local (Linux), `cargo test --workspace --features crdt --no-fail-fast`, i.e. under full-sweep load |
 | **required fragments** | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
-| **status** | **new incident, unreproduced — causal status UNRESOLVED** |
-| **what IS established** | one occurrence at `pmacs-gpu/src/attach.rs:1680`; the test drives a scripted transient-then-success sequence over a real socket pair |
+| **status** | **THIRD OCCURRENCE 2026-08-09 — causal status still UNRESOLVED, but one candidate mechanism is now EXCLUDED** |
+| **what IS established** | **three** occurrences at `pmacs-gpu/src/attach.rs:1680`, the second and third with all three fragments **verified** rather than inferred; the test drives a scripted transient-then-success sequence over a real socket pair. **The added GPU test is not the mechanism** — see the third-occurrence control below |
 | **what is NOT** | whether the broken pipe is the *fixture's* writer closing early or a real retry-path defect. **This row is not a claim that it is harmless** |
-| **rerun evidence** | 6 isolated runs green, plus a full `--workspace --features crdt` sweep green (113 targets). Per the rerun rule this establishes **intermittence only** |
+| **rerun evidence** | occurrence 1: 6 isolated runs green, plus a full `--workspace --features crdt` sweep green (113 targets). Occurrence 2: **30 green on the observing branch** (15 isolated selector, 15 full `-p pmacs-gpu`) **plus a 15-run merge-base control, also green**. Occurrence 3: 5 isolated selector runs green, 10 full `-p pmacs-gpu` runs green **with** the added test, and **1 failure in 10 with the added test `#[ignore]`d** — the first rerun in this row's history that reproduced anything. Per the rerun rule the green runs establish intermittence only; the red control run is what carries the exclusion |
 | **retirement** | hardening that removes the named mechanism plus a discriminating witness — or a diagnosis showing the fixture, not the code, closes the pipe |
 
-**Not attributed to this lane**, and the reasoning is not merely "my
-diff looks unrelated": Stage 4 adds no wire surface, no protocol
-version change, and touches no file in `pmacs-gpu`. A merge-base
-control would settle it if this recurs.
+**Not attributed to the observing lane**, and in neither case is the
+reasoning merely "my diff looks unrelated": long-lines Stage 4 added no
+wire surface, no protocol version change, and touched no file in
+`pmacs-gpu`.
 
-### U2 — `m6_1_pty_raw_mode_disables_kernel_echo`, one local occurrence
+**Second occurrence — worker identity Stage 1, 2026-08-09, local
+(Linux).** Recorded at the `scripts/gate` **`gpu` step**
+(`PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`), which is a **third
+flavor**: not the `--features crdt` sweep of occurrence 1, and not U3's
+default-features workspace sweep. Two things make it a match rather than
+a `U` note:
 
-Has a selector, which U1 lacks — but still no fragments, so it cannot
-be matched either. Recorded so a recurrence is recognisable.
+* **The fragments were captured this time.** `transient sequence must
+  attach: Attach(Handshake(Io(Os { code: 32, kind: BrokenPipe, message:
+  "Broken pipe" })))` — all three of the row's required fragments,
+  verified against the durable gate log rather than a filtered live
+  stream. **That is what U2 and U3 both lost**, and it is why U3 could
+  not be judged a recurrence. Reading the gate's own `NN-gpu.log` is the
+  mechanical fix U3 prescribed, and it worked.
+* **The merge-base control R7 asked for was run** — 15 runs at `4bc55e8`,
+  green. It is **non-discriminating**, not exculpatory: the observing
+  branch was equally green over 30 runs, so neither side reproduced and
+  the control separates nothing. Recorded as a null result rather than
+  as evidence.
+
+**One causal path is NOT excluded and is named here rather than
+dismissed.** The observing lane added a test to `pmacs-gpu`'s test module
+(`main.rs`) — a GPU-heavy `render_offscreen` case. It touches no
+`attach.rs`, no protocol, and no wire, but it does add a concurrent test
+to the same binary, and the failing test is a socket handshake with a
+one-second deadline. Contention is a plausible mechanism for a
+`BrokenPipe`, and 30 green runs do not rule it out. If a third occurrence
+lands, **run the control with the added test removed** rather than at the
+merge base — that is the discriminating comparison this one was not.
+
+**Third occurrence — worker identity Stage 1 review round 2,
+2026-08-09, local (Linux). Same selector, same `gpu`-step flavor, all
+three fragments verified** against the durable gate log
+(`20260809T172606Z-1387979/11-gpu.log`): `transient sequence must
+attach: Attach(Handshake(Io(Os { code: 32, kind: BrokenPipe, message:
+"Broken pipe" })))`. A match on this file's own rule, not a `U` note.
+
+**The control the second-occurrence note prescribed was run, and this
+time it discriminated — against the hypothesis.** Ten full
+`PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu` runs with the added
+`render_offscreen` test present: **10/10 green**. Ten more with that
+test `#[ignore]`d, changing nothing else: **1 failure in 10**, carrying
+all three required fragments
+(`without/run-6.log`, `pmacs-gpu/src/attach.rs:1680`).
+
+So the concurrent-GPU-test path named above is **excluded**: removing
+the suspect made the failure *more* frequent, not less, which no
+contention story from that test survives. What the run does establish is
+that **the failure reproduces on demand at roughly 1-in-10 under
+ordinary `-p pmacs-gpu` load** — the first time any rerun in this row's
+history has reproduced it at all. That is a materially better starting
+point than three isolated sightings, and it is the fact a diagnosis
+should be built on: the rate makes a bisect of `attach.rs`'s handshake
+path affordable, where before it was not.
+
+**It is still not attributed to the observing lane**, and now for a
+measured reason rather than an argument from diff shape: the arm without
+the lane's only `pmacs-gpu` addition is the arm that went red.
+
+**What would retire it is unchanged** — the mechanism, not the rate.
+The next agent to touch this row should reproduce at 1-in-10 and
+instrument which side closes the pipe, rather than re-running for green.
+
+### U2 — `m6_1_pty_raw_mode_disables_kernel_echo`, THIRD known occurrence
+
+**Corrected 2026-08-09 after review.** A previous edit of this row
+called the 2026-08-09 failure the *second* occurrence and claimed it
+captured the fragment for the first time. **Both were wrong**, and the
+evidence was already in this repository:
+`docs/active-work.md` records a **2026-08-06** loaded `--features crdt`
+run failing this selector *and* `m6_1_pty_canonical_mode_keeps_kernel_echo`
+with the same `stty -a output was: ""`, and it already proposed a
+mechanism family — **read-before-write on the child's output**, the
+shape of **R4** (readiness predicate satisfied by an empty file) and
+**R6** (readiness file never published).
+
+So the fragment was captured before, under another feature flavor, and
+this row's earlier "no mechanism has been proposed" was false of the
+tree it was written in.
 
 | field | value |
 |---|---|
 | **selector** | `--lib process::tests::m6_1_pty_raw_mode_disables_kernel_echo` |
 | **job / flavor** | local (Linux), during `cargo test --tests --no-fail-fast` — the lib target alongside a full PTY-heavy corpus |
-| **required fragments** | **none captured** — output was filtered to the `FAILED` line |
-| **status** | **new incident, unreproduced** |
-| **what IS established** | it failed once (`1916 passed; 1 failed`), in no registry row, under a full-corpus run |
-| **what is NOT** | any mechanism. Not reproduced in a later full `--tests --no-fail-fast` sweep (108 targets, exit 0) nor in 3 isolated `--lib` runs (1917/0 each) |
+| **required fragments** | `panicked at src/process.rs:3953` · `raw mode should disable echo; stty -a output was: ""` |
+| **status** | **at least three occurrences, load-correlated; the diff is EXCLUDED on the 2026-08-09 one** |
+| **what IS established** | **Three occurrences.** **(1)** the original: failed once (`1916 passed; 1 failed`) under a full-corpus `--tests --no-fail-fast` run, fragments not captured. **(2) 2026-08-06**, loaded `--features crdt`: this selector **and** `m6_1_pty_canonical_mode_keeps_kernel_echo` both failed with the same `stty -a output was: ""` — the first capture, and the occurrence that proposed the read-before-write family. **(3) 2026-08-09**, worker-identity tip: `1919 passed; 1 failed` in `scripts/gate` step `03-lib` at load ~21, and **the tree contained ZERO code change since a 13/13 green run on the same lane** — the only delta was three lines of `docs/active-work.md`. A markdown edit cannot break a PTY test, so the change under test is ruled out as a cause rather than merely doubted. Passes isolated (`1 passed`, 0.01s). **Occurrence 2 is the one that matters most**: it shows the failure is not confined to one feature flavor and can take both selectors at once |
+| **what the fragment ACTUALLY shows** | **The supervisor collected empty stdout** — `drain_until` then `collect_stdout(&evs)` (`src/process.rs:3948-3951`); the assertion inspects that string. It does **NOT** establish that `stty` emitted nothing: the bytes could have been lost in PTY delivery or in event collection. An earlier edit of this row said "`stty` produced no output at all", which asserts a mechanism the test cannot see. What is true is narrower and still useful: this is not a *termios* failure — nothing shows echo being configured wrongly — but which of {child never wrote, PTY dropped it, collection missed it} is open. The assertion's message invites the wrong reading, since it prints an empty string as though it were `stty`'s answer |
+| **what is NOT** | **No mechanism is ESTABLISHED** — one is *proposed*: read-before-write on the child's output, the R4/R6 readiness family (occurrence 2). Proposed is not confirmed, and nothing here discriminates it from PTY delivery or event-collection loss. Not reproduced in a later full sweep (108 targets, exit 0), nor in 3 isolated `--lib` runs (1917/0 each), nor in the isolated rerun after occurrence 3. **Three occurrences establish intermittence and a load correlation; none establishes cause** |
+| **discriminating control for the next occurrence** | capture the **full process event stream and the child's exit disposition**, not only the collected string — that is what separates "child never wrote" from "delivery or collection lost it", and the collected string cannot distinguish them however many times it is sampled. Cross-check against R4/R6's readiness family, which `docs/active-work.md`'s 2026-08-06 entry already implicates |
+| **cross-reference** | `docs/active-work.md` — 2026-08-06 occurrence, `--features crdt`, **both** the raw and canonical selectors, same fragment, read-before-write hypothesis |
 | **rival explanation not excluded** | leaked `pmacs --daemon` processes, which the handoff names as a standing confound for any load-sensitive local red |
 
 ### U3 — the R7 selector again, fragments lost the same way U2's were
@@ -552,6 +630,54 @@ it again here by piping a sweep through `grep`. The fix is mechanical:
 stream. A signature that is cheap to capture and impossible to
 reconstruct should never be traded for terminal brevity.
 
+*(Renumbered from U4/U5 to **U6/U7** on the rebase onto `0857bf4`: `gate-protocol-build` landed its own U4/U5 in #229, and git merged both files **without a conflict**, producing duplicate ids across four sites. The pre-rebase warning is retired here because it has been carried out.)*
+
+### U6 — two wall-clock budget tests fail together in one `lib-crdt` step
+
+Recorded during worker identity Stage 1 review round 2, 2026-08-09, in
+the same gate run that produced R7's third occurrence. **Fragments were
+captured**, so unlike U1–U3 this one is matchable — it is a `U` row
+because it has one occurrence and no mechanism, not because the evidence
+was lost.
+
+| field | value |
+|---|---|
+| **selector** | `--lib --features crdt optimistic::tests::criterion_1_end_of_line_typing_completes_sub_frame_per_keystroke` **and** `editor::tests::composition_overhead_under_ten_percent`, failing in the same run |
+| **job / flavor** | local (Linux), `scripts/gate` step `04-lib-crdt`, with sibling worktrees building concurrently |
+| **required fragments** | `criterion 1: per-keystroke orchestrator time` + `exceeds 1ms`; and `composition machinery added more than 10% overhead` |
+| **status** | **new incident, one occurrence, not reproduced** |
+| **what IS established** | both are **wall-clock budget assertions** — 1.264ms against a 1ms budget, and 1.297× against a 1.10× budget — so both are load-sensitive by construction. Both green in an isolated rerun of exactly those two selectors, and both green in the next full gate run of the same command (2105 passed) |
+| **what is NOT** | whether the machine's concurrent load caused it. The confound is real (this machine runs one shared `CARGO_TARGET_DIR` and several worktrees) but **was not measured**, so it is a rival explanation, not a finding |
+| **rival explanation not excluded** | a genuine regression in either path. Nothing in the observing diff touches the optimistic-echo orchestrator or the composition pipeline, but "my diff looks unrelated" is not evidence, and this row does not treat it as such |
+
+**Two budget tests failing in one run and neither in the next is the
+signature worth matching**, more than either name alone: a real
+regression in two unrelated subsystems at once is far less likely than
+one loaded machine. If a future run reds **one** of these without the
+other, that is a different incident and should be judged as one.
+
+### U7 — a *different* wall-clock render-budget test reds each sweep
+
+Recorded during worker identity Stage 1 review round 3, 2026-08-09.
+**Two consecutive `scripts/gate` runs of the same command, on the same
+tree, red on step `12-sweep` with a different test each time** — which
+is the signature, and it is a stronger one than any single selector.
+
+| field | value |
+|---|---|
+| **selector** | run 1: `--test m8_2_acceptance dired_open_renders_10k_entries_under_200ms` **and** `--test m8_9_acceptance outline_5_level_100_entry_renders_within_100ms`; run 2: `--test dired_acceptance dired_renders_10k_entries_within_200ms` |
+| **job / flavor** | local (Linux), `scripts/gate` step `12-sweep` (`cargo test --workspace --no-fail-fast`), **load average 12.9 / 23.9** with sibling worktrees building concurrently |
+| **required fragments** | `must render within 200ms; took ` / `open() (parse + render) took ` + `spec budget is 100ms` |
+| **status** | **new incident, three selectors, none reproduced** |
+| **what IS established** | all three are **wall-clock render-budget assertions** (224ms and 258ms against a 200ms budget; 114ms against a 100ms budget), so all three are load-sensitive by construction. Each was green in an isolated rerun of its own selector, no selector reds twice, and **the third run of the same command on the same tree was green on all 13 steps** (log `20260809T200907Z-2672209`). The observing diff is **two string literals, their doc comments and one test** — it touches no render path at all, and cannot |
+| **what is NOT** | that load caused it. The one-shared-`CARGO_TARGET_DIR` confound is real and again **unmeasured**, so it stays a rival explanation rather than a finding |
+| **relation to U6** | same shape, different step and different tests: U6 is two budget tests in `04-lib-crdt` failing **together**; this is three render-budget tests in `12-sweep` failing **one per run**. Kept separate rather than merged, because merging would assert a shared mechanism nothing here shows |
+
+**The rotating selector is the thing to match.** A regression that
+moved between three unrelated render paths on an unchanged tree is far
+less likely than one loaded machine; a future run that reds the *same*
+one of these twice is a different incident and should be judged as one.
+
 **The retirements are not occurrences and do not close the log.** R1 and
 R3 stay live, and each retired row keeps its signature so a later red
 matching one reopens it.
@@ -567,18 +693,40 @@ not caused by the PRs they appeared on — that PR is **docs-only and its
 tree is byte-identical to a green `main`**. It is not evidence that any
 of them is harmless.
 
-### U4 — `a_pty_resize_blanks_the_host_before_repainting`, macOS `lua54`, one occurrence
+### U4 — `a_pty_resize_blanks_the_host_before_repainting`, macOS **both flavours**, three occurrences
 
-Surfaced on PR #229's CI.
+Surfaced on PR #229's CI; twice more on PR #231's.
+
+**The `lua54` in this row's original title was wrong as a signature
+component, and matching on it would have missed two occurrences.** The
+row was filed from #229's single `lua54` red and recorded the flavour in
+the matching key. #231 then reddened the identical selector with the
+identical three fragments **twice on `luajit`** — so flavour is not part
+of this signature, and the row's own caution that "a deterministic
+defect *can* be Lua-flavour-specific" is now settled in the other
+direction: this one is not. Occurrence-keyed by suffix length, the three
+are `25 362` (#229, `lua54`), `25 222` (#231 attempt 1, `luajit`) and
+`25 054` (#231 attempt 2, `luajit`).
+
+**A fourth sighting of these fragments was NOT an occurrence and must
+not be counted as one.** It came from a deliberate bite during this
+test's own development — the defect reintroduced on purpose (`consumer
+ignores full_grid`), 34 831 bytes, failing in 20.09 s. It earns its
+place here for what it proves instead: **the genuine defect and these
+CI reds are signature-indistinguishable**, same message class and same
+full-timeout duration, so the fragments alone can never tell a real
+resync failure from whatever this is.
 
 | field | value |
 |---|---|
 | **selector** | `--test full_grid_resync_acceptance a_pty_resize_blanks_the_host_before_repainting` |
-| **job / flavor** | GitHub Actions, `Test (macos-latest / lua54)`, `macos-26-arm64` |
+| **job / flavor** | GitHub Actions, `Test (macos-latest / lua54)` **and** `Test (macos-latest / luajit)`, `macos-26-arm64`. **Flavour is not a matching key for this row** |
 | **required fragments** | `FG-INV: the post-resize resync must blank the host` · `no CSI 2 J appeared in the` · `bytes emitted after the first painted frame` |
 | **NOT fragments** | the byte count and the `:LINE` suffix are **occurrence-specific** and must not be matched on — the count is the collected suffix length, which varies per run, and the line moves with the file |
-| **status** | **one occurrence; INTERMITTENT — passed on rerun** |
-| **why the diff is excluded** | #229 changes only `scripts/gate`, `tests/gate_script_acceptance.rs` and documentation — **no `src/`, and the workflow never invokes `scripts/gate`**. Decisively, `full_grid_resync_acceptance` runs **before** the changed gate suite, so even a cross-suite leaked-state path is not available. The `luajit` leg passing on the same commit is **corroboration only** — a deterministic defect *can* be Lua-flavour-specific, so that observation must not be used as a structural exclusion |
+| **status** | **three occurrences on two branches; INTERMITTENT on #229 (passed on rerun), NOT observed to pass on #231 (0/2)** |
+| **the #231 control experiment, and what it does and does not license** | Five valid observations at #231's exact base `0190102` — `run_attempt` 1, 2, 3, 4 and 6 — **all green on both macOS flavours**, against #231's 0/2. Under an equal-rate model the chance both failures land on the two branch runs is 1/C(7,2) = **4.8%**. Two things bound that number. First, **attempt 5 was discarded** because it reddened a *different* selector (U8) — so the base leg is 5/5 green *for this signature* and 5/6 overall, and "the base never fails" is not what was observed. Second, three unrelated macOS selectors reddening in one session is **a background platform failure rate**, and the equal-rate model the 4.8% assumes is exactly what such a rate violates. **The branch side was never resampled**: 5-vs-2 is an asymmetric experiment, and rerunning #231's failing job three more times at `4654b94` was the outstanding discriminator when it merged |
+| **why #231's diff is excluded** | grepping its **entire** `src/` diff for `full_grid\|resize\|resync\|Geometry\|reconcile_panel_layout` matches **one import line** and nothing else; all 721 changed lines are placement, dedication and commit-contract logic. From the other side, `full_grid_resync_acceptance` (191 lines) contains no panel, side-window, dedication, display or directory surface — grep for those matches only a comment about CSI 2 J. #231 merged on this reading **over** the statistical signal above, which is a judgement recorded here so that a fourth occurrence can revisit it rather than re-derive it |
+| **why #229's diff is excluded** | #229 changes only `scripts/gate`, `tests/gate_script_acceptance.rs` and documentation — **no `src/`, and the workflow never invokes `scripts/gate`**. Decisively, `full_grid_resync_acceptance` runs **before** the changed gate suite, so even a cross-suite leaked-state path is not available. The `luajit` leg passing on the same commit is **corroboration only** — a deterministic defect *can* be Lua-flavour-specific, so that observation must not be used as a structural exclusion |
 | **what IS established** | **no blank was OBSERVED after the mark** within the test's fixed 20-second deadline. The collected suffix was the **entire** post-mark output (`suffix.len()`, 25 362 bytes on this occurrence — not a capped window; only the *displayed* head is truncated to 400 bytes), and that head shows ordinary repaint traffic (`ZQXMARKERQZ` rows with SGR + CUP), so the host was painting |
 | **what is NOT** | any mechanism. Whether the blank was never emitted, emitted after the deadline, or lost in transport is **open** — and "it never emitted the blank" is a claim this evidence does not support. **The failing run's ~20 s duration is the fixed `Duration::from_secs(20)` timeout**, so the spread against a fast passing run is mechanically determined and is **not** independent timing evidence |
 | **discriminating control — ASYMMETRIC, and only one direction concludes** | the suffix is already complete, so "capture more bytes" is not the gap — arrival time is. Extending the deadline and recording whether `CLEAR_ALL` arrives, and at what offset: **if it arrives, "emitted late" is established.** **If it does not, that establishes only "not observed by the longer deadline"** — *not* "never emitted", because transport loss produces the same absence. Separating non-emission from transport loss needs **producer-side emission evidence** (did pmacs write the clear?) cross-checked against the collected stream; no deadline, however long, can do it alone |
