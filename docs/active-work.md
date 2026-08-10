@@ -210,6 +210,63 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
+## LSP file watcher (issue #233) — branch OPEN, framing revision 1 AWAITING REVIEW
+
+**Issue #233** — https://github.com/levineuwirth/pmacs/issues/233.
+**URGENT by user ruling 2026-08-10: PR #227 is held unmerged until this
+is resolved**, even though #227 is green and cleared.
+
+- **Branch `lsp-file-watcher`**, base `githubsucks/main` @ `0e4c58d`.
+  **`githubsucks/lsp-file-watcher` is the authoritative tip** — the ref,
+  not a SHA. Recover with
+  `git fetch githubsucks && git checkout lsp-file-watcher`.
+- **Framing `docs/lsp-file-watcher-framing.md`, revision 1, DRAFT.**
+  Committed at the branch's first commit so it is portable during
+  review — the standing lesson from the GUI arc framing, which spent two
+  review rounds as an untracked file in one worktree.
+- **NO IMPLEMENTATION MAY START** until revision 1 is approved *and* the
+  open ruling below is answered.
+
+**Not a #232 regression.** The statusline activity indicator is correct;
+it renders real in-flight jobs. What changed on 2026-08-09 is
+**visibility**. The polling watcher has been there since `1c25730`
+(2026-05-19). Quieting the indicator would delete the only instrument
+that found this, and is explicitly not the fix.
+
+- **Scope: D1 and D2 only** — plain-string globs are matched against
+  relative paths so they never match (rust-analyzer sees **no** file
+  changes at all; gopls sees `go.mod` but never `.go`), and
+  re-registering the same id leaks the previous coroutines
+  (rust-analyzer registers twice under one id → 12 pollers, 6
+  permanently uncancellable).
+- **Two findings from framing that the issue does not carry**, both of
+  which change the fix:
+  1. **The existing test cannot discriminate this fix in either
+     direction.** The fake LSP's `**/*.txt` compiles to `^.-[^/]*%.txt$`
+     and `.-` spans `/`, so it matches relative *and* absolute subjects.
+     `m4_24` passes whether D1 is fixed or broken. New coverage must use
+     a pattern whose two readings disagree.
+  2. **"Match the absolute path" alone would break `RelativePattern`.**
+     Measured: `*.txt` matches `a.txt` but not `/base/a.txt`.
+     `resolve_watcher` returns `(base, pattern)` and discards which form
+     it came from, so its contract has to change — not just the match
+     subject.
+- **OPEN RULING, blocking the start of implementation:** D1 and D2 fix
+  correctness and the leak but **do not stop the walking** — `walk`
+  recurses unconditionally and `matches` gates only recording. After
+  this lane rust-analyzer still walks the whole tree every 250 ms, six
+  times per tick instead of twelve. If the acceptance bar is "the
+  modeline stops flipping", this lane does not meet it and **D3 must be
+  framed first**.
+- **D3 deferred** with what was checked: there is **no `notify`/inotify
+  dependency in the tree**, so a real filesystem-notification primitive
+  is a new crate plus a Rust primitive plus its binding; and there is
+  **no ignore-list infrastructure** to reuse (`src/project.rs` knows
+  `.git` as a marker, not as something to skip). D3 is a
+  `COHERENCE.md` §9 concern and needs its own framing.
+- **Gates:** `./scripts/gate --acceptance m4_acceptance` plus the
+  touched LSP acceptance suites. No `--protocol` — no wire change.
+
 ## `scripts/gate` — PR #225 OPEN (build tooling)
 
 **PR #225** — https://github.com/levineuwirth/pmacs/pull/225. Written
