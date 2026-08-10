@@ -210,9 +210,11 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## LSP file watcher (issue #233) — IMPLEMENTED, awaiting PR review
+## LSP file watcher (issue #233) — PR #234 OPEN, awaiting review
 
 **Issue #233** — https://github.com/levineuwirth/pmacs/issues/233.
+**PR #234** — https://github.com/levineuwirth/pmacs/pull/234, opened
+2026-08-10 at `ed3033c` (the implementation commit atop the framing).
 **URGENT by user ruling 2026-08-10: PR #227 is held unmerged until this
 is resolved**, even though #227 is green and cleared.
 
