@@ -243,6 +243,52 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
+## The GUI arc — Stage 0 branch OPEN, PARKED behind #227, no PR yet
+
+**Written at the branch's first commit**, with the framing, which is
+what this arc's own §5 requires of every PR in it. The standing
+correction from #171 and #215 was missed at #224 and #225; this lane
+exists to stop the streak rather than to note it again.
+
+- **Branch `gui-arc-stage0`**, base `githubsucks/main` @ `0e4c58d` (the
+  #231 merge). **`githubsucks/gui-arc-stage0` is the authoritative
+  tip** — the ref, not a SHA. Recover with
+  `git fetch githubsucks && git checkout gui-arc-stage0`.
+- **Framing `docs/gui-arc-framing.md`, revision 3, APPROVED
+  2026-08-10** after two review rounds (two blocking findings each
+  round, closed). It is **also the framing for Stage 0 itself**, which
+  is docs-only; Stages 1–10 each require their own framing before their
+  branch.
+- **PARKED, deliberately.** Nothing further happens on this branch
+  until **#227 (git Stage 1) is finished and merged**. #227's ref is 72
+  `main` commits behind and touches `COHERENCE.md`,
+  `docs/active-work.md` and `builtin/runtime/listview.lua` — the three
+  files Stage 0's absorption rewrites. Sequencing it first avoids
+  compounding exactly the conflicts Stage 0 exists to retire. The
+  branch exists now, ahead of that work, **only so the approved framing
+  is portable**: uncommitted work does not travel between machines, and
+  the framing spent its whole review as an untracked file in one
+  worktree.
+- **Scope when it resumes (docs only, no `src/`):** the absorption pass
+  enumerated in the framing's §5 — five stale lanes, the
+  authority/recovery anchor, `COHERENCE.md`'s `v6..=v21` → `v6..=v23`,
+  the U4 correction and the U9 rewrite in `docs/ci-red-signatures.md`,
+  the stale right-click backlog line, and journey step 11's verdict
+  (falsified by #232) — then the per-frontend journey table, the §16
+  product subgrade the scorecard will point at, §20 placement, the
+  handoff cross-reference, and the "Arc 8" retirement.
+- **Two absorption items that are NOT simple deletions**, recorded here
+  because getting them wrong is silent: **#228's lane** must lose only
+  its PR-specific block, while the standing **Discovery lane (P4)** is
+  rewritten to "Stage 2 merged; later discovery work remains" —
+  predicate evaluation, command metadata, help unification and the
+  prefix decision are all still open. And **`v6..=v23` must not sweep
+  away the same row's "production attach remains v20"**, which is
+  correct (`ADVERTISED_PROTOCOL_VERSION` is 20).
+- **Verification:** none applicable — Stage 0 changes no code. The gate
+  suite for its PR is `cargo fmt --check`, `git diff --check`, and
+  nothing else it can meaningfully run.
+
 ## `scripts/gate` — PR #225 OPEN (build tooling)
 
 **PR #225** — https://github.com/levineuwirth/pmacs/pull/225. Written
