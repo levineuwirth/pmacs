@@ -601,3 +601,27 @@ incident, not U4 occurring twice**.
 | **exclusion strength — WEAKER than U4's, deliberately** | the changed `gate_script_acceptance` ran **earlier in the same job**, and it creates worktrees and directories. No leaked child or persistent signal-state mutation was observed, but "the diff touches no `src/`" is **not** the argument here that it is for U4, because cross-suite leaked state is a path reachability reasoning does not close |
 | **control 1 — CROSS-SUITE ATTRIBUTION, and asymmetric** | run `m5_8_acceptance` alone on macOS `lua54`, without the gate suite ahead of it. **A matching isolated RED proves the gate suite is not necessary** for the failure. **An isolated GREEN proves nothing beyond that run** — the failure is intermittent, so absence under one run is not evidence of dependence. It also does **not** discriminate among the three mechanisms in either direction |
 | **control 2 — mechanism** | observe **readiness and raw-mode state at the moment of injection**. Another isolated pass, however many times repeated, cannot separate "injected before raw mode" from "raw mode lost" from a third cause |
+
+### U8 — `acc28_child_input_and_the_c_c_escape_work_unchanged_in_a_panel`, macOS `luajit`, one occurrence, **fragments destroyed**
+
+**Numbered U8 deliberately: U6 and U7 are reserved** for the two
+wall-clock rows on `worker-identity-stage1` (PR #232), which renumbered
+into that range when #229 took U4/U5. Taking U6 here would recreate the
+duplicate-id collision that rebase already produced once.
+
+**This row exists mostly as an admission.** It surfaced on attempt 5 of
+a merge-base control at `0190102`, and **I reran the job before reading
+its log**, which discarded it. GitHub keeps only the latest attempt's
+logs for a rerun job. So this is U2's original condition exactly — a
+selector with no fragments, unmatchable — and it was produced by the
+very mistake U3 is named for.
+
+| field | value |
+|---|---|
+| **selector** | `--test bottom_panel_stage1_acceptance acc28_child_input_and_the_c_c_escape_work_unchanged_in_a_panel` |
+| **job / flavor** | GitHub Actions, `Test (macos-latest / luajit)`, at base `0190102`, control attempt 5 |
+| **required fragments** | **NONE CAPTURED — destroyed by rerunning the job before reading its log.** Recovery attempted via the jobs API and the attempt-scoped jobs endpoint; the log is gone |
+| **what IS established** | it failed once (`46 passed; 1 failed`), panicking at `tests/bottom_panel_stage1_acceptance.rs:2454`, on the **exact merge base** — so it is not attributable to any open branch |
+| **what is NOT** | everything else. Without the assertion text this cannot be matched against a future occurrence, which is the whole purpose of a row here |
+| **why it matters anyway** | it is the **third distinct macOS selector** to red in one session, after U4 (`full_grid_resync`) and U5 (`ctrl_c_during_reconnect`). Three unrelated selectors failing on the macOS legs suggests a **background failure rate on that platform** rather than three independent test bugs — and that materially affects any equal-rate reasoning about which branch a failure "landed on" |
+| **next occurrence** | **read the log BEFORE rerunning anything.** That is U3's stated lesson and this row is its fourth violation |
