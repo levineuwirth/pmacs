@@ -265,10 +265,146 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
-## `scripts/gate --protocol` build step — IMPLEMENTED at `49bc141`, RE-OPENED by review, witness CLOSED at `677fd25`. No PR yet
+## LSP LaTeX coverage — IMPLEMENTED, gates green, no PR yet
 
-**PR #229 OPEN** — https://github.com/levineuwirth/pmacs/pull/229,
-opened at `93d557a`. **Held, not merged.** Its first CI run went red on
+**Written with the lane's first commit**, per the standing correction
+from #171 and #215.
+
+**Branch `lsp-latex-coverage`**, base `githubsucks/main` @ `4bc55e8`
+(the #225 merge). **`githubsucks/lsp-latex-coverage` is the
+authoritative tip** — the ref, not a SHA. Recover with
+`git fetch githubsucks && git checkout lsp-latex-coverage`.
+
+- **Framing `docs/lsp-language-coverage-framing.md`, revision 3 —
+  IMPLEMENTATION AUTHORIZED 2026-08-09**, after a summary of its four
+  corrections rather than a findings round on the document itself.
+  Recorded that way deliberately: the §3 `.texlabroot` verification
+  caveat was live and binding, and was step zero of the work rather
+  than a footnote it could be read past. **It is now discharged — see
+  below.** **Revision 1 was UNTRACKED on `main` in one checkout** and
+  therefore did not travel; committing it here is the fix.
+- **Scope: one `pmacs.lsp.config.latex` entry plus its root resolver.**
+  `texlab` 5.25.1 is installed and unused; a `.tex` buffer highlights
+  correctly and offers no completion, diagnostics, or go-to-definition.
+- **Revision 2 found Slice 1 is SMALLER than revision 1 framed.** The
+  proposed `.tex`/`.latex`/`.sty`/`.cls` filetype mappings are
+  redundant: the grammar already carries exactly those extensions
+  (`src/syntax.rs:1111`), grammar-extension detection sits **ahead** of
+  the LSP filetype map in the precedence chain
+  (`docs/latex-grammar-math-substrate-framing.md:166-171`), and
+  `lsp.lua:267-270` calls that map "mainly the LSP-only fallback". The
+  two systems cannot disagree, because the grammar's extension list is
+  what drives detection.
+- **Two other corrections.** `haskell-language-server` **is** installed
+  on this machine — revision 1 said it was not, which was the whole
+  basis of its Slice 1 / Slice 2 split. And Q#LX3's deferral argument
+  read `COHERENCE.md:1669` ("first slice in flight") when `:124` and
+  `:867` both record multi-root affinity as **merged (#161)**; that
+  line contradicts the same document twice and wants a separate fix.
+- **Q#LX2 (the LaTeX root) is answered.** An upward marker walk through
+  `config.latex.root`, which already accepts a resolver function
+  (`lsp.lua:543`), falling back to the file's own directory.
+  **`.git` is deliberately excluded**: a repo root is the wrong answer
+  for LaTeX, and it is the one place copying the other fourteen
+  entries' instinct is actively wrong.
+- **STEP ZERO IS DISCHARGED — §3's `.texlabroot` caveat, by
+  observation.** Marker 1 **ships**, and the framing's premise for it
+  was corrected in the process.
+  - **`.texlabroot` is a real texlab marker.** texlab v5.25.1's
+    `crates/distro/src/language.rs` maps `.texlabroot`/`texlabroot` →
+    Root, `Tectonic.toml` → Tectonic, `.latexmkrc`/`latexmkrc` →
+    Latexmkrc; `ProjectRoot::walk_and_find`
+    (`crates/base-db/src/deps/root.rs`) walks ancestors testing all
+    three, innermost wins. The shipped marker set is **texlab's own**,
+    including the bare `texlabroot`/`latexmkrc` spellings the framing
+    did not list.
+  - **But texlab cannot apply that walk to fix a root pmacs gets
+    wrong**, which is the correction that matters. Each arm searches
+    `workspace.iter()` — documents ALREADY LOADED — and the workspace
+    comes from the folders the CLIENT supplies. Hand-driven LSP
+    sessions confirmed it: with `rootUri` at a `chapters/`
+    subdirectory, no marker above it (`.texlabroot` included) widened
+    texlab's view and its dependency graph never reached the parent
+    document; with `rootUri` at the marker directory the parent
+    resolved, marker present or not. **texlab honours the root it is
+    handed and never corrects a too-narrow one**, so what
+    `config.latex.root` returns *is* the project scope. That makes the
+    resolver the whole value of the lane rather than a nicety.
+  - **`args = {}` is also observed**, not assumed: bare `texlab`
+    answers `initialize` with `TexLab 5.25.1` over stdio, so the `run`
+    subcommand is not needed.
+  - **§3 said the wrong thing and has been corrected — `b5eaf27` IS
+    revision 3.** It framed marker 1 as conditional on texlab honouring
+    the `.texlabroot` *file*, when the operative fact is that texlab
+    honours the *client-supplied root* and never widens it. The caveat
+    was discharged by observation, and revision 3 records what that
+    established. Nothing about §3 is outstanding.
+- **`.git` exclusion needed more than omitting it from the list.**
+  `project_root_for` falls through to `pmacs.project.detect` when a
+  resolver returns nil, and **that** walk includes `.git` — so a
+  resolver declining on a markerless file would hand texlab the
+  repository root by the back door. The resolver therefore never
+  declines for a file that has a directory. Pinned end to end through
+  attach, with the same fixture asserting the shared detector really
+  would have answered the repo root.
+- **Commit `a9ef37f`** — `builtin/runtime/lsp.lua` plus
+  `tests/lsp_latex_acceptance.rs` (14 tests, one per §6 bullet plus the
+  boundary and decline cases). No `settings`/`init_options` (Q#LX1); no
+  filetype mappings (§2, asserted both ways).
+- **Gates: ALL GREEN** via
+  `./scripts/gate --acceptance lsp_latex_acceptance` — fmt, clippy,
+  lib, lib-crdt, the new suite, m4, gpu, the workspace sweep (115
+  suites, zero failures), diff-check. No `--protocol` — a config entry,
+  no wire.
+- **Seven mutations each fail the suite**: resolver declining on no
+  marker (6 tests), no marker walk (4), a redundant `filetypes.tex`
+  (1), boundary ignored (1), `io.open` truthiness so a directory counts
+  as a marker (1), marker set narrowed (4), command renamed with
+  opinionated settings added (1).
+- **The boundary has now been the interesting part twice, and the
+  second time it was a real defect (fixed in review).** First it was
+  hermeticity — every fixture sets `set_search_boundary` at its own
+  tempdir because R8's shape (a stray `latexmkrc` above the tempdir)
+  would make the markerless assertions pass while testing nothing.
+  Then review found `latex_within_boundary` answering a PATH question
+  with string arithmetic: `dir:sub(1, #boundary + 1) == boundary .. "/"`
+  compares against `"//"` when the boundary is `/`, which no canonical
+  path matches, so a root boundary judged **every** ancestor out of
+  bounds, ran no marker walk at all, and gave each chapter of a thesis
+  its own server — the lane's headline behaviour silently off, with
+  every shipped test still green because each one clamps to a tempdir.
+  The same trap sat at the other end (`/` was never a walk candidate,
+  and `/paper.tex` sliced to an empty directory and declined into the
+  `.git`-aware detector). Now segment comparison throughout: the root
+  is a boundary with zero segments, contained by construction rather
+  than by a special case. Pinned by an ATTACH-level test under a `/`
+  boundary — two chapters, one server, marker root — and the
+  hermeticity property asserts **both** directions, since "stops at the
+  boundary" is also satisfied by a walk that never runs. Suite is 16
+  tests. **A reader
+  deciding whether to trust this resolver should read it as: the marker
+  set and the `.git` exclusion were settled by observation and are
+  solid; the boundary arithmetic around them was not, and is the place
+  to look first if roots come back wrong.**
+- **Trap for the next agent in this worktree:** this machine exports a
+  shared `CARGO_TARGET_DIR`, so a bare `cargo test` compiles against a
+  sibling worktree's artifacts and fails with errors from code that is
+  not in this tree. Use `scripts/gate`, or
+  `CARGO_TARGET_DIR="$(./scripts/gate --print-target-dir)"` for ad-hoc
+  runs. `scripts/gate`'s own header documents this; the failure looks
+  like a broken branch, which is why it is recorded here.
+- **No PR opened**, by instruction.
+
+## `scripts/gate --protocol` build step — **MERGED as #229** (`7cf4653`)
+
+**MERGED as PR #229** — https://github.com/levineuwirth/pmacs/pull/229,
+at `3b10f9d`, 14/14 CI green including both macOS legs. `main` is now
+`7cf4653`. *(This lane still awaits Rule 4 retirement — its durable
+facts belong in the handoff before the entry is removed. Corrected here
+only because the previous text said "Held, not merged", which the merge
+falsified; the retirement itself is not this lane's work.)*
+
+**History, retained:** opened at `93d557a`. Its first CI run went red on
 `Test (macos-latest / lua54)`; the rerun turned that selector green and
 went red on a **different** one. Both are recorded as **U4** and **U5**
 in `docs/ci-red-signatures.md`, as separate incidents per the matching
@@ -466,6 +602,7 @@ authoritative tip** — the ref, not a SHA. Recover with
   emission, an aborting runner, the build folded into `sweep-crdt`, and
   — added in the second round — a **rename of either** the build or the
   sweep step each fail the suite.
+||||||| parent of 72bbb96 (docs: LSP LaTeX coverage framing revision 2, on a branch at last)
 
 ## QoL arc retirement — PR #224 OPEN (docs only)
 
