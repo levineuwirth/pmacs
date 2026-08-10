@@ -265,6 +265,208 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
+## `scripts/gate --protocol` build step — IMPLEMENTED at `49bc141`, RE-OPENED by review, witness CLOSED at `677fd25`. No PR yet
+
+**PR #229 OPEN** — https://github.com/levineuwirth/pmacs/pull/229,
+opened at `93d557a`. **Held, not merged.** Its first CI run went red on
+`Test (macos-latest / lua54)`; the rerun turned that selector green and
+went red on a **different** one. Both are recorded as **U4** and **U5**
+in `docs/ci-red-signatures.md`, as separate incidents per the matching
+rule rather than one signature twice.
+
+**Registry numbering conflict, expected at merge.**
+`worker-identity-stage1` independently defines its own **U4** and **U5**
+on its branch. This lane merges first, so on `main` the rows above are
+U4/U5 and **worker identity must renumber its pair on rebase**. Flagged
+here because a rebase that resolves the textual conflict without
+renumbering produces two different incidents sharing an id, which is
+exactly the failure the registry's matching rule exists to prevent.
+
+**Written with the lane's first commit**, per the standing correction
+from #171 and #215.
+
+**Branch `gate-protocol-build`**, base `githubsucks/main` @ `4bc55e8`
+(the #225 merge). **`githubsucks/gate-protocol-build` is the
+authoritative tip** — the ref, not a SHA. Recover with
+`git fetch githubsucks && git checkout gate-protocol-build`.
+
+- **Framing `docs/gate-protocol-build-framing.md`, revision 5.** The
+  fix itself is implemented and green at `49bc141`; **its regression
+  witness landed separately at `677fd25`**, after review found the
+  original witness did not reach the step it named. Narrow by design:
+  one missing step in one script, plus the boundary question that let
+  it go missing. No `src/`, no protocol, no feature work.
+- **WAS THE OPEN BLOCKER — the witnesses did not reach the step they
+  name. CLOSED at `677fd25`.** `--print-plan` **strips names** before
+  printing, so the ordering assertion saw only commands; `--self-test`
+  **hardcodes** `build-crdt` inside its own synthetic plan. Review
+  demonstrated the consequence: **renaming the real build step to
+  `sweep-crdt` left both tests passing.** So the lane had shipped
+  without the regression guard it was created to provide. §7 requires
+  **both** real emitter pairs — `build-crdt` and `sweep-crdt`, name
+  *and* exact command — because the hole is symmetric and revision 4
+  closed only half of it. The synthetic `--self-test` stays: it
+  witnesses the *runner* (failure naming, `FAILED:` list, log paths,
+  non-zero exit, and continuation via the sentinel), which is a
+  different thing from attributing the real step, and it may no longer
+  stand in for it. **What closed it is the "THE WITNESS DID NOT REACH
+  THE STEP" bullet further down** — `--print-plan-named`, with all four
+  renames and drifts mutated red.
+- **The defect, as found.** `--protocol` adds the CRDT workspace sweep,
+  whose documented precondition is `cargo build --workspace
+  --no-default-features --features luajit,crdt` — documented in handoff
+  **§5** at the time, **§3** now. The plan emitter had **no build step
+  at all** — read from the source, not inferred from the failure.
+- **Why it was latent, and why that makes it urgent rather than tidy.**
+  Before #225 every worktree shared one `CARGO_TARGET_DIR`, which
+  almost always already held a `pmacs-gpu` binary, so the precondition
+  was satisfied **by accident**. Per-worktree target dirs start empty.
+  The hazard is not the red gate that stops you — it is a **green**
+  `--protocol` run whose crdt sweep was decided by the state of the
+  build directory rather than by the diff. That is a gate reporting
+  coverage it does not have, which is what #225 exists to prevent.
+- **Observed on PR #228's first gate run:** twelve
+  `gpu_invocation_acceptance::crdt::*` failures, all *"build pmacs-gpu
+  before this acceptance suite"*, with `debug/pmacs-gpu` absent.
+- **The durable half is a boundary question.** `scripts/gate`'s header
+  names handoff **§3** as the owner of its reasoning, and this
+  precondition lives in **§5** — a coherent cause for the omission, not
+  mere oversight.
+
+  **Resolved in framing revision 2: §3 becomes the SOLE normative home,
+  §5 keeps the incident and its signature as history, and the script's
+  header keeps citing §3 ALONE.** Revision 1 proposed citing both,
+  which splits one executable contract across two homes and weakens the
+  script's only clean boundary at the same time as Q#GR-4 declines to
+  build any automated check for prose drift. This entry recorded that
+  superseded decision until now; a recovering machine reading the stale
+  version would have rebuilt revision 1's wrong boundary.
+- **Q#GR-1 — SETTLED BY OBSERVATION, 2026-08-09, before any fix was
+  written.** On a **disposable** target directory (never a live lane's),
+  with `debug/pmacs-gpu` asserted **absent before each run** as a
+  recorded precondition, each sweep run **alone** from that same cold
+  state so neither could have built the binary for the other:
+
+  | sweep | exit | result | `pmacs-gpu` after |
+  |---|---|---|---|
+  | default | **0** | green, 114 test targets | **still absent** |
+  | crdt | **101** | exactly **12** failures, all `gpu_invocation_acceptance::crdt::*`, all *"build pmacs-gpu before this acceptance suite"* | still absent |
+
+  So framing §3's inference **holds** and §4's *"only under
+  `--protocol`"* is correct — the default sweep never builds the binary
+  and never needs it. **Mechanism, now established rather than
+  guessed:** `pmacs-gpu` has no `tests/` directory, so cargo never
+  uplifts its bin to `debug/pmacs-gpu`; only an explicit `cargo build`
+  produces it.
+
+  **Found while doing it, and worse than the twelve:**
+  `bottom_panel_stage2b_gpu` a54 reported **`ok`** in that cold crdt
+  sweep. Its only path that does not spawn `pmacs-gpu` is its skip
+  branch, so a test whose whole purpose is real wgpu rendering passed
+  having rendered nothing. The missing build does not merely fail
+  twelve tests — it voids coverage in tests that report green.
+  (`vterm_stage3` a37 has the same shape by source read; cargo captures
+  passing tests' output, so the skip is invisible in the log.)
+- **What landed.** A named `build-crdt` step emitted immediately before
+  `sweep-crdt` under `--protocol`, carrying the exact §5 invocation —
+  **not** folded into the sweep command, because `cargo build … &&
+  cargo test …` reports a *build* failure under the name `sweep-crdt`.
+  Plus **`--self-test`** (Q#GR-5): a hardcoded three-line synthetic plan
+  — pass, fail-named-`build-crdt`, **pass sentinel** — driven through
+  the *real* runner loop, which is what makes the **runner's** failure
+  naming *and* continuation observable at all. (It does **not** witness
+  the real step's name — see the round-two entry below, which is where
+  that gap was found and closed.) `PLAN_FILE` is deliberately **not**
+  injectable: that would turn the runner's `eval` into a general command
+  executor, the same defect this script's review caught in
+  `--acceptance`.
+- **THE WITNESS DID NOT REACH THE STEP — found in review of the
+  implementation, closed at `677fd25`.** The lane shipped without the
+  regression guard it was created to provide, because **neither witness
+  could see a name**: `--print-plan` renders `emit_plan | cut -f2-`, so
+  the ordering test compared *commands* with the names cut off, and
+  `--self-test` hardcodes the string `build-crdt` in its **own
+  synthetic** plan, so it proves things about the runner and nothing
+  about the real emitter. Review demonstrated it directly: **renaming
+  the real build step to `sweep-crdt` left both tests passing** — a plan
+  that would report a build failure under the sweep's name, sitting
+  green, which is the exact misattribution the separate step exists to
+  prevent.
+
+  **The fix is `--print-plan-named`**: a second *rendering* of the same
+  `emit_plan`, printing the `name<TAB>command` text the runner reads
+  back from `PLAN_FILE`, asserted by **whole-line equality** so name and
+  command are pinned together, and `sweep-crdt`'s pair asserted too
+  (asserting only the build's name leaves the identical hole open in the
+  other direction). **`PLAN_FILE` remains uninjectable** — a test that
+  supplied the runner's plan would turn its `eval` into a general
+  command executor, the defect the `--acceptance` refusal exists to
+  prevent — and **`--self-test` stays**, witnessing the *runner* (failure
+  naming, `FAILED:`, log paths, non-zero exit, continuation via the
+  sentinel), which it may no longer *stand in for* attribution of the
+  real step. A companion test pins `--print-plan` as that rendering
+  minus its names, so the two cannot drift into asserting a name the
+  runner never uses. Both new tests are on the **no-gates** paths.
+
+  **Mutated individually, each now red** (the first is the one the
+  previous round passed): build renamed `build-crdt` → `sweep-crdt`;
+  sweep renamed `sweep-crdt` → `crdt-sweep`; build features
+  `luajit,crdt` → `luajit`; build emitted **after** the sweep. Suite is
+  20 tests.
+- **AUDITED FOR THE SAME DEFECT ELSEWHERE, and one instance is left
+  open deliberately.** Renaming **every other** plan step — `fmt`,
+  `clippy`, `lib`, `m4`, `gpu`, `sweep`, `diff-check`,
+  `acceptance-<suite>` — leaves all 20 tests green: no test asserts any
+  step name but `build-crdt` and `sweep-crdt`. For most that is only a
+  log filename and a `FAILED:` entry. **`sweep` is not**: the runner's
+  end-of-run listing globs `"$LOGDIR"/*-sweep.log` and
+  `*-sweep-crdt.log`, so renaming that step silently empties the *"read
+  these, do not re-run and grep"* listing that is the U2/U3 remedy, with
+  the suite still green. **Not closed here**: the listing only exists on
+  the *run* path, and every test in this file is deliberately no-gates,
+  so there is no cheap witness for it — recorded rather than papered
+  over.
+- **Blocks PR #228 (discovery Stage 2).** That lane's `--protocol`
+  result needs re-establishing on a fresh target dir under the repaired
+  script. Deliberately **not** folded into that feature branch, and it
+  happens **after** this lands, not inside it.
+- **Acceptance criterion, witnessed 2026-08-09.**
+  `scripts/gate --acceptance gate_script_acceptance --protocol` on a
+  target root that **did not exist** (precondition recorded, not
+  assumed): all eleven steps green, `09 build-crdt ok` producing
+  `debug/pmacs-gpu`, and `gpu_invocation_acceptance` at **15 passed /
+  0 failed** where the same suite was 3/12 without the build step.
+  Zero occurrences of the *"build pmacs-gpu"* signature in the sweep
+  log, and a54/a37 ran for real rather than taking their skip branches.
+  **No manual build anywhere** — which is the thing that was false.
+- **UNEXPLAINED RED, recorded rather than swept up.** An earlier
+  attempt at the same cold run failed step 10 with **36 + 4 + 6 + 4
+  failures across `m5_5`/`m5_6`/`m5_7`/`m5_8`**, all real-daemon
+  suites, all with signature *"daemon exited with exit status: 101
+  before socket appeared; socket=/tmp/.tmpXXXX/pmacs.sock — `<stderr
+  empty>`"*. **Not** the `pmacs-gpu` signature, and no row in
+  `docs/ci-red-signatures.md` matches it. Re-running the same test
+  binary from the same target directory gave 36/36 green, which by
+  that registry's own rule establishes **intermittence only, never
+  environmental cause** — so this stays open rather than being
+  attributed to the load (~25–30 across four concurrent lanes' gates).
+  **De-implicated from `build-crdt` by construction, not by the green
+  rerun:** the root crate's `default = ["luajit"]`, so
+  `--no-default-features --features luajit,crdt` enables *exactly* the
+  same feature set as the sweep's `--features crdt`. The build step
+  cannot hand the sweep a differently-featured binary, so it has no
+  mechanism by which to break a daemon suite. Local, not CI, so not a
+  registry row; noted here for whoever sees it next.
+- **Gates:** `scripts/gate --acceptance gate_script_acceptance`. Note
+  the recursion — this lane edits the script that runs its own gates,
+  so `--print-plan`, `--print-plan-named`, `--help` and `--self-test`
+  were also checked by hand after each edit: a change that breaks the
+  script cannot be reported honestly by the script. The assertions were
+  **mutation tested**: wrong features, wrong position, unconditional
+  emission, an aborting runner, the build folded into `sweep-crdt`, and
+  — added in the second round — a **rename of either** the build or the
+  sweep step each fail the suite.
+
 ## QoL arc retirement — PR #224 OPEN (docs only)
 
 **PR #224** — https://github.com/levineuwirth/pmacs/pull/224. Written

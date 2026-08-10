@@ -127,6 +127,307 @@ fn the_crdt_workspace_sweep_is_added_by_protocol_and_absent_without_it() {
     );
 }
 
+/// **The precondition the plan did not encode**, and the reason a green
+/// `--protocol` run could mean nothing.
+///
+/// The crdt workspace sweep spawns `pmacs-gpu` as a *process*, and no
+/// `cargo test` run produces that binary — `pmacs-gpu` has no `tests/`
+/// directory, so cargo never uplifts its bin to `debug/pmacs-gpu`. On a
+/// cold target directory the sweep fails twelve
+/// `gpu_invocation_acceptance::crdt::*` tests on *"build pmacs-gpu
+/// before this acceptance suite"*. Before per-worktree target
+/// directories (#225) every worktree shared one that nearly always
+/// already held the binary, so the precondition was satisfied **by
+/// accident** — and the hazard was never the red gate, it was a green
+/// one decided by the build directory rather than by the diff.
+///
+/// **The exact command is asserted, not just the step's name and
+/// position.** A `build-crdt` running plain `cargo build` would sit in
+/// the right place under the right name and leave the gate exactly as
+/// unsound: the crdt sweep needs *those* features, and the wrong ones
+/// produce a binary the sweep cannot use.
+///
+/// **What this test cannot see: the names.** `--print-plan` strips them
+/// (`emit_plan | cut -f2-`), so everything below is an assertion about
+/// *commands in an order* — renaming the real build step to `sweep-crdt`
+/// leaves it green. The step's **name** is asserted by
+/// `the_crdt_build_step_carries_its_own_name_and_its_exact_command`
+/// below, which reads the plan in the form the runner reads it.
+#[test]
+fn the_crdt_sweep_is_immediately_preceded_by_the_build_that_produces_its_binary() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let build = "cargo build --workspace --no-default-features --features luajit,crdt";
+    let crdt_sweep = "cargo test --workspace --features crdt --no-fail-fast -- --skip basedpyright";
+
+    let (plan, err, ok) = run(root.path(), &["--protocol", "--print-plan"]);
+    assert!(ok, "--protocol --print-plan must succeed; stderr:\n{err}");
+
+    let b = plan
+        .find(build)
+        .unwrap_or_else(|| panic!("the crdt sweep's build is missing; plan was:\n{plan}"));
+    let s = plan
+        .find(crdt_sweep)
+        .unwrap_or_else(|| panic!("the crdt sweep is missing; plan was:\n{plan}"));
+
+    // Ordering is asserted BEFORE the slice below, which would
+    // otherwise panic with a byte-offset message ("begin > end (427 >
+    // 282)") that names neither step. Mutation-tested: emitting the
+    // build *after* the sweep produced exactly that, and a gate test
+    // whose failure has to be decoded is a gate test nobody trusts.
+    assert!(
+        b < s,
+        "the build must run BEFORE the crdt sweep, not after it — a sweep \
+         that builds its own precondition afterwards has already failed; \
+         plan was:\n{plan}"
+    );
+    // IMMEDIATELY before: one newline between them and nothing else. A
+    // build that merely appears *somewhere* earlier could be separated
+    // from the sweep by a step that rewrites the same target directory.
+    assert_eq!(
+        &plan[b + build.len()..s],
+        "\n",
+        "the build must run IMMEDIATELY before the crdt sweep; plan was:\n{plan}"
+    );
+}
+
+/// **The witness that reaches the step it names**, and the reason this
+/// lane needed a second round.
+///
+/// This lane exists to guarantee two things: that the crdt sweep is
+/// preceded by the build producing its binary, and that a build failure
+/// is attributed to **`build-crdt`** rather than to `sweep-crdt`. The
+/// first round shipped with neither guaranteed, because **neither
+/// witness could see a name**:
+///
+/// - `--print-plan` renders `emit_plan | cut -f2-`, so the ordering test
+///   above compares commands and never sees the names beside them.
+/// - `--self-test` hardcodes the string `build-crdt` inside its **own
+///   synthetic** plan, so it proves things about the *runner* and
+///   nothing about the real emitter.
+///
+/// Review demonstrated the consequence directly: **renaming the real
+/// build step to `sweep-crdt` left both tests passing** — a plan that
+/// reports a build failure under the sweep's name, which is exactly the
+/// misattribution the separate step exists to prevent, sitting green.
+///
+/// So the pair is asserted **together, as one emitted line**, against
+/// `--print-plan-named` — the plan in the form the runner reads it back
+/// from `PLAN_FILE`. Name and command in the same `assert`, from the
+/// real emitter, is what makes a rename unable to pass; either half
+/// alone lets the other drift.
+///
+/// The mode is a *rendering*, not a seam: `PLAN_FILE` stays
+/// uninjectable, because a test that supplied the runner's plan would
+/// turn its `eval` into a general command executor — the defect the
+/// `--acceptance` refusal below exists to prevent.
+#[test]
+fn the_crdt_build_step_carries_its_own_name_and_its_exact_command() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let build = "build-crdt\tcargo build --workspace --no-default-features --features luajit,crdt";
+    let sweep =
+        "sweep-crdt\tcargo test --workspace --features crdt --no-fail-fast -- --skip basedpyright";
+
+    let (plan, err, ok) = run(root.path(), &["--protocol", "--print-plan-named"]);
+    assert!(
+        ok,
+        "--protocol --print-plan-named must succeed; stderr:\n{err}"
+    );
+    let lines: Vec<&str> = plan.lines().collect();
+
+    // Whole-line equality, not `contains`: the name, the tab, and the
+    // command with nothing appended. A step is its (name, command) pair
+    // and the plan is where both are decided.
+    let b = lines.iter().position(|l| *l == build).unwrap_or_else(|| {
+        panic!(
+            "no plan line is exactly:\n  {build}\nA build step under a \
+             different NAME misattributes its own failure; a build step \
+             with different FEATURES hands the sweep a binary it cannot \
+             use. Plan was:\n{plan}"
+        )
+    });
+    // The sweep's own pair, for the same reason in the other direction:
+    // asserting only the build's name lets a rename of the SWEEP slip
+    // through the identical hole.
+    let s = lines
+        .iter()
+        .position(|l| *l == sweep)
+        .unwrap_or_else(|| panic!("no plan line is exactly:\n  {sweep}\nPlan was:\n{plan}"));
+
+    assert_eq!(
+        s,
+        b + 1,
+        "the build must be the step IMMEDIATELY before the crdt sweep — a \
+         build merely somewhere earlier could be separated from it by a \
+         step that rewrites the same target directory. Plan was:\n{plan}"
+    );
+
+    // Conditionality, on this rendering too: an ordinary lane must not
+    // carry the step at all, not merely not carry its command.
+    let (default_plan, _, ok) = run(root.path(), &["--print-plan-named"]);
+    assert!(ok, "--print-plan-named must succeed");
+    assert!(
+        !default_plan.contains("build-crdt"),
+        "the default sweep never builds pmacs-gpu and never needs it, so no \
+         ordinary lane may pay for a workspace build; plan was:\n{default_plan}"
+    );
+}
+
+/// **The new rendering must be the same plan, or the assertion above
+/// pins a string only the test ever reads.**
+///
+/// `--print-plan-named` and `--print-plan` both call one emitter, and
+/// the runner writes that same emitter to `PLAN_FILE` — so today they
+/// cannot disagree. This pins that from outside, where a later edit
+/// giving either mode its own plan text would be caught rather than
+/// producing a witness that asserts a name the runner never uses.
+///
+/// It also pins the **shape** the runner depends on: the loop reads each
+/// line with `IFS=<tab> read -r name cmd`, so a plan line without its
+/// tab would silently run under an empty command.
+#[test]
+fn the_named_plan_is_the_printed_plan_with_its_names_removed() {
+    let root = tempfile::tempdir().expect("tempdir");
+
+    for flags in [
+        vec![],
+        vec!["--protocol"],
+        vec!["--acceptance", "m4_acceptance"],
+    ] {
+        let mut named_args = flags.clone();
+        named_args.push("--print-plan-named");
+        let mut plain_args = flags.clone();
+        plain_args.push("--print-plan");
+
+        let (named, err, ok_named) = run(root.path(), &named_args);
+        assert!(ok_named, "{named_args:?} must succeed; stderr:\n{err}");
+        let (plain, err, ok_plain) = run(root.path(), &plain_args);
+        assert!(ok_plain, "{plain_args:?} must succeed; stderr:\n{err}");
+
+        let mut stripped = String::new();
+        for l in named.lines() {
+            let (_name, cmd) = l.split_once('\t').unwrap_or_else(|| {
+                panic!(
+                    "every plan line must be `name<TAB>command` — the runner \
+                     splits on that tab, so a line without one runs an empty \
+                     command under the whole line's name. Line was:\n  {l:?}"
+                )
+            });
+            stripped.push_str(cmd);
+            stripped.push('\n');
+        }
+
+        assert_eq!(
+            stripped, plain,
+            "the two renderings must be one plan; with {flags:?} they diverged"
+        );
+    }
+}
+
+/// **Conditionality, settled by measurement rather than by reading** —
+/// which is the whole methodological point of this lane, since the
+/// defect it repairs was a precondition nobody checked.
+///
+/// Measured 2026-08-09 on a disposable target directory, with
+/// `debug/pmacs-gpu` asserted **absent** before each run and each sweep
+/// run alone from that same cold state: the default sweep exited **0**
+/// and left `debug/pmacs-gpu` **still absent** — it never builds the
+/// binary and never needs it — while the crdt sweep exited **101** with
+/// exactly twelve `gpu_invocation_acceptance::crdt::*` failures.
+///
+/// So an unconditional build would be a real cost paid for nothing on
+/// every ordinary lane.
+#[test]
+fn the_crdt_build_is_absent_without_protocol() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (plan, _, ok) = run(root.path(), &["--print-plan"]);
+    assert!(ok, "--print-plan must succeed");
+    assert!(
+        !plan.contains("cargo build"),
+        "the default sweep passes on a tree with no pmacs-gpu at all, so a \
+         normal lane must not pay for a workspace build; plan was:\n{plan}"
+    );
+}
+
+/// **The attribution and continuation criteria, made observable.**
+///
+/// Everything else in this file drives a no-gates path, so it can prove
+/// a step's name and its order and **nothing** about what the runner
+/// does when a step fails. `--self-test` closes that gap by handing the
+/// *real* runner loop a hardcoded three-line plan — a passing step, a
+/// failing one named `build-crdt`, and a passing sentinel after it.
+///
+/// **Why `build-crdt` must be its own step** is exactly what this
+/// witnesses: folded into the sweep as `cargo build … && cargo test …`,
+/// a *build* failure would be reported under the name `sweep-crdt` — a
+/// wrong attribution in the one place this script exists to be
+/// trustworthy about.
+///
+/// **The sentinel assertion is the load-bearing one.** With the failure
+/// last, a runner that aborts and one that continues produce identical
+/// output, so a two-line witness would pass on a runner doing the
+/// opposite of the stated `--no-fail-fast` policy. The sentinel's own
+/// log existing is the only thing that separates them — delete that
+/// assertion and this test stops testing continuation at all.
+///
+/// The plan is a literal inside the script on purpose. Making
+/// `PLAN_FILE` injectable would let this test supply its own commands,
+/// and would turn the runner's `eval` into a general command executor —
+/// the same defect the `--acceptance` refusal above exists to prevent.
+#[test]
+fn self_test_names_the_failing_gate_and_the_suite_continues_past_it() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (out, err, ok) = run(root.path(), &["--self-test"]);
+
+    assert!(
+        !ok,
+        "a plan containing a failing step must exit non-zero; stdout:\n{out}stderr:\n{err}"
+    );
+    assert!(
+        out.contains("build-crdt"),
+        "the failing gate must be named as it runs; stdout:\n{out}"
+    );
+    assert!(
+        err.contains("FAILED: build-crdt"),
+        "the failing gate must be listed under FAILED: by its OWN name; stderr:\n{err}"
+    );
+
+    // The runner claims a log path for the failure. Assert the file is
+    // actually there: a tool that prints a path it did not write is
+    // worse than one that prints nothing, because the absence is only
+    // discovered while chasing a real failure.
+    let claimed = err
+        .lines()
+        .find_map(|l| l.split_once("log: ").map(|(_, path)| path.trim()))
+        .unwrap_or_else(|| panic!("the failing gate's log path must be printed; stderr:\n{err}"));
+    assert!(
+        claimed.ends_with("02-build-crdt.log"),
+        "the log must be numbered and named for the gate that failed; was {claimed}"
+    );
+    assert!(
+        Path::new(claimed).is_file(),
+        "the runner must WRITE the log it claims at {claimed}"
+    );
+
+    let logdir = Path::new(claimed)
+        .parent()
+        .expect("the log lives in a log directory");
+    assert!(
+        logdir.join("01-self-pass.log").is_file(),
+        "the step before the failure must have its own log; dir was {}",
+        logdir.display()
+    );
+    // THE ASSERTION THE WHOLE MODE EXISTS FOR.
+    assert!(
+        logdir.join("03-self-sentinel.log").is_file(),
+        "the suite must CONTINUE past a failed gate — the sentinel after \
+         build-crdt wrote no log, so this runner ABORTED. Stdout:\n{out}"
+    );
+    assert!(
+        out.contains("self-sentinel"),
+        "the sentinel must be reported like any other gate; stdout:\n{out}"
+    );
+}
+
 /// The seam handoff §3 keeps authority over: a script cannot infer
 /// which acceptance suites a change touched, so it runs what it is
 /// handed — each one, in order.

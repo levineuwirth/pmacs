@@ -3,11 +3,15 @@
 # directory, with isolated ambient roots and durable logs.
 #
 #   scripts/gate [--acceptance SUITE]... [--protocol] [--print-plan]
+#   scripts/gate [--acceptance SUITE]... [--protocol] --print-plan-named
 #   scripts/gate --print-target-dir
 #   scripts/gate --init
 #   scripts/gate --prune [--force]
+#   scripts/gate --self-test
 #
-# Framing: docs/gate-script-framing.md (revision 4, approved).
+# Framing: docs/gate-script-framing.md (revision 4, approved), and
+# docs/gate-protocol-build-framing.md (revision 5, approved) for the
+# crdt build step, --self-test and --print-plan-named.
 #
 # WHY A PER-WORKTREE TARGET DIRECTORY. This machine exports one
 # CARGO_TARGET_DIR for every checkout, and cargo takes an EXCLUSIVE LOCK
@@ -37,9 +41,11 @@ set -eu
 usage() {
     cat >&2 <<'EOF'
 usage: scripts/gate [--acceptance SUITE]... [--protocol] [--print-plan]
+       scripts/gate [--acceptance SUITE]... [--protocol] --print-plan-named
        scripts/gate --print-target-dir
        scripts/gate --init
        scripts/gate --prune [--force]
+       scripts/gate --self-test
 
   --acceptance SUITE  a touched acceptance suite to run (repeatable).
                       docs/agent-handoff.md section 3 stays authoritative
@@ -48,8 +54,15 @@ usage: scripts/gate [--acceptance SUITE]... [--protocol] [--print-plan]
                       working tree, and one that guessed would report
                       coverage it does not have.
   --protocol          the change touches PROTOCOL_VERSION; adds the CRDT
-                      workspace sweep on top of the default one.
-  --print-plan        print the exact gate commands and exit.
+                      workspace sweep on top of the default one, plus
+                      the build that sweep needs (see build-crdt below).
+  --print-plan        print the exact gate commands and exit. Names are
+                      stripped, so every line is runnable as printed.
+  --print-plan-named  print the plan as `name<TAB>command` lines and exit
+                      --- the same text the runner reads. Exists because
+                      a step's NAME is half its contract (a build failure
+                      must be attributed to build-crdt, not sweep-crdt)
+                      and --print-plan cannot show it.
   --print-target-dir  print this worktree's build directory and exit.
                       Creates nothing.
   --init              create the build directory and ownership marker,
@@ -57,6 +70,13 @@ usage: scripts/gate [--acceptance SUITE]... [--protocol] [--print-plan]
   --prune             list managed directories whose worktree is gone.
                       Deletes NOTHING without --force.
   --force             with --prune, actually delete.
+  --self-test         drive the real runner with a HARDCODED synthetic
+                      plan --- true, false, true --- to witness that a
+                      failing gate is named as ITSELF and that the suite
+                      CONTINUES past it. Runs no real gates. EXITS
+                      NON-ZERO BY DESIGN: the middle step fails on
+                      purpose, so a non-zero status is this mode
+                      working, not this mode broken.
 EOF
     exit 2
 }
@@ -198,9 +218,78 @@ emit_plan() {
     if [ "$PROTOCOL" = 1 ]; then
         # Section 3: touching PROTOCOL_VERSION STRENGTHENS the sweep
         # line, it does not replace it. Both sweeps run.
+        #
+        # THE BUILD IS A PRECONDITION OF THE SWEEP, not a courtesy. The
+        # crdt sweep spawns `pmacs-gpu` as a PROCESS, and no `cargo
+        # test` run produces that binary: pmacs-gpu has no tests/
+        # directory, so cargo never uplifts its bin to debug/pmacs-gpu.
+        # On a cold target directory the sweep therefore fails twelve
+        # gpu_invocation_acceptance::crdt::* tests on "build pmacs-gpu
+        # before this acceptance suite" --- and, worse, other crdt tests
+        # that render through the real binary SKIP THEMSELVES and report
+        # ok, so the missing build also voids coverage silently.
+        #
+        # WHY ONLY UNDER --protocol, measured rather than reasoned. On
+        # 2026-08-09, on a disposable target directory with
+        # debug/pmacs-gpu asserted ABSENT before each run and each sweep
+        # run alone from that cold state: the DEFAULT sweep exited 0 and
+        # left debug/pmacs-gpu still absent --- it never builds the
+        # binary and never needs it --- while the crdt sweep exited 101
+        # with exactly those twelve failures. So the default gate does
+        # not pay for this build.
+        #
+        # A SEPARATE NAMED STEP, never folded into the sweep command.
+        # `cargo build ... && cargo test ...` would report a BUILD
+        # failure under the name `sweep-crdt`, which is a wrong
+        # attribution in the one place this script exists to be
+        # trustworthy about. --self-test is what witnesses that the
+        # runner names the failing gate as itself.
+        printf 'build-crdt\tcargo build --workspace --no-default-features --features luajit,crdt\n'
         printf 'sweep-crdt\tcargo test --workspace --features crdt --no-fail-fast -- --skip basedpyright\n'
     fi
     printf 'diff-check\tgit diff --check\n'
+}
+
+# ---------------------------------------------------------------------
+# The synthetic plan behind --self-test: the runner held to its own
+# contract.
+#
+# WHY A MODE EXISTS AT ALL. tests/gate_script_acceptance.rs drives only
+# NO-GATES paths --- a test that ran the real suite would run the gate
+# suite inside the gate suite --- so plan assertions can prove a step's
+# name and its order and NOTHING about what the runner does when a step
+# fails. That left two stated properties with no way to observe them:
+# a failing gate is attributed to ITSELF (which is the whole reason
+# build-crdt is a separate step rather than `cargo build && cargo
+# test`), and the suite CONTINUES past it rather than aborting. Same
+# shape of argument as --init: verification needs a path it can drive
+# safely, and this one is not a second implementation --- it hands the
+# REAL runner loop a different plan file.
+#
+# THE PLAN IS A LITERAL, and that is the design, not a shortcut. The
+# obvious seam --- letting a caller supply PLAN_FILE --- would work,
+# and it would turn the runner's `eval` into a general command
+# executor. That is the same class of defect this script's own review
+# caught in --acceptance and fixed with a refusal at parse time;
+# reintroducing it in the tool whose purpose is to be trustworthy is
+# not a trade worth making. Nothing external supplies a command here.
+#
+# THREE LINES, AND THE THIRD IS LOAD-BEARING. With the failure LAST, a
+# runner that aborts and a runner that continues produce IDENTICAL
+# output, so the witness would pass on a runner doing the opposite of
+# the stated policy. The sentinel after the failure, asserted to have
+# written its own log, is the only thing that separates them.
+#
+# `true` and `false` are the entire workload, so this stays on the
+# cheap side of the suite. Whether `cargo build` really fails is
+# cargo's business; whether THIS SCRIPT names the right gate when a
+# command fails is the criterion, and that is orthogonal to which
+# command failed.
+# ---------------------------------------------------------------------
+emit_self_test_plan() {
+    printf 'self-pass\ttrue\n'
+    printf 'build-crdt\tfalse\n'
+    printf 'self-sentinel\ttrue\n'
 }
 
 # ---------------------------------------------------------------------
@@ -326,18 +415,64 @@ while [ $# -gt 0 ]; do
             shift 2 ;;
         --protocol)          PROTOCOL=1; shift ;;
         --print-plan)        MODE=plan; shift ;;
+        --print-plan-named)  MODE=plannamed; shift ;;
         --print-target-dir)  MODE=printdir; shift ;;
         --init)              MODE=init; shift ;;
         --prune)             MODE=prune; shift ;;
+        --self-test)         MODE=selftest; shift ;;
         --force)             FORCE=1; shift ;;
         -h|--help)           usage ;;
         *)                   echo "gate: unknown argument: $1" >&2; usage ;;
     esac
 done
 
+# ---------------------------------------------------------------------
+# Mode dispatch.
+#
+# TWO RENDERINGS OF ONE PLAN, and the second exists because the first
+# hid a defect. `--print-plan` pipes through `cut -f2-` so every printed
+# line is a command a reader can copy and run --- and that same cut is
+# why the emitted NAMES never reached a test. Not cosmetic: the entire
+# reason build-crdt is a separate step is that a build failure must be
+# attributed to `build-crdt` rather than to `sweep-crdt`, and with the
+# names stripped, RENAMING THE REAL BUILD STEP TO `sweep-crdt` left the
+# ordering assertion green. The witness could not reach the step it
+# named. --self-test could not either --- it hardcodes the string
+# `build-crdt` in its own synthetic plan, which proves things about the
+# RUNNER and nothing about this emitter.
+#
+# --print-plan-named prints emit_plan VERBATIM: the same
+# `name<TAB>command` text the runner reads back from PLAN_FILE, so a
+# test can assert both halves of a real step together and a rename
+# cannot pass.
+#
+# WHY THIS RATHER THAN THE TWO ALTERNATIVES.
+#
+#   Injecting PLAN_FILE would let a test hand the runner a plan and read
+#   the names back, and it would turn the runner's `eval` into a general
+#   command executor --- the same class of defect this script's own
+#   review caught in --acceptance and fixed with a parse-time refusal.
+#   Declined there; declined here for the same reason.
+#
+#   Re-deriving the plan test-side (sourcing this file, or parsing
+#   emit_plan out of it) would be a SECOND implementation of the thing
+#   under test, which is the exact failure being repaired one level up.
+#
+# A DISTINCT MODE, not a modifier on --print-plan: there is then no
+# `--with-names` without `--print-plan` whose behaviour has to be
+# defined, and --print-plan's contract --- runnable lines --- is left
+# exactly as it was. Both modes call emit_plan, and so does the runner,
+# so neither rendering can drift from what actually executes;
+# tests/gate_script_acceptance.rs pins that the stripped rendering is
+# the named one minus its names, so this stays true by test and not
+# only by reading.
+# ---------------------------------------------------------------------
 case $MODE in
     plan)
         emit_plan | cut -f2-
+        exit 0 ;;
+    plannamed)
+        emit_plan
         exit 0 ;;
     printdir)
         target_dir_for "$(canon "$(worktree_root)")"
@@ -397,11 +532,23 @@ echo "gate: logs       $LOGDIR"
 # trap removes it, so it should be gone once the run finishes.
 echo "gate: ambient    $AMBIENT"
 [ -n "$ACCEPTANCE" ] && echo "gate: acceptance $ACCEPTANCE"
-[ "$PROTOCOL" = 1 ] && echo "gate: protocol   yes (CRDT workspace sweep added)"
+[ "$PROTOCOL" = 1 ] && echo "gate: protocol   yes (CRDT build + workspace sweep added)"
+if [ "$MODE" = selftest ]; then
+    echo "gate: SELF-TEST  hardcoded synthetic plan --- NO real gate runs."
+    echo "gate:            the middle step fails ON PURPOSE, so a non-zero"
+    echo "gate:            exit is this mode working, not this mode broken."
+fi
 echo
 
+# The self-test hands the REAL runner loop below a different plan file.
+# Everything after this point is shared, which is the point: a witness
+# that exercised its own copy of the runner would witness nothing.
 PLAN_FILE="$LOGDIR/plan.txt"
-emit_plan > "$PLAN_FILE"
+if [ "$MODE" = selftest ]; then
+    emit_self_test_plan > "$PLAN_FILE"
+else
+    emit_plan > "$PLAN_FILE"
+fi
 
 N=0
 FAILED=''
