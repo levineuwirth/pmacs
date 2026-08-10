@@ -1098,7 +1098,24 @@ pub enum InstanceMessage {
     /// v12). The minibuffer is a single *global* core instance, so this
     /// is bufferless; the producer still emits it from the active-buffer
     /// viewport. `prompt: None` clears the GUI. Cached-compare
-    /// suppressed like `SearchPrompt`; daemon-gated `>= 12`.
+    /// suppressed like `SearchPrompt`; daemon-gated `12..=22`.
+    ///
+    /// # FROZEN — this variant's encoding must not move
+    ///
+    /// Discovery Stage 2 (v23) needed richer rows, and postcard is not
+    /// self-describing: enum variants encode by index and fields by
+    /// position, so widening `candidates` in place would make every
+    /// v12–v22 peer **mis-decode** these bytes rather than ignore them.
+    /// Gating the widened shape at `>= 23` would not rescue them either
+    /// — with only one variant to send, they would receive no minibuffer
+    /// message at all. So the rich form went into a new appended
+    /// variant, [`Self::MinibufferPromptRows`], and this one is retained
+    /// unchanged as what a `12..=22` peer receives.
+    ///
+    /// Its bytes are pinned literally by
+    /// `minibuffer_prompt_v12_wire_bytes_are_frozen` in
+    /// `src/protocol.rs` — a round-trip cannot detect a field addition,
+    /// because both sides simply learn the new shape.
     MinibufferPrompt {
         /// The prompt string (e.g. `"M-x "`), or `None` when no
         /// minibuffer is open.
@@ -1299,6 +1316,59 @@ pub enum InstanceMessage {
         /// Whether that buffer's long lines wrap.
         wrap: bool,
     },
+    /// Discovery Stage 2 (protocol v23): the minibuffer prompt with
+    /// **structured rows** — a label and an optional one-line detail —
+    /// instead of bare candidate strings.
+    ///
+    /// # Why a second variant rather than a wider `MinibufferPrompt`
+    ///
+    /// `Command.description` already exists and is already rendered by
+    /// `help.list-commands`; it is missing at the one moment it would
+    /// change a decision, which is the `M-x` row. Carrying it means
+    /// widening the minibuffer's candidate shape — and postcard encodes
+    /// fields **positionally**, so changing `candidates: Vec<String>` in
+    /// place is a wire break, not an evolution: a v22 peer mis-decodes
+    /// the bytes rather than skipping them. Gating the changed variant
+    /// at `>= 23` does not rescue it either, because a `12..=22` peer
+    /// would then receive no minibuffer message at all. Compatibility
+    /// requires the old shape to still exist *and still be sent*, so
+    /// [`Self::MinibufferPrompt`] is frozen and this is appended beside
+    /// it.
+    ///
+    /// # Exactly one of the two reaches any peer
+    ///
+    /// The producer selects on the session's negotiated version and the
+    /// daemon's write loop gates both directions: `>= 23` receives this
+    /// and never the legacy variant; `12..=22` receives the legacy
+    /// variant and never this. Sending both would double-render; sending
+    /// neither is the bug gating alone would have caused. The close
+    /// message must use the same family as the open — a rows session
+    /// closed by a legacy clear leaves a popup on screen forever.
+    ///
+    /// Otherwise this mirrors [`Self::MinibufferPrompt`] exactly:
+    /// bufferless (one global core minibuffer), `prompt: None` clears
+    /// the GUI, cached-compare suppressed, emitted from the
+    /// active-buffer viewport.
+    ///
+    /// Appended after [`Self::LineWrapFacts`], the final v22 variant, so
+    /// no existing postcard discriminant moves.
+    MinibufferPromptRows {
+        /// The prompt string (e.g. `"M-x "`), or `None` when no
+        /// minibuffer is open.
+        prompt: Option<String>,
+        /// The text typed so far.
+        input: String,
+        /// Codepoints before the cursor within `input` (the caret
+        /// position).
+        cursor: u32,
+        /// A windowed slice of the completion candidates (best-first,
+        /// already filtered/sorted by the core), `<= MB_VISIBLE`.
+        rows: Vec<MinibufferRow>,
+        /// Highlighted row *within* `rows`, or `None`.
+        selected: Option<u32>,
+        /// Total candidate count (the window is a slice of this).
+        total: u32,
+    },
 }
 
 /// One resolved UI face for [`InstanceMessage::ThemeFacts`]: a full
@@ -1391,6 +1461,35 @@ pub struct CompletionPopupRow {
     /// unknown codes to a plain-text glyph, per the LSP contract).
     pub kind: u8,
     /// Optional one-line detail rendered after the label.
+    pub detail: Option<String>,
+}
+
+/// One row of the minibuffer's candidate list on the wire
+/// ([`InstanceMessage::MinibufferPromptRows`], Discovery Stage 2,
+/// protocol v23).
+///
+/// # Why this is not `CompletionPopupRow`
+///
+/// Reuse was tempting and is wrong. [`CompletionPopupRow::kind`] is an
+/// LSP `CompletionItemKind` code with a documented contract, and an
+/// `M-x` command is not an LSP completion item — it has no honest value
+/// for that field. Reusing it would mean inventing a fake kind or
+/// declaring unknown everywhere: a type whose invariant is "meaningless
+/// in half its uses". If a category is wanted later it arrives with
+/// `Command.category`, typed as what it actually is rather than
+/// borrowed from LSP.
+///
+/// `detail` is optional **per row** because `pmacs.minibuffer.read`
+/// serves many sources — file paths, buffer names, settings — and only
+/// some have a natural detail. A source with none leaves it `None` and
+/// renders exactly as it did before v23.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MinibufferRow {
+    /// Display label — the candidate itself, and the value acceptance
+    /// resolves to.
+    pub label: String,
+    /// Optional one-line detail rendered after the label (a command's
+    /// description, for `M-x`).
     pub detail: Option<String>,
 }
 
@@ -1731,7 +1830,17 @@ pub enum ResourceBody {
 /// directions: a v20 peer neither receives `PanelFrame` nor is placed in
 /// a side window, because denying only the events would leave its
 /// window invisible.
-pub const PROTOCOL_VERSION: u32 = 22;
+///
+/// Discovery Stage 2: bumped 22 → 23 for
+/// [`InstanceMessage::MinibufferPromptRows`] — the minibuffer's
+/// candidate rows gaining an optional per-row detail. Appended after
+/// `LineWrapFacts`, the final v22 variant, so no existing discriminant
+/// moves; [`InstanceMessage::MinibufferPrompt`] is retained **frozen**
+/// and still sent to `12..=22` peers, because postcard's positional
+/// encoding makes an in-place widening a wire break rather than an
+/// evolution, and gating the widened form would have left those peers
+/// with no minibuffer message at all.
+pub const PROTOCOL_VERSION: u32 = 23;
 
 /// Protocol version placed in the daemon's server-first [`Hello`].
 ///
@@ -1905,8 +2014,15 @@ pub fn negotiated_session_version(frontend_offer: u32) -> u32 {
 /// [`ADVERTISED_PROTOCOL_VERSION`] does not move — a v21 frontend
 /// negotiates v21, never receives the variant, and keeps its own
 /// behavior.
+///
+/// Discovery Stage 2: extended to `[6, ..., 23]` for
+/// [`InstanceMessage::MinibufferPromptRows`]. Additive and daemon-gated,
+/// and unusually the gate is a **range on both sides**: a `12..=22` peer
+/// keeps receiving the frozen [`InstanceMessage::MinibufferPrompt`], a
+/// `>= 23` peer receives only the rows form, and no peer ever receives
+/// both. [`ADVERTISED_PROTOCOL_VERSION`] does not move.
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[
-    6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+    6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
 ];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if

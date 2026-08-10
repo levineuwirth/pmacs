@@ -337,8 +337,9 @@ fn one_daemon_serves_a_v21_panel_session_and_a_shipped_v20_client() {
 #[test]
 fn the_baseline_stays_and_the_counter_offer_activates() {
     // A deliberate tripwire: bumping the wire must be a conscious edit
-    // here, not a silent one. v22 is `LineWrapFacts` (long-lines Stage 3).
-    assert_eq!(PROTOCOL_VERSION, 22);
+    // here, not a silent one. v23 is `MinibufferPromptRows` (Discovery
+    // Stage 2); v22 was `LineWrapFacts` (long-lines Stage 3).
+    assert_eq!(PROTOCOL_VERSION, 23);
     assert_eq!(
         ADVERTISED_PROTOCOL_VERSION, 20,
         "moving this is the incompatible act the mechanism exists to avoid"
@@ -352,10 +353,10 @@ fn the_baseline_stays_and_the_counter_offer_activates() {
     // This replaces `assert_eq!(PANEL_MIN_VERSION, PROTOCOL_VERSION)`,
     // which asserted a **coincidence**: panel frames were the newest
     // feature when it was written, so their minimum happened to equal
-    // the current wire. Any later feature falsifies that — v22 is the
-    // first, and the equality would have had to be edited on every
-    // subsequent bump while telling a reader something that was never
-    // the contract.
+    // the current wire. Any later feature falsifies that — v22 was the
+    // first and v23 the second, and the equality would have had to be
+    // edited on every subsequent bump while telling a reader something
+    // that was never the contract.
     // `const` blocks, matching the line above: these are compile-time
     // constants, so a runtime `assert!` is both a clippy error and a
     // weaker check than the language already offers.

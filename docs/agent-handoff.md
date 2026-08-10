@@ -2598,10 +2598,29 @@ cannot advertise 21 without stranding existing v20 clients before
 `AttachRequest`. v15 = `CompletionPopup` + `StatusFacts.message`; v16 =
 `ThemeFacts`; v17 = `FontFacts`; v18 = `StatuslineSegments`; v19 = the vterm
 terminal family; v20 = semantic `SessionBootstrapRequest` plus appended
-`InitialTargetResult`; v21 reserves the panel frame/event family. New wire
+`InitialTargetResult`; v21 reserves the panel frame/event family;
+v22 = `LineWrapFacts`; v23 = `MinibufferPromptRows`. New wire
 surface ⇒ bump + both-frontends support + acceptance. An APPENDED variant
 must be guarded by a byte pin on the PREVIOUS final variant — its own
 round-trip cannot detect a discriminant shift.
+
+**A SUPERSEDED variant can be frozen rather than widened, and v23 is the
+first case.** Discovery Stage 2 needed richer minibuffer rows.
+Widening `MinibufferPrompt` in place was not an option — postcard
+encodes fields positionally, so every v12–v22 peer would **mis-decode**
+the bytes rather than ignore them — and gating the widened form at
+`>= 23` would have left those peers with **no minibuffer message at
+all**, because there would have been only one variant to gate.
+Compatibility requires the old shape to still exist *and still be sent*.
+So `MinibufferPrompt` is retained unchanged for `12..=22`,
+`MinibufferPromptRows` is appended for `>= 23`, and the daemon gate is a
+**range on both sides** so exactly one variant reaches any peer.
+Two consequences worth carrying forward: a frozen variant needs a
+**literal byte fixture** (`assert_eq!(encoded, LEGACY_BYTES)`), because a
+round-trip encodes and decodes with the same types and so freezes
+nothing; and the CLOSE message must use the same variant family as the
+OPEN, or a session closed by the other family's clear leaves its surface
+on screen forever.
 
 **Fake LSP** (`src/bin/pmacs_fake_lsp.rs`) modes: `fullonly`,
 `rangeonly`, `rangeonly16` (UTF-16 + fail-closed bounds validation),

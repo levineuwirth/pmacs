@@ -265,6 +265,128 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
+## Discovery Stage 2 — PR #228 OPEN, **MERGE-BLOCKED**
+
+**PR #228** — https://github.com/levineuwirth/pmacs/pull/228. Opened
+2026-08-09 at `2d298dd`. **Open for review, not for merge.**
+
+**The block is a gate-integrity problem, not backlog hygiene.** This
+lane's gate is `scripts/gate --protocol`, which promises the CRDT
+workspace sweep. That sweep's documented precondition is
+`cargo build --workspace --no-default-features --features luajit,crdt`
+(handoff §5), and **the script does not run it** — confirmed by reading
+its plan emitter. On a fresh per-worktree target directory the sweep
+fails on twelve `gpu_invocation_acceptance` tests missing the
+`pmacs-gpu` binary, so a `--protocol` result can be decided by the
+state of the build directory rather than by the diff.
+
+Latent until #225 gave each worktree its own target dir — a shared one
+usually already had `pmacs-gpu` built, satisfying the precondition by
+accident. It surfaced on this branch's first gate run.
+
+**Unblocking requires both:** the `scripts/gate` repair, in its own
+narrow framing and its own PR (explicitly **not** folded into this
+feature branch), and then a **fresh-target rerun of this branch's
+protocol gate** under the repaired script.
+
+**Written with the lane's first commit**, per the standing correction
+from #171 and #215.
+
+**Branch `discovery-stage2`**, base `githubsucks/main` @ `4bc55e8`
+(the #225 merge). **`githubsucks/discovery-stage2` is the authoritative
+tip** — the ref, not a SHA. Recover with
+`git fetch githubsucks && git checkout discovery-stage2`.
+
+- **Framing `docs/discovery-stage2-framing.md`, revision 3, APPROVED
+  2026-08-09** after three review rounds. Each round found the previous
+  one reasoning about a mechanism instead of reading it — an in-place
+  field change that postcard cannot make compatible, a TUI that never
+  reads the message at all, a round-trip test that freezes nothing, a
+  cache hazard the per-peer render state makes impossible, and a
+  clipping rule unachievable at narrow widths.
+  Scope: `COHERENCE.md` §5's "M-x rows are still bare names".
+  Descriptions already exist on `Command` and are already rendered by
+  `help.list-commands`; they are missing at the one moment they would
+  change a decision.
+- **PROTOCOL BUMP v22 → v23, and this lane HOLDS THE BUMP SLOT.**
+  Additive: a new `MinibufferPromptRows` variant **appended** to the
+  enum, with `MinibufferPrompt` **frozen** for v12–v22. An in-place
+  field change is a wire break — postcard encodes positionally, and
+  that variant is sent to every peer `>= 12` (`src/daemon.rs:1472`).
+- **Git Stage 2 (gutter markers) also needs a bump and must wait for
+  this to land.** Git Stage 1 is no-wire and runs beside it.
+- **Two halves, only one of which is wire work.** `pmacs-gpu` renders
+  the new variant. **The grid TUI never reads `MinibufferPrompt` at
+  all** — it paints from `core.minibuffer` and renders
+  `format!("  [{cand}]")` (`src/editor.rs:5484`), so its half is a
+  local formatting change reading the registry directly. A multi-row
+  TUI chooser is explicitly NOT this lane.
+- **Gates:** `scripts/gate --protocol --acceptance
+  discovery_stage2_acceptance --acceptance m9_6_acceptance --acceptance
+  m9_7_acceptance --acceptance m9_8_acceptance` — the strengthened
+  two-configuration sweep, which is what `--protocol` exists for. The
+  three m9 suites are named because the PR #228 review round measured
+  them as this change's blast radius (see the description-clip bullet);
+  their continued passing is on the record rather than assumed.
+  **`--protocol` does NOT run its own documented precondition**
+  (`cargo build --workspace --no-default-features --features
+  luajit,crdt`, handoff §5) — run it by hand first or twelve
+  `gpu_invocation_acceptance` tests fail on a missing `pmacs-gpu`
+  binary. That omission is the `gate-protocol-build` lane's, not this
+  one's.
+- **IMPLEMENTED.** `PROTOCOL_VERSION` is 23,
+  `ADVERTISED_PROTOCOL_VERSION` is untouched at 20. New suite
+  `tests/discovery_stage2_acceptance.rs`; the daemon half is
+  `crdt`-gated (a semantic session is necessarily a text replica) and
+  runs one daemon serving a v22 and a v23 session simultaneously.
+- **Multi-line descriptions are clipped AT THE SURFACE, and
+  registration-level rejection was investigated and REJECTED ON
+  EVIDENCE — do not re-propose it.** PR #228 review found the real
+  hazard: the GPU dropdown derives its height, visible window and
+  highlight offset from `rows.len()` (one logical row per candidate),
+  so a detail carrying a line break misaligns every row below it; the
+  TUI writes into a single-row band. The obvious fix — reject CR/LF in
+  `CommandRegistry::define` — was implemented and measured, and it
+  **fails 36 tests across `m9_6`/`m9_7`/`m9_8`**, because MCP tool
+  registration renders a whole schema block into `description`
+  (`tests/fixtures/pmacs-mcp-tools/init.lua:272`,
+  `table.concat(lines, "\n")`, used at `:496`) and
+  **`tests/m9_6_acceptance.rs:583-598` asserts four separate lines of
+  it** — tool text, `Arguments:`, and two per-argument lines. No
+  single-line rendering satisfies those assertions, so a registry guard
+  could only go green by deleting a shipped acceptance criterion.
+  The one-line constraint belongs to the surfaces that have it:
+  `Command::description_first_line` clips, both single-row consumers
+  call it, and the full text still reaches `describe-command` /
+  `help.list-commands` untouched. Precedent already in-tree — the same
+  MCP fixture clips a tool RESULT to its first line because *"a
+  multi-line set_status would corrupt the row layout"* (`:277-285`).
+  **A startup census is not a corpus census**: booting an
+  `EditorState` and scanning all 180 registered descriptions found zero
+  offenders, because MCP registers at RUNTIME and builds the string by
+  concatenation — invisible to both that census and a grep for literals.
+  The workspace sweep is what caught it.
+- **The freeze is enforced by LITERAL byte fixtures**, not a round-trip
+  — `minibuffer_prompt_v12_wire_bytes_are_frozen` in `src/protocol.rs`,
+  the first such fixture in this repo. Bite-verified: reordering two
+  fields of `MinibufferPrompt` leaves
+  `minibuffer_prompt_round_trips_through_postcard` **passing** and fails
+  the fixture, which is exactly the hazard a round-trip cannot see.
+- **Version assertions updated (five, each read before editing):**
+  `src/protocol.rs` — the `PROTOCOL_VERSION == 22` tripwire (renamed
+  `protocol_version_is_twenty_three_for_minibuffer_prompt_rows`) and
+  `supported_protocol_versions_resume_ladder_on_v6_floor`'s
+  accepted/rejected ranges; `tests/statusline_segments_acceptance.rs`
+  (version + supported range + the `!supported` ceiling);
+  `tests/bottom_panel_stage2b_gpu_acceptance.rs`;
+  `tests/vterm_stage3_acceptance.rs`. **No `ADVERTISED_PROTOCOL_VERSION`
+  assertion fired**, which is the pin doing its job.
+- **No cross-version cache test, deliberately** (framing §3.2/§6):
+  `SemanticRenderState::for_peer` bakes the negotiated version in at
+  attach and is dropped at detach, so a cache cannot span two versions.
+  A test for an impossible condition passes forever while teaching the
+  next reader that the hazard is real.
+
 ## LSP LaTeX coverage — IMPLEMENTED, gates green, no PR yet
 
 **Written with the lane's first commit**, per the standing correction
@@ -603,6 +725,7 @@ authoritative tip** — the ref, not a SHA. Recover with
   — added in the second round — a **rename of either** the build or the
   sweep step each fail the suite.
 ||||||| parent of 72bbb96 (docs: LSP LaTeX coverage framing revision 2, on a branch at last)
+||||||| parent of 312ec7a (docs: frame Discovery Stage 2 (revision 2) — M-x rows)
 
 ## QoL arc retirement — PR #224 OPEN (docs only)
 

@@ -66,7 +66,28 @@ impl SourceLocation {
 pub struct Command {
     /// Unique name (e.g. `buffer.save`).
     pub name: String,
-    /// One-line human-readable description (R42, required).
+    /// Human-readable description. Required and non-empty after trim
+    /// (R42), but otherwise **free-form, and legitimately multi-line**.
+    ///
+    /// # Do not add a registration-time one-line guard
+    ///
+    /// This doc used to read "one-line human-readable description",
+    /// which was an aspiration rather than the contract: MCP tool
+    /// registration renders a whole schema block in here — the tool's
+    /// text, a blank line, `Arguments:`, then one line per argument
+    /// (`tests/fixtures/pmacs-mcp-tools/init.lua:272`, a
+    /// `table.concat(lines, "\n")`) — and `m9_6_acceptance.rs:583-598`
+    /// asserts all four of those lines. Rejecting CR/LF in
+    /// [`CommandRegistry::define`] was tried, measured, and abandoned:
+    /// it fails 36 tests across `m9_6`/`m9_7`/`m9_8` and could only be
+    /// made green by deleting a shipped acceptance criterion.
+    ///
+    /// The one-line constraint belongs to the **surfaces that have
+    /// it**, so a consumer rendering into a single row clips with
+    /// [`Self::description_first_line`] — the minibuffer band and the
+    /// completion dropdown both do. The full text stays intact for
+    /// `describe-command` and `help.list-commands`, which is what keeps
+    /// this a rendering decision rather than data loss.
     pub description: String,
     /// Where the command was defined.
     pub source: SourceLocation,
@@ -77,6 +98,53 @@ pub struct Command {
     /// applies in the current state. The command palette (T M2.7) uses
     /// it to gray out unavailable entries.
     pub predicate: Option<Function>,
+}
+
+impl Command {
+    /// [`Self::description`] clipped to its first line, for a consumer
+    /// rendering into a surface that has exactly one row.
+    ///
+    /// The description is free-form and may carry a whole schema block
+    /// (see that field). Two surfaces cannot show one: the grid TUI
+    /// writes the selected candidate into a single-row suffix on the
+    /// minibuffer band, and the GPU dropdown derives its height, its
+    /// visible window and its selection-highlight offset from
+    /// `rows.len()` — **one logical row per candidate** — so a detail
+    /// that shapes into more physical lines than that misaligns every
+    /// row below it and the highlight with it.
+    ///
+    /// Clipping here rather than refusing at registration follows the
+    /// precedent already in this tree: the MCP fixture's result
+    /// delivery keeps only the first line of a tool result because
+    /// *"a multi-line `set_status` would corrupt the row layout"*
+    /// (`tests/fixtures/pmacs-mcp-tools/init.lua:277-285`), leaving
+    /// width clipping to the frontend. Same hazard class, same
+    /// resolution.
+    ///
+    /// **No ellipsis or truncation marker**, matching that precedent
+    /// and the minibuffer's own width rule, which rejects stub markers
+    /// for the same reason: the full text is one `describe-command`
+    /// away, and a marker in a candidate row reads as part of the
+    /// candidate.
+    #[must_use]
+    pub fn description_first_line(&self) -> &str {
+        first_line(&self.description)
+    }
+}
+
+/// The prefix of `text` before its first line break.
+///
+/// Breaks on CR **or** LF, not LF alone: a lone CR ends a line on
+/// classic-Mac-era input and is the leading half of a CRLF, so an
+/// LF-only clip would pass a bare `\r` straight through to a
+/// single-row surface — and a CR-only clip would do the same for `\n`.
+/// Splitting on the first of either handles all three forms with one
+/// scan, since CRLF's `\r` comes first.
+fn first_line(text: &str) -> &str {
+    match text.find(['\n', '\r']) {
+        Some(break_at) => &text[..break_at],
+        None => text,
+    }
 }
 
 /// Errors raised by the command registry.
@@ -269,6 +337,83 @@ mod tests {
             r.define(c),
             Err(CommandError::MissingDescription { .. })
         ));
+    }
+
+    #[test]
+    fn a_multi_line_description_registers_and_clips_to_its_first_line() {
+        // Registration accepts it — MCP tool registration renders a
+        // whole schema block into `description` and
+        // `m9_6_acceptance.rs:583-598` asserts four of its lines, so a
+        // one-line guard here would delete a shipped contract. The
+        // one-line constraint lives at the single-row surfaces, which
+        // read `description_first_line`.
+        //
+        // All three break forms: a clip that split on `\n` alone would
+        // pass a bare `\r` through, and one that split on `\r` alone
+        // would pass `\n` through.
+        let lua = Lua::new();
+        for (label, description) in [
+            (
+                "LF",
+                "Greet someone.\n\nArguments:\n  name (string, required)",
+            ),
+            (
+                "CR",
+                "Greet someone.\r\rArguments:\r  name (string, required)",
+            ),
+            (
+                "CRLF",
+                "Greet someone.\r\n\r\nArguments:\r\n  name (string, required)",
+            ),
+        ] {
+            let mut r = CommandRegistry::new();
+            r.define(make_command(&lua, "mcp.greet", description))
+                .unwrap_or_else(|e| panic!("{label}: a schema block must still register: {e}"));
+            let cmd = r.get("mcp.greet").expect("registered");
+            assert_eq!(
+                cmd.description, description,
+                "{label}: the registry stores the description verbatim — the clip is a \
+                 rendering decision, so `describe-command` must still see every line"
+            );
+            assert_eq!(
+                cmd.description_first_line(),
+                "Greet someone.",
+                "{label}: a single-row surface gets the first line only"
+            );
+            assert!(
+                !cmd.description_first_line().contains(['\n', '\r']),
+                "{label}: the clipped form must carry no break at all"
+            );
+        }
+    }
+
+    #[test]
+    fn a_single_line_description_is_byte_identical_after_the_clip() {
+        // The other half: the clip must not tighten past its purpose.
+        // Interior whitespace, punctuation and non-ASCII all survive,
+        // and there is no ellipsis or truncation marker.
+        let lua = Lua::new();
+        let mut r = CommandRegistry::new();
+        let description = "Write the buffer to its file — with a dash, and \ttabs.";
+        r.define(make_command(&lua, "buffer.save", description))
+            .expect("registers");
+        assert_eq!(
+            r.get("buffer.save").unwrap().description_first_line(),
+            description,
+            "a description with no break is returned unchanged"
+        );
+    }
+
+    #[test]
+    fn a_description_whose_first_line_is_empty_clips_to_empty() {
+        // The case the producer turns into `None` rather than
+        // `Some("")`: a leading break leaves nothing to render, and a
+        // `Some("")` detail would draw trailing padding after the label.
+        let lua = Lua::new();
+        let mut r = CommandRegistry::new();
+        r.define(make_command(&lua, "x", "\nArguments:\n  a (string)"))
+            .expect("registers");
+        assert_eq!(r.get("x").unwrap().description_first_line(), "");
     }
 
     #[test]
