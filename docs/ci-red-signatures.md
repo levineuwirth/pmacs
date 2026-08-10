@@ -773,3 +773,29 @@ very mistake U3 is named for.
 | **what is NOT** | everything else. Without the assertion text this cannot be matched against a future occurrence, which is the whole purpose of a row here |
 | **why it matters anyway** | it is the **third distinct macOS selector** to red in one session, after U4 (`full_grid_resync`) and U5 (`ctrl_c_during_reconnect`). Three unrelated selectors failing on the macOS legs suggests a **background failure rate on that platform** rather than three independent test bugs — and that materially affects any equal-rate reasoning about which branch a failure "landed on" |
 | **next occurrence** | **read the log BEFORE rerunning anything.** That is U3's stated lesson and this row is its fourth violation |
+
+### U9 — a PTY test and a budget test red **together** in one `11-sweep`, with an in-run control
+
+Recorded on the `destination-capture` merge tree, 2026-08-10, in the
+gate run that was meant to clear PR #231.
+
+**This row's value is its control, not its selectors.** U6 and U7 could
+only compare a red run against a *different* run. Here both selectors
+ran green **inside the same gate invocation**, minutes earlier, on the
+same tree and machine — `03-lib` (1928 passed, 0 failed) and
+`04-lib-crdt` (2113 passed, 0 failed) — and then failed in `11-sweep`.
+Whatever this is, it is not the tree.
+
+| field | value |
+|---|---|
+| **selector** | `--lib process::tests::m6_1_pty_canonical_mode_keeps_kernel_echo` **and** `editor::tests::composition_overhead_under_ten_percent`, failing in the same `11-sweep` step |
+| **job / flavor** | local (Linux), `scripts/gate` step `11-sweep` (`cargo test --workspace --no-fail-fast -- --skip basedpyright`), fresh per-lane target dir, no sibling worktrees building |
+| **required fragments** | ``canonical mode should leave echo enabled (no `-echo` flag); stty -a output was: ""`` **and** `composition machinery added more than 10% overhead` |
+| **NOT fragments** | the measured numbers (`1.613`, `single=191935 ns`, `dispatch=309602 ns`) and every `:LINE` suffix — occurrence-specific |
+| **status** | **one occurrence; INTERMITTENT — the identical sweep command on the same tree was green (118 targets, 1928 passed, exit 0)** |
+| **what IS established** | intermittence, with the strongest available exclusion of the tree: green in two earlier steps of the **same run**, green isolated afterwards (`2 passed`, 1.70 s), green on a full sweep rerun. Both assertions are **timing-sensitive by construction** — one reads collected child output within a deadline, the other measures wall-clock composition overhead (observed 1.613× against a 1.10× budget; 61.3% dispatch and 124.6% realistic overhead) |
+| **what is NOT** | cause, and the load confound is **partially measured but NOT controlled**. The failing sweep ran inside a full gate; the green rerun started at load average 1.98 with the 5-minute figure still at 8.03 from that gate. Different conditions is not a measurement of the mechanism, and this row does not treat it as one |
+| **the structural difference worth testing next** | `cargo test --workspace` runs **many test binaries concurrently**; `--lib` runs **one**. That is a difference in kind between the passing steps and the failing one, not merely a difference in load average — and it is the first candidate this family has had that is checkable rather than atmospheric. **Discriminating control:** rerun the sweep with test-binary concurrency pinned to 1, and separately run the `--lib` binary alone under synthetic load. A red under synthetic load at low sweep concurrency implicates load; a red at high concurrency and low load implicates the concurrency itself |
+| **relation to U2 — a NEAR MISS, do not match it there** | the PTY fragment is U2's exact family (`stty -a output was: ""`), but U2's selector field names only `m6_1_pty_raw_mode_disables_kernel_echo`. U2's occurrence 2 saw raw **and** canonical fail together; here **canonical redded alone and raw passed**, which U2's evidence has never shown. It is recorded here rather than folded into U2 so that the "canonical alone" case stays visible |
+| **relation to U6 — its own instruction, honoured** | `composition_overhead_under_ten_percent` is one of U6's two selectors, and U6 says plainly: "If a future run reds **one** of these without the other, that is a different incident and should be judged as one." It redded without `criterion_1_end_of_line_typing…`, in a different step, at a far larger margin (1.613× here against U6's 1.297×). Judged as a different incident, as instructed |
+| **what this row does NOT assert** | that the two selectors share a mechanism. They failed together once; they belong to different subsystems; and U7 already refused this exact merge for U6. The **co-failure inside one step with an in-run green control** is the signature — not either name, and not a shared cause |
