@@ -529,7 +529,7 @@ the authoritative tip** — the ref, not a SHA. Recover with
     `20260809T200120Z-2427128`; load average 12.9/23.9 with sibling
     lanes building). All three pass in isolated reruns, none reds twice,
     and the diff is two string literals, their doc comments and one
-    test — no render path is touched. Recorded as **U5** in
+    test — no render path is touched. Recorded as **U7** in
     `docs/ci-red-signatures.md` rather than re-run away silently.
     `journey_acceptance` **47/47 UNTOUCHED** and the three
     `#pmacs.process.list()` leak detectors unedited — the stop signals

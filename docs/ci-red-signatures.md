@@ -630,23 +630,9 @@ it again here by piping a sweep through `grep`. The fix is mechanical:
 stream. A signature that is cheap to capture and impossible to
 reconstruct should never be traded for terminal brevity.
 
-> [!IMPORTANT]
-> **RENUMBER THESE TO U6 AND U7 WHEN THIS LANE REBASES.** The
-> `gate-protocol-build` lane independently defines its own **U4** and
-> **U5** (a macOS `lua54` PTY-resize failure and a Ctrl-C-as-`SIGINT`
-> failure), and it merges **first** — so on `main` those ids are taken.
->
-> A rebase that resolves the textual conflict without renumbering leaves
-> **two different incidents sharing an id**, which is exactly the
-> failure this file's matching rule exists to prevent.
->
-> **Every site, so none is missed:**
-> 1. this heading (`### U4 …`)
-> 2. `### U5 …` below
-> 3. U5's **relation to U4** field, which names it in prose
-> 4. `docs/active-work.md` — "Recorded as **U5**" in the worker lane entry
+*(Renumbered from U4/U5 to **U6/U7** on the rebase onto `0857bf4`: `gate-protocol-build` landed its own U4/U5 in #229, and git merged both files **without a conflict**, producing duplicate ids across four sites. The pre-rebase warning is retired here because it has been carried out.)*
 
-### U4 — two wall-clock budget tests fail together in one `lib-crdt` step
+### U6 — two wall-clock budget tests fail together in one `lib-crdt` step
 
 Recorded during worker identity Stage 1 review round 2, 2026-08-09, in
 the same gate run that produced R7's third occurrence. **Fragments were
@@ -670,7 +656,7 @@ regression in two unrelated subsystems at once is far less likely than
 one loaded machine. If a future run reds **one** of these without the
 other, that is a different incident and should be judged as one.
 
-### U5 — a *different* wall-clock render-budget test reds each sweep
+### U7 — a *different* wall-clock render-budget test reds each sweep
 
 Recorded during worker identity Stage 1 review round 3, 2026-08-09.
 **Two consecutive `scripts/gate` runs of the same command, on the same
@@ -685,7 +671,7 @@ is the signature, and it is a stronger one than any single selector.
 | **status** | **new incident, three selectors, none reproduced** |
 | **what IS established** | all three are **wall-clock render-budget assertions** (224ms and 258ms against a 200ms budget; 114ms against a 100ms budget), so all three are load-sensitive by construction. Each was green in an isolated rerun of its own selector, no selector reds twice, and **the third run of the same command on the same tree was green on all 13 steps** (log `20260809T200907Z-2672209`). The observing diff is **two string literals, their doc comments and one test** — it touches no render path at all, and cannot |
 | **what is NOT** | that load caused it. The one-shared-`CARGO_TARGET_DIR` confound is real and again **unmeasured**, so it stays a rival explanation rather than a finding |
-| **relation to U4** | same shape, different step and different tests: U4 is two budget tests in `04-lib-crdt` failing **together**; this is three render-budget tests in `12-sweep` failing **one per run**. Kept separate rather than merged, because merging would assert a shared mechanism nothing here shows |
+| **relation to U6** | same shape, different step and different tests: U6 is two budget tests in `04-lib-crdt` failing **together**; this is three render-budget tests in `12-sweep` failing **one per run**. Kept separate rather than merged, because merging would assert a shared mechanism nothing here shows |
 
 **The rotating selector is the thing to match.** A regression that
 moved between three unrelated render paths on an unchanged tree is far
