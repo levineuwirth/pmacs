@@ -210,7 +210,7 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## LSP file watcher (issue #233) — branch OPEN, framing revision 1 AWAITING REVIEW
+## LSP file watcher (issue #233) — IMPLEMENTED, awaiting PR review
 
 **Issue #233** — https://github.com/levineuwirth/pmacs/issues/233.
 **URGENT by user ruling 2026-08-10: PR #227 is held unmerged until this
@@ -220,12 +220,27 @@ is resolved**, even though #227 is green and cleared.
   **`githubsucks/lsp-file-watcher` is the authoritative tip** — the ref,
   not a SHA. Recover with
   `git fetch githubsucks && git checkout lsp-file-watcher`.
-- **Framing `docs/lsp-file-watcher-framing.md`, revision 1, DRAFT.**
-  Committed at the branch's first commit so it is portable during
-  review — the standing lesson from the GUI arc framing, which spent two
-  review rounds as an untracked file in one worktree.
-- **NO IMPLEMENTATION MAY START** until revision 1 is approved *and* the
-  open ruling below is answered.
+- **Framing `docs/lsp-file-watcher-framing.md`, revision 1, APPROVED
+  2026-08-10.** The ruling that blocked implementation is ANSWERED (see
+  below); D1 and D2 are implemented on the branch atop the framing
+  commit. Committed at the branch's first commit so it is portable
+  during review — the standing lesson from the GUI arc framing, which
+  spent two review rounds as an untracked file in one worktree.
+- **What the implementation is**: `resolve_watcher` returns
+  `(base, pattern, form)` and the watch record carries the form —
+  `"absolute"` (plain string) matches `base .. "/" .. rel`,
+  `"relative"` (RelativePattern) matches `rel`; and
+  `register_file_watchers` cancels the outgoing record list through the
+  new `cancel_watch_records` (shared with `unregister_file_watchers`)
+  before the table write drops the only reference to it.
+- **Verification**: three new discriminating tests beside `m4_24`
+  (`filewatchabs` / `filewatchflat` / `filewatchrereg` fake-LSP modes),
+  each mutation-tested against the defect it names: reverting D1 fails
+  only the plain-string test; matching every form absolutely fails only
+  the RelativePattern guard; reverting D2 fails only the
+  re-registration test, with the leaked watcher's `.old` event visible
+  in `.received`. `m4_24` stayed green under all three mutations —
+  its recorded insensitivity, confirmed.
 
 **Not a #232 regression.** The statusline activity indicator is correct;
 it renders real in-flight jobs. What changed on 2026-08-09 is
@@ -251,21 +266,27 @@ that found this, and is explicitly not the fix.
      `resolve_watcher` returns `(base, pattern)` and discards which form
      it came from, so its contract has to change — not just the match
      subject.
-- **OPEN RULING, blocking the start of implementation:** D1 and D2 fix
-  correctness and the leak but **do not stop the walking** — `walk`
-  recurses unconditionally and `matches` gates only recording. After
-  this lane rust-analyzer still walks the whole tree every 250 ms, six
-  times per tick instead of twelve. If the acceptance bar is "the
-  modeline stops flipping", this lane does not meet it and **D3 must be
-  framed first**.
+- **RULING ANSWERED 2026-08-10:** D1 and D2 fix correctness and the
+  leak but **do not stop the walking** — `walk` recurses
+  unconditionally and `matches` gates only recording. After this lane
+  rust-analyzer still walks the whole tree every 250 ms, six times per
+  tick instead of twelve. **The user accepted that scope**: the
+  acceptance bar for this lane is correctness and the leak, not "the
+  flipping stops". The walking is D3's, framed separately.
 - **D3 deferred** with what was checked: there is **no `notify`/inotify
   dependency in the tree**, so a real filesystem-notification primitive
   is a new crate plus a Rust primitive plus its binding; and there is
   **no ignore-list infrastructure** to reuse (`src/project.rs` knows
   `.git` as a marker, not as something to skip). D3 is a
   `COHERENCE.md` §9 concern and needs its own framing.
-- **Gates:** `./scripts/gate --acceptance m4_acceptance` plus the
-  touched LSP acceptance suites. No `--protocol` — no wire change.
+- **Gates:** `./scripts/gate --acceptance m4_acceptance` — **all nine
+  steps green, 2026-08-10** (lib 1,928; lib-crdt 2,113; m4 154 with the
+  standing `basedpyright` skip; GPU 243 under `PMACS_REQUIRE_GPU=1`;
+  full-workspace sweep 3,891 passed / 0 failed across 118 targets;
+  `diff --check` clean). The sweep covers the eleven other acceptance
+  suites that spawn the fake LSP; the three new modes are additive and
+  no existing mode's behaviour changes. No `--protocol` — no wire
+  change.
 
 ## `scripts/gate` — PR #225 OPEN (build tooling)
 

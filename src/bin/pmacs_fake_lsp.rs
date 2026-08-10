@@ -332,6 +332,80 @@ fn main() {
                 });
                 write_frame(&mut stdout, &req);
             }
+            // Issue #233 D1: `filewatchabs` registers the same watcher
+            // as a PLAIN-STRING glob — `<base>/**/*.txt`, the form
+            // rust-analyzer and gopls actually send. Per LSP it matches
+            // the file's ABSOLUTE path; its relative reading matches
+            // nothing, so the mode discriminates the match subject.
+            ("initialized", _) if mode == "filewatchabs" => {
+                let base = std::env::var("PMACS_FAKE_LSP_WATCH_BASE").unwrap_or_default();
+                let req = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 9301,
+                    "method": "client/registerCapability",
+                    "params": { "registrations": [{
+                        "id": "watch-abs",
+                        "method": "workspace/didChangeWatchedFiles",
+                        "registerOptions": { "watchers": [{
+                            "globPattern": format!("{base}/**/*.txt"),
+                            "kind": 7
+                        }] }
+                    }] }
+                });
+                write_frame(&mut stdout, &req);
+            }
+            // Issue #233 F2 guard: `filewatchflat` registers a
+            // RelativePattern whose pattern has no leading `**/`
+            // (`*.txt` at the base). It matches base-level files
+            // RELATIVELY and no absolute path at all, so a fix that
+            // matches every form against the absolute path goes red.
+            ("initialized", _) if mode == "filewatchflat" => {
+                let base = std::env::var("PMACS_FAKE_LSP_WATCH_BASE").unwrap_or_default();
+                let req = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 9302,
+                    "method": "client/registerCapability",
+                    "params": { "registrations": [{
+                        "id": "watch-flat",
+                        "method": "workspace/didChangeWatchedFiles",
+                        "registerOptions": { "watchers": [{
+                            "globPattern": {
+                                "baseUri": format!("file://{base}"),
+                                "pattern": "*.txt"
+                            },
+                            "kind": 7
+                        }] }
+                    }] }
+                });
+                write_frame(&mut stdout, &req);
+            }
+            // Issue #233 D2: `filewatchrereg` registers the SAME id
+            // twice with no unregister between — `**/*.old` then
+            // `**/*.new` — exactly rust-analyzer's shape. The second
+            // registration must supersede the first: only `.new`
+            // events may ever reach `.received`.
+            ("initialized", _) if mode == "filewatchrereg" => {
+                let base = std::env::var("PMACS_FAKE_LSP_WATCH_BASE").unwrap_or_default();
+                for (rid, pattern) in [(9303, "**/*.old"), (9304, "**/*.new")] {
+                    let req = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": rid,
+                        "method": "client/registerCapability",
+                        "params": { "registrations": [{
+                            "id": "watch-re",
+                            "method": "workspace/didChangeWatchedFiles",
+                            "registerOptions": { "watchers": [{
+                                "globPattern": {
+                                    "baseUri": format!("file://{base}"),
+                                    "pattern": pattern
+                                },
+                                "kind": 7
+                            }] }
+                        }] }
+                    });
+                    write_frame(&mut stdout, &req);
+                }
+            }
             ("initialized", _) => {}
             // T M4.5: the client's file-watch notifications. Append
             // `type uri` lines to `<base>/.received` as a test

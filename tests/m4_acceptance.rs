@@ -5351,6 +5351,248 @@ fn m4_24_workspace_did_change_watched_files() {
     );
 }
 
+/// Issue #233 D1 — a PLAIN-STRING `GlobPattern` matches the file's
+/// ABSOLUTE path (LSP 3.17), not the walk's relative path. The
+/// `filewatchabs` fake registers `<base>/**/*.txt` as a bare string —
+/// the form rust-analyzer and gopls actually send. Its relative
+/// reading matches nothing (an anchored `^<base>/…` can never match
+/// `foo.txt`), so before the fix no event could ever be reported.
+/// The watcher's base is guessed from the attached file's directory —
+/// the tempdir here, and the production path for bare-string globs.
+#[test]
+fn m4_24_plain_string_glob_matches_absolute_path() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().to_path_buf();
+    let base_disp = base.display().to_string();
+    let a_path = base.join("a.rs");
+    std::fs::write(&a_path, b"fn a() {}\n").expect("write a");
+    let a_disp = a_path.display().to_string();
+    let received = base.join(".received");
+    let foo_uri = format!("file://{}", base.join("foo.txt").display());
+
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{ command = '{fake}',
+               env = {{ PMACS_FAKE_LSP_MODE = 'filewatchabs',
+                        PMACS_FAKE_LSP_WATCH_BASE = '{base_disp}' }} }}"
+        ))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "(function() for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.state and r.state.kind=='initialized' then return true end \
+             end return false end)()",
+            5,
+        ),
+        "fake never initialized"
+    );
+
+    // Same warm-up as m4_24: let registerCapability land and the
+    // watcher take its empty baseline before files appear.
+    let warm = Instant::now() + Duration::from_millis(900);
+    while Instant::now() < warm {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        std::thread::sleep(Duration::from_millis(15));
+    }
+
+    std::fs::write(base.join("foo.txt"), b"one\n").expect("write foo.txt");
+    std::fs::write(base.join("bar.md"), b"md\n").expect("write bar.md");
+    assert!(
+        pump_until_file_contains(&mut state, &received, &format!("1 {foo_uri}"), 6),
+        "CREATED for foo.txt never reported under a plain-string glob; \
+         .received = {:?}",
+        std::fs::read_to_string(&received).unwrap_or_default()
+    );
+    assert!(
+        !std::fs::read_to_string(&received)
+            .unwrap_or_default()
+            .contains("bar.md"),
+        "non-matching .md must be filtered out"
+    );
+}
+
+/// Issue #233 F2 guard — a `RelativePattern` stays relative to its
+/// base. The `filewatchflat` fake registers `{ baseUri, pattern =
+/// "*.txt" }`, whose pattern has no leading `**/`: it matches
+/// base-level files RELATIVELY and cannot match any absolute path
+/// (`[^/]*` spans no `/`). Green before and after D1's fix; red
+/// against the obvious wrong fix that matches every form absolutely.
+/// `sub/nested.txt` pins the other half of the same contract: a
+/// base-level pattern must not match into subdirectories.
+#[test]
+fn m4_24_relative_pattern_without_globstar_stays_relative() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().to_path_buf();
+    let base_disp = base.display().to_string();
+    let a_path = base.join("a.rs");
+    std::fs::write(&a_path, b"fn a() {}\n").expect("write a");
+    let a_disp = a_path.display().to_string();
+    let received = base.join(".received");
+    let foo_uri = format!("file://{}", base.join("foo.txt").display());
+    std::fs::create_dir(base.join("sub")).expect("mkdir sub");
+
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{ command = '{fake}',
+               env = {{ PMACS_FAKE_LSP_MODE = 'filewatchflat',
+                        PMACS_FAKE_LSP_WATCH_BASE = '{base_disp}' }} }}"
+        ))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "(function() for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.state and r.state.kind=='initialized' then return true end \
+             end return false end)()",
+            5,
+        ),
+        "fake never initialized"
+    );
+
+    let warm = Instant::now() + Duration::from_millis(900);
+    while Instant::now() < warm {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        std::thread::sleep(Duration::from_millis(15));
+    }
+
+    // nested.txt is written BEFORE foo.txt, so a watcher that wrongly
+    // matched it would report it no later than foo.txt's event — the
+    // negative assertion after the positive one is race-free.
+    std::fs::write(base.join("sub").join("nested.txt"), b"deep\n").expect("write nested.txt");
+    std::fs::write(base.join("foo.txt"), b"one\n").expect("write foo.txt");
+    assert!(
+        pump_until_file_contains(&mut state, &received, &format!("1 {foo_uri}"), 6),
+        "CREATED for base-level foo.txt never reported under a \
+         RelativePattern without `**/`; .received = {:?}",
+        std::fs::read_to_string(&received).unwrap_or_default()
+    );
+    assert!(
+        !std::fs::read_to_string(&received)
+            .unwrap_or_default()
+            .contains("nested.txt"),
+        "a base-level `*.txt` RelativePattern must not match into \
+         subdirectories"
+    );
+}
+
+/// Issue #233 D2 — re-registering a live id supersedes it. The
+/// `filewatchrereg` fake registers `watch-re` TWICE with no
+/// unregister between — `**/*.old`, then `**/*.new` — exactly the
+/// shape rust-analyzer sends. The superseded watchers must STOP,
+/// asserted on observable polling rather than on table shape (the
+/// defect is precisely that the replaced records become unreachable
+/// while still polling): `f.old` exists on disk before either `.new`
+/// event lands, so a leaked first-registration watcher, polling at
+/// the same 250 ms cadence, would have reported it by the time the
+/// second `.new` positive arrives.
+#[test]
+fn m4_24_reregistration_supersedes_previous_watchers() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().to_path_buf();
+    let base_disp = base.display().to_string();
+    let a_path = base.join("a.rs");
+    std::fs::write(&a_path, b"fn a() {}\n").expect("write a");
+    let a_disp = a_path.display().to_string();
+    let received = base.join(".received");
+    let f_old_uri = format!("file://{}", base.join("f.old").display());
+    let f_new_uri = format!("file://{}", base.join("f.new").display());
+    let g_new_uri = format!("file://{}", base.join("g.new").display());
+
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{ command = '{fake}',
+               env = {{ PMACS_FAKE_LSP_MODE = 'filewatchrereg',
+                        PMACS_FAKE_LSP_WATCH_BASE = '{base_disp}' }} }}"
+        ))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "(function() for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.state and r.state.kind=='initialized' then return true end \
+             end return false end)()",
+            5,
+        ),
+        "fake never initialized"
+    );
+
+    let warm = Instant::now() + Duration::from_millis(900);
+    while Instant::now() < warm {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        std::thread::sleep(Duration::from_millis(15));
+    }
+
+    std::fs::write(base.join("f.old"), b"old\n").expect("write f.old");
+    std::fs::write(base.join("f.new"), b"new\n").expect("write f.new");
+    assert!(
+        pump_until_file_contains(&mut state, &received, &format!("1 {f_new_uri}"), 6),
+        "CREATED for f.new never reported by the superseding watcher; \
+         .received = {:?}",
+        std::fs::read_to_string(&received).unwrap_or_default()
+    );
+    // A second positive puts at least one more full poll cycle between
+    // f.old appearing on disk and the negative assertion below.
+    std::fs::write(base.join("g.new"), b"new\n").expect("write g.new");
+    assert!(
+        pump_until_file_contains(&mut state, &received, &format!("1 {g_new_uri}"), 6),
+        "CREATED for g.new never reported by the superseding watcher"
+    );
+    assert!(
+        !std::fs::read_to_string(&received)
+            .unwrap_or_default()
+            .contains(&f_old_uri),
+        "the superseded `**/*.old` watcher is still polling after \
+         re-registration under the same id; .received = {:?}",
+        std::fs::read_to_string(&received).unwrap_or_default()
+    );
+}
+
 /// Tier 1 single-binary language servers ship pre-configured in the
 /// default bundle. Binary-independent: we don't spawn anything, just
 /// assert the `pmacs.lsp.config` tables and the `pmacs.lsp.filetypes`

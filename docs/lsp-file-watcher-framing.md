@@ -1,7 +1,9 @@
 # LSP file watcher — framing
 
-**Status: revision 1 — DRAFT, awaiting review. No implementation may
-begin from this document.**
+**Status: revision 1 — APPROVED 2026-08-10.** The user ruled that D1
+and D2 proceed with the walking explicitly surviving this lane; D3 gets
+its own framing. The acceptance bar for this lane is correctness and
+the leak, not "the flipping stops".
 
 Answers issue #233. **Scope is D1 and D2 only** — the two bug-shaped
 defects. D3 (the polling cost) is named here, deferred with reasons, and
@@ -137,6 +139,9 @@ So the modeline will still show activity, at roughly half the rate. **If
 the acceptance bar for this lane is "the flipping stops", this lane does
 not meet it** and should not be started until D3 is framed. That is a
 ruling for the user, not an assumption to make quietly.
+
+**Answered 2026-08-10: the user accepted this scope.** D1 and D2
+proceed; the walking is D3's problem, framed separately.
 
 ## D3 — deferred, with what was checked
 
