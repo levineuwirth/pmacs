@@ -688,7 +688,8 @@ fn g6_2b_a_non_utf8_row_refuses_both_gestures_with_a_message() {
         &s,
         &format!(
             "pmacs.git._deliver_status(\n\
-               {{ generation = pmacs.git._generation() }},\n\
+               {{ generation = pmacs.git._generation(),\n\
+                  dest = pmacs.window.capture_destination() }},\n\
                {{ ok = true, code = 0, stdout = {payload}, stderr = '' }})"
         ),
     );
@@ -1034,7 +1035,8 @@ fn g6_4b_a_copy_says_copied_and_a_rename_says_renamed() {
         &s,
         &format!(
             "pmacs.git._deliver_status(\n\
-               {{ generation = pmacs.git._generation() }},\n\
+               {{ generation = pmacs.git._generation(),\n\
+                  dest = pmacs.window.capture_destination() }},\n\
                {{ ok = true, code = 0, stdout = {}, stderr = '' }})",
             z_payload(&refs)
         ),
@@ -1323,7 +1325,8 @@ fn g6_22_a_two_step_plan_keeps_the_root_it_started_with() {
         &s,
         &format!(
             "pmacs.git._deliver_root(\n\
-               {{ generation = pmacs.git._generation(), dir = {b:?} }},\n\
+               {{ generation = pmacs.git._generation(), dir = {b:?},\n\
+                  dest = pmacs.window.capture_destination() }},\n\
                {{ ok = true, code = 0, stdout = {b:?}, stderr = '' }})"
         ),
     );
@@ -1722,7 +1725,8 @@ fn g6_17_a_stale_completion_discards_its_rows() {
         &format!(
             "local current = pmacs.git._generation()\n\
              pmacs.git._deliver_status(\n\
-               {{ generation = current - 1 }},\n\
+               {{ generation = current - 1,\n\
+                  dest = pmacs.window.capture_destination() }},\n\
                {{ ok = true, code = 0, stdout = {payload}, stderr = '' }})"
         ),
     );
@@ -1743,7 +1747,8 @@ fn g6_17_a_stale_completion_discards_its_rows() {
         &s,
         &format!(
             "pmacs.git._deliver_status(\n\
-               {{ generation = pmacs.git._generation() }},\n\
+               {{ generation = pmacs.git._generation(),\n\
+                  dest = pmacs.window.capture_destination() }},\n\
                {{ ok = true, code = 0, stdout = {payload}, stderr = '' }})"
         ),
     );
@@ -1958,7 +1963,8 @@ fn g6_23_a_superseded_diff_does_not_replace_the_newer_one() {
         "pmacs.git._deliver_diff(\n\
            {{ generation = {gen_a}, row = {{ path = 'staged.txt' }},\n\
              plan = {{ header = 'against HEAD', steps = {{}} }},\n\
-             root = '/', pieces = {{}}, index = 0 }},\n\
+             root = '/', pieces = {{}}, index = 0,\n\
+             dest = pmacs.window.capture_destination() }},\n\
            {{}},\n\
            {{ ok = true, code = 0, stdout = 'STALE-DIFF-SENTINEL\\n', stderr = '' }})"
     );
@@ -1978,7 +1984,8 @@ fn g6_23_a_superseded_diff_does_not_replace_the_newer_one() {
             "pmacs.git._deliver_diff(\n\
                {{ generation = {gen_a}, row = {{ path = 'staged.txt' }},\n\
                  plan = {{ header = 'against HEAD', steps = {{}} }},\n\
-                 root = '/', pieces = {{}}, index = 0 }},\n\
+                 root = '/', pieces = {{}}, index = 0,\n\
+             dest = pmacs.window.capture_destination() }},\n\
                {{}},\n\
                {{ ok = true, code = 128, stdout = '',\n\
                  stderr = 'fatal: STALE-FAILURE' }})"
@@ -2475,6 +2482,197 @@ fn g6_config_git_enabled_is_registry_defined_and_honoured() {
     let spawned: i64 = eval(&s, "return #pmacs.git._spawn_log");
     assert_eq!(spawned, 0, "and nothing was spawned");
     assert!(panel_text(&s).is_empty(), "and no panel opened");
+}
+
+// ---------------------------------------------------------------------------
+// Q#G-9 — the continuation lands where it was ASKED FROM
+// ---------------------------------------------------------------------------
+
+/// The frontend that competes for ambient authority while git runs.
+///
+/// Same shape and same id as `destination_capture_acceptance`'s, so the
+/// two suites describe one mechanism rather than two conventions.
+const COMPETITOR: FrontendId = FrontendId(7);
+
+/// The buffer name in `fid`'s own side (panel) slot, or `None` when that
+/// frontend has no panel.
+///
+/// **Per-frontend on purpose.** `panel_text` finds `*git-status*` by
+/// NAME, which is global — it answers "does this buffer exist and what
+/// is in it", not "which frontend is showing it". A name lookup is
+/// therefore satisfied by a render into the wrong frontend, and an
+/// earlier draft of `g6_25` passed its own mutation for exactly that
+/// reason.
+fn panel_buffer_name(s: &EditorState, fid: FrontendId) -> Option<String> {
+    let core = s.core.borrow();
+    let side = core.side_window_for(fid)?;
+    let buffer_id = core.windows.get(&side)?.buffer_id;
+    let reg = core.registry.borrow();
+    Some(reg.get(buffer_id).ok()?.name().to_string())
+}
+
+/// The buffer name in `fid`'s active window.
+fn active_name_in(s: &EditorState, fid: FrontendId) -> Option<String> {
+    let core = s.core.borrow();
+    let win = core.views.get(&fid)?.active;
+    let buffer_id = core.windows.get(&win)?.buffer_id;
+    let reg = core.registry.borrow();
+    Some(reg.get(buffer_id).ok()?.name().to_string())
+}
+
+/// Register a second frontend with its own single-window layout.
+fn attach_frontend(s: &EditorState) -> pmacs::window::WindowId {
+    use pmacs::window::{FrontendView, Layout, Window, WindowId};
+    let win = WindowId::next();
+    let mut core = s.core.borrow_mut();
+    let buffer_id = core.active_buffer_id();
+    let text_view = {
+        let reg = core.registry.borrow();
+        pmacs::text_view::TextView::new(reg.get(buffer_id).expect("buffer"))
+    };
+    core.windows
+        .insert(win, Window::new(win, buffer_id, text_view));
+    core.register_frontend_view(
+        COMPETITOR,
+        FrontendView {
+            layout: Layout::single(win),
+            active: win,
+            fold_projection: true,
+            panel_capable: true,
+            frame_geometry: None,
+            panel_hidden: false,
+        },
+    );
+    win
+}
+
+/// **The defect this lane's review found, pinned on both channels.**
+///
+/// `git status` and `git diff` settle a tick or more after the keypress.
+/// Before the destination capture, both rendered through whichever
+/// frontend was ambient *at completion* — so running `M-x git.status` in
+/// frontend A and letting B become active while git ran opened A's panel
+/// in B. The generation and root were already captured at invocation;
+/// the frontend was the one thing still read late.
+///
+/// Driven through `_deliver_status` / `_deliver_diff` — the seams the
+/// concurrency tests already use — because the switch has to happen
+/// *while the work is in flight*, and no arrangement of real subprocess
+/// timing can produce that moment on demand.
+///
+/// **Falsified by dropping either `commit_ui` call**: the render then
+/// follows the ambient frontend and the competitor's window changes.
+/// Asserting only that the capturing frontend got the buffer would pass
+/// on a commit that wrote to *both*, so the competitor is asserted
+/// unchanged as well.
+#[test]
+fn g6_25_a_completion_lands_in_the_frontend_that_asked() {
+    let (_td, root) = tempdir();
+    init_repo(&root);
+    mixed_repo(&root);
+    let mut s = editor();
+    open_panel(&mut s, &root, "staged.txt");
+
+    let other_win = attach_frontend(&s);
+    let other_before = {
+        let core = s.core.borrow();
+        core.windows.get(&other_win).map(|w| w.buffer_id)
+    };
+
+    // Captured while LOCAL is the acting frontend — the invocation.
+    exec(&s, "saved_dest = pmacs.window.capture_destination()");
+
+    // The competitor takes ambient authority while git is "running".
+    s.core.borrow_mut().active_frontend = COMPETITOR;
+
+    let row = format!("1 .M N... 100644 100644 100644 {H} {H} SENTINEL.txt");
+    let payload = z_payload(&["# branch.oid deadbeef", "# branch.head main", &row]);
+    exec(
+        &s,
+        &format!(
+            "pmacs.git._deliver_status(\n\
+               {{ generation = pmacs.git._generation(), dest = saved_dest }},\n\
+               {{ ok = true, code = 0, stdout = {payload}, stderr = '' }})"
+        ),
+    );
+
+    // Asserted PER FRONTEND. `panel_text` alone would pass on a render
+    // into the competitor, because it finds the buffer by name.
+    assert_eq!(
+        panel_buffer_name(&s, FrontendId::LOCAL).as_deref(),
+        Some("*git-status*"),
+        "the panel must be in the capturing frontend's own side slot"
+    );
+    assert_eq!(
+        panel_buffer_name(&s, COMPETITOR),
+        None,
+        "the competing frontend must not have grown a panel"
+    );
+    assert_eq!(
+        {
+            let core = s.core.borrow();
+            core.windows.get(&other_win).map(|w| w.buffer_id)
+        },
+        other_before,
+        "…and its document window is untouched too"
+    );
+
+    s.core.borrow_mut().active_frontend = FrontendId::LOCAL;
+    assert!(
+        panel_text(&s).contains("SENTINEL.txt"),
+        "the rows must have rendered:\n{}",
+        panel_text(&s)
+    );
+
+    // The diff channel, same shape, DOCUMENT profile. An empty remaining
+    // plan makes `advance_diff` render on this very delivery.
+    let root_str = root.display().to_string();
+    exec(&s, "saved_dest = pmacs.window.capture_destination()");
+    s.core.borrow_mut().active_frontend = COMPETITOR;
+    let other_before_diff = {
+        let core = s.core.borrow();
+        core.windows.get(&other_win).map(|w| w.buffer_id)
+    };
+    exec(
+        &s,
+        &format!(
+            "pmacs.git._deliver_diff(\n\
+               {{ generation = pmacs.git._diff_generation(),\n\
+                  row = {{ path = 'SENTINEL.txt' }},\n\
+                  plan = {{ steps = {{}}, header = 'hdr' }},\n\
+                  pieces = {{}}, index = 0, root = {root_str:?},\n\
+                  dest = saved_dest }},\n\
+               {{ }},\n\
+               {{ ok = true, code = 0, stdout = 'diff body', stderr = '' }})"
+        ),
+    );
+
+    // The diff takes a DOCUMENT window, so the discriminating question
+    // is which frontend's active window now holds `*git-diff*`.
+    assert_ne!(
+        active_name_in(&s, COMPETITOR).as_deref(),
+        Some("*git-diff*"),
+        "the diff must not have taken the competing frontend's window"
+    );
+    assert_eq!(
+        {
+            let core = s.core.borrow();
+            core.windows.get(&other_win).map(|w| w.buffer_id)
+        },
+        other_before_diff,
+        "…and that window's buffer is unchanged"
+    );
+    assert_eq!(
+        active_name_in(&s, FrontendId::LOCAL).as_deref(),
+        Some("*git-diff*"),
+        "the diff must land in the capturing frontend's own window"
+    );
+    s.core.borrow_mut().active_frontend = FrontendId::LOCAL;
+    assert!(
+        diff_text(&s).contains("diff body"),
+        "…carrying the body it was given:\n{}",
+        diff_text(&s)
+    );
 }
 
 // Isolated bootstrap storage roots: an integration test is compiled

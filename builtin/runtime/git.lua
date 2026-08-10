@@ -231,9 +231,17 @@ local pump = {}
 -- it terminates. A spawn failure calls `on_done` too, with
 -- `spawn_error` set --- §1.2's silence asymmetry: the failure must be
 -- surfaced with guidance, never swallowed.
-local function run_git(label, root, rest, on_done)
+local function run_git(label, purpose, root, rest, on_done)
   local spec = {
     label = label,
+    -- Required since worker identity Stage 1 (#232), and deliberately
+    -- NOT the label. `label` identifies the process --- "git status" ---
+    -- while this says what the run is FOR, which is what someone reading
+    -- `*workers*` or the statusline activity indicator needs: three of
+    -- this module's spawns are all "git", and only the purpose tells
+    -- them apart. Each call site writes its own; copying the label
+    -- across is the failure that ruling was made against.
+    purpose = purpose,
     command = pmacs.git._program,
     args = pmacs.git.argv(root, rest),
     stdin = "null",
@@ -241,6 +249,7 @@ local function run_git(label, root, rest, on_done)
   if root then spec.cwd = root end
   pmacs.git._last_spawn = {
     command = spec.command, args = spec.args, cwd = spec.cwd, label = spec.label,
+    purpose = spec.purpose,
   }
   local log = pmacs.git._spawn_log
   log[#log + 1] = spec.args
@@ -670,6 +679,44 @@ local function open_status_panel(rows)
   state.buffer = pmacs.window.buffer()
 end
 
+-- ---------------------------------------------------------------------
+-- The destination boundary (Q#JR14, Q#DC-1)
+-- ---------------------------------------------------------------------
+--
+-- Every continuation in this module renders a tick or more after the
+-- keypress that asked for it, and until #231 there was nothing it could
+-- render *to* except ambient state: whichever frontend happened to be
+-- active when git exited. Run `M-x git.status` in frontend A, let B
+-- become active while `git status` runs, and A's panel opened in B.
+--
+-- So the destination is CAPTURED AT INVOCATION and threaded through,
+-- exactly as this module already threads the generation, the root and
+-- the row --- and for the same reason. `state.root` has a comment
+-- explaining why reading module-level state per step is wrong; the
+-- ambient frontend is that same argument one layer down, and it was the
+-- one thing still being read late.
+
+--- Run `body` against the destination captured at invocation.
+---
+--- Returns false when the commit is REFUSED --- the captured window or
+--- buffer is gone, or the frontend can no longer satisfy `profile`.
+--- A refusal drops the render, which is the same answer the
+--- `expect_buffer` rule already gives when the panel a refresh belongs
+--- to has been killed: a result whose destination no longer exists is
+--- not a result to force somewhere else. `commit_to` refuses BEFORE the
+--- body runs, so a refusal is mutation-free and there is no partial
+--- render to undo.
+---
+--- Deliberately not `pcall`-wrapped. A refusal returns `(false, reason)`
+--- and is handled here; anything that RAISES is a defect in this module
+--- (a fabricated destination, an unknown profile) and must not be
+--- swallowed into a silent no-op.
+local function commit_ui(dest, profile, body)
+  local ok, reason = pmacs.window.commit_to(dest, body, profile)
+  if ok == false then return false, reason end
+  return true
+end
+
 --- The status-refresh ticket currently in force.
 ---
 --- Exposed alongside `_deliver_status` below, and for the same reason:
@@ -704,7 +751,12 @@ function pmacs.git._deliver_status(request, res)
     if not (live and valid) then return end
   end
 
-  local rows
+  -- Rows and the status line are COMPUTED here and EMITTED inside the
+  -- commit below. Splitting them is the point: `set_status` is a UI
+  -- mutation, and a failure message announcing a panel that the commit
+  -- then refuses to open is the misrouting this boundary exists to
+  -- prevent, in its most confusing form.
+  local rows, message
   if res.ok and res.code == 0 then
     local parsed = pmacs.git.parse_status(res.stdout)
     state.branch = parsed.branch
@@ -714,41 +766,50 @@ function pmacs.git._deliver_status(request, res)
     local reason = failure_reason(res)
     state.branch = state.branch or {}
     rows = failure_rows(reason)
-    pmacs.editor.set_status("git status: " .. reason)
+    message = "git status: " .. reason
   end
 
-  open_status_panel(rows)
-  -- `listview.open` resets collapse and does NOT preserve selection ---
-  -- only `listview.refresh` does, and that is the synchronous path this
-  -- model cannot use. So re-seating is owned here.
-  --
-  -- And `open`'s own `seat_cursor(p, 1)` cannot be relied on either: it
-  -- walks DOWN from wherever the cursor is, on the premise that a fresh
-  -- `switch_active_buffer` zeroed it. Re-opening a panel that is
-  -- already displayed does not zero anything, so that walk would land
-  -- one row below the previous cursor instead of on row 1. The handler
-  -- therefore seats unconditionally, from line 0.
-  local target = 1
-  if request.selected_path then
-    for i, row in ipairs(state.rows) do
-      if row.path == request.selected_path then
-        target = i
-        break
+  -- The PANEL profile: `*git-status*` is a bottom-panel surface
+  -- (`listview.open` defaults `display` to `"panel"`), so the
+  -- stale-intent checks that guard replacing a document window do not
+  -- apply --- but only while the placement really is a panel, which is
+  -- what the profile's own refusal keeps true for the extent of this
+  -- body (Q#DC-2).
+  commit_ui(request.dest, "panel", function()
+    if message then pmacs.editor.set_status(message) end
+    open_status_panel(rows)
+    -- `listview.open` resets collapse and does NOT preserve selection ---
+    -- only `listview.refresh` does, and that is the synchronous path this
+    -- model cannot use. So re-seating is owned here.
+    --
+    -- And `open`'s own `seat_cursor(p, 1)` cannot be relied on either: it
+    -- walks DOWN from wherever the cursor is, on the premise that a fresh
+    -- `switch_active_buffer` zeroed it. Re-opening a panel that is
+    -- already displayed does not zero anything, so that walk would land
+    -- one row below the previous cursor instead of on row 1. The handler
+    -- therefore seats unconditionally, from line 0.
+    local target = 1
+    if request.selected_path then
+      for i, row in ipairs(state.rows) do
+        if row.path == request.selected_path then
+          target = i
+          break
+        end
       end
     end
-  end
-  -- If the captured path is gone --- the commonest case, since a file
-  -- that stopped being modified drops out of status --- `target` stays
-  -- 1 and nothing is said about it. That is the correct answer, not a
-  -- failure.
-  pmacs.editor.clear_selection()
-  pmacs.editor.set_view_top(0)
-  pmacs.editor.move_to_line(0)
-  -- Walked with `move_down` rather than a single `move_to_line(target)`
-  -- because motion is what drags the viewport along; a bare cursor set
-  -- would leave a long status list scrolled to the top with the cursor
-  -- off screen. This is `listview.refresh`'s own idiom.
-  for _ = 1, target do pmacs.editor.move_down() end
+    -- If the captured path is gone --- the commonest case, since a file
+    -- that stopped being modified drops out of status --- `target` stays
+    -- 1 and nothing is said about it. That is the correct answer, not a
+    -- failure.
+    pmacs.editor.clear_selection()
+    pmacs.editor.set_view_top(0)
+    pmacs.editor.move_to_line(0)
+    -- Walked with `move_down` rather than a single `move_to_line(target)`
+    -- because motion is what drags the viewport along; a bare cursor set
+    -- would leave a long status list scrolled to the top with the cursor
+    -- off screen. This is `listview.refresh`'s own idiom.
+    for _ = 1, target do pmacs.editor.move_down() end
+  end)
 end
 
 -- The path of the row under the cursor right now, or nil.
@@ -767,13 +828,19 @@ end
 --- generation and replace the newer request. Reserving at the command
 --- and carrying it through is what makes the ordering the user's, not
 --- the filesystem's.
-local function start_status(root, expect_buffer, want_selection, generation)
+local function start_status(root, expect_buffer, want_selection, generation, dest)
   local request = {
     generation = generation,
     expect_buffer = expect_buffer,
     selected_path = want_selection and selected_path() or nil,
+    -- A parameter for the same reason `generation` is: it belongs to
+    -- the invocation, and this function can run from a root-resolution
+    -- callback that is already a tick removed from it.
+    dest = dest,
   }
-  run_git("git status", root,
+  run_git("git status",
+    "reading the working tree status of " .. root .. " for the *git-status* panel",
+    root,
     { "status", "--porcelain=v2", "--branch", "-z" },
     function(res) pmacs.git._deliver_status(request, res) end)
 end
@@ -793,8 +860,12 @@ function pmacs.git._on_refresh()
   end
   -- Reserved HERE, at the keypress, for the same reason `git.status`
   -- reserves at the command: `g` needs no root lookup, so this is
-  -- already the moment of invocation.
-  start_status(state.root, state.buffer, true, status_requests.reserve())
+  -- already the moment of invocation. The destination is captured on
+  -- the same line of reasoning --- `g` is pressed IN the panel, so the
+  -- frontend showing it is the one this refresh belongs to, and that is
+  -- true now and possibly not true when git exits.
+  start_status(state.root, state.buffer, true, status_requests.reserve(),
+    pmacs.window.capture_destination())
   return listview_rows("(refreshing...)")
 end
 
@@ -865,8 +936,12 @@ function pmacs.git._deliver_root(request, res)
   -- A fresh open carries no buffer expectation, so a panel the user
   -- killed earlier does not make this run drop its own first result.
   state.buffer = nil
-  -- The generation reserved at the command, NOT a fresh one.
-  start_status(root, nil, false, request.generation)
+  -- The generation reserved at the command, NOT a fresh one --- and the
+  -- destination captured there, for the same reason. This callback runs
+  -- after `git rev-parse` has exited, so capturing here would read the
+  -- ambient frontend a round trip late and reintroduce exactly the
+  -- misrouting the capture exists to close.
+  start_status(root, nil, false, request.generation, request.dest)
 end
 
 --- Open (or re-open) `*git-status*` for the repository containing the
@@ -885,10 +960,19 @@ function pmacs.git.status()
   -- invocation that starts no work must not invalidate one that is
   -- already in flight, and an invocation that does start work must own
   -- the newest generation from that moment on.
-  local request = { generation = status_requests.reserve(), dir = dir }
+  -- Captured alongside the generation, at the same moment and for the
+  -- same reason: this is the last instant at which "the frontend the
+  -- user asked from" is knowable without guessing.
+  local request = {
+    generation = status_requests.reserve(),
+    dir = dir,
+    dest = pmacs.window.capture_destination(),
+  }
   -- The root rule (Q#G-2): ask git, and let a non-zero exit BE the
   -- "not a repository" answer. `-C <dir>` with no root of our own.
-  run_git("git rev-parse", nil, { "-C", dir, "rev-parse", "--show-toplevel" },
+  run_git("git rev-parse",
+    "resolving which Git repository contains " .. dir,
+    nil, { "-C", dir, "rev-parse", "--show-toplevel" },
     function(res) pmacs.git._deliver_root(request, res) end)
 end
 
@@ -1038,11 +1122,21 @@ local function advance_diff(request)
     if body:gsub("%s", "") == "" then
       body = "(no differences)"
     end
-    show_diff_buffer(string.format("git diff --- %s\n%s",
-      pmacs.git.display_path(request.row.path), request.plan.header), body)
+    -- The DOCUMENT profile, and the contrast with the status channel is
+    -- the whole of Q#DC-2: `*git-diff*` REPLACES a document window, so
+    -- every stale-intent check applies. If the window the `d` was
+    -- pressed from now holds a different buffer, this diff is answering
+    -- a question about a view the user has already left, and the commit
+    -- is refused rather than allowed to overwrite it.
+    commit_ui(request.dest, "document", function()
+      show_diff_buffer(string.format("git diff --- %s\n%s",
+        pmacs.git.display_path(request.row.path), request.plan.header), body)
+    end)
     return
   end
-  run_git("git diff", request.root, step.args,
+  run_git("git diff",
+    "diffing " .. pmacs.git.display_path(request.row.path) .. " against HEAD for *git-diff*",
+    request.root, step.args,
     function(res) pmacs.git._deliver_diff(request, step, res) end)
 end
 
@@ -1067,9 +1161,15 @@ function pmacs.git._deliver_diff(request, step, res)
   if not diff_requests.is_current(request.generation) then return end
   if not diff_step_ok(step, res) then
     local reason = failure_reason(res)
-    show_diff_buffer(string.format("git diff --- %s",
-      pmacs.git.display_path(request.row.path)), reason)
-    pmacs.editor.set_status("git diff: " .. reason)
+    -- The failure render is a render: same destination, same profile,
+    -- same refusal. Announcing a diff failure into whatever frontend
+    -- happens to be active would be the identical misrouting as
+    -- announcing a success there.
+    commit_ui(request.dest, "document", function()
+      show_diff_buffer(string.format("git diff --- %s",
+        pmacs.git.display_path(request.row.path)), reason)
+      pmacs.editor.set_status("git diff: " .. reason)
+    end)
     return
   end
   local text = utf8_clean(res.stdout)
@@ -1085,10 +1185,10 @@ end
 -- Run `plan`'s steps in order under an ALREADY-RESERVED diff ticket,
 -- then render. `generation` is a parameter for the same reason
 -- `start_status`'s is: it belongs to the keypress, not to this call.
-local function run_diff_plan(row, plan, root, generation)
+local function run_diff_plan(row, plan, root, generation, dest)
   advance_diff {
     generation = generation, row = row, plan = plan, root = root,
-    pieces = {}, index = 0,
+    pieces = {}, index = 0, dest = dest,
   }
 end
 
@@ -1122,10 +1222,13 @@ pmacs.command.define {
     -- Everything the plan runs on is captured HERE, at the keypress, and
     -- threaded through every step: the ticket, reserved AFTER the early
     -- returns above so a `d` that starts no work cannot supersede one
-    -- that is already in flight; the root; and the unborn flag. All three
-    -- describe the repository the user is looking at right now, and all
-    -- three are replaced wholesale by a `git.status` against another one.
+    -- that is already in flight; the root; the unborn flag; and the
+    -- DESTINATION. The first three describe the repository the user is
+    -- looking at right now and are replaced wholesale by a `git.status`
+    -- against another one; the fourth describes the window they are
+    -- looking at it IN, which nothing in this module replaces and
+    -- nothing outside it announces.
     run_diff_plan(row, diff_plan(row, (state.branch or {}).unborn == true),
-      state.root, diff_requests.reserve())
+      state.root, diff_requests.reserve(), pmacs.window.capture_destination())
   end,
 }

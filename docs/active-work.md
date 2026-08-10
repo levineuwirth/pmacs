@@ -269,7 +269,20 @@ census.
 
 **PR #227** — https://github.com/levineuwirth/pmacs/pull/227. Opened
 2026-08-09 at `4002734`, after the framing was approved at revision 5
-and the full gate suite went green. **Now at `4b82d1e`, MERGE-BLOCKED.**
+and the full gate suite went green. **UNBLOCKED 2026-08-10**: `main` was
+merged in (72 commits) and the destination capture #231 provides is
+adopted below. Re-gated 12/12 green on the merged tree.
+
+**One cross-lane break the merge surfaced**, recorded because it was
+invisible until the suites ran: #232 made `purpose` **required** on
+`pmacs.process.spawn`, and this module's spawn lives on this branch, so
+it was never among the 11 call sites #232 updated — every git test
+failed at once. Each of the three spawns now carries its own purpose,
+and deliberately **not** the label, which is the copy #232's ruling was
+made against: all three are labelled `git`, and only the purpose
+distinguishes "resolving which repository contains `<dir>`" from
+"reading the working tree status of `<root>`" from "diffing `<path>`
+against HEAD".
 
 **Review round 1 found three blockers. Two are fixed; the third is why
 this lane is blocked.**
@@ -299,17 +312,32 @@ this lane is blocked.**
   `display_sequence` escapes only through `describe.key` and
   `keymap.list`, both of which require the sequence to be bound
   already. Verified; no binding was added for this.
-- **P1a NOT fixed, and deliberately — it blocks this PR.** The async
-  completions display UI without capturing the initiating frontend
-  (`builtin/runtime/git.lua:684` and `:965` at `723afa7`), so a result
-  surfaces in whichever frontend is active when git exits. `commit_to`
-  is the right mechanism and is **not Lua-reachable** outside a
-  directory open, so the fix lives in the **`destination-capture`**
-  lane — approved and in implementation. This lane adopts it after that
-  lands. Verified untouched: `show_diff_buffer`'s body and
-  `open_status_panel`'s `listview.open` are byte-identical to `4002734`,
-  and no commit on this branch adds a `commit_to` call or a frontend
-  capture anywhere.
+- **P1a FIXED — the block is lifted.** The async completions displayed
+  UI without capturing the initiating frontend, so a result surfaced in
+  whichever frontend was active when git exited. `commit_to` was the
+  right mechanism and was **not Lua-reachable** outside a directory
+  open, so the capture half shipped as **#231** (`0e4c58d`) and this
+  lane adopts it now that `main` carries it:
+
+  - **Captured at invocation** in all four entrances — `git.status()`,
+    `_on_refresh` (the `g` keypress), `_deliver_root`'s hand-off, and
+    the `git.diff-file` command — and threaded on the request table
+    exactly as the generation and root already were. The ambient
+    frontend was the one input still being read late.
+  - **Committed under the profile the surface actually takes**:
+    `"panel"` for `*git-status*`, `"document"` for `*git-diff*` (Q#DC-2).
+  - **`set_status` moved INSIDE the status commit.** A failure message
+    announcing a panel that the commit then refuses is the same
+    misrouting in its most confusing form, so rows and message are now
+    computed first and emitted together.
+  - **Witnessed by `g6_25`**, and the first version of that test was
+    **worthless**: `panel_text` finds `*git-status*` by NAME, which is
+    global, so a render into the wrong frontend satisfied it and the
+    test passed its own mutation. Rewritten per frontend
+    (`side_window_for`, and each view's active window) it fails both
+    bites — removing the status commit grows a `*git-status*` panel in
+    the competitor, removing the diff commit hands it the document
+    window.
 
   **The second citation written here in round 1 was wrong** — `:854`
   pointed at `local unstaged = …` inside `diff_plan`, not at a display
