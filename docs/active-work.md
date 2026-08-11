@@ -173,7 +173,7 @@ lesson, §1 for the two framings).
   where they describe a stage as it landed** — only this
   current-state paragraph tracks the live range.
   **The recovery floor advances with the base**, so the check below
-  now requires `9a26ac8` or newer; a tree at `db1bbe9` no longer
+  now requires **`e67ad07`** or newer; a tree at `db1bbe9` no longer
   passes — it would lack the entire QoL arc, which this file and the
   handoff both describe as complete. That is deliberate — a check accepting an older commit than
   the declared base passes on a tree the rest of this file does not
@@ -220,9 +220,14 @@ declares canonical will pass on a tree the rest of this file does not
 describe.
 If it does not, stop and repair the remote/fetch configuration.
 
-**This path was exercised, not asserted, at this snapshot** — re-run
-from an empty directory on 2026-08-08 when the base advanced to
-`9a26ac8`, rather than having its SHA swapped. That distinction is the
+**LAST EXERCISED AT `9a26ac8`, 2026-08-08** — re-run from an empty
+directory rather than having its SHA swapped. **The advance to
+`e67ad07` (2026-08-11) has NOT been re-exercised**, and by this
+paragraph's own argument that is exactly when the exercise matters, so
+it is recorded as an outstanding obligation rather than left to read as
+though it had been done. The floor above and the check below are in
+step at `e67ad07`; what is unverified is the *procedure* against that
+base, not the SHA. That distinction is the
 whole point of this paragraph: advancing the base is exactly when the
 recovery commands are most likely to have rotted, and a swapped SHA
 reads identically to a verified one. `git clone` the canonical URL, add
@@ -278,8 +283,10 @@ is listed at the commit that does it, not promised here.
   its first commit until #227 merged, because #227 was 72 `main` commits
   behind and touched the three files Stage 0's absorption rewrites.
   #227 merged (`b867f64`), #233's arc closed (#234, #235), this branch
-  rebased onto `e67ad07`, and the absorption ran. **15 commits above the
-  base; ready for its PR.**
+  rebased onto `e67ad07`, and the absorption ran. **Sixteen commits
+  above the base as of `30e2209`; ready for its PR.** *(Anchored to a
+  SHA deliberately: a bare running count goes stale on the next commit,
+  which is the staleness class this lane exists to retire.)*
 - **What landed (docs only, no `src/`):** the absorption pass
   enumerated in the framing's §5 — five stale lanes, the
   authority/recovery anchor, `COHERENCE.md`'s `v6..=v21` → `v6..=v23`,

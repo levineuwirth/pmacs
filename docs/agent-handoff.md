@@ -3195,7 +3195,7 @@ servers.
 
 ## 6. Named deferrals (the standing backlog, consolidated)
 
-**The GUI arc — OPEN, framing approved 2026-08-10, Stage 0 in PR.**
+**The GUI arc — OPEN, framing approved 2026-08-10, Stage 0 READY FOR PR (not yet opened).**
 `docs/gui-arc-framing.md` is the arc-level frame and is also Stage 0's
 own framing; Stages 1–10 each need their own before their branch. It
 opened from a daily-driver report: the TUI is daily-drivable, the GUI is

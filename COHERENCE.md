@@ -107,7 +107,7 @@ remain open to them.
 | 11 | Config layering + provenance | **Partial (foundation only)** | Typed registry is right; 5 settings live in it; no value provenance |
 | 12 | Profiles | **Missing** | One hardcoded default keymap; not a named concept |
 | 13 | Package lifecycle UX | **Resolution without lifecycle** | Mature resolver/lockfile; init-only install; no uninstall/disable/search |
-| 14 | Workbench primitives | **Partial (best trajectory)** | Listview is a real primitive with call sites in **two** modules — `lsp.lua` (5) and **`git.lua` (4, `*git-status*`, #227)** — so it is **no longer LSP-only**; buffer-list and search re-implement it; **the bottom panel is COMPLETE — both frontends, and Stage 3 flipped the adopter default so omission means the panel**. **Tree is implemented (◐) with the LSP outline as its one adopter; the remaining consumers, including dired's `i`, have not adopted** |
+| 14 | Workbench primitives | **Partial (best trajectory)** | Listview is a real primitive with executable call sites in **two** modules — `lsp.lua` (**4**) and **`git.lua` (1, `*git-status*`, #227)** — so it is **no longer LSP-only**; *(counted excluding comment mentions, which an earlier `grep -c` included)*; buffer-list and search re-implement it; **the bottom panel is COMPLETE — both frontends, and Stage 3 flipped the adopter default so omission means the panel**. **Tree is implemented (◐) with the LSP outline as its one adopter; the remaining consumers, including dired's `i`, have not adopted** |
 | 15 | Contextual affordances | **Weak** | Right-click menu only; code actions apply first-blindly; **Git integration reaches status and diff (#227, Stage 1) and no further** — §15's ground truth is authoritative, and this row previously said "no git integration at all" |
 | 16 | Semantic frontend | **Architectural: Strong · Product: Weak** | v6..=v23 schema support; production attach remains v20 during the dark panel slice; degradation practiced. **The two subgrades and the product criteria live in §16** — the row points there rather than carrying a grade of its own, so the GUI-as-a-product half cannot hide inside an architectural `Strong` |
 | 17 | Distribution | **Partial** | **v1.1.0 ships prebuilt Linux/macOS binaries on tag** (#211) with checksums and a stated glibc floor. No channels, in-place update, rollback, signing, or package-manager distribution |
@@ -507,7 +507,15 @@ fails on GPU *alone*, so it is **frontend-local** — Stage 1d's IME work
 closes it. A single merged TUI column would have shown two identical
 red cells and no way to tell those apart.
 
-**Inference flags.** GPU 3(c) is inferred **in both halves** —
+**Inference flags — and when they must be closed (user ruling,
+2026-08-11).** These do **not** block the Stage 0 docs PR. They **must**
+be verified **before this table is first enforced as a release gate**.
+**3(c) and 9 can change the deficit set**; **6(c) cannot change step 6's
+grade today** — 6(e) already floors it at `Missing` on all three
+frontends — but still needs evidentiary closure rather than standing
+indefinitely as an assumption.
+
+GPU 3(c) is inferred **in both halves** —
 rendering and browsing interaction — as are GPU 9 (compile output
 renders like any other daemon buffer) and GPU 6(c) (hover reaches the
 echo area as on the grid). All must be verified before this table is
@@ -1754,12 +1762,23 @@ grade. The product subgrade reads:
 | grade | condition |
 |---|---|
 | **Strong** | all three criteria pass |
-| **Partial** | criterion 1 passes — the GPU is nowhere *behind* the TUI — while blockers remain open |
-| **Weak** | criterion 1 fails at one or more steps **and** the blocker list is non-empty |
+| **Partial** | usable, criterion 1 **passes**, and not all three criteria pass |
+| **Weak** | usable and criterion 1 **fails** at one or more steps |
 | **Missing** | no usable graphical frontend |
 
-**Current: Weak** — criterion 1 fails at two known steps, and nine
-blockers are open including the one-window ceiling. The distinction that
+**The rule is TOTAL by construction** — every usable state is covered by
+exactly one of `Partial`/`Weak`/`Strong`, since criterion 1 either
+passes or fails and `Strong` is the all-pass case. An earlier draft
+required a non-empty blocker list for `Weak` and named blockers in
+`Partial`, which left a real state ungraded: criterion 1 passing with an
+empty blocker list but criterion 3 failing or unassessed. Criterion 1 is
+the discriminator because it is the only one that measures the GPU
+*against the TUI*; the others measure it against its own goals.
+
+**Current: Weak** — criterion 1 fails at two known steps. (Nine
+blockers are open including the one-window ceiling; under the total rule
+they no longer *derive* the grade, but they are why it is not close to
+`Strong`.) The distinction that
 matters is between `Weak` and `Partial`: the GPU is not merely
 *unfinished*, it is **behind a frontend that ships in the same binary**,
 and that is what the ceiling and the two failing steps say.
