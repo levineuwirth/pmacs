@@ -98,11 +98,11 @@ remain open to them.
 | 2 | Golden product journey | **Runs end to end, thin at 11–12** | **Step 1 now works — v1.1.0 ships binaries (#211)**, so the journey no longer begins with a source build. `pmacs .` opens the directory (1a); the interface introduces itself (1b-3); a missing language server says so (1b-2, #204); a build is bound and prefilled (1b-1, #203). **Steps 11 (background-work ownership, §9) and 12 (session restore) are the remaining thin end** |
 | 3 | Zero-configuration state | **Partial** | Defaults genuinely strong; missing-tool failure is silent, not graceful |
 | 4 | Progressive disclosure | **Inverted** | The advanced level is real; the beginner level is the missing one |
-| 5 | Unified discoverability | **Partial** | Discovery Stage 1: eleven `help.*` commands (describe key/mode/hook/buffer/command/setting, where-is, list commands/keybindings/settings, apropos) over the existing registries, indexed by `M-x help`. Commands, keys, modes, hooks and settings are now reachable, and `*workers*` already was (`M-x editor.list-workers`); **packages have no comparable surface** (§13), and workers still lack owner/purpose/hierarchy and any indicator (§9). `Command` still has no title/category/flags, M-x rows are still bare names, and the Rust help layer is still orphaned |
+| 5 | Unified discoverability | **Partial** | Discovery Stage 1: eleven `help.*` commands (describe key/mode/hook/buffer/command/setting, where-is, list commands/keybindings/settings, apropos) over the existing registries, indexed by `M-x help`. Commands, keys, modes, hooks and settings are now reachable, and `*workers*` already was (`M-x editor.list-workers`); **packages have no comparable surface** (§13), and workers carry a required **purpose** and a statusline **activity indicator** since #232, but still lack an accountable **owner** and any **hierarchy** (§9). `Command` still has no title/category/flags, and the Rust help layer is still orphaned. M-x rows carry descriptions since #228 (protocol v23) |
 | 6 | Interaction islands | **Weak, and growing** | Six hardcoded key-interception shadows; no transient-keymap mechanism exists |
 | 7 | First-class workspaces | **Missing (conventions only)** | Marker walk + four independent consumers; no workspace object |
 | 8 | Execution locations | **Missing (architecture ready)** | SSH attach works; "location" is not a value anywhere |
-| 9 | Worker ownership | **Mechanism without identity** | Cancellation solid; no owner/purpose/hierarchy; four disjoint activity views |
+| 9 | Worker ownership | **Mechanism with purpose, without ownership** | Cancellation solid; **purpose required on every job and process, and a statusline activity indicator, since #232**; still **no accountable owner and no hierarchy**; four disjoint activity views |
 | 10 | Extension trust classes | **Missing (one class)** | Shared Lua state, `__index = _G`; MCP is the one out-of-process seam |
 | 11 | Config layering + provenance | **Partial (foundation only)** | Typed registry is right; 5 settings live in it; no value provenance |
 | 12 | Profiles | **Missing** | One hardcoded default keymap; not a named concept |
@@ -844,8 +844,8 @@ the sharpest instance of §1.1.**
   function passed as `CompletionSource::Custom`.
   **What remains missing here:** a discovery surface for **packages**
   (§13) — `*workers*` already has one, reachable by
-  `M-x editor.list-workers`, though §9's ownership model and activity
-  indicator are still absent — and **no DIRECT binding reaches any of
+  `M-x editor.list-workers`, and §9's activity indicator now exists
+  (#232) while its **ownership model remains absent** — and **no DIRECT binding reaches any of
   this**, though the family is advertised: the welcome names `M-x help`,
   which indexes it. The family stays unbound by design until the
   help-prefix decision is taken (see the prefix bullet below).
@@ -1170,14 +1170,23 @@ so non-pool work (LSP requests, MCP) appears uniformly; one shared
 `*workers*` view (`src/workers_buffer.rs`, opened by `M-x
 editor.list-workers`, auto-refreshing, `C-c C-k` cancel-at-point).
 
-**The identity layer is absent:**
+**The identity layer is PARTLY built — purpose landed, ownership did not:**
 
-- `PendingJob` (`src/async_runtime.rs:365-392`) carries `{cancel,
-  state, supersede_key, stream_buffer, max_batch, kind,
-  dispatched_at}`. **No owner. No purpose string. No
-  workspace/buffer association. No parent.** The one buffer link that
-  exists (parse job → buffer) lives in a `SyntaxCoordinator` side map,
-  invisible to the workers view.
+- `PendingJob` (`src/async_runtime.rs`) carries `{cancel, state,
+  supersede_key, stream_buffer, max_batch, kind, dispatched_at,
+  **purpose**}`. Since #232 the **purpose is required** — `JobSpec` has
+  no `Default`, so a dispatcher that supplies none **does not compile**
+  (`src/async_runtime.rs:429`), which makes presence a type obligation
+  rather than a convention. **Still absent: an accountable owner, any
+  workspace/buffer association, and any parent.** The one buffer link
+  that exists (parse job → buffer) lives in a `SyntaxCoordinator` side
+  map, invisible to the workers view.
+
+  The distinction that survives #232: a purpose says what a job is
+  **doing**; ownership says **who asked**. Populated from static
+  per-subsystem constants, an `owner` field would have been an *origin*
+  and would have misattributed third-party work to a builtin — which is
+  why #232 shipped none rather than a plausible one.
 - `JobKind` is a **closed 12-variant enum** (Sleep, ComputeSum, EmitN,
   Grep, Parse, FsReadDir, FsStat, FsRename, FsChmod, FsRemove,
   McpRequest, LspRequest). `pmacs.workers.register` funnels Lua jobs
@@ -1209,12 +1218,9 @@ editor.list-workers`, auto-refreshing, `C-c C-k` cancel-at-point).
   binding opens that view** — `C-c C-k` is bound inside it, which cannot
   help anyone find it.
 
-  *This bullet previously read "No progress indicator exists anywhere —
-  no statusline spinner, no busy count (grep … is empty)". That grep was
-  the evidence for opening §9's worker-identity work, and #232 is what
-  answered it.* **The indicator's first act was to expose three months
-  of invisible LSP file-watcher polling (issue #233)** — which is §9's
-  own argument, demonstrated.
+  **The indicator's first act was to expose three months of invisible
+  LSP file-watcher polling (issue #233)** — §9's own argument,
+  demonstrated.
 - **`purpose` is now required** on every job and process (#232), through
   a single allocation funnel with no `Default`, so the compiler proves
   every caller supplies one. That is a real per-job description where
@@ -1231,9 +1237,10 @@ editor.list-workers`, auto-refreshing, `C-c C-k` cancel-at-point).
 The audit's conclusion, worth preserving verbatim: *because identity is
 missing, scoped cancellation has nothing to scope over and a unified
 activity view has nothing to group by — the four views exist precisely
-because there is no common key to merge them on.* Owner/purpose/parent
-fields on the job and process specs are the prerequisite; the unified
-view and the ownership tree fall out of them.
+because there is no common key to merge them on.* **Purpose** landed with #232;
+**owner and parent** fields on the job and process specs remain the
+prerequisite, and the unified view and the ownership tree fall out of
+them.
 
 ---
 
@@ -2018,8 +2025,10 @@ implementation — this list is direction, not commitment):
    handle + derived `dispatch_idle`, then migrate shadows one per PR.
 4. **Extension ownership** (P3): `hook.remove`, owner-carrying
    registrations, attribution-by-default.
-5. **Worker identity** (§9): owner/purpose/parent on jobs and
-   processes, join the four planes, statusline activity indicator.
+5. **Worker identity** (§9): **owner and parent** on jobs and
+   processes, and joining the four planes. *Purpose and the statusline
+   activity indicator shipped in #232 (Stage 1); what remains is the
+   ownership half.*
 6. **Workspace entity** (P2): the object, then location values.
 7. **Config provenance + adoption** (P6).
 8. **Package lifecycle** (P7, after 4).
