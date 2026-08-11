@@ -250,11 +250,12 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## GUI arc Stage 1 — 1-pre IMPLEMENTED, no PR yet
+## GUI arc Stage 1 — 1-pre OPEN as PR #237
 
 **Written at the branch's first commit**, with the framing, as the arc's
 §5 requires of every PR in it.
 
+- **PR #237** — https://github.com/levineuwirth/pmacs/pull/237.
 - **Branch `gui-stage1-pre`**, base `githubsucks/main` @ `f8ad3e7` (the
   Stage 0 merge, #236). **`githubsucks/gui-stage1-pre` is the
   authoritative tip** — the ref, not a SHA. Recover with
