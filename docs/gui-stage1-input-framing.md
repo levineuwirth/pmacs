@@ -1,8 +1,10 @@
 # GUI arc, Stage 1 — input foundation (framing)
 
-**Status: revision 9 — APPROVED.** Revisions 1–8 rejected.
-**Q#S1-8, Q#S1-9 and Q#S1-10 are RULED.** Implementation may begin
-from this document.
+**Status: revision 10 — APPROVED.** Revisions 1–8 rejected; revision 9
+is the approved design and **revision 10 changes none of it** — it
+records one scope correction found against the 1-pre implementation
+(§6, "Revision 10"). **Q#S1-8, Q#S1-9 and Q#S1-10 are RULED.**
+**1-pre is IMPLEMENTED**; 1a onward may begin from this document.
 
 **Verification base:** checked in the `gui-arc-stage0` worktree at
 `a994f37`, whose tree for these files is what `f8ad3e7` merged.
@@ -116,6 +118,52 @@ P3 remains an accepted structural exception: not headlessly testable.
 | P1 | Every handled family routes through an extracted function | no extracted functions exist | misroute one family → that family's row |
 | P2 | Harness records outbound events **and local effects** (exit, redraw, resize, state mutation) | no harness | record outbound only → exit/redraw rows |
 | P3 | `window_event` is a thin call-through | — | **structural/code-review invariant; not testable headlessly** (no `ActiveEventLoop`) |
+
+**Revision 10 — one finding against the implementation, not the
+design.** The 1-pre seam is built and the table above holds, with one
+scope correction that could not be seen from the design.
+
+**P1 has a SECOND structural exception, and it is winit's rather than
+this seam's.** `KeyEvent` carries a `pub(crate) platform_specific`
+field (`winit-0.30.13/src/event.rs:655`), so **no
+`WindowEvent::KeyboardInput` can be constructed outside winit** and no
+headless test can feed one to the router. P1's mutation — misroute a
+family, fail that family's row — is therefore unavailable for the
+**keyboard** family alone.
+
+Three things bound it, so it is a measured exception rather than a
+blanket one:
+
+- **The exception does not extend to the pointer families.** Winit
+  provides `DeviceId::dummy()` for exactly this purpose, and
+  `CursorMoved` / `MouseInput` / `MouseWheel` are constructible. Checked
+  before the exception was written down; all three are witnessed.
+- **What stays unwitnessed is one pattern arm with no logic in it.** The
+  family's only decision — a press is acted on, a release is claimed and
+  discarded — is factored into `route_key_action(ElementState) ->
+  KeyAction`, which takes a constructible argument and is witnessed
+  directly, with both misroute mutations failing that row alone.
+- **P3 is now measured, not assumed.** Replacing `window_event`'s entire
+  body with `let _ = (event_loop, event);` — a GUI that responds to no
+  input at all — leaves **all 256 `pmacs-gpu` tests green**, not merely
+  the 13 routing rows. That is the exception's true extent: no headless
+  test anywhere in the crate observes the delegation.
+
+**P2's harness records ROUTES, and that is the mechanism rather than a
+narrowing.** A route names its local effect — `Exit`, `Redraw`,
+`Resize { width, height }`, `Modifiers(state)` — so one transcript
+covers both halves of P2's contract. The transcript row is deliberately
+the **sole** owner of P2 (the per-variant rows call `route_event`
+directly), which is what keeps "record outbound only" failing exactly
+one row instead of every row.
+
+**One design consequence worth carrying into 1a.** The keyboard arm was
+the second caller of `event_loop.exit()` — the idle-Escape local quit —
+so its body returns an `EventOutcome` rather than taking an
+`&ActiveEventLoop`. `event_loop.exit()` now appears in exactly two
+places, both inside `window_event`, and nowhere else in the crate.
+**A4 deletes the Escape branch, at which point `EventOutcome` has one
+variant and should go with it.**
 
 ### 1a — `TextInput` (v24)
 

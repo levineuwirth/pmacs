@@ -3371,7 +3371,8 @@ enum Route<'a> {
 /// keyboard family produces anything but `Continue` today: an idle
 /// Escape is a local quit. Returning the decision rather than taking an
 /// `&ActiveEventLoop` is what keeps every body reachable from a test —
-/// `event_loop.exit()` is called in exactly one place, `window_event`.
+/// the crate's two `event_loop.exit()` call sites, this one and
+/// `LifecycleRoute::Exit`, both sit in `window_event` and nowhere else.
 ///
 /// Stage 1a's A4 deletes that branch (an idle Escape must reach the
 /// daemon and never exit), at which point this type has one variant and

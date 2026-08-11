@@ -210,6 +210,30 @@ commands, read `docs/active-work.md` immediately after this file.
     server-rooted watcher then faithfully watched. A
     markerless-fixture red that looks like a watcher bug may be an
     ancestor marker, on any machine.
+
+    **SEEN AGAIN 2026-08-11, and `scripts/gate` DOES NOT PROTECT YOU
+    FROM IT.** The gate isolates the target directory and five ambient
+    roots but **not `TMPDIR`**, so `tempfile::tempdir()` still lands
+    under a `/tmp` that may carry a marker. It surfaced inside a gate
+    run on an unrelated lane (GUI 1-pre, which touches only
+    `pmacs-gpu/src/main.rs`) as **`m4_24_bare_string_glob_stays_relative`
+    and `m4_24_d3_fallback_base_is_the_smallest_attachment_dir`**, in
+    both the `m4` step and the `--workspace` sweep, with every other
+    target in the corpus green.
+
+    **Diagnose it with the discriminating pair, not a rerun** — same
+    binary, same commit, one variable:
+
+    ```sh
+    TMPDIR=/tmp                 cargo test --test m4_acceptance -- m4_24_   # 0/2
+    TMPDIR=<marker-free dir>    cargo test --test m4_acceptance -- m4_24_   # 2/2
+    ```
+
+    Check the ancestors of the temp root for `.git`, `Cargo.toml` and
+    friends before believing any markerless-fixture red. **Isolating
+    `TMPDIR` inside `scripts/gate` is the standing fix and belongs to
+    the gate lane**, not to whichever feature PR happens to trip over
+    it.
   - **Deliberately unbuilt**: kernel notification (framing option E) —
     a framed option, not residue; its trigger is the 4 s worst-case
     external-change latency mattering in practice.

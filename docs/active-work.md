@@ -250,7 +250,7 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## GUI arc Stage 1 — 1-pre branch OPEN, framing APPROVED, no PR yet
+## GUI arc Stage 1 — 1-pre IMPLEMENTED, no PR yet
 
 **Written at the branch's first commit**, with the framing, as the arc's
 §5 requires of every PR in it.
@@ -259,25 +259,57 @@ waits for a signal that is not coming.
   Stage 0 merge, #236). **`githubsucks/gui-stage1-pre` is the
   authoritative tip** — the ref, not a SHA. Recover with
   `git fetch githubsucks && git checkout gui-stage1-pre`.
-- **Framing `docs/gui-stage1-input-framing.md`, revision 9, APPROVED**
-  after **eight rejected revisions**. It is Stage 1's framing for **all**
-  slices and governs the later branches; only Stage 0 was framed by the
-  arc document itself.
+- **Framing `docs/gui-stage1-input-framing.md`, revision 10, APPROVED**
+  after **eight rejected revisions**. Revision 9 is the approved design;
+  **revision 10 changes none of it** and records one scope correction
+  found against this implementation (below). It is Stage 1's framing for
+  **all** slices and governs the later branches; only Stage 0 was framed
+  by the arc document itself.
 - **Scope of THIS branch: 1-pre only — the input seam. No behaviour
-  change.** `App::window_event` is **655 lines** (`main.rs:2734`) and
-  nothing below it can be witnessed without a display, which is why the
-  seam precedes every other slice.
-- **The evidence contract, because "no behaviour change" is not one:** a
-  **headless routing harness** records, per event family, the routing
-  decision, the **outbound protocol events, and the LOCAL effects** —
-  exit, redraw, resize, state mutation. Production `window_event`
-  becomes a **thin call-through**. Mutation evidence: bypassing an arm,
-  or misrouting one family to another, must fail.
-- **P3 is an ACCEPTED STRUCTURAL EXCEPTION.** A headless test cannot
-  construct `ActiveEventLoop` or invoke the real callback, so the
-  `window_event → router` delegation is a **code-review invariant, not a
-  tested one**. Recorded rather than papered over: mutation evidence
-  covers every router arm and **not** the delegation.
+  change.** `App::window_event` was **655 lines** and is now **33**: one
+  `route_event` call and one arm per route. Nothing below it could be
+  witnessed without a display, which is why the seam precedes every
+  other slice.
+- **IMPLEMENTED in four commits, one per event family**, so each lands
+  with its own witnesses and mutations rather than as one 600-line
+  diff: `014110f` lifecycle (close / modifiers / resize), `7f0f9db`
+  redraw, `0705564` keyboard, `e955645` the four pointer arms.
+- **The shape.** Deciding is `route_event(&WindowEvent) -> Route`, a
+  free function composing one decision function per family
+  (`route_lifecycle`, `route_keyboard` + `route_key_action`,
+  `route_pointer`). Performing stays on `App` in seven `apply_*`
+  methods. **A route names its LOCAL EFFECT**, not merely the family
+  that claims it, and the harness records routes — because
+  `CloseRequested` and `RedrawRequested` send the daemon nothing, so a
+  transcript of protocol traffic could not tell a handled arm from a
+  dropped one.
+- **Every moved body verified as the original, mechanically.** The
+  keyboard body is byte-identical modulo two named conversions; the four
+  pointer bodies were checked by re-running rustfmt on the pre-move text
+  at the new indent level and diffing, since de-indenting by 8 columns
+  lets rustfmt rejoin lines. **13 witnesses, 17 mutations.**
+- **P3 IS NOW MEASURED, NOT ASSUMED.** Replacing `window_event`'s whole
+  body with `let _ = (event_loop, event);` — a GUI that responds to no
+  input at all — leaves **all 256 `pmacs-gpu` tests green**. That is the
+  exception's true extent: `ActiveEventLoop` cannot exist outside a live
+  event loop, so **no** headless test in the crate observes the
+  delegation, not merely none of the new ones.
+- **A SECOND ACCEPTED STRUCTURAL EXCEPTION, found here and winit's
+  rather than ours.** `KeyEvent` carries a `pub(crate)
+  platform_specific` field, so **no `WindowEvent::KeyboardInput` can be
+  constructed outside winit** and the keyboard family's routing arm
+  cannot be fed by a test. Bounded three ways: it does **not** extend to
+  the pointer families (`DeviceId::dummy()` exists for exactly this, and
+  all three pointer events are constructible — checked before writing
+  the exception down); the family's only real decision is factored into
+  `route_key_action(ElementState)` and witnessed directly; and what
+  stays unwitnessed is one pattern arm containing a match and a call.
+- **`event_loop.exit()` now appears in exactly two places, both inside
+  `window_event`.** The keyboard body was its second caller (the idle
+  Escape), so `apply_keyboard` returns an `EventOutcome` rather than
+  taking an `&ActiveEventLoop` — which is what keeps the bodies
+  reachable in principle. **Stage 1a's A4 deletes that branch**, at
+  which point `EventOutcome` has one variant and should go.
 - **Slice order (each its own branch and PR):** `1-pre` → `1a`\* → `1b`
   → `1c` → `1d` → `1e`\*. **`1a` and `1e` are protocol-bearing (v24
   `TextInput`, v25 `OpenTarget`/`OpenTargetResult`) and are
@@ -286,9 +318,33 @@ waits for a signal that is not coming.
   Stage 2, so the arc framing's §2.5 and the standing backlog are
   amended here. Stage 1 keeps the deliberate OS reservation and adds no
   island.
-- **Gates:** `./scripts/gate --acceptance gpu_invocation_acceptance`
-  plus touched input suites, and `PMACS_REQUIRE_GPU=1 cargo test -p
-  pmacs-gpu`. **No `--protocol`** — 1-pre changes no wire.
+- **Gates:** `./scripts/gate --acceptance gpu_invocation_acceptance`.
+  That one invocation already runs `PMACS_REQUIRE_GPU=1 cargo test -p
+  pmacs-gpu` (step `gpu`) and the full `--workspace --no-fail-fast`
+  sweep in both feature configurations, so the framing §11 phrase "plus
+  touched input suites" is satisfied by the sweep rather than by a
+  hand-picked list. **No `--protocol`** — 1-pre changes no wire.
+- **THE FIRST GATE RUN WENT RED ON A STRAY `/tmp/.git`, NOT ON THIS
+  BRANCH.** `m4` and the sweep failed
+  `m4_24_bare_string_glob_stays_relative` and
+  `m4_24_d3_fallback_base_is_the_smallest_attachment_dir` — two LSP
+  file-watcher tests — with every other target green. Established as
+  environmental three ways, in increasing strength:
+  - **Structurally impossible for this branch to cause.** The diff
+    touches only `pmacs-gpu/src/main.rs`; `pmacs-gpu` is a workspace
+    **member but not a dependency** of the root package, so the
+    `m4_acceptance` binary never links it.
+  - **The marker is older than the session.** `/tmp/.git` is empty and
+    was created at 20:14 CEST, **3.5 h before** the gate run at 23:45;
+    `/tmp` held 8,920 entries. That is handoff §1's recorded hazard
+    exactly.
+  - **A discriminating pair, same binary and commit, one variable:**
+    `TMPDIR=/tmp` → **0/2**, `TMPDIR=<marker-free>` → **2/2**. A rerun
+    would have established nothing; this establishes the cause.
+
+  **`scripts/gate` isolates the target dir and five ambient roots but
+  NOT `TMPDIR`** — recorded in handoff §1, where the standing fix is
+  assigned to the gate lane rather than to this PR.
 
 ## The GUI arc — Stage 0 MERGED as #236 (`f8ad3e7`)
 
