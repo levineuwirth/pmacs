@@ -210,6 +210,108 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
+## LSP file watcher (issue #233) — PR #234 OPEN, awaiting review
+
+**Issue #233** — https://github.com/levineuwirth/pmacs/issues/233.
+**PR #234** — https://github.com/levineuwirth/pmacs/pull/234, opened
+2026-08-10 at `ed3033c` (the implementation commit atop the framing).
+**URGENT by user ruling 2026-08-10: PR #227 is held unmerged until this
+is resolved**, even though #227 is green and cleared.
+
+- **Branch `lsp-file-watcher`**, base `githubsucks/main` @ `0e4c58d`.
+  **`githubsucks/lsp-file-watcher` is the authoritative tip** — the ref,
+  not a SHA. Recover with
+  `git fetch githubsucks && git checkout lsp-file-watcher`.
+- **Framing `docs/lsp-file-watcher-framing.md`, revision 2** — design
+  approved 2026-08-10; revision 2 records a review round **against the
+  implementation** that found two correctness defects, both now fixed
+  (see below). Committed at the branch's first commit so it is portable
+  during review — the standing lesson from the GUI arc framing, which
+  spent two review rounds as an untracked file in one worktree.
+- **Review round 1 on the code found two defects, and both are cases
+  where the first fix was itself wrong:**
+  1. **P1 — a bare-string `*.txt` stopped working.**
+     `resolve_watcher` classified **every** string as absolute, so a
+     valid relative pattern was matched against `<base>/foo.txt` and
+     could never fire. That path worked **before** this lane, so the
+     repair broke a live case while fixing another. The form now comes
+     from the pattern (a leading `/`), not from the union arm. The
+     flat-pattern test did not catch it because it exercises the
+     RelativePattern **object** arm — F1's tested-vs-exercised split,
+     repeating inside the lane that named it.
+  2. **P2 — a scan finishing after cancellation still emitted one
+     batch.** `scan_tree` suspends on `read_dir` per directory with
+     `_sleep` already cleared, so a cancel landing there had nothing to
+     interrupt and the resumed scan ran on to
+     `did_change_watched_files` under the superseded pattern.
+     Cancellation and liveness are rechecked after the scan.
+- **A test seam was added**: `pmacs.lsp._after_scan_for_tests`, nil in
+  production, handed the scan result. P2's race cannot be produced by
+  timing; the seam is the same device as `git.lua`'s `_deliver_status`.
+  It takes the scan result because a test cancelling on any *other*
+  scan would pass with the fix deleted.
+- **What the implementation is**: `resolve_watcher` returns
+  `(base, pattern, form)` and the watch record carries the form —
+  `"absolute"` (pattern begins `/`) matches `base .. "/" .. rel`,
+  `"relative"` matches `rel`; and
+  `register_file_watchers` cancels the outgoing record list through the
+  new `cancel_watch_records` (shared with `unregister_file_watchers`)
+  before the table write drops the only reference to it.
+- **Verification**: three new discriminating tests beside `m4_24`
+  (`filewatchabs` / `filewatchflat` / `filewatchrereg` fake-LSP modes),
+  each mutation-tested against the defect it names: reverting D1 fails
+  only the plain-string test; matching every form absolutely fails only
+  the RelativePattern guard; reverting D2 fails only the
+  re-registration test, with the leaked watcher's `.old` event visible
+  in `.received`. `m4_24` stayed green under all three mutations —
+  its recorded insensitivity, confirmed.
+
+**Not a #232 regression.** The statusline activity indicator is correct;
+it renders real in-flight jobs. What changed on 2026-08-09 is
+**visibility**. The polling watcher has been there since `1c25730`
+(2026-05-19). Quieting the indicator would delete the only instrument
+that found this, and is explicitly not the fix.
+
+- **Scope: D1 and D2 only** — plain-string globs are matched against
+  relative paths so they never match (rust-analyzer sees **no** file
+  changes at all; gopls sees `go.mod` but never `.go`), and
+  re-registering the same id leaks the previous coroutines
+  (rust-analyzer registers twice under one id → 12 pollers, 6
+  permanently uncancellable).
+- **Two findings from framing that the issue does not carry**, both of
+  which change the fix:
+  1. **The existing test cannot discriminate this fix in either
+     direction.** The fake LSP's `**/*.txt` compiles to `^.-[^/]*%.txt$`
+     and `.-` spans `/`, so it matches relative *and* absolute subjects.
+     `m4_24` passes whether D1 is fixed or broken. New coverage must use
+     a pattern whose two readings disagree.
+  2. **"Match the absolute path" alone would break `RelativePattern`.**
+     Measured: `*.txt` matches `a.txt` but not `/base/a.txt`.
+     `resolve_watcher` returns `(base, pattern)` and discards which form
+     it came from, so its contract has to change — not just the match
+     subject.
+- **RULING ANSWERED 2026-08-10:** D1 and D2 fix correctness and the
+  leak but **do not stop the walking** — `walk` recurses
+  unconditionally and `matches` gates only recording. After this lane
+  rust-analyzer still walks the whole tree every 250 ms, six times per
+  tick instead of twelve. **The user accepted that scope**: the
+  acceptance bar for this lane is correctness and the leak, not "the
+  flipping stops". The walking is D3's, framed separately.
+- **D3 deferred** with what was checked: there is **no `notify`/inotify
+  dependency in the tree**, so a real filesystem-notification primitive
+  is a new crate plus a Rust primitive plus its binding; and there is
+  **no ignore-list infrastructure** to reuse (`src/project.rs` knows
+  `.git` as a marker, not as something to skip). D3 is a
+  `COHERENCE.md` §9 concern and needs its own framing.
+- **Gates:** `./scripts/gate --acceptance m4_acceptance` — **all nine
+  steps green, 2026-08-10** (lib 1,928; lib-crdt 2,113; m4 154 with the
+  standing `basedpyright` skip; GPU 243 under `PMACS_REQUIRE_GPU=1`;
+  full-workspace sweep 3,891 passed / 0 failed across 118 targets;
+  `diff --check` clean). The sweep covers the eleven other acceptance
+  suites that spawn the fake LSP; the three new modes are additive and
+  no existing mode's behaviour changes. No `--protocol` — no wire
+  change.
+
 ## `scripts/gate` — PR #225 OPEN (build tooling)
 
 **PR #225** — https://github.com/levineuwirth/pmacs/pull/225. Written
