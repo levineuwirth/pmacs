@@ -1178,6 +1178,10 @@ someone forgot.
     it — the reverted seam failed only the consumed-plan check, not the
     content assertion. That is what the consumed-plan check is for.
 - **Lean 4 arc (Arc 8) — stages 1, 2, 3a, 3b, 4a, 4b ALL LANDED**
+  *(**"Arc 8" means THIS arc and only this one.** The roadmap's
+  colliding "Arc 8 — GPU structural parity" label is retired: that scope
+  is Half B of **the GUI arc**, which is a name and not a number —
+  `COHERENCE.md` §20, Q#GA4.)*
   (`docs/lean4-mode-framing.md`; #160, #161, #167, #170, #179, #181). pmacs edits Lean 4: `arborium-lean` highlighting, a
   `lean4` major mode, `⟨⟩ ⦃⦄ ⟮⟯` pairs, and a `lake serve` language
   server with a Lake-aware outermost root, a lazy toolchain probe, a

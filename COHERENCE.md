@@ -109,7 +109,7 @@ remain open to them.
 | 13 | Package lifecycle UX | **Resolution without lifecycle** | Mature resolver/lockfile; init-only install; no uninstall/disable/search |
 | 14 | Workbench primitives | **Partial (best trajectory)** | Listview is a real primitive but only **4** call sites, all LSP panels (`*lsp*` added post-audit by #204); buffer-list and search re-implement it; **the bottom panel is COMPLETE — both frontends, and Stage 3 flipped the adopter default so omission means the panel**. **Tree is implemented (◐) with the LSP outline as its one adopter; the remaining consumers, including dired's `i`, have not adopted** |
 | 15 | Contextual affordances | **Weak** | Right-click menu only; code actions apply first-blindly; no git integration at all |
-| 16 | Semantic frontend | **Strong** | v6..=v23 schema support; production attach remains v20 during the dark panel slice; degradation practiced |
+| 16 | Semantic frontend | **Architectural: Strong · Product: Weak** | v6..=v23 schema support; production attach remains v20 during the dark panel slice; degradation practiced. **The two subgrades and the product criteria live in §16** — the row points there rather than carrying a grade of its own, so the GUI-as-a-product half cannot hide inside an architectural `Strong` |
 | 17 | Distribution | **Partial** | **v1.1.0 ships prebuilt Linux/macOS binaries on tag** (#211) with checksums and a stated glibc floor. No channels, in-place update, rollback, signing, or package-manager distribution |
 | 18 | Onboarding | **Partial** | Journey Stage 1b-3: an unconfigured launch greets in `*scratch*` naming `M-x` and four real bindings, and `M-x help` renders a cheat sheet. Still no tutorial and `C-h` still deletes a word — deliberately, see §18 |
 | 19 | Coherence acceptance tests | **Started** | `tests/journey_acceptance.rs` carries 45 pins over steps 2, 3, 4, 5, 6 and 9 — the ratchet is real and stages add rows to it. The other five §19 scenarios (workspace lifecycle, worker ownership, config provenance, package lifecycle, extension isolation) are still unwritten |
@@ -1709,10 +1709,40 @@ facto privileged implementation.
 
 ### Ground truth
 
-**Grade: strong — the healthiest concern in this document, and most of
-its asks are already practiced.**
+**This concern carries TWO subgrades, because it asks two different
+questions and one answer was hiding the other.**
 
-- Versioned protocol schema `SUPPORTED=[6..=21]` with deliberate
+| subgrade | grade | what it measures |
+|---|---|---|
+| **Architectural** | **Strong** | the protocol, its versioning discipline, capability negotiation, degradation, and the absence of a privileged frontend |
+| **Product** | **Weak** | whether the graphical frontend is a workbench a user would choose — graded against §2b's per-frontend journey table and §3.1's blocker list |
+
+**Why the split exists.** "Productize the semantic frontend" was graded
+`Strong` on architectural evidence alone, and that grade was true and
+was answering the wrong question: the protocol is excellent *and* the
+GUI is not yet a daily driver. A single cell could not hold both, so the
+product half was invisible — which is how a frontend the reporter would
+not choose sat inside the healthiest concern in this document.
+
+**Product subgrade criteria** (each falsifiable, none aspirational):
+
+1. **GPU ≥ local TUI at every journey step** under §2b. **Currently
+   FAILS at two steps** — 5 (no IME) and 12 (restore is a structural
+   no-op).
+2. **The daily-driver blocker list is empty.** **Currently nine open**
+   (`docs/gui-arc-framing.md` §3.1): Escape quits, IME absent,
+   `translate_key` holes, sub-line/horizontal scroll, no DPI, folding
+   dead on the GPU, no session restore, no reconnect, the one-window
+   ceiling.
+3. **Every surviving divergence is declared**, not accidental.
+
+**What moves it.** The GUI arc, and nothing else — it exists to satisfy
+exactly these three. The product subgrade is what the arc closes
+against, and it should be re-graded when the arc closes, not before.
+
+**Architectural ground truth follows; it is unchanged and still strong.**
+
+- Versioned protocol schema `SUPPORTED=[6..=23]` with deliberate
   encoding-breaking bumps, both-frontends support required per bump,
   and byte-pin discipline for appended variants (handoff §4). The v21
   bottom-panel family landed with Stage 2B-1 (#184) and is **live in
@@ -1968,6 +1998,36 @@ only consumer; dired's `i` insert-subdirectory is the next real
 constraint source, and DAP's variables view is why the primitive was
 worth building first. Also remaining: table / inspector / diff, and help
 unification.
+
+### The GUI arc — placement (Q#GA5)
+
+**Half A slots after Priority 1**, whose own work is complete (§20 P1).
+It is the product half of §16, and it is what the §16 product subgrade
+is graded against.
+
+**Reaching Stage 4b is a P2 START GATE.** Stages 4b (session save and
+restore) and 9 (project/files sidebar) are **workspace-owned**: a
+session and a sidebar root are both P2's objects, and inventing local
+conventions for them is precisely the "fifth independent root
+convention" §7 warns against. So when the arc reaches Stage 4b, **P2
+starts**, and **no later GUI stage begins** until P2 has an approved
+framing and an opened lane. Non-gated GUI work may interleave freely
+after that while the object lands.
+
+**The gate is on STARTING P2, not on finishing it** — so the arc is
+never blocked on work nobody has begun, and it cannot outrun the model
+it depends on. Without the gate, every non-gated stage could finish
+first and leave P2 as a terminal closure blocker.
+
+**Arc naming (Q#GA4).** This arc is **"the GUI arc"**, deliberately a
+name and not a number. The roadmap's **"Arc 8 — GPU structural parity"
+label is RETIRED** here; its scope is this arc's Half B. **"Arc 8" now
+unambiguously means the Lean 4 arc** (`docs/agent-handoff.md` §1a,
+stages 1–4b landed), which is the numbering that stays. Landed framing
+documents that say "Arc 8 adjacent" of viewport facts or splits
+(`editing-conveniences-framing.md`, `bottom-panel-framing.md`) keep
+their historical text — they are dated records, and this is the
+authoritative disambiguation for anything written from here on.
 
 ### Priority 6: Productize configuration
 

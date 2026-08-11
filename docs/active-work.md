@@ -243,7 +243,7 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## The GUI arc — Stage 0 branch OPEN, UNPARKED 2026-08-11, absorption underway
+## The GUI arc — Stage 0 branch OPEN, absorption COMPLETE, ready for PR
 
 **Written at the branch's first commit**, with the framing, which is
 what this arc's own §5 requires of every PR in it. The standing
