@@ -389,6 +389,18 @@ contradicted its own exclusions.*
 | 11 | Understand what background work is running | (a) work in flight is **visible without asking**; (b) a detailed view is reachable that names each substantial background work item's **purpose and accountable owner — not merely its kind or dispatcher** — **across jobs, processes, servers and terminals**; (c) **discoverable** — reachable by an advertised binding; (d) cancellable |
 | 12 | Close + restore | (a) closing is clean and loses no data; (b) per-file state (cursor, scroll) restores; (c) the open-buffer set and window layout restore |
 
+**Aggregation inside a subclaim, stated because it decided two cells.**
+A subclaim that names a conjunction — "completion, hover and
+go-to-definition"; "a startup failure *and* a later crash" — is graded
+by the same minimum rule as the step: **an absent member makes the
+subclaim `Missing`, not `Partial`.** Degradation is for a member that is
+present and qualified; absence is absence at every level. Steps 6 and 11
+are `Missing` on this rule, and an earlier draft graded both `Partial`
+by treating a conjunction as one degradable atom — which would have made
+the ordinal mean something different at the subclaim level than at the
+step level, and is the reading the framing's own Step 7 worked example
+already rejects.
+
 **3(c) requires a browsable directory SURFACE, not dired.** Dired is
 today's evidence for it, not its definition — so a frontend inherits
 whatever browsing it actually has, which is precisely what the
@@ -434,21 +446,30 @@ which is what decides every discoverability subclaim below.
 | 1 | Install | Works | Works | **Works** | — release builds, ships and *verifies* `pmacs-gpu` (`release.yml:149,168,195`) |
 | 2 | Launch unconfigured | Works | Works | Works | — |
 | 3 | Open real project | Works | Works | Works | 3(c) satisfied by a browsable surface, not by dired specifically |
-| 4 | Understand interface | **Partial** | **Partial** | **Partial** | 4(c) — help exists but the welcome advertises `C-x C-f`/`C-c t`/`C-c c`/`C-x b` and **not** the help route; `C-h` deletes a word by design |
+| 4 | Understand interface | Works | Works | Works | 4(c) satisfied — the welcome's **first line** says "M-x runs any command; **M-x help lists the keys**" (`welcome.lua:61`). An earlier draft graded this Partial by reading only the four-entry key table and ignoring the prose above it |
 | 5 | Edit | Works | Works | **Partial** | 5(a) on GPU — **no IME, no `set_ime_allowed`**, so composed/CJK input is impossible; Latin editing is fine. Local/attached satisfy 5(d) by wrap and by QoL Stage 5 horizontal scroll |
-| 6 | Language intelligence | **Partial** | **Partial** | **Partial** | 6(e) everywhere — startup failure surfaces, a **later crash does not**; `server_is_live` is consulted at five sites and every one *skips* work rather than reporting. GPU additionally degrades 6(d): single-authority semantic styling vs the grid's `merge_styles` |
-| 7 | Find symbol / file | **Partial** | **Partial** | **Partial** | 7(d) — `C-x C-f` is advertised; **browse (`C-x d`/`C-x C-j`) and symbol (`M-.`) are not**. `M-.` is *bound* and still undiscoverable, which is why 7(d) requires advertisement |
-| 8 | Open terminal | **Partial** | **Partial** | **Partial** | 8(c) — **no close/kill command exists**. 8(d) passes: `C-c t` is advertised in the welcome |
+| 6 | Language intelligence | **Missing** | **Missing** | **Missing** | 6(e) — startup failure surfaces; a **later crash does not**, and an absent member of a conjunction makes the subclaim **Missing**, not degraded (§2a's aggregation rule). `server_is_live` is consulted at five sites and every one *skips* work rather than reporting. GPU additionally degrades 6(d) — single-authority semantic styling vs the grid's `merge_styles` — but the grade is already floored by 6(e) |
+| 7 | Find symbol / file | Works | Works | Works | 7(d) satisfied **under the published "advertised in-product" wording**: the advertised `M-x help` route reaches `help.list-keybindings`, which lists **every registered binding** (`help.lua`; asserted over every sequence at `discovery_acceptance.rs:208`), so browse and symbol are advertised transitively. *If the intent is direct advertisement only, 7(d) must say so — and the framing's own worked example then forces **Missing**, never Partial* |
+| 8 | Open terminal | Works | Works | Works | 8(c) satisfied by the **global** `M-x buffer.kill-this` (`default.lua:1209`); killing a terminal buffer prunes the session and reaps the process (`vterm_stage1_acceptance.rs:336`). 8(c) never required a terminal-*specific* command. 8(d) passes on the welcome's `C-c t` |
 | 9 | Build / test | Works | Works | Works | 9(d) passes on the welcome's `C-c c` entry, not on the bare binding; 9(a) runs in the detected project's context |
-| 10 | Inspect error | **Partial** | **Partial** | **Partial** | gated entirely on step 6 or 9 succeeding first — a dependency, recorded rather than graded away |
-| 11 | Understand background work | **Partial** | **Partial** | **Partial** | 11(b) — #232 gives **purpose**, never an accountable **owner**, and the planes stay disjoint (jobs in `*workers*`, processes in `pmacs.process.list`, servers in `*lsp*`, terminals **nowhere**). 11(c) also fails: no advertised binding. 11(a) now passes on the activity indicator |
+| 10 | Inspect error | Works | Works | Works | all of 10(a–c) hold. *Being gated on step 6 or 9 is a **dependency, not a subclaim**, and §2a's membership rule forbids an annotation from lowering a grade — an earlier draft let it do exactly that. Grading the dependency would require adding it as a subclaim first* |
+| 11 | Understand background work | **Missing** | **Missing** | **Missing** | 11(c) — the `*workers*` view has **no binding at all**, so a keybinding listing cannot reveal it: the subclaim is **absent**, not degraded, and it floors the cell. 11(b) fails too — #232 gives **purpose**, never an accountable **owner**, and the planes stay disjoint (jobs in `*workers*`, processes in `pmacs.process.list`, servers in `*lsp*`, terminals **nowhere**). 11(a) passes on the activity indicator |
 | 12 | Close + restore | **Partial** | **Missing** | **Missing** | 12(c) — local restores nothing beyond per-file state (desktop-save is opt-in); on **both daemon-backed frontends it is a structural no-op** (Q#DS9), so they fail it **by construction** |
 
 **Closure condition 2 currently FAILS, at exactly two steps.** GPU is
 below local TUI at **step 5** (Partial vs Works) and **step 12**
 (Missing vs Partial). Every other cell is equal. That is the whole of
 the GPU's journey deficit as this table measures it — a narrower result
-than "the GUI feels behind", and a falsifiable one.
+than "the GUI feels behind", and a falsifiable one. It survived a review
+round that corrected six of the twelve rows, which is some evidence it
+is a property of the tree rather than of the grader.
+
+**The journey's two worst steps are frontend-INDEPENDENT**, and that is
+the table's other finding. Steps 6 and 11 grade `Missing` in all three
+columns: language intelligence dies silently after a server crash, and
+background work has no advertised route at all. Neither is GUI work,
+neither is closed by this arc, and both were previously carried as
+`Partial` — which is how they stayed off the critical path.
 
 **The attached column earns its place at those two rows, and they point
 opposite ways.** Step 12 fails on attached TUI *and* GPU, so it is a
@@ -458,11 +479,14 @@ fails on GPU *alone*, so it is **frontend-local** — Stage 1d's IME work
 closes it. A single merged TUI column would have shown two identical
 red cells and no way to tell those apart.
 
-**Three cells rest on inference, not on the audit, and must be verified
-before this table is used as a release gate**: GPU 3(c) and 9 assume a
-semantic frontend renders daemon-produced listing and compile buffers
-like any other buffer, and GPU 6(c) assumes hover reaches the echo area
-there as it does on the grid. Marked rather than quietly graded.
+**Inference flags, narrowed to what is actually unverified.** GPU
+3(c)'s *rendering* half is **verified**, not inferred:
+`gpu_invocation_acceptance.rs:706` drives a GPU directory target and
+asserts the dired listing reaches and renders on that frontend. What
+remains inferred is **browsing interaction** there, plus GPU 9 (that
+compile output renders like any other daemon buffer) and GPU 6(c) (that
+hover reaches the echo area as it does on the grid). Those three must be
+verified before this table is used as a release gate.
 
 ### Ground truth: the journey today
 
