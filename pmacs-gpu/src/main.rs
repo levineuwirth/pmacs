@@ -2703,6 +2703,14 @@ impl App {
         // daemon can act on changed.
         self.flush_panel_geometry(GeometryTrigger::Surface);
     }
+
+    /// Perform [`LifecycleRoute::Redraw`]. A no-op before `resumed` has
+    /// built the surface.
+    fn apply_redraw(&mut self) {
+        if let Some(state) = self.state.as_mut() {
+            state.render();
+        }
+    }
 }
 
 /// GUI Stage 1-pre — the input seam.
@@ -2720,11 +2728,11 @@ impl App {
 ///
 /// The decision is what the route *is*, not merely which family claims
 /// it: `Exit` is the local exit effect, `Resize` carries the clamped
-/// surface extent, `Modifiers` carries the state mutation. Two arms
-/// (`CloseRequested`, and `RedrawRequested` once it moves here) send
-/// nothing outbound at all, so a harness recording only protocol traffic
-/// would leave them invisible — which is why a route names its local
-/// effect and the harness records routes.
+/// surface extent, `Modifiers` carries the state mutation. **Two arms —
+/// `CloseRequested` and `RedrawRequested` — send nothing outbound at
+/// all**, so a harness recording only protocol traffic would leave them
+/// invisible; that is why a route names its local effect and the harness
+/// records routes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Route {
     /// The lifecycle family — see [`route_lifecycle`].
@@ -2736,9 +2744,11 @@ enum Route {
     Unrouted,
 }
 
-/// The lifecycle family: the three arms that read no pointer state, hold
-/// no `State` borrow, and reach the socket only through the resize
-/// declaration.
+/// The lifecycle family: events about the **window itself** — closing,
+/// resizing, repainting — rather than about a gesture aimed into the
+/// document. `ModifiersChanged` is grouped here as the one exception,
+/// and it is named as one: it is a bare state mutation with no gesture
+/// of its own and no body to extract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LifecycleRoute {
     /// `CloseRequested` — leave the event loop. Q#S1-1: a native close
@@ -2753,6 +2763,10 @@ enum LifecycleRoute {
     /// defensive padding; deciding it here is what makes it witnessable
     /// without a surface.
     Resize { width: u32, height: u32 },
+    /// `RedrawRequested` — paint a frame. Nothing goes to the daemon,
+    /// which is why the harness records local effects rather than
+    /// outbound traffic.
+    Redraw,
 }
 
 /// Decide what `window_event` should do with an event, from the event
@@ -2774,6 +2788,7 @@ fn route_lifecycle(event: &WindowEvent) -> Option<LifecycleRoute> {
             width: size.width.max(1),
             height: size.height.max(1),
         }),
+        WindowEvent::RedrawRequested => Some(LifecycleRoute::Redraw),
         _ => None,
     }
 }
@@ -2897,6 +2912,18 @@ mod input_routing_tests {
         );
     }
 
+    /// P1 — `RedrawRequested`. The second arm that sends the daemon
+    /// nothing, and the reason the harness cannot be a transcript of
+    /// outbound traffic.
+    #[test]
+    fn redraw_requested_routes_to_redraw() {
+        let mut harness = RoutingHarness::default();
+        assert_eq!(
+            harness.feed(&WindowEvent::RedrawRequested),
+            Route::Lifecycle(LifecycleRoute::Redraw)
+        );
+    }
+
     /// An event no family claims. `Occluded` is chosen because pmacs has
     /// never handled it and no later slice will — a still-inline family
     /// would also read `Unrouted` today and stop doing so when it moves.
@@ -2907,14 +2934,16 @@ mod input_routing_tests {
     }
 
     /// P2 — the harness records a transcript, and the transcript
-    /// distinguishes the three lifecycle effects from each other and
-    /// from an unclaimed event. Two of these four rows produce no
-    /// outbound traffic whatsoever.
+    /// distinguishes each lifecycle effect from the others and from an
+    /// unclaimed event. **Two of these five rows produce no outbound
+    /// traffic whatsoever**, which is the property that rules out a
+    /// harness built on protocol traffic alone.
     #[test]
     fn the_harness_records_each_local_effect_in_order() {
         let mut harness = RoutingHarness::default();
         harness.feed(&WindowEvent::Resized(PhysicalSize::new(800, 600)));
         harness.feed(&modifiers_changed(ModifiersState::SHIFT));
+        harness.feed(&WindowEvent::RedrawRequested);
         harness.feed(&WindowEvent::Occluded(false));
         harness.feed(&WindowEvent::CloseRequested);
         assert_eq!(
@@ -2925,6 +2954,7 @@ mod input_routing_tests {
                     height: 600,
                 }),
                 Route::Lifecycle(LifecycleRoute::Modifiers(ModifiersState::SHIFT)),
+                Route::Lifecycle(LifecycleRoute::Redraw),
                 Route::Unrouted,
                 Route::Lifecycle(LifecycleRoute::Exit),
             ]
@@ -3606,11 +3636,6 @@ impl ApplicationHandler<AppEvent> for App {
                     eprintln!("pmacs-gpu: wheel send_viewport failed: {e}");
                 }
             }
-            WindowEvent::RedrawRequested => {
-                if let Some(state) = self.state.as_mut() {
-                    state.render();
-                }
-            }
             // Stage 1-pre — everything the router already claims. The
             // arms above are the families not yet moved behind it; when
             // the last one goes, this match collapses to the call below
@@ -3621,6 +3646,7 @@ impl ApplicationHandler<AppEvent> for App {
                 Route::Lifecycle(LifecycleRoute::Resize { width, height }) => {
                     self.apply_resize(width, height);
                 }
+                Route::Lifecycle(LifecycleRoute::Redraw) => self.apply_redraw(),
                 Route::Unrouted => {}
             },
         }
