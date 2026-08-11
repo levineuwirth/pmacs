@@ -1924,7 +1924,8 @@ end
 local FILE_WATCH_INTERVAL_MS = 250
 
 -- file_watchers[tostring(sid)][registrationId] = list of watch records
--- ({ cancelled = bool, _sleep = handle? }), one per glob watcher.
+-- ({ cancelled = bool, form = "relative"|"absolute", _sleep = handle? }),
+-- one per glob watcher.
 local file_watchers = {}
 
 -- WatchKind is a bitmask (Create=1, Change=2, Delete=4); test it
@@ -2058,7 +2059,18 @@ end
 local FC_CREATED, FC_CHANGED, FC_DELETED = 1, 2, 3
 
 local function start_file_watcher(sid, base, glob, kind_mask, record)
-  local matches = glob_matcher(glob)
+  -- Per LSP, a plain-string glob matches the file's ABSOLUTE path,
+  -- while a RelativePattern's pattern is relative to its base — the
+  -- record's `form` (from resolve_watcher) picks the match subject.
+  -- scan_tree always walks in relative terms; only the string handed
+  -- to the matcher changes.
+  local match_glob = glob_matcher(glob)
+  local matches = match_glob
+  if record.form == "absolute" then
+    matches = function(rel)
+      return match_glob(base .. "/" .. rel)
+    end
+  end
   pmacs.async(function()
     local prev = scan_tree(base, matches)
     while not record.cancelled and server_is_live(sid) do
@@ -2069,6 +2081,29 @@ local function start_file_watcher(sid, base, glob, kind_mask, record)
       if record.cancelled or not server_is_live(sid) then break end
 
       local cur = scan_tree(base, matches)
+      -- The seam that makes the recheck below WITNESSABLE. `scan_tree`
+      -- suspends on `read_dir` once per directory, and the race is a
+      -- cancel arriving during one of those suspensions --- which no
+      -- arrangement of real timing can be made to happen on demand.
+      -- Same reason `git.lua` exposes `_deliver_status`: the contract is
+      -- about an interleaving the caller does not choose. Unset in
+      -- production, so this costs one nil test per tick.
+      -- `cur` is handed over so a test can cancel on THE SCAN THAT
+      -- OBSERVED a given change. Cancelling on any other scan is not a
+      -- witness: the loop would break at the post-sleep check on the
+      -- next iteration and emit nothing anyway, so the assertion would
+      -- pass with the recheck below deleted.
+      if pmacs.lsp._after_scan_for_tests then
+        pcall(pmacs.lsp._after_scan_for_tests, record, cur)
+      end
+      -- RECHECKED AFTER THE SCAN, not only after the sleep (review P2).
+      -- The coroutine is suspended for most of a tick with `_sleep`
+      -- already cleared, so a cancel landing there sets `cancelled` and
+      -- has no sleep to interrupt. Without this line the resumed scan
+      -- runs on to `did_change_watched_files` below and a SUPERSEDED
+      -- watcher emits one last batch under its OLD pattern. One batch is
+      -- enough: it is a wrong-pattern notification the server acts on.
+      if record.cancelled or not server_is_live(sid) then break end
       local changes = {}
       for rel, sig in pairs(cur) do
         local was = prev[rel]
@@ -2097,22 +2132,44 @@ local function start_file_watcher(sid, base, glob, kind_mask, record)
 end
 
 -- Resolve a GlobPattern (string | { baseUri, pattern }) to
--- (base_dir, pattern). A bare string with no base falls back to the
--- directory of an attached file on `sid` (best effort).
+-- (base_dir, pattern, form). The form must travel with the pair: a
+-- RelativePattern's pattern is relative to its baseUri, and dropping
+-- that distinction is what made absolute server globs unable to match
+-- anything. A bare string with no base falls back to the directory of
+-- an attached file on `sid` (best effort).
+--
+-- THE FORM COMES FROM THE PATTERN, NOT FROM THE UNION ARM (review P1).
+-- The first fix for #233 returned `"absolute"` for every string, which
+-- is a different bug wearing the same shape: LSP 3.17 defines `Pattern`
+-- relative to a base path, and VS Code treats a string watcher as
+-- applying across workspace folders, so a bare `*.txt` is a VALID
+-- relative pattern. Classifying it absolute matched it against
+-- `<base>/foo.txt`, which `^[^/]*%.txt$` can never match --- so that
+-- fix silently broke a case that worked before it. A leading `/` is
+-- what makes a pattern absolute; the arm it arrived in is not.
 local function resolve_watcher(sid, gp)
   if type(gp) == "table" and gp.baseUri then
-    return pmacs.lsp.path_for_uri(gp.baseUri), gp.pattern or "**"
+    return pmacs.lsp.path_for_uri(gp.baseUri), gp.pattern or "**", "relative"
   end
   if type(gp) == "string" then
     for _, rec in pairs(attachments) do
       if rec.server == sid and rec.uri then
         local p = pmacs.lsp.path_for_uri(rec.uri)
         local dir = p and p:match("^(.*)/[^/]*$")
-        if dir then return dir, gp end
+        if dir then
+          return dir, gp, (gp:sub(1, 1) == "/") and "absolute" or "relative"
+        end
       end
     end
   end
-  return nil, nil
+  return nil, nil, nil
+end
+
+local function cancel_watch_records(recs)
+  for _, r in ipairs(recs or {}) do
+    r.cancelled = true
+    if r._sleep then pcall(function() r._sleep:cancel() end) end
+  end
 end
 
 local function register_file_watchers(sid, registrations)
@@ -2120,11 +2177,16 @@ local function register_file_watchers(sid, registrations)
   file_watchers[skey] = file_watchers[skey] or {}
   for _, reg in ipairs(registrations or {}) do
     if reg.method == "workspace/didChangeWatchedFiles" then
+      -- Re-registering a live id supersedes it (rust-analyzer does
+      -- this): cancel the outgoing records first, because the table
+      -- write below drops the only reference to them and an
+      -- uncancelled record polls until the server dies.
+      cancel_watch_records(file_watchers[skey][reg.id])
       local recs = {}
       for _, w in ipairs((reg.registerOptions or {}).watchers or {}) do
-        local base, pat = resolve_watcher(sid, w.globPattern)
+        local base, pat, form = resolve_watcher(sid, w.globPattern)
         if base and pat then
-          local r = { cancelled = false }
+          local r = { cancelled = false, form = form }
           recs[#recs + 1] = r
           start_file_watcher(sid, base, pat, w.kind or 7, r)
         end
@@ -2139,10 +2201,7 @@ local function unregister_file_watchers(sid, unregs)
   if not byid then return end
   for _, u in ipairs(unregs or {}) do
     if u.method == "workspace/didChangeWatchedFiles" and byid[u.id] then
-      for _, r in ipairs(byid[u.id]) do
-        r.cancelled = true
-        if r._sleep then pcall(function() r._sleep:cancel() end) end
-      end
+      cancel_watch_records(byid[u.id])
       byid[u.id] = nil
     end
   end
