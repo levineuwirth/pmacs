@@ -231,12 +231,33 @@ all share one keymap:
 | `RET` / `SPC` | `listview.visit` — act on the item under the cursor |
 | `n` / `<down>` | `cursor.down` |
 | `p` / `<up>` | `cursor.up` |
+| `TAB` | `listview.toggle` — collapse/expand the tree node under the cursor; a panel with no tree rows delegates to `buffer.tab` |
 | `g` | `listview.refresh` — re-run the data source and re-render |
 | `q` | `listview.quit` — restore the buffer that was active before the panel opened |
 
+(`TAB` arrived with the tree primitive and this table had not recorded
+it. Noted rather than quietly added: the omission predates the git lane
+that found it.)
+
 Panels currently built on this: `*references*`, `*outline*`,
-`*lsp-help*` (hover docs). Header text always spells out the same
-`RET`/`n`/`p`/`g`/`q` legend inline.
+`*lsp-help*` (hover docs), `*lsp*` (`lsp.status`), and `*git-status*`
+(`git.status`). Header text always spells out the panel's own legend
+inline.
+
+A panel may add keys of its own through an optional `keys` table on the
+open spec, bound through the same buffer-local path — so they are
+inspectable by `describe-key` and rebindable from `init.lua`, exactly
+like the fixed set. They are installed once with the panel's buffer and
+may not collide with the fixed set, nor prefix it. One panel uses this
+today:
+
+| Buffer | Key | Command |
+|---|---|---|
+| `*git-status*` (`git.status`) | `d` | `git.diff-file` — the diff for the file under the cursor, into `*git-diff*` |
+
+`git.status` gets **no global chord**: an opening key is a
+command-surface decision the Stage 1 framing did not make, so the entry
+point is `M-x git.status`.
 
 `*buffer-list*` (`editor.list-buffers`, `C-x C-b`) uses its own
 keymap, layered on the same idiom, in `builtin/commands/default.lua`:

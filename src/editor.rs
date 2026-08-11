@@ -797,6 +797,20 @@ impl EditorState {
                 include_str!("../builtin/runtime/linewrap.lua"),
             )
             .expect("load linewrap builtin chunk");
+        // Git integration Stage 1 (docs/git-integration-framing.md):
+        // `*git-status*` and `*git-diff*`. Loaded after `listview.lua`,
+        // whose `open` (and whose new optional `keys` table) it drives,
+        // and after `window.lua`, which owns `window.panel-height` — the
+        // setting a `display = "panel"` listview resolves. It binds no
+        // global key: an opening chord is a command-surface decision and
+        // the framing did not make one, so the entry point is
+        // `M-x git.status`.
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/git.lua"),
+                include_str!("../builtin/runtime/git.lua"),
+            )
+            .expect("load git builtin chunk");
         // T M7.11 bundled-package bootstrap. Through M7.10 the REPL
         // was loaded directly via `eval(include_str!(...))`; the
         // M7.11 deliverable migrates it to the package system so it
