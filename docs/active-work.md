@@ -303,9 +303,14 @@ is listed at the commit that does it, not promised here.
   prefix decision are all still open. And **`v6..=v23` must not sweep
   away the same row's "production attach remains v20"**, which is
   correct (`ADVERTISED_PROTOCOL_VERSION` is 20).
-- **Verification:** none applicable — Stage 0 changes no code. The gate
-  suite for its PR is `cargo fmt --check`, `git diff --check`, and
-  nothing else it can meaningfully run.
+- **Verification (2026-08-11, committed branch tip): FULL PRE-PR SUITE
+  PASS.** Stage 0 changes no code, so there is no touched acceptance
+  suite; that does **not** exempt a docs-only PR from the standing gates
+  in `AGENTS.md`. Ran `cargo fmt --check`; `cargo clippy --workspace
+  --all-targets -- -D warnings` as its own step; `cargo test --lib`;
+  `cargo test --lib --features crdt`; `cargo test --test m4_acceptance --
+  --skip basedpyright`; `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`;
+  and `git diff --check`.
 
 ## Git integration — STAGE 1 MERGED as #227; Stage 2 must be scheduled alone
 
