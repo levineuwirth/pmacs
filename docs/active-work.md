@@ -5,6 +5,16 @@ landed on `main`. Read it after `docs/agent-handoff.md`. Remove completed
 entries when their PR merges; do not let this become a second permanent
 backlog.
 
+**Updated 2026-08-11, second pass — the file-watcher arc is DONE.**
+**#235 merged** (`main` @ `122b8e8`) and **issue #233 is CLOSED**; per
+rule 4 the file-watcher lane is REMOVED — its durable facts are in
+`docs/agent-handoff.md` §1's arc bullet, its full review history in
+`docs/lsp-file-watch-d3-framing.md` and the two PRs. The one framed
+option deliberately left unbuilt (kernel notification) lives in the
+framing, triggered only if the 4 s idle-latency cap ever matters.
+The canonical-base line below and the handoff anchor moved to
+`122b8e8`.
+
 **Updated 2026-08-11 — two merges and a discharge.** The LSP file
 watcher D1+D2 landed as **#234** (`ae84d58`) after one review round
 (P1 form-from-the-pattern, P2 cancelled-scan emission — both
@@ -126,7 +136,8 @@ lesson, §1 for the two framings).
   are identical on every machine. Remote names are otherwise
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
-- Canonical base at this snapshot: **`githubsucks/main` @ `b867f64`** —
+- Canonical base at this snapshot: **`githubsucks/main` @ `122b8e8`** —
+  the file-watcher D3 **#235** (closes issue #233), atop `b867f64`
   git integration Stage 1 **#227**, atop `ae84d58` the LSP file-watcher
   fix **#234**, atop `0e4c58d` destination capture **#231**, `3cc1b85`
   worker identity Stage 1 **#232**, `0857bf4` discovery Stage 2
@@ -231,151 +242,6 @@ bare `git push`, and is exactly the "uncommitted work does not travel"
 hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
-
-## LSP file watcher (issue #233) — D1+D2 MERGED as #234; D3 IS NEXT
-
-**Issue #233** — https://github.com/levineuwirth/pmacs/issues/233,
-still OPEN: it closes when D3 does. **PR #234 MERGED 2026-08-11**
-(`main` @ `ae84d58`), one review round. The framing is
-`docs/lsp-file-watcher-framing.md`, revision 2 — it carries the full
-record: the approved design, the answered ruling, and the two review
-findings (P1 form-from-the-pattern, P2 cancelled-scan emission) with
-their bite results. Durable facts are absorbed in
-`docs/agent-handoff.md` §1.
-
-**The #227 hold is DISCHARGED.** The 2026-08-10 ruling held #227
-unmerged until this was resolved; #234 merged first and #227 followed
-the same day (`b867f64`), refreshed and re-gated on the merged base.
-
-**D3 — the polling cost — PR #235 OPEN**
-(https://github.com/levineuwirth/pmacs/pull/235, opened 2026-08-11 at
-`db24abb`, the implementation commit after two pre-commit review
-rounds). **Branch `lsp-file-watch-d3`** (base
-`githubsucks/main` @ `add0ba1`; the remote ref is authoritative), with
-**framing `docs/lsp-file-watch-d3-framing.md`, revision 4, APPROVED
-2026-08-11 with the four rulings adopted as proposed** (honest ⋯N bar;
-no exclusions; server root then cwd then attachment fallback;
-constants). **IMPLEMENTED on the branch**: `pmacs.fs.walk_tree` (one
-cancellable job per scan, eight Rust unit tests), the group scheduler
-in `lsp.lua` (after-tick cadence, single-flight state machine with
-the round-3 non-success partition, registration epochs, backoff,
-retirement), and eighteen acceptance tests — the six #234 tests
-byte-unchanged plus twelve witnesses, each mutation-verified.
-Implementation-time facts and review-round records worth keeping:
-
-- **Retirement is deliberately double-enforced** (the unregister path
-  and the post-scan sweep), and the mutation pass proved it: biting
-  either copy alone is masked by the other; only biting both goes red.
-  The sweep exists for seam-cancelled members, the unregister path for
-  idle groups whose next scan may be seconds away.
-- **Round three, post-PR: two witness overclaims, and the PR's first
-  CI red — my own fixed-duration pump.** The mid-walk bound (60) could
-  not tell a deleted per-entry poll from the real code — the cancel
-  lands two files into a 41-file directory, so the per-DIRECTORY poll
-  stops a poll-less walk at 44; the bound is now 40 against an
-  expected exactly-35, and the entry-poll-only bite goes red at 44.
-  The retirement helper accepted `cancel_requested` on an active row —
-  a request, not settlement; it now waits for a `cancelled`
-  COMPLETION. And all five CI test legs failed deterministically where
-  sixteen local cores stayed green: `d3_pump(1600)` wrote the
-  discriminating file before the held walk even STARTED on a
-  3-thread pool (8×1200 ms sleeps drain in ~3.6 s of waves), folding
-  it into the baseline. The drain is now an observable condition
-  (a post-join walk completed and none active), the sleeps are 800 ms,
-  and the three saturation tests plus the whole family were re-run
-  green under `taskset -c 0-3` — the CI pool shape, reproduced
-  locally. **A fixed-duration pump against pool-dependent timing is a
-  core-count assumption in disguise.**
-- **A second pre-commit round found three more** (implementation
-  review, not framing): mid-walk cancellation was unwitnessed — both
-  Rust cancel tests pre-cancelled and the acceptance test cancelled a
-  QUEUED walk, so deleting the internal polls left everything green
-  (a `cfg(test)` entry hook now cancels at an exact entry boundary
-  and asserts the walk stopped NEAR it, and the retirement witness
-  holds a walk in flight across the unregister and asserts the job
-  settles cancelled); the "unreachable fallback" claim was WRONG — a
-  manual `pmacs.lsp.spawn` may omit both `cwd` and `root_uri`, and
-  `ensure_server` adopts such a server for markerless files (nil ==
-  nil), so the deterministic minimum now has a five-directory
-  through-the-server witness (five, because with two the build's hash
-  order coincided with the lexicographic answer and the first-pairs
-  bite survived); and the root-boundary joins gained a witness
-  through the exported production matcher/URI functions, since no
-  fixture can walk `/` for real.
-- **A pre-commit review round found four blockers**, fixed before
-  anything was committed: empty-tree cancellation (the entry loops
-  never run, so a pre-cancelled walk returned empty SUCCESS — the
-  deletion-storm shape the non-success arm exists to prevent); the
-  attachment fallback was still `pairs`-order nondeterministic (now
-  lexicographic-minimum; this round also called it unreachable, which
-  round two above DISPROVED via the manual-spawn adoption path); a
-  filesystem-root base joined as `//path` (now `join_under`, dired's
-  idiom); and two test probes defaulted on error, so a broken pair
-  could compare equal and lie green (every probe now `expect`s).
-- **A stray marker high in the tree re-roots every markerless fixture
-  under it.** An empty `/tmp/.git` (leftover from the #233
-  investigation, since removed by the user) made project detection
-  root tempdir fixtures at `/tmp`, which under Q#D3-3 the watcher then
-  faithfully watched. Any machine can grow one; a markerless-fixture
-  red that looks like a watcher bug may be an ancestor marker.
-
-Framing and lane were committed
-at the branch's first commit so the document stayed portable during
-review. **Review
-round 3 (2026-08-11) found the live group's non-success transition
-missing**: every job is user-cancellable and `Handle:await()` raises on
-cancel/failure, so an uncaught result could leave `in_flight` set forever.
-Revision 4 partitions completion into success, stale/retired, and live
-non-success: live cancel/failure commits no snapshot or epoch, preserves
-the prior snapshot/backoff, clears in-flight, honors a queued baseline or
-reschedules, and visibly deduplicates failures. It also corrects the
-queued-baseline bound: a mid-walk join waits for the current walk's
-remainder plus its own follow-up walk, never a backoff cap. Two round-3
-witnesses cover live cancel and failure. **Review round 2 (2026-08-11)
-found the scheduler underspecified**: a joining watcher must force an
-immediate baseline scan (a backed-off group would otherwise fold
-post-registration files into the baseline — and a baseline is now
-only a snapshot whose WALK STARTED after the join); the group gained
-a defined state machine (single-flight per group, deadlines advanced
-from completion, stale completions rejected by generation, retirement
-that cooperatively cancels the walk — cancellation joining
-`walk_tree`'s contract); and Q#D3-1's `⋯1` was an overclaim — the
-accurate bar is absence at idle plus one attributable job per
-concurrently due (server, base) group. Six round-2 witnesses joined
-the plan. **Review round 1 (2026-08-11) found five
-findings and revision 1 did not survive it** — the promised idle
-state was impossible (`workers.sleep` is a pool-thread-holding
-running job the indicator counts; revision 2 replaces the sleep loop
-with autosave's Q#AS2 after-tick cadence), the scan root must be the
-server's own `root_uri`/`cwd` (not `pmacs.project.detect`, which
-texlab's Q#LX2 proves wrong), coalescing gained registration-epoch
-delivery semantics with two new witnesses, the exclusion default
-became **none** (any unconditional skip deviates from the registered
-glob contract, and `walk_tree` removes the job-count economics that
-motivated it), and the cost arithmetic was corrected to this
-checkout (1,326 jobs/tick for rust-analyzer's six watchers; revised
-steady state is zero jobs at idle). The four rulings (Q#D3-1..4)
-were ADOPTED AS PROPOSED at the 2026-08-11 approval and are recorded
-in the framing's status block. What was known before framing,
-verified while framing D1/D2:
-
-- After #234 the watcher is *correct* but still walks: `walk` recurses
-  unconditionally and `matches` gates only recording, so rust-analyzer
-  walks the whole tree — `.git`, `target`, `node_modules` included —
-  every 250 ms, six times per tick (was twelve before D2), one async
-  job per directory. The modeline still shows the churn, at roughly
-  half the pre-#234 rate.
-- **No `notify`/inotify dependency in the tree** — a real
-  filesystem-notification primitive is a new crate plus a new Rust
-  primitive plus its Lua binding.
-- **No ignore-list infrastructure to reuse** — `src/project.rs` knows
-  `.git` as a *marker* name, not as something to skip.
-- Options named in the issue: coalesce a server's watchers into one
-  scan; root the scan at the workspace root; an ignore list; back off
-  when nothing changes; a real notification primitive.
-- It is a `COHERENCE.md` §9 concern — background work with no
-  ownership model — and the activity indicator that surfaced it is
-  §9's own Stage 1. The framing must state its §20 coherence impact.
 
 ## `scripts/gate` — PR #225 OPEN (build tooling)
 

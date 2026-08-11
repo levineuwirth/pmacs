@@ -1,18 +1,20 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-08-11.** `main` is **`b867f64`** — git integration
-Stage 1 **#227** (`*git-status*` / `*git-diff*`, no wire change), atop
-`ae84d58` **#234**, the LSP file-watcher correctness fix (issue #233
-D1+D2, one review round; **D3 — the polling cost — is deliberately
-unfixed and is the ruled next lane**). Beneath them, in first-parent
-order: **#231** destination capture, **#232** worker identity Stage 1,
-**#228** discovery Stage 2, **#230** LSP LaTeX coverage, **#229** the
-gate `--protocol` build step, **#225** per-worktree gate target dirs,
+**Last updated: 2026-08-11 (second pass, same day).** `main` is
+**`122b8e8`** — **#235**, D3 of the LSP file watcher, which **closes
+issue #233 and completes that arc**: the watcher stops sleeping and
+walks once per scan, zero jobs at idle. Beneath it `b867f64` — git
+integration Stage 1 **#227** (`*git-status*` / `*git-diff*`, no wire
+change), atop `ae84d58` **#234**, the file-watcher correctness fix
+(issue #233 D1+D2). Beneath them, in first-parent order: **#231**
+destination capture, **#232** worker identity Stage 1, **#228**
+discovery Stage 2, **#230** LSP LaTeX coverage, **#229** the gate
+`--protocol` build step, **#225** per-worktree gate target dirs,
 **#226** the R8 fixture fix, and **#224** the QoL docs retirement.
-**Only #227 and #234 are absorbed into §1 at this anchor**; the eight
-between carry their facts in their `docs/active-work.md` lanes, several
-of whose headers still say OPEN — trust this chain over any lane
-header, per the ledger's own rule.
+**Only #227, #234 and #235 are absorbed into §1 at this anchor**; the
+eight between carry their facts in their `docs/active-work.md` lanes,
+several of whose headers still say OPEN — trust this chain over any
+lane header, per the ledger's own rule.
 
 Previously **2026-08-08**: `main` was `9a26ac8` — GPU horizontal
 scroll **#223**, which **closes the QoL arc** (§1). Beneath it the arc's
@@ -149,45 +151,68 @@ commands, read `docs/active-work.md` immediately after this file.
     splitting would force every present and future consumer to spell
     both arms, and a forgotten arm silently degrades copies. The score
     byte carries the distinction where presentation needs it.
-- **LSP file watcher — D1+D2 MERGED as #234 (2026-08-11); D3 is
-  next.** Issue #233: with any server that dynamically registers
-  `workspace/didChangeWatchedFiles`, plain-string globs never matched
-  (matched **relative** where LSP says **absolute** — rust-analyzer
-  saw no file change, ever; gopls saw `go.mod` but never `.go`), and
-  re-registering a live id leaked the previous pollers uncancellably
-  (rust-analyzer registers twice under one id: 12 pollers, 6
-  unreachable). Invisible for three months until #232's activity
-  indicator — §9's instrument doing exactly its job. Durable facts:
-  - **The GlobPattern form travels with the pattern, and it is read
-    FROM the pattern, not from the union arm.** `resolve_watcher`
-    returns `(base, pattern, form)`; a leading `/` is what makes a
-    string absolute. The first fix classified every string absolute —
-    repairing rust-analyzer while silently breaking bare `*.txt`, a
-    case that had worked since May. Review caught it (P1).
-  - **A scan that completes after cancellation must not emit (P2).**
-    The watcher coroutine spends most of a tick suspended in
-    `read_dir` awaits with `_sleep` already cleared, so a cancel
-    landing there had nothing to interrupt and the resumed scan
-    emitted one stale batch under the superseded pattern. Cancellation
-    and liveness are rechecked after the scan;
-    `pmacs.lsp._after_scan_for_tests` (nil in production, handed the
-    scan result) exists because no real timing produces that
-    interleaving on demand — `git.lua`'s `_deliver_status` device
-    again.
-  - **F1's lesson fired twice in one lane.** The pre-existing test was
-    insensitive (`**/` compiles to `.-`, which spans `/`, so it passes
-    under either match subject) — and then the lane's own flat-pattern
-    guard constrained the RelativePattern *object* arm while P1's
-    regression lived in the *string* arm. A guard proves things about
-    the arm it exercises, nothing more.
-  - **All six watcher tests are mutation-verified, each bite failing
-    only its own defect** — the two review fixes re-verified
-    independently after review.
-  - **D3 is deliberately unfixed and ruled next**: the walk still
-    recurses into everything every 250 ms, six jobs per tick for
-    rust-analyzer. The D3 lane in `docs/active-work.md` carries what
-    was checked (no notify dependency, no ignore-list infrastructure)
-    and the option space.
+- **LSP file watcher — ARC COMPLETE. Issue #233 CLOSED by #234 (D1+D2)
+  and #235 (D3, 2026-08-11).** The watcher no longer sleeps and no
+  longer walks per directory: `pmacs.fs.walk_tree` is the whole tree
+  as ONE cancellable job, and a `process.after-tick` scheduler
+  (autosave's Q#AS2 idiom) drives one scan group per (server, base) —
+  zero jobs and zero pool threads at idle, one attributable job per
+  scan, 250 ms under activity backing off to 4 s at rest. Three
+  framing review rounds and three implementation review rounds; the
+  framing (`docs/lsp-file-watch-d3-framing.md`) records all of them.
+  Durable facts:
+  - **A sleep job OCCUPIES A POOL THREAD for its whole duration**
+    (`dispatch_sleep` runs `run_sleep` on the pool). N sleeping
+    watchers subtract N of `available_parallelism - 1` threads. Any
+    recurring wait belongs on the after-tick cadence, not in
+    `workers.sleep` — autosave's comment says so and is now proven at
+    scale.
+  - **A loop that never runs cannot poll.** `walk_tree`'s cancellation
+    is checked at entry, per directory, per 32 entries, AND at exit —
+    the entry/exit checks exist because an EMPTY tree enters no loop,
+    and a pre-cancelled walk returning empty SUCCESS would have been
+    committed as a snapshot and diffed into a deletion storm.
+  - **The group scheduler is a state machine, not a cadence**:
+    single-flight per group (overlap unrepresentable), deadlines
+    advanced from completion, stale completions rejected by
+    generation, and a THREE-ARM completion partition — success /
+    stale-or-retired / live non-success — because every job is
+    user-cancellable and `Handle:await()` raises structured outcomes;
+    an uncaught non-success would strand `in_flight` forever and
+    silently stop watching. Joins wake the group and queue exactly one
+    mid-walk follow-up; a watcher's baseline is the first snapshot
+    whose WALK STARTED after its join. Retirement is deliberately
+    double-enforced (unregister path + post-scan sweep) — mutation
+    bites proved either copy alone is masked.
+  - **The scan root is the server's** (Q#D3-3): `root_uri` → `cwd` →
+    lexicographically smallest attachment directory. The fallback is
+    REACHABLE — a manual `pmacs.lsp.spawn` may omit both fields and
+    `ensure_server` adopts it for markerless files (nil == nil) — and
+    `pairs`-order was the nondeterminism D3 existed to remove.
+  - **A fixed-duration pump against pool-dependent timing is a
+    core-count assumption in disguise.** PR #235's only CI red: all
+    five test legs failed deterministically where sixteen local cores
+    stayed green, because a 1.6 s pump assumed a held walk would
+    complete while a 3-thread CI pool was still draining sleep waves.
+    Drains wait on observable conditions; `taskset -c 0-3` reproduces
+    the CI pool shape locally and is now the standard rehearsal for
+    saturation-timed tests.
+  - **A test probe must fail loudly, and a witness bound must sit
+    BETWEEN the mutant and the real value.** One probe read
+    `pmacs.async` for `pmacs._async` and defaulted every error to
+    "absent" — a vacuously green idle witness; probes `expect` now.
+    The mid-walk cancellation bound was 60 where the real value is 35
+    and the poll-less mutant is 44. And `cancel_requested` on an
+    active row is a REQUEST — settlement is a `cancelled` completion.
+  - **A stray marker high in the tree re-roots every markerless
+    fixture beneath it.** An empty `/tmp/.git` made project detection
+    root tempdir fixtures at `/tmp` (7,751 entries), which the
+    server-rooted watcher then faithfully watched. A
+    markerless-fixture red that looks like a watcher bug may be an
+    ancestor marker, on any machine.
+  - **Deliberately unbuilt**: kernel notification (framing option E) —
+    a framed option, not residue; its trigger is the 4 s worst-case
+    external-change latency mattering in practice.
 - **QoL arc — CLOSED. All five stages merged (#219, #220, #221, #222,
   #223).** From one daily-driver report: terminal zoom broke TUI
   rendering and did nothing in the GUI, and a long line was unreadable
