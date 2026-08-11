@@ -516,7 +516,26 @@ witnesses delivery and decoding — which is real, and is not rendering.
 Retracted rather than softened, because "verified" was the word doing
 the damage.*
 
-### Ground truth: the journey today
+### Ground truth: the journey today — EVIDENCE ONLY; §2b OWNS THE GRADES
+
+**The verdict column below is the SUPERSEDED single-verdict model.**
+§2b's per-frontend table is authoritative for every grade, and where the
+two disagree — steps 4, 6, 7, 10 and 11 — **§2b is correct and this
+table's verdict is historical.** It disagrees because it grades by a
+prose string rather than by the minimum over declared subclaims, which
+is the reading §2a and §2b exist to replace.
+
+**Kept rather than deleted, and kept rather than re-synced.** Its value
+is the per-step *evidence* — what exists, what was measured, which PR
+changed it — which §2b's cells cite and do not restate. Re-syncing its
+verdicts would restore a second source of truth for grades and
+guarantee this drift recurs; marking it removes the second source
+instead.
+
+**A historical grade may stand here. A false statement about the tree
+may not** — the two are different, and only the first is what "kept for
+its evidence" licenses. Step 8's "no close/kill command" was the latter
+and is corrected in place below.
 
 **Grade: reaches step 5; thin from step 6 on.** Was **broken at step 3**
 at audit time:
@@ -556,7 +575,7 @@ Full verdict table:
 | 5 | Edit | **Works** | Full CUA + Emacs keymap in 161 lines (`builtin/keymaps/default.lua`); isearch, query-replace, kill ring, undo/redo, auto-indent/pair/comment, atomic save. Genuinely excellent zero-config |
 | 6 | Language intelligence | **Partial** | Rust grammar bundled and auto-attaches; rust-analyzer preconfigured (`builtin/runtime/lsp.lua`). **Journey Stage 1b-2 (#204) ended the silence** for a server that fails to *start*: the status line names the command, language and errno once per `(language, root, command)`; the modeline reads `LSP:!` instead of nothing; and `M-x lsp.status` renders `*lsp*` over the `status_buffer_text()` renderer that had existed since M4.8 with no caller. **Still Partial**, for a reason unaffected by that landing: a server that starts and then *crashes* is still unsurfaced — `LspEventKind::Crashed` is pushed and no builtin subscriber handles it |
 | 7 | Find symbol / file | **File: fixed (open by path merged #162; browsing #165). Symbol: works but undiscoverable** | No find-file/dired/picker existed at audit. Now `C-x C-f` opens a known path and `C-x d` / `C-x C-j` browse (flat listing, `dired` mode keymap); `M-.`/`M-?`/`C-c o` still bound but advertised nowhere and server-gated; no workspace-symbol command; `pmacs.index.*` has no UI |
-| 8 | Open terminal | **Works** | Full PTY with scrollback + modeline segment, bound to `C-c t` and configurable through three registered settings (`terminal.default-profile`, `terminal.scrollback-rows`, `terminal.escape-key`) plus named `pmacs.terminal.profiles` (PR #173), and searchable through `M-x terminal.copy-mode` / `C-c C-t`, which materializes the retained scrollback into an ordinary read-only buffer (Stage 2). Named limitations: `C-c t` is unreachable from *inside* a terminal window, where `C-c` is consumed as the escape — `M-x terminal` still works there; and there is still **no close/kill command**, which is the remaining half of this step's discoverability gap. *Was broken outright on the GPU frontend until the double terminal-layout sync was fixed: the child took a `SIGWINCH` storm at tick cadence, so typing into it was impossible while output still flowed.* |
+| 8 | Open terminal | **Works** | Full PTY with scrollback + modeline segment, bound to `C-c t` and configurable through three registered settings (`terminal.default-profile`, `terminal.scrollback-rows`, `terminal.escape-key`) plus named `pmacs.terminal.profiles` (PR #173), and searchable through `M-x terminal.copy-mode` / `C-c C-t`, which materializes the retained scrollback into an ordinary read-only buffer (Stage 2). Named limitations: `C-c t` is unreachable from *inside* a terminal window, where `C-c` is consumed as the escape — `M-x terminal` still works there; and `C-c t` is not re-advertised there. **The "no close/kill command" claim previously recorded here was false**: `M-x buffer.kill-this` is global (`builtin/commands/default.lua:1209`) and killing a terminal buffer prunes the session and reaps the owned process (`tests/vterm_stage1_acceptance.rs:336`). Corrected in place because it is a statement about the tree, not a historical grade. *Was broken outright on the GPU frontend until the double terminal-layout sync was fixed: the child took a `SIGWINCH` storm at tick cadence, so typing into it was impossible while output still flowed.* |
 | 9 | Build / test | **Works** | Journey Stage 1b-1 (#203): `C-c c` runs `compile.run`, and the first prompt is prefilled from the detected project kind (`pmacs.compile.defaults`, seeded `rust = "cargo build"`, extensible from `init.lua`) via `ProjectKind::Rust` — **not** `Cargo`, see §24. The prompt **captures** its directory rather than re-resolving at accept time, so the command it offers and the directory it runs in cannot drift while the minibuffer waits. Still defaults cwd to the detected project root and parses Rust `-->` errors. Named limitation: after `pmacs <dir>` the active buffer is dired's and pathless, so the cwd falls back to the process cwd — §8's execution-location model owns that, and the degradation stays coherent (no suggestion is offered for a directory with no detected Cargo project) |
 | 10 | Inspect error | **Partial (good once reached)** | `E:n W:n` modeline counts, underlines, `M-g n/p` + ``C-x ` `` walking a unified compile/grep/diag source, message echo, `RET` visits. Gated entirely on step 6 or 9 succeeding first |
 | 11 | See background work | **Partial** | **Statusline activity indicator since #232** — in-flight count plus the oldest job's purpose, absent entirely when idle, through `ui.activity-indicator`. `*workers*` view via `M-x editor.list-workers`, **still with no keybinding**; `C-c C-k` cancel-at-point. *Was "Works but undiscoverable — no statusline spinner/progress indicator anywhere"; #232 shipped exactly that indicator on 2026-08-09 and the row went stale the same day* |
