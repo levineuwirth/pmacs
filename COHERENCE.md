@@ -686,6 +686,7 @@ build actions, menus, missing-tool guidance):
   (`C-c t`, in the welcome) · build ✓ **and advertised** (`C-c c`, in
   the welcome; the prompt is **prefilled from the detected project
   kind**, not empty) · menus △
+  (right-click only, 11 items) · missing-tool guidance ✗ (§1.2).
 
   *Three claims in this bullet were false and are corrected together:
   "neither is advertised anywhere but the keymap", "terminal ✓ but
@@ -694,7 +695,6 @@ build actions, menus, missing-tool guidance):
   fixes the paragraph after §2's audit quote already records as
   landed. They survived because a level-by-level inventory was never
   re-run against them.*
-  (right-click only, 11 items) · missing-tool guidance ✗ (§1.2).
 
 **Intermediate** (should discover: palette, keybinding search, workspace
 settings, profiles, package management, task definitions,
@@ -702,7 +702,8 @@ frontend/language settings):
 
 - palette △ (`M-x` fuzzy over bare names — the rows are still bare, §5) ·
   keybinding search ✓ (`help.list-keybindings`, `help.where-is`,
-  `help.describe-key`; still no key to reach them) · workspace settings
+  `help.describe-key`; **advertised through the welcome's `M-x help`
+  route, but no DIRECT binding reaches them**) · workspace settings
   ✗ (no workspace scope, §11) · profiles ✗ (§12) · package management ✗
   in-session (§13) · task definitions ✗ · frontend customization △
   (themes, `pmacs.gpu.set_font`, statusline providers — all Lua-only) ·
@@ -844,9 +845,10 @@ the sharpest instance of §1.1.**
   **What remains missing here:** a discovery surface for **packages**
   (§13) — `*workers*` already has one, reachable by
   `M-x editor.list-workers`, though §9's ownership model and activity
-  indicator are still absent — and **no key reaches any of this**: the
-  family is `M-x`-only by design until the help-prefix decision is taken
-  (see the prefix bullet below).
+  indicator are still absent — and **no DIRECT binding reaches any of
+  this**, though the family is advertised: the welcome names `M-x help`,
+  which indexes it. The family stays unbound by design until the
+  help-prefix decision is taken (see the prefix bullet below).
   *Completion is assistance, not validation:* `resolve_accepted_value`
   returns the literal typed text when no candidate is selected, so a
   typo still reaches the handler; refusing a non-candidate is unbuilt
@@ -1203,8 +1205,9 @@ editor.list-workers`, auto-refreshing, `C-c C-k` cancel-at-point).
   provider rendering the in-flight count and the **oldest** job's
   purpose, absent when idle, gated by `ui.activity-indicator`. So
   "visible asynchronous work" (§3) is **no longer false**: activity is
-  visible without knowing to run `M-x editor.list-workers`, though that
-  view still has no keybinding of its own.
+  visible without knowing to run `M-x editor.list-workers`, though **no
+  binding opens that view** — `C-c C-k` is bound inside it, which cannot
+  help anyone find it.
 
   *This bullet previously read "No progress indicator exists anywhere —
   no statusline spinner, no busy count (grep … is empty)". That grep was
