@@ -98,18 +98,18 @@ remain open to them.
 | 2 | Golden product journey | **Runs end to end, thin at 11–12** | **Step 1 now works — v1.1.0 ships binaries (#211)**, so the journey no longer begins with a source build. `pmacs .` opens the directory (1a); the interface introduces itself (1b-3); a missing language server says so (1b-2, #204); a build is bound and prefilled (1b-1, #203). **Steps 11 (background-work ownership, §9) and 12 (session restore) are the remaining thin end** |
 | 3 | Zero-configuration state | **Partial** | Defaults genuinely strong; missing-tool failure is silent, not graceful |
 | 4 | Progressive disclosure | **Inverted** | The advanced level is real; the beginner level is the missing one |
-| 5 | Unified discoverability | **Partial** | Discovery Stage 1: eleven `help.*` commands (describe key/mode/hook/buffer/command/setting, where-is, list commands/keybindings/settings, apropos) over the existing registries, indexed by `M-x help`. Commands, keys, modes, hooks and settings are now reachable, and `*workers*` already was (`M-x editor.list-workers`); **packages have no comparable surface** (§13), and workers still lack owner/purpose/hierarchy and any indicator (§9). `Command` still has no title/category/flags, M-x rows are still bare names, and the Rust help layer is still orphaned |
+| 5 | Unified discoverability | **Partial** | Discovery Stage 1: eleven `help.*` commands (describe key/mode/hook/buffer/command/setting, where-is, list commands/keybindings/settings, apropos) over the existing registries, indexed by `M-x help`. Commands, keys, modes, hooks and settings are now reachable, and `*workers*` already was (`M-x editor.list-workers`); **packages have no comparable surface** (§13), and workers carry a required **purpose** and a statusline **activity indicator** since #232, but still lack an accountable **owner** and any **hierarchy** (§9). `Command` still has no title/category/flags, and the Rust help layer is still orphaned. M-x rows carry descriptions since #228 (protocol v23) |
 | 6 | Interaction islands | **Weak, and growing** | Six hardcoded key-interception shadows; no transient-keymap mechanism exists |
 | 7 | First-class workspaces | **Missing (conventions only)** | Marker walk + four independent consumers; no workspace object |
 | 8 | Execution locations | **Missing (architecture ready)** | SSH attach works; "location" is not a value anywhere |
-| 9 | Worker ownership | **Mechanism without identity** | Cancellation solid; no owner/purpose/hierarchy; four disjoint activity views |
+| 9 | Worker ownership | **Mechanism with purpose, without ownership** | Cancellation solid; **purpose required on every job and process, and a statusline activity indicator, since #232**; still **no accountable owner and no hierarchy**; four disjoint activity views |
 | 10 | Extension trust classes | **Missing (one class)** | Shared Lua state, `__index = _G`; MCP is the one out-of-process seam |
 | 11 | Config layering + provenance | **Partial (foundation only)** | Typed registry is right; 5 settings live in it; no value provenance |
 | 12 | Profiles | **Missing** | One hardcoded default keymap; not a named concept |
 | 13 | Package lifecycle UX | **Resolution without lifecycle** | Mature resolver/lockfile; init-only install; no uninstall/disable/search |
-| 14 | Workbench primitives | **Partial (best trajectory)** | Listview is a real primitive but only **4** call sites, all LSP panels (`*lsp*` added post-audit by #204); buffer-list and search re-implement it; **the bottom panel is COMPLETE — both frontends, and Stage 3 flipped the adopter default so omission means the panel**. **Tree is implemented (◐) with the LSP outline as its one adopter; the remaining consumers, including dired's `i`, have not adopted** |
-| 15 | Contextual affordances | **Weak** | Right-click menu only; code actions apply first-blindly; no git integration at all |
-| 16 | Semantic frontend | **Strong** | v6..=v21 schema support; production attach remains v20 during the dark panel slice; degradation practiced |
+| 14 | Workbench primitives | **Partial (best trajectory)** | Listview is a real primitive with executable call sites in **two** modules — `lsp.lua` (**4**) and **`git.lua` (1, `*git-status*`, #227)** — so it is **no longer LSP-only**; *(counted excluding comment mentions, which an earlier `grep -c` included)*; buffer-list and search re-implement it; **the bottom panel is COMPLETE — both frontends, and Stage 3 flipped the adopter default so omission means the panel**. **Tree is implemented (◐) with the LSP outline as its one adopter; the remaining consumers, including dired's `i`, have not adopted** |
+| 15 | Contextual affordances | **Weak** | Right-click menu only; code actions apply first-blindly; **Git integration reaches status and diff (#227, Stage 1) and no further** — §15's ground truth is authoritative, and this row previously said "no git integration at all" |
+| 16 | Semantic frontend | **Architectural: Strong · Product: Weak** | v6..=v23 schema support; production attach remains v20 during the dark panel slice; degradation practiced. **The two subgrades and the product criteria live in §16** — the row points there rather than carrying a grade of its own, so the GUI-as-a-product half cannot hide inside an architectural `Strong` |
 | 17 | Distribution | **Partial** | **v1.1.0 ships prebuilt Linux/macOS binaries on tag** (#211) with checksums and a stated glibc floor. No channels, in-place update, rollback, signing, or package-manager distribution |
 | 18 | Onboarding | **Partial** | Journey Stage 1b-3: an unconfigured launch greets in `*scratch*` naming `M-x` and four real bindings, and `M-x help` renders a cheat sheet. Still no tutorial and `C-h` still deletes a word — deliberately, see §18 |
 | 19 | Coherence acceptance tests | **Started** | `tests/journey_acceptance.rs` carries 45 pins over steps 2, 3, 4, 5, 6 and 9 — the ratchet is real and stages add rows to it. The other five §19 scenarios (workspace lifecycle, worker ownership, config provenance, package lifecycle, extension isolation) are still unwritten |
@@ -356,7 +356,200 @@ This journey should become a release gate. New architectural work should
 be evaluated partly by whether it improves, preserves, or complicates
 the journey.
 
-### Ground truth: the journey today
+### 2a. Required subclaims per step (the GUI arc, Stage 0)
+
+**A grade whose subclaims are unstated is not falsifiable.** The
+per-frontend table below grades each (step, frontend) cell as the
+**minimum over that step's required subclaims** — never the first word
+of a prose verdict. This section is that list, published so a reader can
+disagree with a grade by pointing at a subclaim rather than at taste.
+
+Two rules decide what belongs here. **Discoverability is a subclaim
+wherever it is the step's substance**, not an annotation on it — steps
+4, 7, 8, 9 and 11 are graded on whether a capability is *findable*, because
+"present but nobody can find it" is the failure those steps exist to
+catch. And **any defect cited as the reason a cell is below `Works` must be a
+subclaim**: an annotation cannot absorb a failing one. *Narrowed from
+"anything named as a defect", which swept in limitations this section
+explicitly excludes — no package manager, no tutorial — and so
+contradicted its own exclusions.*
+
+| # | Step | Required subclaims |
+|---|---|---|
+| 1 | Install | (a) a documented install path completes on a clean machine; (b) the installed binary launches |
+| 2 | Launch unconfigured | (a) starts with no user config; (b) presents a usable editing surface; (c) raises no error the user must dismiss |
+| 3 | Open real project | (a) a file opens from the CLI; (b) a file opens from inside the editor; (c) a directory opens and is browsable; (d) the project root is established |
+| 4 | Understand interface | (a) the mode line reports buffer state; (b) a help surface exists; (c) **discoverable** — the route to it is advertised in-product, not only known |
+| 5 | Edit | (a) text edits apply and render; (b) undo/redo; (c) selection, kill and yank; (d) **the full contents of an overlong line are reachable**, by wrapping or horizontal navigation |
+| 6 | Language intelligence | (a) a server attaches for a supported language; (b) diagnostics surface; (c) completion, hover and go-to-definition are available; (d) styling reflects the server; (e) **failure is visible and actionable** — both a startup failure and a *later* crash say so, rather than intelligence silently ceasing |
+| 7 | Find symbol / file | (a) open a file by path; (b) browse to a file without knowing its path; (c) find a symbol; (d) **discoverable** — the file, browse and symbol routes are **advertised in-product**, not merely bound |
+| 8 | Open terminal | (a) a terminal opens; (b) input and output round-trip; (c) it can be closed or killed; (d) **discoverable** — reachable by an advertised binding |
+| 9 | Build / test | (a) a build or test command runs **in the opened project's context**; (b) its output is captured; (c) the output is navigable; (d) **discoverable** — §2's own criteria say "Build or test command discoverable" (line above), which is what `C-c c` was bound to satisfy |
+| 10 | Inspect error | (a) errors are enumerated; (b) navigation reaches the site; (c) the site is marked in the buffer |
+| 11 | Understand what background work is running | (a) work in flight is **visible without asking**; (b) a detailed view is reachable that names each substantial background work item's **purpose and accountable owner — not merely its kind or dispatcher** — **across jobs, processes, servers and terminals**; (c) **discoverable** — reachable by an advertised binding; (d) cancellable |
+| 12 | Close + restore | (a) closing is clean and loses no data; (b) per-file state (cursor, scroll) restores; (c) the open-buffer set and window layout restore |
+
+**Aggregation inside a subclaim, stated because it decided two cells.**
+A subclaim that names a conjunction — "completion, hover and
+go-to-definition"; "a startup failure *and* a later crash" — is graded
+by the same minimum rule as the step: **an absent member makes the
+subclaim `Missing`, not `Partial`.** Degradation is for a member that is
+present and qualified; absence is absence at every level. Steps 6 and 11
+are `Missing` on this rule, and an earlier draft graded both `Partial`
+by treating a conjunction as one degradable atom — which would have made
+the ordinal mean something different at the subclaim level than at the
+step level, and is the reading the framing's own Step 7 worked example
+already rejects.
+
+**3(c) requires a browsable directory SURFACE, not dired.** Dired is
+today's evidence for it, not its definition — so a frontend inherits
+whatever browsing it actually has, which is precisely what the
+per-frontend columns exist to expose. A subclaim naming the
+implementation would have graded the mechanism instead of the journey.
+
+**Deliberately NOT subclaims.** Performance, aesthetics, and parity with
+other editors: each is real, and each is graded elsewhere or nowhere.
+**5(d) is the boundary case and is deliberately a correctness claim**:
+unreachable text is the long-lines arc's defect, while its 100 MB timing
+witness stays a separate performance gate. "Large files stay usable" was
+in an earlier draft of this row and was performance wearing a
+correctness coat.
+Folding them in here would make every cell a judgement about taste and
+the ordinal would stop meaning anything. **Frontend-specific
+limitations are also not subclaims** — they are what the three columns
+*measure*, so encoding them here would beg the question.
+
+**Step 12(c) is the worked example of why subclaims are per step and
+not per frontend.** It is a required subclaim everywhere, and Q#DS9
+makes it structurally impossible on any daemon-backed frontend — so the
+GPU cell fails it by construction rather than by omission. That is a
+finding the old single-verdict table could not express, because "Partial"
+was doing the work of both "some of this is missing" and "some of this
+cannot exist yet".
+
+### 2b. The per-frontend journey table
+
+Each cell is the **minimum over §2a's required subclaims**, with the
+binding subclaim named. Columns: **local TUI** (`pmacs .`), **attached
+TUI** (`pmacs --attach`), **GPU**. **The bar is GPU ≥ local TUI**; the
+attached column is evidence, separating a daemon-boundary gap from a
+frontend-local one.
+
+Anchors: `COHERENCE.md` §2's ground-truth rows, the GUI arc audit at
+`4bc55e8` (`docs/gui-arc-framing.md` §2), Q#DS9
+(`docs/desktop-save-framing.md`), and `builtin/runtime/welcome.lua`.
+
+**What counts as "advertised in-product", stated because an earlier
+draft of this paragraph got it wrong and mis-graded two steps.** The
+welcome advertises **both** a key table (`C-x C-f`, `C-c t`, `C-c c`,
+`C-x b`) **and prose** — its first line names `M-x` and `M-x help`
+(`welcome.lua:61`). Advertisement is therefore **transitive through the
+help graph**: a command reachable from an advertised route counts as
+advertised, which is how `help.list-keybindings` carries browse and
+symbol (step 7) and how `help.list-commands` carries
+`editor.list-workers` (step 11). Reading only the four-entry key table
+is what produced the earlier `Partial` at steps 4 and 7.
+
+**A binding is a stronger claim than a route, and 11(c) asks for the
+binding.** That is why step 11 still fails while step 7 passes: both are
+reachable through the help graph, but **no binding reaches
+`editor.list-workers`**. `*workers*` is not binding-free — it carries a
+buffer-local `C-c C-k` for `workers.cancel-at-point`
+(`async.lua`; `docs/keybindings.md:282`) — and that binding lives
+*inside* the view, so it cannot help anyone find it. The absent thing is
+specifically **a binding that opens it**.
+
+| # | Step | local TUI | attached TUI | GPU | binding subclaim |
+|---|---|---|---|---|---|
+| 1 | Install | Works | Works | **Works** | — release builds, ships and *verifies* `pmacs-gpu` (`release.yml:149,168,195`) |
+| 2 | Launch unconfigured | Works | Works | Works | — |
+| 3 | Open real project | Works | Works | Works | 3(c) satisfied by a browsable surface, not by dired specifically |
+| 4 | Understand interface | Works | Works | Works | 4(c) satisfied — the welcome's **first line** says "M-x runs any command; **M-x help lists the keys**" (`welcome.lua:61`). An earlier draft graded this Partial by reading only the four-entry key table and ignoring the prose above it |
+| 5 | Edit | Works | Works | **Partial** | 5(a) on GPU — **no IME, no `set_ime_allowed`**, so composed/CJK input is impossible; Latin editing is fine. Local/attached satisfy 5(d) by wrap and by QoL Stage 5 horizontal scroll |
+| 6 | Language intelligence | **Missing** | **Missing** | **Missing** | 6(e) — startup failure surfaces; a **later crash does not**, and an absent member of a conjunction makes the subclaim **Missing**, not degraded (§2a's aggregation rule). `server_is_live` is consulted at five sites and every one *skips* work rather than reporting. GPU additionally degrades 6(d) — single-authority semantic styling vs the grid's `merge_styles` — but the grade is already floored by 6(e) |
+| 7 | Find symbol / file | Works | Works | Works | 7(d) satisfied **under the published "advertised in-product" wording**: the advertised `M-x help` route reaches `help.list-keybindings`, which lists **every registered binding** (`help.lua`; asserted over every sequence at `discovery_acceptance.rs:208`), so browse and symbol are advertised transitively. *If the intent is direct advertisement only, 7(d) must say so — and the framing's own worked example then forces **Missing**, never Partial* |
+| 8 | Open terminal | Works | Works | Works | 8(c) satisfied by the **global** `M-x buffer.kill-this` (`default.lua:1209`); killing a terminal buffer prunes the session and reaps the process (`vterm_stage1_acceptance.rs:336`). 8(c) never required a terminal-*specific* command. 8(d) passes on the welcome's `C-c t` |
+| 9 | Build / test | Works | Works | Works | 9(d) passes on the welcome's `C-c c` entry, not on the bare binding; 9(a) runs in the detected project's context |
+| 10 | Inspect error | Works | Works | Works | all of 10(a–c) hold. *Being gated on step 6 or 9 is a **dependency, not a subclaim**, and §2a's membership rule forbids an annotation from lowering a grade — an earlier draft let it do exactly that. Grading the dependency would require adding it as a subclaim first* |
+| 11 | Understand background work | **Missing** | **Missing** | **Missing** | 11(c) — **no binding opens `editor.list-workers`**, so a keybinding listing cannot lead anyone to it: the subclaim is **absent**, not degraded, and it floors the cell. *The view is not binding-free — `C-c C-k` runs `workers.cancel-at-point` buffer-locally inside it (`docs/keybindings.md:282`) — but a binding that only works once you are already there cannot satisfy a discoverability subclaim.* 11(b) fails too — #232 gives **purpose**, never an accountable **owner**, and the planes stay disjoint (jobs in `*workers*`, processes in `pmacs.process.list`, servers in `*lsp*`, terminals **nowhere**). 11(a) passes on the activity indicator |
+| 12 | Close + restore | **Partial** | **Missing** | **Missing** | 12(c) — local restores nothing beyond per-file state (desktop-save is opt-in); on **both daemon-backed frontends it is a structural no-op** (Q#DS9), so they fail it **by construction** |
+
+**Closure condition 2 currently FAILS, with KNOWN failures at two
+steps and the exact set pending verification.** GPU is below local TUI
+at **step 5** (Partial vs Works) and **step 12** (Missing vs Partial),
+and every *graded* cell elsewhere is equal — but GPU 3(c) and 9 rest on
+inference (below), so a third failure cannot be ruled out until they are
+verified. "Exactly two" would be a stronger claim than this table's own
+evidence supports, and an earlier draft made it. GPU 6(c) is inferred
+too, but cannot change step 6, which is already floored at `Missing` by
+6(e) on all three frontends. That is the whole of
+the GPU's journey deficit as this table measures it — a narrower result
+than "the GUI feels behind", and a falsifiable one. It survived a review
+round that corrected six of the twelve rows, which is some evidence it
+is a property of the tree rather than of the grader.
+
+**The journey's two worst steps are frontend-INDEPENDENT**, and that is
+the table's other finding. Steps 6 and 11 grade `Missing` in all three
+columns: language intelligence dies silently after a server crash, and
+**no binding opens** the background-work view — a route exists
+(`M-x help` → `help.list-commands` → `editor.list-workers`), and a
+buffer-local `C-c C-k` exists *within* the view, but nothing bound leads
+to it. That is why 11(c) asks for a binding rather than a route, and why
+the binding it asks for is one that **reaches** the view. Neither is GUI work,
+neither is closed by this arc, and both were previously carried as
+`Partial` — which is how they stayed off the critical path.
+
+**The attached column earns its place at those two rows, and they point
+opposite ways.** Step 12 fails on attached TUI *and* GPU, so it is a
+**daemon-boundary** gap that no GPU work can close — Q#DS9 and the
+workspace object own it, which is why Stage 4b is P2-gated. Step 5
+fails on GPU *alone*, so it is **frontend-local** — Stage 1d's IME work
+closes it. A single merged TUI column would have shown two identical
+red cells and no way to tell those apart.
+
+**Inference flags — and when they must be closed (user ruling,
+2026-08-11).** These do **not** block the Stage 0 docs PR. They **must**
+be verified **before this table is first enforced as a release gate**.
+**3(c) and 9 can change the deficit set**; **6(c) cannot change step 6's
+grade today** — 6(e) already floors it at `Missing` on all three
+frontends — but still needs evidentiary closure rather than standing
+indefinitely as an assumption.
+
+GPU 3(c) is inferred **in both halves** —
+rendering and browsing interaction — as are GPU 9 (compile output
+renders like any other daemon buffer) and GPU 6(c) (hover reaches the
+echo area as on the grid). All must be verified before this table is
+used as a release gate.
+
+*An earlier draft called 3(c)'s rendering half "verified" on
+`gpu_invocation_acceptance.rs:706`. That test runs
+`--headless-managed-probe`, which connects, receives and DECODES a
+`BufferSnapshot` into text; it never constructs GPU render state and
+never calls `render_offscreen` (`pmacs-gpu/src/main.rs:1065`). It
+witnesses delivery and decoding — which is real, and is not rendering.
+Retracted rather than softened, because "verified" was the word doing
+the damage.*
+
+### Ground truth: the journey today — EVIDENCE ONLY; §2b OWNS THE GRADES
+
+**The verdict column below is the SUPERSEDED single-verdict model.**
+§2b's per-frontend table is authoritative for every grade, and where the
+two disagree — steps 4, 6, 7, 10 and 11 — **§2b is correct and this
+table's verdict is historical.** It disagrees because it grades by a
+prose string rather than by the minimum over declared subclaims, which
+is the reading §2a and §2b exist to replace.
+
+**Kept rather than deleted, and kept rather than re-synced.** Its value
+is the per-step *evidence* — what exists, what was measured, which PR
+changed it — which §2b's cells cite and do not restate. Re-syncing its
+verdicts would restore a second source of truth for grades and
+guarantee this drift recurs; marking it removes the second source
+instead.
+
+**A historical grade may stand here. A false statement about the tree
+may not** — the two are different, and only the first is what "kept for
+its evidence" licenses. Step 8's "no close/kill command" was the latter
+and is corrected in place below.
 
 **Grade: reaches step 5; thin from step 6 on.** Was **broken at step 3**
 at audit time:
@@ -395,11 +588,11 @@ Full verdict table:
 | 4 | Understand interface | **Partial** | Mode line gives name/modified/L:C/scroll + mode/LSP/terminal segments. Journey Stage 1b-3 adds a welcome in `*scratch*` and `M-x help`; **still Partial** because `C-h` deletes a word (deliberately — §18) and there is no tutorial |
 | 5 | Edit | **Works** | Full CUA + Emacs keymap in 161 lines (`builtin/keymaps/default.lua`); isearch, query-replace, kill ring, undo/redo, auto-indent/pair/comment, atomic save. Genuinely excellent zero-config |
 | 6 | Language intelligence | **Partial** | Rust grammar bundled and auto-attaches; rust-analyzer preconfigured (`builtin/runtime/lsp.lua`). **Journey Stage 1b-2 (#204) ended the silence** for a server that fails to *start*: the status line names the command, language and errno once per `(language, root, command)`; the modeline reads `LSP:!` instead of nothing; and `M-x lsp.status` renders `*lsp*` over the `status_buffer_text()` renderer that had existed since M4.8 with no caller. **Still Partial**, for a reason unaffected by that landing: a server that starts and then *crashes* is still unsurfaced — `LspEventKind::Crashed` is pushed and no builtin subscriber handles it |
-| 7 | Find symbol / file | **File: fixed (open by path merged #162; browsing #165). Symbol: works but undiscoverable** | No find-file/dired/picker existed at audit. Now `C-x C-f` opens a known path and `C-x d` / `C-x C-j` browse (flat listing, `dired` mode keymap); `M-.`/`M-?`/`C-c o` still bound but advertised nowhere and server-gated; no workspace-symbol command; `pmacs.index.*` has no UI |
-| 8 | Open terminal | **Works** | Full PTY with scrollback + modeline segment, bound to `C-c t` and configurable through three registered settings (`terminal.default-profile`, `terminal.scrollback-rows`, `terminal.escape-key`) plus named `pmacs.terminal.profiles` (PR #173), and searchable through `M-x terminal.copy-mode` / `C-c C-t`, which materializes the retained scrollback into an ordinary read-only buffer (Stage 2). Named limitations: `C-c t` is unreachable from *inside* a terminal window, where `C-c` is consumed as the escape — `M-x terminal` still works there; and there is still **no close/kill command**, which is the remaining half of this step's discoverability gap. *Was broken outright on the GPU frontend until the double terminal-layout sync was fixed: the child took a `SIGWINCH` storm at tick cadence, so typing into it was impossible while output still flowed.* |
+| 7 | Find symbol / file | **File: fixed (open by path merged #162; browsing #165). Symbol: works but undiscoverable** | No find-file/dired/picker existed at audit. Now `C-x C-f` opens a known path and `C-x d` / `C-x C-j` browse (flat listing, `dired` mode keymap); `M-.`/`M-?`/`C-c o` are bound and server-gated. **The "advertised nowhere" claim previously recorded here was false** under the transitive-help contract (§2b): being bound, they are named by `help.list-keybindings`, which the welcome's advertised `M-x help` reaches — which is why §2b grades this step `Works`. Corrected in place as a statement about the tree, while the historical verdict at the left stands. Still true: no workspace-symbol command, and `pmacs.index.*` has no UI |
+| 8 | Open terminal | **Works** | Full PTY with scrollback + modeline segment, bound to `C-c t` and configurable through three registered settings (`terminal.default-profile`, `terminal.scrollback-rows`, `terminal.escape-key`) plus named `pmacs.terminal.profiles` (PR #173), and searchable through `M-x terminal.copy-mode` / `C-c C-t`, which materializes the retained scrollback into an ordinary read-only buffer (Stage 2). Named limitations: `C-c t` is unreachable from *inside* a terminal window, where `C-c` is consumed as the escape — `M-x terminal` still works there; and `C-c t` is not re-advertised there. **The "no close/kill command" claim previously recorded here was false**: `M-x buffer.kill-this` is global (`builtin/commands/default.lua:1209`) and killing a terminal buffer prunes the session and reaps the owned process (`tests/vterm_stage1_acceptance.rs:336`). Corrected in place because it is a statement about the tree, not a historical grade. *Was broken outright on the GPU frontend until the double terminal-layout sync was fixed: the child took a `SIGWINCH` storm at tick cadence, so typing into it was impossible while output still flowed.* |
 | 9 | Build / test | **Works** | Journey Stage 1b-1 (#203): `C-c c` runs `compile.run`, and the first prompt is prefilled from the detected project kind (`pmacs.compile.defaults`, seeded `rust = "cargo build"`, extensible from `init.lua`) via `ProjectKind::Rust` — **not** `Cargo`, see §24. The prompt **captures** its directory rather than re-resolving at accept time, so the command it offers and the directory it runs in cannot drift while the minibuffer waits. Still defaults cwd to the detected project root and parses Rust `-->` errors. Named limitation: after `pmacs <dir>` the active buffer is dired's and pathless, so the cwd falls back to the process cwd — §8's execution-location model owns that, and the degradation stays coherent (no suggestion is offered for a directory with no detected Cargo project) |
 | 10 | Inspect error | **Partial (good once reached)** | `E:n W:n` modeline counts, underlines, `M-g n/p` + ``C-x ` `` walking a unified compile/grep/diag source, message echo, `RET` visits. Gated entirely on step 6 or 9 succeeding first |
-| 11 | See background work | **Works but undiscoverable** | `*workers*` view via `M-x editor.list-workers`; `C-c C-k` cancel-at-point. No keybinding, no statusline spinner/progress indicator anywhere (§9) |
+| 11 | See background work | **Partial** | **Statusline activity indicator since #232** — in-flight count plus the oldest job's purpose, absent entirely when idle, through `ui.activity-indicator`. `*workers*` view via `M-x editor.list-workers`, **with no binding that OPENS it**; `C-c C-k` cancel-at-point works buffer-locally once inside. *Was "Works but undiscoverable — no statusline spinner/progress indicator anywhere"; #232 shipped exactly that indicator on 2026-08-09 and the row went stale the same day* |
 | 12 | Close + restore | **Partial** | Per-file cursor+scroll (saveplace), recent files, minibuffer history, autosave recovery all restore zero-config. Open-buffer set and window layout do **not**: desktop-save is opt-in (`pmacs.session.desktop_mode(true)`) *and* a documented no-op under a daemon (`src/desktop.rs:323-326`, `:353-356`, Q#DS9) |
 
 A journey observation worth keeping verbatim from the audit:
@@ -499,11 +692,23 @@ level is the one missing. Audited level-by-level:
 build actions, menus, missing-tool guidance):
 
 - files ✓ since #162 / #165 (`C-x C-f` opens a path, `C-x d` browses;
-  neither is advertised anywhere but the keymap) · buffers ✓ (`C-x
-  b`, `*buffer-list*`) · search ✓ (`C-s`/`C-r`/`C-M-s`; project.search
-  is M-x-only) · diagnostics ✓ once a server runs · terminal ✓ but
-  M-x-only · build ✓ but M-x-only with empty prompt · menus △
+  **both are advertised** — `C-x C-f` directly in the welcome's key
+  table, `C-x d` transitively through `M-x help` →
+  `help.list-keybindings`) · buffers ✓ (`C-x b`, `*buffer-list*`) ·
+  search ✓ (`C-s`/`C-r`/`C-M-s`; project.search is M-x-only) ·
+  diagnostics ✓ once a server runs · terminal ✓ **and advertised**
+  (`C-c t`, in the welcome) · build ✓ **and advertised** (`C-c c`, in
+  the welcome; the prompt is **prefilled from the detected project
+  kind**, not empty) · menus △
   (right-click only, 11 items) · missing-tool guidance ✗ (§1.2).
+
+  *Three claims in this bullet were false and are corrected together:
+  "neither is advertised anywhere but the keymap", "terminal ✓ but
+  M-x-only", and "build ✓ but M-x-only with empty prompt". All three
+  were answered by the welcome buffer and by `C-c t`/`C-c c` — the very
+  fixes the paragraph after §2's audit quote already records as
+  landed. They survived because a level-by-level inventory was never
+  re-run against them.*
 
 **Intermediate** (should discover: palette, keybinding search, workspace
 settings, profiles, package management, task definitions,
@@ -511,7 +716,8 @@ frontend/language settings):
 
 - palette △ (`M-x` fuzzy over bare names — the rows are still bare, §5) ·
   keybinding search ✓ (`help.list-keybindings`, `help.where-is`,
-  `help.describe-key`; still no key to reach them) · workspace settings
+  `help.describe-key`; **advertised through the welcome's `M-x help`
+  route, but no DIRECT binding reaches them**) · workspace settings
   ✗ (no workspace scope, §11) · profiles ✗ (§12) · package management ✗
   in-session (§13) · task definitions ✗ · frontend customization △
   (themes, `pmacs.gpu.set_font`, statusline providers — all Lua-only) ·
@@ -652,10 +858,11 @@ the sharpest instance of §1.1.**
   function passed as `CompletionSource::Custom`.
   **What remains missing here:** a discovery surface for **packages**
   (§13) — `*workers*` already has one, reachable by
-  `M-x editor.list-workers`, though §9's ownership model and activity
-  indicator are still absent — and **no key reaches any of this**: the
-  family is `M-x`-only by design until the help-prefix decision is taken
-  (see the prefix bullet below).
+  `M-x editor.list-workers`, and §9's activity indicator now exists
+  (#232) while its **ownership model remains absent** — and **no DIRECT binding reaches any of
+  this**, though the family is advertised: the welcome names `M-x help`,
+  which indexes it. The family stays unbound by design until the
+  help-prefix decision is taken (see the prefix bullet below).
   *Completion is assistance, not validation:* `resolve_accepted_value`
   returns the literal typed text when no candidate is selected, so a
   typo still reaches the handler; refusing a non-candidate is unbuilt
@@ -977,14 +1184,23 @@ so non-pool work (LSP requests, MCP) appears uniformly; one shared
 `*workers*` view (`src/workers_buffer.rs`, opened by `M-x
 editor.list-workers`, auto-refreshing, `C-c C-k` cancel-at-point).
 
-**The identity layer is absent:**
+**The identity layer is PARTLY built — purpose landed, ownership did not:**
 
-- `PendingJob` (`src/async_runtime.rs:365-392`) carries `{cancel,
-  state, supersede_key, stream_buffer, max_batch, kind,
-  dispatched_at}`. **No owner. No purpose string. No
-  workspace/buffer association. No parent.** The one buffer link that
-  exists (parse job → buffer) lives in a `SyntaxCoordinator` side map,
-  invisible to the workers view.
+- `PendingJob` (`src/async_runtime.rs`) carries `{cancel, state,
+  supersede_key, stream_buffer, max_batch, kind, dispatched_at,
+  **purpose**}`. Since #232 the **purpose is required** — `JobSpec` has
+  no `Default`, so a dispatcher that supplies none **does not compile**
+  (`src/async_runtime.rs:429`), which makes presence a type obligation
+  rather than a convention. **Still absent: an accountable owner, any
+  workspace/buffer association, and any parent.** The one buffer link
+  that exists (parse job → buffer) lives in a `SyntaxCoordinator` side
+  map, invisible to the workers view.
+
+  The distinction that survives #232: a purpose says what a job is
+  **doing**; ownership says **who asked**. Populated from static
+  per-subsystem constants, an `owner` field would have been an *origin*
+  and would have misattributed third-party work to a builtin — which is
+  why #232 shipped none rather than a plausible one.
 - `JobKind` is a **closed 12-variant enum** (Sleep, ComputeSum, EmitN,
   Grep, Parse, FsReadDir, FsStat, FsRename, FsChmod, FsRemove,
   McpRequest, LspRequest). `pmacs.workers.register` funnels Lua jobs
@@ -1002,26 +1218,43 @@ editor.list-workers`, auto-refreshing, `C-c C-k` cancel-at-point).
 |---|---|---|
 | Async jobs | `*workers*` | processes, servers, terminals |
 | OS processes | `pmacs.process.list` (no buffer view exists) | **filters to `LineOriented` only — terminal PTYs are invisible**; `spawn_terminal` bypasses the public path entirely |
-| LSP servers | `*lsp*` status text | **no builtin command opens it**; LSP sets `RestartPolicy::Never` on the supervisor and runs its own restart logic |
+| LSP servers | `*lsp*` status text | opened by **`M-x lsp.status`** (`builtin/runtime/lsp.lua:3533`), but by no binding; LSP sets `RestartPolicy::Never` on the supervisor and runs its own restart logic |
 | Terminals | private id set drained after the supervisor tick | user-visible in none of the above |
 
   A terminal PTY appears in **no** user-visible activity view. An LSP
   server appears in `*lsp*` (unreachable) and `list()`; its requests
   appear in `*workers*`; nothing joins them.
-- **No progress indicator exists anywhere** — no statusline spinner,
-  no busy count (grep for progress/spinner/busy in `src/statusline.rs`
-  is empty). "Visible asynchronous work" (§3) is currently false unless
-  the user knows to run `M-x editor.list-workers`.
-- `ProcessSpec.label` is the nearest thing to attribution: caller-
-  supplied, unvalidated convention (`lsp:{name}`, terminal buffer
-  name).
+- **A progress indicator now exists (#232, 2026-08-09)** — a statusline
+  provider rendering the in-flight count and the **oldest** job's
+  purpose, absent when idle, gated by `ui.activity-indicator`. So
+  "visible asynchronous work" (§3) is **no longer false**: activity is
+  visible without knowing to run `M-x editor.list-workers`, though **no
+  binding opens that view** — `C-c C-k` is bound inside it, which cannot
+  help anyone find it.
+
+  **The indicator's first act was to expose three months of invisible
+  LSP file-watcher polling (issue #233)** — §9's own argument,
+  demonstrated.
+- **`purpose` is now required** on every job and process (#232), through
+  a single allocation funnel with no `Default`, so the compiler proves
+  every caller supplies one. That is a real per-job description where
+  there was none.
+- **Attribution is still missing, and that is what §9 grades.** A
+  purpose says what a job is *doing*; it does not say **who asked** —
+  no owner, no parent, no package. `ProcessSpec.label` remains a
+  caller-supplied, unvalidated convention (`lsp:{name}`, terminal
+  buffer name). **This section's grade is left untouched pending a
+  re-audit**: the mechanism-without-identity finding is *partly*
+  answered, and moving a grade is an audit act, not a documentation
+  correction.
 
 The audit's conclusion, worth preserving verbatim: *because identity is
 missing, scoped cancellation has nothing to scope over and a unified
 activity view has nothing to group by — the four views exist precisely
-because there is no common key to merge them on.* Owner/purpose/parent
-fields on the job and process specs are the prerequisite; the unified
-view and the ownership tree fall out of them.
+because there is no common key to merge them on.* **Purpose** landed with #232;
+**owner and parent** fields on the job and process specs remain the
+prerequisite, and the unified view and the ownership tree fall out of
+them.
 
 ---
 
@@ -1490,10 +1723,73 @@ facto privileged implementation.
 
 ### Ground truth
 
-**Grade: strong — the healthiest concern in this document, and most of
-its asks are already practiced.**
+**This concern carries TWO subgrades, because it asks two different
+questions and one answer was hiding the other.**
 
-- Versioned protocol schema `SUPPORTED=[6..=21]` with deliberate
+| subgrade | grade | what it measures |
+|---|---|---|
+| **Architectural** | **Strong** | the protocol, its versioning discipline, capability negotiation, degradation, and the absence of a privileged frontend |
+| **Product** | **Weak** | whether the graphical frontend is a workbench a user would choose — graded against §2b's per-frontend journey table and §3.1's blocker list |
+
+**Why the split exists.** "Productize the semantic frontend" was graded
+`Strong` on architectural evidence alone, and that grade was true and
+was answering the wrong question: the protocol is excellent *and* the
+GUI is not yet a daily driver. A single cell could not hold both, so the
+product half was invisible — which is how a frontend the reporter would
+not choose sat inside the healthiest concern in this document.
+
+**Product subgrade criteria** (each falsifiable, none aspirational):
+
+1. **GPU ≥ local TUI at every journey step** under §2b. **Currently
+   FAILS at two known steps** — 5 (no IME) and 12 (restore is a
+   structural no-op) — with the exact set pending verification of §2b's
+   inferred cells.
+2. **The daily-driver blocker list is empty.** **Currently nine open**
+   (`docs/gui-arc-framing.md` §3.1): Escape quits, IME absent,
+   `translate_key` holes, sub-line/horizontal scroll, no DPI, folding
+   dead on the GPU, no session restore, no reconnect, the one-window
+   ceiling.
+3. **Every surviving divergence is declared**, not accidental.
+   **Not yet assessed** — §3.2's register is seeded empty, so this
+   criterion has no finding either way and cannot lift or lower the
+   grade.
+
+**How the grade is derived, so it is a grading rule and not an
+adjective.** The three criteria above are *closure* conditions; on their
+own they distinguish only "closed" from "not closed", which is not a
+grade. The product subgrade reads:
+
+| grade | condition |
+|---|---|
+| **Strong** | all three criteria pass |
+| **Partial** | usable, criterion 1 **passes**, and not all three criteria pass |
+| **Weak** | usable and criterion 1 **fails** at one or more steps |
+| **Missing** | no usable graphical frontend |
+
+**The rule is TOTAL by construction** — every usable state is covered by
+exactly one of `Partial`/`Weak`/`Strong`, since criterion 1 either
+passes or fails and `Strong` is the all-pass case. An earlier draft
+required a non-empty blocker list for `Weak` and named blockers in
+`Partial`, which left a real state ungraded: criterion 1 passing with an
+empty blocker list but criterion 3 failing or unassessed. Criterion 1 is
+the discriminator because it is the only one that measures the GPU
+*against the TUI*; the others measure it against its own goals.
+
+**Current: Weak** — criterion 1 fails at two known steps. (Nine
+blockers are open including the one-window ceiling; under the total rule
+they no longer *derive* the grade, but they are why it is not close to
+`Strong`.) The distinction that
+matters is between `Weak` and `Partial`: the GPU is not merely
+*unfinished*, it is **behind a frontend that ships in the same binary**,
+and that is what the ceiling and the two failing steps say.
+
+**What moves it.** The GUI arc, and nothing else — it exists to satisfy
+exactly these three. The product subgrade is what the arc closes
+against, and it should be re-graded when the arc closes, not before.
+
+**Architectural ground truth follows; it is unchanged and still strong.**
+
+- Versioned protocol schema `SUPPORTED=[6..=23]` with deliberate
   encoding-breaking bumps, both-frontends support required per bump,
   and byte-pin discipline for appended variants (handoff §4). The v21
   bottom-panel family landed with Stage 2B-1 (#184) and is **live in
@@ -1615,7 +1911,10 @@ across the whole command family, not an oversight.
 
 Note the dependency: five of the ten onboarding steps above currently
 lead somewhere broken or invisible (find a file — the mechanism is fixed
-since #162/#165 but is advertised nowhere except the keymap; inspect a
+since #162/#165 and IS advertised — `C-x C-f` sits in the welcome's key
+table directly, and every bound command is reachable through `M-x help`;
+this clause read "advertised nowhere except the keymap" and was false at
+both levels, found while correcting step 7's row above; inspect a
 diagnostic — silent-failure risk; view workers — undiscoverable;
 setting provenance — unanswerable). Onboarding is correctly sequenced
 *after* the P1/P4 fixes, but the cheap floor — a welcome buffer in
@@ -1700,6 +1999,47 @@ install, which is **P8**; step 11 is background-work ownership, which is
 documented no-op under a daemon. Journey Stage 1 closing is what moves
 this priority's own work to done — what is left is other priorities'
 work showing up in the journey.
+
+### The GUI arc — placement (Q#GA5)
+
+**Half A slots after Priority 1**, whose own work is complete (§20 P1),
+which is why this block sits here rather than lower down — in a
+*Recommended Priority Order*, position IS the schedule, and an earlier
+draft placed it after Priority 5 while the prose said P1.
+
+**How it interleaves with P2–P5.** Half A is independent of them and
+runs alongside: it adds no workspace object, no extension-ownership
+model, no discovery surface. The interaction is at **P2 only**, through
+the gate below. P3, P4 and P5 neither block it nor are blocked by it,
+and P5's workbench-primitive adoption is *helped* by it — Stage 9's
+sidebar is a tree-primitive consumer.
+
+It is the product half of §16, and it is what the §16 product subgrade
+is graded against.
+
+**Reaching Stage 4b is a P2 START GATE.** Stages 4b (session save and
+restore) and 9 (project/files sidebar) are **workspace-owned**: a
+session and a sidebar root are both P2's objects, and inventing local
+conventions for them is precisely the "fifth independent root
+convention" §7 warns against. So when the arc reaches Stage 4b, **P2
+starts**, and **no later GUI stage begins** until P2 has an approved
+framing and an opened lane. Non-gated GUI work may interleave freely
+after that while the object lands.
+
+**The gate is on STARTING P2, not on finishing it** — so the arc is
+never blocked on work nobody has begun, and it cannot outrun the model
+it depends on. Without the gate, every non-gated stage could finish
+first and leave P2 as a terminal closure blocker.
+
+**Arc naming (Q#GA4).** This arc is **"the GUI arc"**, deliberately a
+name and not a number. The roadmap's **"Arc 8 — GPU structural parity"
+label is RETIRED** here; its scope is this arc's Half B. **"Arc 8" now
+unambiguously means the Lean 4 arc** (`docs/agent-handoff.md` §1a,
+stages 1–4b landed), which is the numbering that stays. Landed framing
+documents that say "Arc 8 adjacent" of viewport facts or splits
+(`editing-conveniences-framing.md`, `bottom-panel-framing.md`) keep
+their historical text — they are dated records, and this is the
+authoritative disambiguation for anything written from here on.
 
 ### Priority 2: Make workspace and location explicit
 
@@ -1803,8 +2143,10 @@ implementation — this list is direction, not commitment):
    handle + derived `dispatch_idle`, then migrate shadows one per PR.
 4. **Extension ownership** (P3): `hook.remove`, owner-carrying
    registrations, attribution-by-default.
-5. **Worker identity** (§9): owner/purpose/parent on jobs and
-   processes, join the four planes, statusline activity indicator.
+5. **Worker identity** (§9): **owner and parent** on jobs and
+   processes, and joining the four planes. *Purpose and the statusline
+   activity indicator shipped in #232 (Stage 1); what remains is the
+   ownership half.*
 6. **Workspace entity** (P2): the object, then location values.
 7. **Config provenance + adoption** (P6).
 8. **Package lifecycle** (P7, after 4).

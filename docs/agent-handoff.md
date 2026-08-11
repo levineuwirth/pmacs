@@ -1178,6 +1178,10 @@ someone forgot.
     it — the reverted seam failed only the consumed-plan check, not the
     content assertion. That is what the consumed-plan check is for.
 - **Lean 4 arc (Arc 8) — stages 1, 2, 3a, 3b, 4a, 4b ALL LANDED**
+  *(**"Arc 8" means THIS arc and only this one.** The roadmap's
+  colliding "Arc 8 — GPU structural parity" label is retired: that scope
+  is Half B of **the GUI arc**, which is a name and not a number —
+  `COHERENCE.md` §20, Q#GA4.)*
   (`docs/lean4-mode-framing.md`; #160, #161, #167, #170, #179, #181). pmacs edits Lean 4: `arborium-lean` highlighting, a
   `lean4` major mode, `⟨⟩ ⦃⦄ ⟮⟯` pairs, and a `lake serve` language
   server with a Lake-aware outermost root, a lazy toolchain probe, a
@@ -2747,9 +2751,30 @@ nothing; and the CLOSE message must use the same variant family as the
 OPEN, or a session closed by the other family's clear leaves its surface
 on screen forever.
 
-**Fake LSP** (`src/bin/pmacs_fake_lsp.rs`) modes: `fullonly`,
-`rangeonly`, `rangeonly16` (UTF-16 + fail-closed bounds validation),
-`sighelp`. Use these for capability-matrix tests, not real servers.
+**LaTeX is served by `texlab`, and its root is NOT the repository root**
+(#230). `pmacs.lsp.config.latex` resolves the document root by an upward
+marker walk — `.texlabroot`/`texlabroot` are texlab's own markers,
+verified in its `crates/distro/src/language.rs` rather than assumed —
+and **`.git` is deliberately excluded from that walk**: a repository
+root is the wrong answer for a multi-file document, which is the whole
+reason the resolver exists. `config.latex.root` already accepted a
+resolver function, so this added no new mechanism.
+
+**Fake LSP** (`src/bin/pmacs_fake_lsp.rs`) modes — enumerated from the
+binary, because this list had gone stale and a stale mode list is how a
+test ends up covering the shape next to the defect. Capability matrix:
+`fullonly`, `rangeonly`, `rangeonly16` (UTF-16 + fail-closed bounds
+validation), `sighelp`, `prepare`, `preprefuse`, `rename`,
+`inlaybounds`, `inlayrefresh`, `semantictokensrefresh`,
+`applyeditplan`, `resourceops`, `posecho`, `defenv`, `wsconfig`,
+`rooturi`, `leanprogress`. Failure shapes: `crash`, `error`, `garbage`,
+`silent`. **File watchers (issue #233)**: `filewatch` (RelativePattern
+`**/*.txt`), `filewatchabs` (plain-string ABSOLUTE glob),
+`filewatchflat` (RelativePattern with no leading `**/`),
+`filewatchbare` (bare relative string — the P1 regression guard),
+`filewatchrereg` (same id twice, no unregister), `filewatchjoin`,
+`filewatchretire`. Use these for capability-matrix tests, not real
+servers.
 
 ## 5. Hard-won ops lessons
 
@@ -3169,6 +3194,20 @@ on screen forever.
 
 
 ## 6. Named deferrals (the standing backlog, consolidated)
+
+**The GUI arc — OPEN, framing approved 2026-08-10, Stage 0 READY FOR PR (not yet opened).**
+`docs/gui-arc-framing.md` is the arc-level frame and is also Stage 0's
+own framing; Stages 1–10 each need their own before their branch. It
+opened from a daily-driver report: the TUI is daily-drivable, the GUI is
+not. **`COHERENCE.md` §16 now carries a PRODUCT subgrade (Weak) beside
+its architectural one (Strong)**, and the arc is what closes it. §20
+places Half A after Priority 1, and **reaching Stage 4b is a P2 START
+GATE** — no later GUI stage begins until P2 has an approved framing and
+an opened lane. The name is deliberate: **"Arc 8" means the Lean 4 arc
+and nothing else** (Q#GA4). Several standing-backlog items below are
+sequenced by this arc rather than deferred — §2.5 of the framing maps
+every one to a stage or leaves it here explicitly.
+
 
 **Fixture project-detection census — NOT STARTED, follow-on from R8.**
 `tests/m4_acceptance.rs` alone constructs state through

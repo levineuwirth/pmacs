@@ -136,7 +136,8 @@ lesson, §1 for the two framings).
   are identical on every machine. Remote names are otherwise
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
-- Canonical base at this snapshot: **`githubsucks/main` @ `122b8e8`** —
+- Canonical base at this snapshot: **`githubsucks/main` @ `e67ad07`** —
+  the file-watcher arc absorption, atop `122b8e8`
   the file-watcher D3 **#235** (closes issue #233), atop `b867f64`
   git integration Stage 1 **#227**, atop `ae84d58` the LSP file-watcher
   fix **#234**, atop `0e4c58d` destination capture **#231**, `3cc1b85`
@@ -160,9 +161,10 @@ lesson, §1 for the two framings).
   #206, Journey Stage 1b-3 #205, 1b-2 #204 and 1b-1 #203, the
   reap-ledger diagnostic #202, the isolation framing #201, the
   process-signal diagnostic #200 and the ledger absorption #199.
-  **Protocol schema support is `v6..=v22`; the production server-first
+  **Protocol schema support is `v6..=v23`; the production server-first
   `Hello` still advertises v20** — two different facts, and #184 landed
-  only the first. The upper bound moved to **v22 at #221**, which added
+  only the first. The upper bound moved to **v23 at #228**
+  (`MinibufferPromptRows`), after **v22 at #221**, which added
   `InstanceMessage::LineWrapFacts`; `ADVERTISED_PROTOCOL_VERSION` did
   not move and must not be edited to chase it. Verified against
   `pmacs-protocol/src/message.rs`, not carried forward: this line said
@@ -171,7 +173,7 @@ lesson, §1 for the two framings).
   where they describe a stage as it landed** — only this
   current-state paragraph tracks the live range.
   **The recovery floor advances with the base**, so the check below
-  now requires `9a26ac8` or newer; a tree at `db1bbe9` no longer
+  now requires **`e67ad07`** or newer; a tree at `db1bbe9` no longer
   passes — it would lack the entire QoL arc, which this file and the
   handoff both describe as complete. That is deliberate — a check accepting an older commit than
   the declared base passes on a tree the rest of this file does not
@@ -211,16 +213,21 @@ git worktree list
 git status --short --branch
 ```
 
-The `git log` command must expose `9a26ac8` — the base named above — or a
+The `git log` command must expose `e67ad07` — the base named above — or a
 newer intentional main. Keep this threshold and the canonical-base line in
 step: a recovery check that accepts an older commit than the base it
 declares canonical will pass on a tree the rest of this file does not
 describe.
 If it does not, stop and repair the remote/fetch configuration.
 
-**This path was exercised, not asserted, at this snapshot** — re-run
-from an empty directory on 2026-08-08 when the base advanced to
-`9a26ac8`, rather than having its SHA swapped. That distinction is the
+**LAST EXERCISED AT `9a26ac8`, 2026-08-08** — re-run from an empty
+directory rather than having its SHA swapped. **The advance to
+`e67ad07` (2026-08-11) has NOT been re-exercised**, and by this
+paragraph's own argument that is exactly when the exercise matters, so
+it is recorded as an outstanding obligation rather than left to read as
+though it had been done. The floor above and the check below are in
+step at `e67ad07`; what is unverified is the *procedure* against that
+base, not the SHA. That distinction is the
 whole point of this paragraph: advancing the base is exactly when the
 recovery commands are most likely to have rotted, and a swapped SHA
 reads identically to a verified one. `git clone` the canonical URL, add
@@ -243,60 +250,67 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## `scripts/gate` — PR #225 OPEN (build tooling)
+## The GUI arc — Stage 0 branch OPEN, absorption COMPLETE, ready for PR
 
-**PR #225** — https://github.com/levineuwirth/pmacs/pull/225. Written
-**after** the PR existed, again, and again because review asked. Two
-lanes in a row have now been added late; the correction from #171 and
-#215 is not sticking, and recording that is more useful than a
-back-dated block that pretends it did.
+**Written at the branch's first commit**, with the framing, which is
+what this arc's own §5 requires of every PR in it. The standing
+correction from #171 and #215 was missed at #224 and #225; this lane
+exists to stop the streak rather than to note it again.
 
-- **Branch `gate-script`**, base `githubsucks/main` @ `b833b13` (the
-  #224 merge). **`githubsucks/gate-script` is the authoritative tip** —
-  the ref, not a SHA. Recover with
-  `git fetch githubsucks && git checkout gate-script`.
-- **Framing `docs/gate-script-framing.md`**, approved at revision 4
-  after four review rounds; revision 5 records two safety defects found
-  against the implementation, not the design.
-- **Scope:** `scripts/gate` (per-worktree `CARGO_TARGET_DIR`, five
-  ambient roots, durable per-gate logs, the fixed gate suite),
-  `tests/gate_script_acceptance.rs`, and a handoff §3 rewrite pointing
-  at the script while §3 keeps policy and acceptance-suite selection.
-  No `src/`, no crate, no manifest, no protocol.
-- **Verification:** 15 acceptance tests over the no-gates paths, each
-  isolated by `PMACS_GATE_TARGET_ROOT`. Mutation-tested; the two prune
-  guards are redundant by design and only fail the test when **both**
-  are removed, which is recorded in the test itself. Observed real runs
-  confirm failed-gate naming, log paths, ambient creation and reaping,
-  and distinct log directories per run.
+**The park is discharged**: #227 merged as `b867f64`, and the
+file-watcher arc (#233) closed via #234 and #235. Rebased onto
+`e67ad07`; the single framing commit replayed with no conflict.
 
-**GATE STATUS — R8 RESOLVED.** This lane was blocked because
-`scripts/gate` exited 1 on a clean tree: **R8** failed `m4_acceptance`
-and therefore the sweep. That was never a footnote — #225 is the lane
-that makes the gate suite authoritative, and a tool shipping with its
-own gate red teaches the opposite of what it exists to teach.
+**Stage 0's absorption scope was RE-DERIVED from the tree rather than
+taken from this lane's own earlier text, and the earlier text was
+wrong in the optimistic direction.** `add0ba1` absorbed **#227 and
+#234 only**; a reading of its −532-line diff as "half of Stage 0's
+absorption" was too generous. Five stale lanes remain below, and two
+`COHERENCE.md` corrections had not been made at all. What is done here
+is listed at the commit that does it, not promised here.
 
-**R8 was fixed and retired in #226** (`dcb852e`), which bounded the LSP
-fixture's project detection. This branch is rebased onto it.
-
-**RE-GATED 2026-08-09: `scripts/gate` exits 0.** All nine gates green in
-one command — fmt, clippy, `--lib`, `--lib --features crdt`, both named
-acceptance suites, `m4_acceptance`, `-p pmacs-gpu`, and the full
-workspace sweep. That is #225's own acceptance criterion, and it is the
-first time the tool has passed the suite it exists to run.
-
-**Rebase resolution, per the standing rule that #226's R8 documentation
-wins.** Three conflicts, all in R8 text this branch had written while
-the row was still an open investigation: two in
-`docs/ci-red-signatures.md` (both resolved to #226's retired row, this
-branch's pre-fix copy dropped), and the framing-doc pair
-(`e71e1bd` added it, `7cfba73` removed it — both **skipped**, since they
-are net-zero here and `main` owns the file authoritatively; replaying
-the second would have deleted `main`'s copy). Two now-stale lanes were
-also removed: this branch's "R8 NEEDS A LANE" investigation block, and
-#226's own lane, which Rule 4 retires now that it has merged — its
-durable facts are in the retired registry row and the handoff §6
-census.
+- **Branch `gui-arc-stage0`**, base `githubsucks/main` @ `e67ad07` (the
+  file-watcher arc absorption) after the 2026-08-11 rebase; it was
+  branched at `0e4c58d`. **`githubsucks/gui-arc-stage0` is the
+  authoritative tip** — the ref, not a SHA. Recover with
+  `git fetch githubsucks && git checkout gui-arc-stage0`.
+- **Framing `docs/gui-arc-framing.md`, revision 3, APPROVED
+  2026-08-10** after two review rounds (two blocking findings each
+  round, closed). It is **also the framing for Stage 0 itself**, which
+  is docs-only; Stages 1–10 each require their own framing before their
+  branch.
+- **The park is over and the work is DONE.** The branch was parked at
+  its first commit until #227 merged, because #227 was 72 `main` commits
+  behind and touched the three files Stage 0's absorption rewrites.
+  #227 merged (`b867f64`), #233's arc closed (#234, #235), this branch
+  rebased onto `e67ad07`, and the absorption ran. **Sixteen commits
+  above the base as of `30e2209`; ready for its PR.** *(Anchored to a
+  SHA deliberately: a bare running count goes stale on the next commit,
+  which is the staleness class this lane exists to retire.)*
+- **What landed (docs only, no `src/`):** the absorption pass
+  enumerated in the framing's §5 — five stale lanes, the
+  authority/recovery anchor, `COHERENCE.md`'s `v6..=v21` → `v6..=v23`,
+  the U4 correction and the U9 rewrite in `docs/ci-red-signatures.md`,
+  the stale right-click backlog line, and journey step 11's verdict
+  (falsified by #232) — then the per-frontend journey table, the §16
+  product subgrade the scorecard will point at, §20 placement, the
+  handoff cross-reference, and the "Arc 8" retirement.
+- **Two absorption items that are NOT simple deletions**, recorded here
+  because getting them wrong is silent: **#228's lane** must lose only
+  its PR-specific block, while the standing **Discovery lane (P4)** is
+  rewritten to "Stage 2 merged; later discovery work remains" —
+  predicate evaluation, command metadata, help unification and the
+  prefix decision are all still open. And **`v6..=v23` must not sweep
+  away the same row's "production attach remains v20"**, which is
+  correct (`ADVERTISED_PROTOCOL_VERSION` is 20).
+- **Verification (2026-08-11, committed branch tip): FULL PRE-PR SUITE
+  PASS.** Stage 0 changes no code, so there is no touched acceptance
+  suite; that does **not** exempt a docs-only PR from the standing gates
+  in `AGENTS.md`. Ran `cargo fmt --check`; `cargo clippy --workspace
+  --all-targets -- -D warnings` as its own step; `cargo test --lib`;
+  `cargo test --lib --features crdt`; `cargo test --test m4_acceptance --
+  --skip basedpyright`; `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`;
+  and `git diff --check`.
 
 ## Git integration — STAGE 1 MERGED as #227; Stage 2 must be scheduled alone
 
@@ -331,401 +345,6 @@ serialization rule on wire changes. No branch, no framing yet.
   `#[cfg(feature = "crdt")]`, and the crdt job is ubuntu-only — it
   fails the day that job gains a macOS leg, the same way `g6_2` did
   (handoff §1: macOS cannot hold a non-UTF-8 filename).
-
-## Destination capture (Q#JR14 generalization) — PR #231 OPEN, revision 9, cleared to merge
-
-**PR #231** — https://github.com/levineuwirth/pmacs/pull/231. #227
-blocks on this lane.
-
-The mechanism landed at `0efc8c0`; review found a correctness blocker;
-`ca72461` implemented **revision 7**, which review then **also**
-rejected; `469d5c8` replaced it with **revision 8** and its §3
-enumeration is **performed and recorded in the framing**; review then
-found a hole in revision 8's guard **scope** and the commit below closes
-it as **revision 9**.
-
-**The macOS red that blocked this lane, and how it was cleared.** Both
-CI attempts at `4654b94` failed `a_pty_resize_blanks_the_host_before_repainting`
-on `Test (macos-latest / luajit)`. A control experiment was run at the
-exact base commit `0190102`: **five valid observations, all green on
-both macOS flavours**, against the branch's 0/2 — 1/C(7,2) = 4.8% under
-an equal-rate model. That implicates the branch statistically. **The
-diff exonerates it mechanically**: grepping this lane's entire `src/`
-diff for `full_grid|resize|resync|Geometry|reconcile_panel_layout`
-matches an **import line and nothing else**, and
-`full_grid_resync_acceptance` (191 lines) has no panel, side-window,
-dedication, display or directory surface at all. Merged on that reading,
-with the equal-rate model itself in doubt — see the U4 row, and note a
-sixth base attempt reddened on a *third, unrelated* macOS selector
-(U8), which is what a background platform failure rate looks like.
-
-**The original blocker:** the panel profile skipped checks 2–4 on the
-claim that a panel result never touches a document window. **Panel
-placement falls back to an ordinary document window** when the frontend
-is not panel-capable or its side slot is dedicated, so a `"panel"`
-commit could replace a **newer** document with every stale-intent guard
-skipped. Reproduced in review.
-
-**Four designs, two rejected outright and one corrected — the sequence
-is the part worth not re-learning:**
-
-1. **Revision 6 — predict at preflight.** Rejected: the `await` refusal
-   stops concurrent interleaving, not the body, which is arbitrary
-   synchronous Lua and can create the fallback itself.
-2. **Revision 7 — enforce at the placement boundary.** Implemented at
-   `ca72461`, then rejected: `docs/agent-handoff.md:748` requires
-   `commit_to` to preflight **before** the callback, because
-   "validating at display time is four mutations too late". A body has
-   already created buffers, handles and paint by then, so a
-   placement-time refusal is a partial commit with an error return.
-3. **Revision 8 — keep the preflight, REFUSE the scope-invalidating
-   mutation.** The shape the tree implements. Same as `Handle:await`
-   being refused inside a commit scope: the fallback never comes into
-   existence, and refusal stays mutation-free on `(false, reason)`.
-4. **Revision 9 — make the refusal hold for the WHOLE body.** Not a new
-   shape; a correction to revision 8's scope. A nested `commit_to`
-   **replaced** the enclosing contract and restored it afterwards, so
-   an outer `"panel"` commit's restriction went out of force for the
-   inner body's extent: nested `"document"` commit → callback dedicates
-   the side slot, unrefused → outer commit resumes, falls back,
-   overwrites a newer document. Reproduced in review. Contracts now
-   **compose** — the core holds a stack, `commit_to` pushes and pops
-   rather than swapping, and the guard consults every contract in force,
-   so the strictest active restriction wins. Nesting itself is **not**
-   forbidden: only the mutation is refused, so a nested commit that
-   touches no dedication runs exactly as before. Detecting the
-   dedication when the outer commit resumed was not available — that is
-   a late refusal, which is what revision 7 was rejected for.
-
-**WHAT REVISION 9 DID *NOT* INVALIDATE — read this before re-opening the
-enumeration.** The write-site enumeration below survived intact: every
-site is real, every one is still guarded, and review of the nesting
-defect found no missing route. What was wrong was the *surrounding*
-claim — that the guard was in force for the whole outer body. A complete
-list of write sites is not a complete argument until the guard's extent
-is stated too. The acceptance suite now drives the same rows at **two
-depths**, directly and through a nested `commit_to`.
-
-**THE ENUMERATION IS THE LOAD-BEARING PART, AND IT IS CLOSED AS AN
-ENUMERATION OF WRITE SITES — for a structural reason, not because
-inspection ran out of ideas.** Full working in the framing §3; the short
-form:
-
-- **Only two pieces of state can matter**, because `resolve_placement`
-  reaches `Ordinary` from a side request through exactly two branches:
-  `panel_capable`, and the one side window's `dedicated`.
-- **`panel_capable` is unreachable from a body.** It is written only
-  where a `FrontendView` is constructed, and nothing in
-  `src/lua_bindings/` constructs, registers or unregisters one —
-  `register_frontend_view` has callers only in `daemon.rs` and core
-  unit tests.
-- **Eight writes to `dedicated` exist** (`rg 'params\.dedicated\s*='
-  src/`); **four are reachable and a fifth is guarded defensively** —
-  `apply_placement`'s `Side` created / replacing / non-replacing arms
-  and `set_params` are the reachable four, and `quit_window`'s
-  `QuitAction::Restore` is the fifth, proved unreachable below and
-  guarded anyway. **All five are guarded**, which is the count that
-  matters; listing four under the word "five" is what an earlier version
-  of this bullet did. Two `Ordinary` arms are harmless (their target is
-  never a side window; one only ever clears the flag) and one is a unit
-  test.
-- **The guards are sited where the property converges, not per caller.**
-  All three `Side` arms are reached through `apply_placement`, which has
-  **exactly one caller** — so one guard in `display_buffer` covers every
-  request-driven dedication, including spellings that do not exist yet.
-  `set_params` is a genuinely separate write and is guarded separately;
-  dedication does **not** converge before the field itself, and that is
-  stated rather than papered over.
-- **Closing the side window is NOT a route**, checked rather than
-  assumed: with no side leaf `side_window_for` returns `None` and
-  placement **creates** a fresh panel instead of falling back. Hiding is
-  likewise irrelevant — `panel_hidden` is not consulted by placement.
-- **`quit_window`'s `QuitAction::Restore { dedicated: true }` is
-  UNREACHABLE**, and this was the surprise. `Restore` is stored only on
-  a *replacing* side placement, and a dedicated slot can never be the
-  target of one. Guarded anyway, labelled defensive, because its
-  unreachability is emergent from two rules in another function.
-- **What this does not rule out:** the enumeration is closed over the
-  current tree, not future edits. `params.dedicated` is a public field,
-  so nothing but the acceptance rows would catch a new direct writer.
-
-**Also closed:** an invalid-UTF-8 profile (`string.char(255)`) reached
-`to_str()` and surfaced mlua's generic conversion error instead of the
-documented message naming the accepted values — the same reachability
-class as revision 5's `Option<String>` defect, one layer down. The
-comparison is on bytes now.
-
-**Written with the lane's first commit**, per the standing correction
-from #171 and #215.
-
-**Branch `destination-capture`**, base `githubsucks/main` @ `4bc55e8`
-(the #225 merge). **`githubsucks/destination-capture` is the
-authoritative tip** — the ref, not a SHA. Recover with
-`git fetch githubsucks && git checkout destination-capture`.
-
-- **Framing `docs/destination-capture-framing.md`, revision 9.**
-  Revisions 1–5 were approved over four review rounds; revisions 6–9 are
-  corrections carrying the blocker above, and **revision 8's design as
-  scoped by revision 9 is what the tree implements**. Revisions 6 and 7
-  are described in that document as the record of why *not* those;
-  neither is in the tree and neither should be restored from it.
-- **Implemented in four commits.** `779bb02` is the mechanism
-  (`pmacs.window.capture_destination()`, the `ViewDestination` rename,
-  the profile argument); `d5a6170` is
-  `tests/destination_capture_acceptance.rs`; `469d5c8` is the
-  revision-8 panel-profile correction plus the invalid-UTF-8 hole;
-  `394fa43` is revision 9's contract stack and the commit below adds its
-  cross-frontend pin. **15 pins**, and both preservation suites pass
-  **unchanged** (journey 47, dired 31) — §7's stop signal not firing
-  rather than being suppressed.
-- **HOW THE PANEL PROFILE IS ENFORCED, in one sentence so no earlier
-  revision gets reinstated by someone reading only that document:** the
-  preflight stays exactly where it was, and the mutations that would
-  invalidate it are **refused at the attempt**.
-  - `EditorCore::panel_commit_dedication_refusal` is the one rule. It
-    fires while **any** `"panel"` `CommitContract` for this frontend is
-    in force — every contract on the stack, not the innermost — and is
-    consulted from `display_buffer` (before `apply_placement`, so a
-    refused attempt mutates nothing), `pmacs.window.set_params` (before
-    its borrow, so `fixed_rows` in the same table is not applied
-    either), and `quit_window`.
-  - **This is the same shape as `Handle:await` being refused inside a
-    commit scope**, and for the identical reason: something that would
-    invalidate the scope's guarantee is rejected outright rather than
-    predicted around or caught late.
-  - The contract (`CommitContract { destination, profile }`) rides on
-    the core in a **stack**, pushed and popped by the **same**
-    `ScopedFrontendGuard` that scopes the frontend, so a `"panel"`
-    profile can never outlive the body that declared it. The field is
-    private to the crate — Lua cannot claim a profile for a placement it
-    did not commit to.
-  - **A stack, not a slot, and the distinction is revision 9 (above).**
-    The frontend override and the ambient frontend are *substitutions*,
-    so a nested scope rightly replaces them; a contract is a
-    *restriction*, and replacing one suspends it. The guard stores a
-    depth and truncates back to it, so an inner exit removes exactly the
-    contract it added and leaves every enclosing one in force.
-  - **Matching is per FRONTEND as well as per profile, and that is a
-    deliberate exception with its own positive pin.** A nested commit for
-    a different frontend may dedicate *its* side slot: `resolve_placement`
-    consults only the requesting frontend's `panel_capable` and its own
-    one side window, so nothing done to B can change where A's side
-    request lands. Pinned by
-    `a_nested_commit_for_another_frontend_may_dedicate_its_own_slot`,
-    which is the file's only row asserting that something is **allowed**
-    — every other asserts a refusal, and an exception only the doc
-    comment knows about is one review round from being simplified out.
-  - **Prohibiting nested `commit_to` was the other candidate and was
-    rejected.** It closes the hole by forbidding a construction no rule
-    objects to — `commit_to` is public Lua API for saying where a
-    continuation's result belongs, and a body committing to a second
-    destination (a diff beside a status panel) is where #227's adoption
-    is heading. Only the restriction needed preserving. **No Lua in the
-    tree nests today** — `builtin/runtime/dired.lua` is the only
-    `commit_to` consumer and it does not — so this is a decision about
-    the API's future rather than about a live consumer, which is why it
-    is recorded rather than left implicit.
-  - **`panel_placement_can_fall_back` remains the preflight**, unchanged
-    in role: it measures whether this frontend places side requests in
-    the panel *right now*. With the invalidating mutations refused, that
-    measurement stays true for the life of the body, which is what makes
-    it a guarantee rather than a forecast.
-  - The four document checks live once, in
-    `EditorCore::document_destination_refusal`.
-  - **Three deliberate limits**, each a different decision rather than a
-    stricter version of this one: the **document profile is untouched**
-    (constraining its body would newly refuse dired's own documented
-    panel path — a preservation-suite stop signal); **dedicating a
-    document window is still allowed** (it cannot change which of
-    panel-or-document a side request resolves to); and **falling back is
-    still allowed** — a frontend that cannot render a panel degrades
-    gracefully exactly as today, because this refuses the mutation that
-    *manufactures* a fallback, never the fallback itself.
-- **Mutation-checked per guard, and the pattern is the evidence the rows
-  are independent rather than one assertion repeated.** Deleting the
-  `display_buffer` guard fails the three `display{side, dedicated}` rows
-  — verified **individually**, by rotating each to the front of the
-  table, since the first failure otherwise masks the rest. Deleting the
-  `set_params` guard fails only that row and leaves the display rows
-  passing. Both leave every other test in the file green.
-- **Audit: nothing else relied on "a panel never touches a document".**
-  Four doc sites repeated the claim (`ViewDestination`'s own doc twice,
-  `capture_view_destination`, `ViewDestinationLua`) and were corrected;
-  no other code depended on it. Dired — the only Lua `commit_to`
-  consumer — takes the **two-argument document profile**, so all four
-  checks already applied to it, and it separately documents and accepts
-  the side-slot fallback (`builtin/runtime/dired.lua`).
-  `compile.lua`'s `already_in_panel` queries live state rather than
-  assuming, and the terminal adopter's rollback keys off
-  `DisplayOutcome::created_side`, already false on a fallback.
-- **TWO FRAMING CLAIMS THE TREE DID NOT MATCH.** Neither changed a
-  decision; both are recorded because the framing says "counted, not
-  estimated" and a reader will check.
-  1. **The rename was 11 references across 5 files, not 8 across 4.**
-     `src/daemon.rs:1804` also calls the capture (the attaching
-     frontend's directory open), and `editor.rs` holds six references
-     rather than the counted total. Mechanical either way.
-  2. **Q#DC-4's "a frontend with no document window" is a DEFENSIVE
-     branch, not a routine one.** The obvious spelling — a frontend
-     showing only a bottom panel — is asserted impossible: Q#BP6 says a
-     layout always retains at least one non-side window, and
-     `EditorCore::non_side_target` carries a `debug_assert!` that fires
-     under `cargo test` when one does. So with Q#BP6 held a *registered*
-     frontend always has a live document window. The decision still
-     stands (capture stays total; an adopter with nowhere to land gets a
-     refusal naming that rather than permission to fall back to ambient
-     state), and the two Q#DC-4 pins drive the reachable spelling of the
-     same condition — a layout whose document window has gone while the
-     view remains. **#227 should not expect to hit this refusal**; it is
-     insurance, not a path.
-- **Mutation-tested, since a matrix of deliberate omissions is exactly
-  what passes vacuously.** Retyping the profile to `Option<String>`
-  fails the table and boolean rows with mlua's conversion error (the
-  number row survives — Lua coerces it — which is why the closed set is
-  witnessed by more than one non-string). Applying all four checks in
-  both profiles fails the panel column; applying only check 1 in both
-  fails the document column. Defaulting an omitted profile to `"panel"`
-  fails **`journey_acceptance`'s two preservation pins**, which is the
-  contract claim being executable rather than asserted. Dropping the
-  frontend scope for the panel profile fails the survives-a-switch pin's
-  panel row; dropping the no-document-window arm fails the Q#DC-4 pair.
-
-  **Revision 8's four, each isolating a different way to get it wrong** —
-  and the pattern of *which* rows survive each is the evidence the parts
-  are independent rather than redundant:
-  1. delete the `panel_commit_dedication_refusal` call from
-     `display_buffer` → the three `display{side, dedicated}` rows fail,
-     **verified individually** by rotating each to the front of the
-     table so the first failure cannot mask the rest. Every other test
-     passes — which is exactly the hole an implementation guarding only
-     `set_params` would ship.
-  2. delete it from `set_params` → **only** that row fails; the three
-     display rows still pass.
-  3. delete the `panel_placement_can_fall_back` arm from
-     `commit_destination_refusal` → **only** the two pre-established
-     fallback rows fail, which is the preflight half.
-  4. make `panel_placement_can_fall_back` unconditionally `true` (the
-     "widen the predicate" non-fix) → the really-lands-in-the-panel pin,
-     the Q#DC-4 panel pin and the matrix's three panel rows all fail.
-     That is the two profiles collapsing into one, made visible — the
-     named fallback design, showing up as a test diff rather than
-     silently.
-
-  And reverting the byte comparison to `to_str()?` fails the
-  `invalid utf-8` row with mlua's conversion error, on content.
-
-  **Revision 9's two, each isolating a different half of the rule:**
-  1. restore `panel_commit_dedication_refusal` to reading only the
-     innermost contract (`.last()`, which is exactly revision 8's
-     swapped slot) → **only**
-     `a_nested_commit_cannot_mask_an_outer_panel_restriction` fails.
-     Note the ordinary-nesting pin deliberately survives this — it
-     exists to fail the *other* candidate fix (prohibit nesting), so the
-     two are a pair rather than one test written twice.
-  2. delete `&& contract.destination.frontend == fid` from the same
-     scan, making any outer `"panel"` contract **globally** restrictive
-     → **only**
-     `a_nested_commit_for_another_frontend_may_dedicate_its_own_slot`
-     fails. Both single-frontend nesting tests pass under it, which is
-     the evidence they are independent of the frontend match rather than
-     merely looking so; the cross-frontend exception had no pin at all
-     before this row, since every other test in the file drives one
-     frontend.
-
-  Both were run across all three acceptance suites and the lib: in each
-  case `journey_acceptance` (47), `dired_acceptance` (31) and
-  `cargo test --lib` (1920) stay green, along with every other pin in
-  this file.
-
-  **The counts above are journey 47 / dired 31**, matching the bullet
-  further up. The mutation paragraph committed at `394fa43` had them
-  **reversed** in both the ledger and that commit's message; the ledger
-  is corrected here and the message is left as written, since rewriting
-  a pushed commit is worse than a footnote. A reader following that SHA
-  should take these numbers, not those.
-- **The public API #227 adopts against (Q#DC-5), pinned so it is a
-  contract rather than an intention:**
-  `pmacs.window.commit_to(dest, body [, profile])`. Profile is an
-  optional trailing argument typed **`mlua::Value`, not
-  `Option<String>`** — with `Option<String>` mlua rejects a number or
-  table during argument *conversion*, before the closure runs, making
-  the promised "accepted values are…" message unreachable. That is the
-  same trap the existing binding documents for `dest`. Validated in the
-  body against a **closed** set — `"document"` and
-  `"panel"`. **Omitted means `"document"`**, so every existing
-  two-argument caller keeps all four preflight checks *by definition of
-  the signature*, which is what makes `journey_acceptance` passing
-  untouched a consequence rather than a hope. An unrecognized or
-  non-string profile **errors**, naming the accepted values — a silent
-  fallback would hand a caller different checks than it asked for,
-  which is the exact failure the parameterization exists to prevent.
-  Git's mapping is settled here too: `*git-status*` → panel,
-  `*git-diff*` → document. Revision 2 took three findings: Q#DC-2's parameterization was
-  incomplete (a panel depends on **none** of checks 2–4, not just check
-  3, so the question now carries a full preflight matrix with every
-  omission testable); `tests/journey_acceptance.rs` joins dired as a
-  **preservation suite and stop signal**, since it holds the
-  `commit_to` scope, forged-userdata, preflight and restoration pins
-  this lane generalizes; and the **coherence-impact section was missing
-  entirely**, which `CLAUDE.md` and `COHERENCE.md` §25 both require.
-- **A PREREQUISITE LANE. PR #227 (git Stage 1) blocks on it.** #227's
-  P1a review finding is why it exists: git's async completions mutate
-  and display UI without capturing the initiating frontend
-  (`builtin/runtime/git.lua:609`, `:854`), so a result surfaces in
-  whichever frontend is active when git exits.
-- **The mechanism existed but was not Lua-reachable** until `779bb02`.
-  `pmacs.window.commit_to` took a `DirectoryDestinationLua`, which is
-  **nonconstructible from Lua** by design
-  (`src/lua_bindings/mod.rs:4256`) and minted only inside the
-  `path.open-directory` listener dispatch (`src/editor.rs:1311`) from a
-  `pub(crate)` capture (`:1241`). So no async Lua continuation outside
-  a directory open could say where its result belongs. Line numbers are
-  the pre-lane ones, kept because they are what the finding was written
-  against.
-- **Scope:** a Lua-reachable capture, a generic rename
-  (`DirectoryDestination` → `ViewDestination`; the framing counted 8
-  references across 4 files, the tree held **11 across 5** — see the
-  finding above), and the preflight question below.
-  **No adopter**: git's adoption is #227's work after this lands, since
-  a prerequisite that converts its own first consumer cannot be
-  reviewed separately from it.
-- **The substantive question (Q#DC-2)** is that git's two continuations
-  differ in kind. `*git-status*` goes to the **bottom panel**
-  (`listview.open` defaults `display` to `"panel"`,
-  `builtin/runtime/listview.lua:550`); `*git-diff*` replaces a
-  **document** window. `commit_to`'s stale-intent check (Q#JR14c) is
-  right for the second and, *when the placement really is a panel*,
-  irrelevant to the first. One shape over-refuses the panel or
-  under-checks the document.
-
-  **DO NOT READ THE OLDER FORM OF THIS BULLET, WHICH SAID "the panel
-  never touches the captured window's buffer".** That is the claim
-  revisions 6–8 invalidate: panel placement **falls back** to an
-  ordinary document window when the frontend is not panel-capable or
-  its side slot is dedicated. The relaxation is conditional, and the
-  mutations that could make it fall back are refused inside a
-  panel-profile commit (revision 8) rather than predicted at preflight
-  (revision 6) or caught at placement (revision 7, which would refuse
-  after the callback had already mutated).
-- **Stop signal recorded in the framing:** if any existing dired test
-  needs editing, the generalization changed Journey Stage 1a's
-  semantics, and that is cause to stop rather than to adjust the test.
-- **Gates, as the executable line rather than a description:**
-
-  ```
-  scripts/gate --acceptance destination_capture_acceptance \
-               --acceptance journey_acceptance \
-               --acceptance dired_acceptance
-  ```
-
-  `--acceptance` is repeatable, so there is no reason for this ledger
-  to say "plus dired's" and leave the reader to reconstruct it.
-  **`journey_acceptance` and `dired_acceptance` are preservation suites
-  and a STOP SIGNAL**: they carry the `commit_to` scope,
-  forged-userdata, preflight and restoration pins this lane
-  generalizes, and if either needs editing, the change altered Journey
-  Stage 1a's semantics rather than closing a gap in them. No
-  `--protocol` — core and Lua bindings only.
 
 ## Worker identity Stage 1 (§9) — MERGED as #232 (`3cc1b85`)
 
@@ -1004,258 +623,6 @@ the authoritative tip** — the ref, not a SHA. Recover with
   each grew a required `purpose` field, and `pmacs.process.spawn`
   requires `purpose` in its spec table.
 
-## Discovery Stage 2 — PR #228 OPEN, **MERGE-BLOCKED**
-
-**PR #228** — https://github.com/levineuwirth/pmacs/pull/228. Opened
-2026-08-09 at `2d298dd`. **Open for review, not for merge.**
-
-**The block is a gate-integrity problem, not backlog hygiene.** This
-lane's gate is `scripts/gate --protocol`, which promises the CRDT
-workspace sweep. That sweep's documented precondition is
-`cargo build --workspace --no-default-features --features luajit,crdt`
-(handoff §5), and **the script does not run it** — confirmed by reading
-its plan emitter. On a fresh per-worktree target directory the sweep
-fails on twelve `gpu_invocation_acceptance` tests missing the
-`pmacs-gpu` binary, so a `--protocol` result can be decided by the
-state of the build directory rather than by the diff.
-
-Latent until #225 gave each worktree its own target dir — a shared one
-usually already had `pmacs-gpu` built, satisfying the precondition by
-accident. It surfaced on this branch's first gate run.
-
-**Unblocking requires both:** the `scripts/gate` repair, in its own
-narrow framing and its own PR (explicitly **not** folded into this
-feature branch), and then a **fresh-target rerun of this branch's
-protocol gate** under the repaired script.
-
-**Written with the lane's first commit**, per the standing correction
-from #171 and #215.
-
-**Branch `discovery-stage2`**, base `githubsucks/main` @ `4bc55e8`
-(the #225 merge). **`githubsucks/discovery-stage2` is the authoritative
-tip** — the ref, not a SHA. Recover with
-`git fetch githubsucks && git checkout discovery-stage2`.
-
-- **Framing `docs/discovery-stage2-framing.md`, revision 3, APPROVED
-  2026-08-09** after three review rounds. Each round found the previous
-  one reasoning about a mechanism instead of reading it — an in-place
-  field change that postcard cannot make compatible, a TUI that never
-  reads the message at all, a round-trip test that freezes nothing, a
-  cache hazard the per-peer render state makes impossible, and a
-  clipping rule unachievable at narrow widths.
-  Scope: `COHERENCE.md` §5's "M-x rows are still bare names".
-  Descriptions already exist on `Command` and are already rendered by
-  `help.list-commands`; they are missing at the one moment they would
-  change a decision.
-- **PROTOCOL BUMP v22 → v23, and this lane HOLDS THE BUMP SLOT.**
-  Additive: a new `MinibufferPromptRows` variant **appended** to the
-  enum, with `MinibufferPrompt` **frozen** for v12–v22. An in-place
-  field change is a wire break — postcard encodes positionally, and
-  that variant is sent to every peer `>= 12` (`src/daemon.rs:1472`).
-- **Git Stage 2 (gutter markers) also needs a bump and must wait for
-  this to land.** Git Stage 1 is no-wire and runs beside it.
-- **Two halves, only one of which is wire work.** `pmacs-gpu` renders
-  the new variant. **The grid TUI never reads `MinibufferPrompt` at
-  all** — it paints from `core.minibuffer` and renders
-  `format!("  [{cand}]")` (`src/editor.rs:5484`), so its half is a
-  local formatting change reading the registry directly. A multi-row
-  TUI chooser is explicitly NOT this lane.
-- **Gates:** `scripts/gate --protocol --acceptance
-  discovery_stage2_acceptance --acceptance m9_6_acceptance --acceptance
-  m9_7_acceptance --acceptance m9_8_acceptance` — the strengthened
-  two-configuration sweep, which is what `--protocol` exists for. The
-  three m9 suites are named because the PR #228 review round measured
-  them as this change's blast radius (see the description-clip bullet);
-  their continued passing is on the record rather than assumed.
-  **`--protocol` does NOT run its own documented precondition**
-  (`cargo build --workspace --no-default-features --features
-  luajit,crdt`, handoff §5) — run it by hand first or twelve
-  `gpu_invocation_acceptance` tests fail on a missing `pmacs-gpu`
-  binary. That omission is the `gate-protocol-build` lane's, not this
-  one's.
-- **IMPLEMENTED.** `PROTOCOL_VERSION` is 23,
-  `ADVERTISED_PROTOCOL_VERSION` is untouched at 20. New suite
-  `tests/discovery_stage2_acceptance.rs`; the daemon half is
-  `crdt`-gated (a semantic session is necessarily a text replica) and
-  runs one daemon serving a v22 and a v23 session simultaneously.
-- **Multi-line descriptions are clipped AT THE SURFACE, and
-  registration-level rejection was investigated and REJECTED ON
-  EVIDENCE — do not re-propose it.** PR #228 review found the real
-  hazard: the GPU dropdown derives its height, visible window and
-  highlight offset from `rows.len()` (one logical row per candidate),
-  so a detail carrying a line break misaligns every row below it; the
-  TUI writes into a single-row band. The obvious fix — reject CR/LF in
-  `CommandRegistry::define` — was implemented and measured, and it
-  **fails 36 tests across `m9_6`/`m9_7`/`m9_8`**, because MCP tool
-  registration renders a whole schema block into `description`
-  (`tests/fixtures/pmacs-mcp-tools/init.lua:272`,
-  `table.concat(lines, "\n")`, used at `:496`) and
-  **`tests/m9_6_acceptance.rs:583-598` asserts four separate lines of
-  it** — tool text, `Arguments:`, and two per-argument lines. No
-  single-line rendering satisfies those assertions, so a registry guard
-  could only go green by deleting a shipped acceptance criterion.
-  The one-line constraint belongs to the surfaces that have it:
-  `Command::description_first_line` clips, both single-row consumers
-  call it, and the full text still reaches `describe-command` /
-  `help.list-commands` untouched. Precedent already in-tree — the same
-  MCP fixture clips a tool RESULT to its first line because *"a
-  multi-line set_status would corrupt the row layout"* (`:277-285`).
-  **A startup census is not a corpus census**: booting an
-  `EditorState` and scanning all 180 registered descriptions found zero
-  offenders, because MCP registers at RUNTIME and builds the string by
-  concatenation — invisible to both that census and a grep for literals.
-  The workspace sweep is what caught it.
-- **The freeze is enforced by LITERAL byte fixtures**, not a round-trip
-  — `minibuffer_prompt_v12_wire_bytes_are_frozen` in `src/protocol.rs`,
-  the first such fixture in this repo. Bite-verified: reordering two
-  fields of `MinibufferPrompt` leaves
-  `minibuffer_prompt_round_trips_through_postcard` **passing** and fails
-  the fixture, which is exactly the hazard a round-trip cannot see.
-- **Version assertions updated (five, each read before editing):**
-  `src/protocol.rs` — the `PROTOCOL_VERSION == 22` tripwire (renamed
-  `protocol_version_is_twenty_three_for_minibuffer_prompt_rows`) and
-  `supported_protocol_versions_resume_ladder_on_v6_floor`'s
-  accepted/rejected ranges; `tests/statusline_segments_acceptance.rs`
-  (version + supported range + the `!supported` ceiling);
-  `tests/bottom_panel_stage2b_gpu_acceptance.rs`;
-  `tests/vterm_stage3_acceptance.rs`. **No `ADVERTISED_PROTOCOL_VERSION`
-  assertion fired**, which is the pin doing its job.
-- **No cross-version cache test, deliberately** (framing §3.2/§6):
-  `SemanticRenderState::for_peer` bakes the negotiated version in at
-  attach and is dropped at detach, so a cache cannot span two versions.
-  A test for an impossible condition passes forever while teaching the
-  next reader that the hazard is real.
-
-## LSP LaTeX coverage — IMPLEMENTED, gates green, no PR yet
-
-**Written with the lane's first commit**, per the standing correction
-from #171 and #215.
-
-**Branch `lsp-latex-coverage`**, base `githubsucks/main` @ `4bc55e8`
-(the #225 merge). **`githubsucks/lsp-latex-coverage` is the
-authoritative tip** — the ref, not a SHA. Recover with
-`git fetch githubsucks && git checkout lsp-latex-coverage`.
-
-- **Framing `docs/lsp-language-coverage-framing.md`, revision 3 —
-  IMPLEMENTATION AUTHORIZED 2026-08-09**, after a summary of its four
-  corrections rather than a findings round on the document itself.
-  Recorded that way deliberately: the §3 `.texlabroot` verification
-  caveat was live and binding, and was step zero of the work rather
-  than a footnote it could be read past. **It is now discharged — see
-  below.** **Revision 1 was UNTRACKED on `main` in one checkout** and
-  therefore did not travel; committing it here is the fix.
-- **Scope: one `pmacs.lsp.config.latex` entry plus its root resolver.**
-  `texlab` 5.25.1 is installed and unused; a `.tex` buffer highlights
-  correctly and offers no completion, diagnostics, or go-to-definition.
-- **Revision 2 found Slice 1 is SMALLER than revision 1 framed.** The
-  proposed `.tex`/`.latex`/`.sty`/`.cls` filetype mappings are
-  redundant: the grammar already carries exactly those extensions
-  (`src/syntax.rs:1111`), grammar-extension detection sits **ahead** of
-  the LSP filetype map in the precedence chain
-  (`docs/latex-grammar-math-substrate-framing.md:166-171`), and
-  `lsp.lua:267-270` calls that map "mainly the LSP-only fallback". The
-  two systems cannot disagree, because the grammar's extension list is
-  what drives detection.
-- **Two other corrections.** `haskell-language-server` **is** installed
-  on this machine — revision 1 said it was not, which was the whole
-  basis of its Slice 1 / Slice 2 split. And Q#LX3's deferral argument
-  read `COHERENCE.md:1669` ("first slice in flight") when `:124` and
-  `:867` both record multi-root affinity as **merged (#161)**; that
-  line contradicts the same document twice and wants a separate fix.
-- **Q#LX2 (the LaTeX root) is answered.** An upward marker walk through
-  `config.latex.root`, which already accepts a resolver function
-  (`lsp.lua:543`), falling back to the file's own directory.
-  **`.git` is deliberately excluded**: a repo root is the wrong answer
-  for LaTeX, and it is the one place copying the other fourteen
-  entries' instinct is actively wrong.
-- **STEP ZERO IS DISCHARGED — §3's `.texlabroot` caveat, by
-  observation.** Marker 1 **ships**, and the framing's premise for it
-  was corrected in the process.
-  - **`.texlabroot` is a real texlab marker.** texlab v5.25.1's
-    `crates/distro/src/language.rs` maps `.texlabroot`/`texlabroot` →
-    Root, `Tectonic.toml` → Tectonic, `.latexmkrc`/`latexmkrc` →
-    Latexmkrc; `ProjectRoot::walk_and_find`
-    (`crates/base-db/src/deps/root.rs`) walks ancestors testing all
-    three, innermost wins. The shipped marker set is **texlab's own**,
-    including the bare `texlabroot`/`latexmkrc` spellings the framing
-    did not list.
-  - **But texlab cannot apply that walk to fix a root pmacs gets
-    wrong**, which is the correction that matters. Each arm searches
-    `workspace.iter()` — documents ALREADY LOADED — and the workspace
-    comes from the folders the CLIENT supplies. Hand-driven LSP
-    sessions confirmed it: with `rootUri` at a `chapters/`
-    subdirectory, no marker above it (`.texlabroot` included) widened
-    texlab's view and its dependency graph never reached the parent
-    document; with `rootUri` at the marker directory the parent
-    resolved, marker present or not. **texlab honours the root it is
-    handed and never corrects a too-narrow one**, so what
-    `config.latex.root` returns *is* the project scope. That makes the
-    resolver the whole value of the lane rather than a nicety.
-  - **`args = {}` is also observed**, not assumed: bare `texlab`
-    answers `initialize` with `TexLab 5.25.1` over stdio, so the `run`
-    subcommand is not needed.
-  - **§3 said the wrong thing and has been corrected — `b5eaf27` IS
-    revision 3.** It framed marker 1 as conditional on texlab honouring
-    the `.texlabroot` *file*, when the operative fact is that texlab
-    honours the *client-supplied root* and never widens it. The caveat
-    was discharged by observation, and revision 3 records what that
-    established. Nothing about §3 is outstanding.
-- **`.git` exclusion needed more than omitting it from the list.**
-  `project_root_for` falls through to `pmacs.project.detect` when a
-  resolver returns nil, and **that** walk includes `.git` — so a
-  resolver declining on a markerless file would hand texlab the
-  repository root by the back door. The resolver therefore never
-  declines for a file that has a directory. Pinned end to end through
-  attach, with the same fixture asserting the shared detector really
-  would have answered the repo root.
-- **Commit `a9ef37f`** — `builtin/runtime/lsp.lua` plus
-  `tests/lsp_latex_acceptance.rs` (14 tests, one per §6 bullet plus the
-  boundary and decline cases). No `settings`/`init_options` (Q#LX1); no
-  filetype mappings (§2, asserted both ways).
-- **Gates: ALL GREEN** via
-  `./scripts/gate --acceptance lsp_latex_acceptance` — fmt, clippy,
-  lib, lib-crdt, the new suite, m4, gpu, the workspace sweep (115
-  suites, zero failures), diff-check. No `--protocol` — a config entry,
-  no wire.
-- **Seven mutations each fail the suite**: resolver declining on no
-  marker (6 tests), no marker walk (4), a redundant `filetypes.tex`
-  (1), boundary ignored (1), `io.open` truthiness so a directory counts
-  as a marker (1), marker set narrowed (4), command renamed with
-  opinionated settings added (1).
-- **The boundary has now been the interesting part twice, and the
-  second time it was a real defect (fixed in review).** First it was
-  hermeticity — every fixture sets `set_search_boundary` at its own
-  tempdir because R8's shape (a stray `latexmkrc` above the tempdir)
-  would make the markerless assertions pass while testing nothing.
-  Then review found `latex_within_boundary` answering a PATH question
-  with string arithmetic: `dir:sub(1, #boundary + 1) == boundary .. "/"`
-  compares against `"//"` when the boundary is `/`, which no canonical
-  path matches, so a root boundary judged **every** ancestor out of
-  bounds, ran no marker walk at all, and gave each chapter of a thesis
-  its own server — the lane's headline behaviour silently off, with
-  every shipped test still green because each one clamps to a tempdir.
-  The same trap sat at the other end (`/` was never a walk candidate,
-  and `/paper.tex` sliced to an empty directory and declined into the
-  `.git`-aware detector). Now segment comparison throughout: the root
-  is a boundary with zero segments, contained by construction rather
-  than by a special case. Pinned by an ATTACH-level test under a `/`
-  boundary — two chapters, one server, marker root — and the
-  hermeticity property asserts **both** directions, since "stops at the
-  boundary" is also satisfied by a walk that never runs. Suite is 16
-  tests. **A reader
-  deciding whether to trust this resolver should read it as: the marker
-  set and the `.git` exclusion were settled by observation and are
-  solid; the boundary arithmetic around them was not, and is the place
-  to look first if roots come back wrong.**
-- **Trap for the next agent in this worktree:** this machine exports a
-  shared `CARGO_TARGET_DIR`, so a bare `cargo test` compiles against a
-  sibling worktree's artifacts and fails with errors from code that is
-  not in this tree. Use `scripts/gate`, or
-  `CARGO_TARGET_DIR="$(./scripts/gate --print-target-dir)"` for ad-hoc
-  runs. `scripts/gate`'s own header documents this; the failure looks
-  like a broken branch, which is why it is recorded here.
-- **No PR opened**, by instruction.
-
 ## `scripts/gate --protocol` build step — **MERGED as #229** (`7cf4653`)
 
 **MERGED as PR #229** — https://github.com/levineuwirth/pmacs/pull/229,
@@ -1464,41 +831,6 @@ authoritative tip** — the ref, not a SHA. Recover with
   — added in the second round — a **rename of either** the build or the
   sweep step each fail the suite.
 
-
-## QoL arc retirement — PR #224 OPEN (docs only)
-
-**PR #224** — https://github.com/levineuwirth/pmacs/pull/224. Written
-**after** the PR existed rather than with the lane's first commit —
-which is the standing correction from #171 and #215 being missed again,
-and it took review asking. Recorded that way rather than quietly
-back-dated: this file requires a lane for **every open PR**, including
-the PR that retires other lanes.
-
-- **Branch `retire-long-lines-lane`**, base `githubsucks/main` @
-  `9a26ac8` (the #223 merge). **`githubsucks/retire-long-lines-lane` is
-  the authoritative tip** — the ref, not a SHA, since any edit to this
-  block advances past whatever SHA it records. Recover with
-  `git fetch githubsucks && git checkout retire-long-lines-lane`.
-- **Docs only.** Two files, `docs/active-work.md` and
-  `docs/agent-handoff.md`. No `src/`, no crate, no manifest, no test
-  changes.
-- **Scope:** Rule 4 for the QoL arc, closed at #223. Remove the three
-  merged lane blocks (long lines, Stage 1 #219, Stage 2 #220) **after**
-  re-homing their durable residue to the handoff; advance the handoff's
-  date and `main` anchor and this file's canonical-base record and
-  recovery floor; add capability-aware keymap resolution as a named
-  handoff §6 backlog item — cross-cutting, **not started**, needs its
-  own framing.
-- **Verification:** `git diff --check` clean. **The recovery path was
-  re-exercised, not SHA-swapped** — fresh clone into an empty
-  directory, `githubsucks` alias, `--prune` fetch, `9a26ac8` confirmed
-  an ancestor of `githubsucks/main`, worktree recovered with the
-  three-argument form; all four steps clean. Swept for dangling
-  references to the removed lanes and their branches. The full gate
-  suite is **not** re-run for a change that cannot reach it, and that
-  is stated rather than left as a gap.
-- **Retire this block in the next absorption after #224 merges.** It
-  describes a docs PR; once merged there is nothing volatile left.
 
 ## Docs absorption after #217 — MERGED as #218 (2026-08-06 09:59Z)
 
@@ -1849,40 +1181,45 @@ wants, not a continuation of a plan.**
   optional external tools; `/bin/sh`, `stty`, git and tar are documented
   and never checked. That is §18 onboarding work.
 
-## Discovery lane (P4) — STAGE 1 MERGED (#207); STAGE 2 IS NEXT
+## Discovery lane (P4) — STAGES 1 AND 2 MERGED (#207, #228); LATER WORK REMAINS
 
-**Rewritten, not removed.** Rule 4 removes a lane when its ARC is done;
-this arc is not — Stage 1 built the command surface and everything that
-needs a Rust change is still ahead. Stage 1's durable facts are in
-`docs/agent-handoff.md` §1.
+**Rewritten, not removed, and the PR-specific Stage 2 block above it is
+retired into this one.** Rule 4 removes a lane when its ARC is done;
+this arc is not. **Deleting this lane on the strength of one merged
+stage would have dropped four named pieces of open work** — predicate
+evaluation, command metadata, help unification, and the prefix
+decision — which is exactly why the coalesce is spelled out rather than
+left to judgement. Durable facts from both stages are in
+`docs/agent-handoff.md` (§1 for Stage 1; the v23 frozen-variant lesson
+in §4 for Stage 2).
 
-- **Landed:** eleven `help.*` commands over the existing registries,
-  indexed by `M-x help`, with `editor.describe-command` /
+- **Landed, Stage 1:** eleven `help.*` commands over the existing
+  registries, indexed by `M-x help`, with `editor.describe-command` /
   `editor.describe-setting` kept as forwarders. No Rust, no protocol
   change. §5 moved substrate-without-surface → **Partial**.
-- **Stage 2 candidates, in rough dependency order:**
-  1. **Richer M-x rows** — a **protocol change**:
-     `MinibufferPrompt.candidates` is `Vec<String>`, while
-     `CompletionPopupRow` already carries `kind`/`detail`, so the wire
-     pattern is solved and the bump is the work.
-  2. **`Command` gains title / category / aliases / flags /
+- **Landed, Stage 2 (#228, `0857bf4`):** M-x rows carry descriptions
+  over **protocol v23** — `MinibufferPromptRows` appended while
+  `MinibufferPrompt` stays frozen and still sent for `12..=22`, gated as
+  a range on both sides so exactly one variant reaches any peer.
+- **Still open, and the reason this lane survives:**
+  1. **`Command` gains title / category / aliases / flags /
      arg-schema** — a Rust type change across ~147 definition sites.
      MCP currently works around the missing schema by stuffing rendered
      JSON into the description string.
-  3. **Predicate evaluation.** `Command.predicate` is read at
+  2. **Predicate evaluation.** `Command.predicate` is read at
      `src/help.rs:76` and one test, and **evaluated nowhere**. Starting
      to evaluate it makes commands stop being invocable, so it needs its
      own decision about what "unavailable" means at each call site —
      M-x, dispatch, menu. `discovery_acceptance`'s `d9` pins today's
      behaviour with a *raising* predicate, so that stage must change the
      pin knowingly.
-  4. **Help-layer unification.** `src/help.rs` is still orphaned. Stage 1
+  3. **Help-layer unification.** `src/help.rs` is still orphaned. Stage 1
      funnels every command through `pmacs.editor._show_help` and renders
      via named per-subject functions, so the work is enumerated:
      replace the four subjects `src/help.rs` covers (key, mode, hook,
      buffer) and **write three new Rust renderers** for settings, lists
      and apropos.
-  5. **The help prefix.** Deliberately untouched by Stage 1 — the
+  4. **The help prefix.** Deliberately untouched by Stage 1 — the
      decision is one for the whole family, and `C-h` is **not** free
      (non-kitty terminals cannot disambiguate Ctrl+Backspace from
      Ctrl+H; both produce byte 0x08). `F1` / `C-c ?` / a rebind are the
