@@ -338,13 +338,27 @@ waits for a signal that is not coming.
     was created at 20:14 CEST, **3.5 h before** the gate run at 23:45;
     `/tmp` held 8,920 entries. That is handoff §1's recorded hazard
     exactly.
-  - **A discriminating pair, same binary and commit, one variable:**
-    `TMPDIR=/tmp` → **0/2**, `TMPDIR=<marker-free>` → **2/2**. A rerun
-    would have established nothing; this establishes the cause.
+  - **A discriminating pair compared on SIGNATURE, not test name**, same
+    binary and commit, one variable. `TMPDIR=/tmp` → **0/2**, panicking
+    at `m4_acceptance.rs:5668:5` and `:6615:5` with `.received = ""` —
+    **byte-identical to the gate red's own signature**.
+    `TMPDIR=<marker-free>` → **2/2 with zero panics**. A rerun would
+    have established only intermittence; the pair establishes the cause.
 
   **`scripts/gate` isolates the target dir and five ambient roots but
   NOT `TMPDIR`** — recorded in handoff §1, where the standing fix is
   assigned to the gate lane rather than to this PR.
+
+  **The marker was left in place**: it is foreign, deleting it is
+  unnecessary, and the isolated `TMPDIR` is the correct remedy. It must
+  be **outside `/tmp` and outside every git worktree** — a child of
+  `/tmp` is not isolated, because `/tmp/.git` remains its ancestor.
+- **GREEN under an isolated `TMPDIR`: all nine gates pass** (log
+  `20260811T215605Z-2664352`). fmt, clippy, lib, lib-crdt,
+  `gpu_invocation_acceptance`, **m4 168/0/3**, `PMACS_REQUIRE_GPU=1 -p
+  pmacs-gpu`, the **117-target `--workspace --no-fail-fast` sweep with
+  zero failures anywhere** (`m4_acceptance` running all 171 in it), and
+  `diff-check`.
 
 ## The GUI arc — Stage 0 MERGED as #236 (`f8ad3e7`)
 

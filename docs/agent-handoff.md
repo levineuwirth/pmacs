@@ -230,10 +230,30 @@ commands, read `docs/active-work.md` immediately after this file.
     ```
 
     Check the ancestors of the temp root for `.git`, `Cargo.toml` and
-    friends before believing any markerless-fixture red. **Isolating
+    friends before believing any markerless-fixture red, and **compare
+    SIGNATURES, not test names** — here both runs matched on panic site
+    (`:5668:5`, `:6615:5`) and on `.received = ""`, which is what makes
+    the pair evidence rather than coincidence.
+
+    **The isolated `TMPDIR` must be outside `/tmp` AND outside every git
+    worktree.** A child of `/tmp` is not isolated: `/tmp/.git` is still
+    its ancestor. Verify with `git -C <dir> rev-parse --show-toplevel`
+    failing, not by eye. **Do not delete a foreign marker** — isolating
+    is sufficient and deletion is someone else's call. **Isolating
     `TMPDIR` inside `scripts/gate` is the standing fix and belongs to
     the gate lane**, not to whichever feature PR happens to trip over
     it.
+- **A libtest filter that matches nothing reports `test result: ok`.**
+  `0 passed; 0 failed; N filtered out` and a zero exit code are what a
+  *typo'd or mis-quoted filter* looks like, and it is indistinguishable
+  from success at a glance. **This shell is zsh, which does NOT
+  word-split unquoted parameter expansions**, so `NAMES="a b"; cargo
+  test -- $NAMES` passes ONE argument `"a b"`, matches no test, and
+  prints a green line. Seen 2026-08-11 while running a
+  contaminated/clean pair: the contaminated leg "passed" and briefly
+  looked like the environmental hypothesis collapsing. **Read the
+  `running N tests` line, not just `test result`** — it is the only
+  place the filter's actual reach is stated.
   - **Deliberately unbuilt**: kernel notification (framing option E) —
     a framed option, not residue; its trigger is the 4 s worst-case
     external-change latency mattering in practice.
