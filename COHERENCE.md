@@ -578,7 +578,7 @@ Full verdict table:
 | 8 | Open terminal | **Works** | Full PTY with scrollback + modeline segment, bound to `C-c t` and configurable through three registered settings (`terminal.default-profile`, `terminal.scrollback-rows`, `terminal.escape-key`) plus named `pmacs.terminal.profiles` (PR #173), and searchable through `M-x terminal.copy-mode` / `C-c C-t`, which materializes the retained scrollback into an ordinary read-only buffer (Stage 2). Named limitations: `C-c t` is unreachable from *inside* a terminal window, where `C-c` is consumed as the escape — `M-x terminal` still works there; and `C-c t` is not re-advertised there. **The "no close/kill command" claim previously recorded here was false**: `M-x buffer.kill-this` is global (`builtin/commands/default.lua:1209`) and killing a terminal buffer prunes the session and reaps the owned process (`tests/vterm_stage1_acceptance.rs:336`). Corrected in place because it is a statement about the tree, not a historical grade. *Was broken outright on the GPU frontend until the double terminal-layout sync was fixed: the child took a `SIGWINCH` storm at tick cadence, so typing into it was impossible while output still flowed.* |
 | 9 | Build / test | **Works** | Journey Stage 1b-1 (#203): `C-c c` runs `compile.run`, and the first prompt is prefilled from the detected project kind (`pmacs.compile.defaults`, seeded `rust = "cargo build"`, extensible from `init.lua`) via `ProjectKind::Rust` — **not** `Cargo`, see §24. The prompt **captures** its directory rather than re-resolving at accept time, so the command it offers and the directory it runs in cannot drift while the minibuffer waits. Still defaults cwd to the detected project root and parses Rust `-->` errors. Named limitation: after `pmacs <dir>` the active buffer is dired's and pathless, so the cwd falls back to the process cwd — §8's execution-location model owns that, and the degradation stays coherent (no suggestion is offered for a directory with no detected Cargo project) |
 | 10 | Inspect error | **Partial (good once reached)** | `E:n W:n` modeline counts, underlines, `M-g n/p` + ``C-x ` `` walking a unified compile/grep/diag source, message echo, `RET` visits. Gated entirely on step 6 or 9 succeeding first |
-| 11 | See background work | **Partial** | **Statusline activity indicator since #232** — in-flight count plus the oldest job's purpose, absent entirely when idle, through `ui.activity-indicator`. `*workers*` view via `M-x editor.list-workers`, **still with no keybinding**; `C-c C-k` cancel-at-point. *Was "Works but undiscoverable — no statusline spinner/progress indicator anywhere"; #232 shipped exactly that indicator on 2026-08-09 and the row went stale the same day* |
+| 11 | See background work | **Partial** | **Statusline activity indicator since #232** — in-flight count plus the oldest job's purpose, absent entirely when idle, through `ui.activity-indicator`. `*workers*` view via `M-x editor.list-workers`, **with no binding that OPENS it**; `C-c C-k` cancel-at-point works buffer-locally once inside. *Was "Works but undiscoverable — no statusline spinner/progress indicator anywhere"; #232 shipped exactly that indicator on 2026-08-09 and the row went stale the same day* |
 | 12 | Close + restore | **Partial** | Per-file cursor+scroll (saveplace), recent files, minibuffer history, autosave recovery all restore zero-config. Open-buffer set and window layout do **not**: desktop-save is opt-in (`pmacs.session.desktop_mode(true)`) *and* a documented no-op under a daemon (`src/desktop.rs:323-326`, `:353-356`, Q#DS9) |
 
 A journey observation worth keeping verbatim from the audit:
@@ -678,10 +678,22 @@ level is the one missing. Audited level-by-level:
 build actions, menus, missing-tool guidance):
 
 - files ✓ since #162 / #165 (`C-x C-f` opens a path, `C-x d` browses;
-  neither is advertised anywhere but the keymap) · buffers ✓ (`C-x
-  b`, `*buffer-list*`) · search ✓ (`C-s`/`C-r`/`C-M-s`; project.search
-  is M-x-only) · diagnostics ✓ once a server runs · terminal ✓ but
-  M-x-only · build ✓ but M-x-only with empty prompt · menus △
+  **both are advertised** — `C-x C-f` directly in the welcome's key
+  table, `C-x d` transitively through `M-x help` →
+  `help.list-keybindings`) · buffers ✓ (`C-x b`, `*buffer-list*`) ·
+  search ✓ (`C-s`/`C-r`/`C-M-s`; project.search is M-x-only) ·
+  diagnostics ✓ once a server runs · terminal ✓ **and advertised**
+  (`C-c t`, in the welcome) · build ✓ **and advertised** (`C-c c`, in
+  the welcome; the prompt is **prefilled from the detected project
+  kind**, not empty) · menus △
+
+  *Three claims in this bullet were false and are corrected together:
+  "neither is advertised anywhere but the keymap", "terminal ✓ but
+  M-x-only", and "build ✓ but M-x-only with empty prompt". All three
+  were answered by the welcome buffer and by `C-c t`/`C-c c` — the very
+  fixes the paragraph after §2's audit quote already records as
+  landed. They survived because a level-by-level inventory was never
+  re-run against them.*
   (right-click only, 11 items) · missing-tool guidance ✗ (§1.2).
 
 **Intermediate** (should discover: palette, keybinding search, workspace
