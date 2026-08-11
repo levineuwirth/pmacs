@@ -427,7 +427,10 @@ step. They quote the **pre-Stage-0** verdict strings, not today's table:
   `help.list-keybindings`, which names every registered binding.
 - **Step 11** — the row then read "**Works but undiscoverable**". Same
   shape, and here the outcome **stands**: Stage 0 also graded it
-  `Missing`, because `*workers*` has no binding for any listing to name.
+  `Missing`, because **no binding opens `editor.list-workers`** for a
+  listing to name. The view does carry a buffer-local `C-c C-k`
+  (`workers.cancel-at-point`), which is reachable only once you are
+  already inside it.
 
 The rule these examples exist to establish is untouched by either
 outcome: **the head-grade rule would have graded both `Works`**, and

@@ -452,8 +452,12 @@ is what produced the earlier `Partial` at steps 4 and 7.
 
 **A binding is a stronger claim than a route, and 11(c) asks for the
 binding.** That is why step 11 still fails while step 7 passes: both are
-reachable through the help graph, but `*workers*` has **no binding for
-any listing to name**.
+reachable through the help graph, but **no binding reaches
+`editor.list-workers`**. `*workers*` is not binding-free — it carries a
+buffer-local `C-c C-k` for `workers.cancel-at-point`
+(`async.lua`; `docs/keybindings.md:282`) — and that binding lives
+*inside* the view, so it cannot help anyone find it. The absent thing is
+specifically **a binding that opens it**.
 
 | # | Step | local TUI | attached TUI | GPU | binding subclaim |
 |---|---|---|---|---|---|
@@ -467,7 +471,7 @@ any listing to name**.
 | 8 | Open terminal | Works | Works | Works | 8(c) satisfied by the **global** `M-x buffer.kill-this` (`default.lua:1209`); killing a terminal buffer prunes the session and reaps the process (`vterm_stage1_acceptance.rs:336`). 8(c) never required a terminal-*specific* command. 8(d) passes on the welcome's `C-c t` |
 | 9 | Build / test | Works | Works | Works | 9(d) passes on the welcome's `C-c c` entry, not on the bare binding; 9(a) runs in the detected project's context |
 | 10 | Inspect error | Works | Works | Works | all of 10(a–c) hold. *Being gated on step 6 or 9 is a **dependency, not a subclaim**, and §2a's membership rule forbids an annotation from lowering a grade — an earlier draft let it do exactly that. Grading the dependency would require adding it as a subclaim first* |
-| 11 | Understand background work | **Missing** | **Missing** | **Missing** | 11(c) — the `*workers*` view has **no binding at all**, so a keybinding listing cannot reveal it: the subclaim is **absent**, not degraded, and it floors the cell. 11(b) fails too — #232 gives **purpose**, never an accountable **owner**, and the planes stay disjoint (jobs in `*workers*`, processes in `pmacs.process.list`, servers in `*lsp*`, terminals **nowhere**). 11(a) passes on the activity indicator |
+| 11 | Understand background work | **Missing** | **Missing** | **Missing** | 11(c) — **no binding opens `editor.list-workers`**, so a keybinding listing cannot lead anyone to it: the subclaim is **absent**, not degraded, and it floors the cell. *The view is not binding-free — `C-c C-k` runs `workers.cancel-at-point` buffer-locally inside it (`docs/keybindings.md:282`) — but a binding that only works once you are already there cannot satisfy a discoverability subclaim.* 11(b) fails too — #232 gives **purpose**, never an accountable **owner**, and the planes stay disjoint (jobs in `*workers*`, processes in `pmacs.process.list`, servers in `*lsp*`, terminals **nowhere**). 11(a) passes on the activity indicator |
 | 12 | Close + restore | **Partial** | **Missing** | **Missing** | 12(c) — local restores nothing beyond per-file state (desktop-save is opt-in); on **both daemon-backed frontends it is a structural no-op** (Q#DS9), so they fail it **by construction** |
 
 **Closure condition 2 currently FAILS, at exactly two steps.** GPU is
@@ -481,9 +485,11 @@ is a property of the tree rather than of the grader.
 **The journey's two worst steps are frontend-INDEPENDENT**, and that is
 the table's other finding. Steps 6 and 11 grade `Missing` in all three
 columns: language intelligence dies silently after a server crash, and
-background work has no advertised **binding** — a route exists
-(`M-x help` → `help.list-commands` → `editor.list-workers`), which is
-why 11(c)'s wording asks for a binding and not a route. Neither is GUI work,
+**no binding opens** the background-work view — a route exists
+(`M-x help` → `help.list-commands` → `editor.list-workers`), and a
+buffer-local `C-c C-k` exists *within* the view, but nothing bound leads
+to it. That is why 11(c) asks for a binding rather than a route, and why
+the binding it asks for is one that **reaches** the view. Neither is GUI work,
 neither is closed by this arc, and both were previously carried as
 `Partial` — which is how they stayed off the critical path.
 
