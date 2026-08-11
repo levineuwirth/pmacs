@@ -106,6 +106,7 @@ end
 
 local READ_DIR_OPTS = { supersede = true, tolerant = true }
 local STAT_OPTS = { supersede = true }
+local WALK_TREE_OPTS = { supersede = true }
 
 -- Two result shapes, chosen by `opts.tolerant` (dired Q#DR6):
 --
@@ -127,6 +128,22 @@ function fs.read_dir(path, opts)
   end
   local key, tolerant = read_opts(opts, "pmacs.fs.read_dir", READ_DIR_OPTS)
   local id = async_mod._dispatch_fs_read_dir(path, key, tolerant)
+  return build_handle(id)
+end
+
+-- walk_tree(base [, opts]) -> handle; await -> { <entry>, ... } where
+-- each entry is the read_dir shape but `name` is a BASE-RELATIVE path
+-- ("sub/dir/file.txt") and the listing covers the whole tree as ONE
+-- job (issue #233 D3). Symlinks are recorded, never traversed; an
+-- unreadable subdirectory is skipped with its subtree; only the root
+-- failing to open fails the walk. Directory entries are included
+-- (kind "dir") --- consumers that only want files filter on kind.
+function fs.walk_tree(base, opts)
+  if type(base) ~= "string" then
+    error("pmacs.fs.walk_tree: base must be a string, got " .. type(base))
+  end
+  local key = read_opts(opts, "pmacs.fs.walk_tree", WALK_TREE_OPTS)
+  local id = async_mod._dispatch_fs_walk_tree(base, key)
   return build_handle(id)
 end
 

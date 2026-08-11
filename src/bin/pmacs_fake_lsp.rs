@@ -88,6 +88,8 @@ fn main() {
     let mut stdout = io::stdout().lock();
     let mut crashed_after_init = false;
     let mut open_docs: HashMap<String, String> = HashMap::new();
+    // `filewatchjoin` / `filewatchretire` mid-session triggers.
+    let mut didchange_count: u32 = 0;
     // `fullonly` observability: counts /full responses (rid-1, rid-2…).
     let mut full_count: u32 = 0;
     loop {
@@ -354,6 +356,58 @@ fn main() {
                 });
                 write_frame(&mut stdout, &req);
             }
+            // Issue #233 D3: `filewatchjoin` registers one watcher at
+            // initialized and a SECOND one — same base, different
+            // pattern — on the first didChange it receives. The
+            // didChange is the test's trigger for a mid-session join,
+            // which is what the join-wakes / registration-epoch /
+            // queued-baseline witnesses need and no
+            // at-initialized-only mode can produce.
+            ("initialized", _) if mode == "filewatchjoin" => {
+                let base = std::env::var("PMACS_FAKE_LSP_WATCH_BASE").unwrap_or_default();
+                let req = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 9310,
+                    "method": "client/registerCapability",
+                    "params": { "registrations": [{
+                        "id": "watch-j1",
+                        "method": "workspace/didChangeWatchedFiles",
+                        "registerOptions": { "watchers": [{
+                            "globPattern": {
+                                "baseUri": format!("file://{base}"),
+                                "pattern": "**/*.aaa"
+                            },
+                            "kind": 7
+                        }] }
+                    }] }
+                });
+                write_frame(&mut stdout, &req);
+            }
+            // Issue #233 D3: `filewatchretire` registers at
+            // initialized, UNREGISTERS on the first didChange (the
+            // group's last member leaves — retirement), and
+            // re-registers on the second (a fresh group whose
+            // baseline folds whatever happened while unwatched).
+            ("initialized", _) if mode == "filewatchretire" => {
+                let base = std::env::var("PMACS_FAKE_LSP_WATCH_BASE").unwrap_or_default();
+                let req = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 9320,
+                    "method": "client/registerCapability",
+                    "params": { "registrations": [{
+                        "id": "watch-r1",
+                        "method": "workspace/didChangeWatchedFiles",
+                        "registerOptions": { "watchers": [{
+                            "globPattern": {
+                                "baseUri": format!("file://{base}"),
+                                "pattern": "**/*.txt"
+                            },
+                            "kind": 7
+                        }] }
+                    }] }
+                });
+                write_frame(&mut stdout, &req);
+            }
             // Issue #233 review P1 guard: `filewatchbare` registers a
             // BARE STRING with no base and no leading `/` — `*.txt`.
             // The string arm and the `filewatchflat` arm below carry the
@@ -563,6 +617,63 @@ fn main() {
                 }
             }
             ("textDocument/didOpen" | "textDocument/didChange", _) => {
+                if method == "textDocument/didChange" {
+                    didchange_count += 1;
+                    let base = std::env::var("PMACS_FAKE_LSP_WATCH_BASE").unwrap_or_default();
+                    // `filewatchjoin` / `filewatchretire`: a didChange
+                    // is the test's mid-session trigger; see the
+                    // `initialized` arms above.
+                    if mode == "filewatchjoin" && didchange_count == 1 {
+                        let req = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 9311,
+                            "method": "client/registerCapability",
+                            "params": { "registrations": [{
+                                "id": "watch-j2",
+                                "method": "workspace/didChangeWatchedFiles",
+                                "registerOptions": { "watchers": [{
+                                    "globPattern": {
+                                        "baseUri": format!("file://{base}"),
+                                        "pattern": "**/*.bbb"
+                                    },
+                                    "kind": 7
+                                }] }
+                            }] }
+                        });
+                        write_frame(&mut stdout, &req);
+                    }
+                    if mode == "filewatchretire" && didchange_count == 1 {
+                        let req = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 9321,
+                            "method": "client/unregisterCapability",
+                            "params": { "unregisterations": [{
+                                "id": "watch-r1",
+                                "method": "workspace/didChangeWatchedFiles"
+                            }] }
+                        });
+                        write_frame(&mut stdout, &req);
+                    }
+                    if mode == "filewatchretire" && didchange_count == 2 {
+                        let req = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 9322,
+                            "method": "client/registerCapability",
+                            "params": { "registrations": [{
+                                "id": "watch-r2",
+                                "method": "workspace/didChangeWatchedFiles",
+                                "registerOptions": { "watchers": [{
+                                    "globPattern": {
+                                        "baseUri": format!("file://{base}"),
+                                        "pattern": "**/*.txt"
+                                    },
+                                    "kind": 7
+                                }] }
+                            }] }
+                        });
+                        write_frame(&mut stdout, &req);
+                    }
+                }
                 let uri = params
                     .get("textDocument")
                     .and_then(|t| t.get("uri"))

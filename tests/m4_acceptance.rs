@@ -5674,6 +5674,1033 @@ fn m4_24_bare_string_glob_stays_relative() {
     );
 }
 
+// ---------------------------------------------------------------------
+// Issue #233 D3 — the group-scheduler witnesses. Shared scaffold: spawn
+// the fake in `mode` with PMACS_FAKE_LSP_WATCH_BASE at `watch_base`
+// (the tempdir root unless a test passes a subdirectory), open `a.rs`
+// at the tempdir root, and wait for initialization.
+// ---------------------------------------------------------------------
+
+fn d3_scaffold(
+    mode: &str,
+    watch_sub: Option<&str>,
+) -> (
+    tempfile::TempDir,
+    pmacs::editor::EditorState,
+    std::path::PathBuf,
+) {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().to_path_buf();
+    let watch_base = match watch_sub {
+        Some(sub) => {
+            let p = base.join(sub);
+            std::fs::create_dir_all(&p).expect("mkdir watch base");
+            p
+        }
+        None => base.clone(),
+    };
+    let a_path = base.join("a.rs");
+    std::fs::write(&a_path, b"fn a() {}\n").expect("write a");
+
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{ command = '{fake}',
+               env = {{ PMACS_FAKE_LSP_MODE = '{mode}',
+                        PMACS_FAKE_LSP_WATCH_BASE = '{}' }} }}",
+            watch_base.display()
+        ))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{}')", a_path.display()))
+        .exec()
+        .expect("open a.rs");
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "(function() for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.state and r.state.kind=='initialized' then return true end \
+             end return false end)()",
+            5,
+        ),
+        "fake never initialized"
+    );
+    (dir, state, watch_base)
+}
+
+/// Pump every tick for `ms` milliseconds.
+fn d3_pump(state: &mut pmacs::editor::EditorState, ms: u64) {
+    let deadline = Instant::now() + Duration::from_millis(ms);
+    while Instant::now() < deadline {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Install the scan-time collector on the group seam. Multi-member
+/// scans fire the seam once per member back-to-back, so calls within
+/// 40 ms collapse to one recorded scan.
+fn d3_install_scan_collector(state: &mut pmacs::editor::EditorState) {
+    state
+        .lua_host
+        .lua()
+        .load(
+            "_G.__d3_scans = {}
+             pmacs.lsp._after_scan_for_tests = function(_, _)
+               local t = pmacs.editor.monotonic_ms()
+               local s = _G.__d3_scans
+               if #s == 0 or t - s[#s] > 40 then s[#s + 1] = t end
+             end",
+        )
+        .exec()
+        .expect("install scan collector");
+}
+
+fn d3_scan_times(state: &pmacs::editor::EditorState) -> Vec<f64> {
+    // `expect`, never a default: a broken probe must be a red test,
+    // not a green lie (the first idle probe was exactly that).
+    state
+        .lua_host
+        .lua()
+        .load("return _G.__d3_scans")
+        .eval::<Vec<f64>>()
+        .expect("scan-times probe must not error")
+}
+
+/// Count `fs_walk_tree` jobs currently visible in the workers snapshot
+/// (active plus the 64-entry completed ring).
+fn d3_walk_job_count(state: &pmacs::editor::EditorState) -> i64 {
+    state
+        .lua_host
+        .lua()
+        .load(
+            "(function()
+               local n = 0
+               local snap = pmacs.workers.snapshot()
+               for _, r in ipairs(snap.active) do
+                 if r.kind == 'fs_walk_tree' then n = n + 1 end
+               end
+               for _, r in ipairs(snap.completed) do
+                 if r.kind == 'fs_walk_tree' then n = n + 1 end
+               end
+               return n
+             end)()",
+        )
+        .eval()
+        .expect("walk-count probe must not error")
+}
+
+/// Number of `fs_walk_tree` jobs currently ACTIVE (running or queued).
+fn d3_active_walk_count(state: &pmacs::editor::EditorState) -> i64 {
+    state
+        .lua_host
+        .lua()
+        .load(
+            "(function()
+               local n = 0
+               for _, r in ipairs(pmacs.workers.snapshot().active) do
+                 if r.kind == 'fs_walk_tree' then n = n + 1 end
+               end
+               return n
+             end)()",
+        )
+        .eval()
+        .expect("active-walk probe must not error")
+}
+
+/// Pump until at least one `fs_walk_tree` job is active (typically
+/// queued behind a saturated pool). Panics on timeout.
+fn d3_wait_for_active_walk(state: &mut pmacs::editor::EditorState) {
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        let active: i64 = state
+            .lua_host
+            .lua()
+            .load(
+                "(function()
+                   local n = 0
+                   for _, r in ipairs(pmacs.workers.snapshot().active) do
+                     if r.kind == 'fs_walk_tree' then n = n + 1 end
+                   end
+                   return n
+                 end)()",
+            )
+            .eval()
+            .expect("active-walk probe must not error");
+        if active >= 1 {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no walk dispatched while waiting"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Pump until some `fs_walk_tree` job has SETTLED cancelled — a
+/// `cancelled` completion in the ring, not merely `cancel_requested`
+/// on an active row (review round 3: a worker that ignored the token
+/// and completed successfully would satisfy a request-level check).
+/// Panics on timeout.
+fn d3_wait_for_walk_cancelled(state: &mut pmacs::editor::EditorState) {
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        let cancelled: bool = state
+            .lua_host
+            .lua()
+            .load(
+                "(function()
+                   for _, r in ipairs(pmacs.workers.snapshot().completed) do
+                     if r.kind == 'fs_walk_tree' and r.status == 'cancelled' then
+                       return true
+                     end
+                   end
+                   return false
+                 end)()",
+            )
+            .eval()
+            .expect("cancel-observation probe must not error");
+        if cancelled {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the in-flight walk was never cancelled"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// D3 idle witness. With a watcher registered and no file activity,
+/// the activity indicator must settle to ABSENT between scans —
+/// `activity_summary`'s `None`-at-zero contract — and no `sleep`
+/// purpose may ever appear: the old design ran one pool-thread-holding
+/// `sleep 250ms` job per watcher per tick, forever, and this witness
+/// is unwritable under it.
+#[test]
+fn m4_24_d3_idle_is_absent_and_never_sleeps() {
+    let (_dir, mut state, _watch) = d3_scaffold("filewatch", None);
+    // Let the baseline land and the backoff start stretching.
+    d3_pump(&mut state, 1200);
+
+    let mut absent_seen = 0u32;
+    let mut samples = 0u32;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        let s: String = state
+            .lua_host
+            .lua()
+            .load(
+                "(function()
+                   local s = pmacs._async._activity_summary()
+                   if s == nil then return '' end
+                   return tostring(s.purpose)
+                 end)()",
+            )
+            .eval()
+            .expect("activity summary probe must not error");
+        samples += 1;
+        if s.is_empty() {
+            absent_seen += 1;
+        }
+        assert!(
+            !s.contains("sleep"),
+            "the watcher must not run sleep jobs; activity showed {s:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        absent_seen > 0,
+        "activity never settled to absent across {samples} samples — \
+         something is running continuously at idle"
+    );
+}
+
+/// D3 scan-cost witness. One scan is ONE `fs_walk_tree` job; the
+/// per-directory `read_dir` storm is gone. The fixture holds twelve
+/// subdirectories, so under the old design a single scan would allocate
+/// twelve `read_dir` jobs — here the watcher may allocate none at all.
+#[test]
+fn m4_24_d3_one_walk_job_per_scan_not_per_directory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for i in 0..12 {
+        let d = dir.path().join(format!("sub{i}"));
+        std::fs::create_dir(&d).expect("mkdir");
+        std::fs::write(d.join("f.txt"), b"x").expect("write");
+    }
+    // Scaffold by hand so the subdirectories exist before the baseline.
+    let base = dir.path().to_path_buf();
+    let a_path = base.join("a.rs");
+    std::fs::write(&a_path, b"fn a() {}\n").expect("write a");
+    let mut state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{ command = '{fake}',
+               env = {{ PMACS_FAKE_LSP_MODE = 'filewatch',
+                        PMACS_FAKE_LSP_WATCH_BASE = '{}' }} }}",
+            base.display()
+        ))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{}')", a_path.display()))
+        .exec()
+        .expect("open a.rs");
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "(function() for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.state and r.state.kind=='initialized' then return true end \
+             end return false end)()",
+            5,
+        ),
+        "fake never initialized"
+    );
+    d3_pump(&mut state, 1500);
+
+    let (walks, watcher_read_dirs): (i64, i64) = state
+        .lua_host
+        .lua()
+        .load(format!(
+            "(function()
+               local walks, rds = 0, 0
+               local snap = pmacs.workers.snapshot()
+               local function scan(rows)
+                 for _, r in ipairs(rows) do
+                   if r.kind == 'fs_walk_tree' then walks = walks + 1 end
+                   if r.kind == 'fs_read_dir'
+                     and r.purpose:find('{}', 1, true) then
+                     rds = rds + 1
+                   end
+                 end
+               end
+               scan(snap.active)
+               scan(snap.completed)
+               return walks, rds
+             end)()",
+            base.display()
+        ))
+        .eval()
+        .expect("count jobs");
+    assert!(
+        walks >= 1,
+        "at least one walk_tree job must have run; saw {walks}"
+    );
+    assert_eq!(
+        watcher_read_dirs, 0,
+        "the watcher must not allocate per-directory read_dir jobs"
+    );
+}
+
+/// D3 join-wakes + registration-epoch witness. `filewatchjoin`
+/// registers `**/*.aaa` at initialized and `**/*.bbb` on the first
+/// didChange. With the group backed off, a file matching the SECOND
+/// pattern is created, then the join is triggered: the group must scan
+/// immediately (never a backoff cap away), and the joiner must NOT
+/// receive a CREATED for the pre-join file — it folds into its
+/// baseline, exactly as the initial scan folds pre-existing files. A
+/// file created after the baseline settles IS reported.
+#[test]
+fn m4_24_d3_join_wakes_a_backed_off_group_and_epochs_gate_delivery() {
+    let (_dir, mut state, watch) = d3_scaffold("filewatchjoin", None);
+    let received = watch.join(".received");
+    d3_install_scan_collector(&mut state);
+
+    // Back off: pump quietly until the last two scans are ≥ 1200 ms
+    // apart (the curve has left the 250 ms floor well behind).
+    let deadline = Instant::now() + Duration::from_secs(12);
+    loop {
+        d3_pump(&mut state, 120);
+        let t = d3_scan_times(&state);
+        if t.len() >= 3 && t[t.len() - 1] - t[t.len() - 2] >= 1200.0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "group never backed off; scan times: {t:?}"
+        );
+    }
+
+    // The discriminating file: matches only the still-unregistered
+    // second watcher, created BEFORE the join.
+    std::fs::write(watch.join("pre.bbb"), b"early\n").expect("write pre.bbb");
+    let edit_at: f64 = state
+        .lua_host
+        .lua()
+        .load(
+            "pmacs.window.buffer():insert(0, '-')
+             pmacs.hook.run('buffer.after-edit')
+             return pmacs.editor.monotonic_ms()",
+        )
+        .eval()
+        .expect("edit to trigger join");
+
+    // The join must wake the backed-off group promptly.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let woke = loop {
+        d3_pump(&mut state, 40);
+        let t = d3_scan_times(&state);
+        if let Some(last) = t.last()
+            && *last > edit_at
+        {
+            break *last - edit_at;
+        }
+        if Instant::now() >= deadline {
+            break f64::INFINITY;
+        }
+    };
+    assert!(
+        woke < 1000.0,
+        "join did not wake the backed-off group (first post-join scan \
+         {woke} ms after the edit)"
+    );
+
+    // Baseline correctness: a post-baseline file is reported to the
+    // joiner; the pre-join file never is.
+    d3_pump(&mut state, 300);
+    let post_uri = format!("file://{}", watch.join("post.bbb").display());
+    std::fs::write(watch.join("post.bbb"), b"late\n").expect("write post.bbb");
+    assert!(
+        pump_until_file_contains(&mut state, &received, &format!("1 {post_uri}"), 10),
+        "CREATED for post.bbb never reached the joined watcher; \
+         .received = {:?}",
+        std::fs::read_to_string(&received).unwrap_or_default()
+    );
+    assert!(
+        !std::fs::read_to_string(&received)
+            .unwrap_or_default()
+            .contains("pre.bbb"),
+        "a file predating the join must fold into the joiner's \
+         baseline, never appear as CREATED"
+    );
+}
+
+/// D3 queued-baseline witness. A join landing while a walk is IN
+/// FLIGHT queues exactly one immediate follow-up scan, and the
+/// joiner's baseline is that follow-up. The in-flight state is made
+/// real by saturating the worker pool with sleeps so the walk sits
+/// queued; the join and a `.bbb` file both land in that window, and
+/// the file must fold into the baseline rather than surface as
+/// CREATED. A later `.bbb` file is reported — which also proves the
+/// follow-up actually ran (without it the joiner would have no
+/// baseline and nothing would ever be delivered).
+#[test]
+fn m4_24_d3_join_mid_walk_queues_one_immediate_baseline() {
+    let (_dir, mut state, watch) = d3_scaffold("filewatchjoin", None);
+    let received = watch.join(".received");
+    d3_pump(&mut state, 900);
+
+    // Reset the cadence to the floor so the next scan dispatches
+    // quickly once the pool is saturated: an .aaa event is observed by
+    // the FIRST watcher.
+    let trig_uri = format!("file://{}", watch.join("trig.aaa").display());
+    std::fs::write(watch.join("trig.aaa"), b"t\n").expect("write trig.aaa");
+    assert!(
+        pump_until_file_contains(&mut state, &received, &format!("1 {trig_uri}"), 8),
+        "watcher-1 never reported trig.aaa"
+    );
+
+    // Saturate the pool; the next due walk queues behind the sleeps.
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "for _ = 1, {} do pmacs.workers.sleep(800) end",
+            std::thread::available_parallelism().map_or(8, std::num::NonZeroUsize::get) + 4
+        ))
+        .exec()
+        .expect("saturate pool");
+    // Wait for the due scan to dispatch (it sits queued, in-flight
+    // from the group's point of view).
+    d3_wait_for_active_walk(&mut state);
+
+    // Join lands mid-walk; the discriminating file lands in the same
+    // window.
+    state
+        .lua_host
+        .lua()
+        .load(
+            "pmacs.window.buffer():insert(0, '-')
+             pmacs.hook.run('buffer.after-edit')",
+        )
+        .exec()
+        .expect("edit to trigger join");
+    std::fs::write(watch.join("mid.bbb"), b"m\n").expect("write mid.bbb");
+
+    // Drain DETERMINISTICALLY, not for a fixed duration: the held
+    // walk must complete and a post-join walk (the queued baseline)
+    // must have settled before `late.bbb` exists. On a small CI pool
+    // the sleep waves take seconds, and a fixed 1.6 s pump wrote the
+    // file before the held walk even started — folding it into the
+    // baseline. That was PR #235's first CI red: deterministic on
+    // every 2–4-core runner, invisible on sixteen local cores.
+    let walks_at_join = d3_walk_job_count(&state);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        d3_pump(&mut state, 100);
+        if d3_walk_job_count(&state) > walks_at_join && d3_active_walk_count(&state) == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the queued baseline walk never settled"
+        );
+    }
+    let late_uri = format!("file://{}", watch.join("late.bbb").display());
+    std::fs::write(watch.join("late.bbb"), b"l\n").expect("write late.bbb");
+    assert!(
+        pump_until_file_contains(&mut state, &received, &format!("1 {late_uri}"), 10),
+        "the joiner never received events — the queued baseline scan \
+         did not run; .received = {:?}",
+        std::fs::read_to_string(&received).unwrap_or_default()
+    );
+    assert!(
+        !std::fs::read_to_string(&received)
+            .unwrap_or_default()
+            .contains("mid.bbb"),
+        "a file from the join window must fold into the queued \
+         baseline, never appear as CREATED"
+    );
+}
+
+/// D3 single-flight witness. With completion delivery withheld (the
+/// async tick is the delivery path; only the process/LSP ticks run),
+/// the group's walk stays in flight while several intervals elapse —
+/// and the scheduler must NOT dispatch a second walk. Resuming
+/// delivery resumes the cadence.
+#[test]
+fn m4_24_d3_no_overlap_when_a_walk_outlives_its_interval() {
+    let (_dir, mut state, _watch) = d3_scaffold("filewatch", None);
+    d3_pump(&mut state, 900);
+
+    let before = d3_walk_job_count(&state);
+    assert!(before >= 1, "no walks during warm-up?");
+
+    // Withhold completions for ~1.3 s (≥ 2 intervals even after one
+    // backoff step): deadlines pass, the in-flight walk cannot settle,
+    // and at most ONE new dispatch (the scan due at stop time) may
+    // appear.
+    let deadline = Instant::now() + Duration::from_millis(1300);
+    while Instant::now() < deadline {
+        state.tick_processes();
+        state.tick_lsp();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let during = d3_walk_job_count(&state);
+    assert!(
+        during - before <= 1,
+        "overlapping walks dispatched while one was in flight: \
+         {before} -> {during}"
+    );
+
+    // Resume delivery: the cadence recovers.
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        d3_pump(&mut state, 150);
+        if d3_walk_job_count(&state) > during {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "cadence never resumed after completions were delivered"
+        );
+    }
+}
+
+/// D3 retirement witness. `filewatchretire` unregisters its only
+/// watcher on the first didChange — the group's last member leaves, so
+/// the group must retire: no further walks are dispatched, and a file
+/// created while unwatched is NEVER reported. The second didChange
+/// re-registers: a FRESH group whose baseline folds the unwatched-era
+/// file; a file created after that is reported.
+#[test]
+fn m4_24_d3_retirement_stops_scans_and_a_fresh_group_rebaselines() {
+    let (_dir, mut state, watch) = d3_scaffold("filewatchretire", None);
+    let received = watch.join(".received");
+    d3_pump(&mut state, 900);
+
+    // Watched: f1 is reported.
+    let f1_uri = format!("file://{}", watch.join("f1.txt").display());
+    std::fs::write(watch.join("f1.txt"), b"1\n").expect("write f1");
+    assert!(
+        pump_until_file_contains(&mut state, &received, &format!("1 {f1_uri}"), 8),
+        "watched file never reported before retirement"
+    );
+
+    // Hold a walk genuinely in flight across the unregister (review
+    // round 2): saturate the pool so the next due walk sits queued,
+    // then let the unregister land — retirement must CANCEL that job,
+    // not orphan it.
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "for _ = 1, {} do pmacs.workers.sleep(800) end",
+            std::thread::available_parallelism().map_or(8, std::num::NonZeroUsize::get) + 4
+        ))
+        .exec()
+        .expect("saturate pool");
+    d3_wait_for_active_walk(&mut state);
+
+    // First edit → unregister → retirement, with the walk in flight.
+    state
+        .lua_host
+        .lua()
+        .load(
+            "pmacs.window.buffer():insert(0, '-')
+             pmacs.hook.run('buffer.after-edit')",
+        )
+        .exec()
+        .expect("edit 1");
+    d3_wait_for_walk_cancelled(&mut state);
+    // Drain the sleeps, then confirm scanning has stopped.
+    d3_pump(&mut state, 1400);
+    let after_retire = d3_walk_job_count(&state);
+    d3_pump(&mut state, 1500);
+    assert_eq!(
+        d3_walk_job_count(&state),
+        after_retire,
+        "walks kept dispatching after the group's last member left"
+    );
+
+    // Unwatched: f2 exists but must never be reported.
+    std::fs::write(watch.join("f2.txt"), b"2\n").expect("write f2");
+    d3_pump(&mut state, 400);
+
+    // Second edit → re-register → fresh group, fresh baseline.
+    state
+        .lua_host
+        .lua()
+        .load(
+            "pmacs.window.buffer():insert(0, '-')
+             pmacs.hook.run('buffer.after-edit')",
+        )
+        .exec()
+        .expect("edit 2");
+    d3_pump(&mut state, 600);
+    let f3_uri = format!("file://{}", watch.join("f3.txt").display());
+    std::fs::write(watch.join("f3.txt"), b"3\n").expect("write f3");
+    assert!(
+        pump_until_file_contains(&mut state, &received, &format!("1 {f3_uri}"), 10),
+        "the re-registered watcher never reported a fresh file"
+    );
+    assert!(
+        !std::fs::read_to_string(&received)
+            .unwrap_or_default()
+            .contains("f2.txt"),
+        "a file created while unwatched must fold into the fresh \
+         group's baseline, never appear as CREATED"
+    );
+}
+
+/// D3 live-cancel witness. A walk cancelled while its group is still
+/// live (the `workers.cancel-at-point` outcome, driven here through
+/// `pmacs.async._cancel` on the queued job) must commit nothing: the
+/// previous snapshot survives, so a change the cancelled scan would
+/// have observed is still reported by the NEXT scan — and no spurious
+/// events appear for files already in the baseline.
+#[test]
+fn m4_24_d3_live_cancel_preserves_snapshot_and_cadence() {
+    let (_dir, mut state, watch) = d3_scaffold("filewatch", None);
+    let received = watch.join(".received");
+    // bar.txt is in the baseline; it must never produce an event.
+    std::fs::write(watch.join("bar.txt"), b"b\n").expect("write bar");
+    d3_pump(&mut state, 900);
+
+    // Saturate the pool, then create the change and cancel the walk
+    // that would observe it while it is still queued.
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "for _ = 1, {} do pmacs.workers.sleep(800) end",
+            std::thread::available_parallelism().map_or(8, std::num::NonZeroUsize::get) + 4
+        ))
+        .exec()
+        .expect("saturate pool");
+    std::fs::write(watch.join("foo.txt"), b"f\n").expect("write foo");
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let cancelled: bool = loop {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        let did: bool = state
+            .lua_host
+            .lua()
+            .load(
+                "(function()
+                   for _, r in ipairs(pmacs.workers.snapshot().active) do
+                     if r.kind == 'fs_walk_tree' and not r.cancel_requested then
+                       pmacs._async._cancel(r.id)
+                       return true
+                     end
+                   end
+                   return false
+                 end)()",
+            )
+            .eval()
+            .expect("cancel probe must not error");
+        if did {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(cancelled, "never caught a walk to cancel");
+
+    // The cancelled scan commits nothing; the next scheduled scan
+    // reports foo.txt off the PRESERVED snapshot.
+    let foo_uri = format!("file://{}", watch.join("foo.txt").display());
+    assert!(
+        pump_until_file_contains(&mut state, &received, &format!("1 {foo_uri}"), 10),
+        "the change was lost after a live cancel — the prior snapshot \
+         did not survive; .received = {:?}",
+        std::fs::read_to_string(&received).unwrap_or_default()
+    );
+    assert!(
+        !std::fs::read_to_string(&received)
+            .unwrap_or_default()
+            .contains("bar.txt"),
+        "a cancelled scan must not commit: baseline files must never \
+         produce spurious events"
+    );
+}
+
+/// D3 live-failure witness. The watch base is a subdirectory; deleting
+/// it makes every walk fail at the root. The failure must be reported
+/// ONCE per distinct error (`pmacs.error` is nil in production — the
+/// test installs a counter), the group must keep its schedule, and the
+/// PRIOR snapshot must survive: recreating the directory yields both a
+/// DELETED for the old file and a CREATED for the new one, which is
+/// only possible off the retained pre-failure snapshot.
+#[test]
+fn m4_24_d3_live_failure_reports_once_and_preserves_snapshot() {
+    let (_dir, mut state, watch) = d3_scaffold("filewatch", Some("watched"));
+    let received = watch.join(".received");
+    std::fs::write(watch.join("foo.txt"), b"f\n").expect("write foo");
+    state
+        .lua_host
+        .lua()
+        .load(
+            "_G.__d3_failures = 0
+             pmacs.error = function(msg)
+               if tostring(msg):find('file watch scan failed', 1, true) then
+                 _G.__d3_failures = _G.__d3_failures + 1
+               end
+             end",
+        )
+        .exec()
+        .expect("install failure counter");
+    d3_pump(&mut state, 900);
+
+    std::fs::remove_dir_all(&watch).expect("remove watch base");
+    d3_pump(&mut state, 1800);
+    let failures: i64 = state
+        .lua_host
+        .lua()
+        .load("return _G.__d3_failures")
+        .eval()
+        .expect("read counter");
+    assert_eq!(
+        failures, 1,
+        "a persistent walk failure must be reported exactly once, not \
+         per attempt"
+    );
+
+    // Recovery: the retained snapshot yields DELETED foo + CREATED bar.
+    std::fs::create_dir_all(&watch).expect("recreate watch base");
+    std::fs::write(watch.join("bar.txt"), b"b\n").expect("write bar");
+    let foo_uri = format!("file://{}", watch.join("foo.txt").display());
+    let bar_uri = format!("file://{}", watch.join("bar.txt").display());
+    assert!(
+        pump_until_file_contains(&mut state, &received, &format!("1 {bar_uri}"), 10),
+        "the group did not resume scanning after the failure cleared"
+    );
+    assert!(
+        pump_until_file_contains(&mut state, &received, &format!("3 {foo_uri}"), 6),
+        "DELETED for the pre-failure file never arrived — the prior \
+         snapshot was not preserved across the failures"
+    );
+    let failures_after: i64 = state
+        .lua_host
+        .lua()
+        .load("return _G.__d3_failures")
+        .eval()
+        .expect("read counter");
+    assert_eq!(failures_after, 1, "recovery must not re-report the failure");
+}
+
+/// D3 backoff witness. Quiet scans stretch the gap between scans;
+/// one observed change snaps it back to the floor. Asserted on scan
+/// timestamps from the group seam — there are no sleep purposes to
+/// read, because there are no sleeps.
+#[test]
+fn m4_24_d3_backoff_lengthens_quiet_gaps_and_a_change_resets() {
+    let (_dir, mut state, watch) = d3_scaffold("filewatch", None);
+    let received = watch.join(".received");
+    d3_install_scan_collector(&mut state);
+
+    // Quiet: collect at least five scans (baseline + four backing off).
+    let deadline = Instant::now() + Duration::from_secs(12);
+    loop {
+        d3_pump(&mut state, 120);
+        let t = d3_scan_times(&state);
+        if t.len() >= 5 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "too few scans: {t:?}");
+    }
+    let t = d3_scan_times(&state);
+    let first_gap = t[1] - t[0];
+    let last_gap = t[t.len() - 1] - t[t.len() - 2];
+    assert!(
+        last_gap > first_gap * 2.5,
+        "quiet gaps must lengthen: first {first_gap} ms, last {last_gap} ms"
+    );
+
+    // One change resets the curve.
+    let z_uri = format!("file://{}", watch.join("z.txt").display());
+    std::fs::write(watch.join("z.txt"), b"z\n").expect("write z");
+    assert!(
+        pump_until_file_contains(&mut state, &received, &format!("1 {z_uri}"), 10),
+        "change never observed"
+    );
+    let observed_at: f64 = *d3_scan_times(&state).last().expect("scan times");
+    d3_pump(&mut state, 900);
+    let t = d3_scan_times(&state);
+    let post_gap = t
+        .windows(2)
+        .find(|w| w[0] >= observed_at)
+        .map(|w| w[1] - w[0]);
+    let post_gap = post_gap.expect("no scan followed the change");
+    assert!(
+        post_gap < last_gap / 2.0,
+        "an observed change must reset the cadence: pre-change gap \
+         {last_gap} ms, post-change gap {post_gap} ms"
+    );
+}
+
+/// D3 root-boundary witness (review round 2). Both join sites
+/// special-case the filesystem root: a naive `base .. "/" .. rel` at
+/// `/` yields `//path` — the implementation-defined POSIX spelling —
+/// and `file:////path` once a URI wraps it. No fixture can walk `/`
+/// for real, so this drives the PRODUCTION matcher and URI builder
+/// (exported for tests, the `_deliver_status` pattern) at base `/`:
+/// reverting either `join_under` call to concatenation makes the
+/// anchored absolute glob refuse `//hit-1.txt` and the URI grow a
+/// fourth slash.
+#[test]
+fn m4_24_d3_root_base_joins_are_root_aware() {
+    let state = pmacs::editor::EditorState::new_with_roots(&crate::iso::roots());
+    let (matched, uri): (bool, String) = state
+        .lua_host
+        .lua()
+        .load(
+            "(function()
+               local m = pmacs.lsp._watch_matcher_for_tests(
+                 '/', '/hit-*.txt', 'absolute')
+               local uri = pmacs.lsp._watch_change_uri_for_tests(
+                 '/', 'hit-1.txt')
+               return m('hit-1.txt'), uri
+             end)()",
+        )
+        .eval()
+        .expect("root-boundary probes must not error");
+    assert!(
+        matched,
+        "an absolute glob at base `/` must see the subject `/hit-1.txt`, \
+         not `//hit-1.txt`"
+    );
+    assert_eq!(
+        uri, "file:///hit-1.txt",
+        "an event URI at base `/` must not grow a fourth slash"
+    );
+}
+
+/// D3 fallback-determinism witness (review round 2, which also
+/// corrected round 1's "unreachable" claim). A manually spawned
+/// server may omit BOTH `cwd` and `root_uri`, and for markerless
+/// files `ensure_server` adopts it (`root_uri` and `key_uri` both
+/// nil) — after which buffers in different directories attach to it.
+/// Its bare-string registration must then base at the
+/// lexicographically SMALLEST attachment directory, not whichever
+/// record `pairs` yields first. `beta` is opened before `alpha` so
+/// insertion order disagrees with the lexicographic answer.
+#[test]
+fn m4_24_d3_fallback_base_is_the_smallest_attachment_dir() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().to_path_buf();
+    // Five sibling directories, the lexicographic minimum opened LAST
+    // — so neither insertion order nor (very probably) hash order
+    // coincides with the contract's answer.
+    let alpha = base.join("alpha");
+    let beta = base.join("beta");
+    for name in ["beta", "gamma", "delta", "zeta", "alpha"] {
+        let d = base.join(name);
+        std::fs::create_dir(&d).expect("mkdir");
+        std::fs::write(d.join(format!("{name}.rs")), b"fn x() {}\n").expect("write");
+    }
+    let received = base.join(".received");
+
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{ command = '{fake}' }}
+             pmacs.lsp.spawn {{
+               label = 'manual', language_id = 'rust', command = '{fake}',
+               env = {{ PMACS_FAKE_LSP_MODE = 'filewatchbare',
+                        PMACS_FAKE_LSP_WATCH_BASE = '{}' }} }}",
+            base.display()
+        ))
+        .exec()
+        .expect("manual spawn without cwd or root_uri");
+    for name in ["beta", "gamma", "delta", "zeta", "alpha"] {
+        state
+            .lua_host
+            .lua()
+            .load(format!(
+                "pmacs.buffer.find_or_open('{}')",
+                base.join(name).join(format!("{name}.rs")).display()
+            ))
+            .exec()
+            .expect("open markerless file");
+    }
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "(function() for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.state and r.state.kind=='initialized' then return true end \
+             end return false end)()",
+            5,
+        ),
+        "fake never initialized"
+    );
+    d3_pump(&mut state, 900);
+
+    // The smaller directory is watched...
+    let hit_uri = format!("file://{}", alpha.join("hit.txt").display());
+    std::fs::write(alpha.join("hit.txt"), b"h\n").expect("write hit");
+    assert!(
+        pump_until_file_contains(&mut state, &received, &format!("1 {hit_uri}"), 10),
+        "the fallback base must be the lexicographically smallest \
+         attachment directory; .received = {:?}",
+        std::fs::read_to_string(&received).unwrap_or_default()
+    );
+    // ...and the larger one is not.
+    std::fs::write(beta.join("miss.txt"), b"m\n").expect("write miss");
+    d3_pump(&mut state, 900);
+    assert!(
+        !std::fs::read_to_string(&received)
+            .unwrap_or_default()
+            .contains("miss.txt"),
+        "a sibling attachment directory above the chosen base must not \
+         be watched"
+    );
+}
+
+/// D3 root witness (Q#D3-3). A server with a CONFIGURED root watches
+/// that root: the bare-string `*.txt` watcher must match at the
+/// configured workspace's top level even though the attached file
+/// lives in a subdirectory — under the old attachment-directory
+/// guessing, the base would have been `ws/src` and the top-level file
+/// unreachable. The subdirectory file pins the other half: a
+/// base-level pattern does not match into subdirectories.
+#[test]
+fn m4_24_d3_configured_root_is_the_bare_string_base() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(ws.join("src")).expect("mkdir ws/src");
+    let a_path = ws.join("src/a.rs");
+    std::fs::write(&a_path, b"fn a() {}\n").expect("write a");
+    let received = ws.join(".received");
+
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{ command = '{fake}', root = '{}',
+               env = {{ PMACS_FAKE_LSP_MODE = 'filewatchbare',
+                        PMACS_FAKE_LSP_WATCH_BASE = '{}' }} }}",
+            ws.display(),
+            ws.display()
+        ))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{}')", a_path.display()))
+        .exec()
+        .expect("open a.rs");
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "(function() for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.state and r.state.kind=='initialized' then return true end \
+             end return false end)()",
+            5,
+        ),
+        "fake never initialized"
+    );
+    d3_pump(&mut state, 900);
+
+    // Created before the top-level hit so the negative assertion after
+    // the positive one is race-free (both land in the same or an
+    // earlier scan).
+    std::fs::write(ws.join("src/nested.txt"), b"n\n").expect("write nested");
+    let hit_uri = format!("file://{}", ws.join("root_hit.txt").display());
+    std::fs::write(ws.join("root_hit.txt"), b"r\n").expect("write hit");
+    assert!(
+        pump_until_file_contains(&mut state, &received, &format!("1 {hit_uri}"), 10),
+        "a bare-string watcher did not watch the CONFIGURED root; \
+         .received = {:?}",
+        std::fs::read_to_string(&received).unwrap_or_default()
+    );
+    assert!(
+        !std::fs::read_to_string(&received)
+            .unwrap_or_default()
+            .contains("nested.txt"),
+        "a base-level `*.txt` pattern must not match into \
+         subdirectories of the configured root"
+    );
+}
+
 /// Issue #233 D2 — re-registering a live id supersedes it. The
 /// `filewatchrereg` fake registers `watch-re` TWICE with no
 /// unregister between — `**/*.old`, then `**/*.new` — exactly the
