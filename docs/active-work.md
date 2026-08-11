@@ -247,8 +247,10 @@ their bite results. Durable facts are absorbed in
 unmerged until this was resolved; #234 merged first and #227 followed
 the same day (`b867f64`), refreshed and re-gated on the merged base.
 
-**D3 — the polling cost — is the remainder, and the user has ruled it
-is next (2026-08-11).** **Branch `lsp-file-watch-d3`** (base
+**D3 — the polling cost — PR #235 OPEN**
+(https://github.com/levineuwirth/pmacs/pull/235, opened 2026-08-11 at
+`db24abb`, the implementation commit after two pre-commit review
+rounds). **Branch `lsp-file-watch-d3`** (base
 `githubsucks/main` @ `add0ba1`; the remote ref is authoritative), with
 **framing `docs/lsp-file-watch-d3-framing.md`, revision 4, APPROVED
 2026-08-11 with the four rulings adopted as proposed** (honest ⋯N bar;
