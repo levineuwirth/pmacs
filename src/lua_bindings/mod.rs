@@ -7367,6 +7367,16 @@ pub fn install_async(
     {
         let rt = runtime.clone();
         async_mod.set(
+            "_dispatch_fs_walk_tree",
+            lua.create_function(move |_, (base, key): (String, Option<String>)| {
+                Ok(rt.dispatch_fs_walk_tree(std::path::PathBuf::from(base), key.as_deref()))
+            })?,
+        )?;
+    }
+
+    {
+        let rt = runtime.clone();
+        async_mod.set(
             "_dispatch_fs_read_dir",
             lua.create_function(
                 move |_, (path, key, tolerant): (String, Option<String>, Option<bool>)| {

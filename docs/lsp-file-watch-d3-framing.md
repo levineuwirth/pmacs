@@ -1,8 +1,12 @@
 # LSP file watcher D3 — the polling cost — framing
 
-**Status: revision 4 — DRAFT, review corrections absorbed; awaiting
-the user rulings Q#D3-1..4. No implementation may begin from this
-document.**
+**Status: revision 4 — APPROVED 2026-08-11.** The user's own review
+pass (round 3, absorbed below) closed the state machine; on the
+soundness confirmation the four rulings were adopted as proposed:
+**Q#D3-1** the honest bar — absent at idle, one attributable job per
+concurrently due group; **Q#D3-2** no exclusions by default;
+**Q#D3-3** server `root_uri` → `cwd` → attachment fallback;
+**Q#D3-4** constants, no config keys.
 
 Continues issue #233, which stays open until this lane closes it. D1
 and D2 — matching correctness and the re-registration leak — merged as
@@ -374,7 +378,7 @@ jobs at idle**, with one `walk_tree` job per group for the few
 milliseconds each scan actually runs — at most every 250 ms under
 activity and every 4 s at rest, immediately once at registration.
 
-## Open rulings — each blocks implementation
+## The rulings — adopted as proposed at approval (2026-08-11)
 
 - **Q#D3-1 — the acceptance bar, stated accurately (round 2).** At
   idle the indicator is **absent** (no running job exists —
@@ -382,22 +386,23 @@ activity and every 4 s at rest, immediately once at registration.
   shows **one attributable job per concurrently due group** — `⋯N`
   when N (server, base) groups are due on the same frame, each named
   for its root; a typical single-project session has one group.
-  Alternative if `⋯1` must be guaranteed: a global scan queue
-  serializing walks across groups, at the cost of coupling one
-  server's scan latency to another's tree size. Which bar?
-- **Q#D3-2 — exclusions.** Proposed: none by default, with opt-in
-  exclusion as a documented contract trade (option b) if a user
-  asks. Confirm, or rule for one of (b)/(c)/(d) above.
-- **Q#D3-3 — the scan root.** Proposed: server `root_uri` → server
-  `cwd` → attached-file directory. This widens the watched tree for
-  servers with a real root (today it is one attached file's
-  directory, chosen by hash order) — a behavioural change to a path
-  real servers exercise. Confirm the order, or rule otherwise.
-- **Q#D3-4 — interval, cap, and backoff curve: constants or config
-  keys.** The D1/D2 framing refused a knob for a defect; with D3 the
-  cadence becomes a designed mechanism, so keys are defensible — but
-  more registry surface is coherence cost. Proposed: constants until
-  someone asks.
+  **Adopted.** The alternative — a global scan queue guaranteeing
+  `⋯1` at the cost of coupling one server's scan latency to
+  another's tree size — was declined.
+- **Q#D3-2 — exclusions.** **Adopted: none by default**, with opt-in
+  exclusion as a documented contract trade (option b) if a user ever
+  asks.
+- **Q#D3-3 — the scan root.** **Adopted: server `root_uri` → server
+  `cwd` → attached-file directory** (the fallback itself made
+  deterministic in implementation review: lexicographically smallest
+  attachment directory). This widens the watched tree for servers
+  with a real root — a behavioural change to a path real servers
+  exercise, accepted as such.
+- **Q#D3-4 — interval, cap, and backoff curve.** **Adopted:
+  constants until someone asks.** The D1/D2 framing refused a knob
+  for a defect; with D3 the cadence is a designed mechanism, so keys
+  would be defensible — but more registry surface is coherence cost
+  nobody has yet paid for a reason.
 
 ## Verification sketch
 

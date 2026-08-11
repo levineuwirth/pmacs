@@ -317,6 +317,10 @@ pub enum JobKind {
     Parse,
     /// `dispatch_fs_read_dir` --- directory enumeration ([T M8.1]).
     FsReadDir,
+    /// `dispatch_fs_walk_tree` --- one whole-tree enumeration as a
+    /// single job (issue #233 D3: the watcher's per-directory job
+    /// storm collapsed into one purpose per scan).
+    FsWalkTree,
     /// `dispatch_fs_stat` --- single-path metadata ([T M8.1]).
     FsStat,
     /// `dispatch_fs_rename` --- atomic rename ([T M8.1]).
@@ -355,6 +359,7 @@ impl JobKind {
             JobKind::Grep => "grep",
             JobKind::Parse => "parse",
             JobKind::FsReadDir => "fs_read_dir",
+            JobKind::FsWalkTree => "fs_walk_tree",
             JobKind::FsStat => "fs_stat",
             JobKind::FsRename => "fs_rename",
             JobKind::FsChmod => "fs_chmod",
@@ -1185,6 +1190,29 @@ impl AsyncRuntime {
         id
     }
 
+    /// Dispatch a `walk_tree(base)` job: the whole recursive tree as
+    /// ONE job, entry names base-relative (issue #233 D3). The reply
+    /// reuses [`ReplyKind::ReadDir`] --- the payload shape is
+    /// identical and the Lua boundary needs no second conversion;
+    /// [`JobKind::FsWalkTree`] still separates the two for the
+    /// `*workers*` label and the purpose string. Cancellation and
+    /// tolerance are [`crate::fs::walk_tree_blocking`]'s contract.
+    pub fn dispatch_fs_walk_tree(&self, base: PathBuf, supersede: Option<&str>) -> JobId {
+        let (id, cancel) = self.allocate(JobSpec {
+            kind: JobKind::FsWalkTree,
+            supersede,
+            stream: None,
+            resource: None,
+            purpose: format!("walk_tree {}", base.display()),
+        });
+        let bus = self.workers.clone();
+        self.pool.dispatch(move |_pool| {
+            let kind = run_fs_walk_tree(&cancel, &base);
+            let _ = bus.send(ASYNC_REPLY_TOPIC, &WorkerReply { job_id: id, kind });
+        });
+        id
+    }
+
     /// Dispatch a `stat(path)` job. Returns one [`FsDirEntry`] of
     /// metadata for `path`. T M8.1.
     pub fn dispatch_fs_stat(&self, path: PathBuf, supersede: Option<&str>) -> JobId {
@@ -1751,6 +1779,16 @@ fn run_fs_read_dir(
     tolerance: ReadDirTolerance,
 ) -> ReplyKind {
     match read_dir_blocking(path, cancel, tolerance) {
+        Ok(listing) => ReplyKind::ReadDir(listing),
+        Err(FsError::Cancelled) => ReplyKind::Cancelled,
+        Err(e @ (FsError::Io { .. } | FsError::NonUtf8Path { .. })) => {
+            ReplyKind::Error(e.to_string())
+        }
+    }
+}
+
+fn run_fs_walk_tree(cancel: &CancellationToken, base: &Path) -> ReplyKind {
+    match crate::fs::walk_tree_blocking(base, cancel) {
         Ok(listing) => ReplyKind::ReadDir(listing),
         Err(FsError::Cancelled) => ReplyKind::Cancelled,
         Err(e @ (FsError::Io { .. } | FsError::NonUtf8Path { .. })) => {

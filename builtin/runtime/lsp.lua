@@ -1910,22 +1910,33 @@ local function repull_for_attachments(sid, request_fn)
   end
 end
 
--- T M4.5 — workspace file watching (workspace/didChangeWatchedFiles).
+-- T M4.5 / issue #233 D3 — workspace file watching
+-- (workspace/didChangeWatchedFiles).
 --
 -- Servers register watchers dynamically via client/registerCapability.
--- pmacs has no kernel file-watch, so each registration runs a polling
--- snapshot-diff coroutine: walk the base dir into a { relpath = sig }
--- map and, every tick, diff against the previous map to emit per-file
--- created/changed/deleted FileEvents (filtered by the glob and the
--- WatchKind bitmask), batched into one notification. Coarser than an
--- inotify bridge but accurate; a watcher self-cancels when the server
--- dies or the capability is unregistered.
+-- pmacs has no kernel file-watch, so watching is a polling
+-- snapshot-diff — but scheduled, not slept (D3 framing, approved
+-- 2026-08-11): one SCAN GROUP per (server, base) owns a retained
+-- { relpath = sig } snapshot, and a single `process.after-tick`
+-- subscription drives every group's cadence off
+-- `pmacs.editor.monotonic_ms` (autosave's Q#AS2 idiom). Waiting
+-- allocates no job and holds no pool thread; a due group runs ONE
+-- `pmacs.fs.walk_tree` job for the whole tree, diffs in Lua, and
+-- routes per-file created/changed/deleted FileEvents through each
+-- member watcher's glob and WatchKind mask, deduped into one
+-- notification. Quiet scans back the interval off to a cap; any
+-- change resets it. Groups retire when their last member leaves or
+-- their server dies, cancelling an in-flight walk cooperatively.
 
 local FILE_WATCH_INTERVAL_MS = 250
+local FILE_WATCH_BACKOFF_CAP_MS = 4000
 
 -- file_watchers[tostring(sid)][registrationId] = list of watch records
--- ({ cancelled = bool, form = "relative"|"absolute", _sleep = handle? }),
--- one per glob watcher.
+-- ({ cancelled, form = "relative"|"absolute", kind_mask, match_subject,
+--    baseline_epoch, group }), one per glob watcher. `baseline_epoch`
+-- is nil until the first snapshot whose WALK STARTED after the record
+-- joined its group — the registration-epoch rule that keeps a joiner
+-- from receiving events for files that predate it.
 local file_watchers = {}
 
 -- WatchKind is a bitmask (Create=1, Change=2, Delete=4); test it
@@ -2029,106 +2040,326 @@ local function glob_matcher(glob)
   end
 end
 
--- Recursively list files under `base` → { relpath = sig }. `sig`
--- folds size+mtime+kind so a content/metadata change flips it.
--- Symlinks are recorded, not traversed (loop-safe). Awaits fs
--- primitives, so call from inside an async coroutine.
-local function scan_tree(base, matches)
-  local out = {}
-  local function walk(dir, rel_prefix)
-    local ok, entries = pcall(function()
-      return pmacs.fs.read_dir(dir):await()
-    end)
-    if not ok or not entries then return end
-    for _, e in ipairs(entries) do
-      local rel = (rel_prefix == "") and e.name or (rel_prefix .. "/" .. e.name)
-      if e.kind == "dir" then
-        walk(dir .. "/" .. e.name, rel)
-      elseif matches(rel) then
-        out[rel] = table.concat({
-          tostring(e.size), tostring(e.mtime),
-          tostring(e.mtime_nsec), tostring(e.kind),
-        }, "|")
-      end
-    end
-  end
-  walk(base, "")
-  return out
-end
-
 local FC_CREATED, FC_CHANGED, FC_DELETED = 1, 2, 3
 
-local function start_file_watcher(sid, base, glob, kind_mask, record)
-  -- Per LSP, a plain-string glob matches the file's ABSOLUTE path,
-  -- while a RelativePattern's pattern is relative to its base — the
-  -- record's `form` (from resolve_watcher) picks the match subject.
-  -- scan_tree always walks in relative terms; only the string handed
-  -- to the matcher changes.
-  local match_glob = glob_matcher(glob)
-  local matches = match_glob
-  if record.form == "absolute" then
-    matches = function(rel)
-      return match_glob(base .. "/" .. rel)
+-- Join a base-relative path under its base. The filesystem root is
+-- special-cased the way `dired`'s handler already spells it (the
+-- `(dir == "/") and "" or dir` idiom): a naive `base .. "/" .. rel`
+-- at `/` yields `//path` — the implementation-defined POSIX spelling
+-- — and `file:////path` once a URI wraps it.
+local function join_under(base, rel)
+  if base == "/" then return "/" .. rel end
+  return base .. "/" .. rel
+end
+
+-- Build a record's match predicate over a base-RELATIVE path. Per LSP
+-- (and #234's P1 review), a plain-string glob matches the file's
+-- ABSOLUTE path while a RelativePattern's pattern is relative to its
+-- base — the record's `form` picks the subject; the walk itself is
+-- always relative.
+local function make_matcher(base, pat, form)
+  local match_glob = glob_matcher(pat)
+  if form == "absolute" then
+    return function(rel)
+      return match_glob(join_under(base, rel))
     end
   end
-  pmacs.async(function()
-    local prev = scan_tree(base, matches)
-    while not record.cancelled and server_is_live(sid) do
-      local sh = pmacs.workers.sleep(FILE_WATCH_INTERVAL_MS)
-      record._sleep = sh
-      pcall(function() sh:await() end)
-      record._sleep = nil
-      if record.cancelled or not server_is_live(sid) then break end
+  return match_glob
+end
 
-      local cur = scan_tree(base, matches)
-      -- The seam that makes the recheck below WITNESSABLE. `scan_tree`
-      -- suspends on `read_dir` once per directory, and the race is a
-      -- cancel arriving during one of those suspensions --- which no
-      -- arrangement of real timing can be made to happen on demand.
-      -- Same reason `git.lua` exposes `_deliver_status`: the contract is
-      -- about an interleaving the caller does not choose. Unset in
-      -- production, so this costs one nil test per tick.
-      -- `cur` is handed over so a test can cancel on THE SCAN THAT
-      -- OBSERVED a given change. Cancelling on any other scan is not a
-      -- witness: the loop would break at the post-sleep check on the
-      -- next iteration and emit nothing anyway, so the assertion would
-      -- pass with the recheck below deleted.
-      if pmacs.lsp._after_scan_for_tests then
-        pcall(pmacs.lsp._after_scan_for_tests, record, cur)
+-- The event URI for one change, as `finish_group_scan` emits it. A
+-- named function rather than an inline concat so the root-boundary
+-- witness can drive the PRODUCTION construction at base "/" — a base
+-- no fixture can walk for real.
+local function watch_change_uri(base, rel)
+  return file_uri_for(join_under(base, rel))
+end
+
+-- Exposed for the root-boundary witness (the `_deliver_status`
+-- pattern): the exact functions the watcher matches subjects and
+-- builds URIs with. Test-only by convention; production never reads
+-- them back.
+pmacs.lsp._watch_matcher_for_tests = make_matcher
+pmacs.lsp._watch_change_uri_for_tests = watch_change_uri
+
+-- scan_groups[skey .. "\0" .. base] = one scan group per
+-- (server, base): the shared snapshot, the members it serves, and the
+-- D3 state machine — single-flight (`in_flight`), completion-advanced
+-- deadlines (`next_scan_at`), a scan `generation` that rejects stale
+-- completions, `rescan_queued` for joins landing mid-walk, the
+-- backoff `interval`, and the `failure_reported` dedup latch.
+local scan_groups = {}
+
+local function group_key(skey, base)
+  return skey .. "\0" .. base
+end
+
+-- Retire a group: forget it and cancel any in-flight walk
+-- cooperatively. The walk's completion is then rejected by the
+-- identity/generation check in `finish_group_scan`, so a retired
+-- group's state can never be written again.
+local function retire_group(group)
+  scan_groups[group.key] = nil
+  if group.in_flight and group.in_flight.handle then
+    pcall(function()
+      group.in_flight.handle:cancel()
+    end)
+  end
+end
+
+-- One scan's completion. `scan_members` is the membership captured at
+-- scan START — a watcher joining mid-walk is not in it and waits for
+-- its queued baseline scan. Three disjoint arms (framing round 3):
+-- stale/retired, live non-success, success.
+local function finish_group_scan(group, gen, scan_members, ok, result)
+  -- Stale/retired arm: the group was retired (or superseded under the
+  -- same key) while the walk was parked. Nothing here may touch a
+  -- successor's state — #234's P2 recheck, applied at group scope.
+  if scan_groups[group.key] ~= group then return end
+  if not group.in_flight or group.in_flight.generation ~= gen then return end
+  group.in_flight = nil
+  local now = pmacs.editor.monotonic_ms()
+
+  if not ok then
+    -- Live non-success arm: no snapshot, no epoch, no emit; the prior
+    -- snapshot and backoff interval survive. A queued join still gets
+    -- its immediate baseline attempt; otherwise reschedule normally.
+    -- `Handle:await()` raises { tag = "cancelled" } (R45) for the
+    -- intentional `workers.cancel-at-point` outcome, which stays
+    -- quiet; a failure is reported once per distinct message until a
+    -- success clears the latch.
+    local tag = type(result) == "table" and result.tag or nil
+    if tag ~= "cancelled" then
+      local msg = type(result) == "table"
+          and tostring(result.message or result.tag)
+        or tostring(result)
+      if group.failure_reported ~= msg then
+        group.failure_reported = msg
+        local report = "lsp: file watch scan failed for " .. group.base .. ": " .. msg
+        if pmacs.error then pcall(pmacs.error, report) end
+        pcall(pmacs.editor.set_status, report)
       end
-      -- RECHECKED AFTER THE SCAN, not only after the sleep (review P2).
-      -- The coroutine is suspended for most of a tick with `_sleep`
-      -- already cleared, so a cancel landing there sets `cancelled` and
-      -- has no sleep to interrupt. Without this line the resumed scan
-      -- runs on to `did_change_watched_files` below and a SUPERSEDED
-      -- watcher emits one last batch under its OLD pattern. One batch is
-      -- enough: it is a wrong-pattern notification the server acts on.
-      if record.cancelled or not server_is_live(sid) then break end
-      local changes = {}
-      for rel, sig in pairs(cur) do
-        local was = prev[rel]
-        if was == nil then
-          if kind_has(kind_mask, 1) then
-            changes[#changes + 1] =
-              { uri = file_uri_for(base .. "/" .. rel), type = FC_CREATED }
+    end
+    if group.rescan_queued then
+      group.rescan_queued = false
+      group.next_scan_at = now
+    else
+      group.next_scan_at = now + group.interval
+    end
+    return
+  end
+
+  -- Success arm.
+  group.failure_reported = nil
+  local cur = {}
+  for _, e in ipairs(result) do
+    if e.kind ~= "dir" then
+      cur[e.name] = table.concat({
+        tostring(e.size), tostring(e.mtime),
+        tostring(e.mtime_nsec), tostring(e.kind),
+      }, "|")
+    end
+  end
+
+  -- The seam that makes cancel-during-scan WITNESSABLE (#234's P2
+  -- device, per member): the race is a cancel landing while the walk
+  -- job is out, which no arrangement of real timing produces on
+  -- demand. Unset in production. Handed the snapshot so a test can
+  -- cancel on THE SCAN THAT OBSERVED a given change; the delivery
+  -- loop below rechecks `cancelled` per member.
+  if pmacs.lsp._after_scan_for_tests then
+    for _, m in ipairs(scan_members) do
+      pcall(pmacs.lsp._after_scan_for_tests, m, cur)
+    end
+  end
+
+  local changes = {}
+  local prev = group.snapshot
+  if prev then
+    -- Diff once; route per member. `bit` is the WatchKind the event
+    -- needs (Create=1, Change=2, Delete=4).
+    local diff = {}
+    for rel, sig in pairs(cur) do
+      local was = prev[rel]
+      if was == nil then
+        diff[#diff + 1] = { rel = rel, type = FC_CREATED, bit = 1 }
+      elseif was ~= sig then
+        diff[#diff + 1] = { rel = rel, type = FC_CHANGED, bit = 2 }
+      end
+    end
+    for rel in pairs(prev) do
+      if cur[rel] == nil then
+        diff[#diff + 1] = { rel = rel, type = FC_DELETED, bit = 4 }
+      end
+    end
+    -- A member delivers only with a baseline (the registration-epoch
+    -- rule: no events for files that predate the join) and only while
+    -- uncancelled. Changes are deduped by (path, type) into the
+    -- server's single notification.
+    local emitted = {}
+    for _, m in ipairs(scan_members) do
+      if not m.cancelled and m.baseline_epoch ~= nil then
+        for _, d in ipairs(diff) do
+          if kind_has(m.kind_mask, d.bit) and m.match_subject(d.rel) then
+            local key = d.type .. " " .. d.rel
+            if not emitted[key] then
+              emitted[key] = true
+              changes[#changes + 1] = {
+                uri = watch_change_uri(group.base, d.rel),
+                type = d.type,
+              }
+            end
           end
-        elseif was ~= sig and kind_has(kind_mask, 2) then
-          changes[#changes + 1] =
-            { uri = file_uri_for(base .. "/" .. rel), type = FC_CHANGED }
         end
       end
-      for rel in pairs(prev) do
-        if cur[rel] == nil and kind_has(kind_mask, 4) then
-          changes[#changes + 1] =
-            { uri = file_uri_for(base .. "/" .. rel), type = FC_DELETED }
-        end
+    end
+  end
+
+  group.snapshot = cur
+  group.epoch = group.epoch + 1
+  -- Baseline assignment: exactly the members captured at scan start
+  -- with no baseline yet — for them this walk is the first one that
+  -- STARTED after their join.
+  for _, m in ipairs(scan_members) do
+    if not m.cancelled and m.baseline_epoch == nil then
+      m.baseline_epoch = group.epoch
+    end
+  end
+
+  if #changes > 0 then
+    pcall(pmacs.lsp.did_change_watched_files, group.sid, changes)
+    group.interval = FILE_WATCH_INTERVAL_MS
+  else
+    -- A quiet scan backs off toward the cap; waiting costs nothing
+    -- under the after-tick cadence, so this bounds scan frequency,
+    -- not sleep-job length (there are no sleeps).
+    group.interval = math.min(group.interval * 2, FILE_WATCH_BACKOFF_CAP_MS)
+  end
+
+  -- Sweep members cancelled outside cancel_watch_records (the seam,
+  -- or a supersede that raced the walk); an empty group retires.
+  local live = {}
+  for _, m in ipairs(group.members) do
+    if not m.cancelled then live[#live + 1] = m end
+  end
+  group.members = live
+  if #group.members == 0 then
+    retire_group(group)
+    return
+  end
+
+  if group.rescan_queued then
+    group.rescan_queued = false
+    group.next_scan_at = now
+  else
+    group.next_scan_at = now + group.interval
+  end
+end
+
+-- Start one walk for `group`. Single-flight is the caller's contract
+-- (the tick skips in-flight groups; joins queue instead) — this only
+-- stamps the generation and captures the delivery membership.
+local function start_group_scan(group)
+  group.generation = group.generation + 1
+  local gen = group.generation
+  local scan_members = {}
+  for i, m in ipairs(group.members) do
+    scan_members[i] = m
+  end
+  local handle = pmacs.fs.walk_tree(group.base)
+  group.in_flight = {
+    generation = gen,
+    started_at = pmacs.editor.monotonic_ms(),
+    handle = handle,
+  }
+  pmacs.async(function()
+    local ok, result = pcall(function()
+      return handle:await()
+    end)
+    finish_group_scan(group, gen, scan_members, ok, result)
+  end)
+end
+
+-- The cadence (D3 framing; autosave's Q#AS2 idiom). One after-tick
+-- subscription drives every group: a clock read and a compare per
+-- frame, no job and no pool thread while waiting. Installed once and
+-- guarded rather than removed, because `pmacs.hook.remove` does not
+-- exist (the P3 gap).
+local watch_tick_installed = false
+local function ensure_watch_tick()
+  if watch_tick_installed then return end
+  watch_tick_installed = true
+  pmacs.hook.add("process.after-tick", function()
+    if next(scan_groups) == nil then return end
+    local now = pmacs.editor.monotonic_ms()
+    for _, group in pairs(scan_groups) do
+      if not server_is_live(group.sid) then
+        retire_group(group)
+      elseif not group.in_flight and now >= group.next_scan_at then
+        start_group_scan(group)
       end
-      if #changes > 0 then
-        pcall(pmacs.lsp.did_change_watched_files, sid, changes)
-      end
-      prev = cur
     end
   end)
+end
+
+-- Join `record` to its (server, base) group, creating the group on
+-- first use. Joins WAKE the group (framing round 2): the deadline
+-- pulls to now, or — mid-walk — exactly one immediate follow-up scan
+-- is queued, so a joiner's baseline is at most the current walk's
+-- remainder plus one walk away, never a backoff cap. The
+-- join-triggered scan does not reset the backoff curve; only observed
+-- changes do.
+local function join_group(sid, skey, base, record)
+  ensure_watch_tick()
+  local key = group_key(skey, base)
+  local group = scan_groups[key]
+  if not group then
+    group = {
+      key = key,
+      sid = sid,
+      skey = skey,
+      base = base,
+      members = {},
+      snapshot = nil,
+      epoch = 0,
+      generation = 0,
+      in_flight = nil,
+      rescan_queued = false,
+      next_scan_at = 0,
+      interval = FILE_WATCH_INTERVAL_MS,
+      failure_reported = nil,
+    }
+    scan_groups[key] = group
+  end
+  group.members[#group.members + 1] = record
+  record.group = group
+  if group.in_flight then
+    group.rescan_queued = true
+  else
+    group.next_scan_at = 0
+  end
+end
+
+-- The workspace directory the registering server actually serves
+-- (Q#D3-3): its spec `root_uri` — verbatim, nil when the server never
+-- asked for a root — then its `cwd`. Configured roots and custom
+-- resolvers (texlab's Q#LX2) are already folded into the spec, which
+-- is why this must NOT be a fresh `pmacs.project.detect`.
+local function server_workspace_dir(sid)
+  local skey = tostring(sid)
+  local ok, rows = pcall(pmacs.lsp.list)
+  if not ok then return nil end
+  for _, row in ipairs(rows) do
+    if tostring(row.id) == skey then
+      if row.root_uri then
+        local p = pmacs.lsp.path_for_uri(row.root_uri)
+        if p then return p end
+      end
+      if row.cwd then return row.cwd end
+      return nil
+    end
+  end
+  return nil
 end
 
 -- Resolve a GlobPattern (string | { baseUri, pattern }) to
@@ -2152,23 +2383,52 @@ local function resolve_watcher(sid, gp)
     return pmacs.lsp.path_for_uri(gp.baseUri), gp.pattern or "**", "relative"
   end
   if type(gp) == "string" then
+    local form = (gp:sub(1, 1) == "/") and "absolute" or "relative"
+    -- Q#D3-3: the server's own workspace first. The
+    -- attachment-directory guess remains only for a server with
+    -- neither root_uri nor cwd — and even there it must be
+    -- DETERMINISTIC (review blocker): `pairs` order is hash order, so
+    -- the fallback takes the lexicographically smallest attachment
+    -- directory rather than whichever record iteration yields first.
+    -- REACHABLE, not defensive (review round 2 corrected round 1's
+    -- "unreachable" claim here): `pmacs.lsp.spawn` accepts a spec
+    -- with neither field, and for a MARKERLESS file `ensure_server`
+    -- adopts such a live server because its `root_uri` and the
+    -- attach's `key_uri` are both nil — after which any number of
+    -- buffers in different directories can attach to it.
+    local dir = server_workspace_dir(sid)
+    if dir then return dir, gp, form end
+    local fallback = nil
     for _, rec in pairs(attachments) do
       if rec.server == sid and rec.uri then
         local p = pmacs.lsp.path_for_uri(rec.uri)
-        local dir = p and p:match("^(.*)/[^/]*$")
-        if dir then
-          return dir, gp, (gp:sub(1, 1) == "/") and "absolute" or "relative"
-        end
+        local d = p and p:match("^(.*)/[^/]*$")
+        -- A file at the filesystem root leaves the capture empty.
+        if d == "" then d = "/" end
+        if d and (fallback == nil or d < fallback) then fallback = d end
       end
     end
+    if fallback then return fallback, gp, form end
   end
   return nil, nil, nil
 end
 
+-- Cancel records and leave their groups; a group losing its last
+-- member retires (its in-flight walk cancelled cooperatively).
 local function cancel_watch_records(recs)
   for _, r in ipairs(recs or {}) do
     r.cancelled = true
-    if r._sleep then pcall(function() r._sleep:cancel() end) end
+    local group = r.group
+    if group then
+      r.group = nil
+      for i, m in ipairs(group.members) do
+        if m == r then
+          table.remove(group.members, i)
+          break
+        end
+      end
+      if #group.members == 0 then retire_group(group) end
+    end
   end
 end
 
@@ -2177,20 +2437,29 @@ local function register_file_watchers(sid, registrations)
   file_watchers[skey] = file_watchers[skey] or {}
   for _, reg in ipairs(registrations or {}) do
     if reg.method == "workspace/didChangeWatchedFiles" then
-      -- Re-registering a live id supersedes it (rust-analyzer does
-      -- this): cancel the outgoing records first, because the table
-      -- write below drops the only reference to them and an
-      -- uncancelled record polls until the server dies.
-      cancel_watch_records(file_watchers[skey][reg.id])
+      local outgoing = file_watchers[skey][reg.id]
       local recs = {}
       for _, w in ipairs((reg.registerOptions or {}).watchers or {}) do
         local base, pat, form = resolve_watcher(sid, w.globPattern)
         if base and pat then
-          local r = { cancelled = false, form = form }
+          local r = {
+            cancelled = false,
+            form = form,
+            kind_mask = w.kind or 7,
+            match_subject = make_matcher(base, pat, form),
+            baseline_epoch = nil,
+          }
           recs[#recs + 1] = r
-          start_file_watcher(sid, base, pat, w.kind or 7, r)
+          join_group(sid, skey, base, r)
         end
       end
+      -- Re-registering a live id supersedes it (rust-analyzer does
+      -- this, #234's D2). The successors joined FIRST, so a same-base
+      -- group stays alive across the hand-over — its in-flight walk
+      -- is not torn down, and the joiners already queued their
+      -- baseline. An id whose successors watch a different base still
+      -- retires the old group when its last member leaves here.
+      cancel_watch_records(outgoing)
       file_watchers[skey][reg.id] = recs
     end
   end
@@ -2225,7 +2494,7 @@ end
 --     family for every attached document so the matching store
 --     (`pmacs.inlay_hint` / `pmacs.semantic_tokens`) stays fresh.
 --   * `client/registerCapability` / `client/unregisterCapability` —
---     start/stop the file-watch coroutines for any
+--     join/leave the file-watch scan groups for any
 --     `workspace/didChangeWatchedFiles` registration; reply `null`.
 --
 -- Only servers in `attachments` are drained, so a test (or package)

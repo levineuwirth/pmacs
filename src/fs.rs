@@ -377,6 +377,144 @@ pub fn read_dir_blocking(
     })
 }
 
+/// Recursively walk `base` into ONE flat listing whose entry names are
+/// base-RELATIVE paths (`sub/dir/file.txt`). Issue #233 D3: the LSP
+/// file-watcher scan used to be one `read_dir` job per directory per
+/// tick; this is the whole tree as one job.
+///
+/// Contract, in the D3 framing's terms:
+/// - **Symlinks are recorded, never traversed.** `lstat` kind
+///   `Symlink` regardless of target, so a link cycle cannot loop the
+///   walk. A dangling or unreadable link target leaves the entry in
+///   the listing with `symlink_target = None`, the same tolerance
+///   [`read_dir_blocking`] applies.
+/// - **Cancellation is cooperative and prompt**: the token is polled
+///   once per directory and every [`READDIR_CANCEL_POLL_EVERY`]
+///   entries within one --- the cadence [`read_dir_blocking`] set.
+/// - **The root failing to open fails the walk** (the caller's
+///   live-failure arm owns it); an unreadable SUBDIRECTORY is skipped
+///   with its whole subtree, which is the Lua `scan_tree` `pcall`
+///   behaviour this primitive replaces. A non-UTF-8 entry name is
+///   skipped the same way: such a path cannot become a watcher URI,
+///   and one weird name must not take the walk down.
+///
+/// Directory entries appear in the listing (kind `dir`) so a consumer
+/// can see structure; the watcher filters them out when building
+/// signatures, as its Lua walk always did.
+pub fn walk_tree_blocking(
+    base: &Path,
+    cancel: &CancellationToken,
+) -> Result<FsDirListing, FsError> {
+    // Checked BEFORE opening and again before returning, not only
+    // inside the entry loops: an empty tree never enters a loop, so a
+    // pre-cancelled queued walk would otherwise return an empty
+    // SUCCESS — which the scheduler's success arm would commit as a
+    // snapshot and diff into a deletion storm, the exact outcome the
+    // live non-success arm exists to prevent. (And a missing root
+    // must report Cancelled, not its Io error, for the same reason.)
+    if cancel.is_cancelled() {
+        return Err(FsError::Cancelled);
+    }
+    let root = std::fs::read_dir(base).map_err(|source| FsError::Io {
+        path: base.display().to_string(),
+        source,
+    })?;
+    let mut out: Vec<FsDirEntry> = Vec::new();
+    // Subdirectories discovered but not yet walked, with their
+    // base-relative prefixes. LIFO order --- traversal order is not
+    // part of the contract; the consumer diffs a map.
+    let mut pending: Vec<(std::path::PathBuf, String)> = Vec::new();
+    walk_one_dir(root, "", cancel, &mut out, &mut pending)?;
+    while let Some((dir, prefix)) = pending.pop() {
+        if cancel.is_cancelled() {
+            return Err(FsError::Cancelled);
+        }
+        // Subtree skip on an unreadable directory: scan_tree's pcall.
+        let Ok(iter) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        walk_one_dir(iter, &prefix, cancel, &mut out, &mut pending)?;
+    }
+    if cancel.is_cancelled() {
+        return Err(FsError::Cancelled);
+    }
+    Ok(FsDirListing {
+        entries: out,
+        errors: None,
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only seam: invoked after every entry [`walk_one_dir`]
+    /// records. A MID-walk cancellation is an interleaving no real
+    /// timing produces on demand (the `_after_scan_for_tests`
+    /// justification, at this layer): the hook lets a test flip the
+    /// cancel token at an exact entry boundary and assert the walk
+    /// stopped NEAR it --- which is what discriminates the internal
+    /// polls from the entry/exit checks alone. `None` outside the one
+    /// test that arms it.
+    static WALK_ENTRY_HOOK: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// One directory's worth of [`walk_tree_blocking`]: record every
+/// representable entry under its base-relative name and queue child
+/// directories. Only cancellation propagates as an error --- every
+/// per-entry failure is a skip, per the walk's tolerance contract.
+fn walk_one_dir(
+    iter: std::fs::ReadDir,
+    prefix: &str,
+    cancel: &CancellationToken,
+    out: &mut Vec<FsDirEntry>,
+    pending: &mut Vec<(std::path::PathBuf, String)>,
+) -> Result<(), FsError> {
+    for (i, entry_result) in iter.enumerate() {
+        if i % READDIR_CANCEL_POLL_EVERY == 0 && cancel.is_cancelled() {
+            return Err(FsError::Cancelled);
+        }
+        let Ok(entry) = entry_result else { continue };
+        let Some(name) = entry.file_name().to_str().map(ToOwned::to_owned) else {
+            continue;
+        };
+        let rel = if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let entry_path = entry.path();
+        let Ok(metadata) = std::fs::symlink_metadata(&entry_path) else {
+            continue;
+        };
+        let kind = classify(&metadata);
+        if matches!(kind, FsEntryKind::Dir) {
+            pending.push((entry_path.clone(), rel.clone()));
+        }
+        let mut symlink_target = None;
+        if matches!(kind, FsEntryKind::Symlink)
+            && let Ok(target) = std::fs::read_link(&entry_path)
+        {
+            symlink_target = target.to_str().map(ToOwned::to_owned);
+        }
+        out.push(FsDirEntry {
+            name: rel,
+            kind,
+            size: metadata.len(),
+            mtime_secs: mtime_to_unix_secs(&metadata),
+            mtime_nsec: mtime_to_unix_nsec(&metadata),
+            mode: mode_bits(&metadata),
+            symlink_target,
+        });
+        #[cfg(test)]
+        WALK_ENTRY_HOOK.with(|h| {
+            if let Some(hook) = h.borrow_mut().as_mut() {
+                hook();
+            }
+        });
+    }
+    Ok(())
+}
+
 /// Route one per-entry failure: append it to the tolerant channel, or
 /// propagate it when the caller asked for the fatal contract.
 ///
@@ -929,5 +1067,186 @@ mod tests {
             }
             other => panic!("expected NonUtf8Path, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn walk_tree_flattens_with_relative_names() {
+        let td = tempfile::tempdir().expect("tempdir");
+        std::fs::write(td.path().join("a.txt"), b"hello").expect("write");
+        std::fs::create_dir(td.path().join("sub")).expect("mkdir");
+        std::fs::write(td.path().join("sub/b.txt"), b"xy").expect("write");
+        std::fs::create_dir(td.path().join("sub/deep")).expect("mkdir");
+        std::fs::write(td.path().join("sub/deep/c.txt"), b"z").expect("write");
+        let listing = walk_tree_blocking(td.path(), &token()).expect("walk");
+        assert!(listing.errors.is_none());
+        let mut names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec!["a.txt", "sub", "sub/b.txt", "sub/deep", "sub/deep/c.txt"]
+        );
+        let c = listing
+            .entries
+            .iter()
+            .find(|e| e.name == "sub/deep/c.txt")
+            .unwrap();
+        assert_eq!(c.kind, FsEntryKind::File);
+        assert_eq!(c.size, 1);
+        let sub = listing.entries.iter().find(|e| e.name == "sub").unwrap();
+        assert_eq!(sub.kind, FsEntryKind::Dir);
+    }
+
+    #[test]
+    fn walk_tree_records_symlink_without_traversing() {
+        let td = tempfile::tempdir().expect("tempdir");
+        std::fs::write(td.path().join("real.txt"), b"x").expect("write");
+        // A link back to the root: traversal would loop forever, so
+        // completing at all is half the witness.
+        symlink(td.path(), td.path().join("loop")).expect("symlink");
+        let listing = walk_tree_blocking(td.path(), &token()).expect("walk");
+        let link = listing.entries.iter().find(|e| e.name == "loop").unwrap();
+        assert_eq!(link.kind, FsEntryKind::Symlink);
+        assert!(
+            !listing.entries.iter().any(|e| e.name.starts_with("loop/")),
+            "a symlinked directory must be recorded, never entered"
+        );
+    }
+
+    #[test]
+    fn walk_tree_skips_unreadable_subdirectory_and_keeps_the_rest() {
+        use std::os::unix::fs::PermissionsExt;
+        let td = tempfile::tempdir().expect("tempdir");
+        std::fs::write(td.path().join("a.txt"), b"x").expect("write");
+        std::fs::create_dir(td.path().join("locked")).expect("mkdir");
+        std::fs::write(td.path().join("locked/hidden.txt"), b"x").expect("write");
+        std::fs::set_permissions(
+            td.path().join("locked"),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .expect("chmod 000");
+        let result = walk_tree_blocking(td.path(), &token());
+        // Restore before asserting so the tempdir can be removed even
+        // if an assertion fails.
+        std::fs::set_permissions(
+            td.path().join("locked"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .expect("chmod back");
+        let listing = result.expect("walk must survive an unreadable subdirectory");
+        let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"a.txt"));
+        assert!(
+            names.contains(&"locked"),
+            "the dir entry itself is representable"
+        );
+        assert!(
+            !names.contains(&"locked/hidden.txt"),
+            "the unreadable subtree is skipped, matching scan_tree's pcall"
+        );
+    }
+
+    #[test]
+    fn walk_tree_polls_cancellation_token() {
+        let td = tempfile::tempdir().expect("tempdir");
+        std::fs::write(td.path().join("a.txt"), b"x").expect("write");
+        let cancel = token();
+        cancel.cancel();
+        let err = walk_tree_blocking(td.path(), &cancel).expect_err("must observe cancel");
+        assert!(matches!(err, FsError::Cancelled));
+    }
+
+    /// Review blocker: the entry loops never run on an EMPTY tree, so
+    /// without the entry/exit checks a pre-cancelled queued walk
+    /// returned an empty SUCCESS — which the scheduler would commit as
+    /// a snapshot and diff into a deletion storm. A missing root must
+    /// likewise report Cancelled, not its Io error.
+    #[test]
+    fn walk_tree_pre_cancelled_is_cancelled_even_with_no_entries() {
+        let empty = tempfile::tempdir().expect("tempdir");
+        let cancel = token();
+        cancel.cancel();
+        let err = walk_tree_blocking(empty.path(), &cancel)
+            .expect_err("empty tree must still observe cancel");
+        assert!(matches!(err, FsError::Cancelled));
+
+        let err = walk_tree_blocking(&empty.path().join("absent"), &cancel)
+            .expect_err("missing root must still observe cancel");
+        assert!(
+            matches!(err, FsError::Cancelled),
+            "cancellation outranks the root error: got {err:?}"
+        );
+    }
+
+    /// Review blocker: both prior cancellation tests pre-cancelled, so
+    /// deleting the INTERNAL polls (per directory, and every
+    /// [`READDIR_CANCEL_POLL_EVERY`] entries) left every test green —
+    /// the walk ran to completion and only the exit check fired. This
+    /// cancels MID-walk through the test hook and asserts the walk
+    /// stopped near the cancellation point, not at the end.
+    #[test]
+    fn walk_tree_observes_cancellation_mid_walk() {
+        let td = tempfile::tempdir().expect("tempdir");
+        for d in 0..3 {
+            let dir = td.path().join(format!("d{d}"));
+            std::fs::create_dir(&dir).expect("mkdir");
+            for i in 0..41 {
+                std::fs::write(dir.join(format!("f{i:02}.txt")), b"x").expect("write");
+            }
+        }
+        let cancel = token();
+        let seen = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        {
+            let seen = seen.clone();
+            let cancel = cancel.clone();
+            WALK_ENTRY_HOOK.with(|h| {
+                *h.borrow_mut() = Some(Box::new(move || {
+                    let n = seen.get() + 1;
+                    seen.set(n);
+                    if n == 5 {
+                        cancel.cancel();
+                    }
+                }));
+            });
+        }
+        let result = walk_tree_blocking(td.path(), &cancel);
+        WALK_ENTRY_HOOK.with(|h| *h.borrow_mut() = None);
+        assert!(
+            matches!(result, Err(FsError::Cancelled)),
+            "mid-walk cancel must surface as Cancelled"
+        );
+        // 126 entries total (3 dirs + 123 files). The next entry poll
+        // after the cancel at entry 5 is at most one
+        // READDIR_CANCEL_POLL_EVERY stride away.
+        assert!(
+            seen.get() < 60,
+            "the walk must stop near the mid-walk cancel, not run the \
+             whole tree ({} of 126 entries processed)",
+            seen.get()
+        );
+    }
+
+    #[test]
+    fn walk_tree_fails_when_the_root_cannot_open() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let err = walk_tree_blocking(&td.path().join("absent"), &token())
+            .expect_err("missing root must fail the walk");
+        assert!(matches!(err, FsError::Io { .. }));
+    }
+
+    #[test]
+    fn walk_tree_matches_read_dir_on_a_flat_directory() {
+        let td = tempfile::tempdir().expect("tempdir");
+        std::fs::write(td.path().join("a.txt"), b"hello").expect("write");
+        std::fs::write(td.path().join("b.md"), b"xy").expect("write");
+        let mut walked = walk_tree_blocking(td.path(), &token())
+            .expect("walk")
+            .entries;
+        let mut listed = read_dir_fatal(td.path(), &token()).expect("read_dir");
+        walked.sort_by(|a, b| a.name.cmp(&b.name));
+        listed.sort_by(|a, b| a.name.cmp(&b.name));
+        // At depth zero the relative name IS the basename, so the two
+        // primitives must agree entry-for-entry --- the signature
+        // parity the D3 framing requires.
+        assert_eq!(walked, listed);
     }
 }

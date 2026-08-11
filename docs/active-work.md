@@ -250,9 +250,58 @@ the same day (`b867f64`), refreshed and re-gated on the merged base.
 **D3 — the polling cost — is the remainder, and the user has ruled it
 is next (2026-08-11).** **Branch `lsp-file-watch-d3`** (base
 `githubsucks/main` @ `add0ba1`; the remote ref is authoritative), with
-**framing `docs/lsp-file-watch-d3-framing.md`, revision 4, DRAFT —
-review corrections absorbed; awaiting the four user rulings**, committed
-at the branch's first commit so it is portable during review. **Review
+**framing `docs/lsp-file-watch-d3-framing.md`, revision 4, APPROVED
+2026-08-11 with the four rulings adopted as proposed** (honest ⋯N bar;
+no exclusions; server root then cwd then attachment fallback;
+constants). **IMPLEMENTED on the branch**: `pmacs.fs.walk_tree` (one
+cancellable job per scan, eight Rust unit tests), the group scheduler
+in `lsp.lua` (after-tick cadence, single-flight state machine with
+the round-3 non-success partition, registration epochs, backoff,
+retirement), and eighteen acceptance tests — the six #234 tests
+byte-unchanged plus twelve witnesses, each mutation-verified. Two
+implementation-time facts worth keeping:
+
+- **Retirement is deliberately double-enforced** (the unregister path
+  and the post-scan sweep), and the mutation pass proved it: biting
+  either copy alone is masked by the other; only biting both goes red.
+  The sweep exists for seam-cancelled members, the unregister path for
+  idle groups whose next scan may be seconds away.
+- **A second pre-commit round found three more** (implementation
+  review, not framing): mid-walk cancellation was unwitnessed — both
+  Rust cancel tests pre-cancelled and the acceptance test cancelled a
+  QUEUED walk, so deleting the internal polls left everything green
+  (a `cfg(test)` entry hook now cancels at an exact entry boundary
+  and asserts the walk stopped NEAR it, and the retirement witness
+  holds a walk in flight across the unregister and asserts the job
+  settles cancelled); the "unreachable fallback" claim was WRONG — a
+  manual `pmacs.lsp.spawn` may omit both `cwd` and `root_uri`, and
+  `ensure_server` adopts such a server for markerless files (nil ==
+  nil), so the deterministic minimum now has a five-directory
+  through-the-server witness (five, because with two the build's hash
+  order coincided with the lexicographic answer and the first-pairs
+  bite survived); and the root-boundary joins gained a witness
+  through the exported production matcher/URI functions, since no
+  fixture can walk `/` for real.
+- **A pre-commit review round found four blockers**, fixed before
+  anything was committed: empty-tree cancellation (the entry loops
+  never run, so a pre-cancelled walk returned empty SUCCESS — the
+  deletion-storm shape the non-success arm exists to prevent); the
+  defensive attachment fallback was still `pairs`-order
+  nondeterministic (now lexicographic-minimum, with its
+  unreachability-through-production-spawning recorded at the site); a
+  filesystem-root base joined as `//path` (now `join_under`, dired's
+  idiom); and two test probes defaulted on error, so a broken pair
+  could compare equal and lie green (every probe now `expect`s).
+- **A stray marker high in the tree re-roots every markerless fixture
+  under it.** An empty `/tmp/.git` (leftover from the #233
+  investigation, since removed by the user) made project detection
+  root tempdir fixtures at `/tmp`, which under Q#D3-3 the watcher then
+  faithfully watched. Any machine can grow one; a markerless-fixture
+  red that looks like a watcher bug may be an ancestor marker.
+
+Framing and lane were committed
+at the branch's first commit so the document stayed portable during
+review. **Review
 round 3 (2026-08-11) found the live group's non-success transition
 missing**: every job is user-cancellable and `Handle:await()` raises on
 cancel/failure, so an uncaught result could leave `in_flight` set forever.
@@ -285,10 +334,10 @@ became **none** (any unconditional skip deviates from the registered
 glob contract, and `walk_tree` removes the job-count economics that
 motivated it), and the cost arithmetic was corrected to this
 checkout (1,326 jobs/tick for rust-analyzer's six watchers; revised
-steady state is zero jobs at idle). Four open rulings (Q#D3-1..4:
-the acceptance bar, exclusions, the scan root, knobs vs constants)
-block implementation. What was known before framing, verified while
-framing D1/D2:
+steady state is zero jobs at idle). The four rulings (Q#D3-1..4)
+were ADOPTED AS PROPOSED at the 2026-08-11 approval and are recorded
+in the framing's status block. What was known before framing,
+verified while framing D1/D2:
 
 - After #234 the watcher is *correct* but still walks: `walk` recurses
   unconditionally and `matches` gates only recording, so rust-analyzer
