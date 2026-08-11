@@ -193,9 +193,12 @@ external-change detection (verify-modtime-while-open, revert?).
 
 ## GPU frontend mechanics (non-theme)
 
-- **Input:** full command/minibuffer chord forwarding to the GUI,
-  Meta/Super chords, rebindable local `Ctrl-V`/`Escape`, middle-click
-  paste, right-click context menu, frontend-local provisional selection.
+- **Input:** ~~full command/minibuffer chord forwarding to the GUI~~
+  (**shipped**, `bc32332`), **Meta/Super chords — now GUI arc Stage 2**,
+  not Stage 1a (Q#S1-7, 2026-08-11: forwarding them before
+  capability-aware policy exists would capture platform Command/Super
+  shortcuts), rebindable local `Ctrl-V`/`Escape`, middle-click paste,
+  right-click context menu, frontend-local provisional selection.
 - **Minibuffer:** `i/total` hint (already on the wire), Telescope-style
   preview pane, candidate kind/doc annotations, unify TUI inline vs GPU
   dropdown, multibyte-exact band caret, the nav highlight-wrap bug.
