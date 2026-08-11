@@ -260,8 +260,8 @@ cancellable job per scan, eight Rust unit tests), the group scheduler
 in `lsp.lua` (after-tick cadence, single-flight state machine with
 the round-3 non-success partition, registration epochs, backoff,
 retirement), and eighteen acceptance tests — the six #234 tests
-byte-unchanged plus twelve witnesses, each mutation-verified. Two
-implementation-time facts worth keeping:
+byte-unchanged plus twelve witnesses, each mutation-verified.
+Implementation-time facts and review-round records worth keeping:
 
 - **Retirement is deliberately double-enforced** (the unregister path
   and the post-scan sweep), and the mutation pass proved it: biting
@@ -306,9 +306,9 @@ implementation-time facts worth keeping:
   anything was committed: empty-tree cancellation (the entry loops
   never run, so a pre-cancelled walk returned empty SUCCESS — the
   deletion-storm shape the non-success arm exists to prevent); the
-  defensive attachment fallback was still `pairs`-order
-  nondeterministic (now lexicographic-minimum, with its
-  unreachability-through-production-spawning recorded at the site); a
+  attachment fallback was still `pairs`-order nondeterministic (now
+  lexicographic-minimum; this round also called it unreachable, which
+  round two above DISPROVED via the manual-spawn adoption path); a
   filesystem-root base joined as `//path` (now `join_under`, dired's
   idiom); and two test probes defaulted on error, so a broken pair
   could compare equal and lie green (every probe now `expect`s).
