@@ -1,6 +1,20 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-08-08.** `main` is **`9a26ac8`** — GPU horizontal
+**Last updated: 2026-08-11.** `main` is **`b867f64`** — git integration
+Stage 1 **#227** (`*git-status*` / `*git-diff*`, no wire change), atop
+`ae84d58` **#234**, the LSP file-watcher correctness fix (issue #233
+D1+D2, one review round; **D3 — the polling cost — is deliberately
+unfixed and is the ruled next lane**). Beneath them, in first-parent
+order: **#231** destination capture, **#232** worker identity Stage 1,
+**#228** discovery Stage 2, **#230** LSP LaTeX coverage, **#229** the
+gate `--protocol` build step, **#225** per-worktree gate target dirs,
+**#226** the R8 fixture fix, and **#224** the QoL docs retirement.
+**Only #227 and #234 are absorbed into §1 at this anchor**; the eight
+between carry their facts in their `docs/active-work.md` lanes, several
+of whose headers still say OPEN — trust this chain over any lane
+header, per the ledger's own rule.
+
+Previously **2026-08-08**: `main` was `9a26ac8` — GPU horizontal
 scroll **#223**, which **closes the QoL arc** (§1). Beneath it the arc's
 other four: **#222** TUI horizontal scroll, **#221** `ui.line-wrap` at
 protocol v22, **#220** GUI zoom, **#219** `full_grid` honored by the
@@ -86,8 +100,94 @@ reads it the way you just did.
 For volatile branches, checkpoints, verification, and recovery
 commands, read `docs/active-work.md` immediately after this file.
 
-## 1. Where the project stands (2026-08-08)
+## 1. Where the project stands (2026-08-11)
 
+- **Git integration Stage 1 — MERGED as #227 (2026-08-11).**
+  `*git-status*` (a `listview` panel over `git --no-optional-locks -C
+  <dir> status --porcelain=v2 --branch -z`) and `*git-diff*`
+  (file-level, plain generated text), plus an install-once `keys`
+  extension on `listview`. No wire change; **Stage 2 (gutter markers)
+  needs new `DecorationKind` variants — a `PROTOCOL_VERSION` bump — and
+  must be scheduled alone.** Held unmerged behind issue #233 by user
+  ruling, then landed the same day as #234, refreshed and re-gated on
+  the merged base. Durable facts:
+  - **Capture at invocation, never read at continuation — enforced by
+    ONE mechanism, not four counters.** Review found FOUR instances of
+    the same shape (ordering by `rev-parse` completion; `state.root`
+    read mid-plan; no generation on the diff path; one byte inside a
+    fix). `new_channel()` tickets answer "is this still the request in
+    force?" — **two channels, deliberately**: status and diff are
+    independent things a user asks for, so each gets its own ordering
+    and what is shared is the mechanism. The async-continuation census
+    (three continuations, one dispatcher, one synchronous impostor)
+    lives in the PR and framing.
+  - **macOS cannot hold a non-UTF-8 filename, and this project will
+    hit it again.** APFS/HFS+ reject invalid UTF-8 at the syscall
+    (`EILSEQ`, errno 92); Linux's VFS treats names as opaque bytes. It
+    cannot be reached around the filesystem either: an index-only
+    entry still fails `git status`'s lstat with `EILSEQ`, which git
+    skips — **there is no macOS arrangement in which real `git status`
+    names a non-UTF-8 path.** The fix pattern: split coverage along
+    the line the platform draws — behaviour runs everywhere (rows
+    supplied through the `_deliver_status` seam), only *provenance* is
+    Linux-gated. A latent sibling in `gpu_invocation_acceptance`'s
+    crdt module is recorded in the git lane.
+  - **Both root-parsing bugs lived in a pattern.** `rev-parse
+    --show-toplevel` gets exactly ONE trailing `\n` removed, by an
+    explicit last-byte test: `\r` is a legal POSIX name byte, and
+    `rev-parse` has **no `-z`** — it echoes a literal `-z` onto stdout
+    with exit 0, checked against the installed git rather than
+    assumed. `first_line` was deliberately left alone both times: its
+    three callers feed the single-line status band, where truncation
+    is right.
+  - **`{:?}` on a string containing NUL cannot build a `-z` fixture**
+    — Lua's decimal escape swallows following digits, so payloads are
+    assembled as raw bytes with three-digit escapes, joined in Lua
+    with `string.char(0)`.
+  - **A copy renders `copied from`, but `kind` stays `"rename"` for
+    both, deliberately.** Every behaviour keyed on it is identical;
+    splitting would force every present and future consumer to spell
+    both arms, and a forgotten arm silently degrades copies. The score
+    byte carries the distinction where presentation needs it.
+- **LSP file watcher — D1+D2 MERGED as #234 (2026-08-11); D3 is
+  next.** Issue #233: with any server that dynamically registers
+  `workspace/didChangeWatchedFiles`, plain-string globs never matched
+  (matched **relative** where LSP says **absolute** — rust-analyzer
+  saw no file change, ever; gopls saw `go.mod` but never `.go`), and
+  re-registering a live id leaked the previous pollers uncancellably
+  (rust-analyzer registers twice under one id: 12 pollers, 6
+  unreachable). Invisible for three months until #232's activity
+  indicator — §9's instrument doing exactly its job. Durable facts:
+  - **The GlobPattern form travels with the pattern, and it is read
+    FROM the pattern, not from the union arm.** `resolve_watcher`
+    returns `(base, pattern, form)`; a leading `/` is what makes a
+    string absolute. The first fix classified every string absolute —
+    repairing rust-analyzer while silently breaking bare `*.txt`, a
+    case that had worked since May. Review caught it (P1).
+  - **A scan that completes after cancellation must not emit (P2).**
+    The watcher coroutine spends most of a tick suspended in
+    `read_dir` awaits with `_sleep` already cleared, so a cancel
+    landing there had nothing to interrupt and the resumed scan
+    emitted one stale batch under the superseded pattern. Cancellation
+    and liveness are rechecked after the scan;
+    `pmacs.lsp._after_scan_for_tests` (nil in production, handed the
+    scan result) exists because no real timing produces that
+    interleaving on demand — `git.lua`'s `_deliver_status` device
+    again.
+  - **F1's lesson fired twice in one lane.** The pre-existing test was
+    insensitive (`**/` compiles to `.-`, which spans `/`, so it passes
+    under either match subject) — and then the lane's own flat-pattern
+    guard constrained the RelativePattern *object* arm while P1's
+    regression lived in the *string* arm. A guard proves things about
+    the arm it exercises, nothing more.
+  - **All six watcher tests are mutation-verified, each bite failing
+    only its own defect** — the two review fixes re-verified
+    independently after review.
+  - **D3 is deliberately unfixed and ruled next**: the walk still
+    recurses into everything every 250 ms, six jobs per tick for
+    rust-analyzer. The D3 lane in `docs/active-work.md` carries what
+    was checked (no notify dependency, no ignore-list infrastructure)
+    and the option space.
 - **QoL arc — CLOSED. All five stages merged (#219, #220, #221, #222,
   #223).** From one daily-driver report: terminal zoom broke TUI
   rendering and did nothing in the GUI, and a long line was unreadable

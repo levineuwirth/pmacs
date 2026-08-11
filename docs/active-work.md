@@ -5,6 +5,21 @@ landed on `main`. Read it after `docs/agent-handoff.md`. Remove completed
 entries when their PR merges; do not let this become a second permanent
 backlog.
 
+**Updated 2026-08-11 — two merges and a discharge.** The LSP file
+watcher D1+D2 landed as **#234** (`ae84d58`) after one review round
+(P1 form-from-the-pattern, P2 cancelled-scan emission — both
+bite-verified), and git integration Stage 1 landed as **#227**
+(`b867f64`) immediately after, refreshed onto the merged base and
+re-gated. The 2026-08-10 hold on #227 is **discharged in order**, not
+overridden. Both lanes below are rewritten to their remainders (D3;
+git Stage 2), their durable facts absorbed into
+`docs/agent-handoff.md` §1. **Next, by user ruling: D3.** The
+canonical-base line below and the handoff anchor both moved to
+`b867f64`. Several other lane headers still say OPEN for PRs that have
+since merged (#224–#232) — per this file's own rule, trust the
+canonical-base line over any lane header; those absorptions remain
+owed by their own lanes.
+
 **Updated later the same day, on a new machine.** Development moved to
 the laptop; the recovery path in "Repository authority" below was
 exercised from this checkout and the `githubsucks` alias was absent and
@@ -111,7 +126,14 @@ lesson, §1 for the two framings).
   are identical on every machine. Remote names are otherwise
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
-- Canonical base at this snapshot: **`githubsucks/main` @ `9a26ac8`** —
+- Canonical base at this snapshot: **`githubsucks/main` @ `b867f64`** —
+  git integration Stage 1 **#227**, atop `ae84d58` the LSP file-watcher
+  fix **#234**, atop `0e4c58d` destination capture **#231**, `3cc1b85`
+  worker identity Stage 1 **#232**, `0857bf4` discovery Stage 2
+  **#228**, `0190102` LSP LaTeX coverage **#230**, `7cf4653` the gate
+  `--protocol` build step **#229**, `4bc55e8` per-worktree gate target
+  dirs **#225**, `dcb852e` the R8 fixture fix **#226** and `b833b13`
+  the QoL docs retirement **#224**. Beneath those, `9a26ac8`:
   GPU horizontal scroll **#223**, which **closes the QoL arc**, atop
   `2b56d16` TUI horizontal scroll **#222**, `02f3ec3` `ui.line-wrap`
   **#221** (protocol v22), `218d2e7` GUI zoom **#220** and `da56bec`
@@ -210,107 +232,42 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## LSP file watcher (issue #233) — PR #234 OPEN, awaiting review
+## LSP file watcher (issue #233) — D1+D2 MERGED as #234; D3 IS NEXT
 
-**Issue #233** — https://github.com/levineuwirth/pmacs/issues/233.
-**PR #234** — https://github.com/levineuwirth/pmacs/pull/234, opened
-2026-08-10 at `ed3033c` (the implementation commit atop the framing).
-**URGENT by user ruling 2026-08-10: PR #227 is held unmerged until this
-is resolved**, even though #227 is green and cleared.
+**Issue #233** — https://github.com/levineuwirth/pmacs/issues/233,
+still OPEN: it closes when D3 does. **PR #234 MERGED 2026-08-11**
+(`main` @ `ae84d58`), one review round. The framing is
+`docs/lsp-file-watcher-framing.md`, revision 2 — it carries the full
+record: the approved design, the answered ruling, and the two review
+findings (P1 form-from-the-pattern, P2 cancelled-scan emission) with
+their bite results. Durable facts are absorbed in
+`docs/agent-handoff.md` §1.
 
-- **Branch `lsp-file-watcher`**, base `githubsucks/main` @ `0e4c58d`.
-  **`githubsucks/lsp-file-watcher` is the authoritative tip** — the ref,
-  not a SHA. Recover with
-  `git fetch githubsucks && git checkout lsp-file-watcher`.
-- **Framing `docs/lsp-file-watcher-framing.md`, revision 2** — design
-  approved 2026-08-10; revision 2 records a review round **against the
-  implementation** that found two correctness defects, both now fixed
-  (see below). Committed at the branch's first commit so it is portable
-  during review — the standing lesson from the GUI arc framing, which
-  spent two review rounds as an untracked file in one worktree.
-- **Review round 1 on the code found two defects, and both are cases
-  where the first fix was itself wrong:**
-  1. **P1 — a bare-string `*.txt` stopped working.**
-     `resolve_watcher` classified **every** string as absolute, so a
-     valid relative pattern was matched against `<base>/foo.txt` and
-     could never fire. That path worked **before** this lane, so the
-     repair broke a live case while fixing another. The form now comes
-     from the pattern (a leading `/`), not from the union arm. The
-     flat-pattern test did not catch it because it exercises the
-     RelativePattern **object** arm — F1's tested-vs-exercised split,
-     repeating inside the lane that named it.
-  2. **P2 — a scan finishing after cancellation still emitted one
-     batch.** `scan_tree` suspends on `read_dir` per directory with
-     `_sleep` already cleared, so a cancel landing there had nothing to
-     interrupt and the resumed scan ran on to
-     `did_change_watched_files` under the superseded pattern.
-     Cancellation and liveness are rechecked after the scan.
-- **A test seam was added**: `pmacs.lsp._after_scan_for_tests`, nil in
-  production, handed the scan result. P2's race cannot be produced by
-  timing; the seam is the same device as `git.lua`'s `_deliver_status`.
-  It takes the scan result because a test cancelling on any *other*
-  scan would pass with the fix deleted.
-- **What the implementation is**: `resolve_watcher` returns
-  `(base, pattern, form)` and the watch record carries the form —
-  `"absolute"` (pattern begins `/`) matches `base .. "/" .. rel`,
-  `"relative"` matches `rel`; and
-  `register_file_watchers` cancels the outgoing record list through the
-  new `cancel_watch_records` (shared with `unregister_file_watchers`)
-  before the table write drops the only reference to it.
-- **Verification**: three new discriminating tests beside `m4_24`
-  (`filewatchabs` / `filewatchflat` / `filewatchrereg` fake-LSP modes),
-  each mutation-tested against the defect it names: reverting D1 fails
-  only the plain-string test; matching every form absolutely fails only
-  the RelativePattern guard; reverting D2 fails only the
-  re-registration test, with the leaked watcher's `.old` event visible
-  in `.received`. `m4_24` stayed green under all three mutations —
-  its recorded insensitivity, confirmed.
+**The #227 hold is DISCHARGED.** The 2026-08-10 ruling held #227
+unmerged until this was resolved; #234 merged first and #227 followed
+the same day (`b867f64`), refreshed and re-gated on the merged base.
 
-**Not a #232 regression.** The statusline activity indicator is correct;
-it renders real in-flight jobs. What changed on 2026-08-09 is
-**visibility**. The polling watcher has been there since `1c25730`
-(2026-05-19). Quieting the indicator would delete the only instrument
-that found this, and is explicitly not the fix.
+**D3 — the polling cost — is the remainder, and the user has ruled it
+is next (2026-08-11).** No branch and no framing yet. What is known,
+verified while framing D1/D2:
 
-- **Scope: D1 and D2 only** — plain-string globs are matched against
-  relative paths so they never match (rust-analyzer sees **no** file
-  changes at all; gopls sees `go.mod` but never `.go`), and
-  re-registering the same id leaks the previous coroutines
-  (rust-analyzer registers twice under one id → 12 pollers, 6
-  permanently uncancellable).
-- **Two findings from framing that the issue does not carry**, both of
-  which change the fix:
-  1. **The existing test cannot discriminate this fix in either
-     direction.** The fake LSP's `**/*.txt` compiles to `^.-[^/]*%.txt$`
-     and `.-` spans `/`, so it matches relative *and* absolute subjects.
-     `m4_24` passes whether D1 is fixed or broken. New coverage must use
-     a pattern whose two readings disagree.
-  2. **"Match the absolute path" alone would break `RelativePattern`.**
-     Measured: `*.txt` matches `a.txt` but not `/base/a.txt`.
-     `resolve_watcher` returns `(base, pattern)` and discards which form
-     it came from, so its contract has to change — not just the match
-     subject.
-- **RULING ANSWERED 2026-08-10:** D1 and D2 fix correctness and the
-  leak but **do not stop the walking** — `walk` recurses
-  unconditionally and `matches` gates only recording. After this lane
-  rust-analyzer still walks the whole tree every 250 ms, six times per
-  tick instead of twelve. **The user accepted that scope**: the
-  acceptance bar for this lane is correctness and the leak, not "the
-  flipping stops". The walking is D3's, framed separately.
-- **D3 deferred** with what was checked: there is **no `notify`/inotify
-  dependency in the tree**, so a real filesystem-notification primitive
-  is a new crate plus a Rust primitive plus its binding; and there is
-  **no ignore-list infrastructure** to reuse (`src/project.rs` knows
-  `.git` as a marker, not as something to skip). D3 is a
-  `COHERENCE.md` §9 concern and needs its own framing.
-- **Gates:** `./scripts/gate --acceptance m4_acceptance` — **all nine
-  steps green, 2026-08-10** (lib 1,928; lib-crdt 2,113; m4 154 with the
-  standing `basedpyright` skip; GPU 243 under `PMACS_REQUIRE_GPU=1`;
-  full-workspace sweep 3,891 passed / 0 failed across 118 targets;
-  `diff --check` clean). The sweep covers the eleven other acceptance
-  suites that spawn the fake LSP; the three new modes are additive and
-  no existing mode's behaviour changes. No `--protocol` — no wire
-  change.
+- After #234 the watcher is *correct* but still walks: `walk` recurses
+  unconditionally and `matches` gates only recording, so rust-analyzer
+  walks the whole tree — `.git`, `target`, `node_modules` included —
+  every 250 ms, six times per tick (was twelve before D2), one async
+  job per directory. The modeline still shows the churn, at roughly
+  half the pre-#234 rate.
+- **No `notify`/inotify dependency in the tree** — a real
+  filesystem-notification primitive is a new crate plus a new Rust
+  primitive plus its Lua binding.
+- **No ignore-list infrastructure to reuse** — `src/project.rs` knows
+  `.git` as a *marker* name, not as something to skip.
+- Options named in the issue: coalesce a server's watchers into one
+  scan; root the scan at the workspace root; an ignore list; back off
+  when nothing changes; a real notification primitive.
+- It is a `COHERENCE.md` §9 concern — background work with no
+  ownership model — and the activity indicator that surfaced it is
+  §9's own Stage 1. The framing must state its §20 coherence impact.
 
 ## `scripts/gate` — PR #225 OPEN (build tooling)
 
@@ -367,444 +324,40 @@ also removed: this branch's "R8 NEEDS A LANE" investigation block, and
 durable facts are in the retired registry row and the handoff §6
 census.
 
-## Git integration Stage 1 — PR #227 OPEN
+## Git integration — STAGE 1 MERGED as #227; Stage 2 must be scheduled alone
 
-**PR #227** — https://github.com/levineuwirth/pmacs/pull/227. Opened
-2026-08-09 at `4002734`, after the framing was approved at revision 5
-and the full gate suite went green. **UNBLOCKED 2026-08-10**: `main` was
-merged in (72 commits) and the destination capture #231 provides is
-adopted below. Re-gated 12/12 green on the merged tree.
+**PR #227 MERGED 2026-08-11** (`main` @ `b867f64`), after five review
+rounds, a macOS CI round, and a base refresh: it was held unmerged
+behind issue #233 by the 2026-08-10 ruling, refreshed onto the merged
+base (`e2394c7`, a clean merge whose only file shared with #234 was
+this ledger), re-gated 11/11 locally and 14/14 on CI. Durable facts
+are absorbed in `docs/agent-handoff.md` §1; the framing
+(`docs/git-integration-framing.md`, revision 5) and the PR carry the
+full five-round review history.
 
-**One cross-lane break the merge surfaced**, recorded because it was
-invisible until the suites ran: #232 made `purpose` **required** on
-`pmacs.process.spawn`, and this module's spawn lives on this branch, so
-it was never among the 11 call sites #232 updated — every git test
-failed at once. Each of the three spawns now carries its own purpose,
-and deliberately **not** the label, which is the copy #232's ruling was
-made against: all three are labelled `git`, and only the purpose
-distinguishes "resolving which repository contains `<dir>`" from
-"reading the working tree status of `<root>`" from "diffing `<path>`
-against HEAD".
+**What shipped:** `*git-status*` — a `listview` panel over
+`git --no-optional-locks -C <dir> status --porcelain=v2 --branch -z` —
+and `*git-diff*` (file-level, plain generated text), with the
+install-once `keys` extension on `listview`. `builtin/runtime/git.lua`,
+34 acceptance tests, **no wire change**.
 
-**Review round 1 found three blockers. Two are fixed; the third is why
-this lane is blocked.**
+**Stage 2 (gutter markers) is the remainder, and it is NOT freely
+schedulable: it needs new `DecorationKind` variants — a
+`PROTOCOL_VERSION` bump — so it must run alone**, per the strict
+serialization rule on wire changes. No branch, no framing yet.
 
-- **P1 fixed (`ffe5ae2`) — concurrent `status` opens were ordered by
-  `rev-parse` completion, not by invocation.** The generation was
-  minted on arrival, inside `start_status`, so the **slowest root
-  lookup won** rather than the newest invocation. It is now reserved at
-  the command and carried through the root-resolution callback, which
-  drops a superseded result **before any effect** — no spawn, no
-  `state.root` write, and no status message either, since a message
-  from a replaced invocation is as wrong as a panel from one.
-- **P2 fixed (`6c1631e`) — a refused `keys` bind left a live, unowned
-  buffer.** The preflight compared **raw tokens** while `parse_key_code`
-  folds `RET`/`RETURN`/`ENTER` (and `SPC`/`SPACE`, `ESC`/`ESCAPE`,
-  `BS`/`BACKSPACE`, `DEL`/`DELETE`, case-insensitively) onto one chord,
-  so an alias spelling passed preflight and failed at bind time —
-  *after* buffer creation and intercept install. The partial rollback
-  removed only new keys, so later opens silently got `<2>`.
+**Residue that stays live here:**
 
-  **Fixed by full teardown, not by canonicalizing the preflight**, and
-  the reasoning is worth keeping: a Lua canonicalizer would be a second
-  copy of the Rust alias table and would go stale the day that table
-  gains a name, reintroducing this exact bug for the new alias.
-  `Keymap::bind` is the authority because it *is* what decides. There
-  is also **no Lua-reachable canonicalization** to build on —
-  `display_sequence` escapes only through `describe.key` and
-  `keymap.list`, both of which require the sequence to be bound
-  already. Verified; no binding was added for this.
-- **P1a FIXED — the block is lifted.** The async completions displayed
-  UI without capturing the initiating frontend, so a result surfaced in
-  whichever frontend was active when git exited. `commit_to` was the
-  right mechanism and was **not Lua-reachable** outside a directory
-  open, so the capture half shipped as **#231** (`0e4c58d`) and this
-  lane adopts it now that `main` carries it:
+- **§9 negative impact stands:** git runs as a spawned process, and
+  spawned processes do not appear in `*workers*`. A fifth
+  unattributable background thing, labelled honestly; a label is not
+  attribution. The D3 lane (above) and §9 Stage 2 own the model.
+- **The latent macOS sibling:** `tests/gpu_invocation_acceptance.rs`
+  writes a non-UTF-8 filename to disk inside
+  `#[cfg(feature = "crdt")]`, and the crdt job is ubuntu-only — it
+  fails the day that job gains a macOS leg, the same way `g6_2` did
+  (handoff §1: macOS cannot hold a non-UTF-8 filename).
 
-  - **Captured at invocation** in all four entrances — `git.status()`,
-    `_on_refresh` (the `g` keypress), `_deliver_root`'s hand-off, and
-    the `git.diff-file` command — and threaded on the request table
-    exactly as the generation and root already were. The ambient
-    frontend was the one input still being read late.
-  - **Committed under the profile the surface actually takes**:
-    `"panel"` for `*git-status*`, `"document"` for `*git-diff*` (Q#DC-2).
-  - **`set_status` moved INSIDE the status commit.** A failure message
-    announcing a panel that the commit then refuses is the same
-    misrouting in its most confusing form, so rows and message are now
-    computed first and emitted together.
-  - **Witnessed by `g6_25`**, and the first version of that test was
-    **worthless**: `panel_text` finds `*git-status*` by NAME, which is
-    global, so a render into the wrong frontend satisfied it and the
-    test passed its own mutation. Rewritten per frontend
-    (`side_window_for`, and each view's active window) it fails both
-    bites — removing the status commit grows a `*git-status*` panel in
-    the competitor, removing the diff commit hands it the document
-    window.
-
-  **The second citation written here in round 1 was wrong** — `:854`
-  pointed at `local unstaged = …` inside `diff_plan`, not at a display
-  call. The site was always `show_diff_buffer`'s `pmacs.window.display`.
-  Corrected rather than silently re-numbered, because a stale pointer in
-  a block whose whole purpose is "do not touch these two lines" is worse
-  than none.
-
-**Re-gated at `6c1631e`:** all 11 steps green, acceptance now 27 tests.
-Both fixes mutation-verified.
-
-**Review round 2 found three more P2s, all the SAME SHAPE as the round-1
-P1: module-level mutable state read or written at CONTINUATION time
-instead of captured at INVOCATION time.** All three fixed here; the P1a
-block above is unchanged and still the reason this lane cannot merge.
-The fourth recurrence is why the last fix generalizes the rule instead
-of adding another counter, and why the census below exists.
-
-- **P2 fixed (`3eca5e8`) — an unborn-repository diff could switch
-  repositories mid-plan.** `run_diff_plan`'s `next_step` read
-  `state.root` each time it started a step, and an unborn `AM`/`AD` row
-  produces a **two-step** plan. A concurrent `git.status` for another
-  repository reassigns `state.root` from its own root-resolution
-  callback, so a diff started in A ran its second step with B as cwd and
-  A's path — git there matches nothing, so the unstaged half silently
-  rendered `(no changes)` instead of the worktree delta it exists to
-  show. The root is now captured at the keypress and threaded through as
-  a parameter; `state.root` is not read inside the plan at all.
-- **P2 fixed (`842ec61`) — a repository root containing a newline was
-  truncated.** `rev-parse --show-toplevel` was parsed with `first_line`,
-  so a root at `/tmp/a\nb` became `/tmp/a` and every command after it ran
-  with a nonexistent cwd. Fixed with a **separate** helper,
-  `strip_output_terminator`, at that one call site. `first_line` is
-  deliberately untouched: its other three callers all feed the
-  **single-line status band**, where truncating is right, so folding the
-  two together would fix one caller and break three.
-
-**A third instance of the shape was found in the same pass and reported
-rather than fixed silently:** the diff path had no generation counter at
-all. Review independently raised it as **P2 #3**, and it is fixed below.
-
-- **P2 fixed (`723afa7`) — concurrent `d` requests were
-  last-writer-wins.** `git.diff-file` started a plan with **no request
-  generation** while every plan writes the **singleton** `*git-diff*`
-  buffer through `show_diff_buffer`. `d` on A, then `d` on B before A
-  finishes: if A completed last, A's diff replaced B's. Reachable
-  without contrivance — `d` renders into the document window only at
-  completion, so the panel is still focused for a second press.
-
-  **Fixed by giving the rule ONE implementation instead of a fourth
-  hand-rolled counter.** `new_channel()` hands out a ticket at the
-  command and answers "is this still the request in force?" at the
-  completion; `state.generation` and `reserve_generation` are gone.
-
-  **Two channels, not one, and that is a design decision.** A single
-  module-wide counter would make `d` cancel an in-flight `g` and vice
-  versa. The status panel and the diff view are independent things a
-  user asks for, so each gets its own ordering; what is shared is the
-  **mechanism**, not the counter. A channel spans a whole **request**
-  rather than one process — a status open is `rev-parse` then `status` —
-  so `_deliver_root` and `_deliver_status` correctly share one ticket
-  while a diff plan gets its own. `g6_23` asserts the separation: two
-  `d` presses leave `_generation()` untouched.
-
-  The plan is restructured into the request shape the other two
-  continuations already use: `step_done`'s closure becomes
-  `pmacs.git._deliver_diff(request, step, res)`, exposed for the same
-  reason `_deliver_status` and `_deliver_root` are.
-
-**The async-continuation census, so the next round is not another
-instance hunt.** `git.lua` has **exactly three** async continuations,
-plus one dispatcher and one synchronous impostor:
-
-| continuation | invocation-time ticket? | needs one? | shared state written |
-|---|---|---|---|
-| `_deliver_root` (`rev-parse`) | yes, `status_requests`, reserved in `git.status()` | yes | `state.root`, `state.buffer`, spawns the status |
-| `_deliver_status` (`git status`) | yes, `status_requests`, reserved at the command or the `g` keypress | yes | `state.branch`, `.rows`, `.display`, `.failure`, `.buffer`, the panel, the cursor |
-| `_deliver_diff` (`git diff`, 1–2 steps) | **now yes**, `diff_requests`, reserved at the `d` keypress | yes | `state.diff_buffer`, the `*git-diff*` contents, the status band |
-| `process.after-tick` pump | no | **no** — it is the dispatcher, not a request; it owns only the module-local `pump` table and calls each `on_done` once | `pump` |
-| `run_git`'s spawn-failure path | n/a | **no** — it calls `on_done` **synchronously**, at invocation time, and that `on_done` carries the ticket anyway | none |
-
-Everything else that looks like a callback is synchronous at the
-keypress: `on_visit`/`on_refresh` on the listview spec, the `*git-diff*`
-read-only intercept, and the two `pmacs.command.define` bodies.
-
-`state.diff_buffer` is deliberately still read at continuation time and
-that is correct: "do I already have a live diff buffer?" is a question
-about *now*, not about the invocation. It is the state `_deliver_diff`
-guards, not a second instance of the bug.
-
-**Re-gated at `723afa7`:** all steps green, acceptance now 30 tests. All
-three round-2 fixes mutation-verified — `g6_22` fails on the second
-spawned diff argv when the `state.root` read is restored; `g6_14c`
-resolves `<tmp>/nl` instead of `<tmp>/nl\nroot` when `first_line` is;
-and `g6_23` fails when the ticket check is removed, at its **real**
-half, the older plan having overwritten the newer one's patch before the
-driven delivery was reached.
-
-**Review round 3 found a FOURTH instance of the byte/lifetime shape, and
-it was one byte inside round 2's own fix.**
-
-- **P2 fixed (`39ad43d`) — a repository root ENDING IN A CARRIAGE RETURN
-  was truncated.** `strip_output_terminator` stripped `\r?\n$`, and `\r`
-  is as legal a byte in a POSIX directory name as `\n` is. For a root
-  named `trailing\r`, `git rev-parse --show-toplevel` prints
-  `…/trailing` `0d` `0a` — the path's own CR, then git's LF terminator —
-  and a pattern tolerant of an optional preceding carriage return cannot
-  tell those apart, so it took both. The root resolved as `…/trailing`
-  and every command after it ran with that as its `-C` and cwd: a
-  directory that does not exist. Now **exactly one trailing `\n`** is
-  removed, by an explicit last-byte test rather than an anchored pattern
-  — both of this function's bugs lived in a pattern.
-
-  **`-z` was CHECKED against the installed git, not assumed, and must
-  NOT be used.** `git rev-parse` has no `-z` option at all on git 2.55:
-  it is absent from the manual, `--parseopt -z` errors with "unknown
-  switch", and in ordinary mode `rev-parse` treats `-z` as an
-  unrecognized **flag argument** and echoes a literal `-z\n` onto stdout
-  **ahead of** the toplevel — exit code 0, corrupted output, silent.
-  `--show-toplevel` applies no C quoting either, not even under
-  `core.quotePath=true`. So there is no unambiguous representation to
-  prefer over a correct strip, and removing the one byte git appended is
-  the whole of the right answer.
-
-  `first_line` is untouched again, for the reason `842ec61` recorded: its
-  three callers all feed the single-line status band.
-
-**Re-gated at `39ad43d`:** all steps green, acceptance now 31 tests.
-`g6_14d` is end to end — real directories, the real `git`, asserted on
-the cwd of the spawn the module actually made — and covers both
-`trailing\r` and `nl\nand-trailing\r`, the second because the two hazards
-compose and neither fix may mask the other. `g6_14c` now shares that
-chain through `assert_root_resolves_whole` rather than keeping a second
-copy of it. Mutation-verified: restoring `\r?\n$` fails `g6_14d` at
-`<tmp>/trailing` against `<tmp>/trailing\r` while `g6_14c` still passes,
-which is exactly the byte separating the two fixes.
-
-**CI round: a DETERMINISTIC macOS failure, in the FIXTURE rather than in
-the product.** Both macOS legs of the matrix (LuaJIT and Lua 5.4) failed
-`g6_2` identically at
-https://github.com/levineuwirth/pmacs/actions/runs/31324683235 while
-Linux stayed green.
-
-- **DURABLE PORTABILITY FACT, and this project will hit it again:
-  macOS cannot hold a non-UTF-8 filename.** APFS and HFS+ validate
-  pathnames as UTF-8 and reject an invalid one at the syscall with
-  **errno 92, `EILSEQ`, "Illegal byte sequence"**. Linux's VFS treats a
-  filename as opaque bytes and accepts it. So `std::fs::write` on
-  `bad\xFF.txt` is a Linux-only fixture, and any test that builds one is
-  red on macOS by construction, not by flake.
-
-  It goes further than creation: the name cannot be reached *around* the
-  filesystem either. Putting it only in the index (`update-index
-  --index-info` plus `write-tree`, never touching the worktree) does not
-  help, because `git status` lstats every index entry and on macOS that
-  lstat fails with `EILSEQ` rather than `ENOENT` — which git reports on
-  stderr and **skips**, so the row would be absent rather than
-  unrepresentable. **There is no macOS arrangement in which real `git
-  status` names a non-UTF-8 path at all.**
-
-- **Fixed (`4b82d1e`) by splitting the coverage along the line the
-  platform actually draws, NOT by `#[cfg]`-skipping the behaviour.**
-  A behaviour that vanishes on one platform is how a boundary stops
-  being tested; the behaviour now runs everywhere and only the
-  *provenance* is gated.
-
-  | test | what it witnesses | where it runs |
-  |---|---|---|
-  | `g6_2` | parse + display, driven from the **payload bytes** — no repository, no filesystem | every platform |
-  | `g6_2b` | RET and `d` **refusing with a message**, over a real repository, with the row delivered through `_deliver_status` | every platform |
-  | `g6_2c` | that real `git` emits those bytes at all | **Linux only**, loudly named and commented |
-
-  The gestures are exercised against a **real** repository, panel,
-  keymap and dispatch; only the row bytes are supplied, through the same
-  `_deliver_status` seam `g6_17` and `g6_21` already use because a
-  chosen completion is not otherwise expressible. `g6_2b` also gained
-  the **rename-ORIGIN** case, which the old single test never had: `d`
-  passes the origin to `git diff` as an argument too, so a check written
-  on `row.path` alone would let it through.
-
-  The one link no payload can witness — that the spawn pipe carries
-  bytes rather than text — is **structural**: `event_to_lua` in
-  `src/lua_bindings/mod.rs` builds the stdout chunk with
-  `lua.create_string(bytes)`, and `git.lua` only concatenates chunks.
-
-- **New fixture mechanism: `lua_bytes` / `z_payload_bytes`.** A `-z`
-  payload whose paths are not UTF-8 **cannot be spelled as a Rust
-  `&str`**, so it is assembled as raw bytes and handed to Lua as one
-  literal, with every non-printable byte spelled as a **three-digit**
-  decimal escape. Three digits always: Lua's decimal escape consumes up
-  to three, so a shorter one swallows the digit after it — the same
-  hazard the `{:?}`-on-NUL note above records, removed rather than
-  worked around.
-
-- **Verified here vs. reasoned about.** Verified locally: the full gate
-  suite green; 33/33 under **both** LuaJIT and Lua 5.4; the two portable
-  tests still green with `g6_2c` compiled out (a stand-in for the macOS
-  build, with no dead-code warnings left behind); three mutations each
-  caught by `g6_2b` — removing the RET check, removing the `d` check,
-  and removing only the origin clause. Reasoned about, not executed: the
-  macOS `EILSEQ` behaviour itself and the `lstat`-vs-`ENOENT` argument
-  above. What is *no longer* reasoned about is the important part —
-  after this change nothing macOS runs depends on a filesystem accepting
-  such a name.
-
-- **CONFIRMED ON THE REAL MATRIX.** Run
-  https://github.com/levineuwirth/pmacs/actions/runs/31330601204 at
-  `e816812`: **all 14 jobs green**, including
-  `Test (macos-latest / luajit)` and `Test (macos-latest / lua54)` — the
-  two that were red. So the macOS half is now OBSERVED rather than
-  reasoned about; what stays reasoned about is only the *explanation*
-  (`EILSEQ`, and the `lstat`-vs-`ENOENT` argument for why `g6_2c` cannot
-  be made portable), which nothing in CI can confirm or refute.
-
-- **LATENT SIBLING, out of scope and NOT red today:**
-  `tests/gpu_invocation_acceptance.rs:621` writes
-  `OsString::from_vec(vec![b'r', b'a', b'w', 0xff])` to disk. It sits
-  inside `#[cfg(feature = "crdt")] mod crdt`, and the `crdt-test` job is
-  **ubuntu-only**, so it never runs on macOS. It would fail the same way
-  the day that job gains a macOS leg. No other test in the tree builds a
-  platform-hostile path: `g6_14c`/`g6_14d`'s `nl\nroot` and `trailing\r`
-  are valid UTF-8 and legal on APFS, which is why they were green on
-  macOS all along.
-
-**Review round 4: a COPY was being reported as a RENAME.**
-
-- **Fixed at presentation, not in `kind`.** Porcelain v2's `2` record
-  covers renames **and** copies — `<Xscore>` leads with `R` or `C` —
-  and the parser already retained `score`. The diff header now reads
-  that byte and says `copied from` or `renamed from`; nothing new is
-  parsed.
-
-  **`kind` stays `"rename"` for both, deliberately.** Every *behaviour*
-  keyed on it is identical, including the two-path
-  `git diff HEAD -- <orig> <current>`, which is correct for a copy as
-  much as for a rename. Splitting the kind would force every consumer
-  present and future to spell `kind == "rename" or kind == "copy"`, and
-  an arm forgotten anywhere silently drops copies back to the one-path
-  diff — the exact regression the fix exists to avoid. Consumers
-  checked, and there are few: `diff_plan` (the only `kind == "rename"`
-  branch in the tree), `status_line_text` (keys off `row.orig`, not
-  `kind`), `g6_1`'s corpus assertion and `g6_8`'s unborn-unreachability
-  assertion. `score` has no other reader anywhere.
-
-- **Read from `score`, not from `row.x`.** The score field names
-  rename-vs-copy whichever side detected the change; `X` carries the
-  letter only for an index-side one, a worktree-side detection leaving
-  `X` a `.`.
-
-- **The status ROW is unchanged, and that is a decision.** Its `XY`
-  prefix already reads `R.` against `C.`, out of the same byte, in the
-  porcelain vocabulary every other row is read in — so the distinction
-  is already on screen and a second vocabulary beside it would be the
-  wider surface for no new fact. `g6_4b` asserts both prefixes, so the
-  claim is checked rather than asserted here.
-
-- **Parser-level coverage, stated plainly rather than implied.** The
-  copy ROW is supplied through `_deliver_status`, the seam
-  `g6_2b`/`g6_17`/`g6_21` already use.
-
-  **Scope corrected in review round 5.** This entry claimed real `git`
-  emits no `2 C` record at all, measured under
-  `-c status.renames=copies`. **The measurement was real; the claim
-  drawn from it was too broad.** `git-status(1)` documents `C` as
-  "copied (if config option status.renames is set to `copies`)", so
-  git does emit it. What the test establishes is that **this fixture**
-  — whose copy source is unchanged — yields `1 A.`. That is enough to
-  justify crafting the row and nothing more. Everything downstream is real: repository,
-  panel, `d` dispatch, spawned `git diff`, rendered buffer. Both
-  crafted rows name paths that exist in the fixture, so each drives a
-  real two-path diff.
-
-- **Unborn `HEAD` needed nothing, confirmed rather than assumed.**
-  `diff_plan`'s rename branch is inside `if not unborn`, and `g6_8`
-  already pins that no `2` record can occur there — over
-  `kind == 'rename'`, which under this choice covers copies too.
-
-**Re-gated:** all steps green, acceptance now **34 tests**. Three
-mutations, each caught: header always `renamed` fails only the copy
-half; header always `copied` fails only the rename half; dropping
-`row.orig` from the steps fails the argv equality. The two `--lib`
-failures seen on an earlier run (`composition_overhead_under_ten_percent`,
-`setsid_escapee_…`, plus two perf tests) were **machine load from
-sibling worktrees** — load average 15–27 — and pass in isolation and on
-a re-run; nothing in this change touches `src/`.
-
-**Written with the lane's first commit, before the PR exists** — the
-standing correction from #171 and #215. This session it was missed on
-#224 and again on #225, both caught by review; writing it now is the
-only thing that stops a third.
-
-**Branch `git-status-stage1`**, base `githubsucks/main` @ `4bc55e8`
-(the #225 merge). **`githubsucks/git-status-stage1` is the
-authoritative tip** — the ref, not a SHA. Recover with
-`git fetch githubsucks && git checkout git-status-stage1`.
-
-- **Framing `docs/git-integration-framing.md`, revision 5, APPROVED
-  2026-08-09** after four review rounds. Every round found something
-  the previous one had asserted without reading; the doc records which.
-- **Scope:** `*git-status*` (a `listview` panel over
-  `git --no-optional-locks -C <dir> status --porcelain=v2 --branch -z`)
-  and `*git-diff*` (plain generated text, file-level, no hunk model).
-  Plus **one additive `listview` change**: an optional `keys` table,
-  install-once with match-on-reopen, because `Keymap::bind` refuses
-  duplicates and the refresh path re-opens.
-- **NO WIRE CHANGE**, and that is load-bearing for scheduling:
-  `PROTOCOL_VERSION` is a strict serialization point, so this lane can
-  run concurrently with other work. **Stage 2 (gutter markers) needs
-  new `DecorationKind` variants and must be scheduled alone.**
-- **Known negative coherence impact (§9):** git runs as a spawned
-  process, and spawned processes do not appear in `*workers*` — that is
-  `async.lua`'s job list. This adds a fifth unattributable background
-  thing. Labelled honestly; a label is not attribution.
-- **Verification plan** in framing §6. The load-bearing cases: an `AM`
-  unborn fixture (two labelled patches), untracked diff rendering on
-  **exit 1** (`--no-index` implies `--exit-code`), two successive
-  refreshes not raising `DuplicateBinding`, and a non-UTF-8 path that
-  parses and displays but **refuses** its gestures at the
-  `String`-typed binding boundary.
-- **Gates:** `scripts/gate --acceptance git_status_stage1_acceptance`.
-
-**Implemented.** `builtin/runtime/git.lua` (new, loaded after
-`linewrap.lua`), the `keys` extension in `builtin/runtime/listview.lua`,
-one chunk-load line in `src/editor.rs`, and
-`tests/git_status_stage1_acceptance.rs` (25 tests, one per §6 bullet).
-No `pmacs-protocol` change, no `PROTOCOL_VERSION` change, no
-`DecorationKind` change — the no-wire property held.
-
-Five things worth carrying, all found by biting the suite rather than by
-reading:
-
-- **`listview.open`'s `seat_cursor` walks DOWN from wherever the cursor
-  is**, on the premise that a fresh `switch_active_buffer` zeroed it.
-  Re-opening an already-displayed panel — which is exactly what the
-  async completion model does — zeroes nothing, so the walk lands one
-  row *below* the previous cursor. The completion handler seats
-  unconditionally from line 0 instead of trusting `open`.
-- **A selection test that inserts ONE row above the selection is
-  vacuous**, because that accidental off-by-one lands on the right row.
-  The fixture inserts two.
-- **`{:?}` on a Rust string containing NUL cannot build a `-z` fixture.**
-  Debug renders NUL as `\0`, and Lua's decimal escape swallows the
-  digits after it — so `\0` before a `1` record becomes
-  `string.char(1)` and the record merges into its predecessor. One test
-  passed while parsing nothing: the merged text landed in
-  `# branch.head`, the panel header rendered it, and a `contains`
-  assertion on the panel text was satisfied by the header. Payloads are
-  joined in Lua with `string.char(0)`.
-- **A path may contain a newline, so a panel row must escape it.**
-  Parsing the bytes correctly and then writing them raw into a
-  one-row-per-line buffer desynchronizes every line-to-row map — and the
-  rope is UTF-8 by project invariant, so non-UTF-8 path bytes cannot go
-  in at all. Rows render `\xNN` escapes; the raw bytes stay on the
-  record, where the refusal check reads them.
-- **Untracked rows sort AFTER every tracked row** in porcelain v2, so an
-  untracked file cannot be used to reorder a list above a selection.
-
-Two deliberate deviations from the framing's letter, both narrow:
-`--no-color` on every diff invocation (a user with `color.ui = always`
-would otherwise get escape sequences in a buffer with no ANSI parser
-behind it), and `pmacs.git._program`, a module-local that the
-missing-binary witness points at a name not on `PATH`. There is no other
-in-process route to that branch: Rust's `Command` resolves the program
-against the **parent** process's `PATH`, so a child `env` cannot hide
-git, and `std::env::set_var` is `unsafe` in edition 2024.
 ## Destination capture (Q#JR14 generalization) — PR #231 OPEN, revision 9, cleared to merge
 
 **PR #231** — https://github.com/levineuwirth/pmacs/pull/231. #227
