@@ -55,7 +55,7 @@ use pmacs_protocol::{
 use unicode_width::UnicodeWidthChar;
 use wgpu::MultisampleState;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
@@ -2704,6 +2704,429 @@ impl App {
         self.flush_panel_geometry(GeometryTrigger::Surface);
     }
 
+    /// Perform [`PointerRoute::Moved`]. `x`/`y` are the physical
+    /// pointer position winit reported.
+    #[allow(clippy::too_many_lines)] // one linear gesture pipeline; splitting hides the order.
+    fn apply_cursor_moved(&mut self, x: f64, y: f64) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        state.pointer_pos = Some((x, y));
+        // Q#CM1 — while the menu is open, motion only moves the
+        // highlight; send a hover when the item under the pointer
+        // changes from the daemon's current active row.
+        if state.menu.is_some() {
+            let hit = state.menu_hit(x, y);
+            let active = state.menu.as_ref().and_then(|m| m.active);
+            if let Some((row, true)) = hit
+                && active != Some(row)
+            {
+                self.send_menu_pointer(Some(row), false);
+            }
+            return;
+        }
+        // Bottom panel Stage 2B-3 — the band is consumed BEFORE
+        // the terminal and document paths. It sits below
+        // `document_text_bottom`, so a band pixel cannot hit the
+        // document grid, but ordering it first is what makes that a
+        // stated rule rather than a consequence of the arithmetic.
+        if state.panel.drag.is_some() {
+            self.advance_panel_drag(y);
+            return;
+        }
+        let surface = state.classify_pointer_surface(x as f32, y as f32);
+        if state.set_panel_divider_hover(surface == PointerSurface::PanelDivider) {
+            state.apply_panel_cursor_icon();
+        }
+        match surface {
+            PointerSurface::PanelDivider | PointerSurface::PanelBackground => return,
+            PointerSurface::PanelCell(coord) => {
+                // A held left button makes this a `Drag(Left)`, not a
+                // `Move`. That distinction is the whole of panel
+                // selection: `Move` never focuses or claims, while
+                // every non-`Move` gesture activates the panel first,
+                // so reporting a drag as a hover makes a selection
+                // drag silently do nothing.
+                let kind = state.panel_motion_kind();
+                if state.panel_motion_is_new(coord) {
+                    let mods = translate_mods(self.modifiers);
+                    self.send_panel_pointer_at(x, y, kind, mods);
+                }
+                return;
+            }
+            PointerSurface::Elsewhere => {
+                if state.panel.pointer_held {
+                    // A drag that wandered out of the band keeps
+                    // belonging to the band until the button comes up.
+                    return;
+                }
+            }
+        }
+        // Vterm Stage 3 — inside the terminal clip, motion is a
+        // terminal gesture. Consumed before minimap scrubbing
+        // and document hit testing: terminal mode paints no
+        // minimap and has no source bytes to resolve.
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        if state.terminal.is_some() {
+            let dragging = state.pointer_drag_active;
+            if let Some((buffer_id, coord)) = self.terminal_pointer_hit(x, y) {
+                // Sub-cell motion resolves to the same cell and
+                // carries nothing new. Report only on a cell
+                // change, matching the document drag path's
+                // hit-byte dedupe — otherwise pixel-rate motion
+                // becomes pixel-rate wire traffic, and every one
+                // of those is a daemon-side gesture.
+                let state = self.state.as_mut().expect("checked above");
+                if state.terminal_motion_is_new(coord) {
+                    let mods = translate_mods(self.modifiers);
+                    let kind = if dragging {
+                        ProtocolMouseKind::Drag(ProtocolMouseButton::Left)
+                    } else {
+                        ProtocolMouseKind::Move
+                    };
+                    self.send_terminal_pointer(buffer_id, coord, kind, mods);
+                }
+            }
+            return;
+        }
+        if state.minimap_scrub_active {
+            // Scrubbing (Q#M6): the press began on the
+            // minimap; motion keeps jumping, even if the
+            // pointer wanders out of the band.
+            let vp = state.minimap_jump_to(y);
+            if let Some(vp) = vp
+                && let Some(client) = self.attach_client.as_ref()
+                && let Err(e) = client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+            {
+                eprintln!("pmacs-gpu: minimap scrub send_viewport failed: {e}");
+            }
+            return;
+        }
+        if !state.pointer_drag_active {
+            return;
+        }
+        // Q#M7 — arm/disarm edge auto-scroll from the drag's
+        // vertical position; `about_to_wait` runs the ticks.
+        state.edge_scroll_dir =
+            edge_scroll_direction(y as f32, state.config.height, state.fm, state.band_inset());
+        // Drag coalescing (predicted finding #4): pixel-rate
+        // motion only ships when the hit byte changes.
+        let Some(byte) = state.hit_test_source_byte(x, y) else {
+            return;
+        };
+        if state.last_pointer_sent_byte == Some(byte) {
+            return;
+        }
+        state.last_pointer_sent_byte = Some(byte);
+        state.note_pointer_round_trip();
+        let buffer_id = state.current_buffer_id;
+        let mods = translate_mods(self.modifiers);
+        if let Some(buffer_id) = buffer_id {
+            self.send_pointer(buffer_id, byte, PointerKind::Drag, mods);
+        }
+    }
+
+    /// Perform [`PointerRoute::Left`], press or release.
+    #[allow(clippy::too_many_lines)] // one linear gesture pipeline; splitting hides the order.
+    fn apply_left_button(&mut self, button_state: ElementState) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        let Some((x, y)) = state.pointer_pos else {
+            return;
+        };
+        // Q#CM1 — while the menu is open the left button drives
+        // it: a press invokes the row under the pointer (or
+        // dismisses on a click outside); a release is swallowed.
+        if state.menu.is_some() {
+            if button_state == ElementState::Pressed {
+                let action = match state.menu_hit(x, y) {
+                    Some((row, true)) => Some((Some(row), true)),
+                    Some((_, false)) => None,   // separator — ignore
+                    None => Some((None, true)), // outside — dismiss
+                };
+                if let Some((index, invoke)) = action {
+                    self.send_menu_pointer(index, invoke);
+                }
+            }
+            return;
+        }
+        let mods = translate_mods(self.modifiers);
+        // Bottom panel Stage 2B-3 — the divider strip and the band
+        // claim the gesture before either document path sees it.
+        let panel_surface = state.classify_pointer_surface(x as f32, y as f32);
+        match button_state {
+            ElementState::Pressed => {
+                if panel_surface == PointerSurface::PanelDivider
+                    && state.begin_panel_drag(x as f32, y as f32)
+                {
+                    return;
+                }
+                // Arm the gesture BEFORE sending, and only when the
+                // press actually landed on a cell: arming on a miss
+                // would make a later in-band motion send a `Drag` with
+                // no preceding `Down`, and not arming at all means
+                // `Drag(Left)` is never emitted and panel selection
+                // cannot work at all.
+                if let PointerSurface::PanelCell(_) = panel_surface {
+                    let state = self.state.as_mut().expect("checked above");
+                    state.set_panel_pointer_held(true);
+                    self.send_panel_pointer_at(
+                        x,
+                        y,
+                        ProtocolMouseKind::Down(ProtocolMouseButton::Left),
+                        mods,
+                    );
+                    return;
+                }
+                if state.panel.pointer_held {
+                    let state = self.state.as_mut().expect("checked above");
+                    state.set_panel_pointer_held(false);
+                }
+            }
+            ElementState::Released => {
+                if state.end_panel_drag() {
+                    return;
+                }
+                if state.panel.pointer_held {
+                    let cell = state.panel_release_cell(x as f32, y as f32);
+                    self.send_panel_pointer_at_cell(
+                        cell,
+                        ProtocolMouseKind::Up(ProtocolMouseButton::Left),
+                        mods,
+                    );
+                    if let Some(state) = self.state.as_mut() {
+                        state.set_panel_pointer_held(false);
+                    }
+                    return;
+                }
+            }
+        }
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        if state.terminal.is_some() {
+            let hit = self.terminal_pointer_hit(x, y);
+            let state = self.state.as_mut().expect("checked above");
+            let kind = match button_state {
+                ElementState::Pressed => {
+                    // A press that MISSES the grid (the status
+                    // band, the trailing padding) starts no
+                    // drag: arming the flag there would make a
+                    // later in-grid motion send a `Drag` with no
+                    // preceding `Down`.
+                    state.pointer_drag_active = hit.is_some();
+                    ProtocolMouseKind::Down(ProtocolMouseButton::Left)
+                }
+                ElementState::Released => {
+                    // A release always ends the drag, including
+                    // one that wandered outside the grid.
+                    state.pointer_drag_active = false;
+                    ProtocolMouseKind::Up(ProtocolMouseButton::Left)
+                }
+            };
+            // A press or release always reports, and it re-arms
+            // the motion dedupe: the first drag after a press
+            // must reach the daemon even at the cell the press
+            // landed on.
+            state.last_terminal_pointer_cell = None;
+            if let Some((buffer_id, coord)) = hit {
+                self.send_terminal_pointer(buffer_id, coord, kind, mods);
+            }
+            return;
+        }
+        match button_state {
+            ElementState::Pressed => {
+                if state.in_minimap_band(x, y) {
+                    // Q#M6 — consumed before text hit-testing;
+                    // never a Pointer event.
+                    state.minimap_scrub_active = true;
+                    let vp = state.minimap_jump_to(y);
+                    if let Some(vp) = vp
+                        && let Some(client) = self.attach_client.as_ref()
+                        && let Err(e) =
+                            client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+                    {
+                        eprintln!("pmacs-gpu: minimap jump send_viewport failed: {e}");
+                    }
+                    return;
+                }
+                let Some(byte) = state.hit_test_source_byte(x, y) else {
+                    return;
+                };
+                let kind = state.classify_pointer_down(byte, mods.contains(Modifiers::SHIFT));
+                state.pointer_drag_active = true;
+                state.last_pointer_sent_byte = Some(byte);
+                state.note_pointer_round_trip();
+                if let Some(buffer_id) = state.current_buffer_id {
+                    if debug_input() {
+                        eprintln!("pmacs-gpu pointer: {kind:?} byte={byte}");
+                    }
+                    self.send_pointer(buffer_id, byte, kind, mods);
+                }
+            }
+            ElementState::Released => {
+                if state.minimap_scrub_active {
+                    state.minimap_scrub_active = false;
+                    return;
+                }
+                if !state.pointer_drag_active {
+                    return;
+                }
+                state.pointer_drag_active = false;
+                state.edge_scroll_dir = None;
+                state.edge_scroll_last = None;
+                let byte = state
+                    .hit_test_source_byte(x, y)
+                    .or(state.last_pointer_sent_byte);
+                let buffer_id = state.current_buffer_id;
+                if let (Some(byte), Some(buffer_id)) = (byte, buffer_id) {
+                    self.send_pointer(buffer_id, byte, PointerKind::Up, mods);
+                }
+            }
+        }
+    }
+
+    /// Perform [`PointerRoute::RightPress`].
+    ///
+    /// Q#CM1 — right-click opens the context menu at the hit byte
+    /// (or dismisses an open one). The anchor pixel is remembered
+    /// so the popup the daemon sends back draws at the click.
+    #[allow(clippy::too_many_lines)] // one linear gesture pipeline; splitting hides the order.
+    fn apply_right_press(&mut self) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        let Some((x, y)) = state.pointer_pos else {
+            return;
+        };
+        if state.menu.is_some() {
+            self.send_menu_pointer(None, true);
+            return;
+        }
+        // Bottom panel Stage 2B-3 — a right-click in the band is a
+        // panel gesture, claimed before the terminal and document
+        // paths. The daemon decides between child mouse reporting and
+        // the editor context menu, so the anchor is remembered here
+        // exactly as for a document click; without this the band's
+        // context actions are unreachable and the click is applied to
+        // the document underneath instead.
+        if let PointerSurface::PanelCell(_) = state.classify_pointer_surface(x as f32, y as f32) {
+            if let Some(state) = self.state.as_mut() {
+                state.menu_anchor_px = (x, y);
+            }
+            let mods = translate_mods(self.modifiers);
+            self.send_panel_pointer_at(
+                x,
+                y,
+                ProtocolMouseKind::Down(ProtocolMouseButton::Right),
+                mods,
+            );
+            return;
+        }
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        // Vterm Stage 3 — a right-click in the terminal clip is
+        // a terminal gesture; the daemon decides between child
+        // reporting and the editor context menu, so the anchor
+        // is remembered here exactly as for a document click.
+        if state.terminal.is_some() {
+            state.menu_anchor_px = (x, y);
+            if let Some((buffer_id, coord)) = self.terminal_pointer_hit(x, y) {
+                let mods = translate_mods(self.modifiers);
+                self.send_terminal_pointer(
+                    buffer_id,
+                    coord,
+                    ProtocolMouseKind::Down(ProtocolMouseButton::Right),
+                    mods,
+                );
+            }
+            return;
+        }
+        let Some(byte) = state.hit_test_source_byte(x, y) else {
+            return;
+        };
+        state.menu_anchor_px = (x, y);
+        let buffer_id = state.current_buffer_id;
+        let mods = translate_mods(self.modifiers);
+        if let Some(buffer_id) = buffer_id {
+            self.send_pointer(buffer_id, byte, PointerKind::Context, mods);
+        }
+    }
+
+    /// Perform [`PointerRoute::Wheel`].
+    #[allow(clippy::too_many_lines)] // one linear gesture pipeline; splitting hides the order.
+    fn apply_wheel(&mut self, delta: MouseScrollDelta) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        // Wheel scroll is local-only: the GPU owns the
+        // viewport. Positive winit y = scroll up = smaller
+        // scroll_top.
+        let lines = match delta {
+            winit::event::MouseScrollDelta::LineDelta(_, y) => {
+                (-y * WHEEL_LINES_PER_TICK).round() as i64
+            }
+            winit::event::MouseScrollDelta::PixelDelta(p) => {
+                (-(p.y as f32) / state.fm.code_line_height()).round() as i64
+            }
+        };
+        if lines == 0 {
+            return;
+        }
+        // Bottom panel Stage 2B-3 — a wheel tick over the band scrolls
+        // the PANEL's window, which is daemon-side state, so it
+        // crosses the wire instead of moving this frontend's local
+        // document `scroll_top`. Falling through would scroll the
+        // document while the pointer is inside the panel.
+        if let Some((x, y)) = state.pointer_pos
+            && matches!(
+                state.classify_pointer_surface(x as f32, y as f32),
+                PointerSurface::PanelCell(_)
+            )
+        {
+            let mods = translate_mods(self.modifiers);
+            let kind = if lines < 0 {
+                ProtocolMouseKind::ScrollUp
+            } else {
+                ProtocolMouseKind::ScrollDown
+            };
+            self.send_panel_pointer_at(x, y, kind, mods);
+            return;
+        }
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        // Vterm Stage 3 — the terminal's scrollback belongs to
+        // the daemon-side view, not to this frontend's local
+        // scroll, so a wheel tick crosses the wire as a
+        // terminal gesture instead of moving `scroll_top`.
+        if state.terminal.is_some() {
+            if let Some((x, y)) = state.pointer_pos
+                && let Some((buffer_id, coord)) = self.terminal_pointer_hit(x, y)
+            {
+                let mods = translate_mods(self.modifiers);
+                let kind = if lines < 0 {
+                    ProtocolMouseKind::ScrollUp
+                } else {
+                    ProtocolMouseKind::ScrollDown
+                };
+                self.send_terminal_pointer(buffer_id, coord, kind, mods);
+            }
+            return;
+        }
+        let vp = state.scroll_by_lines(lines);
+        if let Some(vp) = vp
+            && let Some(client) = self.attach_client.as_ref()
+            && let Err(e) = client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+        {
+            eprintln!("pmacs-gpu: wheel send_viewport failed: {e}");
+        }
+    }
+
     /// Perform [`LifecycleRoute::Redraw`]. A no-op before `resumed` has
     /// built the surface.
     fn apply_redraw(&mut self) {
@@ -2938,10 +3361,9 @@ enum Route<'a> {
         action: KeyAction,
         key: &'a KeyEvent,
     },
-    /// No extracted family claims this event. During 1-pre that covers
-    /// both the families still inline in `window_event` and the events
-    /// pmacs genuinely ignores; when the last family moves here it means
-    /// only the second.
+    /// The pointer family — see [`route_pointer`].
+    Pointer(PointerRoute),
+    /// No family claims this event: pmacs ignores it.
     Unrouted,
 }
 
@@ -3007,6 +3429,9 @@ fn route_event(event: &WindowEvent) -> Route<'_> {
     if let Some((action, key)) = route_keyboard(event) {
         return Route::Keyboard { action, key };
     }
+    if let Some(pointer) = route_pointer(event) {
+        return Route::Pointer(pointer);
+    }
     Route::Unrouted
 }
 
@@ -3053,6 +3478,55 @@ fn route_key_action(state: ElementState) -> KeyAction {
     }
 }
 
+/// The pointer family — Session M-2 pointer input, see
+/// `docs/pmacs-gpu-mouse-framing.md`.
+///
+/// The button discrimination used to live in the shape of two
+/// overlapping `MouseInput` match arms — left in **either** state, right
+/// in the **pressed** state only, everything else falling through the
+/// wildcard several hundred lines away. Naming the cases makes the
+/// asymmetry a decision instead of an artefact of arm order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PointerRoute {
+    /// `CursorMoved`, at the physical position winit reported.
+    Moved { x: f64, y: f64 },
+    /// `MouseInput` on the left button, in **either** state: a press
+    /// starts a selection or a scrub, a release ends it.
+    Left(ElementState),
+    /// `MouseInput` **pressing** the right button. The context menu
+    /// opens on the press, so the matching release is deliberately
+    /// nothing — see `UnusedButton`.
+    RightPress,
+    /// A `MouseInput` this frontend has no semantics for: the right
+    /// button's release, and every middle / back / forward / other
+    /// button in either state. **Claimed by the pointer family and
+    /// dropped**, exactly as it behaved when it fell through to the
+    /// wildcard. Stage 1b's B4 gives the middle button a meaning
+    /// (PRIMARY-selection paste on Linux) and lands here.
+    UnusedButton,
+    /// `MouseWheel`. The delta is carried raw: converting it to lines
+    /// needs the code line height, which is `State`'s to know.
+    Wheel(MouseScrollDelta),
+}
+
+/// The pointer family's decision. `None` means some other family owns
+/// the event.
+fn route_pointer(event: &WindowEvent) -> Option<PointerRoute> {
+    match event {
+        WindowEvent::CursorMoved { position, .. } => Some(PointerRoute::Moved {
+            x: position.x,
+            y: position.y,
+        }),
+        WindowEvent::MouseInput { state, button, .. } => Some(match (button, state) {
+            (MouseButton::Left, _) => PointerRoute::Left(*state),
+            (MouseButton::Right, ElementState::Pressed) => PointerRoute::RightPress,
+            _ => PointerRoute::UnusedButton,
+        }),
+        WindowEvent::MouseWheel { delta, .. } => Some(PointerRoute::Wheel(*delta)),
+        _ => None,
+    }
+}
+
 /// GUI Stage 1-pre — the headless routing harness (P2).
 ///
 /// It feeds `WindowEvent`s through the production [`route_event`] and
@@ -3092,7 +3566,8 @@ impl<'a> RoutingHarness<'a> {
 #[cfg(test)]
 mod input_routing_tests {
     use super::*;
-    use winit::dpi::PhysicalSize;
+    use winit::dpi::{PhysicalPosition, PhysicalSize};
+    use winit::event::{DeviceId, TouchPhase};
     use winit::keyboard::ModifiersState;
 
     fn modifiers_changed(state: ModifiersState) -> WindowEvent {
@@ -3208,9 +3683,114 @@ mod input_routing_tests {
         assert_eq!(route_key_action(ElementState::Released), KeyAction::Release);
     }
 
+    fn mouse_input(state: ElementState, button: MouseButton) -> WindowEvent {
+        WindowEvent::MouseInput {
+            device_id: DeviceId::dummy(),
+            state,
+            button,
+        }
+    }
+
+    /// P1 — `CursorMoved` carries the position through.
+    #[test]
+    fn cursor_moved_routes_the_position() {
+        let event = WindowEvent::CursorMoved {
+            device_id: DeviceId::dummy(),
+            position: PhysicalPosition::new(12.5, 34.25),
+        };
+        assert_eq!(
+            route_one(&event),
+            Route::Pointer(PointerRoute::Moved { x: 12.5, y: 34.25 })
+        );
+    }
+
+    /// P1 — the left button routes in **both** states, because a press
+    /// starts a gesture and a release ends it. The state is carried, not
+    /// discarded: routing a release as a press would leave a drag armed
+    /// forever.
+    #[test]
+    fn the_left_button_routes_in_either_state() {
+        for state in [ElementState::Pressed, ElementState::Released] {
+            let event = mouse_input(state, MouseButton::Left);
+            assert_eq!(
+                route_one(&event),
+                Route::Pointer(PointerRoute::Left(state)),
+                "left {state:?}"
+            );
+        }
+    }
+
+    /// P1 — the right button is **asymmetric with the left, on purpose**:
+    /// the context menu opens on the press and the release means nothing.
+    /// This asymmetry used to be implicit in the order and shape of two
+    /// overlapping match arms.
+    #[test]
+    fn the_right_button_routes_only_on_press() {
+        let pressed = mouse_input(ElementState::Pressed, MouseButton::Right);
+        assert_eq!(
+            route_one(&pressed),
+            Route::Pointer(PointerRoute::RightPress)
+        );
+        let released = mouse_input(ElementState::Released, MouseButton::Right);
+        assert_eq!(
+            route_one(&released),
+            Route::Pointer(PointerRoute::UnusedButton)
+        );
+    }
+
+    /// A button the frontend has no semantics for is **claimed by the
+    /// pointer family and dropped**, not left unrouted — the same
+    /// distinction the keyboard family draws for a key-up. Stage 1b's B4
+    /// gives the middle button a meaning and lands on this route.
+    #[test]
+    fn a_button_without_semantics_is_claimed_and_dropped() {
+        for button in [
+            MouseButton::Middle,
+            MouseButton::Back,
+            MouseButton::Forward,
+            MouseButton::Other(9),
+        ] {
+            for state in [ElementState::Pressed, ElementState::Released] {
+                let event = mouse_input(state, button);
+                assert_eq!(
+                    route_one(&event),
+                    Route::Pointer(PointerRoute::UnusedButton),
+                    "{button:?} {state:?}"
+                );
+            }
+        }
+    }
+
+    /// P1 — the wheel delta is carried **raw**. Converting it to lines
+    /// needs the code line height, which only `State` knows, so the
+    /// router must not try.
+    #[test]
+    fn the_wheel_carries_its_delta_unconverted() {
+        let lines = WindowEvent::MouseWheel {
+            device_id: DeviceId::dummy(),
+            delta: MouseScrollDelta::LineDelta(0.0, -3.0),
+            phase: TouchPhase::Moved,
+        };
+        assert_eq!(
+            route_one(&lines),
+            Route::Pointer(PointerRoute::Wheel(MouseScrollDelta::LineDelta(0.0, -3.0)))
+        );
+        let pixels = WindowEvent::MouseWheel {
+            device_id: DeviceId::dummy(),
+            delta: MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 17.5)),
+            phase: TouchPhase::Moved,
+        };
+        assert_eq!(
+            route_one(&pixels),
+            Route::Pointer(PointerRoute::Wheel(MouseScrollDelta::PixelDelta(
+                PhysicalPosition::new(0.0, 17.5)
+            )))
+        );
+    }
+
     /// An event no family claims. `Occluded` is chosen because pmacs has
-    /// never handled it and no later slice will — a still-inline family
-    /// would also read `Unrouted` today and stop doing so when it moves.
+    /// never handled it and — unlike a mouse button it has no semantics
+    /// for — no family claims it at all.
     #[test]
     fn an_unclaimed_event_is_unrouted() {
         let event = WindowEvent::Occluded(true);
@@ -3218,15 +3798,21 @@ mod input_routing_tests {
     }
 
     /// P2 — the harness records a transcript, and the transcript
-    /// distinguishes each lifecycle effect from the others and from an
-    /// unclaimed event. **Two of these five rows produce no outbound
-    /// traffic whatsoever**, which is the property that rules out a
-    /// harness built on protocol traffic alone.
+    /// distinguishes every routed effect from the others and from an
+    /// unclaimed event. **Two of these rows produce no outbound traffic
+    /// whatsoever** (`Redraw`, `Exit`), which is the property that rules
+    /// out a harness built on protocol traffic alone.
     #[test]
     fn the_harness_records_each_local_effect_in_order() {
         let events = [
             WindowEvent::Resized(PhysicalSize::new(800, 600)),
             modifiers_changed(ModifiersState::SHIFT),
+            WindowEvent::CursorMoved {
+                device_id: DeviceId::dummy(),
+                position: PhysicalPosition::new(4.0, 8.0),
+            },
+            mouse_input(ElementState::Pressed, MouseButton::Left),
+            mouse_input(ElementState::Pressed, MouseButton::Middle),
             WindowEvent::RedrawRequested,
             WindowEvent::Occluded(false),
             WindowEvent::CloseRequested,
@@ -3243,6 +3829,9 @@ mod input_routing_tests {
                     height: 600,
                 }),
                 Route::Lifecycle(LifecycleRoute::Modifiers(ModifiersState::SHIFT)),
+                Route::Pointer(PointerRoute::Moved { x: 4.0, y: 8.0 }),
+                Route::Pointer(PointerRoute::Left(ElementState::Pressed)),
+                Route::Pointer(PointerRoute::UnusedButton),
                 Route::Lifecycle(LifecycleRoute::Redraw),
                 Route::Unrouted,
                 Route::Lifecycle(LifecycleRoute::Exit),
@@ -3300,466 +3889,42 @@ impl ApplicationHandler<AppEvent> for App {
         }
     }
 
-    #[allow(clippy::too_many_lines)] // linear per-event dispatch; splitting hides the input flow.
+    /// P3 — the thin call-through. Every decision belongs to
+    /// [`route_event`] and every effect to an `apply_*` method; what is
+    /// left here is `event_loop.exit()`, which exists nowhere else in
+    /// the crate and is the one thing a headless test cannot reach.
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        match event {
-            // Session M-2 — pointer input (docs/pmacs-gpu-mouse-framing.md).
-            WindowEvent::CursorMoved { position, .. } => {
-                let Some(state) = self.state.as_mut() else {
-                    return;
-                };
-                state.pointer_pos = Some((position.x, position.y));
-                // Q#CM1 — while the menu is open, motion only moves the
-                // highlight; send a hover when the item under the pointer
-                // changes from the daemon's current active row.
-                if state.menu.is_some() {
-                    let hit = state.menu_hit(position.x, position.y);
-                    let active = state.menu.as_ref().and_then(|m| m.active);
-                    if let Some((row, true)) = hit
-                        && active != Some(row)
-                    {
-                        self.send_menu_pointer(Some(row), false);
-                    }
-                    return;
-                }
-                // Bottom panel Stage 2B-3 — the band is consumed BEFORE
-                // the terminal and document paths. It sits below
-                // `document_text_bottom`, so a band pixel cannot hit the
-                // document grid, but ordering it first is what makes that a
-                // stated rule rather than a consequence of the arithmetic.
-                if state.panel.drag.is_some() {
-                    self.advance_panel_drag(position.y);
-                    return;
-                }
-                let surface = state.classify_pointer_surface(position.x as f32, position.y as f32);
-                if state.set_panel_divider_hover(surface == PointerSurface::PanelDivider) {
-                    state.apply_panel_cursor_icon();
-                }
-                match surface {
-                    PointerSurface::PanelDivider | PointerSurface::PanelBackground => return,
-                    PointerSurface::PanelCell(coord) => {
-                        // A held left button makes this a `Drag(Left)`, not a
-                        // `Move`. That distinction is the whole of panel
-                        // selection: `Move` never focuses or claims, while
-                        // every non-`Move` gesture activates the panel first,
-                        // so reporting a drag as a hover makes a selection
-                        // drag silently do nothing.
-                        let kind = state.panel_motion_kind();
-                        if state.panel_motion_is_new(coord) {
-                            let mods = translate_mods(self.modifiers);
-                            self.send_panel_pointer_at(position.x, position.y, kind, mods);
-                        }
-                        return;
-                    }
-                    PointerSurface::Elsewhere => {
-                        if state.panel.pointer_held {
-                            // A drag that wandered out of the band keeps
-                            // belonging to the band until the button comes up.
-                            return;
-                        }
-                    }
-                }
-                // Vterm Stage 3 — inside the terminal clip, motion is a
-                // terminal gesture. Consumed before minimap scrubbing
-                // and document hit testing: terminal mode paints no
-                // minimap and has no source bytes to resolve.
-                let Some(state) = self.state.as_mut() else {
-                    return;
-                };
-                if state.terminal.is_some() {
-                    let dragging = state.pointer_drag_active;
-                    if let Some((buffer_id, coord)) =
-                        self.terminal_pointer_hit(position.x, position.y)
-                    {
-                        // Sub-cell motion resolves to the same cell and
-                        // carries nothing new. Report only on a cell
-                        // change, matching the document drag path's
-                        // hit-byte dedupe — otherwise pixel-rate motion
-                        // becomes pixel-rate wire traffic, and every one
-                        // of those is a daemon-side gesture.
-                        let state = self.state.as_mut().expect("checked above");
-                        if state.terminal_motion_is_new(coord) {
-                            let mods = translate_mods(self.modifiers);
-                            let kind = if dragging {
-                                ProtocolMouseKind::Drag(ProtocolMouseButton::Left)
-                            } else {
-                                ProtocolMouseKind::Move
-                            };
-                            self.send_terminal_pointer(buffer_id, coord, kind, mods);
-                        }
-                    }
-                    return;
-                }
-                if state.minimap_scrub_active {
-                    // Scrubbing (Q#M6): the press began on the
-                    // minimap; motion keeps jumping, even if the
-                    // pointer wanders out of the band.
-                    let vp = state.minimap_jump_to(position.y);
-                    if let Some(vp) = vp
-                        && let Some(client) = self.attach_client.as_ref()
-                        && let Err(e) =
-                            client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
-                    {
-                        eprintln!("pmacs-gpu: minimap scrub send_viewport failed: {e}");
-                    }
-                    return;
-                }
-                if !state.pointer_drag_active {
-                    return;
-                }
-                // Q#M7 — arm/disarm edge auto-scroll from the drag's
-                // vertical position; `about_to_wait` runs the ticks.
-                state.edge_scroll_dir = edge_scroll_direction(
-                    position.y as f32,
-                    state.config.height,
-                    state.fm,
-                    state.band_inset(),
-                );
-                // Drag coalescing (predicted finding #4): pixel-rate
-                // motion only ships when the hit byte changes.
-                let Some(byte) = state.hit_test_source_byte(position.x, position.y) else {
-                    return;
-                };
-                if state.last_pointer_sent_byte == Some(byte) {
-                    return;
-                }
-                state.last_pointer_sent_byte = Some(byte);
-                state.note_pointer_round_trip();
-                let buffer_id = state.current_buffer_id;
-                let mods = translate_mods(self.modifiers);
-                if let Some(buffer_id) = buffer_id {
-                    self.send_pointer(buffer_id, byte, PointerKind::Drag, mods);
-                }
+        match route_event(&event) {
+            Route::Lifecycle(LifecycleRoute::Exit) => event_loop.exit(),
+            Route::Lifecycle(LifecycleRoute::Modifiers(mods)) => self.modifiers = mods,
+            Route::Lifecycle(LifecycleRoute::Resize { width, height }) => {
+                self.apply_resize(width, height);
             }
-            WindowEvent::MouseInput {
-                state: button_state,
-                button: winit::event::MouseButton::Left,
-                ..
+            Route::Lifecycle(LifecycleRoute::Redraw) => self.apply_redraw(),
+            Route::Keyboard {
+                action: KeyAction::Press,
+                key,
             } => {
-                let Some(state) = self.state.as_mut() else {
-                    return;
-                };
-                let Some((x, y)) = state.pointer_pos else {
-                    return;
-                };
-                // Q#CM1 — while the menu is open the left button drives
-                // it: a press invokes the row under the pointer (or
-                // dismisses on a click outside); a release is swallowed.
-                if state.menu.is_some() {
-                    if button_state == ElementState::Pressed {
-                        let action = match state.menu_hit(x, y) {
-                            Some((row, true)) => Some((Some(row), true)),
-                            Some((_, false)) => None, // separator — ignore
-                            None => Some((None, true)), // outside — dismiss
-                        };
-                        if let Some((index, invoke)) = action {
-                            self.send_menu_pointer(index, invoke);
-                        }
-                    }
-                    return;
-                }
-                let mods = translate_mods(self.modifiers);
-                // Bottom panel Stage 2B-3 — the divider strip and the band
-                // claim the gesture before either document path sees it.
-                let panel_surface = state.classify_pointer_surface(x as f32, y as f32);
-                match button_state {
-                    ElementState::Pressed => {
-                        if panel_surface == PointerSurface::PanelDivider
-                            && state.begin_panel_drag(x as f32, y as f32)
-                        {
-                            return;
-                        }
-                        // Arm the gesture BEFORE sending, and only when the
-                        // press actually landed on a cell: arming on a miss
-                        // would make a later in-band motion send a `Drag` with
-                        // no preceding `Down`, and not arming at all means
-                        // `Drag(Left)` is never emitted and panel selection
-                        // cannot work at all.
-                        if let PointerSurface::PanelCell(_) = panel_surface {
-                            let state = self.state.as_mut().expect("checked above");
-                            state.set_panel_pointer_held(true);
-                            self.send_panel_pointer_at(
-                                x,
-                                y,
-                                ProtocolMouseKind::Down(ProtocolMouseButton::Left),
-                                mods,
-                            );
-                            return;
-                        }
-                        if state.panel.pointer_held {
-                            let state = self.state.as_mut().expect("checked above");
-                            state.set_panel_pointer_held(false);
-                        }
-                    }
-                    ElementState::Released => {
-                        if state.end_panel_drag() {
-                            return;
-                        }
-                        if state.panel.pointer_held {
-                            let cell = state.panel_release_cell(x as f32, y as f32);
-                            self.send_panel_pointer_at_cell(
-                                cell,
-                                ProtocolMouseKind::Up(ProtocolMouseButton::Left),
-                                mods,
-                            );
-                            if let Some(state) = self.state.as_mut() {
-                                state.set_panel_pointer_held(false);
-                            }
-                            return;
-                        }
-                    }
-                }
-                let Some(state) = self.state.as_mut() else {
-                    return;
-                };
-                if state.terminal.is_some() {
-                    let hit = self.terminal_pointer_hit(x, y);
-                    let state = self.state.as_mut().expect("checked above");
-                    let kind = match button_state {
-                        ElementState::Pressed => {
-                            // A press that MISSES the grid (the status
-                            // band, the trailing padding) starts no
-                            // drag: arming the flag there would make a
-                            // later in-grid motion send a `Drag` with no
-                            // preceding `Down`.
-                            state.pointer_drag_active = hit.is_some();
-                            ProtocolMouseKind::Down(ProtocolMouseButton::Left)
-                        }
-                        ElementState::Released => {
-                            // A release always ends the drag, including
-                            // one that wandered outside the grid.
-                            state.pointer_drag_active = false;
-                            ProtocolMouseKind::Up(ProtocolMouseButton::Left)
-                        }
-                    };
-                    // A press or release always reports, and it re-arms
-                    // the motion dedupe: the first drag after a press
-                    // must reach the daemon even at the cell the press
-                    // landed on.
-                    state.last_terminal_pointer_cell = None;
-                    if let Some((buffer_id, coord)) = hit {
-                        self.send_terminal_pointer(buffer_id, coord, kind, mods);
-                    }
-                    return;
-                }
-                match button_state {
-                    ElementState::Pressed => {
-                        if state.in_minimap_band(x, y) {
-                            // Q#M6 — consumed before text hit-testing;
-                            // never a Pointer event.
-                            state.minimap_scrub_active = true;
-                            let vp = state.minimap_jump_to(y);
-                            if let Some(vp) = vp
-                                && let Some(client) = self.attach_client.as_ref()
-                                && let Err(e) =
-                                    client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
-                            {
-                                eprintln!("pmacs-gpu: minimap jump send_viewport failed: {e}");
-                            }
-                            return;
-                        }
-                        let Some(byte) = state.hit_test_source_byte(x, y) else {
-                            return;
-                        };
-                        let kind =
-                            state.classify_pointer_down(byte, mods.contains(Modifiers::SHIFT));
-                        state.pointer_drag_active = true;
-                        state.last_pointer_sent_byte = Some(byte);
-                        state.note_pointer_round_trip();
-                        if let Some(buffer_id) = state.current_buffer_id {
-                            if debug_input() {
-                                eprintln!("pmacs-gpu pointer: {kind:?} byte={byte}");
-                            }
-                            self.send_pointer(buffer_id, byte, kind, mods);
-                        }
-                    }
-                    ElementState::Released => {
-                        if state.minimap_scrub_active {
-                            state.minimap_scrub_active = false;
-                            return;
-                        }
-                        if !state.pointer_drag_active {
-                            return;
-                        }
-                        state.pointer_drag_active = false;
-                        state.edge_scroll_dir = None;
-                        state.edge_scroll_last = None;
-                        let byte = state
-                            .hit_test_source_byte(x, y)
-                            .or(state.last_pointer_sent_byte);
-                        let buffer_id = state.current_buffer_id;
-                        if let (Some(byte), Some(buffer_id)) = (byte, buffer_id) {
-                            self.send_pointer(buffer_id, byte, PointerKind::Up, mods);
-                        }
-                    }
+                if self.apply_keyboard(key) == EventOutcome::Exit {
+                    event_loop.exit();
                 }
             }
-            // Q#CM1 — right-click opens the context menu at the hit byte
-            // (or dismisses an open one). The anchor pixel is remembered
-            // so the popup the daemon sends back draws at the click.
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button: winit::event::MouseButton::Right,
+            Route::Pointer(PointerRoute::Moved { x, y }) => self.apply_cursor_moved(x, y),
+            Route::Pointer(PointerRoute::Left(button_state)) => {
+                self.apply_left_button(button_state);
+            }
+            Route::Pointer(PointerRoute::RightPress) => self.apply_right_press(),
+            Route::Pointer(PointerRoute::Wheel(delta)) => self.apply_wheel(delta),
+            // Three different facts, merged only because all three are
+            // today nothing to do: a key-up the keyboard family claimed
+            // and dropped, a button the pointer family has no semantics
+            // for, and an event no family claims at all.
+            Route::Keyboard {
+                action: KeyAction::Release,
                 ..
-            } => {
-                let Some(state) = self.state.as_mut() else {
-                    return;
-                };
-                let Some((x, y)) = state.pointer_pos else {
-                    return;
-                };
-                if state.menu.is_some() {
-                    self.send_menu_pointer(None, true);
-                    return;
-                }
-                // Bottom panel Stage 2B-3 — a right-click in the band is a
-                // panel gesture, claimed before the terminal and document
-                // paths. The daemon decides between child mouse reporting and
-                // the editor context menu, so the anchor is remembered here
-                // exactly as for a document click; without this the band's
-                // context actions are unreachable and the click is applied to
-                // the document underneath instead.
-                if let PointerSurface::PanelCell(_) =
-                    state.classify_pointer_surface(x as f32, y as f32)
-                {
-                    if let Some(state) = self.state.as_mut() {
-                        state.menu_anchor_px = (x, y);
-                    }
-                    let mods = translate_mods(self.modifiers);
-                    self.send_panel_pointer_at(
-                        x,
-                        y,
-                        ProtocolMouseKind::Down(ProtocolMouseButton::Right),
-                        mods,
-                    );
-                    return;
-                }
-                let Some(state) = self.state.as_mut() else {
-                    return;
-                };
-                // Vterm Stage 3 — a right-click in the terminal clip is
-                // a terminal gesture; the daemon decides between child
-                // reporting and the editor context menu, so the anchor
-                // is remembered here exactly as for a document click.
-                if state.terminal.is_some() {
-                    state.menu_anchor_px = (x, y);
-                    if let Some((buffer_id, coord)) = self.terminal_pointer_hit(x, y) {
-                        let mods = translate_mods(self.modifiers);
-                        self.send_terminal_pointer(
-                            buffer_id,
-                            coord,
-                            ProtocolMouseKind::Down(ProtocolMouseButton::Right),
-                            mods,
-                        );
-                    }
-                    return;
-                }
-                let Some(byte) = state.hit_test_source_byte(x, y) else {
-                    return;
-                };
-                state.menu_anchor_px = (x, y);
-                let buffer_id = state.current_buffer_id;
-                let mods = translate_mods(self.modifiers);
-                if let Some(buffer_id) = buffer_id {
-                    self.send_pointer(buffer_id, byte, PointerKind::Context, mods);
-                }
             }
-            WindowEvent::MouseWheel { delta, .. } => {
-                let Some(state) = self.state.as_mut() else {
-                    return;
-                };
-                // Wheel scroll is local-only: the GPU owns the
-                // viewport. Positive winit y = scroll up = smaller
-                // scroll_top.
-                let lines = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => {
-                        (-y * WHEEL_LINES_PER_TICK).round() as i64
-                    }
-                    winit::event::MouseScrollDelta::PixelDelta(p) => {
-                        (-(p.y as f32) / state.fm.code_line_height()).round() as i64
-                    }
-                };
-                if lines == 0 {
-                    return;
-                }
-                // Bottom panel Stage 2B-3 — a wheel tick over the band scrolls
-                // the PANEL's window, which is daemon-side state, so it
-                // crosses the wire instead of moving this frontend's local
-                // document `scroll_top`. Falling through would scroll the
-                // document while the pointer is inside the panel.
-                if let Some((x, y)) = state.pointer_pos
-                    && matches!(
-                        state.classify_pointer_surface(x as f32, y as f32),
-                        PointerSurface::PanelCell(_)
-                    )
-                {
-                    let mods = translate_mods(self.modifiers);
-                    let kind = if lines < 0 {
-                        ProtocolMouseKind::ScrollUp
-                    } else {
-                        ProtocolMouseKind::ScrollDown
-                    };
-                    self.send_panel_pointer_at(x, y, kind, mods);
-                    return;
-                }
-                let Some(state) = self.state.as_mut() else {
-                    return;
-                };
-                // Vterm Stage 3 — the terminal's scrollback belongs to
-                // the daemon-side view, not to this frontend's local
-                // scroll, so a wheel tick crosses the wire as a
-                // terminal gesture instead of moving `scroll_top`.
-                if state.terminal.is_some() {
-                    if let Some((x, y)) = state.pointer_pos
-                        && let Some((buffer_id, coord)) = self.terminal_pointer_hit(x, y)
-                    {
-                        let mods = translate_mods(self.modifiers);
-                        let kind = if lines < 0 {
-                            ProtocolMouseKind::ScrollUp
-                        } else {
-                            ProtocolMouseKind::ScrollDown
-                        };
-                        self.send_terminal_pointer(buffer_id, coord, kind, mods);
-                    }
-                    return;
-                }
-                let vp = state.scroll_by_lines(lines);
-                if let Some(vp) = vp
-                    && let Some(client) = self.attach_client.as_ref()
-                    && let Err(e) = client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
-                {
-                    eprintln!("pmacs-gpu: wheel send_viewport failed: {e}");
-                }
-            }
-            // Stage 1-pre — everything the router already claims. The
-            // arms above are the families not yet moved behind it; when
-            // the last one goes, this match collapses to the call below
-            // and `window_event` is the thin call-through P3 asks for.
-            ref routed => match route_event(routed) {
-                Route::Lifecycle(LifecycleRoute::Exit) => event_loop.exit(),
-                Route::Lifecycle(LifecycleRoute::Modifiers(mods)) => self.modifiers = mods,
-                Route::Lifecycle(LifecycleRoute::Resize { width, height }) => {
-                    self.apply_resize(width, height);
-                }
-                Route::Lifecycle(LifecycleRoute::Redraw) => self.apply_redraw(),
-                Route::Keyboard {
-                    action: KeyAction::Press,
-                    key,
-                } => {
-                    if self.apply_keyboard(key) == EventOutcome::Exit {
-                        event_loop.exit();
-                    }
-                }
-                // A key-up is claimed by the keyboard family and
-                // discarded; an unrouted event was claimed by nobody.
-                // The route keeps those apart — they are merged here
-                // only because both are, today, nothing to do.
-                Route::Keyboard {
-                    action: KeyAction::Release,
-                    ..
-                }
-                | Route::Unrouted => {}
-            },
+            | Route::Pointer(PointerRoute::UnusedButton)
+            | Route::Unrouted => {}
         }
     }
 
