@@ -109,7 +109,7 @@ remain open to them.
 | 13 | Package lifecycle UX | **Resolution without lifecycle** | Mature resolver/lockfile; init-only install; no uninstall/disable/search |
 | 14 | Workbench primitives | **Partial (best trajectory)** | Listview is a real primitive but only **4** call sites, all LSP panels (`*lsp*` added post-audit by #204); buffer-list and search re-implement it; **the bottom panel is COMPLETE — both frontends, and Stage 3 flipped the adopter default so omission means the panel**. **Tree is implemented (◐) with the LSP outline as its one adopter; the remaining consumers, including dired's `i`, have not adopted** |
 | 15 | Contextual affordances | **Weak** | Right-click menu only; code actions apply first-blindly; no git integration at all |
-| 16 | Semantic frontend | **Strong** | v6..=v21 schema support; production attach remains v20 during the dark panel slice; degradation practiced |
+| 16 | Semantic frontend | **Strong** | v6..=v23 schema support; production attach remains v20 during the dark panel slice; degradation practiced |
 | 17 | Distribution | **Partial** | **v1.1.0 ships prebuilt Linux/macOS binaries on tag** (#211) with checksums and a stated glibc floor. No channels, in-place update, rollback, signing, or package-manager distribution |
 | 18 | Onboarding | **Partial** | Journey Stage 1b-3: an unconfigured launch greets in `*scratch*` naming `M-x` and four real bindings, and `M-x help` renders a cheat sheet. Still no tutorial and `C-h` still deletes a word — deliberately, see §18 |
 | 19 | Coherence acceptance tests | **Started** | `tests/journey_acceptance.rs` carries 45 pins over steps 2, 3, 4, 5, 6 and 9 — the ratchet is real and stages add rows to it. The other five §19 scenarios (workspace lifecycle, worker ownership, config provenance, package lifecycle, extension isolation) are still unwritten |
@@ -399,7 +399,7 @@ Full verdict table:
 | 8 | Open terminal | **Works** | Full PTY with scrollback + modeline segment, bound to `C-c t` and configurable through three registered settings (`terminal.default-profile`, `terminal.scrollback-rows`, `terminal.escape-key`) plus named `pmacs.terminal.profiles` (PR #173), and searchable through `M-x terminal.copy-mode` / `C-c C-t`, which materializes the retained scrollback into an ordinary read-only buffer (Stage 2). Named limitations: `C-c t` is unreachable from *inside* a terminal window, where `C-c` is consumed as the escape — `M-x terminal` still works there; and there is still **no close/kill command**, which is the remaining half of this step's discoverability gap. *Was broken outright on the GPU frontend until the double terminal-layout sync was fixed: the child took a `SIGWINCH` storm at tick cadence, so typing into it was impossible while output still flowed.* |
 | 9 | Build / test | **Works** | Journey Stage 1b-1 (#203): `C-c c` runs `compile.run`, and the first prompt is prefilled from the detected project kind (`pmacs.compile.defaults`, seeded `rust = "cargo build"`, extensible from `init.lua`) via `ProjectKind::Rust` — **not** `Cargo`, see §24. The prompt **captures** its directory rather than re-resolving at accept time, so the command it offers and the directory it runs in cannot drift while the minibuffer waits. Still defaults cwd to the detected project root and parses Rust `-->` errors. Named limitation: after `pmacs <dir>` the active buffer is dired's and pathless, so the cwd falls back to the process cwd — §8's execution-location model owns that, and the degradation stays coherent (no suggestion is offered for a directory with no detected Cargo project) |
 | 10 | Inspect error | **Partial (good once reached)** | `E:n W:n` modeline counts, underlines, `M-g n/p` + ``C-x ` `` walking a unified compile/grep/diag source, message echo, `RET` visits. Gated entirely on step 6 or 9 succeeding first |
-| 11 | See background work | **Works but undiscoverable** | `*workers*` view via `M-x editor.list-workers`; `C-c C-k` cancel-at-point. No keybinding, no statusline spinner/progress indicator anywhere (§9) |
+| 11 | See background work | **Partial** | **Statusline activity indicator since #232** — in-flight count plus the oldest job's purpose, absent entirely when idle, through `ui.activity-indicator`. `*workers*` view via `M-x editor.list-workers`, **still with no keybinding**; `C-c C-k` cancel-at-point. *Was "Works but undiscoverable — no statusline spinner/progress indicator anywhere"; #232 shipped exactly that indicator on 2026-08-09 and the row went stale the same day* |
 | 12 | Close + restore | **Partial** | Per-file cursor+scroll (saveplace), recent files, minibuffer history, autosave recovery all restore zero-config. Open-buffer set and window layout do **not**: desktop-save is opt-in (`pmacs.session.desktop_mode(true)`) *and* a documented no-op under a daemon (`src/desktop.rs:323-326`, `:353-356`, Q#DS9) |
 
 A journey observation worth keeping verbatim from the audit:
@@ -1008,13 +1008,31 @@ editor.list-workers`, auto-refreshing, `C-c C-k` cancel-at-point).
   A terminal PTY appears in **no** user-visible activity view. An LSP
   server appears in `*lsp*` (unreachable) and `list()`; its requests
   appear in `*workers*`; nothing joins them.
-- **No progress indicator exists anywhere** — no statusline spinner,
-  no busy count (grep for progress/spinner/busy in `src/statusline.rs`
-  is empty). "Visible asynchronous work" (§3) is currently false unless
-  the user knows to run `M-x editor.list-workers`.
-- `ProcessSpec.label` is the nearest thing to attribution: caller-
-  supplied, unvalidated convention (`lsp:{name}`, terminal buffer
-  name).
+- **A progress indicator now exists (#232, 2026-08-09)** — a statusline
+  provider rendering the in-flight count and the **oldest** job's
+  purpose, absent when idle, gated by `ui.activity-indicator`. So
+  "visible asynchronous work" (§3) is **no longer false**: activity is
+  visible without knowing to run `M-x editor.list-workers`, though that
+  view still has no keybinding of its own.
+
+  *This bullet previously read "No progress indicator exists anywhere —
+  no statusline spinner, no busy count (grep … is empty)". That grep was
+  the evidence for opening §9's worker-identity work, and #232 is what
+  answered it.* **The indicator's first act was to expose three months
+  of invisible LSP file-watcher polling (issue #233)** — which is §9's
+  own argument, demonstrated.
+- **`purpose` is now required** on every job and process (#232), through
+  a single allocation funnel with no `Default`, so the compiler proves
+  every caller supplies one. That is a real per-job description where
+  there was none.
+- **Attribution is still missing, and that is what §9 grades.** A
+  purpose says what a job is *doing*; it does not say **who asked** —
+  no owner, no parent, no package. `ProcessSpec.label` remains a
+  caller-supplied, unvalidated convention (`lsp:{name}`, terminal
+  buffer name). **This section's grade is left untouched pending a
+  re-audit**: the mechanism-without-identity finding is *partly*
+  answered, and moving a grade is an audit act, not a documentation
+  correction.
 
 The audit's conclusion, worth preserving verbatim: *because identity is
 missing, scoped cancellation has nothing to scope over and a unified

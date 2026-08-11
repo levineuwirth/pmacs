@@ -801,7 +801,15 @@ only compare a red run against a *different* run. Here both selectors
 ran green **inside the same gate invocation**, minutes earlier, on the
 same tree and machine — `03-lib` (1928 passed, 0 failed) and
 `04-lib-crdt` (2113 passed, 0 failed) — and then failed in `11-sweep`.
-Whatever this is, it is not the tree.
+So this is **not deterministic on this tree; causation and any rate
+effect are unresolved.**
+
+*The original wording here was "whatever this is, it is not the tree",
+which this file's own rerun rule forbids: a same-tree green establishes
+**intermittence only**, and a tree can raise an intermittent failure
+**rate** without making it deterministic. Same-tree greens cannot
+exonerate the tree. Corrected rather than deleted, because the wrong
+claim is the one a later reader would otherwise reach for.*
 
 | field | value |
 |---|---|

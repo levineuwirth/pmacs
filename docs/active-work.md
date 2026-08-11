@@ -243,12 +243,24 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## The GUI arc — Stage 0 branch OPEN, PARKED behind #227, no PR yet
+## The GUI arc — Stage 0 branch OPEN, UNPARKED 2026-08-11, absorption underway
 
 **Written at the branch's first commit**, with the framing, which is
 what this arc's own §5 requires of every PR in it. The standing
 correction from #171 and #215 was missed at #224 and #225; this lane
 exists to stop the streak rather than to note it again.
+
+**The park is discharged**: #227 merged as `b867f64`, and the
+file-watcher arc (#233) closed via #234 and #235. Rebased onto
+`e67ad07`; the single framing commit replayed with no conflict.
+
+**Stage 0's absorption scope was RE-DERIVED from the tree rather than
+taken from this lane's own earlier text, and the earlier text was
+wrong in the optimistic direction.** `add0ba1` absorbed **#227 and
+#234 only**; a reading of its −532-line diff as "half of Stage 0's
+absorption" was too generous. Five stale lanes remain below, and two
+`COHERENCE.md` corrections had not been made at all. What is done here
+is listed at the commit that does it, not promised here.
 
 - **Branch `gui-arc-stage0`**, base `githubsucks/main` @ `0e4c58d` (the
   #231 merge). **`githubsucks/gui-arc-stage0` is the authoritative
