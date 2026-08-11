@@ -413,14 +413,27 @@ step in the table declares its required subclaims explicitly; the cell's
 grade is the **minimum** over them, never the first word of a prose
 verdict.
 
-The worked examples are not hypothetical — they are the two rows
-`COHERENCE.md` §2 carries today:
+**The worked examples below are HISTORICAL, and `COHERENCE.md` §2b is
+authoritative for every current grade.** They are kept because they are
+what motivated this rule, and they are marked because a framing and the
+standard it serves must not hand a reader two different grades for one
+step. They quote the **pre-Stage-0** verdict strings, not today's table:
 
-- **Step 7** — "Symbol: **works but undiscoverable**". Subclaims
-  *reachable* / *discoverable*: `Works` and `Missing`. Cell grade
-  **`Missing`**.
-- **Step 11** — "**Works but undiscoverable**". Same shape, same
-  result.
+- **Step 7** — the row then read "Symbol: **works but
+  undiscoverable**". Subclaims *reachable* / *discoverable*: `Works` and
+  `Missing` ⇒ **`Missing`**. **Stage 0 graded it `Works`** on evidence
+  this example did not have: advertisement is transitive through the
+  help graph, and the advertised `M-x help` route reaches
+  `help.list-keybindings`, which names every registered binding.
+- **Step 11** — the row then read "**Works but undiscoverable**". Same
+  shape, and here the outcome **stands**: Stage 0 also graded it
+  `Missing`, because `*workers*` has no binding for any listing to name.
+
+The rule these examples exist to establish is untouched by either
+outcome: **the head-grade rule would have graded both `Works`**, and
+that is what makes it unsound. Step 7 moving on better evidence is the
+system working; step 11 not moving is the defect surviving contact with
+it.
 
 Under revision 2's head-grade rule **both would have graded `Works`**,
 and the undiscoverability that is the entire finding would have become

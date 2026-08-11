@@ -437,9 +437,23 @@ frontend-local one.
 
 Anchors: `COHERENCE.md` §2's ground-truth rows, the GUI arc audit at
 `4bc55e8` (`docs/gui-arc-framing.md` §2), Q#DS9
-(`docs/desktop-save-framing.md`), and `builtin/runtime/welcome.lua`,
-whose advertised set is exactly `C-x C-f`, `C-c t`, `C-c c`, `C-x b` —
-which is what decides every discoverability subclaim below.
+(`docs/desktop-save-framing.md`), and `builtin/runtime/welcome.lua`.
+
+**What counts as "advertised in-product", stated because an earlier
+draft of this paragraph got it wrong and mis-graded two steps.** The
+welcome advertises **both** a key table (`C-x C-f`, `C-c t`, `C-c c`,
+`C-x b`) **and prose** — its first line names `M-x` and `M-x help`
+(`welcome.lua:61`). Advertisement is therefore **transitive through the
+help graph**: a command reachable from an advertised route counts as
+advertised, which is how `help.list-keybindings` carries browse and
+symbol (step 7) and how `help.list-commands` carries
+`editor.list-workers` (step 11). Reading only the four-entry key table
+is what produced the earlier `Partial` at steps 4 and 7.
+
+**A binding is a stronger claim than a route, and 11(c) asks for the
+binding.** That is why step 11 still fails while step 7 passes: both are
+reachable through the help graph, but `*workers*` has **no binding for
+any listing to name**.
 
 | # | Step | local TUI | attached TUI | GPU | binding subclaim |
 |---|---|---|---|---|---|
@@ -467,7 +481,9 @@ is a property of the tree rather than of the grader.
 **The journey's two worst steps are frontend-INDEPENDENT**, and that is
 the table's other finding. Steps 6 and 11 grade `Missing` in all three
 columns: language intelligence dies silently after a server crash, and
-background work has no advertised route at all. Neither is GUI work,
+background work has no advertised **binding** — a route exists
+(`M-x help` → `help.list-commands` → `editor.list-workers`), which is
+why 11(c)'s wording asks for a binding and not a route. Neither is GUI work,
 neither is closed by this arc, and both were previously carried as
 `Partial` — which is how they stayed off the critical path.
 
@@ -479,14 +495,20 @@ fails on GPU *alone*, so it is **frontend-local** — Stage 1d's IME work
 closes it. A single merged TUI column would have shown two identical
 red cells and no way to tell those apart.
 
-**Inference flags, narrowed to what is actually unverified.** GPU
-3(c)'s *rendering* half is **verified**, not inferred:
-`gpu_invocation_acceptance.rs:706` drives a GPU directory target and
-asserts the dired listing reaches and renders on that frontend. What
-remains inferred is **browsing interaction** there, plus GPU 9 (that
-compile output renders like any other daemon buffer) and GPU 6(c) (that
-hover reaches the echo area as it does on the grid). Those three must be
-verified before this table is used as a release gate.
+**Inference flags.** GPU 3(c) is inferred **in both halves** —
+rendering and browsing interaction — as are GPU 9 (compile output
+renders like any other daemon buffer) and GPU 6(c) (hover reaches the
+echo area as on the grid). All must be verified before this table is
+used as a release gate.
+
+*An earlier draft called 3(c)'s rendering half "verified" on
+`gpu_invocation_acceptance.rs:706`. That test runs
+`--headless-managed-probe`, which connects, receives and DECODES a
+`BufferSnapshot` into text; it never constructs GPU render state and
+never calls `render_offscreen` (`pmacs-gpu/src/main.rs:1065`). It
+witnesses delivery and decoding — which is real, and is not rendering.
+Retracted rather than softened, because "verified" was the word doing
+the damage.*
 
 ### Ground truth: the journey today
 
