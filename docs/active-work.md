@@ -250,10 +250,22 @@ the same day (`b867f64`), refreshed and re-gated on the merged base.
 **D3 — the polling cost — is the remainder, and the user has ruled it
 is next (2026-08-11).** **Branch `lsp-file-watch-d3`** (base
 `githubsucks/main` @ `add0ba1`; the remote ref is authoritative), with
-**framing `docs/lsp-file-watch-d3-framing.md`, revision 1, DRAFT —
+**framing `docs/lsp-file-watch-d3-framing.md`, revision 2, DRAFT —
 awaiting review**, committed at the branch's first commit so it is
-portable during review. Four open rulings (Q#D3-1..4: the acceptance
-bar, the skip-list default, the string-form base, knobs vs constants)
+portable during review. **Review round 1 (2026-08-11) found five
+findings and revision 1 did not survive it** — the promised idle
+state was impossible (`workers.sleep` is a pool-thread-holding
+running job the indicator counts; revision 2 replaces the sleep loop
+with autosave's Q#AS2 after-tick cadence), the scan root must be the
+server's own `root_uri`/`cwd` (not `pmacs.project.detect`, which
+texlab's Q#LX2 proves wrong), coalescing gained registration-epoch
+delivery semantics with two new witnesses, the exclusion default
+became **none** (any unconditional skip deviates from the registered
+glob contract, and `walk_tree` removes the job-count economics that
+motivated it), and the cost arithmetic was corrected to this
+checkout (1,326 jobs/tick for rust-analyzer's six watchers; revised
+steady state is zero jobs at idle). Four open rulings (Q#D3-1..4:
+the acceptance bar, exclusions, the scan root, knobs vs constants)
 block implementation. What was known before framing, verified while
 framing D1/D2:
 
