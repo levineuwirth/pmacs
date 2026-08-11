@@ -1,0 +1,436 @@
+# GUI arc, Stage 1 — input foundation (framing)
+
+**Status: revision 9 — APPROVED.** Revisions 1–8 rejected.
+**Q#S1-8, Q#S1-9 and Q#S1-10 are RULED.** Implementation may begin
+from this document.
+
+**Verification base:** checked in the `gui-arc-stage0` worktree at
+`a994f37`, whose tree for these files is what `f8ad3e7` merged.
+
+## 1. What this stage closes
+
+Journey **step 5**. **Not step 12** (Stage 4b, P2-gated). Five of nine
+§3.1 blockers die here.
+
+## 2. Ground truth at `a994f37`
+
+`App::window_event` (`main.rs:2734`) is **655 lines**; **eight**
+`WindowEvent` arms handled, the rest fall to `_`.
+
+**Two text producers.** `translate_key(logical: &Key, …)`
+(`main.rs:10975`) reads the **logical key** and truncates via
+`chars().next()`; **`KeyEvent.text` is never read.**
+`WindowEvent::Ime::Commit(String)` is a **separate event, ignored
+entirely** (`set_ime_allowed`/`WindowEvent::Ime`: zero occurrences).
+**Today's two failures are therefore: multi-scalar keyboard input is
+truncated to its first scalar, and an IME commit produces nothing.**
+
+**`FrontendEvent`: sixteen variants, none carrying an open path or
+command invocation.** `PROTOCOL_VERSION = 23`.
+
+**The handshake precedes any window** — `EventLoop` built, client
+constructed, handshake done **before `run_app`** (`main.rs:696`).
+
+**TUI wheel arms**: `EditorState::dispatch_mouse` (`src/editor.rs:3052`),
+`ScrollUp`/`ScrollDown` at **`:3203`**.
+
+**1c is producer-side only for Focus/Detach** — those variants exist on
+the wire. **Title, Bell and `Goodbye` are GPU consumer work.**
+
+**`Outbox::enqueue` returns `false` once closed** (`attach.rs:414`) and
+**coalesces by kind**.
+
+## 3. PR topology
+
+`1-pre` → `1a`\* → `1b` → `1c` → `1d` → `1e`\*  (\* `--protocol`)
+
+**1c is NOT protocol-bearing** under Q#S1-8's ruling. Protocol slices
+are serialized.
+
+## 4. Q#S1-8 — RULED: (A), preserve pre-window readiness
+
+`AttachRequest.initial_size` for a semantic session is a **named,
+provisional `SEMANTIC_BOOTSTRAP_GRID` of 24×80**. It is **not measured
+geometry** and **must never become semantic frame or panel authority**.
+**`FrontendCellGeometry`, sent after window creation, is the sole real
+frame declaration.**
+
+This **codifies current daemon behaviour**, so **1c stays
+non-protocol-bearing** — unless implementation changes that behaviour,
+which would be a wire-contract change even with no bytes moved.
+
+## 5. Q#S1-9 — RULED: `TextInput` precedence
+
+**A `KeyboardInput` stays `Key` unless a rule below moves it.**
+
+1. **Named keys and control text remain `Key`**, regardless of
+   `KeyEvent.text` — so `Enter`'s `"\r"` never becomes text.
+2. **Ctrl/Alt chords remain `Key`**, except **printable Ctrl+Alt
+   recognized by the existing AltGr rule**.
+3. **Meta/Super-only text stays reserved to the OS.**
+4. **Plain printable SINGLE-scalar remains `Key`** — preserving mode
+   keymaps and today's typed provenance.
+5. **Printable MULTI-scalar becomes one `TextInput`.**
+6. **Every non-empty `Ime::Commit` becomes one `TextInput`**, even
+   single-scalar.
+7. **`Key::Dead` is 1d-owned; 1a buffers nothing.**
+8. **`Shift` is already reflected in resolved text** and is **not**
+   carried on `TextInput`.
+
+**Provenance and chain.** A **single-scalar** `TextInput` rotates to
+`buffer.self-insert` and creates **today's one-codepoint typed
+provenance**. A **multi-scalar** `TextInput` **breaks the command chain
+and creates no typed provenance**. Both are **one edit, one undo unit,
+one hook, one eligible CRDT op**.
+
+**Modal precedence is preserved:** terminals take **raw UTF-8**;
+search and minibuffer **consume** text; menu and query-replace **retain
+their shadow behaviour**; **only the ordinary document path performs the
+atomic edit**.
+
+**Payload cap: 64 KiB UTF-8, oversize REJECTED, never truncated.**
+
+## 6. Evidence
+
+**The promise, corrected.** Revision 4 claimed every mutation fails only
+its own clause. That is **false and cannot be made true**: clauses have
+real dependencies — D1 gates every 1d row, D3's failure surfaces at A6,
+and **E0 and E2–E6 all presuppose E1** (no transport, no receiver). The promise is therefore
+**dependency-aware, and split by clause kind** — revision 5 still said
+"every clause fails today", which C6 falsifies by design:
+
+- **CHANGE clauses** have a witness that **fails today** and a mutation
+  that fails **at least** its own clause.
+- **PRESERVATION clauses** (marked **[P]**) **pass today**; their
+  witness pins behaviour that must not regress, and their mutation is
+  the change that would break it.
+- Where a mutation necessarily breaks dependents, **the dependency is
+  named**.
+
+P3 remains an accepted structural exception: not headlessly testable.
+
+### 1-pre
+
+| # | Contract | Witness (fails today because) | Mutation |
+|---|---|---|---|
+| P1 | Every handled family routes through an extracted function | no extracted functions exist | misroute one family → that family's row |
+| P2 | Harness records outbound events **and local effects** (exit, redraw, resize, state mutation) | no harness | record outbound only → exit/redraw rows |
+| P3 | `window_event` is a thin call-through | — | **structural/code-review invariant; not testable headlessly** (no `ActiveEventLoop`) |
+
+### 1a — `TextInput` (v24)
+
+| # | Contract | Witness (fails today because) | Mutation |
+|---|---|---|---|
+| A1 | `F1`–`F35` → `F(1..=35)` | `_ => return None` | map `F13+` → `None` → F13–F35 rows |
+| A2 | Shift+Tab → `BackTab` with `Shift` set | produces `Tab` | drop `Shift` → A2 only |
+| A3 | `ContextMenu` → `Menu` | produces nothing | map to `Char('\0')` → A3 only |
+| A4 | Idle Escape reaches the daemon, never exits | exits (`main.rs:2771`) | restore the quit branch → A4 only |
+| A5 | Precedence per §5 (1–8) | multi-scalar truncated; IME ignored | move rule 1 (control text → text) → the `Enter`-in-dired row |
+| A6 | One commit = one edit, undo unit, hook, eligible CRDT op | commit truncated to one scalar | one edit per scalar → undo-unit row (**and D3 surfaces here**) |
+| A7 | Prompts consume scalars **in order** | multi-scalar never arrives | reverse order → A7's prompt transcript |
+| A8 | Terminals get **raw UTF-8, never bracketed paste** | multi-scalar never arrives | route via `Paste` → terminal row shows bracket markers |
+| A9 | **64 KiB cap; oversize rejected, not truncated** | no cap exists | truncate instead → the oversize row observes silent loss |
+
+### 1b — pointer and scroll
+
+| # | Contract | Witness | Mutation |
+|---|---|---|---|
+| B1 | Residual per **axis and surface** | deltas discarded | share one accumulator → surface-switch jump |
+| B2 | Wheel-right raises leftmost column; wheel-down raises top line | `x` discarded | invert a sign → that axis's row |
+| B3 | Clamps at content bounds; never a negative origin | no horizontal scroll to clamp | remove clamp → **at-bounds row: origin goes negative and the view blanks** |
+| B4 | Middle-click paste uses **PRIMARY on Linux** | no middle-click path | use `CLIPBOARD` → B4 only |
+| B5 | I-beam over text content only | no I-beam | extend over the gutter → B5 only |
+| B6 | Wheel over the minimap scrolls the **document viewport** with **its own residual accumulator**; click/drag remains scrub | **a FULL tick already scrolls today** — minimap pixels are `Elsewhere` (`main.rs:2061`) and the wheel falls through to `scroll_by_lines` (`main.rs:3373`). What fails is **fractional accumulation**, and **residual ownership distinct from the document's**: sub-tick minimap deltas are discarded, and a **surface-switch fractional witness** (part-tick over the minimap, then over the document) must not carry residue across | share the document's accumulator → the surface-switch fractional row jumps |
+| B7 | **TUI horizontal**: **three columns per wheel tick**, sign per B2; **left origin clamps at 0 and at (widest display-line width − text viewport width), SATURATING AT ZERO**; **wrap pins the origin to 0** | events arrive at `:3203` and are dropped | step of one → the three-column row; clamp at the widest line's **full width** → **the right-bound row blanks the viewport**; drop the wrap guard → the wrap row scrolls a wrapped buffer sideways |
+
+**B7's right bound corrected.** Clamping at the widest line's full width
+lets the origin pass every glyph and leave the viewport **entirely
+blank**. The bound is *width − viewport*, saturating at zero for buffers
+narrower than the viewport, and **the right-bound witness asserts the
+final display column is still visible**.
+
+**Why B6 changed — and revision 5's reason was wrong.** Scrubbing on
+wheel is not *impossible*: the wheel handler already reads the cached
+`state.pointer_pos` for surface routing (`main.rs:3337`), so an absolute
+target is available. It is the **wrong semantics**: a wheel is a
+**relative** gesture, and mapping relative ticks onto an absolute
+position would make one notch jump to wherever the pointer happens to
+rest. Click and drag remain scrub because those *are* absolute.
+
+### 1c — session and window signals
+
+| # | Contract | Witness | Mutation |
+|---|---|---|---|
+| C1 | Title `"<buffer> — pmacs"`, `"pmacs"` when unnamed | title is static | drop the name → C1 only |
+| C2 | **Visible bell: 120 ms, WHOLE CLIENT AREA visibly changes**; repeats **neither queue nor extend** the first deadline | `Bell` unconsumed | let repeats extend → the repeat row's flash outlasts 120 ms; flash a sub-region → the headless render witness cannot see it |
+| C3 | `Goodbye` names the daemon's reason, else an explicitly **locally-classified** transport/EOF reason; never blank | live-loop reason discarded | blank the fallback → EOF row |
+| C4 | `FocusLost` precedes `Detach`; `FocusGained` only after attach completes | `Focused` unhandled | swap → C4 only |
+| C5a | **Local DPI correctness**: at scale 1→2 with **unchanged logical size**, logical wrapping, row count and hit testing are **stable** while **physical pixels double** — glyphs, clips, caret, hit tests and overlays all rescale | `scale: 1.0` hardcoded (`main.rs:8950`) | rescale glyphs only → **caret, clip and hit-test rows fail while text still looks right**, which is the bug this splits out |
+| C5b | **Geometry declaration**: the epoch advances and `FrontendCellGeometry` is emitted | no `ScaleFactorChanged` arm | suppress the emit → C5b only, **C5a still passing** |
+| C6 **[P]** | `initial_size` = `SEMANTIC_BOOTSTRAP_GRID` (24×80), **never** frame or panel authority | **passes today** — this codifies current daemon behaviour; the witness pins that a semantic frame/panel is sized from `FrontendCellGeometry` alone | derive a frame or panel extent from `initial_size` → the panel-authority row |
+| C7 | Close contract — §7 | see §7 | see §7 |
+
+**C5 was one row and hid half the defect** — suppressing the wire emit
+says nothing about glyphs or hit tests staying at scale 1.
+
+### 1d — IME
+
+| # | Contract | Witness | Mutation |
+|---|---|---|---|
+| D1 | `set_ime_allowed(true)` | zero occurrences — **no composition arrives at all** | omit → **every 1d row (stated dependency, not a matrix defect)** |
+| D2 | Preedit overlay with caret and selection; **indices are BYTE OFFSETS** into the preedit string | no overlay | treat as char indices → multibyte row |
+| D3 | `Ime::Commit` emits A5's `TextInput` | commit ignored | emit per-scalar `Key`s → **A6's undo row (named dependency)** |
+| D4 | **`set_ime_cursor_area` updated** after caret motion, scroll, resize, font/DPI change, and every preedit change | never called → candidates misplaced | update on caret only → scroll and resize rows |
+| D5 | Overlay clears on **empty `Preedit`, `Ime::Disabled`, and focus loss** — all three | no overlay | clear on focus loss only → `Disabled` row leaves stale text |
+| D6 | Dead-key state owned here; 1a buffers nothing | dead keys dropped | buffer in 1a → D6 by construction |
+
+### 1e — `OpenTarget` (v25)
+
+| # | Contract | Witness (fails today because) | Mutation |
+|---|---|---|---|
+| E0 | **SUCCESS**: a **successfully handled valid target** is **resolved, installed, hooked and dispatched through the existing file/directory pipeline**, and the originating frontend receives **exactly one terminal result** — `Opened { request_id, buffer_id }` when a commit lands, **or `Handled` when an extension legitimately claims it** | no receiver — a drop does nothing | dispatch without firing the open hooks → the hook row; settle before the deferred commit lands → the async-directory row (Q#S1-10) |
+| E1 | Versioned `OpenTarget { request_id: u64, cwd, path }` carrying `InitialTarget`'s raw shape. **`request_id` is unique among a frontend's OUTSTANDING requests; a duplicate is REJECTED at the protocol boundary** and must never replace or settle the original completion | no variant exists | **omit `request_id`** → the two-concurrent-drops row misattributes; **accept a duplicate id** → the reuse row settles the first drop's completion with the second drop's outcome |
+| E2 | Source is **authenticated** | no receiver | accept an unauthenticated sender → E2's forged-source row |
+| E3 | Primary document `ViewDestination` captured **immediately on receipt**, before any await | no receiver | capture after the open resolves → **frontend-switch row: the file lands in whichever frontend is ambient** (the #231 defect) |
+| E4 | **No window identity trusted from the wire** | no receiver | accept a window id → E4's forged-window row |
+| E5 | Failures **before terminal disposition** — including completion-aware `Deferred` work — are **visible to the ORIGINATING frontend** as bounded `Failed { request_id, message }`. After `Handled`, responsibility and any later failure belong to the claiming extension, and no second result is sent — see §8 | no receiver | swallow the error → the permission and embedded-NUL rows |
+| E6 | `InitialTarget` limits enforced: **32 KiB per raw path**, **non-empty path**, **absolute non-empty cwd**, **embedded NUL rejected** | no receiver | drop the NUL check → the embedded-NUL row |
+
+**The failure taxonomy was wrong in revision 5.** **A missing path is
+NOT a failure**: the resolver deliberately creates an **empty
+path-backed buffer** on `NotFound` (`src/editor_core.rs:1177`), which is
+how "open a file that does not exist yet" works. **Directories are valid
+targets too.** Genuine failures are permission denial, validation
+rejection (E6), and open errors that are not `NotFound`. Revision 5
+listed "missing-path" and "not-a-directory" rows that would have pinned
+the opposite of the intended behaviour.
+
+### Q#S1-10 — RULED: the result is TERMINAL
+
+Directory opening completes **asynchronously**, so `OpenTargetResult`
+either waits for the captured-destination commit or merely acknowledges
+dispatch. **Ruling: terminal.** The result is sent **when the request
+reaches a terminal disposition** — for `Opened`, after the commit
+resolves; for `Handled`, at the moment responsibility transfers; for
+`Failed`, at the failure, **which for several paths has no commit at
+all**. Asynchronous failure is reported through the same result — an acknowledgement-plus-later-channel design would need a
+second source-scoped mechanism to carry exactly the failures that matter
+most.
+
+```
+OpenTargetResult::Opened  { request_id: u64, buffer_id: BufferId }
+OpenTargetResult::Handled { request_id: u64 }                  // claimed; no buffer attributable
+OpenTargetResult::Failed  { request_id: u64, message: String }  // 4 KiB cap
+```
+
+**Terminal completion must be TOTAL over the existing pipeline, and
+"after the commit resolves" is not** — three legitimate paths reach
+neither a commit nor a result:
+
+- **Claimed**: a `path.open-directory` listener returns `proceed =
+  false` and the dispatch **returns without committing**
+  (`src/editor.rs:1375`).
+- **Disabled**: the `directory_handler` slot is clear, which is a
+  supported configuration — the dispatch emits a **status message and no
+  commit** (`src/editor.rs:1389`).
+- **Asynchronous fallback**: the default handler calls `open_async` and
+  **returns immediately** (`builtin/runtime/dired.lua:750`), so the
+  commit lands long after the dispatch unwinds.
+
+**Mechanism: a request-scoped ONE-SHOT COMPLETION with an EXPLICIT
+STATE MACHINE**, carried through the directory pipeline, settled
+**exactly once**, and **discarded on source detach** — a frontend that
+left cannot be told anything.
+
+```
+Pending ──(defer before scheduling)──▶ Deferred ──▶ Settled
+   │                                    │
+   └──────────(commit / failure)────────┴──▶ Settled
+   │
+   └──(source detach, from Pending or Deferred)──▶ Cancelled
+```
+
+**`open_async` transitions to `Deferred` BEFORE handing the completion
+to scheduled work.** The ownership transfer is explicit and does not
+depend on whether today's scheduler starts a coroutine synchronously or
+a future scheduler defers its first step. Without the transition the
+dispatch unwinds while the completion is still `Pending`, the
+end-of-turn fallback fires, and the request is settled *before* the
+commit it was waiting for.
+
+**The end-of-turn fallback acts ONLY on `Pending`.** A `Deferred`
+completion is owned by the scheduled work. **Any later settlement is
+exactly-once**: a second attempt against `Settled` or `Cancelled` is a
+no-op, never a second message.
+
+*Mutation:* omit the `Deferred` transition, or delay it until after the
+end-of-turn fallback → the async-directory row receives a premature
+`Handled`/`Failed`; exactly-once settlement then suppresses the later
+`Opened` attempt when the commit lands.
+
+`open_async` carrying the completion to the commit is what makes the
+asynchronous path terminal rather than silent.
+
+**Total disposition, so no path can fall through:**
+
+| path | settles as |
+|---|---|
+| commit lands | `Opened { buffer_id }` |
+| listener **claimed** and did not settle | `Handled` |
+| **replacement handler** ran and did not settle | `Handled` |
+| handler slot **disabled** | `Failed` naming that directory opening is disabled |
+| **synchronous error** (listener raised, validation, permission) | `Failed` with the reason |
+| pipeline unwinds **still `Pending`** at end of dispatch turn | `Handled` if a listener claimed or a replacement handler ran; **otherwise `Failed`** |
+| **source detached** before settlement | discarded — nothing is sent, and the completion is dropped rather than leaked |
+
+**`Handled` exists because `Opened` cannot be honest there.** A claim
+means a user listener took responsibility and **no buffer is
+attributable**; reporting `Opened` would require inventing a
+`buffer_id`, and reporting `Failed` would mislabel a supported
+extension point as an error. `Handled` is the terminal responsibility
+transfer: any later extension-owned failure uses the extension's own
+reporting surface and cannot emit a second `OpenTargetResult`.
+
+*Witness:* one case per **live-source** row, each asserting **exactly
+one** result. **The detach row asserts the opposite and must not be
+read as "one result":** zero messages sent, **no completion retained**,
+and a later settlement attempt **ignored** rather than delivered.
+*Mutation:* drop the end-of-turn fallback → the claimed and disabled
+rows hang with no result at all, which is the defect this ruling
+closes.
+
+`message` uses the **existing 4 KiB error cap**. **Both affected enums
+get an independent frozen-byte pin on their own preceding final
+variant** — `FrontendEvent` for `OpenTarget`, `InstanceMessage` for
+`OpenTargetResult` — because an appended variant's own round-trip cannot
+detect a discriminant shift in either.
+
+## 7. The close contract
+
+`send_event` only enqueues (`attach.rs:1145`); the writer takes a batch
+and releases the lock before blocking writes (`:671`); **`enqueue`
+returns `false` once closed** (`:414`).
+
+**So revision 4's order was literally unexecutable** — closing first
+would have rejected the `Detach` it then tried to enqueue.
+
+**Contract — state inspection plus any append/transition is ONE atomic
+critical section under a single lock hold, dispatched on the outbox
+STATE. The lock is released before notifying the writer, waiting on an
+acknowledgement, returning, or shutting down.** Holding it while waiting
+would prevent the writer from taking the suffix or transitioning to
+`Drained`. The four states are tabulated below; this paragraph is their
+normative statement, and revision 6's "append `Detach` /
+already-closed → fallback" wording is superseded:
+
+- **Open** → under the lock, append the **complete suffix** (`FocusLost`
+  when currently focused, then `Detach`), transition to `Sealed`, and
+  capture its acknowledgement handle; release the lock, wake the writer,
+  then wait.
+- **Sealed** → under the lock, capture the **existing acknowledgement**;
+  release the lock, then join it. Do not re-append, do not seal again,
+  do not shut down.
+- **Drained** → release the lock, then return immediately.
+- **Failed** → release the lock, then take the socket-shutdown fallback.
+
+**An ordinary post-seal `send_event` REJECTS and does nothing else** —
+it must not invoke shutdown, because a healthy drain is in flight.
+**`Detach` is exempt from coalescing.** **Wake the writer after
+append-and-seal**, or
+a sealed outbox with a pending `Detach` waits on a condvar nobody
+signals and the 250 ms bound expires on a daemon that was reading fine.
+
+**The exactly-full case, which revision 5 left undefined.**
+`OUTBOX_MAX` is **8192**, and a queue at exactly that length is a
+**valid OPEN state**: the *next* ordinary `enqueue` both **sets
+`closed`** and **rejects the event** (`attach.rs:427`). So terminal
+close must not go through the ordinary path. **Ruling: the terminal operation appends the whole required SUFFIX
+atomically** — **`FocusLost` when currently focused, then `Detach`** —
+reserving **at most `OUTBOX_MAX + 2`**.
+
+**One slot was not enough, and C4 is why.** C4 requires `FocusLost`
+before `Detach`; at exactly `OUTBOX_MAX` an *ordinary* `FocusLost`
+enqueue is **rejected and sets `closed`**, so the terminal append would
+then find a closed outbox and fall back — losing both events. Revision 6
+reserved one slot and so contradicted a contract two sections above it.
+
+**Exact-cap witness:** fill to exactly `OUTBOX_MAX` **while focused**,
+then close. The transcript ends **`… FocusLost, Detach`**, the writer is
+woken, and acknowledgement precedes exit. *Mutation:* reserve one slot →
+`FocusLost` is dropped and C4's ordering row fails at exact cap only.
+
+**Outbox states — clean SEALED is not failed CLOSED.** Revision 6 had
+one `closed` flag doing both jobs, so a duplicate close or a post-seal
+send would see "closed" and **invoke the socket-shutdown fallback,
+aborting the drain it should have joined**. Four states, with distinct
+behaviour:
+
+| state | ordinary enqueue | close called again |
+|---|---|---|
+| **Open** | ordinary policy: accepted below the cap; a cap-crossing lossless append is rejected and transitions to `Failed` | performs the terminal append-and-seal |
+| **Sealed** (suffix appended, drain in flight) | rejected | **waits on the existing acknowledgement** — never re-seals, never falls back |
+| **Drained** (acknowledged) | rejected | returns immediately |
+| **Failed** (overflow, or transport error) | rejected | **takes the socket-shutdown fallback** |
+
+*Mutation:* collapse `Sealed` into `Failed` → the duplicate-close witness
+aborts a healthy drain and exits before `Detach` is written.
+
+**Acknowledgement point:** the batch containing `Detach` **fully written
+and flushed to the socket**. **Bound: 250 ms.**
+
+**Two witnesses, mutually exclusive:**
+
+- **Responsive reader** — all preceding lossless events **and** `Detach`
+  are written, acknowledgement occurs, **then** exit. *Mutation:* drop
+  the drain → exit-before-`Detach` is observable.
+- **Stalled reader** — the deadline fires, socket shutdown yields EOF
+  cleanup, the frontend **exits anyway**. *Mutation:* remove the bound
+  → this test hangs.
+
+*Seal mutation:* permit a late enqueue → an event appears after
+`Detach` in the responsive transcript.
+
+## 8. Wire contracts
+
+| | **1a — `TextInput`** | **1e — `OpenTarget` + `OpenTargetResult`** |
+|---|---|---|
+| **floor** | **v24** | **v25**, after v24, serialized |
+| **encoding** | **appended variant**; never widen a field in place — postcard is positional | appended variants |
+| **byte pin** | frozen-byte fixture on the **previous final variant** | same |
+| **gate** | daemon accepts from `>= 24`; producer withholds below | `>= 25`; producer withholds below |
+| **old peer** | a `< 24` frontend **retains its existing `Key` behaviour and its existing limitations** — it truncates multi-scalar input today and ignores IME, and continues to. **The guarantee is NO REGRESSION, not retroactive correctness** | a `< 25` frontend cannot drop-open; nothing it already had degrades |
+| **bounds** | **64 KiB** UTF-8; oversize **rejected** | **32 KiB** per raw path; non-empty path; absolute non-empty cwd; **embedded NUL rejected**; `Failed.message` capped at the **existing 4 KiB** error cap |
+| **pins** | frozen bytes on `FrontendEvent`'s previous final variant | **two independent pins** — `FrontendEvent` for `OpenTarget`, `InstanceMessage` for `OpenTargetResult` |
+
+**E5's delivery mechanism.** `StatusFacts.message` is **global and can
+be cleared before the originating frontend observes it**, so it cannot
+carry this. **1e adds a source-scoped `OpenTargetResult`, correlated by
+a frontend request ID**, so a failure reaches the frontend that dropped
+the file and no other.
+
+## 9. Coherence impact (§20)
+
+- **Journey steps**: **5**; **3** (1e); **6(e)** on the GPU column.
+- **Islands**: Escape ceasing to be a local quit **removes** one;
+  Q#S1-7 adds none → the census **falls by one**.
+- **Config registry**: none. The bell's 120 ms is a constant.
+- **Background work**: **1e adds no new worker**, but it **attributes
+  the existing asynchronous directory operation to an originating
+  frontend and request** until terminal settlement — the one-shot
+  completion is that attribution — **and drops it on source detach**.
+  That is §9's ownership question appearing in miniature, and it is
+  answered here for this one operation rather than in general.
+
+## 10. Rulings
+
+**Q#S1-1** native close detaches, `editor.quit` shuts down the daemon
+and its attachments, Escape only cancels/round-trips · **Q#S1-5** A/`1e`
+· **Q#S1-6** B/`TextInput` · **Q#S1-7** Meta/Super → Stage 2, arc §2.5
+and the backlog amended by 1-pre's first PR · **Q#S1-8** (A),
+`SEMANTIC_BOOTSTRAP_GRID` · **Q#S1-9** precedence per §5 · **Q#S1-10** terminal `OpenTargetResult`.
+
+## 11. Gates
+
+`./scripts/gate --acceptance gpu_invocation_acceptance` plus touched
+input suites, and `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`.
+**`--protocol` for 1a and 1e only.**

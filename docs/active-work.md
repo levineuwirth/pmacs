@@ -250,7 +250,47 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## The GUI arc — Stage 0 branch OPEN, absorption COMPLETE, ready for PR
+## GUI arc Stage 1 — 1-pre branch OPEN, framing APPROVED, no PR yet
+
+**Written at the branch's first commit**, with the framing, as the arc's
+§5 requires of every PR in it.
+
+- **Branch `gui-stage1-pre`**, base `githubsucks/main` @ `f8ad3e7` (the
+  Stage 0 merge, #236). **`githubsucks/gui-stage1-pre` is the
+  authoritative tip** — the ref, not a SHA. Recover with
+  `git fetch githubsucks && git checkout gui-stage1-pre`.
+- **Framing `docs/gui-stage1-input-framing.md`, revision 9, APPROVED**
+  after **eight rejected revisions**. It is Stage 1's framing for **all**
+  slices and governs the later branches; only Stage 0 was framed by the
+  arc document itself.
+- **Scope of THIS branch: 1-pre only — the input seam. No behaviour
+  change.** `App::window_event` is **655 lines** (`main.rs:2734`) and
+  nothing below it can be witnessed without a display, which is why the
+  seam precedes every other slice.
+- **The evidence contract, because "no behaviour change" is not one:** a
+  **headless routing harness** records, per event family, the routing
+  decision, the **outbound protocol events, and the LOCAL effects** —
+  exit, redraw, resize, state mutation. Production `window_event`
+  becomes a **thin call-through**. Mutation evidence: bypassing an arm,
+  or misrouting one family to another, must fail.
+- **P3 is an ACCEPTED STRUCTURAL EXCEPTION.** A headless test cannot
+  construct `ActiveEventLoop` or invoke the real callback, so the
+  `window_event → router` delegation is a **code-review invariant, not a
+  tested one**. Recorded rather than papered over: mutation evidence
+  covers every router arm and **not** the delegation.
+- **Slice order (each its own branch and PR):** `1-pre` → `1a`\* → `1b`
+  → `1c` → `1d` → `1e`\*. **`1a` and `1e` are protocol-bearing (v24
+  `TextInput`, v25 `OpenTarget`/`OpenTargetResult`) and are
+  SERIALIZED.** 1c is **not** protocol-bearing under Q#S1-8.
+- **Q#S1-7 obligation carried by THIS PR:** Meta/Super policy moves to
+  Stage 2, so the arc framing's §2.5 and the standing backlog are
+  amended here. Stage 1 keeps the deliberate OS reservation and adds no
+  island.
+- **Gates:** `./scripts/gate --acceptance gpu_invocation_acceptance`
+  plus touched input suites, and `PMACS_REQUIRE_GPU=1 cargo test -p
+  pmacs-gpu`. **No `--protocol`** — 1-pre changes no wire.
+
+## The GUI arc — Stage 0 MERGED as #236 (`f8ad3e7`)
 
 **Written at the branch's first commit**, with the framing, which is
 what this arc's own §5 requires of every PR in it. The standing
