@@ -2747,9 +2747,30 @@ nothing; and the CLOSE message must use the same variant family as the
 OPEN, or a session closed by the other family's clear leaves its surface
 on screen forever.
 
-**Fake LSP** (`src/bin/pmacs_fake_lsp.rs`) modes: `fullonly`,
-`rangeonly`, `rangeonly16` (UTF-16 + fail-closed bounds validation),
-`sighelp`. Use these for capability-matrix tests, not real servers.
+**LaTeX is served by `texlab`, and its root is NOT the repository root**
+(#230). `pmacs.lsp.config.latex` resolves the document root by an upward
+marker walk — `.texlabroot`/`texlabroot` are texlab's own markers,
+verified in its `crates/distro/src/language.rs` rather than assumed —
+and **`.git` is deliberately excluded from that walk**: a repository
+root is the wrong answer for a multi-file document, which is the whole
+reason the resolver exists. `config.latex.root` already accepted a
+resolver function, so this added no new mechanism.
+
+**Fake LSP** (`src/bin/pmacs_fake_lsp.rs`) modes — enumerated from the
+binary, because this list had gone stale and a stale mode list is how a
+test ends up covering the shape next to the defect. Capability matrix:
+`fullonly`, `rangeonly`, `rangeonly16` (UTF-16 + fail-closed bounds
+validation), `sighelp`, `prepare`, `preprefuse`, `rename`,
+`inlaybounds`, `inlayrefresh`, `semantictokensrefresh`,
+`applyeditplan`, `resourceops`, `posecho`, `defenv`, `wsconfig`,
+`rooturi`, `leanprogress`. Failure shapes: `crash`, `error`, `garbage`,
+`silent`. **File watchers (issue #233)**: `filewatch` (RelativePattern
+`**/*.txt`), `filewatchabs` (plain-string ABSOLUTE glob),
+`filewatchflat` (RelativePattern with no leading `**/`),
+`filewatchbare` (bare relative string — the P1 regression guard),
+`filewatchrereg` (same id twice, no unregister), `filewatchjoin`,
+`filewatchretire`. Use these for capability-matrix tests, not real
+servers.
 
 ## 5. Hard-won ops lessons
 
