@@ -1214,13 +1214,17 @@ mod tests {
             matches!(result, Err(FsError::Cancelled)),
             "mid-walk cancel must surface as Cancelled"
         );
-        // 126 entries total (3 dirs + 123 files). The next entry poll
-        // after the cancel at entry 5 is at most one
-        // READDIR_CANCEL_POLL_EVERY stride away.
+        // 126 entries total (3 dirs + 123 files). The cancel lands at
+        // entry 5 (root's three dir entries, then two files), so the
+        // per-entry poll stops the walk at exactly 35 = 3 + 32 (one
+        // READDIR_CANCEL_POLL_EVERY stride). The bound sits BELOW 44:
+        // with the per-entry poll deleted, the 41-file directory runs
+        // to completion and the per-directory poll catches at 44 --- a
+        // bound of 60 could not tell the two apart (review round 3).
         assert!(
-            seen.get() < 60,
-            "the walk must stop near the mid-walk cancel, not run the \
-             whole tree ({} of 126 entries processed)",
+            seen.get() < 40,
+            "the walk must stop within one poll stride of the cancel \
+             ({} of 126 entries processed; expected 35)",
             seen.get()
         );
     }

@@ -5800,6 +5800,24 @@ fn d3_walk_job_count(state: &pmacs::editor::EditorState) -> i64 {
         .expect("walk-count probe must not error")
 }
 
+/// Number of `fs_walk_tree` jobs currently ACTIVE (running or queued).
+fn d3_active_walk_count(state: &pmacs::editor::EditorState) -> i64 {
+    state
+        .lua_host
+        .lua()
+        .load(
+            "(function()
+               local n = 0
+               for _, r in ipairs(pmacs.workers.snapshot().active) do
+                 if r.kind == 'fs_walk_tree' then n = n + 1 end
+               end
+               return n
+             end)()",
+        )
+        .eval()
+        .expect("active-walk probe must not error")
+}
+
 /// Pump until at least one `fs_walk_tree` job is active (typically
 /// queued behind a saturated pool). Panics on timeout.
 fn d3_wait_for_active_walk(state: &mut pmacs::editor::EditorState) {
@@ -5833,11 +5851,13 @@ fn d3_wait_for_active_walk(state: &mut pmacs::editor::EditorState) {
     }
 }
 
-/// Pump until some `fs_walk_tree` job is observed cancelled — either
-/// `cancel_requested` while active or a `cancelled` completion in the
-/// ring. Panics on timeout.
+/// Pump until some `fs_walk_tree` job has SETTLED cancelled — a
+/// `cancelled` completion in the ring, not merely `cancel_requested`
+/// on an active row (review round 3: a worker that ignored the token
+/// and completed successfully would satisfy a request-level check).
+/// Panics on timeout.
 fn d3_wait_for_walk_cancelled(state: &mut pmacs::editor::EditorState) {
-    let deadline = Instant::now() + Duration::from_secs(4);
+    let deadline = Instant::now() + Duration::from_secs(6);
     loop {
         state.tick_processes();
         state.tick_lsp();
@@ -5847,13 +5867,7 @@ fn d3_wait_for_walk_cancelled(state: &mut pmacs::editor::EditorState) {
             .lua()
             .load(
                 "(function()
-                   local snap = pmacs.workers.snapshot()
-                   for _, r in ipairs(snap.active) do
-                     if r.kind == 'fs_walk_tree' and r.cancel_requested then
-                       return true
-                     end
-                   end
-                   for _, r in ipairs(snap.completed) do
+                   for _, r in ipairs(pmacs.workers.snapshot().completed) do
                      if r.kind == 'fs_walk_tree' and r.status == 'cancelled' then
                        return true
                      end
@@ -6116,7 +6130,7 @@ fn m4_24_d3_join_mid_walk_queues_one_immediate_baseline() {
         .lua_host
         .lua()
         .load(format!(
-            "for _ = 1, {} do pmacs.workers.sleep(1200) end",
+            "for _ = 1, {} do pmacs.workers.sleep(800) end",
             std::thread::available_parallelism().map_or(8, std::num::NonZeroUsize::get) + 4
         ))
         .exec()
@@ -6138,9 +6152,25 @@ fn m4_24_d3_join_mid_walk_queues_one_immediate_baseline() {
         .expect("edit to trigger join");
     std::fs::write(watch.join("mid.bbb"), b"m\n").expect("write mid.bbb");
 
-    // Drain: sleeps expire, the queued walk runs, the follow-up
-    // baselines the joiner, and a later file is delivered to it.
-    d3_pump(&mut state, 1600);
+    // Drain DETERMINISTICALLY, not for a fixed duration: the held
+    // walk must complete and a post-join walk (the queued baseline)
+    // must have settled before `late.bbb` exists. On a small CI pool
+    // the sleep waves take seconds, and a fixed 1.6 s pump wrote the
+    // file before the held walk even started — folding it into the
+    // baseline. That was PR #235's first CI red: deterministic on
+    // every 2–4-core runner, invisible on sixteen local cores.
+    let walks_at_join = d3_walk_job_count(&state);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        d3_pump(&mut state, 100);
+        if d3_walk_job_count(&state) > walks_at_join && d3_active_walk_count(&state) == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the queued baseline walk never settled"
+        );
+    }
     let late_uri = format!("file://{}", watch.join("late.bbb").display());
     std::fs::write(watch.join("late.bbb"), b"l\n").expect("write late.bbb");
     assert!(
@@ -6230,7 +6260,7 @@ fn m4_24_d3_retirement_stops_scans_and_a_fresh_group_rebaselines() {
         .lua_host
         .lua()
         .load(format!(
-            "for _ = 1, {} do pmacs.workers.sleep(1200) end",
+            "for _ = 1, {} do pmacs.workers.sleep(800) end",
             std::thread::available_parallelism().map_or(8, std::num::NonZeroUsize::get) + 4
         ))
         .exec()
@@ -6308,7 +6338,7 @@ fn m4_24_d3_live_cancel_preserves_snapshot_and_cadence() {
         .lua_host
         .lua()
         .load(format!(
-            "for _ = 1, {} do pmacs.workers.sleep(1200) end",
+            "for _ = 1, {} do pmacs.workers.sleep(800) end",
             std::thread::available_parallelism().map_or(8, std::num::NonZeroUsize::get) + 4
         ))
         .exec()

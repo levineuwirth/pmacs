@@ -268,6 +268,24 @@ implementation-time facts worth keeping:
   either copy alone is masked by the other; only biting both goes red.
   The sweep exists for seam-cancelled members, the unregister path for
   idle groups whose next scan may be seconds away.
+- **Round three, post-PR: two witness overclaims, and the PR's first
+  CI red — my own fixed-duration pump.** The mid-walk bound (60) could
+  not tell a deleted per-entry poll from the real code — the cancel
+  lands two files into a 41-file directory, so the per-DIRECTORY poll
+  stops a poll-less walk at 44; the bound is now 40 against an
+  expected exactly-35, and the entry-poll-only bite goes red at 44.
+  The retirement helper accepted `cancel_requested` on an active row —
+  a request, not settlement; it now waits for a `cancelled`
+  COMPLETION. And all five CI test legs failed deterministically where
+  sixteen local cores stayed green: `d3_pump(1600)` wrote the
+  discriminating file before the held walk even STARTED on a
+  3-thread pool (8×1200 ms sleeps drain in ~3.6 s of waves), folding
+  it into the baseline. The drain is now an observable condition
+  (a post-join walk completed and none active), the sleeps are 800 ms,
+  and the three saturation tests plus the whole family were re-run
+  green under `taskset -c 0-3` — the CI pool shape, reproduced
+  locally. **A fixed-duration pump against pool-dependent timing is a
+  core-count assumption in disguise.**
 - **A second pre-commit round found three more** (implementation
   review, not framing): mid-walk cancellation was unwitnessed — both
   Rust cancel tests pre-cancelled and the acceptance test cancelled a

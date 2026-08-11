@@ -570,6 +570,23 @@ the lane's only `pmacs-gpu` addition is the arm that went red.
 The next agent to touch this row should reproduce at 1-in-10 and
 instrument which side closes the pipe, rather than re-running for green.
 
+**Fourth occurrence — D3 file-watch scheduler (PR #235), 2026-08-11,
+local (Linux), at the gate's SWEEP step** (`cargo test --workspace
+--no-fail-fast`, default features — U3's flavor, this time with the
+fragments captured). All three required fragments verified against the
+durable gate log
+(`pmacs-fdccc423/gate-logs/20260811T150651Z-1481359/08-sweep.log`):
+`transient sequence must attach: Attach(Handshake(Io(Os { code: 32,
+kind: BrokenPipe, message: "Broken pipe" })))`, `attach.rs:1680`.
+242/243 in the target; the same sweep had passed twice earlier the same
+day on materially the same tree (the diff between runs was a test file
+and docs — **no `pmacs-gpu` code, no wire, no protocol**, the
+strongest non-attribution shape this row has had). Ambient context,
+recorded not asserted: load average ~5.2 and four leaked
+`pmacs --daemon` processes resident. Consistent with the established
+~1-in-10-under-load rate; adds no new mechanism evidence. The
+retirement bar is unchanged.
+
 ### U2 — `m6_1_pty_raw_mode_disables_kernel_echo`, THIRD known occurrence
 
 **Corrected 2026-08-09 after review.** A previous edit of this row
