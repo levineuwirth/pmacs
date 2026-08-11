@@ -248,8 +248,14 @@ unmerged until this was resolved; #234 merged first and #227 followed
 the same day (`b867f64`), refreshed and re-gated on the merged base.
 
 **D3 — the polling cost — is the remainder, and the user has ruled it
-is next (2026-08-11).** No branch and no framing yet. What is known,
-verified while framing D1/D2:
+is next (2026-08-11).** **Branch `lsp-file-watch-d3`** (base
+`githubsucks/main` @ `add0ba1`; the remote ref is authoritative), with
+**framing `docs/lsp-file-watch-d3-framing.md`, revision 1, DRAFT —
+awaiting review**, committed at the branch's first commit so it is
+portable during review. Four open rulings (Q#D3-1..4: the acceptance
+bar, the skip-list default, the string-form base, knobs vs constants)
+block implementation. What was known before framing, verified while
+framing D1/D2:
 
 - After #234 the watcher is *correct* but still walks: `walk` recurses
   unconditionally and `matches` gates only recording, so rust-analyzer
