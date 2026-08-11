@@ -55,7 +55,7 @@ use pmacs_protocol::{
 use unicode_width::UnicodeWidthChar;
 use wgpu::MultisampleState;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, WindowEvent};
+use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
@@ -2711,6 +2711,202 @@ impl App {
             state.render();
         }
     }
+
+    /// Perform [`KeyboardRoute::Press`]. The router has already
+    /// discarded key-ups, so `key` is always a press.
+    #[allow(clippy::too_many_lines)] // one linear key pipeline; splitting hides the order.
+    fn apply_keyboard(&mut self, key: &KeyEvent) -> EventOutcome {
+        // While the daemon is intercepting keystrokes — an active
+        // incremental search (Q#SR5), or a minibuffer / pending
+        // prefix — every key belongs to its handler, not the
+        // buffer. The GUI round-trips them all and never
+        // optimistic-applies (that would edit the document
+        // mid-search).
+        let intercept = self
+            .state
+            .as_ref()
+            .is_some_and(State::daemon_intercepts_keys);
+
+        // Arc 1a Q#C6 — the completion popup is NON-modal, so it
+        // never flips the intercept gate (typing stays
+        // optimistic; the daemon's after-edit refresh re-ships
+        // the popup). Only the keys whose *default GPU handling
+        // is wrong under a popup* need this flag: Esc (below,
+        // else it's the local quit) and RET/TAB (the optimistic
+        // gate further down, else they'd insert instead of
+        // accept). C-n/C-p/C-g already round-trip as command
+        // chords, Up/Down as forwarded motion keys — the daemon's
+        // completion shadow handles all of them.
+        let completion_open = self
+            .state
+            .as_ref()
+            .is_some_and(State::completion_open_for_current_buffer);
+
+        // Escape cancels an active intercept (e.g. a running
+        // search) or dismisses the completion popup; otherwise it
+        // stays the local quit.
+        if matches!(key.logical_key, Key::Named(NamedKey::Escape)) {
+            if intercept || completion_open {
+                if let Some(client) = self.attach_client.as_ref()
+                    && let Err(e) = client.send_key(ProtocolKey::Escape, Modifiers::NONE)
+                {
+                    eprintln!("pmacs-gpu: send Escape (cancel) failed: {e}");
+                }
+            } else {
+                // Q#S1-1 / A4 — the local quit, unchanged here and
+                // deleted by Stage 1a: an idle Escape must reach the
+                // daemon. `window_event` performs the exit; this is
+                // the only reason a body needs an outcome at all.
+                return EventOutcome::Exit;
+            }
+            return EventOutcome::Continue;
+        }
+
+        let Some((pkey, mut pmods)) = translate_key(&key.logical_key, self.modifiers) else {
+            return EventOutcome::Continue;
+        };
+
+        // AltGr / international text (audit F-004). winit reports
+        // the text a keypress produces; when a keypress yields
+        // printable text *while both Ctrl and Alt* are held — the
+        // AltGr signature on Windows (LCtrl+RAlt) — it's text
+        // input, not a command chord. Strip those modifiers (keep
+        // Shift) so it inserts (through the plain-text path, or the
+        // daemon's SelfInsert while a prompt is open) instead of
+        // being routed to the keymap. Alt alone is left intact so
+        // macOS Option-as-Meta still reaches the keymap; on layouts
+        // where AltGr isn't Ctrl+Alt this is a no-op.
+        if matches!(pkey, ProtocolKey::Char(_)) && is_layout_text(key.text.as_deref(), pmods) {
+            pmods = if pmods.contains(Modifiers::SHIFT) {
+                Modifiers::SHIFT
+            } else {
+                Modifiers::NONE
+            };
+        }
+
+        // Ctrl-V — OS paste (Q#CM6). Read the system clipboard
+        // locally via arboard and ship it as a `Paste` event; the
+        // daemon inserts it. Handled before binding `client` so
+        // the `&mut self` clipboard read doesn't conflict with the
+        // client borrow. Skipped while intercepting (the daemon's
+        // active handler owns the key then). The daemon keymap's
+        // C-y yanks the in-app slot instead.
+        if !intercept && pkey == ProtocolKey::Char('v') && pmods == Modifiers::CTRL {
+            let bytes = self.state.as_mut().and_then(State::read_os_clipboard);
+            if let Some(bytes) = bytes
+                && let Some(client) = self.attach_client.as_ref()
+                && let Err(e) = client.send_paste(bytes)
+            {
+                eprintln!("pmacs-gpu: send_paste failed: {e}");
+            }
+            return EventOutcome::Continue;
+        }
+
+        let Some(client) = self.attach_client.as_ref() else {
+            return EventOutcome::Continue;
+        };
+
+        // Intercept path: round-trip every key into the daemon's
+        // active handler (search query / step / accept / cancel).
+        if intercept {
+            if let Some(state) = self.state.as_mut() {
+                state.mark_cursor_stale_after_round_trip();
+            }
+            if debug_input() {
+                eprintln!("pmacs-gpu send_key (intercepted): {pkey:?} mods={pmods:?}");
+            }
+            if let Err(e) = client.send_key(pkey, pmods) {
+                eprintln!("pmacs-gpu: send_key (intercepted) failed: {e}");
+            }
+            return EventOutcome::Continue;
+        }
+
+        // Idle: forward any command chord (Char/Enter/Tab with
+        // Ctrl or Alt) to the daemon (Q#GC1). These drive the
+        // keymap — `C-a`, `M-f`, `C-x C-s`, isearch/clipboard/M-x,
+        // … — the same path the TUI forwards everything through.
+        // The GUI no longer withholds them (the minibuffer / prompt
+        // flows they open now render, Q#MB1). Once a forwarded
+        // chord opens a prompt or enters a prefix, `dispatch_idle`
+        // flips false and the intercept gate round-trips the rest —
+        // no optimistic local flip, so a chord that changes no
+        // daemon state can never wedge the gate. (Ctrl-V / OS paste
+        // is handled locally above and never reaches here.)
+        if is_command_chord(pkey, pmods) {
+            if let Some(state) = self.state.as_mut() {
+                state.mark_cursor_stale_after_round_trip();
+            }
+            if let Err(e) = client.send_key(pkey, pmods) {
+                eprintln!("pmacs-gpu: send_key (command chord) failed: {e}");
+            }
+            return EventOutcome::Continue;
+        }
+
+        // Session B2 forwards cursor motion + plain text editing
+        // (Char / Backspace / Enter / Delete / Tab). Command chords
+        // are handled above; Meta/Super-only chords fall through
+        // here and are withheld, leaving OS/WM shortcuts (Cmd-Q,
+        // Cmd-C) to the platform.
+        if !should_forward_key(pkey, pmods) {
+            return EventOutcome::Continue;
+        }
+
+        // Arc 1a Q#C6 — with the popup open, RET and TAB mean
+        // "accept", not "insert \n / \t": skip the optimistic
+        // path so they round-trip into the daemon's
+        // dispatch_completion_key. Everything else stays
+        // optimistic.
+        let completion_takes_key =
+            completion_open && matches!(pkey, ProtocolKey::Enter | ProtocolKey::Tab);
+
+        if !completion_takes_key
+            && let Some(op) = self.state.as_mut().and_then(|state| {
+                state
+                    .optimistic_crdt_insert(pkey, pmods)
+                    .or_else(|| state.optimistic_crdt_delete(pkey, pmods))
+            })
+        {
+            if debug_input() {
+                eprintln!(
+                    "pmacs-gpu send_crdt: key={pkey:?} buf={:?} bytes={}B",
+                    op.buffer_id,
+                    op.op.bytes.len()
+                );
+            }
+            if let Err(e) = client.send_crdt_op(op.buffer_id, op.op) {
+                eprintln!("pmacs-gpu: send_crdt_op failed: {e}");
+            }
+            // An optimistic edit near the viewport edge can
+            // scroll (a wrap-inducing insert, a Backspace
+            // above the top); re-declare the scoped viewport
+            // so the producer styles the newly visible lines.
+            if let Some(vp) = op.viewport
+                && let Err(e) = client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+            {
+                eprintln!("pmacs-gpu: send Viewport failed: {e}");
+            }
+            return EventOutcome::Continue;
+        }
+        if let Some(state) = self.state.as_mut() {
+            if state.defer_round_trip_key_if_needed(pkey, pmods) {
+                if debug_input() {
+                    eprintln!(
+                        "pmacs-gpu defer_key: {pkey:?} mods={pmods:?} \
+                         pending optimistic cursor"
+                    );
+                }
+                return EventOutcome::Continue;
+            }
+            state.mark_cursor_stale_after_round_trip();
+        }
+        if debug_input() {
+            eprintln!("pmacs-gpu send_key: {pkey:?} mods={pmods:?}");
+        }
+        if let Err(e) = client.send_key(pkey, pmods) {
+            eprintln!("pmacs-gpu: send_key failed: {e}");
+        }
+        EventOutcome::Continue
+    }
 }
 
 /// GUI Stage 1-pre — the input seam.
@@ -2733,15 +2929,35 @@ impl App {
 /// all**, so a harness recording only protocol traffic would leave them
 /// invisible; that is why a route names its local effect and the harness
 /// records routes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Route {
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Route<'a> {
     /// The lifecycle family — see [`route_lifecycle`].
     Lifecycle(LifecycleRoute),
+    /// The keyboard family — see [`route_keyboard`].
+    Keyboard {
+        action: KeyAction,
+        key: &'a KeyEvent,
+    },
     /// No extracted family claims this event. During 1-pre that covers
     /// both the families still inline in `window_event` and the events
     /// pmacs genuinely ignores; when the last family moves here it means
     /// only the second.
     Unrouted,
+}
+
+/// What the event loop must do once a family's body has run. Only the
+/// keyboard family produces anything but `Continue` today: an idle
+/// Escape is a local quit. Returning the decision rather than taking an
+/// `&ActiveEventLoop` is what keeps every body reachable from a test —
+/// `event_loop.exit()` is called in exactly one place, `window_event`.
+///
+/// Stage 1a's A4 deletes that branch (an idle Escape must reach the
+/// daemon and never exit), at which point this type has one variant and
+/// should go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventOutcome {
+    Continue,
+    Exit,
 }
 
 /// The lifecycle family: events about the **window itself** — closing,
@@ -2769,11 +2985,27 @@ enum LifecycleRoute {
     Redraw,
 }
 
+/// The keyboard family's whole decision. `Release` is a route rather
+/// than an absence: the family **claims** a key-up and drops it, which
+/// is a different fact from no family claiming the event, and
+/// conflating the two would hide the drop the moment a later slice
+/// wants key-up semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyAction {
+    /// A key-down — the only keyboard state pmacs acts on.
+    Press,
+    /// A key-up. Claimed and deliberately discarded.
+    Release,
+}
+
 /// Decide what `window_event` should do with an event, from the event
 /// alone. See [`Route`].
-fn route_event(event: &WindowEvent) -> Route {
+fn route_event(event: &WindowEvent) -> Route<'_> {
     if let Some(lifecycle) = route_lifecycle(event) {
         return Route::Lifecycle(lifecycle);
+    }
+    if let Some((action, key)) = route_keyboard(event) {
+        return Route::Keyboard { action, key };
     }
     Route::Unrouted
 }
@@ -2790,6 +3022,34 @@ fn route_lifecycle(event: &WindowEvent) -> Option<LifecycleRoute> {
         }),
         WindowEvent::RedrawRequested => Some(LifecycleRoute::Redraw),
         _ => None,
+    }
+}
+
+/// The keyboard family's claim. `None` means some other family owns the
+/// event.
+///
+/// **A SECOND ACCEPTED STRUCTURAL EXCEPTION, alongside P3.** This
+/// function's own pattern arm is unwitnessable: `KeyEvent` carries a
+/// `pub(crate) platform_specific` field, so **no `WindowEvent::KeyboardInput`
+/// can be constructed outside winit** and no headless test can feed one.
+/// The limitation is winit's and not this seam's — it is why the arm is
+/// kept to a pattern and a call, with the family's only real decision
+/// factored into [`route_key_action`], which takes an `ElementState` and
+/// is tested directly. The pointer families have no such problem:
+/// `DeviceId::dummy()` is provided by winit for exactly this purpose,
+/// and their events are constructible.
+fn route_keyboard(event: &WindowEvent) -> Option<(KeyAction, &KeyEvent)> {
+    match event {
+        WindowEvent::KeyboardInput { event: key, .. } => Some((route_key_action(key.state), key)),
+        _ => None,
+    }
+}
+
+/// Press or release — see [`KeyAction`].
+fn route_key_action(state: ElementState) -> KeyAction {
+    match state {
+        ElementState::Pressed => KeyAction::Press,
+        ElementState::Released => KeyAction::Release,
     }
 }
 
@@ -2812,19 +3072,19 @@ fn route_lifecycle(event: &WindowEvent) -> Option<LifecycleRoute> {
 /// delegation.
 #[cfg(test)]
 #[derive(Debug, Default)]
-struct RoutingHarness {
-    transcript: Vec<Route>,
+struct RoutingHarness<'a> {
+    transcript: Vec<Route<'a>>,
 }
 
 #[cfg(test)]
-impl RoutingHarness {
-    fn feed(&mut self, event: &WindowEvent) -> Route {
+impl<'a> RoutingHarness<'a> {
+    fn feed(&mut self, event: &'a WindowEvent) -> Route<'a> {
         let route = route_event(event);
         self.transcript.push(route);
         route
     }
 
-    fn transcript(&self) -> &[Route] {
+    fn transcript(&self) -> &[Route<'a>] {
         &self.transcript
     }
 }
@@ -2839,32 +3099,43 @@ mod input_routing_tests {
         WindowEvent::ModifiersChanged(state.into())
     }
 
+    /// The per-variant rows below drive [`route_event`] directly and the
+    /// transcript row drives the harness. That split is deliberate: it
+    /// leaves the transcript row as P2's sole owner, so a harness that
+    /// stopped recording an effect fails exactly one row instead of
+    /// every row.
+    ///
+    /// Events are bound to locals rather than passed as temporaries
+    /// because a `Route` borrows the event it came from — the keyboard
+    /// variant carries a `&KeyEvent`.
+    fn route_one(event: &WindowEvent) -> Route<'_> {
+        route_event(event)
+    }
+
     /// P1 — `CloseRequested`. It sends the daemon nothing and its whole
     /// effect is local, so this row exists only because the route names
     /// the effect.
     #[test]
     fn close_requested_routes_to_exit() {
-        let mut harness = RoutingHarness::default();
-        assert_eq!(
-            harness.feed(&WindowEvent::CloseRequested),
-            Route::Lifecycle(LifecycleRoute::Exit)
-        );
+        let event = WindowEvent::CloseRequested;
+        assert_eq!(route_one(&event), Route::Lifecycle(LifecycleRoute::Exit));
     }
 
     /// P1 — `ModifiersChanged` carries the unwrapped state, which is the
     /// mutation `window_event` performs.
     #[test]
     fn modifiers_changed_routes_the_new_state() {
-        let mut harness = RoutingHarness::default();
         let mods = ModifiersState::CONTROL | ModifiersState::ALT;
+        let held = modifiers_changed(mods);
         assert_eq!(
-            harness.feed(&modifiers_changed(mods)),
+            route_one(&held),
             Route::Lifecycle(LifecycleRoute::Modifiers(mods))
         );
         // An empty state is a real transition (every modifier released),
         // not an absent one.
+        let released = modifiers_changed(ModifiersState::empty());
         assert_eq!(
-            harness.feed(&modifiers_changed(ModifiersState::empty())),
+            route_one(&released),
             Route::Lifecycle(LifecycleRoute::Modifiers(ModifiersState::empty()))
         );
     }
@@ -2873,9 +3144,9 @@ mod input_routing_tests {
     /// already non-zero.
     #[test]
     fn resized_routes_the_new_extent() {
-        let mut harness = RoutingHarness::default();
+        let event = WindowEvent::Resized(PhysicalSize::new(1280, 720));
         assert_eq!(
-            harness.feed(&WindowEvent::Resized(PhysicalSize::new(1280, 720))),
+            route_one(&event),
             Route::Lifecycle(LifecycleRoute::Resize {
                 width: 1280,
                 height: 720,
@@ -2888,23 +3159,25 @@ mod input_routing_tests {
     /// on one axis only still keeps the other.
     #[test]
     fn a_zero_extent_resize_clamps_per_axis() {
-        let mut harness = RoutingHarness::default();
+        let collapsed = WindowEvent::Resized(PhysicalSize::new(0, 0));
         assert_eq!(
-            harness.feed(&WindowEvent::Resized(PhysicalSize::new(0, 0))),
+            route_one(&collapsed),
             Route::Lifecycle(LifecycleRoute::Resize {
                 width: 1,
                 height: 1,
             })
         );
+        let no_width = WindowEvent::Resized(PhysicalSize::new(0, 720));
         assert_eq!(
-            harness.feed(&WindowEvent::Resized(PhysicalSize::new(0, 720))),
+            route_one(&no_width),
             Route::Lifecycle(LifecycleRoute::Resize {
                 width: 1,
                 height: 720,
             })
         );
+        let no_height = WindowEvent::Resized(PhysicalSize::new(1280, 0));
         assert_eq!(
-            harness.feed(&WindowEvent::Resized(PhysicalSize::new(1280, 0))),
+            route_one(&no_height),
             Route::Lifecycle(LifecycleRoute::Resize {
                 width: 1280,
                 height: 1,
@@ -2917,11 +3190,22 @@ mod input_routing_tests {
     /// outbound traffic.
     #[test]
     fn redraw_requested_routes_to_redraw() {
-        let mut harness = RoutingHarness::default();
-        assert_eq!(
-            harness.feed(&WindowEvent::RedrawRequested),
-            Route::Lifecycle(LifecycleRoute::Redraw)
-        );
+        let event = WindowEvent::RedrawRequested;
+        assert_eq!(route_one(&event), Route::Lifecycle(LifecycleRoute::Redraw));
+    }
+
+    /// P1, keyboard — the family's whole decision.
+    ///
+    /// It is driven through [`route_key_action`] rather than the
+    /// harness, and that is the accepted exception documented on
+    /// [`route_keyboard`]: `KeyEvent` has a `pub(crate)` field, so no
+    /// `WindowEvent::KeyboardInput` exists that a test can build. What
+    /// remains unwitnessed is one pattern arm with no logic in it; the
+    /// decision itself is here.
+    #[test]
+    fn a_press_is_acted_on_and_a_release_is_discarded() {
+        assert_eq!(route_key_action(ElementState::Pressed), KeyAction::Press);
+        assert_eq!(route_key_action(ElementState::Released), KeyAction::Release);
     }
 
     /// An event no family claims. `Occluded` is chosen because pmacs has
@@ -2929,8 +3213,8 @@ mod input_routing_tests {
     /// would also read `Unrouted` today and stop doing so when it moves.
     #[test]
     fn an_unclaimed_event_is_unrouted() {
-        let mut harness = RoutingHarness::default();
-        assert_eq!(harness.feed(&WindowEvent::Occluded(true)), Route::Unrouted);
+        let event = WindowEvent::Occluded(true);
+        assert_eq!(route_one(&event), Route::Unrouted);
     }
 
     /// P2 — the harness records a transcript, and the transcript
@@ -2940,12 +3224,17 @@ mod input_routing_tests {
     /// harness built on protocol traffic alone.
     #[test]
     fn the_harness_records_each_local_effect_in_order() {
+        let events = [
+            WindowEvent::Resized(PhysicalSize::new(800, 600)),
+            modifiers_changed(ModifiersState::SHIFT),
+            WindowEvent::RedrawRequested,
+            WindowEvent::Occluded(false),
+            WindowEvent::CloseRequested,
+        ];
         let mut harness = RoutingHarness::default();
-        harness.feed(&WindowEvent::Resized(PhysicalSize::new(800, 600)));
-        harness.feed(&modifiers_changed(ModifiersState::SHIFT));
-        harness.feed(&WindowEvent::RedrawRequested);
-        harness.feed(&WindowEvent::Occluded(false));
-        harness.feed(&WindowEvent::CloseRequested);
+        for event in &events {
+            harness.feed(event);
+        }
         assert_eq!(
             harness.transcript(),
             &[
@@ -3014,200 +3303,6 @@ impl ApplicationHandler<AppEvent> for App {
     #[allow(clippy::too_many_lines)] // linear per-event dispatch; splitting hides the input flow.
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::KeyboardInput { event: key, .. } => {
-                if key.state != ElementState::Pressed {
-                    return;
-                }
-                // While the daemon is intercepting keystrokes — an active
-                // incremental search (Q#SR5), or a minibuffer / pending
-                // prefix — every key belongs to its handler, not the
-                // buffer. The GUI round-trips them all and never
-                // optimistic-applies (that would edit the document
-                // mid-search).
-                let intercept = self
-                    .state
-                    .as_ref()
-                    .is_some_and(State::daemon_intercepts_keys);
-
-                // Arc 1a Q#C6 — the completion popup is NON-modal, so it
-                // never flips the intercept gate (typing stays
-                // optimistic; the daemon's after-edit refresh re-ships
-                // the popup). Only the keys whose *default GPU handling
-                // is wrong under a popup* need this flag: Esc (below,
-                // else it's the local quit) and RET/TAB (the optimistic
-                // gate further down, else they'd insert instead of
-                // accept). C-n/C-p/C-g already round-trip as command
-                // chords, Up/Down as forwarded motion keys — the daemon's
-                // completion shadow handles all of them.
-                let completion_open = self
-                    .state
-                    .as_ref()
-                    .is_some_and(State::completion_open_for_current_buffer);
-
-                // Escape cancels an active intercept (e.g. a running
-                // search) or dismisses the completion popup; otherwise it
-                // stays the local quit.
-                if matches!(key.logical_key, Key::Named(NamedKey::Escape)) {
-                    if intercept || completion_open {
-                        if let Some(client) = self.attach_client.as_ref()
-                            && let Err(e) = client.send_key(ProtocolKey::Escape, Modifiers::NONE)
-                        {
-                            eprintln!("pmacs-gpu: send Escape (cancel) failed: {e}");
-                        }
-                    } else {
-                        event_loop.exit();
-                    }
-                    return;
-                }
-
-                let Some((pkey, mut pmods)) = translate_key(&key.logical_key, self.modifiers)
-                else {
-                    return;
-                };
-
-                // AltGr / international text (audit F-004). winit reports
-                // the text a keypress produces; when a keypress yields
-                // printable text *while both Ctrl and Alt* are held — the
-                // AltGr signature on Windows (LCtrl+RAlt) — it's text
-                // input, not a command chord. Strip those modifiers (keep
-                // Shift) so it inserts (through the plain-text path, or the
-                // daemon's SelfInsert while a prompt is open) instead of
-                // being routed to the keymap. Alt alone is left intact so
-                // macOS Option-as-Meta still reaches the keymap; on layouts
-                // where AltGr isn't Ctrl+Alt this is a no-op.
-                if matches!(pkey, ProtocolKey::Char(_))
-                    && is_layout_text(key.text.as_deref(), pmods)
-                {
-                    pmods = if pmods.contains(Modifiers::SHIFT) {
-                        Modifiers::SHIFT
-                    } else {
-                        Modifiers::NONE
-                    };
-                }
-
-                // Ctrl-V — OS paste (Q#CM6). Read the system clipboard
-                // locally via arboard and ship it as a `Paste` event; the
-                // daemon inserts it. Handled before binding `client` so
-                // the `&mut self` clipboard read doesn't conflict with the
-                // client borrow. Skipped while intercepting (the daemon's
-                // active handler owns the key then). The daemon keymap's
-                // C-y yanks the in-app slot instead.
-                if !intercept && pkey == ProtocolKey::Char('v') && pmods == Modifiers::CTRL {
-                    let bytes = self.state.as_mut().and_then(State::read_os_clipboard);
-                    if let Some(bytes) = bytes
-                        && let Some(client) = self.attach_client.as_ref()
-                        && let Err(e) = client.send_paste(bytes)
-                    {
-                        eprintln!("pmacs-gpu: send_paste failed: {e}");
-                    }
-                    return;
-                }
-
-                let Some(client) = self.attach_client.as_ref() else {
-                    return;
-                };
-
-                // Intercept path: round-trip every key into the daemon's
-                // active handler (search query / step / accept / cancel).
-                if intercept {
-                    if let Some(state) = self.state.as_mut() {
-                        state.mark_cursor_stale_after_round_trip();
-                    }
-                    if debug_input() {
-                        eprintln!("pmacs-gpu send_key (intercepted): {pkey:?} mods={pmods:?}");
-                    }
-                    if let Err(e) = client.send_key(pkey, pmods) {
-                        eprintln!("pmacs-gpu: send_key (intercepted) failed: {e}");
-                    }
-                    return;
-                }
-
-                // Idle: forward any command chord (Char/Enter/Tab with
-                // Ctrl or Alt) to the daemon (Q#GC1). These drive the
-                // keymap — `C-a`, `M-f`, `C-x C-s`, isearch/clipboard/M-x,
-                // … — the same path the TUI forwards everything through.
-                // The GUI no longer withholds them (the minibuffer / prompt
-                // flows they open now render, Q#MB1). Once a forwarded
-                // chord opens a prompt or enters a prefix, `dispatch_idle`
-                // flips false and the intercept gate round-trips the rest —
-                // no optimistic local flip, so a chord that changes no
-                // daemon state can never wedge the gate. (Ctrl-V / OS paste
-                // is handled locally above and never reaches here.)
-                if is_command_chord(pkey, pmods) {
-                    if let Some(state) = self.state.as_mut() {
-                        state.mark_cursor_stale_after_round_trip();
-                    }
-                    if let Err(e) = client.send_key(pkey, pmods) {
-                        eprintln!("pmacs-gpu: send_key (command chord) failed: {e}");
-                    }
-                    return;
-                }
-
-                // Session B2 forwards cursor motion + plain text editing
-                // (Char / Backspace / Enter / Delete / Tab). Command chords
-                // are handled above; Meta/Super-only chords fall through
-                // here and are withheld, leaving OS/WM shortcuts (Cmd-Q,
-                // Cmd-C) to the platform.
-                if !should_forward_key(pkey, pmods) {
-                    return;
-                }
-
-                // Arc 1a Q#C6 — with the popup open, RET and TAB mean
-                // "accept", not "insert \n / \t": skip the optimistic
-                // path so they round-trip into the daemon's
-                // dispatch_completion_key. Everything else stays
-                // optimistic.
-                let completion_takes_key =
-                    completion_open && matches!(pkey, ProtocolKey::Enter | ProtocolKey::Tab);
-
-                if !completion_takes_key
-                    && let Some(op) = self.state.as_mut().and_then(|state| {
-                        state
-                            .optimistic_crdt_insert(pkey, pmods)
-                            .or_else(|| state.optimistic_crdt_delete(pkey, pmods))
-                    })
-                {
-                    if debug_input() {
-                        eprintln!(
-                            "pmacs-gpu send_crdt: key={pkey:?} buf={:?} bytes={}B",
-                            op.buffer_id,
-                            op.op.bytes.len()
-                        );
-                    }
-                    if let Err(e) = client.send_crdt_op(op.buffer_id, op.op) {
-                        eprintln!("pmacs-gpu: send_crdt_op failed: {e}");
-                    }
-                    // An optimistic edit near the viewport edge can
-                    // scroll (a wrap-inducing insert, a Backspace
-                    // above the top); re-declare the scoped viewport
-                    // so the producer styles the newly visible lines.
-                    if let Some(vp) = op.viewport
-                        && let Err(e) =
-                            client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
-                    {
-                        eprintln!("pmacs-gpu: send Viewport failed: {e}");
-                    }
-                    return;
-                }
-                if let Some(state) = self.state.as_mut() {
-                    if state.defer_round_trip_key_if_needed(pkey, pmods) {
-                        if debug_input() {
-                            eprintln!(
-                                "pmacs-gpu defer_key: {pkey:?} mods={pmods:?} \
-                                 pending optimistic cursor"
-                            );
-                        }
-                        return;
-                    }
-                    state.mark_cursor_stale_after_round_trip();
-                }
-                if debug_input() {
-                    eprintln!("pmacs-gpu send_key: {pkey:?} mods={pmods:?}");
-                }
-                if let Err(e) = client.send_key(pkey, pmods) {
-                    eprintln!("pmacs-gpu: send_key failed: {e}");
-                }
-            }
             // Session M-2 — pointer input (docs/pmacs-gpu-mouse-framing.md).
             WindowEvent::CursorMoved { position, .. } => {
                 let Some(state) = self.state.as_mut() else {
@@ -3647,7 +3742,23 @@ impl ApplicationHandler<AppEvent> for App {
                     self.apply_resize(width, height);
                 }
                 Route::Lifecycle(LifecycleRoute::Redraw) => self.apply_redraw(),
-                Route::Unrouted => {}
+                Route::Keyboard {
+                    action: KeyAction::Press,
+                    key,
+                } => {
+                    if self.apply_keyboard(key) == EventOutcome::Exit {
+                        event_loop.exit();
+                    }
+                }
+                // A key-up is claimed by the keyboard family and
+                // discarded; an unrouted event was claimed by nobody.
+                // The route keeps those apart — they are merged here
+                // only because both are, today, nothing to do.
+                Route::Keyboard {
+                    action: KeyAction::Release,
+                    ..
+                }
+                | Route::Unrouted => {}
             },
         }
     }
