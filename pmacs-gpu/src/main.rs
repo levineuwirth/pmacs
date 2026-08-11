@@ -2679,6 +2679,257 @@ impl App {
             }
         }
     }
+
+    /// Perform [`LifecycleRoute::Resize`]. `width`/`height` arrive
+    /// already clamped away from zero by the router.
+    fn apply_resize(&mut self, width: u32, height: u32) {
+        let vp = self
+            .state
+            .as_mut()
+            .and_then(|state| state.resize(width, height));
+        if let Some(vp) = vp
+            && let Some(client) = self.attach_client.as_ref()
+            && let Err(e) = client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+        {
+            eprintln!("pmacs-gpu: resize send_viewport failed: {e}");
+        }
+        // Vterm Stage 3 — a resize is a real geometry change, so
+        // the cell grid is re-derived and declared here. The
+        // daemon resizes the shared PTY only if this frontend is
+        // the durable controller.
+        self.flush_terminal_declaration();
+        // Q#BP15a — and so is the panel's whole-frame capacity. An
+        // identical cell total is not re-declared: nothing the
+        // daemon can act on changed.
+        self.flush_panel_geometry(GeometryTrigger::Surface);
+    }
+}
+
+/// GUI Stage 1-pre — the input seam.
+///
+/// `window_event` receives a `WindowEvent` and, until this seam existed,
+/// decided *and performed* everything in one 655-line match. Nothing
+/// below it could be witnessed without a display: `ActiveEventLoop` is
+/// non-constructible outside a live event loop, and the arms that matter
+/// reach a GPU surface or a socket.
+///
+/// The seam splits the two halves. **Deciding** is [`route_event`] — a
+/// free function over `&WindowEvent` alone, so a headless test can drive
+/// every family. **Performing** stays on `App`, in the `apply_*` methods
+/// the router's variants name.
+///
+/// The decision is what the route *is*, not merely which family claims
+/// it: `Exit` is the local exit effect, `Resize` carries the clamped
+/// surface extent, `Modifiers` carries the state mutation. Two arms
+/// (`CloseRequested`, and `RedrawRequested` once it moves here) send
+/// nothing outbound at all, so a harness recording only protocol traffic
+/// would leave them invisible — which is why a route names its local
+/// effect and the harness records routes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    /// The lifecycle family — see [`route_lifecycle`].
+    Lifecycle(LifecycleRoute),
+    /// No extracted family claims this event. During 1-pre that covers
+    /// both the families still inline in `window_event` and the events
+    /// pmacs genuinely ignores; when the last family moves here it means
+    /// only the second.
+    Unrouted,
+}
+
+/// The lifecycle family: the three arms that read no pointer state, hold
+/// no `State` borrow, and reach the socket only through the resize
+/// declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LifecycleRoute {
+    /// `CloseRequested` — leave the event loop. Q#S1-1: a native close
+    /// detaches this frontend, it does not shut the daemon down.
+    Exit,
+    /// `ModifiersChanged` — the new modifier state, already unwrapped
+    /// from winit's `Modifiers` wrapper.
+    Modifiers(winit::keyboard::ModifiersState),
+    /// `Resized` — the new surface extent, **already clamped away from
+    /// zero**. A minimize delivers `0×0`, and wgpu rejects a zero-extent
+    /// surface configuration, so the clamp is a rule rather than
+    /// defensive padding; deciding it here is what makes it witnessable
+    /// without a surface.
+    Resize { width: u32, height: u32 },
+}
+
+/// Decide what `window_event` should do with an event, from the event
+/// alone. See [`Route`].
+fn route_event(event: &WindowEvent) -> Route {
+    if let Some(lifecycle) = route_lifecycle(event) {
+        return Route::Lifecycle(lifecycle);
+    }
+    Route::Unrouted
+}
+
+/// The lifecycle family's decision. `None` means some other family owns
+/// the event.
+fn route_lifecycle(event: &WindowEvent) -> Option<LifecycleRoute> {
+    match event {
+        WindowEvent::CloseRequested => Some(LifecycleRoute::Exit),
+        WindowEvent::ModifiersChanged(mods) => Some(LifecycleRoute::Modifiers(mods.state())),
+        WindowEvent::Resized(size) => Some(LifecycleRoute::Resize {
+            width: size.width.max(1),
+            height: size.height.max(1),
+        }),
+        _ => None,
+    }
+}
+
+/// GUI Stage 1-pre — the headless routing harness (P2).
+///
+/// It feeds `WindowEvent`s through the production [`route_event`] and
+/// records what each one routed to. The transcript is of **routes**,
+/// deliberately, not of outbound protocol traffic: `CloseRequested`
+/// exits and `RedrawRequested` repaints, and neither sends the daemon
+/// anything, so a transcript of daemon traffic alone cannot tell a
+/// handled arm from a dropped one. A route names its local effect —
+/// exit, resize extent, modifier mutation — which is what makes those
+/// arms observable here at all.
+///
+/// P3 is the stated exception: that `window_event` *calls* the router
+/// rather than deciding for itself is a code-review invariant, not a
+/// tested one. `ActiveEventLoop` cannot be constructed outside a live
+/// event loop, so the real callback is unreachable from a test. The
+/// mutation evidence below covers every router arm and **not** the
+/// delegation.
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct RoutingHarness {
+    transcript: Vec<Route>,
+}
+
+#[cfg(test)]
+impl RoutingHarness {
+    fn feed(&mut self, event: &WindowEvent) -> Route {
+        let route = route_event(event);
+        self.transcript.push(route);
+        route
+    }
+
+    fn transcript(&self) -> &[Route] {
+        &self.transcript
+    }
+}
+
+#[cfg(test)]
+mod input_routing_tests {
+    use super::*;
+    use winit::dpi::PhysicalSize;
+    use winit::keyboard::ModifiersState;
+
+    fn modifiers_changed(state: ModifiersState) -> WindowEvent {
+        WindowEvent::ModifiersChanged(state.into())
+    }
+
+    /// P1 — `CloseRequested`. It sends the daemon nothing and its whole
+    /// effect is local, so this row exists only because the route names
+    /// the effect.
+    #[test]
+    fn close_requested_routes_to_exit() {
+        let mut harness = RoutingHarness::default();
+        assert_eq!(
+            harness.feed(&WindowEvent::CloseRequested),
+            Route::Lifecycle(LifecycleRoute::Exit)
+        );
+    }
+
+    /// P1 — `ModifiersChanged` carries the unwrapped state, which is the
+    /// mutation `window_event` performs.
+    #[test]
+    fn modifiers_changed_routes_the_new_state() {
+        let mut harness = RoutingHarness::default();
+        let mods = ModifiersState::CONTROL | ModifiersState::ALT;
+        assert_eq!(
+            harness.feed(&modifiers_changed(mods)),
+            Route::Lifecycle(LifecycleRoute::Modifiers(mods))
+        );
+        // An empty state is a real transition (every modifier released),
+        // not an absent one.
+        assert_eq!(
+            harness.feed(&modifiers_changed(ModifiersState::empty())),
+            Route::Lifecycle(LifecycleRoute::Modifiers(ModifiersState::empty()))
+        );
+    }
+
+    /// P1 — `Resized` carries the extent through unchanged when it is
+    /// already non-zero.
+    #[test]
+    fn resized_routes_the_new_extent() {
+        let mut harness = RoutingHarness::default();
+        assert_eq!(
+            harness.feed(&WindowEvent::Resized(PhysicalSize::new(1280, 720))),
+            Route::Lifecycle(LifecycleRoute::Resize {
+                width: 1280,
+                height: 720,
+            })
+        );
+    }
+
+    /// A minimize delivers `0×0` and wgpu rejects a zero-extent surface
+    /// configuration. The clamp is per axis, so an extent that collapses
+    /// on one axis only still keeps the other.
+    #[test]
+    fn a_zero_extent_resize_clamps_per_axis() {
+        let mut harness = RoutingHarness::default();
+        assert_eq!(
+            harness.feed(&WindowEvent::Resized(PhysicalSize::new(0, 0))),
+            Route::Lifecycle(LifecycleRoute::Resize {
+                width: 1,
+                height: 1,
+            })
+        );
+        assert_eq!(
+            harness.feed(&WindowEvent::Resized(PhysicalSize::new(0, 720))),
+            Route::Lifecycle(LifecycleRoute::Resize {
+                width: 1,
+                height: 720,
+            })
+        );
+        assert_eq!(
+            harness.feed(&WindowEvent::Resized(PhysicalSize::new(1280, 0))),
+            Route::Lifecycle(LifecycleRoute::Resize {
+                width: 1280,
+                height: 1,
+            })
+        );
+    }
+
+    /// An event no family claims. `Occluded` is chosen because pmacs has
+    /// never handled it and no later slice will — a still-inline family
+    /// would also read `Unrouted` today and stop doing so when it moves.
+    #[test]
+    fn an_unclaimed_event_is_unrouted() {
+        let mut harness = RoutingHarness::default();
+        assert_eq!(harness.feed(&WindowEvent::Occluded(true)), Route::Unrouted);
+    }
+
+    /// P2 — the harness records a transcript, and the transcript
+    /// distinguishes the three lifecycle effects from each other and
+    /// from an unclaimed event. Two of these four rows produce no
+    /// outbound traffic whatsoever.
+    #[test]
+    fn the_harness_records_each_local_effect_in_order() {
+        let mut harness = RoutingHarness::default();
+        harness.feed(&WindowEvent::Resized(PhysicalSize::new(800, 600)));
+        harness.feed(&modifiers_changed(ModifiersState::SHIFT));
+        harness.feed(&WindowEvent::Occluded(false));
+        harness.feed(&WindowEvent::CloseRequested);
+        assert_eq!(
+            harness.transcript(),
+            &[
+                Route::Lifecycle(LifecycleRoute::Resize {
+                    width: 800,
+                    height: 600,
+                }),
+                Route::Lifecycle(LifecycleRoute::Modifiers(ModifiersState::SHIFT)),
+                Route::Unrouted,
+                Route::Lifecycle(LifecycleRoute::Exit),
+            ]
+        );
+    }
 }
 
 impl ApplicationHandler<AppEvent> for App {
@@ -2733,8 +2984,6 @@ impl ApplicationHandler<AppEvent> for App {
     #[allow(clippy::too_many_lines)] // linear per-event dispatch; splitting hides the input flow.
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
             WindowEvent::KeyboardInput { event: key, .. } => {
                 if key.state != ElementState::Pressed {
                     return;
@@ -2928,27 +3177,6 @@ impl ApplicationHandler<AppEvent> for App {
                 if let Err(e) = client.send_key(pkey, pmods) {
                     eprintln!("pmacs-gpu: send_key failed: {e}");
                 }
-            }
-            WindowEvent::Resized(size) => {
-                let vp = self
-                    .state
-                    .as_mut()
-                    .and_then(|state| state.resize(size.width.max(1), size.height.max(1)));
-                if let Some(vp) = vp
-                    && let Some(client) = self.attach_client.as_ref()
-                    && let Err(e) = client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
-                {
-                    eprintln!("pmacs-gpu: resize send_viewport failed: {e}");
-                }
-                // Vterm Stage 3 — a resize is a real geometry change, so
-                // the cell grid is re-derived and declared here. The
-                // daemon resizes the shared PTY only if this frontend is
-                // the durable controller.
-                self.flush_terminal_declaration();
-                // Q#BP15a — and so is the panel's whole-frame capacity. An
-                // identical cell total is not re-declared: nothing the
-                // daemon can act on changed.
-                self.flush_panel_geometry(GeometryTrigger::Surface);
             }
             // Session M-2 — pointer input (docs/pmacs-gpu-mouse-framing.md).
             WindowEvent::CursorMoved { position, .. } => {
@@ -3383,7 +3611,18 @@ impl ApplicationHandler<AppEvent> for App {
                     state.render();
                 }
             }
-            _ => {}
+            // Stage 1-pre — everything the router already claims. The
+            // arms above are the families not yet moved behind it; when
+            // the last one goes, this match collapses to the call below
+            // and `window_event` is the thin call-through P3 asks for.
+            ref routed => match route_event(routed) {
+                Route::Lifecycle(LifecycleRoute::Exit) => event_loop.exit(),
+                Route::Lifecycle(LifecycleRoute::Modifiers(mods)) => self.modifiers = mods,
+                Route::Lifecycle(LifecycleRoute::Resize { width, height }) => {
+                    self.apply_resize(width, height);
+                }
+                Route::Unrouted => {}
+            },
         }
     }
 
