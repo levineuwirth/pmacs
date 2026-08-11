@@ -386,7 +386,7 @@ contradicted its own exclusions.*
 | 8 | Open terminal | (a) a terminal opens; (b) input and output round-trip; (c) it can be closed or killed; (d) **discoverable** — reachable by an advertised binding |
 | 9 | Build / test | (a) a build or test command runs **in the opened project's context**; (b) its output is captured; (c) the output is navigable; (d) **discoverable** — §2's own criteria say "Build or test command discoverable" (line above), which is what `C-c c` was bound to satisfy |
 | 10 | Inspect error | (a) errors are enumerated; (b) navigation reaches the site; (c) the site is marked in the buffer |
-| 11 | Understand what background work is running | (a) work in flight is **visible without asking**; (b) a detailed view is reachable **that names each job's purpose AND what originated it**; (c) **discoverable** — reachable by an advertised binding; (d) cancellable |
+| 11 | Understand what background work is running | (a) work in flight is **visible without asking**; (b) a detailed view is reachable that names each substantial background work item's **purpose and accountable owner — not merely its kind or dispatcher** — **across jobs, processes, servers and terminals**; (c) **discoverable** — reachable by an advertised binding; (d) cancellable |
 | 12 | Close + restore | (a) closing is clean and loses no data; (b) per-file state (cursor, scroll) restores; (c) the open-buffer set and window layout restore |
 
 **3(c) requires a browsable directory SURFACE, not dired.** Dired is
@@ -414,6 +414,55 @@ GPU cell fails it by construction rather than by omission. That is a
 finding the old single-verdict table could not express, because "Partial"
 was doing the work of both "some of this is missing" and "some of this
 cannot exist yet".
+
+### 2b. The per-frontend journey table
+
+Each cell is the **minimum over §2a's required subclaims**, with the
+binding subclaim named. Columns: **local TUI** (`pmacs .`), **attached
+TUI** (`pmacs --attach`), **GPU**. **The bar is GPU ≥ local TUI**; the
+attached column is evidence, separating a daemon-boundary gap from a
+frontend-local one.
+
+Anchors: `COHERENCE.md` §2's ground-truth rows, the GUI arc audit at
+`4bc55e8` (`docs/gui-arc-framing.md` §2), Q#DS9
+(`docs/desktop-save-framing.md`), and `builtin/runtime/welcome.lua`,
+whose advertised set is exactly `C-x C-f`, `C-c t`, `C-c c`, `C-x b` —
+which is what decides every discoverability subclaim below.
+
+| # | Step | local TUI | attached TUI | GPU | binding subclaim |
+|---|---|---|---|---|---|
+| 1 | Install | Works | Works | **Works** | — release builds, ships and *verifies* `pmacs-gpu` (`release.yml:149,168,195`) |
+| 2 | Launch unconfigured | Works | Works | Works | — |
+| 3 | Open real project | Works | Works | Works | 3(c) satisfied by a browsable surface, not by dired specifically |
+| 4 | Understand interface | **Partial** | **Partial** | **Partial** | 4(c) — help exists but the welcome advertises `C-x C-f`/`C-c t`/`C-c c`/`C-x b` and **not** the help route; `C-h` deletes a word by design |
+| 5 | Edit | Works | Works | **Partial** | 5(a) on GPU — **no IME, no `set_ime_allowed`**, so composed/CJK input is impossible; Latin editing is fine. Local/attached satisfy 5(d) by wrap and by QoL Stage 5 horizontal scroll |
+| 6 | Language intelligence | **Partial** | **Partial** | **Partial** | 6(e) everywhere — startup failure surfaces, a **later crash does not**; `server_is_live` is consulted at five sites and every one *skips* work rather than reporting. GPU additionally degrades 6(d): single-authority semantic styling vs the grid's `merge_styles` |
+| 7 | Find symbol / file | **Partial** | **Partial** | **Partial** | 7(d) — `C-x C-f` is advertised; **browse (`C-x d`/`C-x C-j`) and symbol (`M-.`) are not**. `M-.` is *bound* and still undiscoverable, which is why 7(d) requires advertisement |
+| 8 | Open terminal | **Partial** | **Partial** | **Partial** | 8(c) — **no close/kill command exists**. 8(d) passes: `C-c t` is advertised in the welcome |
+| 9 | Build / test | Works | Works | Works | 9(d) passes on the welcome's `C-c c` entry, not on the bare binding; 9(a) runs in the detected project's context |
+| 10 | Inspect error | **Partial** | **Partial** | **Partial** | gated entirely on step 6 or 9 succeeding first — a dependency, recorded rather than graded away |
+| 11 | Understand background work | **Partial** | **Partial** | **Partial** | 11(b) — #232 gives **purpose**, never an accountable **owner**, and the planes stay disjoint (jobs in `*workers*`, processes in `pmacs.process.list`, servers in `*lsp*`, terminals **nowhere**). 11(c) also fails: no advertised binding. 11(a) now passes on the activity indicator |
+| 12 | Close + restore | **Partial** | **Missing** | **Missing** | 12(c) — local restores nothing beyond per-file state (desktop-save is opt-in); on **both daemon-backed frontends it is a structural no-op** (Q#DS9), so they fail it **by construction** |
+
+**Closure condition 2 currently FAILS, at exactly two steps.** GPU is
+below local TUI at **step 5** (Partial vs Works) and **step 12**
+(Missing vs Partial). Every other cell is equal. That is the whole of
+the GPU's journey deficit as this table measures it — a narrower result
+than "the GUI feels behind", and a falsifiable one.
+
+**The attached column earns its place at those two rows, and they point
+opposite ways.** Step 12 fails on attached TUI *and* GPU, so it is a
+**daemon-boundary** gap that no GPU work can close — Q#DS9 and the
+workspace object own it, which is why Stage 4b is P2-gated. Step 5
+fails on GPU *alone*, so it is **frontend-local** — Stage 1d's IME work
+closes it. A single merged TUI column would have shown two identical
+red cells and no way to tell those apart.
+
+**Three cells rest on inference, not on the audit, and must be verified
+before this table is used as a release gate**: GPU 3(c) and 9 assume a
+semantic frontend renders daemon-produced listing and compile buffers
+like any other buffer, and GPU 6(c) assumes hover reaches the echo area
+there as it does on the grid. Marked rather than quietly graded.
 
 ### Ground truth: the journey today
 
