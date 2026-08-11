@@ -222,16 +222,38 @@ is resolved**, even though #227 is green and cleared.
   **`githubsucks/lsp-file-watcher` is the authoritative tip** — the ref,
   not a SHA. Recover with
   `git fetch githubsucks && git checkout lsp-file-watcher`.
-- **Framing `docs/lsp-file-watcher-framing.md`, revision 1, APPROVED
-  2026-08-10.** The ruling that blocked implementation is ANSWERED (see
-  below); D1 and D2 are implemented on the branch atop the framing
-  commit. Committed at the branch's first commit so it is portable
+- **Framing `docs/lsp-file-watcher-framing.md`, revision 2** — design
+  approved 2026-08-10; revision 2 records a review round **against the
+  implementation** that found two correctness defects, both now fixed
+  (see below). Committed at the branch's first commit so it is portable
   during review — the standing lesson from the GUI arc framing, which
   spent two review rounds as an untracked file in one worktree.
+- **Review round 1 on the code found two defects, and both are cases
+  where the first fix was itself wrong:**
+  1. **P1 — a bare-string `*.txt` stopped working.**
+     `resolve_watcher` classified **every** string as absolute, so a
+     valid relative pattern was matched against `<base>/foo.txt` and
+     could never fire. That path worked **before** this lane, so the
+     repair broke a live case while fixing another. The form now comes
+     from the pattern (a leading `/`), not from the union arm. The
+     flat-pattern test did not catch it because it exercises the
+     RelativePattern **object** arm — F1's tested-vs-exercised split,
+     repeating inside the lane that named it.
+  2. **P2 — a scan finishing after cancellation still emitted one
+     batch.** `scan_tree` suspends on `read_dir` per directory with
+     `_sleep` already cleared, so a cancel landing there had nothing to
+     interrupt and the resumed scan ran on to
+     `did_change_watched_files` under the superseded pattern.
+     Cancellation and liveness are rechecked after the scan.
+- **A test seam was added**: `pmacs.lsp._after_scan_for_tests`, nil in
+  production, handed the scan result. P2's race cannot be produced by
+  timing; the seam is the same device as `git.lua`'s `_deliver_status`.
+  It takes the scan result because a test cancelling on any *other*
+  scan would pass with the fix deleted.
 - **What the implementation is**: `resolve_watcher` returns
   `(base, pattern, form)` and the watch record carries the form —
-  `"absolute"` (plain string) matches `base .. "/" .. rel`,
-  `"relative"` (RelativePattern) matches `rel`; and
+  `"absolute"` (pattern begins `/`) matches `base .. "/" .. rel`,
+  `"relative"` matches `rel`; and
   `register_file_watchers` cancels the outgoing record list through the
   new `cancel_watch_records` (shared with `unregister_file_watchers`)
   before the table write drops the only reference to it.

@@ -5506,6 +5506,174 @@ fn m4_24_relative_pattern_without_globstar_stays_relative() {
     );
 }
 
+/// Issue #233 review P2 — a scan that completes AFTER cancellation
+/// must not emit.
+///
+/// `scan_tree` awaits `read_dir` once per directory, so the watcher
+/// coroutine spends most of a tick suspended with `_sleep` already
+/// cleared. A cancel arriving there — re-registration or unregistration
+/// — sets `cancelled` and has no sleep to interrupt, so before the fix
+/// the resumed scan ran on and emitted one last batch under the
+/// superseded pattern.
+///
+/// No arrangement of real timing produces that interleaving on demand,
+/// so it is driven through `pmacs.lsp._after_scan_for_tests`, the same
+/// device `git.lua` uses for out-of-order completions. The hook is
+/// handed the scan result and cancels **only on the scan that observed
+/// `foo.txt`** — cancelling on any other scan would pass with the fix
+/// deleted, because the loop would break at the post-sleep check and
+/// emit nothing regardless.
+#[test]
+fn m4_24_a_scan_finishing_after_cancellation_emits_nothing() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().to_path_buf();
+    let base_disp = base.display().to_string();
+    let a_path = base.join("a.rs");
+    std::fs::write(&a_path, b"fn a() {}\n").expect("write a");
+    let a_disp = a_path.display().to_string();
+    let received = base.join(".received");
+
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{ command = '{fake}',
+               env = {{ PMACS_FAKE_LSP_MODE = 'filewatch',
+                        PMACS_FAKE_LSP_WATCH_BASE = '{base_disp}' }} }}"
+        ))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "(function() for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.state and r.state.kind=='initialized' then return true end \
+             end return false end)()",
+            5,
+        ),
+        "fake never initialized"
+    );
+
+    // Armed BEFORE the file exists, so the cancel cannot land early:
+    // the hook fires on every scan and only cancels once the scan it is
+    // inspecting actually contains foo.txt.
+    state
+        .lua_host
+        .lua()
+        .load(
+            "pmacs.lsp._after_scan_for_tests = function(record, cur)
+               if cur and cur['foo.txt'] then record.cancelled = true end
+             end",
+        )
+        .exec()
+        .expect("install scan hook");
+
+    let warm = Instant::now() + Duration::from_millis(900);
+    while Instant::now() < warm {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        std::thread::sleep(Duration::from_millis(15));
+    }
+
+    std::fs::write(base.join("foo.txt"), b"one\n").expect("write foo.txt");
+
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while Instant::now() < deadline {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        std::thread::sleep(Duration::from_millis(15));
+    }
+
+    let got = std::fs::read_to_string(&received).unwrap_or_default();
+    assert!(
+        !got.contains("foo.txt"),
+        "a watcher cancelled during its scan emitted a stale batch \
+         anyway; .received = {got:?}"
+    );
+}
+
+/// Issue #233 review P1 — a BARE-STRING glob with no leading `/` is a
+/// relative pattern and must stay one.
+///
+/// The first fix for #233 classified every string-arm pattern as
+/// absolute, so `*.txt` was matched against `<base>/foo.txt` and could
+/// never fire — silently breaking a case that had worked since May
+/// while fixing the absolute one. `m4_24_relative_pattern_without_globstar_stays_relative`
+/// does not cover it: that mode sends the `RelativePattern` OBJECT form,
+/// so it constrains the object arm only. This sends the same pattern
+/// through the STRING arm, which is the arm the regression lived in.
+#[test]
+fn m4_24_bare_string_glob_stays_relative() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().to_path_buf();
+    let base_disp = base.display().to_string();
+    let a_path = base.join("a.rs");
+    std::fs::write(&a_path, b"fn a() {}\n").expect("write a");
+    let a_disp = a_path.display().to_string();
+    let received = base.join(".received");
+    let foo_uri = format!("file://{}", base.join("foo.txt").display());
+
+    let mut state = EditorState::new_with_roots(&crate::iso::roots());
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{ command = '{fake}',
+               env = {{ PMACS_FAKE_LSP_MODE = 'filewatchbare',
+                        PMACS_FAKE_LSP_WATCH_BASE = '{base_disp}' }} }}"
+        ))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "(function() for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.state and r.state.kind=='initialized' then return true end \
+             end return false end)()",
+            5,
+        ),
+        "fake never initialized"
+    );
+
+    let warm = Instant::now() + Duration::from_millis(900);
+    while Instant::now() < warm {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        std::thread::sleep(Duration::from_millis(15));
+    }
+
+    std::fs::write(base.join("foo.txt"), b"one\n").expect("write foo.txt");
+    assert!(
+        pump_until_file_contains(&mut state, &received, &format!("1 {foo_uri}"), 6),
+        "CREATED for foo.txt never reported under a bare-string `*.txt` \
+         glob — the string arm is being classified absolute again; \
+         .received = {:?}",
+        std::fs::read_to_string(&received).unwrap_or_default()
+    );
+}
+
 /// Issue #233 D2 — re-registering a live id supersedes it. The
 /// `filewatchrereg` fake registers `watch-re` TWICE with no
 /// unregister between — `**/*.old`, then `**/*.new` — exactly the

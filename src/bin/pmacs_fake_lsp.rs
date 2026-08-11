@@ -354,6 +354,32 @@ fn main() {
                 });
                 write_frame(&mut stdout, &req);
             }
+            // Issue #233 review P1 guard: `filewatchbare` registers a
+            // BARE STRING with no base and no leading `/` — `*.txt`.
+            // The string arm and the `filewatchflat` arm below carry the
+            // same pattern deliberately: `flat` proves a
+            // RelativePattern stays relative, and this proves the
+            // classification is read from THE PATTERN rather than from
+            // the union arm it arrived in. The first fix for #233
+            // called every string absolute, which matched this against
+            // `<base>/foo.txt` and broke a case that had worked since
+            // May. Without this mode that regression is invisible.
+            ("initialized", _) if mode == "filewatchbare" => {
+                let req = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 9304,
+                    "method": "client/registerCapability",
+                    "params": { "registrations": [{
+                        "id": "watch-bare",
+                        "method": "workspace/didChangeWatchedFiles",
+                        "registerOptions": { "watchers": [{
+                            "globPattern": "*.txt",
+                            "kind": 7
+                        }] }
+                    }] }
+                });
+                write_frame(&mut stdout, &req);
+            }
             // Issue #233 F2 guard: `filewatchflat` registers a
             // RelativePattern whose pattern has no leading `**/`
             // (`*.txt` at the base). It matches base-level files

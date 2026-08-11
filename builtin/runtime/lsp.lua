@@ -2081,6 +2081,29 @@ local function start_file_watcher(sid, base, glob, kind_mask, record)
       if record.cancelled or not server_is_live(sid) then break end
 
       local cur = scan_tree(base, matches)
+      -- The seam that makes the recheck below WITNESSABLE. `scan_tree`
+      -- suspends on `read_dir` once per directory, and the race is a
+      -- cancel arriving during one of those suspensions --- which no
+      -- arrangement of real timing can be made to happen on demand.
+      -- Same reason `git.lua` exposes `_deliver_status`: the contract is
+      -- about an interleaving the caller does not choose. Unset in
+      -- production, so this costs one nil test per tick.
+      -- `cur` is handed over so a test can cancel on THE SCAN THAT
+      -- OBSERVED a given change. Cancelling on any other scan is not a
+      -- witness: the loop would break at the post-sleep check on the
+      -- next iteration and emit nothing anyway, so the assertion would
+      -- pass with the recheck below deleted.
+      if pmacs.lsp._after_scan_for_tests then
+        pcall(pmacs.lsp._after_scan_for_tests, record, cur)
+      end
+      -- RECHECKED AFTER THE SCAN, not only after the sleep (review P2).
+      -- The coroutine is suspended for most of a tick with `_sleep`
+      -- already cleared, so a cancel landing there sets `cancelled` and
+      -- has no sleep to interrupt. Without this line the resumed scan
+      -- runs on to `did_change_watched_files` below and a SUPERSEDED
+      -- watcher emits one last batch under its OLD pattern. One batch is
+      -- enough: it is a wrong-pattern notification the server acts on.
+      if record.cancelled or not server_is_live(sid) then break end
       local changes = {}
       for rel, sig in pairs(cur) do
         local was = prev[rel]
@@ -2110,11 +2133,20 @@ end
 
 -- Resolve a GlobPattern (string | { baseUri, pattern }) to
 -- (base_dir, pattern, form). The form must travel with the pair: a
--- RelativePattern's pattern is relative to its baseUri, but a bare
--- string matches the file's ABSOLUTE path (real servers send absolute
--- globs), and dropping the distinction here is what made those globs
--- unable to match anything. A bare string with no base falls back to
--- the directory of an attached file on `sid` (best effort).
+-- RelativePattern's pattern is relative to its baseUri, and dropping
+-- that distinction is what made absolute server globs unable to match
+-- anything. A bare string with no base falls back to the directory of
+-- an attached file on `sid` (best effort).
+--
+-- THE FORM COMES FROM THE PATTERN, NOT FROM THE UNION ARM (review P1).
+-- The first fix for #233 returned `"absolute"` for every string, which
+-- is a different bug wearing the same shape: LSP 3.17 defines `Pattern`
+-- relative to a base path, and VS Code treats a string watcher as
+-- applying across workspace folders, so a bare `*.txt` is a VALID
+-- relative pattern. Classifying it absolute matched it against
+-- `<base>/foo.txt`, which `^[^/]*%.txt$` can never match --- so that
+-- fix silently broke a case that worked before it. A leading `/` is
+-- what makes a pattern absolute; the arm it arrived in is not.
 local function resolve_watcher(sid, gp)
   if type(gp) == "table" and gp.baseUri then
     return pmacs.lsp.path_for_uri(gp.baseUri), gp.pattern or "**", "relative"
@@ -2124,7 +2156,9 @@ local function resolve_watcher(sid, gp)
       if rec.server == sid and rec.uri then
         local p = pmacs.lsp.path_for_uri(rec.uri)
         local dir = p and p:match("^(.*)/[^/]*$")
-        if dir then return dir, gp, "absolute" end
+        if dir then
+          return dir, gp, (gp:sub(1, 1) == "/") and "absolute" or "relative"
+        end
       end
     end
   end

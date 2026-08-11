@@ -1,9 +1,47 @@
 # LSP file watcher — framing
 
-**Status: revision 1 — APPROVED 2026-08-10.** The user ruled that D1
-and D2 proceed with the walking explicitly surviving this lane; D3 gets
-its own framing. The acceptance bar for this lane is correctness and
-the leak, not "the flipping stops".
+**Status: revision 2 — approved design (2026-08-10), plus two
+correctness findings from review OF THE IMPLEMENTATION.** The user ruled
+that D1 and D2 proceed with the walking explicitly surviving this lane;
+D3 gets its own framing. The acceptance bar for this lane is correctness
+and the leak, not "the flipping stops".
+
+**Revision 2 records a review round against the code, not the design.
+Both findings are cases where the first fix was itself wrong**, and both
+were confirmed against the tree before being acted on:
+
+- **P1 — the form must be read from the PATTERN, not from the union
+  arm.** `resolve_watcher` returned `"absolute"` for *every* string, so
+  a bare `*.txt` — a valid relative pattern under LSP 3.17, and how VS
+  Code treats string watchers across workspace folders — was matched
+  against `<base>/foo.txt` and could never fire. **That case worked
+  before this lane touched it**, so the repair for #233 silently broke a
+  live path while fixing another. A leading `/` is what makes a pattern
+  absolute; classification now reads the string.
+- **P2 — a scan completing after cancellation still emitted.**
+  `scan_tree` awaits `read_dir` once per directory, so the coroutine
+  sits suspended for most of a tick with `_sleep` already cleared. A
+  cancel arriving there sets `cancelled` and has no sleep to interrupt,
+  and the resumed scan ran on to `did_change_watched_files` — one stale
+  batch under the superseded pattern, which is a wrong-pattern
+  notification the server acts on. Cancellation and liveness are now
+  rechecked after the scan.
+
+**F1's lesson repeated itself inside this lane.** The flat-pattern test
+constrains the RelativePattern **object** arm, so it said nothing about
+the **string** arm P1's regression lived in — the same
+tested-path/exercised-path split this framing opened by naming. Both
+findings now have tests, and both tests were mutation-checked: each
+fails only its own defect.
+
+**A test seam was added, and is recorded here rather than buried.**
+`pmacs.lsp._after_scan_for_tests` is a production hook, nil in normal
+operation, that P2's witness requires: the race is a cancel landing
+during one of the scan's suspensions, which no arrangement of real
+timing produces on demand. Same device and justification as `git.lua`'s
+`_deliver_status`. It is handed the scan result deliberately — a test
+that cancels on any *other* scan passes with the fix deleted, because
+the loop would break at the post-sleep check and emit nothing anyway.
 
 Answers issue #233. **Scope is D1 and D2 only** — the two bug-shaped
 defects. D3 (the polling cost) is named here, deferred with reasons, and
