@@ -250,11 +250,21 @@ the same day (`b867f64`), refreshed and re-gated on the merged base.
 **D3 — the polling cost — is the remainder, and the user has ruled it
 is next (2026-08-11).** **Branch `lsp-file-watch-d3`** (base
 `githubsucks/main` @ `add0ba1`; the remote ref is authoritative), with
-**framing `docs/lsp-file-watch-d3-framing.md`, revision 3, DRAFT —
-awaiting review**, committed at the branch's first commit so it is
-portable during review. **Review round 2 (2026-08-11) found the
-scheduler underspecified**: a joining watcher must force an immediate
-baseline scan (a backed-off group would otherwise fold
+**framing `docs/lsp-file-watch-d3-framing.md`, revision 4, DRAFT —
+review corrections absorbed; awaiting the four user rulings**, committed
+at the branch's first commit so it is portable during review. **Review
+round 3 (2026-08-11) found the live group's non-success transition
+missing**: every job is user-cancellable and `Handle:await()` raises on
+cancel/failure, so an uncaught result could leave `in_flight` set forever.
+Revision 4 partitions completion into success, stale/retired, and live
+non-success: live cancel/failure commits no snapshot or epoch, preserves
+the prior snapshot/backoff, clears in-flight, honors a queued baseline or
+reschedules, and visibly deduplicates failures. It also corrects the
+queued-baseline bound: a mid-walk join waits for the current walk's
+remainder plus its own follow-up walk, never a backoff cap. Two round-3
+witnesses cover live cancel and failure. **Review round 2 (2026-08-11)
+found the scheduler underspecified**: a joining watcher must force an
+immediate baseline scan (a backed-off group would otherwise fold
 post-registration files into the baseline — and a baseline is now
 only a snapshot whose WALK STARTED after the join); the group gained
 a defined state machine (single-flight per group, deadlines advanced

@@ -1,7 +1,8 @@
 # LSP file watcher D3 — the polling cost — framing
 
-**Status: revision 3 — DRAFT, awaiting review. No implementation may
-begin from this document.**
+**Status: revision 4 — DRAFT, review corrections absorbed; awaiting
+the user rulings Q#D3-1..4. No implementation may begin from this
+document.**
 
 Continues issue #233, which stays open until this lane closes it. D1
 and D2 — matching correctness and the re-registration leak — merged as
@@ -102,10 +103,36 @@ retirement collide.
   job per concurrently due group. Global serialization is offered as
   the alternative under Q#D3-1 if `⋯1` must be guaranteed.
 
+## Review round 3 — live non-success closes the state machine
+
+Round 3 (2026-08-11) accepted all three round-2 corrections and found
+one transition still absent: revision 3 specified successful and stale
+scan completions, but not a cancellation or failure while the group
+itself remains live.
+
+- **P1 — a live cancelled/failed walk needs a terminal transition.**
+  Every job is user-cancellable from `*workers*`, and `Handle:await()`
+  raises structured `cancelled` and `failed` outcomes. Without a caught
+  non-success path, the group can retain `in_flight = true` forever and
+  silently stop watching. **Revision 4 partitions completion into
+  success, stale/retired, and live non-success** (below). A live
+  cancellation or failure commits no snapshot or epoch, emits nothing,
+  preserves the previous snapshot and backoff curve, clears in-flight,
+  and either serves a queued join immediately or schedules the next
+  attempt normally. Failures are reported visibly and deduplicated per
+  group; cancellation is an intentional user/runtime outcome and stays
+  quiet.
+- **P2 — the queued-baseline latency bound was one walk short.** A
+  join just after a walk starts waits for the remainder of that walk
+  *and* its own follow-up walk before the baseline snapshot completes.
+  Revision 4 states the two boundaries separately: the baseline walk
+  starts when the current walk completes, and its snapshot completes
+  after that follow-up walk — never after the backoff cap.
+
 ## Verified against the tree at `add0ba1`
 
-Every claim below was read or measured this session (revisions 2 and
-3 re-verified their corrections against the code).
+Every claim below was read or measured this session (revisions 2–4
+re-verified their corrections against the code).
 
 - Each registered watcher is its own coroutine looping
   `sleep(FILE_WATCH_INTERVAL_MS)` → `scan_tree` (`lsp.lua:1924`,
@@ -183,11 +210,13 @@ no groups exist — it cannot be removed, because `pmacs.hook.remove`
 does not exist, and a guard is the house answer (autosave's
 `enabled` check).
 
-### The group state machine (round 2)
+### The group state machine (rounds 2 and 3)
 
 Per group — keyed (server, base) — the scheduler holds
-`next_scan_at`, the backoff interval, an **in-flight flag**, a
-**scan generation counter**, and a `rescan_queued` bit.
+`next_scan_at`, the backoff interval, an **in-flight record** (handle,
+generation, and start time), a **scan generation counter**, a
+`rescan_queued` bit, and the last reported walk failure for
+deduplication.
 
 - **Single-flight.** The after-tick check skips a group whose walk is
   in flight; a group cannot become due against itself. Concurrent
@@ -201,14 +230,31 @@ Per group — keyed (server, base) — the scheduler holds
   generation at start; a completion whose group is retired, or whose
   generation is not the group's current one, is dropped before any
   state write or emit — #234's P2 recheck, applied at group scope.
+- **Current completions have three disjoint outcomes (round 3).** The
+  coroutine catches `Handle:await()` so its structured outcome cannot
+  bypass group cleanup. A successful current completion clears
+  in-flight, commits the snapshot and epoch, routes its diff, updates
+  the backoff curve, and clears the failure-dedup latch. A
+  **cancelled or failed completion while the group is still live**
+  also clears in-flight, but commits no snapshot or epoch, emits
+  nothing, and preserves the previous snapshot and backoff interval.
+  It consumes `rescan_queued` by starting exactly one immediate scan;
+  otherwise it sets `next_scan_at = completion time + current
+  interval`. Failure is surfaced through the existing LSP status/error
+  reporting shape once per distinct `(group, error)` until a success;
+  cancellation stays quiet because `workers.cancel-at-point` makes it
+  an intentional outcome. Retirement is the third arm: its cancelled
+  completion is stale by construction and reaches none of this live
+  state.
 - **Joins wake the group.** A watcher joining sets
   `next_scan_at = now`. If a walk is in flight, `rescan_queued` is
   set instead, and completion of the current walk starts **exactly
   one** immediate follow-up scan. The joiner's baseline is the first
   snapshot whose **walk started after its join** (see below), so the
-  baseline is at most one walk-duration away — never a backoff cap
-  away. The join-triggered scan does **not** reset the backoff curve;
-  only observed changes do.
+  baseline walk starts as soon as the current walk completes and its
+  snapshot completes after that one follow-up walk — never a backoff
+  cap away. The join-triggered scan does **not** reset the backoff
+  curve; only observed changes do.
 - **Retirement.** When the last member leaves (unregistration, or
   supersession with no successor) or the server dies, the group
   retires: the in-flight walk's job is **cancelled cooperatively**,
@@ -363,8 +409,8 @@ activity and every 4 s at rest, immediately once at registration.
   O(directories), on a tree with enough directories to discriminate.
 - **Join-wakes witness (round 2):** with a group backed off at the
   cap, register a new watcher — a scan starts immediately
-  (timestamps through the group seam), and a file created after the
-  join is reported to the joiner from its baseline onward.
+  (timestamps through the group seam); after that baseline settles, a
+  newly created file is reported to the joiner.
 - **No-overlap witness (round 2):** with a walk deliberately held
   in flight past its interval (through the group seam or by
   withholding the completion pump), the group allocates **no second
@@ -373,6 +419,15 @@ activity and every 4 s at rest, immediately once at registration.
   mid-walk — the walk's job is cancelled, its completion is
   rejected (no emit, no state write), and the group's schedule entry
   is gone; a server death takes the same path.
+- **Live-cancel witness (round 3):** cancel an in-flight walk while
+  members remain (the `workers.cancel-at-point` outcome) — no snapshot
+  or epoch commits, the previous snapshot remains, in-flight clears,
+  and the group scans again on schedule; repeat with a queued join and
+  its baseline scan starts immediately.
+- **Live-failure witness (round 3):** force a walk failure through the
+  group completion seam — no snapshot or epoch commits, the prior
+  snapshot remains, the group retries, one distinct failure is
+  reported once, and a later success clears the dedup latch.
 - **Queued-baseline witness (round 2):** a watcher joining mid-walk
   gets exactly one immediate follow-up scan, and its baseline is
   that scan, not the walk that was in flight at join.
