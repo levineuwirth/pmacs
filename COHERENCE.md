@@ -107,8 +107,8 @@ remain open to them.
 | 11 | Config layering + provenance | **Partial (foundation only)** | Typed registry is right; 5 settings live in it; no value provenance |
 | 12 | Profiles | **Missing** | One hardcoded default keymap; not a named concept |
 | 13 | Package lifecycle UX | **Resolution without lifecycle** | Mature resolver/lockfile; init-only install; no uninstall/disable/search |
-| 14 | Workbench primitives | **Partial (best trajectory)** | Listview is a real primitive but only **4** call sites, all LSP panels (`*lsp*` added post-audit by #204); buffer-list and search re-implement it; **the bottom panel is COMPLETE — both frontends, and Stage 3 flipped the adopter default so omission means the panel**. **Tree is implemented (◐) with the LSP outline as its one adopter; the remaining consumers, including dired's `i`, have not adopted** |
-| 15 | Contextual affordances | **Weak** | Right-click menu only; code actions apply first-blindly; no git integration at all |
+| 14 | Workbench primitives | **Partial (best trajectory)** | Listview is a real primitive with call sites in **two** modules — `lsp.lua` (5) and **`git.lua` (4, `*git-status*`, #227)** — so it is **no longer LSP-only**; buffer-list and search re-implement it; **the bottom panel is COMPLETE — both frontends, and Stage 3 flipped the adopter default so omission means the panel**. **Tree is implemented (◐) with the LSP outline as its one adopter; the remaining consumers, including dired's `i`, have not adopted** |
+| 15 | Contextual affordances | **Weak** | Right-click menu only; code actions apply first-blindly; **Git integration reaches status and diff (#227, Stage 1) and no further** — §15's ground truth is authoritative, and this row previously said "no git integration at all" |
 | 16 | Semantic frontend | **Architectural: Strong · Product: Weak** | v6..=v23 schema support; production attach remains v20 during the dark panel slice; degradation practiced. **The two subgrades and the product criteria live in §16** — the row points there rather than carrying a grade of its own, so the GUI-as-a-product half cannot hide inside an architectural `Strong` |
 | 17 | Distribution | **Partial** | **v1.1.0 ships prebuilt Linux/macOS binaries on tag** (#211) with checksums and a stated glibc floor. No channels, in-place update, rollback, signing, or package-manager distribution |
 | 18 | Onboarding | **Partial** | Journey Stage 1b-3: an unconfigured launch greets in `*scratch*` naming `M-x` and four real bindings, and `M-x help` renders a cheat sheet. Still no tutorial and `C-h` still deletes a word — deliberately, see §18 |
@@ -474,9 +474,15 @@ specifically **a binding that opens it**.
 | 11 | Understand background work | **Missing** | **Missing** | **Missing** | 11(c) — **no binding opens `editor.list-workers`**, so a keybinding listing cannot lead anyone to it: the subclaim is **absent**, not degraded, and it floors the cell. *The view is not binding-free — `C-c C-k` runs `workers.cancel-at-point` buffer-locally inside it (`docs/keybindings.md:282`) — but a binding that only works once you are already there cannot satisfy a discoverability subclaim.* 11(b) fails too — #232 gives **purpose**, never an accountable **owner**, and the planes stay disjoint (jobs in `*workers*`, processes in `pmacs.process.list`, servers in `*lsp*`, terminals **nowhere**). 11(a) passes on the activity indicator |
 | 12 | Close + restore | **Partial** | **Missing** | **Missing** | 12(c) — local restores nothing beyond per-file state (desktop-save is opt-in); on **both daemon-backed frontends it is a structural no-op** (Q#DS9), so they fail it **by construction** |
 
-**Closure condition 2 currently FAILS, at exactly two steps.** GPU is
-below local TUI at **step 5** (Partial vs Works) and **step 12**
-(Missing vs Partial). Every other cell is equal. That is the whole of
+**Closure condition 2 currently FAILS, with KNOWN failures at two
+steps and the exact set pending verification.** GPU is below local TUI
+at **step 5** (Partial vs Works) and **step 12** (Missing vs Partial),
+and every *graded* cell elsewhere is equal — but GPU 3(c) and 9 rest on
+inference (below), so a third failure cannot be ruled out until they are
+verified. "Exactly two" would be a stronger claim than this table's own
+evidence supports, and an earlier draft made it. GPU 6(c) is inferred
+too, but cannot change step 6, which is already floored at `Missing` by
+6(e) on all three frontends. That is the whole of
 the GPU's journey deficit as this table measures it — a narrower result
 than "the GUI feels behind", and a falsifiable one. It survived a review
 round that corrected six of the twelve rows, which is some evidence it
@@ -1204,7 +1210,7 @@ editor.list-workers`, auto-refreshing, `C-c C-k` cancel-at-point).
 |---|---|---|
 | Async jobs | `*workers*` | processes, servers, terminals |
 | OS processes | `pmacs.process.list` (no buffer view exists) | **filters to `LineOriented` only — terminal PTYs are invisible**; `spawn_terminal` bypasses the public path entirely |
-| LSP servers | `*lsp*` status text | **no builtin command opens it**; LSP sets `RestartPolicy::Never` on the supervisor and runs its own restart logic |
+| LSP servers | `*lsp*` status text | opened by **`M-x lsp.status`** (`builtin/runtime/lsp.lua:3533`), but by no binding; LSP sets `RestartPolicy::Never` on the supervisor and runs its own restart logic |
 | Terminals | private id set drained after the supervisor tick | user-visible in none of the above |
 
   A terminal PTY appears in **no** user-visible activity view. An LSP
@@ -1727,14 +1733,36 @@ not choose sat inside the healthiest concern in this document.
 **Product subgrade criteria** (each falsifiable, none aspirational):
 
 1. **GPU ≥ local TUI at every journey step** under §2b. **Currently
-   FAILS at two steps** — 5 (no IME) and 12 (restore is a structural
-   no-op).
+   FAILS at two known steps** — 5 (no IME) and 12 (restore is a
+   structural no-op) — with the exact set pending verification of §2b's
+   inferred cells.
 2. **The daily-driver blocker list is empty.** **Currently nine open**
    (`docs/gui-arc-framing.md` §3.1): Escape quits, IME absent,
    `translate_key` holes, sub-line/horizontal scroll, no DPI, folding
    dead on the GPU, no session restore, no reconnect, the one-window
    ceiling.
 3. **Every surviving divergence is declared**, not accidental.
+   **Not yet assessed** — §3.2's register is seeded empty, so this
+   criterion has no finding either way and cannot lift or lower the
+   grade.
+
+**How the grade is derived, so it is a grading rule and not an
+adjective.** The three criteria above are *closure* conditions; on their
+own they distinguish only "closed" from "not closed", which is not a
+grade. The product subgrade reads:
+
+| grade | condition |
+|---|---|
+| **Strong** | all three criteria pass |
+| **Partial** | criterion 1 passes — the GPU is nowhere *behind* the TUI — while blockers remain open |
+| **Weak** | criterion 1 fails at one or more steps **and** the blocker list is non-empty |
+| **Missing** | no usable graphical frontend |
+
+**Current: Weak** — criterion 1 fails at two known steps, and nine
+blockers are open including the one-window ceiling. The distinction that
+matters is between `Weak` and `Partial`: the GPU is not merely
+*unfinished*, it is **behind a frontend that ships in the same binary**,
+and that is what the ceiling and the two failing steps say.
 
 **What moves it.** The GUI arc, and nothing else — it exists to satisfy
 exactly these three. The product subgrade is what the arc closes
@@ -1953,6 +1981,47 @@ documented no-op under a daemon. Journey Stage 1 closing is what moves
 this priority's own work to done — what is left is other priorities'
 work showing up in the journey.
 
+### The GUI arc — placement (Q#GA5)
+
+**Half A slots after Priority 1**, whose own work is complete (§20 P1),
+which is why this block sits here rather than lower down — in a
+*Recommended Priority Order*, position IS the schedule, and an earlier
+draft placed it after Priority 5 while the prose said P1.
+
+**How it interleaves with P2–P5.** Half A is independent of them and
+runs alongside: it adds no workspace object, no extension-ownership
+model, no discovery surface. The interaction is at **P2 only**, through
+the gate below. P3, P4 and P5 neither block it nor are blocked by it,
+and P5's workbench-primitive adoption is *helped* by it — Stage 9's
+sidebar is a tree-primitive consumer.
+
+It is the product half of §16, and it is what the §16 product subgrade
+is graded against.
+
+**Reaching Stage 4b is a P2 START GATE.** Stages 4b (session save and
+restore) and 9 (project/files sidebar) are **workspace-owned**: a
+session and a sidebar root are both P2's objects, and inventing local
+conventions for them is precisely the "fifth independent root
+convention" §7 warns against. So when the arc reaches Stage 4b, **P2
+starts**, and **no later GUI stage begins** until P2 has an approved
+framing and an opened lane. Non-gated GUI work may interleave freely
+after that while the object lands.
+
+**The gate is on STARTING P2, not on finishing it** — so the arc is
+never blocked on work nobody has begun, and it cannot outrun the model
+it depends on. Without the gate, every non-gated stage could finish
+first and leave P2 as a terminal closure blocker.
+
+**Arc naming (Q#GA4).** This arc is **"the GUI arc"**, deliberately a
+name and not a number. The roadmap's **"Arc 8 — GPU structural parity"
+label is RETIRED** here; its scope is this arc's Half B. **"Arc 8" now
+unambiguously means the Lean 4 arc** (`docs/agent-handoff.md` §1a,
+stages 1–4b landed), which is the numbering that stays. Landed framing
+documents that say "Arc 8 adjacent" of viewport facts or splits
+(`editing-conveniences-framing.md`, `bottom-panel-framing.md`) keep
+their historical text — they are dated records, and this is the
+authoritative disambiguation for anything written from here on.
+
 ### Priority 2: Make workspace and location explicit
 
 Otherwise project, LSP, remote, task, and persistence accumulate
@@ -1998,36 +2067,6 @@ only consumer; dired's `i` insert-subdirectory is the next real
 constraint source, and DAP's variables view is why the primitive was
 worth building first. Also remaining: table / inspector / diff, and help
 unification.
-
-### The GUI arc — placement (Q#GA5)
-
-**Half A slots after Priority 1**, whose own work is complete (§20 P1).
-It is the product half of §16, and it is what the §16 product subgrade
-is graded against.
-
-**Reaching Stage 4b is a P2 START GATE.** Stages 4b (session save and
-restore) and 9 (project/files sidebar) are **workspace-owned**: a
-session and a sidebar root are both P2's objects, and inventing local
-conventions for them is precisely the "fifth independent root
-convention" §7 warns against. So when the arc reaches Stage 4b, **P2
-starts**, and **no later GUI stage begins** until P2 has an approved
-framing and an opened lane. Non-gated GUI work may interleave freely
-after that while the object lands.
-
-**The gate is on STARTING P2, not on finishing it** — so the arc is
-never blocked on work nobody has begun, and it cannot outrun the model
-it depends on. Without the gate, every non-gated stage could finish
-first and leave P2 as a terminal closure blocker.
-
-**Arc naming (Q#GA4).** This arc is **"the GUI arc"**, deliberately a
-name and not a number. The roadmap's **"Arc 8 — GPU structural parity"
-label is RETIRED** here; its scope is this arc's Half B. **"Arc 8" now
-unambiguously means the Lean 4 arc** (`docs/agent-handoff.md` §1a,
-stages 1–4b landed), which is the numbering that stays. Landed framing
-documents that say "Arc 8 adjacent" of viewport facts or splits
-(`editing-conveniences-framing.md`, `bottom-panel-framing.md`) keep
-their historical text — they are dated records, and this is the
-authoritative disambiguation for anything written from here on.
 
 ### Priority 6: Productize configuration
 

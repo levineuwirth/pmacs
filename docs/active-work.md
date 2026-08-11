@@ -136,7 +136,8 @@ lesson, §1 for the two framings).
   are identical on every machine. Remote names are otherwise
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
-- Canonical base at this snapshot: **`githubsucks/main` @ `122b8e8`** —
+- Canonical base at this snapshot: **`githubsucks/main` @ `e67ad07`** —
+  the file-watcher arc absorption, atop `122b8e8`
   the file-watcher D3 **#235** (closes issue #233), atop `b867f64`
   git integration Stage 1 **#227**, atop `ae84d58` the LSP file-watcher
   fix **#234**, atop `0e4c58d` destination capture **#231**, `3cc1b85`
@@ -160,9 +161,10 @@ lesson, §1 for the two framings).
   #206, Journey Stage 1b-3 #205, 1b-2 #204 and 1b-1 #203, the
   reap-ledger diagnostic #202, the isolation framing #201, the
   process-signal diagnostic #200 and the ledger absorption #199.
-  **Protocol schema support is `v6..=v22`; the production server-first
+  **Protocol schema support is `v6..=v23`; the production server-first
   `Hello` still advertises v20** — two different facts, and #184 landed
-  only the first. The upper bound moved to **v22 at #221**, which added
+  only the first. The upper bound moved to **v23 at #228**
+  (`MinibufferPromptRows`), after **v22 at #221**, which added
   `InstanceMessage::LineWrapFacts`; `ADVERTISED_PROTOCOL_VERSION` did
   not move and must not be edited to chase it. Verified against
   `pmacs-protocol/src/message.rs`, not carried forward: this line said
@@ -211,7 +213,7 @@ git worktree list
 git status --short --branch
 ```
 
-The `git log` command must expose `9a26ac8` — the base named above — or a
+The `git log` command must expose `e67ad07` — the base named above — or a
 newer intentional main. Keep this threshold and the canonical-base line in
 step: a recovery check that accepts an older commit than the base it
 declares canonical will pass on a tree the rest of this file does not
@@ -262,26 +264,23 @@ absorption" was too generous. Five stale lanes remain below, and two
 `COHERENCE.md` corrections had not been made at all. What is done here
 is listed at the commit that does it, not promised here.
 
-- **Branch `gui-arc-stage0`**, base `githubsucks/main` @ `0e4c58d` (the
-  #231 merge). **`githubsucks/gui-arc-stage0` is the authoritative
-  tip** — the ref, not a SHA. Recover with
+- **Branch `gui-arc-stage0`**, base `githubsucks/main` @ `e67ad07` (the
+  file-watcher arc absorption) after the 2026-08-11 rebase; it was
+  branched at `0e4c58d`. **`githubsucks/gui-arc-stage0` is the
+  authoritative tip** — the ref, not a SHA. Recover with
   `git fetch githubsucks && git checkout gui-arc-stage0`.
 - **Framing `docs/gui-arc-framing.md`, revision 3, APPROVED
   2026-08-10** after two review rounds (two blocking findings each
   round, closed). It is **also the framing for Stage 0 itself**, which
   is docs-only; Stages 1–10 each require their own framing before their
   branch.
-- **PARKED, deliberately.** Nothing further happens on this branch
-  until **#227 (git Stage 1) is finished and merged**. #227's ref is 72
-  `main` commits behind and touches `COHERENCE.md`,
-  `docs/active-work.md` and `builtin/runtime/listview.lua` — the three
-  files Stage 0's absorption rewrites. Sequencing it first avoids
-  compounding exactly the conflicts Stage 0 exists to retire. The
-  branch exists now, ahead of that work, **only so the approved framing
-  is portable**: uncommitted work does not travel between machines, and
-  the framing spent its whole review as an untracked file in one
-  worktree.
-- **Scope when it resumes (docs only, no `src/`):** the absorption pass
+- **The park is over and the work is DONE.** The branch was parked at
+  its first commit until #227 merged, because #227 was 72 `main` commits
+  behind and touched the three files Stage 0's absorption rewrites.
+  #227 merged (`b867f64`), #233's arc closed (#234, #235), this branch
+  rebased onto `e67ad07`, and the absorption ran. **15 commits above the
+  base; ready for its PR.**
+- **What landed (docs only, no `src/`):** the absorption pass
   enumerated in the framing's §5 — five stale lanes, the
   authority/recovery anchor, `COHERENCE.md`'s `v6..=v21` → `v6..=v23`,
   the U4 correction and the U9 rewrite in `docs/ci-red-signatures.md`,

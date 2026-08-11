@@ -3195,6 +3195,20 @@ servers.
 
 ## 6. Named deferrals (the standing backlog, consolidated)
 
+**The GUI arc — OPEN, framing approved 2026-08-10, Stage 0 in PR.**
+`docs/gui-arc-framing.md` is the arc-level frame and is also Stage 0's
+own framing; Stages 1–10 each need their own before their branch. It
+opened from a daily-driver report: the TUI is daily-drivable, the GUI is
+not. **`COHERENCE.md` §16 now carries a PRODUCT subgrade (Weak) beside
+its architectural one (Strong)**, and the arc is what closes it. §20
+places Half A after Priority 1, and **reaching Stage 4b is a P2 START
+GATE** — no later GUI stage begins until P2 has an approved framing and
+an opened lane. The name is deliberate: **"Arc 8" means the Lean 4 arc
+and nothing else** (Q#GA4). Several standing-backlog items below are
+sequenced by this arc rather than deferred — §2.5 of the framing maps
+every one to a stage or leaves it here explicitly.
+
+
 **Fixture project-detection census — NOT STARTED, follow-on from R8.**
 `tests/m4_acceptance.rs` alone constructs state through
 `EditorState::new_with_roots` **113 times**, and an unknown number of
