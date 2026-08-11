@@ -366,11 +366,13 @@ disagree with a grade by pointing at a subclaim rather than at taste.
 
 Two rules decide what belongs here. **Discoverability is a subclaim
 wherever it is the step's substance**, not an annotation on it — steps
-4, 7, 8 and 11 are graded on whether a capability is *findable*, because
+4, 7, 8, 9 and 11 are graded on whether a capability is *findable*, because
 "present but nobody can find it" is the failure those steps exist to
-catch. And **anything load-bearing enough to name as a defect is
-load-bearing enough to be a subclaim**: an annotation cannot absorb a
-failing one.
+catch. And **any defect cited as the reason a cell is below `Works` must be a
+subclaim**: an annotation cannot absorb a failing one. *Narrowed from
+"anything named as a defect", which swept in limitations this section
+explicitly excludes — no package manager, no tutorial — and so
+contradicted its own exclusions.*
 
 | # | Step | Required subclaims |
 |---|---|---|
@@ -378,17 +380,28 @@ failing one.
 | 2 | Launch unconfigured | (a) starts with no user config; (b) presents a usable editing surface; (c) raises no error the user must dismiss |
 | 3 | Open real project | (a) a file opens from the CLI; (b) a file opens from inside the editor; (c) a directory opens and is browsable; (d) the project root is established |
 | 4 | Understand interface | (a) the mode line reports buffer state; (b) a help surface exists; (c) **discoverable** — the route to it is advertised in-product, not only known |
-| 5 | Edit | (a) text edits apply and render; (b) undo/redo; (c) selection, kill and yank; (d) large and long-line files stay usable |
-| 6 | Language intelligence | (a) a server attaches for a supported language; (b) diagnostics surface; (c) completion, hover and go-to-definition are available; (d) styling reflects the server |
-| 7 | Find symbol / file | (a) open a file by path; (b) browse to a file without knowing its path; (c) find a symbol; (d) **discoverable** — the commands are bound or advertised |
+| 5 | Edit | (a) text edits apply and render; (b) undo/redo; (c) selection, kill and yank; (d) **the full contents of an overlong line are reachable**, by wrapping or horizontal navigation |
+| 6 | Language intelligence | (a) a server attaches for a supported language; (b) diagnostics surface; (c) completion, hover and go-to-definition are available; (d) styling reflects the server; (e) **failure is visible and actionable** — both a startup failure and a *later* crash say so, rather than intelligence silently ceasing |
+| 7 | Find symbol / file | (a) open a file by path; (b) browse to a file without knowing its path; (c) find a symbol; (d) **discoverable** — the file, browse and symbol routes are **advertised in-product**, not merely bound |
 | 8 | Open terminal | (a) a terminal opens; (b) input and output round-trip; (c) it can be closed or killed; (d) **discoverable** — reachable by an advertised binding |
-| 9 | Build / test | (a) a build or test command runs; (b) its output is captured; (c) the output is navigable |
+| 9 | Build / test | (a) a build or test command runs **in the opened project's context**; (b) its output is captured; (c) the output is navigable; (d) **discoverable** — §2's own criteria say "Build or test command discoverable" (line above), which is what `C-c c` was bound to satisfy |
 | 10 | Inspect error | (a) errors are enumerated; (b) navigation reaches the site; (c) the site is marked in the buffer |
-| 11 | See background work | (a) work in flight is **visible without asking**; (b) a detailed view is reachable; (c) **discoverable** — reachable by an advertised binding; (d) cancellable |
+| 11 | Understand what background work is running | (a) work in flight is **visible without asking**; (b) a detailed view is reachable **that names each job's purpose AND what originated it**; (c) **discoverable** — reachable by an advertised binding; (d) cancellable |
 | 12 | Close + restore | (a) closing is clean and loses no data; (b) per-file state (cursor, scroll) restores; (c) the open-buffer set and window layout restore |
+
+**3(c) requires a browsable directory SURFACE, not dired.** Dired is
+today's evidence for it, not its definition — so a frontend inherits
+whatever browsing it actually has, which is precisely what the
+per-frontend columns exist to expose. A subclaim naming the
+implementation would have graded the mechanism instead of the journey.
 
 **Deliberately NOT subclaims.** Performance, aesthetics, and parity with
 other editors: each is real, and each is graded elsewhere or nowhere.
+**5(d) is the boundary case and is deliberately a correctness claim**:
+unreachable text is the long-lines arc's defect, while its 100 MB timing
+witness stays a separate performance gate. "Large files stay usable" was
+in an earlier draft of this row and was performance wearing a
+correctness coat.
 Folding them in here would make every cell a judgement about taste and
 the ordinal would stop meaning anything. **Frontend-specific
 limitations are also not subclaims** — they are what the three columns
