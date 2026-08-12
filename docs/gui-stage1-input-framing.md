@@ -148,11 +148,14 @@ blanket one:
   directly, with both misroute mutations failing that row alone.
 - **P3 is now measured, not assumed.** Replacing `window_event`'s entire
   body with `let _ = (event_loop, event);` — a GUI that responds to no
-  input at all — leaves **all 256 `pmacs-gpu` tests green**, not merely
-  the 13 routing rows. That is the exception's true extent: no headless
-  test anywhere in the crate observes the delegation. *(Revision 11
-  shrinks what the exception covers: `window_event` is now four lines,
-  so the unwitnessed residue is one `if` rather than a 33-line match.)*
+  input at all — leaves **every `pmacs-gpu` test green**. That is the
+  exception's true extent: no headless test anywhere in the crate
+  observes the delegation. **Re-measured at the current shape after
+  revision 11: 265/265 under `PMACS_REQUIRE_GPU=1`** (it was 256 before
+  the effect rows existed, and the number is re-run rather than carried
+  forward). Revision 11 also shrinks what the exception *covers*:
+  `window_event` is four lines, so the unwitnessed residue is one `if`
+  rather than a 33-line match.
 
 **Revision 11 — P2 IS IMPLEMENTED AS WRITTEN. Revision 10's argument
 here was wrong and is retracted.**
@@ -194,17 +197,30 @@ directions, which is P2's contract executable rather than asserted.
 
 The routing rows stay, and the division of labour is deliberate: the
 routing harness answers *where did this event go*, the effect harness
-answers *what did it do*. The transcript row remains the routing
-harness's sole P2-recording owner, which keeps its own mutation
-surgical.
+answers *what did it do*. **P2 is owned by the effect rows.** The
+routing transcript row is only the sole owner of the *routing*
+harness's own recording, which is what keeps that one mutation
+surgical — revision 10 claimed it owned P2, and it never did.
 
-**One design consequence worth carrying into 1a.** The keyboard arm was
-the second caller of `event_loop.exit()` — the idle-Escape local quit —
-so its body returns an `EventOutcome` rather than taking an
-`&ActiveEventLoop`. `event_loop.exit()` now appears in exactly two
-places, both inside `window_event`, and nowhere else in the crate.
-**A4 deletes the Escape branch, at which point `EventOutcome` has one
-variant and should go with it.**
+**One further correction revision 11 carries, and it is the design
+consequence 1a inherits.** Revision 10 stated that Stage 1a's A4 would
+leave `EventOutcome` with a single variant and that the type should go
+with the Escape branch. **Both are wrong.**
+
+`EventOutcome` has **two producers today**: `LifecycleRoute::Exit`, a
+native window close that must always exit, and `apply_keyboard`'s idle
+Escape, a local quit. **A4 removes the keyboard one**, leaving **exactly
+one `Exit` producer** — the native close.
+
+**One producer is not one variant.** The type survives because
+`dispatch_window_event` still has to distinguish `Continue` from
+`Exit` on every event it handles: the overwhelming majority of
+dispatches must *not* exit, and the native close must. What A4 actually
+removes is `apply_keyboard`'s need to return an outcome at all, which is
+a change to that one signature rather than to this type.
+
+The crate has **exactly one** executable `event_loop.exit()`, in
+`window_event`.
 
 ### 1a — `TextInput` (v24)
 

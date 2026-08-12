@@ -268,10 +268,11 @@ waits for a signal that is not coming.
   Stage 1's framing for **all** slices and governs the later branches;
   only Stage 0 was framed by the arc document itself.
 - **Scope of THIS branch: 1-pre only — the input seam. No behaviour
-  change.** `App::window_event` was **655 lines** and is now **33**: one
-  `route_event` call and one arm per route. Nothing below it could be
-  witnessed without a display, which is why the seam precedes every
-  other slice.
+  change.** `App::window_event` was **655 lines** and is now **four** —
+  call `dispatch_window_event`, exit if it asks. The dispatch it calls
+  is one `route_event` call and one arm per route. Nothing below it
+  could be witnessed without a display, which is why the seam precedes
+  every other slice.
 - **IMPLEMENTED in four commits, one per event family**, so each lands
   with its own witnesses and mutations rather than as one 600-line
   diff: `014110f` lifecycle (close / modifiers / resize), `7f0f9db`
@@ -321,22 +322,26 @@ waits for a signal that is not coming.
   free function composing one decision function per family
   (`route_lifecycle`, `route_keyboard` + `route_key_action`,
   `route_pointer`). Performing stays on `App` in seven `apply_*`
-  methods. **A route names its LOCAL EFFECT**, not merely the family
-  that claims it, and the harness records routes — because
-  `CloseRequested` and `RedrawRequested` send the daemon nothing, so a
-  transcript of protocol traffic could not tell a handled arm from a
-  dropped one.
+  methods. A route carries the **decision**, not the effect: a wheel
+  route holds a delta, and whether that becomes a viewport update, a
+  panel event, a terminal event or nothing depends on `State`. Effects
+  are witnessed separately — see the P2 bullet below.
 - **Every moved body verified as the original, mechanically.** The
   keyboard body is byte-identical modulo two named conversions; the four
   pointer bodies were checked by re-running rustfmt on the pre-move text
   at the new indent level and diffing, since de-indenting by 8 columns
-  lets rustfmt rejoin lines. **13 witnesses, 17 mutations.**
-- **P3 IS NOW MEASURED, NOT ASSUMED.** Replacing `window_event`'s whole
-  body with `let _ = (event_loop, event);` — a GUI that responds to no
-  input at all — leaves **all 256 `pmacs-gpu` tests green**. That is the
-  exception's true extent: `ActiveEventLoop` cannot exist outside a live
-  event loop, so **no** headless test in the crate observes the
-  delegation, not merely none of the new ones.
+  lets rustfmt rejoin lines. **22 witnesses — 13 routing, 9 effect — and
+  23 mutations**, each failing its own rows, plus the P3 exception check
+  which must stay green.
+- **P3 IS NOW MEASURED, NOT ASSUMED — and re-measured after the effect
+  harness landed.** Replacing `window_event`'s whole body with `let _ =
+  (event_loop, event);` — a GUI that responds to no input at all —
+  leaves **all 265 `pmacs-gpu` tests green** under `PMACS_REQUIRE_GPU=1`
+  at the current shape (it was 256 before the effect rows; the number is
+  re-run, not carried forward). That is the exception's true extent:
+  `ActiveEventLoop` cannot exist outside a live event loop, so **no**
+  headless test in the crate observes the delegation. What it covers is
+  now **one `if`**, not a 33-line match.
 - **A SECOND ACCEPTED STRUCTURAL EXCEPTION, found here and winit's
   rather than ours.** `KeyEvent` carries a `pub(crate)
   platform_specific` field, so **no `WindowEvent::KeyboardInput` can be
@@ -347,12 +352,19 @@ waits for a signal that is not coming.
   the exception down); the family's only real decision is factored into
   `route_key_action(ElementState)` and witnessed directly; and what
   stays unwitnessed is one pattern arm containing a match and a call.
-- **`event_loop.exit()` now appears in exactly two places, both inside
-  `window_event`.** The keyboard body was its second caller (the idle
-  Escape), so `apply_keyboard` returns an `EventOutcome` rather than
-  taking an `&ActiveEventLoop` — which is what keeps the bodies
-  reachable in principle. **Stage 1a's A4 deletes that branch**, at
-  which point `EventOutcome` has one variant and should go.
+- **The crate now has exactly ONE executable `event_loop.exit()`**, in
+  `window_event`. Bodies return an `EventOutcome` rather than taking an
+  `&ActiveEventLoop`, which is what keeps them reachable in principle.
+  **`EventOutcome` has TWO producers and they differ in kind**: a native
+  close (`LifecycleRoute::Exit`), which must always exit, and
+  `apply_keyboard`'s idle Escape, which is a local quit. **Stage 1a's A4
+  removes the keyboard producer only**, leaving **one** `Exit`
+  producer — the native close. **One producer is not one variant**:
+  `EventOutcome` survives because `dispatch_window_event` must still
+  distinguish `Continue` from `Exit` on every event, and only the close
+  exits. A4 changes `apply_keyboard`'s signature, not the type. An
+  earlier revision of this bullet claimed the type would collapse and
+  should go with the Escape branch; that was wrong.
 - **Slice order (each its own branch and PR):** `1-pre` → `1a`\* → `1b`
   → `1c` → `1d` → `1e`\*. **`1a` and `1e` are protocol-bearing (v24
   `TextInput`, v25 `OpenTarget`/`OpenTargetResult`) and are
@@ -374,10 +386,11 @@ waits for a signal that is not coming.
   file-watcher tests — with every other target green. Established as
   environmental three ways, in increasing strength:
   - **Structurally impossible for this branch to cause.** The branch
-    changes six files, five of them under `docs/`; **the whole
-    executable diff is `pmacs-gpu/src/main.rs`**, and `pmacs-gpu` is a
-    workspace **member but not a dependency** of the root package, so
-    the `m4_acceptance` binary never links it.
+    changes seven files, five of them under `docs/`; **the whole
+    executable diff is inside the `pmacs-gpu` crate**
+    (`src/main.rs` and `src/attach.rs`), and `pmacs-gpu` is a workspace
+    **member but not a dependency** of the root package, so the
+    `m4_acceptance` binary never links it.
   - **The marker is older than the session.** `/tmp/.git` is empty and
     was created at 20:14 CEST, **3.5 h before** the gate run at 23:45;
     `/tmp` held 8,920 entries. That is handoff §1's recorded hazard
@@ -400,12 +413,21 @@ waits for a signal that is not coming.
   unnecessary, and the isolated `TMPDIR` is the correct remedy. It must
   be **outside `/tmp` and outside every git worktree** — a child of
   `/tmp` is not isolated, because `/tmp/.git` remains its ancestor.
-- **GREEN under an isolated `TMPDIR`: all nine gates pass** (log
-  `20260811T215605Z-2664352`). fmt, clippy, lib, lib-crdt,
-  `gpu_invocation_acceptance`, **m4 168/0/3**, `PMACS_REQUIRE_GPU=1 -p
-  pmacs-gpu`, the **117-target `--workspace --no-fail-fast` sweep with
-  zero failures anywhere** (`m4_acceptance` running all 171 in it), and
-  `diff-check`.
+- **GREEN under an isolated `TMPDIR`: all nine gates pass on the final
+  tree** (log `20260812T090034Z-2989598`, review round 2). fmt, clippy,
+  lib, lib-crdt, `gpu_invocation_acceptance`, **m4 168/0/3**,
+  `PMACS_REQUIRE_GPU=1 -p pmacs-gpu` (**265 tests, none filtered and
+  none skipped**, all nine effect rows included), the **117-target
+  `--workspace --no-fail-fast` sweep with zero failures anywhere**
+  (`m4_acceptance` running all 171 in it), and `diff-check`. Earlier
+  full-green runs at `20260811T215605Z-2664352` (round 1) and
+  `20260812T083735Z-2869707` (the P2 harness) are superseded by this
+  one. **What changed after it is doc comments and prose only** — the
+  `EventOutcome` correction below and this paragraph; `cargo fmt
+  --check`, `clippy -D warnings` and the 22 routing/effect rows were
+  re-run on the result. Stated rather than glossed, because "the gate
+  was green" and "the gate was green on exactly this tree" are
+  different claims.
 
 ## The GUI arc — Stage 0 MERGED as #236 (`f8ad3e7`)
 

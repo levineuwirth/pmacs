@@ -3226,8 +3226,9 @@ impl App {
             } else {
                 // Q#S1-1 / A4 — the local quit, unchanged here and
                 // deleted by Stage 1a: an idle Escape must reach the
-                // daemon. `window_event` performs the exit; this is
-                // the only reason a body needs an outcome at all.
+                // daemon. `window_event` performs the exit. This is the
+                // only reason a BODY needs an outcome; `EventOutcome`
+                // itself outlives A4, since a native close still exits.
                 return EventOutcome::Exit;
             }
             return EventOutcome::Continue;
@@ -3395,13 +3396,11 @@ impl App {
 /// exception and how far it reaches. **Performing** stays on `App`, in
 /// the `apply_*` methods the router's variants name.
 ///
-/// The decision is what the route *is*, not merely which family claims
-/// it: `Exit` is the local exit effect, `Resize` carries the clamped
-/// surface extent, `Modifiers` carries the state mutation. **Two arms —
-/// `CloseRequested` and `RedrawRequested` — send nothing outbound at
-/// all**, so a harness recording only protocol traffic would leave them
-/// invisible; that is why a route names its local effect and the harness
-/// records routes.
+/// A route carries the decision, not merely the family: `Resize` holds
+/// the clamped extent, `Modifiers` the new state. **What a route does
+/// NOT carry is the effect** — a `Wheel` may become a viewport update, a
+/// panel event, a terminal event or nothing at all, depending on
+/// `State`. Effects are witnessed separately, by `EffectHarness`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Route<'a> {
     /// The lifecycle family — see [`route_lifecycle`].
@@ -3417,16 +3416,25 @@ enum Route<'a> {
     Unrouted,
 }
 
-/// What the event loop must do once a family's body has run. Only the
-/// keyboard family produces anything but `Continue` today: an idle
-/// Escape is a local quit. Returning the decision rather than taking an
-/// `&ActiveEventLoop` is what keeps every body reachable from a test —
-/// the crate's two `event_loop.exit()` call sites, this one and
-/// `LifecycleRoute::Exit`, both sit in `window_event` and nowhere else.
+/// What the event loop must do once a family's body has run.
 ///
-/// Stage 1a's A4 deletes that branch (an idle Escape must reach the
-/// daemon and never exit), at which point this type has one variant and
-/// should go.
+/// **Two producers, and they are not the same kind of thing.**
+/// `LifecycleRoute::Exit` is a native window close, which must always
+/// exit; `apply_keyboard` returns `Exit` for an idle Escape, which is a
+/// local quit. Returning the decision rather than taking an
+/// `&ActiveEventLoop` is what keeps every body reachable from a test:
+/// the crate has **exactly one** executable `event_loop.exit()`, in
+/// `window_event`.
+///
+/// **Stage 1a's A4 removes the KEYBOARD producer only** — an idle
+/// Escape must reach the daemon and never exit — leaving **one** `Exit`
+/// producer, the native close.
+///
+/// **One producer is not one variant.** This type survives A4 because
+/// `dispatch_window_event` must still distinguish `Continue` from
+/// `Exit` on every event it handles: nearly all of them must not exit,
+/// and the close must. What A4 changes is `apply_keyboard`'s signature,
+/// not this type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EventOutcome {
     Continue,
@@ -3585,7 +3593,7 @@ fn route_pointer(event: &WindowEvent) -> Option<PointerRoute> {
 /// deliberately, not of outbound protocol traffic: `CloseRequested`
 /// exits and `RedrawRequested` repaints, and neither sends the daemon
 /// anything, so a transcript of daemon traffic alone cannot tell a
-/// handled arm from a dropped one. A route names its local effect —
+/// handled arm from a dropped one. A route records the decision —
 /// exit, resize extent, modifier mutation — which is what makes those
 /// arms observable here at all.
 ///
@@ -3691,6 +3699,13 @@ impl EffectHarness {
     /// anything a body would legitimately send.
     const SENTINEL: char = '\u{e000}';
 
+    /// Error ceiling on one outbound read. **Not a pacing device** — the
+    /// sentinel decides arrival — so this is set far above any plausible
+    /// drain: reaching it means the writer or encoder is broken, never
+    /// that the machine is busy. Without it a regression downstream of
+    /// `enqueue` wedges the gate instead of reddening it.
+    const READ_CEILING: std::time::Duration = std::time::Duration::from_secs(30);
+
     /// Build the harness, or fail loudly.
     ///
     /// **Never skips.** `State::new_headless` returns `None` when no
@@ -3717,6 +3732,9 @@ impl EffectHarness {
         let client = crate::attach::connect_stream_for_test(client_stream, |_| true)
             .expect("attach over socketpair");
         let daemon = handshake.join().expect("handshake thread");
+        daemon
+            .set_read_timeout(Some(Self::READ_CEILING))
+            .expect("arm the outbound read ceiling");
 
         // A document tall enough to scroll. A two-line fixture made the
         // wheel row pass vacuously: `scroll_by_lines` returns `None`
@@ -3822,10 +3840,17 @@ impl EffectHarness {
     /// Push a sentinel through the same outbox and read until it comes
     /// back. Everything ahead of it belongs to the step just dispatched.
     ///
-    /// This is a **condition**, not a sleep: it blocks on the socket
-    /// until the writer thread has drained past the sentinel, so it is
-    /// insensitive to how many cores are free — the mistake PR #235's CI
-    /// red was made of.
+    /// **The sentinel is the success condition, and the timeout is only
+    /// an error ceiling** — the two are not the same thing and the
+    /// distinction is the whole design. Arrival is decided by the
+    /// sentinel, so the harness never infers "nothing was sent" from a
+    /// duration and is insensitive to how many cores are free; that is
+    /// the mistake PR #235's CI red was made of. But a blocking read
+    /// with no bound turns a regressed writer or encoder into a **wedged
+    /// gate** rather than a red one, and a hang is the worst failure
+    /// shape there is: it looks like slowness until the job is killed.
+    /// [`Self::READ_CEILING`] is therefore set far above any plausible
+    /// drain, so reaching it means broken, never busy.
     fn read_until_sentinel(&mut self) -> Vec<pmacs_protocol::FrontendEvent> {
         self.sentinel_seq += 1;
         let tag = self.sentinel_seq;
@@ -3837,7 +3862,16 @@ impl EffectHarness {
         let mut seen = Vec::new();
         loop {
             let event: pmacs_protocol::FrontendEvent =
-                pmacs_protocol::read_message(&mut self.daemon).expect("read outbound");
+                match pmacs_protocol::read_message(&mut self.daemon) {
+                    Ok(event) => event,
+                    Err(e) => panic!(
+                        "outbound read failed before the sentinel arrived \
+                         after {:?}: {e}. Either the writer or the encoder \
+                         regressed, or the step produced no sentinel at all. \
+                         Recorded so far: {seen:?}",
+                        Self::READ_CEILING
+                    ),
+                };
             if is_sentinel(&event, tag) {
                 return seen;
             }
@@ -3856,9 +3890,11 @@ struct EffectSnapshot {
 }
 
 /// Modifier bits carrying the sentinel's sequence number, so a stale
-/// sentinel cannot end the wrong step. Four bits is plenty: the harness
-/// reads every sentinel it writes, so the counter only has to
-/// distinguish neighbours.
+/// sentinel cannot end the wrong step. **Three bits — Ctrl, Alt, Shift —
+/// so the tag wraps every eight steps.** That is sufficient rather than
+/// sloppy: the harness reads every sentinel it writes before issuing the
+/// next, so a tag only ever has to distinguish itself from the one
+/// immediately before it.
 #[cfg(test)]
 fn sentinel_mods(tag: u32) -> Modifiers {
     let mut mods = Modifiers::NONE;
@@ -3915,10 +3951,10 @@ mod input_routing_tests {
     }
 
     /// The per-variant rows below drive [`route_event`] directly and the
-    /// transcript row drives the harness. That split is deliberate: it
-    /// leaves the transcript row as P2's sole owner, so a harness that
-    /// stopped recording an effect fails exactly one row instead of
-    /// every row.
+    /// transcript row drives [`RoutingHarness`]. That split keeps the
+    /// transcript row the only one that fails when the ROUTING harness
+    /// stops recording, so that mutation stays surgical. **P2 itself is
+    /// owned by the effect rows** — see [`EffectHarness`].
     ///
     /// Events are bound to locals rather than passed as temporaries
     /// because a `Route` borrows the event it came from — the keyboard

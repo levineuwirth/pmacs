@@ -216,7 +216,7 @@ commands, read `docs/active-work.md` immediately after this file.
     roots but **not `TMPDIR`**, so `tempfile::tempdir()` still lands
     under a `/tmp` that may carry a marker. It surfaced inside a gate
     run on an unrelated lane (GUI 1-pre, whose whole **executable** diff
-    is `pmacs-gpu/src/main.rs`) as **`m4_24_bare_string_glob_stays_relative`
+    is inside the `pmacs-gpu` crate) as **`m4_24_bare_string_glob_stays_relative`
     and `m4_24_d3_fallback_base_is_the_smallest_attachment_dir`**, in
     both the `m4` step and the `--workspace` sweep, with every other
     target in the corpus green.
