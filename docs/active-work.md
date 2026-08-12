@@ -266,6 +266,43 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
+## Docs absorption of #236 and #237 — branch OPEN, docs only
+
+**Written with the branch's own commit**, because this file's standing
+rule is *when a PR is opened, give it a lane* — and a lane recording an
+absorption belongs in the absorption, not after it. #171 drifted 153
+commits while invisible here.
+
+- **Branch `docs-absorb-237`**, base `githubsucks/main` @ `d038f71`
+  exactly. **`githubsucks/docs-absorb-237` is the authoritative tip** —
+  the ref, not a SHA.
+- **Scope: `docs/active-work.md` and `docs/agent-handoff.md` only.** No
+  `src/`, no `pmacs-gpu/`, **no Stage 1a implementation** — verified with
+  `git diff --name-only githubsucks/main`, which lists nothing outside
+  `docs/`.
+- **The recovery procedure was RE-RUN from an empty directory on git
+  2.55.0, not SHA-swapped**, and that is what licenses advancing the
+  base at all. It also **discharges the obligation left at `e67ad07`**,
+  where the base moved without the procedure being exercised. Details in
+  "Repository authority" above; the floor check was run against **both**
+  floors, and the documented two-argument worktree trap was reproduced
+  rather than assumed.
+- **Gates: `./scripts/gate`, all eight stages green** (log
+  `20260812T111504Z-3265400`). No `--acceptance` and no `--protocol` —
+  docs only, so no suite is touched and no wire moves. That run covered
+  `502308d`; **the only later commit is this lane**, 34 lines of
+  markdown, with `git diff --check` and `cargo fmt --check` re-run clean
+  on the result.
+- **One judgement recorded because it exceeded the requested scope and
+  was approved on review**: §1a's board carried no GUI-arc row, which
+  contradicted the anchor two sections above it. The row sits where
+  `COHERENCE.md` §20 Q#GA5 puts the arc — after Priority 1, alongside
+  P2–P5, interacting only at the **P2 start gate** — and the section's
+  dateline now says which row is current and which are as of
+  2026-08-01.
+- **This lane goes when the PR merges.** It describes a docs pass, not
+  an arc, so rule 4 removes it outright rather than rewriting it.
+
 ## GUI arc Stage 1 — 1-pre MERGED as #237 (`d038f71`); 1a is next, NOT STARTED
 
 **The lane is rewritten, not removed.** Rule 4 removes a lane when its
