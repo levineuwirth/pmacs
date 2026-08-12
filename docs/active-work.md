@@ -266,13 +266,14 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## Docs absorption of #236 and #237 — branch OPEN, docs only
+## Docs absorption of #236 and #237 — PR #238 OPEN, docs only
 
 **Written with the branch's own commit**, because this file's standing
 rule is *when a PR is opened, give it a lane* — and a lane recording an
 absorption belongs in the absorption, not after it. #171 drifted 153
 commits while invisible here.
 
+- **PR #238** — https://github.com/levineuwirth/pmacs/pull/238.
 - **Branch `docs-absorb-237`**, base `githubsucks/main` @ `d038f71`
   exactly. **`githubsucks/docs-absorb-237` is the authoritative tip** —
   the ref, not a SHA.
