@@ -1,10 +1,11 @@
 # GUI arc, Stage 1 — input foundation (framing)
 
-**Status: revision 10 — APPROVED.** Revisions 1–8 rejected; revision 9
-is the approved design and **revision 10 changes none of it** — it
-records one scope correction found against the 1-pre implementation
-(§6, "Revision 10"). **Q#S1-8, Q#S1-9 and Q#S1-10 are RULED.**
-**1-pre is IMPLEMENTED**; 1a onward may begin from this document.
+**Status: revision 11 — APPROVED.** Revisions 1–8 rejected; revision 9
+is the approved design. Revision 10 recorded a scope correction found
+against the 1-pre implementation and **also made a claim about P2 that
+review overturned; revision 11 retracts it and P2 is implemented as
+written** (§6). **Q#S1-8, Q#S1-9 and Q#S1-10 are RULED.** **1-pre is
+IMPLEMENTED**; 1a onward may begin from this document.
 
 **Verification base:** checked in the `gui-arc-stage0` worktree at
 `a994f37`, whose tree for these files is what `f8ad3e7` merged.
@@ -121,7 +122,9 @@ P3 remains an accepted structural exception: not headlessly testable.
 
 **Revision 10 — one finding against the implementation, not the
 design.** The 1-pre seam is built and the table above holds, with one
-scope correction that could not be seen from the design.
+scope correction that could not be seen from the design. *(Revision 10
+also argued P2 was satisfied by classification alone. It is not — see
+revision 11 at the end of this section.)*
 
 **P1 has a SECOND structural exception, and it is winit's rather than
 this seam's.** `KeyEvent` carries a `pub(crate) platform_specific`
@@ -147,15 +150,53 @@ blanket one:
   body with `let _ = (event_loop, event);` — a GUI that responds to no
   input at all — leaves **all 256 `pmacs-gpu` tests green**, not merely
   the 13 routing rows. That is the exception's true extent: no headless
-  test anywhere in the crate observes the delegation.
+  test anywhere in the crate observes the delegation. *(Revision 11
+  shrinks what the exception covers: `window_event` is now four lines,
+  so the unwitnessed residue is one `if` rather than a 33-line match.)*
 
-**P2's harness records ROUTES, and that is the mechanism rather than a
-narrowing.** A route names its local effect — `Exit`, `Redraw`,
-`Resize { width, height }`, `Modifiers(state)` — so one transcript
-covers both halves of P2's contract. The transcript row is deliberately
-the **sole** owner of P2 (the per-variant rows call `route_event`
-directly), which is what keeps "record outbound only" failing exactly
-one row instead of every row.
+**Revision 11 — P2 IS IMPLEMENTED AS WRITTEN. Revision 10's argument
+here was wrong and is retracted.**
+
+Revision 10 claimed a route-classification transcript covered both
+halves of P2 because a route "names its local effect". **The wheel
+falsifies that.** A wheel route carries a delta; whether that delta
+becomes a viewport update, a panel event, a terminal event or nothing at
+all depends on `State`. The route names the *family*, and only running
+the body names the *effect* — so classification could not have
+satisfied P2, and arguing that it did was a narrowing wearing the
+costume of a mechanism.
+
+P2 now has a second harness beside the routing one:
+
+- **`EffectHarness` drives production end to end** — a real
+  `AttachClient` over a `socketpair` (real handshake, outbox, writer
+  thread, encoder, so the transcript is the wire), a real windowless
+  `State`, and `App::dispatch_window_event`.
+- **`App::dispatch_window_event` is what made this reachable.** Left
+  inside `window_event`, the dispatch would force a harness to
+  re-implement it, and a harness that re-implements what it tests
+  witnesses its own copy. **P3 therefore narrows from a 33-line match to
+  a single `if`**: `window_event` is now `call dispatch, exit if it
+  asks`.
+- **Local effects are read where they land**: exit from the returned
+  `EventOutcome`, redraw from a test-only `render_calls`, resize from
+  the surface config, modifiers from `App`, scroll from `scroll_top`.
+- **Steps are delimited by a non-coalesceable sentinel key, not a
+  sleep** — "this step sent nothing" is otherwise undecidable without
+  waiting, and a fixed-duration wait against a writer thread is the
+  core-count assumption of PR #235's CI red.
+- **The rows never skip.** A missing wgpu adapter is an assertion
+  failure; mutation M21 confirms all nine effect rows fail loudly while
+  the thirteen GPU-free routing rows stay green.
+
+`M22` (blind to outbound) and `M23` (blind to local) fail rows in both
+directions, which is P2's contract executable rather than asserted.
+
+The routing rows stay, and the division of labour is deliberate: the
+routing harness answers *where did this event go*, the effect harness
+answers *what did it do*. The transcript row remains the routing
+harness's sole P2-recording owner, which keeps its own mutation
+surgical.
 
 **One design consequence worth carrying into 1a.** The keyboard arm was
 the second caller of `event_loop.exit()` — the idle-Escape local quit —

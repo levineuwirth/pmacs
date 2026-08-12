@@ -260,12 +260,13 @@ waits for a signal that is not coming.
   Stage 0 merge, #236). **`githubsucks/gui-stage1-pre` is the
   authoritative tip** — the ref, not a SHA. Recover with
   `git fetch githubsucks && git checkout gui-stage1-pre`.
-- **Framing `docs/gui-stage1-input-framing.md`, revision 10, APPROVED**
+- **Framing `docs/gui-stage1-input-framing.md`, revision 11, APPROVED**
   after **eight rejected revisions**. Revision 9 is the approved design;
-  **revision 10 changes none of it** and records one scope correction
-  found against this implementation (below). It is Stage 1's framing for
-  **all** slices and governs the later branches; only Stage 0 was framed
-  by the arc document itself.
+  revision 10 recorded a scope correction found against this
+  implementation and **also argued P2 was satisfied by classification
+  alone, which review overturned — revision 11 retracts it**. It is
+  Stage 1's framing for **all** slices and governs the later branches;
+  only Stage 0 was framed by the arc document itself.
 - **Scope of THIS branch: 1-pre only — the input seam. No behaviour
   change.** `App::window_event` was **655 lines** and is now **33**: one
   `route_event` call and one arm per route. Nothing below it could be
@@ -274,7 +275,37 @@ waits for a signal that is not coming.
 - **IMPLEMENTED in four commits, one per event family**, so each lands
   with its own witnesses and mutations rather than as one 600-line
   diff: `014110f` lifecycle (close / modifiers / resize), `7f0f9db`
-  redraw, `0705564` keyboard, `e955645` the four pointer arms.
+  redraw, `0705564` keyboard, `e955645` the four pointer arms. Review
+  round 1 added `f976dc1`, the P2 effect harness.
+- **P2 HAS TWO HARNESSES, and the second was review round 1's blocker.**
+  The routing harness answers *where did this event go*; `EffectHarness`
+  answers *what did it do*. Classification alone could not satisfy P2 —
+  **a wheel route carries a delta, and whether that becomes a viewport
+  update, a panel event, a terminal event or nothing depends on
+  `State`.** The effect harness drives a real `AttachClient` over a
+  `socketpair` (real handshake, outbox, writer thread and encoder, so
+  the transcript is the wire), a real windowless `State`, and
+  `App::dispatch_window_event`.
+- **`App::dispatch_window_event` is what made P2 reachable.** Left inside
+  `window_event`, the dispatch would force the harness to re-implement
+  it, and a harness that re-implements what it tests witnesses its own
+  copy. `window_event` is now **four lines**, so **P3 shrinks from a
+  33-line match to a single `if`**.
+- **Steps are delimited by a non-coalesceable sentinel key, not a
+  sleep** — otherwise "this step sent nothing" is undecidable without
+  waiting, and a fixed-duration wait against a writer thread is exactly
+  the core-count assumption behind PR #235's CI red.
+- **The effect rows never skip**: a missing wgpu adapter is an assertion
+  failure. M21 confirms all **nine** effect rows fail loudly while the
+  **thirteen** GPU-free routing rows stay green.
+- **Three manufactured absences, all found by running the rows**, and
+  each the same shape: the harness withheld something production
+  supplies, then witnessed its own omission. `resumed` sets the frontend
+  id and session version before any geometry flush (the resize row);
+  the fixture document was two lines and could not scroll; a headless
+  `State` has no attached buffer, so `scroll_by_lines` returned `None`.
+  A fourth was a vacuous assertion — `.all(|e| matches!(..))` over an
+  empty transcript is true — caught by the outbound-blind mutation.
 - **The shape.** Deciding is `route_event(&WindowEvent) -> Route`, a
   free function composing one decision function per family
   (`route_lifecycle`, `route_keyboard` + `route_key_action`,
