@@ -297,7 +297,18 @@ waits for a signal that is not coming.
   the core-count assumption behind PR #235's CI red.
 - **The effect rows never skip**: a missing wgpu adapter is an assertion
   failure. M21 confirms all **nine** effect rows fail loudly while the
-  **thirteen** GPU-free routing rows stay green.
+  **thirteen** GPU-free routing rows stay green. The assert is
+  **unconditional**, not `PMACS_REQUIRE_GPU`-gated, so no invocation
+  anywhere can turn a missing adapter into a quiet `ok`.
+- **They execute in exactly ONE CI job, and that is checked rather than
+  assumed.** `cargo metadata` reports `workspace_default_members` as the
+  root `pmacs` package alone, so the `test` matrix and `crdt-test` —
+  both bare `cargo test --all-targets` — never compile `pmacs-gpu`'s
+  unit tests at all. Only **`gpu-render`** runs them, and it installs
+  lavapipe, proves the adapter with `vulkaninfo`, and sets
+  `PMACS_REQUIRE_GPU=1`. This is the handoff's "`gpu-render` runs a
+  DIFFERENT PACKAGE" fact showing up as a dependency: these rows live or
+  die with that one job.
 - **Three manufactured absences, all found by running the rows**, and
   each the same shape: the harness withheld something production
   supplies, then witnessed its own omission. `resumed` sets the frontend
