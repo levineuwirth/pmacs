@@ -55,7 +55,7 @@ use pmacs_protocol::{
 use unicode_width::UnicodeWidthChar;
 use wgpu::MultisampleState;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
@@ -1579,6 +1579,11 @@ type LoroTextDeltaBatches = Arc<Mutex<Vec<Vec<loro::TextDelta>>>>;
     reason = "independent render/input state flags, not a config bitset"
 )]
 struct State {
+    /// GUI 1-pre P2 — how many times [`State::render`] has been called.
+    /// The redraw arm's only local effect, and invisible without this
+    /// on a windowless `State`. Test-only.
+    #[cfg(test)]
+    render_calls: u64,
     // `None` in the headless render-test path (F-014): a windowless State
     // that renders to an offscreen texture instead of a surface.
     window: Option<Arc<Window>>,
@@ -2679,6 +2684,1713 @@ impl App {
             }
         }
     }
+
+    /// Perform [`LifecycleRoute::Resize`]. `width`/`height` arrive
+    /// already clamped away from zero by the router.
+    fn apply_resize(&mut self, width: u32, height: u32) {
+        let vp = self
+            .state
+            .as_mut()
+            .and_then(|state| state.resize(width, height));
+        if let Some(vp) = vp
+            && let Some(client) = self.attach_client.as_ref()
+            && let Err(e) = client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+        {
+            eprintln!("pmacs-gpu: resize send_viewport failed: {e}");
+        }
+        // Vterm Stage 3 — a resize is a real geometry change, so
+        // the cell grid is re-derived and declared here. The
+        // daemon resizes the shared PTY only if this frontend is
+        // the durable controller.
+        self.flush_terminal_declaration();
+        // Q#BP15a — and so is the panel's whole-frame capacity. An
+        // identical cell total is not re-declared: nothing the
+        // daemon can act on changed.
+        self.flush_panel_geometry(GeometryTrigger::Surface);
+    }
+
+    /// Perform [`PointerRoute::Moved`]. `x`/`y` are the physical
+    /// pointer position winit reported.
+    #[allow(clippy::too_many_lines)] // one linear gesture pipeline; splitting hides the order.
+    fn apply_cursor_moved(&mut self, x: f64, y: f64) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        state.pointer_pos = Some((x, y));
+        // Q#CM1 — while the menu is open, motion only moves the
+        // highlight; send a hover when the item under the pointer
+        // changes from the daemon's current active row.
+        if state.menu.is_some() {
+            let hit = state.menu_hit(x, y);
+            let active = state.menu.as_ref().and_then(|m| m.active);
+            if let Some((row, true)) = hit
+                && active != Some(row)
+            {
+                self.send_menu_pointer(Some(row), false);
+            }
+            return;
+        }
+        // Bottom panel Stage 2B-3 — the band is consumed BEFORE
+        // the terminal and document paths. It sits below
+        // `document_text_bottom`, so a band pixel cannot hit the
+        // document grid, but ordering it first is what makes that a
+        // stated rule rather than a consequence of the arithmetic.
+        if state.panel.drag.is_some() {
+            self.advance_panel_drag(y);
+            return;
+        }
+        let surface = state.classify_pointer_surface(x as f32, y as f32);
+        if state.set_panel_divider_hover(surface == PointerSurface::PanelDivider) {
+            state.apply_panel_cursor_icon();
+        }
+        match surface {
+            PointerSurface::PanelDivider | PointerSurface::PanelBackground => return,
+            PointerSurface::PanelCell(coord) => {
+                // A held left button makes this a `Drag(Left)`, not a
+                // `Move`. That distinction is the whole of panel
+                // selection: `Move` never focuses or claims, while
+                // every non-`Move` gesture activates the panel first,
+                // so reporting a drag as a hover makes a selection
+                // drag silently do nothing.
+                let kind = state.panel_motion_kind();
+                if state.panel_motion_is_new(coord) {
+                    let mods = translate_mods(self.modifiers);
+                    self.send_panel_pointer_at(x, y, kind, mods);
+                }
+                return;
+            }
+            PointerSurface::Elsewhere => {
+                if state.panel.pointer_held {
+                    // A drag that wandered out of the band keeps
+                    // belonging to the band until the button comes up.
+                    return;
+                }
+            }
+        }
+        // Vterm Stage 3 — inside the terminal clip, motion is a
+        // terminal gesture. Consumed before minimap scrubbing
+        // and document hit testing: terminal mode paints no
+        // minimap and has no source bytes to resolve.
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        if state.terminal.is_some() {
+            let dragging = state.pointer_drag_active;
+            if let Some((buffer_id, coord)) = self.terminal_pointer_hit(x, y) {
+                // Sub-cell motion resolves to the same cell and
+                // carries nothing new. Report only on a cell
+                // change, matching the document drag path's
+                // hit-byte dedupe — otherwise pixel-rate motion
+                // becomes pixel-rate wire traffic, and every one
+                // of those is a daemon-side gesture.
+                let state = self.state.as_mut().expect("checked above");
+                if state.terminal_motion_is_new(coord) {
+                    let mods = translate_mods(self.modifiers);
+                    let kind = if dragging {
+                        ProtocolMouseKind::Drag(ProtocolMouseButton::Left)
+                    } else {
+                        ProtocolMouseKind::Move
+                    };
+                    self.send_terminal_pointer(buffer_id, coord, kind, mods);
+                }
+            }
+            return;
+        }
+        if state.minimap_scrub_active {
+            // Scrubbing (Q#M6): the press began on the
+            // minimap; motion keeps jumping, even if the
+            // pointer wanders out of the band.
+            let vp = state.minimap_jump_to(y);
+            if let Some(vp) = vp
+                && let Some(client) = self.attach_client.as_ref()
+                && let Err(e) = client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+            {
+                eprintln!("pmacs-gpu: minimap scrub send_viewport failed: {e}");
+            }
+            return;
+        }
+        if !state.pointer_drag_active {
+            return;
+        }
+        // Q#M7 — arm/disarm edge auto-scroll from the drag's
+        // vertical position; `about_to_wait` runs the ticks.
+        state.edge_scroll_dir =
+            edge_scroll_direction(y as f32, state.config.height, state.fm, state.band_inset());
+        // Drag coalescing (predicted finding #4): pixel-rate
+        // motion only ships when the hit byte changes.
+        let Some(byte) = state.hit_test_source_byte(x, y) else {
+            return;
+        };
+        if state.last_pointer_sent_byte == Some(byte) {
+            return;
+        }
+        state.last_pointer_sent_byte = Some(byte);
+        state.note_pointer_round_trip();
+        let buffer_id = state.current_buffer_id;
+        let mods = translate_mods(self.modifiers);
+        if let Some(buffer_id) = buffer_id {
+            self.send_pointer(buffer_id, byte, PointerKind::Drag, mods);
+        }
+    }
+
+    /// Perform [`PointerRoute::Left`], press or release.
+    #[allow(clippy::too_many_lines)] // one linear gesture pipeline; splitting hides the order.
+    fn apply_left_button(&mut self, button_state: ElementState) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        let Some((x, y)) = state.pointer_pos else {
+            return;
+        };
+        // Q#CM1 — while the menu is open the left button drives
+        // it: a press invokes the row under the pointer (or
+        // dismisses on a click outside); a release is swallowed.
+        if state.menu.is_some() {
+            if button_state == ElementState::Pressed {
+                let action = match state.menu_hit(x, y) {
+                    Some((row, true)) => Some((Some(row), true)),
+                    Some((_, false)) => None,   // separator — ignore
+                    None => Some((None, true)), // outside — dismiss
+                };
+                if let Some((index, invoke)) = action {
+                    self.send_menu_pointer(index, invoke);
+                }
+            }
+            return;
+        }
+        let mods = translate_mods(self.modifiers);
+        // Bottom panel Stage 2B-3 — the divider strip and the band
+        // claim the gesture before either document path sees it.
+        let panel_surface = state.classify_pointer_surface(x as f32, y as f32);
+        match button_state {
+            ElementState::Pressed => {
+                if panel_surface == PointerSurface::PanelDivider
+                    && state.begin_panel_drag(x as f32, y as f32)
+                {
+                    return;
+                }
+                // Arm the gesture BEFORE sending, and only when the
+                // press actually landed on a cell: arming on a miss
+                // would make a later in-band motion send a `Drag` with
+                // no preceding `Down`, and not arming at all means
+                // `Drag(Left)` is never emitted and panel selection
+                // cannot work at all.
+                if let PointerSurface::PanelCell(_) = panel_surface {
+                    let state = self.state.as_mut().expect("checked above");
+                    state.set_panel_pointer_held(true);
+                    self.send_panel_pointer_at(
+                        x,
+                        y,
+                        ProtocolMouseKind::Down(ProtocolMouseButton::Left),
+                        mods,
+                    );
+                    return;
+                }
+                if state.panel.pointer_held {
+                    let state = self.state.as_mut().expect("checked above");
+                    state.set_panel_pointer_held(false);
+                }
+            }
+            ElementState::Released => {
+                if state.end_panel_drag() {
+                    return;
+                }
+                if state.panel.pointer_held {
+                    let cell = state.panel_release_cell(x as f32, y as f32);
+                    self.send_panel_pointer_at_cell(
+                        cell,
+                        ProtocolMouseKind::Up(ProtocolMouseButton::Left),
+                        mods,
+                    );
+                    if let Some(state) = self.state.as_mut() {
+                        state.set_panel_pointer_held(false);
+                    }
+                    return;
+                }
+            }
+        }
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        if state.terminal.is_some() {
+            let hit = self.terminal_pointer_hit(x, y);
+            let state = self.state.as_mut().expect("checked above");
+            let kind = match button_state {
+                ElementState::Pressed => {
+                    // A press that MISSES the grid (the status
+                    // band, the trailing padding) starts no
+                    // drag: arming the flag there would make a
+                    // later in-grid motion send a `Drag` with no
+                    // preceding `Down`.
+                    state.pointer_drag_active = hit.is_some();
+                    ProtocolMouseKind::Down(ProtocolMouseButton::Left)
+                }
+                ElementState::Released => {
+                    // A release always ends the drag, including
+                    // one that wandered outside the grid.
+                    state.pointer_drag_active = false;
+                    ProtocolMouseKind::Up(ProtocolMouseButton::Left)
+                }
+            };
+            // A press or release always reports, and it re-arms
+            // the motion dedupe: the first drag after a press
+            // must reach the daemon even at the cell the press
+            // landed on.
+            state.last_terminal_pointer_cell = None;
+            if let Some((buffer_id, coord)) = hit {
+                self.send_terminal_pointer(buffer_id, coord, kind, mods);
+            }
+            return;
+        }
+        match button_state {
+            ElementState::Pressed => {
+                if state.in_minimap_band(x, y) {
+                    // Q#M6 — consumed before text hit-testing;
+                    // never a Pointer event.
+                    state.minimap_scrub_active = true;
+                    let vp = state.minimap_jump_to(y);
+                    if let Some(vp) = vp
+                        && let Some(client) = self.attach_client.as_ref()
+                        && let Err(e) =
+                            client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+                    {
+                        eprintln!("pmacs-gpu: minimap jump send_viewport failed: {e}");
+                    }
+                    return;
+                }
+                let Some(byte) = state.hit_test_source_byte(x, y) else {
+                    return;
+                };
+                let kind = state.classify_pointer_down(byte, mods.contains(Modifiers::SHIFT));
+                state.pointer_drag_active = true;
+                state.last_pointer_sent_byte = Some(byte);
+                state.note_pointer_round_trip();
+                if let Some(buffer_id) = state.current_buffer_id {
+                    if debug_input() {
+                        eprintln!("pmacs-gpu pointer: {kind:?} byte={byte}");
+                    }
+                    self.send_pointer(buffer_id, byte, kind, mods);
+                }
+            }
+            ElementState::Released => {
+                if state.minimap_scrub_active {
+                    state.minimap_scrub_active = false;
+                    return;
+                }
+                if !state.pointer_drag_active {
+                    return;
+                }
+                state.pointer_drag_active = false;
+                state.edge_scroll_dir = None;
+                state.edge_scroll_last = None;
+                let byte = state
+                    .hit_test_source_byte(x, y)
+                    .or(state.last_pointer_sent_byte);
+                let buffer_id = state.current_buffer_id;
+                if let (Some(byte), Some(buffer_id)) = (byte, buffer_id) {
+                    self.send_pointer(buffer_id, byte, PointerKind::Up, mods);
+                }
+            }
+        }
+    }
+
+    /// Perform [`PointerRoute::RightPress`].
+    ///
+    /// Q#CM1 — right-click opens the context menu at the hit byte
+    /// (or dismisses an open one). The anchor pixel is remembered
+    /// so the popup the daemon sends back draws at the click.
+    #[allow(clippy::too_many_lines)] // one linear gesture pipeline; splitting hides the order.
+    fn apply_right_press(&mut self) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        let Some((x, y)) = state.pointer_pos else {
+            return;
+        };
+        if state.menu.is_some() {
+            self.send_menu_pointer(None, true);
+            return;
+        }
+        // Bottom panel Stage 2B-3 — a right-click in the band is a
+        // panel gesture, claimed before the terminal and document
+        // paths. The daemon decides between child mouse reporting and
+        // the editor context menu, so the anchor is remembered here
+        // exactly as for a document click; without this the band's
+        // context actions are unreachable and the click is applied to
+        // the document underneath instead.
+        if let PointerSurface::PanelCell(_) = state.classify_pointer_surface(x as f32, y as f32) {
+            if let Some(state) = self.state.as_mut() {
+                state.menu_anchor_px = (x, y);
+            }
+            let mods = translate_mods(self.modifiers);
+            self.send_panel_pointer_at(
+                x,
+                y,
+                ProtocolMouseKind::Down(ProtocolMouseButton::Right),
+                mods,
+            );
+            return;
+        }
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        // Vterm Stage 3 — a right-click in the terminal clip is
+        // a terminal gesture; the daemon decides between child
+        // reporting and the editor context menu, so the anchor
+        // is remembered here exactly as for a document click.
+        if state.terminal.is_some() {
+            state.menu_anchor_px = (x, y);
+            if let Some((buffer_id, coord)) = self.terminal_pointer_hit(x, y) {
+                let mods = translate_mods(self.modifiers);
+                self.send_terminal_pointer(
+                    buffer_id,
+                    coord,
+                    ProtocolMouseKind::Down(ProtocolMouseButton::Right),
+                    mods,
+                );
+            }
+            return;
+        }
+        let Some(byte) = state.hit_test_source_byte(x, y) else {
+            return;
+        };
+        state.menu_anchor_px = (x, y);
+        let buffer_id = state.current_buffer_id;
+        let mods = translate_mods(self.modifiers);
+        if let Some(buffer_id) = buffer_id {
+            self.send_pointer(buffer_id, byte, PointerKind::Context, mods);
+        }
+    }
+
+    /// Perform [`PointerRoute::Wheel`].
+    #[allow(clippy::too_many_lines)] // one linear gesture pipeline; splitting hides the order.
+    fn apply_wheel(&mut self, delta: MouseScrollDelta) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        // Wheel scroll is local-only: the GPU owns the
+        // viewport. Positive winit y = scroll up = smaller
+        // scroll_top.
+        let lines = match delta {
+            winit::event::MouseScrollDelta::LineDelta(_, y) => {
+                (-y * WHEEL_LINES_PER_TICK).round() as i64
+            }
+            winit::event::MouseScrollDelta::PixelDelta(p) => {
+                (-(p.y as f32) / state.fm.code_line_height()).round() as i64
+            }
+        };
+        if lines == 0 {
+            return;
+        }
+        // Bottom panel Stage 2B-3 — a wheel tick over the band scrolls
+        // the PANEL's window, which is daemon-side state, so it
+        // crosses the wire instead of moving this frontend's local
+        // document `scroll_top`. Falling through would scroll the
+        // document while the pointer is inside the panel.
+        if let Some((x, y)) = state.pointer_pos
+            && matches!(
+                state.classify_pointer_surface(x as f32, y as f32),
+                PointerSurface::PanelCell(_)
+            )
+        {
+            let mods = translate_mods(self.modifiers);
+            let kind = if lines < 0 {
+                ProtocolMouseKind::ScrollUp
+            } else {
+                ProtocolMouseKind::ScrollDown
+            };
+            self.send_panel_pointer_at(x, y, kind, mods);
+            return;
+        }
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        // Vterm Stage 3 — the terminal's scrollback belongs to
+        // the daemon-side view, not to this frontend's local
+        // scroll, so a wheel tick crosses the wire as a
+        // terminal gesture instead of moving `scroll_top`.
+        if state.terminal.is_some() {
+            if let Some((x, y)) = state.pointer_pos
+                && let Some((buffer_id, coord)) = self.terminal_pointer_hit(x, y)
+            {
+                let mods = translate_mods(self.modifiers);
+                let kind = if lines < 0 {
+                    ProtocolMouseKind::ScrollUp
+                } else {
+                    ProtocolMouseKind::ScrollDown
+                };
+                self.send_terminal_pointer(buffer_id, coord, kind, mods);
+            }
+            return;
+        }
+        let vp = state.scroll_by_lines(lines);
+        if let Some(vp) = vp
+            && let Some(client) = self.attach_client.as_ref()
+            && let Err(e) = client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+        {
+            eprintln!("pmacs-gpu: wheel send_viewport failed: {e}");
+        }
+    }
+
+    /// Perform [`LifecycleRoute::Redraw`]. A no-op before `resumed` has
+    /// built the surface.
+    fn apply_redraw(&mut self) {
+        if let Some(state) = self.state.as_mut() {
+            state.render();
+        }
+    }
+
+    /// Route one window event and perform it — **the whole of
+    /// `window_event` except the exit itself**, which is returned rather
+    /// than performed.
+    ///
+    /// This split is what makes P2 reachable at all. Left inside
+    /// `window_event`, the dispatch would force a harness to
+    /// re-implement it, and a harness that re-implements the thing it
+    /// tests witnesses its own copy. Here the harness drives production
+    /// code, and `window_event` keeps only the one statement no headless
+    /// test can reach — which narrows P3 from a 33-line match to a
+    /// single `if`.
+    fn dispatch_window_event(&mut self, event: &WindowEvent) -> EventOutcome {
+        match route_event(event) {
+            Route::Lifecycle(LifecycleRoute::Exit) => return EventOutcome::Exit,
+            Route::Lifecycle(LifecycleRoute::Modifiers(mods)) => self.modifiers = mods,
+            Route::Lifecycle(LifecycleRoute::Resize { width, height }) => {
+                self.apply_resize(width, height);
+            }
+            Route::Lifecycle(LifecycleRoute::Redraw) => self.apply_redraw(),
+            Route::Keyboard {
+                action: KeyAction::Press,
+                key,
+            } => return self.apply_keyboard(key),
+            Route::Pointer(PointerRoute::Moved { x, y }) => self.apply_cursor_moved(x, y),
+            Route::Pointer(PointerRoute::Left(button_state)) => {
+                self.apply_left_button(button_state);
+            }
+            Route::Pointer(PointerRoute::RightPress) => self.apply_right_press(),
+            Route::Pointer(PointerRoute::Wheel(delta)) => self.apply_wheel(delta),
+            // Three different facts, merged only because all three are
+            // today nothing to do: a key-up the keyboard family claimed
+            // and dropped, a button the pointer family has no semantics
+            // for, and an event no family claims at all.
+            Route::Keyboard {
+                action: KeyAction::Release,
+                ..
+            }
+            | Route::Pointer(PointerRoute::UnusedButton)
+            | Route::Unrouted => {}
+        }
+        EventOutcome::Continue
+    }
+
+    /// Perform [`KeyAction::Press`]. The router has already
+    /// discarded key-ups, so `key` is always a press.
+    #[allow(clippy::too_many_lines)] // one linear key pipeline; splitting hides the order.
+    fn apply_keyboard(&mut self, key: &KeyEvent) -> EventOutcome {
+        // While the daemon is intercepting keystrokes — an active
+        // incremental search (Q#SR5), or a minibuffer / pending
+        // prefix — every key belongs to its handler, not the
+        // buffer. The GUI round-trips them all and never
+        // optimistic-applies (that would edit the document
+        // mid-search).
+        let intercept = self
+            .state
+            .as_ref()
+            .is_some_and(State::daemon_intercepts_keys);
+
+        // Arc 1a Q#C6 — the completion popup is NON-modal, so it
+        // never flips the intercept gate (typing stays
+        // optimistic; the daemon's after-edit refresh re-ships
+        // the popup). Only the keys whose *default GPU handling
+        // is wrong under a popup* need this flag: Esc (below,
+        // else it's the local quit) and RET/TAB (the optimistic
+        // gate further down, else they'd insert instead of
+        // accept). C-n/C-p/C-g already round-trip as command
+        // chords, Up/Down as forwarded motion keys — the daemon's
+        // completion shadow handles all of them.
+        let completion_open = self
+            .state
+            .as_ref()
+            .is_some_and(State::completion_open_for_current_buffer);
+
+        // Escape cancels an active intercept (e.g. a running
+        // search) or dismisses the completion popup; otherwise it
+        // stays the local quit.
+        if matches!(key.logical_key, Key::Named(NamedKey::Escape)) {
+            if intercept || completion_open {
+                if let Some(client) = self.attach_client.as_ref()
+                    && let Err(e) = client.send_key(ProtocolKey::Escape, Modifiers::NONE)
+                {
+                    eprintln!("pmacs-gpu: send Escape (cancel) failed: {e}");
+                }
+            } else {
+                // Q#S1-1 / A4 — the local quit, unchanged here and
+                // deleted by Stage 1a: an idle Escape must reach the
+                // daemon. `window_event` performs the exit. This is the
+                // only reason a BODY needs an outcome; `EventOutcome`
+                // itself outlives A4, since a native close still exits.
+                return EventOutcome::Exit;
+            }
+            return EventOutcome::Continue;
+        }
+
+        let Some((pkey, mut pmods)) = translate_key(&key.logical_key, self.modifiers) else {
+            return EventOutcome::Continue;
+        };
+
+        // AltGr / international text (audit F-004). winit reports
+        // the text a keypress produces; when a keypress yields
+        // printable text *while both Ctrl and Alt* are held — the
+        // AltGr signature on Windows (LCtrl+RAlt) — it's text
+        // input, not a command chord. Strip those modifiers (keep
+        // Shift) so it inserts (through the plain-text path, or the
+        // daemon's SelfInsert while a prompt is open) instead of
+        // being routed to the keymap. Alt alone is left intact so
+        // macOS Option-as-Meta still reaches the keymap; on layouts
+        // where AltGr isn't Ctrl+Alt this is a no-op.
+        if matches!(pkey, ProtocolKey::Char(_)) && is_layout_text(key.text.as_deref(), pmods) {
+            pmods = if pmods.contains(Modifiers::SHIFT) {
+                Modifiers::SHIFT
+            } else {
+                Modifiers::NONE
+            };
+        }
+
+        // Ctrl-V — OS paste (Q#CM6). Read the system clipboard
+        // locally via arboard and ship it as a `Paste` event; the
+        // daemon inserts it. Handled before binding `client` so
+        // the `&mut self` clipboard read doesn't conflict with the
+        // client borrow. Skipped while intercepting (the daemon's
+        // active handler owns the key then). The daemon keymap's
+        // C-y yanks the in-app slot instead.
+        if !intercept && pkey == ProtocolKey::Char('v') && pmods == Modifiers::CTRL {
+            let bytes = self.state.as_mut().and_then(State::read_os_clipboard);
+            if let Some(bytes) = bytes
+                && let Some(client) = self.attach_client.as_ref()
+                && let Err(e) = client.send_paste(bytes)
+            {
+                eprintln!("pmacs-gpu: send_paste failed: {e}");
+            }
+            return EventOutcome::Continue;
+        }
+
+        let Some(client) = self.attach_client.as_ref() else {
+            return EventOutcome::Continue;
+        };
+
+        // Intercept path: round-trip every key into the daemon's
+        // active handler (search query / step / accept / cancel).
+        if intercept {
+            if let Some(state) = self.state.as_mut() {
+                state.mark_cursor_stale_after_round_trip();
+            }
+            if debug_input() {
+                eprintln!("pmacs-gpu send_key (intercepted): {pkey:?} mods={pmods:?}");
+            }
+            if let Err(e) = client.send_key(pkey, pmods) {
+                eprintln!("pmacs-gpu: send_key (intercepted) failed: {e}");
+            }
+            return EventOutcome::Continue;
+        }
+
+        // Idle: forward any command chord (Char/Enter/Tab with
+        // Ctrl or Alt) to the daemon (Q#GC1). These drive the
+        // keymap — `C-a`, `M-f`, `C-x C-s`, isearch/clipboard/M-x,
+        // … — the same path the TUI forwards everything through.
+        // The GUI no longer withholds them (the minibuffer / prompt
+        // flows they open now render, Q#MB1). Once a forwarded
+        // chord opens a prompt or enters a prefix, `dispatch_idle`
+        // flips false and the intercept gate round-trips the rest —
+        // no optimistic local flip, so a chord that changes no
+        // daemon state can never wedge the gate. (Ctrl-V / OS paste
+        // is handled locally above and never reaches here.)
+        if is_command_chord(pkey, pmods) {
+            if let Some(state) = self.state.as_mut() {
+                state.mark_cursor_stale_after_round_trip();
+            }
+            if let Err(e) = client.send_key(pkey, pmods) {
+                eprintln!("pmacs-gpu: send_key (command chord) failed: {e}");
+            }
+            return EventOutcome::Continue;
+        }
+
+        // Session B2 forwards cursor motion + plain text editing
+        // (Char / Backspace / Enter / Delete / Tab). Command chords
+        // are handled above; Meta/Super-only chords fall through
+        // here and are withheld, leaving OS/WM shortcuts (Cmd-Q,
+        // Cmd-C) to the platform.
+        if !should_forward_key(pkey, pmods) {
+            return EventOutcome::Continue;
+        }
+
+        // Arc 1a Q#C6 — with the popup open, RET and TAB mean
+        // "accept", not "insert \n / \t": skip the optimistic
+        // path so they round-trip into the daemon's
+        // dispatch_completion_key. Everything else stays
+        // optimistic.
+        let completion_takes_key =
+            completion_open && matches!(pkey, ProtocolKey::Enter | ProtocolKey::Tab);
+
+        if !completion_takes_key
+            && let Some(op) = self.state.as_mut().and_then(|state| {
+                state
+                    .optimistic_crdt_insert(pkey, pmods)
+                    .or_else(|| state.optimistic_crdt_delete(pkey, pmods))
+            })
+        {
+            if debug_input() {
+                eprintln!(
+                    "pmacs-gpu send_crdt: key={pkey:?} buf={:?} bytes={}B",
+                    op.buffer_id,
+                    op.op.bytes.len()
+                );
+            }
+            if let Err(e) = client.send_crdt_op(op.buffer_id, op.op) {
+                eprintln!("pmacs-gpu: send_crdt_op failed: {e}");
+            }
+            // An optimistic edit near the viewport edge can
+            // scroll (a wrap-inducing insert, a Backspace
+            // above the top); re-declare the scoped viewport
+            // so the producer styles the newly visible lines.
+            if let Some(vp) = op.viewport
+                && let Err(e) = client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+            {
+                eprintln!("pmacs-gpu: send Viewport failed: {e}");
+            }
+            return EventOutcome::Continue;
+        }
+        if let Some(state) = self.state.as_mut() {
+            if state.defer_round_trip_key_if_needed(pkey, pmods) {
+                if debug_input() {
+                    eprintln!(
+                        "pmacs-gpu defer_key: {pkey:?} mods={pmods:?} \
+                         pending optimistic cursor"
+                    );
+                }
+                return EventOutcome::Continue;
+            }
+            state.mark_cursor_stale_after_round_trip();
+        }
+        if debug_input() {
+            eprintln!("pmacs-gpu send_key: {pkey:?} mods={pmods:?}");
+        }
+        if let Err(e) = client.send_key(pkey, pmods) {
+            eprintln!("pmacs-gpu: send_key failed: {e}");
+        }
+        EventOutcome::Continue
+    }
+}
+
+/// GUI Stage 1-pre — the input seam.
+///
+/// `window_event` receives a `WindowEvent` and, until this seam existed,
+/// decided *and performed* everything in one 655-line match. Nothing
+/// below it could be witnessed without a display: `ActiveEventLoop` is
+/// non-constructible outside a live event loop, and the arms that matter
+/// reach a GPU surface or a socket.
+///
+/// The seam splits the two halves. **Deciding** is [`route_event`] — a
+/// free function over `&WindowEvent` alone, so a headless test can drive
+/// it for **every family whose event winit lets a test construct**,
+/// which is all of them except keyboard; see [`route_keyboard`] for that
+/// exception and how far it reaches. **Performing** stays on `App`, in
+/// the `apply_*` methods the router's variants name.
+///
+/// A route carries the decision, not merely the family: `Resize` holds
+/// the clamped extent, `Modifiers` the new state. **What a route does
+/// NOT carry is the effect** — a `Wheel` may become a viewport update, a
+/// panel event, a terminal event or nothing at all, depending on
+/// `State`. Effects are witnessed separately, by `EffectHarness`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Route<'a> {
+    /// The lifecycle family — see [`route_lifecycle`].
+    Lifecycle(LifecycleRoute),
+    /// The keyboard family — see [`route_keyboard`].
+    Keyboard {
+        action: KeyAction,
+        key: &'a KeyEvent,
+    },
+    /// The pointer family — see [`route_pointer`].
+    Pointer(PointerRoute),
+    /// No family claims this event: pmacs ignores it.
+    Unrouted,
+}
+
+/// What the event loop must do once a family's body has run.
+///
+/// **Two producers, and they are not the same kind of thing.**
+/// `LifecycleRoute::Exit` is a native window close, which must always
+/// exit; `apply_keyboard` returns `Exit` for an idle Escape, which is a
+/// local quit. Returning the decision rather than taking an
+/// `&ActiveEventLoop` is what keeps every body reachable from a test:
+/// the crate has **exactly one** executable `event_loop.exit()`, in
+/// `window_event`.
+///
+/// **Stage 1a's A4 removes the KEYBOARD producer only** — an idle
+/// Escape must reach the daemon and never exit — leaving **one** `Exit`
+/// producer, the native close.
+///
+/// **One producer is not one variant.** This type survives A4 because
+/// `dispatch_window_event` must still distinguish `Continue` from
+/// `Exit` on every event it handles: nearly all of them must not exit,
+/// and the close must. What A4 changes is `apply_keyboard`'s signature,
+/// not this type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventOutcome {
+    Continue,
+    Exit,
+}
+
+/// The lifecycle family: events about the **window itself** — closing,
+/// resizing, repainting — rather than about a gesture aimed into the
+/// document. `ModifiersChanged` is grouped here as the one exception,
+/// and it is named as one: it is a bare state mutation with no gesture
+/// of its own and no body to extract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LifecycleRoute {
+    /// `CloseRequested` — leave the event loop. Q#S1-1: a native close
+    /// detaches this frontend, it does not shut the daemon down.
+    Exit,
+    /// `ModifiersChanged` — the new modifier state, already unwrapped
+    /// from winit's `Modifiers` wrapper.
+    Modifiers(winit::keyboard::ModifiersState),
+    /// `Resized` — the new surface extent, **already clamped away from
+    /// zero**. A minimize delivers `0×0`, and wgpu rejects a zero-extent
+    /// surface configuration, so the clamp is a rule rather than
+    /// defensive padding; deciding it here is what makes it witnessable
+    /// without a surface.
+    Resize { width: u32, height: u32 },
+    /// `RedrawRequested` — paint a frame. Nothing goes to the daemon,
+    /// which is why the harness records local effects rather than
+    /// outbound traffic.
+    Redraw,
+}
+
+/// The keyboard family's whole decision. `Release` is a route rather
+/// than an absence: the family **claims** a key-up and drops it, which
+/// is a different fact from no family claiming the event, and
+/// conflating the two would hide the drop the moment a later slice
+/// wants key-up semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyAction {
+    /// A key-down — the only keyboard state pmacs acts on.
+    Press,
+    /// A key-up. Claimed and deliberately discarded.
+    Release,
+}
+
+/// Decide what `window_event` should do with an event, from the event
+/// alone. See [`Route`].
+fn route_event(event: &WindowEvent) -> Route<'_> {
+    if let Some(lifecycle) = route_lifecycle(event) {
+        return Route::Lifecycle(lifecycle);
+    }
+    if let Some((action, key)) = route_keyboard(event) {
+        return Route::Keyboard { action, key };
+    }
+    if let Some(pointer) = route_pointer(event) {
+        return Route::Pointer(pointer);
+    }
+    Route::Unrouted
+}
+
+/// The lifecycle family's decision. `None` means some other family owns
+/// the event.
+fn route_lifecycle(event: &WindowEvent) -> Option<LifecycleRoute> {
+    match event {
+        WindowEvent::CloseRequested => Some(LifecycleRoute::Exit),
+        WindowEvent::ModifiersChanged(mods) => Some(LifecycleRoute::Modifiers(mods.state())),
+        WindowEvent::Resized(size) => Some(LifecycleRoute::Resize {
+            width: size.width.max(1),
+            height: size.height.max(1),
+        }),
+        WindowEvent::RedrawRequested => Some(LifecycleRoute::Redraw),
+        _ => None,
+    }
+}
+
+/// The keyboard family's claim. `None` means some other family owns the
+/// event.
+///
+/// **A SECOND ACCEPTED STRUCTURAL EXCEPTION, alongside P3.** This
+/// function's own pattern arm is unwitnessable: `KeyEvent` carries a
+/// `pub(crate) platform_specific` field, so **no `WindowEvent::KeyboardInput`
+/// can be constructed outside winit** and no headless test can feed one.
+/// The limitation is winit's and not this seam's — it is why the arm is
+/// kept to a pattern and a call, with the family's only real decision
+/// factored into [`route_key_action`], which takes an `ElementState` and
+/// is tested directly. The pointer families have no such problem:
+/// `DeviceId::dummy()` is provided by winit for exactly this purpose,
+/// and their events are constructible.
+fn route_keyboard(event: &WindowEvent) -> Option<(KeyAction, &KeyEvent)> {
+    match event {
+        WindowEvent::KeyboardInput { event: key, .. } => Some((route_key_action(key.state), key)),
+        _ => None,
+    }
+}
+
+/// Press or release — see [`KeyAction`].
+fn route_key_action(state: ElementState) -> KeyAction {
+    match state {
+        ElementState::Pressed => KeyAction::Press,
+        ElementState::Released => KeyAction::Release,
+    }
+}
+
+/// The pointer family — Session M-2 pointer input, see
+/// `docs/pmacs-gpu-mouse-framing.md`.
+///
+/// The button discrimination used to live in the shape of two
+/// overlapping `MouseInput` match arms — left in **either** state, right
+/// in the **pressed** state only, everything else falling through the
+/// wildcard several hundred lines away. Naming the cases makes the
+/// asymmetry a decision instead of an artefact of arm order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PointerRoute {
+    /// `CursorMoved`, at the physical position winit reported.
+    Moved { x: f64, y: f64 },
+    /// `MouseInput` on the left button, in **either** state: a press
+    /// starts a selection or a scrub, a release ends it.
+    Left(ElementState),
+    /// `MouseInput` **pressing** the right button. The context menu
+    /// opens on the press, so the matching release is deliberately
+    /// nothing — see `UnusedButton`.
+    RightPress,
+    /// A `MouseInput` this frontend has no semantics for: the right
+    /// button's release, and every middle / back / forward / other
+    /// button in either state. **Claimed by the pointer family and
+    /// dropped**, exactly as it behaved when it fell through to the
+    /// wildcard. Stage 1b's B4 gives the middle button a meaning
+    /// (PRIMARY-selection paste on Linux) and lands here.
+    UnusedButton,
+    /// `MouseWheel`. The delta is carried raw: converting it to lines
+    /// needs the code line height, which is `State`'s to know.
+    Wheel(MouseScrollDelta),
+}
+
+/// The pointer family's decision. `None` means some other family owns
+/// the event.
+fn route_pointer(event: &WindowEvent) -> Option<PointerRoute> {
+    match event {
+        WindowEvent::CursorMoved { position, .. } => Some(PointerRoute::Moved {
+            x: position.x,
+            y: position.y,
+        }),
+        WindowEvent::MouseInput { state, button, .. } => Some(match (button, state) {
+            (MouseButton::Left, _) => PointerRoute::Left(*state),
+            (MouseButton::Right, ElementState::Pressed) => PointerRoute::RightPress,
+            _ => PointerRoute::UnusedButton,
+        }),
+        WindowEvent::MouseWheel { delta, .. } => Some(PointerRoute::Wheel(*delta)),
+        _ => None,
+    }
+}
+
+/// GUI Stage 1-pre — the headless routing harness (P2).
+///
+/// It feeds `WindowEvent`s through the production [`route_event`] and
+/// records what each one routed to. The transcript is of **routes**,
+/// deliberately, not of outbound protocol traffic: `CloseRequested`
+/// exits and `RedrawRequested` repaints, and neither sends the daemon
+/// anything, so a transcript of daemon traffic alone cannot tell a
+/// handled arm from a dropped one. A route records the decision —
+/// exit, resize extent, modifier mutation — which is what makes those
+/// arms observable here at all.
+///
+/// P3 is the stated exception: that `window_event` *calls* the router
+/// rather than deciding for itself is a code-review invariant, not a
+/// tested one. `ActiveEventLoop` cannot be constructed outside a live
+/// event loop, so the real callback is unreachable from a test. The
+/// mutation evidence below covers every router arm and **not** the
+/// delegation.
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct RoutingHarness<'a> {
+    transcript: Vec<Route<'a>>,
+}
+
+#[cfg(test)]
+impl<'a> RoutingHarness<'a> {
+    fn feed(&mut self, event: &'a WindowEvent) -> Route<'a> {
+        let route = route_event(event);
+        self.transcript.push(route);
+        route
+    }
+
+    fn transcript(&self) -> &[Route<'a>] {
+        &self.transcript
+    }
+}
+
+/// GUI Stage 1-pre — the headless EFFECT harness (P2).
+///
+/// [`RoutingHarness`] above answers "where did this event go?".
+/// This one answers **"what did it do?"** — the other half of P2, and
+/// the half a route cannot supply on its own. A wheel route carries a
+/// delta; whether that delta becomes a panel event, a terminal event, a
+/// viewport update, or nothing at all depends on `State`, so only
+/// running the body can say.
+///
+/// It drives production code end to end:
+///
+/// * **A real `AttachClient` over a `socketpair`**, through the real
+///   handshake, outbox, writer thread and encoder. The harness reads
+///   encoded `pmacs_protocol::FrontendEvent`s off the daemon end, so what it records is
+///   the wire, not a mock's idea of it.
+/// * **A real windowless `State`**, so the bodies take their real
+///   branches.
+/// * **`App::dispatch_window_event`**, the production dispatch — not a
+///   re-implementation of it, which would witness only itself.
+///
+/// **Local effects** have no wire trace, so each is read from the place
+/// it actually lands: exit from the returned [`EventOutcome`], redraw
+/// from `State::render_calls`, resize from the surface config, and the
+/// modifier mutation from `App::modifiers`.
+///
+/// **Two honest limits, both structural.**
+///
+/// 1. `window_event` itself is still unreachable (P3) — the harness
+///    calls `dispatch_window_event`, which is everything `window_event`
+///    does except the `event_loop.exit()` it cannot construct.
+/// 2. A step is delimited by a **sentinel key** pushed through the same
+///    outbox, so "this step sent nothing" is decidable without a sleep.
+///    The sentinel is not coalesceable (only viewport and drag kinds
+///    are), so it can neither replace nor be replaced by a recorded
+///    event — but it does sit between steps, so consecutive same-kind
+///    events that production would coalesce are recorded separately
+///    here. That makes the transcript per-step rather than as-coalesced,
+///    which is what a per-step contract wants.
+#[cfg(test)]
+struct EffectHarness {
+    app: App,
+    daemon: std::os::unix::net::UnixStream,
+    /// Distinguishes one sentinel from the next, so a step cannot end on
+    /// a stale one left behind by an earlier read.
+    sentinel_seq: u32,
+}
+
+/// A local effect — something a dispatch did that leaves no wire trace.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalEffect {
+    /// The dispatch asked the event loop to exit.
+    Exit,
+    /// `State::render` was called.
+    Redraw,
+    /// The surface was reconfigured to this extent.
+    Resize { width: u32, height: u32 },
+    /// The document scrolled to this top line.
+    Scroll { top: usize },
+    /// `App::modifiers` changed to this value.
+    Modifiers(winit::keyboard::ModifiersState),
+}
+
+/// What one dispatched event did.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq)]
+struct Step {
+    local: Vec<LocalEffect>,
+    outbound: Vec<pmacs_protocol::FrontendEvent>,
+}
+
+#[cfg(test)]
+impl EffectHarness {
+    /// The sentinel key. A private-use scalar, so it cannot collide with
+    /// anything a body would legitimately send.
+    const SENTINEL: char = '\u{e000}';
+
+    /// Error ceiling on one outbound read. **Not a pacing device** — the
+    /// sentinel decides arrival — so this is set far above any plausible
+    /// drain: reaching it means the writer or encoder is broken, never
+    /// that the machine is busy. Without it a regression downstream of
+    /// `enqueue` wedges the gate instead of reddening it.
+    const READ_CEILING: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// Build the harness, or fail loudly.
+    ///
+    /// **Never skips.** `State::new_headless` returns `None` when no
+    /// wgpu adapter exists, and a suite that quietly returns `ok` in
+    /// that case proves nothing — this project has recorded that failure
+    /// mode twice. Under `PMACS_REQUIRE_GPU` the absence is an assertion
+    /// failure; without it the harness still panics rather than skips,
+    /// because these rows are the whole of P2.
+    fn new() -> Self {
+        let (client_stream, mut daemon) =
+            std::os::unix::net::UnixStream::pair().expect("socketpair");
+
+        // The daemon half of the handshake, synchronous and inline: the
+        // client blocks reading `Hello` before it writes anything, so a
+        // thread would only add a join.
+        let handshake = std::thread::spawn(move || {
+            pmacs_protocol::write_message(&mut daemon, &test_hello()).expect("write Hello");
+            let _: pmacs_protocol::AttachRequest =
+                pmacs_protocol::read_message(&mut daemon).expect("read AttachRequest");
+            let _: pmacs_protocol::SessionBootstrapRequest =
+                pmacs_protocol::read_message(&mut daemon).expect("read bootstrap");
+            daemon
+        });
+        let client = crate::attach::connect_stream_for_test(client_stream, |_| true)
+            .expect("attach over socketpair");
+        let daemon = handshake.join().expect("handshake thread");
+        daemon
+            .set_read_timeout(Some(Self::READ_CEILING))
+            .expect("arm the outbound read ceiling");
+
+        // A document tall enough to scroll. A two-line fixture made the
+        // wheel row pass vacuously: `scroll_by_lines` returns `None`
+        // when there is nothing below the fold, so the row asserted
+        // "every outbound event is a Viewport" over an EMPTY transcript.
+        // Mutation M22 surfaced the first half of that and this fixture
+        // is the second.
+        let document = "line\n".repeat(200);
+        let state = State::new_headless(640, 480, &document);
+        assert!(
+            state.is_some(),
+            "no wgpu adapter: the 1-pre effect rows are P2's only witness and must not be skipped"
+        );
+
+        let mut harness = Self {
+            app: App {
+                mode: Mode::Attach {
+                    socket: PathBuf::from("/nonexistent-harness-socket"),
+                },
+                proxy: None,
+                state,
+                pending_events: Vec::new(),
+                attach_client: Some(client),
+                modifiers: winit::keyboard::ModifiersState::empty(),
+            },
+            daemon,
+            sentinel_seq: 0,
+        };
+
+        // Mirror the post-connect wiring `resumed` performs. Without it
+        // the panel wire stays below `PANEL_MIN_VERSION` and every
+        // geometry declaration is silently withheld — the harness would
+        // then witness an absence it created itself. Getting this wrong
+        // is exactly what the first run of the resize row caught.
+        {
+            let client = harness.app.attach_client.as_ref().expect("harness client");
+            let frontend_id = client.frontend_id();
+            let session_version = client.session_protocol_version();
+            let state = harness.app.state.as_mut().expect("harness state");
+            state.set_frontend_id(frontend_id);
+            state.set_panel_wire(session_version);
+            // Stands in for the `BufferSnapshot` the daemon would send.
+            // Without a current buffer `scroll_by_lines` scrolls locally
+            // and returns `None`, so every viewport send is withheld and
+            // the harness would witness an absence it manufactured —
+            // the same trap the panel wire set above. This is the
+            // pattern the file's other headless-State tests already use.
+            state.current_buffer_id = Some(BufferId::from_raw(1));
+        }
+        harness.app.flush_panel_geometry(GeometryTrigger::Surface);
+
+        // Drain the attach-time declaration, so each row's transcript
+        // contains only what its own event produced.
+        harness.read_until_sentinel();
+        harness
+    }
+
+    /// Dispatch one event and report everything it did.
+    fn feed(&mut self, event: &WindowEvent) -> Step {
+        let before = self.snapshot();
+        let outcome = self.app.dispatch_window_event(event);
+        let after = self.snapshot();
+
+        let mut local = Vec::new();
+        if outcome == EventOutcome::Exit {
+            local.push(LocalEffect::Exit);
+        }
+        if after.render_calls > before.render_calls {
+            local.push(LocalEffect::Redraw);
+        }
+        if after.extent != before.extent {
+            local.push(LocalEffect::Resize {
+                width: after.extent.0,
+                height: after.extent.1,
+            });
+        }
+        if after.modifiers != before.modifiers {
+            local.push(LocalEffect::Modifiers(after.modifiers));
+        }
+        if after.scroll_top != before.scroll_top {
+            local.push(LocalEffect::Scroll {
+                top: after.scroll_top,
+            });
+        }
+
+        Step {
+            local,
+            outbound: self.read_until_sentinel(),
+        }
+    }
+
+    /// Observable state the local effects are derived from.
+    fn snapshot(&self) -> EffectSnapshot {
+        let state = self.app.state.as_ref().expect("harness state");
+        EffectSnapshot {
+            render_calls: state.render_calls,
+            extent: (state.config.width, state.config.height),
+            modifiers: self.app.modifiers,
+            scroll_top: state.scroll_top,
+        }
+    }
+
+    /// Push a sentinel through the same outbox and read until it comes
+    /// back. Everything ahead of it belongs to the step just dispatched.
+    ///
+    /// **The sentinel is the success condition, and the timeout is only
+    /// an error ceiling** — the two are not the same thing and the
+    /// distinction is the whole design. Arrival is decided by the
+    /// sentinel, so the harness never infers "nothing was sent" from a
+    /// duration and is insensitive to how many cores are free; that is
+    /// the mistake PR #235's CI red was made of. But a blocking read
+    /// with no bound turns a regressed writer or encoder into a **wedged
+    /// gate** rather than a red one, and a hang is the worst failure
+    /// shape there is: it looks like slowness until the job is killed.
+    /// [`Self::READ_CEILING`] is therefore set far above any plausible
+    /// drain, so reaching it means broken, never busy.
+    fn read_until_sentinel(&mut self) -> Vec<pmacs_protocol::FrontendEvent> {
+        self.sentinel_seq += 1;
+        let tag = self.sentinel_seq;
+        let client = self.app.attach_client.as_ref().expect("harness client");
+        client
+            .send_key(ProtocolKey::Char(Self::SENTINEL), sentinel_mods(tag))
+            .expect("enqueue sentinel");
+
+        let mut seen = Vec::new();
+        loop {
+            let event: pmacs_protocol::FrontendEvent =
+                match pmacs_protocol::read_message(&mut self.daemon) {
+                    Ok(event) => event,
+                    Err(e) => panic!(
+                        "outbound read failed before the sentinel arrived \
+                         after {:?}: {e}. Either the writer or the encoder \
+                         regressed, or the step produced no sentinel at all. \
+                         Recorded so far: {seen:?}",
+                        Self::READ_CEILING
+                    ),
+                };
+            if is_sentinel(&event, tag) {
+                return seen;
+            }
+            seen.push(event);
+        }
+    }
+}
+
+/// Observable state behind [`LocalEffect`].
+#[cfg(test)]
+struct EffectSnapshot {
+    render_calls: u64,
+    extent: (u32, u32),
+    modifiers: winit::keyboard::ModifiersState,
+    scroll_top: usize,
+}
+
+/// Modifier bits carrying the sentinel's sequence number, so a stale
+/// sentinel cannot end the wrong step. **Three bits — Ctrl, Alt, Shift —
+/// so the tag wraps every eight steps.** That is sufficient rather than
+/// sloppy: the harness reads every sentinel it writes before issuing the
+/// next, so a tag only ever has to distinguish itself from the one
+/// immediately before it.
+#[cfg(test)]
+fn sentinel_mods(tag: u32) -> Modifiers {
+    let mut mods = Modifiers::NONE;
+    if tag & 1 != 0 {
+        mods |= Modifiers::CTRL;
+    }
+    if tag & 2 != 0 {
+        mods |= Modifiers::ALT;
+    }
+    if tag & 4 != 0 {
+        mods |= Modifiers::SHIFT;
+    }
+    mods
+}
+
+#[cfg(test)]
+fn is_sentinel(event: &pmacs_protocol::FrontendEvent, tag: u32) -> bool {
+    matches!(
+        event,
+        pmacs_protocol::FrontendEvent::Key(k)
+            if k.key == ProtocolKey::Char(EffectHarness::SENTINEL) && k.mods == sentinel_mods(tag)
+    )
+}
+
+#[cfg(test)]
+fn test_hello() -> pmacs_protocol::Hello {
+    pmacs_protocol::Hello {
+        protocol_version: pmacs_protocol::PROTOCOL_VERSION,
+        assigned_frontend_id: pmacs_protocol::FrontendId(7),
+        instance_identity: pmacs_protocol::InstanceIdentity {
+            pmacs_version: "1-pre-harness".to_owned(),
+            build_hash: None,
+            instance_name: None,
+            uptime_secs: 0,
+            working_directory: "/".to_owned(),
+        },
+        instance_capabilities: pmacs_protocol::InstanceCapabilities {
+            multi_frontend: true,
+            crdt_replica: true,
+            semantic_render: true,
+        },
+    }
+}
+
+#[cfg(test)]
+mod input_routing_tests {
+    use super::*;
+    use winit::dpi::{PhysicalPosition, PhysicalSize};
+    use winit::event::{DeviceId, TouchPhase};
+    use winit::keyboard::ModifiersState;
+
+    fn modifiers_changed(state: ModifiersState) -> WindowEvent {
+        WindowEvent::ModifiersChanged(state.into())
+    }
+
+    /// The per-variant rows below drive [`route_event`] directly and the
+    /// transcript row drives [`RoutingHarness`]. That split keeps the
+    /// transcript row the only one that fails when the ROUTING harness
+    /// stops recording, so that mutation stays surgical. **P2 itself is
+    /// owned by the effect rows** — see [`EffectHarness`].
+    ///
+    /// Events are bound to locals rather than passed as temporaries
+    /// because a `Route` borrows the event it came from — the keyboard
+    /// variant carries a `&KeyEvent`.
+    fn route_one(event: &WindowEvent) -> Route<'_> {
+        route_event(event)
+    }
+
+    /// P1 — `CloseRequested`. It sends the daemon nothing and its whole
+    /// effect is local, so this row exists only because the route names
+    /// the effect.
+    #[test]
+    fn close_requested_routes_to_exit() {
+        let event = WindowEvent::CloseRequested;
+        assert_eq!(route_one(&event), Route::Lifecycle(LifecycleRoute::Exit));
+    }
+
+    /// P1 — `ModifiersChanged` carries the unwrapped state, which is the
+    /// mutation `window_event` performs.
+    #[test]
+    fn modifiers_changed_routes_the_new_state() {
+        let mods = ModifiersState::CONTROL | ModifiersState::ALT;
+        let held = modifiers_changed(mods);
+        assert_eq!(
+            route_one(&held),
+            Route::Lifecycle(LifecycleRoute::Modifiers(mods))
+        );
+        // An empty state is a real transition (every modifier released),
+        // not an absent one.
+        let released = modifiers_changed(ModifiersState::empty());
+        assert_eq!(
+            route_one(&released),
+            Route::Lifecycle(LifecycleRoute::Modifiers(ModifiersState::empty()))
+        );
+    }
+
+    /// P1 — `Resized` carries the extent through unchanged when it is
+    /// already non-zero.
+    #[test]
+    fn resized_routes_the_new_extent() {
+        let event = WindowEvent::Resized(PhysicalSize::new(1280, 720));
+        assert_eq!(
+            route_one(&event),
+            Route::Lifecycle(LifecycleRoute::Resize {
+                width: 1280,
+                height: 720,
+            })
+        );
+    }
+
+    /// A minimize delivers `0×0` and wgpu rejects a zero-extent surface
+    /// configuration. The clamp is per axis, so an extent that collapses
+    /// on one axis only still keeps the other.
+    #[test]
+    fn a_zero_extent_resize_clamps_per_axis() {
+        let collapsed = WindowEvent::Resized(PhysicalSize::new(0, 0));
+        assert_eq!(
+            route_one(&collapsed),
+            Route::Lifecycle(LifecycleRoute::Resize {
+                width: 1,
+                height: 1,
+            })
+        );
+        let no_width = WindowEvent::Resized(PhysicalSize::new(0, 720));
+        assert_eq!(
+            route_one(&no_width),
+            Route::Lifecycle(LifecycleRoute::Resize {
+                width: 1,
+                height: 720,
+            })
+        );
+        let no_height = WindowEvent::Resized(PhysicalSize::new(1280, 0));
+        assert_eq!(
+            route_one(&no_height),
+            Route::Lifecycle(LifecycleRoute::Resize {
+                width: 1280,
+                height: 1,
+            })
+        );
+    }
+
+    /// P1 — `RedrawRequested`. The second arm that sends the daemon
+    /// nothing, and the reason the harness cannot be a transcript of
+    /// outbound traffic.
+    #[test]
+    fn redraw_requested_routes_to_redraw() {
+        let event = WindowEvent::RedrawRequested;
+        assert_eq!(route_one(&event), Route::Lifecycle(LifecycleRoute::Redraw));
+    }
+
+    /// P1, keyboard — the family's whole decision.
+    ///
+    /// It is driven through [`route_key_action`] rather than the
+    /// harness, and that is the accepted exception documented on
+    /// [`route_keyboard`]: `KeyEvent` has a `pub(crate)` field, so no
+    /// `WindowEvent::KeyboardInput` exists that a test can build. What
+    /// remains unwitnessed is one pattern arm with no logic in it; the
+    /// decision itself is here.
+    #[test]
+    fn a_press_is_acted_on_and_a_release_is_discarded() {
+        assert_eq!(route_key_action(ElementState::Pressed), KeyAction::Press);
+        assert_eq!(route_key_action(ElementState::Released), KeyAction::Release);
+    }
+
+    fn mouse_input(state: ElementState, button: MouseButton) -> WindowEvent {
+        WindowEvent::MouseInput {
+            device_id: DeviceId::dummy(),
+            state,
+            button,
+        }
+    }
+
+    /// P1 — `CursorMoved` carries the position through.
+    #[test]
+    fn cursor_moved_routes_the_position() {
+        let event = WindowEvent::CursorMoved {
+            device_id: DeviceId::dummy(),
+            position: PhysicalPosition::new(12.5, 34.25),
+        };
+        assert_eq!(
+            route_one(&event),
+            Route::Pointer(PointerRoute::Moved { x: 12.5, y: 34.25 })
+        );
+    }
+
+    /// P1 — the left button routes in **both** states, because a press
+    /// starts a gesture and a release ends it. The state is carried, not
+    /// discarded: routing a release as a press would leave a drag armed
+    /// forever.
+    #[test]
+    fn the_left_button_routes_in_either_state() {
+        for state in [ElementState::Pressed, ElementState::Released] {
+            let event = mouse_input(state, MouseButton::Left);
+            assert_eq!(
+                route_one(&event),
+                Route::Pointer(PointerRoute::Left(state)),
+                "left {state:?}"
+            );
+        }
+    }
+
+    /// P1 — the right button is **asymmetric with the left, on purpose**:
+    /// the context menu opens on the press and the release means nothing.
+    /// This asymmetry used to be implicit in the order and shape of two
+    /// overlapping match arms.
+    #[test]
+    fn the_right_button_routes_only_on_press() {
+        let pressed = mouse_input(ElementState::Pressed, MouseButton::Right);
+        assert_eq!(
+            route_one(&pressed),
+            Route::Pointer(PointerRoute::RightPress)
+        );
+        let released = mouse_input(ElementState::Released, MouseButton::Right);
+        assert_eq!(
+            route_one(&released),
+            Route::Pointer(PointerRoute::UnusedButton)
+        );
+    }
+
+    /// A button the frontend has no semantics for is **claimed by the
+    /// pointer family and dropped**, not left unrouted — the same
+    /// distinction the keyboard family draws for a key-up. Stage 1b's B4
+    /// gives the middle button a meaning and lands on this route.
+    #[test]
+    fn a_button_without_semantics_is_claimed_and_dropped() {
+        for button in [
+            MouseButton::Middle,
+            MouseButton::Back,
+            MouseButton::Forward,
+            MouseButton::Other(9),
+        ] {
+            for state in [ElementState::Pressed, ElementState::Released] {
+                let event = mouse_input(state, button);
+                assert_eq!(
+                    route_one(&event),
+                    Route::Pointer(PointerRoute::UnusedButton),
+                    "{button:?} {state:?}"
+                );
+            }
+        }
+    }
+
+    /// P1 — the wheel delta is carried **raw**. Converting it to lines
+    /// needs the code line height, which only `State` knows, so the
+    /// router must not try.
+    #[test]
+    fn the_wheel_carries_its_delta_unconverted() {
+        let lines = WindowEvent::MouseWheel {
+            device_id: DeviceId::dummy(),
+            delta: MouseScrollDelta::LineDelta(0.0, -3.0),
+            phase: TouchPhase::Moved,
+        };
+        assert_eq!(
+            route_one(&lines),
+            Route::Pointer(PointerRoute::Wheel(MouseScrollDelta::LineDelta(0.0, -3.0)))
+        );
+        let pixels = WindowEvent::MouseWheel {
+            device_id: DeviceId::dummy(),
+            delta: MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 17.5)),
+            phase: TouchPhase::Moved,
+        };
+        assert_eq!(
+            route_one(&pixels),
+            Route::Pointer(PointerRoute::Wheel(MouseScrollDelta::PixelDelta(
+                PhysicalPosition::new(0.0, 17.5)
+            )))
+        );
+    }
+
+    /// An event no family claims. `Occluded` is chosen because pmacs has
+    /// never handled it and — unlike a mouse button it has no semantics
+    /// for — no family claims it at all.
+    #[test]
+    fn an_unclaimed_event_is_unrouted() {
+        let event = WindowEvent::Occluded(true);
+        assert_eq!(route_one(&event), Route::Unrouted);
+    }
+
+    // ---------------------------------------------------------------
+    // P2 — the EFFECT rows. `EffectHarness` drives the production
+    // dispatch over a real client and a real windowless `State`, and
+    // records BOTH halves of P2: the outbound protocol messages and the
+    // local effects that leave no wire trace.
+    // ---------------------------------------------------------------
+
+    /// P2 — a redraw's whole effect is local. It sends the daemon
+    /// nothing, so **the outbound half of the transcript is empty and
+    /// the local half is what proves the arm ran** — which is precisely
+    /// why P2 requires both.
+    #[test]
+    fn a_redraw_produces_a_local_effect_and_no_outbound_traffic() {
+        let mut h = EffectHarness::new();
+        let step = h.feed(&WindowEvent::RedrawRequested);
+        assert_eq!(step.local, vec![LocalEffect::Redraw]);
+        assert!(
+            step.outbound.is_empty(),
+            "a redraw must send the daemon nothing, got {:?}",
+            step.outbound
+        );
+    }
+
+    /// P2 — `CloseRequested` is the other silent arm: one local effect,
+    /// no traffic.
+    #[test]
+    fn a_close_request_exits_locally_and_sends_nothing() {
+        let mut h = EffectHarness::new();
+        let step = h.feed(&WindowEvent::CloseRequested);
+        assert_eq!(step.local, vec![LocalEffect::Exit]);
+        assert!(step.outbound.is_empty(), "{:?}", step.outbound);
+    }
+
+    /// P2 — a modifier change mutates `App` and sends nothing. The
+    /// mutation is the effect.
+    #[test]
+    fn a_modifier_change_mutates_state_and_sends_nothing() {
+        let mut h = EffectHarness::new();
+        let mods = ModifiersState::CONTROL;
+        let step = h.feed(&modifiers_changed(mods));
+        assert_eq!(step.local, vec![LocalEffect::Modifiers(mods)]);
+        assert!(step.outbound.is_empty(), "{:?}", step.outbound);
+        assert_eq!(h.app.modifiers, mods);
+    }
+
+    /// P2 — a resize is the one lifecycle arm with **both** halves: it
+    /// reconfigures the surface locally and declares the new cell
+    /// geometry to the daemon.
+    #[test]
+    fn a_resize_reconfigures_locally_and_declares_geometry() {
+        let mut h = EffectHarness::new();
+        let step = h.feed(&WindowEvent::Resized(PhysicalSize::new(900, 500)));
+        assert_eq!(
+            step.local,
+            vec![LocalEffect::Resize {
+                width: 900,
+                height: 500
+            }]
+        );
+        assert!(
+            step.outbound.iter().any(|e| matches!(
+                e,
+                pmacs_protocol::FrontendEvent::FrontendCellGeometry { .. }
+            )),
+            "a resize must declare the new cell geometry, got {:?}",
+            step.outbound
+        );
+    }
+
+    /// P2 — the zero-extent clamp, observed as a real surface
+    /// configuration rather than as a route value. wgpu rejects a
+    /// zero-extent surface, so this is the row that would fail if the
+    /// clamp were only cosmetic.
+    #[test]
+    fn a_minimize_configures_a_nonzero_surface() {
+        let mut h = EffectHarness::new();
+        let step = h.feed(&WindowEvent::Resized(PhysicalSize::new(0, 0)));
+        assert_eq!(
+            step.local,
+            vec![LocalEffect::Resize {
+                width: 1,
+                height: 1
+            }]
+        );
+    }
+
+    /// P2, pointer — **the row that shows a route cannot stand in for an
+    /// effect.** A wheel carries only a delta; whether it becomes a
+    /// viewport update, a panel event, a terminal event or nothing at
+    /// all is `State`'s to decide. Here, over a plain document, it
+    /// scrolls and re-declares the scoped viewport.
+    #[test]
+    fn a_wheel_over_a_document_declares_a_new_viewport() {
+        let mut h = EffectHarness::new();
+        let event = WindowEvent::MouseWheel {
+            device_id: DeviceId::dummy(),
+            delta: MouseScrollDelta::LineDelta(0.0, -3.0),
+            phase: TouchPhase::Moved,
+        };
+        let step = h.feed(&event);
+        assert_eq!(
+            step.local,
+            vec![LocalEffect::Scroll {
+                top: WHEEL_LINES_PER_TICK as usize * 3
+            }],
+            "a wheel scrolls locally"
+        );
+        // NOT `.all()` alone — that is vacuously true on an empty
+        // transcript, so an outbound-blind harness would pass this row.
+        // Mutation M22 found exactly that.
+        assert!(
+            !step.outbound.is_empty(),
+            "a document wheel must send something"
+        );
+        assert!(
+            step.outbound
+                .iter()
+                .all(|e| matches!(e, pmacs_protocol::FrontendEvent::Viewport { .. })),
+            "a document wheel sends viewport updates and nothing else, got {:?}",
+            step.outbound
+        );
+    }
+
+    /// P2, pointer — a wheel that resolves to **zero lines** is dropped
+    /// by the body before any send. Same route, no effect: the
+    /// distinction only exists once effects are observed.
+    #[test]
+    fn a_subtick_wheel_sends_nothing_at_all() {
+        let mut h = EffectHarness::new();
+        let event = WindowEvent::MouseWheel {
+            device_id: DeviceId::dummy(),
+            delta: MouseScrollDelta::LineDelta(0.0, 0.0),
+            phase: TouchPhase::Moved,
+        };
+        let step = h.feed(&event);
+        assert!(step.local.is_empty(), "{:?}", step.local);
+        assert!(
+            step.outbound.is_empty(),
+            "a zero-line wheel must send nothing, got {:?}",
+            step.outbound
+        );
+    }
+
+    /// P2, pointer — motion updates the cached pointer position, which
+    /// is the state mutation the drag path later reads. It is not a
+    /// `LocalEffect` variant because it is `State`-internal, so the row
+    /// asserts it directly.
+    #[test]
+    fn cursor_motion_caches_the_pointer_position() {
+        let mut h = EffectHarness::new();
+        let event = WindowEvent::CursorMoved {
+            device_id: DeviceId::dummy(),
+            position: PhysicalPosition::new(30.0, 40.0),
+        };
+        h.feed(&event);
+        assert_eq!(
+            h.app.state.as_ref().expect("harness state").pointer_pos,
+            Some((30.0, 40.0))
+        );
+    }
+
+    /// P2 — a button the frontend has no semantics for reaches no body:
+    /// nothing local, nothing outbound. The counterpart to the routing
+    /// row that calls it claimed-and-dropped.
+    #[test]
+    fn an_unused_button_produces_no_effect_of_any_kind() {
+        let mut h = EffectHarness::new();
+        let step = h.feed(&mouse_input(ElementState::Pressed, MouseButton::Middle));
+        assert_eq!(
+            step,
+            Step {
+                local: Vec::new(),
+                outbound: Vec::new()
+            }
+        );
+    }
+
+    /// P2 — the harness records a transcript, and the transcript
+    /// distinguishes every routed effect from the others and from an
+    /// unclaimed event. **Two of these rows produce no outbound traffic
+    /// whatsoever** (`Redraw`, `Exit`), which is the property that rules
+    /// out a harness built on protocol traffic alone.
+    #[test]
+    fn the_harness_records_each_local_effect_in_order() {
+        let events = [
+            WindowEvent::Resized(PhysicalSize::new(800, 600)),
+            modifiers_changed(ModifiersState::SHIFT),
+            WindowEvent::CursorMoved {
+                device_id: DeviceId::dummy(),
+                position: PhysicalPosition::new(4.0, 8.0),
+            },
+            mouse_input(ElementState::Pressed, MouseButton::Left),
+            mouse_input(ElementState::Pressed, MouseButton::Middle),
+            WindowEvent::RedrawRequested,
+            WindowEvent::Occluded(false),
+            WindowEvent::CloseRequested,
+        ];
+        let mut harness = RoutingHarness::default();
+        for event in &events {
+            harness.feed(event);
+        }
+        assert_eq!(
+            harness.transcript(),
+            &[
+                Route::Lifecycle(LifecycleRoute::Resize {
+                    width: 800,
+                    height: 600,
+                }),
+                Route::Lifecycle(LifecycleRoute::Modifiers(ModifiersState::SHIFT)),
+                Route::Pointer(PointerRoute::Moved { x: 4.0, y: 8.0 }),
+                Route::Pointer(PointerRoute::Left(ElementState::Pressed)),
+                Route::Pointer(PointerRoute::UnusedButton),
+                Route::Lifecycle(LifecycleRoute::Redraw),
+                Route::Unrouted,
+                Route::Lifecycle(LifecycleRoute::Exit),
+            ]
+        );
+    }
 }
 
 impl ApplicationHandler<AppEvent> for App {
@@ -2730,660 +4442,14 @@ impl ApplicationHandler<AppEvent> for App {
         }
     }
 
-    #[allow(clippy::too_many_lines)] // linear per-event dispatch; splitting hides the input flow.
+    /// P3 — the thin call-through. Every decision belongs to
+    /// [`Self::dispatch_window_event`], which a headless test drives
+    /// directly. What is left here is `event_loop.exit()` — the one
+    /// statement no headless test can reach, because `ActiveEventLoop`
+    /// cannot exist outside a live event loop.
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
-            WindowEvent::KeyboardInput { event: key, .. } => {
-                if key.state != ElementState::Pressed {
-                    return;
-                }
-                // While the daemon is intercepting keystrokes — an active
-                // incremental search (Q#SR5), or a minibuffer / pending
-                // prefix — every key belongs to its handler, not the
-                // buffer. The GUI round-trips them all and never
-                // optimistic-applies (that would edit the document
-                // mid-search).
-                let intercept = self
-                    .state
-                    .as_ref()
-                    .is_some_and(State::daemon_intercepts_keys);
-
-                // Arc 1a Q#C6 — the completion popup is NON-modal, so it
-                // never flips the intercept gate (typing stays
-                // optimistic; the daemon's after-edit refresh re-ships
-                // the popup). Only the keys whose *default GPU handling
-                // is wrong under a popup* need this flag: Esc (below,
-                // else it's the local quit) and RET/TAB (the optimistic
-                // gate further down, else they'd insert instead of
-                // accept). C-n/C-p/C-g already round-trip as command
-                // chords, Up/Down as forwarded motion keys — the daemon's
-                // completion shadow handles all of them.
-                let completion_open = self
-                    .state
-                    .as_ref()
-                    .is_some_and(State::completion_open_for_current_buffer);
-
-                // Escape cancels an active intercept (e.g. a running
-                // search) or dismisses the completion popup; otherwise it
-                // stays the local quit.
-                if matches!(key.logical_key, Key::Named(NamedKey::Escape)) {
-                    if intercept || completion_open {
-                        if let Some(client) = self.attach_client.as_ref()
-                            && let Err(e) = client.send_key(ProtocolKey::Escape, Modifiers::NONE)
-                        {
-                            eprintln!("pmacs-gpu: send Escape (cancel) failed: {e}");
-                        }
-                    } else {
-                        event_loop.exit();
-                    }
-                    return;
-                }
-
-                let Some((pkey, mut pmods)) = translate_key(&key.logical_key, self.modifiers)
-                else {
-                    return;
-                };
-
-                // AltGr / international text (audit F-004). winit reports
-                // the text a keypress produces; when a keypress yields
-                // printable text *while both Ctrl and Alt* are held — the
-                // AltGr signature on Windows (LCtrl+RAlt) — it's text
-                // input, not a command chord. Strip those modifiers (keep
-                // Shift) so it inserts (through the plain-text path, or the
-                // daemon's SelfInsert while a prompt is open) instead of
-                // being routed to the keymap. Alt alone is left intact so
-                // macOS Option-as-Meta still reaches the keymap; on layouts
-                // where AltGr isn't Ctrl+Alt this is a no-op.
-                if matches!(pkey, ProtocolKey::Char(_))
-                    && is_layout_text(key.text.as_deref(), pmods)
-                {
-                    pmods = if pmods.contains(Modifiers::SHIFT) {
-                        Modifiers::SHIFT
-                    } else {
-                        Modifiers::NONE
-                    };
-                }
-
-                // Ctrl-V — OS paste (Q#CM6). Read the system clipboard
-                // locally via arboard and ship it as a `Paste` event; the
-                // daemon inserts it. Handled before binding `client` so
-                // the `&mut self` clipboard read doesn't conflict with the
-                // client borrow. Skipped while intercepting (the daemon's
-                // active handler owns the key then). The daemon keymap's
-                // C-y yanks the in-app slot instead.
-                if !intercept && pkey == ProtocolKey::Char('v') && pmods == Modifiers::CTRL {
-                    let bytes = self.state.as_mut().and_then(State::read_os_clipboard);
-                    if let Some(bytes) = bytes
-                        && let Some(client) = self.attach_client.as_ref()
-                        && let Err(e) = client.send_paste(bytes)
-                    {
-                        eprintln!("pmacs-gpu: send_paste failed: {e}");
-                    }
-                    return;
-                }
-
-                let Some(client) = self.attach_client.as_ref() else {
-                    return;
-                };
-
-                // Intercept path: round-trip every key into the daemon's
-                // active handler (search query / step / accept / cancel).
-                if intercept {
-                    if let Some(state) = self.state.as_mut() {
-                        state.mark_cursor_stale_after_round_trip();
-                    }
-                    if debug_input() {
-                        eprintln!("pmacs-gpu send_key (intercepted): {pkey:?} mods={pmods:?}");
-                    }
-                    if let Err(e) = client.send_key(pkey, pmods) {
-                        eprintln!("pmacs-gpu: send_key (intercepted) failed: {e}");
-                    }
-                    return;
-                }
-
-                // Idle: forward any command chord (Char/Enter/Tab with
-                // Ctrl or Alt) to the daemon (Q#GC1). These drive the
-                // keymap — `C-a`, `M-f`, `C-x C-s`, isearch/clipboard/M-x,
-                // … — the same path the TUI forwards everything through.
-                // The GUI no longer withholds them (the minibuffer / prompt
-                // flows they open now render, Q#MB1). Once a forwarded
-                // chord opens a prompt or enters a prefix, `dispatch_idle`
-                // flips false and the intercept gate round-trips the rest —
-                // no optimistic local flip, so a chord that changes no
-                // daemon state can never wedge the gate. (Ctrl-V / OS paste
-                // is handled locally above and never reaches here.)
-                if is_command_chord(pkey, pmods) {
-                    if let Some(state) = self.state.as_mut() {
-                        state.mark_cursor_stale_after_round_trip();
-                    }
-                    if let Err(e) = client.send_key(pkey, pmods) {
-                        eprintln!("pmacs-gpu: send_key (command chord) failed: {e}");
-                    }
-                    return;
-                }
-
-                // Session B2 forwards cursor motion + plain text editing
-                // (Char / Backspace / Enter / Delete / Tab). Command chords
-                // are handled above; Meta/Super-only chords fall through
-                // here and are withheld, leaving OS/WM shortcuts (Cmd-Q,
-                // Cmd-C) to the platform.
-                if !should_forward_key(pkey, pmods) {
-                    return;
-                }
-
-                // Arc 1a Q#C6 — with the popup open, RET and TAB mean
-                // "accept", not "insert \n / \t": skip the optimistic
-                // path so they round-trip into the daemon's
-                // dispatch_completion_key. Everything else stays
-                // optimistic.
-                let completion_takes_key =
-                    completion_open && matches!(pkey, ProtocolKey::Enter | ProtocolKey::Tab);
-
-                if !completion_takes_key
-                    && let Some(op) = self.state.as_mut().and_then(|state| {
-                        state
-                            .optimistic_crdt_insert(pkey, pmods)
-                            .or_else(|| state.optimistic_crdt_delete(pkey, pmods))
-                    })
-                {
-                    if debug_input() {
-                        eprintln!(
-                            "pmacs-gpu send_crdt: key={pkey:?} buf={:?} bytes={}B",
-                            op.buffer_id,
-                            op.op.bytes.len()
-                        );
-                    }
-                    if let Err(e) = client.send_crdt_op(op.buffer_id, op.op) {
-                        eprintln!("pmacs-gpu: send_crdt_op failed: {e}");
-                    }
-                    // An optimistic edit near the viewport edge can
-                    // scroll (a wrap-inducing insert, a Backspace
-                    // above the top); re-declare the scoped viewport
-                    // so the producer styles the newly visible lines.
-                    if let Some(vp) = op.viewport
-                        && let Err(e) =
-                            client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
-                    {
-                        eprintln!("pmacs-gpu: send Viewport failed: {e}");
-                    }
-                    return;
-                }
-                if let Some(state) = self.state.as_mut() {
-                    if state.defer_round_trip_key_if_needed(pkey, pmods) {
-                        if debug_input() {
-                            eprintln!(
-                                "pmacs-gpu defer_key: {pkey:?} mods={pmods:?} \
-                                 pending optimistic cursor"
-                            );
-                        }
-                        return;
-                    }
-                    state.mark_cursor_stale_after_round_trip();
-                }
-                if debug_input() {
-                    eprintln!("pmacs-gpu send_key: {pkey:?} mods={pmods:?}");
-                }
-                if let Err(e) = client.send_key(pkey, pmods) {
-                    eprintln!("pmacs-gpu: send_key failed: {e}");
-                }
-            }
-            WindowEvent::Resized(size) => {
-                let vp = self
-                    .state
-                    .as_mut()
-                    .and_then(|state| state.resize(size.width.max(1), size.height.max(1)));
-                if let Some(vp) = vp
-                    && let Some(client) = self.attach_client.as_ref()
-                    && let Err(e) = client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
-                {
-                    eprintln!("pmacs-gpu: resize send_viewport failed: {e}");
-                }
-                // Vterm Stage 3 — a resize is a real geometry change, so
-                // the cell grid is re-derived and declared here. The
-                // daemon resizes the shared PTY only if this frontend is
-                // the durable controller.
-                self.flush_terminal_declaration();
-                // Q#BP15a — and so is the panel's whole-frame capacity. An
-                // identical cell total is not re-declared: nothing the
-                // daemon can act on changed.
-                self.flush_panel_geometry(GeometryTrigger::Surface);
-            }
-            // Session M-2 — pointer input (docs/pmacs-gpu-mouse-framing.md).
-            WindowEvent::CursorMoved { position, .. } => {
-                let Some(state) = self.state.as_mut() else {
-                    return;
-                };
-                state.pointer_pos = Some((position.x, position.y));
-                // Q#CM1 — while the menu is open, motion only moves the
-                // highlight; send a hover when the item under the pointer
-                // changes from the daemon's current active row.
-                if state.menu.is_some() {
-                    let hit = state.menu_hit(position.x, position.y);
-                    let active = state.menu.as_ref().and_then(|m| m.active);
-                    if let Some((row, true)) = hit
-                        && active != Some(row)
-                    {
-                        self.send_menu_pointer(Some(row), false);
-                    }
-                    return;
-                }
-                // Bottom panel Stage 2B-3 — the band is consumed BEFORE
-                // the terminal and document paths. It sits below
-                // `document_text_bottom`, so a band pixel cannot hit the
-                // document grid, but ordering it first is what makes that a
-                // stated rule rather than a consequence of the arithmetic.
-                if state.panel.drag.is_some() {
-                    self.advance_panel_drag(position.y);
-                    return;
-                }
-                let surface = state.classify_pointer_surface(position.x as f32, position.y as f32);
-                if state.set_panel_divider_hover(surface == PointerSurface::PanelDivider) {
-                    state.apply_panel_cursor_icon();
-                }
-                match surface {
-                    PointerSurface::PanelDivider | PointerSurface::PanelBackground => return,
-                    PointerSurface::PanelCell(coord) => {
-                        // A held left button makes this a `Drag(Left)`, not a
-                        // `Move`. That distinction is the whole of panel
-                        // selection: `Move` never focuses or claims, while
-                        // every non-`Move` gesture activates the panel first,
-                        // so reporting a drag as a hover makes a selection
-                        // drag silently do nothing.
-                        let kind = state.panel_motion_kind();
-                        if state.panel_motion_is_new(coord) {
-                            let mods = translate_mods(self.modifiers);
-                            self.send_panel_pointer_at(position.x, position.y, kind, mods);
-                        }
-                        return;
-                    }
-                    PointerSurface::Elsewhere => {
-                        if state.panel.pointer_held {
-                            // A drag that wandered out of the band keeps
-                            // belonging to the band until the button comes up.
-                            return;
-                        }
-                    }
-                }
-                // Vterm Stage 3 — inside the terminal clip, motion is a
-                // terminal gesture. Consumed before minimap scrubbing
-                // and document hit testing: terminal mode paints no
-                // minimap and has no source bytes to resolve.
-                let Some(state) = self.state.as_mut() else {
-                    return;
-                };
-                if state.terminal.is_some() {
-                    let dragging = state.pointer_drag_active;
-                    if let Some((buffer_id, coord)) =
-                        self.terminal_pointer_hit(position.x, position.y)
-                    {
-                        // Sub-cell motion resolves to the same cell and
-                        // carries nothing new. Report only on a cell
-                        // change, matching the document drag path's
-                        // hit-byte dedupe — otherwise pixel-rate motion
-                        // becomes pixel-rate wire traffic, and every one
-                        // of those is a daemon-side gesture.
-                        let state = self.state.as_mut().expect("checked above");
-                        if state.terminal_motion_is_new(coord) {
-                            let mods = translate_mods(self.modifiers);
-                            let kind = if dragging {
-                                ProtocolMouseKind::Drag(ProtocolMouseButton::Left)
-                            } else {
-                                ProtocolMouseKind::Move
-                            };
-                            self.send_terminal_pointer(buffer_id, coord, kind, mods);
-                        }
-                    }
-                    return;
-                }
-                if state.minimap_scrub_active {
-                    // Scrubbing (Q#M6): the press began on the
-                    // minimap; motion keeps jumping, even if the
-                    // pointer wanders out of the band.
-                    let vp = state.minimap_jump_to(position.y);
-                    if let Some(vp) = vp
-                        && let Some(client) = self.attach_client.as_ref()
-                        && let Err(e) =
-                            client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
-                    {
-                        eprintln!("pmacs-gpu: minimap scrub send_viewport failed: {e}");
-                    }
-                    return;
-                }
-                if !state.pointer_drag_active {
-                    return;
-                }
-                // Q#M7 — arm/disarm edge auto-scroll from the drag's
-                // vertical position; `about_to_wait` runs the ticks.
-                state.edge_scroll_dir = edge_scroll_direction(
-                    position.y as f32,
-                    state.config.height,
-                    state.fm,
-                    state.band_inset(),
-                );
-                // Drag coalescing (predicted finding #4): pixel-rate
-                // motion only ships when the hit byte changes.
-                let Some(byte) = state.hit_test_source_byte(position.x, position.y) else {
-                    return;
-                };
-                if state.last_pointer_sent_byte == Some(byte) {
-                    return;
-                }
-                state.last_pointer_sent_byte = Some(byte);
-                state.note_pointer_round_trip();
-                let buffer_id = state.current_buffer_id;
-                let mods = translate_mods(self.modifiers);
-                if let Some(buffer_id) = buffer_id {
-                    self.send_pointer(buffer_id, byte, PointerKind::Drag, mods);
-                }
-            }
-            WindowEvent::MouseInput {
-                state: button_state,
-                button: winit::event::MouseButton::Left,
-                ..
-            } => {
-                let Some(state) = self.state.as_mut() else {
-                    return;
-                };
-                let Some((x, y)) = state.pointer_pos else {
-                    return;
-                };
-                // Q#CM1 — while the menu is open the left button drives
-                // it: a press invokes the row under the pointer (or
-                // dismisses on a click outside); a release is swallowed.
-                if state.menu.is_some() {
-                    if button_state == ElementState::Pressed {
-                        let action = match state.menu_hit(x, y) {
-                            Some((row, true)) => Some((Some(row), true)),
-                            Some((_, false)) => None, // separator — ignore
-                            None => Some((None, true)), // outside — dismiss
-                        };
-                        if let Some((index, invoke)) = action {
-                            self.send_menu_pointer(index, invoke);
-                        }
-                    }
-                    return;
-                }
-                let mods = translate_mods(self.modifiers);
-                // Bottom panel Stage 2B-3 — the divider strip and the band
-                // claim the gesture before either document path sees it.
-                let panel_surface = state.classify_pointer_surface(x as f32, y as f32);
-                match button_state {
-                    ElementState::Pressed => {
-                        if panel_surface == PointerSurface::PanelDivider
-                            && state.begin_panel_drag(x as f32, y as f32)
-                        {
-                            return;
-                        }
-                        // Arm the gesture BEFORE sending, and only when the
-                        // press actually landed on a cell: arming on a miss
-                        // would make a later in-band motion send a `Drag` with
-                        // no preceding `Down`, and not arming at all means
-                        // `Drag(Left)` is never emitted and panel selection
-                        // cannot work at all.
-                        if let PointerSurface::PanelCell(_) = panel_surface {
-                            let state = self.state.as_mut().expect("checked above");
-                            state.set_panel_pointer_held(true);
-                            self.send_panel_pointer_at(
-                                x,
-                                y,
-                                ProtocolMouseKind::Down(ProtocolMouseButton::Left),
-                                mods,
-                            );
-                            return;
-                        }
-                        if state.panel.pointer_held {
-                            let state = self.state.as_mut().expect("checked above");
-                            state.set_panel_pointer_held(false);
-                        }
-                    }
-                    ElementState::Released => {
-                        if state.end_panel_drag() {
-                            return;
-                        }
-                        if state.panel.pointer_held {
-                            let cell = state.panel_release_cell(x as f32, y as f32);
-                            self.send_panel_pointer_at_cell(
-                                cell,
-                                ProtocolMouseKind::Up(ProtocolMouseButton::Left),
-                                mods,
-                            );
-                            if let Some(state) = self.state.as_mut() {
-                                state.set_panel_pointer_held(false);
-                            }
-                            return;
-                        }
-                    }
-                }
-                let Some(state) = self.state.as_mut() else {
-                    return;
-                };
-                if state.terminal.is_some() {
-                    let hit = self.terminal_pointer_hit(x, y);
-                    let state = self.state.as_mut().expect("checked above");
-                    let kind = match button_state {
-                        ElementState::Pressed => {
-                            // A press that MISSES the grid (the status
-                            // band, the trailing padding) starts no
-                            // drag: arming the flag there would make a
-                            // later in-grid motion send a `Drag` with no
-                            // preceding `Down`.
-                            state.pointer_drag_active = hit.is_some();
-                            ProtocolMouseKind::Down(ProtocolMouseButton::Left)
-                        }
-                        ElementState::Released => {
-                            // A release always ends the drag, including
-                            // one that wandered outside the grid.
-                            state.pointer_drag_active = false;
-                            ProtocolMouseKind::Up(ProtocolMouseButton::Left)
-                        }
-                    };
-                    // A press or release always reports, and it re-arms
-                    // the motion dedupe: the first drag after a press
-                    // must reach the daemon even at the cell the press
-                    // landed on.
-                    state.last_terminal_pointer_cell = None;
-                    if let Some((buffer_id, coord)) = hit {
-                        self.send_terminal_pointer(buffer_id, coord, kind, mods);
-                    }
-                    return;
-                }
-                match button_state {
-                    ElementState::Pressed => {
-                        if state.in_minimap_band(x, y) {
-                            // Q#M6 — consumed before text hit-testing;
-                            // never a Pointer event.
-                            state.minimap_scrub_active = true;
-                            let vp = state.minimap_jump_to(y);
-                            if let Some(vp) = vp
-                                && let Some(client) = self.attach_client.as_ref()
-                                && let Err(e) =
-                                    client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
-                            {
-                                eprintln!("pmacs-gpu: minimap jump send_viewport failed: {e}");
-                            }
-                            return;
-                        }
-                        let Some(byte) = state.hit_test_source_byte(x, y) else {
-                            return;
-                        };
-                        let kind =
-                            state.classify_pointer_down(byte, mods.contains(Modifiers::SHIFT));
-                        state.pointer_drag_active = true;
-                        state.last_pointer_sent_byte = Some(byte);
-                        state.note_pointer_round_trip();
-                        if let Some(buffer_id) = state.current_buffer_id {
-                            if debug_input() {
-                                eprintln!("pmacs-gpu pointer: {kind:?} byte={byte}");
-                            }
-                            self.send_pointer(buffer_id, byte, kind, mods);
-                        }
-                    }
-                    ElementState::Released => {
-                        if state.minimap_scrub_active {
-                            state.minimap_scrub_active = false;
-                            return;
-                        }
-                        if !state.pointer_drag_active {
-                            return;
-                        }
-                        state.pointer_drag_active = false;
-                        state.edge_scroll_dir = None;
-                        state.edge_scroll_last = None;
-                        let byte = state
-                            .hit_test_source_byte(x, y)
-                            .or(state.last_pointer_sent_byte);
-                        let buffer_id = state.current_buffer_id;
-                        if let (Some(byte), Some(buffer_id)) = (byte, buffer_id) {
-                            self.send_pointer(buffer_id, byte, PointerKind::Up, mods);
-                        }
-                    }
-                }
-            }
-            // Q#CM1 — right-click opens the context menu at the hit byte
-            // (or dismisses an open one). The anchor pixel is remembered
-            // so the popup the daemon sends back draws at the click.
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button: winit::event::MouseButton::Right,
-                ..
-            } => {
-                let Some(state) = self.state.as_mut() else {
-                    return;
-                };
-                let Some((x, y)) = state.pointer_pos else {
-                    return;
-                };
-                if state.menu.is_some() {
-                    self.send_menu_pointer(None, true);
-                    return;
-                }
-                // Bottom panel Stage 2B-3 — a right-click in the band is a
-                // panel gesture, claimed before the terminal and document
-                // paths. The daemon decides between child mouse reporting and
-                // the editor context menu, so the anchor is remembered here
-                // exactly as for a document click; without this the band's
-                // context actions are unreachable and the click is applied to
-                // the document underneath instead.
-                if let PointerSurface::PanelCell(_) =
-                    state.classify_pointer_surface(x as f32, y as f32)
-                {
-                    if let Some(state) = self.state.as_mut() {
-                        state.menu_anchor_px = (x, y);
-                    }
-                    let mods = translate_mods(self.modifiers);
-                    self.send_panel_pointer_at(
-                        x,
-                        y,
-                        ProtocolMouseKind::Down(ProtocolMouseButton::Right),
-                        mods,
-                    );
-                    return;
-                }
-                let Some(state) = self.state.as_mut() else {
-                    return;
-                };
-                // Vterm Stage 3 — a right-click in the terminal clip is
-                // a terminal gesture; the daemon decides between child
-                // reporting and the editor context menu, so the anchor
-                // is remembered here exactly as for a document click.
-                if state.terminal.is_some() {
-                    state.menu_anchor_px = (x, y);
-                    if let Some((buffer_id, coord)) = self.terminal_pointer_hit(x, y) {
-                        let mods = translate_mods(self.modifiers);
-                        self.send_terminal_pointer(
-                            buffer_id,
-                            coord,
-                            ProtocolMouseKind::Down(ProtocolMouseButton::Right),
-                            mods,
-                        );
-                    }
-                    return;
-                }
-                let Some(byte) = state.hit_test_source_byte(x, y) else {
-                    return;
-                };
-                state.menu_anchor_px = (x, y);
-                let buffer_id = state.current_buffer_id;
-                let mods = translate_mods(self.modifiers);
-                if let Some(buffer_id) = buffer_id {
-                    self.send_pointer(buffer_id, byte, PointerKind::Context, mods);
-                }
-            }
-            WindowEvent::MouseWheel { delta, .. } => {
-                let Some(state) = self.state.as_mut() else {
-                    return;
-                };
-                // Wheel scroll is local-only: the GPU owns the
-                // viewport. Positive winit y = scroll up = smaller
-                // scroll_top.
-                let lines = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => {
-                        (-y * WHEEL_LINES_PER_TICK).round() as i64
-                    }
-                    winit::event::MouseScrollDelta::PixelDelta(p) => {
-                        (-(p.y as f32) / state.fm.code_line_height()).round() as i64
-                    }
-                };
-                if lines == 0 {
-                    return;
-                }
-                // Bottom panel Stage 2B-3 — a wheel tick over the band scrolls
-                // the PANEL's window, which is daemon-side state, so it
-                // crosses the wire instead of moving this frontend's local
-                // document `scroll_top`. Falling through would scroll the
-                // document while the pointer is inside the panel.
-                if let Some((x, y)) = state.pointer_pos
-                    && matches!(
-                        state.classify_pointer_surface(x as f32, y as f32),
-                        PointerSurface::PanelCell(_)
-                    )
-                {
-                    let mods = translate_mods(self.modifiers);
-                    let kind = if lines < 0 {
-                        ProtocolMouseKind::ScrollUp
-                    } else {
-                        ProtocolMouseKind::ScrollDown
-                    };
-                    self.send_panel_pointer_at(x, y, kind, mods);
-                    return;
-                }
-                let Some(state) = self.state.as_mut() else {
-                    return;
-                };
-                // Vterm Stage 3 — the terminal's scrollback belongs to
-                // the daemon-side view, not to this frontend's local
-                // scroll, so a wheel tick crosses the wire as a
-                // terminal gesture instead of moving `scroll_top`.
-                if state.terminal.is_some() {
-                    if let Some((x, y)) = state.pointer_pos
-                        && let Some((buffer_id, coord)) = self.terminal_pointer_hit(x, y)
-                    {
-                        let mods = translate_mods(self.modifiers);
-                        let kind = if lines < 0 {
-                            ProtocolMouseKind::ScrollUp
-                        } else {
-                            ProtocolMouseKind::ScrollDown
-                        };
-                        self.send_terminal_pointer(buffer_id, coord, kind, mods);
-                    }
-                    return;
-                }
-                let vp = state.scroll_by_lines(lines);
-                if let Some(vp) = vp
-                    && let Some(client) = self.attach_client.as_ref()
-                    && let Err(e) = client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
-                {
-                    eprintln!("pmacs-gpu: wheel send_viewport failed: {e}");
-                }
-            }
-            WindowEvent::RedrawRequested => {
-                if let Some(state) = self.state.as_mut() {
-                    state.render();
-                }
-            }
-            _ => {}
+        if self.dispatch_window_event(&event) == EventOutcome::Exit {
+            event_loop.exit();
         }
     }
 
@@ -4032,6 +5098,8 @@ impl State {
         let (current_line_starts, current_line_char_starts) = line_offset_tables(initial_text);
 
         let mut state = Self {
+            #[cfg(test)]
+            render_calls: 0,
             window,
             device,
             queue,
@@ -8615,6 +9683,16 @@ impl State {
     /// windowed path. Composition lives in `render_to_view`, shared with
     /// the headless offscreen path (`render_offscreen`, F-014).
     fn render(&mut self) {
+        // GUI 1-pre P2 — a repaint is a LOCAL effect with no outbound
+        // trace, and headless there is no surface either: every path
+        // below returns without observable consequence. The counter is
+        // the only way a harness can witness that the redraw arm ran,
+        // and it is incremented before the surface check for exactly
+        // that reason. Test-only, so production carries nothing.
+        #[cfg(test)]
+        {
+            self.render_calls += 1;
+        }
         let frame = {
             let Some(surface) = self.surface.as_ref() else {
                 return;

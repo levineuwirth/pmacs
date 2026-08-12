@@ -275,7 +275,8 @@ reference** — each keeps its own framing.
 
 | Backlog item | Disposition |
 |---|---|
-| Command/minibuffer chord forwarding; Meta/Super chords | Stage 1a |
+| Command/minibuffer chord forwarding | **SHIPPED** (`bc32332`) — `Char`/`Enter`/`Tab` with Ctrl or Alt reach the daemon keymap, subsuming the old per-feature allowlists |
+| **Meta/Super chords** | **Stage 2 (Q#S1-7 ruling, 2026-08-11)** — *moved from Stage 1a.* Blind forwarding would turn platform Command/Super shortcuts into daemon Meta chords **before** capability-aware and local-binding policy exists. Stage 1 keeps the deliberate, tested OS reservation (`pmacs-gpu/src/main.rs:11050`) and adds no island |
 | Rebindable local `Ctrl-V`/`Escape` | Escape half → Stage 1a; `Ctrl-V` half → Stage 2 (it is a keymap-vocabulary question, not an input-plumbing one) |
 | Middle-click paste | Stage 1b |
 | Right-click context menu | **Already shipped** (§2.1) — the backlog item is stale and Stage 0 retires the line |

@@ -210,6 +210,68 @@ commands, read `docs/active-work.md` immediately after this file.
     server-rooted watcher then faithfully watched. A
     markerless-fixture red that looks like a watcher bug may be an
     ancestor marker, on any machine.
+
+    **SEEN AGAIN 2026-08-11, and `scripts/gate` DOES NOT PROTECT YOU
+    FROM IT.** The gate isolates the target directory and five ambient
+    roots but **not `TMPDIR`**, so `tempfile::tempdir()` still lands
+    under a `/tmp` that may carry a marker. It surfaced inside a gate
+    run on an unrelated lane (GUI 1-pre, whose whole **executable** diff
+    is inside the `pmacs-gpu` crate) as **`m4_24_bare_string_glob_stays_relative`
+    and `m4_24_d3_fallback_base_is_the_smallest_attachment_dir`**, in
+    both the `m4` step and the `--workspace` sweep, with every other
+    target in the corpus green.
+
+    **Diagnose it with the discriminating pair, not a rerun** — same
+    binary, same commit, one variable. **Four literal `--exact`
+    invocations, one test each**, because `m4_24_` is a PREFIX matching
+    **18** tests and a prefix run reports ~16/2 and 18/0 rather than the
+    0/1 and 1/0 that make the pair readable:
+
+    ```sh
+    C=<marker-free dir>   # outside /tmp AND outside every git worktree
+
+    TMPDIR=/tmp cargo test --test m4_acceptance -- \
+      --exact m4_24_bare_string_glob_stays_relative                 # 0 passed; 1 failed
+    TMPDIR=$C   cargo test --test m4_acceptance -- \
+      --exact m4_24_bare_string_glob_stays_relative                 # 1 passed; 0 failed
+
+    TMPDIR=/tmp cargo test --test m4_acceptance -- \
+      --exact m4_24_d3_fallback_base_is_the_smallest_attachment_dir # 0 passed; 1 failed
+    TMPDIR=$C   cargo test --test m4_acceptance -- \
+      --exact m4_24_d3_fallback_base_is_the_smallest_attachment_dir # 1 passed; 0 failed
+    ```
+
+    Each prints `running 1 test` and `171 filtered out`. **Read that
+    line** — see the libtest-filter bullet below for why a filter that
+    reaches nothing still prints green.
+
+    Check the ancestors of the temp root for `.git`, `Cargo.toml` and
+    friends before believing any markerless-fixture red, and **compare
+    SIGNATURES, not test names** — the contaminated legs panic at
+    `m4_acceptance.rs:5668:5` and `:6615:5` with `.received = ""`,
+    matching the gate red's own signature, and the clean legs panic
+    nowhere. That is what makes the pair evidence rather than
+    coincidence.
+
+    **The isolated `TMPDIR` must be outside `/tmp` AND outside every git
+    worktree.** A child of `/tmp` is not isolated: `/tmp/.git` is still
+    its ancestor. Verify with `git -C <dir> rev-parse --show-toplevel`
+    failing, not by eye. **Do not delete a foreign marker** — isolating
+    is sufficient and deletion is someone else's call. **Isolating
+    `TMPDIR` inside `scripts/gate` is the standing fix and belongs to
+    the gate lane**, not to whichever feature PR happens to trip over
+    it.
+- **A libtest filter that matches nothing reports `test result: ok`.**
+  `0 passed; 0 failed; N filtered out` and a zero exit code are what a
+  *typo'd or mis-quoted filter* looks like, and it is indistinguishable
+  from success at a glance. **This shell is zsh, which does NOT
+  word-split unquoted parameter expansions**, so `NAMES="a b"; cargo
+  test -- $NAMES` passes ONE argument `"a b"`, matches no test, and
+  prints a green line. Seen 2026-08-11 while running a
+  contaminated/clean pair: the contaminated leg "passed" and briefly
+  looked like the environmental hypothesis collapsing. **Read the
+  `running N tests` line, not just `test result`** — it is the only
+  place the filter's actual reach is stated.
   - **Deliberately unbuilt**: kernel notification (framing option E) —
     a framed option, not residue; its trigger is the 4 s worst-case
     external-change latency mattering in practice.
