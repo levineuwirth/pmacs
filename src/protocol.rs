@@ -1981,9 +1981,14 @@ mod tests {
         // only they can witness the shift.
         //
         // `PanelPointer` was the last `FrontendEvent` variant at v23.
-        // Every v6–v23 daemon decodes the variants below it on every
-        // session, so a variant inserted anywhere earlier is a silent
-        // wire break for all of them.
+        // Inserting anything before it shifts its discriminant and
+        // breaks **v21–v23 panel traffic** — `PanelPointer` arrived at
+        // v21 and is gated, so that is its whole population, not every
+        // peer and not every session. Stated exactly rather than
+        // dramatically: an earlier version of this comment claimed
+        // every v6–v23 daemon on every session, which is false and
+        // would send the next reader hunting a larger blast radius than
+        // exists.
         let ev = FrontendEvent::PanelPointer {
             frontend_id: FrontendId(2),
             geometry_epoch: 1,
