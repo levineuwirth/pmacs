@@ -317,8 +317,43 @@ from #171 and #215.
   tripwire `assert_eq!(PROTOCOL_VERSION, N)` is meant to fire; an
   absolute contract expressed as arithmetic on a moving constant is a
   defect. **`ADVERTISED_PROTOCOL_VERSION == 20` must NOT fire.**
-- **Gates:** `./scripts/gate --protocol` plus the touched input suites.
-  **`--protocol` is required here** — 1a changes the wire.
+- **IMPLEMENTED. All sixteen gates green** under an isolated `TMPDIR`
+  (log `20260812T204615Z-215223`):
+
+  ```
+  ./scripts/gate --protocol \
+    --acceptance gui_stage1a_acceptance \
+    --acceptance gui_stage1a_wire_acceptance \
+    --acceptance auto_pair_acceptance \
+    --acceptance discovery_stage2_acceptance \
+    --acceptance statusline_segments_acceptance \
+    --acceptance vterm_stage3_acceptance
+  ```
+
+  **`--protocol` is required** — 1a changes the wire — and it is what
+  adds the crdt build and the second sweep. `gui_stage1a_wire_acceptance`
+  is `#![cfg(feature = "crdt")]`, so it runs **2 tests in the crdt sweep
+  and 0 in the default one**; checked in the logs rather than assumed,
+  because a suite that compiles to nothing reports `ok`.
+- **Evidence: 8 + 2 acceptance rows, 6 producer/router rows, and the
+  A1–A4 unit witnesses; mutations M-1a-1 … M-1a-6b, each failing the row
+  it targets.**
+  - `M-1a-1` single-scalar back through the generic insert → the record
+    row **and** the auto-pair row.
+  - `M-1a-2` `break_command_chain` deleted → the primed-chain row alone.
+  - `M-1a-3` `TextInput` selection back below the intercept return →
+    the intercepting-producer row alone.
+  - `M-1a-4` typed text through `encode_paste` → A8, with the forbidden
+    bytes at the PTY.
+  - `M-1a-5` inbound gate disabled → the v23 row, with `REFUSED` inside
+    the CRDT op.
+  - `M-1a-6b` a variant inserted **before** `PanelPointer` → the
+    frozen-byte pin, discriminant 15 → 16.
+- **`M-1a-6` (the first attempt) was a WRONG MUTATION, not a vacuous
+  pin**, and is recorded because the failure mode is instructive: the
+  wedge went in *after* `PanelPointer` — where an append belongs — so
+  nothing shifted and the pin passed, correctly. A mutation aimed at the
+  wrong side of a boundary reports a sound pin as worthless.
 
 ## GUI arc Stage 1 — 1-pre MERGED as #237 (`d038f71`); 1a is next, NOT STARTED
 
