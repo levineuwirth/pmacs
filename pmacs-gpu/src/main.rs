@@ -3162,7 +3162,7 @@ impl App {
             Route::Keyboard {
                 action: KeyAction::Press,
                 key,
-            } => self.apply_keyboard(key),
+            } => self.apply_keyboard(&key.logical_key, key.text.as_deref()),
             Route::Pointer(PointerRoute::Moved { x, y }) => self.apply_cursor_moved(x, y),
             Route::Pointer(PointerRoute::Left(button_state)) => {
                 self.apply_left_button(button_state);
@@ -3183,10 +3183,25 @@ impl App {
         EventOutcome::Continue
     }
 
-    /// Perform [`KeyAction::Press`]. The router has already
-    /// discarded key-ups, so `key` is always a press.
+    /// Perform [`KeyAction::Press`]. The router has already discarded
+    /// key-ups, so this is always a press.
+    ///
+    /// **Takes the two fields it reads rather than the whole
+    /// `KeyEvent`, deliberately.** `KeyEvent` carries a `pub(crate)`
+    /// field and cannot be constructed outside winit, so a body taking
+    /// one is undrivable by any test; `Key` and `&str` are ordinary
+    /// values. That distinction is not academic — 1a's first review
+    /// found the `TextInput` selection sited *below* the intercept
+    /// return, making A7 and A8 reachable only when no prompt and no
+    /// terminal were present. The classifier was correct throughout;
+    /// only the call site was wrong, so only a test that drives THIS
+    /// function could have caught it.
+    ///
+    /// The router arm remains unwitnessable — it still cannot be handed
+    /// a `WindowEvent::KeyboardInput` — so 1-pre's structural exception
+    /// narrows to that one pattern arm rather than disappearing.
     #[allow(clippy::too_many_lines)] // one linear key pipeline; splitting hides the order.
-    fn apply_keyboard(&mut self, key: &KeyEvent) {
+    fn apply_keyboard(&mut self, logical: &Key, text: Option<&str>) {
         // While the daemon is intercepting keystrokes — an active
         // incremental search (Q#SR5), or a minibuffer / pending
         // prefix — every key belongs to its handler, not the
@@ -3229,7 +3244,7 @@ impl App {
         // behaviour left there is nothing for it to choose. (Both flags
         // remain live below, for the OS-paste, round-trip and
         // completion-accept paths.)
-        if matches!(key.logical_key, Key::Named(NamedKey::Escape)) {
+        if matches!(*logical, Key::Named(NamedKey::Escape)) {
             if let Some(client) = self.attach_client.as_ref()
                 && let Err(e) = client.send_key(ProtocolKey::Escape, Modifiers::NONE)
             {
@@ -3238,7 +3253,7 @@ impl App {
             return;
         }
 
-        let Some((pkey, mut pmods)) = translate_key(&key.logical_key, self.modifiers) else {
+        let Some((pkey, mut pmods)) = translate_key(logical, self.modifiers) else {
             return;
         };
 
@@ -3252,7 +3267,7 @@ impl App {
         // being routed to the keymap. Alt alone is left intact so
         // macOS Option-as-Meta still reaches the keymap; on layouts
         // where AltGr isn't Ctrl+Alt this is a no-op.
-        if matches!(pkey, ProtocolKey::Char(_)) && is_layout_text(key.text.as_deref(), pmods) {
+        if matches!(pkey, ProtocolKey::Char(_)) && is_layout_text(text, pmods) {
             pmods = if pmods.contains(Modifiers::SHIFT) {
                 Modifiers::SHIFT
             } else {
@@ -3307,7 +3322,7 @@ impl App {
         // truncation to the first scalar — because the fallback is the
         // unchanged `Key` path below. No regression, not retroactive
         // correctness.
-        if let Some(text) = text_input_payload(&key.logical_key, key.text.as_deref(), pmods)
+        if let Some(text) = text_input_payload(logical, text, pmods)
             && client.session_protocol_version() >= TEXT_INPUT_MIN_VERSION
         {
             if let Some(state) = self.state.as_mut() {
@@ -3835,12 +3850,42 @@ impl EffectHarness {
         harness
     }
 
+    /// Drive `apply_keyboard` directly and report what it produced.
+    ///
+    /// Bypasses `route_event` because a `WindowEvent::KeyboardInput`
+    /// cannot be constructed outside winit — 1-pre's recorded
+    /// structural exception. What that exception covers is the router's
+    /// pattern arm; the BODY is reachable, and the body is where 1a's
+    /// placement defect lived.
+    fn feed_keyboard(&mut self, logical: &Key, text: Option<&str>) -> Step {
+        let before = self.snapshot();
+        self.app.apply_keyboard(logical, text);
+        let after = self.snapshot();
+        Step {
+            local: Self::diff(&before, &after, EventOutcome::Continue),
+            outbound: self.read_until_sentinel(),
+        }
+    }
+
     /// Dispatch one event and report everything it did.
     fn feed(&mut self, event: &WindowEvent) -> Step {
         let before = self.snapshot();
         let outcome = self.app.dispatch_window_event(event);
         let after = self.snapshot();
 
+        Step {
+            local: Self::diff(&before, &after, outcome),
+            outbound: self.read_until_sentinel(),
+        }
+    }
+
+    /// The local effects between two snapshots. Shared by every entry
+    /// point so a new one cannot observe a different set by accident.
+    fn diff(
+        before: &EffectSnapshot,
+        after: &EffectSnapshot,
+        outcome: EventOutcome,
+    ) -> Vec<LocalEffect> {
         let mut local = Vec::new();
         if outcome == EventOutcome::Exit {
             local.push(LocalEffect::Exit);
@@ -3862,11 +3907,7 @@ impl EffectHarness {
                 top: after.scroll_top,
             });
         }
-
-        Step {
-            local,
-            outbound: self.read_until_sentinel(),
-        }
+        local
     }
 
     /// Observable state the local effects are derived from.
@@ -4390,6 +4431,76 @@ mod input_routing_tests {
                 local: Vec::new(),
                 outbound: Vec::new()
             }
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // GUI arc 1a — PRODUCER REACHABILITY.
+    //
+    // These drive `App::apply_keyboard`, the real call site, not
+    // `text_input_payload`. 1a's first review found the classifier
+    // correct and the call site wrong: `TextInput` selection sat below
+    // the intercept return, and a modal prompt or a focused terminal is
+    // exactly what makes intercept true, so A7 and A8 were reachable
+    // only when neither was present. A classifier test stays green
+    // through that defect; these rows do not.
+    // ---------------------------------------------------------------
+
+    /// Multi-scalar text reaches the wire as `TextInput` **while the
+    /// daemon is intercepting** — the state a modal prompt puts the
+    /// session in.
+    #[test]
+    fn multi_scalar_text_is_sent_while_the_daemon_intercepts() {
+        let mut h = EffectHarness::new();
+        // A minibuffer is up: `daemon_intercepts_keys` is true.
+        h.app.state.as_mut().expect("harness state").dispatch_idle = false;
+
+        let step = h.feed_keyboard(&Key::Character("e\u{301}".into()), Some("e\u{301}"));
+
+        assert!(
+            step.outbound.iter().any(|e| matches!(
+                e,
+                pmacs_protocol::FrontendEvent::TextInput { text, .. } if text == "e\u{301}"
+            )),
+            "an intercepting session must still get the whole commit, \
+             not a truncated Key; got {:?}",
+            step.outbound
+        );
+        assert!(
+            !step
+                .outbound
+                .iter()
+                .any(|e| matches!(e, pmacs_protocol::FrontendEvent::Key(_))),
+            "and must NOT also get the first-scalar Key: {:?}",
+            step.outbound
+        );
+    }
+
+    /// The complement, so the row above cannot pass by sending
+    /// `TextInput` for everything: a SINGLE scalar while intercepting
+    /// still travels as `Key`, which is §5 rule 4 and preserves mode
+    /// keymaps and typed provenance.
+    #[test]
+    fn single_scalar_text_still_travels_as_key_while_intercepting() {
+        let mut h = EffectHarness::new();
+        h.app.state.as_mut().expect("harness state").dispatch_idle = false;
+
+        let step = h.feed_keyboard(&Key::Character("a".into()), Some("a"));
+
+        assert!(
+            step.outbound
+                .iter()
+                .any(|e| matches!(e, pmacs_protocol::FrontendEvent::Key(_))),
+            "a single scalar stays a Key: {:?}",
+            step.outbound
+        );
+        assert!(
+            !step
+                .outbound
+                .iter()
+                .any(|e| matches!(e, pmacs_protocol::FrontendEvent::TextInput { .. })),
+            "and must not become TextInput: {:?}",
+            step.outbound
         );
     }
 
