@@ -1,6 +1,15 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-08-11 (second pass, same day).** `main` is
+**Last updated: 2026-08-12.** `main` is **`d038f71`** — **#237**, GUI
+arc **Stage 1-pre**, the input seam: `App::window_event` goes from 655
+lines to four, deciding moves to a pure `route_event` and performing to
+seven `apply_*` methods. **No behaviour change and no wire change** —
+it is the seam the five behavioural slices land on, and **1a is next
+and not started**. Beneath it `f8ad3e7` — **#236**, GUI arc **Stage
+0**, the arc framing and its documentation sweep. **Both are absorbed
+into §1 at this anchor.**
+
+Previously **2026-08-11 (second pass)**: `main` was
 **`122b8e8`** — **#235**, D3 of the LSP file watcher, which **closes
 issue #233 and completes that arc**: the watcher stops sleeping and
 walks once per scan, zero jobs at idle. Beneath it `b867f64` — git
@@ -102,8 +111,68 @@ reads it the way you just did.
 For volatile branches, checkpoints, verification, and recovery
 commands, read `docs/active-work.md` immediately after this file.
 
-## 1. Where the project stands (2026-08-11)
+## 1. Where the project stands (2026-08-12)
 
+- **GUI arc — Stage 0 MERGED as #236, Stage 1-pre MERGED as #237
+  (2026-08-12). The arc is OPEN: five Stage 1 slices remain and 1a has
+  not started.** Stage 0 framed the arc
+  (`docs/gui-arc-framing.md`); Stage 1 is framed for **all** its slices
+  by `docs/gui-stage1-input-framing.md` (revision 11). 1-pre is the
+  input seam and changes **no behaviour and no wire**:
+  `App::window_event` went from 655 lines to four. Durable facts:
+  - **A route carries the DECISION; only running the body gives the
+    EFFECT.** A wheel route holds a delta, and whether that becomes a
+    viewport update, a panel event, a terminal event or nothing at all
+    depends on `State`. An approved evidence contract asked for
+    "outbound events **and** local effects", and a first implementation
+    argued route-classification covered both. It does not, and framing
+    revision 11 retracts the argument. **When a contract names two
+    things, satisfying one and arguing it implies the other is a
+    narrowing wearing the costume of a mechanism.**
+  - **A harness that re-implements the thing it tests witnesses its own
+    copy.** The dispatch had to leave `window_event` — which cannot be
+    driven, since `ActiveEventLoop` does not exist outside a live event
+    loop — and become `App::dispatch_window_event` before any effect
+    could be observed. That single extraction is what made the evidence
+    possible, and it shrank the untestable residue to one `if`.
+  - **Winit's `KeyEvent` cannot be constructed outside winit** — a
+    `pub(crate) platform_specific` field — so **no
+    `WindowEvent::KeyboardInput` can be built by a test**. This will
+    bind every future GUI input slice. It does **not** extend to the
+    pointer families: `DeviceId::dummy()` exists for exactly this
+    purpose and `CursorMoved` / `MouseInput` / `MouseWheel` are
+    constructible. Bound an exception by checking its edges before
+    writing it down.
+  - **The sentinel is the success condition; the timeout is only an
+    error ceiling**, and conflating them undoes the design. Absence is
+    decided by a non-coalesceable sentinel rather than a duration, so
+    the harness is insensitive to core count — but an unbounded blocking
+    read turns a downstream regression into a **wedged gate** instead of
+    a red one, and a hang reads as slowness until the job is killed.
+  - **Four defects in the tests themselves, all one shape: witnessing an
+    absence the harness had manufactured.** It skipped the post-connect
+    wiring `resumed` performs, so geometry was silently withheld; the
+    fixture was too short to scroll; a windowless `State` has no
+    attached buffer, so viewport sends were withheld; and
+    `.all(|e| matches!(..))` over an **empty** transcript is vacuously
+    true. **Before believing a green row, ask what the harness withheld
+    that production supplies.**
+  - **`cargo metadata` decides which CI job runs a member's unit
+    tests, not intuition.** `workspace_default_members` is the root
+    package alone, so every bare `cargo test --all-targets` skips
+    `pmacs-gpu` entirely; only `gpu-render` runs it. A GPU-dependent
+    assert is therefore **unconditional** rather than
+    `PMACS_REQUIRE_GPU`-gated, so a missing adapter can never become a
+    quiet `ok`.
+  - **Deliberately unbuilt here**: every behavioural change. 1a
+    (`TextInput`, **v24**, protocol-bearing) is next and serialized
+    against 1e (`OpenTarget`, **v25**); **A4 deletes the idle-Escape
+    local quit**, which is **pre-existing behaviour that 1-pre preserved
+    and isolated rather than introduced** — the seam moved it behind an
+    `EventOutcome` return, and 1a is what removes it. `EventOutcome`
+    nevertheless **survives** A4:
+    the native close still returns `Exit`, and **one producer is not one
+    variant**.
 - **Git integration Stage 1 — MERGED as #227 (2026-08-11).**
   `*git-status*` (a `listview` panel over `git --no-optional-locks -C
   <dir> status --porcelain=v2 --branch -z`) and `*git-diff*`
@@ -620,18 +689,27 @@ commands, read `docs/active-work.md` immediately after this file.
 
 **Read this before picking anything up.** It is the only place the
 remaining work is enumerated in one view; the per-arc bullets below give
-the detail. Nothing here is in flight: **zero PRs are open** at this
-anchor, so every item is startable.
+the detail.
+
+**THIS TABLE IS MIXED-ANCHOR AND IS NOT CURRENT AS A WHOLE.** The GUI
+row is written at `d038f71` (2026-08-12); **every other row dates from
+2026-08-01** and has not been re-audited since, including the original
+claim that zero PRs were open. Rows are known to have drifted — P5
+called the tree primitive "PR held" when **#217 had already merged** —
+so **check `git log --first-parent githubsucks/main` before believing
+any row is still startable**. Refreshing the rest of the board is a
+separate pass, deliberately not folded into a GUI absorption.
 
 #### Arc state, against `COHERENCE.md` §20's priority order
 
 | P | Arc | State | What is next |
 |---|---|---|---|
 | 1 | **Journey** | **Stage 1 COMPLETE** (1a #182/#183; 1b-1 #203, 1b-2 #204, 1b-3 #205) | Journey runs to step 10. The thin end is now steps **1** (install — that is P8), **11** (background work: visible but no ownership model, §9) and **12** (session restore: desktop-save is opt-in *and* a documented no-op under a daemon) |
-| 2 | Workspace + location | Missing; model gap | The long-lead arc. Start before a fifth subsystem grows its own root convention — four have already diverged (§7) |
+| 1.5 | **GUI arc (half A)** | **Stage 0 MERGED (#236); Stage 1-pre MERGED (#237)** | **`COHERENCE.md` §20 Q#GA5 slots half A immediately after Priority 1** and it runs alongside P2–P5, interacting only at Q#GA5's start gate — **reaching Stage 4b obliges P2 to have STARTED, and no later GUI stage begins until it has an approved framing and an opened lane. The constraint binds THIS arc, not P2**, which is free to start at any time. It is the product half of §16 and what that section's product subgrade is graded against. **Next: Stage 1a**, not started, protocol-bearing at **v24** and serialized against 1e's v25 |
+| 2 | Workspace + location | Missing; model gap | The long-lead arc. Start before a fifth subsystem grows its own root convention — four have already diverged (§7). **P2 is blocked by nothing and may start now.** Q#GA5 runs the other way: when the GUI arc reaches Stage 4b, **P2 must already have started**, and no later GUI stage begins until it has an approved framing and an opened lane. **The gate is on STARTING P2, not on finishing it** |
 | 3 | Extension ownership | Missing; prerequisite-shaped | **`pmacs.hook.remove` does not exist.** That one bug-sized gap blocks §13's disable/uninstall, §10's trust classes, and package-scoped cancellation |
 | 4 | **Discovery** | **Stage 1 MERGED (#207)** | Stage 2 candidates, in rough dependency order: richer M-x rows (**protocol change** — `MinibufferPrompt.candidates` is `Vec<String>`; `CompletionPopupRow` already proves the pattern), `Command` gaining title/category/aliases/flags/arg-schema (~147 definition sites), predicate evaluation, help-layer unification, and the help-prefix decision |
-| 5 | Workbench convergence | Partial; **Arc 7 COMPLETE** (#213) and **the tree primitive is implemented** (PR held) | The bottom panel is finished on both frontends and the adopter default is flipped. The tree primitive has landed on a held PR: §14's Tree moves ✗ → ◐ with the LSP outline as its one adopter. **Next: adoption** — dired's `i`, then DAP's variables view, which is why it was built first |
+| 5 | Workbench convergence | Partial; **Arc 7 COMPLETE** (#213) and **the tree primitive MERGED as #217** | The bottom panel is finished on both frontends and the adopter default is flipped. §14's Tree moves ✗ → ◐ with the LSP outline as its one adopter. *(This row said "PR held" until 2026-08-12; #217 is in the canonical base chain.)* **Next: adoption** — dired's `i`, then DAP's variables view, which is why it was built first |
 | 6 | Config productization | Foundation only | Value provenance, then layering, then adoption migration (**table-valued settings are the hard prerequisite** — `ConfigValue` is four scalars) |
 | 7 | Package lifecycle | Not started | Correctly sequenced after P3 |
 | 8 | **Distribution** | **Stage 1 SHIPPED (v1.1.0, #211)** | Binaries on tag, checksums, machine-checked glibc floor. **Journey step 1 now works and the "invisible until this exists" blocker is lifted.** Next is a *decision* about channels / update / signing, not a queued plan |
@@ -3257,7 +3335,9 @@ servers.
 
 ## 6. Named deferrals (the standing backlog, consolidated)
 
-**The GUI arc — OPEN, framing approved 2026-08-10, Stage 0 READY FOR PR (not yet opened).**
+**The GUI arc — OPEN. Stage 0 MERGED as #236 and Stage 1-pre MERGED as
+#237 (2026-08-12); Stage 1a is next and not started.** See §1's arc
+bullet for what landed.
 `docs/gui-arc-framing.md` is the arc-level frame and is also Stage 0's
 own framing; Stages 1–10 each need their own before their branch. It
 opened from a daily-driver report: the TUI is daily-drivable, the GUI is

@@ -136,7 +136,11 @@ lesson, §1 for the two framings).
   are identical on every machine. Remote names are otherwise
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
-- Canonical base at this snapshot: **`githubsucks/main` @ `e67ad07`** —
+- Canonical base at this snapshot: **`githubsucks/main` @ `d038f71`** —
+  **GUI Stage 1-pre #237**, the input seam (`App::window_event` from 655
+  lines to four; no behaviour change, no wire change), atop `f8ad3e7`
+  **GUI arc Stage 0 #236**, the arc framing and its documentation sweep.
+  Beneath them `e67ad07`,
   the file-watcher arc absorption, atop `122b8e8`
   the file-watcher D3 **#235** (closes issue #233), atop `b867f64`
   git integration Stage 1 **#227**, atop `ae84d58` the LSP file-watcher
@@ -173,7 +177,7 @@ lesson, §1 for the two framings).
   where they describe a stage as it landed** — only this
   current-state paragraph tracks the live range.
   **The recovery floor advances with the base**, so the check below
-  now requires **`e67ad07`** or newer; a tree at `db1bbe9` no longer
+  now requires **`d038f71`** or newer; a tree at `db1bbe9` no longer
   passes — it would lack the entire QoL arc, which this file and the
   handoff both describe as complete. That is deliberate — a check accepting an older commit than
   the declared base passes on a tree the rest of this file does not
@@ -213,28 +217,44 @@ git worktree list
 git status --short --branch
 ```
 
-The `git log` command must expose `e67ad07` — the base named above — or a
+The `git log` command must expose `d038f71` — the base named above — or a
 newer intentional main. Keep this threshold and the canonical-base line in
 step: a recovery check that accepts an older commit than the base it
 declares canonical will pass on a tree the rest of this file does not
 describe.
 If it does not, stop and repair the remote/fetch configuration.
 
-**LAST EXERCISED AT `9a26ac8`, 2026-08-08** — re-run from an empty
-directory rather than having its SHA swapped. **The advance to
-`e67ad07` (2026-08-11) has NOT been re-exercised**, and by this
-paragraph's own argument that is exactly when the exercise matters, so
-it is recorded as an outstanding obligation rather than left to read as
-though it had been done. The floor above and the check below are in
-step at `e67ad07`; what is unverified is the *procedure* against that
-base, not the SHA. That distinction is the
-whole point of this paragraph: advancing the base is exactly when the
-recovery commands are most likely to have rotted, and a swapped SHA
-reads identically to a verified one. `git clone` the canonical URL, add
-the `githubsucks` alias, `git fetch githubsucks --prune`, confirm
-`9a26ac8` is an ancestor of `githubsucks/main`, and recover with the
-three-argument `git worktree add <path> -b <local> githubsucks/<branch>`
-form. All four steps ran clean.
+**LAST EXERCISED AT `d038f71`, 2026-08-12**, from an empty directory
+rather than by having its SHA swapped — **which also discharges the
+outstanding obligation this paragraph carried at `e67ad07`**, where the
+base advanced without the procedure being re-run. That debt is settled,
+not inherited: the advance recorded here was exercised as part of making
+it.
+
+Every documented step ran, in order, on git **2.55.0**:
+
+1. `git clone` the canonical URL into an empty directory. The clone
+   names it `origin`; **`git remote get-url githubsucks` errors with
+   `No such remote`**, exactly as the section above anticipates.
+2. Add the alias, confirm the URL, `git fetch githubsucks --prune`.
+3. `git log -1 --oneline githubsucks/main` → `d038f71`.
+4. **The floor check, run against the OLD DECLARED FLOOR and the new
+   one**: `e67ad07` and `d038f71` are each an ancestor of the tip, so
+   advancing the floor is valid rather than merely plausible.
+   *(`9a26ac8` is the previous last-EXERCISED anchor, which is a
+   different thing from the previous declared floor — the two had
+   drifted apart, and checking the exercised anchor in the floor's place
+   would have verified the wrong claim.)*
+5. The three-argument `git worktree add <path> -b <local>
+   githubsucks/<branch>` form → a real branch with its upstream set
+   (`## recovered-local...githubsucks/gui-stage1-pre`).
+6. **The documented trap, reproduced rather than assumed**: the
+   two-argument form on a remote-only branch **succeeds** and leaves
+   `## HEAD (no branch)`. The correction below still holds on 2.55.0.
+
+That distinction is the whole point of this paragraph: advancing the
+base is exactly when the recovery commands are most likely to have
+rotted, and a swapped SHA reads identically to a verified one.
 
 **Correction, found by re-running it.** This file claimed the
 two-argument form fails for a remote-only branch with `fatal: invalid
@@ -250,186 +270,91 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## GUI arc Stage 1 — 1-pre OPEN as PR #237
+## GUI arc Stage 1 — 1-pre MERGED as #237 (`d038f71`); 1a is next, NOT STARTED
 
-**Written at the branch's first commit**, with the framing, as the arc's
-§5 requires of every PR in it.
+**The lane is rewritten, not removed.** Rule 4 removes a lane when its
+ARC is done, and the arc is Stage 1 as a whole: **five slices remain**.
 
-- **PR #237** — https://github.com/levineuwirth/pmacs/pull/237.
-- **Branch `gui-stage1-pre`**, base `githubsucks/main` @ `f8ad3e7` (the
-  Stage 0 merge, #236). **`githubsucks/gui-stage1-pre` is the
-  authoritative tip** — the ref, not a SHA. Recover with
-  `git fetch githubsucks && git checkout gui-stage1-pre`.
 - **Framing `docs/gui-stage1-input-framing.md`, revision 11, APPROVED**
-  after **eight rejected revisions**. Revision 9 is the approved design;
-  revision 10 recorded a scope correction found against this
-  implementation and **also argued P2 was satisfied by classification
-  alone, which review overturned — revision 11 retracts it**. It is
-  Stage 1's framing for **all** slices and governs the later branches;
-  only Stage 0 was framed by the arc document itself.
-- **Scope of THIS branch: 1-pre only — the input seam. No behaviour
-  change.** `App::window_event` was **655 lines** and is now **four** —
-  call `dispatch_window_event`, exit if it asks. The dispatch it calls
-  is one `route_event` call and one arm per route. Nothing below it
-  could be witnessed without a display, which is why the seam precedes
-  every other slice.
-- **IMPLEMENTED in four commits, one per event family**, so each lands
-  with its own witnesses and mutations rather than as one 600-line
-  diff: `014110f` lifecycle (close / modifiers / resize), `7f0f9db`
-  redraw, `0705564` keyboard, `e955645` the four pointer arms. Review
-  round 1 added `f976dc1`, the P2 effect harness.
-- **P2 HAS TWO HARNESSES, and the second was review round 1's blocker.**
-  The routing harness answers *where did this event go*; `EffectHarness`
-  answers *what did it do*. Classification alone could not satisfy P2 —
-  **a wheel route carries a delta, and whether that becomes a viewport
-  update, a panel event, a terminal event or nothing depends on
-  `State`.** The effect harness drives a real `AttachClient` over a
-  `socketpair` (real handshake, outbox, writer thread and encoder, so
-  the transcript is the wire), a real windowless `State`, and
-  `App::dispatch_window_event`.
-- **`App::dispatch_window_event` is what made P2 reachable.** Left inside
-  `window_event`, the dispatch would force the harness to re-implement
-  it, and a harness that re-implements what it tests witnesses its own
-  copy. `window_event` is now **four lines**, so **P3 shrinks from a
-  33-line match to a single `if`**.
-- **Steps are delimited by a non-coalesceable sentinel key, not a
-  sleep** — otherwise "this step sent nothing" is undecidable without
-  waiting, and a fixed-duration wait against a writer thread is exactly
-  the core-count assumption behind PR #235's CI red.
-- **The effect rows never skip**: a missing wgpu adapter is an assertion
-  failure. M21 confirms all **nine** effect rows fail loudly while the
-  **thirteen** GPU-free routing rows stay green. The assert is
-  **unconditional**, not `PMACS_REQUIRE_GPU`-gated, so no invocation
-  anywhere can turn a missing adapter into a quiet `ok`.
-- **They execute in exactly ONE CI job, and that is checked rather than
-  assumed.** `cargo metadata` reports `workspace_default_members` as the
-  root `pmacs` package alone, so the `test` matrix and `crdt-test` —
-  both bare `cargo test --all-targets` — never compile `pmacs-gpu`'s
-  unit tests at all. Only **`gpu-render`** runs them, and it installs
-  lavapipe, proves the adapter with `vulkaninfo`, and sets
-  `PMACS_REQUIRE_GPU=1`. This is the handoff's "`gpu-render` runs a
-  DIFFERENT PACKAGE" fact showing up as a dependency: these rows live or
-  die with that one job.
-- **Three manufactured absences, all found by running the rows**, and
-  each the same shape: the harness withheld something production
-  supplies, then witnessed its own omission. `resumed` sets the frontend
-  id and session version before any geometry flush (the resize row);
-  the fixture document was two lines and could not scroll; a headless
-  `State` has no attached buffer, so `scroll_by_lines` returned `None`.
-  A fourth was a vacuous assertion — `.all(|e| matches!(..))` over an
-  empty transcript is true — caught by the outbound-blind mutation.
-- **The shape.** Deciding is `route_event(&WindowEvent) -> Route`, a
-  free function composing one decision function per family
-  (`route_lifecycle`, `route_keyboard` + `route_key_action`,
-  `route_pointer`). Performing stays on `App` in seven `apply_*`
-  methods. A route carries the **decision**, not the effect: a wheel
-  route holds a delta, and whether that becomes a viewport update, a
-  panel event, a terminal event or nothing depends on `State`. Effects
-  are witnessed separately — see the P2 bullet below.
-- **Every moved body verified as the original, mechanically.** The
-  keyboard body is byte-identical modulo two named conversions; the four
-  pointer bodies were checked by re-running rustfmt on the pre-move text
-  at the new indent level and diffing, since de-indenting by 8 columns
-  lets rustfmt rejoin lines. **22 witnesses — 13 routing, 9 effect — and
-  24 mutations, M1–M24.** Twenty-three fail their own rows; **M6 is the
-  P3 exception check and must stay green**.
-- **P3 IS NOW MEASURED, NOT ASSUMED — and re-measured after the effect
-  harness landed.** Replacing `window_event`'s whole body with `let _ =
-  (event_loop, event);` — a GUI that responds to no input at all —
-  leaves **all 265 `pmacs-gpu` tests green** under `PMACS_REQUIRE_GPU=1`
-  at the current shape (it was 256 before the effect rows; the number is
-  re-run, not carried forward). That is the exception's true extent:
-  `ActiveEventLoop` cannot exist outside a live event loop, so **no**
-  headless test in the crate observes the delegation. What it covers is
-  now **one `if`**, not a 33-line match.
-- **A SECOND ACCEPTED STRUCTURAL EXCEPTION, found here and winit's
-  rather than ours.** `KeyEvent` carries a `pub(crate)
-  platform_specific` field, so **no `WindowEvent::KeyboardInput` can be
-  constructed outside winit** and the keyboard family's routing arm
-  cannot be fed by a test. Bounded three ways: it does **not** extend to
-  the pointer families (`DeviceId::dummy()` exists for exactly this, and
-  all three pointer events are constructible — checked before writing
-  the exception down); the family's only real decision is factored into
-  `route_key_action(ElementState)` and witnessed directly; and what
-  stays unwitnessed is one pattern arm containing a match and a call.
-- **The crate now has exactly ONE executable `event_loop.exit()`**, in
-  `window_event`. Bodies return an `EventOutcome` rather than taking an
-  `&ActiveEventLoop`, which is what keeps them reachable in principle.
-  **`EventOutcome` has TWO producers and they differ in kind**: a native
-  close (`LifecycleRoute::Exit`), which must always exit, and
-  `apply_keyboard`'s idle Escape, which is a local quit. **Stage 1a's A4
-  removes the keyboard producer only**, leaving **one** `Exit`
-  producer — the native close. **One producer is not one variant**:
-  `EventOutcome` survives because `dispatch_window_event` must still
-  distinguish `Continue` from `Exit` on every event, and only the close
-  exits. A4 changes `apply_keyboard`'s signature, not the type. An
-  earlier revision of this bullet claimed the type would collapse and
-  should go with the Escape branch; that was wrong.
-- **Slice order (each its own branch and PR):** `1-pre` → `1a`\* → `1b`
-  → `1c` → `1d` → `1e`\*. **`1a` and `1e` are protocol-bearing (v24
-  `TextInput`, v25 `OpenTarget`/`OpenTargetResult`) and are
-  SERIALIZED.** 1c is **not** protocol-bearing under Q#S1-8.
-- **Q#S1-7 obligation carried by THIS PR:** Meta/Super policy moves to
-  Stage 2, so the arc framing's §2.5 and the standing backlog are
-  amended here. Stage 1 keeps the deliberate OS reservation and adds no
-  island.
-- **Gates:** `./scripts/gate --acceptance gpu_invocation_acceptance`.
-  That one invocation already runs `PMACS_REQUIRE_GPU=1 cargo test -p
-  pmacs-gpu` (step `gpu`) and the full `--workspace --no-fail-fast`
-  sweep in both feature configurations, so the framing §11 phrase "plus
-  touched input suites" is satisfied by the sweep rather than by a
-  hand-picked list. **No `--protocol`** — 1-pre changes no wire.
-- **THE FIRST GATE RUN WENT RED ON A STRAY `/tmp/.git`, NOT ON THIS
-  BRANCH.** `m4` and the sweep failed
-  `m4_24_bare_string_glob_stays_relative` and
-  `m4_24_d3_fallback_base_is_the_smallest_attachment_dir` — two LSP
-  file-watcher tests — with every other target green. Established as
-  environmental three ways, in increasing strength:
-  - **Structurally impossible for this branch to cause.** The branch
-    changes seven files, five of them under `docs/`; **the whole
-    executable diff is inside the `pmacs-gpu` crate**
-    (`src/main.rs` and `src/attach.rs`), and `pmacs-gpu` is a workspace
-    **member but not a dependency** of the root package, so the
-    `m4_acceptance` binary never links it.
-  - **The marker is older than the session.** `/tmp/.git` is empty and
-    was created at 20:14 CEST, **3.5 h before** the gate run at 23:45;
-    `/tmp` held 8,920 entries. That is handoff §1's recorded hazard
-    exactly.
-  - **A discriminating pair compared on SIGNATURE, not test name**, same
-    binary and commit, one variable — run as **four literal `--exact`
-    invocations, one test each**, since `m4_24_` is a prefix matching
-    **18** tests. Contaminated: `0 passed; 1 failed` each, panicking at
-    `m4_acceptance.rs:5668:5` and `:6615:5` with `.received = ""`,
-    **matching the gate red's own signature**. Clean: `1 passed; 0
-    failed` each, **zero panics**. The exact commands are in handoff
-    §1's hazard bullet. A rerun would have established only
-    intermittence; the pair establishes the cause.
+  after eight rejected revisions. It is Stage 1's framing for **all**
+  slices and governs every later branch; only Stage 0 was framed by the
+  arc document itself. Revision 9 is the approved design; 10 recorded a
+  scope correction found against the 1-pre implementation; **11 retracts
+  10's claim that P2 was satisfied by route classification alone**, and
+  corrects the Stage 1a consequence 10 got wrong.
+- **Slice order, each its own branch and PR:** ~~`1-pre`~~ → **`1a`**\* →
+  `1b` → `1c` → `1d` → `1e`\*. **`1a` and `1e` are the two
+  protocol-bearing slices — v24 `TextInput` and v25
+  `OpenTarget`/`OpenTargetResult` — and they are SERIALIZED** against
+  each other and against every other wire change in the project. 1c is
+  **not** protocol-bearing, under Q#S1-8.
+- **NEXT: 1a, and nothing of it exists yet** — no branch, no code. It
+  carries the **v24** `TextInput` variant, so it must run alone.
+  `PROTOCOL_VERSION` is **23** at this base, and
+  `ADVERTISED_PROTOCOL_VERSION` stays pinned at 20 and must not be
+  edited to chase it. Its nine contracts (A1–A9) and the Q#S1-9
+  precedence rules are in the framing; **A4 deletes the idle-Escape
+  local quit**, which is **pre-existing behaviour, not something 1-pre
+  introduced** — 1-pre preserved it and moved it behind an
+  `EventOutcome` return, and 1a removes it. `EventOutcome` survives that
+  removal: the native close still returns `Exit`.
 
-  **`scripts/gate` isolates the target dir and five ambient roots but
-  NOT `TMPDIR`** — recorded in handoff §1, where the standing fix is
-  assigned to the gate lane rather than to this PR.
+### What 1-pre landed, and the facts worth not re-deriving
 
-  **The marker was left in place**: it is foreign, deleting it is
-  unnecessary, and the isolated `TMPDIR` is the correct remedy. It must
-  be **outside `/tmp` and outside every git worktree** — a child of
-  `/tmp` is not isolated, because `/tmp/.git` remains its ancestor.
-- **GREEN under an isolated `TMPDIR`: all nine gates pass on the final
-  EXECUTABLE tree** (log `20260812T090034Z-2989598`, review round 2) —
-  executable, not final, because prose and doc comments changed after
-  it, as the sentence below records. fmt, clippy,
-  lib, lib-crdt, `gpu_invocation_acceptance`, **m4 168/0/3**,
-  `PMACS_REQUIRE_GPU=1 -p pmacs-gpu` (**265 tests, none filtered and
-  none skipped**, all nine effect rows included), the **117-target
-  `--workspace --no-fail-fast` sweep with zero failures anywhere**
-  (`m4_acceptance` running all 171 in it), and `diff-check`. Earlier
-  full-green runs at `20260811T215605Z-2664352` (round 1) and
-  `20260812T083735Z-2869707` (the P2 harness) are superseded by this
-  one. **What changed after it is doc comments and prose only** — the
-  `EventOutcome` correction below and this paragraph; `cargo fmt
-  --check`, `clippy -D warnings` and the 22 routing/effect rows were
-  re-run on the result. Stated rather than glossed, because "the gate
-  was green" and "the gate was green on exactly this tree" are
-  different claims.
+- **`App::window_event` went from 655 lines to four**: call
+  `dispatch_window_event`, exit if it asks. Deciding is
+  `route_event(&WindowEvent) -> Route`, composing one decision function
+  per family; performing is seven `apply_*` methods. **No behaviour
+  change, no wire change.**
+- **A route carries the DECISION, not the effect.** A wheel route holds
+  a delta; whether that becomes a viewport update, a panel event, a
+  terminal event or nothing depends on `State`. This is why P2 needs a
+  second harness, and why revision 10's contrary argument was retracted.
+- **Two harnesses.** `RoutingHarness` answers *where did this event go*
+  (13 rows, no GPU). `EffectHarness` answers *what did it do* (9 rows) —
+  a real `AttachClient` over a `socketpair` through the real handshake,
+  outbox, writer thread and encoder, a real windowless `State`, and the
+  production dispatch. **22 witnesses, 24 mutations M1–M24**;
+  twenty-three fail their own rows and **M6 is the P3 exception check,
+  which must stay green**.
+- **`dispatch_window_event` is why P2 was reachable at all.** Left inside
+  `window_event`, the dispatch would force a harness to re-implement it,
+  and a harness that re-implements what it tests witnesses its own copy.
+- **The sentinel is the success condition; the 30 s read ceiling is only
+  an error ceiling.** Steps are delimited by a non-coalesceable sentinel
+  key rather than a sleep, so absence is never inferred from duration —
+  but an unbounded blocking read would wedge the gate instead of
+  reddening it, and a hang looks like slowness until the job is killed.
+- **TWO ACCEPTED STRUCTURAL EXCEPTIONS, both measured rather than
+  asserted.** **P3**: deleting `window_event`'s whole body leaves all
+  **265** `pmacs-gpu` tests green, so no headless test in the crate
+  observes the delegation — what it covers is now one `if`. **P1,
+  keyboard only, and winit's rather than ours**: `KeyEvent` carries a
+  `pub(crate) platform_specific` field, so **no
+  `WindowEvent::KeyboardInput` can be constructed outside winit**. It
+  does **not** reach the pointer families — `DeviceId::dummy()` exists
+  for exactly this and all three pointer events are constructible,
+  checked before the exception was written down.
+- **`EventOutcome` survives A4, and one producer is not one variant.**
+  The crate has **exactly one** executable `event_loop.exit()`, in
+  `window_event`. A4 removes the keyboard `Exit` producer, leaving the
+  native close; the type stays because `dispatch_window_event` must
+  still distinguish `Continue` from `Exit` on every event. What A4
+  changes is `apply_keyboard`'s signature.
+- **The effect rows execute in exactly ONE CI job**, checked with `cargo
+  metadata`: `workspace_default_members` is the root `pmacs` package
+  alone, so the `test` matrix and `crdt-test` — both bare `cargo test
+  --all-targets` — never compile `pmacs-gpu`'s unit tests. Only
+  **`gpu-render`** runs them, with lavapipe, `vulkaninfo` and
+  `PMACS_REQUIRE_GPU=1`. The harness's adapter assert is
+  **unconditional**, so a missing adapter can never become a quiet `ok`.
+- **A stray `/tmp/.git` reddened the first gate run and had nothing to do
+  with this branch.** Established on signature, not test name, by four
+  literal `--exact` invocations; the marker was left in place and an
+  isolated `TMPDIR` used instead. **`scripts/gate` does not isolate
+  `TMPDIR`** — recorded in `docs/agent-handoff.md` §1, where the
+  standing fix is assigned to the gate lane.
+
 
 ## The GUI arc — Stage 0 MERGED as #236 (`f8ad3e7`)
 
@@ -450,24 +375,21 @@ absorption" was too generous. Five stale lanes remain below, and two
 `COHERENCE.md` corrections had not been made at all. What is done here
 is listed at the commit that does it, not promised here.
 
-- **Branch `gui-arc-stage0`**, base `githubsucks/main` @ `e67ad07` (the
-  file-watcher arc absorption) after the 2026-08-11 rebase; it was
-  branched at `0e4c58d`. **`githubsucks/gui-arc-stage0` is the
-  authoritative tip** — the ref, not a SHA. Recover with
-  `git fetch githubsucks && git checkout gui-arc-stage0`.
+- **MERGED as #236 (`f8ad3e7`).** The branch was `gui-arc-stage0`, based
+  on `e67ad07` after the 2026-08-11 rebase and branched at `0e4c58d`.
+  **Recovery instructions are removed deliberately**: a merged lane that
+  still says "checkout the branch" sends a reader to a tip that no
+  longer moves. Its content is on `main`.
 - **Framing `docs/gui-arc-framing.md`, revision 3, APPROVED
   2026-08-10** after two review rounds (two blocking findings each
   round, closed). It is **also the framing for Stage 0 itself**, which
   is docs-only; Stages 1–10 each require their own framing before their
   branch.
-- **The park is over and the work is DONE.** The branch was parked at
+- **The park is over and the work is MERGED.** The branch was parked at
   its first commit until #227 merged, because #227 was 72 `main` commits
   behind and touched the three files Stage 0's absorption rewrites.
   #227 merged (`b867f64`), #233's arc closed (#234, #235), this branch
-  rebased onto `e67ad07`, and the absorption ran. **Sixteen commits
-  above the base as of `30e2209`; ready for its PR.** *(Anchored to a
-  SHA deliberately: a bare running count goes stale on the next commit,
-  which is the staleness class this lane exists to retire.)*
+  rebased onto `e67ad07`, the absorption ran, and it landed as **#236**.
 - **What landed (docs only, no `src/`):** the absorption pass
   enumerated in the framing's §5 — five stale lanes, the
   authority/recovery anchor, `COHERENCE.md`'s `v6..=v21` → `v6..=v23`,
