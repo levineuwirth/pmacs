@@ -270,6 +270,56 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
+## GUI arc Stage 1a — `TextInput` at v24 — branch OPEN, no PR yet
+
+**Written with the branch's first commit**, per the standing correction
+from #171 and #215.
+
+- **Branch `gui-stage1a-textinput`**, base `githubsucks/main` @
+  `4f77491` exactly. **`githubsucks/gui-stage1a-textinput` is the
+  authoritative tip** — the ref, not a SHA. Recover with
+  `git fetch githubsucks && git checkout gui-stage1a-textinput`.
+- **No new framing.** `docs/gui-stage1-input-framing.md` already governs
+  every Stage 1 slice; A1–A9, the eight Q#S1-9 precedence rules, §8's
+  wire contract and §11's gates are ruled there. Writing a 1a framing
+  would duplicate an approved document.
+- **First commit is a GROUND-TRUTH RE-MEASUREMENT of §2 (revision 12),
+  not code.** §2 was taken at `a994f37`, before 1-pre moved almost every
+  GPU-side coordinate in it. It is refreshed here rather than in its own
+  PR so the contract and the code that depends on it are reviewed
+  together. **No ruling changes.**
+  - Moved: `window_event` `:2734`/655 lines → **`:4450`/four lines**;
+    `translate_key` `:10975` → **`:12053`**; the eight-arms description
+    → three family decision functions over nine variants.
+  - **CORRECTION, wrong at BOTH anchors: "`KeyEvent.text` is never
+    read" is false** — the AltGr rule reads it (`a994f37:2800`, now
+    `main.rs:3251`). The true claim is narrower: `text` is never read as
+    the text a keypress **inserts**, only as a *discriminator*. This is
+    load-bearing for A5, because §5's rule 2 already exempts "printable
+    Ctrl+Alt recognized by the existing AltGr rule" — **1a widens `text`
+    from discriminator to payload, and that is the change of kind the
+    old wording hid.**
+  - **CORRECTION: A4's exit site.** 1-pre moved the mechanism without
+    changing behaviour. **A4 edits `apply_keyboard`'s branch and return
+    type, not `window_event`**, and **`EventOutcome` survives A4** — a
+    native close still returns `Exit`.
+- **PROTOCOL-BEARING at v24 and therefore SERIALIZED.** `TextInput` is
+  an **appended** `FrontendEvent` variant; never widen a field in place,
+  because postcard is positional. `PROTOCOL_VERSION` is **23** at this
+  base and `ADVERTISED_PROTOCOL_VERSION` stays pinned at **20** and must
+  not be edited to chase it. A frozen-byte pin goes on `FrontendEvent`'s
+  **previous final variant**, since an appended variant's own round-trip
+  cannot detect a discriminant shift.
+- **A `PROTOCOL_VERSION` bump's blast radius is every version-sensitive
+  test and NONE of them appear in the diff** — handoff §1a records eight
+  such failures across six suites on the last bump, of which CI showed
+  one because cargo stops at the first failing target. **Sort them:** a
+  tripwire `assert_eq!(PROTOCOL_VERSION, N)` is meant to fire; an
+  absolute contract expressed as arithmetic on a moving constant is a
+  defect. **`ADVERTISED_PROTOCOL_VERSION == 20` must NOT fire.**
+- **Gates:** `./scripts/gate --protocol` plus the touched input suites.
+  **`--protocol` is required here** — 1a changes the wire.
+
 ## GUI arc Stage 1 — 1-pre MERGED as #237 (`d038f71`); 1a is next, NOT STARTED
 
 **The lane is rewritten, not removed.** Rule 4 removes a lane when its

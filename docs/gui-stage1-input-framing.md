@@ -1,47 +1,108 @@
 # GUI arc, Stage 1 — input foundation (framing)
 
-**Status: revision 11 — APPROVED.** Revisions 1–8 rejected; revision 9
+**Status: revision 12 — APPROVED.** Revision 12 is §2's ground-truth
+re-measurement for Stage 1a and changes no ruling; it carries two
+corrections to claims that were wrong at the original anchor too.
+
+**Previously, revision 11 — APPROVED.** Revisions 1–8 rejected; revision 9
 is the approved design. Revision 10 recorded a scope correction found
 against the 1-pre implementation and **also made a claim about P2 that
 review overturned; revision 11 retracts it and P2 is implemented as
 written** (§6). **Q#S1-8, Q#S1-9 and Q#S1-10 are RULED.** **1-pre is
 IMPLEMENTED**; 1a onward may begin from this document.
 
-**Verification base:** checked in the `gui-arc-stage0` worktree at
-`a994f37`, whose tree for these files is what `f8ad3e7` merged.
+**Verification base:** §2 is **re-measured at `4f77491`** (2026-08-12),
+the tip after 1-pre; it was originally taken at `a994f37`. Sections
+other than §2 were written against `a994f37` and their *rulings* are
+unaffected by 1-pre, which changed no behaviour — but **any line number
+outside §2 predates 1-pre and should be re-checked before it is relied
+on.**
 
 ## 1. What this stage closes
 
 Journey **step 5**. **Not step 12** (Stage 4b, P2-gated). Five of nine
 §3.1 blockers die here.
 
-## 2. Ground truth at `a994f37`
+## 2. Ground truth — RE-MEASURED at `4f77491` (2026-08-12)
 
-`App::window_event` (`main.rs:2734`) is **655 lines**; **eight**
-`WindowEvent` arms handled, the rest fall to `_`.
+**Originally taken at `a994f37`, before 1-pre.** 1-pre (#237) moved
+almost every GPU-side coordinate below, so the section is re-measured
+rather than left to rot — **a framing whose ground truth points at the
+wrong lines is how an implementation ends up arguing with the tree**.
+Two claims were *wrong at both anchors* and are corrected, not merely
+renumbered; they are marked **CORRECTION**.
 
-**Two text producers.** `translate_key(logical: &Key, …)`
-(`main.rs:10975`) reads the **logical key** and truncates via
-`chars().next()`; **`KeyEvent.text` is never read.**
-`WindowEvent::Ime::Commit(String)` is a **separate event, ignored
-entirely** (`set_ime_allowed`/`WindowEvent::Ime`: zero occurrences).
-**Today's two failures are therefore: multi-scalar keyboard input is
-truncated to its first scalar, and an IME commit produces nothing.**
+### Still true, re-checked
 
-**`FrontendEvent`: sixteen variants, none carrying an open path or
-command invocation.** `PROTOCOL_VERSION = 23`.
+- **`FrontendEvent`: sixteen variants**, none carrying an open path or
+  command invocation. **`PROTOCOL_VERSION = 23`.**
+- **`WindowEvent::Ime` is ignored entirely** —
+  `set_ime_allowed`/`WindowEvent::Ime` still **zero occurrences**, so
+  `Ime::Commit(String)` produces nothing. (1d's D1.)
+- **TUI wheel arms unmoved**: `EditorState::dispatch_mouse`
+  (`src/editor.rs:3052`), `ScrollUp`/`ScrollDown` at **`:3203`** — 1-pre
+  touched only `pmacs-gpu`.
+- **The handshake precedes any window**: the client is constructed and
+  the handshake done before `run_app` (connect `main.rs:702`, `run_app`
+  `main.rs:733`; the old citation `:696` was the enclosing block).
+- **1c is producer-side only for Focus/Detach** — those variants exist
+  on the wire. **Title, Bell and `Goodbye` are GPU consumer work.**
+- **`Outbox::enqueue` returns `false` once closed** and **coalesces by
+  kind** (`attach.rs:415`; the old `:414` was off by one at both
+  anchors).
 
-**The handshake precedes any window** — `EventLoop` built, client
-constructed, handshake done **before `run_app`** (`main.rs:696`).
+### Moved by 1-pre
 
-**TUI wheel arms**: `EditorState::dispatch_mouse` (`src/editor.rs:3052`),
-`ScrollUp`/`ScrollDown` at **`:3203`**.
+- **`App::window_event` is `main.rs:4450` and is FOUR lines**, not 655
+  at `:2734`. It calls `dispatch_window_event` and performs the exit;
+  **routing lives in `route_event`, and the bodies in seven `apply_*`
+  methods.**
+- **"Eight arms handled, the rest fall to `_`" is now three family
+  decision functions** — `route_lifecycle`, `route_keyboard` (plus
+  `route_key_action`), `route_pointer` — over **nine** named
+  `WindowEvent` variants, with `Route::Unrouted` as the wildcard. **1a
+  edits `apply_keyboard` and `translate_key`, not `window_event`.**
+- **`translate_key(logical: &Key, …)` is `main.rs:12053`**, not
+  `:10975`. It still reads the **logical key** and still truncates via
+  `chars().next()`, and `_ => return None` is still there — so **A1's
+  witness holds**.
 
-**1c is producer-side only for Focus/Detach** — those variants exist on
-the wire. **Title, Bell and `Goodbye` are GPU consumer work.**
+### CORRECTION 1 — `KeyEvent.text` IS read, and always was
 
-**`Outbox::enqueue` returns `false` once closed** (`attach.rs:414`) and
-**coalesces by kind**.
+The original section said *"`KeyEvent.text` is never read."* **That is
+false, and was false at `a994f37` too** (`:2800` there, `main.rs:3251`
+now): the AltGr rule reads it, as `is_layout_text(key.text.as_deref(),
+pmods)`.
+
+The claim the section meant, and which is true: **`KeyEvent.text` is
+never read as the text a keypress INSERTS.** It is consulted only as a
+*discriminator* — Ctrl+Alt plus printable text means AltGr rather than a
+command chord — and the inserted character always comes from
+`translate_key`'s logical key, truncated to one scalar.
+
+**This matters to A5, not just to accuracy.** §5's rule 2 exempts
+"printable Ctrl+Alt recognized by the existing AltGr rule", so the
+precedence table already depends on the code the section claimed did not
+exist. **1a widens `text` from a discriminator to a payload**, and that
+is the actual change of kind — stating it as "text is never read" hides
+the one place the new payload must not disturb.
+
+### CORRECTION 2 — A4's exit site
+
+A4's witness cited *"exits (`main.rs:2771`)"*. 1-pre moved the mechanism
+without changing the behaviour: an idle Escape still exits, but
+`apply_keyboard` (`main.rs:3219`) now returns `EventOutcome::Exit` and
+**`window_event` (`main.rs:4452`) performs the only executable
+`event_loop.exit()` in the crate.**
+
+**A4 therefore deletes a branch in `apply_keyboard` and changes its
+return type — it does not touch `window_event`.** And **`EventOutcome`
+survives A4**: a native close still returns `Exit`, and
+`dispatch_window_event` must still distinguish it from `Continue`.
+
+**Today's two failures are unchanged by any of this:** multi-scalar
+keyboard input is truncated to its first scalar, and an IME commit
+produces nothing.
 
 ## 3. PR topology
 
@@ -229,7 +290,7 @@ The crate has **exactly one** executable `event_loop.exit()`, in
 | A1 | `F1`–`F35` → `F(1..=35)` | `_ => return None` | map `F13+` → `None` → F13–F35 rows |
 | A2 | Shift+Tab → `BackTab` with `Shift` set | produces `Tab` | drop `Shift` → A2 only |
 | A3 | `ContextMenu` → `Menu` | produces nothing | map to `Char('\0')` → A3 only |
-| A4 | Idle Escape reaches the daemon, never exits | exits (`main.rs:2771`) | restore the quit branch → A4 only |
+| A4 | Idle Escape reaches the daemon, never exits | exits — `apply_keyboard` (`main.rs:3219`) returns `EventOutcome::Exit`, performed at `main.rs:4452` | restore the quit branch → A4 only |
 | A5 | Precedence per §5 (1–8) | multi-scalar truncated; IME ignored | move rule 1 (control text → text) → the `Enter`-in-dired row |
 | A6 | One commit = one edit, undo unit, hook, eligible CRDT op | commit truncated to one scalar | one edit per scalar → undo-unit row (**and D3 surfaces here**) |
 | A7 | Prompts consume scalars **in order** | multi-scalar never arrives | reverse order → A7's prompt transcript |
