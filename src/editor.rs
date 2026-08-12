@@ -1950,16 +1950,29 @@ impl EditorState {
         let pre_revision = self.active_buffer_revision();
         {
             let mut core = self.core.borrow_mut();
-            match single {
-                Some(ch) => {
-                    core.rotate_command(frontend_id, "buffer.self-insert");
-                    core.typed_edit_arm(frontend_id, ch);
+            if let Some(ch) = single {
+                core.rotate_command(frontend_id, "buffer.self-insert");
+                core.typed_edit_arm(frontend_id, ch);
+                // **Must go through `insert_char_over_region`, not
+                // the generic byte insert.** Arming provenance is
+                // only half of it: `typed_edit_complete` is called
+                // from `insert_char` / `insert_char_over_region` and
+                // nowhere else, so a generic insert leaves the arm
+                // holding `None` and `buffer.after-edit` sees no
+                // record — `this_command` rotates correctly and
+                // auto-pairing still fails, which is a failure mode
+                // that looks like success from the command side.
+                // It handles the no-region case itself, by
+                // delegating to `insert_char`.
+                core.insert_char_over_region(ch);
+            } else {
+                core.break_command_chain(frontend_id);
+                // A6 — multi-scalar is ONE generic edit, and
+                // deliberately creates no typed provenance: it is not a
+                // keystroke.
+                if let Err(e) = core.insert_text_input(text) {
+                    eprintln!("pmacs: text input failed: {e}");
                 }
-                None => core.break_command_chain(frontend_id),
-            }
-            // A6 — ONE edit, whichever branch armed it.
-            if let Err(e) = core.insert_text_input(text) {
-                eprintln!("pmacs: text input failed: {e}");
             }
         }
 

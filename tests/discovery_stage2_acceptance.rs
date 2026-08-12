@@ -77,9 +77,12 @@ fn the_wire_is_v24_and_the_advertised_baseline_is_unmoved() {
         "moving this is the incompatible act the counter-offer mechanism exists to avoid"
     );
     // The whole v12..=22 population this lane is compatible with is
-    // still supported, and the set ends at the new wire — a widened set
-    // is a failure rather than a silent pass.
-    for version in 6..=23 {
+    // still supported, AND the current wire is in the set. The loop
+    // must run to `PROTOCOL_VERSION`, not to a literal: stopping at 23
+    // let a supported range that ended at 23 pass this test while
+    // `PROTOCOL_VERSION` was already 24 — the accepted half proved
+    // nothing about the version the constant names.
+    for version in 6..=PROTOCOL_VERSION {
         assert!(
             is_supported_protocol_version(version),
             "v{version} must still be supported"

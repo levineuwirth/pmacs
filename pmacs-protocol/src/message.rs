@@ -1895,6 +1895,24 @@ pub enum ResourceBody {
 /// encoding makes an in-place widening a wire break rather than an
 /// evolution, and gating the widened form would have left those peers
 /// with no minibuffer message at all.
+///
+/// GUI arc Stage 1a: bumped 23 → 24 for
+/// [`FrontendEvent::TextInput`] — committed text from a keypress or an
+/// IME composition, carried as one event so that a multi-scalar
+/// grapheme is one edit, one undo unit and one eligible CRDT op instead
+/// of being truncated to its first scalar. Appended after
+/// `PanelPointer`, the final v23 `FrontendEvent` variant, so no
+/// existing discriminant moves.
+///
+/// **This is the first FRONTEND→INSTANCE extension to need a gate in
+/// both directions**, and the reason is that the direction of travel is
+/// reversed: for an instance→frontend variant the daemon simply
+/// withholds, but here the *frontend* must withhold below
+/// [`TEXT_INPUT_MIN_VERSION`] **and** the daemon must refuse what a peer
+/// below it nonetheless sends. A client built from this crate can encode
+/// the variant whatever it negotiated, so the producer gate alone would
+/// leave a v6–v23 session able to drive an edit through a variant its
+/// own session never declared.
 pub const PROTOCOL_VERSION: u32 = 24;
 
 /// Protocol version placed in the daemon's server-first [`Hello`].
@@ -2076,6 +2094,14 @@ pub fn negotiated_session_version(frontend_offer: u32) -> u32 {
 /// keeps receiving the frozen [`InstanceMessage::MinibufferPrompt`], a
 /// `>= 23` peer receives only the rows form, and no peer ever receives
 /// both. [`ADVERTISED_PROTOCOL_VERSION`] does not move.
+///
+/// GUI arc Stage 1a: extended to `[6, ..., 24]` for
+/// [`FrontendEvent::TextInput`]. Additive, and gated in **both**
+/// directions rather than only daemon-side — see [`PROTOCOL_VERSION`]
+/// for why an inbound frontend→instance variant needs the receiving
+/// check too. [`ADVERTISED_PROTOCOL_VERSION`] does not move: a v23
+/// frontend negotiates v23, never sends the variant, and keeps today's
+/// first-scalar behaviour.
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[
     6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
 ];
