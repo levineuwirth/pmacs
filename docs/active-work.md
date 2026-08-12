@@ -270,54 +270,6 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## Docs absorption of #236 and #237 — PR #238 OPEN, docs only
-
-**Written with the branch's own commit**, because this file's standing
-rule is *when a PR is opened, give it a lane* — and a lane recording an
-absorption belongs in the absorption, not after it. #171 drifted 153
-commits while invisible here.
-
-- **PR #238** — https://github.com/levineuwirth/pmacs/pull/238.
-- **Branch `docs-absorb-237`**, base `githubsucks/main` @ `d038f71`
-  exactly. **`githubsucks/docs-absorb-237` is the authoritative tip** —
-  the ref, not a SHA.
-- **Scope: `docs/active-work.md` and `docs/agent-handoff.md` only.** No
-  `src/`, no `pmacs-gpu/`, **no Stage 1a implementation** — verified with
-  `git diff --name-only githubsucks/main`, which lists nothing outside
-  `docs/`.
-- **The recovery procedure was RE-RUN from an empty directory on git
-  2.55.0, not SHA-swapped**, and that is what licenses advancing the
-  base at all. It also **discharges the obligation left at `e67ad07`**,
-  where the base moved without the procedure being exercised. Details in
-  "Repository authority" above; the floor check was run against **both**
-  floors, and the documented two-argument worktree trap was reproduced
-  rather than assumed.
-- **Gates: `./scripts/gate`, all eight stages green** (log
-  `20260812T111504Z-3265400`). No `--acceptance` and no `--protocol` —
-  docs only, so no suite is touched and no wire moves. That run covered
-  `502308d`. **Every commit after it is markdown-only** — stated as a
-  standing property rather than a count, because a count goes stale on
-  the next commit, which is how the previous version of this sentence
-  came to say "one commit, 34 lines" when there were two and 38. Check
-  it with `git diff --name-only 502308d..HEAD`, which must list nothing
-  outside `*.md`; `git diff --check` and `cargo fmt --check` are clean
-  at HEAD.
-- **One judgement recorded because it exceeded the requested scope and
-  was approved on review**: §1a's board carried no GUI-arc row, which
-  contradicted the anchor two sections above it. The row sits where
-  `COHERENCE.md` §20 Q#GA5 puts the arc — after Priority 1, alongside
-  P2–P5, interacting only at the **P2 start gate** — and the section's
-  dateline now says which row is current and which are as of
-  2026-08-01.
-- **THIS LANE MUST BE DELETED BY A FINAL PRE-MERGE COMMIT ON THIS
-  BRANCH, and cannot remove itself at merge.** GitHub merges the tree as
-  it stands, so "removed at merge" would land the words *PR #238 OPEN*
-  on `main` — a lane advertising an open PR that closed in the same
-  commit. It stays while the PR is under review, because an open PR
-  without a lane is the #171 defect; the last commit before merge takes
-  it out. Rule 4 removes it **outright** rather than rewriting it: it
-  describes a docs pass, not an arc.
-
 ## GUI arc Stage 1 — 1-pre MERGED as #237 (`d038f71`); 1a is next, NOT STARTED
 
 **The lane is rewritten, not removed.** Rule 4 removes a lane when its
