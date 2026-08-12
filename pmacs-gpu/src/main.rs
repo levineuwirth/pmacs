@@ -46,8 +46,8 @@ use pmacs_protocol::{
     MAX_STATUSLINE_FACE_BYTES, MAX_STATUSLINE_PROVIDERS, MAX_STATUSLINE_SEGMENT_BYTES,
     MAX_STATUSLINE_TOTAL_TEXT_BYTES, MenuPromptRow, MinibufferRow, Modifiers,
     MouseButton as ProtocolMouseButton, MouseKind as ProtocolMouseKind, PointerKind,
-    SelectionSnapshot, StatuslineSegment, StyleSegment, StyleSpan, TAB_STOP_COLUMNS, TerminalFrame,
-    UnderlineStyle,
+    SelectionSnapshot, StatuslineSegment, StyleSegment, StyleSpan, TAB_STOP_COLUMNS,
+    TEXT_INPUT_MIN_VERSION, TerminalFrame, UnderlineStyle,
     cell::{Color as CellColor, Style as CellStyle},
     is_builtin_pair_char, is_modeline_face_name,
     panel::{PANEL_MIN_VERSION, PanelFrame, PanelFramePayload},
@@ -3213,23 +3213,27 @@ impl App {
             .as_ref()
             .is_some_and(State::completion_open_for_current_buffer);
 
-        // Escape cancels an active intercept (e.g. a running
-        // search) or dismisses the completion popup; otherwise it
-        // stays the local quit.
+        // A4 / Q#S1-1 — **every** Escape reaches the daemon, and none
+        // exits.
+        //
+        // It used to quit the frontend when nothing was intercepting,
+        // which made the GUI's most common "get me out of this" key
+        // destroy the window instead of cancelling. Q#S1-1 settles the
+        // exits and Escape is not among them: a native close detaches
+        // this frontend, `editor.quit` shuts the daemon and its
+        // attachments down, and **Escape only cancels or round-trips**.
+        //
+        // The `intercept || completion_open` test went with the quit
+        // branch. It never decided what to SEND — both arms sent the
+        // same `Escape` — only whether to send at all, so with one
+        // behaviour left there is nothing for it to choose. (Both flags
+        // remain live below, for the OS-paste, round-trip and
+        // completion-accept paths.)
         if matches!(key.logical_key, Key::Named(NamedKey::Escape)) {
-            if intercept || completion_open {
-                if let Some(client) = self.attach_client.as_ref()
-                    && let Err(e) = client.send_key(ProtocolKey::Escape, Modifiers::NONE)
-                {
-                    eprintln!("pmacs-gpu: send Escape (cancel) failed: {e}");
-                }
-            } else {
-                // Q#S1-1 / A4 — the local quit, unchanged here and
-                // deleted by Stage 1a: an idle Escape must reach the
-                // daemon. `window_event` performs the exit. This is the
-                // only reason a BODY needs an outcome; `EventOutcome`
-                // itself outlives A4, since a native close still exits.
-                return EventOutcome::Exit;
+            if let Some(client) = self.attach_client.as_ref()
+                && let Err(e) = client.send_key(ProtocolKey::Escape, Modifiers::NONE)
+            {
+                eprintln!("pmacs-gpu: send Escape failed: {e}");
             }
             return EventOutcome::Continue;
         }
@@ -3310,6 +3314,32 @@ impl App {
             }
             if let Err(e) = client.send_key(pkey, pmods) {
                 eprintln!("pmacs-gpu: send_key (command chord) failed: {e}");
+            }
+            return EventOutcome::Continue;
+        }
+
+        // A5 — multi-scalar text travels as one `TextInput`, if the
+        // session can carry it.
+        //
+        // Sited AFTER the command-chord and OS-paste branches and
+        // BEFORE the optimistic path, which is the order §5's rules
+        // describe: a chord is never text, and text must not be
+        // optimistically applied one scalar at a time when the whole
+        // point is that it is one edit.
+        //
+        // **The version gate withholds rather than degrades.** A `< 24`
+        // daemon keeps exactly the behaviour it has — including today's
+        // truncation to the first scalar — because the fallback below
+        // is the unchanged `Key` path. That is the no-regression
+        // promise, not retroactive correctness.
+        if let Some(text) = text_input_payload(&key.logical_key, key.text.as_deref(), pmods)
+            && client.session_protocol_version() >= TEXT_INPUT_MIN_VERSION
+        {
+            if let Some(state) = self.state.as_mut() {
+                state.mark_cursor_stale_after_round_trip();
+            }
+            if let Err(e) = client.send_text_input(text) {
+                eprintln!("pmacs-gpu: send_text_input failed: {e}");
             }
             return EventOutcome::Continue;
         }
@@ -12070,14 +12100,137 @@ fn translate_key(
             NamedKey::Enter => ProtocolKey::Enter,
             NamedKey::Delete => ProtocolKey::Delete,
             NamedKey::Insert => ProtocolKey::Insert,
+            // A2 — Shift+Tab is `BackTab`, a key of its own, and the
+            // Shift stays set. The daemon's keymap binds the two
+            // differently (indent versus outdent), and a `Tab` that
+            // merely carries Shift is indistinguishable from a Tab the
+            // user shifted by accident. The TUI has always sent
+            // `BackTab`; this closes the divergence rather than
+            // inventing a convention.
+            NamedKey::Tab if mods.shift_key() => ProtocolKey::BackTab,
             NamedKey::Tab => ProtocolKey::Tab,
             NamedKey::Space => ProtocolKey::Char(' '),
-            _ => return None,
+            // A3 — the menu key. `ProtocolKey::Menu` already exists and
+            // the TUI already sends it; only the GPU translation was
+            // missing, so the key did nothing in the GUI.
+            NamedKey::ContextMenu => ProtocolKey::Menu,
+            // A1 — F1..=F35. winit names each as its own variant, so
+            // there is no arithmetic to do and no range to trust: the
+            // mapping is total over the variants winit defines, and
+            // `named_function_key` is exhaustive rather than a
+            // computed offset.
+            named => named_function_key(*named).map(ProtocolKey::F)?,
         },
         Key::Character(s) => ProtocolKey::Char(s.chars().next()?),
         _ => return None,
     };
     Some((pkey, pmods))
+}
+
+/// A5 / Q#S1-9 — whether a keypress should travel as `TextInput`
+/// rather than `Key`, and with what payload.
+///
+/// **A keypress stays `Key` unless a rule below moves it.** That
+/// default is the contract, not an implementation convenience: every
+/// mode keymap, every command chord and today's typed provenance are
+/// built on `Key`, so widening the exception is how a working binding
+/// silently becomes an insert.
+///
+/// The rules, in the order they are checked:
+///
+/// 1. **Named keys and control text stay `Key`**, whatever
+///    `KeyEvent.text` says — `Enter` reports `"\r"`, and an `Enter`
+///    that arrived as text would insert a newline in dired instead of
+///    opening a file.
+/// 2. **Ctrl/Alt chords stay `Key`**, except printable Ctrl+Alt that
+///    the existing `AltGr` rule already recognizes — the caller strips
+///    those modifiers before this is reached, so they arrive here as
+///    plain text.
+/// 3. **Meta/Super-only text stays reserved to the OS** (Q#S1-7 moves
+///    the whole question to Stage 2).
+/// 4. **Plain printable SINGLE-scalar stays `Key`.** This is the
+///    conservative half of the ruling: it preserves mode keymaps and
+///    the one-codepoint typed provenance that already exists.
+/// 5. **Printable MULTI-scalar becomes one `TextInput`** — the case
+///    that is broken today, truncated to its first scalar.
+///
+/// `Key::Dead` is 1d's, and 1a buffers nothing (rule 7); `Shift` is
+/// already baked into the resolved text and is not carried (rule 8).
+fn text_input_payload<'a>(
+    logical: &Key,
+    text: Option<&'a str>,
+    mods: Modifiers,
+) -> Option<&'a str> {
+    // Rule 1 — a named key is never text, regardless of what winit
+    // reports as its text.
+    if matches!(logical, Key::Named(_)) {
+        return None;
+    }
+    // Rules 2 and 3 — any command modifier still held at this point is
+    // a chord. The AltGr case has already had its modifiers stripped by
+    // the caller, so reaching here with Ctrl/Alt means a genuine chord.
+    if !is_plain_text_modifiers(mods) {
+        return None;
+    }
+    let text = text?;
+    // Rule 1, second half — control text is not text.
+    if text.is_empty() || text.chars().any(char::is_control) {
+        return None;
+    }
+    // Rules 4 and 5 — the single/multi split.
+    if text.chars().count() < 2 {
+        return None;
+    }
+    Some(text)
+}
+
+/// A1 — winit's function-key variants to the protocol's 1-based `F(n)`.
+///
+/// Written as an exhaustive match rather than parsed from the variant
+/// name or computed as an offset from `F1`: winit's `NamedKey` is
+/// `#[non_exhaustive]` and its ordering is not a contract, so arithmetic
+/// over it would be a silent-corruption bug the day a variant is
+/// inserted. `None` for anything that is not a function key, which is
+/// what makes the caller's `?` fall through to "unmapped".
+fn named_function_key(named: NamedKey) -> Option<u8> {
+    Some(match named {
+        NamedKey::F1 => 1,
+        NamedKey::F2 => 2,
+        NamedKey::F3 => 3,
+        NamedKey::F4 => 4,
+        NamedKey::F5 => 5,
+        NamedKey::F6 => 6,
+        NamedKey::F7 => 7,
+        NamedKey::F8 => 8,
+        NamedKey::F9 => 9,
+        NamedKey::F10 => 10,
+        NamedKey::F11 => 11,
+        NamedKey::F12 => 12,
+        NamedKey::F13 => 13,
+        NamedKey::F14 => 14,
+        NamedKey::F15 => 15,
+        NamedKey::F16 => 16,
+        NamedKey::F17 => 17,
+        NamedKey::F18 => 18,
+        NamedKey::F19 => 19,
+        NamedKey::F20 => 20,
+        NamedKey::F21 => 21,
+        NamedKey::F22 => 22,
+        NamedKey::F23 => 23,
+        NamedKey::F24 => 24,
+        NamedKey::F25 => 25,
+        NamedKey::F26 => 26,
+        NamedKey::F27 => 27,
+        NamedKey::F28 => 28,
+        NamedKey::F29 => 29,
+        NamedKey::F30 => 30,
+        NamedKey::F31 => 31,
+        NamedKey::F32 => 32,
+        NamedKey::F33 => 33,
+        NamedKey::F34 => 34,
+        NamedKey::F35 => 35,
+        _ => return None,
+    })
 }
 
 /// Cursor-motion keys — forwarded with any modifier set (e.g. `C-Left`
@@ -12115,6 +12268,20 @@ fn should_forward_key(key: ProtocolKey, mods: Modifiers) -> bool {
         return true;
     }
     if matches!(key, ProtocolKey::Backspace | ProtocolKey::Delete) {
+        return true;
+    }
+    // A1–A3 — function keys, `BackTab` and `Menu` forward with ANY
+    // modifier set, for the same reason motion keys do: they are
+    // command keys that never insert text, so the chord-withholding
+    // rule below has nothing to protect them from. Translating them
+    // without forwarding them would have been the more expensive
+    // mistake — the key would map correctly and still do nothing,
+    // which reads as a daemon-side keymap gap rather than a frontend
+    // one.
+    if matches!(
+        key,
+        ProtocolKey::F(_) | ProtocolKey::BackTab | ProtocolKey::Menu
+    ) {
         return true;
     }
     if !is_plain_text_modifiers(mods) {

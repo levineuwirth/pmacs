@@ -5009,6 +5009,18 @@ impl EditorCore {
         self.insert_bytes_over_region(data)
     }
 
+    /// GUI arc Stage 1a / A6 — insert committed text as **one edit**.
+    ///
+    /// Shares [`Self::insert_bytes_over_region`] with paste, which is
+    /// what makes it a single `EditOp` and therefore a single undo
+    /// unit, a single `buffer.after-edit`, and a single eligible CRDT
+    /// op. **It deliberately does NOT touch `clipboard_slot`**: typed
+    /// text was never copied, and recording it would let the next yank
+    /// resurrect something the user merely typed.
+    pub fn insert_text_input(&mut self, text: &str) -> Result<(), String> {
+        self.insert_bytes_over_region(text.as_bytes())
+    }
+
     /// Shared insert/replace for paste: `Replace` over the active
     /// region, else `Insert` at the cursor. The cursor lands just past
     /// the inserted bytes and any selection is cleared. No-op insert for

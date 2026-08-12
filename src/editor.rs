@@ -1881,6 +1881,110 @@ impl EditorState {
         true
     }
 
+    /// GUI arc Stage 1a / A5 — apply committed text from a keypress or
+    /// an IME composition.
+    ///
+    /// **This is typed text, not a paste**, and the two differ in three
+    /// observable ways:
+    ///
+    /// * a terminal gets **raw UTF-8, never bracketed paste** (A8) — a
+    ///   shell that sees `ESC[200~` treats the input as pasted and
+    ///   changes how it handles newlines and completion;
+    /// * the clipboard slot is **not** touched, because nothing was
+    ///   copied;
+    /// * the document path performs **one atomic edit** (A6) — one undo
+    ///   unit, one `buffer.after-edit`, one eligible CRDT op — which is
+    ///   the entire reason the wire variant exists. Delivering a
+    ///   two-scalar grapheme as two keypresses makes two undo units and
+    ///   lets a remote edit interleave between them.
+    ///
+    /// The modal precedence is `dispatch_key`'s, deliberately: menu,
+    /// search, query-replace and minibuffer are full keymap shadows, so
+    /// text that arrives while one is up belongs to it and not to the
+    /// buffer underneath. Those surfaces have no notion of a
+    /// multi-scalar commit, so the text is fed to them **one scalar at
+    /// a time, in order** (A7) — order is the contract, since a prompt
+    /// accumulates a query.
+    ///
+    /// Returns `true` when the text was consumed by a shadow or a
+    /// terminal, `false` when the caller should treat it as an ordinary
+    /// document edit — the same convention as [`Self::dispatch_paste`].
+    pub fn dispatch_text_input(&mut self, frontend_id: FrontendId, text: &str) {
+        self.core.borrow_mut().active_frontend = frontend_id;
+
+        // Shadows first, one scalar at a time and in order (A7).
+        if self.feed_shadow_scalars(frontend_id, text) {
+            return;
+        }
+
+        // A8 — a terminal takes the bytes exactly as typed.
+        if let Some(key) = self.active_terminal_key(frontend_id) {
+            self.claim_terminal_controller(key);
+            self.send_terminal_bytes(key.buffer_id, text.as_bytes());
+            return;
+        }
+
+        // A6 — the ordinary document path: ONE edit.
+        self.with_after_edit_check(|state| {
+            let mut core = state.core.borrow_mut();
+            // Provenance follows §5. A single-scalar commit is
+            // indistinguishable from a keypress and keeps today's
+            // one-codepoint typed provenance; a multi-scalar commit is
+            // not a command and breaks the chain, exactly as a paste
+            // does.
+            if text.chars().count() > 1 {
+                core.break_command_chain(frontend_id);
+            }
+            if let Err(e) = core.insert_text_input(text) {
+                eprintln!("pmacs: text input failed: {e}");
+            }
+        });
+    }
+
+    /// Feed `text` to whichever modal shadow owns input, one scalar at a
+    /// time and in order. Returns `true` when a shadow consumed it.
+    ///
+    /// Each scalar becomes a plain `Char` chord, which is what these
+    /// handlers already take from `dispatch_key`; routing through them
+    /// rather than reaching into their state is what keeps a prompt's
+    /// own editing rules — history, completion, acceptance — in one
+    /// place.
+    fn feed_shadow_scalars(&mut self, frontend_id: FrontendId, text: &str) -> bool {
+        enum Shadow {
+            Menu,
+            Search,
+            QueryReplace,
+            Minibuffer,
+        }
+        let shadow = {
+            let core = self.core.borrow();
+            if core.menu_is_open() {
+                Some(Shadow::Menu)
+            } else if core.search_active() {
+                Some(Shadow::Search)
+            } else if core.query_replace_active() {
+                Some(Shadow::QueryReplace)
+            } else if core.minibuffer.is_active() {
+                Some(Shadow::Minibuffer)
+            } else {
+                None
+            }
+        };
+        let Some(shadow) = shadow else {
+            return false;
+        };
+        for ch in text.chars() {
+            let chord = Chord::plain(KeyCode::Char(ch));
+            match shadow {
+                Shadow::Menu => self.dispatch_menu_key(frontend_id, chord),
+                Shadow::Search => self.dispatch_search_key(chord),
+                Shadow::QueryReplace => self.dispatch_query_replace_key(chord),
+                Shadow::Minibuffer => self.dispatch_minibuffer_key(frontend_id, chord),
+            }
+        }
+        true
+    }
+
     /// Apply authenticated frontend focus to terminal control/reporting.
     pub fn dispatch_focus(&mut self, frontend_id: FrontendId, gained: bool) {
         self.core.borrow_mut().active_frontend = frontend_id;

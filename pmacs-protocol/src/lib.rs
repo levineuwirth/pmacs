@@ -68,9 +68,9 @@ pub use message::{
     MenuPromptRow, MinibufferRow, Modifiers, MouseButton, MouseEvent, MouseKind,
     NegotiatedCapabilities, PROTOCOL_VERSION, PointerKind, ResourceBody,
     SUPPORTED_PROTOCOL_VERSIONS, SelectionSnapshot, SessionBootstrapRequest, StatuslineSegment,
-    StyleSegment, StyleSpan, ThemeFace, is_builtin_pair_char, is_modeline_face_name,
-    is_supported_protocol_version, is_ui_face_name, negotiate_capabilities,
-    negotiated_session_version, requested_protocol_version,
+    StyleSegment, StyleSpan, TEXT_INPUT_MAX_BYTES, TEXT_INPUT_MIN_VERSION, ThemeFace,
+    is_builtin_pair_char, is_modeline_face_name, is_supported_protocol_version, is_ui_face_name,
+    negotiate_capabilities, negotiated_session_version, requested_protocol_version,
 };
 pub use panel::{
     MAX_PANEL_VISIBLE_CELLS, PANEL_MIN_VERSION, PanelFrame, PanelFrameError, PanelFramePayload,
