@@ -324,6 +324,12 @@ fn a8_a_terminal_receives_raw_utf8_with_bracketed_paste_enabled() {
     let typed = "h\u{e9}llo\u{301}";
     s.dispatch_text_input(FID, typed);
 
+    // Waits for AT LEAST the full payload, then asserts exact equality.
+    // Sound against a split write for a reason the contrast below does
+    // not share: the gate is a lower bound on length, so a partial
+    // delivery keeps waiting rather than being mistaken for a wrong
+    // answer — and the equality can still fail for the real reason,
+    // which a wait-for-exact-content loop could not.
     let deadline = Instant::now() + Duration::from_secs(10);
     let got = loop {
         s.tick_processes();
@@ -356,20 +362,27 @@ fn a8_a_terminal_receives_raw_utf8_with_bracketed_paste_enabled() {
         s.dispatch_paste(FID, b"pasted"),
         "the terminal claims the paste"
     );
+    //
+    // **Wait for the COMPLETE sequence, not the opening marker.** PTY
+    // delivery and the child's writes can split anywhere, so breaking
+    // as soon as `ESC[200~` appears and then requiring the payload and
+    // the closer is a race that fails on correct code — the closer may
+    // simply not have arrived yet. Polling for the whole string makes a
+    // partial write indistinguishable from "not yet", which is what it
+    // is. Same rule the vterm suite follows when it waits for `row19`
+    // rather than for a prefix of it.
+    let want = "\u{1b}[200~pasted\u{1b}[201~";
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         s.tick_processes();
         let all = String::from_utf8_lossy(&std::fs::read(&sink).unwrap_or_default()).into_owned();
-        if all.contains("\u{1b}[200~") {
-            assert!(
-                all.contains("pasted") && all.contains("\u{1b}[201~"),
-                "a paste is bracketed on both sides: {all:?}"
-            );
+        if all.contains(want) {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "a paste through the same terminal must be bracketed; got {all:?}"
+            "a paste through the same terminal must be bracketed on both \
+             sides; waited for {want:?}, saw {all:?}"
         );
         std::thread::sleep(Duration::from_millis(10));
     }
