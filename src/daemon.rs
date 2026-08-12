@@ -71,7 +71,7 @@ use crate::protocol::{
     InitialTarget, InitialTargetResult, InstanceCapabilities, InstanceIdentity, InstanceMessage,
     InstanceSignal, MAX_INITIAL_TARGET_ERROR_BYTES, MAX_INITIAL_TARGET_PATH_BYTES,
     PANEL_MIN_VERSION, PointerKind, SelectionSnapshot, SessionBootstrapRequest,
-    TEXT_INPUT_MAX_BYTES,
+    TEXT_INPUT_MAX_BYTES, TEXT_INPUT_MIN_VERSION,
 };
 use crate::socket_path::{SocketPathError, ensure_runtime_subdir};
 use crate::transport::{read_message, write_message};
@@ -2536,6 +2536,25 @@ fn handle_dispatcher_event(
                     // worse than a refused one. An empty payload is
                     // dropped too — it would be an edit that edits
                     // nothing, and would still cost an undo unit.
+                    // **The producer gate is only half the contract.**
+                    // A frontend that negotiated v6–v23 can still encode
+                    // this variant — it is compiled from the same crate,
+                    // and postcard will happily write the discriminant —
+                    // so a peer that never declared v24 could otherwise
+                    // mutate the buffer through a variant its own
+                    // session does not include. Gate on the
+                    // AUTHENTICATED session's negotiated version, not on
+                    // the payload and not on what the daemon supports.
+                    let peer_declared_text_input = session_registry
+                        .session_state(source)
+                        .is_some_and(|s| s.negotiated_protocol_version >= TEXT_INPUT_MIN_VERSION);
+                    if !peer_declared_text_input {
+                        eprintln!(
+                            "pmacs: dropping TextInput from {source:?}, which negotiated \
+                             below v{TEXT_INPUT_MIN_VERSION}"
+                        );
+                        return;
+                    }
                     if text.is_empty() {
                         return;
                     }

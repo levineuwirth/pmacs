@@ -3162,7 +3162,7 @@ impl App {
             Route::Keyboard {
                 action: KeyAction::Press,
                 key,
-            } => return self.apply_keyboard(key),
+            } => self.apply_keyboard(key),
             Route::Pointer(PointerRoute::Moved { x, y }) => self.apply_cursor_moved(x, y),
             Route::Pointer(PointerRoute::Left(button_state)) => {
                 self.apply_left_button(button_state);
@@ -3186,7 +3186,7 @@ impl App {
     /// Perform [`KeyAction::Press`]. The router has already
     /// discarded key-ups, so `key` is always a press.
     #[allow(clippy::too_many_lines)] // one linear key pipeline; splitting hides the order.
-    fn apply_keyboard(&mut self, key: &KeyEvent) -> EventOutcome {
+    fn apply_keyboard(&mut self, key: &KeyEvent) {
         // While the daemon is intercepting keystrokes — an active
         // incremental search (Q#SR5), or a minibuffer / pending
         // prefix — every key belongs to its handler, not the
@@ -3235,11 +3235,11 @@ impl App {
             {
                 eprintln!("pmacs-gpu: send Escape failed: {e}");
             }
-            return EventOutcome::Continue;
+            return;
         }
 
         let Some((pkey, mut pmods)) = translate_key(&key.logical_key, self.modifiers) else {
-            return EventOutcome::Continue;
+            return;
         };
 
         // AltGr / international text (audit F-004). winit reports
@@ -3275,12 +3275,56 @@ impl App {
             {
                 eprintln!("pmacs-gpu: send_paste failed: {e}");
             }
-            return EventOutcome::Continue;
+            return;
         }
 
         let Some(client) = self.attach_client.as_ref() else {
-            return EventOutcome::Continue;
+            return;
         };
+
+        // A5 — multi-scalar text travels as ONE `TextInput`, if the
+        // session can carry it.
+        //
+        // **This MUST precede the intercept branch below, and that
+        // placement is the contract rather than a preference.** A
+        // modal prompt or a focused terminal is exactly what makes
+        // `daemon_intercepts_keys` true, so classifying after it would
+        // leave A7 (prompts consume scalars in order) and A8 (terminals
+        // take raw UTF-8) reachable only when neither a prompt nor a
+        // terminal is present — which is to say, never. Sited here, the
+        // producer sends the same `TextInput` in every state and the
+        // daemon's `dispatch_text_input` applies §5's modal precedence,
+        // which is where that decision belongs: the frontend cannot see
+        // which shadow is up.
+        //
+        // Ordering against the branches below is safe by construction,
+        // not by luck: `text_input_payload` returns `None` whenever a
+        // command modifier is held, so the Ctrl-V paste and
+        // command-chord paths can never be shadowed by it.
+        //
+        // **The version gate WITHHOLDS rather than degrades.** A `< 24`
+        // daemon keeps exactly the behaviour it has — including today's
+        // truncation to the first scalar — because the fallback is the
+        // unchanged `Key` path below. No regression, not retroactive
+        // correctness.
+        if let Some(text) = text_input_payload(&key.logical_key, key.text.as_deref(), pmods)
+            && client.session_protocol_version() >= TEXT_INPUT_MIN_VERSION
+        {
+            if let Some(state) = self.state.as_mut() {
+                state.mark_cursor_stale_after_round_trip();
+            }
+            if debug_input() {
+                eprintln!(
+                    "pmacs-gpu send_text_input: {} scalars",
+                    text.chars().count()
+                );
+            }
+            let client = self.attach_client.as_ref().expect("client checked above");
+            if let Err(e) = client.send_text_input(text) {
+                eprintln!("pmacs-gpu: send_text_input failed: {e}");
+            }
+            return;
+        }
 
         // Intercept path: round-trip every key into the daemon's
         // active handler (search query / step / accept / cancel).
@@ -3294,7 +3338,7 @@ impl App {
             if let Err(e) = client.send_key(pkey, pmods) {
                 eprintln!("pmacs-gpu: send_key (intercepted) failed: {e}");
             }
-            return EventOutcome::Continue;
+            return;
         }
 
         // Idle: forward any command chord (Char/Enter/Tab with
@@ -3315,33 +3359,7 @@ impl App {
             if let Err(e) = client.send_key(pkey, pmods) {
                 eprintln!("pmacs-gpu: send_key (command chord) failed: {e}");
             }
-            return EventOutcome::Continue;
-        }
-
-        // A5 — multi-scalar text travels as one `TextInput`, if the
-        // session can carry it.
-        //
-        // Sited AFTER the command-chord and OS-paste branches and
-        // BEFORE the optimistic path, which is the order §5's rules
-        // describe: a chord is never text, and text must not be
-        // optimistically applied one scalar at a time when the whole
-        // point is that it is one edit.
-        //
-        // **The version gate withholds rather than degrades.** A `< 24`
-        // daemon keeps exactly the behaviour it has — including today's
-        // truncation to the first scalar — because the fallback below
-        // is the unchanged `Key` path. That is the no-regression
-        // promise, not retroactive correctness.
-        if let Some(text) = text_input_payload(&key.logical_key, key.text.as_deref(), pmods)
-            && client.session_protocol_version() >= TEXT_INPUT_MIN_VERSION
-        {
-            if let Some(state) = self.state.as_mut() {
-                state.mark_cursor_stale_after_round_trip();
-            }
-            if let Err(e) = client.send_text_input(text) {
-                eprintln!("pmacs-gpu: send_text_input failed: {e}");
-            }
-            return EventOutcome::Continue;
+            return;
         }
 
         // Session B2 forwards cursor motion + plain text editing
@@ -3350,7 +3368,7 @@ impl App {
         // here and are withheld, leaving OS/WM shortcuts (Cmd-Q,
         // Cmd-C) to the platform.
         if !should_forward_key(pkey, pmods) {
-            return EventOutcome::Continue;
+            return;
         }
 
         // Arc 1a Q#C6 — with the popup open, RET and TAB mean
@@ -3387,7 +3405,7 @@ impl App {
             {
                 eprintln!("pmacs-gpu: send Viewport failed: {e}");
             }
-            return EventOutcome::Continue;
+            return;
         }
         if let Some(state) = self.state.as_mut() {
             if state.defer_round_trip_key_if_needed(pkey, pmods) {
@@ -3397,7 +3415,7 @@ impl App {
                          pending optimistic cursor"
                     );
                 }
-                return EventOutcome::Continue;
+                return;
             }
             state.mark_cursor_stale_after_round_trip();
         }
@@ -3407,7 +3425,6 @@ impl App {
         if let Err(e) = client.send_key(pkey, pmods) {
             eprintln!("pmacs-gpu: send_key failed: {e}");
         }
-        EventOutcome::Continue
     }
 }
 
@@ -3448,23 +3465,19 @@ enum Route<'a> {
 
 /// What the event loop must do once a family's body has run.
 ///
-/// **Two producers, and they are not the same kind of thing.**
-/// `LifecycleRoute::Exit` is a native window close, which must always
-/// exit; `apply_keyboard` returns `Exit` for an idle Escape, which is a
-/// local quit. Returning the decision rather than taking an
-/// `&ActiveEventLoop` is what keeps every body reachable from a test:
-/// the crate has **exactly one** executable `event_loop.exit()`, in
-/// `window_event`.
+/// **Since A4, `LifecycleRoute::Exit` — a native window close — is the
+/// SOLE producer.** `apply_keyboard` used to be the second, for the
+/// idle-Escape local quit; A4 deleted that branch and with it the
+/// keyboard body's need to return anything, so it returns `()` and the
+/// obsolete channel is gone rather than merely unused.
 ///
-/// **Stage 1a's A4 removes the KEYBOARD producer only** — an idle
-/// Escape must reach the daemon and never exit — leaving **one** `Exit`
-/// producer, the native close.
-///
-/// **One producer is not one variant.** This type survives A4 because
+/// **One producer is not one variant.** The type stays because
 /// `dispatch_window_event` must still distinguish `Continue` from
-/// `Exit` on every event it handles: nearly all of them must not exit,
-/// and the close must. What A4 changes is `apply_keyboard`'s signature,
-/// not this type.
+/// `Exit` on every event it handles: nearly all must not exit, and the
+/// close must. Returning the decision rather than taking an
+/// `&ActiveEventLoop` is also what keeps the bodies reachable from a
+/// test — the crate has exactly one executable `event_loop.exit()`, in
+/// `window_event`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EventOutcome {
     Continue,

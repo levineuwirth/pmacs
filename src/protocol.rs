@@ -1683,7 +1683,7 @@ mod tests {
     // --- M5.5a handshake & postcard round-trips ---
 
     #[test]
-    fn protocol_version_is_twenty_three_for_minibuffer_prompt_rows() {
+    fn protocol_version_is_twenty_four_for_text_input() {
         // Pin the value: T M10.5 bumped 1→2 (v1.0 wire: CrdtOp /
         // PresenceUpdate). T M11.1 bumped 2→3 (v1.1 wire: the
         // SemanticFrame family + FrontendEvent::Viewport). T M11.6
@@ -1740,7 +1740,11 @@ mod tests {
         // and gating the wider form would have left them with no
         // minibuffer at all. `MinibufferPrompt` is therefore frozen and
         // pinned by literal bytes below.
-        assert_eq!(PROTOCOL_VERSION, 23);
+        //
+        // v24 is `FrontendEvent::TextInput` (GUI arc Stage 1a) — an
+        // APPENDED variant, which is why the freeze above survives it
+        // untouched: nothing in `MinibufferPrompt`'s encoding moved.
+        assert_eq!(PROTOCOL_VERSION, 24);
     }
 
     #[test]
@@ -1817,18 +1821,19 @@ mod tests {
         // (`CompletionPopup`), v16 (`ThemeFacts`), v17 (`FontFacts`),
         // v18 (`StatuslineSegments`), v19 (the vterm terminal family),
         // v20 (semantic initial-target bootstrap), v21 (the bottom
-        // panel band), v22 (`LineWrapFacts`), and v23
-        // (`MinibufferPromptRows`) all interoperate.
-        for accepted in 6..=23 {
+        // panel band), v22 (`LineWrapFacts`), v23
+        // (`MinibufferPromptRows`), and v24 (`TextInput`, GUI arc Stage
+        // 1a) all interoperate.
+        for accepted in 6..=24 {
             assert!(
                 is_supported_protocol_version(accepted),
                 "v{accepted} must be accepted"
             );
         }
-        for rejected in [0, 1, 2, 3, 4, 5, 24, u32::MAX] {
+        for rejected in [0, 1, 2, 3, 4, 5, 25, u32::MAX] {
             assert!(
                 !is_supported_protocol_version(rejected),
-                "v{rejected} must be rejected by a v23 binary"
+                "v{rejected} must be rejected by a v24 binary"
             );
         }
     }
@@ -2738,9 +2743,20 @@ mod tests {
 
     #[test]
     fn m4_6_handshake_accepts_v6_peer() {
+        // ANCHORED ON THE LITERAL 6, deliberately. The body used to
+        // assert `is_supported_protocol_version(PROTOCOL_VERSION)` —
+        // "the current wire accepts itself" — which is a different and
+        // much weaker claim than the name and the M4.6 contract make:
+        // **v6 is the FLOOR**, the oldest peer the handshake still
+        // admits, and it must keep being accepted no matter how far the
+        // ceiling moves. Written against the moving constant, the test
+        // would have gone on passing after v6 was dropped from the
+        // supported set, which is the only regression it exists to
+        // catch. Found when the v24 bump made it fail for the unrelated
+        // reason that `SUPPORTED_PROTOCOL_VERSIONS` had not been widened.
         assert!(
-            is_supported_protocol_version(PROTOCOL_VERSION),
-            "the current wire version must accept itself"
+            is_supported_protocol_version(6),
+            "v6 is the floor and must stay accepted"
         );
     }
 

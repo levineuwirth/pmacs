@@ -337,9 +337,10 @@ fn one_daemon_serves_a_v21_panel_session_and_a_shipped_v20_client() {
 #[test]
 fn the_baseline_stays_and_the_counter_offer_activates() {
     // A deliberate tripwire: bumping the wire must be a conscious edit
-    // here, not a silent one. v23 is `MinibufferPromptRows` (Discovery
-    // Stage 2); v22 was `LineWrapFacts` (long-lines Stage 3).
-    assert_eq!(PROTOCOL_VERSION, 23);
+    // here, not a silent one. v24 is `TextInput` (GUI arc Stage 1a);
+    // v23 was `MinibufferPromptRows` (Discovery Stage 2); v22 was
+    // `LineWrapFacts` (long-lines Stage 3).
+    assert_eq!(PROTOCOL_VERSION, 24);
     assert_eq!(
         ADVERTISED_PROTOCOL_VERSION, 20,
         "moving this is the incompatible act the mechanism exists to avoid"

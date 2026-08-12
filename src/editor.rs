@@ -1906,9 +1906,11 @@ impl EditorState {
     /// a time, in order** (A7) — order is the contract, since a prompt
     /// accumulates a query.
     ///
-    /// Returns `true` when the text was consumed by a shadow or a
-    /// terminal, `false` when the caller should treat it as an ordinary
-    /// document edit — the same convention as [`Self::dispatch_paste`].
+    /// Returns nothing, unlike [`Self::dispatch_paste`], and the
+    /// difference is real rather than stylistic: §5's precedence is
+    /// **total** — shadow, terminal, or document, every state routes
+    /// somewhere — so there is no "unhandled" case for a caller to fall
+    /// back on.
     pub fn dispatch_text_input(&mut self, frontend_id: FrontendId, text: &str) {
         self.core.borrow_mut().active_frontend = frontend_id;
 
@@ -1924,21 +1926,57 @@ impl EditorState {
             return;
         }
 
-        // A6 — the ordinary document path: ONE edit.
-        self.with_after_edit_check(|state| {
-            let mut core = state.core.borrow_mut();
-            // Provenance follows §5. A single-scalar commit is
-            // indistinguishable from a keypress and keeps today's
-            // one-codepoint typed provenance; a multi-scalar commit is
-            // not a command and breaks the chain, exactly as a paste
-            // does.
-            if text.chars().count() > 1 {
-                core.break_command_chain(frontend_id);
+        // §5's provenance split. A SINGLE-scalar commit is
+        // indistinguishable from a keypress, so it must be
+        // indistinguishable downstream too: it rotates to
+        // `buffer.self-insert` and produces the same one-codepoint
+        // typed-edit record a keystroke does. Without that, auto-pairing
+        // (Q#AP9) and every other typed-edit consumer silently stop
+        // recognizing GUI input, and `this_command` goes stale — a
+        // regression that shows up as "auto-pair stopped working in the
+        // GUI", far from its cause.
+        //
+        // A MULTI-scalar commit is not a keystroke: it breaks the
+        // command chain and creates no typed provenance, exactly as a
+        // paste does.
+        let single = {
+            let mut chars = text.chars();
+            match (chars.next(), chars.next()) {
+                (Some(ch), None) => Some(ch),
+                _ => None,
             }
+        };
+
+        let pre_revision = self.active_buffer_revision();
+        {
+            let mut core = self.core.borrow_mut();
+            match single {
+                Some(ch) => {
+                    core.rotate_command(frontend_id, "buffer.self-insert");
+                    core.typed_edit_arm(frontend_id, ch);
+                }
+                None => core.break_command_chain(frontend_id),
+            }
+            // A6 — ONE edit, whichever branch armed it.
             if let Err(e) = core.insert_text_input(text) {
                 eprintln!("pmacs: text input failed: {e}");
             }
-        });
+        }
+
+        // The dispatch tail `dispatch_key` runs, for the same reason: a
+        // typed-edit record is only meaningful to a hook that can see
+        // it, so it is armed across the fan-out and cleared after.
+        let typed_edit = self.core.borrow_mut().typed_edit_finish(frontend_id);
+        if pre_revision != self.active_buffer_revision() {
+            if let Some(record) = typed_edit {
+                self.core
+                    .borrow_mut()
+                    .typed_edit_set_armed(frontend_id, record);
+            }
+            self.lua_host
+                .run_hook("buffer.after-edit", mlua::MultiValue::new());
+            self.core.borrow_mut().typed_edit_clear_armed();
+        }
     }
 
     /// Feed `text` to whichever modal shadow owns input, one scalar at a

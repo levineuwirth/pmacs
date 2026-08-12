@@ -67,10 +67,10 @@ use common::daemon::{TestDaemon, build_default_caps};
 /// server-first, so moving it locks out every already-shipped frontend
 /// before it can counter-offer. An additive family never needs it.
 #[test]
-fn the_wire_is_v23_and_the_advertised_baseline_is_unmoved() {
+fn the_wire_is_v24_and_the_advertised_baseline_is_unmoved() {
     assert_eq!(
-        PROTOCOL_VERSION, 23,
-        "v23 is MinibufferPromptRows (Discovery Stage 2)"
+        PROTOCOL_VERSION, 24,
+        "v24 is TextInput (GUI arc Stage 1a); v23 was MinibufferPromptRows"
     );
     assert_eq!(
         ADVERTISED_PROTOCOL_VERSION, 20,
@@ -85,7 +85,10 @@ fn the_wire_is_v23_and_the_advertised_baseline_is_unmoved() {
             "v{version} must still be supported"
         );
     }
-    assert!(!is_supported_protocol_version(24));
+    // The ceiling: the supported set ENDS at the current wire, which
+    // is what makes an accidentally-widened set a failure rather than
+    // a silent pass. Probes one PAST the top, so it moves with it.
+    assert!(!is_supported_protocol_version(PROTOCOL_VERSION + 1));
 }
 
 // ---------------------------------------------------------------------------
@@ -612,7 +615,7 @@ fn one_daemon_serves_a_v23_rows_session_and_a_frozen_v22_session() {
     // rather than after the interesting half has already passed.
     let (mut legacy, _legacy_fid) = attach_semantic(&daemon, 22);
     let (mut current, current_fid) = attach_semantic(&daemon, PROTOCOL_VERSION);
-    assert_eq!(PROTOCOL_VERSION, 23);
+    assert_eq!(PROTOCOL_VERSION, 24);
 
     // Open the real `M-x` through the real key path, then narrow to the
     // probe command by typing it — the candidate window is ten rows out
