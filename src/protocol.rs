@@ -1972,6 +1972,38 @@ mod tests {
     }
 
     #[test]
+    fn panel_pointer_encoding_is_unchanged_by_the_v24_build() {
+        // GUI arc Stage 1a — the placement pin for `TextInput`, and it
+        // sits on `PanelPointer` rather than on `TextInput` itself for
+        // a structural reason: `TextInput` is APPENDED, so its own
+        // round-trip is identical whether or not a variant was inserted
+        // beneath it. Only the PREVIOUS final variant's bytes move, so
+        // only they can witness the shift.
+        //
+        // `PanelPointer` was the last `FrontendEvent` variant at v23.
+        // Every v6–v23 daemon decodes the variants below it on every
+        // session, so a variant inserted anywhere earlier is a silent
+        // wire break for all of them.
+        let ev = FrontendEvent::PanelPointer {
+            frontend_id: FrontendId(2),
+            geometry_epoch: 1,
+            panel_epoch: 1,
+            buffer_id: pmacs_protocol::BufferId::from_raw(4),
+            coord: CellCoord { row: 0, col: 0 },
+            kind: pmacs_protocol::MouseKind::Move,
+            mods: Modifiers::NONE,
+        };
+        let bytes = postcard::to_allocvec(&ev).expect("encode");
+        assert_eq!(
+            bytes,
+            [15, 2, 1, 1, 4, 0, 0, 3, 0],
+            "PanelPointer's v23 wire bytes changed — a variant was \
+             inserted before it; append new FrontendEvent variants at \
+             the end"
+        );
+    }
+
+    #[test]
     fn terminal_family_round_trips_and_pins_its_discriminants() {
         let bid = pmacs_protocol::BufferId::from_raw(9);
         let frame = pmacs_protocol::TerminalFrame {

@@ -4476,6 +4476,48 @@ mod input_routing_tests {
         );
     }
 
+    /// A4 — an IDLE Escape reaches the daemon and does not exit.
+    ///
+    /// "Idle" is the case that used to quit: with nothing intercepting,
+    /// Escape destroyed the window instead of cancelling. Both halves
+    /// are asserted, because either alone would pass a wrong
+    /// implementation — sending Escape while also exiting, or not
+    /// exiting while also sending nothing.
+    #[test]
+    fn a4_an_idle_escape_reaches_the_daemon_and_does_not_exit() {
+        let mut h = EffectHarness::new();
+        // Establish idle explicitly. A fresh `State` starts with
+        // `dispatch_idle` false — the daemon has not said otherwise yet
+        // — so ASSERTING the precondition rather than setting it would
+        // have tested the intercepting case under an idle name. It
+        // failed exactly that way first.
+        h.app.state.as_mut().expect("harness state").dispatch_idle = true;
+        assert!(
+            !h.app
+                .state
+                .as_ref()
+                .expect("harness state")
+                .daemon_intercepts_keys(),
+            "precondition: nothing intercepts, which is the case that quit"
+        );
+
+        let step = h.feed_keyboard(&Key::Named(NamedKey::Escape), None);
+
+        assert!(
+            step.outbound.iter().any(|e| matches!(
+                e,
+                pmacs_protocol::FrontendEvent::Key(k) if k.key == ProtocolKey::Escape
+            )),
+            "an idle Escape must reach the daemon: {:?}",
+            step.outbound
+        );
+        assert!(
+            !step.local.contains(&LocalEffect::Exit),
+            "and must NOT exit: {:?}",
+            step.local
+        );
+    }
+
     /// The complement, so the row above cannot pass by sending
     /// `TextInput` for everything: a SINGLE scalar while intercepting
     /// still travels as `Key`, which is §5 rule 4 and preserves mode
@@ -13707,6 +13749,105 @@ mod tests {
         assert_eq!(source_line_range(text, 8), (7, 10));
         // Cursor past end clamps to the last line, never indexes out.
         assert_eq!(source_line_range(text, 99), (7, 10));
+    }
+
+    /// A1 — every function key winit names maps to the protocol's
+    /// 1-based `F(n)`, and forwards.
+    ///
+    /// Written as an exhaustive loop over all 35 rather than spot
+    /// checks: the old code stopped at `_ => return None`, so F13+
+    /// silently did nothing, and a test covering only F1–F12 would have
+    /// passed against exactly that.
+    #[test]
+    fn a1_function_keys_f1_to_f35_map_and_forward() {
+        use winit::keyboard::{Key as WKey, ModifiersState, NamedKey};
+
+        let named = [
+            NamedKey::F1,
+            NamedKey::F2,
+            NamedKey::F3,
+            NamedKey::F4,
+            NamedKey::F5,
+            NamedKey::F6,
+            NamedKey::F7,
+            NamedKey::F8,
+            NamedKey::F9,
+            NamedKey::F10,
+            NamedKey::F11,
+            NamedKey::F12,
+            NamedKey::F13,
+            NamedKey::F14,
+            NamedKey::F15,
+            NamedKey::F16,
+            NamedKey::F17,
+            NamedKey::F18,
+            NamedKey::F19,
+            NamedKey::F20,
+            NamedKey::F21,
+            NamedKey::F22,
+            NamedKey::F23,
+            NamedKey::F24,
+            NamedKey::F25,
+            NamedKey::F26,
+            NamedKey::F27,
+            NamedKey::F28,
+            NamedKey::F29,
+            NamedKey::F30,
+            NamedKey::F31,
+            NamedKey::F32,
+            NamedKey::F33,
+            NamedKey::F34,
+            NamedKey::F35,
+        ];
+        for (index, key) in named.into_iter().enumerate() {
+            let n = u8::try_from(index + 1).expect("1..=35 fits");
+            let (k, m) = translate_key(&WKey::Named(key), ModifiersState::empty())
+                .unwrap_or_else(|| panic!("F{n} must map"));
+            assert_eq!(k, ProtocolKey::F(n), "F{n} maps to F({n})");
+            assert!(
+                should_forward_key(k, m),
+                "F{n} must FORWARD; translating without forwarding leaves \
+                 the key mapped and inert"
+            );
+        }
+    }
+
+    /// A2 — Shift+Tab is `BackTab`, and the `Shift` stays set.
+    ///
+    /// Both halves matter: the daemon binds `Tab` and `BackTab`
+    /// differently, and a `BackTab` that lost its modifier would be
+    /// indistinguishable from one the user did not shift.
+    #[test]
+    fn a2_shift_tab_is_backtab_with_shift_retained() {
+        use winit::keyboard::{Key as WKey, ModifiersState, NamedKey};
+
+        let (plain, plain_mods) =
+            translate_key(&WKey::Named(NamedKey::Tab), ModifiersState::empty()).expect("Tab maps");
+        assert_eq!(plain, ProtocolKey::Tab);
+        assert!(plain_mods.is_empty());
+
+        let (shifted, shifted_mods) =
+            translate_key(&WKey::Named(NamedKey::Tab), ModifiersState::SHIFT)
+                .expect("Shift+Tab maps");
+        assert_eq!(shifted, ProtocolKey::BackTab);
+        assert!(
+            shifted_mods.contains(Modifiers::SHIFT),
+            "Shift is retained on BackTab"
+        );
+        assert!(should_forward_key(shifted, shifted_mods));
+    }
+
+    /// A3 — the menu key reaches the daemon. `ProtocolKey::Menu` and the
+    /// TUI's mapping both already existed; only the GPU translation was
+    /// missing, so the key did nothing in the GUI.
+    #[test]
+    fn a3_context_menu_maps_to_menu_and_forwards() {
+        use winit::keyboard::{Key as WKey, ModifiersState, NamedKey};
+
+        let (k, m) = translate_key(&WKey::Named(NamedKey::ContextMenu), ModifiersState::empty())
+            .expect("ContextMenu maps");
+        assert_eq!(k, ProtocolKey::Menu);
+        assert!(should_forward_key(k, m), "and forwards, or it is inert");
     }
 
     #[test]
