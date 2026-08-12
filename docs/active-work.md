@@ -331,8 +331,8 @@ waits for a signal that is not coming.
   pointer bodies were checked by re-running rustfmt on the pre-move text
   at the new indent level and diffing, since de-indenting by 8 columns
   lets rustfmt rejoin lines. **22 witnesses — 13 routing, 9 effect — and
-  23 mutations**, each failing its own rows, plus the P3 exception check
-  which must stay green.
+  24 mutations, M1–M24.** Twenty-three fail their own rows; **M6 is the
+  P3 exception check and must stay green**.
 - **P3 IS NOW MEASURED, NOT ASSUMED — and re-measured after the effect
   harness landed.** Replacing `window_event`'s whole body with `let _ =
   (event_loop, event);` — a GUI that responds to no input at all —
@@ -414,7 +414,9 @@ waits for a signal that is not coming.
   be **outside `/tmp` and outside every git worktree** — a child of
   `/tmp` is not isolated, because `/tmp/.git` remains its ancestor.
 - **GREEN under an isolated `TMPDIR`: all nine gates pass on the final
-  tree** (log `20260812T090034Z-2989598`, review round 2). fmt, clippy,
+  EXECUTABLE tree** (log `20260812T090034Z-2989598`, review round 2) —
+  executable, not final, because prose and doc comments changed after
+  it, as the sentence below records. fmt, clippy,
   lib, lib-crdt, `gpu_invocation_acceptance`, **m4 168/0/3**,
   `PMACS_REQUIRE_GPU=1 -p pmacs-gpu` (**265 tests, none filtered and
   none skipped**, all nine effect rows included), the **117-target
