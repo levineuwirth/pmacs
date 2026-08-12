@@ -238,9 +238,13 @@ Every documented step ran, in order, on git **2.55.0**:
    `No such remote`**, exactly as the section above anticipates.
 2. Add the alias, confirm the URL, `git fetch githubsucks --prune`.
 3. `git log -1 --oneline githubsucks/main` → `d038f71`.
-4. **The floor check, run against both floors**: `9a26ac8` (the old one)
-   and `d038f71` are each an ancestor of the tip, so advancing the floor
-   is valid rather than merely plausible.
+4. **The floor check, run against the OLD DECLARED FLOOR and the new
+   one**: `e67ad07` and `d038f71` are each an ancestor of the tip, so
+   advancing the floor is valid rather than merely plausible.
+   *(`9a26ac8` is the previous last-EXERCISED anchor, which is a
+   different thing from the previous declared floor — the two had
+   drifted apart, and checking the exercised anchor in the floor's place
+   would have verified the wrong claim.)*
 5. The three-argument `git worktree add <path> -b <local>
    githubsucks/<branch>` form → a real branch with its upstream set
    (`## recovered-local...githubsucks/gui-stage1-pre`).
@@ -291,9 +295,13 @@ commits while invisible here.
 - **Gates: `./scripts/gate`, all eight stages green** (log
   `20260812T111504Z-3265400`). No `--acceptance` and no `--protocol` —
   docs only, so no suite is touched and no wire moves. That run covered
-  `502308d`; **the only later commit is this lane**, 34 lines of
-  markdown, with `git diff --check` and `cargo fmt --check` re-run clean
-  on the result.
+  `502308d`. **Every commit after it is markdown-only** — stated as a
+  standing property rather than a count, because a count goes stale on
+  the next commit, which is how the previous version of this sentence
+  came to say "one commit, 34 lines" when there were two and 38. Check
+  it with `git diff --name-only 502308d..HEAD`, which must list nothing
+  outside `*.md`; `git diff --check` and `cargo fmt --check` are clean
+  at HEAD.
 - **One judgement recorded because it exceeded the requested scope and
   was approved on review**: §1a's board carried no GUI-arc row, which
   contradicted the anchor two sections above it. The row sits where
@@ -301,8 +309,14 @@ commits while invisible here.
   P2–P5, interacting only at the **P2 start gate** — and the section's
   dateline now says which row is current and which are as of
   2026-08-01.
-- **This lane goes when the PR merges.** It describes a docs pass, not
-  an arc, so rule 4 removes it outright rather than rewriting it.
+- **THIS LANE MUST BE DELETED BY A FINAL PRE-MERGE COMMIT ON THIS
+  BRANCH, and cannot remove itself at merge.** GitHub merges the tree as
+  it stands, so "removed at merge" would land the words *PR #238 OPEN*
+  on `main` — a lane advertising an open PR that closed in the same
+  commit. It stays while the PR is under review, because an open PR
+  without a lane is the #171 defect; the last commit before merge takes
+  it out. Rule 4 removes it **outright** rather than rewriting it: it
+  describes a docs pass, not an arc.
 
 ## GUI arc Stage 1 — 1-pre MERGED as #237 (`d038f71`); 1a is next, NOT STARTED
 
@@ -328,7 +342,10 @@ ARC is done, and the arc is Stage 1 as a whole: **five slices remain**.
   `ADVERTISED_PROTOCOL_VERSION` stays pinned at 20 and must not be
   edited to chase it. Its nine contracts (A1–A9) and the Q#S1-9
   precedence rules are in the framing; **A4 deletes the idle-Escape
-  local quit**, which is the one 1-pre change 1a is expected to undo.
+  local quit**, which is **pre-existing behaviour, not something 1-pre
+  introduced** — 1-pre preserved it and moved it behind an
+  `EventOutcome` return, and 1a removes it. `EventOutcome` survives that
+  removal: the native close still returns `Exit`.
 
 ### What 1-pre landed, and the facts worth not re-deriving
 
@@ -406,24 +423,21 @@ absorption" was too generous. Five stale lanes remain below, and two
 `COHERENCE.md` corrections had not been made at all. What is done here
 is listed at the commit that does it, not promised here.
 
-- **Branch `gui-arc-stage0`**, base `githubsucks/main` @ `e67ad07` (the
-  file-watcher arc absorption) after the 2026-08-11 rebase; it was
-  branched at `0e4c58d`. **`githubsucks/gui-arc-stage0` is the
-  authoritative tip** — the ref, not a SHA. Recover with
-  `git fetch githubsucks && git checkout gui-arc-stage0`.
+- **MERGED as #236 (`f8ad3e7`).** The branch was `gui-arc-stage0`, based
+  on `e67ad07` after the 2026-08-11 rebase and branched at `0e4c58d`.
+  **Recovery instructions are removed deliberately**: a merged lane that
+  still says "checkout the branch" sends a reader to a tip that no
+  longer moves. Its content is on `main`.
 - **Framing `docs/gui-arc-framing.md`, revision 3, APPROVED
   2026-08-10** after two review rounds (two blocking findings each
   round, closed). It is **also the framing for Stage 0 itself**, which
   is docs-only; Stages 1–10 each require their own framing before their
   branch.
-- **The park is over and the work is DONE.** The branch was parked at
+- **The park is over and the work is MERGED.** The branch was parked at
   its first commit until #227 merged, because #227 was 72 `main` commits
   behind and touched the three files Stage 0's absorption rewrites.
   #227 merged (`b867f64`), #233's arc closed (#234, #235), this branch
-  rebased onto `e67ad07`, and the absorption ran. **Sixteen commits
-  above the base as of `30e2209`; ready for its PR.** *(Anchored to a
-  SHA deliberately: a bare running count goes stale on the next commit,
-  which is the staleness class this lane exists to retire.)*
+  rebased onto `e67ad07`, the absorption ran, and it landed as **#236**.
 - **What landed (docs only, no `src/`):** the absorption pass
   enumerated in the framing's §5 — five stale lanes, the
   authority/recovery anchor, `COHERENCE.md`'s `v6..=v21` → `v6..=v23`,
