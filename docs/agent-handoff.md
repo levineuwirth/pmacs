@@ -215,25 +215,43 @@ commands, read `docs/active-work.md` immediately after this file.
     FROM IT.** The gate isolates the target directory and five ambient
     roots but **not `TMPDIR`**, so `tempfile::tempdir()` still lands
     under a `/tmp` that may carry a marker. It surfaced inside a gate
-    run on an unrelated lane (GUI 1-pre, which touches only
-    `pmacs-gpu/src/main.rs`) as **`m4_24_bare_string_glob_stays_relative`
+    run on an unrelated lane (GUI 1-pre, whose whole **executable** diff
+    is `pmacs-gpu/src/main.rs`) as **`m4_24_bare_string_glob_stays_relative`
     and `m4_24_d3_fallback_base_is_the_smallest_attachment_dir`**, in
     both the `m4` step and the `--workspace` sweep, with every other
     target in the corpus green.
 
     **Diagnose it with the discriminating pair, not a rerun** — same
-    binary, same commit, one variable:
+    binary, same commit, one variable. **Four literal `--exact`
+    invocations, one test each**, because `m4_24_` is a PREFIX matching
+    **18** tests and a prefix run reports ~16/2 and 18/0 rather than the
+    0/1 and 1/0 that make the pair readable:
 
     ```sh
-    TMPDIR=/tmp                 cargo test --test m4_acceptance -- m4_24_   # 0/2
-    TMPDIR=<marker-free dir>    cargo test --test m4_acceptance -- m4_24_   # 2/2
+    C=<marker-free dir>   # outside /tmp AND outside every git worktree
+
+    TMPDIR=/tmp cargo test --test m4_acceptance -- \
+      --exact m4_24_bare_string_glob_stays_relative                 # 0 passed; 1 failed
+    TMPDIR=$C   cargo test --test m4_acceptance -- \
+      --exact m4_24_bare_string_glob_stays_relative                 # 1 passed; 0 failed
+
+    TMPDIR=/tmp cargo test --test m4_acceptance -- \
+      --exact m4_24_d3_fallback_base_is_the_smallest_attachment_dir # 0 passed; 1 failed
+    TMPDIR=$C   cargo test --test m4_acceptance -- \
+      --exact m4_24_d3_fallback_base_is_the_smallest_attachment_dir # 1 passed; 0 failed
     ```
+
+    Each prints `running 1 test` and `171 filtered out`. **Read that
+    line** — see the libtest-filter bullet below for why a filter that
+    reaches nothing still prints green.
 
     Check the ancestors of the temp root for `.git`, `Cargo.toml` and
     friends before believing any markerless-fixture red, and **compare
-    SIGNATURES, not test names** — here both runs matched on panic site
-    (`:5668:5`, `:6615:5`) and on `.received = ""`, which is what makes
-    the pair evidence rather than coincidence.
+    SIGNATURES, not test names** — the contaminated legs panic at
+    `m4_acceptance.rs:5668:5` and `:6615:5` with `.received = ""`,
+    matching the gate red's own signature, and the clean legs panic
+    nowhere. That is what makes the pair evidence rather than
+    coincidence.
 
     **The isolated `TMPDIR` must be outside `/tmp` AND outside every git
     worktree.** A child of `/tmp` is not isolated: `/tmp/.git` is still

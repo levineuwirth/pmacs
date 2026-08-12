@@ -3135,7 +3135,7 @@ impl App {
         }
     }
 
-    /// Perform [`KeyboardRoute::Press`]. The router has already
+    /// Perform [`KeyAction::Press`]. The router has already
     /// discarded key-ups, so `key` is always a press.
     #[allow(clippy::too_many_lines)] // one linear key pipeline; splitting hides the order.
     fn apply_keyboard(&mut self, key: &KeyEvent) -> EventOutcome {
@@ -3342,8 +3342,10 @@ impl App {
 ///
 /// The seam splits the two halves. **Deciding** is [`route_event`] — a
 /// free function over `&WindowEvent` alone, so a headless test can drive
-/// every family. **Performing** stays on `App`, in the `apply_*` methods
-/// the router's variants name.
+/// it for **every family whose event winit lets a test construct**,
+/// which is all of them except keyboard; see [`route_keyboard`] for that
+/// exception and how far it reaches. **Performing** stays on `App`, in
+/// the `apply_*` methods the router's variants name.
 ///
 /// The decision is what the route *is*, not merely which family claims
 /// it: `Exit` is the local exit effect, `Resize` carries the clamped

@@ -331,20 +331,24 @@ waits for a signal that is not coming.
   `m4_24_d3_fallback_base_is_the_smallest_attachment_dir` — two LSP
   file-watcher tests — with every other target green. Established as
   environmental three ways, in increasing strength:
-  - **Structurally impossible for this branch to cause.** The diff
-    touches only `pmacs-gpu/src/main.rs`; `pmacs-gpu` is a workspace
-    **member but not a dependency** of the root package, so the
-    `m4_acceptance` binary never links it.
+  - **Structurally impossible for this branch to cause.** The branch
+    changes six files, five of them under `docs/`; **the whole
+    executable diff is `pmacs-gpu/src/main.rs`**, and `pmacs-gpu` is a
+    workspace **member but not a dependency** of the root package, so
+    the `m4_acceptance` binary never links it.
   - **The marker is older than the session.** `/tmp/.git` is empty and
     was created at 20:14 CEST, **3.5 h before** the gate run at 23:45;
     `/tmp` held 8,920 entries. That is handoff §1's recorded hazard
     exactly.
   - **A discriminating pair compared on SIGNATURE, not test name**, same
-    binary and commit, one variable. `TMPDIR=/tmp` → **0/2**, panicking
-    at `m4_acceptance.rs:5668:5` and `:6615:5` with `.received = ""` —
-    **byte-identical to the gate red's own signature**.
-    `TMPDIR=<marker-free>` → **2/2 with zero panics**. A rerun would
-    have established only intermittence; the pair establishes the cause.
+    binary and commit, one variable — run as **four literal `--exact`
+    invocations, one test each**, since `m4_24_` is a prefix matching
+    **18** tests. Contaminated: `0 passed; 1 failed` each, panicking at
+    `m4_acceptance.rs:5668:5` and `:6615:5` with `.received = ""`,
+    **matching the gate red's own signature**. Clean: `1 passed; 0
+    failed` each, **zero panics**. The exact commands are in handoff
+    §1's hazard bullet. A rerun would have established only
+    intermittence; the pair establishes the cause.
 
   **`scripts/gate` isolates the target dir and five ambient roots but
   NOT `TMPDIR`** — recorded in handoff §1, where the standing fix is
