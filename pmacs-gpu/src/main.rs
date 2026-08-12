@@ -1579,6 +1579,11 @@ type LoroTextDeltaBatches = Arc<Mutex<Vec<Vec<loro::TextDelta>>>>;
     reason = "independent render/input state flags, not a config bitset"
 )]
 struct State {
+    /// GUI 1-pre P2 — how many times [`State::render`] has been called.
+    /// The redraw arm's only local effect, and invisible without this
+    /// on a windowless `State`. Test-only.
+    #[cfg(test)]
+    render_calls: u64,
     // `None` in the headless render-test path (F-014): a windowless State
     // that renders to an offscreen texture instead of a surface.
     window: Option<Arc<Window>>,
@@ -3135,6 +3140,49 @@ impl App {
         }
     }
 
+    /// Route one window event and perform it — **the whole of
+    /// `window_event` except the exit itself**, which is returned rather
+    /// than performed.
+    ///
+    /// This split is what makes P2 reachable at all. Left inside
+    /// `window_event`, the dispatch would force a harness to
+    /// re-implement it, and a harness that re-implements the thing it
+    /// tests witnesses its own copy. Here the harness drives production
+    /// code, and `window_event` keeps only the one statement no headless
+    /// test can reach — which narrows P3 from a 33-line match to a
+    /// single `if`.
+    fn dispatch_window_event(&mut self, event: &WindowEvent) -> EventOutcome {
+        match route_event(event) {
+            Route::Lifecycle(LifecycleRoute::Exit) => return EventOutcome::Exit,
+            Route::Lifecycle(LifecycleRoute::Modifiers(mods)) => self.modifiers = mods,
+            Route::Lifecycle(LifecycleRoute::Resize { width, height }) => {
+                self.apply_resize(width, height);
+            }
+            Route::Lifecycle(LifecycleRoute::Redraw) => self.apply_redraw(),
+            Route::Keyboard {
+                action: KeyAction::Press,
+                key,
+            } => return self.apply_keyboard(key),
+            Route::Pointer(PointerRoute::Moved { x, y }) => self.apply_cursor_moved(x, y),
+            Route::Pointer(PointerRoute::Left(button_state)) => {
+                self.apply_left_button(button_state);
+            }
+            Route::Pointer(PointerRoute::RightPress) => self.apply_right_press(),
+            Route::Pointer(PointerRoute::Wheel(delta)) => self.apply_wheel(delta),
+            // Three different facts, merged only because all three are
+            // today nothing to do: a key-up the keyboard family claimed
+            // and dropped, a button the pointer family has no semantics
+            // for, and an event no family claims at all.
+            Route::Keyboard {
+                action: KeyAction::Release,
+                ..
+            }
+            | Route::Pointer(PointerRoute::UnusedButton)
+            | Route::Unrouted => {}
+        }
+        EventOutcome::Continue
+    }
+
     /// Perform [`KeyAction::Press`]. The router has already
     /// discarded key-ups, so `key` is always a press.
     #[allow(clippy::too_many_lines)] // one linear key pipeline; splitting hides the order.
@@ -3566,6 +3614,295 @@ impl<'a> RoutingHarness<'a> {
     }
 }
 
+/// GUI Stage 1-pre — the headless EFFECT harness (P2).
+///
+/// [`RoutingHarness`] above answers "where did this event go?".
+/// This one answers **"what did it do?"** — the other half of P2, and
+/// the half a route cannot supply on its own. A wheel route carries a
+/// delta; whether that delta becomes a panel event, a terminal event, a
+/// viewport update, or nothing at all depends on `State`, so only
+/// running the body can say.
+///
+/// It drives production code end to end:
+///
+/// * **A real `AttachClient` over a `socketpair`**, through the real
+///   handshake, outbox, writer thread and encoder. The harness reads
+///   encoded `pmacs_protocol::FrontendEvent`s off the daemon end, so what it records is
+///   the wire, not a mock's idea of it.
+/// * **A real windowless `State`**, so the bodies take their real
+///   branches.
+/// * **`App::dispatch_window_event`**, the production dispatch — not a
+///   re-implementation of it, which would witness only itself.
+///
+/// **Local effects** have no wire trace, so each is read from the place
+/// it actually lands: exit from the returned [`EventOutcome`], redraw
+/// from `State::render_calls`, resize from the surface config, and the
+/// modifier mutation from `App::modifiers`.
+///
+/// **Two honest limits, both structural.**
+///
+/// 1. `window_event` itself is still unreachable (P3) — the harness
+///    calls `dispatch_window_event`, which is everything `window_event`
+///    does except the `event_loop.exit()` it cannot construct.
+/// 2. A step is delimited by a **sentinel key** pushed through the same
+///    outbox, so "this step sent nothing" is decidable without a sleep.
+///    The sentinel is not coalesceable (only viewport and drag kinds
+///    are), so it can neither replace nor be replaced by a recorded
+///    event — but it does sit between steps, so consecutive same-kind
+///    events that production would coalesce are recorded separately
+///    here. That makes the transcript per-step rather than as-coalesced,
+///    which is what a per-step contract wants.
+#[cfg(test)]
+struct EffectHarness {
+    app: App,
+    daemon: std::os::unix::net::UnixStream,
+    /// Distinguishes one sentinel from the next, so a step cannot end on
+    /// a stale one left behind by an earlier read.
+    sentinel_seq: u32,
+}
+
+/// A local effect — something a dispatch did that leaves no wire trace.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalEffect {
+    /// The dispatch asked the event loop to exit.
+    Exit,
+    /// `State::render` was called.
+    Redraw,
+    /// The surface was reconfigured to this extent.
+    Resize { width: u32, height: u32 },
+    /// The document scrolled to this top line.
+    Scroll { top: usize },
+    /// `App::modifiers` changed to this value.
+    Modifiers(winit::keyboard::ModifiersState),
+}
+
+/// What one dispatched event did.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq)]
+struct Step {
+    local: Vec<LocalEffect>,
+    outbound: Vec<pmacs_protocol::FrontendEvent>,
+}
+
+#[cfg(test)]
+impl EffectHarness {
+    /// The sentinel key. A private-use scalar, so it cannot collide with
+    /// anything a body would legitimately send.
+    const SENTINEL: char = '\u{e000}';
+
+    /// Build the harness, or fail loudly.
+    ///
+    /// **Never skips.** `State::new_headless` returns `None` when no
+    /// wgpu adapter exists, and a suite that quietly returns `ok` in
+    /// that case proves nothing — this project has recorded that failure
+    /// mode twice. Under `PMACS_REQUIRE_GPU` the absence is an assertion
+    /// failure; without it the harness still panics rather than skips,
+    /// because these rows are the whole of P2.
+    fn new() -> Self {
+        let (client_stream, mut daemon) =
+            std::os::unix::net::UnixStream::pair().expect("socketpair");
+
+        // The daemon half of the handshake, synchronous and inline: the
+        // client blocks reading `Hello` before it writes anything, so a
+        // thread would only add a join.
+        let handshake = std::thread::spawn(move || {
+            pmacs_protocol::write_message(&mut daemon, &test_hello()).expect("write Hello");
+            let _: pmacs_protocol::AttachRequest =
+                pmacs_protocol::read_message(&mut daemon).expect("read AttachRequest");
+            let _: pmacs_protocol::SessionBootstrapRequest =
+                pmacs_protocol::read_message(&mut daemon).expect("read bootstrap");
+            daemon
+        });
+        let client = crate::attach::connect_stream_for_test(client_stream, |_| true)
+            .expect("attach over socketpair");
+        let daemon = handshake.join().expect("handshake thread");
+
+        // A document tall enough to scroll. A two-line fixture made the
+        // wheel row pass vacuously: `scroll_by_lines` returns `None`
+        // when there is nothing below the fold, so the row asserted
+        // "every outbound event is a Viewport" over an EMPTY transcript.
+        // Mutation M22 surfaced the first half of that and this fixture
+        // is the second.
+        let document = "line\n".repeat(200);
+        let state = State::new_headless(640, 480, &document);
+        assert!(
+            state.is_some(),
+            "no wgpu adapter: the 1-pre effect rows are P2's only witness and must not be skipped"
+        );
+
+        let mut harness = Self {
+            app: App {
+                mode: Mode::Attach {
+                    socket: PathBuf::from("/nonexistent-harness-socket"),
+                },
+                proxy: None,
+                state,
+                pending_events: Vec::new(),
+                attach_client: Some(client),
+                modifiers: winit::keyboard::ModifiersState::empty(),
+            },
+            daemon,
+            sentinel_seq: 0,
+        };
+
+        // Mirror the post-connect wiring `resumed` performs. Without it
+        // the panel wire stays below `PANEL_MIN_VERSION` and every
+        // geometry declaration is silently withheld — the harness would
+        // then witness an absence it created itself. Getting this wrong
+        // is exactly what the first run of the resize row caught.
+        {
+            let client = harness.app.attach_client.as_ref().expect("harness client");
+            let frontend_id = client.frontend_id();
+            let session_version = client.session_protocol_version();
+            let state = harness.app.state.as_mut().expect("harness state");
+            state.set_frontend_id(frontend_id);
+            state.set_panel_wire(session_version);
+            // Stands in for the `BufferSnapshot` the daemon would send.
+            // Without a current buffer `scroll_by_lines` scrolls locally
+            // and returns `None`, so every viewport send is withheld and
+            // the harness would witness an absence it manufactured —
+            // the same trap the panel wire set above. This is the
+            // pattern the file's other headless-State tests already use.
+            state.current_buffer_id = Some(BufferId::from_raw(1));
+        }
+        harness.app.flush_panel_geometry(GeometryTrigger::Surface);
+
+        // Drain the attach-time declaration, so each row's transcript
+        // contains only what its own event produced.
+        harness.read_until_sentinel();
+        harness
+    }
+
+    /// Dispatch one event and report everything it did.
+    fn feed(&mut self, event: &WindowEvent) -> Step {
+        let before = self.snapshot();
+        let outcome = self.app.dispatch_window_event(event);
+        let after = self.snapshot();
+
+        let mut local = Vec::new();
+        if outcome == EventOutcome::Exit {
+            local.push(LocalEffect::Exit);
+        }
+        if after.render_calls > before.render_calls {
+            local.push(LocalEffect::Redraw);
+        }
+        if after.extent != before.extent {
+            local.push(LocalEffect::Resize {
+                width: after.extent.0,
+                height: after.extent.1,
+            });
+        }
+        if after.modifiers != before.modifiers {
+            local.push(LocalEffect::Modifiers(after.modifiers));
+        }
+        if after.scroll_top != before.scroll_top {
+            local.push(LocalEffect::Scroll {
+                top: after.scroll_top,
+            });
+        }
+
+        Step {
+            local,
+            outbound: self.read_until_sentinel(),
+        }
+    }
+
+    /// Observable state the local effects are derived from.
+    fn snapshot(&self) -> EffectSnapshot {
+        let state = self.app.state.as_ref().expect("harness state");
+        EffectSnapshot {
+            render_calls: state.render_calls,
+            extent: (state.config.width, state.config.height),
+            modifiers: self.app.modifiers,
+            scroll_top: state.scroll_top,
+        }
+    }
+
+    /// Push a sentinel through the same outbox and read until it comes
+    /// back. Everything ahead of it belongs to the step just dispatched.
+    ///
+    /// This is a **condition**, not a sleep: it blocks on the socket
+    /// until the writer thread has drained past the sentinel, so it is
+    /// insensitive to how many cores are free — the mistake PR #235's CI
+    /// red was made of.
+    fn read_until_sentinel(&mut self) -> Vec<pmacs_protocol::FrontendEvent> {
+        self.sentinel_seq += 1;
+        let tag = self.sentinel_seq;
+        let client = self.app.attach_client.as_ref().expect("harness client");
+        client
+            .send_key(ProtocolKey::Char(Self::SENTINEL), sentinel_mods(tag))
+            .expect("enqueue sentinel");
+
+        let mut seen = Vec::new();
+        loop {
+            let event: pmacs_protocol::FrontendEvent =
+                pmacs_protocol::read_message(&mut self.daemon).expect("read outbound");
+            if is_sentinel(&event, tag) {
+                return seen;
+            }
+            seen.push(event);
+        }
+    }
+}
+
+/// Observable state behind [`LocalEffect`].
+#[cfg(test)]
+struct EffectSnapshot {
+    render_calls: u64,
+    extent: (u32, u32),
+    modifiers: winit::keyboard::ModifiersState,
+    scroll_top: usize,
+}
+
+/// Modifier bits carrying the sentinel's sequence number, so a stale
+/// sentinel cannot end the wrong step. Four bits is plenty: the harness
+/// reads every sentinel it writes, so the counter only has to
+/// distinguish neighbours.
+#[cfg(test)]
+fn sentinel_mods(tag: u32) -> Modifiers {
+    let mut mods = Modifiers::NONE;
+    if tag & 1 != 0 {
+        mods |= Modifiers::CTRL;
+    }
+    if tag & 2 != 0 {
+        mods |= Modifiers::ALT;
+    }
+    if tag & 4 != 0 {
+        mods |= Modifiers::SHIFT;
+    }
+    mods
+}
+
+#[cfg(test)]
+fn is_sentinel(event: &pmacs_protocol::FrontendEvent, tag: u32) -> bool {
+    matches!(
+        event,
+        pmacs_protocol::FrontendEvent::Key(k)
+            if k.key == ProtocolKey::Char(EffectHarness::SENTINEL) && k.mods == sentinel_mods(tag)
+    )
+}
+
+#[cfg(test)]
+fn test_hello() -> pmacs_protocol::Hello {
+    pmacs_protocol::Hello {
+        protocol_version: pmacs_protocol::PROTOCOL_VERSION,
+        assigned_frontend_id: pmacs_protocol::FrontendId(7),
+        instance_identity: pmacs_protocol::InstanceIdentity {
+            pmacs_version: "1-pre-harness".to_owned(),
+            build_hash: None,
+            instance_name: None,
+            uptime_secs: 0,
+            working_directory: "/".to_owned(),
+        },
+        instance_capabilities: pmacs_protocol::InstanceCapabilities {
+            multi_frontend: true,
+            crdt_replica: true,
+            semantic_render: true,
+        },
+    }
+}
+
 #[cfg(test)]
 mod input_routing_tests {
     use super::*;
@@ -3800,6 +4137,183 @@ mod input_routing_tests {
         assert_eq!(route_one(&event), Route::Unrouted);
     }
 
+    // ---------------------------------------------------------------
+    // P2 — the EFFECT rows. `EffectHarness` drives the production
+    // dispatch over a real client and a real windowless `State`, and
+    // records BOTH halves of P2: the outbound protocol messages and the
+    // local effects that leave no wire trace.
+    // ---------------------------------------------------------------
+
+    /// P2 — a redraw's whole effect is local. It sends the daemon
+    /// nothing, so **the outbound half of the transcript is empty and
+    /// the local half is what proves the arm ran** — which is precisely
+    /// why P2 requires both.
+    #[test]
+    fn a_redraw_produces_a_local_effect_and_no_outbound_traffic() {
+        let mut h = EffectHarness::new();
+        let step = h.feed(&WindowEvent::RedrawRequested);
+        assert_eq!(step.local, vec![LocalEffect::Redraw]);
+        assert!(
+            step.outbound.is_empty(),
+            "a redraw must send the daemon nothing, got {:?}",
+            step.outbound
+        );
+    }
+
+    /// P2 — `CloseRequested` is the other silent arm: one local effect,
+    /// no traffic.
+    #[test]
+    fn a_close_request_exits_locally_and_sends_nothing() {
+        let mut h = EffectHarness::new();
+        let step = h.feed(&WindowEvent::CloseRequested);
+        assert_eq!(step.local, vec![LocalEffect::Exit]);
+        assert!(step.outbound.is_empty(), "{:?}", step.outbound);
+    }
+
+    /// P2 — a modifier change mutates `App` and sends nothing. The
+    /// mutation is the effect.
+    #[test]
+    fn a_modifier_change_mutates_state_and_sends_nothing() {
+        let mut h = EffectHarness::new();
+        let mods = ModifiersState::CONTROL;
+        let step = h.feed(&modifiers_changed(mods));
+        assert_eq!(step.local, vec![LocalEffect::Modifiers(mods)]);
+        assert!(step.outbound.is_empty(), "{:?}", step.outbound);
+        assert_eq!(h.app.modifiers, mods);
+    }
+
+    /// P2 — a resize is the one lifecycle arm with **both** halves: it
+    /// reconfigures the surface locally and declares the new cell
+    /// geometry to the daemon.
+    #[test]
+    fn a_resize_reconfigures_locally_and_declares_geometry() {
+        let mut h = EffectHarness::new();
+        let step = h.feed(&WindowEvent::Resized(PhysicalSize::new(900, 500)));
+        assert_eq!(
+            step.local,
+            vec![LocalEffect::Resize {
+                width: 900,
+                height: 500
+            }]
+        );
+        assert!(
+            step.outbound.iter().any(|e| matches!(
+                e,
+                pmacs_protocol::FrontendEvent::FrontendCellGeometry { .. }
+            )),
+            "a resize must declare the new cell geometry, got {:?}",
+            step.outbound
+        );
+    }
+
+    /// P2 — the zero-extent clamp, observed as a real surface
+    /// configuration rather than as a route value. wgpu rejects a
+    /// zero-extent surface, so this is the row that would fail if the
+    /// clamp were only cosmetic.
+    #[test]
+    fn a_minimize_configures_a_nonzero_surface() {
+        let mut h = EffectHarness::new();
+        let step = h.feed(&WindowEvent::Resized(PhysicalSize::new(0, 0)));
+        assert_eq!(
+            step.local,
+            vec![LocalEffect::Resize {
+                width: 1,
+                height: 1
+            }]
+        );
+    }
+
+    /// P2, pointer — **the row that shows a route cannot stand in for an
+    /// effect.** A wheel carries only a delta; whether it becomes a
+    /// viewport update, a panel event, a terminal event or nothing at
+    /// all is `State`'s to decide. Here, over a plain document, it
+    /// scrolls and re-declares the scoped viewport.
+    #[test]
+    fn a_wheel_over_a_document_declares_a_new_viewport() {
+        let mut h = EffectHarness::new();
+        let event = WindowEvent::MouseWheel {
+            device_id: DeviceId::dummy(),
+            delta: MouseScrollDelta::LineDelta(0.0, -3.0),
+            phase: TouchPhase::Moved,
+        };
+        let step = h.feed(&event);
+        assert_eq!(
+            step.local,
+            vec![LocalEffect::Scroll {
+                top: WHEEL_LINES_PER_TICK as usize * 3
+            }],
+            "a wheel scrolls locally"
+        );
+        // NOT `.all()` alone — that is vacuously true on an empty
+        // transcript, so an outbound-blind harness would pass this row.
+        // Mutation M22 found exactly that.
+        assert!(
+            !step.outbound.is_empty(),
+            "a document wheel must send something"
+        );
+        assert!(
+            step.outbound
+                .iter()
+                .all(|e| matches!(e, pmacs_protocol::FrontendEvent::Viewport { .. })),
+            "a document wheel sends viewport updates and nothing else, got {:?}",
+            step.outbound
+        );
+    }
+
+    /// P2, pointer — a wheel that resolves to **zero lines** is dropped
+    /// by the body before any send. Same route, no effect: the
+    /// distinction only exists once effects are observed.
+    #[test]
+    fn a_subtick_wheel_sends_nothing_at_all() {
+        let mut h = EffectHarness::new();
+        let event = WindowEvent::MouseWheel {
+            device_id: DeviceId::dummy(),
+            delta: MouseScrollDelta::LineDelta(0.0, 0.0),
+            phase: TouchPhase::Moved,
+        };
+        let step = h.feed(&event);
+        assert!(step.local.is_empty(), "{:?}", step.local);
+        assert!(
+            step.outbound.is_empty(),
+            "a zero-line wheel must send nothing, got {:?}",
+            step.outbound
+        );
+    }
+
+    /// P2, pointer — motion updates the cached pointer position, which
+    /// is the state mutation the drag path later reads. It is not a
+    /// `LocalEffect` variant because it is `State`-internal, so the row
+    /// asserts it directly.
+    #[test]
+    fn cursor_motion_caches_the_pointer_position() {
+        let mut h = EffectHarness::new();
+        let event = WindowEvent::CursorMoved {
+            device_id: DeviceId::dummy(),
+            position: PhysicalPosition::new(30.0, 40.0),
+        };
+        h.feed(&event);
+        assert_eq!(
+            h.app.state.as_ref().expect("harness state").pointer_pos,
+            Some((30.0, 40.0))
+        );
+    }
+
+    /// P2 — a button the frontend has no semantics for reaches no body:
+    /// nothing local, nothing outbound. The counterpart to the routing
+    /// row that calls it claimed-and-dropped.
+    #[test]
+    fn an_unused_button_produces_no_effect_of_any_kind() {
+        let mut h = EffectHarness::new();
+        let step = h.feed(&mouse_input(ElementState::Pressed, MouseButton::Middle));
+        assert_eq!(
+            step,
+            Step {
+                local: Vec::new(),
+                outbound: Vec::new()
+            }
+        );
+    }
+
     /// P2 — the harness records a transcript, and the transcript
     /// distinguishes every routed effect from the others and from an
     /// unclaimed event. **Two of these rows produce no outbound traffic
@@ -3893,41 +4407,13 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     /// P3 — the thin call-through. Every decision belongs to
-    /// [`route_event`] and every effect to an `apply_*` method; what is
-    /// left here is `event_loop.exit()`, which exists nowhere else in
-    /// the crate and is the one thing a headless test cannot reach.
+    /// [`Self::dispatch_window_event`], which a headless test drives
+    /// directly. What is left here is `event_loop.exit()` — the one
+    /// statement no headless test can reach, because `ActiveEventLoop`
+    /// cannot exist outside a live event loop.
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        match route_event(&event) {
-            Route::Lifecycle(LifecycleRoute::Exit) => event_loop.exit(),
-            Route::Lifecycle(LifecycleRoute::Modifiers(mods)) => self.modifiers = mods,
-            Route::Lifecycle(LifecycleRoute::Resize { width, height }) => {
-                self.apply_resize(width, height);
-            }
-            Route::Lifecycle(LifecycleRoute::Redraw) => self.apply_redraw(),
-            Route::Keyboard {
-                action: KeyAction::Press,
-                key,
-            } => {
-                if self.apply_keyboard(key) == EventOutcome::Exit {
-                    event_loop.exit();
-                }
-            }
-            Route::Pointer(PointerRoute::Moved { x, y }) => self.apply_cursor_moved(x, y),
-            Route::Pointer(PointerRoute::Left(button_state)) => {
-                self.apply_left_button(button_state);
-            }
-            Route::Pointer(PointerRoute::RightPress) => self.apply_right_press(),
-            Route::Pointer(PointerRoute::Wheel(delta)) => self.apply_wheel(delta),
-            // Three different facts, merged only because all three are
-            // today nothing to do: a key-up the keyboard family claimed
-            // and dropped, a button the pointer family has no semantics
-            // for, and an event no family claims at all.
-            Route::Keyboard {
-                action: KeyAction::Release,
-                ..
-            }
-            | Route::Pointer(PointerRoute::UnusedButton)
-            | Route::Unrouted => {}
+        if self.dispatch_window_event(&event) == EventOutcome::Exit {
+            event_loop.exit();
         }
     }
 
@@ -4576,6 +5062,8 @@ impl State {
         let (current_line_starts, current_line_char_starts) = line_offset_tables(initial_text);
 
         let mut state = Self {
+            #[cfg(test)]
+            render_calls: 0,
             window,
             device,
             queue,
@@ -9159,6 +9647,16 @@ impl State {
     /// windowed path. Composition lives in `render_to_view`, shared with
     /// the headless offscreen path (`render_offscreen`, F-014).
     fn render(&mut self) {
+        // GUI 1-pre P2 — a repaint is a LOCAL effect with no outbound
+        // trace, and headless there is no surface either: every path
+        // below returns without observable consequence. The counter is
+        // the only way a harness can witness that the redraw arm ran,
+        // and it is incremented before the surface check for exactly
+        // that reason. Test-only, so production carries nothing.
+        #[cfg(test)]
+        {
+            self.render_calls += 1;
+        }
         let frame = {
             let Some(surface) = self.surface.as_ref() else {
                 return;

@@ -1169,6 +1169,24 @@ impl AttachClient {
     }
 }
 
+/// Build a real [`AttachClient`] over an already-connected stream, for
+/// the GUI 1-pre effect harness in `main.rs`.
+///
+/// The harness needs to observe the protocol messages a dispatch
+/// actually produces. Faking the client would only witness the fake, so
+/// it drives the **real** handshake, outbox, writer thread and encoder
+/// over a `socketpair`, and reads the encoded `FrontendEvent`s off the
+/// other end. This wrapper exists solely because
+/// [`connect_stream_with_sink`] is private to this module and the
+/// harness is a sibling; it adds no behaviour of its own.
+#[cfg(test)]
+pub(crate) fn connect_stream_for_test(
+    stream: UnixStream,
+    sink: impl Fn(AttachEvent) -> bool + Send + 'static,
+) -> Result<AttachClient, AttachClientError> {
+    connect_stream_with_sink(stream, None, sink)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
