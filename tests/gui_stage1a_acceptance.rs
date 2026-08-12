@@ -232,5 +232,179 @@ fn a9_a_payload_at_the_cap_is_inserted_whole() {
     );
 }
 
+// ---------------------------------------------------------------------
+// A8 — a terminal receives RAW UTF-8, never bracketed paste
+// ---------------------------------------------------------------------
+
+/// A8, delivered rather than merely routed: the child process receives
+/// the exact UTF-8 bytes, **while bracketed-paste mode is ENABLED**, and
+/// no `ESC[200~` / `ESC[201~` markers.
+///
+/// **The enabled mode is the whole precondition.** With bracketed paste
+/// off, "no markers" is true of every code path including a paste, so
+/// the assertion would pass against the behaviour it exists to forbid.
+/// The row therefore waits for the child's own `ESC[?2004h` to be
+/// parsed, asserts the mode really is on, and only then types.
+///
+/// The contrast at the end is what makes it a discriminator: through the
+/// same terminal in the same mode, a PASTE does get the markers. One
+/// path bracketed and the other not, observed at the PTY.
+#[test]
+fn a8_a_terminal_receives_raw_utf8_with_bracketed_paste_enabled() {
+    use pmacs::terminal::TerminalSpec;
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sink = dir.path().join("received");
+    let sink_disp = sink.display().to_string();
+
+    let mut s = EditorState::new_with_roots(&crate::iso::roots());
+
+    // The child turns bracketed paste ON, then copies its stdin to a
+    // file so the test can read exactly what arrived on the PTY.
+    let script = format!("printf '\\033[?2004h'; exec cat > {sink_disp}");
+    let mut spec = TerminalSpec::new("/bin/sh");
+    spec.args = vec!["-c".into(), script];
+    spec.rows = 24;
+    spec.cols = 80;
+    let buffer_id = s
+        .terminal_manager
+        .borrow_mut()
+        .open(
+            spec,
+            &mut s.core.borrow_mut(),
+            &mut s.process_supervisor.borrow_mut(),
+        )
+        .expect("open terminal");
+
+    // Point this frontend's view at the terminal buffer, the way a
+    // daemon-side buffer switch does. Without it `active_terminal_key`
+    // returns `None`, the terminal branch is never taken, and the row
+    // fails for a setup reason rather than a behavioural one — which is
+    // exactly how it first failed.
+    let window_id = attach_terminal_view(&s, FID, buffer_id);
+    let key = pmacs::terminal::TerminalViewKey::new(FID, window_id, buffer_id);
+    // Precondition, asserted rather than assumed: this frontend's
+    // ACTIVE window shows the terminal buffer. A row that silently
+    // failed this would be testing the document path and reporting it
+    // as a terminal result.
+    {
+        let core = s.core.borrow();
+        let view = core.views.get(&FID).expect("view registered");
+        let active = core.windows.get(&view.active).expect("active window");
+        assert_eq!(active.buffer_id, buffer_id);
+        assert!(
+            s.terminal_manager.borrow().is_terminal(buffer_id),
+            "and the manager agrees it is a terminal"
+        );
+    }
+
+    // Wait for the child's mode-set to be parsed — a condition, not a
+    // sleep, so a slow machine waits longer rather than failing.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        s.tick_processes();
+        let on = s
+            .terminal_manager
+            .borrow()
+            .modes_for_view(key)
+            .is_some_and(|m| m.bracketed_paste);
+        if on {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "child never enabled bracketed paste; the precondition this \
+             row depends on was never established"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // Multi-byte and multi-scalar, so a byte-level mistake shows up.
+    let typed = "h\u{e9}llo\u{301}";
+    s.dispatch_text_input(FID, typed);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let got = loop {
+        s.tick_processes();
+        let got = std::fs::read(&sink).unwrap_or_default();
+        if got.len() >= typed.len() {
+            break got;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the child never received the typed text; got {got:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+
+    assert_eq!(
+        String::from_utf8_lossy(&got),
+        typed,
+        "the PTY must receive the exact UTF-8 that was typed"
+    );
+    let text = String::from_utf8_lossy(&got).into_owned();
+    assert!(
+        !text.contains("\u{1b}[200~") && !text.contains("\u{1b}[201~"),
+        "typed text must NOT be bracketed: {text:?}"
+    );
+
+    // The contrast, through the same terminal in the same mode: a paste
+    // IS bracketed. Without this the row above could pass because the
+    // mode was somehow inert rather than because the code is right.
+    assert!(
+        s.dispatch_paste(FID, b"pasted"),
+        "the terminal claims the paste"
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        s.tick_processes();
+        let all = String::from_utf8_lossy(&std::fs::read(&sink).unwrap_or_default()).into_owned();
+        if all.contains("\u{1b}[200~") {
+            assert!(
+                all.contains("pasted") && all.contains("\u{1b}[201~"),
+                "a paste is bracketed on both sides: {all:?}"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "a paste through the same terminal must be bracketed; got {all:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Register a frontend view whose active window shows `buffer_id`.
+fn attach_terminal_view(
+    state: &EditorState,
+    frontend_id: FrontendId,
+    buffer_id: pmacs::buffer::BufferId,
+) -> pmacs::window::WindowId {
+    use pmacs::window::{FrontendView, Layout, Window, WindowId};
+    let mut core = state.core.borrow_mut();
+    let text_view = {
+        let registry = core.registry.clone();
+        let registry = registry.borrow();
+        let buffer = registry.get(buffer_id).expect("buffer present");
+        pmacs::text_view::TextView::new(buffer)
+    };
+    let window_id = WindowId::next();
+    core.windows
+        .insert(window_id, Window::new(window_id, buffer_id, text_view));
+    core.register_frontend_view(
+        frontend_id,
+        FrontendView {
+            layout: Layout::single(window_id),
+            active: window_id,
+            fold_projection: true,
+            panel_capable: true,
+            frame_geometry: None,
+            panel_hidden: false,
+        },
+    );
+    window_id
+}
+
 #[path = "common/iso.rs"]
 mod iso;
