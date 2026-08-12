@@ -1904,15 +1904,22 @@ pub enum ResourceBody {
 /// `PanelPointer`, the final v23 `FrontendEvent` variant, so no
 /// existing discriminant moves.
 ///
-/// **This is the first FRONTEND→INSTANCE extension to need a gate in
-/// both directions**, and the reason is that the direction of travel is
-/// reversed: for an instance→frontend variant the daemon simply
-/// withholds, but here the *frontend* must withhold below
-/// [`TEXT_INPUT_MIN_VERSION`] **and** the daemon must refuse what a peer
-/// below it nonetheless sends. A client built from this crate can encode
-/// the variant whatever it negotiated, so the producer gate alone would
-/// leave a v6–v23 session able to drive an edit through a variant its
-/// own session never declared.
+/// **The gate is producer-side AND receiver-side**, and for an inbound
+/// variant the receiving half is the load-bearing one. An
+/// instance→frontend variant is gated by the daemon simply not sending
+/// it, which is entirely within the daemon's control; an inbound variant
+/// cannot be, because the withholding would be the *peer's* job and a
+/// client built from this same crate can encode the discriminant
+/// whatever it negotiated. So the daemon refuses `TextInput` from a
+/// session below [`TEXT_INPUT_MIN_VERSION`] rather than trusting the
+/// producer to withhold — otherwise a v6–v23 session could drive an edit
+/// through a variant its own session never declared.
+///
+/// This is not a new shape: the v19 terminal and v21 panel families
+/// already gate their own inbound events on the authenticated session's
+/// negotiated version. What is unusual here is only that the extension
+/// is **inbound-only** — there is no outbound counterpart to withhold,
+/// so the receiver check is the whole of the daemon's half.
 pub const PROTOCOL_VERSION: u32 = 24;
 
 /// Protocol version placed in the daemon's server-first [`Hello`].
@@ -2096,10 +2103,9 @@ pub fn negotiated_session_version(frontend_offer: u32) -> u32 {
 /// both. [`ADVERTISED_PROTOCOL_VERSION`] does not move.
 ///
 /// GUI arc Stage 1a: extended to `[6, ..., 24]` for
-/// [`FrontendEvent::TextInput`]. Additive, and gated in **both**
-/// directions rather than only daemon-side — see [`PROTOCOL_VERSION`]
-/// for why an inbound frontend→instance variant needs the receiving
-/// check too. [`ADVERTISED_PROTOCOL_VERSION`] does not move: a v23
+/// [`FrontendEvent::TextInput`]. Additive, and gated producer-side AND
+/// receiver-side — see [`PROTOCOL_VERSION`] for why an inbound variant
+/// cannot rely on the producer withholding. [`ADVERTISED_PROTOCOL_VERSION`] does not move: a v23
 /// frontend negotiates v23, never sends the variant, and keeps today's
 /// first-scalar behaviour.
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[

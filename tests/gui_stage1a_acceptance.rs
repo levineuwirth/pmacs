@@ -127,10 +127,38 @@ fn multi_scalar_text_input_creates_no_typed_provenance() {
         no_record,
         "a multi-scalar commit must not forge a typed-edit record"
     );
-    let this_command: String = eval(&s, "return pmacs.editor.this_command() or ''");
-    assert_ne!(
-        this_command, "buffer.self-insert",
-        "a multi-scalar commit is not a self-insert"
+}
+
+/// §5 — a MULTI-scalar commit **breaks the command chain**, as a paste
+/// does.
+///
+/// **The chain is PRIMED first, and that is what makes the row
+/// discriminating.** Starting from a fresh editor the chain is already
+/// empty, so an assertion that it is empty afterwards passes whether or
+/// not `break_command_chain` is called — the first version of this row
+/// did exactly that and would have survived deleting the call.
+#[test]
+fn multi_scalar_text_input_breaks_a_live_command_chain() {
+    let mut s = editor_with("");
+
+    // Prime it with 1a's OWN single-scalar path, which rotates to
+    // `buffer.self-insert`. A programmatic
+    // `pmacs.command.invoke('buffer.self-insert')` cannot prime it:
+    // rotation belongs to the dispatcher, and invoking the command
+    // directly deliberately never rotates or arms.
+    s.dispatch_text_input(FID, "x");
+    let primed: String = eval(&s, "return pmacs.editor.this_command() or ''");
+    assert_eq!(
+        primed, "buffer.self-insert",
+        "precondition: the chain is live before the commit"
+    );
+
+    s.dispatch_text_input(FID, "e\u{301}");
+
+    let after: Option<String> = eval(&s, "return pmacs.editor.this_command()");
+    assert_eq!(
+        after, None,
+        "a multi-scalar commit is not a command and must clear the chain"
     );
 }
 
