@@ -270,7 +270,58 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## `scripts/gate` TMPDIR isolation — PR #240 OPEN
+## GUI arc Stage 1b — pointer and scroll — ACTIVE, framing only
+
+**Written with the branch's first commit**, per the standing correction
+from #171 and #215. **Minimal by intent**: the recovery facts and the
+checkpoint, nothing else. The #239/#240 absorption is a separate lane
+and is still deferred.
+
+- **Branch `gui-stage1b-pointer-scroll`**, base `githubsucks/main` @
+  **`72da24a`** exactly — the #240 merge commit.
+  **`githubsucks/gui-stage1b-pointer-scroll` is the authoritative
+  tip** (the ref, not a SHA). Recover with
+  `git fetch githubsucks && git checkout gui-stage1b-pointer-scroll`.
+- **No PR yet.** Framing approval gates it.
+- **Checkpoint: framing revision 14 AWAITING APPROVAL; NO CODE
+  WRITTEN.** `docs/gui-stage1-input-framing.md` §2a is the 1b ground
+  truth, measured at `72da24a`. Revision 13 was the re-measurement;
+  **revision 14 answers review of it** and is what is pending.
+- **No new framing doc.** The approved Stage 1 framing governs every
+  slice; B1–B7 are ruled there. §2a extends it rather than duplicating
+  it.
+- **What §2a settled, and why the lane cannot start without it:**
+  - **Q#S1-11 RULED (B), viewport only** — a horizontal wheel never
+    moves point or selection, under a **five-clause lifetime
+    contract**. (A) is not viable: the GPU cursor is a *mirror* of
+    daemon state (`pmacs-gpu/src/main.rs:2337`) and the only wire
+    operation that positions it breaks the command chain and changes
+    selection (`src/editor.rs:3638`), so carrying point needs a wire
+    operation 1b may not add. This also settles the horizontal-scroll
+    framing's **Q#HS4** for the wheel case.
+  - **The snap-back lands on the next PAINT, not the next caret
+    event** — `horizontal_follow` is the first act of
+    `prepare_window_cursor_visible` (`src/editor.rs:4539`), which
+    `paint_frame` runs every frame (`:4852`). Revision 13 said "caret
+    event" and understated it.
+  - **B1's "surface" is enumerated** as six wheel targets with a
+    residual owner and a horizontal answer each. Quantization precedes
+    routing (`:3074` before `:3090`/`:3112`), so an accumulator added
+    after the routing decision fixes the document and leaves the wire
+    targets broken.
+  - **B3 takes B7's exact saturated upper bound** in the GPU column
+    grid, with narrow-buffer and final-column-visible rows. A clamp at
+    full content width must fail.
+  - **B3/B4/B5 each describe an empty field that is occupied** —
+    `code_scroll_left`, `apply_panel_cursor_icon`'s `Default` else
+    branch, and 1-pre's `UnusedButton` landing site.
+- **Still non-protocol-bearing.** `MouseKind::ScrollLeft`/`ScrollRight`
+  already exist and round-trip, so no `--protocol`.
+- **Gates when it has code:** §11's —
+  `./scripts/gate --acceptance gpu_invocation_acceptance` plus touched
+  input suites, and `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`.
+
+## `scripts/gate` TMPDIR isolation — MERGED as #240 (`72da24a`)
 
 **Written with the branch's first commit**, per the standing correction
 from #171 and #215.
@@ -363,7 +414,7 @@ from #171 and #215.
 - **Out of scope, deliberately:** the overdue absorption of #239. This
   lane is the gate fix and nothing else.
 
-## GUI arc Stage 1a — `TextInput` at v24 — PR #239 OPEN
+## GUI arc Stage 1a — `TextInput` at v24 — MERGED as #239
 
 **Written with the branch's first commit**, per the standing correction
 from #171 and #215.
@@ -449,7 +500,7 @@ from #171 and #215.
   nothing shifted and the pin passed, correctly. A mutation aimed at the
   wrong side of a boundary reports a sound pin as worthless.
 
-## GUI arc Stage 1 — 1-pre MERGED as #237 (`d038f71`); 1a is next, NOT STARTED
+## GUI arc Stage 1 — 1-pre MERGED as #237 (`d038f71`); 1a MERGED as #239; 1b IS THE ACTIVE LANE
 
 **The lane is rewritten, not removed.** Rule 4 removes a lane when its
 ARC is done, and the arc is Stage 1 as a whole: **five slices remain**.

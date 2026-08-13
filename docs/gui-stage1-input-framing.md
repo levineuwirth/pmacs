@@ -1,12 +1,24 @@
 # GUI arc, Stage 1 — input foundation (framing)
 
-**Status: revision 13 — AWAITING APPROVAL.** Revision 13 is §2a's
-ground-truth re-measurement **for Stage 1b**, taken at the post-#240
-tip. Every 1b line anchor was stale, which was expected. What was not
-expected is that **three B-rows describe a field as empty when it is
-occupied**, and that **B7 re-opens a question another framing
-deliberately deferred** — so this revision asks for a ruling (Q#S1-11)
-rather than only renumbering. **No B-row contract is changed here.**
+**Status: revision 14 — AWAITING APPROVAL.** Revision 14 answers review
+of revision 13. **Q#S1-11 is RULED (B), viewport only**, with the full
+five-clause lifetime contract and its witnesses; (A) was not viable
+because the GPU cursor is a daemon-owned mirror and carrying point
+would need a wire operation 1b is not allowed. Two further holes review
+named are closed: **B1's "surface" is now enumerated** as a
+wheel-target table with a residual owner and a horizontal answer per
+target, and **B3 takes B7's exact saturated upper bound** in the GPU's
+column grid instead of "content bounds". Revision 13's claim that the
+snap-back lands on the next *caret event* is **corrected**: it lands on
+the next **paint**.
+
+**Previously, revision 13 — SUPERSEDED.** §2a's ground-truth
+re-measurement for Stage 1b at the post-#240 tip. Every 1b anchor was
+stale, as expected; what was not was that **three B-rows describe a
+field as empty when it is occupied**, and that **B7 re-opens a question
+another framing deliberately deferred**. **No B-row contract is changed
+by either revision** — 13 and 14 add ground truth, a ruling, and
+witnesses.
 
 **Previously, revision 12 — APPROVED.** Revision 12 is §2's ground-truth
 re-measurement for Stage 1a and changes no ruling; it carries two
@@ -22,7 +34,8 @@ IMPLEMENTED**; 1a onward may begin from this document.
 **Verification base:** §2 is **re-measured at `4f77491`** (2026-08-12),
 the tip after 1-pre; it was originally taken at `a994f37`. **§2a is
 measured at `72da24a`** (2026-08-13), the tip after 1a and #240, and it
-is the base for **1b only**. Sections other than §2/§2a were written
+is the base for **1b only**; it carries Q#S1-11's ruling. Sections
+other than §2/§2a were written
 against `a994f37` and their *rulings* are unaffected by 1-pre, which
 changed no behaviour — but **any line number outside §2 and §2a
 predates 1-pre and should be re-checked before it is relied on.** The
@@ -156,6 +169,57 @@ accumulator is what both need. **There is no wheel accumulator today.**
 pixel residual, buffer-scoped, cleared at `:5928`. **Reusing it would
 be a defect**, not a shortcut.
 
+### CORRECTION 5 — B1's "surface" is not enumerated, and the classifier cannot enumerate it
+
+B1 says "residual per **axis and surface**" and the table leaves
+"surface" undefined. Two facts make that a hole rather than a detail.
+
+**Quantization happens BEFORE routing.** The rounding and the
+`lines == 0` return are at `:3074`–`:3084`; the panel branch is `:3090`
+and the terminal branch `:3112`. So a sub-tick delta bound for the
+panel or the terminal is **discarded before anything knows where it was
+going**. An accumulator added after the routing decision would fix the
+document and leave the wire targets exactly as broken as they are now.
+
+**And `PointerSurface` cannot name the surfaces B1 needs.**
+`classify_pointer_surface` (`:7192`) resolves panel geometry only;
+`Elsewhere` (`:2067`) is *"the document, the terminal, the minimap, or
+the chrome"* — four wheel targets under one name, three of which B1 and
+B6 must distinguish. **B1 needs a wheel-target enumeration; it does not
+get one for free from the existing classifier.**
+
+Note also a live consequence of `:3090` matching `PanelCell(_)` alone:
+**a wheel over the panel DIVIDER or the band's BACKGROUND scrolls the
+document today**, though the enum's own doc says the band "still owns
+the pixel."
+
+The enumeration B1 must carry, measured:
+
+| wheel target | classified today | vertical wheel today | residual owner | horizontal |
+|---|---|---|---|---|
+| Panel cell | `PanelCell` | wire `ScrollUp`/`Down` (`:3102`) | per panel | **must be ruled** — wire has the kinds, daemon has no arm |
+| Panel divider / background | `PanelDivider` / `PanelBackground` | **falls through to the document** | — | inert |
+| Terminal | `Elsewhere` + `terminal.is_some()` (`:3112`) | wire terminal `ScrollUp`/`Down` (`:3122`) | per terminal | **must be ruled** — same gap |
+| Minimap | `Elsewhere` | document `scroll_by_lines` | **its own** (B6) | inert |
+| Document | `Elsewhere` | `scroll_by_lines` (`:3126`) | document | `code_scroll_left` (B3) |
+| Chrome | `Elsewhere` | document | none | inert |
+
+**The horizontal gap is not a wire gap.** `MouseKind::ScrollLeft` and
+`ScrollRight` already exist (`pmacs-protocol/src/message.rs:245`,
+`:247`) and round-trip (`src/protocol.rs:720`), so **emitting them
+needs no protocol bump** — 1b stays non-protocol-bearing either way.
+What is missing is a *handler*: the terminal path has arms for
+`ScrollUp`/`ScrollDown` only (`src/editor.rs:3576`, `:3579`), and the
+panel path only `ScrollUp` (`src/daemon.rs:6683`). So for each wire
+target 1b must choose **emit-and-handle** or **explicitly inert**, and
+say which. Silence here is what lets a horizontal tick vanish.
+
+**Without this table the rows are satisfiable by an implementation that
+is wrong**: one global accumulator passes every per-surface row that
+only ever tests one surface, and a document-and-minimap-only
+implementation passes B1 and B6 while panel and terminal traffic still
+carries residue across surfaces or drops sub-tick deltas silently.
+
 ### CORRECTION 3 — three rows say "nothing exists" where something does
 
 Each of these reads as an empty field in the table and is not one. The
@@ -208,33 +272,123 @@ scroll for exactly this reason:
 (That citation is itself stale: `scroll_window` is **`src/editor.rs:3845`**,
 not `:3628`.)
 
-So a wheel-driven `view_left` that does **not** carry the cursor will be
-snapped back by the next `horizontal_follow`, and horizontal wheel
-scrolling will "feel stuck after one notch" — the identical bug, one
-axis over, on **both** frontends, since the GPU's `horizontal_follow`
-(`:7702`) has the same shape.
+So a wheel-driven `view_left` that does **not** carry the cursor is
+snapped back, and horizontal wheel scrolling "feels stuck after one
+notch" — the identical bug, one axis over, on **both** frontends, since
+the GPU's `horizontal_follow` (`:7702`) has the same shape.
 
-**B7's stated contract does not mention the cursor at all**, and its
-mutations therefore cannot detect this: a clamp row and a wrap row both
-pass against a viewport that snaps back on the next caret event.
+**And it happens on the next PAINT, not the next caret event.**
+`prepare_window_cursor_visible` (`src/editor.rs:4518`) calls
+`horizontal_follow` unconditionally as its **first** act (`:4539`), and
+`paint_frame` (`:4747`) calls it every frame (`:4852`, and `:2572` for
+the panel). Revision 13 said "the next caret event"; that was wrong and
+understated the exposure — the origin is overwritten by a redraw with
+no input at all.
 
-#### Q#S1-11 — does a horizontal wheel scroll carry the cursor? **OPEN**
+**B7's stated contract does not mention the cursor**, so its mutations
+cannot detect this: a clamp row and a wrap row both pass against a
+viewport that is overwritten on the next frame.
 
-Not answerable from the table as written; Q#HS4 was deferred rather
-than closed precisely so this would be decided when explicit commands
-arrived. Two candidate answers, both defensible:
+#### Q#S1-11 — does a horizontal wheel scroll carry the cursor? **RULED: (B), viewport only**
 
-- **(A) Carry it, mirroring `scroll_window`.** Consistent with the
-  vertical axis, and the snap-back cannot arise. Costs a cursor move
-  the user did not ask for.
-- **(B) Do not carry it; suppress the follow while a wheel origin is
-  live.** Preserves the cursor, but needs a rule for when the origin
-  stops being authoritative, and that rule is new state on both
-  frontends.
+**(A) is not viable in 1b, and the vertical precedent does not reach
+it.** `scroll_window` carries point because it is **TUI-side**, where
+the editor owns the cursor directly. The GPU has no such power:
+`OwnCursor` (`pmacs-gpu/src/main.rs:2337`) is *"pmacs-gpu's own cursor
+position, **mirrored** from `CursorByte`"* — a read-only reflection of
+daemon state. The only wire operation that positions it is `Pointer`,
+and `dispatch_pointer` (`src/editor.rs:3638`) sets `active_frontend`,
+calls `break_command_chain`, and — by its own comment — *"Every
+`PointerKind` moves point or changes the selection."* Carrying point
+from a wheel would mean **a new wire operation**, which contradicts
+1b's non-protocol scope outright.
 
-**Whichever is ruled, B7 needs a witness the current table lacks:**
-scroll sideways, then trigger a caret-follow, and assert the origin
-behaves as ruled. Without it the row is green either way.
+Note also that **GPU vertical scrolling already does not carry point**:
+`apply_wheel` ends at `send_viewport` (`:3129`). (A) would therefore not
+even be internally consistent — it would make the horizontal axis carry
+point on a frontend where the vertical axis does not.
+
+##### The lifetime contract (B)
+
+A ruling that only says "do not carry" leaves the origin's lifetime
+undefined, which is the part that decides whether the feature works.
+**All five clauses are the ruling**, not commentary on it:
+
+1. **Horizontal wheel changes the VIEWPORT only** — never point, never
+   selection, on either frontend.
+2. **An effective wheel move makes that origin authoritative**, and it
+   stays authoritative while the cursor position is unchanged. "An
+   effective move" means one that actually changed the origin; a move
+   fully absorbed by the clamp arms nothing.
+3. **Preserved by** repaint, a same-cursor follow, resize, and vertical
+   wheel. **Clamped by** geometry and content changes — clamped, not
+   released: a narrower window must not silently discard the gesture.
+4. **A genuine cursor-position change releases it**, and normal follow
+   resumes on that same event. Release is driven by the cursor
+   *changing*, never by elapsed time or by the follow running.
+5. **Wrap and buffer replacement clear it and pin the origin to zero.**
+   This is the existing rule (`horizontal_follow`'s wrap branch, and
+   the GPU's at `:7703`); authority must not survive either.
+
+##### What B7 and B3 must witness
+
+Rows against the **real call sites**, on **both** frontends — a unit
+test of a helper cannot see a follow that runs inside `paint_frame`:
+
+- **Preservation:** wheel sideways, then drive a real paint with the
+  cursor unchanged; the origin holds.
+- **Release:** wheel sideways, then a genuine cursor-position change;
+  the origin follows the cursor on that event.
+- **Cross-axis, TUI only:** wheel sideways, then wheel **vertically**.
+  Vertical wheel carries point in the TUI (`scroll_window`), so this
+  path *does* move the cursor and would release a naive
+  authority-on-any-cursor-write implementation. Clause 3 says the
+  horizontal origin survives it.
+
+Two mutations, and both must fail their own rows:
+
+| mutation | must fail |
+|---|---|
+| follow ignores manual authority (always overwrites) | preservation |
+| manual authority never releases | release |
+
+Clause 5 is already implemented for the caret path; the mutation for it
+is the existing wrap-guard removal named in the B7 row.
+
+### CORRECTION 6 — B3's right bound is vaguer than B7's, for the same bound
+
+B7 states its upper bound exactly — *"(widest display-line width − text
+viewport width), SATURATING AT ZERO"* — and pins that the final display
+column stays visible. **B3 says only "content bounds"** and witnesses
+just the negative-origin end. That asymmetry is not defensible: it is
+the same bound on the same rule, and B7's exactness exists because the
+loose version *blanks the viewport*.
+
+**B3 takes B7's rule verbatim, in the GPU's column-grid units.** The
+GPU already reckons in that grid — `horizontal_follow` (`:7702`)
+derives `cols = (width / advance).floor()` and `left_col =
+(code_scroll_left / advance).round()`, then re-multiplies to snap the
+offset back onto the grid, deliberately, so both frontends put the same
+first character on screen. The clamp is therefore stated in **columns**
+and applied to `code_scroll_left` through the same conversion — not in
+pixels, which would break the snap the shared rule depends on.
+
+B3's rows, matching B7's:
+
+- **Lower bound:** the origin never goes negative (already named).
+- **Upper bound:** clamped at *widest display-line width − text
+  viewport width*, **saturating at zero** — a buffer narrower than the
+  viewport clamps to 0, not to a negative.
+- **Narrow-buffer row:** every line shorter than the viewport → the
+  origin stays 0 however far the wheel is pushed.
+- **Final-column-visible row:** at the upper bound, the widest line's
+  **last display column is still on screen**. This is the row that
+  distinguishes the correct bound from the plausible one.
+
+**Mutation: clamp at the full content width.** It must fail the
+final-column-visible row — that clamp lets the origin advance past
+every glyph and leaves the viewport blank, which is exactly the defect
+B7's revision found and B3 currently has no row to catch.
 
 ## 3. PR topology
 
@@ -432,10 +586,13 @@ The crate has **exactly one** executable `event_loop.exit()`, in
 ### 1b — pointer and scroll
 
 > **Read §2a first.** Every line number in this table was measured
-> before 1-pre and is stale. §2a re-measures them at `72da24a` and
-> records three rows whose "nothing exists yet" is wrong, plus **Q#S1-11
-> (open)**, which B7 cannot be implemented without. The contracts below
-> are unchanged.
+> before 1-pre and is stale. §2a re-measures them at `72da24a`, records
+> three rows whose "nothing exists yet" is wrong (B3, B4, B5),
+> enumerates B1's wheel targets, gives B3 B7's exact upper bound, and
+> rules **Q#S1-11 (B, viewport only)** with the lifetime contract and
+> witnesses B7 and B3 both depend on. The contracts below are
+> unchanged, but **none of B1, B3 or B7 is implementable from this
+> table alone.**
 
 | # | Contract | Witness | Mutation |
 |---|---|---|---|
@@ -733,11 +890,16 @@ and its attachments, Escape only cancels/round-trips · **Q#S1-5** A/`1e`
 and the backlog amended by 1-pre's first PR · **Q#S1-8** (A),
 `SEMANTIC_BOOTSTRAP_GRID` · **Q#S1-9** precedence per §5 · **Q#S1-10** terminal `OpenTargetResult`.
 
-**OPEN: Q#S1-11** — does a horizontal wheel scroll carry the cursor?
-Raised by §2a; **blocks B7 and B3 only**, and nothing else in 1b. It is
-the question `docs/horizontal-scroll-framing.md` deferred as Q#HS4,
-now live because B7 is the explicit horizontal scroll command whose
-absence was that deferral's stated premise.
+**Q#S1-11 — RULED: (B), viewport only** (§2a). A horizontal wheel
+scroll never moves point or selection; the origin it sets is
+authoritative under a **five-clause lifetime contract**, and B7 and B3
+carry preservation, release and cross-axis witnesses at the real call
+sites. (A) — carrying point, as `scroll_window` does vertically — is
+**not viable in 1b**: the GPU cursor is a mirror of daemon state, the
+only wire operation that positions it also breaks the command chain and
+changes selection, and a new one would break 1b's non-protocol scope.
+This settles `docs/horizontal-scroll-framing.md`'s **Q#HS4** for the
+wheel case, which was deferred against exactly this arrival.
 
 ## 11. Gates
 
