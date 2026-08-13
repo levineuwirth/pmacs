@@ -1,12 +1,21 @@
 # `scripts/gate` — per-worktree build isolation, and one gate suite
 
-**Status: revision 6 — AWAITING APPROVAL.** Revision 6 extends the
-isolation contract to `TMPDIR` (§2a below) and is the only unapproved
-part of this document; everything else is as approved. It is a
-*widening of an existing responsibility*, not a new feature: §2 already
-owns "what the gate isolates", and `TMPDIR` was simply missing from
-that list — which is how a stray `/tmp/.git` came to redden a gate run
-on an unrelated lane.
+**Status: revision 6 — APPROVED and IMPLEMENTED.** Revision 6 extends
+the isolation contract to `TMPDIR` (§2a below). It is a *widening of an
+existing responsibility*, not a new feature: §2 already owns "what the
+gate isolates", and `TMPDIR` was simply missing from that list — which
+is how a stray `/tmp/.git` came to redden a gate run on an unrelated
+lane.
+
+**Approved after three review rounds, all of which turned on evidence
+rather than design.** Revisions 6a–6c tightened the socket budget to
+the Darwin floor, replaced an existence-only ancestor check with one
+that honours marker types, made the traversal canonical, moved the
+guard rows onto the exact boundary, and — last — required the
+byte-versus-character row to *establish* its locale precondition
+instead of naming one. Each correction was a witness asserting
+something adjacent to the contract while appearing to assert the
+contract itself.
 
 **Previously, revision 5. Approved at revision 4 and IMPLEMENTED; revision
 5 records two safety defects review found in the implementation.**
@@ -425,7 +434,7 @@ under real parallel load, direnv is the escalation.
 
 ---
 
-## 2a. `TMPDIR` isolation (revision 6, AWAITING APPROVAL)
+## 2a. `TMPDIR` isolation (revision 6, APPROVED)
 
 **The gap.** §2 lists what a gate run isolates: the target directory and
 five ambient roots. `TMPDIR` was not on that list, so

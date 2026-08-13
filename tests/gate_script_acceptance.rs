@@ -834,13 +834,20 @@ fn the_socket_path_guard_counts_bytes_not_characters() {
          bytes (must fail), path {path}"
     );
 
+    // **Chosen by BEHAVIOUR, not by name.** Locale names beyond `C` and
+    // `POSIX` are implementation-defined and an unrecognized value has
+    // unspecified behaviour, so setting `LC_ALL=C.UTF-8` and hoping is
+    // not a precondition — where that locale is absent the shell would
+    // fall back to byte semantics and the character-counting mutant
+    // would pass, silently.
+    let locale = char_counting_locale();
     let out = std::process::Command::new(gate())
         .arg("--self-test")
         .current_dir(repo_root())
         .env("PMACS_GATE_TARGET_ROOT", root.path())
         .env("PMACS_GATE_ALLOW_ANCESTOR_MARKER", "1")
-        .env("LC_ALL", "C.UTF-8")
-        .env("LANG", "C.UTF-8")
+        .env("LC_ALL", &locale)
+        .env("LANG", &locale)
         .env_remove("TMPDIR")
         .output()
         .expect("run gate");
@@ -850,6 +857,56 @@ fn the_socket_path_guard_counts_bytes_not_characters() {
         "a root over the BYTE budget must be refused even though it is \
          under the CHARACTER budget ({chars} chars, {bytes} bytes); \
          stderr:\n{err}"
+    );
+}
+
+/// A locale under which **`/bin/sh` counts CHARACTERS** — verified by
+/// asking that very shell, not by trusting a name.
+///
+/// `${#x}` on a two-byte character answers `1` under a working UTF-8
+/// locale and `2` under `C`. That difference is the entire subject of
+/// the row this serves, so the row must establish it as a precondition
+/// rather than assume it: otherwise, on a machine without the named
+/// locale, the shell counts bytes, the mutant agrees with the fix, and
+/// the test passes while proving nothing.
+///
+/// Candidates come from `locale -a`, so this reflects what is actually
+/// installed. **Fails loudly when none qualifies** — a skip here would
+/// be indistinguishable from a pass.
+fn char_counting_locale() -> String {
+    let installed = std::process::Command::new("locale")
+        .arg("-a")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+
+    let candidates: Vec<String> = ["C.UTF-8".to_owned(), "C.utf8".to_owned()]
+        .into_iter()
+        .chain(
+            installed
+                .lines()
+                .filter(|l| l.to_ascii_lowercase().contains("utf"))
+                .map(str::to_owned),
+        )
+        .collect();
+
+    for cand in &candidates {
+        let probe = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("x=é; echo ${#x}")
+            .env("LC_ALL", cand)
+            .env("LANG", cand)
+            .output();
+        if let Ok(out) = probe
+            && String::from_utf8_lossy(&out.stdout).trim() == "1"
+        {
+            return cand.clone();
+        }
+    }
+    panic!(
+        "no installed locale makes /bin/sh count characters, so the \
+         byte-vs-character distinction this row exists to test cannot \
+         be established here. Tried: {candidates:?}"
     );
 }
 
