@@ -46,8 +46,8 @@ use pmacs_protocol::{
     MAX_STATUSLINE_FACE_BYTES, MAX_STATUSLINE_PROVIDERS, MAX_STATUSLINE_SEGMENT_BYTES,
     MAX_STATUSLINE_TOTAL_TEXT_BYTES, MenuPromptRow, MinibufferRow, Modifiers,
     MouseButton as ProtocolMouseButton, MouseKind as ProtocolMouseKind, PointerKind,
-    SelectionSnapshot, StatuslineSegment, StyleSegment, StyleSpan, TAB_STOP_COLUMNS, TerminalFrame,
-    UnderlineStyle,
+    SelectionSnapshot, StatuslineSegment, StyleSegment, StyleSpan, TAB_STOP_COLUMNS,
+    TEXT_INPUT_MIN_VERSION, TerminalFrame, UnderlineStyle,
     cell::{Color as CellColor, Style as CellStyle},
     is_builtin_pair_char, is_modeline_face_name,
     panel::{PANEL_MIN_VERSION, PanelFrame, PanelFramePayload},
@@ -3162,7 +3162,7 @@ impl App {
             Route::Keyboard {
                 action: KeyAction::Press,
                 key,
-            } => return self.apply_keyboard(key),
+            } => self.apply_keyboard(&key.logical_key, key.text.as_deref()),
             Route::Pointer(PointerRoute::Moved { x, y }) => self.apply_cursor_moved(x, y),
             Route::Pointer(PointerRoute::Left(button_state)) => {
                 self.apply_left_button(button_state);
@@ -3183,10 +3183,25 @@ impl App {
         EventOutcome::Continue
     }
 
-    /// Perform [`KeyAction::Press`]. The router has already
-    /// discarded key-ups, so `key` is always a press.
+    /// Perform [`KeyAction::Press`]. The router has already discarded
+    /// key-ups, so this is always a press.
+    ///
+    /// **Takes the two fields it reads rather than the whole
+    /// `KeyEvent`, deliberately.** `KeyEvent` carries a `pub(crate)`
+    /// field and cannot be constructed outside winit, so a body taking
+    /// one is undrivable by any test; `Key` and `&str` are ordinary
+    /// values. That distinction is not academic — 1a's first review
+    /// found the `TextInput` selection sited *below* the intercept
+    /// return, making A7 and A8 reachable only when no prompt and no
+    /// terminal were present. The classifier was correct throughout;
+    /// only the call site was wrong, so only a test that drives THIS
+    /// function could have caught it.
+    ///
+    /// The router arm remains unwitnessable — it still cannot be handed
+    /// a `WindowEvent::KeyboardInput` — so 1-pre's structural exception
+    /// narrows to that one pattern arm rather than disappearing.
     #[allow(clippy::too_many_lines)] // one linear key pipeline; splitting hides the order.
-    fn apply_keyboard(&mut self, key: &KeyEvent) -> EventOutcome {
+    fn apply_keyboard(&mut self, logical: &Key, text: Option<&str>) {
         // While the daemon is intercepting keystrokes — an active
         // incremental search (Q#SR5), or a minibuffer / pending
         // prefix — every key belongs to its handler, not the
@@ -3213,29 +3228,33 @@ impl App {
             .as_ref()
             .is_some_and(State::completion_open_for_current_buffer);
 
-        // Escape cancels an active intercept (e.g. a running
-        // search) or dismisses the completion popup; otherwise it
-        // stays the local quit.
-        if matches!(key.logical_key, Key::Named(NamedKey::Escape)) {
-            if intercept || completion_open {
-                if let Some(client) = self.attach_client.as_ref()
-                    && let Err(e) = client.send_key(ProtocolKey::Escape, Modifiers::NONE)
-                {
-                    eprintln!("pmacs-gpu: send Escape (cancel) failed: {e}");
-                }
-            } else {
-                // Q#S1-1 / A4 — the local quit, unchanged here and
-                // deleted by Stage 1a: an idle Escape must reach the
-                // daemon. `window_event` performs the exit. This is the
-                // only reason a BODY needs an outcome; `EventOutcome`
-                // itself outlives A4, since a native close still exits.
-                return EventOutcome::Exit;
+        // A4 / Q#S1-1 — **every** Escape reaches the daemon, and none
+        // exits.
+        //
+        // It used to quit the frontend when nothing was intercepting,
+        // which made the GUI's most common "get me out of this" key
+        // destroy the window instead of cancelling. Q#S1-1 settles the
+        // exits and Escape is not among them: a native close detaches
+        // this frontend, `editor.quit` shuts the daemon and its
+        // attachments down, and **Escape only cancels or round-trips**.
+        //
+        // The `intercept || completion_open` test went with the quit
+        // branch. It never decided what to SEND — both arms sent the
+        // same `Escape` — only whether to send at all, so with one
+        // behaviour left there is nothing for it to choose. (Both flags
+        // remain live below, for the OS-paste, round-trip and
+        // completion-accept paths.)
+        if matches!(*logical, Key::Named(NamedKey::Escape)) {
+            if let Some(client) = self.attach_client.as_ref()
+                && let Err(e) = client.send_key(ProtocolKey::Escape, Modifiers::NONE)
+            {
+                eprintln!("pmacs-gpu: send Escape failed: {e}");
             }
-            return EventOutcome::Continue;
+            return;
         }
 
-        let Some((pkey, mut pmods)) = translate_key(&key.logical_key, self.modifiers) else {
-            return EventOutcome::Continue;
+        let Some((pkey, mut pmods)) = translate_key(logical, self.modifiers) else {
+            return;
         };
 
         // AltGr / international text (audit F-004). winit reports
@@ -3248,7 +3267,7 @@ impl App {
         // being routed to the keymap. Alt alone is left intact so
         // macOS Option-as-Meta still reaches the keymap; on layouts
         // where AltGr isn't Ctrl+Alt this is a no-op.
-        if matches!(pkey, ProtocolKey::Char(_)) && is_layout_text(key.text.as_deref(), pmods) {
+        if matches!(pkey, ProtocolKey::Char(_)) && is_layout_text(text, pmods) {
             pmods = if pmods.contains(Modifiers::SHIFT) {
                 Modifiers::SHIFT
             } else {
@@ -3271,12 +3290,56 @@ impl App {
             {
                 eprintln!("pmacs-gpu: send_paste failed: {e}");
             }
-            return EventOutcome::Continue;
+            return;
         }
 
         let Some(client) = self.attach_client.as_ref() else {
-            return EventOutcome::Continue;
+            return;
         };
+
+        // A5 — multi-scalar text travels as ONE `TextInput`, if the
+        // session can carry it.
+        //
+        // **This MUST precede the intercept branch below, and that
+        // placement is the contract rather than a preference.** A
+        // modal prompt or a focused terminal is exactly what makes
+        // `daemon_intercepts_keys` true, so classifying after it would
+        // leave A7 (prompts consume scalars in order) and A8 (terminals
+        // take raw UTF-8) reachable only when neither a prompt nor a
+        // terminal is present — which is to say, never. Sited here, the
+        // producer sends the same `TextInput` in every state and the
+        // daemon's `dispatch_text_input` applies §5's modal precedence,
+        // which is where that decision belongs: the frontend cannot see
+        // which shadow is up.
+        //
+        // Ordering against the branches below is safe by construction,
+        // not by luck: `text_input_payload` returns `None` whenever a
+        // command modifier is held, so the Ctrl-V paste and
+        // command-chord paths can never be shadowed by it.
+        //
+        // **The version gate WITHHOLDS rather than degrades.** A `< 24`
+        // daemon keeps exactly the behaviour it has — including today's
+        // truncation to the first scalar — because the fallback is the
+        // unchanged `Key` path below. No regression, not retroactive
+        // correctness.
+        if let Some(text) = text_input_payload(logical, text, pmods)
+            && client.session_protocol_version() >= TEXT_INPUT_MIN_VERSION
+        {
+            if let Some(state) = self.state.as_mut() {
+                state.mark_cursor_stale_after_round_trip();
+            }
+            if debug_input() {
+                eprintln!(
+                    "pmacs-gpu send_text_input: {} scalars",
+                    text.chars().count()
+                );
+            }
+            let client = self.attach_client.as_ref().expect("client checked above");
+            if let Err(e) = client.send_text_input(text) {
+                eprintln!("pmacs-gpu: send_text_input failed: {e}");
+            }
+            return;
+        }
 
         // Intercept path: round-trip every key into the daemon's
         // active handler (search query / step / accept / cancel).
@@ -3290,7 +3353,7 @@ impl App {
             if let Err(e) = client.send_key(pkey, pmods) {
                 eprintln!("pmacs-gpu: send_key (intercepted) failed: {e}");
             }
-            return EventOutcome::Continue;
+            return;
         }
 
         // Idle: forward any command chord (Char/Enter/Tab with
@@ -3311,7 +3374,7 @@ impl App {
             if let Err(e) = client.send_key(pkey, pmods) {
                 eprintln!("pmacs-gpu: send_key (command chord) failed: {e}");
             }
-            return EventOutcome::Continue;
+            return;
         }
 
         // Session B2 forwards cursor motion + plain text editing
@@ -3320,7 +3383,7 @@ impl App {
         // here and are withheld, leaving OS/WM shortcuts (Cmd-Q,
         // Cmd-C) to the platform.
         if !should_forward_key(pkey, pmods) {
-            return EventOutcome::Continue;
+            return;
         }
 
         // Arc 1a Q#C6 — with the popup open, RET and TAB mean
@@ -3357,7 +3420,7 @@ impl App {
             {
                 eprintln!("pmacs-gpu: send Viewport failed: {e}");
             }
-            return EventOutcome::Continue;
+            return;
         }
         if let Some(state) = self.state.as_mut() {
             if state.defer_round_trip_key_if_needed(pkey, pmods) {
@@ -3367,7 +3430,7 @@ impl App {
                          pending optimistic cursor"
                     );
                 }
-                return EventOutcome::Continue;
+                return;
             }
             state.mark_cursor_stale_after_round_trip();
         }
@@ -3377,7 +3440,6 @@ impl App {
         if let Err(e) = client.send_key(pkey, pmods) {
             eprintln!("pmacs-gpu: send_key failed: {e}");
         }
-        EventOutcome::Continue
     }
 }
 
@@ -3418,23 +3480,19 @@ enum Route<'a> {
 
 /// What the event loop must do once a family's body has run.
 ///
-/// **Two producers, and they are not the same kind of thing.**
-/// `LifecycleRoute::Exit` is a native window close, which must always
-/// exit; `apply_keyboard` returns `Exit` for an idle Escape, which is a
-/// local quit. Returning the decision rather than taking an
-/// `&ActiveEventLoop` is what keeps every body reachable from a test:
-/// the crate has **exactly one** executable `event_loop.exit()`, in
-/// `window_event`.
+/// **Since A4, `LifecycleRoute::Exit` — a native window close — is the
+/// SOLE producer.** `apply_keyboard` used to be the second, for the
+/// idle-Escape local quit; A4 deleted that branch and with it the
+/// keyboard body's need to return anything, so it returns `()` and the
+/// obsolete channel is gone rather than merely unused.
 ///
-/// **Stage 1a's A4 removes the KEYBOARD producer only** — an idle
-/// Escape must reach the daemon and never exit — leaving **one** `Exit`
-/// producer, the native close.
-///
-/// **One producer is not one variant.** This type survives A4 because
+/// **One producer is not one variant.** The type stays because
 /// `dispatch_window_event` must still distinguish `Continue` from
-/// `Exit` on every event it handles: nearly all of them must not exit,
-/// and the close must. What A4 changes is `apply_keyboard`'s signature,
-/// not this type.
+/// `Exit` on every event it handles: nearly all must not exit, and the
+/// close must. Returning the decision rather than taking an
+/// `&ActiveEventLoop` is also what keeps the bodies reachable from a
+/// test — the crate has exactly one executable `event_loop.exit()`, in
+/// `window_event`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EventOutcome {
     Continue,
@@ -3792,12 +3850,42 @@ impl EffectHarness {
         harness
     }
 
+    /// Drive `apply_keyboard` directly and report what it produced.
+    ///
+    /// Bypasses `route_event` because a `WindowEvent::KeyboardInput`
+    /// cannot be constructed outside winit — 1-pre's recorded
+    /// structural exception. What that exception covers is the router's
+    /// pattern arm; the BODY is reachable, and the body is where 1a's
+    /// placement defect lived.
+    fn feed_keyboard(&mut self, logical: &Key, text: Option<&str>) -> Step {
+        let before = self.snapshot();
+        self.app.apply_keyboard(logical, text);
+        let after = self.snapshot();
+        Step {
+            local: Self::diff(&before, &after, EventOutcome::Continue),
+            outbound: self.read_until_sentinel(),
+        }
+    }
+
     /// Dispatch one event and report everything it did.
     fn feed(&mut self, event: &WindowEvent) -> Step {
         let before = self.snapshot();
         let outcome = self.app.dispatch_window_event(event);
         let after = self.snapshot();
 
+        Step {
+            local: Self::diff(&before, &after, outcome),
+            outbound: self.read_until_sentinel(),
+        }
+    }
+
+    /// The local effects between two snapshots. Shared by every entry
+    /// point so a new one cannot observe a different set by accident.
+    fn diff(
+        before: &EffectSnapshot,
+        after: &EffectSnapshot,
+        outcome: EventOutcome,
+    ) -> Vec<LocalEffect> {
         let mut local = Vec::new();
         if outcome == EventOutcome::Exit {
             local.push(LocalEffect::Exit);
@@ -3819,11 +3907,7 @@ impl EffectHarness {
                 top: after.scroll_top,
             });
         }
-
-        Step {
-            local,
-            outbound: self.read_until_sentinel(),
-        }
+        local
     }
 
     /// Observable state the local effects are derived from.
@@ -4347,6 +4431,118 @@ mod input_routing_tests {
                 local: Vec::new(),
                 outbound: Vec::new()
             }
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // GUI arc 1a — PRODUCER REACHABILITY.
+    //
+    // These drive `App::apply_keyboard`, the real call site, not
+    // `text_input_payload`. 1a's first review found the classifier
+    // correct and the call site wrong: `TextInput` selection sat below
+    // the intercept return, and a modal prompt or a focused terminal is
+    // exactly what makes intercept true, so A7 and A8 were reachable
+    // only when neither was present. A classifier test stays green
+    // through that defect; these rows do not.
+    // ---------------------------------------------------------------
+
+    /// Multi-scalar text reaches the wire as `TextInput` **while the
+    /// daemon is intercepting** — the state a modal prompt puts the
+    /// session in.
+    #[test]
+    fn multi_scalar_text_is_sent_while_the_daemon_intercepts() {
+        let mut h = EffectHarness::new();
+        // A minibuffer is up: `daemon_intercepts_keys` is true.
+        h.app.state.as_mut().expect("harness state").dispatch_idle = false;
+
+        let step = h.feed_keyboard(&Key::Character("e\u{301}".into()), Some("e\u{301}"));
+
+        assert!(
+            step.outbound.iter().any(|e| matches!(
+                e,
+                pmacs_protocol::FrontendEvent::TextInput { text, .. } if text == "e\u{301}"
+            )),
+            "an intercepting session must still get the whole commit, \
+             not a truncated Key; got {:?}",
+            step.outbound
+        );
+        assert!(
+            !step
+                .outbound
+                .iter()
+                .any(|e| matches!(e, pmacs_protocol::FrontendEvent::Key(_))),
+            "and must NOT also get the first-scalar Key: {:?}",
+            step.outbound
+        );
+    }
+
+    /// A4 — an IDLE Escape reaches the daemon and does not exit.
+    ///
+    /// "Idle" is the case that used to quit: with nothing intercepting,
+    /// Escape destroyed the window instead of cancelling. Both halves
+    /// are asserted, because either alone would pass a wrong
+    /// implementation — sending Escape while also exiting, or not
+    /// exiting while also sending nothing.
+    #[test]
+    fn a4_an_idle_escape_reaches_the_daemon_and_does_not_exit() {
+        let mut h = EffectHarness::new();
+        // Establish idle explicitly. A fresh `State` starts with
+        // `dispatch_idle` false — the daemon has not said otherwise yet
+        // — so ASSERTING the precondition rather than setting it would
+        // have tested the intercepting case under an idle name. It
+        // failed exactly that way first.
+        h.app.state.as_mut().expect("harness state").dispatch_idle = true;
+        assert!(
+            !h.app
+                .state
+                .as_ref()
+                .expect("harness state")
+                .daemon_intercepts_keys(),
+            "precondition: nothing intercepts, which is the case that quit"
+        );
+
+        let step = h.feed_keyboard(&Key::Named(NamedKey::Escape), None);
+
+        assert!(
+            step.outbound.iter().any(|e| matches!(
+                e,
+                pmacs_protocol::FrontendEvent::Key(k) if k.key == ProtocolKey::Escape
+            )),
+            "an idle Escape must reach the daemon: {:?}",
+            step.outbound
+        );
+        assert!(
+            !step.local.contains(&LocalEffect::Exit),
+            "and must NOT exit: {:?}",
+            step.local
+        );
+    }
+
+    /// The complement, so the row above cannot pass by sending
+    /// `TextInput` for everything: a SINGLE scalar while intercepting
+    /// still travels as `Key`, which is §5 rule 4 and preserves mode
+    /// keymaps and typed provenance.
+    #[test]
+    fn single_scalar_text_still_travels_as_key_while_intercepting() {
+        let mut h = EffectHarness::new();
+        h.app.state.as_mut().expect("harness state").dispatch_idle = false;
+
+        let step = h.feed_keyboard(&Key::Character("a".into()), Some("a"));
+
+        assert!(
+            step.outbound
+                .iter()
+                .any(|e| matches!(e, pmacs_protocol::FrontendEvent::Key(_))),
+            "a single scalar stays a Key: {:?}",
+            step.outbound
+        );
+        assert!(
+            !step
+                .outbound
+                .iter()
+                .any(|e| matches!(e, pmacs_protocol::FrontendEvent::TextInput { .. })),
+            "and must not become TextInput: {:?}",
+            step.outbound
         );
     }
 
@@ -12070,14 +12266,137 @@ fn translate_key(
             NamedKey::Enter => ProtocolKey::Enter,
             NamedKey::Delete => ProtocolKey::Delete,
             NamedKey::Insert => ProtocolKey::Insert,
+            // A2 — Shift+Tab is `BackTab`, a key of its own, and the
+            // Shift stays set. The daemon's keymap binds the two
+            // differently (indent versus outdent), and a `Tab` that
+            // merely carries Shift is indistinguishable from a Tab the
+            // user shifted by accident. The TUI has always sent
+            // `BackTab`; this closes the divergence rather than
+            // inventing a convention.
+            NamedKey::Tab if mods.shift_key() => ProtocolKey::BackTab,
             NamedKey::Tab => ProtocolKey::Tab,
             NamedKey::Space => ProtocolKey::Char(' '),
-            _ => return None,
+            // A3 — the menu key. `ProtocolKey::Menu` already exists and
+            // the TUI already sends it; only the GPU translation was
+            // missing, so the key did nothing in the GUI.
+            NamedKey::ContextMenu => ProtocolKey::Menu,
+            // A1 — F1..=F35. winit names each as its own variant, so
+            // there is no arithmetic to do and no range to trust: the
+            // mapping is total over the variants winit defines, and
+            // `named_function_key` is exhaustive rather than a
+            // computed offset.
+            named => named_function_key(*named).map(ProtocolKey::F)?,
         },
         Key::Character(s) => ProtocolKey::Char(s.chars().next()?),
         _ => return None,
     };
     Some((pkey, pmods))
+}
+
+/// A5 / Q#S1-9 — whether a keypress should travel as `TextInput`
+/// rather than `Key`, and with what payload.
+///
+/// **A keypress stays `Key` unless a rule below moves it.** That
+/// default is the contract, not an implementation convenience: every
+/// mode keymap, every command chord and today's typed provenance are
+/// built on `Key`, so widening the exception is how a working binding
+/// silently becomes an insert.
+///
+/// The rules, in the order they are checked:
+///
+/// 1. **Named keys and control text stay `Key`**, whatever
+///    `KeyEvent.text` says — `Enter` reports `"\r"`, and an `Enter`
+///    that arrived as text would insert a newline in dired instead of
+///    opening a file.
+/// 2. **Ctrl/Alt chords stay `Key`**, except printable Ctrl+Alt that
+///    the existing `AltGr` rule already recognizes — the caller strips
+///    those modifiers before this is reached, so they arrive here as
+///    plain text.
+/// 3. **Meta/Super-only text stays reserved to the OS** (Q#S1-7 moves
+///    the whole question to Stage 2).
+/// 4. **Plain printable SINGLE-scalar stays `Key`.** This is the
+///    conservative half of the ruling: it preserves mode keymaps and
+///    the one-codepoint typed provenance that already exists.
+/// 5. **Printable MULTI-scalar becomes one `TextInput`** — the case
+///    that is broken today, truncated to its first scalar.
+///
+/// `Key::Dead` is 1d's, and 1a buffers nothing (rule 7); `Shift` is
+/// already baked into the resolved text and is not carried (rule 8).
+fn text_input_payload<'a>(
+    logical: &Key,
+    text: Option<&'a str>,
+    mods: Modifiers,
+) -> Option<&'a str> {
+    // Rule 1 — a named key is never text, regardless of what winit
+    // reports as its text.
+    if matches!(logical, Key::Named(_)) {
+        return None;
+    }
+    // Rules 2 and 3 — any command modifier still held at this point is
+    // a chord. The AltGr case has already had its modifiers stripped by
+    // the caller, so reaching here with Ctrl/Alt means a genuine chord.
+    if !is_plain_text_modifiers(mods) {
+        return None;
+    }
+    let text = text?;
+    // Rule 1, second half — control text is not text.
+    if text.is_empty() || text.chars().any(char::is_control) {
+        return None;
+    }
+    // Rules 4 and 5 — the single/multi split.
+    if text.chars().count() < 2 {
+        return None;
+    }
+    Some(text)
+}
+
+/// A1 — winit's function-key variants to the protocol's 1-based `F(n)`.
+///
+/// Written as an exhaustive match rather than parsed from the variant
+/// name or computed as an offset from `F1`: winit's `NamedKey` is
+/// `#[non_exhaustive]` and its ordering is not a contract, so arithmetic
+/// over it would be a silent-corruption bug the day a variant is
+/// inserted. `None` for anything that is not a function key, which is
+/// what makes the caller's `?` fall through to "unmapped".
+fn named_function_key(named: NamedKey) -> Option<u8> {
+    Some(match named {
+        NamedKey::F1 => 1,
+        NamedKey::F2 => 2,
+        NamedKey::F3 => 3,
+        NamedKey::F4 => 4,
+        NamedKey::F5 => 5,
+        NamedKey::F6 => 6,
+        NamedKey::F7 => 7,
+        NamedKey::F8 => 8,
+        NamedKey::F9 => 9,
+        NamedKey::F10 => 10,
+        NamedKey::F11 => 11,
+        NamedKey::F12 => 12,
+        NamedKey::F13 => 13,
+        NamedKey::F14 => 14,
+        NamedKey::F15 => 15,
+        NamedKey::F16 => 16,
+        NamedKey::F17 => 17,
+        NamedKey::F18 => 18,
+        NamedKey::F19 => 19,
+        NamedKey::F20 => 20,
+        NamedKey::F21 => 21,
+        NamedKey::F22 => 22,
+        NamedKey::F23 => 23,
+        NamedKey::F24 => 24,
+        NamedKey::F25 => 25,
+        NamedKey::F26 => 26,
+        NamedKey::F27 => 27,
+        NamedKey::F28 => 28,
+        NamedKey::F29 => 29,
+        NamedKey::F30 => 30,
+        NamedKey::F31 => 31,
+        NamedKey::F32 => 32,
+        NamedKey::F33 => 33,
+        NamedKey::F34 => 34,
+        NamedKey::F35 => 35,
+        _ => return None,
+    })
 }
 
 /// Cursor-motion keys — forwarded with any modifier set (e.g. `C-Left`
@@ -12115,6 +12434,20 @@ fn should_forward_key(key: ProtocolKey, mods: Modifiers) -> bool {
         return true;
     }
     if matches!(key, ProtocolKey::Backspace | ProtocolKey::Delete) {
+        return true;
+    }
+    // A1–A3 — function keys, `BackTab` and `Menu` forward with ANY
+    // modifier set, for the same reason motion keys do: they are
+    // command keys that never insert text, so the chord-withholding
+    // rule below has nothing to protect them from. Translating them
+    // without forwarding them would have been the more expensive
+    // mistake — the key would map correctly and still do nothing,
+    // which reads as a daemon-side keymap gap rather than a frontend
+    // one.
+    if matches!(
+        key,
+        ProtocolKey::F(_) | ProtocolKey::BackTab | ProtocolKey::Menu
+    ) {
         return true;
     }
     if !is_plain_text_modifiers(mods) {
@@ -13416,6 +13749,105 @@ mod tests {
         assert_eq!(source_line_range(text, 8), (7, 10));
         // Cursor past end clamps to the last line, never indexes out.
         assert_eq!(source_line_range(text, 99), (7, 10));
+    }
+
+    /// A1 — every function key winit names maps to the protocol's
+    /// 1-based `F(n)`, and forwards.
+    ///
+    /// Written as an exhaustive loop over all 35 rather than spot
+    /// checks: the old code stopped at `_ => return None`, so F13+
+    /// silently did nothing, and a test covering only F1–F12 would have
+    /// passed against exactly that.
+    #[test]
+    fn a1_function_keys_f1_to_f35_map_and_forward() {
+        use winit::keyboard::{Key as WKey, ModifiersState, NamedKey};
+
+        let named = [
+            NamedKey::F1,
+            NamedKey::F2,
+            NamedKey::F3,
+            NamedKey::F4,
+            NamedKey::F5,
+            NamedKey::F6,
+            NamedKey::F7,
+            NamedKey::F8,
+            NamedKey::F9,
+            NamedKey::F10,
+            NamedKey::F11,
+            NamedKey::F12,
+            NamedKey::F13,
+            NamedKey::F14,
+            NamedKey::F15,
+            NamedKey::F16,
+            NamedKey::F17,
+            NamedKey::F18,
+            NamedKey::F19,
+            NamedKey::F20,
+            NamedKey::F21,
+            NamedKey::F22,
+            NamedKey::F23,
+            NamedKey::F24,
+            NamedKey::F25,
+            NamedKey::F26,
+            NamedKey::F27,
+            NamedKey::F28,
+            NamedKey::F29,
+            NamedKey::F30,
+            NamedKey::F31,
+            NamedKey::F32,
+            NamedKey::F33,
+            NamedKey::F34,
+            NamedKey::F35,
+        ];
+        for (index, key) in named.into_iter().enumerate() {
+            let n = u8::try_from(index + 1).expect("1..=35 fits");
+            let (k, m) = translate_key(&WKey::Named(key), ModifiersState::empty())
+                .unwrap_or_else(|| panic!("F{n} must map"));
+            assert_eq!(k, ProtocolKey::F(n), "F{n} maps to F({n})");
+            assert!(
+                should_forward_key(k, m),
+                "F{n} must FORWARD; translating without forwarding leaves \
+                 the key mapped and inert"
+            );
+        }
+    }
+
+    /// A2 — Shift+Tab is `BackTab`, and the `Shift` stays set.
+    ///
+    /// Both halves matter: the daemon binds `Tab` and `BackTab`
+    /// differently, and a `BackTab` that lost its modifier would be
+    /// indistinguishable from one the user did not shift.
+    #[test]
+    fn a2_shift_tab_is_backtab_with_shift_retained() {
+        use winit::keyboard::{Key as WKey, ModifiersState, NamedKey};
+
+        let (plain, plain_mods) =
+            translate_key(&WKey::Named(NamedKey::Tab), ModifiersState::empty()).expect("Tab maps");
+        assert_eq!(plain, ProtocolKey::Tab);
+        assert!(plain_mods.is_empty());
+
+        let (shifted, shifted_mods) =
+            translate_key(&WKey::Named(NamedKey::Tab), ModifiersState::SHIFT)
+                .expect("Shift+Tab maps");
+        assert_eq!(shifted, ProtocolKey::BackTab);
+        assert!(
+            shifted_mods.contains(Modifiers::SHIFT),
+            "Shift is retained on BackTab"
+        );
+        assert!(should_forward_key(shifted, shifted_mods));
+    }
+
+    /// A3 — the menu key reaches the daemon. `ProtocolKey::Menu` and the
+    /// TUI's mapping both already existed; only the GPU translation was
+    /// missing, so the key did nothing in the GUI.
+    #[test]
+    fn a3_context_menu_maps_to_menu_and_forwards() {
+        use winit::keyboard::{Key as WKey, ModifiersState, NamedKey};
+
+        let (k, m) = translate_key(&WKey::Named(NamedKey::ContextMenu), ModifiersState::empty())
+            .expect("ContextMenu maps");
+        assert_eq!(k, ProtocolKey::Menu);
+        assert!(should_forward_key(k, m), "and forwards, or it is inert");
     }
 
     #[test]

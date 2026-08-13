@@ -513,7 +513,61 @@ pub enum FrontendEvent {
         /// Modifiers held during the gesture.
         mods: Modifiers,
     },
+    /// Committed text from a keypress or an IME composition — GUI arc
+    /// Stage 1a, **protocol v24** ([`TEXT_INPUT_MIN_VERSION`]).
+    ///
+    /// **APPENDED, never widened.** postcard encodes an enum variant by
+    /// its positional index, so adding a field to any variant above
+    /// would silently re-interpret every older peer's bytes. A new
+    /// variant at the end is the only backward-compatible shape, which
+    /// is also why the frozen-byte pin in the tests sits on
+    /// [`FrontendEvent::PanelPointer`] — the *previous* final variant —
+    /// rather than on this one: an appended variant's own round-trip
+    /// cannot detect a discriminant shift beneath it.
+    ///
+    /// **This is not [`FrontendEvent::Paste`], and the difference is
+    /// behavioural rather than cosmetic.** A paste is bulk data from
+    /// elsewhere; this is what the user *typed*, so a terminal receives
+    /// it as **raw UTF-8 and never inside bracketed-paste markers** — a
+    /// shell that sees `ESC[200~` around typed input treats it as
+    /// pasted, which changes how it handles newlines and completion.
+    ///
+    /// **One `TextInput` is ONE edit**: one undo unit, one
+    /// `buffer.after-edit`, one eligible CRDT op. The multi-scalar case
+    /// is the whole reason the variant exists — a two-scalar grapheme
+    /// arriving as two keypresses is two undo units and, worse, can be
+    /// split by an intervening remote edit.
+    ///
+    /// `text` is capped at [`TEXT_INPUT_MAX_BYTES`]; an oversize payload
+    /// is **rejected, never truncated**, because truncating a UTF-8
+    /// sequence at a byte boundary silently corrupts the last character
+    /// and a silently-shortened insert is worse than a refused one.
+    TextInput {
+        /// Which frontend produced the text. **Untrusted**, like every
+        /// other `frontend_id` on this enum — the daemon uses the
+        /// authenticated source, not this field.
+        frontend_id: FrontendId,
+        /// The committed text. Non-empty; see [`TEXT_INPUT_MAX_BYTES`].
+        text: String,
+    },
 }
+
+/// First protocol version carrying [`FrontendEvent::TextInput`].
+///
+/// A frontend older than this **retains its existing `Key` behaviour and
+/// its existing limitations** — it truncates multi-scalar input to the
+/// first scalar today and ignores IME, and it continues to. The promise
+/// is **no regression, not retroactive correctness**: nothing a `< 24`
+/// peer already had degrades, and the daemon simply never receives a
+/// variant such a peer cannot encode.
+pub const TEXT_INPUT_MIN_VERSION: u32 = 24;
+
+/// Cap on [`FrontendEvent::TextInput::text`], in bytes of UTF-8.
+///
+/// 64 KiB is far above any keystroke or IME commit and far below a
+/// pathological paste, which has its own event. **Oversize is rejected
+/// rather than truncated** — see the variant's own documentation.
+pub const TEXT_INPUT_MAX_BYTES: usize = 64 * 1024;
 
 /// Gesture step for [`FrontendEvent::Pointer`]. Double-click
 /// detection is frontend-side (`DoubleDown` instead of a second
@@ -562,7 +616,8 @@ impl FrontendEvent {
             | Self::TerminalPointer { frontend_id, .. }
             | Self::FrontendCellGeometry { frontend_id, .. }
             | Self::PanelResizeRows { frontend_id, .. }
-            | Self::PanelPointer { frontend_id, .. } => *frontend_id,
+            | Self::PanelPointer { frontend_id, .. }
+            | Self::TextInput { frontend_id, .. } => *frontend_id,
         }
     }
 }
@@ -1840,7 +1895,32 @@ pub enum ResourceBody {
 /// encoding makes an in-place widening a wire break rather than an
 /// evolution, and gating the widened form would have left those peers
 /// with no minibuffer message at all.
-pub const PROTOCOL_VERSION: u32 = 23;
+///
+/// GUI arc Stage 1a: bumped 23 → 24 for
+/// [`FrontendEvent::TextInput`] — committed text from a keypress or an
+/// IME composition, carried as one event so that a multi-scalar
+/// grapheme is one edit, one undo unit and one eligible CRDT op instead
+/// of being truncated to its first scalar. Appended after
+/// `PanelPointer`, the final v23 `FrontendEvent` variant, so no
+/// existing discriminant moves.
+///
+/// **The gate is producer-side AND receiver-side**, and for an inbound
+/// variant the receiving half is the load-bearing one. An
+/// instance→frontend variant is gated by the daemon simply not sending
+/// it, which is entirely within the daemon's control; an inbound variant
+/// cannot be, because the withholding would be the *peer's* job and a
+/// client built from this same crate can encode the discriminant
+/// whatever it negotiated. So the daemon refuses `TextInput` from a
+/// session below [`TEXT_INPUT_MIN_VERSION`] rather than trusting the
+/// producer to withhold — otherwise a v6–v23 session could drive an edit
+/// through a variant its own session never declared.
+///
+/// This is not a new shape: the v19 terminal and v21 panel families
+/// already gate their own inbound events on the authenticated session's
+/// negotiated version. What is unusual here is only that the extension
+/// is **inbound-only** — there is no outbound counterpart to withhold,
+/// so the receiver check is the whole of the daemon's half.
+pub const PROTOCOL_VERSION: u32 = 24;
 
 /// Protocol version placed in the daemon's server-first [`Hello`].
 ///
@@ -2021,8 +2101,15 @@ pub fn negotiated_session_version(frontend_offer: u32) -> u32 {
 /// keeps receiving the frozen [`InstanceMessage::MinibufferPrompt`], a
 /// `>= 23` peer receives only the rows form, and no peer ever receives
 /// both. [`ADVERTISED_PROTOCOL_VERSION`] does not move.
+///
+/// GUI arc Stage 1a: extended to `[6, ..., 24]` for
+/// [`FrontendEvent::TextInput`]. Additive, and gated producer-side AND
+/// receiver-side — see [`PROTOCOL_VERSION`] for why an inbound variant
+/// cannot rely on the producer withholding. [`ADVERTISED_PROTOCOL_VERSION`] does not move: a v23
+/// frontend negotiates v23, never sends the variant, and keeps today's
+/// first-scalar behaviour.
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[
-    6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+    6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
 ];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if

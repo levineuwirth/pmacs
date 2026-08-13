@@ -960,6 +960,36 @@ impl AttachClient {
         }))
     }
 
+    /// Send a `FrontendEvent::TextInput` (GUI arc 1a): text the user
+    /// committed, by keypress or IME.
+    ///
+    /// **The caller must gate on [`Self::session_protocol_version`]
+    /// `>= TEXT_INPUT_MIN_VERSION` and fall back to `Key`** — this
+    /// method does not check, because the fallback needs the untranslated
+    /// key and only the caller has it. Withholding is the whole
+    /// old-peer contract: a `< 24` daemon keeps the behaviour it has,
+    /// including today's first-scalar truncation.
+    ///
+    /// Rejects oversize here as well as at the daemon, so a payload
+    /// that could never be accepted is not written to the socket at
+    /// all; rejection rather than truncation, per `TEXT_INPUT_MAX_BYTES`.
+    pub fn send_text_input(&self, text: &str) -> Result<(), TransportError> {
+        if text.len() > pmacs_protocol::TEXT_INPUT_MAX_BYTES {
+            return Err(TransportError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "TextInput of {} bytes exceeds the {}-byte cap",
+                    text.len(),
+                    pmacs_protocol::TEXT_INPUT_MAX_BYTES
+                ),
+            )));
+        }
+        self.send_event(FrontendEvent::TextInput {
+            frontend_id: self.frontend_id,
+            text: text.to_owned(),
+        })
+    }
+
     /// Send a `FrontendEvent::Pointer` (session M-2): a locally
     /// hit-tested gesture in source bytes. Callers gate on
     /// [`Self::session_protocol_version`] `>= 5`.

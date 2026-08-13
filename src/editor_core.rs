@@ -478,8 +478,9 @@ pub struct CommandBoundary {
 /// the exact facts for the one consumer contract that needs them (the
 /// pairing hook): the decoded codepoint, the requested and effective
 /// ranges, and the post-edit cursor, plus a `clean` verdict (effective
-/// triple equals the request). It is ephemeral — armed by the two
-/// self-insert producers (dispatch fallback, optimistic CRDT arm) for
+/// triple equals the request). It is ephemeral — armed by the three
+/// self-insert producers (dispatch fallback, optimistic CRDT arm, and
+/// the single-scalar `TextInput` path of GUI arc Stage 1a) for
 /// exactly one `buffer.after-edit` fan-out, consumable once via
 /// `pmacs.editor.take_typed_edit()`, and cleared when the fan-out
 /// returns. Paste, programmatic mutation, manual hook runs, and a
@@ -687,8 +688,10 @@ pub struct EditorCore {
     /// query-replace twin of `search`; drives the fifth dispatcher
     /// shadow.
     query_replace: Option<QueryReplaceSession>,
-    /// In-flight typed-edit arm (auto-pairing Q#AP9): set by the
-    /// dispatch fallback just before it invokes `buffer.self-insert`,
+    /// In-flight typed-edit arm (auto-pairing Q#AP9): set by a
+    /// self-insert producer just before the edit — the dispatch
+    /// fallback invoking `buffer.self-insert`, or 1a's single-scalar
+    /// `TextInput` path —
     /// completed by the insert primitives, taken back by the
     /// dispatcher via [`Self::typed_edit_finish`] in the same
     /// dispatch. Never survives a dispatch cycle.
@@ -4808,9 +4811,19 @@ impl EditorCore {
     /// Declare that `fid`'s dispatch is about to invoke
     /// `buffer.self-insert` for `codepoint`: the next insert primitive
     /// whose character matches completes the [`TypedEditRecord`].
-    /// Called by the dispatch fallback only — programmatic
+    /// Called by the self-insert producers: the dispatch fallback, and
+    /// the **single-scalar** `TextInput` path (GUI arc 1a), which must
+    /// be indistinguishable from a keypress downstream. Programmatic
     /// `pmacs.command.invoke("buffer.self-insert")` deliberately never
-    /// arms, so a hook run after it observes no record.
+    /// arms, so a hook run after it observes no record; nor does a
+    /// MULTI-scalar `TextInput`, which is not a keystroke.
+    ///
+    /// **Arming is only half.** Completion happens in the insert
+    /// primitives ([`Self::insert_char`] /
+    /// [`Self::insert_char_over_region`]) and nowhere else, so a caller
+    /// that arms and then performs a generic byte insert leaves the arm
+    /// holding `None` — `this_command` looks right and auto-pairing
+    /// silently stops working.
     pub fn typed_edit_arm(&mut self, fid: FrontendId, codepoint: char) {
         self.typed_edit_pending = Some(TypedEditPending {
             fid,
@@ -5007,6 +5020,25 @@ impl EditorCore {
     pub fn paste_inbound(&mut self, data: &[u8]) -> Result<(), String> {
         self.clipboard_slot = data.to_vec();
         self.insert_bytes_over_region(data)
+    }
+
+    /// GUI arc Stage 1a / A6 — insert **multi-scalar** committed text as
+    /// one edit.
+    ///
+    /// **Single-scalar text does NOT come here**; it goes through
+    /// [`Self::insert_char_over_region`], which is the only path (with
+    /// [`Self::insert_char`]) that completes a [`TypedEditRecord`].
+    /// Routing a single scalar here would arm provenance and never
+    /// complete it — see `EditorState::dispatch_text_input`.
+    ///
+    /// Shares [`Self::insert_bytes_over_region`] with paste, which is
+    /// what makes it a single `EditOp` and therefore a single undo
+    /// unit, a single `buffer.after-edit`, and a single eligible CRDT
+    /// op. **It deliberately does NOT touch `clipboard_slot`**: typed
+    /// text was never copied, and recording it would let the next yank
+    /// resurrect something the user merely typed.
+    pub fn insert_text_input(&mut self, text: &str) -> Result<(), String> {
+        self.insert_bytes_over_region(text.as_bytes())
     }
 
     /// Shared insert/replace for paste: `Replace` over the active

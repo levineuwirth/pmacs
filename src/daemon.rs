@@ -71,6 +71,7 @@ use crate::protocol::{
     InitialTarget, InitialTargetResult, InstanceCapabilities, InstanceIdentity, InstanceMessage,
     InstanceSignal, MAX_INITIAL_TARGET_ERROR_BYTES, MAX_INITIAL_TARGET_PATH_BYTES,
     PANEL_MIN_VERSION, PointerKind, SelectionSnapshot, SessionBootstrapRequest,
+    TEXT_INPUT_MAX_BYTES, TEXT_INPUT_MIN_VERSION,
 };
 use crate::socket_path::{SocketPathError, ensure_runtime_subdir};
 use crate::transport::{read_message, write_message};
@@ -2518,6 +2519,55 @@ fn handle_dispatcher_event(
                         handle_inbound_paste(editor, source, claimed_fid, &data);
                     }
                 }
+                FrontendEvent::TextInput { text, .. } => {
+                    // GUI arc 1a / A5 — committed text from a keypress
+                    // or an IME composition. Handled here, beside
+                    // `Paste`, for the same two reasons: the
+                    // authenticated `source` is in scope (the event's
+                    // own `frontend_id` is client-supplied and not
+                    // trusted), and the semantic input dispatcher would
+                    // otherwise drop it, which is exactly how GPU
+                    // Ctrl-V was a no-op before Q#KR10a.
+                    //
+                    // A9 — the cap is enforced at the BOUNDARY, before
+                    // anything is inserted. Rejected, never truncated:
+                    // cutting UTF-8 at a byte offset corrupts the last
+                    // character, and a silently-shortened insert is
+                    // worse than a refused one. An empty payload is
+                    // dropped too — it would be an edit that edits
+                    // nothing, and would still cost an undo unit.
+                    // **The producer gate is only half the contract.**
+                    // A frontend that negotiated v6–v23 can still encode
+                    // this variant — it is compiled from the same crate,
+                    // and postcard will happily write the discriminant —
+                    // so a peer that never declared v24 could otherwise
+                    // mutate the buffer through a variant its own
+                    // session does not include. Gate on the
+                    // AUTHENTICATED session's negotiated version, not on
+                    // the payload and not on what the daemon supports.
+                    let peer_declared_text_input = session_registry
+                        .session_state(source)
+                        .is_some_and(|s| s.negotiated_protocol_version >= TEXT_INPUT_MIN_VERSION);
+                    if !peer_declared_text_input {
+                        eprintln!(
+                            "pmacs: dropping TextInput from {source:?}, which negotiated \
+                             below v{TEXT_INPUT_MIN_VERSION}"
+                        );
+                        return;
+                    }
+                    if text.is_empty() {
+                        return;
+                    }
+                    if text.len() > TEXT_INPUT_MAX_BYTES {
+                        eprintln!(
+                            "pmacs: rejecting oversize TextInput from {source:?} \
+                             ({} bytes > {TEXT_INPUT_MAX_BYTES})",
+                            text.len()
+                        );
+                        return;
+                    }
+                    editor.dispatch_text_input(source, &text);
+                }
                 _ => {
                     let Some(&term_size) = term_sizes.get(&source) else {
                         eprintln!(
@@ -3588,12 +3638,15 @@ fn apply_event(
             render_state.resize(size);
             *term_size = size;
         }
-        // Q#KR10a — Paste is handled in the dispatcher's own
-        // `FrontendEvent::Paste` arm (unified for grid and semantic
-        // sessions, keyed by the authenticated source), and never
-        // reaches here. Listed explicitly so a future reshuffle can't
-        // silently re-route it through this payload-trusting path.
+        // Q#KR10a (Paste) and GUI arc 1a (TextInput) — both are handled
+        // in the dispatcher's own arms, unified for grid and semantic
+        // sessions and keyed by the AUTHENTICATED source, and neither
+        // reaches here. Listed explicitly rather than left to a
+        // wildcard so a future reshuffle cannot silently re-route
+        // either through this payload-trusting path: both carry a
+        // client-supplied `frontend_id` this function would believe.
         FrontendEvent::Paste { .. }
+        | FrontendEvent::TextInput { .. }
         | FrontendEvent::FocusGained(_)
         | FrontendEvent::FocusLost(_)
         // T M11.1: the semantic-frontend viewport declaration. Its
