@@ -270,11 +270,12 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## GUI arc Stage 1a — `TextInput` at v24 — branch OPEN, no PR yet
+## GUI arc Stage 1a — `TextInput` at v24 — PR #239 OPEN
 
 **Written with the branch's first commit**, per the standing correction
 from #171 and #215.
 
+- **PR #239** — https://github.com/levineuwirth/pmacs/pull/239.
 - **Branch `gui-stage1a-textinput`**, base `githubsucks/main` @
   `4f77491` exactly. **`githubsucks/gui-stage1a-textinput` is the
   authoritative tip** — the ref, not a SHA. Recover with
