@@ -270,11 +270,12 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## `scripts/gate` TMPDIR isolation — branch OPEN, no PR yet
+## `scripts/gate` TMPDIR isolation — PR #240 OPEN
 
 **Written with the branch's first commit**, per the standing correction
 from #171 and #215.
 
+- **PR #240** — https://github.com/levineuwirth/pmacs/pull/240.
 - **Branch `gate-tmpdir-isolation`**, base `githubsucks/main` @
   `ca92796` exactly (the #239 merge). **Recover with `git fetch
   githubsucks && git checkout gate-tmpdir-isolation`.**
