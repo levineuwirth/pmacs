@@ -1,6 +1,14 @@
 # GUI arc, Stage 1 — input foundation (framing)
 
-**Status: revision 12 — APPROVED.** Revision 12 is §2's ground-truth
+**Status: revision 13 — AWAITING APPROVAL.** Revision 13 is §2a's
+ground-truth re-measurement **for Stage 1b**, taken at the post-#240
+tip. Every 1b line anchor was stale, which was expected. What was not
+expected is that **three B-rows describe a field as empty when it is
+occupied**, and that **B7 re-opens a question another framing
+deliberately deferred** — so this revision asks for a ruling (Q#S1-11)
+rather than only renumbering. **No B-row contract is changed here.**
+
+**Previously, revision 12 — APPROVED.** Revision 12 is §2's ground-truth
 re-measurement for Stage 1a and changes no ruling; it carries two
 corrections to claims that were wrong at the original anchor too.
 
@@ -12,11 +20,13 @@ written** (§6). **Q#S1-8, Q#S1-9 and Q#S1-10 are RULED.** **1-pre is
 IMPLEMENTED**; 1a onward may begin from this document.
 
 **Verification base:** §2 is **re-measured at `4f77491`** (2026-08-12),
-the tip after 1-pre; it was originally taken at `a994f37`. Sections
-other than §2 were written against `a994f37` and their *rulings* are
-unaffected by 1-pre, which changed no behaviour — but **any line number
-outside §2 predates 1-pre and should be re-checked before it is relied
-on.**
+the tip after 1-pre; it was originally taken at `a994f37`. **§2a is
+measured at `72da24a`** (2026-08-13), the tip after 1a and #240, and it
+is the base for **1b only**. Sections other than §2/§2a were written
+against `a994f37` and their *rulings* are unaffected by 1-pre, which
+changed no behaviour — but **any line number outside §2 and §2a
+predates 1-pre and should be re-checked before it is relied on.** The
+1b table's own anchors are superseded by §2a wholesale; read §2a first.
 
 ## 1. What this stage closes
 
@@ -103,6 +113,128 @@ survives A4**: a native close still returns `Exit`, and
 **Today's two failures are unchanged by any of this:** multi-scalar
 keyboard input is truncated to its first scalar, and an IME commit
 produces nothing.
+
+## 2a. Ground truth for 1b — MEASURED at `72da24a` (2026-08-13)
+
+§2 above was measured for **1a**, at `4f77491`. 1a (#239) has since
+merged and #240 landed on top, so **every coordinate the 1b table cites
+is stale** — `pmacs-gpu/src/main.rs` is now **21,435 lines** and 1-pre's
+router extraction moved the wheel path wholesale. Renumbering alone
+would have been routine. It is not what the measurement found.
+
+**`PROTOCOL_VERSION = 24`** now (1a's `TextInput`). 1b remains
+non-protocol-bearing.
+
+### The anchors, re-measured
+
+| the table cites | holds what now | the real site |
+|---|---|---|
+| `main.rs:2061` "minimap is `Elsewhere`" | `PanelCell(CellCoord)` | `enum PointerSurface` `:2057`; **`Elsewhere` `:2067`** |
+| `main.rs:3337` wheel reads `pointer_pos` | an `attach_client` line | `apply_wheel` `:3090` and `:3113` |
+| `main.rs:3373` falls to `scroll_by_lines` | a bare `}` | `apply_wheel` `:3126`; `scroll_by_lines` `:8002` |
+| `editor.rs:3052` `dispatch_mouse` | — | **`:3207`** |
+| `editor.rs:3203` scroll arms | a doc-comment line | `ScrollUp` `:3358`, `ScrollDown` `:3362` |
+
+**B6's premise survives the move intact**, and is now stated by the code
+itself: `Elsewhere`'s doc comment reads *"Not the band: the document,
+the terminal, the minimap, or the chrome."* The wheel's panel branch
+(`:3090`) tests `PanelCell` only, so minimap pixels still fall through
+to `scroll_by_lines`.
+
+**B1's defect is visible in four lines.** `apply_wheel` rounds to whole
+lines and returns on zero:
+
+```rust
+let lines = match delta { LineDelta(_, y) => (-y * WHEEL_LINES_PER_TICK).round() as i64, … };
+if lines == 0 { return; }
+```
+
+`:3075`–`:3084`. The `_` is the **x** delta, discarded at the same site
+— so **B1 and B2's witnesses are the same four lines**, and a residual
+accumulator is what both need. **There is no wheel accumulator today.**
+`code_scroll_residual` (`:1622`) is *not* it: that is the caret-follow
+pixel residual, buffer-scoped, cleared at `:5928`. **Reusing it would
+be a defect**, not a shortcut.
+
+### CORRECTION 3 — three rows say "nothing exists" where something does
+
+Each of these reads as an empty field in the table and is not one. The
+contracts are unaffected; the **implementation shape** is.
+
+- **B3 — "no horizontal scroll to clamp".** The GPU has a horizontal
+  origin: **`code_scroll_left`** (`:1639`), a pixel offset *snapped to
+  the column grid*, moved by its own `horizontal_follow` (`:7702`).
+  What is missing is a **wheel-driven** horizontal scroll. B3 adds a
+  second writer to an existing field, which is a different job from
+  introducing one.
+- **B5 — "no I-beam".** True as stated, but the cursor already has an
+  owner: **`apply_panel_cursor_icon`** (`:7328`) sets `RowResize` over
+  the divider and **`CursorIcon::Default` everywhere else**. An I-beam
+  written as a separate site would be **clobbered by that else branch**.
+  B5 must extend this function, not join it.
+- **B4 — "no middle-click path".** 1-pre already built the landing
+  site and named this row in it: `PointerRoute::UnusedButton` (`:3623`)
+  is documented *"Stage 1b's B4 gives the middle button a meaning
+  (PRIMARY-selection paste on Linux) and lands here."* `route_pointer`
+  (`:3631`) sends every non-left, non-right-press button there. B4
+  splits a variant that already exists.
+
+### CORRECTION 4 — B7 re-opens a deferred question, and the table does not say so
+
+This is the finding that needs a ruling rather than a renumber.
+
+The TUI horizontal origin is **`window.view_left`** (`src/window.rs:386`),
+and `horizontal_follow` (`src/editor.rs:4495`) already **pins it to 0
+under wrap** — so *B7's wrap clause is implemented today*, for the
+caret-follow path. Both frontends share the arithmetic
+(`pmacs_protocol::scroll::follow_left`, `scroll.rs:134`), deliberately.
+
+But that function's doc states the premise B7 removes:
+
+> there are no explicit scroll commands, so **every viewport move
+> originates here**, and Q#HS4's snap-back hazard cannot arise.
+
+**B7 is an explicit horizontal viewport move.** `docs/horizontal-scroll-framing.md`
+is explicit that such commands *"are what re-opens Q#HS4"* (`:189`), and
+Q#HS4 is recorded as **DEFERRED, not answered** (`:202`). The hazard is
+concrete and already cost this project once — §1.5 there quotes
+`scroll_window`, which carries the cursor with a **vertical** wheel
+scroll for exactly this reason:
+
+> the renderer has an "auto-scroll to keep cursor visible" pass that
+> would otherwise snap `view_top` straight back … so the user's
+> mouse-wheel scroll would feel stuck after one notch.
+
+(That citation is itself stale: `scroll_window` is **`src/editor.rs:3845`**,
+not `:3628`.)
+
+So a wheel-driven `view_left` that does **not** carry the cursor will be
+snapped back by the next `horizontal_follow`, and horizontal wheel
+scrolling will "feel stuck after one notch" — the identical bug, one
+axis over, on **both** frontends, since the GPU's `horizontal_follow`
+(`:7702`) has the same shape.
+
+**B7's stated contract does not mention the cursor at all**, and its
+mutations therefore cannot detect this: a clamp row and a wrap row both
+pass against a viewport that snaps back on the next caret event.
+
+#### Q#S1-11 — does a horizontal wheel scroll carry the cursor? **OPEN**
+
+Not answerable from the table as written; Q#HS4 was deferred rather
+than closed precisely so this would be decided when explicit commands
+arrived. Two candidate answers, both defensible:
+
+- **(A) Carry it, mirroring `scroll_window`.** Consistent with the
+  vertical axis, and the snap-back cannot arise. Costs a cursor move
+  the user did not ask for.
+- **(B) Do not carry it; suppress the follow while a wheel origin is
+  live.** Preserves the cursor, but needs a rule for when the origin
+  stops being authoritative, and that rule is new state on both
+  frontends.
+
+**Whichever is ruled, B7 needs a witness the current table lacks:**
+scroll sideways, then trigger a caret-follow, and assert the origin
+behaves as ruled. Without it the row is green either way.
 
 ## 3. PR topology
 
@@ -298,6 +430,12 @@ The crate has **exactly one** executable `event_loop.exit()`, in
 | A9 | **64 KiB cap; oversize rejected, not truncated** | no cap exists | truncate instead → the oversize row observes silent loss |
 
 ### 1b — pointer and scroll
+
+> **Read §2a first.** Every line number in this table was measured
+> before 1-pre and is stale. §2a re-measures them at `72da24a` and
+> records three rows whose "nothing exists yet" is wrong, plus **Q#S1-11
+> (open)**, which B7 cannot be implemented without. The contracts below
+> are unchanged.
 
 | # | Contract | Witness | Mutation |
 |---|---|---|---|
@@ -594,6 +732,12 @@ and its attachments, Escape only cancels/round-trips · **Q#S1-5** A/`1e`
 · **Q#S1-6** B/`TextInput` · **Q#S1-7** Meta/Super → Stage 2, arc §2.5
 and the backlog amended by 1-pre's first PR · **Q#S1-8** (A),
 `SEMANTIC_BOOTSTRAP_GRID` · **Q#S1-9** precedence per §5 · **Q#S1-10** terminal `OpenTargetResult`.
+
+**OPEN: Q#S1-11** — does a horizontal wheel scroll carry the cursor?
+Raised by §2a; **blocks B7 and B3 only**, and nothing else in 1b. It is
+the question `docs/horizontal-scroll-framing.md` deferred as Q#HS4,
+now live because B7 is the explicit horizontal scroll command whose
+absence was that deferral's stated premise.
 
 ## 11. Gates
 
