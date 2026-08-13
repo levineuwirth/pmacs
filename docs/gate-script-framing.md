@@ -452,7 +452,9 @@ Four decisions inside that, each of which had a cheaper wrong answer:
    therefore the marker. The directory has to sit somewhere with no
    marker above it.
 2. **Off the GATE ROOT, not the per-worktree target.** A Unix socket
-   path cannot exceed `SUN_LEN` (108 bytes) and the suites bind sockets
+   path cannot exceed `sun_path` — **103 usable bytes at the supported
+   floor** (Darwin's 104-byte array minus its terminating NUL; Linux's
+   is 108/107) and the suites bind sockets
    *inside* `TMPDIR`. The per-worktree target is 60 bytes and the gate
    root 36; the first implementation used the former and produced
    114-byte socket paths, failing six daemon and attach tests. **The
@@ -492,8 +494,10 @@ other, which is the worst place to find out. **The usable PATH length is
 one less than the array**, because the stored value is NUL-terminated:
 103 on Darwin, 107 on Linux. The script takes **103**.
 
-**RULING — a synthetic nested gate does not pay a reserve it never
-uses.** The reserve exists for fixtures that bind sockets under
+**RULING — a synthetic nested gate is given room to SATISFY the
+reserve; it is not exempted from it.** The guard is unchanged for every
+run, nested or not. What changed is the layout the behaviour suite
+hands it. The reserve exists for fixtures that bind sockets under
 `TMPDIR`. This script's own behaviour suite runs *nested* gates whose
 plans are synthetic (`true`, `false`, one `echo`) and which bind no
 socket at all, so applying the fixture reserve to them would reject a
@@ -516,10 +520,13 @@ rather than the guard weakened**:
   plans create no markerless fixture — the same reason it may set the
   ancestor escape.
 
-**The guard therefore keeps the true maximum for real runs**, and the
-tests stop paying for a hazard they cannot encounter. If a future
-behaviour row *does* bind a socket, it must move off the short base and
-take the reserve with it.
+**The guard therefore keeps the true maximum for every run**, and the
+suite simply stops handing it a root that cannot clear it. An earlier
+draft of this section said nested gates "do not pay" the reserve, which
+is wrong and would have licensed exempting them: they pay it in full
+and now have the headroom to afford it. If a future behaviour row binds
+a socket, it must move off the short base — the reserve already covers
+it.
 
 **Escape hatch, documented test-only.**
 `PMACS_GATE_ALLOW_ANCESTOR_MARKER` exists for this script's own

@@ -552,27 +552,32 @@ is empty) and adds **no test to that binary**. Occurrence 3 excluded
 reproduces the signature with *nothing added to the binary*, which is
 independent corroboration rather than a repeat of the same argument.
 
-**AND ONE THING IT INTRODUCES, NAMED RATHER THAN DISMISSED — the
-observing lane is not environmentally neutral even though it is
-code-neutral.** That lane moves the gate's `TMPDIR` off `/tmp`, which
-on this machine changes the filesystem underneath every
-`tempfile::tempdir()` in the run **from tmpfs to btrfs**. This test
-creates a tempdir and runs a handshake against a **one-second
-deadline** (`pmacs-gpu/src/attach.rs`). A slower filesystem under a
-timing-bounded test, under full-sweep load, is a plausible mechanism
-and **it did not exist in occurrences 1–3**.
+**The observing lane is environmentally non-neutral, and that is
+recorded as a CHANGE rather than as a mechanism.** It moves the gate's
+`TMPDIR` off `/tmp`, which on this machine puts every
+`tempfile::tempdir()` in the run on btrfs instead of tmpfs. Noted so a
+later occurrence can compare like with like.
 
-It is not established either: the failing I/O is on a `UnixStream::pair`,
-not on the tempdir path, and the tempdir is created but never bound.
-**What this row must not do is book the occurrence as "the usual flake"
-when the observing lane changed the very conditions the flake is
-sensitive to.**
+**A causal claim built on that was advanced here and is WITHDRAWN.**
+The draft argued the test's one-second deadline plus a slower
+filesystem was a plausible new mechanism. It does not hold on
+inspection: **the deadline bounds the connection RETRY loop, not the
+socketpair handshake that returned `BrokenPipe`**, and the filesystem
+work happens before that deadline is armed. The tempdir is created and
+never bound — the failing I/O is on a `UnixStream::pair`. Recording a
+mechanism that the code does not support is worse than recording none,
+because the next occurrence gets measured against a story instead of
+against the evidence.
 
-**The discriminating comparison for a fifth occurrence** is therefore
-the same lane's gate run with `TMPDIR` pointed back at a tmpfs — the
-one variable this lane moves — rather than another merge-base control.
-Three isolated re-runs on the current tree were green, which by this
-file's own rule establishes intermittence only.
+**So the causal status is unchanged by this occurrence: UNRESOLVED,
+with no new mechanism.** What it adds is the corroboration above. Three
+isolated re-runs on the current tree were green, which by this file's
+own rule establishes intermittence only.
+
+**The discriminating comparison for a fifth occurrence** remains the
+one the third occurrence prescribed. One occurrence, with no supported
+mechanism, is not grounds to reverse a fix that closes two observed
+hazards.
 
 **Third occurrence — worker identity Stage 1 review round 2,
 2026-08-09, local (Linux). Same selector, same `gpu`-step flavor, all

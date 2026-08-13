@@ -639,42 +639,45 @@ fi
 # markerless fixture exists for a marker to re-root. The check itself
 # is witnessed by a test that deliberately does NOT set this and
 # asserts the refusal.
+gate_marker_refusal() {
+    echo "gate: a project marker sits above the gate TMPDIR:" >&2
+    echo "gate:   $1" >&2
+    echo "gate:   TMPDIR is $GATE_TMPDIR" >&2
+    echo "gate: every markerless test fixture beneath it would be" >&2
+    echo "gate: re-rooted at that directory. Move the gate root" >&2
+    echo "gate: (PMACS_GATE_TARGET_ROOT) somewhere without one." >&2
+    exit 2
+}
+
 if [ -z "${PMACS_GATE_ALLOW_ANCESTOR_MARKER:-}" ]; then
-for _anc in $(
-    _p="$GATE_TMPDIR"
-    while [ "$_p" != "/" ] && [ -n "$_p" ]; do
-        printf '%s\n' "$_p"
-        _p=$(dirname "$_p")
-    done
-    printf '/\n'
-); do
-    # TYPE MATTERS, and an existence-only test is wrong in both
-    # directions. `match_marker` in `src/project.rs` requires `.git` to
-    # be a DIRECTORY and the seven language markers to be FILES, so
-    # `[ -e ]` would reject ancestors detection itself ignores --- most
-    # importantly a `.git` FILE, which is exactly what a git WORKTREE
-    # has. Every worktree in this repo would have tripped it.
+# CANONICAL, AND QUOTED. Two defects an obvious loop has:
+#
+#   * `for _anc in $(...)` WORD-SPLITS on IFS, so a gate root containing
+#     a space is torn into fragments and the real ancestor is never
+#     tested --- the check would pass on exactly the path it should
+#     reject.
+#   * `dirname` walks LEXICAL ancestry. `detect_project` canonicalizes,
+#     so a symlinked root can hide a marker the editor plainly sees.
+#     Resolving first makes the two agree.
+_anc=$(cd "$GATE_TMPDIR" 2>/dev/null && pwd -P) || _anc="$GATE_TMPDIR"
+while :; do
     for _m in Cargo.toml .luarc.json pyproject.toml go.mod deno.json \
               deno.jsonc package.json; do
+        # TYPE MATTERS, and an existence-only test is wrong in both
+        # directions. `match_marker` in `src/project.rs` requires `.git`
+        # to be a DIRECTORY and the seven language markers to be FILES,
+        # so `[ -e ]` would reject ancestors detection itself ignores.
         if [ -f "$_anc/$_m" ]; then
-            echo "gate: a project marker sits above the gate TMPDIR:" >&2
-            echo "gate:   $_anc/$_m" >&2
-            echo "gate:   TMPDIR is $GATE_TMPDIR" >&2
-            echo "gate: every markerless test fixture beneath it would be" >&2
-            echo "gate: re-rooted at that directory. Move the gate root" >&2
-            echo "gate: (PMACS_GATE_TARGET_ROOT) somewhere without one." >&2
-            exit 2
+            gate_marker_refusal "$_anc/$_m"
         fi
     done
+    # The one directory-valued marker. A git WORKTREE has a `.git`
+    # FILE, which detection ignores and this must too.
     if [ -d "$_anc/.git" ]; then
-        echo "gate: a project marker sits above the gate TMPDIR:" >&2
-        echo "gate:   $_anc/.git" >&2
-        echo "gate:   TMPDIR is $GATE_TMPDIR" >&2
-        echo "gate: every markerless test fixture beneath it would be" >&2
-        echo "gate: re-rooted at that directory. Move the gate root" >&2
-        echo "gate: (PMACS_GATE_TARGET_ROOT) somewhere without one." >&2
-        exit 2
+        gate_marker_refusal "$_anc/.git"
     fi
+    [ "$_anc" = "/" ] && break
+    _anc=$(dirname "$_anc")
 done
 fi
 

@@ -694,7 +694,21 @@ fn the_ancestor_check_honours_marker_types() {
     );
 
     // The same name as a DIRECTORY is a real marker.
+    // A LANGUAGE marker as a DIRECTORY: detection wants a file, so the
+    // guard must ignore it. Without this row, reverting only the
+    // language-marker arm to `[ -e ]` stays green — the `.git` halves
+    // below constrain the directory-valued marker alone.
     std::fs::remove_file(&mine).expect("rm git file");
+    let cargo_dir = base.path().join("Cargo.toml");
+    std::fs::create_dir(&cargo_dir).expect("cargo dir");
+    let err = String::from_utf8_lossy(&run_it().stderr).into_owned();
+    assert!(
+        !err.contains(&format!("{}", cargo_dir.display())),
+        "a `Cargo.toml` DIRECTORY is not a marker to detection and must \
+         not be one here; stderr:\n{err}"
+    );
+    std::fs::remove_dir(&cargo_dir).expect("rm cargo dir");
+
     std::fs::create_dir(&mine).expect("git dir");
     let out = run_it();
     let err = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -706,6 +720,119 @@ fn the_ancestor_check_honours_marker_types() {
         err.contains(&format!("{}", mine.display())),
         "and must name it, not some other ancestor; stderr:\n{err}"
     );
+}
+
+/// The socket-path guard: rejection, acceptance, and cleanup on
+/// rejection.
+///
+/// **The ordinary gate only ever exercises the passing side.** Every
+/// other row here runs with a short root, so the guard is silent and a
+/// broken guard would look identical. These construct the boundary
+/// deliberately.
+///
+/// The budget is **103 usable bytes** — Darwin's `sun_path[104]` minus
+/// its terminating NUL, the supported-platform floor — less a 48-byte
+/// fixture reserve, so a root whose derived TMPDIR exceeds 55 bytes is
+/// refused.
+#[test]
+fn the_socket_path_guard_rejects_accepts_and_cleans_up() {
+    // The gate appends `/tmp/XXXXXX` (11 bytes) to the root, so a root
+    // of N bytes yields a TMPDIR of N + 11.
+    let over_root = long_root(60);
+    let out = run_guarded(over_root.path());
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success(),
+        "a root past the budget must be refused; stderr:\n{err}"
+    );
+    assert!(
+        err.contains("too long for a unix socket path"),
+        "and must say why; stderr:\n{err}"
+    );
+
+    // REJECTION MUST NOT LEAK. The guard creates both temporary areas
+    // before it can measure anything, so a rejection that exits before
+    // the trap is armed leaves them behind — on every rejection, which
+    // is worse than the failure it prevents.
+    let leaked: Vec<_> = walkdir_shallow(over_root.path());
+    assert!(
+        leaked.is_empty(),
+        "a rejected run must reap what it created; found {leaked:?}"
+    );
+
+    // Just inside the budget: accepted.
+    let ok_root = long_root(40);
+    let out = run_guarded(ok_root.path());
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !err.contains("too long for a unix socket path"),
+        "a root inside the budget must not be refused; stderr:\n{err}"
+    );
+}
+
+/// The guard counts BYTES, not characters.
+///
+/// `${#var}` counts characters under a UTF-8 locale while `sun_path` is
+/// byte-limited, so a multibyte path measures short and passes a check
+/// it should fail. Each `é` here is one character and **two bytes**.
+#[test]
+fn the_socket_path_guard_counts_bytes_not_characters() {
+    // Character-length ~34 but byte-length ~68: rejected only if the
+    // guard measures bytes.
+    let root = tempfile::Builder::new()
+        .prefix(&"é".repeat(24))
+        .tempdir_in(short_root_base())
+        .expect("multibyte root");
+    let chars = root.path().to_string_lossy().chars().count();
+    let bytes = root.path().to_string_lossy().len();
+    assert!(
+        bytes > chars,
+        "fixture must actually be multibyte: {chars} chars, {bytes} bytes"
+    );
+
+    let out = run_guarded(root.path());
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success() && err.contains("too long for a unix socket path"),
+        "a multibyte root over the BYTE budget must be refused — it is \
+         {chars} characters but {bytes} bytes; stderr:\n{err}"
+    );
+}
+
+/// A root of exactly `total` bytes, so the boundary can be aimed at.
+fn long_root(total: usize) -> tempfile::TempDir {
+    let base = short_root_base();
+    // `<base>/<prefix>XXXXXX`
+    let fixed = base.display().to_string().len() + 1 + 6;
+    let pad = total.saturating_sub(fixed);
+    tempfile::Builder::new()
+        .prefix(&"a".repeat(pad))
+        .tempdir_in(&base)
+        .expect("sized root")
+}
+
+/// Run the gate with the ancestor escape set (so only the LENGTH guard
+/// can speak) and no ambient `TMPDIR`.
+fn run_guarded(root: &Path) -> std::process::Output {
+    std::process::Command::new(gate())
+        .arg("--self-test")
+        .current_dir(repo_root())
+        .env("PMACS_GATE_TARGET_ROOT", root)
+        .env("PMACS_GATE_ALLOW_ANCESTOR_MARKER", "1")
+        .env_remove("TMPDIR")
+        .output()
+        .expect("run gate")
+}
+
+/// Entries left under `root/tmp` and any `gate-ambient` leaf.
+fn walkdir_shallow(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for sub in ["tmp"] {
+        if let Ok(rd) = std::fs::read_dir(root.join(sub)) {
+            out.extend(rd.filter_map(Result::ok).map(|e| e.path()));
+        }
+    }
+    out
 }
 
 /// The seam handoff §3 keeps authority over: a script cannot infer

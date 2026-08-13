@@ -283,8 +283,12 @@ commands, read `docs/active-work.md` immediately after this file.
     **FIXED 2026-08-13: `scripts/gate` now isolates `TMPDIR`.** Each
     invocation gets a directory created fresh by `mktemp -d` under
     **`<gate-root>/tmp/`** — the shared gate root, not the per-worktree
-    target, because a Unix socket path cannot exceed **`SUN_LEN`** (108
-    bytes) and the suites bind sockets inside `TMPDIR`. It is exported
+    target, because a Unix socket path cannot exceed `sun_path` and the
+    suites bind sockets inside `TMPDIR`. **The budget is the
+    supported-platform floor: 103 usable bytes** — Darwin's 104-byte
+    array minus its terminating NUL, not Linux's 108, because a
+    Linux-derived limit passes where it is written and bind-fails on
+    the macOS leg. It is exported
     once so every stage and every process they spawn inherits it, and
     reaped by the same exit trap as the ambient root. **A gate run no
     longer needs a `TMPDIR=` override.**

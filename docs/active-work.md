@@ -288,7 +288,8 @@ from #171 and #215.
   responsibility to `TMPDIR` rather than adding a feature, which is why
   it amends this document instead of opening a new one.
 - **What it does:** every gate invocation gets a fresh, disk-backed
-  `TMPDIR` at `<gate-root>/tmp/<pid>`, exported once so every stage and
+  `TMPDIR` at `<gate-root>/tmp/<mktemp>`, exported once so every stage
+  and
   every process they spawn inherits it, and reaped by the same exit trap
   as the ambient root. **A gate run no longer needs a `TMPDIR=`
   override.**
@@ -296,8 +297,11 @@ from #171 and #215.
   ANCESTOR marker — project detection walks upward — so a fresh
   subdirectory of `/tmp` inherits `/tmp`'s ancestors and the same stray
   `.git`. The directory had to move somewhere the gate already owns.
-- **`SUN_LEN` is the constraint that shaped the layout, and the fix's
-  own gate run found it.** A Unix socket path cannot exceed 108 bytes
+- **The socket-path limit shaped the layout, and the fix's own gate run
+  found it.** The budget is the **supported-platform floor of 103
+  usable bytes** — Darwin's 104-byte array minus its terminating NUL,
+  not Linux's 108, because a Linux-derived limit passes where it is
+  written and bind-fails on the macOS leg. A path cannot exceed that
   and the suites bind sockets inside `TMPDIR`. The first placement,
   `$TARGET/gate-tmp/$STAMP-$$`, produced a 114-byte socket path and
   failed **six** daemon and attach tests with *"path must be shorter
@@ -308,16 +312,25 @@ from #171 and #215.
   socket failures deep in a suite name a limit, not a cause. The guard
   fails immediately with the path, its length and what to shorten.
   **Its reserve is measured, not round**: the longest suffix a fixture
-  appends is 21 bytes, so 30 leaves ~40% headroom. An earlier
-  "generous" 45 **fired on the gate's own behaviour tests**, which run
-  the gate inside the gate and so reach 71 bytes — a guard that rejects
-  a legitimate configuration fails on every run rather than a rare one.
-- **Witnesses (2), each mutation-checked:** `M-G-1` removes the export
-  → the propagation row alone; `M-G-2` stops the reaping → the cleanup
-  row alone. Propagation is observed in a **spawned child** (the
-  self-test's first step reports its own `$TMPDIR` into its log),
-  because the gate exporting a variable would only prove the gate can
-  export a variable.
+  appends is **33** bytes (`/.tmpXXXXXX/directory-target.sock`), so
+  **48** leaves ~45% headroom. Two earlier values were wrong in
+  OPPOSITE directions — a "generous" 45 that fired on the gate's own
+  behaviour tests, then a 30 that sat **below the real maximum** and
+  would have passed 76–78-byte paths. The suite now roots its nested
+  gates at a short base so it can SATISFY the unchanged production
+  guard rather than be exempted from it.
+- **Witnesses, each mutation-checked.** `M-G-1b` keeps the assignment
+  and removes only `export` → the propagation row; its predecessor
+  `M-G-1` deleted both and so never proved inheritance. `M-G-2` stops
+  the reaping → the cleanup row. `M-G-3` removes the ancestor check →
+  the refusal row. `M-G-4` reverts to existence-only, and `M-G-5`
+  reverts **only** the language-marker arm → the marker-type row, which
+  is why that row covers a `Cargo.toml` **directory** as well as both
+  `.git` shapes. `M-G-6` counts characters → the multibyte row.
+  `M-G-7` moves the trap back after the guards → the
+  rejection-cleanup row. Propagation is observed in a **spawned
+  child**, because the gate exporting a variable would only prove the
+  gate can export a variable.
 - **Proved against the live hazard:** `/tmp/.git` is still present on
   this machine, and the tests it reddened now pass with **no override**.
 - **Gates:** `./scripts/gate --acceptance gate_script_acceptance`, run
