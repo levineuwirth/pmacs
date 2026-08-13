@@ -1,6 +1,7 @@
 //! `scripts/gate` — the behaviour a shell script can be held to.
 //!
-//! Framing: `docs/gate-script-framing.md` §4 (revision 4, approved).
+//! Framing: `docs/gate-script-framing.md` §4, and §2a for the
+//! `TMPDIR` isolation these rows cover (revision 6).
 //!
 //! # Why these tests exist, and why they are shaped like this
 //!
@@ -39,11 +40,39 @@ fn gate() -> PathBuf {
 }
 
 /// Run `scripts/gate` with an isolated managed root, from `cwd`.
+/// A SHORT base for the roots these tests hand the gate, independent of
+/// the ambient `TMPDIR`.
+///
+/// **Not `tempfile::tempdir()`'s default, and the reason is the socket
+/// budget rather than taste.** When this suite runs inside a gate, the
+/// ambient `TMPDIR` is already that gate's own (~47 bytes); rooting a
+/// nested gate under it pushes the nested `TMPDIR` to ~70 bytes and
+/// legitimately trips its own `SUN_LEN` guard. The suite would then
+/// fail on a configuration it created rather than on the behaviour
+/// under test — which is exactly how it failed once.
+///
+/// `/tmp` is named explicitly because it is short and this suite
+/// already requires a Unix environment. These roots hold synthetic
+/// plans and never fixtures, so `/tmp`'s contents are irrelevant to
+/// them; the rows set `PMACS_GATE_ALLOW_ANCESTOR_MARKER` for that
+/// reason.
+fn short_root_base() -> PathBuf {
+    PathBuf::from("/tmp")
+}
+
 fn run_in(cwd: &Path, root: &Path, args: &[&str]) -> (String, String, bool) {
     let out = Command::new(gate())
         .args(args)
         .current_dir(cwd)
         .env("PMACS_GATE_TARGET_ROOT", root)
+        // Test-only, like PMACS_GATE_TARGET_ROOT itself. These roots are
+        // `tempfile::tempdir()`s whose ancestors the suite does not
+        // control — on a machine whose `/tmp` carries a marker, every
+        // row here would otherwise be refused. The plans are synthetic,
+        // so no markerless fixture exists for a marker to re-root. The
+        // check is witnessed separately, by a row that does NOT set
+        // this.
+        .env("PMACS_GATE_ALLOW_ANCESTOR_MARKER", "1")
         .output()
         .expect("run scripts/gate");
     (
@@ -66,7 +95,10 @@ fn run(root: &Path, args: &[&str]) -> (String, String, bool) {
 
 #[test]
 fn the_plan_sweeps_the_workspace_and_never_only_the_tests() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let (plan, _, ok) = run(root.path(), &["--print-plan"]);
     assert!(ok, "--print-plan must succeed");
 
@@ -92,7 +124,10 @@ fn the_plan_sweeps_the_workspace_and_never_only_the_tests() {
 
 #[test]
 fn the_plan_runs_the_library_tests_in_both_feature_configurations() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let (plan, _, _) = run(root.path(), &["--print-plan"]);
     assert!(plan.contains("cargo test --lib\n"), "plan was:\n{plan}");
     assert!(
@@ -107,7 +142,10 @@ fn the_plan_runs_the_library_tests_in_both_feature_configurations() {
 /// default one in place — and the default run must not carry it.
 #[test]
 fn the_crdt_workspace_sweep_is_added_by_protocol_and_absent_without_it() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let crdt_sweep = "cargo test --workspace --features crdt --no-fail-fast";
 
     let (default_plan, _, _) = run(root.path(), &["--print-plan"]);
@@ -155,7 +193,10 @@ fn the_crdt_workspace_sweep_is_added_by_protocol_and_absent_without_it() {
 /// below, which reads the plan in the form the runner reads it.
 #[test]
 fn the_crdt_sweep_is_immediately_preceded_by_the_build_that_produces_its_binary() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let build = "cargo build --workspace --no-default-features --features luajit,crdt";
     let crdt_sweep = "cargo test --workspace --features crdt --no-fail-fast -- --skip basedpyright";
 
@@ -222,7 +263,10 @@ fn the_crdt_sweep_is_immediately_preceded_by_the_build_that_produces_its_binary(
 /// `--acceptance` refusal below exists to prevent.
 #[test]
 fn the_crdt_build_step_carries_its_own_name_and_its_exact_command() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let build = "build-crdt\tcargo build --workspace --no-default-features --features luajit,crdt";
     let sweep =
         "sweep-crdt\tcargo test --workspace --features crdt --no-fail-fast -- --skip basedpyright";
@@ -286,7 +330,10 @@ fn the_crdt_build_step_carries_its_own_name_and_its_exact_command() {
 /// tab would silently run under an empty command.
 #[test]
 fn the_named_plan_is_the_printed_plan_with_its_names_removed() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
 
     for flags in [
         vec![],
@@ -338,7 +385,10 @@ fn the_named_plan_is_the_printed_plan_with_its_names_removed() {
 /// every ordinary lane.
 #[test]
 fn the_crdt_build_is_absent_without_protocol() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let (plan, _, ok) = run(root.path(), &["--print-plan"]);
     assert!(ok, "--print-plan must succeed");
     assert!(
@@ -375,7 +425,10 @@ fn the_crdt_build_is_absent_without_protocol() {
 /// the same defect the `--acceptance` refusal above exists to prevent.
 #[test]
 fn self_test_names_the_failing_gate_and_the_suite_continues_past_it() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let (out, err, ok) = run(root.path(), &["--self-test"]);
 
     assert!(
@@ -428,12 +481,589 @@ fn self_test_names_the_failing_gate_and_the_suite_continues_past_it() {
     );
 }
 
+/// The isolated `TMPDIR` reaches a spawned CHILD, and is disk-backed
+/// under the managed target root.
+///
+/// **The hazard is an ancestor marker, not a dirty temp directory.**
+/// Project detection walks upward, so a stray `/tmp/.git` re-roots every
+/// markerless `tempfile::tempdir()` fixture beneath it — which is how
+/// two LSP file-watcher tests reddened a gate run on a lane whose whole
+/// executable diff lived in a crate the failing binary does not link. A
+/// fresh subdirectory *of* `/tmp` would inherit the same ancestors and
+/// the same marker, so the directory has to live where the gate already
+/// owns the path.
+///
+/// **Observed in a child process, deliberately.** The gate exporting a
+/// variable proves only that the gate can export a variable; what the
+/// suites need is that a process the runner spawns inherits it. The
+/// self-test's first step reports its own `$TMPDIR`, so the assertion
+/// reads a real child's environment out of a real gate log.
+#[test]
+fn the_isolated_tmpdir_reaches_a_spawned_child_under_the_managed_root() {
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
+    let (out, err, _ok) = run(root.path(), &["--self-test"]);
+
+    let announced = out
+        .lines()
+        .find_map(|l| {
+            l.split_once("gate: tmpdir")
+                .map(|(_, p)| p.trim().to_owned())
+        })
+        .unwrap_or_else(|| panic!("the gate must announce its TMPDIR; stdout:\n{out}"));
+
+    // The contract is **under the managed gate root**, which is what
+    // makes it disk-backed in production: the gate root sits beside the
+    // build artifacts, not in `/tmp`.
+    //
+    // **Placement does NOT make it marker-free** — that is the false
+    // inference the ancestor check exists to correct, and an earlier
+    // version of this comment made it. A `.git` in `$HOME` or above
+    // `$HOME/build` re-roots fixtures just as `/tmp/.git` did.
+    // Marker-freeness is a separate, verified precondition; see
+    // `the_ancestor_check_honours_marker_types`.
+    //
+    // Deliberately NOT asserting `!starts_with("/tmp/")` here. This
+    // test's own root is a `tempfile::tempdir()`, so on a normal
+    // machine it IS under `/tmp` and the gate's directory inherits
+    // that — such an assertion would be testing where the fixture put
+    // its root, not what the gate does, and would fail on correct code.
+    let expected_prefix = root.path().join("").display().to_string();
+    assert!(
+        announced.starts_with(&expected_prefix),
+        "the gate TMPDIR must live under the managed target root, which \
+         the gate owns and prunes; expected a child of {expected_prefix}, \
+         was {announced}"
+    );
+    // Its own named area under the root, so `prune` and a human can
+    // both tell it from the ambient root and the logs. Asserted as the
+    // exact parent rather than a substring: the directory is called
+    // `tmp`, and a `contains("/tmp/")` check would also pass for a path
+    // that merely happened to sit under a `/tmp` somewhere.
+    assert_eq!(
+        Path::new(&announced).parent().expect("tmpdir parent"),
+        root.path().join("tmp"),
+        "the per-run TMPDIR must sit directly under <root>/tmp; was {announced}"
+    );
+
+    // The child's own view, read out of the log the runner wrote.
+    let log = Path::new(
+        err.lines()
+            .find_map(|l| l.split_once("log: ").map(|(_, p)| p.trim()))
+            .unwrap_or_else(|| panic!("expected a log path; stderr:\n{err}")),
+    )
+    .parent()
+    .expect("log directory")
+    .join("01-self-pass.log");
+    let seen =
+        std::fs::read_to_string(&log).unwrap_or_else(|e| panic!("read {}: {e}", log.display()));
+    assert_eq!(
+        seen.trim(),
+        format!("gate-child-tmpdir={announced}"),
+        "a spawned child must inherit exactly the announced TMPDIR"
+    );
+}
+
+/// The `TMPDIR` is reaped when the run ends, like the ambient root.
+///
+/// Without this the gate would leak a directory per invocation into the
+/// target root — the same accumulation `prune` exists to clean up, but
+/// created by the tool itself and on every single run.
+#[test]
+fn the_isolated_tmpdir_is_reaped_when_the_run_ends() {
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
+    let (out, _err, _ok) = run(root.path(), &["--self-test"]);
+
+    let announced = out
+        .lines()
+        .find_map(|l| {
+            l.split_once("gate: tmpdir")
+                .map(|(_, p)| p.trim().to_owned())
+        })
+        .unwrap_or_else(|| panic!("the gate must announce its TMPDIR; stdout:\n{out}"));
+
+    // The run above FAILED on purpose (the self-test's middle step), so
+    // this also pins that the trap fires on the failure path — the path
+    // a leak would actually happen on.
+    assert!(
+        !Path::new(&announced).exists(),
+        "the exit trap must remove the TMPDIR even when a gate failed; \
+         {announced} survived"
+    );
+    // The parent stays. It is SHARED between worktrees — it hangs off
+    // the gate root, not the derived per-worktree target, for the
+    // socket budget — and `--prune` never touches it, because prune
+    // only considers directories carrying an ownership marker.
+    assert!(
+        Path::new(&announced)
+            .parent()
+            .expect("gate-tmp parent")
+            .exists(),
+        "only the per-run directory is reaped, not its parent"
+    );
+}
+
+/// A project marker above the gate TMPDIR is REFUSED.
+///
+/// **Placement under a managed root is necessary, not sufficient.** A
+/// `.git` in `$HOME`, any recognized marker above `$HOME/build`, or a
+/// contaminated `PMACS_GATE_TARGET_ROOT` re-roots every markerless
+/// fixture beneath it — which is the original defect, rebuilt one
+/// directory up. Asserting only "the path sits under the configured
+/// root" would prove placement and nothing about the hazard.
+///
+/// This row deliberately does **not** set
+/// `PMACS_GATE_ALLOW_ANCESTOR_MARKER`, which is what every other row
+/// here sets; it is the one place the check itself runs.
+#[test]
+fn a_project_marker_above_the_gate_tmpdir_is_refused() {
+    // Built OUTSIDE the system temp dir on purpose: the point is to
+    // control what sits above the root, and `/tmp` may already carry a
+    // marker — which would make the row pass for the wrong reason.
+    let base = tempfile::Builder::new()
+        .prefix("gm-")
+        .tempdir_in(short_root_base())
+        .expect("base");
+    let root = base.path().join("inner");
+    std::fs::create_dir_all(&root).expect("root");
+    std::fs::write(base.path().join("Cargo.toml"), "[package]\n").expect("marker");
+
+    let out = std::process::Command::new(gate())
+        .arg("--self-test")
+        .current_dir(repo_root())
+        .env("PMACS_GATE_TARGET_ROOT", &root)
+        .env_remove("PMACS_GATE_ALLOW_ANCESTOR_MARKER")
+        .env_remove("TMPDIR")
+        .output()
+        .expect("run gate");
+    let err = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        !out.status.success(),
+        "a marker above the TMPDIR must refuse the run; stderr:\n{err}"
+    );
+    assert!(
+        err.contains("a project marker sits above the gate TMPDIR"),
+        "and must say so, naming the marker; stderr:\n{err}"
+    );
+    assert!(
+        err.contains("Cargo.toml"),
+        "the message must name the marker it found; stderr:\n{err}"
+    );
+}
+
+/// A `.git` **FILE** above the root is accepted; a `.git` **DIRECTORY**
+/// is refused.
+///
+/// **The types are the contract, not the names.** `match_marker`
+/// (`src/project.rs`) requires `.git` to be a directory and the seven
+/// language markers to be files, so an existence-only check would
+/// reject ancestors project detection walks straight past. The case is
+/// not exotic: **a git worktree has a `.git` FILE**, so every worktree
+/// in this repository would have tripped an `[ -e ]` guard.
+#[test]
+fn the_ancestor_check_honours_marker_types() {
+    // **Asserted on WHICH marker is named, not on whether a refusal
+    // happened.** The ancestors of any base this test can create are
+    // outside its control — `/tmp` may hold a real `.git` directory,
+    // and the repo root holds a `Cargo.toml` — so "no refusal" is not
+    // a claim it can make anywhere. "The refusal did not name MY file"
+    // is, and it is the claim that actually distinguishes the two
+    // types.
+    let base = tempfile::Builder::new()
+        .prefix("gt-")
+        .tempdir_in(short_root_base())
+        .expect("base");
+    let root = base.path().join("inner");
+    std::fs::create_dir_all(&root).expect("root");
+
+    let run_it = || {
+        std::process::Command::new(gate())
+            .arg("--self-test")
+            .current_dir(repo_root())
+            .env("PMACS_GATE_TARGET_ROOT", &root)
+            .env_remove("PMACS_GATE_ALLOW_ANCESTOR_MARKER")
+            .env_remove("TMPDIR")
+            .output()
+            .expect("run gate")
+    };
+
+    // A `.git` FILE — a worktree — is not a project root to detection,
+    // so it must not be one here either.
+    let mine = base.path().join(".git");
+    std::fs::write(&mine, "gitdir: /elsewhere\n").expect("git file");
+    let err = String::from_utf8_lossy(&run_it().stderr).into_owned();
+    assert!(
+        !err.contains(&format!("{}", mine.display())),
+        "a `.git` FILE must not be treated as a marker, but the gate \
+         named it; stderr:\n{err}"
+    );
+
+    // The same name as a DIRECTORY is a real marker.
+    // A LANGUAGE marker as a DIRECTORY: detection wants a file, so the
+    // guard must ignore it. Without this row, reverting only the
+    // language-marker arm to `[ -e ]` stays green — the `.git` halves
+    // below constrain the directory-valued marker alone.
+    std::fs::remove_file(&mine).expect("rm git file");
+    let cargo_dir = base.path().join("Cargo.toml");
+    std::fs::create_dir(&cargo_dir).expect("cargo dir");
+    let err = String::from_utf8_lossy(&run_it().stderr).into_owned();
+    assert!(
+        !err.contains(&format!("{}", cargo_dir.display())),
+        "a `Cargo.toml` DIRECTORY is not a marker to detection and must \
+         not be one here; stderr:\n{err}"
+    );
+    std::fs::remove_dir(&cargo_dir).expect("rm cargo dir");
+
+    std::fs::create_dir(&mine).expect("git dir");
+    let out = run_it();
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success(),
+        "a `.git` DIRECTORY must refuse the run"
+    );
+    assert!(
+        err.contains(&format!("{}", mine.display())),
+        "and must name it, not some other ancestor; stderr:\n{err}"
+    );
+}
+
+/// The socket-path guard, **at the boundary**: 55 bytes accepted, 56
+/// rejected, with the measured lengths asserted.
+///
+/// **Straddling the cutoff is not testing it.** An earlier version of
+/// this row generated roughly 51- and 71-byte paths against a 55-byte
+/// cutoff; raising `SUN_LEN_BUDGET` from 103 to 118 would have left
+/// both green, so the row constrained the guard's existence and not its
+/// value. These aim at 55 and 56 exactly and assert the byte lengths
+/// they achieved, so a drifting budget fails here rather than in a
+/// socket bind.
+///
+/// The budget is **103 usable bytes** — Darwin's `sun_path[104]` minus
+/// its terminating NUL, the supported-platform floor — less the 48-byte
+/// fixture reserve.
+#[test]
+fn the_socket_path_guard_holds_at_its_exact_boundary() {
+    // The gate derives `<root>/tmp/XXXXXX`, i.e. root + 11 bytes.
+    const DERIVED: usize = 11;
+    const CUTOFF: usize = 103 - 48;
+
+    let ok_root = root_of_len(CUTOFF - DERIVED);
+    let out = run_guarded(ok_root.path());
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let announced = stdout
+        .lines()
+        .find_map(|l| {
+            l.split_once("gate: tmpdir")
+                .map(|(_, p)| p.trim().to_owned())
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "a root at the cutoff must be ACCEPTED and announce its \
+                 TMPDIR; stdout:\n{stdout}stderr:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            )
+        });
+    assert_eq!(
+        announced.len(),
+        CUTOFF,
+        "the accepted fixture must sit exactly ON the cutoff, not below \
+         it — otherwise a widened budget still passes. Path: {announced}"
+    );
+
+    let over_root = root_of_len(CUTOFF - DERIVED + 1);
+    let out = run_guarded(over_root.path());
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success() && err.contains("too long for a unix socket path"),
+        "one byte past the cutoff must be REJECTED; stderr:\n{err}"
+    );
+    // Keyed on the line that reports the measurement, not on the first
+    // `gate:   ` line — that one is the path.
+    let measured = err
+        .lines()
+        .find(|l| l.contains("bytes, but a fixture needs"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse::<usize>().ok());
+    assert_eq!(
+        measured,
+        Some(CUTOFF + 1),
+        "and the refusal must report exactly one byte over; stderr:\n{err}"
+    );
+
+    // REJECTION MUST NOT LEAK, and **both** areas are checked. The
+    // guard creates the ambient root and the TMPDIR before it can
+    // measure anything, so a rejection that exits before the trap is
+    // armed leaves both behind. Checking only `<root>/tmp` would pass
+    // while `gate-ambient` leaked.
+    let leaked = leaked_temp_areas(over_root.path());
+    assert!(
+        leaked.is_empty(),
+        "a rejected run must reap BOTH created areas; found {leaked:?}"
+    );
+}
+
+/// The guard counts BYTES, not characters — **under a UTF-8 locale**.
+///
+/// `${#var}` counts characters in a UTF-8 locale while `sun_path` is
+/// byte-limited, so a multibyte path measures short and passes a check
+/// it should fail. **The locale is set explicitly**: under an inherited
+/// `LC_ALL=C`, `${#var}` already counts bytes and the character-counting
+/// mutant would pass, making this row's verdict depend on the
+/// environment rather than on the code.
+#[test]
+fn the_socket_path_guard_counts_bytes_not_characters() {
+    // Each `é` is one character and two bytes, so this root is under
+    // the cutoff by character count and over it by byte count — the
+    // only shape that separates the two implementations.
+    let root = tempfile::Builder::new()
+        .prefix(&"é".repeat(22))
+        .tempdir_in(short_root_base())
+        .expect("multibyte root");
+    let path = root.path().to_string_lossy().into_owned();
+    let chars = path.chars().count();
+    let bytes = path.len();
+    assert!(
+        chars + 11 <= 55 && bytes + 11 > 55,
+        "fixture must straddle: {chars} chars (must pass) vs {bytes} \
+         bytes (must fail), path {path}"
+    );
+
+    // **Chosen by BEHAVIOUR, not by name**, and the interpreter is part
+    // of the choice: `${#x}` counting characters is a property of the
+    // SHELL first and the locale second. `bash` counts characters under
+    // a UTF-8 locale; `dash` counts bytes under every locale. Naming a
+    // locale and running `/bin/sh` therefore proves nothing on its own —
+    // where `/bin/sh` is `dash`, the character-counting mutant measures
+    // bytes too, agrees with the fix, and this row passes vacuously.
+    //
+    // The gate is invoked THROUGH that shell rather than by its
+    // shebang, because the configuration being pinned is a real one:
+    // `#!/bin/sh` resolves to `bash` on Arch and on macOS, which is
+    // exactly where a `${#VAR}` guard would miscount.
+    let (shell, locale) = char_counting_shell();
+    let out = std::process::Command::new(&shell)
+        .arg(gate())
+        .arg("--self-test")
+        .current_dir(repo_root())
+        .env("PMACS_GATE_TARGET_ROOT", root.path())
+        .env("PMACS_GATE_ALLOW_ANCESTOR_MARKER", "1")
+        .env("LC_ALL", &locale)
+        .env("LANG", &locale)
+        .env_remove("TMPDIR")
+        .output()
+        .expect("run gate");
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success() && err.contains("too long for a unix socket path"),
+        "a root over the BYTE budget must be refused even though it is \
+         under the CHARACTER budget ({chars} chars, {bytes} bytes); \
+         stderr:\n{err}"
+    );
+}
+
+/// A `(shell, locale)` pair under which **`${#x}` counts CHARACTERS** —
+/// established by asking that very shell, never by trusting a name.
+///
+/// **Both axes matter, and the shell matters more.** `${#x}` on a
+/// two-byte character answers `1` under `bash` with a UTF-8 locale and
+/// `2` under `bash` with `C` — but `dash` answers `2` under *every*
+/// locale, because it has no multibyte handling at all. So naming a
+/// locale and invoking `/bin/sh` establishes nothing: where `/bin/sh`
+/// is `dash` (Debian and Ubuntu, including CI) the character-counting
+/// mutant measures bytes too, agrees with the fix, and the row this
+/// serves passes while proving nothing.
+///
+/// `/bin/sh` is tried first, so the real interpreter is used wherever
+/// it qualifies — as it does on Arch and macOS, which is precisely
+/// where a `${#VAR}` guard would miscount.
+///
+/// Locale candidates are the two conventional `C.UTF-8` spellings,
+/// which are commonly usable without appearing in `locale -a`,
+/// followed by every UTF-8 entry `locale -a` does report. **Fails
+/// loudly when no pair qualifies** — a skip here would be
+/// indistinguishable from a pass.
+fn char_counting_shell() -> (String, String) {
+    let installed = std::process::Command::new("locale")
+        .arg("-a")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+
+    let mut locales: Vec<String> = ["C.UTF-8".to_owned(), "C.utf8".to_owned()]
+        .into_iter()
+        .chain(
+            installed
+                .lines()
+                .filter(|l| l.to_ascii_lowercase().contains("utf"))
+                .map(str::to_owned),
+        )
+        .collect();
+    locales.dedup();
+
+    let shells = ["/bin/sh", "/bin/bash", "bash"];
+    for shell in shells {
+        for locale in &locales {
+            let probe = std::process::Command::new(shell)
+                .arg("-c")
+                .arg("x=é; echo ${#x}")
+                .env("LC_ALL", locale)
+                .env("LANG", locale)
+                .output();
+            if let Ok(out) = probe
+                && String::from_utf8_lossy(&out.stdout).trim() == "1"
+            {
+                return (shell.to_owned(), locale.clone());
+            }
+        }
+    }
+    panic!(
+        "no available shell counts characters under any installed \
+         locale, so the byte-versus-character distinction this row \
+         exists to test cannot be established here. Tried shells \
+         {shells:?} against locales {locales:?}"
+    );
+}
+
+/// A root whose full path is exactly `total` bytes.
+fn root_of_len(total: usize) -> tempfile::TempDir {
+    let base = short_root_base();
+    let fixed = base.display().to_string().len() + 1 + 6; // `<base>/` + XXXXXX
+    let dir = tempfile::Builder::new()
+        .prefix(&"a".repeat(total.saturating_sub(fixed)))
+        .tempdir_in(&base)
+        .expect("sized root");
+    assert_eq!(
+        dir.path().to_string_lossy().len(),
+        total,
+        "fixture must be exactly {total} bytes"
+    );
+    dir
+}
+
+/// Run the gate with the ancestor escape set (so only the LENGTH guard
+/// can speak) and no ambient `TMPDIR`.
+fn run_guarded(root: &Path) -> std::process::Output {
+    std::process::Command::new(gate())
+        .arg("--self-test")
+        .current_dir(repo_root())
+        .env("PMACS_GATE_TARGET_ROOT", root)
+        .env("PMACS_GATE_ALLOW_ANCESTOR_MARKER", "1")
+        .env_remove("TMPDIR")
+        .output()
+        .expect("run gate")
+}
+
+/// Leftovers in **both** areas a run creates: `<root>/tmp/*` and the
+/// derived target's `gate-ambient/*`.
+fn leaked_temp_areas(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(root.join("tmp")) {
+        out.extend(rd.filter_map(Result::ok).map(|e| e.path()));
+    }
+    // The ambient root DOES live under the derived per-worktree target
+    // (unlike the tmp parent, which is shared), and its name is a hash
+    // this test does not compute — so every `gate-ambient` beneath the
+    // root is inspected.
+    if let Ok(rd) = std::fs::read_dir(root) {
+        for entry in rd.filter_map(Result::ok) {
+            if let Ok(inner) = std::fs::read_dir(entry.path().join("gate-ambient")) {
+                out.extend(inner.filter_map(Result::ok).map(|e| e.path()));
+            }
+        }
+    }
+    out
+}
+
+/// The ancestor walk is **canonical** and **does not word-split**.
+///
+/// Both properties were fixed without a witness, and reverting to the
+/// obvious `for _anc in $(... dirname ...)` loop left every other row
+/// green — so the suite constrained the check's existence and neither
+/// of its two hard-won properties.
+///
+/// * **A space in the root** is torn into fragments by an unquoted
+///   `$(...)` expansion, and the real ancestor is then never tested —
+///   the guard passes on exactly the path it must reject.
+/// * **A symlinked root** hides a marker under lexical `dirname` that
+///   `detect_project` sees after canonicalization, so the gate and the
+///   editor would disagree about the same tree.
+#[test]
+fn the_ancestor_walk_is_canonical_and_does_not_word_split() {
+    // A space in the path, with a marker above it.
+    let spaced = tempfile::Builder::new()
+        .prefix("has space ")
+        .tempdir_in(short_root_base())
+        .expect("spaced base");
+    assert!(
+        spaced.path().to_string_lossy().contains(' '),
+        "fixture must actually contain a space"
+    );
+    let marker = spaced.path().join(".git");
+    std::fs::create_dir(&marker).expect("marker");
+    let root = spaced.path().join("inner");
+    std::fs::create_dir_all(&root).expect("root");
+
+    let out = run_unescaped(&root);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        err.contains(&format!("{}", marker.display())),
+        "a marker above a root containing a SPACE must be found and \
+         named; stderr:\n{err}"
+    );
+
+    // A symlinked root whose marker is only visible after resolving.
+    let base = tempfile::Builder::new()
+        .prefix("sym-")
+        .tempdir_in(short_root_base())
+        .expect("sym base");
+    let real = base.path().join("real");
+    std::fs::create_dir_all(real.join("inner")).expect("real tree");
+    let hidden = real.join(".git");
+    std::fs::create_dir(&hidden).expect("hidden marker");
+    let link = base.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+    let out = run_unescaped(&link.join("inner"));
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success(),
+        "a marker reachable only after canonicalization must still \
+         refuse; stderr:\n{err}"
+    );
+    assert!(
+        err.contains(&format!("{}", hidden.display())),
+        "and must name it at its RESOLVED path, which is what \
+         `detect_project` would see; stderr:\n{err}"
+    );
+}
+
+/// Run the gate with the ancestor check ACTIVE (no escape).
+fn run_unescaped(root: &Path) -> std::process::Output {
+    std::process::Command::new(gate())
+        .arg("--self-test")
+        .current_dir(repo_root())
+        .env("PMACS_GATE_TARGET_ROOT", root)
+        .env_remove("PMACS_GATE_ALLOW_ANCESTOR_MARKER")
+        .env_remove("TMPDIR")
+        .output()
+        .expect("run gate")
+}
+
 /// The seam handoff §3 keeps authority over: a script cannot infer
 /// which acceptance suites a change touched, so it runs what it is
 /// handed — each one, in order.
 #[test]
 fn acceptance_suites_reach_the_plan_in_the_order_given() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let (plan, _, _) = run(
         root.path(),
         &[
@@ -460,7 +1090,10 @@ fn acceptance_suites_reach_the_plan_in_the_order_given() {
 
 #[test]
 fn printing_the_target_dir_creates_nothing() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let (dir, _, ok) = run(root.path(), &["--print-target-dir"]);
     assert!(ok, "--print-target-dir must succeed");
     assert!(!dir.trim().is_empty(), "it must print a path");
@@ -472,7 +1105,10 @@ fn printing_the_target_dir_creates_nothing() {
 
 #[test]
 fn init_writes_the_ownership_marker_and_is_idempotent() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let (dir, _, ok) = run(root.path(), &["--init"]);
     assert!(ok, "--init must succeed");
     let dir = PathBuf::from(dir.trim());
@@ -512,8 +1148,14 @@ fn init_writes_the_ownership_marker_and_is_idempotent() {
 /// belt-and-braces against git's behaviour not being contractual.
 #[test]
 fn a_symlinked_spelling_of_a_worktree_derives_the_same_directory() {
-    let root = tempfile::tempdir().expect("tempdir");
-    let link_home = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
+    let link_home = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let link = link_home.path().join("via-symlink");
     if std::os::unix::fs::symlink(repo_root(), &link).is_err() {
         return; // no symlink support; nothing to assert
@@ -550,7 +1192,10 @@ fn prune_fixture(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
 
 #[test]
 fn prune_is_a_dry_run_by_default_and_deletes_nothing() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let (orphan, lookalike, live) = prune_fixture(root.path());
 
     let (out, _, ok) = run(root.path(), &["--prune"]);
@@ -567,7 +1212,10 @@ fn prune_is_a_dry_run_by_default_and_deletes_nothing() {
 
 #[test]
 fn force_deletes_only_the_orphan() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let (orphan, lookalike, live) = prune_fixture(root.path());
 
     let (out, _, ok) = run(root.path(), &["--prune", "--force"]);
@@ -615,8 +1263,14 @@ impl Drop for WorktreePruneGuard {
 
 #[test]
 fn a_registered_worktree_whose_directory_was_deleted_is_prunable() {
-    let root = tempfile::tempdir().expect("tempdir");
-    let home = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
+    let home = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let wt = home.path().join("gate-prunable-probe");
 
     let added = Command::new("git")
@@ -673,9 +1327,15 @@ fn a_registered_worktree_whose_directory_was_deleted_is_prunable() {
 /// grounds that no test noticed.
 #[test]
 fn prune_outside_a_repository_refuses_and_every_directory_survives() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let (orphan, lookalike, live) = prune_fixture(root.path());
-    let outside = tempfile::tempdir().expect("tempdir");
+    let outside = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
 
     // Sanity: the fixture's orphan really is eligible from inside a repo.
     let (inside, _, _) = run(root.path(), &["--prune"]);
@@ -705,7 +1365,10 @@ fn prune_outside_a_repository_refuses_and_every_directory_survives() {
 /// gate runs.
 #[test]
 fn acceptance_names_with_shell_metacharacters_are_refused() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let canary = root.path().join("canary");
     std::fs::write(&canary, "intact").expect("write canary");
 
@@ -746,7 +1409,10 @@ fn acceptance_names_with_shell_metacharacters_are_refused() {
 /// the test above by rejecting everything.
 #[test]
 fn ordinary_acceptance_names_are_accepted() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     for name in ["m4_acceptance", "gate-script", "abc123_x"] {
         let (plan, err, ok) = run(root.path(), &["--acceptance", name, "--print-plan"]);
         assert!(ok, "{name} must be accepted; stderr was:\n{err}");
@@ -762,7 +1428,10 @@ fn ordinary_acceptance_names_are_accepted() {
 /// directory on the strength of a file the script did not understand.
 #[test]
 fn a_multi_line_marker_is_refused_rather_than_read_head_first() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let bad = root.path().join("bad-00000000");
     std::fs::create_dir_all(&bad).expect("mkdir");
     std::fs::write(
@@ -790,7 +1459,10 @@ fn a_multi_line_marker_is_refused_rather_than_read_head_first() {
 /// is how one learns too late that the marker was never written.
 #[test]
 fn skipped_directories_are_reported_with_a_reason() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let (_, lookalike, _) = prune_fixture(root.path());
 
     let (out, _, _) = run(root.path(), &["--prune"]);

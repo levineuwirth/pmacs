@@ -287,7 +287,20 @@ emit_plan() {
 # command failed.
 # ---------------------------------------------------------------------
 emit_self_test_plan() {
-    printf 'self-pass\ttrue\n'
+    # `self-pass` reports the TMPDIR its own CHILD PROCESS sees, rather
+    # than `true`. The step is still a trivially-passing command with
+    # its own log, so every existing assertion about it holds --- but
+    # the log now carries evidence that the isolated TMPDIR reached a
+    # spawned process, which is the only thing that matters. Asserting
+    # the variable inside this script would prove that this script can
+    # set a variable.
+    #
+    # SINGLE-QUOTED INSIDE `sh -c`, so the CHILD expands `$TMPDIR`.
+    # With double quotes the runner's own `eval` expands it in the
+    # PARENT before `sh` ever starts, and the row then passes even when
+    # the variable is assigned but never EXPORTED --- which is precisely
+    # the regression it exists to catch.
+    printf 'self-pass\tsh -c %s\n' "'echo gate-child-tmpdir=\$TMPDIR'"
     printf 'build-crdt\tfalse\n'
     printf 'self-sentinel\ttrue\n'
 }
@@ -516,13 +529,169 @@ mkdir -p "$LOGDIR"
 # reads the environment it was handed. HOME is deliberately left alone.
 AMBIENT="$TARGET/gate-ambient/$STAMP-$$"
 mkdir -p "$AMBIENT"
-cleanup() { rm -rf "$AMBIENT"; }
+
+# TMPDIR: a fresh, DISK-BACKED directory per invocation, reaped with the
+# rest.
+#
+# THE HAZARD IS AN ANCESTOR MARKER, NOT A DIRTY TEMP DIRECTORY. Project
+# detection walks upward, so a stray `/tmp/.git` re-roots every
+# markerless `tempfile::tempdir()` fixture beneath it at `/tmp` --- and
+# the tests then faithfully exercise a tree of several thousand
+# unrelated entries. Seen for real: an empty `/tmp/.git` reddened two
+# LSP file-watcher tests inside a gate run on a lane whose whole
+# executable diff was in `pmacs-gpu`, a crate the failing test binary
+# does not even link.
+#
+# So the fix is NOT "clean the temp directory" --- a fresh subdirectory
+# OF `/tmp` inherits the same ancestors and the same marker. It has to
+# live somewhere with no marker above it, which the check below
+# VERIFIES rather than assumes.
+#
+# Disk-backed matters independently. `/tmp` is commonly a tmpfs, so a
+# sweep's fixtures compete with the machine for RAM rather than for
+# disk. Measured here: `/tmp` is a 30G tmpfs that reached 24G occupied,
+# leaving ~4G of 61G free, at which point process spawning became
+# unreliable and rows failed with EMPTY output --- a symptom that reads
+# like a code defect. It was not out of space. The gate root is on the
+# same filesystem as the build artifacts, which is where the space is.
+#
+# IT HANGS OFF THE GATE ROOT, NOT THE PER-WORKTREE TARGET, AND THE NAME
+# IS SHORT ON PURPOSE --- see the SUN_LEN budget below. Note this
+# parent is SHARED between worktrees and is NOT covered by `--prune`,
+# which only considers directories carrying an ownership marker. Each
+# run removes its own leaf on exit; the parent is a stable empty
+# directory.
+#
+# `HOME` is still deliberately left alone, as above.
+GATE_TMP_PARENT="$(gate_root)/tmp"
+mkdir -p "$GATE_TMP_PARENT"
+
+# FRESH BY CREATION, not by hope. `tmp/$$` with `mkdir -p` silently
+# ADOPTS a leftover directory after a SIGKILL or a power loss, because
+# PIDs are reused; the run would then inherit another run's fixtures.
+# `mktemp -d` fails rather than reuses, and the template is kept short
+# because every byte here is a byte a socket path cannot use.
+GATE_TMPDIR=$(mktemp -d "$GATE_TMP_PARENT/XXXXXX") || {
+    echo "gate: could not create a fresh TMPDIR under $GATE_TMP_PARENT" >&2
+    exit 2
+}
+
+# THE TRAP IS INSTALLED BEFORE THE CHECKS BELOW, deliberately. An
+# earlier draft ran the length guard first and exited on rejection with
+# both temporary areas already created and no trap armed --- so the
+# guard leaked exactly what it exists to manage, on every rejection.
+cleanup() { rm -rf "$AMBIENT" "$GATE_TMPDIR"; }
 trap cleanup EXIT INT TERM
+
+# --- Socket-path budget ------------------------------------------------
+#
+# A Unix socket path cannot exceed SUN_LEN (108 BYTES on Linux) and the
+# suites bind sockets INSIDE TMPDIR, so TMPDIR must leave room for the
+# longest path a fixture appends. Without this the symptom is several
+# unrelated-looking socket failures deep in a suite, naming a limit
+# rather than a cause.
+#
+# THE BUDGET IS THE SUPPORTED-PLATFORM FLOOR, NOT LINUX'S. `sun_path`
+# is 108 bytes on Linux but **104 on Darwin** (xnu `bsd/sys/un.h`), and
+# pmacs supports macOS --- CI runs a `macos-latest` leg. A
+# Linux-derived limit would pass here and bind-fail there, which is the
+# worst place to discover it. **The usable PATH length is one less than
+# the array**, because the value stored in `sun_path` is
+# NUL-terminated: 103 on Darwin, 107 on Linux. This script takes 103.
+#
+# THE RESERVE IS THE MEASURED MAXIMUM PLUS HEADROOM, not a round
+# number. The longest observed is `/.tmpXXXXXX/directory-target.sock`
+# --- 33 bytes (`tests/gpu_invocation_acceptance.rs`) --- so 48 leaves
+# ~45% headroom for a longer fixture name later.
+#
+# COUNTED IN BYTES, NOT CHARACTERS. `${#var}` counts characters under a
+# UTF-8 locale while `sun_path` is byte-limited, so a multibyte path
+# would measure short and pass a check it should fail.
+SUN_LEN_BUDGET=103
+TMPDIR_SUFFIX_RESERVE=48
+GATE_TMPDIR_BYTES=$(printf '%s' "$GATE_TMPDIR" | LC_ALL=C wc -c)
+if [ "$GATE_TMPDIR_BYTES" -gt "$((SUN_LEN_BUDGET - TMPDIR_SUFFIX_RESERVE))" ]; then
+    echo "gate: TMPDIR is too long for a unix socket path:" >&2
+    echo "gate:   $GATE_TMPDIR" >&2
+    echo "gate:   $GATE_TMPDIR_BYTES bytes, but a fixture needs" \
+         "$TMPDIR_SUFFIX_RESERVE of the $SUN_LEN_BUDGET usable bytes" \
+         "(Darwin sun_path[104] minus its NUL --- the supported floor)" >&2
+    echo "gate: shorten PMACS_GATE_TARGET_ROOT (or \$HOME) and retry." >&2
+    exit 2
+fi
+
+# --- Ancestor markers --------------------------------------------------
+#
+# A MANAGED ROOT IS NOT INHERENTLY MARKER-FREE, and assuming it was
+# would rebuild the original defect one directory up: a `.git` in
+# `$HOME`, any recognized marker above `$HOME/build`, or a contaminated
+# `PMACS_GATE_TARGET_ROOT` re-roots every markerless fixture again.
+# Placement under a directory the gate owns is a NECESSARY condition,
+# not a sufficient one, so the precondition is checked rather than
+# asserted.
+#
+# The list mirrors `default_markers()` in `src/project.rs`. A custom
+# marker registered at runtime is out of reach from here, which is
+# stated rather than papered over.
+#
+# PMACS_GATE_ALLOW_ANCESTOR_MARKER exists for the behaviour tests and
+# is documented test-only, exactly like PMACS_GATE_TARGET_ROOT. They
+# run the gate under a tempdir whose ancestors they do not control ---
+# on a machine whose `/tmp` carries the very marker this checks for ---
+# and their plans are synthetic (`true` / `false` / one `echo`), so no
+# markerless fixture exists for a marker to re-root. The check itself
+# is witnessed by a test that deliberately does NOT set this and
+# asserts the refusal.
+gate_marker_refusal() {
+    echo "gate: a project marker sits above the gate TMPDIR:" >&2
+    echo "gate:   $1" >&2
+    echo "gate:   TMPDIR is $GATE_TMPDIR" >&2
+    echo "gate: every markerless test fixture beneath it would be" >&2
+    echo "gate: re-rooted at that directory. Move the gate root" >&2
+    echo "gate: (PMACS_GATE_TARGET_ROOT) somewhere without one." >&2
+    exit 2
+}
+
+if [ -z "${PMACS_GATE_ALLOW_ANCESTOR_MARKER:-}" ]; then
+# CANONICAL, AND QUOTED. Two defects an obvious loop has:
+#
+#   * `for _anc in $(...)` WORD-SPLITS on IFS, so a gate root containing
+#     a space is torn into fragments and the real ancestor is never
+#     tested --- the check would pass on exactly the path it should
+#     reject.
+#   * `dirname` walks LEXICAL ancestry. `detect_project` canonicalizes,
+#     so a symlinked root can hide a marker the editor plainly sees.
+#     Resolving first makes the two agree.
+_anc=$(cd "$GATE_TMPDIR" 2>/dev/null && pwd -P) || _anc="$GATE_TMPDIR"
+while :; do
+    for _m in Cargo.toml .luarc.json pyproject.toml go.mod deno.json \
+              deno.jsonc package.json; do
+        # TYPE MATTERS, and an existence-only test is wrong in both
+        # directions. `match_marker` in `src/project.rs` requires `.git`
+        # to be a DIRECTORY and the seven language markers to be FILES,
+        # so `[ -e ]` would reject ancestors detection itself ignores.
+        if [ -f "$_anc/$_m" ]; then
+            gate_marker_refusal "$_anc/$_m"
+        fi
+    done
+    # The one directory-valued marker. A git WORKTREE has a `.git`
+    # FILE, which detection ignores and this must too.
+    if [ -d "$_anc/.git" ]; then
+        gate_marker_refusal "$_anc/.git"
+    fi
+    [ "$_anc" = "/" ] && break
+    _anc=$(dirname "$_anc")
+done
+fi
 
 export CARGO_TARGET_DIR="$TARGET"
 export XDG_CONFIG_HOME="$AMBIENT" XDG_DATA_HOME="$AMBIENT" \
        XDG_STATE_HOME="$AMBIENT" XDG_CACHE_HOME="$AMBIENT" \
        PMACS_STATE_HOME="$AMBIENT"
+# Exported once, here, so EVERY stage and every process they spawn
+# inherits it --- the stages run as children of this shell, so there is
+# no per-stage plumbing to forget.
+export TMPDIR="$GATE_TMPDIR"
 
 echo "gate: worktree   $WT"
 echo "gate: target dir $TARGET"
@@ -531,6 +700,9 @@ echo "gate: logs       $LOGDIR"
 # this is the directory all five ambient roots point at, and the exit
 # trap removes it, so it should be gone once the run finishes.
 echo "gate: ambient    $AMBIENT"
+# Printed for the same reason as the ambient root: the isolation is
+# observable, and the exit trap removes this too.
+echo "gate: tmpdir     $GATE_TMPDIR"
 [ -n "$ACCEPTANCE" ] && echo "gate: acceptance $ACCEPTANCE"
 [ "$PROTOCOL" = 1 ] && echo "gate: protocol   yes (CRDT build + workspace sweep added)"
 if [ "$MODE" = selftest ]; then

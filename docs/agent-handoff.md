@@ -280,10 +280,44 @@ commands, read `docs/active-work.md` immediately after this file.
     markerless-fixture red that looks like a watcher bug may be an
     ancestor marker, on any machine.
 
-    **SEEN AGAIN 2026-08-11, and `scripts/gate` DOES NOT PROTECT YOU
-    FROM IT.** The gate isolates the target directory and five ambient
-    roots but **not `TMPDIR`**, so `tempfile::tempdir()` still lands
-    under a `/tmp` that may carry a marker. It surfaced inside a gate
+    **FIXED 2026-08-13: `scripts/gate` now isolates `TMPDIR`.** Each
+    invocation gets a directory created fresh by `mktemp -d` under
+    **`<gate-root>/tmp/`** — the shared gate root, not the per-worktree
+    target, because a Unix socket path cannot exceed `sun_path` and the
+    suites bind sockets inside `TMPDIR`. **The budget is the
+    supported-platform floor: 103 usable bytes** — Darwin's 104-byte
+    array minus its terminating NUL, not Linux's 108, because a
+    Linux-derived limit passes where it is written and bind-fails on
+    the macOS leg. It is exported
+    once so every stage and every process they spawn inherits it, and
+    reaped by the same exit trap as the ambient root. **A gate run no
+    longer needs a `TMPDIR=` override.**
+
+    **That parent is SHARED between worktrees and `--prune` does not
+    touch it** — prune only considers directories carrying an ownership
+    marker. Each run removes its own leaf; the parent stays as a stable
+    empty directory.
+
+    **Two guards, both of which cost a round to get right.** A
+    byte-counted length check (`${#var}` counts CHARACTERS under UTF-8
+    while `sun_path` is byte-limited) reserving the measured maximum
+    suffix — `/.tmpXXXXXX/directory-target.sock`, 33 bytes — plus
+    headroom. And an **ancestor-marker check**, because *a managed root
+    is not inherently marker-free*: a `.git` in `$HOME` or above
+    `$HOME/build` rebuilds the original defect one directory up.
+    `PMACS_GATE_ALLOW_ANCESTOR_MARKER` is the documented test-only
+    escape, and a row that does not set it witnesses the refusal.
+
+    **Why a subdirectory of `/tmp` would NOT have worked**, since that
+    is the obvious cheaper fix: the hazard is an ANCESTOR marker, and a
+    child of `/tmp` has exactly the same ancestors. The directory had to
+    move somewhere the gate already owns.
+
+    *(Historical, and still the shape to recognize outside the gate —
+    `cargo test` run by hand is unprotected.)* The gate isolated the
+    target directory and five ambient roots but **not `TMPDIR`**, so
+    `tempfile::tempdir()` landed under a `/tmp` that may carry a
+    marker. It surfaced inside a gate
     run on an unrelated lane (GUI 1-pre, whose whole **executable** diff
     is inside the `pmacs-gpu` crate) as **`m4_24_bare_string_glob_stays_relative`
     and `m4_24_d3_fallback_base_is_the_smallest_attachment_dir`**, in
@@ -327,9 +361,10 @@ commands, read `docs/active-work.md` immediately after this file.
     its ancestor. Verify with `git -C <dir> rev-parse --show-toplevel`
     failing, not by eye. **Do not delete a foreign marker** — isolating
     is sufficient and deletion is someone else's call. **Isolating
-    `TMPDIR` inside `scripts/gate` is the standing fix and belongs to
-    the gate lane**, not to whichever feature PR happens to trip over
-    it.
+    `TMPDIR` inside `scripts/gate` was the standing fix; it landed
+    2026-08-13** (see the FIXED note above), so a gate run is protected
+    and the override is no longer needed. **A bare `cargo test` still
+    is not** — that is when to check the ancestors.
 - **A libtest filter that matches nothing reports `test result: ok`.**
   `0 passed; 0 failed; N filtered out` and a zero exit code are what a
   *typo'd or mis-quoted filter* looks like, and it is indistinguishable

@@ -1,6 +1,30 @@
 # `scripts/gate` — per-worktree build isolation, and one gate suite
 
-**Status: revision 5. Approved at revision 4 and IMPLEMENTED; revision
+**Status: revision 6 — APPROVED and IMPLEMENTED.** Revision 6 extends
+the isolation contract to `TMPDIR` (§2a below). It is a *widening of an
+existing responsibility*, not a new feature: §2 already owns "what the
+gate isolates", and `TMPDIR` was simply missing from that list — which
+is how a stray `/tmp/.git` came to redden a gate run on an unrelated
+lane.
+
+**Approved after four review rounds plus a locale follow-up, all of
+which turned on evidence rather than design.** Round 1 corrected a
+propagation witness that observed no inheritance, a reserve that was
+not the maximum, and a guard that leaked what it exists to manage.
+Round 2 tightened the socket budget to the Darwin floor, *ruled* the
+nested case rather than accommodating it by loosening the reserve, and
+replaced an existence-only ancestor check with one that honours marker
+types. Round 3 made the traversal canonical, gave the length guard its
+first witnesses, and **withdrew an unsupported causal claim**. Round 4
+found four properties that were fixed or claimed but would have stayed
+green if reverted: it added the **canonical-traversal witness**, moved
+the guard rows onto the exact boundary, and covered both managed areas
+on cleanup. The follow-up required the byte-versus-character row to
+*establish* its precondition rather than name one. Each correction was
+a witness asserting something adjacent to the contract while appearing
+to assert the contract itself.
+
+**Previously, revision 5. Approved at revision 4 and IMPLEMENTED; revision
 5 records two safety defects review found in the implementation.**
 
 **Neither was a design gap — both were the implementation failing to
@@ -416,6 +440,147 @@ plus a handoff §3 rewrite that points at it**; if the convention proves leaky
 under real parallel load, direnv is the escalation.
 
 ---
+
+## 2a. `TMPDIR` isolation (revision 6, APPROVED)
+
+**The gap.** §2 lists what a gate run isolates: the target directory and
+five ambient roots. `TMPDIR` was not on that list, so
+`tempfile::tempdir()` fixtures landed wherever the operator's `/tmp`
+pointed. That is not a hygiene preference — **project detection walks
+UPWARD**, so a marker anywhere above the temp directory re-roots every
+markerless fixture beneath it.
+
+**Observed, not hypothesised.** An empty `/tmp/.git` reddened
+`m4_24_bare_string_glob_stays_relative` and
+`m4_24_d3_fallback_base_is_the_smallest_attachment_dir` *inside a gate
+run*, on a lane whose entire executable diff lived in `pmacs-gpu` — a
+crate the failing test binary does not link. Diagnosing it cost a review
+round, and the workaround was a manual `TMPDIR=` on every invocation.
+
+**The contract.** Each invocation gets a directory created fresh by
+`mktemp -d` under `<gate-root>/tmp/`, exported once so every stage and
+every process they spawn inherits it, and reaped by the exit trap that
+already removes the ambient root.
+
+Four decisions inside that, each of which had a cheaper wrong answer:
+
+1. **Not a subdirectory of `/tmp`.** It inherits `/tmp`'s ancestors and
+   therefore the marker. The directory has to sit somewhere with no
+   marker above it.
+2. **Off the GATE ROOT, not the per-worktree target.** A Unix socket
+   path cannot exceed `sun_path` — **103 usable bytes at the supported
+   floor** (Darwin's 104-byte array minus its terminating NUL; Linux's
+   is 108/107) and the suites bind sockets
+   *inside* `TMPDIR`. The per-worktree target is 60 bytes and the gate
+   root 36; the first implementation used the former and produced
+   114-byte socket paths, failing six daemon and attach tests. **The
+   parent is consequently SHARED between worktrees and is not covered
+   by `--prune`**, which only considers directories carrying an
+   ownership marker; each run removes its own leaf.
+3. **Created by `mktemp -d`, not `mkdir -p` on a pid.** PIDs are reused,
+   so after a SIGKILL a `mkdir -p` silently *adopts* a leftover
+   directory and the run inherits another run's fixtures.
+4. **Two guards, and both fail loudly at startup** rather than letting
+   the symptom appear deep in a suite as a limit with no cause:
+   - a **byte-counted** length check reserving the measured maximum
+     suffix (`/.tmpXXXXXX/directory-target.sock`, 33 bytes) plus
+     headroom — byte-counted because `sun_path` is byte-limited while
+     `${#var}` counts *characters* in a shell that handles multibyte.
+     **Which shell runs the script decides this**: `bash` counts
+     characters under a UTF-8 locale, `dash` counts bytes under every
+     locale, and `#!/bin/sh` is `bash` on Arch and macOS but `dash` on
+     Debian and Ubuntu. The count must not depend on that, so the guard
+     measures bytes explicitly (`printf | LC_ALL=C wc -c`) rather than
+     relying on the interpreter it happens to get;
+   - an **ancestor-marker check**, because **a managed root is not
+     inherently marker-free**: a `.git` in `$HOME`, a marker above
+     `$HOME/build`, or a contaminated `PMACS_GATE_TARGET_ROOT` rebuilds
+     the original defect one directory up. Placement under a directory
+     the gate owns is *necessary, not sufficient*, so the precondition
+     is verified rather than assumed.
+
+     **THE TRAVERSAL IS CANONICAL AND MUST NOT WORD-SPLIT**, and both
+     halves are contract rather than style. An unquoted `$(...)`
+     expansion splits on `IFS`, so a gate root containing a **space**
+     is torn into fragments and its real ancestor is never tested —
+     the guard then passes on exactly the path it exists to reject.
+     And `dirname` walks **lexical** ancestry while `detect_project`
+     canonicalizes, so a **symlinked** root hides a marker the editor
+     plainly sees; the gate and the editor must not disagree about the
+     same tree. The walk resolves with `pwd -P` first and iterates a
+     quoted loop, and both shapes are witnessed.
+
+     **MIRRORING THE NAMES IS NOT ENOUGH — the TYPES are part of the
+     contract.** `match_marker` (`src/project.rs`) requires `.git` to be
+     a **directory** and the seven language markers to be **files**, so
+     an existence-only test rejects ancestors detection itself ignores.
+     The case that matters is not exotic: **a git WORKTREE has a `.git`
+     FILE**, so every worktree in this repository would have tripped an
+     `[ -e ]` check while project detection walked straight past it.
+     The guard tests `[ -d ]` for `.git` and `[ -f ]` for the rest.
+
+**The budget is the SUPPORTED-PLATFORM FLOOR, not Linux's.** `sun_path`
+is 108 bytes on Linux but **104 on Darwin** (xnu `bsd/sys/un.h`), and
+pmacs supports macOS — CI runs a `macos-latest` leg. A Linux-derived
+limit would pass on the machine that wrote it and bind-fail on the
+other, which is the worst place to find out. **The usable PATH length is
+one less than the array**, because the stored value is NUL-terminated:
+103 on Darwin, 107 on Linux. The script takes **103**.
+
+**RULING — a synthetic nested gate is given room to SATISFY the
+reserve; it is not exempted from it.** The guard is unchanged for every
+run, nested or not. What changed is the layout the behaviour suite
+hands it. The reserve exists for fixtures that bind sockets under
+`TMPDIR`. This script's own behaviour suite runs *nested* gates whose
+plans are synthetic (`true`, `false`, one `echo`) and which bind no
+socket at all, so applying the fixture reserve to them would reject a
+configuration that cannot suffer the failure it guards against — and
+the suite would fail on a setup it created rather than on the behaviour
+under test. That is not hypothetical: at a 45-byte reserve the nested
+path measured ~71 bytes and was rejected.
+
+Two ways to resolve it were available, and **the layout was changed
+rather than the guard weakened**:
+
+- *Rejected — exempt nested runs from the guard.* It would make the
+  guard untestable in the configuration the tests exercise, and "this
+  run is nested" is not something the script can know reliably.
+- **Adopted — the behaviour suite roots its gates at a SHORT base
+  (`/tmp`) instead of inheriting the ambient `TMPDIR`.** A nested gate
+  then sits at ~24 bytes rather than ~71 and clears the real reserve
+  with room to spare. The suite is explicit that it does this for the
+  socket budget, and it is free to use `/tmp` precisely because its
+  plans create no markerless fixture — the same reason it may set the
+  ancestor escape.
+
+**The guard therefore keeps the true maximum for every run**, and the
+suite simply stops handing it a root that cannot clear it. An earlier
+draft of this section said nested gates "do not pay" the reserve, which
+is wrong and would have licensed exempting them: they pay it in full
+and now have the headroom to afford it. If a future behaviour row binds
+a socket, it must move off the short base — the reserve already covers
+it.
+
+**Escape hatch, documented test-only.**
+`PMACS_GATE_ALLOW_ANCESTOR_MARKER` exists for this script's own
+behaviour tests, which run the gate under a `tempfile::tempdir()` whose
+ancestors they do not control — on a machine whose `/tmp` carries the
+very marker in question — and whose plans are synthetic, so no
+markerless fixture exists for a marker to re-root. It sits beside
+`PMACS_GATE_TARGET_ROOT` in kind and in risk. **The check is witnessed
+by a row that deliberately does not set it.**
+
+**Verification.** Two witnesses beyond the refusal row: propagation
+observed in a *spawned child* (the self-test's first step reports its
+own `$TMPDIR` into its log — asserting the variable inside the script
+would only prove the script can set a variable), and cleanup after a
+run that **failed on purpose**, which is the path a leak would actually
+take.
+
+**Residual, stated rather than covered.** A custom project marker
+registered at runtime is invisible to a shell script and is not
+checked. The built-in list mirrors `default_markers()` in
+`src/project.rs` and will drift if that list grows.
 
 ## 3. Resolved questions
 
