@@ -588,6 +588,14 @@ trap cleanup EXIT INT TERM
 # unrelated-looking socket failures deep in a suite, naming a limit
 # rather than a cause.
 #
+# THE BUDGET IS THE SUPPORTED-PLATFORM FLOOR, NOT LINUX'S. `sun_path`
+# is 108 bytes on Linux but **104 on Darwin** (xnu `bsd/sys/un.h`), and
+# pmacs supports macOS --- CI runs a `macos-latest` leg. A
+# Linux-derived limit would pass here and bind-fail there, which is the
+# worst place to discover it. **The usable PATH length is one less than
+# the array**, because the value stored in `sun_path` is
+# NUL-terminated: 103 on Darwin, 107 on Linux. This script takes 103.
+#
 # THE RESERVE IS THE MEASURED MAXIMUM PLUS HEADROOM, not a round
 # number. The longest observed is `/.tmpXXXXXX/directory-target.sock`
 # --- 33 bytes (`tests/gpu_invocation_acceptance.rs`) --- so 48 leaves
@@ -596,14 +604,15 @@ trap cleanup EXIT INT TERM
 # COUNTED IN BYTES, NOT CHARACTERS. `${#var}` counts characters under a
 # UTF-8 locale while `sun_path` is byte-limited, so a multibyte path
 # would measure short and pass a check it should fail.
-SUN_LEN_BUDGET=108
+SUN_LEN_BUDGET=103
 TMPDIR_SUFFIX_RESERVE=48
 GATE_TMPDIR_BYTES=$(printf '%s' "$GATE_TMPDIR" | LC_ALL=C wc -c)
 if [ "$GATE_TMPDIR_BYTES" -gt "$((SUN_LEN_BUDGET - TMPDIR_SUFFIX_RESERVE))" ]; then
     echo "gate: TMPDIR is too long for a unix socket path:" >&2
     echo "gate:   $GATE_TMPDIR" >&2
     echo "gate:   $GATE_TMPDIR_BYTES bytes, but a fixture needs" \
-         "$TMPDIR_SUFFIX_RESERVE of the $SUN_LEN_BUDGET-byte SUN_LEN budget" >&2
+         "$TMPDIR_SUFFIX_RESERVE of the $SUN_LEN_BUDGET usable bytes" \
+         "(Darwin sun_path[104] minus its NUL --- the supported floor)" >&2
     echo "gate: shorten PMACS_GATE_TARGET_ROOT (or \$HOME) and retry." >&2
     exit 2
 fi
@@ -639,9 +648,15 @@ for _anc in $(
     done
     printf '/\n'
 ); do
+    # TYPE MATTERS, and an existence-only test is wrong in both
+    # directions. `match_marker` in `src/project.rs` requires `.git` to
+    # be a DIRECTORY and the seven language markers to be FILES, so
+    # `[ -e ]` would reject ancestors detection itself ignores --- most
+    # importantly a `.git` FILE, which is exactly what a git WORKTREE
+    # has. Every worktree in this repo would have tripped it.
     for _m in Cargo.toml .luarc.json pyproject.toml go.mod deno.json \
-              deno.jsonc package.json .git; do
-        if [ -e "$_anc/$_m" ]; then
+              deno.jsonc package.json; do
+        if [ -f "$_anc/$_m" ]; then
             echo "gate: a project marker sits above the gate TMPDIR:" >&2
             echo "gate:   $_anc/$_m" >&2
             echo "gate:   TMPDIR is $GATE_TMPDIR" >&2
@@ -651,6 +666,15 @@ for _anc in $(
             exit 2
         fi
     done
+    if [ -d "$_anc/.git" ]; then
+        echo "gate: a project marker sits above the gate TMPDIR:" >&2
+        echo "gate:   $_anc/.git" >&2
+        echo "gate:   TMPDIR is $GATE_TMPDIR" >&2
+        echo "gate: every markerless test fixture beneath it would be" >&2
+        echo "gate: re-rooted at that directory. Move the gate root" >&2
+        echo "gate: (PMACS_GATE_TARGET_ROOT) somewhere without one." >&2
+        exit 2
+    fi
 done
 fi
 

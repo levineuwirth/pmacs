@@ -475,6 +475,52 @@ Four decisions inside that, each of which had a cheaper wrong answer:
      the gate owns is *necessary, not sufficient*, so the precondition
      is verified rather than assumed.
 
+     **MIRRORING THE NAMES IS NOT ENOUGH — the TYPES are part of the
+     contract.** `match_marker` (`src/project.rs`) requires `.git` to be
+     a **directory** and the seven language markers to be **files**, so
+     an existence-only test rejects ancestors detection itself ignores.
+     The case that matters is not exotic: **a git WORKTREE has a `.git`
+     FILE**, so every worktree in this repository would have tripped an
+     `[ -e ]` check while project detection walked straight past it.
+     The guard tests `[ -d ]` for `.git` and `[ -f ]` for the rest.
+
+**The budget is the SUPPORTED-PLATFORM FLOOR, not Linux's.** `sun_path`
+is 108 bytes on Linux but **104 on Darwin** (xnu `bsd/sys/un.h`), and
+pmacs supports macOS — CI runs a `macos-latest` leg. A Linux-derived
+limit would pass on the machine that wrote it and bind-fail on the
+other, which is the worst place to find out. **The usable PATH length is
+one less than the array**, because the stored value is NUL-terminated:
+103 on Darwin, 107 on Linux. The script takes **103**.
+
+**RULING — a synthetic nested gate does not pay a reserve it never
+uses.** The reserve exists for fixtures that bind sockets under
+`TMPDIR`. This script's own behaviour suite runs *nested* gates whose
+plans are synthetic (`true`, `false`, one `echo`) and which bind no
+socket at all, so applying the fixture reserve to them would reject a
+configuration that cannot suffer the failure it guards against — and
+the suite would fail on a setup it created rather than on the behaviour
+under test. That is not hypothetical: at a 45-byte reserve the nested
+path measured ~71 bytes and was rejected.
+
+Two ways to resolve it were available, and **the layout was changed
+rather than the guard weakened**:
+
+- *Rejected — exempt nested runs from the guard.* It would make the
+  guard untestable in the configuration the tests exercise, and "this
+  run is nested" is not something the script can know reliably.
+- **Adopted — the behaviour suite roots its gates at a SHORT base
+  (`/tmp`) instead of inheriting the ambient `TMPDIR`.** A nested gate
+  then sits at ~24 bytes rather than ~71 and clears the real reserve
+  with room to spare. The suite is explicit that it does this for the
+  socket budget, and it is free to use `/tmp` precisely because its
+  plans create no markerless fixture — the same reason it may set the
+  ancestor escape.
+
+**The guard therefore keeps the true maximum for real runs**, and the
+tests stop paying for a hazard they cannot encounter. If a future
+behaviour row *does* bind a socket, it must move off the short base and
+take the reserve with it.
+
 **Escape hatch, documented test-only.**
 `PMACS_GATE_ALLOW_ANCESTOR_MARKER` exists for this script's own
 behaviour tests, which run the gate under a `tempfile::tempdir()` whose

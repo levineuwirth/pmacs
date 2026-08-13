@@ -646,6 +646,68 @@ fn a_project_marker_above_the_gate_tmpdir_is_refused() {
     );
 }
 
+/// A `.git` **FILE** above the root is accepted; a `.git` **DIRECTORY**
+/// is refused.
+///
+/// **The types are the contract, not the names.** `match_marker`
+/// (`src/project.rs`) requires `.git` to be a directory and the seven
+/// language markers to be files, so an existence-only check would
+/// reject ancestors project detection walks straight past. The case is
+/// not exotic: **a git worktree has a `.git` FILE**, so every worktree
+/// in this repository would have tripped an `[ -e ]` guard.
+#[test]
+fn the_ancestor_check_honours_marker_types() {
+    // **Asserted on WHICH marker is named, not on whether a refusal
+    // happened.** The ancestors of any base this test can create are
+    // outside its control — `/tmp` may hold a real `.git` directory,
+    // and the repo root holds a `Cargo.toml` — so "no refusal" is not
+    // a claim it can make anywhere. "The refusal did not name MY file"
+    // is, and it is the claim that actually distinguishes the two
+    // types.
+    let base = tempfile::Builder::new()
+        .prefix("gt-")
+        .tempdir_in(short_root_base())
+        .expect("base");
+    let root = base.path().join("inner");
+    std::fs::create_dir_all(&root).expect("root");
+
+    let run_it = || {
+        std::process::Command::new(gate())
+            .arg("--self-test")
+            .current_dir(repo_root())
+            .env("PMACS_GATE_TARGET_ROOT", &root)
+            .env_remove("PMACS_GATE_ALLOW_ANCESTOR_MARKER")
+            .env_remove("TMPDIR")
+            .output()
+            .expect("run gate")
+    };
+
+    // A `.git` FILE — a worktree — is not a project root to detection,
+    // so it must not be one here either.
+    let mine = base.path().join(".git");
+    std::fs::write(&mine, "gitdir: /elsewhere\n").expect("git file");
+    let err = String::from_utf8_lossy(&run_it().stderr).into_owned();
+    assert!(
+        !err.contains(&format!("{}", mine.display())),
+        "a `.git` FILE must not be treated as a marker, but the gate \
+         named it; stderr:\n{err}"
+    );
+
+    // The same name as a DIRECTORY is a real marker.
+    std::fs::remove_file(&mine).expect("rm git file");
+    std::fs::create_dir(&mine).expect("git dir");
+    let out = run_it();
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success(),
+        "a `.git` DIRECTORY must refuse the run"
+    );
+    assert!(
+        err.contains(&format!("{}", mine.display())),
+        "and must name it, not some other ancestor; stderr:\n{err}"
+    );
+}
+
 /// The seam handoff §3 keeps authority over: a script cannot infer
 /// which acceptance suites a change touched, so it runs what it is
 /// handed — each one, in order.
