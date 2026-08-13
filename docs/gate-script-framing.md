@@ -1,6 +1,14 @@
 # `scripts/gate` — per-worktree build isolation, and one gate suite
 
-**Status: revision 5. Approved at revision 4 and IMPLEMENTED; revision
+**Status: revision 6 — AWAITING APPROVAL.** Revision 6 extends the
+isolation contract to `TMPDIR` (§2a below) and is the only unapproved
+part of this document; everything else is as approved. It is a
+*widening of an existing responsibility*, not a new feature: §2 already
+owns "what the gate isolates", and `TMPDIR` was simply missing from
+that list — which is how a stray `/tmp/.git` came to redden a gate run
+on an unrelated lane.
+
+**Previously, revision 5. Approved at revision 4 and IMPLEMENTED; revision
 5 records two safety defects review found in the implementation.**
 
 **Neither was a design gap — both were the implementation failing to
@@ -416,6 +424,77 @@ plus a handoff §3 rewrite that points at it**; if the convention proves leaky
 under real parallel load, direnv is the escalation.
 
 ---
+
+## 2a. `TMPDIR` isolation (revision 6, AWAITING APPROVAL)
+
+**The gap.** §2 lists what a gate run isolates: the target directory and
+five ambient roots. `TMPDIR` was not on that list, so
+`tempfile::tempdir()` fixtures landed wherever the operator's `/tmp`
+pointed. That is not a hygiene preference — **project detection walks
+UPWARD**, so a marker anywhere above the temp directory re-roots every
+markerless fixture beneath it.
+
+**Observed, not hypothesised.** An empty `/tmp/.git` reddened
+`m4_24_bare_string_glob_stays_relative` and
+`m4_24_d3_fallback_base_is_the_smallest_attachment_dir` *inside a gate
+run*, on a lane whose entire executable diff lived in `pmacs-gpu` — a
+crate the failing test binary does not link. Diagnosing it cost a review
+round, and the workaround was a manual `TMPDIR=` on every invocation.
+
+**The contract.** Each invocation gets a directory created fresh by
+`mktemp -d` under `<gate-root>/tmp/`, exported once so every stage and
+every process they spawn inherits it, and reaped by the exit trap that
+already removes the ambient root.
+
+Four decisions inside that, each of which had a cheaper wrong answer:
+
+1. **Not a subdirectory of `/tmp`.** It inherits `/tmp`'s ancestors and
+   therefore the marker. The directory has to sit somewhere with no
+   marker above it.
+2. **Off the GATE ROOT, not the per-worktree target.** A Unix socket
+   path cannot exceed `SUN_LEN` (108 bytes) and the suites bind sockets
+   *inside* `TMPDIR`. The per-worktree target is 60 bytes and the gate
+   root 36; the first implementation used the former and produced
+   114-byte socket paths, failing six daemon and attach tests. **The
+   parent is consequently SHARED between worktrees and is not covered
+   by `--prune`**, which only considers directories carrying an
+   ownership marker; each run removes its own leaf.
+3. **Created by `mktemp -d`, not `mkdir -p` on a pid.** PIDs are reused,
+   so after a SIGKILL a `mkdir -p` silently *adopts* a leftover
+   directory and the run inherits another run's fixtures.
+4. **Two guards, and both fail loudly at startup** rather than letting
+   the symptom appear deep in a suite as a limit with no cause:
+   - a **byte-counted** length check reserving the measured maximum
+     suffix (`/.tmpXXXXXX/directory-target.sock`, 33 bytes) plus
+     headroom — byte-counted because `${#var}` counts *characters*
+     under UTF-8 while `sun_path` is byte-limited;
+   - an **ancestor-marker check**, because **a managed root is not
+     inherently marker-free**: a `.git` in `$HOME`, a marker above
+     `$HOME/build`, or a contaminated `PMACS_GATE_TARGET_ROOT` rebuilds
+     the original defect one directory up. Placement under a directory
+     the gate owns is *necessary, not sufficient*, so the precondition
+     is verified rather than assumed.
+
+**Escape hatch, documented test-only.**
+`PMACS_GATE_ALLOW_ANCESTOR_MARKER` exists for this script's own
+behaviour tests, which run the gate under a `tempfile::tempdir()` whose
+ancestors they do not control — on a machine whose `/tmp` carries the
+very marker in question — and whose plans are synthetic, so no
+markerless fixture exists for a marker to re-root. It sits beside
+`PMACS_GATE_TARGET_ROOT` in kind and in risk. **The check is witnessed
+by a row that deliberately does not set it.**
+
+**Verification.** Two witnesses beyond the refusal row: propagation
+observed in a *spawned child* (the self-test's first step reports its
+own `$TMPDIR` into its log — asserting the variable inside the script
+would only prove the script can set a variable), and cleanup after a
+run that **failed on purpose**, which is the path a leak would actually
+take.
+
+**Residual, stated rather than covered.** A custom project marker
+registered at runtime is invisible to a shell script and is not
+checked. The built-in list mirrors `default_markers()` in
+`src/project.rs` and will drift if that list grows.
 
 ## 3. Resolved questions
 

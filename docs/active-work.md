@@ -279,9 +279,14 @@ from #171 and #215.
 - **Branch `gate-tmpdir-isolation`**, base `githubsucks/main` @
   `ca92796` exactly (the #239 merge). **Recover with `git fetch
   githubsucks && git checkout gate-tmpdir-isolation`.**
-- **No framing.** This discharges a standing fix already recorded in
-  `docs/agent-handoff.md` §1 and assigned to this lane; the design
-  question was settled when the hazard was diagnosed.
+- **Framing `docs/gate-script-framing.md`, revision 6 — AWAITING
+  APPROVAL, and the PR must not merge before it has it.** An earlier
+  version of this bullet claimed "no framing" on the grounds that the
+  fix was already recorded as standing. **`AGENTS.md` grants no such
+  exception**: its workflow is framing → approval → branch → implement,
+  unconditionally. Revision 6 widens §2's existing isolation
+  responsibility to `TMPDIR` rather than adding a feature, which is why
+  it amends this document instead of opening a new one.
 - **What it does:** every gate invocation gets a fresh, disk-backed
   `TMPDIR` at `<gate-root>/tmp/<pid>`, exported once so every stage and
   every process they spawn inherits it, and reaped by the same exit trap

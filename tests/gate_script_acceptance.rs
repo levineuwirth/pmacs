@@ -44,6 +44,14 @@ fn run_in(cwd: &Path, root: &Path, args: &[&str]) -> (String, String, bool) {
         .args(args)
         .current_dir(cwd)
         .env("PMACS_GATE_TARGET_ROOT", root)
+        // Test-only, like PMACS_GATE_TARGET_ROOT itself. These roots are
+        // `tempfile::tempdir()`s whose ancestors the suite does not
+        // control — on a machine whose `/tmp` carries a marker, every
+        // row here would otherwise be refused. The plans are synthetic,
+        // so no markerless fixture exists for a marker to re-root. The
+        // check is witnessed separately, by a row that does NOT set
+        // this.
+        .env("PMACS_GATE_ALLOW_ANCESTOR_MARKER", "1")
         .output()
         .expect("run scripts/gate");
     (
@@ -536,6 +544,61 @@ fn the_isolated_tmpdir_is_reaped_when_the_run_ends() {
             .expect("gate-tmp parent")
             .exists(),
         "only the per-run directory is reaped, not its parent"
+    );
+}
+
+/// A project marker above the gate TMPDIR is REFUSED.
+///
+/// **Placement under a managed root is necessary, not sufficient.** A
+/// `.git` in `$HOME`, any recognized marker above `$HOME/build`, or a
+/// contaminated `PMACS_GATE_TARGET_ROOT` re-roots every markerless
+/// fixture beneath it — which is the original defect, rebuilt one
+/// directory up. Asserting only "the path sits under the configured
+/// root" would prove placement and nothing about the hazard.
+///
+/// This row deliberately does **not** set
+/// `PMACS_GATE_ALLOW_ANCESTOR_MARKER`, which is what every other row
+/// here sets; it is the one place the check itself runs.
+#[test]
+fn a_project_marker_above_the_gate_tmpdir_is_refused() {
+    // Built OUTSIDE the system temp dir on purpose: the point is to
+    // control what sits above the root, and `/tmp` may already carry a
+    // marker — which would make the row pass for the wrong reason.
+    let base = tempfile::Builder::new()
+        .prefix("gate-marker-")
+        .tempdir_in(
+            repo_root()
+                .join("target")
+                .exists()
+                .then(|| repo_root().join("target"))
+                .unwrap_or_else(std::env::temp_dir),
+        )
+        .expect("base");
+    let root = base.path().join("inner");
+    std::fs::create_dir_all(&root).expect("root");
+    std::fs::write(base.path().join("Cargo.toml"), "[package]\n").expect("marker");
+
+    let out = std::process::Command::new(gate())
+        .arg("--self-test")
+        .current_dir(repo_root())
+        .env("PMACS_GATE_TARGET_ROOT", &root)
+        .env_remove("PMACS_GATE_ALLOW_ANCESTOR_MARKER")
+        .env_remove("TMPDIR")
+        .output()
+        .expect("run gate");
+    let err = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        !out.status.success(),
+        "a marker above the TMPDIR must refuse the run; stderr:\n{err}"
+    );
+    assert!(
+        err.contains("a project marker sits above the gate TMPDIR"),
+        "and must say so, naming the marker; stderr:\n{err}"
+    );
+    assert!(
+        err.contains("Cargo.toml"),
+        "the message must name the marker it found; stderr:\n{err}"
     );
 }
 

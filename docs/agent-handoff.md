@@ -281,13 +281,28 @@ commands, read `docs/active-work.md` immediately after this file.
     ancestor marker, on any machine.
 
     **FIXED 2026-08-13: `scripts/gate` now isolates `TMPDIR`.** Each
-    invocation gets a fresh directory under the managed target root
-    (`<target>/gate-tmp/<stamp>-<pid>`), exported once so every stage
-    and every process they spawn inherits it, and reaped by the same
-    exit trap as the ambient root. **A gate run no longer needs a
-    `TMPDIR=` override**, and the two witnesses in
-    `tests/gate_script_acceptance.rs` pin propagation-to-a-child and
-    cleanup-on-exit separately.
+    invocation gets a directory created fresh by `mktemp -d` under
+    **`<gate-root>/tmp/`** — the shared gate root, not the per-worktree
+    target, because a Unix socket path cannot exceed **`SUN_LEN`** (108
+    bytes) and the suites bind sockets inside `TMPDIR`. It is exported
+    once so every stage and every process they spawn inherits it, and
+    reaped by the same exit trap as the ambient root. **A gate run no
+    longer needs a `TMPDIR=` override.**
+
+    **That parent is SHARED between worktrees and `--prune` does not
+    touch it** — prune only considers directories carrying an ownership
+    marker. Each run removes its own leaf; the parent stays as a stable
+    empty directory.
+
+    **Two guards, both of which cost a round to get right.** A
+    byte-counted length check (`${#var}` counts CHARACTERS under UTF-8
+    while `sun_path` is byte-limited) reserving the measured maximum
+    suffix — `/.tmpXXXXXX/directory-target.sock`, 33 bytes — plus
+    headroom. And an **ancestor-marker check**, because *a managed root
+    is not inherently marker-free*: a `.git` in `$HOME` or above
+    `$HOME/build` rebuilds the original defect one directory up.
+    `PMACS_GATE_ALLOW_ANCESTOR_MARKER` is the documented test-only
+    escape, and a row that does not set it witnesses the refusal.
 
     **Why a subdirectory of `/tmp` would NOT have worked**, since that
     is the obvious cheaper fix: the hazard is an ANCESTOR marker, and a
