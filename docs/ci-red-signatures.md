@@ -496,7 +496,7 @@ Stage 4; the lane touches no `pmacs-gpu` code at all.
 | **selector** | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
 | **job / flavor** | local (Linux), `cargo test --workspace --features crdt --no-fail-fast`, i.e. under full-sweep load |
 | **required fragments** | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
-| **status** | **THIRD OCCURRENCE 2026-08-09 — causal status still UNRESOLVED, but one candidate mechanism is now EXCLUDED** |
+| **status** | **FOURTH OCCURRENCE 2026-08-13 — causal status still UNRESOLVED. A NEW candidate mechanism is introduced by the observing lane and is NOT excluded (see below)** |
 | **what IS established** | **three** occurrences at `pmacs-gpu/src/attach.rs:1680`, the second and third with all three fragments **verified** rather than inferred; the test drives a scripted transient-then-success sequence over a real socket pair. **The added GPU test is not the mechanism** — see the third-occurrence control below |
 | **what is NOT** | whether the broken pipe is the *fixture's* writer closing early or a real retry-path defect. **This row is not a claim that it is harmless** |
 | **rerun evidence** | occurrence 1: 6 isolated runs green, plus a full `--workspace --features crdt` sweep green (113 targets). Occurrence 2: **30 green on the observing branch** (15 isolated selector, 15 full `-p pmacs-gpu`) **plus a 15-run merge-base control, also green**. Occurrence 3: 5 isolated selector runs green, 10 full `-p pmacs-gpu` runs green **with** the added test, and **1 failure in 10 with the added test `#[ignore]`d** — the first rerun in this row's history that reproduced anything. Per the rerun rule the green runs establish intermittence only; the red control run is what carries the exclusion |
@@ -536,6 +536,43 @@ one-second deadline. Contention is a plausible mechanism for a
 `BrokenPipe`, and 30 green runs do not rule it out. If a third occurrence
 lands, **run the control with the added test removed** rather than at the
 merge base — that is the discriminating comparison this one was not.
+
+**Fourth occurrence — the `scripts/gate` TMPDIR isolation lane,
+2026-08-13, local (Linux). Same selector, same `gpu`-step flavor
+(`PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`), all three fragments
+verified** against the durable gate log
+(`20260813T143421Z-708100/07-gpu.log`): `transient sequence must
+attach: Attach(Handshake(Io(Os { code: 32, kind: BrokenPipe, message:
+"Broken pipe" })))`.
+
+**One thing this occurrence ESTABLISHES.** The observing lane touches
+**no `pmacs-gpu` file at all** (`git diff ca92796..HEAD -- pmacs-gpu/`
+is empty) and adds **no test to that binary**. Occurrence 3 excluded
+"the added GPU test is the mechanism" by a control; this occurrence
+reproduces the signature with *nothing added to the binary*, which is
+independent corroboration rather than a repeat of the same argument.
+
+**AND ONE THING IT INTRODUCES, NAMED RATHER THAN DISMISSED — the
+observing lane is not environmentally neutral even though it is
+code-neutral.** That lane moves the gate's `TMPDIR` off `/tmp`, which
+on this machine changes the filesystem underneath every
+`tempfile::tempdir()` in the run **from tmpfs to btrfs**. This test
+creates a tempdir and runs a handshake against a **one-second
+deadline** (`pmacs-gpu/src/attach.rs`). A slower filesystem under a
+timing-bounded test, under full-sweep load, is a plausible mechanism
+and **it did not exist in occurrences 1–3**.
+
+It is not established either: the failing I/O is on a `UnixStream::pair`,
+not on the tempdir path, and the tempdir is created but never bound.
+**What this row must not do is book the occurrence as "the usual flake"
+when the observing lane changed the very conditions the flake is
+sensitive to.**
+
+**The discriminating comparison for a fifth occurrence** is therefore
+the same lane's gate run with `TMPDIR` pointed back at a tmpfs — the
+one variable this lane moves — rather than another merge-base control.
+Three isolated re-runs on the current tree were green, which by this
+file's own rule establishes intermittence only.
 
 **Third occurrence — worker identity Stage 1 review round 2,
 2026-08-09, local (Linux). Same selector, same `gpu`-step flavor, all

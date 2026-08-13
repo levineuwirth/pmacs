@@ -39,6 +39,26 @@ fn gate() -> PathBuf {
 }
 
 /// Run `scripts/gate` with an isolated managed root, from `cwd`.
+/// A SHORT base for the roots these tests hand the gate, independent of
+/// the ambient `TMPDIR`.
+///
+/// **Not `tempfile::tempdir()`'s default, and the reason is the socket
+/// budget rather than taste.** When this suite runs inside a gate, the
+/// ambient `TMPDIR` is already that gate's own (~47 bytes); rooting a
+/// nested gate under it pushes the nested `TMPDIR` to ~70 bytes and
+/// legitimately trips its own `SUN_LEN` guard. The suite would then
+/// fail on a configuration it created rather than on the behaviour
+/// under test — which is exactly how it failed once.
+///
+/// `/tmp` is named explicitly because it is short and this suite
+/// already requires a Unix environment. These roots hold synthetic
+/// plans and never fixtures, so `/tmp`'s contents are irrelevant to
+/// them; the rows set `PMACS_GATE_ALLOW_ANCESTOR_MARKER` for that
+/// reason.
+fn short_root_base() -> PathBuf {
+    PathBuf::from("/tmp")
+}
+
 fn run_in(cwd: &Path, root: &Path, args: &[&str]) -> (String, String, bool) {
     let out = Command::new(gate())
         .args(args)
@@ -74,7 +94,10 @@ fn run(root: &Path, args: &[&str]) -> (String, String, bool) {
 
 #[test]
 fn the_plan_sweeps_the_workspace_and_never_only_the_tests() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let (plan, _, ok) = run(root.path(), &["--print-plan"]);
     assert!(ok, "--print-plan must succeed");
 
@@ -100,7 +123,10 @@ fn the_plan_sweeps_the_workspace_and_never_only_the_tests() {
 
 #[test]
 fn the_plan_runs_the_library_tests_in_both_feature_configurations() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let (plan, _, _) = run(root.path(), &["--print-plan"]);
     assert!(plan.contains("cargo test --lib\n"), "plan was:\n{plan}");
     assert!(
@@ -115,7 +141,10 @@ fn the_plan_runs_the_library_tests_in_both_feature_configurations() {
 /// default one in place — and the default run must not carry it.
 #[test]
 fn the_crdt_workspace_sweep_is_added_by_protocol_and_absent_without_it() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let crdt_sweep = "cargo test --workspace --features crdt --no-fail-fast";
 
     let (default_plan, _, _) = run(root.path(), &["--print-plan"]);
@@ -163,7 +192,10 @@ fn the_crdt_workspace_sweep_is_added_by_protocol_and_absent_without_it() {
 /// below, which reads the plan in the form the runner reads it.
 #[test]
 fn the_crdt_sweep_is_immediately_preceded_by_the_build_that_produces_its_binary() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let build = "cargo build --workspace --no-default-features --features luajit,crdt";
     let crdt_sweep = "cargo test --workspace --features crdt --no-fail-fast -- --skip basedpyright";
 
@@ -230,7 +262,10 @@ fn the_crdt_sweep_is_immediately_preceded_by_the_build_that_produces_its_binary(
 /// `--acceptance` refusal below exists to prevent.
 #[test]
 fn the_crdt_build_step_carries_its_own_name_and_its_exact_command() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let build = "build-crdt\tcargo build --workspace --no-default-features --features luajit,crdt";
     let sweep =
         "sweep-crdt\tcargo test --workspace --features crdt --no-fail-fast -- --skip basedpyright";
@@ -294,7 +329,10 @@ fn the_crdt_build_step_carries_its_own_name_and_its_exact_command() {
 /// tab would silently run under an empty command.
 #[test]
 fn the_named_plan_is_the_printed_plan_with_its_names_removed() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
 
     for flags in [
         vec![],
@@ -346,7 +384,10 @@ fn the_named_plan_is_the_printed_plan_with_its_names_removed() {
 /// every ordinary lane.
 #[test]
 fn the_crdt_build_is_absent_without_protocol() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let (plan, _, ok) = run(root.path(), &["--print-plan"]);
     assert!(ok, "--print-plan must succeed");
     assert!(
@@ -383,7 +424,10 @@ fn the_crdt_build_is_absent_without_protocol() {
 /// the same defect the `--acceptance` refusal above exists to prevent.
 #[test]
 fn self_test_names_the_failing_gate_and_the_suite_continues_past_it() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let (out, err, ok) = run(root.path(), &["--self-test"]);
 
     assert!(
@@ -455,7 +499,10 @@ fn self_test_names_the_failing_gate_and_the_suite_continues_past_it() {
 /// reads a real child's environment out of a real gate log.
 #[test]
 fn the_isolated_tmpdir_reaches_a_spawned_child_under_the_managed_root() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let (out, err, _ok) = run(root.path(), &["--self-test"]);
 
     let announced = out
@@ -518,7 +565,10 @@ fn the_isolated_tmpdir_reaches_a_spawned_child_under_the_managed_root() {
 /// created by the tool itself and on every single run.
 #[test]
 fn the_isolated_tmpdir_is_reaped_when_the_run_ends() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let (out, _err, _ok) = run(root.path(), &["--self-test"]);
 
     let announced = out
@@ -565,14 +615,8 @@ fn a_project_marker_above_the_gate_tmpdir_is_refused() {
     // control what sits above the root, and `/tmp` may already carry a
     // marker — which would make the row pass for the wrong reason.
     let base = tempfile::Builder::new()
-        .prefix("gate-marker-")
-        .tempdir_in(
-            repo_root()
-                .join("target")
-                .exists()
-                .then(|| repo_root().join("target"))
-                .unwrap_or_else(std::env::temp_dir),
-        )
+        .prefix("gm-")
+        .tempdir_in(short_root_base())
         .expect("base");
     let root = base.path().join("inner");
     std::fs::create_dir_all(&root).expect("root");
@@ -607,7 +651,10 @@ fn a_project_marker_above_the_gate_tmpdir_is_refused() {
 /// handed — each one, in order.
 #[test]
 fn acceptance_suites_reach_the_plan_in_the_order_given() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let (plan, _, _) = run(
         root.path(),
         &[
@@ -634,7 +681,10 @@ fn acceptance_suites_reach_the_plan_in_the_order_given() {
 
 #[test]
 fn printing_the_target_dir_creates_nothing() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let (dir, _, ok) = run(root.path(), &["--print-target-dir"]);
     assert!(ok, "--print-target-dir must succeed");
     assert!(!dir.trim().is_empty(), "it must print a path");
@@ -646,7 +696,10 @@ fn printing_the_target_dir_creates_nothing() {
 
 #[test]
 fn init_writes_the_ownership_marker_and_is_idempotent() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let (dir, _, ok) = run(root.path(), &["--init"]);
     assert!(ok, "--init must succeed");
     let dir = PathBuf::from(dir.trim());
@@ -686,8 +739,14 @@ fn init_writes_the_ownership_marker_and_is_idempotent() {
 /// belt-and-braces against git's behaviour not being contractual.
 #[test]
 fn a_symlinked_spelling_of_a_worktree_derives_the_same_directory() {
-    let root = tempfile::tempdir().expect("tempdir");
-    let link_home = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
+    let link_home = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let link = link_home.path().join("via-symlink");
     if std::os::unix::fs::symlink(repo_root(), &link).is_err() {
         return; // no symlink support; nothing to assert
@@ -724,7 +783,10 @@ fn prune_fixture(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
 
 #[test]
 fn prune_is_a_dry_run_by_default_and_deletes_nothing() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let (orphan, lookalike, live) = prune_fixture(root.path());
 
     let (out, _, ok) = run(root.path(), &["--prune"]);
@@ -741,7 +803,10 @@ fn prune_is_a_dry_run_by_default_and_deletes_nothing() {
 
 #[test]
 fn force_deletes_only_the_orphan() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let (orphan, lookalike, live) = prune_fixture(root.path());
 
     let (out, _, ok) = run(root.path(), &["--prune", "--force"]);
@@ -789,8 +854,14 @@ impl Drop for WorktreePruneGuard {
 
 #[test]
 fn a_registered_worktree_whose_directory_was_deleted_is_prunable() {
-    let root = tempfile::tempdir().expect("tempdir");
-    let home = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
+    let home = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let wt = home.path().join("gate-prunable-probe");
 
     let added = Command::new("git")
@@ -847,9 +918,15 @@ fn a_registered_worktree_whose_directory_was_deleted_is_prunable() {
 /// grounds that no test noticed.
 #[test]
 fn prune_outside_a_repository_refuses_and_every_directory_survives() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let (orphan, lookalike, live) = prune_fixture(root.path());
-    let outside = tempfile::tempdir().expect("tempdir");
+    let outside = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
 
     // Sanity: the fixture's orphan really is eligible from inside a repo.
     let (inside, _, _) = run(root.path(), &["--prune"]);
@@ -879,7 +956,10 @@ fn prune_outside_a_repository_refuses_and_every_directory_survives() {
 /// gate runs.
 #[test]
 fn acceptance_names_with_shell_metacharacters_are_refused() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let canary = root.path().join("canary");
     std::fs::write(&canary, "intact").expect("write canary");
 
@@ -920,7 +1000,10 @@ fn acceptance_names_with_shell_metacharacters_are_refused() {
 /// the test above by rejecting everything.
 #[test]
 fn ordinary_acceptance_names_are_accepted() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     for name in ["m4_acceptance", "gate-script", "abc123_x"] {
         let (plan, err, ok) = run(root.path(), &["--acceptance", name, "--print-plan"]);
         assert!(ok, "{name} must be accepted; stderr was:\n{err}");
@@ -936,7 +1019,10 @@ fn ordinary_acceptance_names_are_accepted() {
 /// directory on the strength of a file the script did not understand.
 #[test]
 fn a_multi_line_marker_is_refused_rather_than_read_head_first() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let bad = root.path().join("bad-00000000");
     std::fs::create_dir_all(&bad).expect("mkdir");
     std::fs::write(
@@ -964,7 +1050,10 @@ fn a_multi_line_marker_is_refused_rather_than_read_head_first() {
 /// is how one learns too late that the marker was never written.
 #[test]
 fn skipped_directories_are_reported_with_a_reason() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
     let (_, lookalike, _) = prune_fixture(root.path());
 
     let (out, _, _) = run(root.path(), &["--prune"]);
