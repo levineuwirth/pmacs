@@ -477,6 +477,17 @@ Four decisions inside that, each of which had a cheaper wrong answer:
      the gate owns is *necessary, not sufficient*, so the precondition
      is verified rather than assumed.
 
+     **THE TRAVERSAL IS CANONICAL AND MUST NOT WORD-SPLIT**, and both
+     halves are contract rather than style. An unquoted `$(...)`
+     expansion splits on `IFS`, so a gate root containing a **space**
+     is torn into fragments and its real ancestor is never tested —
+     the guard then passes on exactly the path it exists to reject.
+     And `dirname` walks **lexical** ancestry while `detect_project`
+     canonicalizes, so a **symlinked** root hides a marker the editor
+     plainly sees; the gate and the editor must not disagree about the
+     same tree. The walk resolves with `pwd -P` first and iterates a
+     quoted loop, and both shapes are witnessed.
+
      **MIRRORING THE NAMES IS NOT ENOUGH — the TYPES are part of the
      contract.** `match_marker` (`src/project.rs`) requires `.git` to be
      a **directory** and the seven language markers to be **files**, so
