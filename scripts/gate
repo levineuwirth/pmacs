@@ -287,7 +287,17 @@ emit_plan() {
 # command failed.
 # ---------------------------------------------------------------------
 emit_self_test_plan() {
-    printf 'self-pass\ttrue\n'
+    # `self-pass` reports the TMPDIR its own CHILD PROCESS sees, rather
+    # than `true`. The step is still a trivially-passing command with
+    # its own log, so every existing assertion about it holds --- but
+    # the log now carries evidence that the isolated TMPDIR reached a
+    # spawned process, which is the only thing that matters. Asserting
+    # the variable inside this script would prove that this script can
+    # set a variable.
+    #
+    # `$TMPDIR` is literal here: the single-quoted printf format leaves
+    # it for the runner's `eval` to expand, in the child.
+    printf 'self-pass\tsh -c "echo gate-child-tmpdir=$TMPDIR"\n'
     printf 'build-crdt\tfalse\n'
     printf 'self-sentinel\ttrue\n'
 }
@@ -516,13 +526,79 @@ mkdir -p "$LOGDIR"
 # reads the environment it was handed. HOME is deliberately left alone.
 AMBIENT="$TARGET/gate-ambient/$STAMP-$$"
 mkdir -p "$AMBIENT"
-cleanup() { rm -rf "$AMBIENT"; }
+
+# TMPDIR: a fresh, DISK-BACKED directory per invocation, reaped with the
+# rest.
+#
+# THE HAZARD IS AN ANCESTOR MARKER, NOT A DIRTY TEMP DIRECTORY. Project
+# detection walks upward, so a stray `/tmp/.git` re-roots every
+# markerless `tempfile::tempdir()` fixture beneath it at `/tmp` --- and
+# the tests then faithfully exercise a tree of several thousand
+# unrelated entries. Seen for real: an empty `/tmp/.git` reddened
+# `m4_24_bare_string_glob_stays_relative` and
+# `m4_24_d3_fallback_base_is_the_smallest_attachment_dir` inside a gate
+# run on a lane whose whole executable diff was in `pmacs-gpu`, a crate
+# the failing test binary does not even link.
+#
+# So the fix is NOT "clean the temp directory" --- a fresh subdirectory
+# OF `/tmp` inherits the same ancestors and the same marker. It has to
+# live somewhere the gate already owns, which is the target root: no
+# marker above it, and it is per-worktree already.
+#
+# Disk-backed matters independently. `/tmp` is commonly a tmpfs, so a
+# sweep's fixtures compete with the machine for RAM; a build here has
+# hit tmpfs quota mid-compile. The gate root is on the same filesystem
+# as the build artifacts, which is where the space is.
+#
+# IT HANGS OFF THE GATE ROOT, NOT THE PER-WORKTREE TARGET, AND THE NAME
+# IS SHORT ON PURPOSE. A Unix socket path cannot exceed `SUN_LEN` (108
+# bytes on Linux), and the suites bind sockets INSIDE `TMPDIR`: the
+# first version of this put it at `$TARGET/gate-tmp/$STAMP-$$`, and
+# `.../gate-tmp/<stamp>-<pid>/.tmpXXXXXXX/test.sock` came to 114 bytes,
+# failing six daemon and attach tests with `path must be shorter than
+# SUN_LEN`. The per-worktree target alone is 60 bytes; the gate root is
+# 36. Every byte spent here is a byte a fixture cannot use.
+#
+# `HOME` is still deliberately left alone, as above.
+GATE_TMPDIR="$(gate_root)/tmp/$$"
+mkdir -p "$GATE_TMPDIR"
+
+# Fail LOUDLY and immediately if the budget is gone. Without this the
+# symptom is six unrelated-looking socket failures deep in a suite,
+# naming a limit rather than a cause; a long `$HOME` or a deeply-nested
+# checkout is all it takes.
+#
+# THE RESERVE IS MEASURED, NOT ROUND. The longest suffix a fixture
+# actually appends is `/.tmpXXXXXXX/test.sock`, 21 bytes; 30 leaves
+# ~40% headroom over that. An earlier draft reserved a "generous" 45,
+# which fired on the gate's OWN behaviour tests: they run the gate
+# inside the gate, so their `PMACS_GATE_TARGET_ROOT` is itself under
+# the outer run's TMPDIR and the nested path reaches 71 bytes. A guard
+# that rejects a legitimate configuration is a worse failure than the
+# one it prevents, because it fires on every run rather than on a rare
+# one.
+SUN_LEN_BUDGET=108
+TMPDIR_SUFFIX_RESERVE=30
+if [ "${#GATE_TMPDIR}" -gt "$((SUN_LEN_BUDGET - TMPDIR_SUFFIX_RESERVE))" ]; then
+    echo "gate: TMPDIR is too long for a unix socket path:" >&2
+    echo "gate:   $GATE_TMPDIR" >&2
+    echo "gate:   ${#GATE_TMPDIR} bytes, but a fixture needs" \
+         "$TMPDIR_SUFFIX_RESERVE of the $SUN_LEN_BUDGET-byte SUN_LEN budget" >&2
+    echo "gate: shorten PMACS_GATE_TARGET_ROOT (or \$HOME) and retry." >&2
+    exit 2
+fi
+
+cleanup() { rm -rf "$AMBIENT" "$GATE_TMPDIR"; }
 trap cleanup EXIT INT TERM
 
 export CARGO_TARGET_DIR="$TARGET"
 export XDG_CONFIG_HOME="$AMBIENT" XDG_DATA_HOME="$AMBIENT" \
        XDG_STATE_HOME="$AMBIENT" XDG_CACHE_HOME="$AMBIENT" \
        PMACS_STATE_HOME="$AMBIENT"
+# Exported once, here, so EVERY stage and every process they spawn
+# inherits it --- the stages run as children of this shell, so there is
+# no per-stage plumbing to forget.
+export TMPDIR="$GATE_TMPDIR"
 
 echo "gate: worktree   $WT"
 echo "gate: target dir $TARGET"
@@ -531,6 +607,9 @@ echo "gate: logs       $LOGDIR"
 # this is the directory all five ambient roots point at, and the exit
 # trap removes it, so it should be gone once the run finishes.
 echo "gate: ambient    $AMBIENT"
+# Printed for the same reason as the ambient root: the isolation is
+# observable, and the exit trap removes this too.
+echo "gate: tmpdir     $GATE_TMPDIR"
 [ -n "$ACCEPTANCE" ] && echo "gate: acceptance $ACCEPTANCE"
 [ "$PROTOCOL" = 1 ] && echo "gate: protocol   yes (CRDT build + workspace sweep added)"
 if [ "$MODE" = selftest ]; then

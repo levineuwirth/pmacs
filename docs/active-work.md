@@ -270,6 +270,56 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
+## `scripts/gate` TMPDIR isolation — branch OPEN, no PR yet
+
+**Written with the branch's first commit**, per the standing correction
+from #171 and #215.
+
+- **Branch `gate-tmpdir-isolation`**, base `githubsucks/main` @
+  `ca92796` exactly (the #239 merge). **Recover with `git fetch
+  githubsucks && git checkout gate-tmpdir-isolation`.**
+- **No framing.** This discharges a standing fix already recorded in
+  `docs/agent-handoff.md` §1 and assigned to this lane; the design
+  question was settled when the hazard was diagnosed.
+- **What it does:** every gate invocation gets a fresh, disk-backed
+  `TMPDIR` at `<gate-root>/tmp/<pid>`, exported once so every stage and
+  every process they spawn inherits it, and reaped by the same exit trap
+  as the ambient root. **A gate run no longer needs a `TMPDIR=`
+  override.**
+- **A CHILD OF `/tmp` WOULD NOT HAVE WORKED.** The hazard is an
+  ANCESTOR marker — project detection walks upward — so a fresh
+  subdirectory of `/tmp` inherits `/tmp`'s ancestors and the same stray
+  `.git`. The directory had to move somewhere the gate already owns.
+- **`SUN_LEN` is the constraint that shaped the layout, and the fix's
+  own gate run found it.** A Unix socket path cannot exceed 108 bytes
+  and the suites bind sockets inside `TMPDIR`. The first placement,
+  `$TARGET/gate-tmp/$STAMP-$$`, produced a 114-byte socket path and
+  failed **six** daemon and attach tests with *"path must be shorter
+  than SUN_LEN"*. It now hangs off the **gate root** (36 bytes) rather
+  than the per-worktree target (60), with a short name: **47 bytes**,
+  leaving 61 for fixtures.
+- **A startup guard converts that failure class into a named one.** Six
+  socket failures deep in a suite name a limit, not a cause. The guard
+  fails immediately with the path, its length and what to shorten.
+  **Its reserve is measured, not round**: the longest suffix a fixture
+  appends is 21 bytes, so 30 leaves ~40% headroom. An earlier
+  "generous" 45 **fired on the gate's own behaviour tests**, which run
+  the gate inside the gate and so reach 71 bytes — a guard that rejects
+  a legitimate configuration fails on every run rather than a rare one.
+- **Witnesses (2), each mutation-checked:** `M-G-1` removes the export
+  → the propagation row alone; `M-G-2` stops the reaping → the cleanup
+  row alone. Propagation is observed in a **spawned child** (the
+  self-test's first step reports its own `$TMPDIR` into its log),
+  because the gate exporting a variable would only prove the gate can
+  export a variable.
+- **Proved against the live hazard:** `/tmp/.git` is still present on
+  this machine, and the tests it reddened now pass with **no override**.
+- **Gates:** `./scripts/gate --acceptance gate_script_acceptance`, run
+  with `env -u TMPDIR` — the point is that it needs no override. No
+  `--protocol`: no wire change.
+- **Out of scope, deliberately:** the overdue absorption of #239. This
+  lane is the gate fix and nothing else.
+
 ## GUI arc Stage 1a — `TextInput` at v24 — PR #239 OPEN
 
 **Written with the branch's first commit**, per the standing correction

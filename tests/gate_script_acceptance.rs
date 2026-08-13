@@ -428,6 +428,117 @@ fn self_test_names_the_failing_gate_and_the_suite_continues_past_it() {
     );
 }
 
+/// The isolated `TMPDIR` reaches a spawned CHILD, and is disk-backed
+/// under the managed target root.
+///
+/// **The hazard is an ancestor marker, not a dirty temp directory.**
+/// Project detection walks upward, so a stray `/tmp/.git` re-roots every
+/// markerless `tempfile::tempdir()` fixture beneath it — which is how
+/// two LSP file-watcher tests reddened a gate run on a lane whose whole
+/// executable diff lived in a crate the failing binary does not link. A
+/// fresh subdirectory *of* `/tmp` would inherit the same ancestors and
+/// the same marker, so the directory has to live where the gate already
+/// owns the path.
+///
+/// **Observed in a child process, deliberately.** The gate exporting a
+/// variable proves only that the gate can export a variable; what the
+/// suites need is that a process the runner spawns inherits it. The
+/// self-test's first step reports its own `$TMPDIR`, so the assertion
+/// reads a real child's environment out of a real gate log.
+#[test]
+fn the_isolated_tmpdir_reaches_a_spawned_child_under_the_managed_root() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (out, err, _ok) = run(root.path(), &["--self-test"]);
+
+    let announced = out
+        .lines()
+        .find_map(|l| {
+            l.split_once("gate: tmpdir")
+                .map(|(_, p)| p.trim().to_owned())
+        })
+        .unwrap_or_else(|| panic!("the gate must announce its TMPDIR; stdout:\n{out}"));
+
+    // The contract is **under the managed target root**, which is what
+    // makes it both marker-free and disk-backed in production: the
+    // target root sits beside the build artifacts, not in `/tmp`.
+    //
+    // Deliberately NOT asserting `!starts_with("/tmp/")` here. This
+    // test's own root is a `tempfile::tempdir()`, so on a normal
+    // machine it IS under `/tmp` and the gate's directory inherits
+    // that — such an assertion would be testing where the fixture put
+    // its root, not what the gate does, and would fail on correct code.
+    let expected_prefix = root.path().join("").display().to_string();
+    assert!(
+        announced.starts_with(&expected_prefix),
+        "the gate TMPDIR must live under the managed target root, which \
+         the gate owns and prunes; expected a child of {expected_prefix}, \
+         was {announced}"
+    );
+    // Its own named area under the root, so `prune` and a human can
+    // both tell it from the ambient root and the logs. Asserted as the
+    // exact parent rather than a substring: the directory is called
+    // `tmp`, and a `contains("/tmp/")` check would also pass for a path
+    // that merely happened to sit under a `/tmp` somewhere.
+    assert_eq!(
+        Path::new(&announced).parent().expect("tmpdir parent"),
+        root.path().join("tmp"),
+        "the per-run TMPDIR must sit directly under <root>/tmp; was {announced}"
+    );
+
+    // The child's own view, read out of the log the runner wrote.
+    let log = Path::new(
+        err.lines()
+            .find_map(|l| l.split_once("log: ").map(|(_, p)| p.trim()))
+            .unwrap_or_else(|| panic!("expected a log path; stderr:\n{err}")),
+    )
+    .parent()
+    .expect("log directory")
+    .join("01-self-pass.log");
+    let seen =
+        std::fs::read_to_string(&log).unwrap_or_else(|e| panic!("read {}: {e}", log.display()));
+    assert_eq!(
+        seen.trim(),
+        format!("gate-child-tmpdir={announced}"),
+        "a spawned child must inherit exactly the announced TMPDIR"
+    );
+}
+
+/// The `TMPDIR` is reaped when the run ends, like the ambient root.
+///
+/// Without this the gate would leak a directory per invocation into the
+/// target root — the same accumulation `prune` exists to clean up, but
+/// created by the tool itself and on every single run.
+#[test]
+fn the_isolated_tmpdir_is_reaped_when_the_run_ends() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (out, _err, _ok) = run(root.path(), &["--self-test"]);
+
+    let announced = out
+        .lines()
+        .find_map(|l| {
+            l.split_once("gate: tmpdir")
+                .map(|(_, p)| p.trim().to_owned())
+        })
+        .unwrap_or_else(|| panic!("the gate must announce its TMPDIR; stdout:\n{out}"));
+
+    // The run above FAILED on purpose (the self-test's middle step), so
+    // this also pins that the trap fires on the failure path — the path
+    // a leak would actually happen on.
+    assert!(
+        !Path::new(&announced).exists(),
+        "the exit trap must remove the TMPDIR even when a gate failed; \
+         {announced} survived"
+    );
+    // The parent stays: it is the per-worktree home the next run uses.
+    assert!(
+        Path::new(&announced)
+            .parent()
+            .expect("gate-tmp parent")
+            .exists(),
+        "only the per-run directory is reaped, not its parent"
+    );
+}
+
 /// The seam handoff §3 keeps authority over: a script cannot infer
 /// which acceptance suites a change touched, so it runs what it is
 /// handed — each one, in order.
