@@ -834,14 +834,21 @@ fn the_socket_path_guard_counts_bytes_not_characters() {
          bytes (must fail), path {path}"
     );
 
-    // **Chosen by BEHAVIOUR, not by name.** Locale names beyond `C` and
-    // `POSIX` are implementation-defined and an unrecognized value has
-    // unspecified behaviour, so setting `LC_ALL=C.UTF-8` and hoping is
-    // not a precondition — where that locale is absent the shell would
-    // fall back to byte semantics and the character-counting mutant
-    // would pass, silently.
-    let locale = char_counting_locale();
-    let out = std::process::Command::new(gate())
+    // **Chosen by BEHAVIOUR, not by name**, and the interpreter is part
+    // of the choice: `${#x}` counting characters is a property of the
+    // SHELL first and the locale second. `bash` counts characters under
+    // a UTF-8 locale; `dash` counts bytes under every locale. Naming a
+    // locale and running `/bin/sh` therefore proves nothing on its own —
+    // where `/bin/sh` is `dash`, the character-counting mutant measures
+    // bytes too, agrees with the fix, and this row passes vacuously.
+    //
+    // The gate is invoked THROUGH that shell rather than by its
+    // shebang, because the configuration being pinned is a real one:
+    // `#!/bin/sh` resolves to `bash` on Arch and on macOS, which is
+    // exactly where a `${#VAR}` guard would miscount.
+    let (shell, locale) = char_counting_shell();
+    let out = std::process::Command::new(&shell)
+        .arg(gate())
         .arg("--self-test")
         .current_dir(repo_root())
         .env("PMACS_GATE_TARGET_ROOT", root.path())
@@ -860,27 +867,35 @@ fn the_socket_path_guard_counts_bytes_not_characters() {
     );
 }
 
-/// A locale under which **`/bin/sh` counts CHARACTERS** — verified by
-/// asking that very shell, not by trusting a name.
+/// A `(shell, locale)` pair under which **`${#x}` counts CHARACTERS** —
+/// established by asking that very shell, never by trusting a name.
 ///
-/// `${#x}` on a two-byte character answers `1` under a working UTF-8
-/// locale and `2` under `C`. That difference is the entire subject of
-/// the row this serves, so the row must establish it as a precondition
-/// rather than assume it: otherwise, on a machine without the named
-/// locale, the shell counts bytes, the mutant agrees with the fix, and
-/// the test passes while proving nothing.
+/// **Both axes matter, and the shell matters more.** `${#x}` on a
+/// two-byte character answers `1` under `bash` with a UTF-8 locale and
+/// `2` under `bash` with `C` — but `dash` answers `2` under *every*
+/// locale, because it has no multibyte handling at all. So naming a
+/// locale and invoking `/bin/sh` establishes nothing: where `/bin/sh`
+/// is `dash` (Debian and Ubuntu, including CI) the character-counting
+/// mutant measures bytes too, agrees with the fix, and the row this
+/// serves passes while proving nothing.
 ///
-/// Candidates come from `locale -a`, so this reflects what is actually
-/// installed. **Fails loudly when none qualifies** — a skip here would
-/// be indistinguishable from a pass.
-fn char_counting_locale() -> String {
+/// `/bin/sh` is tried first, so the real interpreter is used wherever
+/// it qualifies — as it does on Arch and macOS, which is precisely
+/// where a `${#VAR}` guard would miscount.
+///
+/// Locale candidates are the two conventional `C.UTF-8` spellings,
+/// which are commonly usable without appearing in `locale -a`,
+/// followed by every UTF-8 entry `locale -a` does report. **Fails
+/// loudly when no pair qualifies** — a skip here would be
+/// indistinguishable from a pass.
+fn char_counting_shell() -> (String, String) {
     let installed = std::process::Command::new("locale")
         .arg("-a")
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default();
 
-    let candidates: Vec<String> = ["C.UTF-8".to_owned(), "C.utf8".to_owned()]
+    let mut locales: Vec<String> = ["C.UTF-8".to_owned(), "C.utf8".to_owned()]
         .into_iter()
         .chain(
             installed
@@ -889,24 +904,29 @@ fn char_counting_locale() -> String {
                 .map(str::to_owned),
         )
         .collect();
+    locales.dedup();
 
-    for cand in &candidates {
-        let probe = std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg("x=é; echo ${#x}")
-            .env("LC_ALL", cand)
-            .env("LANG", cand)
-            .output();
-        if let Ok(out) = probe
-            && String::from_utf8_lossy(&out.stdout).trim() == "1"
-        {
-            return cand.clone();
+    let shells = ["/bin/sh", "/bin/bash", "bash"];
+    for shell in shells {
+        for locale in &locales {
+            let probe = std::process::Command::new(shell)
+                .arg("-c")
+                .arg("x=é; echo ${#x}")
+                .env("LC_ALL", locale)
+                .env("LANG", locale)
+                .output();
+            if let Ok(out) = probe
+                && String::from_utf8_lossy(&out.stdout).trim() == "1"
+            {
+                return (shell.to_owned(), locale.clone());
+            }
         }
     }
     panic!(
-        "no installed locale makes /bin/sh count characters, so the \
-         byte-vs-character distinction this row exists to test cannot \
-         be established here. Tried: {candidates:?}"
+        "no available shell counts characters under any installed \
+         locale, so the byte-versus-character distinction this row \
+         exists to test cannot be established here. Tried shells \
+         {shells:?} against locales {locales:?}"
     );
 }
 

@@ -328,29 +328,33 @@ from #171 and #215.
   is why that row covers a `Cargo.toml` **directory** as well as both
   `.git` shapes. `M-G-6` counts characters → the multibyte row.
   `M-G-7` moves the trap back after the guards → the
-  rejection-cleanup row. Propagation is observed in a **spawned
-  child**, because the gate exporting a variable would only prove the
-  gate can export a variable.
-- **`M-G-8` is the one that proves `M-G-6` is not vacuous**, and it
+  rejection-cleanup row. `M-G-8` restores the old
+  `for _anc in $(...)` loop → the canonical-walk row, which is what
+  proves the traversal neither word-splits a space-bearing root nor
+  misses a marker visible only after `pwd -P`. Propagation is observed
+  in a **spawned child**, because the gate exporting a variable would
+  only prove the gate can export a variable.
+- **`M-G-9` is the one that proves `M-G-6` is not vacuous**, and it
   needs three legs because the hazard is in the *environment*, not the
-  code. The multibyte row originally set `LC_ALL=C.UTF-8` and assumed
-  it took: locale names beyond `C` and `POSIX` are
-  implementation-defined, so on a machine lacking that locale the shell
-  falls back to **byte** semantics — and then the character-counting
-  mutant counts bytes too, agrees with the fix, and the row passes
-  while proving nothing.
-  - **8a** — mutant gate, locale chosen by the probe → the row
-    **fails**, and the exact-boundary row still passes.
-  - **8b** — *same mutant gate*, locale forced to `C` → the row
-    **passes**. This is the defect itself, reproduced rather than
-    argued: the only difference between a real witness and a vacuous
-    one is whether the shell counts characters.
-  - **8c** — no candidate can qualify → the helper **panics** naming
-    what it tried. A skip here would be indistinguishable from a pass.
-  The locale is therefore selected by **behaviour**: candidates come
-  from `locale -a`, and each is probed through the same `/bin/sh` the
-  gate runs under, asking `${#x}` on a two-byte character and requiring
-  `1`.
+  code. **Nine mutations in total.**
+  - **9a** — mutant gate, probed pair → the row **fails**, and the
+    exact-boundary row still passes. Re-run with `/bin/sh` excluded, so
+    the CI fallback path is covered too: still fails.
+  - **9b** — *same mutant gate*, pair forced to byte-counting → the row
+    **passes**. The defect itself, reproduced rather than argued.
+  - **9c** — no pair can qualify → the helper **panics** naming what it
+    tried. A skip would be indistinguishable from a pass.
+- **The multibyte row's axis was wrong, and CI is what proved it.** The
+  row set `LC_ALL=C.UTF-8` and assumed a character count followed.
+  `${#x}` counting characters is a property of the **shell** first:
+  `bash` counts characters under a UTF-8 locale, **`dash` counts bytes
+  under every locale**. `/bin/sh` is `bash` here and `dash` on the
+  Ubuntu runners, so the row panicked on CI — the loud failure working
+  as designed, but on a machine where the distinction is unobservable.
+  The helper now probes `(shell, locale)` pairs and invokes the gate
+  **through** the qualifying shell. That is not a contrivance: `#!/bin/sh`
+  resolves to `bash` on Arch **and on macOS**, which is exactly where a
+  `${#VAR}` guard would miscount.
 - **Proved against the live hazard:** `/tmp/.git` is still present on
   this machine, and the tests it reddened now pass with **no override**.
 - **Gates:** `./scripts/gate --acceptance gate_script_acceptance`, run

@@ -7,15 +7,18 @@ gate isolates", and `TMPDIR` was simply missing from that list — which
 is how a stray `/tmp/.git` came to redden a gate run on an unrelated
 lane.
 
-**Approved after three review rounds, all of which turned on evidence
-rather than design.** Revisions 6a–6c tightened the socket budget to
-the Darwin floor, replaced an existence-only ancestor check with one
-that honours marker types, made the traversal canonical, moved the
-guard rows onto the exact boundary, and — last — required the
-byte-versus-character row to *establish* its locale precondition
-instead of naming one. Each correction was a witness asserting
-something adjacent to the contract while appearing to assert the
-contract itself.
+**Approved after four review rounds plus a locale follow-up, all of
+which turned on evidence rather than design.** Round 1 corrected a
+propagation witness that proved only that the variable was used, and
+two wrong guard reserves. Round 2 tightened the socket budget to the
+Darwin floor and replaced an existence-only ancestor check with one
+that honours marker types. Round 3 made the traversal canonical and
+gave the length guard its first real witnesses. Round 4 moved those
+rows onto the exact boundary, covered both managed areas on cleanup,
+and withdrew an unsupported causal claim. The follow-up required the
+byte-versus-character row to *establish* its precondition rather than
+name one. Each correction was a witness asserting something adjacent
+to the contract while appearing to assert the contract itself.
 
 **Previously, revision 5. Approved at revision 4 and IMPLEMENTED; revision
 5 records two safety defects review found in the implementation.**
@@ -477,8 +480,14 @@ Four decisions inside that, each of which had a cheaper wrong answer:
    the symptom appear deep in a suite as a limit with no cause:
    - a **byte-counted** length check reserving the measured maximum
      suffix (`/.tmpXXXXXX/directory-target.sock`, 33 bytes) plus
-     headroom — byte-counted because `${#var}` counts *characters*
-     under UTF-8 while `sun_path` is byte-limited;
+     headroom — byte-counted because `sun_path` is byte-limited while
+     `${#var}` counts *characters* in a shell that handles multibyte.
+     **Which shell runs the script decides this**: `bash` counts
+     characters under a UTF-8 locale, `dash` counts bytes under every
+     locale, and `#!/bin/sh` is `bash` on Arch and macOS but `dash` on
+     Debian and Ubuntu. The count must not depend on that, so the guard
+     measures bytes explicitly (`printf | LC_ALL=C wc -c`) rather than
+     relying on the interpreter it happens to get;
    - an **ancestor-marker check**, because **a managed root is not
      inherently marker-free**: a `.git` in `$HOME`, a marker above
      `$HOME/build`, or a contaminated `PMACS_GATE_TARGET_ROOT` rebuilds
