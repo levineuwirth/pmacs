@@ -548,9 +548,12 @@ mkdir -p "$AMBIENT"
 # VERIFIES rather than assumes.
 #
 # Disk-backed matters independently. `/tmp` is commonly a tmpfs, so a
-# sweep's fixtures compete with the machine for RAM; a build here has
-# hit tmpfs quota mid-compile. The gate root is on the same filesystem
-# as the build artifacts, which is where the space is.
+# sweep's fixtures compete with the machine for RAM rather than for
+# disk. Measured here: `/tmp` is a 30G tmpfs that reached 24G occupied,
+# leaving ~4G of 61G free, at which point process spawning became
+# unreliable and rows failed with EMPTY output --- a symptom that reads
+# like a code defect. It was not out of space. The gate root is on the
+# same filesystem as the build artifacts, which is where the space is.
 #
 # IT HANGS OFF THE GATE ROOT, NOT THE PER-WORKTREE TARGET, AND THE NAME
 # IS SHORT ON PURPOSE --- see the SUN_LEN budget below. Note this

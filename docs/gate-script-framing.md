@@ -9,16 +9,20 @@ lane.
 
 **Approved after four review rounds plus a locale follow-up, all of
 which turned on evidence rather than design.** Round 1 corrected a
-propagation witness that proved only that the variable was used, and
-two wrong guard reserves. Round 2 tightened the socket budget to the
-Darwin floor and replaced an existence-only ancestor check with one
-that honours marker types. Round 3 made the traversal canonical and
-gave the length guard its first real witnesses. Round 4 moved those
-rows onto the exact boundary, covered both managed areas on cleanup,
-and withdrew an unsupported causal claim. The follow-up required the
-byte-versus-character row to *establish* its precondition rather than
-name one. Each correction was a witness asserting something adjacent
-to the contract while appearing to assert the contract itself.
+propagation witness that observed no inheritance, a reserve that was
+not the maximum, and a guard that leaked what it exists to manage.
+Round 2 tightened the socket budget to the Darwin floor, *ruled* the
+nested case rather than accommodating it by loosening the reserve, and
+replaced an existence-only ancestor check with one that honours marker
+types. Round 3 made the traversal canonical, gave the length guard its
+first witnesses, and **withdrew an unsupported causal claim**. Round 4
+found four properties that were fixed or claimed but would have stayed
+green if reverted: it added the **canonical-traversal witness**, moved
+the guard rows onto the exact boundary, and covered both managed areas
+on cleanup. The follow-up required the byte-versus-character row to
+*establish* its precondition rather than name one. Each correction was
+a witness asserting something adjacent to the contract while appearing
+to assert the contract itself.
 
 **Previously, revision 5. Approved at revision 4 and IMPLEMENTED; revision
 5 records two safety defects review found in the implementation.**
