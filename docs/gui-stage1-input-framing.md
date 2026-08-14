@@ -1,7 +1,31 @@
 # GUI arc, Stage 1 — input foundation (framing)
 
-**Status: revision 16 — AWAITING APPROVAL.** Revision 16 answers review
-of 15. Four changes, three of them corrections to 15's own reasoning:
+**Status: revision 17 — AWAITING APPROVAL.** Revision 17 answers review
+of 16. Two additions and one correction:
+
+- **B1 gains the two separations its crossing witness could not
+  reach.** "Per axis and surface" has two nouns; 16 witnessed one
+  category crossing and left both of the others open. **R1** pins the
+  **axes** apart (a sub-tick horizontal then a sub-tick vertical over
+  one surface must reach no tick), and **R2/R3** pin **identity**
+  apart — panel A→panel B and terminal A→terminal B, so "per surface"
+  cannot degrade to "per surface *kind*". Each has a mutation that
+  shares the store in question. The end-to-end panel row now runs
+  **both axes**, the horizontal leg being the one with no handler at
+  all.
+- **Two mutation dependencies were assumptions and are removed.**
+  "Never releases" need not bite L8 — clause 5's wrap/replacement clear
+  is a separate path — and "writes point" need not bite L4, which
+  concerns the vertical path. Scoped to L3 and L5. Dependents are
+  recorded **only after a mutation run shows them**.
+- **U10's concurrency claim was false and is withdrawn**, along with
+  U9's candidate that prompted it. Detail in
+  `docs/ci-red-signatures.md`; the short form is that cargo runs test
+  binaries **sequentially**, so the two steps never differed in
+  concurrency and no experiment reversed anything.
+
+**Previously, revision 16 — SUPERSEDED.** Four changes, three of them
+corrections to 15's own reasoning:
 
 - **The panel-replay lane becomes a HARD PREREQUISITE in §3's
   topology**, not a note. The defect is "frontend emits, receiver
@@ -287,6 +311,43 @@ sub-tick alone is enough, and the first must not be available to
 complete the second. The mutation is exactly revision 15's error:
 share the cell residual with the background, and this row jumps.
 
+##### "Per axis and surface" needs three separations, not one
+
+The crossing witness above proves **one** of them — a category change,
+background to cell. **Two more are unwitnessed by it, and an
+implementation can satisfy every row written so far while failing
+both.** B1's phrase has two nouns in it, and each needs its own
+discriminator:
+
+**Axis.** A single accumulator per surface, fed by both axes, passes
+every row above: each one moves in one axis at a time. **R1 —
+cross-axis:** a sub-tick **horizontal** motion followed by a sub-tick
+**vertical** motion over the *same* surface must reach **no tick on
+either axis**. *Mutation: one residual per surface instead of one per
+(surface, axis)* — the two half-ticks combine and R1 sees a tick.
+
+**Identity, not just kind.** "Per surface" that means "per surface
+*kind*" leaks between two panels or two terminals, which is the same
+defect as leaking between kinds but invisible to a kind-level row.
+
+- **R2 — panel A→panel B:** bank a sub-tick over panel A, replace it
+  with panel B (the `buffer_id`/`panel_epoch` replacement acceptance 49
+  already models), motion over B must **start from zero**. *Mutation:
+  key the residual by "the panel" rather than by panel identity.*
+- **R3 — terminal A→terminal B:** the same, across two terminal
+  buffers. *Mutation: key the residual by "the terminal".*
+
+R2 and R3 also pin the **discard on disappearance**: a residual banked
+against a surface that no longer exists must not be inherited by its
+successor. That is the identity question and the staleness question at
+once, and acceptance 49's epoch machinery is the existing precedent for
+answering it.
+
+**The end-to-end panel row exercises BOTH axes.** "A wheel moves the
+panel viewport" leaves the horizontal half untested precisely where
+the emit-and-discard defect lived — the axis with no handler at all.
+Vertical and horizontal are separate legs.
+
 **Chrome shares the document's scrolling and the document's residual.**
 That is today's behaviour, and making it normative is what keeps 1b
 from having to change both frontends' hit testing for no user-visible
@@ -361,9 +422,12 @@ So the dependency is **hard, and ordered**:
 2. **1b rebases onto it**, and its base moves from `72da24a` to that
    merge commit. §2a's other measurements are unaffected — the replay
    lane touches the daemon side.
-3. **1b carries an END-TO-END panel-wheel EFFECT witness**: a wheel over
-   a panel cell moves that panel's viewport. Not "a `PanelPointer` was
-   emitted" — the observable effect.
+3. **1b carries an END-TO-END panel-wheel EFFECT witness, on BOTH
+   axes**: a wheel over a panel cell moves that panel's viewport
+   vertically, and a horizontal wheel moves it horizontally. Not "a
+   `PanelPointer` was emitted" — the observable effect. The horizontal
+   leg is not optional garnish: it is the axis with **no handler at
+   all**, which is exactly where the emit-and-discard defect lived.
 
 **Panel inertness is therefore NOT an option and is not claimed.** The
 panel's contract is "emit both axes with its own residual, and the
@@ -551,17 +615,37 @@ which surfaces only on the return to `truncate` when the caret rule
 should have resumed and does not.
 
 Mutations. Per §6's dependency-aware rule, each must **bite its named
-rows**; where one necessarily breaks dependents, the dependency is
+rows**; where one *necessarily* breaks dependents, the dependency is
 named rather than treated as a failure of the mutation.
 
-| mutation | must bite | legitimate dependents |
+**A dependency belongs in the third column only when it is
+UNAVOIDABLE**, and revision 16 put two there that are not. Predicting
+collateral damage is not the same as deriving it, and a predicted bite
+that does not occur reads afterwards as a witness that failed to fire.
+
+| mutation | must bite | necessary dependents |
 |---|---|---|
-| follow ignores manual authority (always overwrites) | L1, L2 | L4, L7a, L7b — all assert a preserved origin, which cannot survive an unconditional overwrite |
-| manual authority never releases | L3 | L8's `truncate` leg, which checks the caret rule resumed |
+| follow ignores manual authority (always overwrites) | L1, L2 | L4, L7a, L7b — each asserts a preserved origin, which cannot survive an unconditional overwrite |
+| manual authority never releases | **L3 only** | none |
 | authority armed by *any* wheel event, effective or not | L6 | none |
 | re-clamp releases authority instead of preserving it | L7a, L7b | none |
 | wrap/replacement zeroes the origin but leaves the latch set | L8 | none |
-| the wheel path writes point or selection | L5 | L4 in the TUI, where a spurious point write is what clause 3 must survive |
+| the wheel path writes point or selection | **L5 only** | none |
+
+**The two removed dependencies were assumptions, not derivations.**
+
+- *"Never releases" → L8.* Clause 5 gives wrap and buffer replacement
+  their **own explicit clear**, which does not run through the
+  cursor-change release path. An implementation with release suppressed
+  and clause 5 intact clears the latch on wrap and L8 passes. **Scoped
+  to L3.**
+- *"Writes point" → L4.* L4 asserts the horizontal origin survives a
+  vertical wheel. A horizontal wheel that spuriously writes point does
+  not change what the *vertical* path does, so L4 can pass while L5
+  fails. **Scoped to L5.**
+
+**Additional bites are recorded only after a mutation run shows
+them** — observed, with the run named, never predicted in advance.
 
 Clause 5's *origin* half is already implemented for the caret path; the
 existing wrap-guard removal named in the B7 row remains its mutation.
@@ -620,7 +704,8 @@ defect is exactly "frontend emits, receiver discards"**, so a 1b that
 witnessed emission alone would repeat the blind spot that hid it.
 
 **Order: the replay lane merges, 1b rebases onto that merge commit,
-then 1b lands an end-to-end panel-wheel EFFECT witness.** 1b's base
+then 1b lands an end-to-end panel-wheel EFFECT witness on both axes.**
+1b's base
 moves off `72da24a` accordingly; the rest of §2a is measured on the GPU
 and TUI sides and is unaffected.
 
