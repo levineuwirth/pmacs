@@ -281,7 +281,7 @@ from #171 and #215.
   **`githubsucks/panel-mapping-generation` is the authoritative tip.**
   Recover with `git fetch githubsucks && git checkout
   panel-mapping-generation`.
-- **No PR yet. Checkpoint: framing revision 14 (§5b) AWAITING
+- **No PR yet. Checkpoint: framing revision 15 (§5b) AWAITING
   APPROVAL; NO IMPLEMENTATION.**
 - **PROTOCOL-BEARING — v25, and it runs alone.**
   `ADVERTISED_PROTOCOL_VERSION` stays pinned at **20**.
@@ -317,9 +317,27 @@ from #171 and #215.
 - **Pins ACCUMULATE**: keep `PanelPointer`, add exact `TextInput`
   bytes (previous-final `FrontendEvent`) and the complete nested
   `PanelFrame(Absent)` bytes (previous-final `PanelFramePayload`).
-  **No exact-bytes pin for `PanelPointer` could be found in the tree**
-  despite `pmacs-protocol/src/message.rs:524` claiming one; this slice
-  resolves that either way.
+  **The `PanelPointer` pin DOES exist** at `src/protocol.rs:1975` —
+  revision 14 recorded it as missing, which was wrong: it lives in the
+  root crate's test module, not under `pmacs-protocol/` or `tests/`.
+- **Appended means LAST**: `PresentMapped` after `Absent`,
+  `PanelPointerMapped` after `TextInput`. `mapping_generation` is a
+  `u64`, **zero invalid**, gated by `PANEL_MAPPING_MIN_VERSION = 25`.
+- **Coordinate-free wheels are EXEMPT** from the freshness check —
+  otherwise the first tick advances the key and the next queued tick is
+  refused, so the panel scrolls once and dies. Child-reported terminal
+  wheels keep the check, because SGR carries row and column.
+- **Cancellation is PROACTIVE**, triggered by the key advancing, with a
+  daemon-side accepted-gesture latch. Reactive cancellation loses a
+  race: a replacement frame landing before the physical `Up` makes the
+  producer suppress the very event that would cancel.
+- **The terminal key is NOT `Screen`'s generation** — that advances
+  from 39 sites including style, bell, tab-stops and cursor-only
+  motion, none of which change what a coordinate denotes.
+- **G5's EFFECTS are owed by the rebased replay lane**, not provable
+  here: `gesture_last_content_cell` and replay exist only on
+  `panel-pointer-replay`. G5a — that the key advancing raises
+  cancellation — stays in this slice.
 - **Owns the version correction.** `docs/gui-stage1-input-framing.md`
   moves 1e's `OpenTarget` to **v26** here — an expected rebase
   conflict on `gui-stage1b-pointer-scroll` is not grounds for leaving

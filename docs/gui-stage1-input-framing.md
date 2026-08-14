@@ -570,8 +570,8 @@ and flushed to the socket**. **Bound: 250 ms.**
 | **floor** | **v24** | **v26**, after v25's mapping generation, serialized |
 | **encoding** | **appended variant**; never widen a field in place — postcard is positional | appended variants |
 | **byte pin** | frozen-byte fixture on the **previous final variant** | same |
-| **gate** | daemon accepts from `>= 24`; producer withholds below | `>= 25`; producer withholds below |
-| **old peer** | a `< 24` frontend **retains its existing `Key` behaviour and its existing limitations** — it truncates multi-scalar input today and ignores IME, and continues to. **The guarantee is NO REGRESSION, not retroactive correctness** | a `< 25` frontend cannot drop-open; nothing it already had degrades |
+| **gate** | daemon accepts from `>= 24`; producer withholds below | **`>= 26`**; producer withholds below |
+| **old peer** | a `< 24` frontend **retains its existing `Key` behaviour and its existing limitations** — it truncates multi-scalar input today and ignores IME, and continues to. **The guarantee is NO REGRESSION, not retroactive correctness** | a **`< 26`** frontend cannot drop-open; nothing it already had degrades |
 | **bounds** | **64 KiB** UTF-8; oversize **rejected** | **32 KiB** per raw path; non-empty path; absolute non-empty cwd; **embedded NUL rejected**; `Failed.message` capped at the **existing 4 KiB** error cap |
 | **pins** | frozen bytes on `FrontendEvent`'s previous final variant | **two independent pins** — `FrontendEvent` for `OpenTarget`, `InstanceMessage` for `OpenTargetResult` |
 
