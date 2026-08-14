@@ -1,7 +1,10 @@
 # GUI arc, Stage 1 — input foundation (framing)
 
-**Status: revision 18 — AWAITING APPROVAL.** Revision 18 answers review
-of 17:
+**Status: revision 18 — APPROVED (2026-08-14).** §2a is the 1b ground
+truth and its rulings are settled: **Q#S1-11 (B)**, the five-clause
+lifetime contract with witnesses L1–L8, B1's six-target enumeration
+with discriminators **R1–R5**, and B3's exact saturated bound. Revision
+18 answers review of 17:
 
 - **Identity has a second half that R2/R3 cannot reach.** A panel or
   terminal residual is keyed to a surface that *goes away*; the
@@ -19,6 +22,18 @@ of 17:
   default intra-binary threading. **"Cargo runs test binaries
   sequentially" is narrowed to the observed cargo 1.95.0 sweep** rather
   than asserted universally. The concurrency conclusion is unaffected.
+
+**§2a took six review rounds (13–18), and each one found a witness that
+would have passed against a broken implementation.** Emission-only
+panel rows against a receiver that discards; a GPU preservation row
+driven by a paint that never calls the follow; lifetime rows whose
+setup left held and released authority indistinguishable; mutation
+dependents predicted rather than derived; and a residual-identity story
+that stopped at the surfaces which get destroyed, missing the two that
+outlive the buffer. **None was a design disagreement** — the rulings
+survived from 14 and 15 untouched. That is the failure mode §6 names,
+arriving once per round, and it is why the R- and L-rows specify their
+*drivers* and *setups* rather than only their assertions.
 
 **Previously, revision 17 — SUPERSEDED.** Two additions and one
 correction:
