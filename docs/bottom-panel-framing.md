@@ -7,15 +7,28 @@ protocol v20, 2026-07-24. Amended by the pre-implementation dependency
 verification in §0.6: the folding dependency is cleared, and one geometry
 caller-census error is corrected.**
 
-**Revision 5 — 2026-08-14, AWAITING APPROVAL. Adds §5a: acceptance 48
-re-measured against production at `72da24a`.** The finding is that AC48
+**Revision 6 — 2026-08-14, AWAITING APPROVAL.** Answers review of 5.
+**Q#BP-R1 is RULED: a single click SELECTS a listview row only**;
+RET/SPC remain activation, and this lane adds no click-to-visit.
+Revision 5 concluded that the activation ordering made replay safe;
+**it is necessary but not sufficient**, and §5a now carries the four
+edges it missed — **R-a** modifiers dropped at the daemon boundary,
+which breaks Shift's local-selection override; **R-b** `Drag`/`Up` do
+not activate and another frontend can interleave, so replay needs a
+named side-window cell→byte adapter and a window-targeted path;
+**R-c** `panel_grid_size` includes the mode-line row while content is
+`rows − 1`, so the terminal viewport must be `rows − 1` and document
+replay needs the TUI's "mode-line click: reserved" rule; **R-d**
+`Present`→`Present` replacement leaves the pointer latch armed, which
+acceptance 49 cannot catch because the orphan gesture carries current
+epochs.
+
+**Previously, revision 5 — SUPERSEDED. Added §5a: acceptance 48
+re-measured against production at `72da24a`.** The finding stands: AC48
 is **half implemented** — focus, activation, the focused-only clamp and
 the coalescing rules all landed; **listview row selection, panel
-selection, terminal mouse reporting and wheel replay did not**, so
-`PanelPointer` reaches `dispatch_semantic_panel_pointer` and stops at
-focus. No ruling in §3 or §5 changes. **One question is opened,
-Q#BP-R1**, on whether a listview row visits on click; this lane
-implements selection and does not answer it.
+selection, terminal mouse reporting and wheel replay did not**. No
+ruling in §3 or §5 changes.
 
 Give pmacs a **bottom panel**: a buffer displayed in a fixed-height window
 pinned to the bottom of the frame, resizable by dragging its divider, which
@@ -1797,7 +1810,7 @@ the halves were never separated in writing. Measured clause by clause:
 |---|---|---|
 | click-to-focus | **DONE** | `dispatch_semantic_panel_pointer`'s `activates` → `focus_window` (`src/editor.rs:2701`) |
 | terminal panel: non-`Move` activates, hover does neither | **DONE** | the same `activates` computation, split by `is_terminal` |
-| focused-only auto-scroll clamp; passive preserves `view_top` | **DONE** | `src/editor.rs:2569`, which already cites "A2A-3 / parent 48" |
+| focused-only auto-scroll clamp; passive preserves `view_top` | **DONE** | `src/editor.rs:2568`–`:2571`, which already cites "A2A-3 / parent 48" |
 | move/drag tails coalesce; press/release/context/wheel lossless and ordered | **DONE** | `pmacs-gpu/src/attach.rs:374`–`:381` — `Move` key 6, `Drag` key 7, everything else unkeyed |
 | **listview row selection** | **MISSING** | — |
 | **panel selection** | **MISSING** | — |
@@ -1832,9 +1845,12 @@ the panel's own, not the document mirror.
 naively from the panel path they would move the **document's** point —
 precisely what "without disturbing the document mirror" forbids.
 
-**No new ruling is needed, because the ordering already rules it.**
-Activation runs *before* replay in the same dispatch, and the gestures
-that need the active-window API are exactly the ones that activate:
+**Activation ordering is NECESSARY BUT NOT SUFFICIENT — revision 5
+stopped here and was wrong to.** It holds only for the gestures that
+activate, in a session that nothing interleaves with, on a
+presentation that does not change mid-gesture, with modifiers intact
+and the mode line excluded. **Each of those four provisos is an edge
+revision 6 had to add** (R-a…R-d below). The ordering itself is real:
 
 - **Document panel** — `activates` on `Down(_)`. A drag-select is
   Down → Drag → Up, and the Down focused the panel, so the later
@@ -1845,29 +1861,125 @@ that need the active-window API are exactly the ones that activate:
 - **The one gesture that does NOT activate** is a document panel's
   wheel — and it needs only `scroll_window`, which is window-scoped.
 
-So the rule is: **replay after activation, and anything reachable
-without activation must use a window-scoped mechanism.** Both halves
-are satisfiable with what exists.
+So the ordering rule is: **replay after activation, and anything
+reachable without activation must use a window-scoped mechanism.**
+That is the floor, not the contract — R-a through R-d are the rest of
+it, and three of the four are places where the tree already contains
+the right precedent and the panel path simply does not use it.
 
-### Q#BP-R1 — is a listview row's activation a click or a double-click? **OPEN**
+### Q#BP-R1 — does a listview row visit on click? **RULED: no — single click SELECTS only**
 
-The one question the measurement could not answer from the tree.
-`builtin/runtime/listview.lua` binds visiting to **RET/SPC**
-(`:610`–`:611`), reading `pmacs.editor.cursor_line()` and calling
-`on_visit`. There is no pointer precedent: nothing in the file mentions
-a mouse.
+RET/SPC remain the activation path (`builtin/runtime/listview.lua:610`,
+which reads `pmacs.editor.cursor_line()` and calls `on_visit`). **This
+lane adds no click-to-visit and no double-click-to-visit.** That
+follows acceptance 48's wording — it names row *selection* — and keeps
+document navigation from becoming an incidental consequence of wiring
+replay.
 
-So a pointer gesture can *move* to a row unambiguously, but **whether a
-single click also VISITS is a product decision with no existing
-answer** — single-click-visits matches a file tree, click-selects /
-double-click-visits matches an editor list, and AC48's wording
-("drives listview row selection") names selection only.
+### The four replay edges — none of which "activation ordering" covers
 
-**This lane implements row SELECTION and does not invent activation.**
-If visiting on click is wanted it should be ruled explicitly rather
-than arriving as a side effect of wiring, because it is the difference
-between a click that navigates the user's document and one that does
-not.
+§5a's first draft concluded that the activation rule made the replay
+safe. **It does not, and each gap below is a place where a plausible
+implementation is silently wrong.**
+
+#### R-a. Modifiers are dropped before they reach the shared path
+
+`FrontendEvent::PanelPointer` **carries `mods`**, and the daemon
+**destructures them into `..`** (`src/daemon.rs:2425`);
+`dispatch_semantic_panel_pointer` has no modifier parameter at all.
+
+**This breaks terminal precedence, not merely fidelity.**
+`apply_terminal_gesture` opens with
+`let shift = modifiers.contains(TerminalModifiers::SHIFT)` (`:3534`)
+and gates child reporting on `!shift && … && modes.mouse_sgr`. **Shift
+is the user's override for "select locally instead of talking to the
+child."** Arriving with modifiers zeroed, a Shift-drag over a
+reporting terminal panel sends SGR to the child instead of selecting.
+
+**Thread `mods` through** the destructure, the dispatcher signature and
+into `apply_terminal_gesture`. **Row:** with mouse reporting enabled,
+a Shift-drag selects locally and the child receives **no bytes**.
+*Mutation: drop `mods` at the daemon boundary — the child receives
+bytes and the row fails.*
+
+#### R-b. Activation does not make the document path target-safe
+
+`activates` is true for a document panel's `Down(_)` only, so **`Drag`
+and `Up` do not activate**, and **another frontend's input can
+interleave between them** — sessions are independent and nothing
+freezes the active window for the duration of a gesture. A replay that
+reads ambient active-window state for `Drag`/`Up` therefore acts on
+whatever is active *then*, which may be a different window entirely.
+
+**The framing names the mechanism rather than leaving it to the
+implementation: an explicit side-window cell→byte adapter, and
+selection routed through a window-TARGETED path.** The precedent and
+the trap are the same function — `activate_and_position`
+(`src/editor.rs:3795`) is already window-scoped in its conversion (it
+takes `win_id` and uses *that* window's `view_top` and fold map, per
+the round-3 F1 correction) **but it also calls
+`set_active_window_id`**, and the selection APIs it feeds
+(`set_cursor_byte`, `begin_selection`) write `active_window_mut()`.
+Panel replay needs the conversion **without** the ambient write.
+
+Two rows, both of which a naive implementation fails:
+
+- **Interleaved frontend:** panel A `Down` → **frontend B input** →
+  panel A `Drag`/`Up`. **Only A's panel changes.**
+- **Orphan gesture:** a `Drag`/`Up` against a **passive** panel with no
+  preceding `Down`. **The document mirror is byte-identical
+  afterwards** — cursor, selection and `view_top`.
+
+#### R-c. `panel_grid_size` is the FRAME, not the terminal viewport
+
+The panel's last row is its **mode line**. Projection says so
+explicitly: `content = Rect::new(0, 0, size.rows.saturating_sub(1),
+size.cols)` against `outer` at full height (`src/editor.rs:2499`–
+`:2500`). But **`panel_hit_test` reports cells across the whole
+frame** — it passes `frame.size` (`pmacs-gpu/src/main.rs:7184`) — so a
+`PanelPointer` **can name the mode-line row**.
+
+Passing `panel_grid_size` straight to `apply_terminal_gesture` as the
+viewport therefore **makes the mode line a child terminal cell**: the
+child is told about a row it does not own, and every coordinate below
+it is off by the same row when the size is used for clamping.
+
+- **Terminal panels:** the viewport is **`rows − 1`**.
+- **Document panels:** the mode line needs an **explicit rule**, and
+  the TUI already has one — `dispatch_mouse` returns early on
+  `local_row >= inner_rows` with the comment *"Mode-line click:
+  reserved."* (`src/editor.rs:3304`–`:3306`). **Panel replay follows it**: a
+  mode-line gesture is reserved, not a click at the nearest content
+  cell.
+
+**Rows must distinguish content from chrome**: a gesture on the last
+row is inert (and reaches no child), while the same gesture one row up
+replays normally. Without that pair, an off-by-one passes.
+
+#### R-d. Panel replacement leaves the frontend's gesture latch armed
+
+`PanelFramePayload::Absent` clears `pointer_held` and
+`last_pointer_cell` (`pmacs-gpu/src/main.rs:6909`–`:6910`). **The
+`Present` arm does not** (`:6913` onward) — it validates, swaps the
+frame, rebuilds buffers, and leaves the latch exactly as it was.
+
+So: press on panel **A**, A is replaced by **B**, and the held latch
+emits a `Drag` or release **for B with no B press**. **Acceptance 49
+cannot reject it** — the event carries B's *current* epochs, so it is
+not stale by any test 49 applies. 49 is a staleness gate, and this is
+not a stale event; it is a **well-formed event from a gesture that
+belongs to a presentation that no longer exists.**
+
+**Reset the gesture latch on presentation-identity change.** The
+precedent is in the same file: the **divider** drag latch already
+carries `panel_epoch`/`geometry_epoch` and self-invalidates when the
+presented frame's epochs differ (`:7288`). The pointer latch simply
+never got the same treatment.
+
+*Mutation: omit the reset on `Present`→`Present` — the orphan-drag row
+fails.* Distinct from R-b's orphan row: that one arrives from a
+**passive** panel, this one from a **replaced** one, and an
+implementation can fix either alone.
 
 ## 6. Deferred (named)
 

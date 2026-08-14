@@ -281,9 +281,9 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
   **`githubsucks/panel-pointer-replay` is the authoritative tip** (the
   ref, not a SHA). Recover with
   `git fetch githubsucks && git checkout panel-pointer-replay`.
-- **No PR yet. Checkpoint: framing revision 5 (§5a) AWAITING APPROVAL;
-  NO IMPLEMENTATION WRITTEN.** The first commit is the ground-truth
-  re-measurement, per the standing method.
+- **No PR yet. Checkpoint: framing revision 6 (§5a) AWAITING APPROVAL;
+  NO IMPLEMENTATION WRITTEN.** Commit one was the ground-truth
+  re-measurement; **commit two answers review of it.**
 - **Why this lane exists.** `PanelPointer` **replays nothing**:
   `dispatch_semantic_panel_pointer` (`src/editor.rs:2674`) validates,
   focuses, returns. A panel wheel is dead on both axes and so is every
@@ -295,7 +295,7 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
   had written the halves down separately.
   - **DONE:** click-to-focus and the terminal activation rule
     (`src/editor.rs:2701` and its `activates`); the focused-only
-    auto-scroll clamp with passive `view_top` preserved (`:2569`, which
+    auto-scroll clamp with passive `view_top` preserved (`:2568`–`:2571`, which
     already cites parent 48); the coalescing rules — `Move`/`Drag`
     tails coalesce, press/release/context/wheel lossless
     (`pmacs-gpu/src/attach.rs:374`).
@@ -310,18 +310,50 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
   `scroll_window` (`:3845`) is window-scoped, cursor carry included.
   **A wheel-only bridge is the wrong shape** — the shared path takes
   every kind at once.
-- **The scoping hazard, and why it needs no ruling.** `set_cursor_byte`
-  (`src/editor_core.rs:1216`), `begin_selection` (`:4691`) and
-  `clear_selection` are **active-window scoped**; used naively they
-  would move the DOCUMENT's point, which AC48 forbids. **Activation
-  runs before replay in the same dispatch**, and the gestures needing
-  that API are exactly the ones that activate. The only gesture that
-  does not activate — a document panel's wheel — needs only the
-  window-scoped `scroll_window`.
-- **OPEN: Q#BP-R1** — does a listview row **visit** on click, or only
-  select? `listview.lua` binds visiting to RET/SPC (`:610`) and there
-  is no pointer precedent. **This lane implements selection and does
-  not invent activation.**
+- **The scoping hazard.** `set_cursor_byte` (`src/editor_core.rs:1216`),
+  `begin_selection` (`:4691`) and `clear_selection` are
+  **active-window scoped**; used naively they would move the
+  DOCUMENT's point, which AC48 forbids. Activation runs before replay
+  in the same dispatch — **necessary but NOT sufficient**, which is
+  what revision 5 got wrong.
+- **FOUR REPLAY EDGES (revision 6), each a place a plausible
+  implementation is silently wrong. Three have a precedent in the tree
+  the panel path simply does not use.**
+  - **R-a — modifiers dropped.** The daemon destructures `mods` into
+    `..` (`src/daemon.rs:2425`) and the dispatcher has no modifier
+    parameter, but `apply_terminal_gesture` gates child reporting on
+    `!shift && … && modes.mouse_sgr` (`src/editor.rs:3534`). **Shift is
+    the user's local-selection override**, so a Shift-drag over a
+    reporting terminal panel would send SGR to the child. Thread
+    `mods`; row: Shift-drag selects locally, child receives no bytes.
+  - **R-b — `Drag`/`Up` do not activate**, and another frontend can
+    interleave between them, so replay must not read ambient
+    active-window state. Name a **side-window cell→byte adapter** and a
+    window-TARGETED selection path. `activate_and_position`
+    (`src/editor.rs:3795`) is the precedent *and* the trap: its
+    conversion is window-scoped, but it calls `set_active_window_id`.
+    Rows: interleaved frontend B between A's Down and Drag/Up; orphan
+    Drag/Up on a passive panel leaves the document mirror
+    byte-identical.
+  - **R-c — `panel_grid_size` is the FRAME, not the viewport.** Content
+    is `rows − 1` (`src/editor.rs:2499`–`:2500`) but `panel_hit_test`
+    reports across the whole frame (`pmacs-gpu/src/main.rs:7184`), so a
+    `PanelPointer` can name the **mode-line row**. Terminal viewport is
+    `rows − 1`; document replay follows the TUI's *"Mode-line click:
+    reserved"* (`src/editor.rs:3304`–`:3306`). Rows must distinguish
+    content from chrome or an off-by-one passes.
+  - **R-d — replacement leaves the gesture latch armed.** `Absent`
+    clears `pointer_held`/`last_pointer_cell`
+    (`pmacs-gpu/src/main.rs:6909`) but **`Present`→`Present` does not**
+    (`:6913`). A press on A then A→B emits a Drag/release for B with no
+    B press, and **acceptance 49 cannot reject it** — the event carries
+    B's *current* epochs. The **divider** drag latch already
+    epoch-scopes itself (`:7288`); the pointer latch never did. Reset
+    on presentation-identity change, mutation-checked.
+- **RULED: Q#BP-R1** — a single click **SELECTS a listview row only**.
+  RET/SPC remain activation (`listview.lua:610`); no click-to-visit and
+  no double-click-to-visit. Keeps document navigation from becoming an
+  incidental consequence of replay.
 - **Gates:** the four `bottom_panel_*` acceptance suites plus
   `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`. **No `--protocol`** —
   `PanelPointer` and every `MouseKind` it carries already exist on the
