@@ -7,7 +7,21 @@ protocol v20, 2026-07-24. Amended by the pre-implementation dependency
 verification in §0.6: the folding dependency is cleared, and one geometry
 caller-census error is corrected.**
 
-**Revision 11 — 2026-08-14, AWAITING APPROVAL.** Answers review of 10.
+**Revision 12 — 2026-08-14, AWAITING APPROVAL.** Answers review of 11,
+whose witness had a **vacuous precondition**.
+
+"Focus unchanged" proves nothing if the terminal panel is **already
+focused**: the below-activation mutation then calls `focus_window` on
+the already-active side window, nothing changes, and the row passes.
+Leg 2 must **start passive**, and assert it — primary document window
+active, terminal side window distinct and passive, controller baseline
+captured. The prose is also narrowed: **focus** catches the
+below-activation ordering mutation; **controller identity** catches the
+shared-path mutation, since `apply_terminal_gesture` claims the
+controller at `src/editor.rs:3571` before local handling. Activation
+alone claims nothing, so the two assertions are not interchangeable.
+
+**Previously, revision 11 — SUPERSEDED.** Answered review of 10.
 
 **The terminal-chrome wheel must be consumed BEFORE ACTIVATION**, not
 merely before `apply_terminal_gesture`. `activates` is
@@ -2300,18 +2314,40 @@ the two outcomes are separated by nothing but the buffer kind:
    no document scroll, **and the focused window and terminal controller
    identity are unchanged**.
 
-Two mutations, biting different halves:
+##### Leg 2 must START PASSIVE, or "focus unchanged" is vacuous
 
-| mutation | must fail |
-|---|---|
-| the terminal branch calls `apply_terminal_gesture` | the chrome coordinate fails its reporting bounds check, drops into the local branch, and the row catches the **accidental local scrollback** revision 8's clamp would have shipped deliberately |
-| the consume check sits **below** the activation block | nothing scrolls, so bytes/scrollback/document all still pass — **only the focus and controller assertions catch it** |
+**A focus assertion proves nothing if the panel already has focus.**
+With the terminal side window active, moving the consume check below
+activation calls `focus_window` on **the window that is already
+active** — nothing changes, and the row stays green against the very
+mutation it exists to catch.
 
-**The second mutation is why the focus and controller assertions are
-load-bearing.** Without them the row is green against an
-implementation that steals focus on every chrome wheel over a
-terminal — the half-state is invisible to any assertion about
-movement, because nothing moves either way.
+**Preconditions, asserted before the wheel, not merely arranged:**
+
+- the **primary document window is active**;
+- the **terminal side window is distinct from it and PASSIVE**;
+- the **terminal controller identity is captured as a baseline**.
+
+Asserted rather than assumed, because each is exactly the kind of setup
+detail a later edit silently changes — and each failure mode is a
+witness that passes while proving nothing.
+
+**With that setup the two mutations separate cleanly, and each is
+caught by a DIFFERENT assertion:**
+
+| mutation | what it does | caught by |
+|---|---|---|
+| the consume check sits **below** the activation block | `focus_window` runs and the panel takes focus; nothing scrolls, so every movement assertion still passes | **focus** — and focus alone |
+| the terminal branch calls `apply_terminal_gesture` | `claims_control` is `!matches!(kind, Move)` (`src/editor.rs:3555`), so a wheel **claims the panel's controller at `:3571`, before any local handling** at `:3575`; the chrome coordinate then fails the reporting bounds check and drops into the local branch, which may also move scrollback | **controller identity** — plus scrollback when it moves |
+
+**The two assertions are not interchangeable**, which revision 11's
+prose blurred by naming them together. **Focus catches the ordering
+mutation; controller identity catches the shared-path mutation.**
+Activation alone does not claim a controller — `focus_window` and
+`claim_terminal_controller` are separate acts — so a row asserting only
+controller identity would miss the below-activation ordering bug
+entirely, and one asserting only focus would miss a replay that quietly
+claims the terminal.
 
 Doing it in one frontend across a replacement is what makes it a
 control rather than two unrelated observations: the geometry, the

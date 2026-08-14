@@ -281,7 +281,7 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
   **`githubsucks/panel-pointer-replay` is the authoritative tip** (the
   ref, not a SHA). Recover with
   `git fetch githubsucks && git checkout panel-pointer-replay`.
-- **No PR yet. Checkpoint: framing revision 11 (§5a) AWAITING APPROVAL;
+- **No PR yet. Checkpoint: framing revision 12 (§5a) AWAITING APPROVAL;
   NO IMPLEMENTATION WRITTEN.** Commit one was the ground-truth
   re-measurement; 6 added the four replay edges; **7 answers review of
   6; **8 answers review of 7** — R-c is target × gesture-ORIGIN
@@ -317,9 +317,17 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
   and `active_frontend` at `:2699` ahead of any replay decision — a
   consume check below that would change focus while scrolling nothing
   and claiming no controller. Four-step order, consumption at step 3;
-  the witness now asserts **focus and controller identity unchanged**,
-  which is what catches the consume-below-activation mutation, since
-  that mutation moves nothing.
+  the witness now asserts **focus and controller identity unchanged**.
+  **Revision 12** makes that setup discriminating: leg 2 must **start
+  PASSIVE** — primary document window active, terminal side window
+  distinct and passive, controller baseline captured — because "focus
+  unchanged" is vacuous if the panel is already focused, and the
+  below-activation mutation would then call `focus_window` on the
+  already-active window and pass. The two assertions are **not
+  interchangeable**: **focus** catches the ordering mutation;
+  **controller identity** catches the shared-path mutation, since
+  `apply_terminal_gesture` claims at `src/editor.rs:3571` before local
+  handling and activation alone claims nothing.
 - **Why this lane exists.** `PanelPointer` **replays nothing**:
   `dispatch_semantic_panel_pointer` (`src/editor.rs:2674`) validates,
   focuses, returns. A panel wheel is dead on both axes and so is every
