@@ -288,8 +288,9 @@ deferred.
   `git fetch githubsucks && git checkout gui-stage1b-pointer-scroll`.
 - **No PR yet.** Framing approval gates it, and so does a
   **prerequisite lane** (below).
-- **Checkpoint: framing revision 18 AWAITING APPROVAL; NO CODE
-  WRITTEN.** `docs/gui-stage1-input-framing.md` §2a is the 1b ground
+- **Checkpoint: framing revision 18 APPROVED 2026-08-14; NO CODE
+  WRITTEN.** The framing no longer gates this lane — **the
+  panel-replay prerequisite does.** `docs/gui-stage1-input-framing.md` §2a is the 1b ground
   truth, measured at `72da24a`. 13 was the re-measurement; 14 ruled
   Q#S1-11; 15 ruled B1's targets; 16 made the replay lane a hard
   prerequisite; 17 added B1's cross-axis and identity-switch
@@ -548,8 +549,8 @@ ARC is done, and the arc is Stage 1 as a whole: **four slices remain**
 — `1b` (active), `1c`, `1d`, `1e`.
 
 - **Framing `docs/gui-stage1-input-framing.md`, approved through
-  revision 12; §2a is at revision 15, AWAITING APPROVAL** (the 1b
-  ground truth and Q#S1-11). Approved after eight rejected revisions.
+  revision 12; §2a APPROVED at revision 18** (the 1b ground truth,
+  Q#S1-11, L1–L8 and R1–R5). Approved after eight rejected revisions.
   It is Stage 1's framing for **all** slices and governs every later
   branch; only Stage 0 was framed by the
   arc document itself. Revision 9 is the approved design; 10 recorded a
