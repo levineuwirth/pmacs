@@ -7,6 +7,16 @@ protocol v20, 2026-07-24. Amended by the pre-implementation dependency
 verification in §0.6: the folding dependency is cleared, and one geometry
 caller-census error is corrected.**
 
+**Revision 5 — 2026-08-14, AWAITING APPROVAL. Adds §5a: acceptance 48
+re-measured against production at `72da24a`.** The finding is that AC48
+is **half implemented** — focus, activation, the focused-only clamp and
+the coalescing rules all landed; **listview row selection, panel
+selection, terminal mouse reporting and wheel replay did not**, so
+`PanelPointer` reaches `dispatch_semantic_panel_pointer` and stops at
+focus. No ruling in §3 or §5 changes. **One question is opened,
+Q#BP-R1**, on whether a listview row visits on click; this lane
+implements selection and does not answer it.
+
 Give pmacs a **bottom panel**: a buffer displayed in a fixed-height window
 pinned to the bottom of the frame, resizable by dragging its divider, which
 feature code targets **by policy** instead of by stealing the selected window.
@@ -1769,6 +1779,95 @@ cannot preserve the old panel-focused attach leak.
     open→visit→return→quit through each adopter rather than a generic helper,
     preserving the Stage 1 unknown-value rollback assertions; the Stage 3 PR
     then runs the full gate suite.
+
+## 5a. Acceptance 48 — ground truth, MEASURED at `72da24a` (2026-08-14)
+
+**Why this section exists.** GUI arc Stage 1b's ground-truth pass found
+that `PanelPointer` **replays nothing**: `dispatch_semantic_panel_pointer`
+(`src/editor.rs:2674`) validates the coord, resolves the side window,
+focuses when the gesture activates, and returns `true`. Its own doc
+defers replay to *"parent acceptance 48… Stage 2B-3"*. **A panel wheel
+is dead today on both axes**, and so is every other panel gesture past
+focus. 1b is blocked on this lane and rebases onto its merge.
+
+**Acceptance 48 is not unimplemented — it is HALF implemented**, and
+the halves were never separated in writing. Measured clause by clause:
+
+| clause | status | production anchor |
+|---|---|---|
+| click-to-focus | **DONE** | `dispatch_semantic_panel_pointer`'s `activates` → `focus_window` (`src/editor.rs:2701`) |
+| terminal panel: non-`Move` activates, hover does neither | **DONE** | the same `activates` computation, split by `is_terminal` |
+| focused-only auto-scroll clamp; passive preserves `view_top` | **DONE** | `src/editor.rs:2569`, which already cites "A2A-3 / parent 48" |
+| move/drag tails coalesce; press/release/context/wheel lossless and ordered | **DONE** | `pmacs-gpu/src/attach.rs:374`–`:381` — `Move` key 6, `Drag` key 7, everything else unkeyed |
+| **listview row selection** | **MISSING** | — |
+| **panel selection** | **MISSING** | — |
+| **terminal mouse reporting** | **MISSING for panels** | the path exists: `apply_terminal_gesture` |
+| **wheel moves the panel's viewport** | **MISSING** | the mechanism exists: `scroll_window` |
+| without disturbing the document mirror | **the constraint on all of the above** | — |
+
+### The replay is mostly WIRING, and both mechanisms already exist
+
+**Terminals.** `apply_terminal_gesture` (`src/editor.rs:3525`) is
+documented as *"The one terminal pointer path, shared by both frontend
+kinds"* — TUI via crossterm, semantic frontend via
+`FrontendEvent::TerminalPointer` — and it already drives child mouse
+reporting, selection and scrollback. A panel terminal needs the **same
+call**, not a second implementation: `side_window_for`
+(`src/editor_core.rs:3146`) gives the window, `TerminalViewKey::new`
+the key, and `panel_grid_size` — which the dispatcher **already
+fetches** — the viewport size. **A wheel-only bridge here would be the
+wrong shape**: the shared path handles every kind at once.
+
+**Documents.** `scroll_window` (`src/editor.rs:3845`) is window-scoped
+throughout, cursor carry included, and says so: *"a wheel event names
+the pane under the pointer and does NOT activate it, so the map must
+come from `win_id`"*. Its cursor carry moves **that window's** point —
+the panel's own, not the document mirror.
+
+### The scoping hazard, and why the activation rule already answers it
+
+**The selection and cursor API is ACTIVE-WINDOW scoped.**
+`set_cursor_byte` (`src/editor_core.rs:1216`), `begin_selection`
+(`:4691`) and `clear_selection` all write `active_window_mut()`. Used
+naively from the panel path they would move the **document's** point —
+precisely what "without disturbing the document mirror" forbids.
+
+**No new ruling is needed, because the ordering already rules it.**
+Activation runs *before* replay in the same dispatch, and the gestures
+that need the active-window API are exactly the ones that activate:
+
+- **Document panel** — `activates` on `Down(_)`. A drag-select is
+  Down → Drag → Up, and the Down focused the panel, so the later
+  gestures act on an active window legitimately.
+- **Terminal panel** — `activates` on every non-`Move`, so reporting,
+  selection and wheel all run focused. This is AC48's own
+  controller-ownership clause.
+- **The one gesture that does NOT activate** is a document panel's
+  wheel — and it needs only `scroll_window`, which is window-scoped.
+
+So the rule is: **replay after activation, and anything reachable
+without activation must use a window-scoped mechanism.** Both halves
+are satisfiable with what exists.
+
+### Q#BP-R1 — is a listview row's activation a click or a double-click? **OPEN**
+
+The one question the measurement could not answer from the tree.
+`builtin/runtime/listview.lua` binds visiting to **RET/SPC**
+(`:610`–`:611`), reading `pmacs.editor.cursor_line()` and calling
+`on_visit`. There is no pointer precedent: nothing in the file mentions
+a mouse.
+
+So a pointer gesture can *move* to a row unambiguously, but **whether a
+single click also VISITS is a product decision with no existing
+answer** — single-click-visits matches a file tree, click-selects /
+double-click-visits matches an editor list, and AC48's wording
+("drives listview row selection") names selection only.
+
+**This lane implements row SELECTION and does not invent activation.**
+If visiting on click is wanted it should be ruled explicitly rather
+than arriving as a side effect of wiring, because it is the difference
+between a click that navigates the user's document and one that does
+not.
 
 ## 6. Deferred (named)
 

@@ -270,6 +270,68 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
+## Panel-pointer replay (parent acceptance 48) — ACTIVE, 1b's prerequisite
+
+**Written with the branch's FIRST commit**, per the standing correction
+from #171 and #215 — the correction the 1b lane missed, honoured here.
+
+- **Branch `panel-pointer-replay`**, base `githubsucks/main` @
+  **`72da24a`** exactly, in worktree
+  `/home/jeans/Repos/personal/pmacs-panel-replay`.
+  **`githubsucks/panel-pointer-replay` is the authoritative tip** (the
+  ref, not a SHA). Recover with
+  `git fetch githubsucks && git checkout panel-pointer-replay`.
+- **No PR yet. Checkpoint: framing revision 5 (§5a) AWAITING APPROVAL;
+  NO IMPLEMENTATION WRITTEN.** The first commit is the ground-truth
+  re-measurement, per the standing method.
+- **Why this lane exists.** `PanelPointer` **replays nothing**:
+  `dispatch_semantic_panel_pointer` (`src/editor.rs:2674`) validates,
+  focuses, returns. A panel wheel is dead on both axes and so is every
+  gesture past focus. **GUI arc 1b is BLOCKED on this lane and rebases
+  onto its merge commit.**
+- **No new framing document.** Acceptance 48 is already ruled in
+  `docs/bottom-panel-framing.md`; §5a adds ground truth to it.
+- **The measurement's headline: AC48 is HALF implemented**, and nothing
+  had written the halves down separately.
+  - **DONE:** click-to-focus and the terminal activation rule
+    (`src/editor.rs:2701` and its `activates`); the focused-only
+    auto-scroll clamp with passive `view_top` preserved (`:2569`, which
+    already cites parent 48); the coalescing rules — `Move`/`Drag`
+    tails coalesce, press/release/context/wheel lossless
+    (`pmacs-gpu/src/attach.rs:374`).
+  - **MISSING:** listview row selection, panel selection, terminal
+    mouse reporting, wheel replay.
+- **The replay is mostly WIRING; both mechanisms exist.**
+  `apply_terminal_gesture` (`src/editor.rs:3525`) is *"the one terminal
+  pointer path, shared by both frontend kinds"* and already drives
+  child reporting, selection and scrollback — a panel terminal needs
+  the same call, with `side_window_for` + `TerminalViewKey` +
+  `panel_grid_size` (which the dispatcher already fetches).
+  `scroll_window` (`:3845`) is window-scoped, cursor carry included.
+  **A wheel-only bridge is the wrong shape** — the shared path takes
+  every kind at once.
+- **The scoping hazard, and why it needs no ruling.** `set_cursor_byte`
+  (`src/editor_core.rs:1216`), `begin_selection` (`:4691`) and
+  `clear_selection` are **active-window scoped**; used naively they
+  would move the DOCUMENT's point, which AC48 forbids. **Activation
+  runs before replay in the same dispatch**, and the gestures needing
+  that API are exactly the ones that activate. The only gesture that
+  does not activate — a document panel's wheel — needs only the
+  window-scoped `scroll_window`.
+- **OPEN: Q#BP-R1** — does a listview row **visit** on click, or only
+  select? `listview.lua` binds visiting to RET/SPC (`:610`) and there
+  is no pointer precedent. **This lane implements selection and does
+  not invent activation.**
+- **Gates:** the four `bottom_panel_*` acceptance suites plus
+  `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`. **No `--protocol`** —
+  `PanelPointer` and every `MouseKind` it carries already exist on the
+  wire.
+- **Expected rebase conflict, flagged deliberately:** the `gui-stage1b`
+  branch inserts its own lane at this same position and corrects three
+  stale headers below (#239/#240 still marked OPEN, "1a is next").
+  Those corrections are **left to that branch**; this lane does not
+  duplicate them. The conflict is a normal insertion collision.
+
 ## `scripts/gate` TMPDIR isolation — PR #240 OPEN
 
 **Written with the branch's first commit**, per the standing correction
