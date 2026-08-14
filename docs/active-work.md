@@ -281,8 +281,8 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
   **`githubsucks/panel-pointer-replay` is the authoritative tip** (the
   ref, not a SHA). Recover with
   `git fetch githubsucks && git checkout panel-pointer-replay`.
-- **No PR yet. Checkpoint: framing revision 12 (§5a) AWAITING APPROVAL;
-  NO IMPLEMENTATION WRITTEN.** Commit one was the ground-truth
+- **No PR yet. Checkpoint: framing revision 12 (§5a) APPROVED
+  2026-08-14; IMPLEMENTATION BEGINS.** Nothing gates this lane now. Commit one was the ground-truth
   re-measurement; 6 added the four replay edges; **7 answers review of
   6; **8 answers review of 7** — R-c is target × gesture-ORIGIN
   (terminals reject all chrome kinds and raw chrome coords fail the

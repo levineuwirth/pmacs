@@ -7,8 +7,26 @@ protocol v20, 2026-07-24. Amended by the pre-implementation dependency
 verification in §0.6: the folding dependency is cleared, and one geometry
 caller-census error is corrected.**
 
-**Revision 12 — 2026-08-14, AWAITING APPROVAL.** Answers review of 11,
-whose witness had a **vacuous precondition**.
+**Revision 12 — 2026-08-14, APPROVED.** §5a is the acceptance-48
+ground truth and its rulings are settled: **Q#BP-R1** (a single click
+selects a listview row only), **Q#BP-R2** (a terminal-chrome wheel is
+consumed, daemon-side, before activation), the **R-a…R-d** replay
+edges, and the witness matrices A1–A5, B1–B6, D1–D4.
+
+**§5a took eight review rounds (5–12), and the pattern is worth
+keeping: every round found a witness or a rule that would have passed
+against a broken implementation.** A test fixture cited as a production
+handler; activation ordering mistaken for a safety proof; a mode-line
+rule that was per-row when the tree's is per-kind, and document-only at
+that; a producer rule the frontend had no information to obey; a
+consume check that would have left focus stolen; and — twice — an
+assertion added without a state in which it could fail. **No round
+found a design disagreement.** The rulings from 8 and 9 survived
+intact, and what changed each time was *where* a rule lived or *what a
+witness could see*.
+
+Revision 12 answered review of 11, whose witness had a **vacuous
+precondition**.
 
 "Focus unchanged" proves nothing if the terminal panel is **already
 focused**: the below-activation mutation then calls `focus_window` on
