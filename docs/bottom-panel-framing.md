@@ -7,8 +7,25 @@ protocol v20, 2026-07-24. Amended by the pre-implementation dependency
 verification in §0.6: the folding dependency is cleared, and one geometry
 caller-census error is corrected.**
 
-**Revision 10 — 2026-08-14, AWAITING APPROVAL.** Answers review of 9,
-which put a correct ruling **on the wrong side of the seam**.
+**Revision 11 — 2026-08-14, AWAITING APPROVAL.** Answers review of 10.
+
+**The terminal-chrome wheel must be consumed BEFORE ACTIVATION**, not
+merely before `apply_terminal_gesture`. `activates` is
+`!matches!(kind, Move)` for a terminal panel
+(`src/editor.rs:2695`), so the wheel already activates: focus and
+`active_frontend` are written at `:2699` ahead of any replay decision.
+A consume check below that block would leave the wheel **changing focus
+while scrolling nothing and claiming no controller** — the precise
+half-state AC48's activate-then-claim rule exists to prevent. §5a now
+states the four-step order, with consumption at step 3, and the
+document→terminal witness asserts **focus and controller identity
+unchanged** alongside no bytes, no scrollback and no document
+movement — assertions that are load-bearing, because the
+consume-below-activation mutation moves nothing and is invisible
+without them.
+
+**Previously, revision 10 — SUPERSEDED.** Answered review of 9, which
+put a correct ruling **on the wrong side of the seam**.
 
 **The GPU cannot know whether a panel holds a terminal.** `PanelFrame`
 carries `buffer_id`, both epochs, `size`, `cells`, `cursor` and
@@ -2194,7 +2211,7 @@ wheel is the sole divergence, and it is now decided receiver-side.
 | chrome `Down`/`Drag` | reserved — drop | drop, matching the TUI |
 | crossing `Drag` (normalized) | process when it arrives | process at the content coordinate |
 | crossing `Up` (normalized) | terminate the gesture | **replay at the last valid CONTENT coordinate** — never the chrome row |
-| chrome wheel | **process through `scroll_window`** | **CONSUME** — no child bytes, no local scrollback, no document fallthrough (Q#BP-R2) |
+| chrome wheel | **process through `scroll_window`** | **CONSUME, before activation** — no focus change, no controller claim, no child bytes, no local scrollback, no document fallthrough (Q#BP-R2) |
 
 **The chrome wheel carries a chrome coordinate over the wire, and that
 is fine**: it is a valid frame cell, the daemon's coord validation
@@ -2244,19 +2261,57 @@ the panel holds a terminal (see the seam note above). The producer
 claims the chrome wheel and sends it for **every** panel; the daemon
 resolves the side window and consumes it when the buffer is a terminal.
 
+##### And it is consumed BEFORE ACTIVATION, not merely before replay
+
+**"Consume before `apply_terminal_gesture`" is not early enough.**
+Every non-`Move` terminal panel gesture activates the side window
+first, and `activates` is computed as `!matches!(kind, Move)`
+(`src/editor.rs:2695`–`:2698`), which **includes the wheel**. Focus and
+`active_frontend` are written at `:2699`–`:2701`, *before* any replay
+decision.
+
+A consume check placed after that block leaves the exact half-state
+AC48's activate-then-claim rule exists to prevent: **the wheel changes
+FOCUS while scrolling nothing and claiming no controller.** The panel
+steals focus and does not move.
+
+**A terminal-chrome wheel is not a terminal gesture at all**, and the
+dispatcher must treat it that way. The order is:
+
+1. Authenticate and validate the panel event (the existing ladder).
+2. Resolve the side window and determine its **buffer kind**.
+3. **If terminal + chrome wheel: consume IMMEDIATELY** — before
+   `focus_window`, before `active_frontend`, before any controller
+   claim, before any command-chain mutation, and before the shared
+   terminal path.
+4. Otherwise, the existing activation and replay rules.
+
+Step 3 is implementable where it needs to be: `is_terminal` is resolved
+from `buffer_id` **before** the activation block, so the kind is
+already known at that point.
+
 **Witness — one frontend across a document→terminal replacement**, so
 the two outcomes are separated by nothing but the buffer kind:
 
 1. panel shows a **document**; wheel over chrome → **the panel
    scrolls**.
 2. the panel is replaced by a **terminal**; wheel over chrome →
-   **nothing changes** — no child bytes, no scrollback movement, no
-   document scroll.
+   **nothing changes at all** — no child bytes, no scrollback movement,
+   no document scroll, **and the focused window and terminal controller
+   identity are unchanged**.
 
-*Mutation: let the terminal branch call `apply_terminal_gesture` — the
-chrome coordinate fails its reporting bounds check, falls into the
-local branch, and the row catches the **accidental local scrollback**
-that revision 8's clamp would have shipped deliberately.*
+Two mutations, biting different halves:
+
+| mutation | must fail |
+|---|---|
+| the terminal branch calls `apply_terminal_gesture` | the chrome coordinate fails its reporting bounds check, drops into the local branch, and the row catches the **accidental local scrollback** revision 8's clamp would have shipped deliberately |
+| the consume check sits **below** the activation block | nothing scrolls, so bytes/scrollback/document all still pass — **only the focus and controller assertions catch it** |
+
+**The second mutation is why the focus and controller assertions are
+load-bearing.** Without them the row is green against an
+implementation that steals focus on every chrome wheel over a
+terminal — the half-state is invisible to any assertion about
+movement, because nothing moves either way.
 
 Doing it in one frontend across a replacement is what makes it a
 control rather than two unrelated observations: the geometry, the

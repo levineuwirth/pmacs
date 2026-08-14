@@ -281,7 +281,7 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
   **`githubsucks/panel-pointer-replay` is the authoritative tip** (the
   ref, not a SHA). Recover with
   `git fetch githubsucks && git checkout panel-pointer-replay`.
-- **No PR yet. Checkpoint: framing revision 10 (§5a) AWAITING APPROVAL;
+- **No PR yet. Checkpoint: framing revision 11 (§5a) AWAITING APPROVAL;
   NO IMPLEMENTATION WRITTEN.** Commit one was the ground-truth
   re-measurement; 6 added the four replay edges; **7 answers review of
   6; **8 answers review of 7** — R-c is target × gesture-ORIGIN
@@ -310,6 +310,16 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
   the side window and decides: document → `scroll_window`, terminal →
   consume. Witness: one frontend across a document→terminal
   replacement.
+  **Revision 11** fixes the ORDERING: the terminal-chrome wheel is
+  consumed **before activation**, not merely before
+  `apply_terminal_gesture`. `activates` is `!matches!(kind, Move)` for
+  a terminal (`src/editor.rs:2695`), so the wheel already writes focus
+  and `active_frontend` at `:2699` ahead of any replay decision — a
+  consume check below that would change focus while scrolling nothing
+  and claiming no controller. Four-step order, consumption at step 3;
+  the witness now asserts **focus and controller identity unchanged**,
+  which is what catches the consume-below-activation mutation, since
+  that mutation moves nothing.
 - **Why this lane exists.** `PanelPointer` **replays nothing**:
   `dispatch_semantic_panel_pointer` (`src/editor.rs:2674`) validates,
   focuses, returns. A panel wheel is dead on both axes and so is every
