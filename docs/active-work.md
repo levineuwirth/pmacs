@@ -281,12 +281,16 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
   **`githubsucks/panel-pointer-replay` is the authoritative tip** (the
   ref, not a SHA). Recover with
   `git fetch githubsucks && git checkout panel-pointer-replay`.
-- **No PR yet. Checkpoint: framing revision 7 (§5a) AWAITING APPROVAL;
+- **No PR yet. Checkpoint: framing revision 8 (§5a) AWAITING APPROVAL;
   NO IMPLEMENTATION WRITTEN.** Commit one was the ground-truth
   re-measurement; 6 added the four replay edges; **7 answers review of
-  6** — R-c is per-KIND with a producer rule, R-d covers geometry
-  identity and both latch fields, R-a gains the document Shift
-  contrast, R-b's rows now pin results.
+  6; **8 answers review of 7** — R-c is target × gesture-ORIGIN
+  (terminals reject all chrome kinds and raw chrome coords fail the
+  reporting bounds check), R-c2 retains the `Down` cell, A3–A5 add
+  positive SGR controls, and four witness seams are tightened. **New
+  ruling Q#BP-R2**: a chrome wheel over a terminal panel clamps into
+  content rather than dropping — a deliberate divergence from the TUI,
+  flagged for overrule.
 - **Why this lane exists.** `PanelPointer` **replays nothing**:
   `dispatch_semantic_panel_pointer` (`src/editor.rs:2674`) validates,
   focuses, returns. A panel wheel is dead on both axes and so is every

@@ -7,8 +7,39 @@ protocol v20, 2026-07-24. Amended by the pre-implementation dependency
 verification in §0.6: the folding dependency is cleared, and one geometry
 caller-census error is corrected.**
 
-**Revision 7 — 2026-08-14, AWAITING APPROVAL.** Answers review of 6.
-Five contract gaps, three of them corrections to 6's own rules:
+**Revision 8 — 2026-08-14, AWAITING APPROVAL.** Answers review of 7:
+
+- **R-c is target × gesture-ORIGIN, not kind alone.** The TUI's
+  per-kind rule is **document-only** — for terminals it rejects every
+  kind on the mode line (`src/editor.rs:3273`) and passes a
+  content-sized viewport. Raw chrome coordinates are actively unsafe
+  there: `apply_terminal_gesture`'s reporting branch is bounds-checked
+  (`:3560`), so a chrome row **falls through to the LOCAL branch** — a
+  reporting child gets `Down` and no `Up`, and a chrome wheel becomes
+  local scrollback. **A content-originated gesture terminates at its
+  last valid CONTENT coordinate.** New: **Q#BP-R2**, ruling that a
+  chrome wheel over a terminal panel **clamps** rather than dropping —
+  a deliberate divergence from the TUI, flagged for overrule.
+- **R-c2: the producer never remembers the `Down` cell.** Arming clears
+  `last_pointer_cell` (`pmacs-gpu/src/main.rs:7250`) and only motion
+  refills it, so once chrome stops being a `PanelCell`, a `Down` +
+  immediate release has **no fallback coordinate**. Retain it at arm
+  time; for a reporting terminal the row asserts the **exact child
+  release bytes**.
+- **A1 was a negative row standing alone** — disabling reporting
+  entirely satisfies it. **A3–A5** add positive controls on the same
+  terminal: exact SGR bytes for `Down`/`Drag`/`Up` and for the wheel,
+  plus the non-reporting wheel's local scrollback effect.
+- **Four witness seams tightened.** B2 reads the **raw `selection`**,
+  because `active_region()` answers `None` on both sides of the `Up`
+  (`src/editor_core.rs:4684`); B4 pins the **exact selected word**; B6
+  runs its sentinel through **single and double** click; D4 uses a
+  **changed** frame with unchanged epochs — the `Down`'s own focus
+  repaint — since a byte-identical duplicate is suppressed before the
+  reset could run (`pmacs-gpu/src/main.rs:6918`).
+
+**Previously, revision 7 — SUPERSEDED.** Five contract gaps, three of
+them corrections to 6's own rules:
 
 - **R-c's "the last row is inert" was wrong.** The TUI's rule is **per
   KIND**: `inner_rows` guards `Down(Left)`/`Drag(Left)`/`Down(Right)`
@@ -1948,6 +1979,23 @@ A2's mutation is deliberately separate from A1's: a single "drop
 `mods`" at the boundary bites both, which proves the boundary matters
 but not that **each consumer** is wired.
 
+**A1 is a NEGATIVE row and cannot stand alone.** It asserts bytes that
+must *not* appear, and **disabling child reporting entirely satisfies
+it** — as does never reaching `apply_terminal_gesture` at all. The
+whole edge matrix could stay green against a replay that never reports.
+Positive controls, on the **same terminal** as A1 so the pair is a
+genuine discriminator:
+
+| # | row | mutation |
+|---|---|---|
+| A3 | unmodified content `Down`/`Drag`/`Up`, reporting enabled → the child receives the **exact SGR byte sequences** for each | bypass `apply_terminal_gesture` → no bytes, A3 fails while A1 still passes |
+| A4 | unmodified content **wheel**, reporting enabled → the child receives the **exact SGR wheel bytes** | as A3 |
+| A5 | same wheel, reporting **disabled** → **no bytes**, and the view's **local scrollback moves** | route the wheel around the shared path → the scrollback does not move |
+
+A3–A5 pin the *positive* half: that replay reaches the shared path and
+the child hears what it should. A1 then pins the one case where it must
+not.
+
 #### R-b. Activation does not make the document path target-safe
 
 `activates` is true for a document panel's `Down(_)` only, so **`Drag`
@@ -1975,11 +2023,25 @@ that drops the tail entirely and changes nothing anywhere.
 | # | row | what it pins |
 |---|---|---|
 | B1 | panel A `Down` → **frontend B input** → panel A `Drag` | A's **anchor is the Down cell's byte and A's cursor is the Drag cell's byte**, exactly; B's window and the document mirror are unchanged |
-| B2 | panel A `Down` → `Up` at the **same** cell | the empty selection **collapses** — an Up that does nothing leaves a stale one-byte region |
+| B2 | panel A `Down` → `Up` at the **same** cell | the window's **raw `selection` is `None`** afterwards — see below |
 | B3 | orphan `Drag`/`Up` on a **passive** panel, no preceding `Down` | the document mirror is **byte-identical**: cursor, selection, `view_top` |
-| B4 | **repeated left `Down`s** at one cell | the existing daemon click state reads a **multi-click**, per Q#BP16 — so replay must not swallow or coalesce them |
+| B4 | **repeated left `Down`s** at one cell | the **exact word** at that cell is selected after the second `Down` — the multi-click actually resolved, per Q#BP16 |
 | B5 | `Down(Right)` on a panel cell | the **context menu** opens, per Q#BP16 — a right press is not a selection gesture |
-| B6 | click a **listview** row | the row is **selected** and `on_visit` **does not run** — a sentinel proving Q#BP-R1's ruling holds through replay |
+| B6 | **single** click, then **repeated/double** click, on a listview row | the row is **selected** and the `on_visit` sentinel **never fires**, in *both* — Q#BP-R1 forbids double-click-to-visit too |
+
+**B2 must read the raw selection, not `active_region()`.** That helper
+returns `None` *"if no region is set **or it is empty**"*
+(`src/editor_core.rs:4684`–`:4688`), so it answers `None` **both before
+and after** the `Up` and cannot see the residue at all. The residue
+being guarded against is an **active-but-empty selection** — a
+`Some(Selection { anchor })` whose anchor equals the cursor — which
+would make the next shift-motion extend from a stale anchor. Inspect
+the **owning window's** `selection` field directly.
+
+**B6 runs both click shapes** because the ruling forbids
+double-click-to-visit as well as single. A sentinel that only tries a
+single click leaves the more tempting implementation — visit on the
+second click, like a file manager — completely uncovered.
 
 B4 and B5 are not new contracts: Q#BP16 already states that repeated
 left `Down`s are what the click state reads as a multi-click and that
@@ -2027,28 +2089,94 @@ Dragging from there into content then emits a `Drag` with no accepted
 receiver-only rule cannot fix this**; the producer must not arm on a
 mode-line press.
 
-| kind on the mode-line row | producer | receiver |
-|---|---|---|
-| `Down(Left)`, `Down(Right)` | **do not arm, do not send** | reserved — drop |
-| `Drag(Left)` | not sent (never armed) | reserved — drop |
-| `Up(Left)` | **send** — it terminates a gesture begun in content | **process**, terminating the gesture |
-| wheel | **send** | **process** — scrolls the panel, per the TUI |
+**Kind alone is still not enough. The rule is target × gesture
+ORIGIN**, and revision 7's table had neither axis complete.
+
+**The TUI's per-kind rule is DOCUMENT-ONLY.** For a terminal window it
+rejects **every** kind on the mode line before any per-kind match:
+`if local_row >= inner_rows || … { self.mouse_click = None; return; }`
+(`src/editor.rs:3273`), and it passes the content-sized viewport
+`CellSize::new(inner_rows, …)` (`:3272`) to `dispatch_terminal_mouse`.
+Terminals never see a chrome coordinate at all.
+
+**And raw chrome coordinates are actively unsafe for terminals**,
+because `apply_terminal_gesture`'s reporting branch is bounds-checked:
+`coord.row < screen_size.rows && coord.col < screen_size.cols`
+(`src/editor.rs:3560`–`:3561`). A chrome row equals `screen_size.rows`,
+so the check **fails and the gesture falls through to the LOCAL
+branch**. Two concrete wrongnesses follow: a reporting child gets a
+`Down` and then **no `Up`** (its release became a local
+`finish_selection`), and a chrome wheel becomes **local scrollback**
+instead of behaving as a content wheel does.
+
+| target | kind | producer | receiver |
+|---|---|---|---|
+| **document** | `Down(Left)`, `Down(Right)` | do not arm, do not send | reserved — drop |
+| **document** | `Drag(Left)`, chrome-originated | not sent (never armed) | reserved — drop |
+| **document** | `Drag(Left)`, **content-originated** | **sent** — the gesture is live | **process at the last valid CONTENT coordinate** |
+| **document** | `Up(Left)` | **send** | **process** — terminates the gesture |
+| **document** | wheel | **send** | **process** — scrolls the panel |
+| **terminal** | any kind, chrome-**originated** | do not arm, do not send | drop, matching the TUI |
+| **terminal** | `Drag`/`Up`, **content-originated**, now over chrome | **send** | **replay at the last valid CONTENT coordinate** — never the chrome row |
+| **terminal** | wheel over chrome | **send, clamped to content** | as a content wheel: reported when eligible, else local scrollback |
+
+**A content-originated gesture terminates normally, at its last valid
+content coordinate.** That is the whole of the crossing rule, and it is
+what keeps a reporting child from being told about a row it does not
+own while still receiving its release.
+
+#### Q#BP-R2 — a chrome wheel over a TERMINAL panel: clamp, or drop? **RULED: clamp**
+
+The one product call inside R-c, flagged because it **diverges from the
+TUI deliberately**. The TUI drops terminal mode-line wheels; this rules
+that a panel clamps them into content instead.
+
+The reason is that the panel's mode line is not a window's mode line
+among many — it is **the band's own chrome**, one row, and the document
+panel already scrolls on a chrome wheel (the TUI does not guard the
+wheel for documents). Dropping for terminals would make **the same
+pixel behave differently depending on the buffer kind currently shown
+there**, which is not a distinction a user is holding in mind while
+scrolling. **Overrule this if you would rather have TUI parity**; it is
+a one-line difference in the clamp and nothing else in R-c depends on
+it.
 
 **Both crossings need witnesses, and they fail in opposite
 directions:**
 
-- **Mode line → content:** press on the mode line, drag into content.
+- **Chrome → content:** press on the mode line, drag into content.
   **No `Drag` reaches the daemon**, because nothing armed. *Mutation:
-  arm on a mode-line press — the orphan appears.*
-- **Content → mode line:** press in content, release over the mode
-  line. **The gesture terminates** — the selection is committed, the
-  latch clears. *Mutation: reserve `Up` as well — the gesture hangs,
-  latched, and the next unrelated motion continues a selection the user
-  ended.*
+  arm on a chrome press — the orphan appears.*
+- **Content → chrome:** press in content, release over the mode line.
+  **The gesture terminates at the last content coordinate.** For a
+  **document** panel the selection commits and the latch clears; for a
+  **reporting terminal** the child receives the release **at the
+  content row**. *Mutation: reserve `Up` for documents — the gesture
+  hangs latched; pass the raw chrome coordinate for terminals — the
+  child receives no `Up` at all, because the bounds check drops it into
+  the local branch.*
 
-**The wheel is ruled explicitly**: a wheel over the mode line scrolls
-the panel exactly as one over content does. It is not a click, it
-carries no position semantics, and the TUI does not guard it.
+#### R-c2. The producer does not remember where the gesture began
+
+`set_panel_pointer_held` **clears `last_pointer_cell`**
+(`pmacs-gpu/src/main.rs:7250`), and only `panel_motion_is_new`
+(`:7238`) ever fills it. `panel_release_cell` falls back to that field
+when the release is not over a cell (`:7225`–`:7230`).
+
+Today that fallback is rarely reached, because chrome *is* a
+`PanelCell`. **Once R-c stops chrome being one, it becomes the normal
+path** — and it is empty. A `Down` in content followed **immediately**
+by a release over chrome or outside the band, with **no intervening
+motion**, has no coordinate to fall back to, so the `Up` is either
+dropped or sent with nothing.
+
+**Retain the `Down` cell when arming.** Row: `Down` in content →
+release over chrome, **no intervening motion** → the `Up` carries the
+**`Down` cell's** coordinate. *Mutation: keep clearing the cell on arm
+— the release has no coordinate.* **For a reporting terminal the row
+asserts the exact child release BYTES**, not merely that the frontend
+latch cleared: a latch that clears while the child never hears the
+release is the failure this row exists for.
 
 #### R-d. Panel replacement leaves the frontend's gesture latch armed
 
@@ -2103,6 +2231,15 @@ independently discriminating legs.
 unconditionally: an **ordinary same-identity frame refresh must NOT
 cancel a live gesture**. A panel repaints constantly during a drag;
 resetting on each frame would make selection impossible.
+
+**D4's frame must be a CHANGED frame with unchanged epochs**, and the
+natural one is **the focus repaint the `Down` itself causes** — the
+panel activates, its mode line and cursor render differently, and the
+frame arrives mid-gesture with both epochs identical. A byte-identical
+duplicate would not exercise the rule at all: production returns early
+on one, *"A duplicate does no work — not even a reshape"*
+(`pmacs-gpu/src/main.rs:6918`–`:6919`), so the reset code is never
+reached and D4 passes against a broken implementation.
 
 R-d's orphan is distinct from R-b's: **R-b's arrives from a passive
 panel, R-d's from a replaced or re-declared one**, and an
