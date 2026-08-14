@@ -1,24 +1,46 @@
 # GUI arc, Stage 1 — input foundation (framing)
 
-**Status: revision 14 — AWAITING APPROVAL.** Revision 14 answers review
-of revision 13. **Q#S1-11 is RULED (B), viewport only**, with the full
-five-clause lifetime contract and its witnesses; (A) was not viable
-because the GPU cursor is a daemon-owned mirror and carrying point
-would need a wire operation 1b is not allowed. Two further holes review
-named are closed: **B1's "surface" is now enumerated** as a
-wheel-target table with a residual owner and a horizontal answer per
-target, and **B3 takes B7's exact saturated upper bound** in the GPU's
-column grid instead of "content bounds". Revision 13's claim that the
-snap-back lands on the next *caret event* is **corrected**: it lands on
-the next **paint**.
+**Status: revision 15 — AWAITING APPROVAL.** Revision 15 answers review
+of 14 and **does change two B-row contracts**, which 14 wrongly denied.
+
+- **B1 is now fully ruled**, not half-ruled. Revision 14 left two
+  "must be ruled" cells in the wheel-target table, which is a question
+  wearing a table's clothes. Every cell is normative now, and the two
+  gaps are closed from measurement: the **terminal** emits both axes
+  (the SGR encoder already carries codes 66/67, and a non-reporting
+  terminal is inert, matching the TUI), and the **panel** emits both
+  axes while its missing **replay** is repaired in a **prerequisite
+  lane** rather than absorbed here. Divider, background and chrome are
+  ruled too.
+- **Revision 14 cited a TEST FIXTURE as the panel's production
+  handler** (`src/daemon.rs:6683`, inside `#[cfg(test)]`). The real
+  path validates and focuses and **replays nothing** — a pre-existing
+  violation of an already-ruled contract, which the wrong citation hid.
+- **The GPU preservation witness 14 specified was vacuous.** "The next
+  paint" is TUI-only; the GPU's `render()` never calls
+  `horizontal_follow`. The lifetime rows are respecified per frontend.
+- **Five clauses now have eight witnesses**, not three. 14 left point
+  and selection, clamp-absorbed motion, re-clamping, and the authority
+  latch under wrap unconstrained.
+- **Clause 3's direction was backwards** in 14: a *wider* viewport
+  lowers the maximum origin.
+
+**What is normative here, stated plainly:** §2a **changes B1 and B3**.
+B1 gains a per-target enumeration it did not have, and B3 gains B7's
+exact upper bound in place of "content bounds". B2, B4, B5, B6 and B7
+are unchanged.
+
+**Previously, revision 14 — SUPERSEDED.** Ruled Q#S1-11 (B) with the
+five-clause lifetime contract, and gave B3 B7's exact saturated bound.
+Both stand.
 
 **Previously, revision 13 — SUPERSEDED.** §2a's ground-truth
 re-measurement for Stage 1b at the post-#240 tip. Every 1b anchor was
 stale, as expected; what was not was that **three B-rows describe a
 field as empty when it is occupied**, and that **B7 re-opens a question
-another framing deliberately deferred**. **No B-row contract is changed
-by either revision** — 13 and 14 add ground truth, a ruling, and
-witnesses.
+another framing deliberately deferred**. Its claim that the snap-back
+lands on the next *caret event* was corrected by 14 to the next
+**paint**, and by 15 to *per-frontend* drivers.
 
 **Previously, revision 12 — APPROVED.** Revision 12 is §2's ground-truth
 re-measurement for Stage 1a and changes no ruling; it carries two
@@ -35,9 +57,9 @@ IMPLEMENTED**; 1a onward may begin from this document.
 the tip after 1-pre; it was originally taken at `a994f37`. **§2a is
 measured at `72da24a`** (2026-08-13), the tip after 1a and #240, and it
 is the base for **1b only**; it carries Q#S1-11's ruling. Sections
-other than §2/§2a were written
-against `a994f37` and their *rulings* are unaffected by 1-pre, which
-changed no behaviour — but **any line number outside §2 and §2a
+other than §2/§2a were written against `a994f37` and their *rulings*
+are unaffected by 1-pre, which changed no behaviour — but **any line
+number outside §2 and §2a
 predates 1-pre and should be re-checked before it is relied on.** The
 1b table's own anchors are superseded by §2a wholesale; read §2a first.
 
@@ -193,26 +215,84 @@ Note also a live consequence of `:3090` matching `PanelCell(_)` alone:
 document today**, though the enum's own doc says the band "still owns
 the pixel."
 
-The enumeration B1 must carry, measured:
+The enumeration B1 carries. **Every cell is normative** — "vertical
+today" is the measurement, "vertical RULED" is the contract, and where
+they differ 1b closes the gap:
 
-| wheel target | classified today | vertical wheel today | residual owner | horizontal |
-|---|---|---|---|---|
-| Panel cell | `PanelCell` | wire `ScrollUp`/`Down` (`:3102`) | per panel | **must be ruled** — wire has the kinds, daemon has no arm |
-| Panel divider / background | `PanelDivider` / `PanelBackground` | **falls through to the document** | — | inert |
-| Terminal | `Elsewhere` + `terminal.is_some()` (`:3112`) | wire terminal `ScrollUp`/`Down` (`:3122`) | per terminal | **must be ruled** — same gap |
-| Minimap | `Elsewhere` | document `scroll_by_lines` | **its own** (B6) | inert |
-| Document | `Elsewhere` | `scroll_by_lines` (`:3126`) | document | `code_scroll_left` (B3) |
-| Chrome | `Elsewhere` | document | none | inert |
+| wheel target | classified | vertical today | vertical RULED | residual owner | horizontal RULED |
+|---|---|---|---|---|---|
+| Panel cell | `PanelCell` | emits (`:3102`), **replay missing** | emit **both axes**; replay is a **prerequisite lane** | per panel | emit `ScrollLeft`/`Right` |
+| Panel divider / background | `PanelDivider` / `PanelBackground` | **scrolls the document** | **consume both axes** — the band owns the pixel | per panel | consumed, no emit |
+| Terminal | `Elsewhere` + `terminal.is_some()` (`:3112`) | emits (`:3122`) | emit **both axes** | per terminal | emit `ScrollLeft`/`Right`; **inert when not reporting** |
+| Minimap | `Elsewhere` | document `scroll_by_lines` | document viewport, **own residual** (B6) | **its own** | inert |
+| Document | `Elsewhere` | `scroll_by_lines` (`:3126`) | unchanged | document | `code_scroll_left` (B3) |
+| Chrome | `Elsewhere` | document | **shares the document's**, deliberately | **the document's** | shares the document's |
+
+**Divider and background consume both axes.** Falling through to the
+document contradicts `PanelBackground`'s own doc — *"the band still owns
+the pixel"* — and is a measurement, never a decision. Consuming is not
+"inert": the residual is the panel's, so a gesture that crosses from
+the band's background onto a cell does not jump.
+
+**Chrome shares the document's scrolling and the document's residual.**
+That is today's behaviour, and making it normative is what keeps 1b
+from having to change both frontends' hit testing for no user-visible
+gain. It is written down so it is a choice rather than a leak.
 
 **The horizontal gap is not a wire gap.** `MouseKind::ScrollLeft` and
 `ScrollRight` already exist (`pmacs-protocol/src/message.rs:245`,
 `:247`) and round-trip (`src/protocol.rs:720`), so **emitting them
-needs no protocol bump** — 1b stays non-protocol-bearing either way.
-What is missing is a *handler*: the terminal path has arms for
-`ScrollUp`/`ScrollDown` only (`src/editor.rs:3576`, `:3579`), and the
-panel path only `ScrollUp` (`src/daemon.rs:6683`). So for each wire
-target 1b must choose **emit-and-handle** or **explicitly inert**, and
-say which. Silence here is what lets a horizontal tick vanish.
+needs no protocol bump** — 1b stays non-protocol-bearing.
+
+**The terminal answer follows from the encoder.** `sgr_mouse_report`
+(`src/terminal/input.rs`) already encodes `ScrollLeft` as **66** and
+`ScrollRight` as **67** (`:126`–`:127`), so the terminal handles both
+axes the moment they are emitted. Its guard (`:111`) returns `None`
+unless `mouse_sgr` is on and tracking is not `Off`, so a
+**non-reporting terminal is horizontally inert** — which matches the
+TUI, where nothing consumes a horizontal tick either. No new arm is
+needed.
+
+#### The panel replay gap — a pre-existing defect, repaired in a prerequisite lane
+
+**Revision 14 cited `src/daemon.rs:6683` as the panel's `ScrollUp`
+handler. That was wrong: it is a test fixture**, inside `#[cfg(test)]
+mod tests` (opened at `:3740`). Citing a fixture as production is
+precisely the error B1's enumeration exists to prevent, and it hid a
+real defect.
+
+The production path is `dispatch_semantic_panel_pointer`
+(`src/editor.rs:2674`). It validates the coord against the panel grid,
+resolves the side window, focuses when the gesture activates — and
+**returns `true` without replaying anything.** Its own doc says so:
+*"**Replay is out of scope in Stage 2B-2.** Driving selection, listview
+rows, or child SGR reporting is **parent acceptance 48**, which needs
+the GPU band and lands in **Stage 2B-3**."*
+
+So **a panel wheel does nothing today, on either axis** — the frontend
+emits, the daemon validates and drops. That is a **pre-existing
+violation of an already-ruled contract**, uncovered by this
+measurement, not created by 1b.
+
+**Ruling: 1b does not absorb it.** 1b owns the frontend half — per-panel
+residual, both axes emitted — and the replay is repaired in a
+**prerequisite lane** carrying parent acceptance 48. Three reasons:
+
+1. **It is already scoped elsewhere.** Stage 2B-3 owns replay by an
+   existing ruling. Absorbing it would overrule that from an input
+   slice.
+2. **It is not input work.** Replay drives selection, listview rows and
+   child SGR reporting, and needs the GPU band — none of which is
+   pointer-and-scroll.
+3. **The defect predates 1b** and is not horizontal-specific: vertical
+   panel scrolling is equally dead today. A fix belongs where the
+   contract lives, not bolted to the slice that happened to find it.
+
+**Panel inertness is therefore NOT an option and is not claimed.** The
+panel's contract is "emit both axes with its own residual"; what is
+deferred is the daemon replaying them, and **1b's panel rows witness
+emission only, which they must say explicitly** rather than implying a
+scroll the user cannot yet see.
 
 **Without this table the rows are satisfiable by an implementation that
 is wrong**: one global accumulator passes every per-surface row that
@@ -322,7 +402,12 @@ undefined, which is the part that decides whether the feature works.
    fully absorbed by the clamp arms nothing.
 3. **Preserved by** repaint, a same-cursor follow, resize, and vertical
    wheel. **Clamped by** geometry and content changes — clamped, not
-   released: a narrower window must not silently discard the gesture.
+   released. **A WIDER viewport lowers the maximum origin**
+   (`widest − viewport`), so widening re-clamps downward; the gesture is
+   preserved at the new bound rather than discarded, and authority
+   survives the clamp. (Revision 14 said "a narrower window", which had
+   the direction backwards — narrowing *raises* the ceiling and needs no
+   clamp at all.)
 4. **A genuine cursor-position change releases it**, and normal follow
    resumes on that same event. Release is driven by the cursor
    *changing*, never by elapsed time or by the follow running.
@@ -332,28 +417,55 @@ undefined, which is the part that decides whether the feature works.
 
 ##### What B7 and B3 must witness
 
-Rows against the **real call sites**, on **both** frontends — a unit
-test of a helper cannot see a follow that runs inside `paint_frame`:
+Rows against the **real call sites**. A unit test of a helper cannot see
+a follow that runs inside a frame.
 
-- **Preservation:** wheel sideways, then drive a real paint with the
-  cursor unchanged; the origin holds.
-- **Release:** wheel sideways, then a genuine cursor-position change;
-  the origin follows the cursor on that event.
-- **Cross-axis, TUI only:** wheel sideways, then wheel **vertically**.
-  Vertical wheel carries point in the TUI (`scroll_window`), so this
-  path *does* move the cursor and would release a naive
-  authority-on-any-cursor-write implementation. Clause 3 says the
-  horizontal origin survives it.
+**The two frontends need DIFFERENT preservation drivers, and this is
+where revision 14 was wrong.** It said "the next paint" without
+qualification. **That is TUI-only.** The GPU's `render()` (`:9881`) goes
+straight to `render_to_view` and **never calls `horizontal_follow`**;
+the follow reaches it only through `ensure_caret_painted` (`:7674`),
+whose callers are cursor paths (`:5607`, `:5659`, `:5776`, `:6320`) and
+geometry paths — `resize` (`:9851`), `apply_font_facts` (`:9729`),
+`reflow_dynamic_code_geometry` (`:9672`). **A GPU wheel-then-paint row
+would stay green with the overwrite mutation restored**, which is a
+vacuous witness of exactly the kind this framing keeps producing.
 
-Two mutations, and both must fail their own rows:
+| # | witness | driver |
+|---|---|---|
+| L1 | preservation, TUI | wheel sideways → **a real paint** (`paint_frame` → `prepare_window_cursor_visible`) |
+| L2 | preservation, GPU | wheel sideways → **a real same-cursor geometry re-follow** (`resize` / `apply_font_facts`), cursor unchanged |
+| L3 | release | wheel sideways → a genuine cursor-position change **to a column OUTSIDE the manual viewport** |
+| L4 | cross-axis, **TUI only** | wheel sideways → wheel **vertically**; vertical wheel carries point in the TUI (`scroll_window`), so a naive authority-on-any-cursor-write releases here. Clause 3 says the origin survives |
+| L5 | point and selection unmoved | wheel sideways on both frontends → point and selection byte-identical (clause 1) |
+| L6 | clamp-absorbed motion does not arm | at the bound already, wheel further → origin unchanged **and authority NOT armed**, so the next follow moves normally (clause 2's "effective") |
+| L7 | re-clamp preserves authority | wheel sideways → **widen** the viewport → origin re-clamped to the new maximum, authority still held, next same-cursor follow does not overwrite (clause 3) |
+| L8 | wrap and buffer replacement clear the LATCH | wheel sideways → toggle to `Wrap` (and separately, replace the buffer) → origin zero **and authority cleared**, verified by a following `truncate` toggle where the caret rule governs again (clause 5) |
+
+**L3 must move the cursor OUTSIDE the manual viewport.** Inside it,
+`follow_left` returns the same origin, so a release row would pass
+whether or not release happened — the "authority never releases"
+mutation would survive it.
+
+**L8 is not covered by the existing wrap-origin rows.** Those assert the
+origin is zeroed; they cannot see a **stale latch** surviving the wrap,
+which surfaces only on the return to `truncate` when the caret rule
+should have resumed and does not.
+
+Mutations, each failing its own rows and no others:
 
 | mutation | must fail |
 |---|---|
-| follow ignores manual authority (always overwrites) | preservation |
-| manual authority never releases | release |
+| follow ignores manual authority (always overwrites) | L1, L2 |
+| manual authority never releases | L3 |
+| authority armed by *any* wheel event, effective or not | L6 |
+| re-clamp releases authority instead of preserving it | L7 |
+| wrap/replacement zeroes the origin but leaves the latch set | L8 |
+| the wheel path writes point or selection | L5 |
 
-Clause 5 is already implemented for the caret path; the mutation for it
-is the existing wrap-guard removal named in the B7 row.
+Clause 5's *origin* half is already implemented for the caret path; the
+existing wrap-guard removal named in the B7 row remains its mutation.
+**L8 covers the half that is new — the latch.**
 
 ### CORRECTION 6 — B3's right bound is vaguer than B7's, for the same bound
 
@@ -585,14 +697,15 @@ The crate has **exactly one** executable `event_loop.exit()`, in
 
 ### 1b — pointer and scroll
 
-> **Read §2a first.** Every line number in this table was measured
-> before 1-pre and is stale. §2a re-measures them at `72da24a`, records
-> three rows whose "nothing exists yet" is wrong (B3, B4, B5),
-> enumerates B1's wheel targets, gives B3 B7's exact upper bound, and
-> rules **Q#S1-11 (B, viewport only)** with the lifetime contract and
-> witnesses B7 and B3 both depend on. The contracts below are
-> unchanged, but **none of B1, B3 or B7 is implementable from this
-> table alone.**
+> **Read §2a first, and note that it CHANGES two of these rows.** Every
+> line number below was measured before 1-pre and is stale. §2a
+> re-measures them at `72da24a`; records three rows whose "nothing
+> exists yet" is wrong (B3, B4, B5); **replaces B1's undefined
+> "surface" with a normative six-target enumeration**; **replaces B3's
+> "content bounds" with B7's exact saturated upper bound**; and rules
+> **Q#S1-11 (B, viewport only)** with a five-clause lifetime contract
+> and eight witnesses. B2, B4, B5, B6 and B7 are unchanged. **None of
+> B1, B3 or B7 is implementable from this table alone.**
 
 | # | Contract | Witness | Mutation |
 |---|---|---|---|

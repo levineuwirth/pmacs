@@ -272,10 +272,14 @@ waits for a signal that is not coming.
 
 ## GUI arc Stage 1b — pointer and scroll — ACTIVE, framing only
 
-**Written with the branch's first commit**, per the standing correction
-from #171 and #215. **Minimal by intent**: the recovery facts and the
-checkpoint, nothing else. The #239/#240 absorption is a separate lane
-and is still deferred.
+**Written with the branch's SECOND commit, not its first** — the
+standing correction from #171 and #215 asks for the first, and this
+lane missed it: commit one was the framing re-measurement alone.
+Recorded rather than quietly fixed, because a lane that claims
+compliance it did not achieve is the failure the correction exists to
+catch. **Minimal by intent**: the recovery facts and the checkpoint,
+nothing else. The #239/#240 absorption is a separate lane and is still
+deferred.
 
 - **Branch `gui-stage1b-pointer-scroll`**, base `githubsucks/main` @
   **`72da24a`** exactly — the #240 merge commit.
@@ -304,11 +308,22 @@ and is still deferred.
     `prepare_window_cursor_visible` (`src/editor.rs:4539`), which
     `paint_frame` runs every frame (`:4852`). Revision 13 said "caret
     event" and understated it.
-  - **B1's "surface" is enumerated** as six wheel targets with a
-    residual owner and a horizontal answer each. Quantization precedes
-    routing (`:3074` before `:3090`/`:3112`), so an accumulator added
-    after the routing decision fixes the document and leaves the wire
-    targets broken.
+  - **B1's "surface" is enumerated** as six wheel targets, each with a
+    residual owner and a **normative** answer on both axes. Revision 14
+    left two cells reading "must be ruled"; revision 15 closes them.
+    Quantization precedes routing (`:3074` before `:3090`/`:3112`), so
+    an accumulator added after the routing decision fixes the document
+    and leaves the wire targets broken.
+  - **A pre-existing defect this uncovered: the panel replays
+    NOTHING.** `dispatch_semantic_panel_pointer` (`src/editor.rs:2674`)
+    validates and focuses, then returns — so a panel wheel is dead
+    today on **both** axes. Its own doc defers replay to **parent
+    acceptance 48, Stage 2B-3**. **1b does not absorb it**: 1b emits
+    both axes with a per-panel residual, and the replay is a
+    **prerequisite lane**. Revision 14 missed this because it cited
+    `src/daemon.rs:6683` — a `#[cfg(test)]` fixture — as the handler.
+  - **Revision 15 CHANGES two B-row contracts**, B1 and B3. Revision 14
+    claimed no contract changed; that was false.
   - **B3 takes B7's exact saturated upper bound** in the GPU column
     grid, with narrow-buffer and final-column-visible rows. A clamp at
     full content width must fail.
@@ -503,31 +518,36 @@ from #171 and #215.
 ## GUI arc Stage 1 — 1-pre MERGED as #237 (`d038f71`); 1a MERGED as #239; 1b IS THE ACTIVE LANE
 
 **The lane is rewritten, not removed.** Rule 4 removes a lane when its
-ARC is done, and the arc is Stage 1 as a whole: **five slices remain**.
+ARC is done, and the arc is Stage 1 as a whole: **four slices remain**
+— `1b` (active), `1c`, `1d`, `1e`.
 
-- **Framing `docs/gui-stage1-input-framing.md`, revision 11, APPROVED**
-  after eight rejected revisions. It is Stage 1's framing for **all**
-  slices and governs every later branch; only Stage 0 was framed by the
+- **Framing `docs/gui-stage1-input-framing.md`, approved through
+  revision 12; §2a is at revision 15, AWAITING APPROVAL** (the 1b
+  ground truth and Q#S1-11). Approved after eight rejected revisions.
+  It is Stage 1's framing for **all** slices and governs every later
+  branch; only Stage 0 was framed by the
   arc document itself. Revision 9 is the approved design; 10 recorded a
   scope correction found against the 1-pre implementation; **11 retracts
   10's claim that P2 was satisfied by route classification alone**, and
   corrects the Stage 1a consequence 10 got wrong.
-- **Slice order, each its own branch and PR:** ~~`1-pre`~~ → **`1a`**\* →
-  `1b` → `1c` → `1d` → `1e`\*. **`1a` and `1e` are the two
-  protocol-bearing slices — v24 `TextInput` and v25
+- **Slice order, each its own branch and PR:** ~~`1-pre`~~ →
+  ~~`1a`~~\* → **`1b`** → `1c` → `1d` → `1e`\*. **`1a` and `1e` are the
+  two protocol-bearing slices — v24 `TextInput` and v25
   `OpenTarget`/`OpenTargetResult` — and they are SERIALIZED** against
   each other and against every other wire change in the project. 1c is
   **not** protocol-bearing, under Q#S1-8.
-- **NEXT: 1a, and nothing of it exists yet** — no branch, no code. It
-  carries the **v24** `TextInput` variant, so it must run alone.
-  `PROTOCOL_VERSION` is **23** at this base, and
-  `ADVERTISED_PROTOCOL_VERSION` stays pinned at 20 and must not be
-  edited to chase it. Its nine contracts (A1–A9) and the Q#S1-9
-  precedence rules are in the framing; **A4 deletes the idle-Escape
-  local quit**, which is **pre-existing behaviour, not something 1-pre
-  introduced** — 1-pre preserved it and moved it behind an
-  `EventOutcome` return, and 1a removes it. `EventOutcome` survives that
-  removal: the native close still returns `Exit`.
+- **ACTIVE: 1b** — branched at `72da24a`, framing only, no code. See
+  the 1b lane above for recovery and checkpoint. **`PROTOCOL_VERSION`
+  is 24** (1a's `TextInput` landed it); `ADVERTISED_PROTOCOL_VERSION`
+  stays pinned at **20** and must not be edited to chase it. **1e's
+  v25 `OpenTarget` is the one remaining protocol-bearing slice** and
+  must run alone; 1a's serialization is discharged.
+- **1a is DONE (#239).** Its nine contracts (A1–A9) and the Q#S1-9
+  precedence rules are in the framing. **A4 deleted the idle-Escape
+  local quit**, which was **pre-existing behaviour, not something
+  1-pre introduced** — 1-pre preserved it behind an `EventOutcome`
+  return and 1a removed it. `EventOutcome` survived: the native close
+  still returns `Exit`.
 
 ### What 1-pre landed, and the facts worth not re-deriving
 
