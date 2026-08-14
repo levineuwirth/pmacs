@@ -288,13 +288,16 @@ deferred.
   `git fetch githubsucks && git checkout gui-stage1b-pointer-scroll`.
 - **No PR yet.** Framing approval gates it, and so does a
   **prerequisite lane** (below).
-- **Checkpoint: framing revision 17 AWAITING APPROVAL; NO CODE
+- **Checkpoint: framing revision 18 AWAITING APPROVAL; NO CODE
   WRITTEN.** `docs/gui-stage1-input-framing.md` §2a is the 1b ground
   truth, measured at `72da24a`. 13 was the re-measurement; 14 ruled
   Q#S1-11; 15 ruled B1's targets; 16 made the replay lane a hard
-  prerequisite; **17 answers review of 16** — B1's cross-axis and
-  identity-switch discriminators (R1–R3), two over-claimed mutation
-  dependencies removed — and is what is pending.
+  prerequisite; 17 added B1's cross-axis and identity-switch
+  discriminators (R1–R3) and removed two over-claimed mutation
+  dependencies; **18 answers review of 17** — R4/R5 for the document,
+  chrome and minimap residuals, which live in the long-lived GPU
+  `State` and reset only from a **manual list**
+  (`pmacs-gpu/src/main.rs:5922`) — and is what is pending.
 - **BLOCKED ON A PREREQUISITE: the panel-replay lane.**
   `dispatch_semantic_panel_pointer` (`src/editor.rs:2674`) validates and
   focuses but **replays nothing**, so a panel wheel is dead today on
