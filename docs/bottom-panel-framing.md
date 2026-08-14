@@ -7,7 +7,37 @@ protocol v20, 2026-07-24. Amended by the pre-implementation dependency
 verification in §0.6: the folding dependency is cleared, and one geometry
 caller-census error is corrected.**
 
-**Revision 6 — 2026-08-14, AWAITING APPROVAL.** Answers review of 5.
+**Revision 7 — 2026-08-14, AWAITING APPROVAL.** Answers review of 6.
+Five contract gaps, three of them corrections to 6's own rules:
+
+- **R-c's "the last row is inert" was wrong.** The TUI's rule is **per
+  KIND**: `inner_rows` guards `Down(Left)`/`Drag(Left)`/`Down(Right)`
+  and deliberately does not guard `Up(Left)` or the wheel. A blanket
+  rule would stop mode-line scrolling and leave a content-started
+  gesture unterminated. **And the producer arms before the receiver can
+  refuse** — a mode-line `Down` sets `pointer_held` locally
+  (`pmacs-gpu/src/main.rs:2878`), so a receiver-only rule cannot
+  prevent the orphan. R-c now carries a per-kind producer/receiver
+  table, both crossings, and an explicit wheel ruling.
+- **R-d covered panel identity but not GEOMETRY identity.** A font or
+  scale change advances `geometry_epoch` while `panel_epoch` holds, and
+  the transition clears neither pointer field, so a held gesture
+  resumes under a new grid with *current, valid* epochs. Four
+  mutations now, including the **negative** one: an ordinary
+  same-identity refresh must not cancel a live gesture.
+- **R-d also needed `last_pointer_cell` constrained separately** —
+  clearing only `pointer_held` leaves the successor's first same-cell
+  `Move` suppressed as a duplicate.
+- **R-a witnessed only the terminal.** The document path consumes Shift
+  too, for the selection anchor, so threading modifiers into
+  `apply_terminal_gesture` alone would pass the proposed row while
+  breaking Shift-click in document and listview panels.
+- **R-b's rows were satisfiable by doing nothing.** They now pin A's
+  anchor and cursor after the Drag, prove `Up` collapses an empty
+  click, and carry Q#BP16's multi-click and Context semantics plus a
+  listview visit sentinel for Q#BP-R1.
+
+**Previously, revision 6 — SUPERSEDED.** Answered review of 5.
 **Q#BP-R1 is RULED: a single click SELECTS a listview row only**;
 RET/SPC remain activation, and this lane adds no click-to-visit.
 Revision 5 concluded that the activation ordering made replay safe;
@@ -1896,11 +1926,27 @@ is the user's override for "select locally instead of talking to the
 child."** Arriving with modifiers zeroed, a Shift-drag over a
 reporting terminal panel sends SGR to the child instead of selecting.
 
-**Thread `mods` through** the destructure, the dispatcher signature and
-into `apply_terminal_gesture`. **Row:** with mouse reporting enabled,
-a Shift-drag selects locally and the child receives **no bytes**.
-*Mutation: drop `mods` at the daemon boundary — the child receives
-bytes and the row fails.*
+**And the terminal is not the only consumer.** The ordinary document
+path reads Shift too: `dispatch_pointer`'s `Down` arm computes
+`extending = mods.contains(SHIFT)` and `keep_anchor`, then either
+**extends from the previous cursor** or collapses the selection to the
+clicked byte (`src/editor.rs:3673`–`:3687`). So Shift-click in a
+**document or listview panel** is selection extension, and threading
+modifiers *only* into `apply_terminal_gesture` would **pass the
+terminal row while leaving document panels broken** — the exact shape
+of a witness that certifies half a fix.
+
+**Thread `mods` through** the destructure, the dispatcher signature,
+and into **both** consumers. Two rows, and both mutations:
+
+| # | row | mutation |
+|---|---|---|
+| A1 | terminal panel, reporting enabled: **Shift**-drag selects locally, child receives **no bytes** | drop `mods` before `apply_terminal_gesture` → the child receives bytes |
+| A2 | document/listview panel: **Shift**-click **extends** the selection from the prior cursor; unmodified click collapses it | drop `mods` before the document path → Shift-click collapses, A2 fails while A1 still passes |
+
+A2's mutation is deliberately separate from A1's: a single "drop
+`mods`" at the boundary bites both, which proves the boundary matters
+but not that **each consumer** is wired.
 
 #### R-b. Activation does not make the document path target-safe
 
@@ -1922,13 +1968,28 @@ the round-3 F1 correction) **but it also calls
 (`set_cursor_byte`, `begin_selection`) write `active_window_mut()`.
 Panel replay needs the conversion **without** the ambient write.
 
-Two rows, both of which a naive implementation fails:
+**The witnesses must pin the RESULT, not just the absence of collateral
+damage.** "Only A's panel changes" is satisfied by an implementation
+that drops the tail entirely and changes nothing anywhere.
 
-- **Interleaved frontend:** panel A `Down` → **frontend B input** →
-  panel A `Drag`/`Up`. **Only A's panel changes.**
-- **Orphan gesture:** a `Drag`/`Up` against a **passive** panel with no
-  preceding `Down`. **The document mirror is byte-identical
-  afterwards** — cursor, selection and `view_top`.
+| # | row | what it pins |
+|---|---|---|
+| B1 | panel A `Down` → **frontend B input** → panel A `Drag` | A's **anchor is the Down cell's byte and A's cursor is the Drag cell's byte**, exactly; B's window and the document mirror are unchanged |
+| B2 | panel A `Down` → `Up` at the **same** cell | the empty selection **collapses** — an Up that does nothing leaves a stale one-byte region |
+| B3 | orphan `Drag`/`Up` on a **passive** panel, no preceding `Down` | the document mirror is **byte-identical**: cursor, selection, `view_top` |
+| B4 | **repeated left `Down`s** at one cell | the existing daemon click state reads a **multi-click**, per Q#BP16 — so replay must not swallow or coalesce them |
+| B5 | `Down(Right)` on a panel cell | the **context menu** opens, per Q#BP16 — a right press is not a selection gesture |
+| B6 | click a **listview** row | the row is **selected** and `on_visit` **does not run** — a sentinel proving Q#BP-R1's ruling holds through replay |
+
+B4 and B5 are not new contracts: Q#BP16 already states that repeated
+left `Down`s are what the click state reads as a multi-click and that
+`Down(Right)` is the context gesture, *"so neither may collapse"*
+(§3, Q#BP16). They are in this matrix because **replay is where those
+statements first become executable** — until now nothing replayed, so
+nothing could contradict them.
+
+B6 is the sentinel for the ruling above: selection without activation
+is only meaningful if something fails when a click visits.
 
 #### R-c. `panel_grid_size` is the FRAME, not the terminal viewport
 
@@ -1945,16 +2006,49 @@ child is told about a row it does not own, and every coordinate below
 it is off by the same row when the size is used for clamping.
 
 - **Terminal panels:** the viewport is **`rows − 1`**.
-- **Document panels:** the mode line needs an **explicit rule**, and
-  the TUI already has one — `dispatch_mouse` returns early on
-  `local_row >= inner_rows` with the comment *"Mode-line click:
-  reserved."* (`src/editor.rs:3304`–`:3306`). **Panel replay follows it**: a
-  mode-line gesture is reserved, not a click at the nearest content
-  cell.
+- **Document panels:** the mode line needs an explicit rule.
 
-**Rows must distinguish content from chrome**: a gesture on the last
-row is inert (and reaches no child), while the same gesture one row up
-replays normally. Without that pair, an off-by-one passes.
+**"The last row is inert" is WRONG, and revision 6 said it.** The TUI's
+rule — which is the precedent — is **per kind**, not per row.
+`inner_rows` guards `Down(Left)` (`src/editor.rs:3303`), `Drag(Left)`
+(`:3331`) and `Down(Right)` (`:3348`), and **`Up(Left)` (`:3339`),
+`ScrollUp` (`:3358`) and `ScrollDown` (`:3362`) are deliberately NOT
+guarded.** A blanket
+"inert" rule would break two things at once: a wheel over the mode line
+would stop scrolling, and a gesture that begins in content and releases
+over the mode line would **never terminate**.
+
+**And the producer arms before the receiver can refuse.** `PanelCell`
+comes from `panel_hit_test`, which spans the whole frame, so a
+mode-line `Down` runs `set_panel_pointer_held(true)` **locally**
+(`pmacs-gpu/src/main.rs:2878`–`:2880`) before any daemon decision.
+Dragging from there into content then emits a `Drag` with no accepted
+`Down` — an orphan the daemon cannot distinguish from a real one. **A
+receiver-only rule cannot fix this**; the producer must not arm on a
+mode-line press.
+
+| kind on the mode-line row | producer | receiver |
+|---|---|---|
+| `Down(Left)`, `Down(Right)` | **do not arm, do not send** | reserved — drop |
+| `Drag(Left)` | not sent (never armed) | reserved — drop |
+| `Up(Left)` | **send** — it terminates a gesture begun in content | **process**, terminating the gesture |
+| wheel | **send** | **process** — scrolls the panel, per the TUI |
+
+**Both crossings need witnesses, and they fail in opposite
+directions:**
+
+- **Mode line → content:** press on the mode line, drag into content.
+  **No `Drag` reaches the daemon**, because nothing armed. *Mutation:
+  arm on a mode-line press — the orphan appears.*
+- **Content → mode line:** press in content, release over the mode
+  line. **The gesture terminates** — the selection is committed, the
+  latch clears. *Mutation: reserve `Up` as well — the gesture hangs,
+  latched, and the next unrelated motion continues a selection the user
+  ended.*
+
+**The wheel is ruled explicitly**: a wheel over the mode line scrolls
+the panel exactly as one over content does. It is not a click, it
+carries no position semantics, and the TUI does not guard it.
 
 #### R-d. Panel replacement leaves the frontend's gesture latch armed
 
@@ -1970,15 +2064,48 @@ not stale by any test 49 applies. 49 is a staleness gate, and this is
 not a stale event; it is a **well-formed event from a gesture that
 belongs to a presentation that no longer exists.**
 
-**Reset the gesture latch on presentation-identity change.** The
-precedent is in the same file: the **divider** drag latch already
-carries `panel_epoch`/`geometry_epoch` and self-invalidates when the
-presented frame's epochs differ (`:7288`). The pointer latch simply
-never got the same treatment.
+**And panel identity is only half of it.** The two epochs move
+independently, by design (`pmacs-protocol/src/panel.rs:61` onward):
+`panel_epoch` is *"stable across ordinary frames of one continuously
+present window/buffer"*, while `geometry_epoch` *"moves whenever the
+frontend declares new effective cell geometry — including a font or
+scale change that leaves `CellSize` identical"*. A font or scale change
+therefore advances `geometry_epoch` with `panel_epoch` untouched, and
+`next_geometry_declaration` (`pmacs-gpu/src/main.rs:6847`) advances it
+**without clearing either pointer field**.
 
-*Mutation: omit the reset on `Present`→`Present` — the orphan-drag row
-fails.* Distinct from R-b's orphan row: that one arrives from a
-**passive** panel, this one from a **replaced** one, and an
+So a held gesture **resumes under a new grid** — new cell advance, new
+row heights, the same cells meaning different text — carrying epochs
+that are *current and valid*. Acceptance 49's geometry-race check
+cannot help: it rejects events bearing a **stale** `geometry_epoch`,
+and this one bears the new one.
+
+**Reset the gesture latch on a change of EITHER identity.** The
+precedent is in the same file: the **divider** drag latch already
+carries both epochs and self-invalidates when the presented frame
+differs in either (`:7288`). The pointer latch never got it.
+
+**Both fields, and both must be constrained separately.** Clearing only
+`pointer_held` kills the orphan drag but leaves `last_pointer_cell`
+set, and `panel_motion_is_new` (`:7238`–`:7242`) then **suppresses B's
+first same-cell `Move` as a duplicate** — the successor's opening
+motion silently vanishes. The fields fail differently and need
+independently discriminating legs.
+
+| # | mutation | must bite |
+|---|---|---|
+| D1 | no reset on `Present`→`Present` (panel identity) | the replaced-panel orphan-drag row |
+| D2 | no reset on `geometry_epoch` change | the font/scale held-gesture row |
+| D3 | reset clears `pointer_held` only | the successor's first same-cell `Move` row |
+| D4 | reset on **every** frame | the negative row below |
+
+**The negative leg is required**, or D1/D2 are satisfiable by resetting
+unconditionally: an **ordinary same-identity frame refresh must NOT
+cancel a live gesture**. A panel repaints constantly during a drag;
+resetting on each frame would make selection impossible.
+
+R-d's orphan is distinct from R-b's: **R-b's arrives from a passive
+panel, R-d's from a replaced or re-declared one**, and an
 implementation can fix either alone.
 
 ## 6. Deferred (named)

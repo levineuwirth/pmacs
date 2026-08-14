@@ -281,9 +281,12 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
   **`githubsucks/panel-pointer-replay` is the authoritative tip** (the
   ref, not a SHA). Recover with
   `git fetch githubsucks && git checkout panel-pointer-replay`.
-- **No PR yet. Checkpoint: framing revision 6 (§5a) AWAITING APPROVAL;
+- **No PR yet. Checkpoint: framing revision 7 (§5a) AWAITING APPROVAL;
   NO IMPLEMENTATION WRITTEN.** Commit one was the ground-truth
-  re-measurement; **commit two answers review of it.**
+  re-measurement; 6 added the four replay edges; **7 answers review of
+  6** — R-c is per-KIND with a producer rule, R-d covers geometry
+  identity and both latch fields, R-a gains the document Shift
+  contrast, R-b's rows now pin results.
 - **Why this lane exists.** `PanelPointer` **replays nothing**:
   `dispatch_semantic_panel_pointer` (`src/editor.rs:2674`) validates,
   focuses, returns. A panel wheel is dead on both axes and so is every
@@ -339,17 +342,27 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
     is `rows − 1` (`src/editor.rs:2499`–`:2500`) but `panel_hit_test`
     reports across the whole frame (`pmacs-gpu/src/main.rs:7184`), so a
     `PanelPointer` can name the **mode-line row**. Terminal viewport is
-    `rows − 1`; document replay follows the TUI's *"Mode-line click:
-    reserved"* (`src/editor.rs:3304`–`:3306`). Rows must distinguish
-    content from chrome or an off-by-one passes.
+    `rows − 1`. **The document rule is PER KIND, not "the row is
+    inert"** — the TUI guards `Down(Left)`/`Drag(Left)`/`Down(Right)`
+    and deliberately not `Up(Left)` or the wheel, so a blanket rule
+    would stop mode-line scrolling and leave a content-started gesture
+    unterminated. **The producer must also not arm** on a mode-line
+    press (`pmacs-gpu/src/main.rs:2878`); a receiver-only rule cannot
+    stop the resulting orphan.
   - **R-d — replacement leaves the gesture latch armed.** `Absent`
     clears `pointer_held`/`last_pointer_cell`
     (`pmacs-gpu/src/main.rs:6909`) but **`Present`→`Present` does not**
     (`:6913`). A press on A then A→B emits a Drag/release for B with no
     B press, and **acceptance 49 cannot reject it** — the event carries
     B's *current* epochs. The **divider** drag latch already
-    epoch-scopes itself (`:7288`); the pointer latch never did. Reset
-    on presentation-identity change, mutation-checked.
+    epoch-scopes itself (`:7288`); the pointer latch never did. **Both
+    epochs**: a font/scale change advances `geometry_epoch` while
+    `panel_epoch` holds (`pmacs-protocol/src/panel.rs:61`) and clears
+    neither field, so a held gesture resumes under a new grid with
+    valid epochs. **Both fields**: clearing only `pointer_held` leaves
+    the successor's first same-cell `Move` suppressed as a duplicate
+    (`:7238`). Four mutations, including the negative one — an ordinary
+    same-identity refresh must NOT cancel a live gesture.
 - **RULED: Q#BP-R1** — a single click **SELECTS a listview row only**.
   RET/SPC remain activation (`listview.lua:610`); no click-to-visit and
   no double-click-to-visit. Keeps document navigation from becoming an
