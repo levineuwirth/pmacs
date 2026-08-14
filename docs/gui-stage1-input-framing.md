@@ -1,7 +1,27 @@
 # GUI arc, Stage 1 — input foundation (framing)
 
-**Status: revision 17 — AWAITING APPROVAL.** Revision 17 answers review
-of 16. Two additions and one correction:
+**Status: revision 18 — AWAITING APPROVAL.** Revision 18 answers review
+of 17:
+
+- **Identity has a second half that R2/R3 cannot reach.** A panel or
+  terminal residual is keyed to a surface that *goes away*; the
+  **document's and the minimap's live in the long-lived GPU `State`
+  and outlive the buffer**. Their reset is a **manual list** —
+  `pmacs-gpu/src/main.rs:5922` zeroes `scroll_top`,
+  `code_scroll_residual` and `code_scroll_left` one line at a time — so
+  a new wheel residual will not reset itself. **R4** (document plus the
+  chrome residual it shares) and **R5** (the minimap's independent
+  residual) add buffer A→B legs, each with its own mutation omitting
+  its own reset. `code_scroll_left` had this exact defect once already.
+- **U9/U10 said "the same executable"; the two artifacts differ.**
+  `pmacs-9d4963…` and `pmacs-7624…`, different sizes, differing bytes.
+  The supported claim is the same *target*, 1,940-test population and
+  default intra-binary threading. **"Cargo runs test binaries
+  sequentially" is narrowed to the observed cargo 1.95.0 sweep** rather
+  than asserted universally. The concurrency conclusion is unaffected.
+
+**Previously, revision 17 — SUPERSEDED.** Two additions and one
+correction:
 
 - **B1 gains the two separations its crossing witness could not
   reach.** "Per axis and surface" has two nouns; 16 witnessed one
@@ -336,6 +356,35 @@ defect as leaking between kinds but invisible to a kind-level row.
   key the residual by "the panel" rather than by panel identity.*
 - **R3 — terminal A→terminal B:** the same, across two terminal
   buffers. *Mutation: key the residual by "the terminal".*
+
+**R2 and R3 are not the whole of identity, because the document and the
+minimap do not get replaced — their state OUTLIVES the buffer.** A
+panel or terminal residual can be keyed to a surface that goes away; the
+document's and the minimap's live in the long-lived GPU `State`, which
+survives a buffer switch. **Their reset is manual, and there is a list
+to be forgotten from.** Buffer replacement (`pmacs-gpu/src/main.rs:5922`
+onward) zeroes `scroll_top`, `code_scroll_residual` and
+`code_scroll_left` **one explicit line at a time**, each with its own
+comment — including `code_scroll_left`, added later precisely because a
+switch *"inherits the PREVIOUS document's leftward viewport and renders
+the new buffer scrolled sideways until a cursor motion repairs it — a
+symptom nothing about the new buffer explains."* **A new wheel residual
+will not reset itself.** Two more legs:
+
+- **R4 — document A→document B**, covering the document residual **and
+  the chrome residual it shares** (chrome's owner is the document's, so
+  one reset must serve both): bank a sub-tick over the document, replace
+  the buffer, motion over B **starts from zero**. *Mutation: omit the
+  document residual from the replacement reset.*
+- **R5 — minimap across A→B:** the minimap's residual is **independent**
+  (B6), so it needs its own reset and its own leg. *Mutation: omit the
+  minimap residual from the replacement reset.*
+
+Two mutations, deliberately separate: **one reset omitted at a time**,
+because a single "forgot to reset" mutation would bite both legs and
+prove neither field is individually covered. This is the same defect
+`code_scroll_left` already had once, and the reason it now has a
+comment explaining itself.
 
 R2 and R3 also pin the **discard on disappearance**: a residual banked
 against a surface that no longer exists must not be inherited by its
