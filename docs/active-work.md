@@ -270,6 +270,65 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
+## Panel cell-mapping generation (v25) — ACTIVE, framing only
+
+**Written with the branch's FIRST commit**, per the standing correction
+from #171 and #215.
+
+- **Branch `panel-mapping-generation`**, base `githubsucks/main` @
+  **`72da24a`**, worktree
+  `/home/jeans/Repos/personal/pmacs-mapping-gen`.
+  **`githubsucks/panel-mapping-generation` is the authoritative tip.**
+  Recover with `git fetch githubsucks && git checkout
+  panel-mapping-generation`.
+- **No PR yet. Checkpoint: framing revision 14 (§5b) AWAITING
+  APPROVAL; NO IMPLEMENTATION.**
+- **PROTOCOL-BEARING — v25, and it runs alone.**
+  `ADVERTISED_PROTOCOL_VERSION` stays pinned at **20**.
+- **Why it exists.** A `PanelPointer` names a cell and nothing on the
+  wire says which inverse mapping the frontend saw, so the daemon
+  inverts against whatever is current. `buffer_id` catches
+  replacement, `panel_epoch` close/reopen, `geometry_epoch` a
+  declaration race — **nothing catches "the text under that cell
+  changed"**. Q#BP-R3 first accepted this as narrow; that was
+  **overruled**, because a **foreign** edit moves the mapping with
+  `view_top` untouched, the error is unbounded, and the window lasts
+  until the frontend **presents** the new frame.
+- **A generation, not a per-frame token.** A token moving with the
+  frame would cancel a drag on the next repaint — the mistake
+  `panel_epoch` is stable to avoid. The key moves with the inverse
+  mapping (`view_top`, **`view_left`**, grid size, folds, wrap/gutter
+  geometry, buffer content, terminal output/scrollback) and holds
+  across focus, styling, selection-only repaints and cursor motion
+  **that the follow rules absorb**.
+- **One authoritative per-frontend key**, used by projection AND
+  inbound validation, advanced after any mapping mutation and
+  **before** the next inbound pointer — comparing against the last
+  emitted frame recreates the hole.
+- **Gating is REFUSAL, not fallback.** A ≥ v25 session sending bare
+  `PanelPointer` is refused; a ≥ v25 frontend rejects legacy
+  `Present`. Only ≤ v24 sessions keep legacy semantics; `Absent` is
+  common.
+- **Stale tails TERMINATE, they do not vanish.** A dropped `Up` leaves
+  an empty selection armed and a reporting child holding a button
+  forever, so cancellation is a ruled outcome: producer latch reset,
+  daemon selection/click-chain cleanup, and the child's release
+  delivered.
+- **Pins ACCUMULATE**: keep `PanelPointer`, add exact `TextInput`
+  bytes (previous-final `FrontendEvent`) and the complete nested
+  `PanelFrame(Absent)` bytes (previous-final `PanelFramePayload`).
+  **No exact-bytes pin for `PanelPointer` could be found in the tree**
+  despite `pmacs-protocol/src/message.rs:524` claiming one; this slice
+  resolves that either way.
+- **Owns the version correction.** `docs/gui-stage1-input-framing.md`
+  moves 1e's `OpenTarget` to **v26** here — an expected rebase
+  conflict on `gui-stage1b-pointer-scroll` is not grounds for leaving
+  the canonical document false.
+- **Chain: this slice → `panel-pointer-replay` (rebases onto it) →
+  GUI arc 1b.**
+- **Gates:** the four `bottom_panel_*` suites, the GUI 1a wire suite,
+  `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`, and **`--protocol`**.
+
 ## GPU launcher / probe SIGINT teardown — MERGED as #241 (`f8033bc`)
 
 - **MERGED 2026-08-20** at approved head `5089715`, merge commit
@@ -722,6 +781,7 @@ from #171 and #215.
   bite, direct-test diagnosis, unaffected foreground success, mutation,
   an otherwise unchanged gate, a distinct `error` outcome, and a
   non-Linux-unix statement.
+||||||| parent of 8a4711e (docs(framing): the panel cell-mapping generation (v25) --- SS5b revision 14)
 
 ## `scripts/gate` TMPDIR isolation — PR #240 OPEN
 

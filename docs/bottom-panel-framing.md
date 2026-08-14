@@ -1770,6 +1770,196 @@ cannot preserve the old panel-focused attach leak.
     preserving the Stage 1 unknown-value rollback assertions; the Stage 3 PR
     then runs the full gate suite.
 
+## 5b. The cell-mapping generation — a protocol slice (Q#BP-R3)
+
+**Status: revision 14 — AWAITING APPROVAL. Nothing implemented.** This
+slice **blocks** panel-pointer replay (`panel-pointer-replay`), which
+blocks GUI arc 1b. It is protocol-bearing and runs alone.
+
+### What it fixes
+
+A `PanelPointer` names a **cell**; the daemon must invert that to a
+**byte**. Nothing on the wire says which inverse mapping the frontend
+was looking at, so the daemon inverts against whatever is current — and
+the mapping can move for reasons the clicking frontend neither caused
+nor can observe.
+
+This is the one hole in the ladder: `buffer_id` catches replacement,
+`panel_epoch` catches close/reopen, `geometry_epoch` catches a
+declaration race, and **nothing catches "the text under that cell
+changed"**.
+
+**Revision 12 accepted this as narrow. It is not.** A **foreign** edit
+moves the mapping with `view_top` untouched; ticks, paging, folds,
+edits and reloads accumulate without bound; and the window lasts until
+the frontend **presents** the replacement frame, which a backed-up
+frontend widens arbitrarily.
+
+### The generation, and why not a token
+
+**A per-frame token is the wrong object.** Panels repaint constantly,
+and a token that moved with the frame would invalidate a live drag on
+the next repaint — the mistake `panel_epoch` is stable to avoid.
+
+**`mapping_generation` identifies the INVERSE MAPPING.**
+
+| changes it | leaves it alone |
+|---|---|
+| `view_top` | focus gained or lost |
+| **`view_left`** — 1b makes horizontal scrolling real | styling, theme, face changes |
+| panel grid size | selection-only changes |
+| fold state | a re-emitted identical frame |
+| wrap mode, gutter geometry | **cursor motion that moves nothing else** |
+| **buffer content — any edit, from any source** | |
+| **terminal output or scrollback movement** (terminal panels) | **terminal buffer revision** (see below) |
+
+**"Cursor movement is stable" is CONDITIONAL, and revision 13 stated it
+flatly.** A cursor move that triggers vertical or horizontal follow
+changes `view_top` or `view_left`, and therefore **does** change the
+generation. The stable case is a cursor move the follow rules absorb.
+
+**Terminal panels are ruled explicitly.** What a coordinate denotes
+there is decided by the terminal's **screen**, so output and scrollback
+movement change the generation. Their **buffer revision** does not — a
+terminal buffer's revision counter tracks something else, and keying on
+it would both miss real changes and fire on non-changes.
+
+**The stability half is load-bearing, not an optimisation.** A drag
+provokes selection repaints on every motion; a generation that moved
+with them would cancel the drag after one step.
+
+### Ownership and refresh timing
+
+**One authoritative per-frontend mapping key**, owned by the daemon,
+**used by both projection and inbound validation**. Not two derivations
+that agree by inspection.
+
+- It **advances after any mapping mutation and BEFORE the next inbound
+  pointer is handled**, whether or not a frame has been rendered or
+  emitted since.
+- **Comparing against the last EMITTED frame recreates the hole.** A
+  mutation that has not yet been painted still changes the inverse
+  mapping, and a gesture arriving in that gap must be refused.
+- Projection stamps the frame with the same key it validates against,
+  so "what the frontend was shown" and "what the daemon checks" cannot
+  drift.
+
+### Wire shape — appended variants, never widened
+
+Postcard encodes enums **positionally**, so a shipped variant's field
+list is frozen. Both messages gain **new variants**:
+
+- `PanelFramePayload::PresentMapped { .. }` beside `Present`.
+- `FrontendEvent::PanelPointerMapped { .. }` beside `PanelPointer`.
+
+`Absent` is unchanged and **common to both families** — hiding a band
+carries no mapping.
+
+### Bilateral gating — REFUSAL, not fallback
+
+Revision 13 said an unmapped event from a new peer is "handled under
+the old semantics". **That is a bypass**: it leaves the exact hole the
+slice exists to close, reachable by omitting a field.
+
+| negotiated | daemon sends | daemon accepts | frontend sends | frontend accepts |
+|---|---|---|---|---|
+| **≤ v24** | `Present` | `PanelPointer` | `PanelPointer` | `Present` |
+| **≥ v25** | `PresentMapped` | `PanelPointerMapped` **only** | `PanelPointerMapped` | `PresentMapped` **only** |
+
+- A **≥ v25 session sending bare `PanelPointer` is REFUSED**, dropped
+  before any mutation, exactly as an out-of-epoch event is.
+- A **≥ v25 frontend receiving legacy `Present` REJECTS it** rather
+  than painting a band it cannot safely hit-test.
+- Only a negotiated **≤ v24** session retains legacy semantics.
+- `Absent` is accepted from either family.
+
+### Enforcement, and the liveness it must not break
+
+On `PanelPointerMapped`, the daemon compares the echoed generation with
+the authoritative key and refuses the gesture before any mutation when
+they differ.
+
+**But a blanket drop breaks liveness, and revision 13's did.** A
+refused **tail** is not the same as a refused **beginning**:
+
+- **Stale BEGINNINGS may simply drop.** A `Down` that never took effect
+  leaves nothing behind.
+- **Stale TAILS must TERMINATE the gesture, not vanish.** A dropped
+  `Up` leaves an empty document selection armed with a stale anchor,
+  and leaves a **reporting terminal child holding a button forever**.
+
+**Cancellation is therefore ruled as a first-class outcome:**
+
+1. **Producer:** the frontend resets its gesture latch —
+   `pointer_held`, `last_pointer_cell`, `gesture_last_content_cell` —
+   on the same signal, so no further `Drag` is manufactured.
+2. **Daemon, document:** the panel's selection is cleared if empty, the
+   click chain is cleared, and no cursor move is applied.
+3. **Daemon, terminal:** the child receives its **release** — a
+   reporting child must not be left holding a button because the
+   mapping moved — and the controller claim is settled.
+
+**A cancelled gesture is not a replayed one**: the release is delivered
+for liveness, at the last coordinate known to be valid, and no
+selection or scroll effect is applied from the stale event.
+
+### Motion must stay coalesced
+
+`PanelPointerMapped` carrying `Move` or `Drag` **takes the same
+tail-coalescing tags as `PanelPointer`** (`pmacs-gpu/src/attach.rs:374`
+onward). A new variant that fell through to the lossless default would
+put pixel-rate motion on a bounded queue — the failure the coalescing
+tags exist to prevent. `Down`/`Up`/wheel/context stay lossless and
+ordered, as today.
+
+### Pins ACCUMULATE
+
+**They are not moved.** Revision 13 said the pin "moves to the previous
+final variant", which would delete coverage of the shape it was
+protecting.
+
+| pin | covers |
+|---|---|
+| existing `FrontendEvent::PanelPointer` | retained, unchanged |
+| **new**: exact `FrontendEvent::TextInput` bytes | the previous-final `FrontendEvent`, appended by 1a and never pinned |
+| **new**: complete nested bytes of `InstanceMessage::PanelFrame(PanelFramePayload::Absent)` | the previous-final `PanelFramePayload` variant |
+
+**A note on what exists today.** The panel protocol suite round-trips
+these shapes and asserts `Absent` differs from an empty `Present`
+(`tests/bottom_panel_stage2b_protocol_acceptance.rs:196`), but I could
+find **no exact-bytes pin** for `PanelPointer`, despite
+`pmacs-protocol/src/message.rs:524` stating one is in the tests. Either
+it is somewhere my search missed, or the doc overclaims — **this slice
+resolves it either way**, since it must add exact-byte pins regardless.
+
+### Acceptance and mutation matrix
+
+| # | row | mutation |
+|---|---|---|
+| G1 | a **foreign** edit before the next render → the old generation is refused | never advance on content change → G1 passes a stale hit |
+| G2 | every **changing** entry of the domain table moves the generation, one row each | omit that entry from the key |
+| G3 | every **stable** entry leaves it unchanged, one row each | include that entry → drags cancel on repaint |
+| G4 | a **selection repaint** preserves the generation and an in-flight drag **continues** | as G3 |
+| G5 | a mid-gesture mapping change **cancels**: latch reset, empty selection cleared, click chain cleared, **child receives its release** | drop the stale tail silently → the child holds the button and the selection stays armed |
+| G6 | **v24 positive control** — a legacy session drives a panel gesture end to end | gate ≤ v24 off → old peers lose the panel |
+| G7 | **v25 positive control** — a mapped session drives one end to end | — |
+| G8 | **wrong-family refusals, both directions** — bare `PanelPointer` from a v25 session is refused; legacy `Present` at a v25 frontend is rejected | accept either → the bypass returns |
+| G9 | **identical cells, changed generation, still emitted** — motion dedupe is per cell, and a mapping change makes the same cell a different byte | dedupe across a generation change → the second gesture is suppressed |
+| G10 | an **invalid** mapped frame retains the previous frame **and** its generation, atomically | update one without the other → a valid generation names a frame never shown |
+| G11 | **generation exhaustion fails CLOSED** — refuse gestures rather than accept unchecked ones | fail open → the hole returns at the boundary |
+
+G2 and G3 are enumerated per entry deliberately: one row asserting "the
+generation changed" cannot show **which** input moved it, and a key
+that ignores `view_left` passes every row that only scrolls
+vertically.
+
+### Consequence for the GUI arc
+
+This slice takes **v25**, so GUI arc **1e's `OpenTarget` moves to
+v26** — corrected in `docs/gui-stage1-input-framing.md` **by this
+slice**, because a canonical document that says v25 is false the moment
+this lands. `ADVERTISED_PROTOCOL_VERSION` stays pinned at **20**.
+
 ## 6. Deferred (named)
 
 Left / right / top side windows; multiple slots per side; **rehoming a leaf
