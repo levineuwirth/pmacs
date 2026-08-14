@@ -7,7 +7,31 @@ protocol v20, 2026-07-24. Amended by the pre-implementation dependency
 verification in §0.6: the folding dependency is cleared, and one geometry
 caller-census error is corrected.**
 
-**Revision 8 — 2026-08-14, AWAITING APPROVAL.** Answers review of 7:
+**Revision 9 — 2026-08-14, AWAITING APPROVAL.** Answers review of 8.
+Both items reverse a decision revision 8 made:
+
+- **Q#BP-R2 is OVERRULED — a terminal-chrome wheel is CONSUMED, not
+  clamped.** SGR wheel input is **coordinate-bearing**: `encode_mouse`
+  writes `coord.col + 1` / `coord.row + 1` into the sequence
+  (`src/terminal/input.rs:102`, `:146`), which A4 pins exactly. Clamping
+  **fabricates a hit on the final content row**, so a
+  position-routing application acts on a cell the user never pointed
+  at. And unlike `Up`, a wheel has **no liveness obligation** —
+  dropping one strands nothing. Consumed, never fallen through to the
+  document; TUI parity restored.
+- **R-c2's field choice is corrected: a SEPARATE
+  `gesture_last_content_cell`.** Revision 8 said to retain the `Down`
+  cell in `last_pointer_cell`, which would break a **tested
+  guarantee** — that field is cleared on press precisely so the first
+  same-cell `Drag` reaches the daemon
+  (`pmacs-gpu/src/main.rs:19841`). Dedupe baseline and termination
+  fallback are different jobs with different lifetimes.
+- **The crossing table follows:** a content-originated `Drag` over
+  chrome is **normalized and then subject to the ordinary dedupe**, not
+  promised as sent. **`Up` is the load-bearing crossing event** and the
+  only one promised unconditionally.
+
+**Previously, revision 8 — SUPERSEDED.** Answered review of 7:
 
 - **R-c is target × gesture-ORIGIN, not kind alone.** The TUI's
   per-kind rule is **document-only** — for terminals it rejects every
@@ -2113,33 +2137,49 @@ instead of behaving as a content wheel does.
 |---|---|---|---|
 | **document** | `Down(Left)`, `Down(Right)` | do not arm, do not send | reserved — drop |
 | **document** | `Drag(Left)`, chrome-originated | not sent (never armed) | reserved — drop |
-| **document** | `Drag(Left)`, **content-originated** | **sent** — the gesture is live | **process at the last valid CONTENT coordinate** |
+| **document** | `Drag(Left)`, **content-originated** | normalized to the last valid CONTENT cell, then **subject to the ordinary dedupe** | process when it arrives |
 | **document** | `Up(Left)` | **send** | **process** — terminates the gesture |
 | **document** | wheel | **send** | **process** — scrolls the panel |
 | **terminal** | any kind, chrome-**originated** | do not arm, do not send | drop, matching the TUI |
-| **terminal** | `Drag`/`Up`, **content-originated**, now over chrome | **send** | **replay at the last valid CONTENT coordinate** — never the chrome row |
-| **terminal** | wheel over chrome | **send, clamped to content** | as a content wheel: reported when eligible, else local scrollback |
+| **terminal** | `Drag`, content-originated, now over chrome | normalized, then **subject to the ordinary dedupe** | process when it arrives |
+| **terminal** | `Up`, content-originated, now over chrome | **always sent** | **replay at the last valid CONTENT coordinate** — never the chrome row |
+| **terminal** | wheel over chrome | **do not send — consume** | n/a; never falls through to the document (Q#BP-R2) |
 
-**A content-originated gesture terminates normally, at its last valid
-content coordinate.** That is the whole of the crossing rule, and it is
-what keeps a reporting child from being told about a row it does not
-own while still receiving its release.
+**`Up` is the load-bearing crossing event, and the only one promised
+unconditionally.** A content-originated gesture terminates at its last
+valid content coordinate — that is what keeps a reporting child from
+being told about a row it does not own while still receiving its
+release.
 
-#### Q#BP-R2 — a chrome wheel over a TERMINAL panel: clamp, or drop? **RULED: clamp**
+**A crossing `Drag` is NOT promised as sent.** Once normalized, its
+coordinate is frequently the one already reported, and the ordinary
+motion dedupe suppresses it — correctly. Promising delivery would
+oblige the producer to defeat its own dedupe for no gain: the daemon's
+state after a suppressed same-cell `Drag` is identical.
 
-The one product call inside R-c, flagged because it **diverges from the
-TUI deliberately**. The TUI drops terminal mode-line wheels; this rules
-that a panel clamps them into content instead.
+#### Q#BP-R2 — a chrome wheel over a TERMINAL panel **RULED: CONSUME, do not clamp**
 
-The reason is that the panel's mode line is not a window's mode line
-among many — it is **the band's own chrome**, one row, and the document
-panel already scrolls on a chrome wheel (the TUI does not guard the
-wheel for documents). Dropping for terminals would make **the same
-pixel behave differently depending on the buffer kind currently shown
-there**, which is not a distinction a user is holding in mind while
-scrolling. **Overrule this if you would rather have TUI parity**; it is
-a one-line difference in the clamp and nothing else in R-c depends on
-it.
+Revision 8 ruled *clamp*, on a consistency argument. **That was wrong,
+and the reason is that SGR wheel input is COORDINATE-BEARING.**
+`encode_mouse` takes a `coord` and writes `coord.col + 1` and
+`coord.row + 1` into the sequence (`src/terminal/input.rs:102`,
+`:146`–`:147`) — which A4 now pins exactly. **Clamping would fabricate
+a hit on the terminal's final content row**, so an application that
+routes wheel input by position could act on a cell the user never
+pointed at. The consistency gain is cosmetic; the cost is a synthetic
+coordinate delivered to a program as though it were real.
+
+**And the wheel carries no liveness obligation.** `Up` must be
+normalized because a gesture left un-terminated hangs — the daemon
+holds a button down forever. A wheel tick is self-contained: dropping
+one ends nothing and strands nothing.
+
+**Ruling: a wheel over a terminal panel's chrome is CONSUMED** — not
+reported, not scrolled locally, and **not fallen through to the
+document**. The band owns the pixel either way. This also restores TUI
+parity, which revision 8 traded away for the weaker argument.
+
+Document chrome is unchanged: a wheel there still scrolls the panel.
 
 **Both crossings need witnesses, and they fail in opposite
 directions:**
@@ -2170,13 +2210,52 @@ by a release over chrome or outside the band, with **no intervening
 motion**, has no coordinate to fall back to, so the `Up` is either
 dropped or sent with nothing.
 
-**Retain the `Down` cell when arming.** Row: `Down` in content →
-release over chrome, **no intervening motion** → the `Up` carries the
-**`Down` cell's** coordinate. *Mutation: keep clearing the cell on arm
-— the release has no coordinate.* **For a reporting terminal the row
-asserts the exact child release BYTES**, not merely that the frontend
-latch cleared: a latch that clears while the child never hears the
-release is the failure this row exists for.
+**Revision 8 said "retain the `Down` cell in that field". That would
+break a tested guarantee.** `last_pointer_cell` is cleared on press
+*deliberately*, and a live test says why:
+
+> *"A press or release re-arms it: the first drag after a press must
+> reach the daemon even at the cell the press landed on."*
+> (`pmacs-gpu/src/main.rs:19841`–`:19844`)
+
+Storing the `Down` cell there would make the press's own cell the
+dedupe baseline and **suppress that first `Drag`**.
+
+**Ruled: a SEPARATE field, `gesture_last_content_cell`.** The two have
+different jobs and conflating them was the error —
+`last_pointer_cell` is a **wire dedupe baseline**, answering *"is this
+motion worth sending?"*; the new field is a **termination fallback**,
+answering *"where did this gesture last legitimately point?"*. They
+have different lifetimes and different reset rules, so one field cannot
+serve both without one job corrupting the other.
+
+- **Written** on arm (the `Down` cell) and on every accepted content
+  motion.
+- **Reset** alongside the rest of the gesture state: on release, and on
+  **both** identity changes (R-d's D1 and D2).
+- **Never consulted** by `panel_motion_is_new`, which keeps its own
+  baseline and its existing behaviour unchanged.
+
+*The alternative was considered and rejected:* ruling that `Down`
+becomes the dedupe baseline, retiring the guarantee and its test. It
+would need a justified mutation showing the first same-cell `Drag` is
+redundant, and it is not obviously so — the daemon's drag state is
+established by that event. **Preserving a tested contract beats
+retiring one to save a field.**
+
+Row: `Down` in content → release over chrome, **no intervening
+motion** → the `Up` carries the **`Down` cell's** coordinate.
+*Mutation: reset `gesture_last_content_cell` on arm instead of writing
+the `Down` cell — the release has no coordinate.* **For a reporting
+terminal the row asserts the exact child release BYTES**, not merely
+that the frontend latch cleared: a latch that clears while the child
+never hears the release is the failure this row exists for.
+
+**A second mutation guards the separation itself:** make
+`panel_motion_is_new` consult `gesture_last_content_cell`. The existing
+first-`Drag`-after-press assertion (`:19841`) must fail — which is what
+proves the new field did not quietly become the dedupe baseline after
+all.
 
 #### R-d. Panel replacement leaves the frontend's gesture latch armed
 
