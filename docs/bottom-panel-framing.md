@@ -7,7 +7,27 @@ protocol v20, 2026-07-24. Amended by the pre-implementation dependency
 verification in §0.6: the folding dependency is cleared, and one geometry
 caller-census error is corrected.**
 
-**Revision 12 — 2026-08-14, APPROVED.** §5a is the acceptance-48
+**Revision 13 — 2026-08-14, AWAITING APPROVAL. Q#BP-R3 is OVERRULED:
+the lane BLOCKS on a protocol-bearing cell-mapping generation (new
+§5b).** Revision 12 accepted current-state hit semantics on three
+bounds, and all three were wrong — a **foreign** edit moves the mapping
+with `view_top` untouched, the error is **unbounded** once ticks, folds,
+edits or reloads accumulate, and the stale window lasts until the
+frontend **presents** the replacement frame rather than one round trip.
+With the narrowness gone there is nothing to trade on.
+
+The follow-up is a **cell-mapping generation, not a per-frame token**:
+it moves when the inverse mapping moves (viewport, folds, wrap/gutter
+geometry, buffer content) and holds across focus, styling, cursor and
+selection-only repaints, so ordinary drags survive. §5b frames it —
+appended variants rather than widened structs, bilateral version
+gating, and a drop-before-mutation check. **GUI arc 1e's `OpenTarget`
+moves to the following protocol version.**
+
+**Everything else in revision 12 stands**, including Q#BP-R1, Q#BP-R2
+and the R-a…R-d edges.
+
+**Previously, revision 12 — APPROVED.** §5a is the acceptance-48
 ground truth and its rulings are settled: **Q#BP-R1** (a single click
 selects a listview row only), **Q#BP-R2** (a terminal-chrome wheel is
 consumed, daemon-side, before activation), the **R-a…R-d** replay
@@ -2031,7 +2051,38 @@ follows acceptance 48's wording — it names row *selection* — and keeps
 document navigation from becoming an incidental consequence of wiring
 replay.
 
-#### Q#BP-R3 — a panel cell has no frame-content provenance **RULED: current-state hit semantics, narrowly, with the token named as follow-up**
+#### Q#BP-R3 — a panel cell has no frame-content provenance **RULED: BLOCK on a protocol-bearing mapping generation**
+
+**Revision 12's answer — accept current-state semantics — is
+OVERRULED, and all three of its bounds were wrong.** They are recorded
+because each was the reason the trade looked cheap:
+
+| the bound I claimed | why it does not hold |
+|---|---|
+| "self-inflicted — the same frontend must move the view and then click" | **another frontend, or a background process, can edit the same buffer.** The cell→byte mapping changes with `view_top` untouched, and the clicking frontend did nothing |
+| "bounded by `SCROLL_LINES`" | **unbounded.** Multiple wheel ticks, paging, folds, edits or a reload can all land before the new frame is seen |
+| "one round trip" | **until the frontend actually PRESENTS the replacement frame** — a slow or backed-up frontend widens the window arbitrarily |
+
+With those gone there is no narrowness left to trade on, so **the lane
+blocks on the wire fix** rather than shipping a mis-hit whose size and
+cause are both unbounded.
+
+**And the follow-up is NOT a per-frame token.** A token that changed on
+every frame would invalidate a gesture on every repaint, which is the
+same mistake `panel_epoch` deliberately avoids — it would break drags
+outright. What is needed is a **CELL-MAPPING GENERATION**: an identity
+of the *inverse mapping*, not of the frame.
+
+- **It changes when the inverse mapping changes**: viewport (`view_top`
+  or grid size), folds, wrapping or gutter geometry, or buffer content.
+- **It is stable across repaints that cannot move a cell's byte**:
+  focus, styling and theme, cursor movement, and selection-only
+  changes. That stability is what lets an ordinary drag survive the
+  repaints it provokes.
+
+See **§5b** for the slice.
+
+#### Superseded — revision 12's reasoning, kept for the record
 
 **The hole.** `PanelPointer` carries `geometry_epoch`, `panel_epoch`,
 `buffer_id` and a `coord` — **and nothing identifying the frame CONTENT
@@ -2576,6 +2627,103 @@ reached and D4 passes against a broken implementation.
 R-d's orphan is distinct from R-b's: **R-b's arrives from a passive
 panel, R-d's from a replaced or re-declared one**, and an
 implementation can fix either alone.
+
+## 5b. The cell-mapping generation — a protocol-bearing slice (Q#BP-R3)
+
+**Status: framing, AWAITING APPROVAL. Nothing implemented.** This slice
+**blocks** panel-pointer replay, which in turn blocks GUI arc 1b.
+
+### What it fixes
+
+A `PanelPointer` names a **cell**; the daemon must invert that to a
+**byte**. Nothing on the wire says which inverse mapping the frontend
+was looking at, so the daemon inverts against whatever is current. The
+mapping can move for reasons the clicking frontend neither caused nor
+can observe — **a foreign edit**, a fold, a reload — and the epochs do
+not move with it, so every existing gate accepts the gesture.
+
+This is the one hole in the ladder: `buffer_id` catches replacement,
+`panel_epoch` catches close/reopen, `geometry_epoch` catches a
+declaration race, and **nothing catches "the text under that cell
+changed"**.
+
+### The generation, and why not a token
+
+**A per-frame token is the wrong object.** Panels repaint constantly —
+focus, cursor blink, styling — and a token that moved with the frame
+would invalidate a live drag on the next repaint. That is precisely why
+`panel_epoch` is stable across ordinary frames, and the same reasoning
+applies one level down.
+
+**`mapping_generation` is an identity of the INVERSE MAPPING.**
+
+| changes it | leaves it alone |
+|---|---|
+| `view_top` | focus gained or lost |
+| panel grid size | styling, theme, face changes |
+| fold state | cursor movement |
+| wrap mode, gutter geometry | selection-only changes |
+| **buffer content — any edit, from any source** | a re-emitted identical frame |
+
+**The stability half is load-bearing, not an optimisation.** A drag
+provokes selection repaints on every motion; if those moved the
+generation, the drag would cancel itself after one step.
+
+### Wire shape — appended variants, never widened
+
+Postcard encodes enums **positionally**, so a variant's field list is
+frozen once shipped. Both messages therefore gain **new variants
+alongside the existing ones**:
+
+- `PanelFramePayload::PresentMapped { .. }` beside `Present`, carrying
+  the frame plus its `mapping_generation`.
+- `FrontendEvent::PanelPointerMapped { .. }` beside `PanelPointer`,
+  echoing the generation the frontend was displaying.
+
+The existing variants stay **byte-frozen** and keep their current
+meaning, and the frozen-byte pin moves to what is then the previous
+final variant of each enum.
+
+### Bilateral gating
+
+Both directions gate on the negotiated version, and **neither side may
+assume the other's support**:
+
+- The daemon sends `PresentMapped` **only** to a peer whose negotiated
+  version reaches the new floor; every older peer keeps receiving
+  `Present`.
+- The frontend sends `PanelPointerMapped` **only** when the session
+  negotiated it; otherwise it sends `PanelPointer` as today.
+- **A daemon that receives the bare `PanelPointer` from a
+  new-enough peer must not silently upgrade it.** The gesture carries
+  no generation, so it is handled under the old semantics — the
+  version gate decides the shape, not a guess about intent.
+
+### Enforcement
+
+On `PanelPointerMapped`, the daemon compares the echoed generation with
+the panel's current one and **drops the gesture before any mutation**
+when they differ — the same position in the ladder as the epoch checks,
+one level finer.
+
+**Dropping mid-drag is correct.** If the mapping changed, the cells the
+user is dragging across no longer mean what they meant when the drag
+began, and continuing would select text they never pointed at.
+
+### Consequence for the GUI arc
+
+This slice takes the **next** protocol version, so **GUI arc 1e's
+`OpenTarget` moves to the one after it**. The arc's serialization rule
+is unchanged — protocol-bearing slices run alone — and this is simply a
+new one inserted ahead of 1e.
+
+**The edit belongs to the 1b branch, not to this one.**
+`docs/gui-stage1-input-framing.md` says *"1e — `OpenTarget` (v25)"*
+(`:1011`) and *"floor: v25, after v24, serialized"* (`:1221`), and that
+document is heavily revised on `gui-stage1b-pointer-scroll`
+(revisions 13–18). Changing it here would collide at the rebase 1b is
+already scheduled for. **It is recorded as required rather than made**,
+so the version bump lands with the branch that owns the file.
 
 ## 6. Deferred (named)
 

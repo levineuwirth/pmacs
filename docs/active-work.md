@@ -281,8 +281,27 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
   **`githubsucks/panel-pointer-replay` is the authoritative tip** (the
   ref, not a SHA). Recover with
   `git fetch githubsucks && git checkout panel-pointer-replay`.
-- **No PR yet. Checkpoint: framing revision 12 (§5a) APPROVED
-  2026-08-14; IMPLEMENTATION BEGINS.** Nothing gates this lane now. Commit one was the ground-truth
+- **No PR yet. Checkpoint: framing revision 13 AWAITING APPROVAL;
+  IMPLEMENTATION PAUSED.** §5a's replay contract is approved at
+  revision 12 and partly implemented, but **Q#BP-R3 was OVERRULED** and
+  the lane now **blocks on a protocol-bearing cell-mapping
+  generation**, framed in **§5b**.
+- **THE BLOCKER, and why the earlier acceptance failed.** A
+  `PanelPointer` names a cell; nothing on the wire says which inverse
+  mapping the frontend saw, so the daemon inverts against whatever is
+  current. Revision 12 accepted that on three bounds and **all three
+  were wrong**: a **foreign** edit moves the mapping with `view_top`
+  untouched, the error is **unbounded** once ticks/folds/edits/reloads
+  accumulate, and the window lasts until the frontend **presents** the
+  new frame. §5b adds a **cell-mapping generation** — moves with the
+  inverse mapping, stable across focus/styling/cursor/selection-only
+  repaints so drags survive — as **appended** wire variants with
+  bilateral gating.
+- **Chain: §5b (protocol) → panel replay → GUI arc 1b.** §5b takes the
+  next protocol version, so **1e's `OpenTarget` moves to the one
+  after**. **That edit is OWED BY THE 1b BRANCH**, which already
+  revises `docs/gui-stage1-input-framing.md` (`:1011`, `:1221` still
+  say v25); making it here would collide at 1b's scheduled rebase. Commit one was the ground-truth
   re-measurement; 6 added the four replay edges; **7 answers review of
   6; **8 answers review of 7** — R-c is target × gesture-ORIGIN
   (terminals reject all chrome kinds and raw chrome coords fail the
