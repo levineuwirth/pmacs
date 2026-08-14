@@ -1,7 +1,32 @@
 # GUI arc, Stage 1 — input foundation (framing)
 
-**Status: revision 15 — AWAITING APPROVAL.** Revision 15 answers review
-of 14 and **does change two B-row contracts**, which 14 wrongly denied.
+**Status: revision 16 — AWAITING APPROVAL.** Revision 16 answers review
+of 15. Four changes, three of them corrections to 15's own reasoning:
+
+- **The panel-replay lane becomes a HARD PREREQUISITE in §3's
+  topology**, not a note. The defect is "frontend emits, receiver
+  discards", so 15's emission-only witnesses would have reproduced the
+  blind spot that hid it. The lane merges, **1b rebases onto it**, and
+  1b carries an **end-to-end panel-wheel effect** row. 15's rationale
+  *"it is not input work"* was wrong — replay includes terminal mouse
+  reporting and click-to-focus. The real reason is **breadth and
+  ownership**: acceptance 48 (`docs/bottom-panel-framing.md:1719`).
+- **Divider and background must BANK NOTHING.** 15 gave them the panel
+  cell's residual, which manufactures the surface-switch jump B1
+  forbids — motion banked over an inert target, spent on entering a
+  cell. They discard both axes, and a **crossing witness** pins it.
+- **The discriminating setup applies to every lifetime row**, not just
+  L3. With the cursor inside the manual viewport, held and released
+  authority produce the **same origin**, so the rows pass either way.
+  **L2 becomes a height-only GPU resize**, and **L7 gains a
+  content-shrink leg** for the half viewport-widening cannot witness.
+- **The mutation table follows §6's dependency-aware rule.** 15's
+  heading promised "own rows and no others", which this document
+  already says is false and unachievable; mutations now name the rows
+  they must **bite** and the **legitimate dependents**.
+
+**Previously, revision 15 — SUPERSEDED.** Answered review of 14 and
+**changed two B-row contracts**, which 14 wrongly denied.
 
 - **B1 is now fully ruled**, not half-ruled. Revision 14 left two
   "must be ruled" cells in the wheel-target table, which is a question
@@ -222,17 +247,31 @@ they differ 1b closes the gap:
 | wheel target | classified | vertical today | vertical RULED | residual owner | horizontal RULED |
 |---|---|---|---|---|---|
 | Panel cell | `PanelCell` | emits (`:3102`), **replay missing** | emit **both axes**; replay is a **prerequisite lane** | per panel | emit `ScrollLeft`/`Right` |
-| Panel divider / background | `PanelDivider` / `PanelBackground` | **scrolls the document** | **consume both axes** — the band owns the pixel | per panel | consumed, no emit |
+| Panel divider / background | `PanelDivider` / `PanelBackground` | **scrolls the document** | **consume both axes** — the band owns the pixel | **none — discards** | consumed, no emit |
 | Terminal | `Elsewhere` + `terminal.is_some()` (`:3112`) | emits (`:3122`) | emit **both axes** | per terminal | emit `ScrollLeft`/`Right`; **inert when not reporting** |
 | Minimap | `Elsewhere` | document `scroll_by_lines` | document viewport, **own residual** (B6) | **its own** | inert |
 | Document | `Elsewhere` | `scroll_by_lines` (`:3126`) | unchanged | document | `code_scroll_left` (B3) |
 | Chrome | `Elsewhere` | document | **shares the document's**, deliberately | **the document's** | shares the document's |
 
-**Divider and background consume both axes.** Falling through to the
-document contradicts `PanelBackground`'s own doc — *"the band still owns
-the pixel"* — and is a measurement, never a decision. Consuming is not
-"inert": the residual is the panel's, so a gesture that crosses from
-the band's background onto a cell does not jump.
+**Divider and background consume both axes, and BANK NOTHING.** Falling
+through to the document contradicts `PanelBackground`'s own doc —
+*"the band still owns the pixel"* — and is a measurement, never a
+decision.
+
+**Revision 15 gave them the panel cell's residual. That was a defect,
+and it is the very jump B1 forbids.** Motion over an inert target would
+be banked and then spent the instant the pointer entered a cell, so a
+gesture that scrolled nothing could complete a tick on arrival — a
+surface-switch jump manufactured by the accumulator itself. Consumption
+therefore **discards and resets both axes**; if an implementation keeps
+state here at all, it must be state that **can never combine with cell
+input**.
+
+**Crossing witness (required):** a partial motion over the background,
+then a partial motion over a cell, **must not reach a tick** — neither
+sub-tick alone is enough, and the first must not be available to
+complete the second. The mutation is exactly revision 15's error:
+share the cell residual with the background, and this row jumps.
 
 **Chrome shares the document's scrolling and the document's residual.**
 That is today's behaviour, and making it normative is what keeps 1b
@@ -274,25 +313,47 @@ emits, the daemon validates and drops. That is a **pre-existing
 violation of an already-ruled contract**, uncovered by this
 measurement, not created by 1b.
 
-**Ruling: 1b does not absorb it.** 1b owns the frontend half — per-panel
-residual, both axes emitted — and the replay is repaired in a
-**prerequisite lane** carrying parent acceptance 48. Three reasons:
+**Ruling: 1b does not absorb it, and 1b does not ship before it.** The
+replay is repaired in a **prerequisite lane** carrying parent
+acceptance 48, and **1b depends on that lane** — see the ordering
+below. Two reasons, and the one revision 15 gave was wrong:
 
-1. **It is already scoped elsewhere.** Stage 2B-3 owns replay by an
-   existing ruling. Absorbing it would overrule that from an input
-   slice.
-2. **It is not input work.** Replay drives selection, listview rows and
-   child SGR reporting, and needs the GPU band — none of which is
-   pointer-and-scroll.
-3. **The defect predates 1b** and is not horizontal-specific: vertical
+1. **Replay is broader than 1b, and already owned.** Acceptance 48
+   (`docs/bottom-panel-framing.md:1719`) has `PanelPointer` driving
+   *"listview row selection, panel selection, terminal mouse reporting,
+   and click-to-focus without disturbing the document mirror"*, plus
+   activation ordering and coalescing rules. A wheel is one gesture in
+   that set. Implementing it alone from an input slice would deliver a
+   fragment of an acceptance criterion owned elsewhere.
+2. **The defect predates 1b** and is not horizontal-specific: vertical
    panel scrolling is equally dead today. A fix belongs where the
    contract lives, not bolted to the slice that happened to find it.
 
+**Revision 15 said "it is not input work". That was wrong** — replay
+includes terminal mouse reporting and click-to-focus, which is exactly
+input work. The reason is ownership and breadth, not category.
+
+##### Ordering — and why emission-only witnesses are not enough
+
+**The defect is precisely "the frontend emits and the receiver
+discards".** An emission-only witness asserts the half that already
+works and cannot see the half that does not — *it reproduces the blind
+spot that let this sit undetected.* Passing panel rows would again mean
+nothing about whether a panel wheel scrolls.
+
+So the dependency is **hard, and ordered**:
+
+1. **The replay lane merges first.**
+2. **1b rebases onto it**, and its base moves from `72da24a` to that
+   merge commit. §2a's other measurements are unaffected — the replay
+   lane touches the daemon side.
+3. **1b carries an END-TO-END panel-wheel EFFECT witness**: a wheel over
+   a panel cell moves that panel's viewport. Not "a `PanelPointer` was
+   emitted" — the observable effect.
+
 **Panel inertness is therefore NOT an option and is not claimed.** The
-panel's contract is "emit both axes with its own residual"; what is
-deferred is the daemon replaying them, and **1b's panel rows witness
-emission only, which they must say explicitly** rather than implying a
-scroll the user cannot yet see.
+panel's contract is "emit both axes with its own residual, and the
+panel scrolls."
 
 **Without this table the rows are satisfiable by an implementation that
 is wrong**: one global accumulator passes every per-surface row that
@@ -431,37 +492,62 @@ geometry paths — `resize` (`:9851`), `apply_font_facts` (`:9729`),
 would stay green with the overwrite mutation restored**, which is a
 vacuous witness of exactly the kind this framing keeps producing.
 
-| # | witness | driver |
+##### The discriminating setup, required by every row
+
+**Revision 15 stated this for L3 alone. It is required by all of
+them.** Every row below asserts "the origin is X"; if the cursor sits
+*inside* the manually scrolled viewport, `follow_left` returns that
+same origin, so **held authority and released authority produce
+identical state** and the row passes either way. Visible state
+coincides; the assertion proves nothing.
+
+**Setup for L1, L2, L4, L6, L7 and L8, not only L3: the cursor is at a
+column OUTSIDE the manual viewport**, so the two outcomes are
+distinguishable — authority held keeps the wheel origin, authority
+released snaps to the caret's.
+
+| # | witness | driver (cursor outside the manual viewport throughout) |
 |---|---|---|
 | L1 | preservation, TUI | wheel sideways → **a real paint** (`paint_frame` → `prepare_window_cursor_visible`) |
-| L2 | preservation, GPU | wheel sideways → **a real same-cursor geometry re-follow** (`resize` / `apply_font_facts`), cursor unchanged |
-| L3 | release | wheel sideways → a genuine cursor-position change **to a column OUTSIDE the manual viewport** |
+| L2 | preservation, GPU | wheel sideways → **a HEIGHT-ONLY `resize`** — real follow, horizontal geometry unchanged |
+| L3 | release | wheel sideways → a genuine cursor-position change, landing outside the manual viewport |
 | L4 | cross-axis, **TUI only** | wheel sideways → wheel **vertically**; vertical wheel carries point in the TUI (`scroll_window`), so a naive authority-on-any-cursor-write releases here. Clause 3 says the origin survives |
 | L5 | point and selection unmoved | wheel sideways on both frontends → point and selection byte-identical (clause 1) |
 | L6 | clamp-absorbed motion does not arm | at the bound already, wheel further → origin unchanged **and authority NOT armed**, so the next follow moves normally (clause 2's "effective") |
-| L7 | re-clamp preserves authority | wheel sideways → **widen** the viewport → origin re-clamped to the new maximum, authority still held, next same-cursor follow does not overwrite (clause 3) |
+| L7a | re-clamp on **viewport widening** | wheel sideways → **widen** the viewport → origin re-clamped to the new maximum, authority still held (clause 3) |
+| L7b | re-clamp on **content shrink** | wheel sideways → **shorten the widest line** so the maximum falls → origin re-clamped, authority still held |
 | L8 | wrap and buffer replacement clear the LATCH | wheel sideways → toggle to `Wrap` (and separately, replace the buffer) → origin zero **and authority cleared**, verified by a following `truncate` toggle where the caret rule governs again (clause 5) |
 
-**L3 must move the cursor OUTSIDE the manual viewport.** Inside it,
-`follow_left` returns the same origin, so a release row would pass
-whether or not release happened — the "authority never releases"
-mutation would survive it.
+**L2 is height-only for the same reason L3 leaves the viewport.** A
+resize that changes width also changes the clamp, so the origin could
+move for a reason unrelated to authority and the row would not
+discriminate. Height-only invokes the real follow path
+(`resize` → `ensure_caret_painted` → `horizontal_follow`) while leaving
+horizontal geometry fixed.
+
+**L7 needs both legs.** Clause 3 promises re-clamping on *geometry and
+content* changes; widening the viewport witnesses only the geometry
+half. **L7b shrinks the content** — the maximum is
+`widest − viewport`, so a shortened widest line lowers it with the
+viewport untouched.
 
 **L8 is not covered by the existing wrap-origin rows.** Those assert the
 origin is zeroed; they cannot see a **stale latch** surviving the wrap,
 which surfaces only on the return to `truncate` when the caret rule
 should have resumed and does not.
 
-Mutations, each failing its own rows and no others:
+Mutations. Per §6's dependency-aware rule, each must **bite its named
+rows**; where one necessarily breaks dependents, the dependency is
+named rather than treated as a failure of the mutation.
 
-| mutation | must fail |
-|---|---|
-| follow ignores manual authority (always overwrites) | L1, L2 |
-| manual authority never releases | L3 |
-| authority armed by *any* wheel event, effective or not | L6 |
-| re-clamp releases authority instead of preserving it | L7 |
-| wrap/replacement zeroes the origin but leaves the latch set | L8 |
-| the wheel path writes point or selection | L5 |
+| mutation | must bite | legitimate dependents |
+|---|---|---|
+| follow ignores manual authority (always overwrites) | L1, L2 | L4, L7a, L7b — all assert a preserved origin, which cannot survive an unconditional overwrite |
+| manual authority never releases | L3 | L8's `truncate` leg, which checks the caret rule resumed |
+| authority armed by *any* wheel event, effective or not | L6 | none |
+| re-clamp releases authority instead of preserving it | L7a, L7b | none |
+| wrap/replacement zeroes the origin but leaves the latch set | L8 | none |
+| the wheel path writes point or selection | L5 | L4 in the TUI, where a spurious point write is what clause 3 must survive |
 
 Clause 5's *origin* half is already implemented for the caret path; the
 existing wrap-guard removal named in the B7 row remains its mutation.
@@ -504,10 +590,25 @@ B7's revision found and B3 currently has no row to catch.
 
 ## 3. PR topology
 
-`1-pre` → `1a`\* → `1b` → `1c` → `1d` → `1e`\*  (\* `--protocol`)
+`1-pre` → `1a`\* → **panel-replay lane** → `1b` → `1c` → `1d` → `1e`\*
+ (\* `--protocol`)
 
 **1c is NOT protocol-bearing** under Q#S1-8's ruling. Protocol slices
 are serialized.
+
+**The panel-replay lane is a HARD PREREQUISITE of 1b**, not a parallel
+track. §2a found that `dispatch_semantic_panel_pointer` validates and
+focuses but **replays nothing**, so a panel wheel is dead on both axes
+today — a pre-existing gap in **parent acceptance 48**
+(`docs/bottom-panel-framing.md:1719`), which owns it. 1b's B1 makes the
+panel a first-class wheel target with its own residual, and **the
+defect is exactly "frontend emits, receiver discards"**, so a 1b that
+witnessed emission alone would repeat the blind spot that hid it.
+
+**Order: the replay lane merges, 1b rebases onto that merge commit,
+then 1b lands an end-to-end panel-wheel EFFECT witness.** 1b's base
+moves off `72da24a` accordingly; the rest of §2a is measured on the GPU
+and TUI sides and is unaffected.
 
 ## 4. Q#S1-8 — RULED: (A), preserve pre-window readiness
 

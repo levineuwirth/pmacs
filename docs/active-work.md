@@ -286,11 +286,22 @@ deferred.
   **`githubsucks/gui-stage1b-pointer-scroll` is the authoritative
   tip** (the ref, not a SHA). Recover with
   `git fetch githubsucks && git checkout gui-stage1b-pointer-scroll`.
-- **No PR yet.** Framing approval gates it.
-- **Checkpoint: framing revision 14 AWAITING APPROVAL; NO CODE
+- **No PR yet.** Framing approval gates it, and so does a
+  **prerequisite lane** (below).
+- **Checkpoint: framing revision 16 AWAITING APPROVAL; NO CODE
   WRITTEN.** `docs/gui-stage1-input-framing.md` §2a is the 1b ground
-  truth, measured at `72da24a`. Revision 13 was the re-measurement;
-  **revision 14 answers review of it** and is what is pending.
+  truth, measured at `72da24a`. 13 was the re-measurement; 14 ruled
+  Q#S1-11; 15 ruled B1 in full; **16 answers review of 15** and is what
+  is pending.
+- **BLOCKED ON A PREREQUISITE: the panel-replay lane.**
+  `dispatch_semantic_panel_pointer` (`src/editor.rs:2674`) validates and
+  focuses but **replays nothing**, so a panel wheel is dead today on
+  both axes — a pre-existing gap in **parent acceptance 48**
+  (`docs/bottom-panel-framing.md:1719`), which owns it. **That lane
+  merges first; 1b then rebases onto its merge commit** and its base
+  moves off `72da24a`. 1b must carry an **end-to-end panel-wheel EFFECT
+  witness**, because the defect is exactly "frontend emits, receiver
+  discards" and an emission-only row repeats that blind spot.
 - **No new framing doc.** The approved Stage 1 framing governs every
   slice; B1–B7 are ruled there. §2a extends it rather than duplicating
   it.
@@ -303,14 +314,23 @@ deferred.
     selection (`src/editor.rs:3638`), so carrying point needs a wire
     operation 1b may not add. This also settles the horizontal-scroll
     framing's **Q#HS4** for the wheel case.
-  - **The snap-back lands on the next PAINT, not the next caret
-    event** — `horizontal_follow` is the first act of
+  - **The snap-back driver DIFFERS BY FRONTEND**, and both earlier
+    descriptions were wrong. In the **TUI** it is the next **paint** —
+    `horizontal_follow` is the first act of
     `prepare_window_cursor_visible` (`src/editor.rs:4539`), which
-    `paint_frame` runs every frame (`:4852`). Revision 13 said "caret
-    event" and understated it.
+    `paint_frame` runs every frame (`:4852`). In the **GPU** it is
+    **not** paint: `render()` (`pmacs-gpu/src/main.rs:9881`) never calls
+    the follow, which is reached only via `ensure_caret_painted` on
+    cursor and geometry paths. Revision 13 said "next caret event"; 14
+    said "next paint" for both; **15 split them**, and a GPU
+    wheel-then-paint witness would have been vacuous.
   - **B1's "surface" is enumerated** as six wheel targets, each with a
     residual owner and a **normative** answer on both axes. Revision 14
     left two cells reading "must be ruled"; revision 15 closes them.
+    **Divider and background bank NOTHING** — revision 15 gave them the
+    cell's residual, which manufactures the very surface-switch jump B1
+    forbids; revision 16 discards both axes and adds a crossing
+    witness.
     Quantization precedes routing (`:3074` before `:3090`/`:3112`), so
     an accumulator added after the routing decision fixes the document
     and leaves the wire targets broken.
@@ -320,8 +340,9 @@ deferred.
     today on **both** axes. Its own doc defers replay to **parent
     acceptance 48, Stage 2B-3**. **1b does not absorb it**: 1b emits
     both axes with a per-panel residual, and the replay is a
-    **prerequisite lane**. Revision 14 missed this because it cited
-    `src/daemon.rs:6683` — a `#[cfg(test)]` fixture — as the handler.
+    **prerequisite lane** that **merges before 1b**. Revision 14 missed
+    this because it cited `src/daemon.rs:6683` — a `#[cfg(test)]`
+    fixture — as the handler.
   - **Revision 15 CHANGES two B-row contracts**, B1 and B3. Revision 14
     claimed no contract changed; that was false.
   - **B3 takes B7's exact saturated upper bound** in the GPU column
@@ -531,7 +552,10 @@ ARC is done, and the arc is Stage 1 as a whole: **four slices remain**
   10's claim that P2 was satisfied by route classification alone**, and
   corrects the Stage 1a consequence 10 got wrong.
 - **Slice order, each its own branch and PR:** ~~`1-pre`~~ →
-  ~~`1a`~~\* → **`1b`** → `1c` → `1d` → `1e`\*. **`1a` and `1e` are the
+  ~~`1a`~~\* → **panel-replay lane** → **`1b`** → `1c` → `1d` →
+  `1e`\*. The replay lane is a **hard prerequisite** of 1b, not a
+  parallel track: it repairs a pre-existing acceptance-48 gap that 1b's
+  panel rows cannot honestly witness around. **`1a` and `1e` are the
   two protocol-bearing slices — v24 `TextInput` and v25
   `OpenTarget`/`OpenTargetResult` — and they are SERIALIZED** against
   each other and against every other wire change in the project. 1c is

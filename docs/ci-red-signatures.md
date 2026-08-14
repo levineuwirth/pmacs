@@ -866,3 +866,23 @@ claim is the one a later reader would otherwise reach for.*
 | **relation to U2 — a NEAR MISS, do not match it there** | the PTY fragment is U2's exact family (`stty -a output was: ""`), but U2's selector field names only `m6_1_pty_raw_mode_disables_kernel_echo`. U2's occurrence 2 saw raw **and** canonical fail together; here **canonical redded alone and raw passed**, which U2's evidence has never shown. It is recorded here rather than folded into U2 so that the "canonical alone" case stays visible |
 | **relation to U6 — its own instruction, honoured** | `composition_overhead_under_ten_percent` is one of U6's two selectors, and U6 says plainly: "If a future run reds **one** of these without the other, that is a different incident and should be judged as one." It redded without `criterion_1_end_of_line_typing…`, in a different step, at a far larger margin (1.613× here against U6's 1.297×). Judged as a different incident, as instructed |
 | **what this row does NOT assert** | that the two selectors share a mechanism. They failed together once; they belong to different subsystems; and U7 already refused this exact merge for U6. The **co-failure inside one step with an in-run green control** is the signature — not either name, and not a shared cause |
+
+### U10 — `composition_overhead_under_ten_percent` reds **alone** in `03-lib`, green in the same run's sweep
+
+**This is the converse of U9's step pattern, and it bears directly on
+the control U9 asked for.** U9 red in the sweep and green in `--lib`;
+this occurrence red in `--lib` and green in the sweep — **the same
+run**, minutes apart, on a **documentation-only diff**.
+
+| field | value |
+|---|---|
+| **selector** | `--lib editor::tests::composition_overhead_under_ten_percent`, failing **alone** in `scripts/gate` step `03-lib` |
+| **job / flavor** | local (Linux), `scripts/gate --acceptance gpu_invocation_acceptance`, log `20260814T081435Z-124213`, per-worktree target dir |
+| **required fragments** | `composition machinery added more than 10% overhead` |
+| **NOT fragments** | the measured numbers (`1.343`, `single=176750 ns`, `dispatch=237461 ns`, `34.3%`, `66.2%`) and every `:LINE` suffix — occurrence-specific |
+| **status** | **one occurrence in this step shape; INTERMITTENT** — the same test passed in step `08-sweep` of the **same gate run** |
+| **what IS established** | intermittence, with an in-run control on the same tree, and the tree excluded about as firmly as this project can: **the diff was documentation only**, touching no Rust. The assertion is timing-sensitive by construction — a wall-clock ratio against a fixed 1.10× budget |
+| **what is NOT** | cause. Load was not measured at either moment, so the load confound is **uncontrolled**, not merely unresolved |
+| **what it does to U9's named next test** | U9's candidate was that `--workspace` running **many test binaries concurrently** differs in kind from `--lib` running **one**, with the concurrency implicated. **This occurrence runs that comparison in the opposite direction and gets the opposite result**: red at low concurrency (`--lib`), green at high (sweep). So sweep concurrency does **not** survive as a general mechanism. **That is not a cause either** — two occurrences pointing opposite ways across one variable is evidence the variable is not the discriminator, nothing more. U9's synthetic-load control remains the useful experiment and is still unrun |
+| **relation to U6 and U9 — judged separately, as U6 instructs** | U6 pairs this selector with `criterion_1_end_of_line_typing…`; U9 pairs it with a PTY test. **Here it redded with no companion at all**, which neither row has recorded. U6's rule — a red of one selector without the other is a different incident — applies a second time, and applies to U9 equally |
+| **margin, for trend only** | 1.343× here; U6 1.297×; U9 1.613×. Three points on one budget, recorded so a later reader can see the spread rather than re-deriving it. **No trend is claimed from three points** |
