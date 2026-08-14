@@ -2672,36 +2672,251 @@ impl EditorState {
     ///
     /// Returns whether the gesture was accepted.
     pub fn dispatch_semantic_panel_pointer(
-        &self,
+        &mut self,
         frontend_id: FrontendId,
         buffer_id: crate::buffer::BufferId,
         coord: CellCoord,
         kind: pmacs_protocol::MouseKind,
+        mods: pmacs_protocol::Modifiers,
     ) -> bool {
+        use pmacs_protocol::MouseKind as PKind;
+
         let Some(size) = self.core.borrow().panel_grid_size(frontend_id) else {
             return false;
         };
         if coord.row >= size.rows || coord.col >= size.cols {
             return false;
         }
-        let is_terminal = self.terminal_manager.borrow().is_terminal(buffer_id);
-        let mut core = self.core.borrow_mut();
-        let Some(side) = core.side_window_for(frontend_id) else {
-            return false;
-        };
-        if core.windows.get(&side).map(|window| window.buffer_id) != Some(buffer_id) {
+        // Parent 48 R-c: the panel's LAST ROW IS ITS MODE LINE. Projection
+        // derives content as `rows - 1` while the frontend hit-tests the
+        // whole frame, so a `PanelPointer` can legitimately name chrome —
+        // and chrome is never a content cell for either target.
+        let content_rows = size.rows.saturating_sub(1);
+        if content_rows == 0 {
             return false;
         }
+        let on_chrome = coord.row >= content_rows;
+        let is_wheel = matches!(
+            kind,
+            PKind::ScrollUp | PKind::ScrollDown | PKind::ScrollLeft | PKind::ScrollRight
+        );
+
+        let is_terminal = self.terminal_manager.borrow().is_terminal(buffer_id);
+        let side = {
+            let core = self.core.borrow();
+            let Some(side) = core.side_window_for(frontend_id) else {
+                return false;
+            };
+            if core.windows.get(&side).map(|window| window.buffer_id) != Some(buffer_id) {
+                return false;
+            }
+            side
+        };
+
+        // Q#BP-R2, step 3 of the ordering: a terminal panel's CHROME WHEEL
+        // is not a terminal gesture at all, so it is consumed HERE —
+        // before `focus_window`, before `active_frontend`, before any
+        // controller claim, and before the shared terminal path.
+        //
+        // Placing this below the activation block would leave the wheel
+        // CHANGING FOCUS while scrolling nothing and claiming no
+        // controller: `activates` is `!Move` for a terminal, so the wheel
+        // already activates. That half-state is what the
+        // activate-then-claim rule exists to prevent.
+        if is_terminal && on_chrome && is_wheel {
+            return true;
+        }
+        if on_chrome {
+            if is_terminal {
+                // TUI parity: a terminal never sees a chrome coordinate
+                // (`dispatch_mouse` rejects every kind above `inner_rows`
+                // for a terminal window). The wheel left above; the rest
+                // stops here.
+                return true;
+            }
+            // Document chrome mirrors the TUI's PER-KIND rule: presses and
+            // motion are reserved, while `Up` and the wheel fall through —
+            // an `Up` must still terminate a gesture begun in content, and
+            // a chrome wheel still scrolls.
+            if matches!(kind, PKind::Down(_) | PKind::Drag(_) | PKind::Move) {
+                return true;
+            }
+        }
+
         let activates = if is_terminal {
-            !matches!(kind, pmacs_protocol::MouseKind::Move)
+            !matches!(kind, PKind::Move)
         } else {
-            matches!(kind, pmacs_protocol::MouseKind::Down(_))
+            matches!(kind, PKind::Down(_))
         };
         if activates {
+            let mut core = self.core.borrow_mut();
             core.focus_window(frontend_id, side);
             core.active_frontend = frontend_id;
         }
+
+        if is_terminal {
+            // The ONE terminal pointer path, shared with the TUI and the
+            // document terminal. The viewport is `content_rows`, never the
+            // full grid: passing the frame would make the mode line a child
+            // cell and put every clamp one row out.
+            let viewport = CellSize::new(content_rows, size.cols);
+            let key = TerminalViewKey::new(frontend_id, side, buffer_id);
+            self.apply_terminal_gesture(key, viewport, coord, kind, mods, (coord.row, coord.col));
+            return true;
+        }
+
+        self.replay_panel_document_gesture(frontend_id, side, coord, kind, mods);
         true
+    }
+
+    /// Replay one accepted gesture into a DOCUMENT panel (parent 48).
+    ///
+    /// Every write here is addressed to `side`, never to the ambient
+    /// active window. `Drag` and `Up` do not activate, and another
+    /// frontend's input can interleave between a `Down` and its tail, so
+    /// a replay reading `active_window_mut()` would act on whatever
+    /// happened to be active at that moment (R-b).
+    fn replay_panel_document_gesture(
+        &mut self,
+        frontend_id: FrontendId,
+        side: WindowId,
+        coord: CellCoord,
+        kind: pmacs_protocol::MouseKind,
+        mods: pmacs_protocol::Modifiers,
+    ) {
+        use pmacs_protocol::{MouseButton as PButton, MouseKind as PKind};
+
+        match kind {
+            PKind::ScrollUp => self.scroll_window(side, -SCROLL_LINES),
+            PKind::ScrollDown => self.scroll_window(side, SCROLL_LINES),
+
+            PKind::Down(PButton::Left) => {
+                self.core.borrow_mut().break_command_chain(frontend_id);
+                let is_double = self.is_double_click(frontend_id, side, coord);
+                let Some(byte) = self.panel_cell_byte(side, coord) else {
+                    return;
+                };
+                let extending = mods.contains(pmacs_protocol::Modifiers::SHIFT);
+                let prev = self.core.borrow().windows[&side].cursor;
+                let keep_anchor = extending
+                    && self
+                        .core
+                        .borrow()
+                        .windows
+                        .get(&side)
+                        .is_some_and(|w| w.selection.is_some());
+                self.panel_set_cursor(side, byte);
+                if is_double && !extending {
+                    // Repeated left `Down`s are a multi-click (Q#BP16), and
+                    // the second selects the word — the same rule the TUI
+                    // applies, resolved against the SIDE window.
+                    // Safe to use the active-window helper HERE and only
+                    // here: `Down` activated the side window two statements
+                    // ago, synchronously, so active == side. The tail
+                    // (`Drag`/`Up`) does not activate and uses the
+                    // window-targeted writers instead.
+                    if self.core.borrow_mut().select_word_at_cursor() {
+                        self.mouse_click = None;
+                        return;
+                    }
+                }
+                if extending {
+                    if !keep_anchor {
+                        self.panel_set_selection(side, Some(prev));
+                    }
+                } else {
+                    self.panel_set_selection(side, Some(byte));
+                }
+                self.mouse_click = Some(MouseClickState {
+                    frontend_id,
+                    window_id: side,
+                    cell: coord,
+                    at: Instant::now(),
+                });
+            }
+            PKind::Drag(PButton::Left) => {
+                self.mouse_click = None;
+                self.core.borrow_mut().break_command_chain(frontend_id);
+                if let Some(byte) = self.panel_cell_byte(side, coord) {
+                    self.panel_set_cursor(side, byte);
+                }
+            }
+            PKind::Up(PButton::Left) => {
+                // A click without a drag leaves an ACTIVE BUT EMPTY
+                // selection whose stale anchor would capture the next
+                // shift-motion, so it is cleared rather than left set.
+                let mut core = self.core.borrow_mut();
+                if let Some(window) = core.windows.get_mut(&side)
+                    && window
+                        .selection
+                        .is_some_and(|selection| selection.anchor == window.cursor)
+                {
+                    window.selection = None;
+                }
+            }
+            PKind::Down(PButton::Right) => {
+                self.core.borrow_mut().break_command_chain(frontend_id);
+                if let Some(byte) = self.panel_cell_byte(side, coord) {
+                    self.panel_set_cursor(side, byte);
+                }
+                self.open_context_menu(side, coord.row, coord.col, (coord.row, coord.col));
+            }
+            // Claimed and dropped, for two different reasons kept in one
+            // arm because their bodies are identical: horizontal panel
+            // scrolling belongs to GUI arc Stage 1b's B-rows rather than
+            // parent 48, bare `Move` neither focuses nor claims, and the
+            // remaining buttons have no panel semantics at all.
+            PKind::ScrollLeft
+            | PKind::ScrollRight
+            | PKind::Move
+            | PKind::Down(_)
+            | PKind::Up(_)
+            | PKind::Drag(_) => {}
+        }
+    }
+
+    /// Byte under a panel cell, resolved against the SIDE window's own
+    /// `view_top` and fold map.
+    ///
+    /// Deliberately not `activate_and_position`: that helper converts
+    /// correctly but also calls `set_active_window_id`, and a panel tail
+    /// must not re-activate a window on a frontend whose active window may
+    /// have moved since the `Down` (R-b).
+    fn panel_cell_byte(&self, win_id: WindowId, coord: CellCoord) -> Option<u64> {
+        let core = self.core.borrow();
+        let window = core.windows.get(&win_id)?;
+        let buffer_id = window.buffer_id;
+        let view_top = window.view_top;
+        let folds = core.fold_map_for_window(win_id);
+        let display_row = match folds.as_ref() {
+            Some(map) => map.nth_visible_from(view_top, coord.row as usize),
+            None => view_top.saturating_add(coord.row as usize),
+        };
+        let display_row = u32::try_from(display_row).ok()?;
+        let target = crate::view::DisplayCoord::new(display_row, coord.col);
+        let registry = core.registry.clone();
+        let reg = registry.borrow();
+        let buf = reg.get(buffer_id).ok()?;
+        core.windows[&win_id]
+            .text_view
+            .display_to_pos(buf, target, core.layout_ctx(win_id))
+    }
+
+    /// Move ONE window's point, never the ambient active window's.
+    fn panel_set_cursor(&self, win_id: WindowId, byte: u64) {
+        let mut core = self.core.borrow_mut();
+        if let Some(window) = core.windows.get_mut(&win_id) {
+            window.cursor = byte;
+            window.goal_col = None;
+        }
+    }
+
+    /// Set or clear ONE window's selection anchor.
+    fn panel_set_selection(&self, win_id: WindowId, anchor: Option<u64>) {
+        let mut core = self.core.borrow_mut();
+        if let Some(window) = core.windows.get_mut(&win_id) {
+            window.selection = anchor.map(|anchor| crate::window::Selection { anchor });
+        }
     }
 
     /// Precompute owned terminal view snapshots before entering paint borrows.

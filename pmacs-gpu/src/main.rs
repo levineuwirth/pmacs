@@ -2131,6 +2131,16 @@ struct PanelBand {
     /// because the first drag after a press must reach the daemon even at the
     /// cell the press landed on.
     last_pointer_cell: Option<CellCoord>,
+    /// Where the live gesture last legitimately pointed **inside content**,
+    /// used to normalize a release that lands on chrome or outside the band
+    /// (parent 48 R-c2).
+    ///
+    /// **Deliberately NOT `last_pointer_cell`.** That field is a wire
+    /// DEDUPE BASELINE and is cleared on press precisely so the first drag
+    /// after a press reaches the daemon; storing the press cell there would
+    /// suppress it. This one is a TERMINATION FALLBACK with a different
+    /// lifetime, and `panel_motion_is_new` never consults it.
+    gesture_last_content_cell: Option<CellCoord>,
     /// Whether the pointer is currently over the divider strip, which
     /// decides the `RowResize` cursor icon.
     hover_divider: bool,
@@ -2753,6 +2763,25 @@ impl App {
                 // so reporting a drag as a hover makes a selection
                 // drag silently do nothing.
                 let kind = state.panel_motion_kind();
+                let is_chrome = state.panel_cell_is_chrome(coord);
+                if !is_chrome {
+                    let state = self.state.as_mut().expect("checked above");
+                    state.panel.gesture_last_content_cell = Some(coord);
+                }
+                let state = self.state.as_mut().expect("checked above");
+                if is_chrome {
+                    // A crossing drag is normalized to the last content cell
+                    // and then deduped like any other motion — usually
+                    // suppressed, because that cell was already reported.
+                    let Some(normalized) = state.panel.gesture_last_content_cell else {
+                        return;
+                    };
+                    if state.panel_motion_is_new(normalized) {
+                        let mods = translate_mods(self.modifiers);
+                        self.send_panel_pointer_at_cell(Some(normalized), kind, mods);
+                    }
+                    return;
+                }
                 if state.panel_motion_is_new(coord) {
                     let mods = translate_mods(self.modifiers);
                     self.send_panel_pointer_at(x, y, kind, mods);
@@ -2875,9 +2904,22 @@ impl App {
                 // no preceding `Down`, and not arming at all means
                 // `Drag(Left)` is never emitted and panel selection
                 // cannot work at all.
-                if let PointerSurface::PanelCell(_) = panel_surface {
+                if let PointerSurface::PanelCell(coord) = panel_surface {
+                    // Parent 48 R-c: a press on the band's MODE LINE is
+                    // reserved, and must not arm. Arming would let a drag
+                    // into content emit a `Drag` with no accepted `Down` —
+                    // an orphan the daemon cannot tell from a real gesture,
+                    // and one no receiver-side rule can prevent, because the
+                    // frontend has already latched.
+                    if state.panel_cell_is_chrome(coord) {
+                        return;
+                    }
                     let state = self.state.as_mut().expect("checked above");
                     state.set_panel_pointer_held(true);
+                    // R-c2: the TERMINATION FALLBACK, not the dedupe
+                    // baseline. `set_panel_pointer_held` just cleared the
+                    // latter on purpose.
+                    state.panel.gesture_last_content_cell = Some(coord);
                     self.send_panel_pointer_at(
                         x,
                         y,
@@ -4340,6 +4382,116 @@ mod input_routing_tests {
                 width: 1,
                 height: 1
             }]
+        );
+    }
+
+    /// Parent 48 R-c, the PRODUCER half — a press on the band's mode line
+    /// must neither send nor arm, and the row above it must do both.
+    ///
+    /// This drives the real `MouseInput` path and reads the wire, because
+    /// the hazard is precisely that the frontend latches BEFORE the daemon
+    /// can refuse: `panel_hit_test` reports across the whole frame, so a
+    /// chrome press is indistinguishable from a content press to the
+    /// arming code, and once armed, a drag into content emits a `Drag`
+    /// with no accepted `Down`. No receiver-side rule can undo that.
+    ///
+    /// The content leg is not decoration: without it, an implementation
+    /// that never arms anywhere passes the chrome half.
+    #[test]
+    fn a_press_on_the_bands_mode_line_neither_sends_nor_arms() {
+        let mut h = EffectHarness::new();
+        let rows = 4;
+        {
+            // Inlined rather than shared: `present_panel` lives in the
+            // other test module. Same shape — wire on, one declaration,
+            // one `Present`.
+            let state = h.app.state.as_mut().expect("harness state");
+            state.set_panel_wire(PANEL_MIN_VERSION);
+            // The harness already declared during setup, so the `Surface`
+            // trigger dedups; reuse the standing declaration rather than
+            // asserting a second one.
+            let geometry_epoch = state
+                .next_geometry_declaration(GeometryTrigger::Surface)
+                .map_or(state.panel.geometry_epoch, |(epoch, _)| epoch);
+            assert_ne!(
+                geometry_epoch, 0,
+                "a declaration must exist to present against"
+            );
+            let cols = state.declared_cell_total().0.cols.max(1);
+            let frame = pmacs_protocol::panel::PanelFrame {
+                buffer_id: BufferId::from_raw(77),
+                panel_epoch: 1,
+                geometry_epoch,
+                size: CellSize::new(rows, cols),
+                cells: vec![pmacs_protocol::Cell::default(); (rows * cols) as usize],
+                cursor: None,
+                focused: true,
+            };
+            assert!(
+                state.apply_panel_payload(pmacs_protocol::panel::PanelFramePayload::Present(frame)),
+                "installing a first frame changes the band"
+            );
+        }
+        let (ox, oy, _, band_h) = h
+            .app
+            .state
+            .as_ref()
+            .expect("harness state")
+            .panel_content_rect()
+            .expect("a presented band has a rect");
+        let row_h = band_h / rows as f32;
+        let press_at = |h: &mut EffectHarness, y: f32| {
+            h.feed(&WindowEvent::CursorMoved {
+                device_id: DeviceId::dummy(),
+                position: PhysicalPosition::new(f64::from(ox) + 0.5, f64::from(y)),
+            });
+            h.feed(&WindowEvent::MouseInput {
+                device_id: DeviceId::dummy(),
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+            })
+        };
+        let panel_events = |step: &Step| {
+            step.outbound
+                .iter()
+                .filter(|event| matches!(event, pmacs_protocol::FrontendEvent::PanelPointer { .. }))
+                .count()
+        };
+
+        // Chrome: the band's LAST row.
+        let step = press_at(&mut h, oy + band_h - 0.5);
+        assert_eq!(
+            panel_events(&step),
+            0,
+            "a press on the mode line is reserved and reaches no daemon"
+        );
+        assert!(
+            !h.app
+                .state
+                .as_ref()
+                .expect("harness state")
+                .panel
+                .pointer_held,
+            "and it must not ARM — an armed chrome press turns the next \
+             motion into a `Drag` with no accepted `Down`"
+        );
+
+        // Content: one row up, same column, same gesture.
+        let step = press_at(&mut h, oy + band_h - row_h - 0.5);
+        assert_eq!(
+            panel_events(&step),
+            1,
+            "the row above chrome is content and must still work — without \
+             this leg, never arming anywhere passes the half above"
+        );
+        assert!(
+            h.app
+                .state
+                .as_ref()
+                .expect("harness state")
+                .panel
+                .pointer_held,
+            "a content press arms the gesture"
         );
     }
 
@@ -6908,6 +7060,7 @@ impl State {
                 self.panel.hover_divider = false;
                 self.panel.pointer_held = false;
                 self.panel.last_pointer_cell = None;
+                self.panel.gesture_last_content_cell = None;
                 had
             }
             PanelFramePayload::Present(frame) => {
@@ -6918,6 +7071,28 @@ impl State {
                 if self.panel.frame.as_ref() == Some(&frame) {
                     // A duplicate does no work — not even a reshape.
                     return false;
+                }
+                // Parent 48 R-d: a held gesture belongs to the presentation
+                // it began on. `Absent` clears the latch, but a
+                // `Present` → `Present` REPLACEMENT did not, so a press on
+                // panel A could emit a drag or release for B with no B
+                // press — and acceptance 49 cannot reject that, because the
+                // event carries B's CURRENT epochs. Geometry counts too: a
+                // font or scale change moves `geometry_epoch` while
+                // `panel_epoch` holds, and the gesture would resume under a
+                // new grid.
+                //
+                // Only on a CHANGE of identity. A panel repaints constantly
+                // during a drag, and resetting on every frame would make
+                // selection impossible.
+                let identity_changed = self.panel.presented().is_some_and(|current| {
+                    current.panel_epoch != frame.panel_epoch
+                        || current.geometry_epoch != frame.geometry_epoch
+                });
+                if identity_changed {
+                    self.panel.pointer_held = false;
+                    self.panel.last_pointer_cell = None;
+                    self.panel.gesture_last_content_cell = None;
                 }
                 let plan = TerminalPaintPlan::build_grid(
                     frame.size,
@@ -7223,10 +7398,27 @@ impl State {
     /// A panel selection drag routinely ends past the band's edge, and
     /// dropping that release leaves the daemon holding a button down forever.
     fn panel_release_cell(&self, x: f32, y: f32) -> Option<CellCoord> {
+        // Parent 48 R-c/R-c2: `Up` is the load-bearing crossing event — a
+        // gesture whose release is dropped leaves the daemon holding a
+        // button down forever. It is therefore always sent, and always at
+        // a CONTENT coordinate: chrome and outside-the-band both fall back
+        // to where the gesture last legitimately pointed, which is set at
+        // press time so a release with no intervening motion still has one.
         match self.classify_pointer_surface(x, y) {
-            PointerSurface::PanelCell(coord) => Some(coord),
-            _ => self.panel.last_pointer_cell,
+            PointerSurface::PanelCell(coord) if !self.panel_cell_is_chrome(coord) => Some(coord),
+            _ => self.panel.gesture_last_content_cell,
         }
+    }
+
+    /// Whether `coord` is the band's MODE-LINE row (parent 48 R-c).
+    ///
+    /// The daemon projects panel content as `rows - 1` and paints the last
+    /// row as chrome, but `panel_hit_test` reports across the whole frame,
+    /// so a hit is not automatically a content cell.
+    fn panel_cell_is_chrome(&self, coord: CellCoord) -> bool {
+        self.panel
+            .presented()
+            .is_some_and(|frame| coord.row + 1 >= frame.size.rows)
     }
 
     /// Whether a panel motion at `coord` carries anything new, and latch it.
@@ -7248,6 +7440,10 @@ impl State {
     fn set_panel_pointer_held(&mut self, held: bool) {
         self.panel.pointer_held = held;
         self.panel.last_pointer_cell = None;
+        // The termination fallback dies with the gesture (parent 48 R-c2).
+        // Safe in both directions: the press path rewrites it immediately
+        // after arming, and a release READS it before this runs.
+        self.panel.gesture_last_content_cell = None;
     }
 
     /// Begin a divider drag at surface pixel `y`, if the pointer is on the
@@ -19809,6 +20005,167 @@ mod tests {
         }
     }
 
+    /// Parent 48 R-c — the band's MODE-LINE row is chrome, and the
+    /// producer must not arm a gesture there.
+    ///
+    /// `panel_hit_test` reports across the whole frame, so a chrome press
+    /// looks exactly like a content press to the arming code. If it armed,
+    /// dragging into content would emit a `Drag` with no accepted `Down` —
+    /// an orphan the daemon cannot distinguish from a real gesture, and one
+    /// no receiver-side rule can prevent, because the latch is already set.
+    #[test]
+    fn a_press_on_the_bands_mode_line_neither_arms_nor_reports_content() {
+        let Some(mut state) = headless_or_skip(800, 600, "alpha") else {
+            return;
+        };
+        let frame = present_panel(&mut state, 4);
+        let last = frame.size.rows - 1;
+
+        assert!(
+            state.panel_cell_is_chrome(pmacs_protocol::CellCoord::new(last, 0)),
+            "the band's last row is its mode line"
+        );
+        assert!(
+            !state.panel_cell_is_chrome(pmacs_protocol::CellCoord::new(last - 1, 0)),
+            "the row above it is content — without this the row proves nothing"
+        );
+
+        // A release that lands on chrome normalizes to the last CONTENT
+        // cell rather than reporting the mode line to the daemon.
+        state.set_panel_pointer_held(true);
+        state.panel.gesture_last_content_cell = Some(pmacs_protocol::CellCoord::new(1, 2));
+        let (ox, oy, _, h) = state
+            .panel_content_rect()
+            .expect("a presented band has a rect");
+        let on_chrome_y = oy + h - 0.5;
+        assert_eq!(
+            state.panel_release_cell(ox + 0.5, on_chrome_y),
+            Some(pmacs_protocol::CellCoord::new(1, 2)),
+            "`Up` is the load-bearing crossing event: it must arrive, and at \
+             a CONTENT coordinate — a chrome row would fail the terminal \
+             reporting bounds check and drop into local handling"
+        );
+    }
+
+    /// Parent 48 R-c2 — a release with NO intervening motion still carries
+    /// a coordinate.
+    ///
+    /// The press cell is remembered in `gesture_last_content_cell`, not in
+    /// `last_pointer_cell`: that one is cleared on press precisely so the
+    /// first drag after a press reaches the daemon, and storing the press
+    /// cell there would suppress it.
+    #[test]
+    fn a_release_with_no_intervening_motion_carries_the_press_cell() {
+        let Some(mut state) = headless_or_skip(800, 600, "alpha") else {
+            return;
+        };
+        present_panel(&mut state, 4);
+        let press = pmacs_protocol::CellCoord::new(1, 3);
+
+        state.set_panel_pointer_held(true);
+        state.panel.gesture_last_content_cell = Some(press);
+
+        assert_eq!(
+            state.panel.last_pointer_cell, None,
+            "arming clears the DEDUPE baseline — the tested guarantee that \
+             the first drag after a press is not suppressed"
+        );
+
+        // Released outside the band entirely, with NO motion in between —
+        // asserted BEFORE any motion probe below, because a probe would
+        // populate `last_pointer_cell` and let a conflated implementation
+        // pass. (It did, on the first run of this row.)
+        assert_eq!(
+            state.panel_release_cell(0.0, 0.0),
+            Some(press),
+            "without the press cell retained, this release has no coordinate \
+             and the daemon is left holding a button down forever"
+        );
+
+        // Separation, checked after: the dedupe must not consult the
+        // fallback, so a drag at the press cell still reaches the daemon.
+        assert!(
+            state.panel_motion_is_new(press),
+            "the first drag after a press must not be suppressed"
+        );
+    }
+
+    /// Parent 48 R-d — a held gesture belongs to the presentation it began
+    /// on, and BOTH identities end it.
+    ///
+    /// `Absent` already cleared the latch; a `Present` → `Present`
+    /// replacement did not, and acceptance 49 cannot catch the resulting
+    /// orphan because it carries the successor's CURRENT epochs. Geometry
+    /// counts too: a font or scale change moves `geometry_epoch` while
+    /// `panel_epoch` holds.
+    #[test]
+    fn a_change_of_either_panel_identity_ends_a_held_gesture() {
+        let Some(mut state) = headless_or_skip(800, 600, "alpha") else {
+            return;
+        };
+        let frame = present_panel(&mut state, 4);
+
+        let arm = |state: &mut State| {
+            state.set_panel_pointer_held(true);
+            state.panel.gesture_last_content_cell = Some(pmacs_protocol::CellCoord::new(1, 1));
+        };
+
+        // D4, the NEGATIVE leg, first: a CHANGED frame at the SAME identity
+        // must not cancel a live gesture. A panel repaints constantly during
+        // a drag, and a reset-every-frame implementation would make
+        // selection impossible while passing D1 and D2.
+        arm(&mut state);
+        let mut refreshed = frame.clone();
+        refreshed.focused = !frame.focused;
+        assert!(
+            state.apply_panel_payload(PanelFramePayload::Present(refreshed)),
+            "a focus repaint is a real frame, not a suppressed duplicate"
+        );
+        assert!(
+            state.panel.pointer_held,
+            "a same-identity repaint must NOT end the gesture"
+        );
+        assert!(state.panel.gesture_last_content_cell.is_some());
+
+        // D1 — panel identity.
+        arm(&mut state);
+        let mut replaced = frame.clone();
+        replaced.panel_epoch = frame.panel_epoch + 1;
+        assert!(state.apply_panel_payload(PanelFramePayload::Present(replaced)));
+        assert!(
+            !state.panel.pointer_held,
+            "a replacement panel never saw the press"
+        );
+        assert_eq!(state.panel.gesture_last_content_cell, None);
+        assert_eq!(
+            state.panel.last_pointer_cell, None,
+            "and the dedupe baseline goes too, or the successor's first \
+             same-cell motion is silently suppressed as a duplicate"
+        );
+
+        // D2 — geometry identity, with panel identity UNCHANGED. This is the
+        // font/scale case: the gesture would otherwise resume under a new
+        // grid carrying epochs that are current and perfectly valid.
+        let base = state
+            .panel
+            .presented()
+            .cloned()
+            .expect("a frame is present");
+        arm(&mut state);
+        let mut regeometried = base.clone();
+        regeometried.geometry_epoch = base.geometry_epoch + 1;
+        assert_eq!(
+            regeometried.panel_epoch, base.panel_epoch,
+            "the point of this leg is that PANEL identity holds"
+        );
+        assert!(state.apply_panel_payload(PanelFramePayload::Present(regeometried)));
+        assert!(
+            !state.panel.pointer_held,
+            "a new grid is a new gesture context, even under the same panel"
+        );
+        assert_eq!(state.panel.gesture_last_content_cell, None);
+    }
+
     /// F1 — a held left button makes motion a `Drag(Left)`, and the dedupe
     /// re-arms on every press and release.
     #[test]
@@ -19849,7 +20206,13 @@ mod tests {
             state.panel_release_cell(ox + 0.5, oy + 0.5),
             Some(pmacs_protocol::CellCoord::new(0, 0))
         );
+        // The dedupe baseline and the TERMINATION FALLBACK are separate
+        // fields (parent 48 R-c2): `panel_motion_is_new` owns the first and
+        // a release reads only the second, so drive both exactly as the
+        // production motion path does. Conflating them is what would
+        // suppress the first drag after a press, asserted above.
         state.panel_motion_is_new(pmacs_protocol::CellCoord::new(1, 7));
+        state.panel.gesture_last_content_cell = Some(pmacs_protocol::CellCoord::new(1, 7));
         assert_eq!(
             state.panel_release_cell(ox + 0.5, 0.0),
             Some(pmacs_protocol::CellCoord::new(1, 7)),

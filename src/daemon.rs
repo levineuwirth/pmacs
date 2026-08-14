@@ -2428,6 +2428,13 @@ fn handle_dispatcher_event(
                     buffer_id,
                     coord,
                     kind,
+                    // Parent 48 R-a: modifiers are NOT decoration here.
+                    // `apply_terminal_gesture` gates child reporting on
+                    // `!shift`, so Shift is the user's "select locally
+                    // instead of talking to the child" override, and the
+                    // document path reads Shift to extend the selection.
+                    // Dropping them into `..` inverted both.
+                    mods,
                     ..
                 } => {
                     // Bottom panel Q#BP16 — a gesture the frontend
@@ -2447,7 +2454,8 @@ fn handle_dispatcher_event(
                             panel_epoch,
                         )
                     {
-                        editor.dispatch_semantic_panel_pointer(source, buffer_id, coord, kind);
+                        editor
+                            .dispatch_semantic_panel_pointer(source, buffer_id, coord, kind, mods);
                     }
                 }
                 FrontendEvent::Pointer {
