@@ -281,7 +281,7 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
   **`githubsucks/panel-pointer-replay` is the authoritative tip** (the
   ref, not a SHA). Recover with
   `git fetch githubsucks && git checkout panel-pointer-replay`.
-- **No PR yet. Checkpoint: framing revision 9 (§5a) AWAITING APPROVAL;
+- **No PR yet. Checkpoint: framing revision 10 (§5a) AWAITING APPROVAL;
   NO IMPLEMENTATION WRITTEN.** Commit one was the ground-truth
   re-measurement; 6 added the four replay edges; **7 answers review of
   6; **8 answers review of 7** — R-c is target × gesture-ORIGIN
@@ -300,6 +300,16 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
   same-cell `Drag` reaches the daemon (`pmacs-gpu/src/main.rs:19841`).
   **`Up` is the only crossing event promised unconditionally**; a
   crossing `Drag` is normalized and then deduped.
+  **Revision 10** keeps Q#BP-R2's outcome and moves its **enforcement
+  point**: the GPU **cannot know a panel holds a terminal** —
+  `PanelFrame` has no target-kind field
+  (`pmacs-protocol/src/panel.rs:73`) and `state.terminal` is the
+  primary full-window terminal — so a producer-side rule needed a new
+  wire field this lane must not add. **The producer is target-blind**
+  and sends the chrome wheel for every panel; **the daemon** resolves
+  the side window and decides: document → `scroll_window`, terminal →
+  consume. Witness: one frontend across a document→terminal
+  replacement.
 - **Why this lane exists.** `PanelPointer` **replays nothing**:
   `dispatch_semantic_panel_pointer` (`src/editor.rs:2674`) validates,
   focuses, returns. A panel wheel is dead on both axes and so is every

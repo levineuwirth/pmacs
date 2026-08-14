@@ -7,8 +7,29 @@ protocol v20, 2026-07-24. Amended by the pre-implementation dependency
 verification in §0.6: the folding dependency is cleared, and one geometry
 caller-census error is corrected.**
 
-**Revision 9 — 2026-08-14, AWAITING APPROVAL.** Answers review of 8.
-Both items reverse a decision revision 8 made:
+**Revision 10 — 2026-08-14, AWAITING APPROVAL.** Answers review of 9,
+which put a correct ruling **on the wrong side of the seam**.
+
+**The GPU cannot know whether a panel holds a terminal.** `PanelFrame`
+carries `buffer_id`, both epochs, `size`, `cells`, `cursor` and
+`focused` and **no target-kind discriminator**
+(`pmacs-protocol/src/panel.rs:73`); `state.terminal`
+(`pmacs-gpu/src/main.rs:1964`) is the **primary full-window** terminal,
+not the side-window projection. So revision 9's producer rule
+*"terminal chrome wheel: do not send"* was unimplementable without a
+new wire field, which this lane must not add.
+
+**Q#BP-R2's OUTCOME is unchanged; its ENFORCEMENT POINT moves.** The
+producer is now target-blind throughout — it claims the chrome wheel
+and sends it for every panel — and the daemon, which resolves the side
+window and knows the buffer kind, decides: document → `scroll_window`;
+terminal → **consume**, with no child bytes, no local scrollback and no
+document fallthrough. The producer/receiver tables are split by seam
+side accordingly, and the witness is **one frontend across a
+document→terminal replacement**, so only the target differs.
+
+**Previously, revision 9 — SUPERSEDED.** Both items reversed a decision
+revision 8 made:
 
 - **Q#BP-R2 is OVERRULED — a terminal-chrome wheel is CONSUMED, not
   clamped.** SGR wheel input is **coordinate-bearing**: `encode_mouse`
@@ -2133,17 +2154,53 @@ branch**. Two concrete wrongnesses follow: a reporting child gets a
 `finish_selection`), and a chrome wheel becomes **local scrollback**
 instead of behaving as a content wheel does.
 
-| target | kind | producer | receiver |
-|---|---|---|---|
-| **document** | `Down(Left)`, `Down(Right)` | do not arm, do not send | reserved — drop |
-| **document** | `Drag(Left)`, chrome-originated | not sent (never armed) | reserved — drop |
-| **document** | `Drag(Left)`, **content-originated** | normalized to the last valid CONTENT cell, then **subject to the ordinary dedupe** | process when it arrives |
-| **document** | `Up(Left)` | **send** | **process** — terminates the gesture |
-| **document** | wheel | **send** | **process** — scrolls the panel |
-| **terminal** | any kind, chrome-**originated** | do not arm, do not send | drop, matching the TUI |
-| **terminal** | `Drag`, content-originated, now over chrome | normalized, then **subject to the ordinary dedupe** | process when it arrives |
-| **terminal** | `Up`, content-originated, now over chrome | **always sent** | **replay at the last valid CONTENT coordinate** — never the chrome row |
-| **terminal** | wheel over chrome | **do not send — consume** | n/a; never falls through to the document (Q#BP-R2) |
+##### The producer is TARGET-BLIND, and the table must respect that
+
+**Revision 9 split the producer column by target. The GPU cannot make
+that split.** `PanelFrame` carries `buffer_id`, both epochs, `size`,
+`cells`, `cursor` and `focused` — **and no target-kind discriminator**
+(`pmacs-protocol/src/panel.rs:73` onward). The panel is an **opaque
+cell projection** to the frontend. `state.terminal`
+(`pmacs-gpu/src/main.rs:1964`) describes the **primary full-window**
+terminal, not the side-window, so it cannot answer the question either.
+
+A producer rule reading "terminal chrome wheel: do not send" is
+therefore **unimplementable without a new wire field**, and this lane
+is explicitly non-protocol-bearing. **Every producer rule must be
+target-blind; every target-dependent decision belongs to the daemon**,
+which resolves the side window and knows the buffer kind
+(`is_terminal(buffer_id)`).
+
+**Producer — by kind and origin only:**
+
+| kind | origin | producer |
+|---|---|---|
+| `Down(Left)`, `Down(Right)` | chrome | **do not arm, do not send** |
+| `Drag(Left)` | chrome | not sent — never armed |
+| `Drag(Left)` | content, now over chrome | normalize to the last valid CONTENT cell, then **ordinary dedupe** |
+| `Up(Left)` | content, now over chrome | **always send**, normalized |
+| wheel | chrome | **claim it and send**, carrying its valid frame coordinate |
+
+These collapse safely because the two targets want the **same producer
+behaviour** everywhere except the wheel: a chrome press is reserved by
+documents and dropped by terminals — both drop; a crossing `Up` must
+arrive for both, to terminate a selection or to deliver a release. The
+wheel is the sole divergence, and it is now decided receiver-side.
+
+**Receiver — after validation and resolving the side window:**
+
+| kind | document panel | terminal panel |
+|---|---|---|
+| chrome `Down`/`Drag` | reserved — drop | drop, matching the TUI |
+| crossing `Drag` (normalized) | process when it arrives | process at the content coordinate |
+| crossing `Up` (normalized) | terminate the gesture | **replay at the last valid CONTENT coordinate** — never the chrome row |
+| chrome wheel | **process through `scroll_window`** | **CONSUME** — no child bytes, no local scrollback, no document fallthrough (Q#BP-R2) |
+
+**The chrome wheel carries a chrome coordinate over the wire, and that
+is fine**: it is a valid frame cell, the daemon's coord validation
+accepts it, `scroll_window` is a window-level move that does not read
+it, and the terminal branch never forwards it to a child. **The
+coordinate is never fabricated and never reaches an application.**
 
 **`Up` is the load-bearing crossing event, and the only one promised
 unconditionally.** A content-originated gesture terminates at its last
@@ -2180,6 +2237,31 @@ document**. The band owns the pixel either way. This also restores TUI
 parity, which revision 8 traded away for the weaker argument.
 
 Document chrome is unchanged: a wheel there still scrolls the panel.
+
+**Enforced in the DAEMON, not the frontend.** Revision 9 wrote this as
+a producer rule, which the GPU cannot implement — it has no way to know
+the panel holds a terminal (see the seam note above). The producer
+claims the chrome wheel and sends it for **every** panel; the daemon
+resolves the side window and consumes it when the buffer is a terminal.
+
+**Witness — one frontend across a document→terminal replacement**, so
+the two outcomes are separated by nothing but the buffer kind:
+
+1. panel shows a **document**; wheel over chrome → **the panel
+   scrolls**.
+2. the panel is replaced by a **terminal**; wheel over chrome →
+   **nothing changes** — no child bytes, no scrollback movement, no
+   document scroll.
+
+*Mutation: let the terminal branch call `apply_terminal_gesture` — the
+chrome coordinate fails its reporting bounds check, falls into the
+local branch, and the row catches the **accidental local scrollback**
+that revision 8's clamp would have shipped deliberately.*
+
+Doing it in one frontend across a replacement is what makes it a
+control rather than two unrelated observations: the geometry, the
+pointer position and the producer path are identical, and only the
+target differs.
 
 **Both crossings need witnesses, and they fail in opposite
 directions:**
