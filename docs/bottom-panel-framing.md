@@ -2031,6 +2031,68 @@ follows acceptance 48's wording — it names row *selection* — and keeps
 document navigation from becoming an incidental consequence of wiring
 replay.
 
+#### Q#BP-R3 — a panel cell has no frame-content provenance **RULED: current-state hit semantics, narrowly, with the token named as follow-up**
+
+**The hole.** `PanelPointer` carries `geometry_epoch`, `panel_epoch`,
+`buffer_id` and a `coord` — **and nothing identifying the frame CONTENT
+the user was looking at** (`pmacs-protocol/src/message.rs:500`).
+`panel_epoch` is deliberately *"stable across ordinary frames of one
+continuously present window/buffer"* (`panel.rs:61`), so an ordinary
+repaint changes no epoch at all.
+
+**The race that follows is real.** A document-panel wheel moves
+`view_top` **daemon-side**. The daemon repaints and emits a new frame.
+Before that frame reaches the GPU, the user clicks. Every validation
+passes — same buffer, same epochs — and the daemon inverts the cell
+through its **current** `view_top`, selecting a row the user never saw.
+Off by up to `SCROLL_LINES` (3). **No existing gate can reject it**,
+because nothing about the event is stale by any test the ladder
+applies.
+
+**Why the epochs cannot be stretched to cover it.** Moving
+`panel_epoch` on content change would invalidate a gesture on every
+repaint, which breaks drags outright — the field is stable *by design*,
+and that design is what makes selection possible.
+
+**Why a fix is not free.** Closing it properly needs a **per-frame
+token** on `PanelFrame`, echoed by `PanelPointer` — **a wire change**,
+which makes it a protocol-bearing slice. This lane is explicitly
+non-protocol-bearing, and GUI arc 1b is blocked behind it.
+
+**A daemon-only mitigation was considered and does not work.** Having
+the daemon invert against the `view_top` it used for its **last emitted
+frame** sounds like it removes the wire dependency, but it does not:
+the daemon still cannot know **which** emitted frame the user saw, and
+the failing window — frames emitted after the one on screen — is
+exactly the same one. Without a token echoed back, the information does
+not exist on the receiving side.
+
+**Ruling: this lane accepts CURRENT-STATE hit semantics**, and says so
+rather than leaving it undiscovered:
+
+- A panel cell is resolved against the daemon's state **at the moment
+  the event is processed**, not against the frame the frontend painted.
+- **The window is narrow and self-inflicted**: it requires the same
+  frontend to change the panel's view and then click inside one
+  round-trip. It cannot arise from another frontend's activity, because
+  a foreign edit that moves `view_top` is not a thing panels do.
+- **The magnitude is bounded** by whatever moved the view — one wheel
+  step, `SCROLL_LINES` rows.
+- **The TUI is unaffected.** It has no round trip; the hazard is
+  structural to a remote frontend inverting cells against mutable
+  daemon state.
+
+**Named follow-up, not a shrug: `PanelFrame` gains a content token and
+`PanelPointer` echoes it, in the next protocol-bearing slice.** The
+daemon then drops a gesture whose token no longer matches — the same
+shape as the epoch ladder, one level finer. It is recorded here so the
+next wire slice inherits it rather than rediscovering the race.
+
+**Overrule this if you would rather block the lane on a protocol
+slice.** The trade is explicit: a narrow, bounded, same-frontend
+mis-hit now, against serializing this lane and 1b behind a v25 wire
+change.
+
 ### The four replay edges — none of which "activation ordering" covers
 
 §5a's first draft concluded that the activation rule made the replay

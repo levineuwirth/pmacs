@@ -7085,7 +7085,14 @@ impl State {
                 // Only on a CHANGE of identity. A panel repaints constantly
                 // during a drag, and resetting on every frame would make
                 // selection impossible.
-                let identity_changed = self.panel.presented().is_some_and(|current| {
+                //
+                // Compared against the RETAINED frame, never `presented()`:
+                // that accessor filters on `geometry_epoch == self.panel
+                // .geometry_epoch`, and a geometry change advances the field
+                // FIRST, so by the time the matching frame arrives
+                // `presented()` is already `None` and an `is_some_and`
+                // predicate skips the reset — exactly the case D2 covers.
+                let identity_changed = self.panel.frame.as_ref().is_some_and(|current| {
                     current.panel_epoch != frame.panel_epoch
                         || current.geometry_epoch != frame.geometry_epoch
                 });
@@ -20105,9 +20112,20 @@ mod tests {
         };
         let frame = present_panel(&mut state, 4);
 
+        let live = pmacs_protocol::CellCoord::new(1, 1);
         let arm = |state: &mut State| {
             state.set_panel_pointer_held(true);
-            state.panel.gesture_last_content_cell = Some(pmacs_protocol::CellCoord::new(1, 1));
+            state.panel.gesture_last_content_cell = Some(live);
+            // SEED THE DEDUPE BASELINE TOO. Arming clears it, so a leg that
+            // only arms leaves `last_pointer_cell` already `None` and its
+            // reset is unconstrained — deleting that line stays green. One
+            // accepted motion is what a real gesture would have produced by
+            // the time a replacement arrives.
+            assert!(
+                state.panel_motion_is_new(live),
+                "the first motion after a press is never a duplicate"
+            );
+            assert_eq!(state.panel.last_pointer_cell, Some(live));
         };
 
         // D4, the NEGATIVE leg, first: a CHANGED frame at the SAME identity
@@ -20137,23 +20155,43 @@ mod tests {
             "a replacement panel never saw the press"
         );
         assert_eq!(state.panel.gesture_last_content_cell, None);
-        assert_eq!(
-            state.panel.last_pointer_cell, None,
-            "and the dedupe baseline goes too, or the successor's first \
-             same-cell motion is silently suppressed as a duplicate"
+        assert_eq!(state.panel.last_pointer_cell, None);
+        assert!(
+            state.panel_motion_is_new(live),
+            "the dedupe baseline goes too: the successor's first motion at \
+             the predecessor's cell must reach the daemon, not be suppressed \
+             as a duplicate of a gesture that belonged to another panel"
         );
 
         // D2 — geometry identity, with panel identity UNCHANGED. This is the
         // font/scale case: the gesture would otherwise resume under a new
         // grid carrying epochs that are current and perfectly valid.
-        let base = state
-            .panel
-            .presented()
-            .cloned()
-            .expect("a frame is present");
+        //
+        // **Driven through the real declaration path.** Inventing a
+        // higher-epoch frame is not the production sequence: a font or
+        // scale change advances `self.panel.geometry_epoch` FIRST, and only
+        // then does the matching frame arrive. That ordering is what broke
+        // the first implementation — `presented()` filters on the epoch, so
+        // it answers `None` in exactly this window — and a witness that
+        // skips the declaration cannot see it.
+        let base = state.panel.frame.clone().expect("a frame is retained");
         arm(&mut state);
+        let (next_epoch, total) = state
+            .next_geometry_declaration(GeometryTrigger::Metrics)
+            .expect("a metrics change re-declares geometry");
+        assert_ne!(next_epoch, base.geometry_epoch, "the declaration advanced");
+        assert!(
+            state.panel.presented().is_none(),
+            "and the retained frame no longer answers `presented()` — the \
+             window in which a `presented()`-based reset silently skips"
+        );
         let mut regeometried = base.clone();
-        regeometried.geometry_epoch = base.geometry_epoch + 1;
+        regeometried.geometry_epoch = next_epoch;
+        regeometried.size = CellSize::new(base.size.rows, total.cols.max(1));
+        regeometried.cells = vec![
+            pmacs_protocol::Cell::default();
+            (regeometried.size.rows * regeometried.size.cols) as usize
+        ];
         assert_eq!(
             regeometried.panel_epoch, base.panel_epoch,
             "the point of this leg is that PANEL identity holds"
