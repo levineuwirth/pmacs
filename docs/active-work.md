@@ -281,8 +281,8 @@ from #171 and #215.
   **`githubsucks/panel-mapping-generation` is the authoritative tip.**
   Recover with `git fetch githubsucks && git checkout
   panel-mapping-generation`.
-- **No PR yet. Checkpoint: framing revision 16 (§5b) AWAITING
-  APPROVAL; NO IMPLEMENTATION.**
+- **No PR yet. Checkpoint: framing revision 16 (§5b) APPROVED
+  2026-08-15; NO IMPLEMENTATION.**
 - **PROTOCOL-BEARING — v25, and it runs alone.**
   `ADVERTISED_PROTOCOL_VERSION` stays pinned at **20**.
 - **Why it exists.** A `PanelPointer` names a cell and nothing on the
@@ -294,6 +294,10 @@ from #171 and #215.
   **overruled**, because a **foreign** edit moves the mapping with
   `view_top` untouched, the error is unbounded, and the window lasts
   until the frontend **presents** the new frame.
+- **Semantic seam only.** The TUI hit-tests current daemon state
+  directly, receives no `PanelFrame`, and carries no mapping token. Its
+  existing panel click/drag/wheel effects are a structural control
+  against moving the generation gate into shared replay.
 - **A generation, not a per-frame token.** A token moving with the
   frame would cancel a drag on the next repaint — the mistake
   `panel_epoch` is stable to avoid. The key moves with the inverse
@@ -308,35 +312,61 @@ from #171 and #215.
 - **Gating is REFUSAL, not fallback.** A ≥ v25 session sending bare
   `PanelPointer` is refused; a ≥ v25 frontend rejects legacy
   `Present`. Only ≤ v24 sessions keep legacy semantics; `Absent` is
-  common.
+  common. The reciprocal wrong-family cases are witnessed too: a v24
+  daemon refuses `PanelPointerMapped`, and a v24 frontend rejects
+  `PresentMapped`. Compiling the variant in the same crate never
+  overrides the negotiated family.
 - **Stale tails TERMINATE, they do not vanish.** A dropped `Up` leaves
   an empty selection armed and a reporting child holding a button
   forever, so cancellation is a ruled outcome: producer latch reset,
-  daemon selection/click-chain cleanup, and the child's release
-  delivered.
+  daemon selection cleanup, and the child's release delivered.
+  Click-chain invalidation is a separate mapping-identity transition;
+  it also runs when no gesture is held.
 - **Pins ACCUMULATE**: keep `PanelPointer`, add exact `TextInput`
   bytes (previous-final `FrontendEvent`) and the complete nested
-  `PanelFrame(Absent)` bytes (previous-final `PanelFramePayload`).
+  `PanelFrame(Absent)` bytes (previous-final `PanelFramePayload`), then
+  add exact encode/decode pins for both new mapped variants with
+  distinct same-typed field values. Previous-final pins protect append
+  position; new-variant pins protect their own frozen field order.
   **The `PanelPointer` pin DOES exist** at `src/protocol.rs:1975` —
   revision 14 recorded it as missing, which was wrong: it lives in the
   root crate's test module, not under `pmacs-protocol/` or `tests/`.
 - **Appended means LAST**: `PresentMapped` after `Absent`,
   `PanelPointerMapped` after `TextInput`. `mapping_generation` is a
   `u64`, **zero invalid**, gated by `PANEL_MAPPING_MIN_VERSION = 25`.
+- **Frontend generation is a session high-water mark.** Higher values
+  may skip, equal-generation style/selection repaints are valid, lower
+  values are rejected atomically, and `Absent` does not erase the
+  high-water mark. Detach does.
 - **Coordinate-free wheels are EXEMPT** from the freshness check —
   otherwise the first tick advances the key and the next queued tick is
   refused, so the panel scrolls once and dies. Child-reported terminal
   wheels keep the check, because SGR carries row and column.
-- **Cancellation is PROACTIVE** — the daemon cancels, THEN emits the
-  replacement frame, and the frontend **clears its latch on receiving
-  that frame and sends nothing**. Revision 15 asked the producer to
-  emit a tail or retain the latch; retaining it manufactures a `Drag`
-  under the new generation with no accepted `Down`.
-- **The latch dies on EVERY loss of gesture authority**: generation
-  advance, `Absent`, panel/buffer identity change, geometry-epoch
-  change **even at an unchanged cell total**, and detach — **and on an
-  ordinary accepted `Up`**, or a later invalidation synthesises a
-  duplicate release.
+- **Cancellation is PROACTIVE**, at the transition that revokes
+  authority: mapped-generation advance before its frame, before
+  daemon-authored `Absent` or panel/buffer replacement, when a new
+  geometry declaration is accepted, and at detach. The last four apply
+  to both v24 legacy and v25 mapped gestures. It is taken exactly once;
+  no producer cancellation tail is sent.
+- **Producer reset has cause-specific signals**, not one generic
+  replacement frame: accept the valid generation/identity frame;
+  accept `Absent`; locally advance the geometry declaration; or tear
+  down the frontend. Invalid frames and same-identity repaints retain
+  the latch.
+- **The accepted-gesture latch is left-button-only and common to both
+  wire families.** It arms only after accepted `Down(Left)` and dies on
+  accepted `Up(Left)` or any authority loss. Move, wheel, context, and
+  right/middle presses do not arm it; otherwise the GPU's press-only
+  right path manufactures a later release. A terminal Down also fixes
+  child-reporting versus local-selection domain through Drag/Up, so a
+  later Shift or reporting-mode change cannot orphan or invent a child
+  release.
+- **Click-chain state is independent and per frontend.** It survives
+  an ordinary `Up` by design, but every mapping identity change clears
+  or re-keys it even when no gesture is held. A completed click followed
+  by a foreign edit and same-cell click is single, not double; an
+  intervening click from another frontend does not erase the first
+  frontend's legitimate chain.
 - **Terminal identity EXCLUDES style.** Wire `Cell` equality covers
   `glyph`, `style` and `attachment`
   (`pmacs-protocol/src/cell.rs:153`), so keying on it would move the
@@ -345,10 +375,34 @@ from #171 and #215.
 - **The terminal key is NOT `Screen`'s generation** — that advances
   from 39 sites including style, bell, tab-stops and cursor-only
   motion, none of which change what a coordinate denotes.
-- **G5's EFFECTS are owed by the rebased replay lane**, not provable
-  here: `gesture_last_content_cell` and replay exist only on
-  `panel-pointer-replay`. G5a — that the key advancing raises
-  cancellation — stays in this slice.
+- **G5 is now an explicit transition matrix.** It crosses every common
+  authority loss with v24 and v25, distinguishes each producer reset
+  signal from invalid/same-identity controls, pins ordinary-Up
+  exact-once and left-only arming, and tests click identity without a
+  live gesture. This slice owns only the new mapping-generation signal
+  and mapped-frame state; the rebased replay lane owns the common
+  invalidations and every document, terminal, complete producer-latch
+  and click-chain effect through real call sites. No dead
+  classification helper is added on a base without replay.
+- **Routing and effects are separate controls.** This slice can prove
+  v24/v25 events reach the existing focus path, but selection,
+  terminal reporting, stable-generation drag continuation, two-tick
+  wheels and exhaustion cancellation remain explicit replay-lane rows;
+  no classification-only result is reported as end-to-end input.
+- **Review-process correction — carry into the next handoff
+  absorption.** Revision 16 replaces finding-at-a-time review with one
+  closure pass for this chain and future framings: verify cited ground
+  truth; enumerate trigger × protocol family × target × lifecycle;
+  separate producer, route, receiver and effect; prove every witness's
+  discriminating setup and positive control; check that each proposed
+  mutation is actually defective; and assign every row to the branch
+  that can reach its real call site. Protocol work also checks all four
+  wrong-family quadrants, exact pins and version fallout. Findings are
+  returned as one batch. If three revisions do not close a framing,
+  stop serial review and perform/fold this complete audit rather than
+  opening another one-finding round. The overdue #239/#240 handoff
+  absorption must promote this rule; this feature branch does not edit
+  the deliberately lagging canonical handoff.
 - **Owns the version correction.** `docs/gui-stage1-input-framing.md`
   moves 1e's `OpenTarget` to **v26** here — an expected rebase
   conflict on `gui-stage1b-pointer-scroll` is not grounds for leaving

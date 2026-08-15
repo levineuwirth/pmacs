@@ -1772,23 +1772,49 @@ cannot preserve the old panel-focused attach leak.
 
 ## 5b. The cell-mapping generation — a protocol slice (Q#BP-R3)
 
-**Status: revision 16 — AWAITING APPROVAL. Nothing implemented.**
+**Status: revision 16 — APPROVED 2026-08-15. Nothing implemented.**
 Revision 16 answers review of 15; three of its items reverse a rule 15
 introduced:
 
-- **The producer rule contradicted proactive cancellation.** Since the
-  daemon cancels *before* emitting the replacement frame, the frontend
-  simply **clears its latch on receiving that frame and sends
-  nothing**. 15's "emit a tail or retain the latch" was redundant in
-  the first case and **actively harmful** in the second — retaining it
-  manufactures a `Drag` under the new generation with no accepted
-  `Down`, the exact orphan the section exists to prevent.
+- **The mapped-generation producer rule contradicted proactive
+  cancellation.** Since the daemon cancels *before* emitting that
+  successor frame, the frontend simply **clears its latch on accepting
+  the frame and sends nothing**. 15's "emit a tail or retain the
+  latch" was redundant in the first case and **actively harmful** in
+  the second — retaining it manufactures a `Drag` under the new
+  generation with no accepted `Down`, the exact orphan the section
+  exists to prevent. Other authority losses have their own reset
+  signals below.
 - **The latch had one trigger and needed five.** Cancellation runs on
   every loss of gesture authority: generation advance, `Absent`, panel
-  or buffer identity change, geometry-epoch change **even at an
-  unchanged cell total**, and detach. **An ordinary accepted `Up` must
-  clear the latch**, or a later invalidation synthesises a duplicate
-  release.
+  epoch or buffer identity change, geometry-epoch change **even at an
+  unchanged cell total**, and detach. The last four apply to the legacy
+  and mapped families alike; generation advance exists only in the
+  mapped family. **An ordinary accepted `Up(Left)` must clear the
+  latch**, or a later invalidation synthesises a duplicate release.
+- **"The replacement frame" was not one producer signal.** A mapped
+  generation or panel/buffer replacement clears on atomic acceptance of
+  its valid frame; `Absent` clears when accepted; a local geometry
+  declaration and detach clear at their own transition, before any
+  replacement frame can be required. Invalid frame payloads and
+  same-identity repaints retain the latch.
+- **Gesture liveness and click counting are different state.** The
+  accepted-gesture latch covers an accepted `Down(Left)` only and is
+  consumed by `Up(Left)` or loss of authority. `MouseClickState`
+  deliberately survives an ordinary `Up` for multi-click detection,
+  but its mapping identity must be cleared or re-keyed on every mapping
+  invalidation even when no gesture is held.
+- **Routing controls had been written as effects.** This base can prove
+  legacy and mapped events reach the already-landed focus path; it
+  cannot prove selection, terminal reporting, drag continuation,
+  two-tick scrolling, or exhaustion cleanup before replay exists.
+  Those controls are split, and the effect halves are obligations of
+  the rebased replay lane rather than claims made by this slice.
+- **Bilateral gating needed all four wrong-family legs.** The v25
+  refusal rows did not constrain a v24 session sending or accepting the
+  mapped variants. Same-crate peers can encode them regardless of what
+  they negotiated, so both inbound and outbound are now witnessed at
+  v24 and v25, with exact-family positive controls.
 - **G9b's mutation was a valid implementation.** Keying dedupe by
   `(mapping_generation, coord)` is a correct design, so requiring it to
   fail would have forbidden a good one. Replaced with two real defects.
@@ -1799,6 +1825,13 @@ introduced:
 - Zero-generation rows added **in both directions**; G7 split into
   outbound and inbound legs; G2's grid and fold composites split;
   journey steps **5** and **8** named in §20.
+- **The folded closure pass made the remaining implicit contracts
+  executable in one matrix:** authenticated-session family authority;
+  a frontend generation high-water mark surviving `Absent`; exact pins
+  for the new variants as well as their previous finals; left-only and
+  fixed-domain terminal gestures; exact-once coincident invalidations;
+  independent click identity; the semantic/TUI boundary; and explicit
+  ownership of every route versus effect row (G0–G15).
 
 **Previously, revision 15 — SUPERSEDED.**
 Revision 15 answers review of 14, and four of its items reverse
@@ -1847,6 +1880,15 @@ This is the one hole in the ladder: `buffer_id` catches replacement,
 `panel_epoch` catches close/reopen, `geometry_epoch` catches a
 declaration race, and **nothing catches "the text under that cell
 changed"**.
+
+The hole exists only across the **semantic frontend's asynchronous
+projection/inbound seam**. The TUI hit-tests and dispatches against its
+current daemon state in one process; it neither receives `PanelFrame`
+nor echoes a mapping generation. This slice adds no TUI token, gate or
+gesture state, and the existing direct TUI panel effects remain a
+regression control. Applying the mapped-family check inside the shared
+replay body instead of at the semantic-session boundary would break
+that control.
 
 **Revision 12 accepted this as narrow. It is not.** A **foreign** edit
 moves the mapping with `view_top` untouched; ticks, paging, folds,
@@ -1989,6 +2031,14 @@ future reader can see that nothing was reordered.
   default-constructed or partially-initialised sender produces, and
   accepting it would let a peer opt out of the check by sending
   nothing. A live key starts at 1.
+- It is **monotonic for the authenticated frontend session**. A
+  frontend accepts a valid generation above its retained high-water
+  mark (gaps are fine), and accepts an equal-generation repaint because
+  styling, focus and selection may legitimately change while the
+  mapping holds. It rejects a lower generation atomically. `Absent`
+  clears the presentation and pointer state but **retains the
+  high-water mark**; otherwise a delayed pre-`Absent` frame can roll
+  authority backward. Detach ends the session and its high-water mark.
 - **`PANEL_MAPPING_MIN_VERSION = 25`**, beside the existing family
   constants, and the gate reads that constant rather than a literal.
 
@@ -2005,6 +2055,14 @@ slice exists to close, reachable by omitting a field.
 |---|---|---|---|---|
 | **≤ v24** | `Present` | `PanelPointer` | `PanelPointer` | `Present` |
 | **≥ v25** | `PresentMapped` | `PanelPointerMapped` **only** | `PanelPointerMapped` | `PresentMapped` **only** |
+
+Both choices use the **authenticated session's negotiated version**.
+Inbound code never derives the family gate from the payload's claimed
+`frontend_id`; like every inbound variant, that field is untrusted and
+is validated separately. Outbound projection uses the destination
+session's negotiated version, not the crate's compile-time ability to
+encode either discriminant. The family gate runs before focus,
+controller, click-chain, gesture-latch or document mutation.
 
 - A **≥ v25 session sending bare `PanelPointer` is REFUSED**, dropped
   before any mutation, exactly as an out-of-epoch event is.
@@ -2045,6 +2103,13 @@ row and column into the child's input stream, so a stale one aims an
 application action at a cell the user never pointed at — the same
 hazard as a stale click, and it keeps the check.
 
+The exemption skips **only generation equality**. It does not bypass
+the authenticated family gate, the nonzero-generation requirement,
+frontend/panel/geometry/buffer identity, coordinate bounds, or target
+resolution. In particular, a zero-generation coordinate-free wheel is
+still refused; zero means "no mapping identity was supplied", not "one
+was supplied and has since gone stale".
+
 **Witnesses: two ticks under ONE generation.** A document wheel and a
 non-reporting terminal wheel must each scroll **twice** when the second
 event carries the generation the first invalidated. Without a
@@ -2071,20 +2136,37 @@ own `Up`**, and the daemon is never told anything — so the selection
 stays armed and the child keeps holding its button. **The cancelling
 event never arrives.**
 
-So the trigger is the authoritative key advancing while a gesture is
-accepted:
+So the daemon cancels at the transition that revokes authority, not at
+the next pointer event:
 
-1. **Daemon, on losing gesture authority with a gesture accepted** —
-   this runs whether or not any further event arrives:
-   - **document:** clear an empty selection, clear the click chain,
-     apply no cursor move;
-   - **terminal:** deliver the child's **release**, at the last
-     coordinate known valid, with the button and encoding the accepted
-     `Down` used.
-2. **Producer: clear the local latch on receiving the replacement
-   frame, and send nothing.** The daemon has already cancelled, ahead
-   of emitting that frame, so the gesture is over before the frontend
-   hears about it.
+| authority loss | daemon cancellation point | protocol families |
+|---|---|---|
+| mapping generation advances | after the mapping mutation and **before** publishing the next `PresentMapped` | mapped, ≥ v25 only |
+| `Absent` | **before** publishing `Absent` | legacy and mapped |
+| panel epoch or buffer identity changes | before publishing the successor `Present`/`PresentMapped` | legacy and mapped |
+| geometry epoch changes | when the new frontend geometry declaration is accepted, even when its rows and columns equal the old declaration | legacy and mapped |
+| detach | in that frontend's teardown, before its pointer state is discarded | legacy and mapped |
+
+If an accepted left-button gesture is live, cancellation is taken
+**exactly once**:
+
+- **document:** clear an empty selection, preserve an already-nonempty
+  region, and apply no cursor move;
+- **terminal:** deliver the child's **release**, at the last coordinate
+  known valid, with the left button and encoding the accepted press
+  used.
+
+The click chain is invalidated at the same authority transitions but is
+**not conditional on a live gesture**; its lifetime is specified
+separately below.
+
+Authority losses may coincide. A changed-size geometry declaration, for
+example, advances both `geometry_epoch` and the mapping generation;
+buffer/panel replacement can also change the projected mapping. All
+causes take the **same** accepted-gesture latch, so the first
+cancellation settles it and later causes observe no live gesture.
+Click-chain invalidation is likewise idempotent. Trigger ordering may
+not create two releases or two selection cleanups.
 
 **Revision 15 asked the producer to emit a cancellation tail or retain
 the latch. Both are wrong, and the second is actively harmful.** A tail
@@ -2095,13 +2177,31 @@ manufactures a `Drag` under the NEW generation with no accepted
 `Down`** — precisely the orphan this whole section is about, created by
 the rule meant to avoid it.
 
-**Ordering is what makes the simple rule safe.** Cancel, then emit. The
-frontend's arrival of the replacement frame *is* the cancellation
-signal, so no second channel is needed.
+**There is no single producer-side "replacement frame" transition.**
+The producer clears its local held-gesture state at the first
+authoritative signal available for the cause:
 
-**Witness:** `Down` → the key advances → the replacement frame lands →
-subsequent motion and the physical `Up` produce **no new drag and no
-duplicate release**.
+| cause | producer reset point |
+|---|---|
+| mapped generation changes | atomically accepting the valid successor `PresentMapped` |
+| panel epoch or buffer identity changes | atomically accepting the valid successor `Present`/`PresentMapped` |
+| `Absent` | accepting `Absent` |
+| geometry epoch changes | locally, when `next_geometry_declaration` advances the epoch (`pmacs-gpu/src/main.rs:6847`), **before** sending the declaration |
+| detach | frontend teardown |
+
+An invalid frame and a repaint with the same generation and identities
+**do not clear** the producer latch. A local geometry declaration is
+different: advancing the local epoch has already revoked the old grid,
+so the producer clears before the daemon can accept or refuse the
+declaration. For the daemon-authored frame cases, ordering is cancel
+then emit; the frame's arrival is the producer's signal, so no second
+channel is needed. For geometry and detach, the local transition is
+itself the signal and no replacement frame is required.
+
+After any reset, subsequent motion and the physical `Up` produce **no
+new drag and no duplicate release**. The producer never emits a
+cancellation tail and never carries the held state into the successor
+identity.
 
 ##### The latch's full lifecycle
 
@@ -2113,7 +2213,7 @@ the rest to be inferred:
 |---|---|
 | **mapping generation advances** | the cells mean different bytes |
 | **`Absent`** | the band the gesture belongs to is gone |
-| **panel or buffer identity change** | the successor never saw the press |
+| **panel epoch or buffer identity change** | the successor never saw the press |
 | **geometry-epoch change** | a new declaration, **even when the cell total is unchanged** — the frontend re-declared, so the grid it hit-tested against is not the one in force |
 | **detach** | there is no frontend left to finish the gesture |
 
@@ -2124,13 +2224,39 @@ the same orphan race the replay lane's D1/D2 producer resets expose,
 arriving from the daemon's side instead of the frontend's.
 
 **The daemon needs an ACCEPTED-GESTURE LATCH** to do any of this, and
-revision 14 assumed state that does not exist. Per frontend it records:
+revision 14 assumed state that does not exist. The latch is common to
+legacy `PanelPointer` and mapped `PanelPointerMapped`, because four of
+the five authority losses are common. Per frontend it records:
 
-- **whether a `Down` was ACCEPTED**, and for a terminal whether it
-  actually reached the child;
-- **the last valid coordinate**, the **button**, and the **encoding**
-  the child was told — a release must match the press it terminates;
+- whether a **`Down(Left)` was ACCEPTED**, and for a terminal whether
+  it actually reached the child;
+- the last valid coordinate and the encoding the child was told — a
+  release must match the press it terminates;
 - enough identity to know the gesture is still the one that began.
+
+It arms only **after** `Down(Left)` is accepted, updates its last valid
+coordinate on an accepted drag, and is taken by either an ordinary
+accepted `Up(Left)` or one authority-loss transition. `Move`, wheel,
+context, and right/middle press events never arm it. `MouseKind` has
+right and middle `Down` variants (`pmacs-protocol/src/message.rs:220`),
+and the GPU panel path currently emits `Down(Right)` from the
+press-only `apply_right_press` route
+(`pmacs-gpu/src/main.rs:2997`, `:3029`). Treating every `Down` as held
+would therefore manufacture a delayed release at the next
+invalidation. If right/middle release semantics are added, they need
+their own complete producer/replay contract rather than silently
+borrowing this left-drag latch.
+
+For a terminal, the accepted `Down(Left)` also fixes the gesture's
+**domain** until it ends: child-reported, or local terminal selection.
+Shift precedence and the child's reporting mode decide the domain at
+the beginning; later modifier or mode changes do not switch a live
+gesture into a path that never saw its Down. Thus a child-reported
+gesture sends Drag/Up using the recorded reporting contract and exact
+release encoding even if reporting turns off or Shift is pressed, and
+a locally-started gesture stays local even if Shift is released or
+reporting turns on. This does not freeze wheel precedence: a wheel is
+self-contained and never arms the gesture latch.
 
 Two consequences fall out of the latch and are ruled here:
 
@@ -2142,9 +2268,52 @@ Two consequences fall out of the latch and are ruled here:
   the claim is not taken back. Reclaiming would make a stale gesture
   steal a live one's terminal.
 
+Detach has an additional ordering constraint: if the departing
+frontend still owns the controller, its child's matching release is
+delivered **before** normal detach teardown releases that claim and
+discards the gesture record. If another frontend owns it, the release
+still settles the recorded gesture without changing that newer claim.
+Clearing controller/gesture state first would make the teardown path
+look clean while leaving the child button down.
+
 **A cancelled gesture is not a replayed one**: the release is delivered
 for liveness, and no selection or scroll effect is applied from the
 stale event.
+
+##### Click-chain identity is independent
+
+`MouseClickState` (`src/editor.rs:352`) is **not** the
+accepted-gesture latch. An ordinary
+`Up(Left)` consumes the gesture latch, while click state intentionally
+survives long enough to recognize a second click. Consequently, only
+clearing click state from the cancellation path is insufficient: after
+a completed click there may be no live gesture to cancel.
+
+The click chain therefore carries, or is cleared against, the complete
+mapping identity: frontend, target window and buffer, panel epoch,
+geometry epoch, and — for mapped sessions — mapping generation. Every
+authority transition in the table above invalidates it independently
+of the gesture latch. A completed click followed by a foreign edit and
+the successor mapped frame, then a `Down` at the same cell inside the
+multi-click interval, is a **single** click under the new mapping, not
+a double-click on unrelated text. The same rule holds for the common
+legacy identity transitions even though v24 has no mapping generation.
+
+This extends rather than replaces Q#M5 and the existing TUI event
+lifetime: only an **unmodified `Down(Left)`** writes click state;
+Shift-Down never enters the double-click chain. Drag, Move, wheel and
+right/context gestures clear it, while ordinary `Up(Left)` and a
+same-identity repaint preserve it. Mapping invalidation is an
+additional clear, not permission to couple click state to every frame
+or to the accepted-gesture latch.
+
+Semantic click chains are **keyed per frontend**, then carry the target
+identity above. Merely storing `frontend_id` inside one global slot
+prevents a false cross-frontend double-click but lets B's click erase
+A's legitimate chain. The adjacent `window_drag` comment already names
+that exact defect and uses a `HashMap<FrontendId, ..>` because
+concurrent frontend gestures are legal (`src/editor.rs:298`). Detach
+removes only the departing frontend's entry.
 
 ### Motion must stay coalesced
 
@@ -2166,6 +2335,8 @@ protecting.
 | existing `FrontendEvent::PanelPointer` | retained, unchanged |
 | **new**: exact `FrontendEvent::TextInput` bytes | the previous-final `FrontendEvent`, appended by 1a and never pinned |
 | **new**: complete nested bytes of `InstanceMessage::PanelFrame(PanelFramePayload::Absent)` | the previous-final `PanelFramePayload` variant |
+| **new**: exact `FrontendEvent::PanelPointerMapped` bytes, encoded **and decoded**, with distinct values in every same-typed field | the new discriminant and its frozen field order; a same-type field swap still round-trips against itself, so round-trip alone is insufficient |
+| **new**: complete nested bytes of `InstanceMessage::PanelFrame(PanelFramePayload::PresentMapped { .. })`, encoded **and decoded** | the new payload discriminant, nesting and `frame`-then-generation order |
 
 **Correction: the `PanelPointer` pin DOES exist**, at
 `src/protocol.rs:1975`
@@ -2173,27 +2344,66 @@ protecting.
 14 said it could not be found. It is in the **root crate's** test
 module rather than under `pmacs-protocol/` or `tests/`, which is
 exactly where the search did not look. `message.rs:524` was right and
-the doubt was mine. The pin is **retained**, and the two new pins are
-added beside it.
+the doubt was mine. The pin is **retained**, and the four new pins are
+added beside it. The previous-final pins catch an insertion on the
+wrong side of the append boundary; the new-variant pins catch
+reordering inside the variants themselves. Neither substitutes for the
+other.
 
 ### Acceptance and mutation matrix
 
 | # | row | mutation |
 |---|---|---|
+| G0a | the existing `PanelPointer` pin and the new exact previous-final `TextInput` and nested `PanelFrame(Absent)` pins all remain byte-identical | insert a wedge before each protected previous-final variant → only the pin whose discriminant moved fails |
+| G0b | exact encode **and decode** bytes for `PanelPointerMapped` and nested `PresentMapped`, using unequal values for every adjacent same-typed field | reorder two `u64` fields or reverse `frame`/generation → a self-consistent round-trip stays green but the exact pin fails |
 | G1 | a **foreign** edit before the next render → the old generation is refused | never advance on content change → G1 passes a stale hit |
 | G2 | every **changing** entry moves the key, one row each — and the composites are **split**: `view_top`; `view_left`; grid **rows** and **columns** separately; **fold-map content** and the owning frontend's **`fold_projection` policy** separately; **wrap** and **gutter geometry** separately; buffer content; terminal **projected content** and **scrollback movement** separately | omit that one entry from the key |
 | G3 | every **stable** entry leaves it unchanged, one row each — focus; styling; selection-only; absorbed cursor motion; and the terminal controls **style, title, bell, tab-stop, cursor-only** | include that one entry → drags cancel on a repaint |
-| G4 | a **selection repaint** preserves the generation and an in-flight drag **continues** | as G3 |
-| G5a | the key advancing with an accepted gesture live **raises cancellation** — the daemon acts without waiting for another event | make cancellation reactive to a refused event → nothing happens when the frame lands before the physical `Up` |
-| G5b | a stale `Up` with **no accepted `Down`** is **inert** | synthesise a release anyway → an unpressed button is released |
-| G5c | cancellation **does not reclaim** a controller another frontend has since taken | reclaim it → a stale gesture steals a live one's terminal |
-| G6 | **v24 positive control** — a legacy session drives a panel gesture end to end | gate ≤ v24 off → old peers lose the panel |
-| G7a | **v25 positive control, OUTBOUND** — a v25 peer receives `PresentMapped`, carrying a live generation | withhold `PresentMapped` from a v25 peer → the mapped frame never reaches it |
-| G7b | **v25 positive control, INBOUND** — a `PanelPointerMapped` with the current generation is **accepted and takes effect** | ignore the mapped variant inbound → every refusal row still passes while nothing works |
-| G8a | a **bare `PanelPointer` from a ≥ v25 session is REFUSED** | accept it → the bypass returns inbound |
-| G8b | a **legacy `Present` at a ≥ v25 frontend is REJECTED** | paint it → the frontend hit-tests a band it cannot map |
+| G4a | a **selection repaint** preserves the generation | as G3 |
+| G4b | after that repaint, an in-flight drag reaches real replay and **continues** | route only or clear the latch despite the stable generation → G4a stays green while the gesture dies |
+| G5a | **mapped generation**: the key advancing with an accepted left gesture live raises cancellation before the successor frame, without waiting for another pointer event | make cancellation reactive to a refused event → nothing happens when the frame lands before the physical `Up` |
+| G5b | **table-driven common authority-loss matrix**: `Absent`, panel-epoch change, buffer replacement, same-size geometry-epoch change, and detach each cancel a live left gesture; every entry has legacy-v24 and mapped-v25 legs, and the rebased effect matrix applies each to a document and a reporting terminal | omit that transition, arm the latch only for the mapped family, or cancel only one target kind → its named leg leaves the gesture live |
+| G5c | an ordinary accepted `Down(Left)` → `Up(Left)` consumes the latch; a later authority loss emits **no second** document cleanup or child release, with v24 same-size geometry and v25 generation legs | leave the latch armed after `Up` → the later transition duplicates the release |
+| G5d | a stale `Up` with **no accepted `Down`** is **inert** | synthesise a release anyway → an unpressed button is released |
+| G5e | cancellation **does not reclaim** a controller another frontend has since taken | reclaim it → a stale gesture steals a live one's terminal |
+| G5f | **producer reset matrix**: mapped generation and panel/buffer replacement clear only on atomic acceptance of the valid successor frame; `Absent` clears on acceptance; same-size geometry clears at local declaration; detach clears in teardown; structurally invalid, stale, zero-generation and wrong-family frames plus same-identity repaints retain | funnel every reset through frame arrival → geometry/detach stay armed; clear before validation or on every repaint → the negative controls lose a valid drag |
+| G5g | only an accepted **`Down(Left)`** arms cancellation; table-driven Move, wheel, context and right/middle controls followed by an authority loss emit no synthetic release | arm on every `Down` or every accepted pointer event → the press-only right path or another non-gesture event manufactures a delayed release |
+| G5h | **click-chain identity is independent**: complete a click, then independently drive `Absent`→Present, panel-epoch change, buffer replacement, same-size geometry change, and detach→reattach with no live gesture; a same-cell click inside the interval is single. A foreign content edit plus successor generation is the additional mapped-v25 leg | clear/re-key `MouseClickState` only while cancelling a held gesture, or omit one identity → unrelated text is treated as the second/third click |
+| G5i | reporting-terminal detach delivers the recorded child release before dropping the old gesture/controller state, then leaves no controller claim owned by the detached frontend; a newer owner's claim remains untouched | tear down controller or gesture state before cancellation → no release bytes; reclaim/release unconditionally → the newer owner is disturbed |
+| G5j | document cancellation has two legs: Down with no accepted Drag clears the empty selection; Down plus accepted Drag preserves the nonempty region's exact anchor/cursor while ending the gesture | clear every selection → the user's completed range disappears; preserve every selection → the empty armed anchor captures later motion |
+| G5k | **terminal gesture-domain matrix**: child-reported Down then (a) reporting off or (b) Shift held before Drag/Up still yields child Drag/release in the recorded encoding and no local selection; local Down via (c) Shift or (d) reporting-off then the condition reverses still finishes locally with no child tail | re-evaluate Shift/reporting independently on every event → the child keeps a button down or receives an Up for a Down it never saw |
+| G5l | **click-chain stability control**: complete a click, accept a same-generation style/selection repaint with every identity unchanged, then click the same cell inside the interval → it remains the second click | clear click state on every frame or couple it to the ordinary-Up gesture-latch clear → multi-click never survives a harmless repaint/release |
+| G5m | **coincident invalidations cancel once**: changed-size geometry (geometry epoch + mapping generation) and panel/buffer replacement that also changes the mapping each produce exactly one document cleanup/child release | keep per-cause live flags or inspect without taking the shared latch → one transition emits duplicate tails |
+| G5n | **click event-lifetime table**: unmodified left Down writes; Shift-Down does not; Drag, Move, wheel and right/context clear; ordinary left Up preserves | write on Shift-Down or omit one clear arm → Q#M5 or the successor click is misclassified; clear on Up → every double-click becomes two singles |
+| G5o | **per-frontend click ownership**: A click, B click, then A same-cell click inside A's interval still produces A's double-click, while detaching B removes only B's chain | keep one global `Option<MouseClickState>` or clear the whole map on detach → B erases A's valid sequence |
+| G5p | **per-frontend gesture ownership**: A and B hold gestures on distinct panels; B's panel-epoch change or detach cancels B exactly once while A's next valid Drag still applies | keep one global accepted-gesture latch or clear the whole map on one frontend transition → B's lifecycle cancels or erases A |
+| G6a | **v24 positive control, OUTBOUND** — a v24 peer receives exactly legacy `Present`, never `PresentMapped` | send the mapped family or both → an old negotiated session receives a discriminant it did not declare |
+| G6b | **v24 routing control, INBOUND** — a current legacy `Down(Left)` reaches the semantic dispatcher and performs the already-landed focus activation | gate v24 off or drop after decoding → the old peer's event is mapped but inert |
+| G6c | **v24 effect control after replay rebase** — the same event performs its document/terminal replay effect | keep only the pre-existing focus path → G6b stays green while replay is dead |
+| G7a | **v25 positive control, OUTBOUND** — a v25 peer receives exactly `PresentMapped`, carrying a live generation, never legacy `Present` | withhold `PresentMapped`, send legacy, or send both → the mapped frame contract is absent or ambiguous |
+| G7b | **v25 routing control, INBOUND** — a current `PanelPointerMapped` carrying `Down(Left)` reaches the semantic dispatcher and performs the already-landed focus activation | ignore the mapped variant inbound → every refusal row still passes while nothing routes |
+| G7c | **v25 effect control after replay rebase** — that current mapped event performs its document/terminal replay effect | stop after focus → G7b stays green while replay is dead |
+| G8a | a **bare `PanelPointer` from a ≥ v25 session is REFUSED before mutation** | accept it → the bypass returns inbound |
+| G8b | a **legacy `Present` at a ≥ v25 frontend is REJECTED**, atomically retaining its mapped frame, generation and pointer state | paint it or clear state first → the frontend hit-tests a band it cannot map or loses a valid gesture |
+| G8c | a **`PanelPointerMapped` from a ≤ v24 session is REFUSED before mutation**, even though a peer compiled from this crate can encode it | accept it → inbound negotiation is treated as a sender convention rather than a gate |
+| G8d | a **`PresentMapped` at a ≤ v24 frontend is REJECTED**, retaining the previous legacy frame atomically | paint it → outbound negotiation is treated as a sender convention rather than a gate |
+| G8e | **authenticated-session authority**: in both inbound wrong-family cases, claiming another frontend whose session negotiated the desired family still refuses | gate by the payload's `frontend_id` lookup → the forged cross-session claim bypasses negotiation |
 | G9a | **daemon emission**: identical cells across a generation change are still **emitted** | dedupe daemon-side across the change → the second gesture is suppressed |
 | G9b | **frontend motion dedupe** suppresses a repeat within one generation and **re-arms across one** | (a) compare **only the cell**, never keying or resetting by generation → the first post-change motion is **eaten**; (b) reset on **every same-generation repaint** → repeated same-cell motion **returns** as pixel-rate traffic |
+| G9c | **frontend acceptance**: a byte-identical `PanelFrame` with a higher generation still updates the high-water/current generation and resets pointer state atomically; it may report no visual redraw | return early on frame equality before applying generation → G9a passes because the message arrived, but the producer keeps echoing stale authority |
+| G10 | an **invalid** mapped frame retains the previous frame **and** its generation, atomically | update one without the other → a valid generation names a frame never shown |
+| G10a | a **structurally valid `PresentMapped` carrying generation ZERO is REJECTED**, atomically — previous frame and generation both retained | accept zero → a sender that never initialised the field disables the check for the whole session |
+| G10b | a **`PanelPointerMapped` carrying generation ZERO is REFUSED** before mutation, including a coordinate-free document and local-terminal wheel | apply the wheel exemption before the nonzero check → the inbound opt-out returns through the exempt path |
+| G10c | mapped-frame generation is nondecreasing: a higher generation may skip values, an equal-generation style/selection repaint is accepted, and a lower generation is rejected atomically; after `PresentMapped(9)` → `Absent`, a valid `PresentMapped(8)` is still rejected | require only nonzero, or clear the high-water mark on `Absent` → a delayed frame rolls the producer's authority backward |
+| G11a | **generation exhaustion fails CLOSED, and does not leave a zombie band**: the daemon publishes `Absent`, clears input authority, and latches exhaustion for the session | fail open → the hole returns at the boundary; refuse input only → a stale panel stays painted and permanently inert; omit the latch → the next frame resurrects it |
+| G11b | exhaustion with an accepted left gesture also performs the ordinary `Absent` cancellation effects **before** publishing it | publish `Absent` and discard authority without replay cancellation → G11a stays green while the gesture is orphaned |
+| G12a | one mapped generation carrying **two document wheel ticks** applies both window-level scrolls even though the first changes the mapping | check every mapped coordinate indiscriminately → only the first tick applies |
+| G12b | one mapped generation carrying **two non-reporting terminal wheel ticks** applies both local-scrollback moves even though the first changes the view anchor | remove the terminal coordinate-free exemption → only the first tick applies |
+| G13a | mapped `Move` and `Drag` retain their respective tail-coalescing behaviour, including replacement by the latest coordinates/generation without crossing an intervening lossless event | let the new variant fall through to the default → pixel-rate traffic fills the bounded queue |
+| G13b | mapped press, release and all wheel kinds remain lossless and ordered | coalesce every mapped pointer → multi-click, release or wheel ticks silently disappear |
+| G14a | version tripwire: `PROTOCOL_VERSION == 25`, `SUPPORTED_PROTOCOL_VERSIONS` reaches it, `PANEL_MAPPING_MIN_VERSION == 25`, and `ADVERTISED_PROTOCOL_VERSION == 20` remains pinned | bump only the wire constant or move the advertised baseline → self-handshake fails or the permanent baseline drifts |
+| G14b | the supported set accepts every version through `PROTOCOL_VERSION`, rejects `PROTOCOL_VERSION + 1`, and the literal boundary routes v24 legacy versus v25 mapped | end the set at 24 or express the boundary arithmetically against a moving ceiling → the current wire is unsupported or a later bump silently moves this feature |
+| G15 | **TUI structural control** — the existing direct panel click/drag/wheel paths keep their effects with no generation token | move the generation requirement into shared replay instead of the authenticated semantic boundary → local TUI input is refused |
 
 **G9b's mutation in revision 15 was a valid implementation, not a
 defect.** Keying the dedupe by `(mapping_generation, coord)` preserves
@@ -2201,26 +2411,32 @@ same-generation suppression *and* naturally admits the first motion
 under a new generation — it is one correct way to satisfy the row, so
 requiring it to fail would have forbidden a good design. The two
 mutations above are actual defects, one in each direction.
-| G10 | an **invalid** mapped frame retains the previous frame **and** its generation, atomically | update one without the other → a valid generation names a frame never shown |
-| G10a | a **structurally valid `PresentMapped` carrying generation ZERO is REJECTED**, atomically — previous frame and generation both retained | accept zero → a sender that never initialised the field disables the check for the whole session |
-| G10b | a **`PanelPointerMapped` carrying generation ZERO is REFUSED** before mutation | accept zero → the inbound half of the same opt-out |
 
 G10a and G10b are **independent rows in opposite directions**, not one
 row seen twice: zero can arrive from either peer, and G10's atomicity
 row exercises neither.
-| G11 | **generation exhaustion fails CLOSED, and does not leave a zombie band**: the daemon publishes **`Absent`**, clears input authority, **cancels any accepted gesture**, and **latches** exhaustion for the session | fail open → the hole returns at the boundary; refuse input only → a stale panel stays painted and permanently inert, with no signal to the user; omit the latch → the next frame resurrects it |
 
 G2 and G3 are enumerated per entry deliberately: one row asserting "the
 generation changed" cannot show **which** input moved it, and a key
 that ignores `view_left` passes every row that only scrolls
 vertically.
 
+The mutation column states each row's **minimum required bite**, not a
+prediction that no legitimate dependent can fail. Alternatives `(a)`,
+`(b)`, or distinct omitted table arms are separate mutations; one
+mega-mutation cannot establish their individual coverage. Record the
+actual bite graph only after each compiling mutant runs. A proposed
+mutation that is itself a valid implementation is replaced, as G9b
+was, rather than used to reject the implementation.
+
 ### What this slice can witness, and what the replay lane owes
 
-**G5's EFFECTS cannot be proven on this branch, and revision 14 claimed
-them anyway.** Cancellation's observable outcomes — the producer latch,
-the panel's selection, the child's release — are all reached through
-**panel replay, which does not exist at this base**.
+**Gesture EFFECTS cannot be proven on this branch, and earlier
+revisions claimed some anyway.** Cancellation's observable outcomes —
+the complete producer latch, the panel's selection, the click chain and
+the child's release — plus drag continuation, replay positive controls
+and two-tick scrolling are all reached through **panel replay, which
+does not exist at this base**.
 `gesture_last_content_cell` and the document/terminal replay live on
 `panel-pointer-replay` (`pmacs-gpu/src/main.rs:2143` there); the same
 struct here (`:2124`) has no such field, and
@@ -2231,17 +2447,18 @@ whoever runs the tests:
 
 | owned by **this slice** | owed by the **rebased replay lane** |
 |---|---|
-| the wire shapes, positions and field order | G5's document effects — empty selection cleared, click chain cleared |
-| the family gate, both directions (G6–G8) | G5's terminal effect — the child's release, with matching button and encoding |
-| the authoritative key: what moves it, what does not (G1–G4) | G5b's inert stale `Up` |
-| the wheel exemptions and their two-tick rows | G5c's controller non-reclaim |
-| **G5a** — that the key advancing RAISES cancellation, observed as the daemon-side signal | the end-to-end effect witnesses for that signal |
-| G9–G11 | — |
+| wire shapes, positions, pins and field order (G0), plus the bidirectional family gate (G6a–b, G7a–b, G8) | document cancellation effect — empty selection cleared without moving point |
+| authoritative-key changing/stable inputs (G1–G4a) and the **mapping-generation** authority-loss signal before frame emission (G5a) | real stable-generation drag continuation, G5a's effects, and the v24/v25 replay-effect controls (G4b, G6c, G7c) |
+| mapped-frame atomicity and generation-aware producer state (the mapped-frame legs of G5f) | complete producer reset lifecycle, including the geometry, `Absent`, identity and detach paths whose fields are introduced by replay (G5f) |
+| motion coalescing, dedupe, invalid-frame atomicity, zero rejection, exhaustion state, version fallout and the TUI structural control (G9–G11a, G13–G15) | every common legacy/mapped cancellation transition and real gesture/click lifecycle (G5b–e, G5g, G5i–p), exhaustion cancellation (G11b), and both two-tick wheel effects (G12) |
 
-**G5a stays here on purpose.** The trigger is this slice's rule; only
-its consequences need replay. Moving the whole row out would leave the
-proactive-cancellation ruling — the one that fixes revision 14's race —
-with no witness in the slice that introduces it.
+Only the **new mapping-generation** transition stays here on purpose,
+and its classification does **not** discharge the effect row. The
+common invalidations do not get a dead classification helper on this
+base; replay owns them where accepted gesture state exists. The rebased
+lane must run the whole G5 matrix through real document and terminal
+call sites. This is the same producer-emits/receiver-discards blind
+spot that forced the replay prerequisite in the first place.
 
 ### Coherence impact (`COHERENCE.md` §20)
 
