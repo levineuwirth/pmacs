@@ -551,7 +551,9 @@ impl SemanticRenderState {
     }
 
     /// Fresh session state for frontend `frontend_id`: no viewport
-    /// declared, nothing sent. Assumes a current-build peer (>= 18);
+    /// declared, nothing sent. Assumes a current-build peer (>= 18, and
+    /// current for every later capability too, including §5b's mapped
+    /// panel family);
     /// daemon sessions with a real negotiated version use
     /// [`Self::for_peer`].
     #[must_use]
@@ -567,7 +569,10 @@ impl SemanticRenderState {
             last_menu_prompt: HashMap::new(),
             last_minibuffer: None,
             peer_knows_minibuffer_rows: true,
-            peer_knows_mapped_panel: false,
+            // A current-build peer, like every other capability here.
+            // Leaving this `false` made `new()` contradict its own doc
+            // and emit the LEGACY family to an implicitly v25 peer.
+            peer_knows_mapped_panel: true,
             last_completion_popup: HashMap::new(),
             last_summary: HashMap::new(),
             last_status: HashMap::new(),

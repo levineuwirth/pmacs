@@ -70,8 +70,8 @@ use crate::protocol::{
     ADVERTISED_PROTOCOL_VERSION, AttachRequest, FrontendEvent, FrontendId, GoodbyeReason, Hello,
     InitialTarget, InitialTargetResult, InstanceCapabilities, InstanceIdentity, InstanceMessage,
     InstanceSignal, MAX_INITIAL_TARGET_ERROR_BYTES, MAX_INITIAL_TARGET_PATH_BYTES,
-    PANEL_MIN_VERSION, PointerKind, SelectionSnapshot, SessionBootstrapRequest,
-    TEXT_INPUT_MAX_BYTES, TEXT_INPUT_MIN_VERSION,
+    PANEL_MAPPING_MIN_VERSION, PANEL_MIN_VERSION, PointerKind, SelectionSnapshot,
+    SessionBootstrapRequest, TEXT_INPUT_MAX_BYTES, TEXT_INPUT_MIN_VERSION,
 };
 use crate::socket_path::{SocketPathError, ensure_runtime_subdir};
 use crate::transport::{read_message, write_message};
@@ -1033,6 +1033,53 @@ fn panel_event_epochs_are_current(
 /// The claimed `frontend_id` in the payload is never consulted anywhere:
 /// routing is by the authenticated transport `source`, so a forged id
 /// addresses nothing.
+/// §5b — which panel-pointer family this session speaks.
+///
+/// **Read from the AUTHENTICATED source, never from the payload's
+/// `frontend_id`.** That field is untrusted on every inbound variant,
+/// and looking the negotiation up by it would let a peer claim another
+/// session's family — the forged cross-session claim G8e mutates for.
+///
+/// Consulted BEFORE the payload is trusted, before any generation is
+/// validated and before any mutation: the family decides which variant
+/// is even admissible, so it cannot depend on the variant's contents.
+fn peer_uses_mapped_panel_family(session_registry: &SessionRegistry, source: FrontendId) -> bool {
+    session_registry
+        .session_state(source)
+        .is_some_and(|state| state.negotiated_protocol_version >= PANEL_MAPPING_MIN_VERSION)
+}
+
+/// §5b — whether an echoed mapping generation still names the mapping
+/// the daemon holds.
+///
+/// The last rung of the ladder and the finest: `buffer_id` catches an
+/// A→B replacement, `panel_epoch` a close/reopen, `geometry_epoch` a
+/// declaration race, and this catches **the text under that cell
+/// changing** — a foreign edit, a fold, a reload, none of which moves
+/// an epoch.
+///
+/// **Zero is refused outright.** It is what a default-constructed or
+/// half-initialised sender produces, so accepting it would let a peer
+/// opt out of the check by sending nothing.
+///
+/// Read through the SAME accessor projection stamps with, so "what the
+/// frontend was shown" and "what the daemon checks" cannot drift.
+fn panel_mapping_is_current(
+    editor: &EditorState,
+    semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+    source: FrontendId,
+    echoed: u64,
+) -> bool {
+    if echoed == 0 {
+        return false;
+    }
+    let snapshot = editor.panel_mapping_snapshot(source);
+    semantic_states
+        .get_mut(&source)
+        .and_then(|state| state.panel_mapping_generation(snapshot))
+        .is_some_and(|current| current == echoed)
+}
+
 fn peer_may_send_panel_events(
     editor: &EditorState,
     session_registry: &SessionRegistry,
@@ -2438,13 +2485,69 @@ fn handle_dispatcher_event(
                     // the daemon's own state inside the dispatcher. Any
                     // failure drops the event before any view, controller,
                     // selection, menu, or PTY mutation.
-                    if peer_may_send_panel_events(editor, session_registry, semantic_states, source)
+                    // §5b G8a — the family is decided FIRST, from the
+                    // AUTHENTICATED session, and a `>= v25` session
+                    // sending the bare variant is REFUSED rather than
+                    // handled under legacy semantics. Handling it would
+                    // leave the mapping hole reachable by choosing a
+                    // discriminant, which is the whole of the bypass.
+                    if !peer_uses_mapped_panel_family(session_registry, source)
+                        && peer_may_send_panel_events(
+                            editor,
+                            session_registry,
+                            semantic_states,
+                            source,
+                        )
                         && panel_event_epochs_are_current(
                             editor,
                             semantic_states,
                             source,
                             geometry_epoch,
                             panel_epoch,
+                        )
+                    {
+                        editor.dispatch_semantic_panel_pointer(source, buffer_id, coord, kind);
+                    }
+                }
+                FrontendEvent::PanelPointerMapped {
+                    geometry_epoch,
+                    panel_epoch,
+                    buffer_id,
+                    coord,
+                    kind,
+                    mapping_generation,
+                    ..
+                } => {
+                    // §5b — the mapped family, in this order:
+                    //
+                    //   1. family, from the AUTHENTICATED session
+                    //   2. the existing epoch ladder
+                    //   3. the mapping generation
+                    //   4. only then, dispatch
+                    //
+                    // G8c is the first line: a `<= v24` session sending
+                    // this variant is refused even though a peer built
+                    // from this crate can encode the discriminant.
+                    // Negotiation is a gate, not a sender convention.
+                    if peer_uses_mapped_panel_family(session_registry, source)
+                        && peer_may_send_panel_events(
+                            editor,
+                            session_registry,
+                            semantic_states,
+                            source,
+                        )
+                        && panel_event_epochs_are_current(
+                            editor,
+                            semantic_states,
+                            source,
+                            geometry_epoch,
+                            panel_epoch,
+                        )
+                        && panel_mapping_is_current(
+                            editor,
+                            semantic_states,
+                            source,
+                            mapping_generation,
                         )
                     {
                         editor.dispatch_semantic_panel_pointer(source, buffer_id, coord, kind);
@@ -5971,6 +6074,14 @@ mod tests {
     ///
     /// The session is registered because the dispatcher drops any event
     /// from an uninstalled session before it reaches a handler.
+    /// §5b — a session that negotiated the LEGACY panel family.
+    ///
+    /// These rows drive `FrontendEvent::PanelPointer`, which a `>= v25`
+    /// session may not send at all, so they must say which family they
+    /// are exercising. Naming it here also makes them explicit legacy
+    /// positive controls rather than tests that happened to pass.
+    const LEGACY_PANEL_VERSION: u32 = PANEL_MAPPING_MIN_VERSION - 1;
+
     fn dispatch_panel_event(
         editor: &mut crate::editor::EditorState,
         fid: FrontendId,
@@ -6271,7 +6382,7 @@ mod tests {
             dispatch_panel_event(
                 &mut editor,
                 fid,
-                PROTOCOL_VERSION,
+                LEGACY_PANEL_VERSION,
                 &mut semantic_states,
                 &mut HashMap::new(),
                 event,
@@ -6286,7 +6397,7 @@ mod tests {
         dispatch_panel_event(
             &mut editor,
             fid,
-            PROTOCOL_VERSION,
+            LEGACY_PANEL_VERSION,
             &mut semantic_states,
             &mut HashMap::new(),
             down(geometry_epoch, panel_epoch),
@@ -6342,7 +6453,7 @@ mod tests {
         dispatch_panel_event(
             &mut editor,
             fid,
-            PROTOCOL_VERSION,
+            LEGACY_PANEL_VERSION,
             &mut semantic_states,
             &mut HashMap::new(),
             FrontendEvent::PanelPointer {
@@ -6369,7 +6480,7 @@ mod tests {
         dispatch_panel_event(
             &mut editor,
             fid,
-            PROTOCOL_VERSION,
+            LEGACY_PANEL_VERSION,
             &mut semantic_states,
             &mut HashMap::new(),
             FrontendEvent::PanelPointer {
@@ -6587,7 +6698,7 @@ mod tests {
         dispatch_panel_event(
             &mut editor,
             fid,
-            PROTOCOL_VERSION,
+            LEGACY_PANEL_VERSION,
             &mut semantic_states,
             &mut HashMap::new(),
             FrontendEvent::PanelPointer {
@@ -6614,7 +6725,7 @@ mod tests {
         dispatch_panel_event(
             &mut editor,
             fid,
-            PROTOCOL_VERSION,
+            LEGACY_PANEL_VERSION,
             &mut semantic_states,
             &mut HashMap::new(),
             FrontendEvent::PanelResizeRows {
@@ -6643,7 +6754,7 @@ mod tests {
         dispatch_panel_event(
             &mut editor,
             fid,
-            PROTOCOL_VERSION,
+            LEGACY_PANEL_VERSION,
             &mut semantic_states,
             &mut HashMap::new(),
             FrontendEvent::PanelPointer {
@@ -6700,7 +6811,7 @@ mod tests {
         dispatch_panel_event(
             &mut editor,
             fid,
-            PROTOCOL_VERSION,
+            LEGACY_PANEL_VERSION,
             &mut semantic_states,
             &mut HashMap::new(),
             wheel(buffer_id, geometry_epoch, panel_epoch),
@@ -6716,7 +6827,7 @@ mod tests {
         dispatch_panel_event(
             &mut editor,
             fid,
-            PROTOCOL_VERSION,
+            LEGACY_PANEL_VERSION,
             &mut semantic_states,
             &mut HashMap::new(),
             FrontendEvent::PanelPointer {
@@ -6782,7 +6893,7 @@ mod tests {
         dispatch_panel_event(
             &mut editor,
             fid,
-            PROTOCOL_VERSION,
+            LEGACY_PANEL_VERSION,
             &mut semantic_states,
             &mut HashMap::new(),
             wheel(terminal_buffer, geometry_epoch, panel_epoch),
