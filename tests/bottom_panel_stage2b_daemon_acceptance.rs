@@ -1744,3 +1744,89 @@ fn the_mapping_snapshot_picks_the_terminal_domain_for_a_terminal_panel() {
         );
     }
 }
+
+/// §5b — the terminal key **across the seam**.
+///
+/// `screen.rs` proves the counter classifies events correctly, and the
+/// row above proves the snapshot picks the terminal domain. Neither
+/// notices a `view_mapping_identity` that returns a CONSTANT: the
+/// classification is right, the branch is taken, and the daemon's key
+/// still never moves. These rows join the two halves.
+#[test]
+fn g2_g3_a_terminal_panels_key_tracks_its_screen_and_anchor() {
+    use pmacs::ansi::AnsiEvent;
+
+    let mut session = Session::new();
+    session.declare(1, 24, 80);
+    exec(
+        &session.state,
+        "TERM_BUF = pmacs.terminal.open { command = \"/bin/sh\", \
+           args = { \"-c\", \"sleep 30\" }, display = \"panel\" }",
+    );
+    let _ = session.frame();
+
+    let buffer_id = {
+        let core = session.state.core.borrow();
+        let side = core.side_window_for(FID).expect("side");
+        core.windows[&side].buffer_id
+    };
+    let feed = |session: &Session, event: AnsiEvent| {
+        assert!(
+            session
+                .state
+                .terminal_manager
+                .borrow_mut()
+                .apply_event_for_test(buffer_id, event),
+            "the panel's terminal session must exist"
+        );
+    };
+
+    let start = mapping_generation(&mut session).expect("a terminal panel has a key");
+
+    // CHANGING: a glyph appears where none was.
+    feed(&session, AnsiEvent::Text("A".to_owned()));
+    let after_glyph = mapping_generation(&mut session).expect("a key");
+    assert!(
+        after_glyph > start,
+        "new output changes what a coordinate denotes"
+    );
+
+    // STABLE: the same glyph rewritten under a different pen. This is
+    // the row that forced `write_character` to compare glyphs — a
+    // blanket bump made a recolour cancel the drag.
+    feed(&session, AnsiEvent::CursorPosition { row: 1, col: 1 });
+    feed(
+        &session,
+        AnsiEvent::SetStyle(pmacs_protocol::Style::default()),
+    );
+    feed(&session, AnsiEvent::Text("A".to_owned()));
+    assert_eq!(
+        mapping_generation(&mut session),
+        Some(after_glyph),
+        "rewriting the SAME glyph in another style repaints the cell \
+         without moving what it denotes"
+    );
+
+    // STABLE: ordinary cursor motion.
+    feed(&session, AnsiEvent::CursorPosition { row: 2, col: 3 });
+    assert_eq!(
+        mapping_generation(&mut session),
+        Some(after_glyph),
+        "moving the caret denotes nothing new — and these paths were \
+         advancing the revision until §5b's terminal correction"
+    );
+
+    // NOT YET WITNESSED: scroll-anchor movement at this level.
+    //
+    // The anchor IS in the key — `PanelMappingContent::Terminal` carries
+    // it — but driving a scroll from here has defeated three attempts:
+    // `scroll_lines` needs a viewport the panel projection registers on
+    // its own schedule, and `scroll_view` with an explicit size still
+    // reports no movement after forty line feeds, so the history the
+    // scroll would move into is not accumulating the way this fixture
+    // assumes.
+    //
+    // Recorded as OWED rather than faked. Without it, a
+    // `view_mapping_identity` that returned a constant ANCHOR while
+    // reporting a live revision would pass every row above.
+}

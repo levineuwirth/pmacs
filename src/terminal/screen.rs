@@ -114,6 +114,15 @@ pub struct ScreenProjection {
     pub title: Option<String>,
     /// Screen generation represented by this projection.
     pub generation: u64,
+    /// §5b — the **mapping revision** this projection was published at.
+    ///
+    /// Carried here, not read live, because the two diverge while
+    /// synchronized output is held: `projection_ref` keeps returning the
+    /// last PUBLISHED cells while the live screen races ahead, so
+    /// stamping a frame with the live revision would give displayed
+    /// cells authority they were never painted under — a frontend would
+    /// then echo a generation that matches nothing it can see.
+    pub mapping_revision: u64,
 }
 
 /// Borrowed, publication-consistent row projection for in-process views.
@@ -128,6 +137,8 @@ pub(crate) struct BorrowedScreenProjection<'a> {
     pub cursor: Option<CellCoord>,
     pub title: Option<&'a str>,
     pub generation: u64,
+    /// §5b — the mapping revision this projection was published at.
+    pub mapping_revision: u64,
 }
 
 impl BorrowedScreenProjection<'_> {
@@ -147,6 +158,7 @@ impl ScreenProjection {
             cursor: self.cursor,
             title: self.title.as_deref(),
             generation: self.generation,
+            mapping_revision: self.mapping_revision,
         }
     }
 }
@@ -224,6 +236,7 @@ impl TerminalScreen {
             cursor: Some(CellCoord::new(0, 0)),
             title: None,
             generation: 0,
+            mapping_revision: 0,
         };
         Ok(Self {
             size,
@@ -599,6 +612,7 @@ impl TerminalScreen {
                 .then(|| CellCoord::new(self.cursor.row as u32, self.cursor.col as u32)),
             title: self.title.as_deref(),
             generation: self.generation,
+            mapping_revision: self.mapping_revision,
         }
     }
 
@@ -658,7 +672,7 @@ impl TerminalScreen {
         self.g0 = saved.g0;
         self.g1 = saved.g1;
         self.use_g1 = saved.use_g1;
-        self.changed();
+        self.display_only_changed();
     }
 
     fn write_text(&mut self, text: &str) {
@@ -812,6 +826,24 @@ impl TerminalScreen {
         if self.modes.insert {
             self.insert_characters(width as u32);
         }
+        // §5b — did the GLYPH change, or only the pen? Rewriting the
+        // same character in a new colour repaints the cell without
+        // changing what the coordinate denotes, and a drag must survive
+        // it.
+        //
+        // Sampled BEFORE `clear_wide_at`, which blanks the cell when it
+        // is part of a wide pair — sampling after would compare the new
+        // glyph against a default and call every rewrite a change.
+        let glyph_changed = {
+            let row = self.cursor.row;
+            let col = self.cursor.col;
+            let cells = &self.active().rows[row].cells;
+            cells[col].glyph != Glyph::Char(ch)
+                || (width == 2
+                    && cells
+                        .get(col + 1)
+                        .is_none_or(|next| next.glyph != Glyph::Continuation))
+        };
         self.clear_wide_at(self.cursor.row, self.cursor.col);
         if width == 2 {
             self.clear_wide_at(self.cursor.row, self.cursor.col + 1);
@@ -832,7 +864,11 @@ impl TerminalScreen {
             self.cursor.pending_wrap = false;
         }
         self.last_grapheme = Some((row, col));
-        self.changed();
+        if glyph_changed {
+            self.changed();
+        } else {
+            self.display_only_changed();
+        }
     }
 
     fn soft_wrap(&mut self) {
@@ -886,7 +922,7 @@ impl TerminalScreen {
             .copied()
             .unwrap_or(cols - 1);
         self.cursor.pending_wrap = false;
-        self.changed();
+        self.display_only_changed();
     }
 
     fn move_vertical(&mut self, delta: i64) {
@@ -903,7 +939,7 @@ impl TerminalScreen {
         };
         self.cursor.row = moved.clamp(lo, hi);
         self.cursor.pending_wrap = false;
-        self.changed();
+        self.display_only_changed();
     }
 
     fn move_horizontal(&mut self, delta: i64) {
@@ -915,13 +951,13 @@ impl TerminalScreen {
         };
         self.cursor.col = moved.min(self.size.cols as usize - 1);
         self.cursor.pending_wrap = false;
-        self.changed();
+        self.display_only_changed();
     }
 
     fn set_col(&mut self, col: u32) {
         self.cursor.col = col.saturating_sub(1).min(self.size.cols - 1) as usize;
         self.cursor.pending_wrap = false;
-        self.changed();
+        self.display_only_changed();
     }
     fn set_row(&mut self, row: u32) {
         let base = if self.modes.origin {
@@ -936,7 +972,7 @@ impl TerminalScreen {
         };
         self.cursor.row = (base + row.saturating_sub(1) as usize).min(hi);
         self.cursor.pending_wrap = false;
-        self.changed();
+        self.display_only_changed();
     }
     fn set_position(&mut self, row: u32, col: u32) {
         self.set_row(row);
@@ -1525,8 +1561,20 @@ impl TerminalScreen {
                 .then(|| CellCoord::new(self.cursor.row as u32, self.cursor.col as u32)),
             title: self.title.clone(),
             generation: self.generation,
+            mapping_revision: self.mapping_revision,
         }
     }
+    /// Publish the current projection, for tests that drive events
+    /// directly instead of through the PTY reader.
+    ///
+    /// `#[doc(hidden)]` rather than `#[cfg(test)]`: the rows that need
+    /// it are integration tests, which link the library WITHOUT
+    /// `cfg(test)` and so cannot see a gated item.
+    #[doc(hidden)]
+    pub fn publish_for_test(&mut self) {
+        self.publish();
+    }
+
     fn publish(&mut self) {
         self.published = self.current_projection();
     }

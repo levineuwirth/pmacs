@@ -249,6 +249,34 @@ impl TerminalManager {
         self.screen_size(key.buffer_id)
     }
 
+    /// Apply one parsed event to a session's screen, for tests.
+    ///
+    /// Terminal output normally arrives on the PTY reader thread, which
+    /// no daemon-level test can drive deterministically. §5b's terminal
+    /// rows must nevertheless be witnessed **across the seam** — the
+    /// screen counter and the daemon's key are separately provable, and
+    /// a `view_mapping_identity` returning a constant would leave both
+    /// green — so this exists to join them.
+    ///
+    /// `#[doc(hidden)]` rather than `#[cfg(test)]`, because the rows
+    /// that need it are integration tests and those link the library
+    /// without `cfg(test)`.
+    #[doc(hidden)]
+    pub fn apply_event_for_test(
+        &mut self,
+        buffer_id: BufferId,
+        event: crate::ansi::AnsiEvent,
+    ) -> bool {
+        match self.sessions.get_mut(&buffer_id) {
+            Some(session) => {
+                session.screen.apply_event(event);
+                session.screen.publish_for_test();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// §5b — the terminal's **mapping revision** plus its per-view
     /// scroll anchor: together, the identity of what a coordinate in
     /// this view denotes.
@@ -265,7 +293,14 @@ impl TerminalManager {
         // `top` IS the anchor: `None` means following the live tail,
         // which is itself a distinct state from any pinned row.
         let anchor = self.views.get(&key).and_then(|view| view.top);
-        Some((session.screen.mapping_revision(), anchor))
+        // The PUBLISHED revision, not the live one. While synchronized
+        // output is held, `projection_ref` keeps returning the last
+        // published cells while the screen races ahead — reading
+        // `screen.mapping_revision()` there would stamp displayed cells
+        // with authority they were never painted under, and the frontend
+        // would echo a generation matching nothing it can see.
+        let published = session.screen.projection_ref().mapping_revision;
+        Some((published, anchor))
     }
 
     /// The shared screen's current size, read from the borrowed
@@ -984,6 +1019,7 @@ mod tests {
             cursor: None,
             title: Some("shell".into()),
             generation: 7,
+            mapping_revision: 0,
         }
     }
 
@@ -1264,6 +1300,7 @@ mod tests {
             cursor: None,
             title: None,
             generation: 2,
+            mapping_revision: 0,
         };
         let mut state = TerminalViewState {
             top: Some(LogicalCellAnchor {

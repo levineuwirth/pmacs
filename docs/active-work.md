@@ -437,6 +437,17 @@ from #171 and #215.
     three of them lost to these two signatures. U9's synthetic-load
     control remains unrun and is the cheapest thing that would either
     implicate load or clear it.
+- **OWED WITNESS — terminal scroll-anchor movement at the daemon
+  level.** The anchor is in the key (`PanelMappingContent::Terminal`
+  carries it) and the review asked for a row proving the daemon's
+  generation moves when it does. **Three attempts failed to drive a
+  scroll from the panel fixture**: `scroll_lines` needs a viewport the
+  panel projection registers on its own schedule, and `scroll_view`
+  with an explicit content size still reports no movement after forty
+  line feeds, so the history it would move into is not accumulating as
+  the fixture assumes. **Recorded rather than faked.** Without it, a
+  `view_mapping_identity` returning a constant ANCHOR while reporting a
+  live revision passes every terminal row that exists.
 - **Gates:** the four `bottom_panel_*` suites, the GUI 1a wire suite,
   `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`, and **`--protocol`**.
 

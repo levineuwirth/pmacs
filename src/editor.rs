@@ -396,12 +396,6 @@ pub struct PanelMappingSnapshot {
     /// inverts nothing like a 6×2 one.
     rows: u32,
     cols: u32,
-    view_top: usize,
-    view_left: u32,
-    wrap: crate::view::WrapMode,
-    content_cols: u32,
-    fold_projection: bool,
-    folds: Vec<pmacs_protocol::ByteRange>,
     content: PanelMappingContent,
 }
 
@@ -422,6 +416,18 @@ pub enum PanelMappingContent {
     Document {
         /// The buffer's content revision, or `None` if it is gone.
         revision: Option<u64>,
+        /// Vertical viewport origin.
+        view_top: usize,
+        /// Horizontal viewport origin. GUI arc 1b makes this move.
+        view_left: u32,
+        /// Wrap mode: it decides how a source line becomes display rows.
+        wrap: crate::view::WrapMode,
+        /// Text width with the gutter reservation already subtracted.
+        content_cols: u32,
+        /// The owning frontend's fold projection policy.
+        fold_projection: bool,
+        /// Fold content, read at its source.
+        folds: Vec<pmacs_protocol::ByteRange>,
     },
     /// A terminal panel: the screen's **mapping revision** and the
     /// view's scroll anchor.
@@ -2545,27 +2551,33 @@ impl EditorState {
                 .get(buffer_id)
                 .ok()
                 .map(crate::buffer::Buffer::revision);
-            PanelMappingContent::Document { revision }
+            PanelMappingContent::Document {
+                revision,
+                view_top: window.view_top,
+                view_left: window.view_left,
+                wrap: window.last_wrap,
+                content_cols: window.last_content_cols,
+                fold_projection: core
+                    .views
+                    .get(&frontend_id)
+                    .is_some_and(|view| view.fold_projection),
+                // Read at their SOURCE — the registry's ranges — rather
+                // than through the derived `VisibleLineMap`, whose only
+                // public summary is `is_identity()`. Too coarse: a fold
+                // edit leaving the map non-identity still changes which
+                // source line a row shows.
+                folds: core.fold_registry.folds(buffer_id),
+            }
         };
 
+        // Only COMMON geometry lives out here. Everything below is
+        // domain-specific: `view_top`, `view_left`, wrap, gutter width
+        // and folds describe a DOCUMENT projection and take no part in a
+        // terminal's, where the child's screen decides the mapping.
         Some(PanelMappingSnapshot {
             buffer_id,
             rows: size.rows,
             cols: size.cols,
-            view_top: window.view_top,
-            view_left: window.view_left,
-            wrap: window.last_wrap,
-            content_cols: window.last_content_cols,
-            fold_projection: core
-                .views
-                .get(&frontend_id)
-                .is_some_and(|view| view.fold_projection),
-            // Read at their SOURCE — the registry's ranges — rather than
-            // through the derived `VisibleLineMap`, whose only public
-            // summary is `is_identity()`. That is too coarse: a fold edit
-            // leaving the map non-identity still changes which source
-            // line a row shows.
-            folds: core.fold_registry.folds(buffer_id),
             content,
         })
     }
