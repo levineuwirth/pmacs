@@ -281,7 +281,7 @@ from #171 and #215.
   **`githubsucks/panel-mapping-generation` is the authoritative tip.**
   Recover with `git fetch githubsucks && git checkout
   panel-mapping-generation`.
-- **No PR yet. Checkpoint: framing revision 15 (§5b) AWAITING
+- **No PR yet. Checkpoint: framing revision 16 (§5b) AWAITING
   APPROVAL; NO IMPLEMENTATION.**
 - **PROTOCOL-BEARING — v25, and it runs alone.**
   `ADVERTISED_PROTOCOL_VERSION` stays pinned at **20**.
@@ -327,10 +327,21 @@ from #171 and #215.
   otherwise the first tick advances the key and the next queued tick is
   refused, so the panel scrolls once and dies. Child-reported terminal
   wheels keep the check, because SGR carries row and column.
-- **Cancellation is PROACTIVE**, triggered by the key advancing, with a
-  daemon-side accepted-gesture latch. Reactive cancellation loses a
-  race: a replacement frame landing before the physical `Up` makes the
-  producer suppress the very event that would cancel.
+- **Cancellation is PROACTIVE** — the daemon cancels, THEN emits the
+  replacement frame, and the frontend **clears its latch on receiving
+  that frame and sends nothing**. Revision 15 asked the producer to
+  emit a tail or retain the latch; retaining it manufactures a `Drag`
+  under the new generation with no accepted `Down`.
+- **The latch dies on EVERY loss of gesture authority**: generation
+  advance, `Absent`, panel/buffer identity change, geometry-epoch
+  change **even at an unchanged cell total**, and detach — **and on an
+  ordinary accepted `Up`**, or a later invalidation synthesises a
+  duplicate release.
+- **Terminal identity EXCLUDES style.** Wire `Cell` equality covers
+  `glyph`, `style` and `attachment`
+  (`pmacs-protocol/src/cell.rs:153`), so keying on it would move the
+  revision on a recolour and contradict the stable control. It is
+  glyph/row topology plus the view anchor.
 - **The terminal key is NOT `Screen`'s generation** — that advances
   from 39 sites including style, bell, tab-stops and cursor-only
   motion, none of which change what a coordinate denotes.

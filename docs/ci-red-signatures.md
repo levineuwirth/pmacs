@@ -496,11 +496,38 @@ Stage 4; the lane touches no `pmacs-gpu` code at all.
 | **selector** | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
 | **job / flavor** | local (Linux), `cargo test --workspace --features crdt --no-fail-fast`, i.e. under full-sweep load |
 | **required fragments** | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
-| **status** | **FOURTH OCCURRENCE 2026-08-13 — causal status still UNRESOLVED. A NEW candidate mechanism is introduced by the observing lane and is NOT excluded (see below)** |
+| **status** | **FIFTH OCCURRENCE 2026-08-15 — causal status still UNRESOLVED.** The fifth carries the strongest tree exclusion this row has had: a **documentation-only diff** |
 | **what IS established** | **three** occurrences at `pmacs-gpu/src/attach.rs:1680`, the second and third with all three fragments **verified** rather than inferred; the test drives a scripted transient-then-success sequence over a real socket pair. **The added GPU test is not the mechanism** — see the third-occurrence control below |
 | **what is NOT** | whether the broken pipe is the *fixture's* writer closing early or a real retry-path defect. **This row is not a claim that it is harmless** |
 | **rerun evidence** | occurrence 1: 6 isolated runs green, plus a full `--workspace --features crdt` sweep green (113 targets). Occurrence 2: **30 green on the observing branch** (15 isolated selector, 15 full `-p pmacs-gpu`) **plus a 15-run merge-base control, also green**. Occurrence 3: 5 isolated selector runs green, 10 full `-p pmacs-gpu` runs green **with** the added test, and **1 failure in 10 with the added test `#[ignore]`d** — the first rerun in this row's history that reproduced anything. Per the rerun rule the green runs establish intermittence only; the red control run is what carries the exclusion |
 | **retirement** | hardening that removes the named mechanism plus a discriminating witness — or a diagnosis showing the fixture, not the code, closes the pipe |
+
+**Fifth occurrence — panel cell-mapping generation (§5b) framing,
+2026-08-15, local (Linux).** The `scripts/gate` **`gpu` step** again,
+the same flavor as occurrence 2, inside a `--protocol` run
+(log `20260815T072601Z-2230169`).
+
+* **All three fragments verified** from the durable log, not a filtered
+  stream: `transient sequence must attach: Attach(Handshake(Io(Os {
+  code: 32, kind: BrokenPipe, message: "Broken pipe" })))`.
+* **The line moved and that is not a fragment.** It is
+  `pmacs-gpu/src/attach.rs:1728` here against `:1680` in the earlier
+  occurrences — `attach.rs` has changed since, and this row's
+  convention already treats a `:LINE` suffix as occurrence-specific.
+* **The tree exclusion is the strongest available in this row's
+  history: the branch's entire diff is DOCUMENTATION.** No Rust, no
+  wire surface, no `pmacs-gpu` file. Occurrences 1 and 4 argued
+  "unrelated lane"; this one cannot be related at all.
+* **Rerun: isolated selector green** (`1 passed`, 0.01 s). Per this
+  file's rerun rule that establishes **intermittence only** and does
+  not exonerate the tree — though here there is no tree change to
+  exonerate.
+
+**What five occurrences now support, stated carefully:** the failure is
+**not lane-correlated**. It has appeared under three flavors across
+five unrelated lanes, once on a diff that touches no code whatsoever.
+That is evidence about *where the cause is not*, and still says nothing
+about what it is. **The retirement condition is unchanged.**
 
 **Not attributed to the observing lane**, and in neither case is the
 reasoning merely "my diff looks unrelated": long-lines Stage 4 added no
