@@ -1019,20 +1019,6 @@ fn panel_event_epochs_are_current(
         .is_some_and(|geometry| geometry.geometry_epoch == geometry_epoch)
 }
 
-/// Whether an authenticated source may send the v21 panel event family
-/// (Q#BP9's "every gate keys on the daemon's own state").
-///
-/// All three inbound events require the same three facts, and they are
-/// checked together so no arm can satisfy two and forget the third: an
-/// installed **semantic** projection, a negotiated version that carries
-/// the variants, and a `FrontendView` this daemon itself marked
-/// panel-capable. A grid session, a pre-panel semantic peer, or a
-/// non-panel-capable view is rejected before any payload state is
-/// trusted.
-///
-/// The claimed `frontend_id` in the payload is never consulted anywhere:
-/// routing is by the authenticated transport `source`, so a forged id
-/// addresses nothing.
 /// §5b — which panel-pointer family this session speaks.
 ///
 /// **Read from the AUTHENTICATED source, never from the payload's
@@ -1080,6 +1066,20 @@ fn panel_mapping_is_current(
         .is_some_and(|current| current == echoed)
 }
 
+/// Whether an authenticated source may send the v21 panel event family
+/// (Q#BP9's "every gate keys on the daemon's own state").
+///
+/// All three inbound events require the same three facts, and they are
+/// checked together so no arm can satisfy two and forget the third: an
+/// installed **semantic** projection, a negotiated version that carries
+/// the variants, and a `FrontendView` this daemon itself marked
+/// panel-capable. A grid session, a pre-panel semantic peer, or a
+/// non-panel-capable view is rejected before any payload state is
+/// trusted.
+///
+/// The claimed `frontend_id` in the payload is never consulted anywhere:
+/// routing is by the authenticated transport `source`, so a forged id
+/// addresses nothing.
 fn peer_may_send_panel_events(
     editor: &EditorState,
     session_registry: &SessionRegistry,
@@ -6080,7 +6080,11 @@ mod tests {
     /// session may not send at all, so they must say which family they
     /// are exercising. Naming it here also makes them explicit legacy
     /// positive controls rather than tests that happened to pass.
-    const LEGACY_PANEL_VERSION: u32 = PANEL_MAPPING_MIN_VERSION - 1;
+    /// Stated as a LITERAL, not `PANEL_MAPPING_MIN_VERSION - 1`:
+    /// G6/G14 make the family boundary absolute, and arithmetic against
+    /// a moving constant would drag these rows forward on the next bump
+    /// — they would silently start testing v25 as "legacy".
+    const LEGACY_PANEL_VERSION: u32 = 24;
 
     fn dispatch_panel_event(
         editor: &mut crate::editor::EditorState,
@@ -6354,7 +6358,7 @@ mod tests {
         let mut semantic_states = HashMap::new();
         semantic_states.insert(
             fid,
-            crate::semantic_render::SemanticRenderState::for_peer(fid, PROTOCOL_VERSION),
+            crate::semantic_render::SemanticRenderState::for_peer(fid, LEGACY_PANEL_VERSION),
         );
         editor.accept_semantic_frame_geometry(fid, 1, CellSize::new(24, 80));
         let (geometry_epoch, panel_epoch) = shipped_declaration(&editor, fid, &mut semantic_states);
@@ -6428,7 +6432,7 @@ mod tests {
         let mut semantic_states = HashMap::new();
         semantic_states.insert(
             fid,
-            crate::semantic_render::SemanticRenderState::for_peer(fid, PROTOCOL_VERSION),
+            crate::semantic_render::SemanticRenderState::for_peer(fid, LEGACY_PANEL_VERSION),
         );
         editor.accept_semantic_frame_geometry(fid, 1, CellSize::new(24, 80));
         let (geometry_epoch, panel_epoch) = shipped_declaration(&editor, fid, &mut semantic_states);
@@ -6652,7 +6656,7 @@ mod tests {
         let mut semantic_states = HashMap::new();
         semantic_states.insert(
             fid,
-            crate::semantic_render::SemanticRenderState::for_peer(fid, PROTOCOL_VERSION),
+            crate::semantic_render::SemanticRenderState::for_peer(fid, LEGACY_PANEL_VERSION),
         );
         editor.accept_semantic_frame_geometry(fid, 1, CellSize::new(24, 80));
         let (geometry_epoch, panel_epoch) = shipped_declaration(&editor, fid, &mut semantic_states);
@@ -6793,7 +6797,7 @@ mod tests {
         let mut semantic_states = HashMap::new();
         semantic_states.insert(
             fid,
-            crate::semantic_render::SemanticRenderState::for_peer(fid, PROTOCOL_VERSION),
+            crate::semantic_render::SemanticRenderState::for_peer(fid, LEGACY_PANEL_VERSION),
         );
         editor.accept_semantic_frame_geometry(fid, 1, CellSize::new(24, 80));
         let (geometry_epoch, panel_epoch) = shipped_declaration(&editor, fid, &mut semantic_states);
@@ -6880,7 +6884,7 @@ mod tests {
         let mut semantic_states = HashMap::new();
         semantic_states.insert(
             fid,
-            crate::semantic_render::SemanticRenderState::for_peer(fid, PROTOCOL_VERSION),
+            crate::semantic_render::SemanticRenderState::for_peer(fid, LEGACY_PANEL_VERSION),
         );
         editor.accept_semantic_frame_geometry(fid, 1, CellSize::new(24, 80));
         let (geometry_epoch, panel_epoch) = shipped_declaration(&editor, fid, &mut semantic_states);
