@@ -254,6 +254,15 @@ pub struct SemanticRenderState {
     /// rows form. Also gates the per-row detail lookup: a peer that
     /// cannot carry a detail does not pay to resolve one.
     peer_knows_minibuffer_rows: bool,
+    /// §5b — whether the peer negotiated `>= v25` and therefore takes
+    /// the **mapped** panel family.
+    ///
+    /// The families are exclusive in both directions: a `>= v25` peer
+    /// receives `PresentMapped` and never legacy `Present`, and a
+    /// `<= v24` peer the reverse. "Send whichever and let the receiver
+    /// cope" would make negotiation a sender convention rather than a
+    /// gate.
+    peer_knows_mapped_panel: bool,
     /// Last emitted `CompletionPopup` payload per buffer (Arc 1a
     /// Q#C5), for cached-compare suppression (see
     /// [`CompletionPopupFacts`]).
@@ -536,6 +545,8 @@ impl SemanticRenderState {
         s.peer_knows_statusline_segments = negotiated_protocol_version >= 18;
         s.peer_knows_terminal_frames = negotiated_protocol_version >= 19;
         s.peer_knows_panel_frames = negotiated_protocol_version >= PANEL_MIN_VERSION;
+        s.peer_knows_mapped_panel =
+            negotiated_protocol_version >= pmacs_protocol::PANEL_MAPPING_MIN_VERSION;
         s
     }
 
@@ -556,6 +567,7 @@ impl SemanticRenderState {
             last_menu_prompt: HashMap::new(),
             last_minibuffer: None,
             peer_knows_minibuffer_rows: true,
+            peer_knows_mapped_panel: false,
             last_completion_popup: HashMap::new(),
             last_summary: HashMap::new(),
             last_status: HashMap::new(),
@@ -1436,7 +1448,7 @@ impl SemanticRenderState {
             self.publish_absent_panel(out);
             return;
         };
-        let payload = PanelFramePayload::Present(PanelFrame {
+        let frame = PanelFrame {
             buffer_id: projection.buffer_id,
             panel_epoch,
             geometry_epoch: geometry.geometry_epoch,
@@ -1444,7 +1456,28 @@ impl SemanticRenderState {
             cells: projection.cells,
             cursor: projection.cursor,
             focused: projection.focused,
-        });
+        };
+        // §5b — ORDER MATTERS. The projection is prepared above, THEN
+        // the key is captured, THEN the payload is built. A terminal
+        // projection registers the view whose scroll anchor the key
+        // reads, so capturing earlier would stamp a frame with a key
+        // derived from an unregistered anchor.
+        let payload = if self.peer_knows_mapped_panel {
+            let snapshot = state.panel_mapping_snapshot(self.frontend_id);
+            let Some(mapping_generation) = self.panel_mapping_generation(snapshot) else {
+                // No presentable mapping means nothing to stamp. Falling
+                // back to the legacy variant here would hand a v25 peer
+                // the family it did not negotiate.
+                self.publish_absent_panel(out);
+                return;
+            };
+            PanelFramePayload::PresentMapped {
+                frame,
+                mapping_generation,
+            }
+        } else {
+            PanelFramePayload::Present(frame)
+        };
         // Complete-payload comparison FIRST, like the terminal pass: only
         // validated payloads are ever stored, so a payload equal to the
         // baseline has already passed and re-running the per-cell width
@@ -1453,8 +1486,10 @@ impl SemanticRenderState {
             self.panel_error_latched = false;
             return;
         }
-        let PanelFramePayload::Present(frame) = &payload else {
-            unreachable!("the Present payload was constructed immediately above");
+        let (PanelFramePayload::Present(frame) | PanelFramePayload::PresentMapped { frame, .. }) =
+            &payload
+        else {
+            unreachable!("a Present payload was constructed immediately above");
         };
         match frame.validate() {
             Ok(()) => {

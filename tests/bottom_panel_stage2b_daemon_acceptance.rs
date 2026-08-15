@@ -117,9 +117,16 @@ impl Session {
         first
     }
 
+    /// The frame from whichever Present family this session negotiated.
+    ///
+    /// Family-agnostic on purpose: these rows are about the PROJECTION,
+    /// and which wrapper carries it is §5b's own concern, pinned by the
+    /// G6/G7/G8 rows rather than incidentally by thirty others.
     fn present(&mut self) -> PanelFrame {
         match self.frame() {
-            Some(PanelFramePayload::Present(frame)) => frame,
+            Some(
+                PanelFramePayload::Present(frame) | PanelFramePayload::PresentMapped { frame, .. },
+            ) => frame,
             other => panic!("expected a Present panel payload, got {other:?}"),
         }
     }
@@ -522,7 +529,10 @@ fn acc41_degenerate_geometry_fails_closed_to_zero_usable_grid() {
         session.declare(1, ROWS, COLS);
         open_panel(&session, "*panel*", 4);
         assert!(
-            matches!(session.frame(), Some(PanelFramePayload::Present(_))),
+            matches!(
+                session.frame(),
+                Some(PanelFramePayload::Present(_) | PanelFramePayload::PresentMapped { .. })
+            ),
             "{label}: fixture precondition — a band was visible first"
         );
 
@@ -898,7 +908,9 @@ fn acc45_one_statusline_invocation_serves_the_document_and_the_panel() {
     let panel_rows = messages
         .iter()
         .find_map(|message| match message {
-            InstanceMessage::PanelFrame(PanelFramePayload::Present(frame)) => Some(rows_of(frame)),
+            InstanceMessage::PanelFrame(
+                PanelFramePayload::Present(frame) | PanelFramePayload::PresentMapped { frame, .. },
+            ) => Some(rows_of(frame)),
             _ => None,
         })
         .expect("a panel frame");
@@ -1327,7 +1339,9 @@ fn sweep_a_panel_wider_than_the_terminal_cap_still_presents_its_terminal() {
     session.state.core.borrow_mut().focus_window(FID, panel);
 
     let frame = match session.frame() {
-        Some(PanelFramePayload::Present(frame)) => frame,
+        Some(
+            PanelFramePayload::Present(frame) | PanelFramePayload::PresentMapped { frame, .. },
+        ) => frame,
         other => panic!(
             "a legally wide panel must still present its terminal; got {other:?} \
              — and the durable state says hidden={}",
