@@ -461,6 +461,10 @@ from #171 and #215.
     live-process race under sweep load. Isolated rerun green. **Not in
     the registry under any id**, so it is a new signature, owed like
     the two above.
+  - **`composition_overhead_under_ten_percent`, a SECOND time**
+    (2026-08-15, plain `cargo test --lib`, not a gate step). Isolated
+    rerun green. Same budget as the occurrence above, now seen in two
+    different selectors on one branch in one day.
   - **Three consecutive full-gate runs, three DIFFERENT unrelated
     failures** (composition budget in `04-lib-crdt`, then composition
     again in `10-sweep-crdt`, then this in `08-sweep`), against a diff

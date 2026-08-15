@@ -429,6 +429,16 @@ pub struct SemanticRenderState {
     /// `generation` starts at 0 meaning "never established"; the first
     /// real mapping takes 1, because zero is invalid on the wire.
     panel_mapping: Option<(crate::editor::PanelMappingSnapshot, u64)>,
+    /// §5b G11a — set once the mapping generation cannot advance, and
+    /// never cleared for the session.
+    ///
+    /// Exhaustion fails **closed**: no key means no authority, so the
+    /// band is published `Absent` and every inbound panel event is
+    /// refused. The latch is what makes that permanent. Without it the
+    /// next projection finds an UNCHANGED snapshot, takes the
+    /// "unchanged" arm, and hands back the frozen ceiling — resurrecting
+    /// the band with a key that can no longer distinguish anything.
+    panel_mapping_exhausted: bool,
     /// §5b G5 — the panel gesture this frontend has an ACCEPTED `Down`
     /// for, if any.
     ///
@@ -661,6 +671,7 @@ impl SemanticRenderState {
             // frame from shipping a redundant authoritative `Absent`.
             last_panel_payload: Some(PanelFramePayload::Absent),
             panel_mapping: None,
+            panel_mapping_exhausted: false,
             accepted_gesture: None,
             panel_gesture_cancellations: 0,
             panel_epoch_used: 0,
@@ -772,6 +783,9 @@ impl SemanticRenderState {
         &mut self,
         snapshot: Option<crate::editor::PanelMappingSnapshot>,
     ) -> Option<u64> {
+        if self.panel_mapping_exhausted {
+            return None;
+        }
         let snapshot = snapshot?;
         // Matched by value, not by reference: the changed arm CANCELS,
         // and cancelling needs `&mut self`.
@@ -792,7 +806,30 @@ impl SemanticRenderState {
                 // physical `Up`, the producer clears its latch and the
                 // cancelling event never arrives.
                 self.cancel_accepted_gesture();
-                generation.saturating_add(1)
+                let Some(next) = generation.checked_add(1) else {
+                    // §5b G11a — fail CLOSED, and return BEFORE the
+                    // store below. A saturating add would freeze the key
+                    // at the ceiling while the mapping kept moving
+                    // underneath it, which is precisely the stale-gesture
+                    // hole the key exists to close, with the check still
+                    // looking like it passes.
+                    //
+                    // Returning BEFORE the store below is a second,
+                    // redundant guard against the same zombie band:
+                    // recording `(snapshot, MAX)` here would make the
+                    // next read take the unchanged arm and hand back the
+                    // ceiling. Measured, the two are ALTERNATIVES —
+                    // either alone keeps the band down, and only
+                    // removing both resurrects it. The latch is kept as
+                    // the primary because it has a job the ordering
+                    // does not: it is what makes `peek` and the
+                    // authoritative read agree that this session has no
+                    // key, rather than reporting the ceiling it stopped
+                    // at.
+                    self.panel_mapping_exhausted = true;
+                    return None;
+                };
+                next
             }
             // First establishment takes 1, never 0: zero is the wire's
             // "uninitialised" value and is refused on sight.
@@ -802,10 +839,34 @@ impl SemanticRenderState {
         Some(next)
     }
 
+    /// §5b G11a — whether this session's key is exhausted.
+    #[must_use]
+    pub fn panel_mapping_generation_exhausted(&self) -> bool {
+        self.panel_mapping_exhausted
+    }
+
+    /// Place the key one advance below the ceiling, so exhaustion is
+    /// reachable in a test without 2^64 mutations.
+    #[doc(hidden)]
+    pub fn seed_panel_mapping_generation_for_test(
+        &mut self,
+        snapshot: crate::editor::PanelMappingSnapshot,
+        generation: u64,
+    ) {
+        self.panel_mapping = Some((snapshot, generation));
+    }
+
     /// The current key without advancing it, for assertions and for
     /// callers that must not have a side effect.
+    ///
+    /// `None` once exhausted, matching the authoritative read. The
+    /// stored pair still holds the ceiling it stopped at, and reporting
+    /// that would name a key no frame carries and no gesture may echo.
     #[must_use]
     pub fn panel_mapping_generation_peek(&self) -> Option<u64> {
+        if self.panel_mapping_exhausted {
+            return None;
+        }
         self.panel_mapping
             .as_ref()
             .map(|(_, generation)| *generation)

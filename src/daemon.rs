@@ -1088,9 +1088,29 @@ fn peer_uses_mapped_panel_family(session_registry: &SessionRegistry, source: Fro
 /// changing** — a foreign edit, a fold, a reload, none of which moves
 /// an epoch.
 ///
-/// **Zero is refused outright.** It is what a default-constructed or
-/// half-initialised sender produces, so accepting it would let a peer
-/// opt out of the check by sending nothing.
+/// **Zero is refused outright, and BEFORE the wheel exemption.** Zero is
+/// what a default-constructed or half-initialised sender produces, so
+/// accepting it would let a peer opt out of the check by sending
+/// nothing. Ordering the exemption first would reopen that opt-out
+/// through the exempt path: a sender emitting zeroed wheels would face
+/// no check at all (G10b).
+///
+/// **Coordinate-free wheels are then EXEMPT from the freshness
+/// comparison.** A wheel tick changes `view_top`, which advances the
+/// key; the next tick already queued behind it echoes the previous
+/// generation and would be refused, so the panel would scroll exactly
+/// once per frame and appear dead. The exemption is safe because the
+/// coordinate is not what a wheel means — the tick is. It returns
+/// before the read, so a wheel does not advance the key either;
+/// advancing would make the wheel invalidate the press after it.
+///
+/// The carve-out the framing states for **child-reported** terminal
+/// wheels, where SGR does carry row and column, is
+/// `panel-pointer-replay`'s. Whether a wheel is forwarded to a child is
+/// decided by the reporting mode, and no panel pointer coordinate is
+/// consumed on this base at all — `dispatch_semantic_panel_pointer`
+/// bounds-checks and routes focus. Re-imposing the check belongs in the
+/// branch that introduces the forwarding it protects.
 ///
 /// Read through the SAME accessor projection stamps with, so "what the
 /// frontend was shown" and "what the daemon checks" cannot drift.
@@ -1098,10 +1118,21 @@ fn panel_mapping_is_current(
     editor: &EditorState,
     semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
     source: FrontendId,
+    kind: pmacs_protocol::MouseKind,
     echoed: u64,
 ) -> bool {
+    // ORDER IS LOAD-BEARING: nonzero first, exemption second.
     if echoed == 0 {
         return false;
+    }
+    if matches!(
+        kind,
+        pmacs_protocol::MouseKind::ScrollUp
+            | pmacs_protocol::MouseKind::ScrollDown
+            | pmacs_protocol::MouseKind::ScrollLeft
+            | pmacs_protocol::MouseKind::ScrollRight
+    ) {
+        return true;
     }
     let snapshot = editor.panel_mapping_snapshot(source);
     semantic_states
@@ -2602,6 +2633,7 @@ fn handle_dispatcher_event(
                             editor,
                             semantic_states,
                             source,
+                            kind,
                             mapping_generation,
                         )
                     {
@@ -6438,6 +6470,22 @@ mod tests {
         )
     }
 
+    /// An edit this frontend did NOT make: the case `view_top` cannot
+    /// catch, because nothing about the frontend's own state moves.
+    fn foreign_edit(
+        editor: &crate::editor::EditorState,
+        buffer_id: crate::buffer::BufferId,
+        text: &[u8],
+    ) {
+        let core = editor.core.borrow();
+        let registry = core.registry.clone();
+        let mut reg = registry.borrow_mut();
+        reg.get_mut(buffer_id)
+            .expect("the panel's buffer")
+            .set_generated_contents(text)
+            .expect("a generated-contents write is a plain content change");
+    }
+
     /// The mapping generation this session's producer most recently
     /// stamped, which a mapped gesture must echo.
     fn stamped_generation(
@@ -6733,6 +6781,276 @@ mod tests {
         );
     }
 
+    /// §5b G10b — **zero is refused BEFORE the wheel exemption**.
+    ///
+    /// The ordering is the row. Zero is what a sender that never
+    /// initialised the field produces; the exemption is a liveness
+    /// carve-out for coordinate-free wheels. Run the carve-out first and
+    /// a zeroed wheel faces no check at all — an inbound opt-out through
+    /// the exempt path.
+    ///
+    /// The predicate is called directly because a wheel has **no
+    /// dispatcher-visible effect on this base**: a document panel
+    /// focuses on `Down` only, and no panel pointer coordinate is
+    /// consumed anywhere, so an accepted wheel and a refused one are
+    /// indistinguishable downstream. Asserting focus for a wheel would
+    /// be a witness that proves nothing. The end-to-end leg below uses a
+    /// press, which does have an effect, so the predicate is shown to be
+    /// wired into the production arm rather than merely correct in
+    /// isolation.
+    #[test]
+    fn g10b_generation_zero_is_refused_before_the_wheel_exemption_applies() {
+        use pmacs_protocol::{MouseButton, MouseKind};
+        let fid = FrontendId(774);
+        let (mut editor, mut semantic_states, mut render, _document, panel, epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        let generation = stamped_generation(&semantic_states, fid);
+
+        // The exempt kind with an INVALID generation: refused.
+        assert!(
+            !panel_mapping_is_current(&editor, &mut semantic_states, fid, MouseKind::ScrollDown, 0),
+            "a zeroed wheel is refused: the exemption must not run first"
+        );
+        // A non-exempt kind with the same zero: also refused, so the
+        // above is the zero and not the kind.
+        assert!(!panel_mapping_is_current(
+            &editor,
+            &mut semantic_states,
+            fid,
+            MouseKind::Down(MouseButton::Left),
+            0
+        ));
+        // POSITIVE CONTROL — the same wheel with a real generation
+        // passes, so the refusal is not a dead predicate.
+        assert!(
+            panel_mapping_is_current(
+                &editor,
+                &mut semantic_states,
+                fid,
+                MouseKind::ScrollDown,
+                generation
+            ),
+            "a wheel with a real generation passes"
+        );
+
+        // And the predicate is WIRED: a press is the kind whose
+        // acceptance is visible, so it carries the end-to-end leg.
+        let baseline = editor.core.borrow().views[&fid].active;
+        assert_ne!(
+            baseline, panel,
+            "fixture: the panel must NOT already be focused, or the \
+             refusal below is indistinguishable from acceptance"
+        );
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut render,
+            mapped_pointer(fid, epochs, buffer_id, 0),
+        );
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            baseline,
+            "a zeroed press never reaches the focus path"
+        );
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut render,
+            mapped_pointer(fid, epochs, buffer_id, generation),
+        );
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            panel,
+            "and a real one does"
+        );
+    }
+
+    /// §5b G10b — a coordinate-free wheel is EXEMPT from the freshness
+    /// comparison, so a second queued tick is not refused.
+    ///
+    /// Only the GATE is proven here. The framing's G12 — that both ticks
+    /// apply their scrolls — is `panel-pointer-replay`'s, because no
+    /// panel wheel moves a view on this base. What this pins is that the
+    /// second tick is not refused, which is the half that would
+    /// otherwise make G12 unreachable.
+    ///
+    /// The exemption must also NOT advance the key. Returning early
+    /// before the read is what gives that; advancing on a wheel would
+    /// make the wheel invalidate the press that follows it.
+    #[test]
+    fn g10b_a_stale_generation_on_a_wheel_is_exempt_but_fatal_on_a_press() {
+        use pmacs_protocol::{MouseButton, MouseKind};
+        let fid = FrontendId(775);
+        let (editor, mut semantic_states, _render, _document, panel, _epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        let stale = stamped_generation(&semantic_states, fid);
+
+        // Move the mapping, so `stale` now names a mapping that is gone —
+        // exactly the state the first of two queued ticks leaves behind.
+        foreign_edit(&editor, buffer_id, b"moved\n");
+
+        // The wheel FIRST, while the key has not yet been re-read: the
+        // exempt path must neither compare nor advance.
+        let before = semantic_states[&fid]
+            .panel_mapping_generation_peek()
+            .expect("a stamped key");
+        assert!(
+            panel_mapping_is_current(
+                &editor,
+                &mut semantic_states,
+                fid,
+                MouseKind::ScrollDown,
+                stale
+            ),
+            "the second queued tick still lands — without the exemption \
+             the first tick advances the key and the panel scrolls once \
+             and dies"
+        );
+        assert_eq!(
+            semantic_states[&fid].panel_mapping_generation_peek(),
+            Some(before),
+            "and the exempt path does not advance the key: a wheel that \
+             advanced it would invalidate the press that follows"
+        );
+
+        // NEGATIVE CONTROL — a press echoing the SAME stale value is
+        // refused, so the acceptance above is the exemption and not a
+        // check that never fires.
+        assert!(
+            !panel_mapping_is_current(
+                &editor,
+                &mut semantic_states,
+                fid,
+                MouseKind::Down(MouseButton::Left),
+                stale
+            ),
+            "a press against a stale mapping is refused"
+        );
+
+        // Every coordinate-free wheel kind is exempt, not just the two
+        // vertical ones.
+        for kind in [
+            MouseKind::ScrollUp,
+            MouseKind::ScrollDown,
+            MouseKind::ScrollLeft,
+            MouseKind::ScrollRight,
+        ] {
+            assert!(
+                panel_mapping_is_current(&editor, &mut semantic_states, fid, kind, stale),
+                "{kind:?} is coordinate-free and exempt"
+            );
+        }
+    }
+
+    /// §5b G11a — **exhaustion fails CLOSED and does not leave a zombie
+    /// band**.
+    ///
+    /// Three obligations, and each has its own failure: publish
+    /// `Absent`, clear input authority, and LATCH so the next frame
+    /// cannot resurrect the band.
+    #[test]
+    fn g11a_generation_exhaustion_publishes_absent_and_latches_for_the_session() {
+        let fid = FrontendId(776);
+        let (mut editor, mut semantic_states, mut render, _document, panel, epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+
+        // Precondition: a live band, and a gesture the exhaustion must
+        // not silently strand.
+        assert!(
+            matches!(
+                semantic_states[&fid].last_panel_payload_for_test(),
+                Some(pmacs_protocol::PanelFramePayload::PresentMapped { .. })
+            ),
+            "fixture: the band is live and mapped"
+        );
+
+        // Park the key one below the ceiling against the CURRENT
+        // snapshot, so the next mapping change is the advance that
+        // overflows. Seeding the snapshot too keeps the "unchanged" arm
+        // from firing instead.
+        let snapshot = editor
+            .panel_mapping_snapshot(fid)
+            .expect("a presentable mapping");
+        semantic_states
+            .get_mut(&fid)
+            .expect("projection")
+            .seed_panel_mapping_generation_for_test(snapshot, u64::MAX);
+
+        foreign_edit(&editor, buffer_id, b"one edit too many\n");
+        let messages = semantic_states
+            .get_mut(&fid)
+            .expect("projection")
+            .render_frame(&editor);
+
+        assert!(
+            messages.iter().any(|msg| matches!(
+                msg,
+                InstanceMessage::PanelFrame(pmacs_protocol::PanelFramePayload::Absent)
+            )),
+            "the band is published Absent: refusing input alone leaves a \
+             stale panel painted and permanently inert"
+        );
+        assert!(
+            semantic_states[&fid].panel_declaration().is_none(),
+            "and input authority is cleared with it"
+        );
+        assert!(
+            semantic_states[&fid].panel_mapping_generation_exhausted(),
+            "and the session latches"
+        );
+        assert_eq!(
+            semantic_states[&fid].panel_mapping_generation_peek(),
+            None,
+            "an exhausted session reports NO key: the stored pair still \
+             holds the ceiling it stopped at, and naming it would \
+             describe a key no frame carries and no gesture may echo"
+        );
+
+        // The NEXT frame must not resurrect the band. Without the latch
+        // the snapshot is unchanged, the "unchanged" arm returns the
+        // frozen ceiling, and a `PresentMapped` ships with a key that can
+        // no longer distinguish anything.
+        let next = semantic_states
+            .get_mut(&fid)
+            .expect("projection")
+            .render_frame(&editor);
+        assert!(
+            !next.iter().any(|msg| matches!(
+                msg,
+                InstanceMessage::PanelFrame(
+                    pmacs_protocol::PanelFramePayload::PresentMapped { .. }
+                )
+            )),
+            "no zombie band on the following frame"
+        );
+
+        // And inbound stays refused for the rest of the session.
+        let baseline = editor.core.borrow().views[&fid].active;
+        assert_ne!(baseline, panel, "fixture: the panel is not focused");
+        for echoed in [1, u64::MAX] {
+            dispatch_panel_event(
+                &mut editor,
+                fid,
+                PROTOCOL_VERSION,
+                &mut semantic_states,
+                &mut render,
+                mapped_pointer(fid, epochs, buffer_id, echoed),
+            );
+            assert_eq!(
+                editor.core.borrow().views[&fid].active,
+                baseline,
+                "an exhausted session accepts no gesture, whatever it echoes"
+            );
+        }
+    }
+
     /// §5b G5a — the key advancing RAISES cancellation, without waiting
     /// for another pointer event.
     ///
@@ -6763,15 +7081,7 @@ mod tests {
 
         // A FOREIGN edit — nothing this frontend did, and no further
         // pointer event. The key moves on the next read.
-        {
-            let core = editor.core.borrow();
-            let registry = core.registry.clone();
-            let mut reg = registry.borrow_mut();
-            reg.get_mut(buffer_id)
-                .expect("panel buffer")
-                .set_generated_contents(b"moved\n")
-                .expect("a plain content change");
-        }
+        foreign_edit(&editor, buffer_id, b"moved\n");
         let snapshot = editor.panel_mapping_snapshot(fid);
         let state = semantic_states.get_mut(&fid).expect("projection");
         let advanced = state.panel_mapping_generation(snapshot);
