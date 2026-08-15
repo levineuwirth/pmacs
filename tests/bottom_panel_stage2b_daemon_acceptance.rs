@@ -1816,17 +1816,57 @@ fn g2_g3_a_terminal_panels_key_tracks_its_screen_and_anchor() {
          advancing the revision until §5b's terminal correction"
     );
 
-    // NOT YET WITNESSED: scroll-anchor movement at this level.
+    // CHANGING: the view's **scroll anchor** moves, with the child's
+    // screen untouched. The same coordinate then names a different
+    // retained row.
     //
-    // The anchor IS in the key — `PanelMappingContent::Terminal` carries
-    // it — but driving a scroll from here has defeated three attempts:
-    // `scroll_lines` needs a viewport the panel projection registers on
-    // its own schedule, and `scroll_view` with an explicit size still
-    // reports no movement after forty line feeds, so the history the
-    // scroll would move into is not accumulating the way this fixture
-    // assumes.
-    //
-    // Recorded as OWED rather than faked. Without it, a
-    // `view_mapping_identity` that returned a constant ANCHOR while
-    // reporting a live revision would pass every row above.
+    // This is the leg that separates the anchor from the screen
+    // revision: the baseline is taken AFTER the history exists, so a
+    // constant anchor leaves it unchanged and the assertion below fails
+    // even though `mapping_revision` is perfectly live.
+    let key = {
+        let core = session.state.core.borrow();
+        let side = core.side_window_for(FID).expect("side");
+        pmacs::terminal::view::TerminalViewKey::new(FID, side, buffer_id)
+    };
+    let viewport = {
+        let core = session.state.core.borrow();
+        let grid = core.panel_grid_size(FID).expect("a presentable panel");
+        pmacs_protocol::CellSize::new(grid.rows.saturating_sub(1), grid.cols)
+    };
+    for _ in 0..40 {
+        feed(&session, AnsiEvent::LineFeed);
+    }
+    let anchor_of = |session: &Session| {
+        session
+            .state
+            .terminal_manager
+            .borrow()
+            .view_mapping_identity(key)
+            .expect("the panel's terminal view")
+            .1
+    };
+
+    let before_scroll = mapping_generation(&mut session).expect("a key");
+    let anchor_before = anchor_of(&session);
+    assert!(
+        session
+            .state
+            .terminal_manager
+            .borrow_mut()
+            .scroll_view(key, viewport, 3),
+        "the scroll must actually move, or this leg proves nothing"
+    );
+
+    assert_ne!(
+        anchor_of(&session),
+        anchor_before,
+        "scrolling pins the view to a retained row, so the anchor moves"
+    );
+    let after_scroll = mapping_generation(&mut session).expect("a key");
+    assert!(
+        after_scroll > before_scroll,
+        "the anchor is part of the mapping — the same coordinate now \
+         names a different retained row, with the screen untouched"
+    );
 }
