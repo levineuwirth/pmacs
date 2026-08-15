@@ -1392,8 +1392,8 @@ fn foreign_edit(session: &Session, text: &str) {
 
 /// The key as the daemon would compute it for `FID`, advancing on change.
 fn mapping_generation(session: &mut Session) -> Option<u64> {
-    let fingerprint = session.state.panel_mapping_fingerprint(FID);
-    session.render.panel_mapping_generation(fingerprint)
+    let snapshot = session.state.panel_mapping_snapshot(FID);
+    session.render.panel_mapping_generation(snapshot)
 }
 
 /// §5b G1 — a **foreign** edit before the next render moves the key.
@@ -1617,61 +1617,130 @@ fn g2_each_input_of_the_inverse_mapping_moves_the_key_on_its_own() {
     }
 }
 
-/// §5b G2 — grid **rows** and **columns** each move the key.
+/// §5b G2 — grid **rows** and **columns** are independent inputs,
+/// proven by a **transposition**.
 ///
-/// **Honest limit, recorded because mutation testing found it:** these
-/// two legs do NOT discriminate `rows`/`cols` from their product.
-/// Collapsing the key to `rows * cols` leaves both GREEN, because
-/// `last_content_cols` co-varies with a column change and the panel's
-/// row count co-varies with a resize — the key still moves, by another
-/// input. Only a **transposition** (2×6 → 6×2, identical product) would
-/// isolate it, and no production path reaches one: rows come from the
-/// band's height and columns from the frame declaration, and nothing
-/// swaps them.
-///
-/// The key hashes them separately anyway. That is cheap and correct,
-/// and the alternative — hashing a product because no test can currently
-/// tell the difference — would be choosing the weaker construction for
-/// the convenience of the test suite. What these legs *do* pin is that
-/// each dimension moves the key at all, which is what the rest of the
-/// slice depends on.
+/// Revision-16's version changed one dimension at a time and could not
+/// discriminate: `last_content_cols` co-varies with a column change, so
+/// collapsing the key to `rows * cols` stayed green. I recorded that as
+/// unwitnessable and claimed no production path reached a
+/// same-area transition. **That was wrong** — resize plus redeclare
+/// gets there: 4×80 → 8×40 holds the product at 320 while swapping the
+/// dimensions, and `last_content_cols` is not refreshed until the next
+/// render, so the two grid fields are isolated.
 #[test]
-fn g2_grid_rows_and_columns_are_independent_inputs() {
-    // ROWS come from the band's own height, not the frame's total rows —
-    // declaring a shorter frame leaves a 4-row panel a 4-row panel. The
-    // resize path is the one that actually changes them.
+fn g2_a_transposed_grid_moves_the_key_at_an_unchanged_area() {
+    let mut session = Session::new();
+    open_panel(&session, "g2t", 4);
+    session.declare(1, 24, 80);
+    let _ = session.present();
+
+    let before = mapping_generation(&mut session).expect("a key");
+
+    // 4×80 → 8×40. Same area, different shape, and no render between.
+    assert!(
+        session.state.apply_panel_resize_rows(FID, 8),
+        "the resize must be accepted, or the transposition never happens"
+    );
+    session.declare(2, 24, 40);
+
+    let after = mapping_generation(&mut session).expect("a key");
+    assert!(
+        after > before,
+        "a transposed grid inverts differently at the same area — a key \
+         hashing rows*cols would not notice ({before} → {after})"
+    );
+}
+
+/// §5b G3 — **focus** is a stable input.
+///
+/// Missing from the first version of G3, which covered only idle and
+/// cursor. Focus in particular is the one a naive
+/// implementation gets wrong, because the panel frame carries a
+/// `focused` flag and it is tempting to fold the whole frame into the
+/// key.
+#[test]
+fn g3_focus_is_a_stable_input() {
+    let mut session = Session::new();
+    open_panel(&session, "g3b", 4);
+    session.declare(1, 24, 80);
+    let _ = session.present();
+
+    let baseline = mapping_generation(&mut session).expect("a key");
+
+    // Focus. The band's `focused` flag flips; no byte moves.
+    {
+        let mut core = session.state.core.borrow_mut();
+        let side = core.side_window_for(FID).expect("side");
+        core.focus_window(FID, side);
+    }
+    assert_eq!(
+        mapping_generation(&mut session),
+        Some(baseline),
+        "focus decides CHROME, never which byte a cell denotes — and a \
+         click focuses the panel mid-gesture"
+    );
+
+    // Styling is pinned STRUCTURALLY rather than by driving a theme
+    // change here: `PanelMappingSnapshot` has no style field at all, so
+    // there is nothing a recolour could touch. The terminal side — where
+    // a convenient style-bumping counter DOES exist and had to be
+    // rejected — is pinned in `screen.rs`'s own tests, at the level the
+    // classification lives.
+}
+
+/// §5b — the snapshot **selects the right domain by target kind**.
+///
+/// Added because mutation testing found the branch unwitnessed: routing
+/// terminal panels through the DOCUMENT arm — keying them on the
+/// buffer's revision, which §5b explicitly rejects — left all thirty-five
+/// other rows green. The daemon-level half of the terminal contract is
+/// that the branch is taken at all; `screen.rs` owns the half that says
+/// the revision it reads classifies events correctly.
+#[test]
+fn the_mapping_snapshot_picks_the_terminal_domain_for_a_terminal_panel() {
+    // Document panel → the document domain.
     {
         let mut session = Session::new();
-        open_panel(&session, "g2rows", 4);
+        open_panel(&session, "doc", 4);
         session.declare(1, 24, 80);
         let _ = session.present();
-
-        let before = mapping_generation(&mut session).expect("a key");
+        let snapshot = session
+            .state
+            .panel_mapping_snapshot(FID)
+            .expect("a presentable document panel");
         assert!(
-            session.state.apply_panel_resize_rows(FID, 6),
-            "the resize must be accepted, or this leg proves nothing"
-        );
-        let after = mapping_generation(&mut session).expect("a key");
-        assert!(
-            after > before,
-            "changing grid ROWS alone must move the key — an area product \
-             would miss a transposition"
+            matches!(
+                snapshot.content(),
+                pmacs::editor::PanelMappingContent::Document { .. }
+            ),
+            "a document panel is keyed on its buffer's content revision"
         );
     }
 
-    // COLUMNS come from the declaration.
+    // Terminal panel → the terminal domain.
     {
         let mut session = Session::new();
-        open_panel(&session, "g2cols", 4);
         session.declare(1, 24, 80);
-        let _ = session.present();
-
-        let before = mapping_generation(&mut session).expect("a key");
-        session.declare(2, 24, 40);
-        let after = mapping_generation(&mut session).expect("a key");
+        exec(
+            &session.state,
+            "TERM_BUF = pmacs.terminal.open { command = \"/bin/sh\", \
+               args = { \"-c\", \"sleep 30\" }, display = \"panel\" }",
+        );
+        let _ = session.frame();
+        let snapshot = session
+            .state
+            .panel_mapping_snapshot(FID)
+            .expect("a presentable terminal panel");
         assert!(
-            after > before,
-            "changing grid COLUMNS alone must move the key"
+            matches!(
+                snapshot.content(),
+                pmacs::editor::PanelMappingContent::Terminal { .. }
+            ),
+            "a terminal panel is keyed on the SCREEN's mapping revision \
+             and scroll anchor — its buffer revision tracks something \
+             else entirely and would both miss real changes and fire on \
+             non-changes"
         );
     }
 }

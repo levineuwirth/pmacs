@@ -249,6 +249,25 @@ impl TerminalManager {
         self.screen_size(key.buffer_id)
     }
 
+    /// §5b — the terminal's **mapping revision** plus its per-view
+    /// scroll anchor: together, the identity of what a coordinate in
+    /// this view denotes.
+    ///
+    /// The anchor is part of it because the same coordinate names a
+    /// different retained row once the view scrolls, even with the
+    /// child's screen untouched.
+    #[must_use]
+    pub fn view_mapping_identity(
+        &self,
+        key: TerminalViewKey,
+    ) -> Option<(u64, Option<LogicalCellAnchor>)> {
+        let session = self.sessions.get(&key.buffer_id)?;
+        // `top` IS the anchor: `None` means following the live tail,
+        // which is itself a distinct state from any pinned row.
+        let anchor = self.views.get(&key).and_then(|view| view.top);
+        Some((session.screen.mapping_revision(), anchor))
+    }
+
     /// The shared screen's current size, read from the borrowed
     /// projection.
     ///

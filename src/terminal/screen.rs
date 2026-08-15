@@ -192,6 +192,9 @@ pub struct TerminalScreen {
     tab_stops: BTreeSet<usize>,
     title: Option<String>,
     generation: u64,
+    /// §5b — see [`Screen::mapping_revision`]. Separate from
+    /// `generation`, which advances for style and title too.
+    mapping_revision: u64,
     published: ScreenProjection,
     sync_started: Option<Instant>,
     next_line_id: u64,
@@ -240,6 +243,7 @@ impl TerminalScreen {
             tab_stops: default_tab_stops(size.cols as usize),
             title: None,
             generation: 0,
+            mapping_revision: 0,
             published,
             sync_started: None,
             next_line_id,
@@ -269,24 +273,24 @@ impl TerminalScreen {
             }
             AnsiEvent::SetStyle(style) => {
                 self.style = style;
-                self.changed();
+                self.display_only_changed();
                 None
             }
             AnsiEvent::CarriageReturn => {
                 self.cursor.col = 0;
                 self.cursor.pending_wrap = false;
-                self.changed();
+                self.display_only_changed();
                 None
             }
             AnsiEvent::Backspace => {
                 self.cursor.col = self.cursor.col.saturating_sub(1);
                 self.cursor.pending_wrap = false;
-                self.changed();
+                self.display_only_changed();
                 None
             }
             AnsiEvent::Bell => {
                 self.bell_count = self.bell_count.saturating_add(1);
-                self.changed();
+                self.display_only_changed();
                 None
             }
             AnsiEvent::LineFeed | AnsiEvent::Index => {
@@ -308,17 +312,17 @@ impl TerminalScreen {
             }
             AnsiEvent::SetTabStop => {
                 self.tab_stops.insert(self.cursor.col);
-                self.changed();
+                self.display_only_changed();
                 None
             }
             AnsiEvent::ClearTabStop => {
                 self.tab_stops.remove(&self.cursor.col);
-                self.changed();
+                self.display_only_changed();
                 None
             }
             AnsiEvent::ClearAllTabStops => {
                 self.tab_stops.clear();
-                self.changed();
+                self.display_only_changed();
                 None
             }
             AnsiEvent::CursorUp(n) => {
@@ -432,23 +436,23 @@ impl TerminalScreen {
                     CharacterSetSlot::G0 => self.g0 = charset,
                     CharacterSetSlot::G1 => self.g1 = charset,
                 }
-                self.changed();
+                self.display_only_changed();
                 None
             }
             AnsiEvent::ShiftOut => {
                 self.use_g1 = true;
-                self.changed();
+                self.display_only_changed();
                 None
             }
             AnsiEvent::ShiftIn => {
                 self.use_g1 = false;
-                self.changed();
+                self.display_only_changed();
                 None
             }
             AnsiEvent::DeviceRequest(request) => Some(self.device_reply(request)),
             AnsiEvent::SetTitle(title) => {
                 self.title = Some(sanitize_title(&title));
-                self.changed();
+                self.display_only_changed();
                 None
             }
             AnsiEvent::EraseToEol => {
@@ -1466,6 +1470,32 @@ impl TerminalScreen {
 
     fn changed(&mut self) {
         self.generation = self.generation.saturating_add(1);
+        // §5b: by DEFAULT a change also moves the mapping. Anything not
+        // explicitly classified as display-only is treated as content,
+        // which fails in the safe direction — over-cancelling a gesture
+        // is a nuisance, under-cancelling one lets a stale coordinate
+        // reach a child.
+        self.mapping_revision = self.mapping_revision.saturating_add(1);
+    }
+
+    /// A change that repaints but **cannot move what a coordinate
+    /// denotes** (§5b's stable controls).
+    ///
+    /// Style, title, bell, tab stops and pure cursor motion all land
+    /// here. The existing `generation` still advances — the screen does
+    /// look different — but `mapping_revision` does not, so a drag
+    /// survives them. Keying the panel's mapping on `generation` was
+    /// rejected for exactly this reason: it moves for all of these.
+    fn display_only_changed(&mut self) {
+        self.generation = self.generation.saturating_add(1);
+    }
+
+    /// §5b — identity of what a terminal coordinate DENOTES.
+    ///
+    /// Advances with content and topology, and holds across the display
+    /// changes above.
+    pub fn mapping_revision(&self) -> u64 {
+        self.mapping_revision
     }
     fn current_snapshot(&self) -> ScreenSnapshot {
         ScreenSnapshot {
@@ -1908,6 +1938,67 @@ mod tests {
         s.apply_event(AnsiEvent::NextLine);
         assert_eq!(&text(&s.snapshot()), "aaaabbbb    dddd");
         assert_eq!(s.snapshot().cursor, Some(CellCoord::new(2, 0)));
+    }
+
+    /// §5b G3 — the terminal **stable controls**.
+    ///
+    /// These are exactly the events that make `generation` unusable as a
+    /// mapping key: each one advances it. `mapping_revision` must hold
+    /// across all of them, or a drag over a panel terminal dies the
+    /// moment the child recolours a character or rings the bell.
+    #[test]
+    fn display_only_events_advance_the_generation_but_not_the_mapping() {
+        for (name, event) in [
+            ("style", AnsiEvent::SetStyle(Style::default())),
+            ("title", AnsiEvent::SetTitle("t".to_owned())),
+            ("bell", AnsiEvent::Bell),
+            ("tab stop", AnsiEvent::SetTabStop),
+            ("clear tab stops", AnsiEvent::ClearAllTabStops),
+            ("carriage return", AnsiEvent::CarriageReturn),
+        ] {
+            let mut s = screen(2, 16);
+            let before_generation = s.snapshot().generation;
+            let before_mapping = s.mapping_revision();
+
+            s.apply_event(event);
+
+            assert!(
+                s.snapshot().generation > before_generation,
+                "{name} repaints, so the display generation must advance \
+                 — otherwise this row proves nothing about the split"
+            );
+            assert_eq!(
+                s.mapping_revision(),
+                before_mapping,
+                "{name} cannot change what a coordinate denotes, so the \
+                 MAPPING revision must hold"
+            );
+        }
+    }
+
+    /// §5b G2 — content and topology **do** move the mapping revision.
+    ///
+    /// The positive half. Without it, a `mapping_revision` that never
+    /// advanced at all would pass every stable control above.
+    #[test]
+    fn content_events_advance_the_mapping_revision() {
+        for (name, event) in [
+            ("text", AnsiEvent::Text("hi".to_owned())),
+            ("line feed", AnsiEvent::LineFeed),
+            (
+                "erase display",
+                AnsiEvent::EraseDisplay(crate::ansi::EraseMode::ToEnd),
+            ),
+            ("scroll up", AnsiEvent::ScrollUp(1)),
+        ] {
+            let mut s = screen(2, 16);
+            let before = s.mapping_revision();
+            s.apply_event(event);
+            assert!(
+                s.mapping_revision() > before,
+                "{name} changes what a coordinate denotes"
+            );
+        }
     }
 
     #[test]

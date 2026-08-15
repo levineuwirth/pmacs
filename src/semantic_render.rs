@@ -396,7 +396,7 @@ pub struct SemanticRenderState {
     /// backward, so this is a high-water mark for the session.
     /// `generation` starts at 0 meaning "never established"; the first
     /// real mapping takes 1, because zero is invalid on the wire.
-    panel_mapping: Option<(u64, u64)>,
+    panel_mapping: Option<(crate::editor::PanelMappingSnapshot, u64)>,
     /// Highest presentation epoch allocated for this session; `0` means
     /// none has been. Advanced only when a frame is actually shipped, so
     /// a frame that fails validation does not burn an identity the peer
@@ -631,16 +631,22 @@ impl SemanticRenderState {
     /// **not** reset the key — the high-water mark survives `Absent`,
     /// so a frame delayed across a hide cannot come back with a lower
     /// generation and be believed.
-    pub fn panel_mapping_generation(&mut self, fingerprint: Option<u64>) -> Option<u64> {
-        let fingerprint = fingerprint?;
-        let next = match self.panel_mapping {
-            Some((seen, generation)) if seen == fingerprint => generation,
+    pub fn panel_mapping_generation(
+        &mut self,
+        snapshot: Option<crate::editor::PanelMappingSnapshot>,
+    ) -> Option<u64> {
+        let snapshot = snapshot?;
+        let next = match &self.panel_mapping {
+            // Compared STRUCTURALLY. A hash would make this
+            // probabilistic, and a collision here silently accepts a
+            // stale gesture — the exact failure the key exists for.
+            Some((seen, generation)) if *seen == snapshot => *generation,
             Some((_, generation)) => generation.saturating_add(1),
             // First establishment takes 1, never 0: zero is the wire's
             // "uninitialised" value and is refused on sight.
             None => 1,
         };
-        self.panel_mapping = Some((fingerprint, next));
+        self.panel_mapping = Some((snapshot, next));
         Some(next)
     }
 
@@ -648,7 +654,9 @@ impl SemanticRenderState {
     /// callers that must not have a side effect.
     #[must_use]
     pub fn panel_mapping_generation_peek(&self) -> Option<u64> {
-        self.panel_mapping.map(|(_, generation)| generation)
+        self.panel_mapping
+            .as_ref()
+            .map(|(_, generation)| *generation)
     }
 
     /// Whether the last shipped declaration is a `Present` whose epochs
