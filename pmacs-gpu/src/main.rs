@@ -850,8 +850,14 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
                     facts.last_title.clone_from(&frame.title);
                 }
                 match msg.as_ref() {
+                    // §5b — BOTH families. Observing only the legacy
+                    // one would let mapped production work perfectly
+                    // while the live probe reported no panel at all,
+                    // which is a false negative in the one place that
+                    // exists to tell us the band is real.
                     InstanceMessage::PanelFrame(
-                        pmacs_protocol::panel::PanelFramePayload::Present(frame),
+                        pmacs_protocol::panel::PanelFramePayload::Present(frame)
+                        | pmacs_protocol::panel::PanelFramePayload::PresentMapped { frame, .. },
                     ) => {
                         facts.panel_frames += 1;
                         facts.panel_rows = frame.size.rows;
@@ -1972,7 +1978,7 @@ struct State {
     /// Whether the negotiated session carries the panel wire at all.
     ///
     /// Keyed on the NEGOTIATED version, never the `Hello` baseline.
-    panel_wire: bool,
+    panel_family: PanelFamily,
     /// Set when a font/scale transaction has invalidated the panel's
     /// geometry declaration, so the caller that owns the client knows to
     /// re-declare under a `Metrics` trigger.
@@ -2084,9 +2090,60 @@ struct PanelDrag {
     sent_rows: u32,
 }
 
+/// §5b — which panel family this session negotiated.
+///
+/// **One value, derived once from `session_protocol_version`, used for
+/// BOTH payload acceptance and pointer production.** Deriving the two
+/// independently is how a frontend ends up accepting one family while
+/// producing the other, which is a bypass with extra steps: the peer
+/// would be speaking v25 inbound and v24 outbound and neither side
+/// could tell.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum PanelFamily {
+    /// Below `PANEL_MIN_VERSION`: no panel at all.
+    #[default]
+    Unsupported,
+    /// v21–v24: `Present` in, `PanelPointer` out.
+    Legacy,
+    /// v25 and later: `PresentMapped` in, `PanelPointerMapped` out.
+    Mapped,
+}
+
+impl PanelFamily {
+    /// Classify a negotiated session version.
+    ///
+    /// Read from the NEGOTIATED version, never the `Hello` baseline:
+    /// that stays at the compatibility floor forever, so reading it
+    /// would leave the band permanently dark.
+    fn from_session_version(session_protocol_version: u32) -> Self {
+        if session_protocol_version >= pmacs_protocol::PANEL_MAPPING_MIN_VERSION {
+            Self::Mapped
+        } else if session_protocol_version >= PANEL_MIN_VERSION {
+            Self::Legacy
+        } else {
+            Self::Unsupported
+        }
+    }
+
+    /// Whether a panel exists on this session at all.
+    fn carries_panel(self) -> bool {
+        !matches!(self, Self::Unsupported)
+    }
+}
+
 /// The GPU frontend's half of the bottom panel (Q#BP15, Q#BP15a, Q#BP16).
 #[derive(Default)]
 struct PanelBand {
+    /// §5b — the mapping generation the retained frame was published
+    /// at, echoed by every `PanelPointerMapped` this frontend sends.
+    ///
+    /// Moves ATOMICALLY with `frame`: a generation naming a frame that
+    /// was never installed would be authority for something the user
+    /// cannot see.
+    ///
+    /// **Nondecreasing, and NOT cleared by `Absent`** — a frame delayed
+    /// across a hide must not roll this frontend's authority backward.
+    mapping_generation: Option<u64>,
     /// The last **valid** frame received, retained until an authoritative
     /// `Absent`.
     ///
@@ -2494,15 +2551,56 @@ impl App {
         else {
             return false;
         };
-        let Some(client) = self.attach_client.as_ref() else {
-            return false;
+        // §5b — production reads the SAME negotiated family as
+        // acceptance. Deriving them separately is how a frontend ends
+        // up accepting one family and producing the other.
+        self.send_panel_gesture(geometry_epoch, panel_epoch, buffer_id, coord, kind, mods);
+        true
+    }
+
+    /// Ship one panel gesture in whichever family this session
+    /// negotiated (§5b).
+    ///
+    /// The single place that chooses, so acceptance and production
+    /// cannot disagree. A mapped session with no retained generation
+    /// sends NOTHING rather than falling back to the legacy variant:
+    /// falling back would be the frontend half of the bypass, and the
+    /// daemon would refuse it anyway.
+    fn send_panel_gesture(
+        &self,
+        geometry_epoch: u64,
+        panel_epoch: u64,
+        buffer_id: pmacs_protocol::BufferId,
+        coord: CellCoord,
+        kind: ProtocolMouseKind,
+        mods: Modifiers,
+    ) {
+        let (Some(client), Some(state)) = (self.attach_client.as_ref(), self.state.as_ref()) else {
+            return;
         };
-        if let Err(e) =
-            client.send_panel_pointer(geometry_epoch, panel_epoch, buffer_id, coord, kind, mods)
-        {
+        let sent = match state.panel_family {
+            PanelFamily::Unsupported => return,
+            PanelFamily::Legacy => {
+                client.send_panel_pointer(geometry_epoch, panel_epoch, buffer_id, coord, kind, mods)
+            }
+            PanelFamily::Mapped => {
+                let Some(mapping_generation) = state.panel.mapping_generation else {
+                    return;
+                };
+                client.send_panel_pointer_mapped(
+                    geometry_epoch,
+                    panel_epoch,
+                    buffer_id,
+                    coord,
+                    kind,
+                    mods,
+                    mapping_generation,
+                )
+            }
+        };
+        if let Err(e) = sent {
             eprintln!("pmacs-gpu: send_panel_pointer failed: {e}");
         }
-        true
     }
 
     /// Ship a panel gesture at an explicitly chosen cell.
@@ -2533,16 +2631,11 @@ impl App {
         let Some(coord) = coord else {
             return false;
         };
-        if let Err(e) = client.send_panel_pointer(
-            frame.geometry_epoch,
-            frame.panel_epoch,
-            frame.buffer_id,
-            coord,
-            kind,
-            mods,
-        ) {
-            eprintln!("pmacs-gpu: send_panel_pointer failed: {e}");
-        }
+        // §5b — through the one family-aware sender, so this site
+        // cannot drift from the other into producing the wrong variant.
+        let (geometry_epoch, panel_epoch, buffer_id) =
+            (frame.geometry_epoch, frame.panel_epoch, frame.buffer_id);
+        self.send_panel_gesture(geometry_epoch, panel_epoch, buffer_id, coord, kind, mods);
         true
     }
 
@@ -5389,7 +5482,7 @@ impl State {
             terminal: None,
             panel: PanelBand::default(),
             panel_text_buffers: Vec::new(),
-            panel_wire: false,
+            panel_family: PanelFamily::Unsupported,
             panel_metrics_changed: false,
             last_terminal_size_sent: None,
             terminal_frame_error_latched: false,
@@ -6727,7 +6820,7 @@ impl State {
     /// `Hello` baseline: the baseline stays at the compatibility floor
     /// forever, so reading it here would leave the band permanently dark.
     fn set_panel_wire(&mut self, session_protocol_version: u32) {
-        self.panel_wire = session_protocol_version >= PANEL_MIN_VERSION;
+        self.panel_family = PanelFamily::from_session_version(session_protocol_version);
     }
 
     /// The band inset the document boundary is computed from.
@@ -6845,7 +6938,7 @@ impl State {
     /// the attach client, so the whole state machine — dedup, exhaustion,
     /// the latch — is reachable without a daemon.
     fn next_geometry_declaration(&mut self, trigger: GeometryTrigger) -> Option<(u64, CellSize)> {
-        if !self.panel_wire || self.panel.exhausted {
+        if !self.panel_family.carries_panel() || self.panel.exhausted {
             return None;
         }
         let (total, advance) = self.declared_cell_total();
@@ -6895,20 +6988,13 @@ impl State {
             return false;
         }
         match payload {
-            // §5b — the mapped family is REFUSED until its gate lands.
-            //
-            // Refusing is the correct default at every intermediate
-            // commit, not a placeholder: G8d requires a `<= v24`
-            // frontend to reject `PresentMapped` outright, and until
-            // this frontend can prove it negotiated `>= v25` it is, for
-            // gating purposes, exactly such a peer. Painting it first
-            // and gating later would mean shipping a window in which the
-            // band is hit-tested with no mapping identity at all.
-            //
-            // The retention is ATOMIC, as G8d and G10 require: nothing
-            // about the previous frame, its generation or the pointer
-            // state is touched on the way out.
-            PanelFramePayload::PresentMapped { .. } => false,
+            // §5b G8d — a mapped frame is accepted ONLY by a session
+            // that negotiated the mapped family. Retention is ATOMIC on
+            // refusal: nothing about the previous frame, its generation
+            // or the pointer state is touched on the way out.
+            PanelFramePayload::PresentMapped { .. } if self.panel_family != PanelFamily::Mapped => {
+                false
+            }
             PanelFramePayload::Absent => {
                 // Authoritative removal, and always safe. Note this does
                 // NOT clear the geometry declaration: the frontend's frame
@@ -6923,6 +7009,58 @@ impl State {
                 self.panel.pointer_held = false;
                 self.panel.last_pointer_cell = None;
                 had
+            }
+            // §5b G8b — a mapped session REJECTS the legacy family
+            // rather than painting a band it cannot safely hit-test. A
+            // frame with no mapping identity is one whose cells cannot
+            // be inverted safely, so accepting it would reintroduce the
+            // hole from the receiving side.
+            PanelFramePayload::Present(_) if self.panel_family == PanelFamily::Mapped => false,
+            PanelFramePayload::PresentMapped {
+                frame,
+                mapping_generation,
+            } => {
+                // §5b — zero is the wire's uninitialised value and is
+                // refused like any mismatch, and the generation is
+                // NONDECREASING: a delayed lower frame must not roll
+                // this frontend's authority backward.
+                if mapping_generation == 0
+                    || self
+                        .panel
+                        .mapping_generation
+                        .is_some_and(|held| mapping_generation < held)
+                {
+                    return false;
+                }
+                if let Err(error) = frame.validate() {
+                    eprintln!("pmacs-gpu: rejecting invalid mapped panel frame: {error}");
+                    return false;
+                }
+                // A duplicate frame at the SAME generation does no work.
+                // A duplicate at a HIGHER one still updates authority:
+                // the daemon has re-keyed the mapping, and echoing the
+                // old generation would have every gesture refused.
+                if self.panel.frame.as_ref() == Some(&frame)
+                    && self.panel.mapping_generation == Some(mapping_generation)
+                {
+                    return false;
+                }
+                // NOTE: the gesture-latch reset on an identity change is
+                // R-d, owned by `panel-pointer-replay`. It is not
+                // duplicated here — two branches resetting the same
+                // latch would conflict at the rebase and neither would
+                // own the contract.
+                let plan = TerminalPaintPlan::build_grid(
+                    frame.size,
+                    &frame.cells,
+                    frame.cursor,
+                    Self::terminal_palette(),
+                );
+                self.panel.frame = Some(frame);
+                self.panel.mapping_generation = Some(mapping_generation);
+                self.panel.plan = Some(plan);
+                self.rebuild_panel_text_buffers();
+                true
             }
             PanelFramePayload::Present(frame) => {
                 if let Err(error) = frame.validate() {

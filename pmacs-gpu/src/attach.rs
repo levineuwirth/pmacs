@@ -1106,6 +1106,36 @@ impl AttachClient {
     /// subsumes the other — the first catches an A→B buffer replacement,
     /// the second a close/hide/reopen of the *same* buffer — so both are
     /// carried rather than one being derived from the other.
+    /// §5b — the MAPPED gesture, echoing the generation of the frame
+    /// this frontend is displaying.
+    ///
+    /// A separate entry point rather than an `Option<u64>` on the one
+    /// above: the two variants are exclusive per session, and a
+    /// nullable field would let a caller send the mapped family with no
+    /// generation, which is the shape the daemon refuses.
+    #[allow(clippy::too_many_arguments)] // mirrors `PanelPointerMapped`'s wire shape exactly.
+    pub fn send_panel_pointer_mapped(
+        &self,
+        geometry_epoch: u64,
+        panel_epoch: u64,
+        buffer_id: BufferId,
+        coord: CellCoord,
+        kind: MouseKind,
+        mods: Modifiers,
+        mapping_generation: u64,
+    ) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::PanelPointerMapped {
+            frontend_id: self.frontend_id,
+            geometry_epoch,
+            panel_epoch,
+            buffer_id,
+            coord,
+            kind,
+            mods,
+            mapping_generation,
+        })
+    }
+
     pub fn send_panel_pointer(
         &self,
         geometry_epoch: u64,
