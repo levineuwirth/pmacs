@@ -592,7 +592,9 @@ impl SemanticRenderState {
     #[must_use]
     pub fn panel_declaration(&self) -> Option<&PanelFrame> {
         match self.last_panel_payload.as_ref()? {
-            PanelFramePayload::Present(frame) => Some(frame),
+            PanelFramePayload::Present(frame) | PanelFramePayload::PresentMapped { frame, .. } => {
+                Some(frame)
+            }
             PanelFramePayload::Absent => None,
         }
     }

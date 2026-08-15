@@ -3607,6 +3607,13 @@ fn apply_semantic_input_event(
             let ct_mouse = mouse_to_crossterm(&pmacs_mouse);
             editor.dispatch_mouse(source, ct_mouse, term_size);
         }
+        // Everything else, including BOTH panel-pointer families. Panel
+        // gestures are dispatched from their own arm in
+        // `handle_dispatcher_event`, behind the epoch ladder; reaching
+        // them from here would route around it. §5b's mapped variant is
+        // dropped for the same reason, and specifically NOT unwrapped to
+        // its legacy meaning — that is the bypass the family gate exists
+        // to close.
         _ => {}
     }
 }
@@ -3647,6 +3654,12 @@ fn apply_event(
         // client-supplied `frontend_id` this function would believe.
         FrontendEvent::Paste { .. }
         | FrontendEvent::TextInput { .. }
+        // §5b: listed here for the same reason as the two above — a
+        // mapped panel gesture must not reach a payload-trusting path.
+        // Its own dispatcher arm authenticates the source and checks
+        // the family gate; arriving here it is dropped, never unwrapped
+        // to the legacy family.
+        | FrontendEvent::PanelPointerMapped { .. }
         | FrontendEvent::FocusGained(_)
         | FrontendEvent::FocusLost(_)
         // T M11.1: the semantic-frontend viewport declaration. Its

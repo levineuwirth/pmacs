@@ -409,6 +409,34 @@ from #171 and #215.
   the canonical document false.
 - **Chain: this slice → `panel-pointer-replay` (rebases onto it) →
   GUI arc 1b.**
+- **CI-red observations on this branch, NOT yet in the registry — and
+  deliberately so.** `docs/ci-red-signatures.md` here ends at **U9**;
+  the `panel-pointer-replay` branch already added a **U10** that has
+  not merged. Adding a row from this branch would either duplicate that
+  id or invent U11 against an unseen neighbour — and this file's own
+  history records exactly that going wrong once already, when two
+  branches' entries "merged **without a conflict**, producing duplicate
+  ids across four sites". **The rows below are owed to the registry by
+  whichever branch merges second**, numbered after the other's.
+  - **R7, two occurrences on this branch** (2026-08-15, `gpu` step,
+    logs `20260815T095532Z` and `20260815T100719Z`). Fragments verified
+    both times: `transient sequence must attach: Attach(Handshake(Io(Os
+    { code: 32, kind: BrokenPipe, message: "Broken pipe" })))` at
+    `pmacs-gpu/src/attach.rs:1728`. One machine, one day, one branch,
+    with a green full-gate run between them. Isolated reruns green.
+  - **`composition_overhead_under_ten_percent`, once** (log
+    `20260815T102527Z`, step **`04-lib-crdt`**). Fragment:
+    `composition machinery added more than 10% overhead: 1.146
+    (single=227350 ns, dispatch=260497 ns)`. **`criterion_1` ran in the
+    same step and PASSED**, so per U6's own instruction this is one
+    selector redding without the other and is a different incident.
+    **1.146× is the smallest margin this budget has ever failed by**
+    (U6 1.297×, U10 1.343×, U9 1.613×), and the "realistic" figure was
+    **negative** (−25.8%) in the same run. Isolated rerun green.
+  - **Cost, stated plainly:** four `--protocol` gate runs on one commit,
+    three of them lost to these two signatures. U9's synthetic-load
+    control remains unrun and is the cheapest thing that would either
+    implicate load or clear it.
 - **Gates:** the four `bottom_panel_*` suites, the GUI 1a wire suite,
   `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`, and **`--protocol`**.
 

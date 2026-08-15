@@ -6895,6 +6895,20 @@ impl State {
             return false;
         }
         match payload {
+            // §5b — the mapped family is REFUSED until its gate lands.
+            //
+            // Refusing is the correct default at every intermediate
+            // commit, not a placeholder: G8d requires a `<= v24`
+            // frontend to reject `PresentMapped` outright, and until
+            // this frontend can prove it negotiated `>= v25` it is, for
+            // gating purposes, exactly such a peer. Painting it first
+            // and gating later would mean shipping a window in which the
+            // band is hit-tested with no mapping identity at all.
+            //
+            // The retention is ATOMIC, as G8d and G10 require: nothing
+            // about the previous frame, its generation or the pointer
+            // state is touched on the way out.
+            PanelFramePayload::PresentMapped { .. } => false,
             PanelFramePayload::Absent => {
                 // Authoritative removal, and always safe. Note this does
                 // NOT clear the geometry declaration: the frontend's frame
