@@ -433,6 +433,19 @@ from #171 and #215.
     **1.146× is the smallest margin this budget has ever failed by**
     (U6 1.297×, U10 1.343×, U9 1.613×), and the "realistic" figure was
     **negative** (−25.8%) in the same run. Isolated rerun green.
+  - **`setsid_escapee_is_not_reaped_and_teardown_reclaims_readers`,
+    once** (log `20260815T184808Z`, step `08-sweep`). Fragment: `live
+    runtime probe` at `src/process.rs:5155` — `active_reader_probe`
+    returned `None` for a process that had just reported `Started`. A
+    live-process race under sweep load. Isolated rerun green. **Not in
+    the registry under any id**, so it is a new signature, owed like
+    the two above.
+  - **Three consecutive full-gate runs, three DIFFERENT unrelated
+    failures** (composition budget in `04-lib-crdt`, then composition
+    again in `10-sweep-crdt`, then this in `08-sweep`), against a diff
+    that touches panels and the wire. Recorded as a rate observation
+    only: no mechanism is claimed, and the standing leaked-daemon
+    confound is uncontrolled as always.
   - **Cost, stated plainly:** four `--protocol` gate runs on one commit,
     three of them lost to these two signatures. U9's synthetic-load
     control remains unrun and is the cheapest thing that would either

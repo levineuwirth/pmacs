@@ -6074,6 +6074,16 @@ mod tests {
     ///
     /// The session is registered because the dispatcher drops any event
     /// from an uninstalled session before it reaches a handler.
+    /// §5b G8e — the frontend a forged payload claims to be. Registered
+    /// in every dispatch fixture at the MAPPED version, so "the claimed
+    /// id speaks the other family" is a real condition rather than an
+    /// absent session.
+    const FORGERY_TARGET_FID: FrontendId = FrontendId(767);
+
+    /// §5b G8e, the other direction: a frontend that speaks the LEGACY
+    /// family, for a mapped session to try to borrow.
+    const FORGERY_TARGET_LEGACY_FID: FrontendId = FrontendId(768);
+
     /// §5b — a session that negotiated the LEGACY panel family.
     ///
     /// These rows drive `FrontendEvent::PanelPointer`, which a `>= v25`
@@ -6102,6 +6112,23 @@ mod tests {
         let mut bells = HashMap::new();
         let mut registry = SessionRegistry::new();
         registry.register_session(fid, session(version, !render_states.contains_key(&fid)));
+        // §5b G8e — a SECOND session that speaks the mapped family, so a
+        // payload claiming its id has something real to borrow. Without
+        // it, a payload-keyed lookup would fail for want of a session
+        // rather than for want of authority, and the mutation that
+        // swaps `source` for the payload's id would be invisible.
+        if fid != FORGERY_TARGET_FID {
+            registry.register_session(
+                FORGERY_TARGET_FID,
+                session(pmacs_protocol::PANEL_MAPPING_MIN_VERSION, true),
+            );
+        }
+        if fid != FORGERY_TARGET_LEGACY_FID {
+            registry.register_session(
+                FORGERY_TARGET_LEGACY_FID,
+                session(LEGACY_PANEL_VERSION, true),
+            );
+        }
         handle_dispatcher_event(
             DispatcherEvent::FrontendEvent { source: fid, event },
             editor,
@@ -6303,6 +6330,344 @@ mod tests {
         );
         let frame = sem.panel_declaration().expect("a Present declaration");
         (frame.geometry_epoch, frame.panel_epoch)
+    }
+
+    // -----------------------------------------------------------------
+    // §5b G6–G8 — the family gate, both directions, all four quadrants.
+    //
+    // Every row negotiates ONE version for both the session registry and
+    // the retained producer: a control that negotiates two proves
+    // nothing about either.
+    // -----------------------------------------------------------------
+
+    /// A panel session at one negotiated version: the editor, its
+    /// producer, its render states, the side window, and the epochs a
+    /// gesture must echo.
+    type PanelSessionFixture = (
+        crate::editor::EditorState,
+        HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+        HashMap<FrontendId, RenderState>,
+        crate::window::WindowId,
+        crate::window::WindowId,
+        (u64, u64),
+    );
+
+    /// Build a panel session at one negotiated version and ship its
+    /// declaration, returning the epochs a gesture must echo.
+    fn panel_session_at(version: u32, fid: FrontendId) -> PanelSessionFixture {
+        let editor = crate::editor::EditorState::new();
+        let (document, panel) = semantic_panel_view(&editor, fid, true);
+        let panel = panel.expect("panel window");
+        let mut semantic_states = HashMap::new();
+        semantic_states.insert(
+            fid,
+            crate::semantic_render::SemanticRenderState::for_peer(fid, version),
+        );
+        editor.accept_semantic_frame_geometry(fid, 1, CellSize::new(24, 80));
+        let epochs = shipped_declaration(&editor, fid, &mut semantic_states);
+        (
+            editor,
+            semantic_states,
+            HashMap::new(),
+            document,
+            panel,
+            epochs,
+        )
+    }
+
+    /// The mapping generation this session's producer most recently
+    /// stamped, which a mapped gesture must echo.
+    fn stamped_generation(
+        semantic_states: &HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+        fid: FrontendId,
+    ) -> u64 {
+        semantic_states
+            .get(&fid)
+            .expect("semantic projection")
+            .panel_mapping_generation_peek()
+            .expect("a stamped mapping generation")
+    }
+
+    fn legacy_pointer(
+        fid: FrontendId,
+        epochs: (u64, u64),
+        buffer_id: crate::buffer::BufferId,
+    ) -> FrontendEvent {
+        FrontendEvent::PanelPointer {
+            frontend_id: fid,
+            geometry_epoch: epochs.0,
+            panel_epoch: epochs.1,
+            buffer_id,
+            coord: pmacs_protocol::CellCoord::new(0, 0),
+            kind: pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left),
+            mods: pmacs_protocol::Modifiers::default(),
+        }
+    }
+
+    fn mapped_pointer(
+        fid: FrontendId,
+        epochs: (u64, u64),
+        buffer_id: crate::buffer::BufferId,
+        mapping_generation: u64,
+    ) -> FrontendEvent {
+        FrontendEvent::PanelPointerMapped {
+            frontend_id: fid,
+            geometry_epoch: epochs.0,
+            panel_epoch: epochs.1,
+            buffer_id,
+            coord: pmacs_protocol::CellCoord::new(0, 0),
+            kind: pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left),
+            mods: pmacs_protocol::Modifiers::default(),
+            mapping_generation,
+        }
+    }
+
+    /// §5b G6a — **legacy OUTBOUND**: a v24 peer receives exactly
+    /// `Present`, never the mapped family.
+    #[test]
+    fn g6a_a_legacy_peer_receives_the_legacy_present_family() {
+        let fid = FrontendId(760);
+        let (_editor, semantic_states, _render, _document, _panel, _epochs) =
+            panel_session_at(LEGACY_PANEL_VERSION, fid);
+        let declaration = semantic_states
+            .get(&fid)
+            .expect("projection")
+            .last_panel_payload_for_test();
+        assert!(
+            matches!(
+                declaration,
+                Some(pmacs_protocol::panel::PanelFramePayload::Present(_))
+            ),
+            "a v24 session must receive the legacy family and only it; \
+             got {declaration:?}"
+        );
+    }
+
+    /// §5b G7a — **mapped OUTBOUND**: a v25 peer receives
+    /// `PresentMapped` carrying a live, nonzero generation.
+    #[test]
+    fn g7a_a_mapped_peer_receives_present_mapped_with_a_live_generation() {
+        let fid = FrontendId(761);
+        let (_editor, semantic_states, _render, _document, _panel, _epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        let declaration = semantic_states
+            .get(&fid)
+            .expect("projection")
+            .last_panel_payload_for_test();
+        match declaration {
+            Some(pmacs_protocol::panel::PanelFramePayload::PresentMapped {
+                mapping_generation,
+                ..
+            }) => assert!(
+                mapping_generation >= 1,
+                "zero is the wire's uninitialised value and is refused on \
+                 sight, so a stamped frame must never carry it"
+            ),
+            other => panic!("a v25 session must receive the mapped family; got {other:?}"),
+        }
+    }
+
+    /// §5b G6b — **legacy INBOUND routing**: a current legacy gesture
+    /// reaches the dispatcher and performs the landed focus activation.
+    #[test]
+    fn g6b_a_legacy_gesture_routes_and_activates() {
+        let fid = FrontendId(762);
+        let (mut editor, mut semantic_states, mut render, document, panel, epochs) =
+            panel_session_at(LEGACY_PANEL_VERSION, fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        // THIS view's active window, asserted directly. The ambient
+        // `active_window_id()` tracks `active_frontend` too, so a row
+        // reading it can be satisfied by a frontend switch that never
+        // routed anything to the panel.
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            document,
+            "precondition: this frontend's active window is the document"
+        );
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            LEGACY_PANEL_VERSION,
+            &mut semantic_states,
+            &mut render,
+            legacy_pointer(fid, epochs, buffer_id),
+        );
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            panel,
+            "a legacy gesture from a legacy session must still route and \
+             activate — the gate must not break the family it kept"
+        );
+    }
+
+    /// §5b G7b — **mapped INBOUND routing**: a current mapped gesture
+    /// reaches the dispatcher and activates.
+    #[test]
+    fn g7b_a_mapped_gesture_routes_and_activates() {
+        let fid = FrontendId(763);
+        let (mut editor, mut semantic_states, mut render, document, panel, epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        let generation = stamped_generation(&semantic_states, fid);
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            document,
+            "precondition: this frontend's active window is the document"
+        );
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut render,
+            mapped_pointer(fid, epochs, buffer_id, generation),
+        );
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            panel,
+            "a mapped gesture echoing the current generation must route"
+        );
+    }
+
+    /// §5b G8a — a **bare `PanelPointer` from a v25 session is
+    /// REFUSED**, not handled under legacy semantics.
+    #[test]
+    fn g8a_a_legacy_gesture_from_a_mapped_session_is_refused() {
+        let fid = FrontendId(764);
+        let (mut editor, mut semantic_states, mut render, document, panel, epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            document,
+            "precondition: this frontend's active window is the document"
+        );
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut render,
+            legacy_pointer(fid, epochs, buffer_id),
+        );
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            document,
+            "handling it under legacy semantics would leave the mapping \
+             hole reachable by choosing a discriminant"
+        );
+    }
+
+    /// §5b G8c — a **`PanelPointerMapped` from a v24 session is
+    /// REFUSED**, even though a peer built from this crate can encode
+    /// the discriminant. Negotiation is a gate, not a convention.
+    #[test]
+    fn g8c_a_mapped_gesture_from_a_legacy_session_is_refused() {
+        let fid = FrontendId(765);
+        let (mut editor, mut semantic_states, mut render, document, panel, epochs) =
+            panel_session_at(LEGACY_PANEL_VERSION, fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            document,
+            "precondition: this frontend's active window is the document"
+        );
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            LEGACY_PANEL_VERSION,
+            &mut semantic_states,
+            &mut render,
+            // Any generation at all: the family gate refuses before the
+            // generation is even looked at.
+            mapped_pointer(fid, epochs, buffer_id, 1),
+        );
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            document,
+            "inbound negotiation is a gate, not a sender convention"
+        );
+    }
+
+    /// §5b G8e — **authenticated-session authority**: claiming another
+    /// frontend whose session negotiated the desired family still
+    /// refuses.
+    ///
+    /// The mutation this row exists for is one line: look the
+    /// negotiation up by the payload's `frontend_id` instead of the
+    /// authenticated `source`, and the forged cross-session claim
+    /// succeeds.
+    #[test]
+    fn g8e_a_forged_frontend_id_cannot_borrow_another_sessions_family() {
+        let legacy_fid = FrontendId(766);
+        let mapped_fid = FORGERY_TARGET_FID;
+        let (mut editor, mut semantic_states, mut render, document, panel, epochs) =
+            panel_session_at(LEGACY_PANEL_VERSION, legacy_fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        assert_eq!(
+            editor.core.borrow().views[&legacy_fid].active,
+            document,
+            "precondition: this frontend's active window is the document"
+        );
+
+        // The AUTHENTICATED source is the legacy session; the payload
+        // claims a frontend that speaks the mapped family.
+        dispatch_panel_event(
+            &mut editor,
+            legacy_fid,
+            LEGACY_PANEL_VERSION,
+            &mut semantic_states,
+            &mut render,
+            mapped_pointer(mapped_fid, epochs, buffer_id, 1),
+        );
+        assert_eq!(
+            editor.core.borrow().views[&legacy_fid].active,
+            document,
+            "the family comes from the AUTHENTICATED session; a payload \
+             id is untrusted and must not borrow another's negotiation"
+        );
+    }
+
+    /// §5b G8e, the OTHER direction — a mapped session cannot borrow a
+    /// legacy identity to smuggle the bare variant through.
+    ///
+    /// Both directions, because an authority check that only holds one
+    /// way is one a peer walks around by choosing which identity to
+    /// forge. The claimed frontend has a REAL legacy session, so a
+    /// payload-keyed lookup succeeds far enough to expose the defect
+    /// rather than failing for want of a session.
+    #[test]
+    fn g8e_a_mapped_session_cannot_forge_a_legacy_identity() {
+        let fid = FrontendId(769);
+        let (mut editor, mut semantic_states, mut render, document, panel, epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            document,
+            "precondition: this frontend's active window is the document"
+        );
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut render,
+            // Authenticated as the MAPPED session; the payload claims a
+            // frontend whose session speaks legacy.
+            legacy_pointer(FORGERY_TARGET_LEGACY_FID, epochs, buffer_id),
+        );
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            document,
+            "a mapped session may not send the bare variant, and cannot \
+             acquire permission by naming someone who may"
+        );
     }
 
     /// Criterion 50: a gesture from a source whose latest declaration is

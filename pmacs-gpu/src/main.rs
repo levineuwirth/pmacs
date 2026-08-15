@@ -860,37 +860,56 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
                 // the retained old frame supplied the rendering. The
                 // probe would report the band showing something it does
                 // not show.
+                // The payload KIND is kept only to tell a real `Absent`
+                // apart from a refusal; every fact below comes from the
+                // accepted state.
+                let panel_absent_payload = matches!(
+                    msg.as_ref(),
+                    InstanceMessage::PanelFrame(pmacs_protocol::panel::PanelFramePayload::Absent)
+                );
                 let panel_message = matches!(msg.as_ref(), InstanceMessage::PanelFrame(_));
-                let panel_before = state
+                // The COMPLETE accepted authority, both halves. An
+                // epoch/size triple is not enough: ordinary content,
+                // focus, cursor and mapping-generation updates all leave
+                // it unchanged, so accepted frames would go uncounted —
+                // including the identical-frame/higher-generation case
+                // this slice requires — and a fixture waiting for two
+                // frames would wait forever.
+                let authority_before = state
                     .panel
                     .presented()
-                    .map(|frame| (frame.panel_epoch, frame.geometry_epoch, frame.size));
+                    .cloned()
+                    .map(|frame| (frame, state.panel.mapping_generation));
 
                 state.apply_attach_message(*msg);
 
                 if panel_message {
-                    match state.panel.presented() {
-                        Some(frame) => {
-                            let identity = (frame.panel_epoch, frame.geometry_epoch, frame.size);
-                            // Counted only when the retained frame
-                            // actually moved: a duplicate or a refusal
-                            // leaves the band exactly as it was, and
-                            // counting either would say the daemon is
-                            // painting when it is not.
-                            if panel_before != Some(identity) {
-                                facts.panel_frames += 1;
-                            }
-                            facts.panel_rows = frame.size.rows;
-                            facts.panel_cols = frame.size.cols;
-                            facts.panel_focused = frame.focused;
-                            facts.panel_frame_text = grid_probe_text(&frame.cells);
-                            if let Some(expected) = expected_panel_text.as_deref()
-                                && facts.panel_frame_text.contains(expected)
-                            {
-                                facts.panel_text_observed = true;
-                            }
+                    let authority_after = state
+                        .panel
+                        .presented()
+                        .cloned()
+                        .map(|frame| (frame, state.panel.mapping_generation));
+                    if authority_before != authority_after {
+                        facts.panel_frames += 1;
+                    }
+                    if let Some((frame, _)) = authority_after.as_ref() {
+                        facts.panel_rows = frame.size.rows;
+                        facts.panel_cols = frame.size.cols;
+                        facts.panel_focused = frame.focused;
+                        facts.panel_frame_text = grid_probe_text(&frame.cells);
+                        if let Some(expected) = expected_panel_text.as_deref()
+                            && facts.panel_frame_text.contains(expected)
+                        {
+                            facts.panel_text_observed = true;
                         }
-                        None => facts.panel_absent_observed = true,
+                    }
+                    // Absence is only ever reported for an actual
+                    // `Absent`. Inferring it from `presented() == None`
+                    // turns a REFUSAL with nothing retained into "the
+                    // daemon says there is no band", which is a
+                    // different fact entirely.
+                    if panel_absent_payload {
+                        facts.panel_absent_observed = true;
                     }
                 }
                 if is_snapshot {
@@ -19981,6 +20000,139 @@ mod tests {
                 "the remainder is band background, not a cell and not the document"
             );
         }
+    }
+
+    /// §5b G8b — a MAPPED frontend refuses the legacy family, and the
+    /// refusal is ATOMIC.
+    ///
+    /// The baseline is accepted in the CORRECT family first, so there is
+    /// real authority to preserve: a row that installs a legacy frame
+    /// and then switches to mapped has `mapping_generation == None`
+    /// throughout, and asserting it stayed `None` proves nothing. The
+    /// pointer latches are primed for the same reason — untouched state
+    /// that was never set is not evidence of atomicity.
+    #[test]
+    fn g8b_a_mapped_frontend_refuses_legacy_atomically() {
+        let Some(mut state) = headless_or_skip(800, 600, "alpha") else {
+            return;
+        };
+        let frame = present_panel(&mut state, 4);
+        state.set_panel_wire(pmacs_protocol::PANEL_MAPPING_MIN_VERSION);
+
+        // A correct-family baseline, so the retained authority is real.
+        let mut baseline = frame.clone();
+        baseline.panel_epoch = frame.panel_epoch + 1;
+        assert!(
+            state.apply_panel_payload(PanelFramePayload::PresentMapped {
+                frame: baseline.clone(),
+                mapping_generation: 5,
+            }),
+            "fixture: the mapped baseline must install"
+        );
+        state.set_panel_pointer_held(true);
+        state.panel.last_pointer_cell = Some(pmacs_protocol::CellCoord::new(1, 1));
+
+        let mut intruder = frame.clone();
+        intruder.panel_epoch = frame.panel_epoch + 2;
+        assert!(
+            !state.apply_panel_payload(PanelFramePayload::Present(intruder)),
+            "a v25 frontend must not paint a band it cannot safely \
+             hit-test — the frame carries no mapping identity"
+        );
+
+        assert_eq!(
+            state.panel.frame.as_ref().map(|f| f.panel_epoch),
+            Some(baseline.panel_epoch),
+            "the retained frame survives the refusal"
+        );
+        assert_eq!(
+            state.panel.mapping_generation,
+            Some(5),
+            "and so does its authority — this is the half a switched \
+             baseline could not have shown"
+        );
+        assert!(state.panel.pointer_held, "a refusal ends no live gesture");
+        assert_eq!(
+            state.panel.last_pointer_cell,
+            Some(pmacs_protocol::CellCoord::new(1, 1)),
+            "nor discards its dedupe baseline"
+        );
+    }
+
+    /// §5b G8d — a LEGACY frontend refuses the mapped family, atomically.
+    ///
+    /// An independent state, not a continuation of G8b: sharing one
+    /// would let the second direction inherit whatever the first left
+    /// behind.
+    #[test]
+    fn g8d_a_legacy_frontend_refuses_mapped_atomically() {
+        let Some(mut state) = headless_or_skip(800, 600, "alpha") else {
+            return;
+        };
+        let frame = present_panel(&mut state, 4);
+        state.set_panel_wire(PANEL_MIN_VERSION);
+
+        let mut baseline = frame.clone();
+        baseline.panel_epoch = frame.panel_epoch + 1;
+        assert!(
+            state.apply_panel_payload(PanelFramePayload::Present(baseline.clone())),
+            "fixture: the legacy baseline must install"
+        );
+        state.set_panel_pointer_held(true);
+        state.panel.last_pointer_cell = Some(pmacs_protocol::CellCoord::new(2, 2));
+
+        let mut intruder = frame.clone();
+        intruder.panel_epoch = frame.panel_epoch + 2;
+        assert!(
+            !state.apply_panel_payload(PanelFramePayload::PresentMapped {
+                frame: intruder,
+                mapping_generation: 9,
+            }),
+            "a v24 frontend must reject a family it never negotiated"
+        );
+
+        assert_eq!(
+            state.panel.frame.as_ref().map(|f| f.panel_epoch),
+            Some(baseline.panel_epoch),
+            "the retained frame survives"
+        );
+        assert_eq!(
+            state.panel.mapping_generation, None,
+            "and no authority is acquired from a refused frame"
+        );
+        assert!(state.panel.pointer_held, "a refusal ends no live gesture");
+        assert_eq!(
+            state.panel.last_pointer_cell,
+            Some(pmacs_protocol::CellCoord::new(2, 2))
+        );
+    }
+
+    /// §5b — an UNSUPPORTED session accepts neither family.
+    ///
+    /// The case a `!= Mapped` gate let through: `Unsupported` is neither
+    /// family, so a negative test admitted a band the session never
+    /// negotiated.
+    #[test]
+    fn an_unsupported_session_accepts_neither_panel_family() {
+        let Some(mut state) = headless_or_skip(800, 600, "alpha") else {
+            return;
+        };
+        let frame = present_panel(&mut state, 4);
+        state.set_panel_wire(PANEL_MIN_VERSION - 1);
+
+        let mut orphan = frame.clone();
+        orphan.panel_epoch = frame.panel_epoch + 1;
+        assert!(
+            !state.apply_panel_payload(PanelFramePayload::Present(orphan.clone())),
+            "a sub-panel session has no band at all"
+        );
+        assert!(
+            !state.apply_panel_payload(PanelFramePayload::PresentMapped {
+                frame: orphan,
+                mapping_generation: 9,
+            }),
+            "in either family"
+        );
     }
 
     /// F1 — a held left button makes motion a `Drag(Left)`, and the dedupe

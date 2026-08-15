@@ -637,6 +637,13 @@ impl SemanticRenderState {
         }
     }
 
+    /// The panel payload most recently shipped, for the family rows.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn last_panel_payload_for_test(&self) -> Option<PanelFramePayload> {
+        self.last_panel_payload.clone()
+    }
+
     /// Advance-if-changed, then read: the authoritative mapping key.
     ///
     /// **The single seam §5b requires.** Projection stamps the frame
