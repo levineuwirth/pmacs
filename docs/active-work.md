@@ -281,8 +281,13 @@ from #171 and #215.
   **`githubsucks/panel-mapping-generation` is the authoritative tip.**
   Recover with `git fetch githubsucks && git checkout
   panel-mapping-generation`.
-- **No PR yet. Checkpoint: framing revision 16 (§5b) APPROVED
-  2026-08-15; NO IMPLEMENTATION.**
+- **No PR yet. Checkpoint: `3c06176`** — framing revision 16 (§5b)
+  APPROVED 2026-08-15 at `7e85a6f`, then eleven implementation commits:
+  wire shapes and pins (G0), the authoritative key with its terminal
+  half (G1–G4), outbound family selection, inbound family gating, the
+  GPU's negotiated family enum, and the nine family-gate rows
+  (G6a–b, G7a–b, G8). **Full `--protocol` gate green at `3c06176`.**
+  In progress since, uncommitted: G5's accepted-gesture latch.
 - **PROTOCOL-BEARING — v25, and it runs alone.**
   `ADVERTISED_PROTOCOL_VERSION` stays pinned at **20**.
 - **Why it exists.** A `PanelPointer` names a cell and nothing on the
@@ -384,6 +389,22 @@ from #171 and #215.
   invalidations and every document, terminal, complete producer-latch
   and click-chain effect through real call sites. No dead
   classification helper is added on a base without replay.
+- **G5's latch lands here under SUBSTRATE names, not the deferred
+  IDs.** G5a needs something to cancel, so the per-frontend
+  `AcceptedPanelGesture` latch and its arming from the accepted inbound
+  arms are this slice's. Writing that code decides which events arm,
+  that an ordinary `Up` consumes without counting as a cancellation,
+  and that the latch is per frontend — pinned as `g5_substrate_*`
+  rather than as G5c/G5d/G5g/G5p, which stay on the replay lane per
+  §5b's split table. **Claiming an ID in two branches is the merge
+  hazard**, and this file already records duplicate ids surviving a
+  clean merge once. Cancellations are **counted, not queued**: the
+  record queue is what replay drains, and landing it here would grow
+  one entry per cancelled drag with no reader. The other G5b
+  transitions (panel epoch, buffer replacement, same-size geometry,
+  detach) deliberately leave the latch armed on this base — inert
+  while nothing consumes it, and a defect only once replay supplies
+  effects, in the branch that owns the row.
 - **Routing and effects are separate controls.** This slice can prove
   v24/v25 events reach the existing focus path, but selection,
   terminal reporting, stable-generation drag continuation, two-tick
@@ -450,6 +471,15 @@ from #171 and #215.
     three of them lost to these two signatures. U9's synthetic-load
     control remains unrun and is the cheapest thing that would either
     implicate load or clear it.
+- **Rustdoc split, FOUR occurrences on this branch** (`screen_size`,
+  `peer_may_send_panel_events`, `send_panel_pointer`, and
+  `SemanticRenderState`). Always the same mechanism: inserting an item
+  at what reads as a blank gap when the lines directly above are the
+  NEXT item's doc comment, which the insertion then adopts. The fourth
+  also stole an `#[allow(clippy::struct_excessive_bools)]`, silently
+  un-suppressing a lint on the struct that needed it. Three were caught
+  by the user in review, one by a `missing_docs` warning. **The check
+  is to look UP from the insertion point before writing, not down.**
 - **Gates:** the four `bottom_panel_*` suites, the GUI 1a wire suite,
   `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`, and **`--protocol`**.
 

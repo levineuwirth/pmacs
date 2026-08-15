@@ -1029,6 +1029,50 @@ fn panel_event_epochs_are_current(
 /// Consulted BEFORE the payload is trusted, before any generation is
 /// validated and before any mutation: the family decides which variant
 /// is even admissible, so it cannot depend on the variant's contents.
+/// §5b G5c/G5d/G5g — update the accepted-gesture latch for one
+/// ACCEPTED panel gesture.
+///
+/// Called only after every gate has passed, so "accepted" means exactly
+/// that. Three rules, and each closes its own hole:
+///
+/// * only a left `Down` ARMS — a right press opens a menu and ends
+///   there, and `Move`, wheel and the other buttons begin nothing, so
+///   arming on them would manufacture a delayed release at the next
+///   authority loss (G5g);
+/// * a left `Up` CONSUMES, or a later invalidation finds a gesture it
+///   believes live and duplicates its release (G5c);
+/// * an `Up` with no armed gesture is INERT — it terminates nothing,
+///   because nothing began (G5d).
+fn update_accepted_gesture(
+    semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+    source: FrontendId,
+    kind: pmacs_protocol::MouseKind,
+    coord: pmacs_protocol::CellCoord,
+    buffer_id: crate::buffer::BufferId,
+    reached_child: bool,
+) {
+    use pmacs_protocol::{MouseButton, MouseKind};
+    let Some(state) = semantic_states.get_mut(&source) else {
+        return;
+    };
+    match kind {
+        MouseKind::Down(MouseButton::Left) => {
+            state.arm_accepted_gesture(crate::semantic_render::AcceptedPanelGesture {
+                button: MouseButton::Left,
+                coord,
+                buffer_id,
+                reached_child,
+            });
+        }
+        MouseKind::Up(MouseButton::Left) => {
+            // Inert when nothing was armed: `take` on `None` is the
+            // whole of G5d.
+            let _ = state.consume_accepted_gesture();
+        }
+        _ => {}
+    }
+}
+
 fn peer_uses_mapped_panel_family(session_registry: &SessionRegistry, source: FrontendId) -> bool {
     session_registry
         .session_state(source)
@@ -2507,6 +2551,17 @@ fn handle_dispatcher_event(
                         )
                     {
                         editor.dispatch_semantic_panel_pointer(source, buffer_id, coord, kind);
+                        update_accepted_gesture(
+                            semantic_states,
+                            source,
+                            kind,
+                            coord,
+                            buffer_id,
+                            // Whether the press reached a child is
+                            // replay's to know; until replay exists no
+                            // press does.
+                            false,
+                        );
                     }
                 }
                 FrontendEvent::PanelPointerMapped {
@@ -2551,6 +2606,14 @@ fn handle_dispatcher_event(
                         )
                     {
                         editor.dispatch_semantic_panel_pointer(source, buffer_id, coord, kind);
+                        update_accepted_gesture(
+                            semantic_states,
+                            source,
+                            kind,
+                            coord,
+                            buffer_id,
+                            false,
+                        );
                     }
                 }
                 FrontendEvent::Pointer {
@@ -6667,6 +6730,226 @@ mod tests {
             document,
             "a mapped session may not send the bare variant, and cannot \
              acquire permission by naming someone who may"
+        );
+    }
+
+    /// §5b G5a — the key advancing RAISES cancellation, without waiting
+    /// for another pointer event.
+    ///
+    /// The daemon-side half. The EFFECTS — clearing an empty selection,
+    /// clearing the click chain, delivering the child's release — are
+    /// owed by `panel-pointer-replay`, which is the only branch where
+    /// replay exists; this pins the trigger and the record it produces.
+    #[test]
+    fn g5a_a_mapping_change_cancels_a_live_gesture_with_no_further_event() {
+        let fid = FrontendId(770);
+        let (mut editor, mut semantic_states, mut render, _document, panel, epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        let generation = stamped_generation(&semantic_states, fid);
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut render,
+            mapped_pointer(fid, epochs, buffer_id, generation),
+        );
+        assert!(
+            semantic_states[&fid].has_accepted_gesture(),
+            "fixture: an accepted left press arms the latch"
+        );
+
+        // A FOREIGN edit — nothing this frontend did, and no further
+        // pointer event. The key moves on the next read.
+        {
+            let core = editor.core.borrow();
+            let registry = core.registry.clone();
+            let mut reg = registry.borrow_mut();
+            reg.get_mut(buffer_id)
+                .expect("panel buffer")
+                .set_generated_contents(b"moved\n")
+                .expect("a plain content change");
+        }
+        let snapshot = editor.panel_mapping_snapshot(fid);
+        let state = semantic_states.get_mut(&fid).expect("projection");
+        let advanced = state.panel_mapping_generation(snapshot);
+        assert_ne!(advanced, Some(generation), "the key must have moved");
+
+        assert!(
+            !state.has_accepted_gesture(),
+            "the advance itself ends the gesture — waiting for another \
+             event loses the race where the successor frame lands first"
+        );
+        assert_eq!(
+            state.panel_gesture_cancellations(),
+            1,
+            "and it records exactly one cancellation for replay to \
+             terminate — an ordinary consume would leave this at zero"
+        );
+    }
+
+    /// §5b — SUBSTRATE for the framing's G5c/G5d/G5g: the latch's
+    /// arming rules, as this branch's inbound arms decide them.
+    ///
+    /// Deliberately not named for those rows. G5c, G5d and G5g are
+    /// `panel-pointer-replay`'s per §5b's split table, and each asserts
+    /// something about a synthetic release that does not exist on this
+    /// branch. What is provable here is narrower and still worth
+    /// pinning, because `update_accepted_gesture` decides it: which
+    /// events arm, which consume, and that a consume is not a
+    /// cancellation.
+    #[test]
+    fn g5_substrate_only_an_accepted_left_press_arms_and_a_release_consumes() {
+        let fid = FrontendId(771);
+        let (mut editor, mut semantic_states, mut render, _document, panel, epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        let generation = stamped_generation(&semantic_states, fid);
+        let mut send = |kind, semantic_states: &mut HashMap<_, _>, editor: &mut _| {
+            let mut event = mapped_pointer(fid, epochs, buffer_id, generation);
+            if let FrontendEvent::PanelPointerMapped { kind: k, .. } = &mut event {
+                *k = kind;
+            }
+            dispatch_panel_event(
+                editor,
+                fid,
+                PROTOCOL_VERSION,
+                semantic_states,
+                &mut render,
+                event,
+            );
+        };
+
+        // G5d — a release with nothing armed is INERT.
+        send(
+            pmacs_protocol::MouseKind::Up(pmacs_protocol::MouseButton::Left),
+            &mut semantic_states,
+            &mut editor,
+        );
+        assert!(
+            !semantic_states[&fid].has_accepted_gesture(),
+            "a stale release terminates nothing, because nothing began"
+        );
+
+        // G5g — a RIGHT press does not arm.
+        send(
+            pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Right),
+            &mut semantic_states,
+            &mut editor,
+        );
+        assert!(
+            !semantic_states[&fid].has_accepted_gesture(),
+            "a right press opens a menu and ends there — arming would \
+             manufacture a delayed release at the next authority loss"
+        );
+
+        // G5g — nor does a wheel step.
+        send(
+            pmacs_protocol::MouseKind::ScrollDown,
+            &mut semantic_states,
+            &mut editor,
+        );
+        assert!(!semantic_states[&fid].has_accepted_gesture());
+
+        // Arming, then G5c — an ordinary release CONSUMES.
+        send(
+            pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left),
+            &mut semantic_states,
+            &mut editor,
+        );
+        assert!(semantic_states[&fid].has_accepted_gesture());
+        send(
+            pmacs_protocol::MouseKind::Up(pmacs_protocol::MouseButton::Left),
+            &mut semantic_states,
+            &mut editor,
+        );
+        assert!(
+            !semantic_states[&fid].has_accepted_gesture(),
+            "leaving it armed lets a later invalidation duplicate the \
+             release for a button already up"
+        );
+        assert_eq!(
+            semantic_states[&fid].panel_gesture_cancellations(),
+            0,
+            "an ordinary release is not a cancellation — counting it \
+             would make replay deliver a release for a button the user \
+             already lifted"
+        );
+    }
+
+    /// §5b — SUBSTRATE for the framing's G5p: per-frontend gesture
+    /// ownership.
+    ///
+    /// A and B hold gestures on their own panels; B losing authority
+    /// cancels B exactly once and leaves A's gesture intact. One global
+    /// latch would make either frontend's lifecycle cancel or erase the
+    /// other's.
+    ///
+    /// G5p itself is replay's per §5b's split table — it requires A's
+    /// next valid Drag to still APPLY, which needs replay. The
+    /// ownership shape underneath it is decided here, by putting the
+    /// latch on `SemanticRenderState` rather than beside the dispatcher,
+    /// so it is pinned here.
+    #[test]
+    fn g5_substrate_one_frontends_authority_loss_leaves_anothers_gesture_alone() {
+        let fid_a = FrontendId(772);
+        let fid_b = FrontendId(773);
+        let (mut editor_a, mut states_a, mut render_a, _doc_a, panel_a, epochs_a) =
+            panel_session_at(PROTOCOL_VERSION, fid_a);
+        let buffer_a = editor_a.core.borrow().windows[&panel_a].buffer_id;
+        let generation_a = stamped_generation(&states_a, fid_a);
+
+        // B lives in the same projection map, so a global latch would be
+        // shared between them.
+        states_a.insert(
+            fid_b,
+            crate::semantic_render::SemanticRenderState::for_peer(fid_b, PROTOCOL_VERSION),
+        );
+        states_a.get_mut(&fid_b).expect("B").arm_accepted_gesture(
+            crate::semantic_render::AcceptedPanelGesture {
+                button: pmacs_protocol::MouseButton::Left,
+                coord: pmacs_protocol::CellCoord::new(0, 0),
+                buffer_id: buffer_a,
+                reached_child: false,
+            },
+        );
+
+        dispatch_panel_event(
+            &mut editor_a,
+            fid_a,
+            PROTOCOL_VERSION,
+            &mut states_a,
+            &mut render_a,
+            mapped_pointer(fid_a, epochs_a, buffer_a, generation_a),
+        );
+        assert!(states_a[&fid_a].has_accepted_gesture(), "A is armed");
+        assert!(states_a[&fid_b].has_accepted_gesture(), "B is armed");
+
+        // B loses authority.
+        states_a
+            .get_mut(&fid_b)
+            .expect("B")
+            .cancel_accepted_gesture();
+
+        assert!(
+            !states_a[&fid_b].has_accepted_gesture(),
+            "B's own gesture ends"
+        );
+        assert_eq!(
+            states_a[&fid_b].panel_gesture_cancellations(),
+            1,
+            "exactly once"
+        );
+        assert!(
+            states_a[&fid_a].has_accepted_gesture(),
+            "and A's survives — a global latch would have erased it"
+        );
+        assert_eq!(
+            states_a[&fid_a].panel_gesture_cancellations(),
+            0,
+            "with no cancellation attributed to A"
         );
     }
 

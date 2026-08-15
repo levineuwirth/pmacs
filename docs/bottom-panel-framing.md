@@ -2460,6 +2460,43 @@ lane must run the whole G5 matrix through real document and terminal
 call sites. This is the same producer-emits/receiver-discards blind
 spot that forced the replay prerequisite in the first place.
 
+#### The latch substrate that lands here, and what it does not claim
+
+G5a needs something to cancel, so the accepted-gesture latch itself —
+`AcceptedPanelGesture` and the per-frontend slot on
+`SemanticRenderState` — lands on this slice, armed from the daemon's
+accepted inbound arms. Writing that code decides three things the
+deferred rows later assert about, so those decisions are pinned here
+under **substrate** names (`g5_substrate_*`) rather than under G5c,
+G5d, G5g or G5p:
+
+- which events arm and which consume (`update_accepted_gesture`);
+- that an ordinary `Up` consumes **without** counting as a
+  cancellation;
+- that the latch is per frontend, so one frontend's loss cannot empty
+  another's.
+
+The framing rows keep their IDs on `panel-pointer-replay`, because each
+of them asserts something about a synthetic release or a real drag
+continuation that does not exist on this base. Two IDs claimed in two
+branches is the merge hazard; substrate names avoid it.
+
+Two consequences are recorded rather than fixed:
+
+- **Cancellations are counted, not queued.** A queue of records is what
+  replay drains to deliver each release; landing it here would grow one
+  entry per cancelled drag with nothing ever draining it. A saturating
+  count is bounded and still separates a consume from a cancellation.
+- **The other G5b transitions leave the latch armed on this base.** A
+  panel-epoch change, a buffer replacement, a same-size geometry change
+  and a detach all strand a live gesture — its release can never be
+  accepted. That is inert here, because nothing consumes the latch, and
+  becomes a defect exactly when replay gives it effects, in the branch
+  that owns the row. `Absent` is wired anyway, because
+  `publish_absent_panel` already clears input authority two lines
+  later and leaving that one out would be an inconsistency inside a
+  single function rather than a clean deferral.
+
 ### Coherence impact (`COHERENCE.md` §20)
 
 - **Journey steps touched: 5** (document-panel editing and selection)
