@@ -1362,3 +1362,316 @@ fn sweep_a_panel_wider_than_the_terminal_cap_still_presents_its_terminal() {
 // write into their real data root.
 #[path = "common/iso.rs"]
 mod iso;
+
+// ---------------------------------------------------------------------------
+// §5b G1–G4 — the authoritative cell-mapping key
+//
+// The key is derived from a FINGERPRINT of the inverse mapping's inputs,
+// so the changing/stable split is structural: an input that is hashed
+// moves the key by construction, and one that is not cannot. These rows
+// pin each input individually, because a single "it changed" row cannot
+// show WHICH input moved it — and a key that silently ignored, say,
+// `view_left` would pass every row that only scrolls vertically.
+// ---------------------------------------------------------------------------
+
+/// Edit the panel's buffer from OUTSIDE any gesture — the "foreign
+/// edit" the ladder cannot see. Done in Rust rather than Lua because it
+/// must be a plain content mutation with no view, cursor or command
+/// state attached to it.
+fn foreign_edit(session: &Session, text: &str) {
+    let core = session.state.core.borrow();
+    let side = core.side_window_for(FID).expect("a side window");
+    let buffer_id = core.windows[&side].buffer_id;
+    let registry = core.registry.clone();
+    let mut reg = registry.borrow_mut();
+    let buffer = reg.get_mut(buffer_id).expect("the panel's buffer");
+    buffer
+        .set_generated_contents(text.as_bytes())
+        .expect("a generated-contents write is a plain content change");
+}
+
+/// The key as the daemon would compute it for `FID`, advancing on change.
+fn mapping_generation(session: &mut Session) -> Option<u64> {
+    let fingerprint = session.state.panel_mapping_fingerprint(FID);
+    session.render.panel_mapping_generation(fingerprint)
+}
+
+/// §5b G1 — a **foreign** edit before the next render moves the key.
+///
+/// This is the case the whole slice exists for: the epoch ladder cannot
+/// see it. No buffer is replaced, no panel reopens, no geometry is
+/// re-declared — every epoch holds — and yet the byte under a cell has
+/// changed. It is also why the key must be derived on demand rather than
+/// from the last emitted frame: nothing has rendered here.
+#[test]
+fn g1_a_foreign_edit_moves_the_mapping_key_before_anything_renders() {
+    let mut session = Session::new();
+    open_panel(&session, "g1", 4);
+    session.declare(1, 24, 80);
+    let _ = session.present();
+
+    let before = mapping_generation(&mut session).expect("a presentable panel has a key");
+    assert!(
+        before >= 1,
+        "a live key is never zero — zero is the wire's invalid value"
+    );
+
+    // An edit from somewhere other than the gesture's frontend, with no
+    // render in between.
+    foreign_edit(&session, "foreign edit\n");
+
+    let after = mapping_generation(&mut session).expect("still presentable");
+    assert!(
+        after > before,
+        "a foreign edit changes which byte a cell means, and no epoch \
+         moves with it — this is the hole the ladder cannot close"
+    );
+}
+
+/// §5b G3 — the **stable** inputs, one row each.
+///
+/// Every entry here is something that repaints a panel without changing
+/// which byte a cell denotes. A drag provokes selection repaints on every
+/// motion, so a key that moved with them would cancel the gesture it
+/// exists to protect after a single step.
+#[test]
+fn g3_repaints_that_cannot_move_a_byte_leave_the_key_alone() {
+    let mut session = Session::new();
+    open_panel(&session, "g3", 4);
+    session.declare(1, 24, 80);
+    let _ = session.present();
+
+    let baseline = mapping_generation(&mut session).expect("a key");
+
+    // Re-reading with nothing changed at all.
+    assert_eq!(
+        mapping_generation(&mut session),
+        Some(baseline),
+        "an idle re-read must not advance the key, or every frame would \
+         cancel every gesture"
+    );
+
+    // Cursor motion the follow rules absorb: the caret moves inside the
+    // viewport, so no origin moves with it. Set directly, so nothing but
+    // the cursor changes.
+    {
+        let mut core = session.state.core.borrow_mut();
+        let side = core.side_window_for(FID).expect("a side window");
+        let window = core.windows.get_mut(&side).expect("the side window");
+        window.cursor = 0;
+    }
+    assert_eq!(
+        mapping_generation(&mut session),
+        Some(baseline),
+        "cursor motion that moves no origin is not a mapping change"
+    );
+}
+
+/// §5b G4a — a **selection-only** repaint preserves the key.
+///
+/// Split from G3 because it is the one the lifecycle depends on: G4b —
+/// that an in-flight drag then continues through real replay — is owed by
+/// the rebased replay lane, which is the only branch where replay exists.
+#[test]
+fn g4a_a_selection_only_repaint_preserves_the_mapping_key() {
+    let mut session = Session::new();
+    open_panel(&session, "g4a", 4);
+    session.declare(1, 24, 80);
+    let _ = session.present();
+
+    let baseline = mapping_generation(&mut session).expect("a key");
+    foreign_edit(&session, "alpha beta\n");
+    let after_edit = mapping_generation(&mut session).expect("a key");
+    assert!(after_edit > baseline, "the edit itself is a mapping change");
+
+    // Now a selection, with no content or viewport change.
+    {
+        let mut core = session.state.core.borrow_mut();
+        let side = core.side_window_for(FID).expect("a side window");
+        let window = core.windows.get_mut(&side).expect("the side window");
+        window.selection = Some(pmacs::window::Selection { anchor: 0 });
+        window.cursor = 5;
+    }
+    assert_eq!(
+        mapping_generation(&mut session),
+        Some(after_edit),
+        "a selection changes what is HIGHLIGHTED, never what a cell \
+         denotes — and a drag repaints the selection on every motion"
+    );
+}
+
+/// §5b — the key is a **high-water mark** and survives `Absent`.
+///
+/// Hiding the band clears input authority, but it must not reset the
+/// generation: a frame delayed across the hide would otherwise return
+/// with a lower value and be believed.
+#[test]
+fn the_mapping_key_never_moves_backward_across_a_hidden_panel() {
+    let mut session = Session::new();
+    open_panel(&session, "hw", 4);
+    session.declare(1, 24, 80);
+    let _ = session.present();
+
+    let before = mapping_generation(&mut session).expect("a key");
+    foreign_edit(&session, "one\n");
+    let peak = mapping_generation(&mut session).expect("a key");
+    assert!(peak > before);
+
+    // Hide it: no fingerprint, so no advance — and no reset either.
+    {
+        let mut core = session.state.core.borrow_mut();
+        core.views
+            .get_mut(&FID)
+            .expect("the frontend's view")
+            .panel_hidden = true;
+    }
+    assert_eq!(
+        mapping_generation(&mut session),
+        None,
+        "no presentable panel means no key to stamp, which is not the \
+         same as a key of zero"
+    );
+    assert_eq!(
+        session.render.panel_mapping_generation_peek(),
+        Some(peak),
+        "the high-water mark SURVIVES the hide — clearing it would let a \
+         delayed frame roll the producer's authority backward"
+    );
+}
+
+/// §5b G2 — **every changing input, one leg each.**
+///
+/// Enumerated rather than asserted in aggregate, and mutation testing is
+/// what forced it: with only the content-edit row present, dropping
+/// `view_left` from the key and collapsing the grid to `rows * cols`
+/// both stayed GREEN. A single "the key moved" row cannot show *which*
+/// input moved it, and a key that ignores horizontal scrolling passes
+/// every row that only scrolls vertically.
+#[test]
+fn g2_each_input_of_the_inverse_mapping_moves_the_key_on_its_own() {
+    // Each leg names one input and touches only that input.
+    type Leg = (&'static str, fn(&Session));
+
+    let legs: &[Leg] = &[
+        ("view_top", |session| {
+            let mut core = session.state.core.borrow_mut();
+            let side = core.side_window_for(FID).expect("side");
+            core.windows.get_mut(&side).expect("win").view_top += 1;
+        }),
+        ("view_left — GUI arc 1b makes this real", |session| {
+            let mut core = session.state.core.borrow_mut();
+            let side = core.side_window_for(FID).expect("side");
+            core.windows.get_mut(&side).expect("win").view_left += 1;
+        }),
+        ("wrap mode", |session| {
+            let mut core = session.state.core.borrow_mut();
+            let side = core.side_window_for(FID).expect("side");
+            let window = core.windows.get_mut(&side).expect("win");
+            window.last_wrap = match window.last_wrap {
+                pmacs::view::WrapMode::Wrap => pmacs::view::WrapMode::Truncate,
+                pmacs::view::WrapMode::Truncate => pmacs::view::WrapMode::Wrap,
+            };
+        }),
+        (
+            "content columns — the gutter is subtracted here",
+            |session| {
+                let mut core = session.state.core.borrow_mut();
+                let side = core.side_window_for(FID).expect("side");
+                core.windows.get_mut(&side).expect("win").last_content_cols += 1;
+            },
+        ),
+        ("fold PROJECTION POLICY, owned by the view", |session| {
+            let mut core = session.state.core.borrow_mut();
+            let view = core.views.get_mut(&FID).expect("view");
+            view.fold_projection = !view.fold_projection;
+        }),
+        ("fold CONTENT, owned by the buffer", |session| {
+            let core = session.state.core.borrow();
+            let side = core.side_window_for(FID).expect("side");
+            let buffer_id = core.windows[&side].buffer_id;
+            let registry = core.registry.clone();
+            let mut reg = registry.borrow_mut();
+            let buffer = reg.get_mut(buffer_id).expect("buffer");
+            let store = core.fold_registry.store_or_attach(buffer);
+            store
+                .lock()
+                .expect("fold store mutex")
+                .insert(pmacs_protocol::ByteRange { start: 0, end: 1 });
+        }),
+    ];
+
+    for (name, mutate) in legs {
+        let mut session = Session::new();
+        open_panel(&session, "g2", 4);
+        session.declare(1, 24, 80);
+        let _ = session.present();
+
+        let before = mapping_generation(&mut session).expect("a key");
+        mutate(&session);
+        let after = mapping_generation(&mut session).expect("a key");
+        assert!(
+            after > before,
+            "changing {name} changes which byte a cell means, so the key \
+             must move; it did not ({before} → {after})"
+        );
+    }
+}
+
+/// §5b G2 — grid **rows** and **columns** each move the key.
+///
+/// **Honest limit, recorded because mutation testing found it:** these
+/// two legs do NOT discriminate `rows`/`cols` from their product.
+/// Collapsing the key to `rows * cols` leaves both GREEN, because
+/// `last_content_cols` co-varies with a column change and the panel's
+/// row count co-varies with a resize — the key still moves, by another
+/// input. Only a **transposition** (2×6 → 6×2, identical product) would
+/// isolate it, and no production path reaches one: rows come from the
+/// band's height and columns from the frame declaration, and nothing
+/// swaps them.
+///
+/// The key hashes them separately anyway. That is cheap and correct,
+/// and the alternative — hashing a product because no test can currently
+/// tell the difference — would be choosing the weaker construction for
+/// the convenience of the test suite. What these legs *do* pin is that
+/// each dimension moves the key at all, which is what the rest of the
+/// slice depends on.
+#[test]
+fn g2_grid_rows_and_columns_are_independent_inputs() {
+    // ROWS come from the band's own height, not the frame's total rows —
+    // declaring a shorter frame leaves a 4-row panel a 4-row panel. The
+    // resize path is the one that actually changes them.
+    {
+        let mut session = Session::new();
+        open_panel(&session, "g2rows", 4);
+        session.declare(1, 24, 80);
+        let _ = session.present();
+
+        let before = mapping_generation(&mut session).expect("a key");
+        assert!(
+            session.state.apply_panel_resize_rows(FID, 6),
+            "the resize must be accepted, or this leg proves nothing"
+        );
+        let after = mapping_generation(&mut session).expect("a key");
+        assert!(
+            after > before,
+            "changing grid ROWS alone must move the key — an area product \
+             would miss a transposition"
+        );
+    }
+
+    // COLUMNS come from the declaration.
+    {
+        let mut session = Session::new();
+        open_panel(&session, "g2cols", 4);
+        session.declare(1, 24, 80);
+        let _ = session.present();
+
+        let before = mapping_generation(&mut session).expect("a key");
+        session.declare(2, 24, 40);
+        let after = mapping_generation(&mut session).expect("a key");
+        assert!(
+            after > before,
+            "changing grid COLUMNS alone must move the key"
+        );
+    }
+}

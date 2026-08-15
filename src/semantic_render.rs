@@ -377,6 +377,26 @@ pub struct SemanticRenderState {
     /// retains its last valid frame and silence would leave a stale band
     /// on screen indefinitely (Q#BP15).
     last_panel_payload: Option<PanelFramePayload>,
+    /// §5b — the authoritative **cell-mapping key** for this frontend.
+    ///
+    /// `(fingerprint, generation)`. The generation advances whenever the
+    /// fingerprint changes, and **both projection and inbound
+    /// validation read it through the same accessor**, so "what the
+    /// frontend was shown" and "what the daemon checks" cannot drift.
+    ///
+    /// It is deliberately **not** recomputed from the last emitted
+    /// frame: a mapping mutation that has not yet been painted has still
+    /// changed the inverse, and a gesture arriving in that gap must be
+    /// refused. Advancing on demand at both seams is what makes
+    /// "advances before the next inbound pointer, whether or not
+    /// anything rendered" true rather than aspirational.
+    ///
+    /// **Nondecreasing, and never cleared** — not even by `Absent`. A
+    /// delayed lower frame must not roll the producer's authority
+    /// backward, so this is a high-water mark for the session.
+    /// `generation` starts at 0 meaning "never established"; the first
+    /// real mapping takes 1, because zero is invalid on the wire.
+    panel_mapping: Option<(u64, u64)>,
     /// Highest presentation epoch allocated for this session; `0` means
     /// none has been. Advanced only when a frame is actually shipped, so
     /// a frame that fails validation does not burn an identity the peer
@@ -575,6 +595,7 @@ impl SemanticRenderState {
             // peer already holds. Seeding the baseline keeps the first
             // frame from shipping a redundant authoritative `Absent`.
             last_panel_payload: Some(PanelFramePayload::Absent),
+            panel_mapping: None,
             panel_epoch_used: 0,
             panel_presentation: None,
             panel_error_latched: false,
@@ -597,6 +618,37 @@ impl SemanticRenderState {
             }
             PanelFramePayload::Absent => None,
         }
+    }
+
+    /// Advance-if-changed, then read: the authoritative mapping key.
+    ///
+    /// **The single seam §5b requires.** Projection stamps the frame
+    /// with what this returns, and inbound validation compares against
+    /// what this returns; there is no second derivation to disagree
+    /// with.
+    ///
+    /// `fingerprint` is `None` when no panel is presentable. That does
+    /// **not** reset the key — the high-water mark survives `Absent`,
+    /// so a frame delayed across a hide cannot come back with a lower
+    /// generation and be believed.
+    pub fn panel_mapping_generation(&mut self, fingerprint: Option<u64>) -> Option<u64> {
+        let fingerprint = fingerprint?;
+        let next = match self.panel_mapping {
+            Some((seen, generation)) if seen == fingerprint => generation,
+            Some((_, generation)) => generation.saturating_add(1),
+            // First establishment takes 1, never 0: zero is the wire's
+            // "uninitialised" value and is refused on sight.
+            None => 1,
+        };
+        self.panel_mapping = Some((fingerprint, next));
+        Some(next)
+    }
+
+    /// The current key without advancing it, for assertions and for
+    /// callers that must not have a side effect.
+    #[must_use]
+    pub fn panel_mapping_generation_peek(&self) -> Option<u64> {
+        self.panel_mapping.map(|(_, generation)| generation)
     }
 
     /// Whether the last shipped declaration is a `Present` whose epochs

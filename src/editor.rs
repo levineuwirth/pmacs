@@ -2452,6 +2452,80 @@ impl EditorState {
         true
     }
 
+    /// Fingerprint of the panel's **inverse mapping** for one frontend
+    /// (§5b, Q#BP-R3).
+    ///
+    /// This is the whole of "what decides which byte a cell means". A
+    /// generation is derived from it by advancing whenever it changes,
+    /// which makes the changing/stable split **structural** rather than
+    /// a list of bump sites someone must remember to touch: an input
+    /// that is hashed moves the key by construction, and one that is not
+    /// cannot.
+    ///
+    /// **Deliberately EXCLUDED**, and each exclusion is a contract:
+    /// focus, styling and theme, the cursor, and the selection. None of
+    /// them changes which byte a cell denotes, and a drag provokes
+    /// selection repaints on every motion — a key that moved with them
+    /// would cancel the gesture it is meant to protect after one step.
+    ///
+    /// Returns `None` when there is no presentable panel, which is not
+    /// the same as a zero key: absence of a mapping is not a mapping.
+    pub fn panel_mapping_fingerprint(&self, frontend_id: FrontendId) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+
+        let core = self.core.borrow();
+        let size = core.panel_grid_size(frontend_id)?;
+        let side = core.side_window_for(frontend_id)?;
+        let window = core.windows.get(&side)?;
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        // Identity first: a different buffer is a different mapping even
+        // if every geometry input coincides.
+        window.buffer_id.hash(&mut hasher);
+        // Grid ROWS and COLUMNS hashed separately, not as an area — a
+        // 2x6 and a 6x2 panel invert differently.
+        size.rows.hash(&mut hasher);
+        size.cols.hash(&mut hasher);
+        // Viewport, both axes. `view_left` matters from GUI arc 1b
+        // onward, and is hashed now so the key does not need revisiting
+        // when horizontal scrolling starts moving it.
+        window.view_top.hash(&mut hasher);
+        window.view_left.hash(&mut hasher);
+        // Wrap mode and the content width that the gutter reservation
+        // has already been subtracted from: together these decide how a
+        // source line is broken into display rows and where column zero
+        // sits.
+        window.last_wrap.hash(&mut hasher);
+        window.last_content_cols.hash(&mut hasher);
+        // Fold POLICY and fold CONTENT are separate inputs. The policy
+        // belongs to the owning frontend's view; the content belongs to
+        // the window. Either alone can change which source line a grid
+        // row shows.
+        core.views
+            .get(&frontend_id)
+            .is_some_and(|view| view.fold_projection)
+            .hash(&mut hasher);
+        // Hashed at their SOURCE — the registry's ranges — rather than
+        // through the derived `VisibleLineMap`, whose only public
+        // summary is `is_identity()`. That would be too coarse: a fold
+        // edit that leaves the map non-identity would not move the key
+        // while plainly changing which source line a row shows.
+        for range in core.fold_registry.folds(window.buffer_id) {
+            range.start.hash(&mut hasher);
+            range.end.hash(&mut hasher);
+        }
+        // Content. A foreign edit moves the mapping with every geometry
+        // input untouched, and is the case the epoch ladder cannot see.
+        let registry = core.registry.clone();
+        let revision = registry
+            .borrow()
+            .get(window.buffer_id)
+            .ok()
+            .map(crate::buffer::Buffer::revision);
+        revision.hash(&mut hasher);
+        Some(hasher.finish())
+    }
+
     /// Paint one semantic frontend's side window into a panel-sized grid
     /// (Q#BP8, Q#BP15, Q#BP15a, Q#BP17).
     ///
