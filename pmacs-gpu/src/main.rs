@@ -849,33 +849,50 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
                     facts.last_frame_text = frame_probe_text(frame);
                     facts.last_title.clone_from(&frame.title);
                 }
-                match msg.as_ref() {
-                    // §5b — BOTH families. Observing only the legacy
-                    // one would let mapped production work perfectly
-                    // while the live probe reported no panel at all,
-                    // which is a false negative in the one place that
-                    // exists to tell us the band is real.
-                    InstanceMessage::PanelFrame(
-                        pmacs_protocol::panel::PanelFramePayload::Present(frame)
-                        | pmacs_protocol::panel::PanelFramePayload::PresentMapped { frame, .. },
-                    ) => {
-                        facts.panel_frames += 1;
-                        facts.panel_rows = frame.size.rows;
-                        facts.panel_cols = frame.size.cols;
-                        facts.panel_focused = frame.focused;
-                        facts.panel_frame_text = grid_probe_text(&frame.cells);
-                        if let Some(expected) = expected_panel_text.as_deref()
-                            && facts.panel_frame_text.contains(expected)
-                        {
-                            facts.panel_text_observed = true;
-                        }
-                    }
-                    InstanceMessage::PanelFrame(
-                        pmacs_protocol::panel::PanelFramePayload::Absent,
-                    ) => facts.panel_absent_observed = true,
-                    _ => {}
-                }
+                // §5b — a panel message is only NOTED here; its facts
+                // are read from the retained state AFTER
+                // `apply_attach_message` has ruled on it.
+                //
+                // Reading the raw payload was a false-positive
+                // generator: once one valid frame had landed, a
+                // REJECTED frame — wrong family, invalid, stale
+                // generation — still supplied the expected text while
+                // the retained old frame supplied the rendering. The
+                // probe would report the band showing something it does
+                // not show.
+                let panel_message = matches!(msg.as_ref(), InstanceMessage::PanelFrame(_));
+                let panel_before = state
+                    .panel
+                    .presented()
+                    .map(|frame| (frame.panel_epoch, frame.geometry_epoch, frame.size));
+
                 state.apply_attach_message(*msg);
+
+                if panel_message {
+                    match state.panel.presented() {
+                        Some(frame) => {
+                            let identity = (frame.panel_epoch, frame.geometry_epoch, frame.size);
+                            // Counted only when the retained frame
+                            // actually moved: a duplicate or a refusal
+                            // leaves the band exactly as it was, and
+                            // counting either would say the daemon is
+                            // painting when it is not.
+                            if panel_before != Some(identity) {
+                                facts.panel_frames += 1;
+                            }
+                            facts.panel_rows = frame.size.rows;
+                            facts.panel_cols = frame.size.cols;
+                            facts.panel_focused = frame.focused;
+                            facts.panel_frame_text = grid_probe_text(&frame.cells);
+                            if let Some(expected) = expected_panel_text.as_deref()
+                                && facts.panel_frame_text.contains(expected)
+                            {
+                                facts.panel_text_observed = true;
+                            }
+                        }
+                        None => facts.panel_absent_observed = true,
+                    }
+                }
                 if is_snapshot {
                     // The dual declaration: a byte viewport for a
                     // document, a cell size for a terminal. The daemon
@@ -7015,7 +7032,12 @@ impl State {
             // frame with no mapping identity is one whose cells cannot
             // be inverted safely, so accepting it would reintroduce the
             // hole from the receiving side.
-            PanelFramePayload::Present(_) if self.panel_family == PanelFamily::Mapped => false,
+            // Gated on the POSITIVE family, not on "not mapped".
+            // `Unsupported` is neither, and a `!= Mapped` test let it
+            // through — a session below `PANEL_MIN_VERSION` accepting a
+            // band it never negotiated. `carries_panel()` guards the
+            // geometry declaration, not this seam.
+            PanelFramePayload::Present(_) if self.panel_family != PanelFamily::Legacy => false,
             PanelFramePayload::PresentMapped {
                 frame,
                 mapping_generation,

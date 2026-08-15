@@ -1098,14 +1098,6 @@ impl AttachClient {
         })
     }
 
-    /// Send a `FrontendEvent::PanelPointer` (Q#BP16): a gesture
-    /// hit-tested locally to a panel CELL. Callers gate on
-    /// [`Self::session_protocol_version`] `>= 21`.
-    ///
-    /// `buffer_id` and `panel_epoch` close different holes and neither
-    /// subsumes the other — the first catches an A→B buffer replacement,
-    /// the second a close/hide/reopen of the *same* buffer — so both are
-    /// carried rather than one being derived from the other.
     /// §5b — the MAPPED gesture, echoing the generation of the frame
     /// this frontend is displaying.
     ///
@@ -1136,6 +1128,14 @@ impl AttachClient {
         })
     }
 
+    /// Send a `FrontendEvent::PanelPointer` (Q#BP16): a gesture
+    /// hit-tested locally to a panel CELL. Callers gate on
+    /// [`Self::session_protocol_version`] `>= 21`.
+    ///
+    /// `buffer_id` and `panel_epoch` close different holes and neither
+    /// subsumes the other — the first catches an A→B buffer replacement,
+    /// the second a close/hide/reopen of the *same* buffer — so both are
+    /// carried rather than one being derived from the other.
     pub fn send_panel_pointer(
         &self,
         geometry_epoch: u64,
