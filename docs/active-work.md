@@ -470,6 +470,27 @@ from #171 and #215.
     (2026-08-15, plain `cargo test --lib`, not a gate step). Isolated
     rerun green. Same budget as the occurrence above, now seen in two
     different selectors on one branch in one day.
+  - **`ctrl_c_on_launcher_group_does_not_reach_spawned_daemon`, a NEW
+    signature, red TWICE and reproducibly** (2026-08-16, logs
+    `20260816T063330Z` and `20260816T064549Z`, step `09-sweep-crdt`
+    both times). Fragment: `child did not exit within 5s` at
+    `tests/gpu_invocation_acceptance.rs:180`. **Not in
+    `docs/ci-red-signatures.md` under any id.** Green in isolation and
+    green with all fourteen of its suite siblings, the latter in
+    **0.15s against its own 5s deadline** — a 33x margin. It reds only
+    inside the full-workspace crdt sweep.
+    - **The row is marginal by construction, and the sweep is the
+      worst place for it.** It holds a FIXED 5s wall-clock deadline for
+      a spawned child to exit after a signal, and it runs inside the
+      heaviest stage the gate has — `cargo test --workspace --features
+      crdt`, which saturates all 16 cores by itself. Nothing about it
+      touches panels or the wire.
+    - **Sweep contention could not be separated from foreign load**,
+      and the attempt is recorded as inconclusive rather than dressed
+      up: running `09-sweep-crdt`'s exact command alone red the same
+      row, but `uptime` hit **59.51** during that run, so the control
+      proved nothing it was meant to. Part of that number is the
+      sweep's own parallelism.
   - **Three wall-clock-deadline rows red in ONE run, under a MEASURED
     foreign load** (2026-08-16, log `20260816T063330Z`). Steps
     `04-lib-crdt` and `09-sweep-crdt`. Fragments:
@@ -518,6 +539,18 @@ from #171 and #215.
   un-suppressing a lint on the struct that needed it. Three were caught
   by the user in review, one by a `missing_docs` warning. **The check
   is to look UP from the insertion point before writing, not down.**
+- **SLICE-COMPLETION GATE STATUS — read before assuming this is
+  mergeable.** Nine of ten stages green at `5174f73`; `09-sweep-crdt`
+  red on the load-sensitive row above, twice. **A gate with a red stage
+  is a red gate, and no PR was opened on it.** The evidence that the
+  red is environmental is the isolation runs, not a judgement call:
+  the row is unrelated to panels, green alone and green with its whole
+  suite. **Clean evidence is not obtainable on this machine right
+  now** — an unrelated `turso` workload
+  (`./verify_task_state.sh turso-without-rowid`, target `/opt/target`)
+  is running in a LOOP, holding a 16-core box at load 20-60. The
+  remaining work on this lane is one clean gate run, on a quiet
+  machine, and nothing else.
 - **Gates:** the four `bottom_panel_*` suites, the GUI 1a wire suite,
   `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`, and **`--protocol`**.
 
