@@ -287,7 +287,12 @@ from #171 and #215.
   half (G1–G4), outbound family selection, inbound family gating, the
   GPU's negotiated family enum, and the nine family-gate rows
   (G6a–b, G7a–b, G8). **Full `--protocol` gate green at `3c06176`.**
-  In progress since, uncommitted: G5's accepted-gesture latch.
+  Then three more: G5a's trigger and its latch, the wheel exemption
+  with exhaustion and mapped coalescing, and the receiver rows.
+  **Every row this slice owns is now witnessed** — G0, G1–G4a, G5a plus
+  latch substrate, G6–G8, G9a–c, G10/G10a–c, G11a, G13a–b, G14a–b, G15
+  — with G4b, G5b–e/g/i–p, G6c, G7c, G11b and G12a–b left to the replay
+  lane per §5b's split table.
 - **PROTOCOL-BEARING — v25, and it runs alone.**
   `ADVERTISED_PROTOCOL_VERSION` stays pinned at **20**.
 - **Why it exists.** A `PanelPointer` names a cell and nothing on the
@@ -465,6 +470,35 @@ from #171 and #215.
     (2026-08-15, plain `cargo test --lib`, not a gate step). Isolated
     rerun green. Same budget as the occurrence above, now seen in two
     different selectors on one branch in one day.
+  - **Three wall-clock-deadline rows red in ONE run, under a MEASURED
+    foreign load** (2026-08-16, log `20260816T063330Z`). Steps
+    `04-lib-crdt` and `09-sweep-crdt`. Fragments:
+    `criterion_1_end_of_line_typing_completes_sub_frame_per_keystroke`
+    — "per-keystroke orchestrator time **1.001196ms** exceeds 1ms",
+    **0.12% over**, the smallest margin any budget on this lane has
+    failed by; `m6_1_pty_mode_lifecycle_started_then_exited` — "must
+    observe stdout 'done'"; and
+    `ctrl_c_on_launcher_group_does_not_reach_spawned_daemon` — "child
+    did not exit within 5s". All three green in isolation, the last in
+    **0.15s against its 5s deadline**, a 33x margin.
+  - **This is the first entry on this lane with a NAMED confound rather
+    than the standing uncontrolled one.** `uptime` during the run:
+    load average **14.02 → 28.35**, from an unrelated `turso` test
+    suite on the same machine (`./verify_task_state.sh
+    turso-without-rowid`, target dir `/opt/target`, one test binary at
+    **693% CPU**). It is not a controlled experiment, but it is the
+    same evidence U9's synthetic-load control was meant to produce, and
+    it points at load. U9 stays owed; its value is now lower.
+  - **Two process traps this cost, both worth carrying forward.** The
+    Bash tool caps a command at 10 minutes and SIGTERMs it, which the
+    gate reports as `FAILED (exit 143)` on whatever stage was running —
+    indistinguishable from a real failure in the summary line. Run the
+    protocol gate under `setsid` and watch the log. And `pkill -f
+    <pattern>` kills the invoking shell when the pattern appears in its
+    own command line, so the intended target survives and the operator
+    believes it died. **Both mistakes were made here**; the second
+    nearly killed an unrelated project's build, because
+    `pkill -f "cargo test"` would have matched it. Identify by PID.
   - **Three consecutive full-gate runs, three DIFFERENT unrelated
     failures** (composition budget in `04-lib-crdt`, then composition
     again in `10-sweep-crdt`, then this in `08-sweep`), against a diff

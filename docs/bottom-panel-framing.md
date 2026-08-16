@@ -2497,6 +2497,47 @@ Two consequences are recorded rather than fixed:
   later and leaving that one out would be an inconsistency inside a
   single function rather than a clean deferral.
 
+#### What the slice actually landed, row by row
+
+Recorded because the split table above states the *intent*, and a
+reader auditing this later needs the *outcome* — including the two
+places where writing the witnesses changed the design.
+
+**Landed here:** G0 (wire shapes, positions, field order, accumulated
+pins), G1–G4a (the authoritative key, document and terminal halves),
+G5a plus the latch substrate, G6a–b/G7a–b/G8a–e (both directions, all
+four wrong-family quadrants, forged identity), G9a/G9b/G9c, G10 and
+G10a–c, G11a, G13a–b, G14a–b, G15.
+
+**Still the replay lane's**, unchanged: G4b, G5b–e, G5g, G5i–p, G6c,
+G7c, G11b, G12a–b.
+
+Two corrections the mutation pass forced, both of which had passed
+their first review as written:
+
+- **G10a proved nothing about zero.** Asserted with a generation
+  already held, zero is also *lower* than it, so the nondecreasing
+  clause did the refusing and deleting the zero check left the row
+  green. Zero is only isolable before any authority exists — which is
+  also the case the framing names, a sender that never initialised the
+  field. Split into its own row with that setup.
+- **G11a's exhaustion latch had no proven job.** The overflow path
+  already returns before storing the ceiling snapshot, so the next read
+  re-takes the changed arm and the band stays down without any latch.
+  Measured, the two are alternatives: only removing both resurrects the
+  band. The latch is kept, and now earns its place through `peek`,
+  which honours it so the peek and the authoritative read agree that an
+  exhausted session has no key rather than reporting the ceiling.
+
+One witness-shape note, since it recurs: the two G10b rows call
+`panel_mapping_is_current` directly. A wheel has **no
+dispatcher-visible effect on this base** — a document panel focuses on
+`Down` only, and no panel pointer coordinate is consumed anywhere — so
+a row asserting focus for a wheel would be green whatever the gate did.
+Each row carries a press leg alongside, which does have an effect, to
+show the predicate is wired into the production arm rather than merely
+correct in isolation.
+
 ### Coherence impact (`COHERENCE.md` §20)
 
 - **Journey steps touched: 5** (document-panel editing and selection)

@@ -7189,6 +7189,60 @@ mod tests {
         );
     }
 
+    /// §5b — SUBSTRATE: a second accepted press ENDS the gesture it
+    /// replaces rather than overwriting it.
+    ///
+    /// Found by reading the arming path back, not by a failing row: a
+    /// dropped `Up` — one lost to a closed outbox under a stall — is
+    /// followed by the next press, and a plain overwrite discards the
+    /// first gesture's record without counting it. Inert on this base,
+    /// where records are only counted; once replay attaches a child
+    /// release to each record, the discarded one leaves a button held
+    /// down with nothing left to release it.
+    #[test]
+    fn g5_substrate_a_second_press_ends_the_gesture_it_replaces() {
+        let fid = FrontendId(777);
+        let (mut editor, mut semantic_states, mut render, _document, panel, epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        let generation = stamped_generation(&semantic_states, fid);
+        let press = || mapped_pointer(fid, epochs, buffer_id, generation);
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut render,
+            press(),
+        );
+        assert!(semantic_states[&fid].has_accepted_gesture());
+        assert_eq!(
+            semantic_states[&fid].panel_gesture_cancellations(),
+            0,
+            "fixture: the first press cancels nothing"
+        );
+
+        // The `Up` never arrives; the next press does.
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut render,
+            press(),
+        );
+        assert!(
+            semantic_states[&fid].has_accepted_gesture(),
+            "the new gesture is armed"
+        );
+        assert_eq!(
+            semantic_states[&fid].panel_gesture_cancellations(),
+            1,
+            "and the one it displaced was ENDED, not dropped on the floor"
+        );
+    }
+
     /// §5b — SUBSTRATE for the framing's G5p: per-frontend gesture
     /// ownership.
     ///

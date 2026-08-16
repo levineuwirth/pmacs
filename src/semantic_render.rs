@@ -728,6 +728,13 @@ impl SemanticRenderState {
     /// per §5b's split table, because the release it denies does not
     /// exist on this branch.
     pub fn arm_accepted_gesture(&mut self, gesture: AcceptedPanelGesture) {
+        // A second accepted press while one is already armed means the
+        // first gesture's release never arrived — a dropped `Up`, or an
+        // outbox that closed under a stall. END it rather than
+        // overwrite it: overwriting discards the record silently, and
+        // once replay attaches effects to that record the child is left
+        // holding a button down with nothing left to release it.
+        self.cancel_accepted_gesture();
         self.accepted_gesture = Some(gesture);
     }
 
