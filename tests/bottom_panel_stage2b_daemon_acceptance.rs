@@ -1442,6 +1442,223 @@ fn g1_a_foreign_edit_moves_the_mapping_key_before_anything_renders() {
     );
 }
 
+/// §5b G15 — **TUI structural control**: the local panel click, drag
+/// and wheel paths keep their effects with NO mapping generation
+/// anywhere.
+///
+/// The TUI hit-tests the daemon's own state directly. It receives no
+/// `PanelFrame`, so it has no generation to echo and there is nothing
+/// for a freshness check to compare. If the check ever migrates from
+/// the authenticated semantic boundary into shared replay, local input
+/// stops working entirely — and it would stop silently, because
+/// refusing a gesture looks exactly like a gesture that did nothing.
+///
+/// The control is the FIXTURE: this session has no
+/// `SemanticRenderState` at all. Every effect below is therefore
+/// reached without a producer in existence, which is the strongest form
+/// of "no generation was consulted" — not an assertion about a value,
+/// but the absence of anything that could hold one.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one control over three input kinds: splitting it would \
+              give each leg its own fixture, and the shared fixture — a \
+              session with no SemanticRenderState at all — is the control"
+)]
+fn g15_local_tui_panel_input_keeps_its_effects_with_no_generation() {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind as TuiMouseKind};
+
+    let state = EditorState::new_with_roots(&crate::iso::roots());
+    exec(&state, "pmacs.lsp.config = {}");
+    state.sync_frame_geometry(FrontendId::LOCAL, CellSize::new(ROWS, COLS));
+    exec(
+        &state,
+        "PANEL_BUF = pmacs.buffer.create(\"*g15*\")
+         pmacs.buffer.set_generated_contents(PANEL_BUF, \
+             \"alpha alpha\\nbravo bravo\\ncharlie\\ndelta\\necho\\nfox\\ngolf\\nhotel\\n\")
+         pmacs.window.display(PANEL_BUF, { side = \"bottom\", height = 4 })",
+    );
+    let mut state = state;
+    let panel = state
+        .core
+        .borrow()
+        .side_window_for(FrontendId::LOCAL)
+        .expect("a panel");
+    let document = state
+        .core
+        .borrow()
+        .non_side_target(FrontendId::LOCAL)
+        .expect("a document");
+
+    // Paint one frame first, exactly as the TUI does before a user can
+    // click anything. The window's text view is built from the buffer at
+    // paint time, so input dispatched against an unpainted window maps
+    // every row to offset zero and the row proves nothing.
+    {
+        let mut cells = vec![pmacs::cell::Cell::default(); (ROWS * COLS) as usize];
+        let mut grid = pmacs::cell::CellGrid {
+            cells: &mut cells,
+            stride: COLS,
+            size: CellSize::new(ROWS, COLS),
+        };
+        pmacs::editor::paint_frame(
+            &state,
+            FrontendId::LOCAL,
+            &HashMap::new(),
+            &mut grid,
+            CellSize::new(ROWS, COLS),
+        );
+    }
+
+    // Where the panel actually is, from the same layout the TUI paints.
+    let panel_rect = {
+        let core = state.core.borrow();
+        let view = core.views.get(&FrontendId::LOCAL).expect("LOCAL view");
+        let area = pmacs::window::Rect::new(0, 0, ROWS - 1, COLS);
+        let fixed = core.panel_fixed_rows(FrontendId::LOCAL, area.size.rows);
+        view.layout.compute(area, &fixed)[&panel]
+    };
+    let row = u16::try_from(panel_rect.origin.row + 1).expect("row fits");
+    // Past the gutter, and inside a line that is long enough for the
+    // drag below to stay within it: clamping at the line end would make
+    // press and drag land on the same byte and prove nothing.
+    let gutter = state.core.borrow().windows[&panel].gutter_width();
+    let col = u16::try_from(panel_rect.origin.col + gutter + 1).expect("col fits");
+    let click = |kind| MouseEvent {
+        kind,
+        column: col,
+        row,
+        modifiers: KeyModifiers::NONE,
+    };
+
+    // Precondition, scoped to THIS view: the panel is not already
+    // focused, or every assertion below would pass without input.
+    assert_eq!(
+        state.core.borrow().views[&FrontendId::LOCAL].active,
+        document,
+        "precondition: the document is focused"
+    );
+
+    // CLICK — focuses the panel and positions the cursor.
+    state.dispatch_mouse(
+        FrontendId::LOCAL,
+        click(TuiMouseKind::Down(MouseButton::Left)),
+        CellSize::new(ROWS, COLS),
+    );
+    assert_eq!(
+        state.core.borrow().views[&FrontendId::LOCAL].active,
+        panel,
+        "a local press focuses the panel — no token, no refusal"
+    );
+    let pressed_cursor = state.core.borrow().windows[&panel].cursor;
+    assert_ne!(
+        pressed_cursor, 0,
+        "the press positioned the cursor inside the text, not at the \
+         buffer start — a row that pressed into an unpainted window \
+         would read zero here and never notice"
+    );
+
+    // DRAG — extends a selection inside the panel.
+    state.dispatch_mouse(
+        FrontendId::LOCAL,
+        MouseEvent {
+            kind: TuiMouseKind::Drag(MouseButton::Left),
+            column: col + 7,
+            row,
+            modifiers: KeyModifiers::NONE,
+        },
+        CellSize::new(ROWS, COLS),
+    );
+    assert!(
+        state.core.borrow().windows[&panel].selection.is_some(),
+        "a local drag selects inside the panel"
+    );
+    assert_ne!(
+        state.core.borrow().windows[&panel].cursor,
+        pressed_cursor,
+        "and the drag moved the cursor, so the selection is a real range"
+    );
+
+    state.dispatch_mouse(
+        FrontendId::LOCAL,
+        MouseEvent {
+            kind: TuiMouseKind::Up(MouseButton::Left),
+            column: col + 7,
+            row,
+            modifiers: KeyModifiers::NONE,
+        },
+        CellSize::new(ROWS, COLS),
+    );
+
+    // WHEEL — two ticks, both of which must land. The mapped family's
+    // wheel exemption exists so this stays true over the wire; here
+    // there is no wire, and it must be true for the same reason.
+    let before = state.core.borrow().windows[&panel].view_top;
+    for _ in 0..2 {
+        state.dispatch_mouse(
+            FrontendId::LOCAL,
+            click(TuiMouseKind::ScrollDown),
+            CellSize::new(ROWS, COLS),
+        );
+    }
+    assert_ne!(
+        state.core.borrow().windows[&panel].view_top,
+        before,
+        "a local wheel scrolls the panel"
+    );
+}
+
+/// §5b G9a — a generation change is EMITTED even when the picture is
+/// byte-identical.
+///
+/// The panel shows four rows; an edit further down the buffer moves the
+/// key without changing a single visible cell. Suppressing that frame
+/// because the cells match would leave the frontend echoing a
+/// generation the daemon has already retired, and every gesture it then
+/// sends is refused — the panel goes quietly dead while looking
+/// perfectly correct.
+#[test]
+fn g9a_a_generation_change_ships_even_when_the_cells_are_identical() {
+    let mut session = Session::new();
+    open_panel(&session, "g9a", 4);
+    session.declare(1, 24, 80);
+
+    // Enough lines that the visible four cannot see the edit below.
+    let mut lines = String::new();
+    for line in 0..20 {
+        use std::fmt::Write as _;
+        writeln!(lines, "line {line}").expect("writing to a String never fails");
+    }
+    foreign_edit(&session, &lines);
+    let baseline = session.present();
+    let before = mapping_generation(&mut session).expect("a live key");
+
+    // Change line 15 only. Rows 0..4 are untouched.
+    let edited = lines.replace("line 15\n", "LINE 15 CHANGED\n");
+    assert_ne!(edited, lines, "fixture: the edit must actually apply");
+    foreign_edit(&session, &edited);
+
+    let payload = session
+        .frame()
+        .expect("a generation change is not silence: the frame must ship");
+    let (frame, shipped) = match payload {
+        PanelFramePayload::PresentMapped {
+            frame,
+            mapping_generation,
+        } => (frame, mapping_generation),
+        other => panic!("a v25 producer ships the mapped family, got {other:?}"),
+    };
+    assert_eq!(
+        frame.cells, baseline.cells,
+        "fixture: the visible cells really are identical — if they \
+         differ, this row is testing an ordinary repaint instead"
+    );
+    assert!(
+        shipped > before,
+        "and the key moved with the edit below the fold"
+    );
+}
+
 /// §5b G3 — the **stable** inputs, one row each.
 ///
 /// Every entry here is something that repaints a panel without changing
