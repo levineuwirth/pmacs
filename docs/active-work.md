@@ -270,7 +270,7 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## Panel cell-mapping generation (v25) — ACTIVE, framing only
+## Panel cell-mapping generation (v25) — CODE-COMPLETE, GATE RED
 
 **Written with the branch's FIRST commit**, per the standing correction
 from #171 and #215.
@@ -281,7 +281,8 @@ from #171 and #215.
   **`githubsucks/panel-mapping-generation` is the authoritative tip.**
   Recover with `git fetch githubsucks && git checkout
   panel-mapping-generation`.
-- **No PR yet. Checkpoint: `3c06176`** — framing revision 16 (§5b)
+- **No PR yet. Code-complete at `5174f73`; ledger tip `fb40d88`; the
+  slice-completion gate is RED.** Framing revision 16 (§5b)
   APPROVED 2026-08-15 at `7e85a6f`, then eleven implementation commits:
   wire shapes and pins (G0), the authoritative key with its terminal
   half (G1–G4), outbound family selection, inbound family gating, the
@@ -541,18 +542,46 @@ from #171 and #215.
   is to look UP from the insertion point before writing, not down.**
 - **SLICE-COMPLETION GATE STATUS — read before assuming this is
   mergeable.** Nine of ten stages green at `5174f73`; `09-sweep-crdt`
-  red on the load-sensitive row above, twice. **A gate with a red stage
-  is a red gate, and no PR was opened on it.** The evidence that the
-  red is environmental is the isolation runs, not a judgement call:
-  the row is unrelated to panels, green alone and green with its whole
-  suite. **Clean evidence is not obtainable on this machine right
+  red on the row above, twice. **A gate with a red stage is a red gate,
+  and no PR was opened on it.**
+  - **The cause is UNRESOLVED.** The row is **intermittent**: green
+    alone, green with all fourteen of its suite siblings, red inside
+    the full-workspace crdt sweep. Foreign load is a **measured
+    confound**, not an explanation — establishing intermittence is not
+    establishing an environmental cause, and no experiment here
+    separated sweep contention, foreign load, and a genuine defect in
+    the row. Do not record it as environmental until something does.
+  - **Clean evidence is not obtainable on this machine right
   now** — an unrelated `turso` workload
   (`./verify_task_state.sh turso-without-rowid`, target `/opt/target`)
   is running in a LOOP, holding a 16-core box at load 20-60. The
   remaining work on this lane is one clean gate run, on a quiet
   machine, and nothing else.
-- **Gates:** the four `bottom_panel_*` suites, the GUI 1a wire suite,
-  `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`, and **`--protocol`**.
+- **Gates — THE EXACT INVOCATION, not a list of suites.** Naming the
+  suites without the flag form is what let two full runs go by with
+  bare `--protocol` and **no acceptance stage at all**; the suites were
+  verified by hand instead, which is not the gate and is exactly the
+  substitution these records exist to prevent. `--acceptance` is an
+  EXPLICIT repeated flag — the gate derives nothing from the diff.
+
+  ```
+  ./scripts/gate --protocol \
+    --acceptance bottom_panel_stage1_acceptance \
+    --acceptance bottom_panel_stage2a_acceptance \
+    --acceptance bottom_panel_stage2b_daemon_acceptance \
+    --acceptance bottom_panel_stage2b_gpu_acceptance \
+    --acceptance bottom_panel_stage2b_protocol_acceptance \
+    --acceptance gui_stage1a_wire_acceptance
+  ```
+
+  Sixteen stages: ten from `--protocol` plus one per suite. **A run
+  that prints ten stages is missing every acceptance stage**, and a run
+  that prints eleven is the older single-suite form.
+- **The "four `bottom_panel_*` suites" phrasing was WRONG — there are
+  five.** `bottom_panel_stage2b_protocol_acceptance` is the fifth and
+  belongs in a protocol-bearing lane above all others. The block above
+  runs all five rather than guessing which four an earlier writer
+  meant; a superset is the safe reading of an ambiguous record.
 
 ## GPU launcher / probe SIGINT teardown — MERGED as #241 (`f8033bc`)
 
