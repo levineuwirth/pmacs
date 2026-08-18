@@ -270,6 +270,55 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
+## GPU launcher / probe SIGINT teardown — FRAMING ONLY, awaiting approval
+
+**Written with the branch's FIRST commit**, per the standing correction
+from #171 and #215.
+
+- **Branch `gpu-probe-sigint-teardown`**, base `githubsucks/main` @
+  **`72da24a`**, worktree
+  `/home/jeans/Repos/personal/pmacs-probe-sigint`. Recover with
+  `git fetch githubsucks && git checkout gpu-probe-sigint-teardown`.
+- **No PR. Framing revision 1 at `docs/gpu-probe-sigint-framing.md`;
+  NO IMPLEMENTATION and no fix proposed** — the mechanism is not known
+  yet, and the framing says so rather than guessing.
+- **Why it exists.** `ctrl_c_on_launcher_group_does_not_reach_spawned_daemon`
+  fails in gate stage `sweep-crdt` with "child did not exit within 5s".
+  **Pre-existing on `main`** — `72da24a` fails it in a clean worktree
+  with its own target dir, 119 binaries green and one red. While it
+  reds, **no branch can present a green sixteen-stage gate, `main`
+  included.**
+- **`panel-mapping-generation` (§5b) is HELD BEHIND THIS LANE** by
+  explicit instruction. That lane is code-complete at `5174f73` with
+  its own fifteen stages green; its sixteenth stage is this defect.
+- **Reproduction is 5/5 in the full sweep and 0/N in every reduction.**
+  All 37 preceding targets plus the suite run green, and other
+  packages' targets run after the failure. That paradox is the shape of
+  the problem, not an aside.
+- **Ruled out by measurement — do not re-run:** machine load; tmpfs
+  starving RAM (settled by experiment, not argument — `/tmp` 21G→1.2G,
+  available 27G→45G, still red); leaked daemons; inotify;
+  `--workspace` feature unification; any specific preceding test.
+- **Ground truth that DEEPENS rather than explains it.** Neither binary
+  handles signals: `run_gpu` (`src/main.rs:324`) blocks in
+  `command.status()` with no handler, and grepping the whole of
+  `pmacs-gpu/src` for signal machinery returns nothing. The probe polls
+  at 50ms (`pmacs-gpu/src/main.rs:1065`). Two processes with default
+  `SIGINT` disposition should both die at once.
+- **One retracted claim, kept as a warning.** An earlier "mechanism
+  located" report — launcher in `do_wait`, probe child in
+  `futex_do_wait` — was retracted on its own evidence: the sampler
+  caught 394 launchers with a maximum lifetime of 5s, while the failing
+  instance must live 8s or more. It had described a HEALTHY teardown.
+  The first step is therefore an instrument recording **only**
+  launchers outliving ~6s, with `/proc/<pid>/status` signal masks —
+  `SigIgn` survives `fork` AND `exec`, handlers do not.
+- **Gates:** `./scripts/gate --protocol --acceptance
+  gpu_invocation_acceptance` at minimum; acceptance criterion A2
+  requires `sweep-crdt` green **three consecutive times** before the
+  fix is believed, since 1/1 is not evidence for a defect that hid from
+  every reduction.
+
 ## `scripts/gate` TMPDIR isolation — PR #240 OPEN
 
 **Written with the branch's first commit**, per the standing correction
