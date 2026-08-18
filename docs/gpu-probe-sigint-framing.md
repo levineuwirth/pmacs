@@ -1,11 +1,19 @@
 # GPU launcher / probe SIGINT teardown — framing
 
-Revision 2. Status: **awaiting approval. No implementation.**
+Revision 3. Status: **awaiting approval. No implementation.**
 
-Revision 1 was rejected on five findings. Each is answered below, and
-the two that changed the technical picture — the lifetime arithmetic
-(§5) and the disposition claim (§3) — are recorded as corrections
-rather than quietly rewritten.
+Revisions 1 and 2 were each rejected on five findings. Every correction
+is recorded in place rather than quietly rewritten, because three of
+them were claims this document itself had advanced:
+
+- r1 → r2: the ">6 s selector" and the "≥8 s lifetime" arithmetic
+  (§5); "two processes with default disposition" (§3); "119 binaries
+  green, one red" (§1); an unobtainable A2 (§8); "journey steps
+  touched: none" (§9).
+- r2 → r3: **"R9 ran the same binaries" — it did not** (§4); "the probe
+  never blocks indefinitely" (§3); the launcher call-site count (§5);
+  reduction provenance, now in `docs/probe-sigint-evidence.md`; and
+  ledger corrections that had not been made portable (§11).
 
 ## 1. The problem, stated as what is observed
 
@@ -52,9 +60,14 @@ stages green and is held behind this lane by explicit instruction.
   `waitpid` — with no handler installed. Grepping
   `SIGINT|signal_hook|sigaction|ctrlc|set_handler|pthread_sigmask|sigprocmask`
   across `pmacs-gpu/src` returns nothing.
-- **The probe never blocks indefinitely.**
+- **The probe's event loop wakes at least every 50 ms.**
   `run_headless_managed_probe` (`pmacs-gpu/src/main.rs:1065`) loops on
-  `event_rx.recv_timeout(Duration::from_millis(50))`.
+  `event_rx.recv_timeout(Duration::from_millis(50))`. **Revision 2 said
+  "never blocks indefinitely", which is false**: the probe's stdin
+  reader thread blocks in `read_to_end` (`:1109`) with no timeout, and
+  once `ready` the loop has **no deadline of its own** — it leaves only
+  when stdin closes (`:1212`). So the process is not bounded; only the
+  event wakeup is.
 - **The daemon *does* handle signals, deliberately.**
   `src/daemon.rs:629-641` registers `SIGTERM`/`SIGINT` via
   `signal_hook::flag`. The daemon is the process the test asserts must
@@ -73,31 +86,67 @@ establishes is narrower: **neither binary sets a disposition itself**,
 so whatever disposition they hold at runtime was inherited, and that is
 measurable rather than arguable.
 
-## 4. Reductions attempted — each with command, count, and log
+## 4. Reductions attempted
 
-Preserved off the tmpfs at
-`/home/jeans/build/pmacs-gate-targets/probe-sigint-evidence/`, because
-`/tmp` is a tmpfs and these were nearly lost to a cleanup mid-lane.
+**Full provenance lives in `docs/probe-sigint-evidence.md`**, which is
+pushed with this branch: exact command, worktree, HEAD, cleanliness,
+the artifact family actually executed, result, and log digest for every
+physical run. Log bodies stay machine-local under
+`/home/jeans/build/pmacs-gate-targets/probe-sigint-evidence/` — `/tmp`
+is a tmpfs and they were nearly lost to a cleanup mid-lane.
 
-| # | reduction | runs | result | log |
+Three provenance caveats are recorded there rather than smoothed over:
+**R1 and R2 have no preserved log** (revision 2 cited `gpu3.log` for
+both R2 and R6; that log is R6's three-suite run alone, and counting
+one run as two was wrong); **cleanliness is `UNKNOWN` for every
+pre-manifest run**, because it was not recorded at the time and is not
+inferrable; and **R1–R10 ran in the `panel-mapping-generation`
+worktree**, not at `main`. `D0` re-runs the matrix under a harness that
+captures all of it, at `main`, before any row here is relied on.
+
+All rows carry `--features crdt`. Full argv, worktree, HEAD,
+cleanliness and artifact family per run: `docs/probe-sigint-evidence.md`.
+
+| # | reduction (after `cargo test`) | runs | result | log |
 |---|---|---|---|---|
-| R1 | `cargo test --features crdt --test gpu_invocation_acceptance ctrl_c_on_launcher_group` | 3 | green, 0.15–0.17 s | *(console; superseded by R2)* |
-| R2 | `cargo test --features crdt --test gpu_invocation_acceptance` (whole suite) | 1 | green, 15 passed | `gpu3.log` |
-| R3 | `cargo test --workspace --features crdt --no-fail-fast -- --skip basedpyright ctrl_c_on_launcher_group` | 1 | green — every binary runs, only this test executes | `filtered.log` |
-| R4 | `cargo test --features crdt --lib --test gpu_invocation_acceptance --no-fail-fast` | 1 | green, 2145 + 15 | `two.log` |
+| R1 | `--test gpu_invocation_acceptance ctrl_c_on_launcher_group` | 3 | green, 0.15–0.17 s | **no log preserved** |
+| R2 | `--test gpu_invocation_acceptance` (whole suite) | 1 | green, 15 passed | **no log preserved** |
+| R3 | `--workspace --no-fail-fast -- --skip basedpyright ctrl_c_on_launcher_group` | 1 | green — every binary runs, only this test executes | `filtered.log` |
+| R4 | `--lib --test gpu_invocation_acceptance --no-fail-fast` | 1 | green, 2145 + 15 | `two.log` |
 | R5 | `--test gate_script_acceptance --test gpu_invocation_acceptance` | 1 | green | `suspect.log` |
-| R6 | three GPU suites in sweep order (`gpu_font`, `gpu_initial_target`, `gpu_invocation`) | 1 | green | `gpu3.log` |
-| R7 | targets 1–19 (incl. `--lib --bins`) + the suite | 1 | green | `half1.log` |
-| R8 | targets 20–37 + the suite | 1 | green | `half2.log` |
-| R9 | **all 37 preceding targets** + the suite | 1 | green | `prefix.log` |
-| R10 | `--workspace` with only `gpu_initial_target` + `gpu_invocation` | 1 | green | `wsonly.log` |
-| F1–F5 | full `cargo test --workspace --features crdt --no-fail-fast -- --skip basedpyright` | 5 | **red, 5/5** | `base-sweep.log` (at `72da24a`), `postclean.log`, `sweep-inst.log`, `sweep-diag.log`, gate `…-2144707` |
+| R6 | `--test gpu_font_acceptance --test gpu_initial_target_acceptance --test gpu_invocation_acceptance` | 1 | green | `gpu3.log` |
+| R7 | `--lib --bins` + `--test`×14 (targets 6–19) + the suite | 1 | green | `half1.log` |
+| R8 | `--test`×18 (targets 20–37) + the suite | 1 | green | `half2.log` |
+| R9 | `--lib --bins` + `--test`×32 (targets 6–37) + the suite | 1 | green (**reduction artifacts**) | `prefix.log` |
+| R10 | `--workspace ... --test gpu_initial_target_acceptance --test gpu_invocation_acceptance` | 1 | green (**workspace artifacts**) | `wsonly.log` |
+| F1–F5 | full `--workspace --no-fail-fast -- --skip basedpyright` | 5 | **red, 5/5** | `base-sweep.log` (at `72da24a`), `postclean.log`, `sweep-inst.log`, `sweep-diag.log`, gate `…-2144707` |
 
-**R9 is the shape of the problem.** The same binaries, in the same
-order, with the same tests before it, pass as a subset and fail as part
-of the whole. R10 rules out `--workspace` feature unification; other
-packages' targets run at log lines 4848+, after the failure at 3066, so
-they cannot be implicated either.
+**Correction to revision 2: R9 did not run the same binaries.** It
+executed `gpu_initial_target_acceptance-91f51d0b5303ff9f` and
+`gpu_invocation_acceptance-6b4b8223dea45247`; the failing sweeps
+executed `-5d9105cb7047aab8` and `-d4dae4f01bcdef62`. Those artifacts
+are **byte-different** (sha256/16 `36912fa2…` vs `1b3cc86c…`, and
+`858d7148…` vs `ede0c07d…`; see `docs/probe-sigint-evidence.md`).
+Cargo's target selection changes the fingerprint, so command shape
+changes the executable. R9 therefore establishes **same target names
+and order**, not same binaries.
+
+What the evidence actually supports is an **interaction**, and only
+that:
+
+| prior targets execute | workspace artifact family | result |
+|---|---|---|
+| yes | no | R9 green |
+| no | yes | R10 green |
+| yes | yes | **F1–F5 red** |
+
+Neither factor alone reproduces it. So `--workspace` artifact
+selection is **not sufficient by itself** — and, importantly, **not
+ruled out either**, which is how revision 2 phrased it. Later-selected
+packages can influence Cargo's build graph and fingerprints *before*
+their test executables ever run, so "their targets execute after the
+failure at line 3066" does not exonerate them. The same applies to the
+claim that other packages "cannot be implicated": withdrawn.
 
 Also refuted, by measurement: machine load (red on a quiet box, load
 2.77); tmpfs starving RAM (**tested by experiment** — `/tmp` 21 G →
@@ -121,10 +170,15 @@ observed. A ">6 s" selector would therefore have captured **nothing**,
 repeating the very sampling error it was written to correct.
 
 So A is **not** refuted by B. A remains **unproven for a different
-reason**: the suite spawns launchers from **five** call sites
-(`:38, :65, :509, :534, :544, :574, :725, :1097` — eight `--gpu`
-arguments across the file), so a launcher captured by command line
-alone cannot be attributed to *this* test. The `do_wait` /
+reason**: under `--features crdt` the suite spawns root launchers from
+**six** call sites — `:509, :534, :544, :574, :725, :1097`, all inside
+`#[cfg(feature = "crdt")] mod crdt` (`:88`). Eight `--gpu` arguments
+appear in the file, but `:38` and `:65` sit under
+`#[cfg(not(feature = "crdt"))]` (`:26`) and are compiled out of the
+failing configuration. Revision 2 said "five" while citing eight, which
+was wrong twice over. Six is the number; what matters is that it is
+more than one, so a launcher captured by command line alone cannot be
+attributed to *this* test. The `do_wait` /
 `futex_do_wait` pair is consistent with the failing instance and
 consistent with a healthy sibling, and nothing recorded distinguishes
 them.
@@ -153,6 +207,11 @@ diagnostic only, and it must **discriminate** the three live candidates:
 blocked delivery, inherited ignore, and an escaped or wrong process
 group.
 
+- **D0 — re-run the §4 matrix with captured provenance**, at `main`,
+  recording the artifact hashes actually executed. Revision 2's
+  strongest claim collapsed because command shape silently changed the
+  binary; no further reduction should be trusted until each row names
+  the executable it ran.
 - **D1 — key on the PID this test records.** The test already owns
   `launcher.id()`. Capture around its own `kill`, not by scanning for
   age or command line.
@@ -223,3 +282,19 @@ Written now so the fix cannot quietly become "make the test pass".
 - `gpu_initial_target_acceptance` including the suite as a module. It
   is why the failure reds twice, and it is a tidiness question, not a
   correctness one.
+
+## 11. Record corrections owed to other ledgers
+
+A correction is not made until it is portable. Two were outstanding
+when revision 2 was reviewed, and both are closed by this revision:
+
+- **This branch's ledger** asserted that two default-disposition
+  processes "should both die at once" and then withdrew that same claim
+  further down. The assertion is removed; only the withdrawal and its
+  reasoning remain.
+- **`panel-mapping-generation` @ `16cf3a2`** still carried "119
+  binaries green, one red", the ≥8 s arithmetic, the "default action"
+  claim and the ">6 s selector". Pushing `16cf3a2` made the *retraction*
+  portable but not the *correction*. That ledger is corrected on its own
+  branch and pushed, so the held lane no longer transports falsified
+  claims.

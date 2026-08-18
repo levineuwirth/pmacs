@@ -295,20 +295,36 @@ from #171 and #215.
 - **`panel-mapping-generation` (§5b) is HELD BEHIND THIS LANE** by
   explicit instruction. That lane is code-complete at `5174f73` with
   its own fifteen stages green; its sixteenth stage is this defect.
-- **Reproduction is 5/5 in the full sweep and 0/N in every reduction.**
-  All 37 preceding targets plus the suite run green, and other
-  packages' targets run after the failure. That paradox is the shape of
-  the problem, not an aside.
+- **Reproduction is 5/5 in the full sweep; every reduction R1–R10 is
+  green.** Each run is enumerated with exact command, worktree, HEAD,
+  cleanliness and log digest in `docs/probe-sigint-evidence.md` — "0/N"
+  is not a record.
+- **But R9 did NOT run the same binaries as the sweep.** It executed
+  `…-91f51d0b…` / `…-6b4b8223…`; the sweeps executed `…-5d9105cb…` /
+  `…-d4dae4f0…`, and those artifacts are byte-different. Command shape
+  changes Cargo's fingerprint. R9 establishes **same target names and
+  order**, not same binaries. What the evidence supports is an
+  **interaction**: prior targets alone (R9) green, workspace artifacts
+  alone (R10) green, both together (F1–F5) red. `--workspace` selection
+  is **not sufficient by itself and not ruled out** — later-selected
+  packages can affect the build graph before their tests ever run, so
+  "their targets execute after the failure" does not exonerate them.
 - **Ruled out by measurement — do not re-run:** machine load; tmpfs
   starving RAM (settled by experiment, not argument — `/tmp` 21G→1.2G,
   available 27G→45G, still red); leaked daemons; inotify;
   `--workspace` feature unification; any specific preceding test.
-- **Ground truth that DEEPENS rather than explains it.** Neither binary
-  handles signals: `run_gpu` (`src/main.rs:324`) blocks in
-  `command.status()` with no handler, and grepping the whole of
-  `pmacs-gpu/src` for signal machinery returns nothing. The probe polls
-  at 50ms (`pmacs-gpu/src/main.rs:1065`). Two processes with default
-  `SIGINT` disposition should both die at once.
+- **Ground truth, and what it does NOT establish.** Neither binary
+  contains signal-handling code: `run_gpu` (`src/main.rs:324`) blocks
+  in `command.status()` with no handler, and grepping all of
+  `pmacs-gpu/src` for signal machinery returns nothing. The probe's
+  **event loop** wakes at least every 50ms
+  (`pmacs-gpu/src/main.rs:1065`) — but the process is **not** bounded:
+  its stdin reader blocks in `read_to_end` (`:1109`) and, once ready,
+  the loop leaves only when stdin closes (`:1212`).
+  **No claim is made that either process holds the DEFAULT
+  disposition** — absence of handler code cannot establish that, and
+  inherited ignore is the leading hypothesis precisely because the
+  source is silent.
 - **TWO retracted claims, both mine.** (a) "Mechanism located" —
   launcher in `do_wait`, probe child in `futex_do_wait`. (b) The
   retraction of (a), which argued the failing launcher "must live ≥8s".
@@ -319,24 +335,37 @@ from #171 and #215.
   correct. (a) is therefore not refuted by (b); it stays **unproven for
   a different reason** — the suite spawns launchers from five call
   sites, so command line alone cannot attribute one to this test.
-  **Do not key on process age. Key on the PID the test records.**
+  Under `--features crdt` that is **six** sites (`:509, :534, :544,
+  :574, :725, :1097`, all inside `#[cfg(feature = "crdt")] mod crdt`);
+  the other two `--gpu` arguments sit under `#[cfg(not(…))]` and are
+  compiled out. **Do not key on process age. Key on the PID the test
+  records.**
 - **Diagnostics must DISCRIMINATE** blocked delivery, inherited ignore,
   and an escaped process group: snapshots **before and after** the
   signal, for test parent / launcher / probe; **per-thread** `SigBlk`
   from `/proc/<pid>/task/*/status`; `SigPnd`/`ShdPnd`; and
   `PID`/`PPID`/`PGID`/`SID`. A post-failure snapshot cannot prove
   inheritance.
-- **"Neither binary handles signals" does NOT mean default
-  disposition.** `SIG_IGN` is inherited across `fork` and survives
-  `exec`, so an inherited non-default disposition is the leading
-  hypothesis precisely because the source is silent. Revision 1's
-  "two processes with default disposition" claim contradicted its own
-  hypothesis and is withdrawn.
-- **Reduction evidence is enumerated** in the framing §4 with command,
-  run count and log for each of R1–R10 and F1–F5, with the logs
-  preserved off the tmpfs at
-  `/home/jeans/build/pmacs-gate-targets/probe-sigint-evidence/` —
-  `/tmp` is a tmpfs and these were nearly lost to a cleanup mid-lane.
+- **Why that matters:** `SIG_IGN` is inherited across `fork` and
+  survives `exec`, while handlers do not. So a runtime disposition can
+  arrive from the test harness, `cargo`, or the invoking shell without
+  appearing anywhere in the source. Revision 1's "two processes with
+  default disposition" contradicted its own hypothesis and is
+  withdrawn; the assertion no longer appears above it either.
+- **Run provenance is a pushed document**, `docs/probe-sigint-evidence.md`:
+  exact command, worktree, HEAD, cleanliness, artifact family, result
+  and log digest per physical run. Three caveats stated there rather
+  than smoothed over — **R1 and R2 have no preserved log** (revision 2
+  double-counted one log as both R2 and R6), **cleanliness is UNKNOWN**
+  for every pre-manifest run, and **R1–R10 ran in the
+  `panel-mapping-generation` worktree**, not at `main`. Log bodies are
+  machine-local under
+  `/home/jeans/build/pmacs-gate-targets/probe-sigint-evidence/`; `/tmp`
+  is a tmpfs and they were nearly lost to a cleanup mid-lane.
+- **D0 precedes every other diagnostic:** re-run the matrix at `main`
+  under a harness that captures provenance **and the artifact hashes
+  actually executed**, since command shape silently changed the binary
+  once already.
 - **Coherence: journey step 12(a), "closing is clean", IS touched** —
   Ctrl-C teardown of a GPU session is that step, grade movement or not.
   Revision 1 claimed no journey step, reasoning from grade movement,
