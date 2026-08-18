@@ -279,14 +279,18 @@ from #171 and #215.
   **`72da24a`**, worktree
   `/home/jeans/Repos/personal/pmacs-probe-sigint`. Recover with
   `git fetch githubsucks && git checkout gpu-probe-sigint-teardown`.
-- **No PR. Framing revision 1 at `docs/gpu-probe-sigint-framing.md`;
+- **No PR. Framing revision 2 at `docs/gpu-probe-sigint-framing.md`;
   NO IMPLEMENTATION and no fix proposed** — the mechanism is not known
-  yet, and the framing says so rather than guessing.
+  yet, and the framing says so rather than guessing. Revision 1 was
+  rejected on five findings, all upheld.
 - **Why it exists.** `ctrl_c_on_launcher_group_does_not_reach_spawned_daemon`
   fails in gate stage `sweep-crdt` with "child did not exit within 5s".
   **Pre-existing on `main`** — `72da24a` fails it in a clean worktree
-  with its own target dir, 119 binaries green and one red. While it
-  reds, **no branch can present a green sixteen-stage gate, `main`
+  with its own target dir. The correct count is **119 green result
+  summaries and TWO red binaries**: `gpu_initial_target_acceptance`
+  includes the suite as a module, so a reproducing sweep reds twice
+  (log `…-2144707/09-sweep-crdt.log:3097` and `:3131`). While it reds,
+  **no branch can present a green sixteen-stage gate, `main`
   included.**
 - **`panel-mapping-generation` (§5b) is HELD BEHIND THIS LANE** by
   explicit instruction. That lane is code-complete at `5174f73` with
@@ -305,19 +309,43 @@ from #171 and #215.
   `pmacs-gpu/src` for signal machinery returns nothing. The probe polls
   at 50ms (`pmacs-gpu/src/main.rs:1065`). Two processes with default
   `SIGINT` disposition should both die at once.
-- **One retracted claim, kept as a warning.** An earlier "mechanism
-  located" report — launcher in `do_wait`, probe child in
-  `futex_do_wait` — was retracted on its own evidence: the sampler
-  caught 394 launchers with a maximum lifetime of 5s, while the failing
-  instance must live 8s or more. It had described a HEALTHY teardown.
-  The first step is therefore an instrument recording **only**
-  launchers outliving ~6s, with `/proc/<pid>/status` signal masks —
-  `SigIgn` survives `fork` AND `exec`, handlers do not.
+- **TWO retracted claims, both mine.** (a) "Mechanism located" —
+  launcher in `do_wait`, probe child in `futex_do_wait`. (b) The
+  retraction of (a), which argued the failing launcher "must live ≥8s".
+  **(b)'s arithmetic is false**: both reproducing binaries finish in
+  ~5.19s *including* the 5s timeout, so the failing launcher lives
+  about **5.1s** — inside what the sampler saw, and a ">6s" selector
+  would have captured nothing, repeating the error it was meant to
+  correct. (a) is therefore not refuted by (b); it stays **unproven for
+  a different reason** — the suite spawns launchers from five call
+  sites, so command line alone cannot attribute one to this test.
+  **Do not key on process age. Key on the PID the test records.**
+- **Diagnostics must DISCRIMINATE** blocked delivery, inherited ignore,
+  and an escaped process group: snapshots **before and after** the
+  signal, for test parent / launcher / probe; **per-thread** `SigBlk`
+  from `/proc/<pid>/task/*/status`; `SigPnd`/`ShdPnd`; and
+  `PID`/`PPID`/`PGID`/`SID`. A post-failure snapshot cannot prove
+  inheritance.
+- **"Neither binary handles signals" does NOT mean default
+  disposition.** `SIG_IGN` is inherited across `fork` and survives
+  `exec`, so an inherited non-default disposition is the leading
+  hypothesis precisely because the source is silent. Revision 1's
+  "two processes with default disposition" claim contradicted its own
+  hypothesis and is withdrawn.
+- **Reduction evidence is enumerated** in the framing §4 with command,
+  run count and log for each of R1–R10 and F1–F5, with the logs
+  preserved off the tmpfs at
+  `/home/jeans/build/pmacs-gate-targets/probe-sigint-evidence/` —
+  `/tmp` is a tmpfs and these were nearly lost to a cleanup mid-lane.
+- **Coherence: journey step 12(a), "closing is clean", IS touched** —
+  Ctrl-C teardown of a GPU session is that step, grade movement or not.
+  Revision 1 claimed no journey step, reasoning from grade movement,
+  which §20 explicitly warns against.
 - **Gates:** `./scripts/gate --protocol --acceptance
-  gpu_invocation_acceptance` at minimum; acceptance criterion A2
-  requires `sweep-crdt` green **three consecutive times** before the
-  fix is believed, since 1/1 is not evidence for a defect that hid from
-  every reduction.
+  gpu_invocation_acceptance` at minimum; A2 requires `sweep-crdt` green
+  **three consecutive runs on the reviewed fixed head of this branch**
+  — not "on main", which is unobtainable before approval and merge.
+  1/1 is not evidence for a defect that hid from every reduction.
 
 ## `scripts/gate` TMPDIR isolation — PR #240 OPEN
 
