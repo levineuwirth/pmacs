@@ -497,7 +497,7 @@ from #171 and #215.
     `docs/probe-sigint-evidence.md`.
   - **The defect now has its own lane:
     `gpu-probe-sigint-teardown`** (pushed; framing revision 5 at
-    `docs/gpu-probe-sigint-framing.md` (revision 5), run provenance at
+    `docs/gpu-probe-sigint-framing.md` (revision 7, `e2084fb`+), run provenance at
     `docs/probe-sigint-evidence.md`). **§5b is held behind it.** That
     lane's framing supersedes every diagnostic claim below; the entries
     here are kept only as the record of how it was found.
