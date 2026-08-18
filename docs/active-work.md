@@ -474,37 +474,39 @@ from #171 and #215.
   - **RESOLVED ATTRIBUTION: the sweep-crdt red is PRE-EXISTING ON
     MAIN.** The identical `build-crdt && sweep-crdt` pair run at the
     merge base **`72da24a`**, in the primary worktree with its own
-    target dir, fails the SAME test: 119 binaries green, one red,
-    `ctrl_c_on_launcher_group_does_not_reach_spawned_daemon`. **This
-    branch is not implicated**, and no branch can pass this gate stage
-    on this machine until the underlying defect is fixed.
-  - **MECHANISM STILL NOT ESTABLISHED. The "located" claim below was
-    RETRACTED on its own evidence** — read this before trusting it.
-    A process-table sampler ran through a reproducing sweep and caught
-    394 distinct launchers, but the **longest-lived was 5s total**. For
-    this test to fail, a launcher must outlive its SIGINT by 5s, so its
-    total lifetime would be 8s or more. **The failing instance was
-    therefore never captured**, and the `do_wait`/`futex_do_wait` pair
-    below is a healthy launcher from one of the suite's other tests,
-    not the one that blew the deadline. The observation is kept only
-    as a description of the NORMAL teardown shape.
-  - Provisional and unconfirmed, from that sampler:
-    - `pmacs --gpu --socket …` (the launcher) sits in **`do_wait`** for
-      the full 5s — it is waiting on a child, not ignoring the signal;
-    - `pmacs-gpu --headless-managed-probe …` (its child, same process
-      group, so it received the SIGINT too) sits in
-      **`futex_do_wait`** and never exits.
-
-    That is what a HEALTHY teardown looks like; it is not evidence
-    about the failing one. Two facts do survive and constrain the next
-    attempt: `pmacs-gpu` installs **no signal handling whatsoever**
-    (grep for SIGINT/signal_hook/sigaction across `pmacs-gpu/src`
-    returns nothing), so the probe should die on SIGINT's default
-    action; and the probe's main loop is a 50ms `recv_timeout`, so it
-    is never blocked indefinitely. **The next instrument must key on
-    the failing instance specifically** — sample only launchers whose
-    lifetime exceeds ~6s, or have the test itself record the PID and
-    timing — rather than sampling every launcher and hoping.
+    target dir, fails the SAME test,
+    `ctrl_c_on_launcher_group_does_not_reach_spawned_daemon`: **119
+    green result summaries and TWO red binaries** —
+    `gpu_initial_target_acceptance` includes the suite as a module, so a
+    reproducing sweep reds twice (`…-2144707/09-sweep-crdt.log:3097`
+    and `:3131`). **This branch is not implicated**, and no branch can
+    pass this gate stage on this machine until the underlying defect is
+    fixed.
+  - **The defect now has its own lane:
+    `gpu-probe-sigint-teardown`** (pushed; framing revision 3 at
+    `docs/gpu-probe-sigint-framing.md`, run provenance at
+    `docs/probe-sigint-evidence.md`). **§5b is held behind it.** That
+    lane's framing supersedes every diagnostic claim below; the entries
+    here are kept only as the record of how it was found.
+  - **MECHANISM STILL NOT ESTABLISHED — and the RETRACTION below was
+    itself wrong.** Two corrections, in order:
+    - A "mechanism located" claim (launcher in `do_wait`, probe child
+      in `futex_do_wait`) was retracted on the argument that the
+      failing launcher "must live 8s or more" while the sampler's
+      longest-lived was 5s.
+    - **That arithmetic is false.** Both reproducing binaries finish in
+      **~5.19s including the 5s timeout** (`:3097`, `:3131`), so
+      `phase=ready` lands in about a tenth of a second and the failing
+      launcher lives roughly **5.1s** — inside what the sampler
+      observed. A ">6s selector", proposed as the remedy, would have
+      captured **nothing**.
+    - So the "located" claim is **not refuted by that argument**. It
+      stays **unproven for a different reason**: under `--features
+      crdt` the suite spawns root launchers from **six** call sites, so
+      a launcher captured by command line alone cannot be attributed to
+      this test.
+    - **Do not key on process age. Key on the PID the test records**,
+      with snapshots before and after its own `kill`.
   - **Five further explanations were tested and REFUTED.** Recorded so
     nobody re-runs them:
     - *Machine load*: refuted. Red on a quiet machine (load 2.77 at
