@@ -471,6 +471,43 @@ from #171 and #215.
     (2026-08-15, plain `cargo test --lib`, not a gate step). Isolated
     rerun green. Same budget as the occurrence above, now seen in two
     different selectors on one branch in one day.
+  - **RESOLVED ATTRIBUTION: the sweep-crdt red is PRE-EXISTING ON
+    MAIN.** The identical `build-crdt && sweep-crdt` pair run at the
+    merge base **`72da24a`**, in the primary worktree with its own
+    target dir, fails the SAME test: 119 binaries green, one red,
+    `ctrl_c_on_launcher_group_does_not_reach_spawned_daemon`. **This
+    branch is not implicated**, and no branch can pass this gate stage
+    on this machine until the underlying defect is fixed.
+  - **The MECHANISM is unknown, and two plausible explanations were
+    tested and REFUTED.** Recorded so nobody re-runs them:
+    - *Machine load*: refuted. Red on a quiet machine (load 2.77 at
+      launch, foreign workload gone).
+    - *Memory pressure*: refuted, **by correcting my own instrument**.
+      A sampler showed free memory falling to 543 MB and that looked
+      damning — but it recorded `free`, which on Linux is not the
+      meaningful figure. `available` was **27 G**. The 543 MB was
+      reclaimable cache.
+    - *Leaked daemons*: refuted. Peak 58 during the sweep, up only 8
+      from the resting 50, and the green standalone runs already ran
+      at 46-50.
+  - **What the bisect DID establish.** Green in every smaller context
+    tried, and deterministic in the largest: the test alone (x3, 0.15s
+    against its 5s deadline); its whole 15-test suite; a
+    workspace-wide run FILTERED to just this test; the lib binary
+    (2145 tests) followed by the suite; and the three GPU suites in
+    sweep order. Red 4/4 in the full workspace sweep, across two
+    different trees. So it is cumulative across the 37 binaries that
+    precede it, and it is **not** flaky.
+  - **`/tmp` is a 30G tmpfs holding 21G**, almost all stale
+    `levshell-*-target` cargo directories belonging to an unrelated
+    project, 3-4 days old. Recorded as an observation about this
+    machine, **not** as the cause — `available` memory refutes that.
+    Not touched: they are not this project's to delete.
+  - **The earlier signature entry below overstated its case** and is
+    kept only for its measurements. It read the isolation runs as
+    proof of an environmental cause; they establish intermittence at
+    most, and the base-comparison above is what actually settled
+    attribution.
   - **`ctrl_c_on_launcher_group_does_not_reach_spawned_daemon`, a NEW
     signature, red TWICE and reproducibly** (2026-08-16, logs
     `20260816T063330Z` and `20260816T064549Z`, step `09-sweep-crdt`
@@ -551,6 +588,11 @@ from #171 and #215.
     establishing an environmental cause, and no experiment here
     separated sweep contention, foreign load, and a genuine defect in
     the row. Do not record it as environmental until something does.
+  - **The gate cannot pass on this machine for ANY branch**, main
+    included, until the pre-existing sweep-crdt defect is fixed. That
+    is a decision point, not a thing to keep re-running: either the
+    defect gets its own lane, or this lane's readiness bar is restated
+    against a gate that main itself can pass.
   - **Clean evidence is not obtainable on this machine right
   now** — an unrelated `turso` workload
   (`./verify_task_state.sh turso-without-rowid`, target `/opt/target`)
