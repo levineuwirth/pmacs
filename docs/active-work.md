@@ -494,8 +494,8 @@ from #171 and #215.
     enumerated with its own log digest in the teardown lane's
     `docs/probe-sigint-evidence.md`.
   - **The defect now has its own lane:
-    `gpu-probe-sigint-teardown`** (pushed; framing revision 3 at
-    `docs/gpu-probe-sigint-framing.md`, run provenance at
+    `gpu-probe-sigint-teardown`** (pushed; framing revision 5 at
+    `docs/gpu-probe-sigint-framing.md` (revision 5), run provenance at
     `docs/probe-sigint-evidence.md`). **§5b is held behind it.** That
     lane's framing supersedes every diagnostic claim below; the entries
     here are kept only as the record of how it was found.
@@ -559,15 +559,19 @@ from #171 and #215.
     - Note the test exists in **two** binaries: `tests/gpu_initial_
       target_acceptance.rs` includes it as a module, so a reproducing
       sweep fails it twice, at log lines 3083 and 3117.
-  - **What the bisect established, and what it did NOT.** Green in
+  - **What the reductions established, and what they did NOT** — they
+    were never a bisect, since no run isolated a variable. Green in
     every smaller context tried — the test alone (x3, 0.15s against its
     5s deadline); its whole 15-test suite; a workspace-wide run
     FILTERED to just this test; the lib binary (2145 tests) then the
     suite; the three GPU suites in sweep order — and red in every full
     workspace sweep, seven of them across two trees.
     **No cumulative cause follows from that.** The subset runs and the
-    sweeps executed byte-different binaries, so the reductions never
-    made the comparison they appeared to make. What is established is
+    sweeps executed **different Cargo compilations** — differing
+    suffixes, hence differing metadata hashes — so the reductions never
+    made the comparison they appeared to make. (Calling them
+    "byte-different" is withdrawn: the bytes a historical run executed
+    are not knowable now, only the suffixes.) What is established is
     only: reproducible in the full sweep, not reproduced in any subset
     attempted so far.
   - **`/tmp` is a 30G tmpfs holding 21G**, almost all stale
