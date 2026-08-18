@@ -1,6 +1,6 @@
 # GPU launcher / probe SIGINT teardown — framing
 
-Revision 5. Status: **awaiting approval. No implementation.**
+Revision 6. Status: **awaiting approval. No implementation.**
 
 Revisions 1 and 2 were each rejected on five findings. Every correction
 is recorded in place rather than quietly rewritten, because three of
@@ -20,6 +20,10 @@ them were claims this document itself had advanced:
   (manifest); ledgers still carried the falsified R9 conclusions (§11).
   **And a finding that reframes the lane: the failure has a datable
   onset (§4a) and is not long-standing.**
+- r5 → r6: the ancestry argument overreached (§4a) — it shows outcome
+  is not determined by commit alone, and nothing more; residual
+  byte-identity and "artifact family" wording in both ledgers (§11);
+  and three provenance slips (§4, manifest).
 - r4 → r5: the section summaries still carried revision-3 counts and
   groupings (§4); the onset count was 13/1/3, not 14 (§4a); "byte-
   different" overstated what is knowable about historical artifacts
@@ -149,8 +153,8 @@ different Cargo compilations:
 
 | prior targets execute | compilation set | result |
 |---|---|---|
-| yes | `-6b4b8223` (subset selection) | R9 green |
-| no | `-5d9105cb` + `-d4dae4f0` (workspace selection) | R10 green |
+| yes | `-91f51d0b` + `-6b4b8223` (subset selection; `prefix.log:3066`, `:3087`) | R9 green |
+| no | `-5d9105cb` + `-d4dae4f0` (workspace selection; `wsonly.log:3`, `:24`) | R10 green |
 | yes | workspace selection | **F1–F7 red (7)** |
 
 Neither factor alone reproduced it **in these runs**. That is the
@@ -203,14 +207,32 @@ after that run ended at 08:42:01. **Cleanliness was captured for
 neither**, and the tree was under active edit throughout. So the window
 dates a **machine/worktree-state transition**, not two clean revisions.
 
-The evidence in fact argues *against* a source cause: `72da24a` is an
-**ancestor** of `7599661` (verified by `git merge-base --is-ancestor`),
-yet `72da24a` fails today while `7599661` passed on 08-15. No
-source-monotonic cause produces that. Unless clean endpoints say
-otherwise, whatever changed is environmental, cached, or uncommitted.
+One further relationship is worth stating **only for what it shows**:
+`72da24a` is an **ancestor** of `7599661` (verified by
+`git merge-base --is-ancestor`), yet `72da24a` fails today while
+`7599661` passed on 08-15. That establishes exactly one thing —
+**outcome is not determined by commit alone** — because the two
+observations are from different environments at different times.
 
-**This still supersedes the reduction matrix as the lane's first move**
-— but as endpoint reproduction, not as a bisect.
+**Revision 5 drew more from it than it carries, and that is
+withdrawn.** It said a source cause was "positively discouraged", that
+the ancestry "says to expect" equal endpoints, and that "whatever
+changed is environmental, cached, or uncommitted". None of that
+follows. The observation cannot distinguish:
+
+- an environmental change;
+- a source/environment interaction; or
+- a source fix landing before `7599661` and a regression landing before
+  `724b785`.
+
+And an older ancestor outside the interval behaving badly is simply
+**irrelevant** to whether `7599661..724b785` contains a regression: a
+bisect over that interval needs only that the two clean endpoints
+differ *now*.
+
+**This still supersedes the reduction matrix as the lane's first
+move**, as endpoint reproduction — which is a decision procedure, not a
+prediction.
 
 ## 5. Two retracted claims, both mine, kept as warnings
 
@@ -268,11 +290,13 @@ group.
 
 - **D0a — reproduce the onset endpoints CLEANLY** (§4a): `7599661`
   (last observed green) and `724b785` (first observed red), each
-  checked out clean, each in its own isolated target directory. **Only
-  if they differ is a Git bisect justified.** If they agree, the
-  changed state is environmental, cached or uncommitted — which the
-  ancestry argument says to expect — and bisecting source would burn
-  runs proving nothing.
+  checked out clean, each in its own isolated target directory. This is
+  a **decision procedure with no predicted outcome**:
+  - **endpoints differ** → a regression lives in `7599661..724b785`
+    and a Git bisect over that interval is justified;
+  - **endpoints agree** → the difference is not captured by those two
+    commits under current conditions, and the next question is what
+    else changed across the window.
 - **D0b — re-run the §4 matrix with captured provenance**, at `main`,
   recording the artifact hashes actually executed **at run time**.
   Revision 2's strongest claim collapsed because command shape silently

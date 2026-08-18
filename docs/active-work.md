@@ -279,7 +279,7 @@ from #171 and #215.
   **`72da24a`**, worktree
   `/home/jeans/Repos/personal/pmacs-probe-sigint`. Recover with
   `git fetch githubsucks && git checkout gpu-probe-sigint-teardown`.
-- **No PR. Framing revision 5 at `docs/gpu-probe-sigint-framing.md`;
+- **No PR. Framing revision 6 at `docs/gpu-probe-sigint-framing.md`;
   NO IMPLEMENTATION and no fix proposed** — the mechanism is not known
   yet, and the framing says so rather than guessing. Revisions 1, 2 and
   3 were each rejected on findings, all upheld; run provenance lives in
@@ -300,13 +300,13 @@ from #171 and #215.
   R1–R10 is green.** Each run is enumerated with exact command, worktree, HEAD,
   cleanliness and log digest in `docs/probe-sigint-evidence.md` — "0/N"
   is not a record.
-- **But R9 did NOT run the same binaries as the sweep.** It executed
-  `…-91f51d0b…` / `…-6b4b8223…`; the sweeps executed `…-5d9105cb…` /
-  `…-d4dae4f0…`, and those artifacts are byte-different. Command shape
-  changes Cargo's fingerprint. R9 establishes **same target names and
-  order**, not same compilations — and "byte-different" is withdrawn,
-  since the bytes a historical run executed are unknowable now; only
-  the differing Cargo suffixes are. What the evidence is **consistent
+- **But R9 did NOT run the same compilations as the sweep.** It
+  executed `…-91f51d0b…` / `…-6b4b8223…`; the sweeps executed
+  `…-5d9105cb…` / `…-d4dae4f0…`. **Differing Cargo suffixes mean
+  differing metadata hashes — different compilations.** Historical byte
+  identity is **UNKNOWN** and is never claimed: target dirs have been
+  overwritten, so a hash computed today is the current occupant's. R9
+  establishes **same target names and order**, not same compilations. What the evidence is **consistent
   with**, not what it isolates: prior targets alone (R9) green,
   workspace selection alone (R10) green, both together (F1–F7) red.
   That is an observation, not a finding. `--workspace` selection
@@ -318,8 +318,8 @@ from #171 and #215.
   available 27G→45G, still red); leaked daemons; inotify.
 - **NOT ruled out, contrary to earlier entries here:** `--workspace`
   artifact selection, and the preceding tests. R9 appeared to clear
-  them but ran **different binaries**, so the comparison was never
-  made. Both are open.
+  them but ran **different Cargo compilations**, so the comparison was
+  never made. Both are open.
 - **Ground truth, and what it does NOT establish.** Neither binary
   contains signal-handling code: `run_gpu` (`src/main.rs:324`) blocks
   in `command.status()` with no handler, and grepping all of
@@ -360,8 +360,8 @@ from #171 and #215.
   default disposition" contradicted its own hypothesis and is
   withdrawn; the assertion no longer appears above it either.
 - **Run provenance is a pushed document**, `docs/probe-sigint-evidence.md`:
-  exact command, worktree, HEAD, cleanliness, artifact family, result
-  and log digest per physical run. Three caveats stated there rather
+  exact command, worktree, HEAD, cleanliness, the Cargo suffixes
+  executed, result and log digest per physical run. Three caveats stated there rather
   than smoothed over — **R1 and R2 have no preserved log** (revision 2
   double-counted one log as both R2 and R6), **cleanliness is UNKNOWN**
   for every pre-manifest run, and **R1–R10 ran in the
@@ -382,8 +382,13 @@ from #171 and #215.
   08:45:41, after that run ended 08:42:01). **Cleanliness captured for
   neither.** And `72da24a` is an **ancestor** of `7599661` yet fails
   today while `7599661` passed — no source-monotonic cause does that.
-  So D0a reproduces clean endpoints first; a Git bisect is justified
-  only if they differ.
+  The ancestry shows only that **outcome is not determined by commit
+  alone**; it does NOT discriminate an environmental change, a
+  source/environment interaction, or a fix before `7599661` with a
+  regression before `724b785`, and an ancestor outside the interval is
+  irrelevant to whether the interval regressed. D0a is a **decision
+  procedure with no predicted outcome**: endpoints differ → bisect
+  `7599661..724b785`; endpoints agree → ask what else changed.
 - **Red full-sweep count is SEVEN, not five** (F1–F7 in the manifest),
   each with its own log digest; revision 3 said 5/5 while the framing
   separately cited a gate run the manifest never listed.

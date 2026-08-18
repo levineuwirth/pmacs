@@ -82,8 +82,8 @@ except `WT=main`, which uses `…/pmacs-fdccc423`.
 | R6 | `test --features crdt --no-fail-fast --test gpu_font_acceptance --test gpu_initial_target_acceptance --test gpu_invocation_acceptance` | mg | ~`5174f73`–`b72843a` | UNKNOWN | reduction | green, 11+15+15 | `332693a39c73731a` 4569 |
 | R7 | `test --features crdt --no-fail-fast --lib --bins --test acceptance --test ambient_isolation_acceptance --test auto_indent_acceptance --test auto_indent_crdt_acceptance --test auto_pair_acceptance --test auto_pair_crdt_acceptance --test autosave_acceptance --test bottom_panel_stage1_acceptance --test bottom_panel_stage2a_acceptance --test bottom_panel_stage2b_daemon_acceptance --test bottom_panel_stage2b_gpu_acceptance --test bottom_panel_stage2b_protocol_acceptance --test comment_toggle_acceptance --test compile_mode_acceptance --test gpu_invocation_acceptance` | mg | ~`b72843a` | UNKNOWN | `gpu_invocation…-6b4b8223` **only** — R7 does not select `gpu_initial_target` | green | `9e1ebc59ed9f0dd4` 187531 |
 | R8 | `test --features crdt --no-fail-fast --test compile_mode_crdt_acceptance --test completion_popup_acceptance --test config_registry_acceptance --test cua_region_acceptance --test desktop_acceptance --test destination_capture_acceptance --test dired_acceptance --test discovery_acceptance --test discovery_stage2_acceptance --test editops_acceptance --test find_file_acceptance --test folding_acceptance --test folding_stage2_acceptance --test full_grid_resync_acceptance --test gate_script_acceptance --test git_status_stage1_acceptance --test gpu_font_acceptance --test gpu_initial_target_acceptance --test gpu_invocation_acceptance` | mg | ~`b72843a` | UNKNOWN | `-91f51d0b` / `-6b4b8223` per log | green | `8b26ebfcf5f871b4` 28677 |
-| R9 | `test --features crdt --no-fail-fast --lib --bins --test acceptance --test ambient_isolation_acceptance --test auto_indent_acceptance --test auto_indent_crdt_acceptance --test auto_pair_acceptance --test auto_pair_crdt_acceptance --test autosave_acceptance --test bottom_panel_stage1_acceptance --test bottom_panel_stage2a_acceptance --test bottom_panel_stage2b_daemon_acceptance --test bottom_panel_stage2b_gpu_acceptance --test bottom_panel_stage2b_protocol_acceptance --test comment_toggle_acceptance --test compile_mode_acceptance --test compile_mode_crdt_acceptance --test completion_popup_acceptance --test config_registry_acceptance --test cua_region_acceptance --test desktop_acceptance --test destination_capture_acceptance --test dired_acceptance --test discovery_acceptance --test discovery_stage2_acceptance --test editops_acceptance --test find_file_acceptance --test folding_acceptance --test folding_stage2_acceptance --test full_grid_resync_acceptance --test gate_script_acceptance --test git_status_stage1_acceptance --test gpu_font_acceptance --test gpu_initial_target_acceptance --test gpu_invocation_acceptance` | mg | ~`b72843a` | UNKNOWN | **`-91f51d0b` / `-6b4b8223`** (log `:3066`) | green | `b31d98ee2f427eca` 214566 |
-| R10 | `test --workspace --features crdt --no-fail-fast --test gpu_initial_target_acceptance --test gpu_invocation_acceptance -- --skip basedpyright` | mg | ~`b72843a` | UNKNOWN | **`-5d9105cb` AND `-d4dae4f0`** (log `:3`, `:4`) | green | `81b48fd7a0e261dc` 3553 |
+| R9 | `test --features crdt --no-fail-fast --lib --bins --test acceptance --test ambient_isolation_acceptance --test auto_indent_acceptance --test auto_indent_crdt_acceptance --test auto_pair_acceptance --test auto_pair_crdt_acceptance --test autosave_acceptance --test bottom_panel_stage1_acceptance --test bottom_panel_stage2a_acceptance --test bottom_panel_stage2b_daemon_acceptance --test bottom_panel_stage2b_gpu_acceptance --test bottom_panel_stage2b_protocol_acceptance --test comment_toggle_acceptance --test compile_mode_acceptance --test compile_mode_crdt_acceptance --test completion_popup_acceptance --test config_registry_acceptance --test cua_region_acceptance --test desktop_acceptance --test destination_capture_acceptance --test dired_acceptance --test discovery_acceptance --test discovery_stage2_acceptance --test editops_acceptance --test find_file_acceptance --test folding_acceptance --test folding_stage2_acceptance --test full_grid_resync_acceptance --test gate_script_acceptance --test git_status_stage1_acceptance --test gpu_font_acceptance --test gpu_initial_target_acceptance --test gpu_invocation_acceptance` | mg | ~`b72843a` | UNKNOWN | **`-91f51d0b` / `-6b4b8223`** (log `:3066`, `:3087`) | green | `b31d98ee2f427eca` 214566 |
+| R10 | `test --workspace --features crdt --no-fail-fast --test gpu_initial_target_acceptance --test gpu_invocation_acceptance -- --skip basedpyright` | mg | ~`b72843a` | UNKNOWN | **`-5d9105cb` AND `-d4dae4f0`** (log `:3`, `:24`) | green | `81b48fd7a0e261dc` 3553 |
 | F1 | `build --workspace --no-default-features --features luajit,crdt && test --workspace --features crdt --no-fail-fast -- --skip basedpyright` | **main** | `72da24a` | clean (verified `git status --porcelain` empty) | `-5d9105cb` / `-d4dae4f0`; today's occupants `e0578039…` / `00f06aeb…` | **red** | `10b55b8ba8741125` 334446 |
 | F2 | `test --workspace --features crdt --no-fail-fast -- --skip basedpyright` | mg | ~`b72843a` | UNKNOWN | `-5d9105cb` / `-d4dae4f0`; bytes UNKNOWN | **red** | `474f88f0dad581fe` 338555 |
 | F3 | same argv as F2, with a resource sampler running | mg | ~`b72843a` | UNKNOWN | as F2; bytes UNKNOWN | **red** | `7b8519e7300e8bb3` 338555 |
@@ -141,12 +141,15 @@ was captured for **neither**, and the tree was being edited throughout.
 So the window dates a **machine/worktree-state transition**, not two
 clean source revisions.
 
-**A source bisect is in fact positively discouraged by the evidence.**
-`72da24a` is an **ancestor** of `7599661` — verified with
-`git merge-base --is-ancestor` — yet `72da24a` fails today (F1) while
-`7599661` passed on 08-15. A source-monotonic cause cannot produce
-that. Whatever changed is environmental, cached, or uncommitted unless
-proven otherwise.
+One relationship is worth recording **for exactly what it shows**:
+`72da24a` is an **ancestor** of `7599661` (`git merge-base
+--is-ancestor`), yet fails today (F1) while `7599661` passed on 08-15.
+That shows **outcome is not determined by commit alone** — the two
+observations come from different environments at different times — and
+nothing further. It does **not** discriminate an environmental change,
+a source/environment interaction, or a fix before `7599661` followed by
+a regression before `724b785`. An ancestor outside the interval is
+irrelevant to whether the interval contains a regression.
 
 ## D0 — re-run the matrix with captured provenance
 
@@ -165,7 +168,9 @@ log digest. Two constraints learned the hard way:
 - **first, reproduce the two candidate endpoints CLEANLY** —
   `7599661` (last observed green) and `724b785` (first observed red) —
   each checked out clean, each in its **own isolated target
-  directory**. Only if those endpoints differ is a Git bisect
-  justified. If they do not differ, the changed state is environmental,
-  cached or uncommitted, and bisecting source would burn runs proving
-  nothing. The ancestry argument above says to expect the latter.
+  directory**. A decision procedure with **no predicted outcome**:
+  endpoints differ → a regression lives in `7599661..724b785` and a
+  bisect over that interval is justified; endpoints agree → the
+  difference is not captured by those two commits under current
+  conditions, and the question becomes what else changed across the
+  window.
