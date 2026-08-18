@@ -478,21 +478,33 @@ from #171 and #215.
     `ctrl_c_on_launcher_group_does_not_reach_spawned_daemon`. **This
     branch is not implicated**, and no branch can pass this gate stage
     on this machine until the underlying defect is fixed.
-  - **MECHANISM LOCATED, by sampling the process table twice a second
-    through a reproducing sweep.** After the test SIGINTs the
-    launcher's process group:
+  - **MECHANISM STILL NOT ESTABLISHED. The "located" claim below was
+    RETRACTED on its own evidence** — read this before trusting it.
+    A process-table sampler ran through a reproducing sweep and caught
+    394 distinct launchers, but the **longest-lived was 5s total**. For
+    this test to fail, a launcher must outlive its SIGINT by 5s, so its
+    total lifetime would be 8s or more. **The failing instance was
+    therefore never captured**, and the `do_wait`/`futex_do_wait` pair
+    below is a healthy launcher from one of the suite's other tests,
+    not the one that blew the deadline. The observation is kept only
+    as a description of the NORMAL teardown shape.
+  - Provisional and unconfirmed, from that sampler:
     - `pmacs --gpu --socket …` (the launcher) sits in **`do_wait`** for
       the full 5s — it is waiting on a child, not ignoring the signal;
     - `pmacs-gpu --headless-managed-probe …` (its child, same process
       group, so it received the SIGINT too) sits in
       **`futex_do_wait`** and never exits.
 
-    So the deadline is missed because the GPU probe child does not tear
-    down under SIGINT, and the launcher blocks on it. **The next step
-    is the probe's shutdown path**, not the test's timeout — raising
-    the 5s would only hide it. Why the child hangs *only* in a complete
-    sweep is still open; every prior GPU suite in the run has already
-    exercised the adapter by then, which is where to look first.
+    That is what a HEALTHY teardown looks like; it is not evidence
+    about the failing one. Two facts do survive and constrain the next
+    attempt: `pmacs-gpu` installs **no signal handling whatsoever**
+    (grep for SIGINT/signal_hook/sigaction across `pmacs-gpu/src`
+    returns nothing), so the probe should die on SIGINT's default
+    action; and the probe's main loop is a 50ms `recv_timeout`, so it
+    is never blocked indefinitely. **The next instrument must key on
+    the failing instance specifically** — sample only launchers whose
+    lifetime exceeds ~6s, or have the test itself record the PID and
+    timing — rather than sampling every launcher and hoping.
   - **Five further explanations were tested and REFUTED.** Recorded so
     nobody re-runs them:
     - *Machine load*: refuted. Red on a quiet machine (load 2.77 at
