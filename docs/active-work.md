@@ -478,8 +478,23 @@ from #171 and #215.
     `ctrl_c_on_launcher_group_does_not_reach_spawned_daemon`. **This
     branch is not implicated**, and no branch can pass this gate stage
     on this machine until the underlying defect is fixed.
-  - **The MECHANISM is unknown, and two plausible explanations were
-    tested and REFUTED.** Recorded so nobody re-runs them:
+  - **MECHANISM LOCATED, by sampling the process table twice a second
+    through a reproducing sweep.** After the test SIGINTs the
+    launcher's process group:
+    - `pmacs --gpu --socket …` (the launcher) sits in **`do_wait`** for
+      the full 5s — it is waiting on a child, not ignoring the signal;
+    - `pmacs-gpu --headless-managed-probe …` (its child, same process
+      group, so it received the SIGINT too) sits in
+      **`futex_do_wait`** and never exits.
+
+    So the deadline is missed because the GPU probe child does not tear
+    down under SIGINT, and the launcher blocks on it. **The next step
+    is the probe's shutdown path**, not the test's timeout — raising
+    the 5s would only hide it. Why the child hangs *only* in a complete
+    sweep is still open; every prior GPU suite in the run has already
+    exercised the adapter by then, which is where to look first.
+  - **Five further explanations were tested and REFUTED.** Recorded so
+    nobody re-runs them:
     - *Machine load*: refuted. Red on a quiet machine (load 2.77 at
       launch, foreign workload gone).
     - *Memory pressure*: refuted, **by correcting my own instrument**.
@@ -490,6 +505,24 @@ from #171 and #215.
     - *Leaked daemons*: refuted. Peak 58 during the sweep, up only 8
       from the resting 50, and the green standalone runs already ran
       at 46-50.
+    - *tmpfs starving the box*: refuted **by experiment**, not
+      argument. `/tmp` went from 21G used to 1.2G (available memory
+      27G -> 45G) and the sweep stayed red, same test. Note the
+      earlier `available`-based dismissal was itself unsound — tmpfs
+      pages are NOT reclaimable yet still appear in `buff/cache` — so
+      the hypothesis deserved the experiment it eventually got.
+    - *inotify exhaustion*: refuted. 47 instances in use of 1024.
+    - *`--workspace` feature unification*: refuted. The same two
+      targets under `--workspace` are green.
+    - *A specific preceding test*: refuted, and this is the strange
+      one. **All 37 targets that precede it, plus the suite, run
+      green** — same binaries, same order, same tests. Only the
+      complete 119-target sweep reproduces it. Other packages'
+      targets run later still (log lines 4848+), after the failure at
+      3066, so they cannot be implicated either.
+    - Note the test exists in **two** binaries: `tests/gpu_initial_
+      target_acceptance.rs` includes it as a module, so a reproducing
+      sweep fails it twice, at log lines 3083 and 3117.
   - **What the bisect DID establish.** Green in every smaller context
     tried, and deterministic in the largest: the test alone (x3, 0.15s
     against its 5s deadline); its whole 15-test suite; a
