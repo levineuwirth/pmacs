@@ -279,10 +279,11 @@ from #171 and #215.
   **`72da24a`**, worktree
   `/home/jeans/Repos/personal/pmacs-probe-sigint`. Recover with
   `git fetch githubsucks && git checkout gpu-probe-sigint-teardown`.
-- **No PR. Framing revision 2 at `docs/gpu-probe-sigint-framing.md`;
+- **No PR. Framing revision 4 at `docs/gpu-probe-sigint-framing.md`;
   NO IMPLEMENTATION and no fix proposed** — the mechanism is not known
-  yet, and the framing says so rather than guessing. Revision 1 was
-  rejected on five findings, all upheld.
+  yet, and the framing says so rather than guessing. Revisions 1, 2 and
+  3 were each rejected on findings, all upheld; run provenance lives in
+  `docs/probe-sigint-evidence.md`.
 - **Why it exists.** `ctrl_c_on_launcher_group_does_not_reach_spawned_daemon`
   fails in gate stage `sweep-crdt` with "child did not exit within 5s".
   **Pre-existing on `main`** — `72da24a` fails it in a clean worktree
@@ -311,8 +312,11 @@ from #171 and #215.
   "their targets execute after the failure" does not exonerate them.
 - **Ruled out by measurement — do not re-run:** machine load; tmpfs
   starving RAM (settled by experiment, not argument — `/tmp` 21G→1.2G,
-  available 27G→45G, still red); leaked daemons; inotify;
-  `--workspace` feature unification; any specific preceding test.
+  available 27G→45G, still red); leaked daemons; inotify.
+- **NOT ruled out, contrary to earlier entries here:** `--workspace`
+  artifact selection, and the preceding tests. R9 appeared to clear
+  them but ran **different binaries**, so the comparison was never
+  made. Both are open.
 - **Ground truth, and what it does NOT establish.** Neither binary
   contains signal-handling code: `run_gpu` (`src/main.rs:324`) blocks
   in `command.status()` with no handler, and grepping all of
@@ -333,9 +337,9 @@ from #171 and #215.
   about **5.1s** — inside what the sampler saw, and a ">6s" selector
   would have captured nothing, repeating the error it was meant to
   correct. (a) is therefore not refuted by (b); it stays **unproven for
-  a different reason** — the suite spawns launchers from five call
-  sites, so command line alone cannot attribute one to this test.
-  Under `--features crdt` that is **six** sites (`:509, :534, :544,
+  a different reason** — under `--features crdt` the suite spawns root
+  launchers from **six** call sites, so command line alone cannot
+  attribute one to this test. The six (`:509, :534, :544,
   :574, :725, :1097`, all inside `#[cfg(feature = "crdt")] mod crdt`);
   the other two `--gpu` arguments sit under `#[cfg(not(…))]` and are
   compiled out. **Do not key on process age. Key on the PID the test
@@ -362,10 +366,22 @@ from #171 and #215.
   machine-local under
   `/home/jeans/build/pmacs-gate-targets/probe-sigint-evidence/`; `/tmp`
   is a tmpfs and they were nearly lost to a cleanup mid-lane.
-- **D0 precedes every other diagnostic:** re-run the matrix at `main`
-  under a harness that captures provenance **and the artifact hashes
-  actually executed**, since command shape silently changed the binary
-  once already.
+- **THE ONSET IS DATABLE, and it reframes the lane.** `sweep-crdt`
+  appears **17 times** in this target dir's gate logs; `ctrl_c` fails
+  in exactly the **last three** and passed — both copies — before them.
+  Last green `20260815T185708Z`, first red `20260816T063330Z`, no
+  reboot between. The three earlier red sweeps failed on unrelated
+  rows. So "pre-existing on `main`" holds (F1 at `72da24a` reproduces
+  it) but **"always broken" is contradicted**.
+- **Red full-sweep count is SEVEN, not five** (F1–F7 in the manifest),
+  each with its own log digest; revision 3 said 5/5 while the framing
+  separately cited a gate run the manifest never listed.
+- **D0 precedes every other diagnostic**, in two parts: **(a) bisect
+  the onset window** — the sharpest lead the lane has; **(b)** re-run
+  the matrix at `main` under a harness capturing provenance **and the
+  artifact hashes executed at run time**, since command shape silently
+  changed the binary once already and a hash computed later reflects
+  only what occupies that path now.
 - **Coherence: journey step 12(a), "closing is clean", IS touched** —
   Ctrl-C teardown of a GPU session is that step, grade movement or not.
   Revision 1 claimed no journey step, reasoning from grade movement,

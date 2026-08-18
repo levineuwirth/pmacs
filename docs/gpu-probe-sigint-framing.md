@@ -1,6 +1,6 @@
 # GPU launcher / probe SIGINT teardown — framing
 
-Revision 3. Status: **awaiting approval. No implementation.**
+Revision 4. Status: **awaiting approval. No implementation.**
 
 Revisions 1 and 2 were each rejected on five findings. Every correction
 is recorded in place rather than quietly rewritten, because three of
@@ -14,6 +14,12 @@ them were claims this document itself had advanced:
   never blocks indefinitely" (§3); the launcher call-site count (§5);
   reduction provenance, now in `docs/probe-sigint-evidence.md`; and
   ledger corrections that had not been made portable (§11).
+- r3 → r4: the interaction table overstated (§4); the red count was 7,
+  not 5, and abbreviated argv were not argv (manifest); "workspace
+  artifact family" conflated Cargo suffix with byte identity
+  (manifest); ledgers still carried the falsified R9 conclusions (§11).
+  **And a finding that reframes the lane: the failure has a datable
+  onset (§4a) and is not long-standing.**
 
 ## 1. The problem, stated as what is observed
 
@@ -131,8 +137,11 @@ Cargo's target selection changes the fingerprint, so command shape
 changes the executable. R9 therefore establishes **same target names
 and order**, not same binaries.
 
-What the evidence actually supports is an **interaction**, and only
-that:
+What the evidence is **consistent with** is an interaction. It does not
+isolate one, because the three rows differ in more than the two columns
+shown — different source heads, different worktrees, unknown
+cleanliness, and, as above, different bytes behind identical Cargo
+suffixes:
 
 | prior targets execute | workspace artifact family | result |
 |---|---|---|
@@ -140,18 +149,49 @@ that:
 | no | yes | R10 green |
 | yes | yes | **F1–F5 red** |
 
-Neither factor alone reproduces it. So `--workspace` artifact
-selection is **not sufficient by itself** — and, importantly, **not
-ruled out either**, which is how revision 2 phrased it. Later-selected
-packages can influence Cargo's build graph and fingerprints *before*
-their test executables ever run, so "their targets execute after the
-failure at line 3066" does not exonerate them. The same applies to the
-claim that other packages "cannot be implicated": withdrawn.
+Neither factor alone reproduced it **in these runs**. That is the
+whole of the claim. `--workspace` artifact selection is **not
+sufficient by itself and not ruled out**; later-selected packages can
+influence Cargo's build graph and fingerprints *before* their test
+executables run, so "their targets execute after the failure at line
+3066" does not exonerate them — that claim is withdrawn. And since
+§4's own preamble says no historical row should be relied on until D0,
+**this table is a description of what was observed, not a finding**.
+Revision 3 asserted it as an interaction while simultaneously
+disclaiming its inputs, which cannot both be true.
 
 Also refuted, by measurement: machine load (red on a quiet box, load
 2.77); tmpfs starving RAM (**tested by experiment** — `/tmp` 21 G →
 1.2 G, available 27 G → 45 G, still red); leaked daemons (peak 58, +8
 per sweep, green runs already at 46–60); inotify (47 of 1024).
+
+## 4a. The onset is datable — and it reframes the lane
+
+`sweep-crdt` appears **17 times** in this target directory's gate logs.
+`ctrl_c` fails in **exactly the last three**, and passed — both copies,
+`... ok` — in the runs before them.
+
+| window | runs | `ctrl_c` |
+|---|---|---|
+| 08-14 → 08-15 19:57 | 14 (11 green; 3 red on *other* tests) | **passes** wherever the stage ran |
+| 08-16 06:33 `…-1977433` | red, 2 bins | **fails, both copies** |
+| 08-16 06:45 `…-2144707` | red, 2 bins | **fails, both copies** |
+| 08-17 17:25 `…-2375685` | red, 3 bins | **fails, both copies** |
+
+The three earlier red sweeps failed on unrelated rows — protocol and
+version tests, and `composition_overhead_under_ten_percent`. None
+involved `ctrl_c`.
+
+**So the failure is not long-standing.** "Pre-existing on `main`"
+remains true — F1 at `72da24a` reproduces it — but "always broken" was
+never established and is now contradicted. Last green containing it:
+`20260815T185708Z`. First red: `20260816T063330Z`. The machine was not
+rebooted across that boundary.
+
+**This supersedes the reduction matrix as the lane's first move.** A
+test that passed in this stage fourteen times and then failed three
+times running has a change behind it, and identifying that change is
+worth more than further reduction — which, per §4, has isolated nothing.
 
 ## 5. Two retracted claims, both mine, kept as warnings
 
@@ -207,11 +247,14 @@ diagnostic only, and it must **discriminate** the three live candidates:
 blocked delivery, inherited ignore, and an escaped or wrong process
 group.
 
-- **D0 — re-run the §4 matrix with captured provenance**, at `main`,
-  recording the artifact hashes actually executed. Revision 2's
-  strongest claim collapsed because command shape silently changed the
-  binary; no further reduction should be trusted until each row names
-  the executable it ran.
+- **D0a — bisect the onset window** (§4a): `20260815T185708Z` green →
+  `20260816T063330Z` red, no reboot between. This is the sharpest lead
+  the lane has and comes before any further reduction.
+- **D0b — re-run the §4 matrix with captured provenance**, at `main`,
+  recording the artifact hashes actually executed **at run time**.
+  Revision 2's strongest claim collapsed because command shape silently
+  changed the binary; no further reduction should be trusted until each
+  row names the executable it ran.
 - **D1 — key on the PID this test records.** The test already owns
   `launcher.id()`. Capture around its own `kill`, not by scanning for
   age or command line.
@@ -246,10 +289,13 @@ Written now so the fix cannot quietly become "make the test pass".
   unobtainable before this lane is approved, gated and merged, and
   revision 1 stated an impossible precondition. Post-merge
   confirmation on `main` is a follow-up, not a gate on the fix.
-- **A3.** The R9 paradox is explained, or explicitly recorded as
-  unexplained. A fix that greens the sweep without accounting for why
-  every subset passed leaves a gap, and the gap is stated rather than
-  left for the next reader.
+- **A3.** There is no established "R9 paradox" to explain — R9 ran
+  different binaries, so the comparison it appeared to make was never
+  made. What A3 requires instead: **D0 recreates the subset/full
+  comparison under captured provenance**, and whatever it then shows is
+  either explained by the fix or explicitly recorded as unexplained. A
+  fix that greens the sweep without that comparison having been made
+  properly leaves the gap stated, not hidden.
 - **A4.** No deadline raised, no test skipped, retried, or serialised
   to obtain green.
 - **A5.** **Conditional on D4.** If bet 1 holds, this is unconditional:
@@ -292,9 +338,13 @@ when revision 2 was reviewed, and both are closed by this revision:
   processes "should both die at once" and then withdrew that same claim
   further down. The assertion is removed; only the withdrawal and its
   reasoning remain.
-- **`panel-mapping-generation` @ `16cf3a2`** still carried "119
-  binaries green, one red", the ≥8 s arithmetic, the "default action"
-  claim and the ">6 s selector". Pushing `16cf3a2` made the *retraction*
-  portable but not the *correction*. That ledger is corrected on its own
-  branch and pushed, so the held lane no longer transports falsified
-  claims.
+- **`panel-mapping-generation`** carried "119 binaries green, one
+  red", the ≥8 s arithmetic, the "default action" claim and the ">6 s
+  selector"; `779a6bd` corrected those. **It still carried more**,
+  found on re-review: `--workspace` unification "refuted", R9 running
+  the "same binaries", later packages that "cannot be implicated", and
+  a cause "cumulative across the preceding 37 binaries". Revision 3's
+  claim here that the held lane no longer transports falsified claims
+  was **premature**; those are corrected now, and this section should
+  be read as a checklist that has been re-verified rather than an
+  assurance.
