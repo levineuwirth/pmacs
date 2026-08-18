@@ -482,14 +482,16 @@ from #171 and #215.
     and `:3131`). **This branch is not implicated**, and no branch can
     pass this gate stage on this machine until the underlying defect is
     fixed.
-  - **THE ONSET IS DATABLE.** `sweep-crdt` appears 17 times in this
-    target dir's gate logs; the `ctrl_c` failure appears in exactly the
-    **last three**, and the test passed — both copies — inside the
-    stage before them. Last green `20260815T185708Z`, first red
-    `20260816T063330Z`, no reboot between. The three earlier red
-    sweeps failed on unrelated rows. So "pre-existing on `main`" holds,
-    but **"always broken" is contradicted**, and bisecting that window
-    is the sharpest available lead.
+  - **THE ONSET IS DATABLE.** `sweep-crdt` has 17 logs here. Counted
+    per test copy: **13** both copies `... ok`, **1** where neither
+    executed (the stage died compiling `pmacs`, `error[E0308]`), **3**
+    both `FAILED`. Last observed green `20260815T185708Z`, first
+    observed red `20260816T063330Z`; boot began 08-14 09:30, so no
+    reboot between. So "pre-existing on `main`" holds,
+    but **"always broken" is contradicted**. The window is **not yet a
+    bisect target**: cleanliness was captured at neither endpoint, so
+    the lane's first move is to reproduce `7599661` and `724b785`
+    clean, in isolated target dirs, and decide from that.
   - **The red full-sweep count is SEVEN**, not five; each run is
     enumerated with its own log digest in the teardown lane's
     `docs/probe-sigint-evidence.md`.
@@ -544,12 +546,14 @@ from #171 and #215.
     - *A specific preceding test*: **NOT refuted, and the earlier entry
       here was wrong.** It claimed all 37 preceding targets plus the
       suite run green "same binaries, same order, same tests". The
-      binaries were **not** the same: that run executed
+      **compilations** were not the same: that run executed
       `gpu_initial_target_acceptance-91f51d0b` and
       `gpu_invocation_acceptance-6b4b8223`, while the failing sweeps
-      executed `-5d9105cb` and `-d4dae4f0`, which are byte-different.
-      Cargo's target selection changes the fingerprint, so command
-      shape changes the executable. The comparison was never made.
+      executed `-5d9105cb` and `-d4dae4f0`. Differing Cargo suffixes
+      mean differing metadata hashes, so command shape changed the
+      compilation and the comparison was never made. **Historical byte
+      identity is UNKNOWN** and is not claimed — target dirs have been
+      overwritten since.
     - Also withdrawn: that other packages "cannot be implicated"
       because their targets run after the failure. Later-selected
       packages can affect Cargo's build graph and fingerprints
