@@ -482,6 +482,17 @@ from #171 and #215.
     and `:3131`). **This branch is not implicated**, and no branch can
     pass this gate stage on this machine until the underlying defect is
     fixed.
+  - **THE ONSET IS DATABLE.** `sweep-crdt` appears 17 times in this
+    target dir's gate logs; the `ctrl_c` failure appears in exactly the
+    **last three**, and the test passed — both copies — inside the
+    stage before them. Last green `20260815T185708Z`, first red
+    `20260816T063330Z`, no reboot between. The three earlier red
+    sweeps failed on unrelated rows. So "pre-existing on `main`" holds,
+    but **"always broken" is contradicted**, and bisecting that window
+    is the sharpest available lead.
+  - **The red full-sweep count is SEVEN**, not five; each run is
+    enumerated with its own log digest in the teardown lane's
+    `docs/probe-sigint-evidence.md`.
   - **The defect now has its own lane:
     `gpu-probe-sigint-teardown`** (pushed; framing revision 3 at
     `docs/gpu-probe-sigint-framing.md`, run provenance at
@@ -526,25 +537,39 @@ from #171 and #215.
       pages are NOT reclaimable yet still appear in `buff/cache` — so
       the hypothesis deserved the experiment it eventually got.
     - *inotify exhaustion*: refuted. 47 instances in use of 1024.
-    - *`--workspace` feature unification*: refuted. The same two
-      targets under `--workspace` are green.
-    - *A specific preceding test*: refuted, and this is the strange
-      one. **All 37 targets that precede it, plus the suite, run
-      green** — same binaries, same order, same tests. Only the
-      complete 119-target sweep reproduces it. Other packages'
-      targets run later still (log lines 4848+), after the failure at
-      3066, so they cannot be implicated either.
+    - *`--workspace` artifact selection*: **NOT refuted.** Two targets
+      under `--workspace` are green, and the preceding targets without
+      `--workspace` are green, but neither run isolates the factor —
+      see below.
+    - *A specific preceding test*: **NOT refuted, and the earlier entry
+      here was wrong.** It claimed all 37 preceding targets plus the
+      suite run green "same binaries, same order, same tests". The
+      binaries were **not** the same: that run executed
+      `gpu_initial_target_acceptance-91f51d0b` and
+      `gpu_invocation_acceptance-6b4b8223`, while the failing sweeps
+      executed `-5d9105cb` and `-d4dae4f0`, which are byte-different.
+      Cargo's target selection changes the fingerprint, so command
+      shape changes the executable. The comparison was never made.
+    - Also withdrawn: that other packages "cannot be implicated"
+      because their targets run after the failure. Later-selected
+      packages can affect Cargo's build graph and fingerprints
+      **before** their tests execute.
+    - Also withdrawn: that the cause is "cumulative across the
+      preceding 37 binaries". Nothing established that.
     - Note the test exists in **two** binaries: `tests/gpu_initial_
       target_acceptance.rs` includes it as a module, so a reproducing
       sweep fails it twice, at log lines 3083 and 3117.
-  - **What the bisect DID establish.** Green in every smaller context
-    tried, and deterministic in the largest: the test alone (x3, 0.15s
-    against its 5s deadline); its whole 15-test suite; a
-    workspace-wide run FILTERED to just this test; the lib binary
-    (2145 tests) followed by the suite; and the three GPU suites in
-    sweep order. Red 4/4 in the full workspace sweep, across two
-    different trees. So it is cumulative across the 37 binaries that
-    precede it, and it is **not** flaky.
+  - **What the bisect established, and what it did NOT.** Green in
+    every smaller context tried — the test alone (x3, 0.15s against its
+    5s deadline); its whole 15-test suite; a workspace-wide run
+    FILTERED to just this test; the lib binary (2145 tests) then the
+    suite; the three GPU suites in sweep order — and red in every full
+    workspace sweep, seven of them across two trees.
+    **No cumulative cause follows from that.** The subset runs and the
+    sweeps executed byte-different binaries, so the reductions never
+    made the comparison they appeared to make. What is established is
+    only: reproducible in the full sweep, not reproduced in any subset
+    attempted so far.
   - **`/tmp` is a 30G tmpfs holding 21G**, almost all stale
     `levshell-*-target` cargo directories belonging to an unrelated
     project, 3-4 days old. Recorded as an observation about this
