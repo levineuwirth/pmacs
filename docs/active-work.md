@@ -279,7 +279,7 @@ from #171 and #215.
   **`72da24a`**, worktree
   `/home/jeans/Repos/personal/pmacs-probe-sigint`. Recover with
   `git fetch githubsucks && git checkout gpu-probe-sigint-teardown`.
-- **No PR. Framing revision 6 at `docs/gpu-probe-sigint-framing.md`;
+- **No PR. Framing revision 7 at `docs/gpu-probe-sigint-framing.md`;
   NO IMPLEMENTATION and no fix proposed** — the mechanism is not known
   yet, and the framing says so rather than guessing. Revisions 1, 2 and
   3 were each rejected on findings, all upheld; run provenance lives in
@@ -320,10 +320,17 @@ from #171 and #215.
   artifact selection, and the preceding tests. R9 appeared to clear
   them but ran **different Cargo compilations**, so the comparison was
   never made. Both are open.
-- **Ground truth, and what it does NOT establish.** Neither binary
-  contains signal-handling code: `run_gpu` (`src/main.rs:324`) blocks
+- **Ground truth, and what it does NOT establish.** `run_gpu`'s own
+  path installs no handler: `run_gpu` (`src/main.rs:324`) blocks
   in `command.status()` with no handler, and grepping all of
-  `pmacs-gpu/src` for signal machinery returns nothing. The probe's
+  `pmacs-gpu/src` for signal machinery returns nothing. **But the
+  `pmacs` binary DOES contain signal machinery** —
+  `install_signal_handlers` (`src/daemon.rs:628`) registers `SIGINT`
+  and `SIGTERM`; it is simply not on `run_gpu`'s path. A source grep
+  also cannot exclude a runtime or dependency installing a disposition.
+  So the established fact is only: **no explicit installation on
+  `run_gpu`'s path**, and "whatever disposition they hold was
+  inherited" stays a **hypothesis** until D2 measures it. The probe's
   **event loop** wakes at least every 50ms
   (`pmacs-gpu/src/main.rs:1065`) — but the process is **not** bounded:
   its stdin reader blocks in `read_to_end` (`:1109`) and, once ready,
@@ -380,15 +387,22 @@ from #171 and #215.
   at `7599661` during the last green (`3c06176` landed 40s after it
   finished) and `724b785` during the first red (`5174f73` landed
   08:45:41, after that run ended 08:42:01). **Cleanliness captured for
-  neither.** And `72da24a` is an **ancestor** of `7599661` yet fails
-  today while `7599661` passed — no source-monotonic cause does that.
-  The ancestry shows only that **outcome is not determined by commit
-  alone**; it does NOT discriminate an environmental change, a
-  source/environment interaction, or a fix before `7599661` with a
-  regression before `724b785`, and an ancestor outside the interval is
-  irrelevant to whether the interval regressed. D0a is a **decision
-  procedure with no predicted outcome**: endpoints differ → bisect
-  `7599661..724b785`; endpoints agree → ask what else changed.
+  neither.** `72da24a` is an **ancestor** of `7599661` yet fails today
+  while `7599661` passed on 08-15 — but those two observations differ
+  in commit AND environment AND time, so they are **non-comparable and
+  support no causal conclusion of any kind**. Earlier wordings here
+  ("no source-monotonic cause does that", "outcome is not determined by
+  commit alone") are both **withdrawn**: different commits can
+  deterministically produce different outcomes, so the pair says
+  nothing about determinism either.
+- **D0a is a decision procedure with no predicted outcome**, and one
+  run per endpoint decides nothing for a context-sensitive failure.
+  **N = 5 full `sweep-crdt` runs per endpoint, interleaved A/B/A/B**,
+  under the same captured conditions as D0b plus `uptime`, `free`,
+  `/tmp` usage and leaked-daemon count. A bisect of
+  `7599661..724b785` is permitted **only on a clean split** — all N red
+  one side, all N green the other. A mixed result means the failure is
+  intermittent under fixed source and **no bisect is justified**.
 - **Red full-sweep count is SEVEN, not five** (F1–F7 in the manifest),
   each with its own log digest; revision 3 said 5/5 while the framing
   separately cited a gate run the manifest never listed.

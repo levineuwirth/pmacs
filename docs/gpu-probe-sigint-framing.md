@@ -1,6 +1,6 @@
 # GPU launcher / probe SIGINT teardown — framing
 
-Revision 6. Status: **awaiting approval. No implementation.**
+Revision 7. Status: **awaiting approval. No implementation.**
 
 Revisions 1 and 2 were each rejected on five findings. Every correction
 is recorded in place rather than quietly rewritten, because three of
@@ -20,6 +20,13 @@ them were claims this document itself had advanced:
   (manifest); ledgers still carried the falsified R9 conclusions (§11).
   **And a finding that reframes the lane: the failure has a datable
   onset (§4a) and is not long-standing.**
+- r6 → r7: the ancestry supports **no** causal statement at all — the
+  observations are non-comparable, and even "outcome is not determined
+  by commit alone" is withdrawn (§4a); D0a was not yet a valid decision
+  procedure
+  (§7); "neither binary contains signal-handling code" is false — the
+  `pmacs` binary registers SIGINT in daemon mode (§3); residual
+  artifact wording (§4, manifest).
 - r5 → r6: the ancestry argument overreached (§4a) — it shows outcome
   is not determined by commit alone, and nothing more; residual
   byte-identity and "artifact family" wording in both ledgers (§11);
@@ -69,11 +76,17 @@ stages green and is held behind this lane by explicit instruction.
 
 ## 3. Ground truth (cited), and what it does *not* establish
 
-- **Neither binary contains signal-handling code.** `run_gpu`
+- **`run_gpu`'s own path installs no handler.** It
   (`src/main.rs:324`) blocks in `command.status()` (`:363`) — a plain
-  `waitpid` — with no handler installed. Grepping
+  `waitpid` — with nothing installed along the way. Grepping
   `SIGINT|signal_hook|sigaction|ctrlc|set_handler|pthread_sigmask|sigprocmask`
   across `pmacs-gpu/src` returns nothing.
+  **Revision 6 said "neither binary contains signal-handling code";
+  that is false.** The `pmacs` binary *does* — `install_signal_handlers`
+  (`src/daemon.rs:628`) registers `SIGINT` and `SIGTERM` — it simply is
+  not on `run_gpu`'s path. And a grep of project sources cannot exclude
+  a runtime or dependency installing a disposition. So the established
+  fact is narrow: **no explicit installation on `run_gpu`'s path**.
 - **The probe's event loop wakes at least every 50 ms.**
   `run_headless_managed_probe` (`pmacs-gpu/src/main.rs:1065`) loops on
   `event_rx.recv_timeout(Duration::from_millis(50))`. **Revision 2 said
@@ -95,16 +108,18 @@ nothing about runtime *disposition*: `SIG_IGN` is inherited across
 `fork` **and** survives `exec`, so either process can hold a
 non-default disposition it never installed — from the test harness,
 from `cargo`, or from the invoking shell. Inherited ignore is a live
-candidate precisely because the source is silent. What the source
-establishes is narrower: **neither binary sets a disposition itself**,
-so whatever disposition they hold at runtime was inherited, and that is
-measurable rather than arguable.
+candidate precisely because `run_gpu`'s path is silent. But **"whatever
+disposition they hold was inherited" is a hypothesis, not a finding** —
+revision 6 stated it as established, which it is not, since neither a
+source grep nor an absent call proves what the runtime disposition is.
+D2 measures it. Until then it is one candidate among the three D1/D2
+are built to separate.
 
 ## 4. Reductions attempted
 
 **Full provenance lives in `docs/probe-sigint-evidence.md`**, which is
 pushed with this branch: exact command, worktree, HEAD, cleanliness,
-the artifact family actually executed, result, and log digest for every
+the Cargo suffixes actually executed, result, and log digest for every
 physical run. Log bodies stay machine-local under
 `/home/jeans/build/pmacs-gate-targets/probe-sigint-evidence/` — `/tmp`
 is a tmpfs and they were nearly lost to a cleanup mid-lane.
@@ -119,7 +134,7 @@ worktree**, not at `main`. `D0` re-runs the matrix under a harness that
 captures all of it, at `main`, before any row here is relied on.
 
 All rows carry `--features crdt`. Full argv, worktree, HEAD,
-cleanliness and artifact family per run: `docs/probe-sigint-evidence.md`.
+cleanliness and Cargo suffixes per run: `docs/probe-sigint-evidence.md`.
 
 | # | reduction (after `cargo test`) | runs | result | log |
 |---|---|---|---|---|
@@ -131,8 +146,8 @@ cleanliness and artifact family per run: `docs/probe-sigint-evidence.md`.
 | R6 | `--test gpu_font_acceptance --test gpu_initial_target_acceptance --test gpu_invocation_acceptance` | 1 | green | `gpu3.log` |
 | R7 | `--lib --bins` + `--test`×14 (targets 6–19) + the suite | 1 | green | `half1.log` |
 | R8 | `--test`×18 (targets 20–37) + the suite | 1 | green | `half2.log` |
-| R9 | `--lib --bins` + `--test`×32 (targets 6–37) + the suite | 1 | green (**reduction artifacts**) | `prefix.log` |
-| R10 | `--workspace ... --test gpu_initial_target_acceptance --test gpu_invocation_acceptance` | 1 | green (**workspace artifacts**) | `wsonly.log` |
+| R9 | `--lib --bins` + `--test`×32 (targets 6–37) + the suite | 1 | green (`-91f51d0b`, `-6b4b8223`) | `prefix.log` |
+| R10 | `--workspace ... --test gpu_initial_target_acceptance --test gpu_invocation_acceptance` | 1 | green (`-5d9105cb`, `-d4dae4f0`) | `wsonly.log` |
 | F1–F7 | full `--workspace --no-fail-fast -- --skip basedpyright`, plus three gate `sweep-crdt` stages | **7** | **red, 7/7** | `base-sweep.log` (at `72da24a`), `postclean.log`, `sweep-inst.log`, `sweep-diag.log`, gates `…-1977433`, `…-2144707`, `…-2375685` |
 
 **Correction to revision 2: R9 did not run the same compilations.** It
@@ -153,9 +168,9 @@ different Cargo compilations:
 
 | prior targets execute | compilation set | result |
 |---|---|---|
-| yes | `-91f51d0b` + `-6b4b8223` (subset selection; `prefix.log:3066`, `:3087`) | R9 green |
-| no | `-5d9105cb` + `-d4dae4f0` (workspace selection; `wsonly.log:3`, `:24`) | R10 green |
-| yes | workspace selection | **F1–F7 red (7)** |
+| yes | `-91f51d0b` + `-6b4b8223` (`prefix.log:3066`, `:3087`) | R9 green |
+| no | `-5d9105cb` + `-d4dae4f0` (`wsonly.log:3`, `:24`) | R10 green |
+| yes | `-5d9105cb` + `-d4dae4f0`, all seven | **F1–F7 red (7)** |
 
 Neither factor alone reproduced it **in these runs**. That is the
 whole of the claim. `--workspace` artifact selection is **not
@@ -207,18 +222,25 @@ after that run ended at 08:42:01. **Cleanliness was captured for
 neither**, and the tree was under active edit throughout. So the window
 dates a **machine/worktree-state transition**, not two clean revisions.
 
-One further relationship is worth stating **only for what it shows**:
-`72da24a` is an **ancestor** of `7599661` (verified by
-`git merge-base --is-ancestor`), yet `72da24a` fails today while
-`7599661` passed on 08-15. That establishes exactly one thing —
-**outcome is not determined by commit alone** — because the two
-observations are from different environments at different times.
+One further relationship is worth recording **only to say what it
+cannot support**: `72da24a` is an **ancestor** of `7599661` (verified
+by `git merge-base --is-ancestor`), yet `72da24a` fails today while
+`7599661` passed on 08-15. **These two observations are
+non-comparable** — they differ in commit *and* in environment *and* in
+time — so **no causal conclusion of any kind may be drawn from the
+pair**.
 
-**Revision 5 drew more from it than it carries, and that is
-withdrawn.** It said a source cause was "positively discouraged", that
-the ancestry "says to expect" equal endpoints, and that "whatever
-changed is environmental, cached, or uncommitted". None of that
-follows. The observation cannot distinguish:
+Revision 6 read it as "outcome is not determined by commit alone".
+**That is withdrawn too**: different commits can deterministically
+produce different outcomes, and this document's own fix-then-regression
+scenario is an example. The pair supports nothing about determinism
+either way.
+
+**Revision 5 drew still more from it.** It said a source cause was
+"positively discouraged", that the ancestry "says to expect" equal
+endpoints, and that "whatever changed is environmental, cached, or
+uncommitted". None of that follows either. Nothing in the pair
+distinguishes:
 
 - an environmental change;
 - a source/environment interaction; or
@@ -291,12 +313,26 @@ group.
 - **D0a — reproduce the onset endpoints CLEANLY** (§4a): `7599661`
   (last observed green) and `724b785` (first observed red), each
   checked out clean, each in its own isolated target directory. This is
-  a **decision procedure with no predicted outcome**:
-  - **endpoints differ** → a regression lives in `7599661..724b785`
-    and a Git bisect over that interval is justified;
-  - **endpoints agree** → the difference is not captured by those two
-    commits under current conditions, and the next question is what
-    else changed across the window.
+  a **decision procedure with no predicted outcome**. One run per
+  endpoint decides nothing — this failure is context-sensitive by
+  construction, appearing only in the full sweep — so the procedure is
+  specified rather than left to judgement:
+  - **N = 5 full `sweep-crdt` runs per endpoint**, since the observed
+    failure rate in the reproducing configuration is 7/7 and the
+    passing configuration 13/13; anything less cannot separate a real
+    difference from the intermittency that has not yet been excluded.
+  - **Interleaved**, alternating endpoints A/B/A/B…, so any drift in
+    machine state across the session hits both arms equally instead of
+    landing entirely on whichever ran second.
+  - **Identical captured conditions per run**: same harness as D0b —
+    argv, worktree, `git rev-parse HEAD`, `git status --porcelain`
+    emptiness, the Cargo suffixes executed, result, log digest — plus
+    the machine facts that have already misled this lane once
+    (`uptime`, `free`, `/tmp` usage, leaked-daemon count).
+  - **Permitting a bisect requires a clean split**: all N of one
+    endpoint red and all N of the other green. A mixed result means the
+    failure is intermittent under fixed source, and **no bisect is
+    justified at all** — that outcome sends the lane back to D1/D2.
 - **D0b — re-run the §4 matrix with captured provenance**, at `main`,
   recording the artifact hashes actually executed **at run time**.
   Revision 2's strongest claim collapsed because command shape silently
@@ -337,8 +373,8 @@ Written now so the fix cannot quietly become "make the test pass".
   revision 1 stated an impossible precondition. Post-merge
   confirmation on `main` is a follow-up, not a gate on the fix.
 - **A3.** There is no established "R9 paradox" to explain — R9 ran
-  different binaries, so the comparison it appeared to make was never
-  made. What A3 requires instead: **D0 recreates the subset/full
+  different Cargo compilations, so the comparison it appeared to make
+  was never made. What A3 requires instead: **D0 recreates the subset/full
   comparison under captured provenance**, and whatever it then shows is
   either explained by the fix or explicitly recorded as unexplained. A
   fix that greens the sweep without that comparison having been made
