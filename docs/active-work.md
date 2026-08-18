@@ -279,7 +279,7 @@ from #171 and #215.
   **`72da24a`**, worktree
   `/home/jeans/Repos/personal/pmacs-probe-sigint`. Recover with
   `git fetch githubsucks && git checkout gpu-probe-sigint-teardown`.
-- **No PR. Framing revision 4 at `docs/gpu-probe-sigint-framing.md`;
+- **No PR. Framing revision 5 at `docs/gpu-probe-sigint-framing.md`;
   NO IMPLEMENTATION and no fix proposed** — the mechanism is not known
   yet, and the framing says so rather than guessing. Revisions 1, 2 and
   3 were each rejected on findings, all upheld; run provenance lives in
@@ -296,17 +296,20 @@ from #171 and #215.
 - **`panel-mapping-generation` (§5b) is HELD BEHIND THIS LANE** by
   explicit instruction. That lane is code-complete at `5174f73` with
   its own fifteen stages green; its sixteenth stage is this defect.
-- **Reproduction is 5/5 in the full sweep; every reduction R1–R10 is
-  green.** Each run is enumerated with exact command, worktree, HEAD,
+- **Reproduction is 7/7 across full sweeps (F1–F7); every reduction
+  R1–R10 is green.** Each run is enumerated with exact command, worktree, HEAD,
   cleanliness and log digest in `docs/probe-sigint-evidence.md` — "0/N"
   is not a record.
 - **But R9 did NOT run the same binaries as the sweep.** It executed
   `…-91f51d0b…` / `…-6b4b8223…`; the sweeps executed `…-5d9105cb…` /
   `…-d4dae4f0…`, and those artifacts are byte-different. Command shape
   changes Cargo's fingerprint. R9 establishes **same target names and
-  order**, not same binaries. What the evidence supports is an
-  **interaction**: prior targets alone (R9) green, workspace artifacts
-  alone (R10) green, both together (F1–F5) red. `--workspace` selection
+  order**, not same compilations — and "byte-different" is withdrawn,
+  since the bytes a historical run executed are unknowable now; only
+  the differing Cargo suffixes are. What the evidence is **consistent
+  with**, not what it isolates: prior targets alone (R9) green,
+  workspace selection alone (R10) green, both together (F1–F7) red.
+  That is an observation, not a finding. `--workspace` selection
   is **not sufficient by itself and not ruled out** — later-selected
   packages can affect the build graph before their tests ever run, so
   "their targets execute after the failure" does not exonerate them.
@@ -367,17 +370,26 @@ from #171 and #215.
   `/home/jeans/build/pmacs-gate-targets/probe-sigint-evidence/`; `/tmp`
   is a tmpfs and they were nearly lost to a cleanup mid-lane.
 - **THE ONSET IS DATABLE, and it reframes the lane.** `sweep-crdt`
-  appears **17 times** in this target dir's gate logs; `ctrl_c` fails
-  in exactly the **last three** and passed — both copies — before them.
-  Last green `20260815T185708Z`, first red `20260816T063330Z`, no
-  reboot between. The three earlier red sweeps failed on unrelated
-  rows. So "pre-existing on `main`" holds (F1 at `72da24a` reproduces
-  it) but **"always broken" is contradicted**.
+  has **17** logs here. Counted per test copy: **13** with both copies
+  `... ok`, **1** where neither executed (stage died compiling `pmacs`,
+  `error[E0308]`, `…-708693`), **3** with both `FAILED`. Last observed
+  green `20260815T185708Z`, first observed red `20260816T063330Z`; boot
+  began 08-14 09:30, so no reboot between. "Pre-existing on `main`"
+  holds (F1 at `72da24a`) but **"always broken" is contradicted**.
+- **The onset is NOT a source boundary.** Reflog/commit times put HEAD
+  at `7599661` during the last green (`3c06176` landed 40s after it
+  finished) and `724b785` during the first red (`5174f73` landed
+  08:45:41, after that run ended 08:42:01). **Cleanliness captured for
+  neither.** And `72da24a` is an **ancestor** of `7599661` yet fails
+  today while `7599661` passed — no source-monotonic cause does that.
+  So D0a reproduces clean endpoints first; a Git bisect is justified
+  only if they differ.
 - **Red full-sweep count is SEVEN, not five** (F1–F7 in the manifest),
   each with its own log digest; revision 3 said 5/5 while the framing
   separately cited a gate run the manifest never listed.
-- **D0 precedes every other diagnostic**, in two parts: **(a) bisect
-  the onset window** — the sharpest lead the lane has; **(b)** re-run
+- **D0 precedes every other diagnostic**, in two parts: **(a)
+  reproduce the onset endpoints `7599661` and `724b785` clean, in
+  isolated target dirs** — not a bisect until they differ; **(b)** re-run
   the matrix at `main` under a harness capturing provenance **and the
   artifact hashes executed at run time**, since command shape silently
   changed the binary once already and a hash computed later reflects

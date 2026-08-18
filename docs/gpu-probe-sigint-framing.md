@@ -1,6 +1,6 @@
 # GPU launcher / probe SIGINT teardown — framing
 
-Revision 4. Status: **awaiting approval. No implementation.**
+Revision 5. Status: **awaiting approval. No implementation.**
 
 Revisions 1 and 2 were each rejected on five findings. Every correction
 is recorded in place rather than quietly rewritten, because three of
@@ -20,6 +20,10 @@ them were claims this document itself had advanced:
   (manifest); ledgers still carried the falsified R9 conclusions (§11).
   **And a finding that reframes the lane: the failure has a datable
   onset (§4a) and is not long-standing.**
+- r4 → r5: the section summaries still carried revision-3 counts and
+  groupings (§4); the onset count was 13/1/3, not 14 (§4a); "byte-
+  different" overstated what is knowable about historical artifacts
+  (§4, manifest); and **the onset is not a source boundary** (§4a).
 
 ## 1. The problem, stated as what is observed
 
@@ -125,29 +129,29 @@ cleanliness and artifact family per run: `docs/probe-sigint-evidence.md`.
 | R8 | `--test`×18 (targets 20–37) + the suite | 1 | green | `half2.log` |
 | R9 | `--lib --bins` + `--test`×32 (targets 6–37) + the suite | 1 | green (**reduction artifacts**) | `prefix.log` |
 | R10 | `--workspace ... --test gpu_initial_target_acceptance --test gpu_invocation_acceptance` | 1 | green (**workspace artifacts**) | `wsonly.log` |
-| F1–F5 | full `--workspace --no-fail-fast -- --skip basedpyright` | 5 | **red, 5/5** | `base-sweep.log` (at `72da24a`), `postclean.log`, `sweep-inst.log`, `sweep-diag.log`, gate `…-2144707` |
+| F1–F7 | full `--workspace --no-fail-fast -- --skip basedpyright`, plus three gate `sweep-crdt` stages | **7** | **red, 7/7** | `base-sweep.log` (at `72da24a`), `postclean.log`, `sweep-inst.log`, `sweep-diag.log`, gates `…-1977433`, `…-2144707`, `…-2375685` |
 
-**Correction to revision 2: R9 did not run the same binaries.** It
-executed `gpu_initial_target_acceptance-91f51d0b5303ff9f` and
-`gpu_invocation_acceptance-6b4b8223dea45247`; the failing sweeps
-executed `-5d9105cb7047aab8` and `-d4dae4f01bcdef62`. Those artifacts
-are **byte-different** (sha256/16 `36912fa2…` vs `1b3cc86c…`, and
-`858d7148…` vs `ede0c07d…`; see `docs/probe-sigint-evidence.md`).
-Cargo's target selection changes the fingerprint, so command shape
-changes the executable. R9 therefore establishes **same target names
-and order**, not same binaries.
+**Correction to revision 2: R9 did not run the same compilations.** It
+executed `gpu_invocation_acceptance-6b4b8223dea45247`; the failing
+sweeps executed `-d4dae4f01bcdef62`. **Differing Cargo suffixes mean
+Cargo computed different metadata hashes — different compilations.**
+Revision 4 went further and called them "byte-different"; that is
+**withdrawn**, because the bytes a historical run executed are not
+knowable now — target directories have been overwritten, and a hash
+computed today is the hash of the current occupant. The weaker claim is
+sufficient: R9 establishes **same target names and order**, not same
+binaries.
 
 What the evidence is **consistent with** is an interaction. It does not
-isolate one, because the three rows differ in more than the two columns
-shown — different source heads, different worktrees, unknown
-cleanliness, and, as above, different bytes behind identical Cargo
-suffixes:
+isolate one, because the rows differ in more than the two columns shown
+— different source heads, different worktrees, unknown cleanliness, and
+different Cargo compilations:
 
-| prior targets execute | workspace artifact family | result |
+| prior targets execute | compilation set | result |
 |---|---|---|
-| yes | no | R9 green |
-| no | yes | R10 green |
-| yes | yes | **F1–F5 red** |
+| yes | `-6b4b8223` (subset selection) | R9 green |
+| no | `-5d9105cb` + `-d4dae4f0` (workspace selection) | R10 green |
+| yes | workspace selection | **F1–F7 red (7)** |
 
 Neither factor alone reproduced it **in these runs**. That is the
 whole of the claim. `--workspace` artifact selection is **not
@@ -171,16 +175,19 @@ per sweep, green runs already at 46–60); inotify (47 of 1024).
 `ctrl_c` fails in **exactly the last three**, and passed — both copies,
 `... ok` — in the runs before them.
 
-| window | runs | `ctrl_c` |
-|---|---|---|
-| 08-14 → 08-15 19:57 | 14 (11 green; 3 red on *other* tests) | **passes** wherever the stage ran |
-| 08-16 06:33 `…-1977433` | red, 2 bins | **fails, both copies** |
-| 08-16 06:45 `…-2144707` | red, 2 bins | **fails, both copies** |
-| 08-17 17:25 `…-2375685` | red, 3 bins | **fails, both copies** |
+Counted **per test copy** across the 17 `sweep-crdt` logs:
 
-The three earlier red sweeps failed on unrelated rows — protocol and
-version tests, and `composition_overhead_under_ten_percent`. None
-involved `ctrl_c`.
+| outcome | runs |
+|---|---|
+| both copies `... ok` | **13** |
+| **neither copy executed** — stage died compiling `pmacs` (`error[E0308]`), `…-708693` | **1** |
+| both copies `FAILED` | **3** (`…-1977433`, `…-2144707`, `…-2375685`) |
+
+Revision 4 said "14 runs, 11 green, 3 red on other tests" and that the
+earlier reds failed on unrelated tests. **Both wrong.** The count is
+13 / 1 / 3, and one earlier non-passing run is a **compile failure that
+never reached either copy**. The two genuinely red-on-other-tests
+sweeps did execute `ctrl_c`, and it passed.
 
 **So the failure is not long-standing.** "Pre-existing on `main`"
 remains true — F1 at `72da24a` reproduces it — but "always broken" was
@@ -188,10 +195,22 @@ never established and is now contradicted. Last green containing it:
 `20260815T185708Z`. First red: `20260816T063330Z`. The machine was not
 rebooted across that boundary.
 
-**This supersedes the reduction matrix as the lane's first move.** A
-test that passed in this stage fourteen times and then failed three
-times running has a change behind it, and identifying that change is
-worth more than further reduction — which, per §4, has isolated nothing.
+**But the onset is NOT a source boundary, and a Git bisect is not yet
+justified.** Reflog and commit times put HEAD at `7599661` during the
+last green — `3c06176` was committed 40 s after that run finished — and
+at `724b785` during the first red, since `5174f73` landed at 08:45:41,
+after that run ended at 08:42:01. **Cleanliness was captured for
+neither**, and the tree was under active edit throughout. So the window
+dates a **machine/worktree-state transition**, not two clean revisions.
+
+The evidence in fact argues *against* a source cause: `72da24a` is an
+**ancestor** of `7599661` (verified by `git merge-base --is-ancestor`),
+yet `72da24a` fails today while `7599661` passed on 08-15. No
+source-monotonic cause produces that. Unless clean endpoints say
+otherwise, whatever changed is environmental, cached, or uncommitted.
+
+**This still supersedes the reduction matrix as the lane's first move**
+— but as endpoint reproduction, not as a bisect.
 
 ## 5. Two retracted claims, both mine, kept as warnings
 
@@ -247,9 +266,13 @@ diagnostic only, and it must **discriminate** the three live candidates:
 blocked delivery, inherited ignore, and an escaped or wrong process
 group.
 
-- **D0a — bisect the onset window** (§4a): `20260815T185708Z` green →
-  `20260816T063330Z` red, no reboot between. This is the sharpest lead
-  the lane has and comes before any further reduction.
+- **D0a — reproduce the onset endpoints CLEANLY** (§4a): `7599661`
+  (last observed green) and `724b785` (first observed red), each
+  checked out clean, each in its own isolated target directory. **Only
+  if they differ is a Git bisect justified.** If they agree, the
+  changed state is environmental, cached or uncommitted — which the
+  ancestry argument says to expect — and bisecting source would burn
+  runs proving nothing.
 - **D0b — re-run the §4 matrix with captured provenance**, at `main`,
   recording the artifact hashes actually executed **at run time**.
   Revision 2's strongest claim collapsed because command shape silently
