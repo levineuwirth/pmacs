@@ -270,7 +270,7 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## GPU launcher / probe SIGINT teardown — MECHANISM FOUND, remedy SELECTED
+## GPU launcher / probe SIGINT teardown — PR #241 OPEN
 
 **Written with the branch's FIRST commit**, per the standing correction
 from #171 and #215.
@@ -279,6 +279,9 @@ from #171 and #215.
   **`72da24a`**, worktree
   `/home/jeans/Repos/personal/pmacs-probe-sigint`. Recover with
   `git fetch githubsucks && git checkout gpu-probe-sigint-teardown`.
+- **PR #241** (`https://github.com/levineuwirth/pmacs/pull/241`), opened
+  2026-08-19 from `gpu-probe-sigint-teardown` into `main`. **Not merged;
+  awaiting review rounds.**
 - **CHECKPOINT: implementation landed at `3206433`; this entry's own
   commit adds the A6 consumer rows on top.** The branch head is the
   authority — a literal SHA naming a branch's own tip goes stale the
