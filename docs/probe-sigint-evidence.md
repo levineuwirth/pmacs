@@ -157,6 +157,72 @@ source/environment interaction, or a fix before `7599661` followed by a
 regression before `724b785`. And an ancestor outside the interval is
 irrelevant to whether the interval contains a regression.
 
+## D1/D2 — EXECUTED 2026-08-19. The outer invocation is the variable
+
+**The causal variable is the OUTER invocation of the test runner**, so
+it is recorded here as a first-class column. Earlier "exact commands"
+in this file are incomplete for that reason: they gave the inner
+`cargo` argv and omitted how the runner itself was started.
+
+### Controlled arms, committed head, worktree-local target
+
+Head `38f2af4`, `dirty=0`, worktree
+`/home/jeans/Repos/personal/pmacs-probe-sigint`, target
+`/home/jeans/build/pmacs-gate-targets/pmacs-probe-sigint-84ed0f9e`,
+`TMPDIR=/home/jeans/build/pmacs-gate-targets/tmp/arms`.
+
+Inner command, identical in both arms:
+
+```
+cargo test --features crdt --no-fail-fast \
+  --test gpu_invocation_acceptance --test gpu_initial_target_acceptance \
+  -- ctrl_c_on_launcher_group
+```
+
+Outer invocation, the only difference:
+
+```
+fg:  /home/jeans/build/pmacs-gate-targets/d0a/arms.sh fg
+bg:  setsid nohup /home/jeans/build/pmacs-gate-targets/d0a/arms.sh bg > /dev/null 2>&1 & disown
+```
+
+| arm | outer | exit | ok | failed | `SigIgn` | binary hashes | log sha256/16 |
+|---|---|---|---|---|---|---|---|
+| fg | foreground | 0 | 2 | 0 | not captured (no failure ⇒ no dump) | `91f51d0b…`=`0890b78cca22ac1e`, `6b4b8223…`=`ef6ff1c15e11062a` | `aaec01673691479a` |
+| bg | `setsid nohup … &` | 101 | 0 | 2 | `0000000000001007` | **identical**: `0890b78cca22ac1e`, `ef6ff1c15e11062a` | `c744d85a84cb8683` |
+
+**The binaries are byte-identical across arms** — same hashes, same
+head, same target directory, `dirty=0` — so nothing but the outer
+invocation varies. `arms.tsv` holds the raw rows.
+
+### Disposition, measured directly
+
+| context | child `SigIgn` | `SIGINT` |
+|---|---|---|
+| foreground | `0000000000001000` | bit 12 (SIGPIPE) only — deliverable |
+| `setsid nohup … &` | `0000000000000007` | SIGHUP, SIGINT, SIGQUIT — ignored |
+
+### The first D1/D2 capture, and why it is superseded
+
+The capture quoted in framing §4c came from `d12.log`, which finished
+14:10 — **five minutes before `afe3631` committed the diagnostic
+code** — and ran in the reused `d0a-B` target directory rather than
+this worktree's. Its signal facts agree with the arms above, but it is
+**not admissible provenance**: uncommitted tree, foreign target. The
+arms table replaces it, and `d12.log` is retained only as the first
+sighting.
+
+### Historical foreground/background mapping — RECONSTRUCTED
+
+The claim that "every reduction was foreground and every full sweep was
+backgrounded" is **reconstructed from this session's transcript, not
+captured at run time**. No run before today recorded its outer
+invocation, because none of the harnesses knew it mattered. It is
+consistent with every observation and with the two arms above, but it
+is inference, and rows R1–R10 and F1–F7 carry **no outer-invocation
+field**. That gap is the direct cause of nine revisions spent on a
+confounded matrix.
+
 ## D0a — EXECUTED 2026-08-19. Verdict: difference NOT captured
 
 Ten runs, counterbalanced `A B B A A B B A A B`, N = 5 per endpoint,

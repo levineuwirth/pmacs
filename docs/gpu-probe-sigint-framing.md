@@ -15,8 +15,8 @@ not extend to revision 10**, because retiring D0b (§7) materially
 changed the approved diagnostic sequence — the revision 9 text made
 D0b mandatory before every other diagnostic. Revision 10's approval
 covers that retirement and the A3 contingency that preserves its
-obligation. D0a's execution and result (§4b) are reported; D1/D2 are
-authorised but have not started.
+obligation. **D1/D2 have since been executed under it and found the
+mechanism (§4c).**
 
 Revisions 1 and 2 were each rejected on five findings. Every correction
 is recorded in place rather than quietly rewritten, because three of
@@ -456,23 +456,34 @@ on process age at all.** Key on identity.
 
 ## 6. Bets
 
-1. **The failure is a real teardown defect** — a user pressing Ctrl-C
-   on `pmacs --gpu` sees the same hang. **This is a bet, not a
-   finding**, and the current witness does not reach the real GUI
-   path: it goes through a wrapper script and `--headless-managed-probe`
-   (`:1090-1093`), not a live wgpu frontend. Confirming or dropping this
-   bet is D4 below.
-2. It is **not** a timing margin. A green run finishes in 0.15 s against
-   a 5 s deadline — 33×. Margins that large do not erode.
-3. Therefore **raising the deadline is not a fix** and is out of scope.
-   If the conclusion turns out to be that the deadline is wrong, that
-   needs its own argument and its own approval.
+1. ~~The failure is a real teardown defect a user meets.~~
+   **WITHDRAWN BY SCOPE — not falsified.** Every observed red run is
+   explained by inherited `SIG_IGN` from a background invocation
+   (§4c), so **no observed evidence of a user-facing defect remains**.
+   That is weaker than proving a real wgpu session is correct, and
+   **D4 was never executed** (§7), so the correct statement is: this
+   lane is now **gate/test correctness only**, and any user-facing
+   claim is out of its scope and unevidenced in both directions.
+2. **UPHELD.** It is **not** a timing margin — confirmed twice over: a
+   green run finishes in ~0.19 s against a 5 s deadline, and the
+   foreground arm passes while the background arm fails with the same
+   binaries.
+3. **UPHELD, and now load-bearing.** Raising the deadline is not a fix
+   and remains out of scope: the signal is never delivered, so no
+   deadline is long enough.
 
 ## 7. First step — diagnostics keyed on identity, not age
 
-No fix is proposed; the mechanism is unknown. The first commit is
-diagnostic only, and it must **discriminate** the three live candidates:
-blocked delivery, inherited ignore, and an escaped or wrong process
+**EXECUTED. The mechanism is known (§4c): inherited `SIG_IGN`.** This
+section is kept as the record of what was run. D1/D2 discriminated the
+three candidates — ignored rather than blocked delivery (`SigPnd` and
+per-thread `SigBlk` all zero), and no escape from the group (shared
+`pgid`). D3 is discharged by the controlled arms. **D4 was NOT
+executed**, and bet 1 is withdrawn by scope rather than falsified.
+
+As written, the step read: the first commit is diagnostic only, and it
+must **discriminate** the three live candidates: blocked delivery,
+inherited ignore, and an escaped or wrong process
 group.
 
 - **D0a — reproduce the onset endpoints CLEANLY** (§4a): `7599661`
@@ -598,9 +609,43 @@ group.
   before/after pair is what makes the claim provable.
 - **D3 — run the full sweep under D1/D2 until the failure is captured
   *with* its diagnostics.** Only then propose a fix.
-- **D4 — settle bet 1 separately.** Establish whether a real
-  `pmacs --gpu` session, not the wrapper/headless probe, reproduces the
-  hang. The answer decides whether A5 is an obligation or is dropped.
+- **D4 — NOT EXECUTED.** It would have established whether a real
+  `pmacs --gpu` session, rather than the wrapper/headless probe,
+  reproduces the hang. It is **not run and not needed**, because bet 1
+  is withdrawn by scope: with every observed failure explained by the
+  runner's invocation, there is no user-facing claim left for this lane
+  to make. **A5 is retired by scope, not falsified** — nothing here
+  demonstrates a real session behaves correctly, only that no evidence
+  of the contrary survives.
+
+## 7b. Remedy options — evaluated, none yet selected
+
+Revision 11 jumped from "`pre_exec` is `unsafe`" to "therefore a
+precondition assertion". That does not follow: ruling out one mechanism
+does not select another. Four candidates, with the trade-off that
+decides each:
+
+| # | remedy | effect | cost / risk |
+|---|---|---|---|
+| R-a | **Runner normalisation** — never invoke the gate so that `SIGINT` is ignored; if backgrounding is needed, restore the disposition first | removes the cause for every test at once | a *practice*, not a mechanism: nothing enforces it, and this lane exists because I violated it silently |
+| R-b | **Early gate guard** — `scripts/gate` refuses to start when `SIGINT` is `SIG_IGN`, naming the reason | enforces R-a mechanically, once, for all suites | refuses runs that would mostly have succeeded; needs an explicit override for deliberate background use |
+| R-c | **Fixture isolation** — the test restores the default disposition in the spawned launcher | fixes the test wherever it runs, background included | `pre_exec` is `unsafe`, and `#![forbid(unsafe_code)]` binds the lib crate; an integration test could technically opt out, but doing so to dodge a project invariant needs its own argument |
+| R-d | **Test-local precondition assertion** — detect `SIG_IGN` on `SIGINT` and fail with that reason instead of "child did not exit within 5s" | converts nine revisions of misdirection into one accurate line | does not make the test *pass* when backgrounded; it only stops it lying about why it failed |
+
+**They are not exclusive**, and the likely answer is R-b + R-d: a guard
+that stops the whole gate from running in a state where several suites
+are meaningless, plus a test that explains itself if it is ever reached
+that way. R-a alone is what already failed. R-c is the only one that
+makes the test genuinely invocation-independent, and it is also the one
+that touches an `unsafe` prohibition, so it needs a separate decision.
+
+**Portability is a selection criterion, not an afterthought.** Reading
+`SigIgn` from `/proc/self/status` is Linux-only. The suite is already
+`#![cfg(unix)]`, so a `/proc`-based guard would narrow it further to
+Linux; `sigaction`-based querying would be portable but is `unsafe`.
+Whichever is chosen must state what it does on a non-`/proc` unix.
+
+No remedy is implemented, and none is selected here.
 
 ## 8. Acceptance criteria for the eventual fix
 
@@ -627,17 +672,23 @@ Written now so the fix cannot quietly become "make the test pass".
   to obtain green.
 - **A5.** **Conditional on D4.** If bet 1 holds, this is unconditional:
   Ctrl-C on a real `pmacs --gpu` session tears down the frontend and
-  leaves the daemon running. If D4 shows the hang is reachable only
-  through the wrapper/headless path, bet 1 is dropped, A5 is struck,
-  and the lane is recorded as gate-correctness only.
+  leaves the daemon running. **RETIRED BY SCOPE**: D4 was not executed,
+  bet 1 is withdrawn, and this lane is recorded as **gate/test
+  correctness only**. A5 is not claimed satisfied and not claimed
+  falsified — it is out of scope, and a user-facing teardown claim would
+  need its own lane and its own evidence.
 
 ## 9. Coherence impact (`COHERENCE.md` §20)
 
-- **Journey step touched: 12(a), "closing is clean."** Ctrl-C teardown
-  of a GPU session is exactly that step, whether or not its grade
-  moves. **Revision 1 said "journey steps touched: none", which was
-  false** — it reasoned from grade movement, which §20 explicitly warns
-  against.
+- **Journey steps touched: NONE, as finally established.** Earlier
+  revisions claimed 12(a) "closing is clean", on the premise that this
+  lane repairs Ctrl-C teardown. §4c withdraws that premise: no product
+  behaviour changes, because the failure is an artifact of how the test
+  runner is invoked. Revision 1's "none" reached the right answer by
+  the wrong route (grade movement, which §20 warns against); this is
+  the right answer for the stated reason.
+- What the lane does touch is **gate trustworthiness**: seven red
+  sweeps that named a product defect and had none.
 - **Grade movement: none expected.** This restores a property that is
   supposed to hold, rather than opening a new one.
 - **Interaction islands: none added.**

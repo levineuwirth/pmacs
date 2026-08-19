@@ -270,7 +270,7 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## GPU launcher / probe SIGINT teardown — D0a DONE, mechanism unknown
+## GPU launcher / probe SIGINT teardown — MECHANISM FOUND, remedy not selected
 
 **Written with the branch's FIRST commit**, per the standing correction
 from #171 and #215.
@@ -282,9 +282,23 @@ from #171 and #215.
 - **No PR. Framing revision 10 at `docs/gpu-probe-sigint-framing.md`,
   APPROVED 2026-08-19 at `4fba9f6`** — revision 9 was approved at
   `15c25ec`, but did **not** cover retiring D0b. Revision 10 does, with
-  the A3 contingency preserved: if the demonstrated D1/D2 mechanism
-  does not account for the subset/full difference, D0b runs before
-  closure. **D1/D2 are authorised but have not started.** Also: **NO
+  the A3 contingency preserved. **D1/D2 HAVE RUN and found the
+  mechanism: `SIGINT` was ignored group-wide (`SigIgn=0x1007`) because
+  the test runner was launched in the background — `SIG_IGN` is
+  inherited across `fork` and survives `exec`, so it reached the
+  launcher and probe, and `kill(-pgid, SIGINT)` was a no-op.**
+  Controlled arms on committed head `38f2af4` with byte-identical
+  binaries: foreground both copies ok, `setsid nohup … &` both FAILED.
+  **I caused this** by adopting background launches on 08-16 to evade
+  the Bash tool's ten-minute cap — that is the "onset", and the
+  subset-vs-full matrix was confounded with it throughout. A3's
+  subset/full obligation is discharged by explanation, so D0b is not
+  needed. **Bet 1 withdrawn by scope and A5 retired by scope — D4 was
+  never executed**, so no claim is made that a real session behaves
+  correctly, only that no evidence of a user-facing defect survives.
+  Framing revision 11 AWAITING APPROVAL; **no remedy selected** (§7b
+  weighs runner normalisation, a gate guard, fixture isolation and a
+  test-local assertion). Also: **NO
   IMPLEMENTATION and no fix proposed** — the mechanism is not known yet,
   and the framing says so
   rather than guessing. Revisions 1, 2 and 3 were each rejected on
