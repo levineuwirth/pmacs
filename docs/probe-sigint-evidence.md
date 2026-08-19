@@ -178,33 +178,53 @@ precondition then the `sweep-crdt` command. `dirty=0` verified per run.
 | A#5 | A | `7599661` | **red** | 0 / 2 | 3 | `d0a/A-5.log` |
 | B#5 | B | `724b785` | **red** | 0 / 2 | 2 | `d0a/B-5.log` |
 
-**Exact commands.** Per run, with `TMPDIR=…/tmp/d0a` and
-`CARGO_TARGET_DIR=…/d0a-A` or `…/d0a-B`, executed in
+**Exact commands.** Every run, in full. `<WT>` is
 `/home/jeans/Repos/personal/pmacs-d0a-A` (detached at `7599661`) or
-`…-d0a-B` (detached at `724b785`):
+`/home/jeans/Repos/personal/pmacs-d0a-B` (detached at `724b785`);
+`<TD>` is `/home/jeans/build/pmacs-gate-targets/d0a-A` or `…/d0a-B`
+correspondingly:
 
 ```
-cargo build --workspace --no-default-features --features luajit,crdt \
-  && cargo test --workspace --features crdt --no-fail-fast -- --skip basedpyright
+env TMPDIR=/home/jeans/build/pmacs-gate-targets/tmp/d0a \
+    CARGO_TARGET_DIR=<TD> \
+    sh -c 'cd <WT> \
+      && cargo build --workspace --no-default-features --features luajit,crdt \
+      && cargo test --workspace --features crdt --no-fail-fast -- --skip basedpyright'
 ```
 
-**Per-run provenance, transcribed** (all runs `exit=101`, `dirty=0`,
-`ok=0 failed=2`, suffixes `-5d9105cb` / `-d4dae4f0`). Times are local
-2026-08-19; `load` is the 1/5/15 average at run start; `freeMB` is
-`MemFree`; `daemons` counts live `pmacs --daemon` processes:
+**Per-run provenance, transcribed.** All runs: `exit=101`, `dirty=0`,
+`ok=0 failed=2`, suffixes `-5d9105cb` / `-d4dae4f0`, `/tmp` 3 G of 30 G.
+Times are local 2026-08-19. `load` is the 1/5/15 average at run start;
+`MemFree`/`MemAvail` in MB; `daemons` counts live `pmacs --daemon`:
 
-| start | run | class | red bins | load | freeMB | daemons | log sha256/16 |
-|---|---|---|---|---|---|---|---|
-| 12:21:20 | A#1 | red | 3 | 2.51, 2.85, 3.57 | 1549 | 72 | `1c0fe47d55d8f5e…` |
-| 12:26:55 | B#1 | red | 2 | 7.86, 13.48, 8.97 | 9405 | 76 | `105794d515e6ec3…` |
-| 12:32:12 | B#2 | red | 2 | 8.04, 18.28, 13.23 | 9761 | 80 | `7a662fb5ca15687…` |
-| 12:35:39 | A#2 | red | 4 | 11.34, 21.23, 16.20 | 8933 | 84 | `50aacb9d15244c9…` |
-| 12:39:35 | A#3 | red | 3 | 13.40, 26.07, 20.45 | 10628 | 88 | `9156bbbc852e2d3…` |
-| 12:43:26 | B#3 | red | 2 | 8.66, 22.18, 20.82 | 8778 | 92 | `f0d768a76ed9cb0…` |
-| 12:47:20 | B#4 | red | 2 | 17.96, 33.10, 27.07 | 10403 | 96 | `5a043a3d5568598…` |
-| 12:50:49 | A#4 | red | 3 | 10.99, 27.07, 26.52 | 10702 | 100 | `1b6d88c08764d9a…` |
-| 12:54:47 | A#5 | red | 3 | 9.75, 28.50, 28.70 | 8494 | 104 | `ae21a3f53fc1a1a…` |
-| 12:58:38 | B#5 | red | 2 | 11.43, 26.69, 28.97 | 8562 | 108 | `2c5baa0c7e49e37…` |
+| start | run | class | red bins | load | MemFree | MemAvail | daemons | log sha256/16 |
+|---|---|---|---|---|---|---|---|---|
+| 12:21:20 | A#1 | red | 3 | 2.51 2.85 3.57 | 1549 | 42069 | 72 | `e1c0fe47d55d8f5e` |
+| 12:26:55 | B#1 | red | 2 | 7.86 13.48 8.97 | 9405 | 42725 | 76 | `3105794d515e6ec3` |
+| 12:32:12 | B#2 | red | 2 | 8.04 18.28 13.23 | 9761 | 43370 | 80 | `07a662fb5ca15687` |
+| 12:35:39 | A#2 | red | 4 | 11.34 21.23 16.20 | 8933 | 43281 | 84 | `450aacb9d15244c9` |
+| 12:39:35 | A#3 | red | 3 | 13.40 26.07 20.45 | 10628 | 42989 | 88 | `19156bbbc852e2d3` |
+| 12:43:26 | B#3 | red | 2 | 8.66 22.18 20.82 | 8778 | 43588 | 92 | `6f0d768a76ed9cb0` |
+| 12:47:20 | B#4 | red | 2 | 17.96 33.10 27.07 | 10403 | 43617 | 96 | `75a043a3d5568598` |
+| 12:50:49 | A#4 | red | 3 | 10.99 27.07 26.52 | 10702 | 43335 | 100 | `c1b6d88c08764d9a` |
+| 12:54:47 | A#5 | red | 3 | 9.75 28.50 28.70 | 8494 | 43053 | 104 | `2ae21a3f53fc1a1a` |
+| 12:58:38 | B#5 | red | 2 | 11.43 26.69 28.97 | 8562 | 43122 | 108 | `82c5baa0c7e49e37` |
+
+**Two defects in the previous transcription of this table, recorded
+rather than silently fixed.** Every digest had lost its leading hex
+character — A#1 read `1c0fe47d55d8f5e…` where the value is
+`e1c0fe47d55d8f5e` — because the extraction started one byte late in
+`logsha=<value>`. And `/tmp` and `MemAvailable` were captured by the
+harness but dropped from the table. A transcription that silently
+corrupts its own digests is worse than a pointer to the raw file, since
+it looks verifiable and is not.
+
+**`uptime` was NOT captured, and is `UNKNOWN` for all ten runs.** §7's
+condition list names `uptime`; the harness recorded only the load
+averages from it and discarded the elapsed time. The classifications
+stand — none of them depends on it — but the condition list was **not
+fully satisfied**, and D1/D2's harness must capture it. Recorded rather
+than quietly treated as met.
 
 Note the leaked-daemon count climbing 72 → 108, four per run. Recorded,
 not implicated: it rises monotonically while every run classifies the

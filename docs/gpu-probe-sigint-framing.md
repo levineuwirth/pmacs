@@ -1,8 +1,14 @@
 # GPU launcher / probe SIGINT teardown — framing
 
-Revision 9, approved 2026-08-19 at `15c25ec`.
-Status: **D0a EXECUTED — see §4b. No fix implemented; mechanism still
-unknown.**
+Revision 10. Status: **AWAITING APPROVAL. No fix implemented;
+mechanism still unknown.**
+
+Revision 9 was approved 2026-08-19 at `15c25ec`. **That approval does
+not extend to this revision**, because retiring D0b (§7) materially
+changes the approved diagnostic sequence — the approved text made D0b
+mandatory before every other diagnostic. D0a's execution and result
+(§4b) are reported under it, and D1/D2 do not begin until this revision
+is approved.
 
 Revisions 1 and 2 were each rejected on five findings. Every correction
 is recorded in place rather than quietly rewritten, because three of
@@ -22,6 +28,15 @@ them were claims this document itself had advanced:
   (manifest); ledgers still carried the falsified R9 conclusions (§11).
   **And a finding that reframes the lane: the failure has a datable
   onset (§4a) and is not long-standing.**
+- r9 → r10: **D0b retired as a precondition** (§7), which changes the
+  approved sequence and is why this revision needs its own approval;
+  D0a executed and its causal conclusion narrowed twice — "source
+  hypothesis eliminated" withdrawn in favour of "the commits do not
+  discriminate under current conditions" (§4b, and the endpoint
+  table's two uniform-same rows); portable provenance corrected after
+  it corrupted every log digest and silently dropped `/tmp` and
+  `MemAvailable`; and `uptime` recorded as **UNKNOWN**, since §7 names
+  it but the harness kept only the load averages.
 - r8 → r9: D0a's classifier was not total — it named only "clean
   split" and "mixed", leaving both-green, both-red, non-execution,
   copy-disagreement and unrelated-failure outcomes unprescribed, all of
@@ -381,7 +396,10 @@ group.
     confounding*; with an even run count one arm still holds the last
     slot, and that residue is accepted and stated rather than papered
     over.
-  - **Identical captured conditions per run**: same harness as D0b —
+  - **Identical captured conditions per run** — and D0a satisfied this
+    list only **partially**: it captured everything below except
+    `uptime`, keeping the load averages and discarding elapsed time.
+    D1/D2's harness must capture the whole list. Same harness as D0b —
     argv, worktree, `git rev-parse HEAD`, `git status --porcelain`
     emptiness, the Cargo suffixes executed, result, log digest — plus
     the machine facts that have already misled this lane once

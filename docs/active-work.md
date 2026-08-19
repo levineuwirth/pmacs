@@ -279,8 +279,11 @@ from #171 and #215.
   **`72da24a`**, worktree
   `/home/jeans/Repos/personal/pmacs-probe-sigint`. Recover with
   `git fetch githubsucks && git checkout gpu-probe-sigint-teardown`.
-- **No PR. Framing revision 9 at `docs/gpu-probe-sigint-framing.md`,
-  APPROVED 2026-08-19 at `15c25ec`; NO IMPLEMENTATION and no fix
+- **No PR. Framing revision 10 at `docs/gpu-probe-sigint-framing.md`,
+  AWAITING APPROVAL** — revision 9 was approved at `15c25ec`, but that
+  approval does **not** cover retiring D0b, which changes the approved
+  diagnostic sequence. **D1/D2 do not begin until revision 10 is
+  approved.** Also: NO IMPLEMENTATION and no fix
   proposed** — the mechanism is not known yet, and the framing says so
   rather than guessing. Revisions 1, 2 and 3 were each rejected on
   findings, all upheld; run provenance lives in
@@ -301,7 +304,13 @@ from #171 and #215.
 - **The useful product is a RELIABLE REPRODUCTION** — 10/10 across two
   commits at ~4 min/run. D1/D2 no longer wait on a rare event and are
   the next step. Per-run provenance in `docs/probe-sigint-evidence.md`
-  §D0a and `/home/jeans/build/pmacs-gate-targets/d0a/results.tsv`.
+  §D0a, transcribed in full into that committed document — after the
+  first transcription corrupted every log digest by one hex character
+  and dropped `/tmp` and `MemAvailable`. **`uptime` was never captured**
+  and is `UNKNOWN` for all ten runs: §7 names it, the harness kept only
+  the load averages, so that condition list was **not fully
+  satisfied**. The classifications stand; D1/D2's harness must capture
+  the whole list.
 - **Why it exists.** `ctrl_c_on_launcher_group_does_not_reach_spawned_daemon`
   fails in gate stage `sweep-crdt` with "child did not exit within 5s".
   **Pre-existing on `main`** — `72da24a` fails it in a clean worktree
