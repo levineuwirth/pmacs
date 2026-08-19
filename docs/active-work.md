@@ -270,7 +270,7 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## GPU launcher / probe SIGINT teardown — FRAMING ONLY, awaiting approval
+## GPU launcher / probe SIGINT teardown — FRAMING APPROVED, diagnostics not started
 
 **Written with the branch's FIRST commit**, per the standing correction
 from #171 and #215.
@@ -279,10 +279,11 @@ from #171 and #215.
   **`72da24a`**, worktree
   `/home/jeans/Repos/personal/pmacs-probe-sigint`. Recover with
   `git fetch githubsucks && git checkout gpu-probe-sigint-teardown`.
-- **No PR. Framing revision 9 at `docs/gpu-probe-sigint-framing.md`;
-  NO IMPLEMENTATION and no fix proposed** — the mechanism is not known
-  yet, and the framing says so rather than guessing. Revisions 1, 2 and
-  3 were each rejected on findings, all upheld; run provenance lives in
+- **No PR. Framing revision 9 at `docs/gpu-probe-sigint-framing.md`,
+  APPROVED 2026-08-19 at `15c25ec`; NO IMPLEMENTATION and no fix
+  proposed** — the mechanism is not known yet, and the framing says so
+  rather than guessing. Revisions 1, 2 and 3 were each rejected on
+  findings, all upheld; run provenance lives in
   `docs/probe-sigint-evidence.md`.
 - **Why it exists.** `ctrl_c_on_launcher_group_does_not_reach_spawned_daemon`
   fails in gate stage `sweep-crdt` with "child did not exit within 5s".

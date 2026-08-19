@@ -1,6 +1,6 @@
 # GPU launcher / probe SIGINT teardown — framing
 
-Revision 9. Status: **awaiting approval. No implementation.**
+Revision 9. Status: **approved 2026-08-19 at `15c25ec`. No implementation.**
 
 Revisions 1 and 2 were each rejected on five findings. Every correction
 is recorded in place rather than quietly rewritten, because three of
