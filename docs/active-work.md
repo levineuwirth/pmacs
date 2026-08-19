@@ -281,8 +281,12 @@ from #171 and #215.
   **`githubsucks/panel-mapping-generation` is the authoritative tip.**
   Recover with `git fetch githubsucks && git checkout
   panel-mapping-generation`.
-- **No PR yet. Code-complete at `5174f73`; ledger tip `fb40d88`; the
-  slice-completion gate is RED.** Framing revision 16 (§5b)
+- **No PR yet. Code-complete at `5174f73`; the slice-completion gate is
+  RED.** The ledger tip is **the branch head itself**
+  (`githubsucks/panel-mapping-generation`) — a literal SHA here goes
+  stale the moment the next commit lands, which is exactly how this
+  line came to name `fb40d88` while the branch was four commits past
+  it. Framing revision 16 (§5b)
   APPROVED 2026-08-15 at `7e85a6f`, then eleven implementation commits:
   wire shapes and pins (G0), the authoritative key with its terminal
   half (G1–G4), outbound family selection, inbound family gating, the
@@ -496,8 +500,8 @@ from #171 and #215.
     enumerated with its own log digest in the teardown lane's
     `docs/probe-sigint-evidence.md`.
   - **The defect now has its own lane:
-    `gpu-probe-sigint-teardown`** (pushed; framing revision 5 at
-    `docs/gpu-probe-sigint-framing.md` (revision 7, `e2084fb`+), run provenance at
+    `gpu-probe-sigint-teardown`** (pushed; framing revision 8 at
+    `docs/gpu-probe-sigint-framing.md` (revision 8), run provenance at
     `docs/probe-sigint-evidence.md`). **§5b is held behind it.** That
     lane's framing supersedes every diagnostic claim below; the entries
     here are kept only as the record of how it was found.
