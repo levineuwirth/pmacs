@@ -222,22 +222,8 @@ mod crdt {
             "      pid {pid} ppid={} pgid={} sid={} state={} threads={}\n\
              \x20       SigIgn={} SigCgt={} SigPnd={} ShdPnd={}\n",
             field("PPid:"),
-            fs::read_to_string(format!("/proc/{pid}/stat"))
-                .ok()
-                .and_then(|st| st.rsplit_once(african_close()).map(|(_, rest)| rest
-                    .split_whitespace()
-                    .nth(2)
-                    .unwrap_or("?")
-                    .to_owned()))
-                .unwrap_or_else(|| "?".to_owned()),
-            fs::read_to_string(format!("/proc/{pid}/stat"))
-                .ok()
-                .and_then(|st| st.rsplit_once(african_close()).map(|(_, rest)| rest
-                    .split_whitespace()
-                    .nth(3)
-                    .unwrap_or("?")
-                    .to_owned()))
-                .unwrap_or_else(|| "?".to_owned()),
+            d12_stat_field_after_comm(pid, 2),
+            d12_stat_field_after_comm(pid, 3),
             field("State:"),
             field("Threads:"),
             field("SigIgn:"),
@@ -283,11 +269,21 @@ mod crdt {
         out
     }
 
-    /// The `)` that closes comm in `/proc/<pid>/stat`; comm may itself
-    /// contain spaces or parentheses, so the fields after it are only
-    /// safe to index from the LAST `)`.
-    fn african_close() -> &'static str {
-        ")"
+    /// Field `n` of `/proc/<pid>/stat`, counted from the first field
+    /// AFTER `comm`.
+    ///
+    /// `comm` is parenthesised and may itself contain spaces and
+    /// parentheses, so the only safe anchor is the **last** `)`.
+    /// Counting from there: 0 = state, 1 = ppid, 2 = **pgrp**,
+    /// 3 = **session**.
+    fn d12_stat_field_after_comm(pid: u32, n: usize) -> String {
+        fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|st| {
+                st.rsplit_once(')')
+                    .and_then(|(_, rest)| rest.split_whitespace().nth(n).map(ToOwned::to_owned))
+            })
+            .unwrap_or_else(|| "?".to_owned())
     }
 
     fn wait_for_exit(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
