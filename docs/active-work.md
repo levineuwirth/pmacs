@@ -279,7 +279,7 @@ from #171 and #215.
   **`72da24a`**, worktree
   `/home/jeans/Repos/personal/pmacs-probe-sigint`. Recover with
   `git fetch githubsucks && git checkout gpu-probe-sigint-teardown`.
-- **No PR. Framing revision 7 at `docs/gpu-probe-sigint-framing.md`;
+- **No PR. Framing revision 8 at `docs/gpu-probe-sigint-framing.md`;
   NO IMPLEMENTATION and no fix proposed** — the mechanism is not known
   yet, and the framing says so rather than guessing. Revisions 1, 2 and
   3 were each rejected on findings, all upheld; run provenance lives in
@@ -396,7 +396,9 @@ from #171 and #215.
   deterministically produce different outcomes, so the pair says
   nothing about determinism either.
 - **D0a is a decision procedure with no predicted outcome**, and one
-  run per endpoint decides nothing for a context-sensitive failure.
+  run per endpoint decides nothing. That the failure has appeared only
+  in the full sweep is **what has been observed so far**, not a
+  property established of the defect.
   **N = 5 full `sweep-crdt` runs per endpoint, interleaved A/B/A/B**,
   under the same captured conditions as D0b plus `uptime`, `free`,
   `/tmp` usage and leaked-daemon count. A bisect of
@@ -408,7 +410,8 @@ from #171 and #215.
   separately cited a gate run the manifest never listed.
 - **D0 precedes every other diagnostic**, in two parts: **(a)
   reproduce the onset endpoints `7599661` and `724b785` clean, in
-  isolated target dirs** — not a bisect until they differ; **(b)** re-run
+  isolated target dirs**, under the N = 5 interleaved clean-split
+  contract below — a bare difference decides nothing; **(b)** re-run
   the matrix at `main` under a harness capturing provenance **and the
   artifact hashes executed at run time**, since command shape silently
   changed the binary once already and a hash computed later reflects

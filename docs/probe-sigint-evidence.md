@@ -76,16 +76,16 @@ All in worktree `pmacs-mapping-gen` unless stated. `WT=mg` is
 `CARGO_TARGET_DIR=/home/jeans/build/pmacs-gate-targets/pmacs-mapping-gen-8cb089c8`
 except `WT=main`, which uses `…/pmacs-fdccc423`.
 
-| id | exact command (after `cargo`) | WT | HEAD | clean | artifacts | result | log (sha256/16, bytes) |
+| id | exact command (after `cargo`) | WT | HEAD | clean | Cargo suffixes executed | result | log (sha256/16, bytes) |
 |---|---|---|---|---|---|---|---|
-| R1 | `test --features crdt --test gpu_invocation_acceptance ctrl_c_on_launcher_group` ×3 | mg | ~`724b785`–`5174f73` | UNKNOWN | reduction | green, 0.15–0.17 s | **none preserved** |
-| R2 | `test --features crdt --test gpu_invocation_acceptance` | mg | ~`724b785`–`5174f73` | UNKNOWN | reduction | green, 15 passed | **none preserved** |
-| R3 | `test --workspace --features crdt --no-fail-fast -- --skip basedpyright ctrl_c_on_launcher_group` | mg | ~`724b785`–`5174f73` | UNKNOWN | workspace | green | `e09a96512035284e` 33113 |
-| R4 | `test --features crdt --lib --test gpu_invocation_acceptance --no-fail-fast` | mg | ~`724b785`–`5174f73` | UNKNOWN | reduction | green, 2145 + 15 | `89050c702de22d57` 158812 |
-| R5 | `test --features crdt --no-fail-fast --test gate_script_acceptance --test gpu_invocation_acceptance` | mg | ~`5174f73`–`b72843a` | UNKNOWN | reduction | green | `31b3e5249b475479` 3706 |
-| R6 | `test --features crdt --no-fail-fast --test gpu_font_acceptance --test gpu_initial_target_acceptance --test gpu_invocation_acceptance` | mg | ~`5174f73`–`b72843a` | UNKNOWN | reduction | green, 11+15+15 | `332693a39c73731a` 4569 |
+| R1 | `test --features crdt --test gpu_invocation_acceptance ctrl_c_on_launcher_group` ×3 | mg | ~`724b785`–`5174f73` | UNKNOWN | **UNKNOWN** (no log) | green, 0.15–0.17 s | **none preserved** |
+| R2 | `test --features crdt --test gpu_invocation_acceptance` | mg | ~`724b785`–`5174f73` | UNKNOWN | **UNKNOWN** (no log) | green, 15 passed | **none preserved** |
+| R3 | `test --workspace --features crdt --no-fail-fast -- --skip basedpyright ctrl_c_on_launcher_group` | mg | ~`724b785`–`5174f73` | UNKNOWN | `-5d9105cb` / `-d4dae4f0` | green | `e09a96512035284e` 33113 |
+| R4 | `test --features crdt --lib --test gpu_invocation_acceptance --no-fail-fast` | mg | ~`724b785`–`5174f73` | UNKNOWN | `-6b4b8223` only | green, 2145 + 15 | `89050c702de22d57` 158812 |
+| R5 | `test --features crdt --no-fail-fast --test gate_script_acceptance --test gpu_invocation_acceptance` | mg | ~`5174f73`–`b72843a` | UNKNOWN | `-6b4b8223` only | green | `31b3e5249b475479` 3706 |
+| R6 | `test --features crdt --no-fail-fast --test gpu_font_acceptance --test gpu_initial_target_acceptance --test gpu_invocation_acceptance` | mg | ~`5174f73`–`b72843a` | UNKNOWN | `-91f51d0b` / `-6b4b8223` | green, 11+15+15 | `332693a39c73731a` 4569 |
 | R7 | `test --features crdt --no-fail-fast --lib --bins --test acceptance --test ambient_isolation_acceptance --test auto_indent_acceptance --test auto_indent_crdt_acceptance --test auto_pair_acceptance --test auto_pair_crdt_acceptance --test autosave_acceptance --test bottom_panel_stage1_acceptance --test bottom_panel_stage2a_acceptance --test bottom_panel_stage2b_daemon_acceptance --test bottom_panel_stage2b_gpu_acceptance --test bottom_panel_stage2b_protocol_acceptance --test comment_toggle_acceptance --test compile_mode_acceptance --test gpu_invocation_acceptance` | mg | ~`b72843a` | UNKNOWN | `gpu_invocation…-6b4b8223` **only** — R7 does not select `gpu_initial_target` | green | `9e1ebc59ed9f0dd4` 187531 |
-| R8 | `test --features crdt --no-fail-fast --test compile_mode_crdt_acceptance --test completion_popup_acceptance --test config_registry_acceptance --test cua_region_acceptance --test desktop_acceptance --test destination_capture_acceptance --test dired_acceptance --test discovery_acceptance --test discovery_stage2_acceptance --test editops_acceptance --test find_file_acceptance --test folding_acceptance --test folding_stage2_acceptance --test full_grid_resync_acceptance --test gate_script_acceptance --test git_status_stage1_acceptance --test gpu_font_acceptance --test gpu_initial_target_acceptance --test gpu_invocation_acceptance` | mg | ~`b72843a` | UNKNOWN | `-91f51d0b` (`half2.log:1`) / `-6b4b8223` | green | `8b26ebfcf5f871b4` 28677 |
+| R8 | `test --features crdt --no-fail-fast --test compile_mode_crdt_acceptance --test completion_popup_acceptance --test config_registry_acceptance --test cua_region_acceptance --test desktop_acceptance --test destination_capture_acceptance --test dired_acceptance --test discovery_acceptance --test discovery_stage2_acceptance --test editops_acceptance --test find_file_acceptance --test folding_acceptance --test folding_stage2_acceptance --test full_grid_resync_acceptance --test gate_script_acceptance --test git_status_stage1_acceptance --test gpu_font_acceptance --test gpu_initial_target_acceptance --test gpu_invocation_acceptance` | mg | ~`b72843a` | UNKNOWN | `-91f51d0b` / `-6b4b8223` (`half2.log:438`, `:459`) | green | `8b26ebfcf5f871b4` 28677 |
 | R9 | `test --features crdt --no-fail-fast --lib --bins --test acceptance --test ambient_isolation_acceptance --test auto_indent_acceptance --test auto_indent_crdt_acceptance --test auto_pair_acceptance --test auto_pair_crdt_acceptance --test autosave_acceptance --test bottom_panel_stage1_acceptance --test bottom_panel_stage2a_acceptance --test bottom_panel_stage2b_daemon_acceptance --test bottom_panel_stage2b_gpu_acceptance --test bottom_panel_stage2b_protocol_acceptance --test comment_toggle_acceptance --test compile_mode_acceptance --test compile_mode_crdt_acceptance --test completion_popup_acceptance --test config_registry_acceptance --test cua_region_acceptance --test desktop_acceptance --test destination_capture_acceptance --test dired_acceptance --test discovery_acceptance --test discovery_stage2_acceptance --test editops_acceptance --test find_file_acceptance --test folding_acceptance --test folding_stage2_acceptance --test full_grid_resync_acceptance --test gate_script_acceptance --test git_status_stage1_acceptance --test gpu_font_acceptance --test gpu_initial_target_acceptance --test gpu_invocation_acceptance` | mg | ~`b72843a` | UNKNOWN | **`-91f51d0b` / `-6b4b8223`** (log `:3066`, `:3087`) | green | `b31d98ee2f427eca` 214566 |
 | R10 | `test --workspace --features crdt --no-fail-fast --test gpu_initial_target_acceptance --test gpu_invocation_acceptance -- --skip basedpyright` | mg | ~`b72843a` | UNKNOWN | **`-5d9105cb` AND `-d4dae4f0`** (log `:3`, `:24`) | green | `81b48fd7a0e261dc` 3553 |
 | F1 | `build --workspace --no-default-features --features luajit,crdt && test --workspace --features crdt --no-fail-fast -- --skip basedpyright` | **main** | `72da24a` | clean (verified `git status --porcelain` empty) | `-5d9105cb` / `-d4dae4f0`; today's occupants `e0578039…` / `00f06aeb…` | **red** | `10b55b8ba8741125` 334446 |
@@ -174,9 +174,11 @@ log digest. Two constraints learned the hard way:
 - **first, reproduce the two candidate endpoints CLEANLY** —
   `7599661` (last observed green) and `724b785` (first observed red) —
   each checked out clean, each in its **own isolated target
-  directory**. A decision procedure with **no predicted outcome**:
-  endpoints differ → a regression lives in `7599661..724b785` and a
-  bisect over that interval is justified; endpoints agree → the
+  directory**. A decision procedure with **no predicted outcome**, and
+  **not decided by one run per endpoint** — see the N = 5 clean-split
+  contract in the framing's §7 D0a, which governs. In summary: a clean
+  split (all 5 red one side, all 5 green the other) permits a bisect of
+  `7599661..724b785`; **any mixed classification forbids it**; the
   difference is not captured by those two commits under current
   conditions, and the question becomes what else changed across the
   window.

@@ -1,6 +1,6 @@
 # GPU launcher / probe SIGINT teardown — framing
 
-Revision 7. Status: **awaiting approval. No implementation.**
+Revision 8. Status: **awaiting approval. No implementation.**
 
 Revisions 1 and 2 were each rejected on five findings. Every correction
 is recorded in place rather than quietly rewritten, because three of
@@ -20,6 +20,10 @@ them were claims this document itself had advanced:
   (manifest); ledgers still carried the falsified R9 conclusions (§11).
   **And a finding that reframes the lane: the failure has a datable
   onset (§4a) and is not long-standing.**
+- r7 → r8: the superseded one-run D0 rule survived in three places
+  (§4a, §7, manifest, ledger); D0a still overstated its rates and left
+  the bisect's own classifier unspecified (§7); residual artifact
+  wording and four wrong suffix attributions (§4, manifest).
 - r6 → r7: the ancestry supports **no** causal statement at all — the
   observations are non-comparable, and even "outcome is not determined
   by commit alone" is withdrawn (§4a); D0a was not yet a valid decision
@@ -158,8 +162,8 @@ Revision 4 went further and called them "byte-different"; that is
 **withdrawn**, because the bytes a historical run executed are not
 knowable now — target directories have been overwritten, and a hash
 computed today is the hash of the current occupant. The weaker claim is
-sufficient: R9 establishes **same target names and order**, not same
-binaries.
+sufficient: R9 establishes **same target names and order**, not the
+same compilations.
 
 What the evidence is **consistent with** is an interaction. It does not
 isolate one, because the rows differ in more than the two columns shown
@@ -248,9 +252,11 @@ distinguishes:
   `724b785`.
 
 And an older ancestor outside the interval behaving badly is simply
-**irrelevant** to whether `7599661..724b785` contains a regression: a
-bisect over that interval needs only that the two clean endpoints
-differ *now*.
+**irrelevant** to whether `7599661..724b785` contains a regression —
+that question is settled by the endpoints themselves, under the N = 5
+clean-split contract in §7 D0a. (Revision 6 wrote "needs only that the
+two clean endpoints differ *now*", which is the superseded one-run
+rule; a bare difference decides nothing.)
 
 **This still supersedes the reduction matrix as the lane's first
 move**, as endpoint reproduction — which is a decision procedure, not a
@@ -314,13 +320,18 @@ group.
   (last observed green) and `724b785` (first observed red), each
   checked out clean, each in its own isolated target directory. This is
   a **decision procedure with no predicted outcome**. One run per
-  endpoint decides nothing — this failure is context-sensitive by
-  construction, appearing only in the full sweep — so the procedure is
+  endpoint decides nothing: **so far** the failure has been observed
+  only in the full sweep, which is a statement about what has been run,
+  not a property established of the defect. The procedure is therefore
   specified rather than left to judgement:
-  - **N = 5 full `sweep-crdt` runs per endpoint**, since the observed
-    failure rate in the reproducing configuration is 7/7 and the
-    passing configuration 13/13; anything less cannot separate a real
-    difference from the intermittency that has not yet been excluded.
+  - **N = 5 full `sweep-crdt` runs per endpoint.** Five is a
+    **predefined evidentiary threshold, chosen in advance so the
+    outcome cannot be argued after the fact** — it does not
+    "mathematically separate" anything. The historical 7/7 red and
+    13/13 green are **not endpoint-specific rates** and must not be
+    read as such: of the seven reds only F6 ran at `724b785`, and of
+    the greens only the last ran at `7599661`, both with **unknown
+    cleanliness**.
   - **Interleaved**, alternating endpoints A/B/A/B…, so any drift in
     machine state across the session hits both arms equally instead of
     landing entirely on whichever ran second.
@@ -333,6 +344,12 @@ group.
     endpoint red and all N of the other green. A mixed result means the
     failure is intermittent under fixed source, and **no bisect is
     justified at all** — that outcome sends the lane back to D1/D2.
+  - **The bisect itself uses the same classifier.** Every intermediate
+    commit is classified by the identical N = 5 protocol under the same
+    captured conditions; a commit that classifies mixed **aborts the
+    bisect** rather than being guessed, skipped, or rerun until it
+    agrees. A bisect whose steps are cheaper than its endpoints would
+    inherit exactly the weakness this contract exists to remove.
 - **D0b — re-run the §4 matrix with captured provenance**, at `main`,
   recording the artifact hashes actually executed **at run time**.
   Revision 2's strongest claim collapsed because command shape silently
