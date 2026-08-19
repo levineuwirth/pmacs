@@ -303,8 +303,9 @@ from #171 and #215.
     without closing it, because an exec failure can return **any**
     nonzero status. The generalisation: **no exit status can prove the
     helper ran.**
-  - **Framing revision 13 — AWAITING APPROVAL — replaces the ABI with a
-    validated `(status, token)` pair**: `0`/`1`/`2` with
+  - **Framing revision 13 — APPROVED 2026-08-19 at `5dece3e` —
+    replaces the ABI with a validated `(status, token)` pair**:
+    `0`/`1`/`2` with
     `pmacs-sigint-v1:safe|ignored|error`, token alone on stdout,
     diagnostics on stderr, and any other pair — including macOS's
     status 1 with no token — a boundary error mapped to 2. Every
@@ -362,8 +363,8 @@ from #171 and #215.
   log, misread as this suite's.)
 - **Framing revision 12 at `docs/gpu-probe-sigint-framing.md`,
   approved 2026-08-19 at `1fc0df6` and IMPLEMENTED; **superseded by
-  revision 13, awaiting approval** — revision 10 was approved at
-  `4fba9f6` and revision 9 at `15c25ec`; neither approval covered the
+  revision 13, approved 2026-08-19 at `5dece3e`** — revision 10 was
+  approved at `4fba9f6` and revision 9 at `15c25ec`; neither approval covered the
   later mechanism finding and remedy selection. **D1/D2 HAVE RUN and
   found the mechanism: `SIGINT` was ignored group-wide
   (`SigIgn=0x1007`) because

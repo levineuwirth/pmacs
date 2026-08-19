@@ -1,8 +1,8 @@
 # GPU launcher / probe SIGINT teardown — framing
 
-Revision 13. Status: **AWAITING APPROVAL — the shipped ABI is
-defective on macOS (§4d), and revision 13 replaces it. No
-implementation of the replacement.**
+Revision 13. Status: **APPROVED 2026-08-19 at `5dece3e` — the shipped
+ABI is defective on macOS (§4d), and revision 13 replaces it.
+Implementation may proceed under §8's A1–A8 contract.**
 
 Revision 12 was approved at `1fc0df6` and implemented; CI then found its
 status-only ABI unsound on a platform this session could not reach.
