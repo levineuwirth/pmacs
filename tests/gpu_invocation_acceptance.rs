@@ -171,6 +171,125 @@ mod crdt {
         let _ = kill(Pid::from_raw(pid.cast_signed()), signal);
     }
 
+    // ---- D1/D2 diagnostics (gpu-probe-sigint-teardown, framing rev 10) ----
+    //
+    // DIAGNOSTIC ONLY. Nothing here changes what the test asserts; it
+    // records why `wait_for_exit` below misses its deadline in a full
+    // `sweep-crdt`, and it is keyed on the PID this test already owns
+    // rather than by scanning for processes by age or command line ---
+    // the suite spawns root launchers from six call sites, so scanning
+    // cannot attribute one to this test.
+
+    /// Direct children of `pid`, from `/proc/<pid>/task/*/children`.
+    fn d12_children(pid: u32) -> Vec<u32> {
+        let mut out = Vec::new();
+        let Ok(tasks) = fs::read_dir(format!("/proc/{pid}/task")) else {
+            return out;
+        };
+        for task in tasks.flatten() {
+            if let Ok(kids) = fs::read_to_string(task.path().join("children")) {
+                out.extend(
+                    kids.split_ascii_whitespace()
+                        .filter_map(|k| k.parse::<u32>().ok()),
+                );
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// One process's signal disposition and identity.
+    ///
+    /// `SigBlk` is **per thread**, so it is read from every
+    /// `/proc/<pid>/task/*/status` rather than the process-wide file: a
+    /// delivery blocked on the one thread that matters would be
+    /// invisible in an aggregate reading. `SigPnd`/`ShdPnd` separate
+    /// "blocked but pending" from "ignored"; `SigIgn` distinguishes an
+    /// inherited `SIG_IGN` --- which survives both `fork` and `exec` ---
+    /// from a handler, which does not.
+    fn d12_facts(pid: u32) -> String {
+        let Ok(status) = fs::read_to_string(format!("/proc/{pid}/status")) else {
+            return format!("      pid {pid}: GONE\n");
+        };
+        let field = |name: &str| -> String {
+            status.lines().find(|l| l.starts_with(name)).map_or_else(
+                || "?".to_owned(),
+                |l| l.split_whitespace().nth(1).unwrap_or("?").to_owned(),
+            )
+        };
+        let mut out = format!(
+            "      pid {pid} ppid={} pgid={} sid={} state={} threads={}\n\
+             \x20       SigIgn={} SigCgt={} SigPnd={} ShdPnd={}\n",
+            field("PPid:"),
+            fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|st| st.rsplit_once(african_close()).map(|(_, rest)| rest
+                    .split_whitespace()
+                    .nth(2)
+                    .unwrap_or("?")
+                    .to_owned()))
+                .unwrap_or_else(|| "?".to_owned()),
+            fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|st| st.rsplit_once(african_close()).map(|(_, rest)| rest
+                    .split_whitespace()
+                    .nth(3)
+                    .unwrap_or("?")
+                    .to_owned()))
+                .unwrap_or_else(|| "?".to_owned()),
+            field("State:"),
+            field("Threads:"),
+            field("SigIgn:"),
+            field("SigCgt:"),
+            field("SigPnd:"),
+            field("ShdPnd:"),
+        );
+        if let Ok(tasks) = fs::read_dir(format!("/proc/{pid}/task")) {
+            for task in tasks.flatten() {
+                let tid = task.file_name().to_string_lossy().to_string();
+                if let Ok(ts) = fs::read_to_string(task.path().join("status")) {
+                    let get = |n: &str| {
+                        ts.lines()
+                            .find(|l| l.starts_with(n))
+                            .and_then(|l| l.split_whitespace().nth(1))
+                            .unwrap_or("?")
+                            .to_owned()
+                    };
+                    out.push_str(&format!(
+                        "        tid {tid}: SigBlk={} SigPnd={} wchan={}\n",
+                        get("SigBlk:"),
+                        get("SigPnd:"),
+                        fs::read_to_string(task.path().join("wchan"))
+                            .unwrap_or_else(|_| "?".to_owned())
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    /// Snapshot the test parent, the launcher, and the launcher's
+    /// children (the GPU probe), at one point in time.
+    fn d12_snapshot(tag: &str, launcher: u32) -> String {
+        let mut out = format!(
+            "  [D1/D2 {tag}]\n    test parent:\n{}",
+            d12_facts(std::process::id())
+        );
+        out.push_str(&format!("    launcher:\n{}", d12_facts(launcher)));
+        for kid in d12_children(launcher) {
+            out.push_str(&format!("    launcher child:\n{}", d12_facts(kid)));
+        }
+        out
+    }
+
+    /// The `)` that closes comm in `/proc/<pid>/stat`; comm may itself
+    /// contain spaces or parentheses, so the fields after it are only
+    /// safe to index from the LAST `)`.
+    fn african_close() -> &'static str {
+        ")"
+    }
+
     fn wait_for_exit(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
         let deadline = Instant::now() + timeout;
         loop {
@@ -1110,9 +1229,32 @@ mod crdt {
         let daemon_pid = facts["daemon_pid"].parse::<u32>().expect("daemon pid");
         let (survivor_id, mut survivor) = attach_surviving_frontend(&socket);
 
-        kill(Pid::from_raw(-launcher.id().cast_signed()), Signal::SIGINT)
+        // D1/D2: before, immediately after, and at the deadline.
+        let launcher_pid = launcher.id();
+        let before = d12_snapshot("before SIGINT", launcher_pid);
+        kill(Pid::from_raw(-launcher_pid.cast_signed()), Signal::SIGINT)
             .expect("signal launcher group");
-        let _ = wait_for_exit(&mut launcher, Duration::from_secs(5));
+        thread::sleep(Duration::from_millis(50));
+        let after = d12_snapshot("50ms after SIGINT", launcher_pid);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let exited = loop {
+            if launcher.try_wait().expect("inspect launcher").is_some() {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        if !exited {
+            eprintln!(
+                "D1/D2 diagnostics --- launcher {launcher_pid} did not exit within 5s\n\
+                 {before}{after}{}",
+                d12_snapshot("at the 5s deadline", launcher_pid)
+            );
+        }
+        assert!(exited, "child did not exit within 5s");
 
         write_message(
             &mut survivor,
