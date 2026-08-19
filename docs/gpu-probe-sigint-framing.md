@@ -519,11 +519,13 @@ Written now so the fix cannot quietly become "make the test pass".
   confirmation on `main` is a follow-up, not a gate on the fix.
 - **A3.** There is no established "R9 paradox" to explain — R9 ran
   different Cargo compilations, so the comparison it appeared to make
-  was never made. What A3 requires instead: **D0 recreates the subset/full
-  comparison under captured provenance**, and whatever it then shows is
-  either explained by the fix or explicitly recorded as unexplained. A
-  fix that greens the sweep without that comparison having been made
-  properly leaves the gap stated, not hidden.
+  was never made. What A3 requires instead: **the demonstrated D1/D2
+  mechanism accounts for the subset/full difference, or D0b recreates
+  that comparison under captured provenance before this lane closes.**
+  In the first case, record the mechanism's explanation. In the second,
+  whatever D0b shows is either explained by the fix or explicitly
+  recorded as unexplained. A fix that greens the sweep without either
+  path leaves the gap stated, not hidden.
 - **A4.** No deadline raised, no test skipped, retried, or serialised
   to obtain green.
 - **A5.** **Conditional on D4.** If bet 1 holds, this is unconditional:
