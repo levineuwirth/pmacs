@@ -632,7 +632,7 @@ decides each:
 | # | remedy | effect | cost / risk |
 |---|---|---|---|
 | R-a | **Runner normalisation** — never invoke the gate so that `SIGINT` is ignored; if backgrounding is needed, restore the disposition first | removes the cause for every test at once | a *practice*, not a mechanism: nothing enforces it, and this lane exists because I violated it silently |
-| R-b | **Early gate guard** — `scripts/gate` refuses to start when `SIGINT` is `SIG_IGN`, naming the reason | enforces R-a mechanically, once, for all suites | refuses runs that would mostly have succeeded; needs an explicit override for deliberate background use |
+| R-b | **Early gate guard** — `scripts/gate` refuses to start when `SIGINT` is `SIG_IGN`, naming the reason | enforces R-a mechanically, once, for all suites | refuses runs that would mostly have succeeded. *This row originally added "needs an explicit override for deliberate background use"; §7c rejects that — see there* |
 | R-c | **Fixture isolation** — the test restores the default disposition in the spawned launcher | fixes the test wherever it runs, background included | `pre_exec` is `unsafe`, and `#![forbid(unsafe_code)]` binds the lib crate; an integration test could technically opt out, but doing so to dodge a project invariant needs its own argument |
 | R-d | **Test-local precondition assertion** — detect `SIG_IGN` on `SIGINT` and fail with that reason instead of "child did not exit within 5s" | converts nine revisions of misdirection into one accurate line | does not make the test *pass* when backgrounded; it only stops it lying about why it failed |
 
@@ -665,6 +665,27 @@ It sends itself `SIGINT`. If the signal is deliverable the trap runs and
 it exits **23**; if `SIGINT` was inherited as `SIG_IGN` the kill is a
 no-op and it exits **0**. Verified in both contexts: 23 foreground, 0
 under `setsid nohup … &`.
+
+**The raw probe is not a total classifier, and must not be used as
+one.** Its `exit 0` is reached both when the `kill` was a no-op *and*
+when the `kill` itself failed — a failed `kill` overwrites its own
+status and lands on the same exit. Read naively, a broken probe reports
+"inherited `SIG_IGN`", which would fail the gate for the wrong reason
+and send the next reader down this lane again.
+
+So the **helper owns the classification**, and returns one of three
+outcomes; consumers only consume the verdict and never re-derive it:
+
+| outcome | meaning | how it is reached |
+|---|---|---|
+| `safe` | `SIGINT` is deliverable | probe exits 23 |
+| `ignored` | `SIGINT` is inherited as `SIG_IGN` | probe exits 0 **and** the `kill` itself reported success |
+| `error` | the probe could not decide | `kill` failed, `sh` unavailable, unexpected exit, or a signal other than the trap |
+
+`error` is **not** treated as `ignored`. It fails the gate too, but with
+a different diagnosis, because "your environment ignores SIGINT" and
+"the guard could not run" are different problems and conflating them is
+what a naive `exit 0` would do.
 
 This is **POSIX shell only** — `trap`, `kill`, `$$` — so it settles the
 portability question §7b raised: no `/proc`, hence not Linux-only, and
@@ -708,7 +729,17 @@ show:
   in the normal case.
 - **A4 — mutation.** Removing the probe's `trap`, or treating exit 0 as
   "deliverable", makes A1 and A2 fail; each mutation is named against
-  the row it must bite.
+  the row it must bite. Additionally, collapsing `error` into `ignored`
+  must fail A6.
+- **A6 — the `error` outcome is distinct.** With the probe forced to
+  fail (e.g. its interpreter made unavailable), the guard reports the
+  **`error`** diagnosis, not the `ignored` one, and does not claim the
+  environment ignores `SIGINT`.
+- **A7 — a supported non-Linux unix.** The helper is exercised on a
+  non-`/proc` unix in the project's supported set, or — if none is
+  reachable — the record states which platforms the guard is *claimed*
+  to work on and which were actually tried. No unexercised portability
+  claim ships unqualified.
 - **A5 — the gate is otherwise unchanged**: a normal foreground run
   reaches and passes every stage it did before, with no stage added,
   skipped, reordered, or made conditional.

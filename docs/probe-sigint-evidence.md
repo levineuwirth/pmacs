@@ -179,12 +179,11 @@ cargo test --features crdt --no-fail-fast \
   -- ctrl_c_on_launcher_group
 ```
 
-Outer invocation, the only difference. `arms.sh` is machine-local, so
-the commands are given **fully expanded** — a reader elsewhere needs no
-access to it:
+Outer invocation — the only difference, written out with **no
+placeholders**:
 
 ```
-# fg arm
+# fg arm — run directly in an interactive foreground shell
 cd /home/jeans/Repos/personal/pmacs-probe-sigint && \
 env TMPDIR=/home/jeans/build/pmacs-gate-targets/tmp/arms \
     CARGO_TARGET_DIR=/home/jeans/build/pmacs-gate-targets/pmacs-probe-sigint-84ed0f9e \
@@ -192,32 +191,38 @@ env TMPDIR=/home/jeans/build/pmacs-gate-targets/tmp/arms \
       --test gpu_invocation_acceptance --test gpu_initial_target_acceptance \
       -- ctrl_c_on_launcher_group
 
-# bg arm — byte-identical inner command, wrapped:
-setsid nohup sh -c '<the fg command above>' > <log> 2>&1 & disown
+# bg arm — the identical command, wrapped
+setsid nohup sh -c 'cd /home/jeans/Repos/personal/pmacs-probe-sigint && \
+env TMPDIR=/home/jeans/build/pmacs-gate-targets/tmp/arms \
+    CARGO_TARGET_DIR=/home/jeans/build/pmacs-gate-targets/pmacs-probe-sigint-84ed0f9e \
+    cargo test --features crdt --no-fail-fast \
+      --test gpu_invocation_acceptance --test gpu_initial_target_acceptance \
+      -- ctrl_c_on_launcher_group' \
+  > /home/jeans/build/pmacs-gate-targets/d0a/arm2-bg.log 2>&1 & disown
 ```
 
-The wrapper additionally recorded `git rev-parse HEAD`,
-`git status --porcelain | wc -l`, the exit status, both copies'
-results, the executed suffixes, their hashes, and the log digest.
+### Result — head `77b623c`, `dirty=0`, digests captured PER RUN
 
-| arm | outer | exit | ok | failed | `SigIgn` | binary hashes | log sha256/16 |
-|---|---|---|---|---|---|---|---|
-| fg | foreground | 0 | 2 | 0 | not captured (no failure ⇒ no dump) | `aaec01673691479a…` (prefix) |
-| bg | `setsid nohup … &` | 101 | 0 | 2 | `0000000000001007` | `c744d85a84cb8683…` (prefix) |
+| arm | outer | exit | ok | failed | `SigIgn` | log sha256 (full) |
+|---|---|---|---|---|---|---|
+| fg | foreground | 0 | 2 | 0 | not captured (no failure ⇒ no dump) | `b6117619242f3dabadbe5826f59f11cef451cd09a2beb304e9a3dec1a4616465` |
+| bg | `setsid nohup … &` | 101 | 0 | 2 | `0000000000001007` | `30ac6568e345c485ddf23734a239d71bd06d4a3c2d549f1b4a8942a930527507` |
 
-Both arms executed the same two binaries, whose **full** SHA-256 are:
+Binary digests, **full SHA-256, taken immediately after each run before
+anything could rebuild them** — not read later from a reused path:
 
-```
-gpu_initial_target_acceptance-91f51d0b5303ff9f
-  0890b78cca22ac1e80b79845f85fb6e88def3330db15ae123a2a672d3084124c
-gpu_invocation_acceptance-6b4b8223dea45247
-  ef6ff1c15e11062ab53a075763814f32c1bbc9be1b146d068c60e91fa247c696
-```
+| binary | fg arm | bg arm |
+|---|---|---|
+| `gpu_initial_target_acceptance-91f51d0b5303ff9f` | `0890b78cca22ac1e80b79845f85fb6e88def3330db15ae123a2a672d3084124c` | *(identical)* |
+| `gpu_invocation_acceptance-6b4b8223dea45247` | `ef6ff1c15e11062ab53a075763814f32c1bbc9be1b146d068c60e91fa247c696` | *(identical)* |
 
-Same head, same target directory, `dirty=0`, and the binaries were not
-rebuilt between arms — so nothing but the outer invocation varies. The
-**log** digests above are 16-character **prefixes**, not full values,
-and are identifiers only; no claim rests on them.
+**These are byte-identical, and that claim is now carried by the
+capture rather than by inference.** The earlier arms table recorded only
+16-character prefixes at run time and its full values were read
+afterwards from reused paths — which is exactly the provenance rule
+§7/D0 states, applied against my own record. Those rows are superseded
+by the table above; raw rows for both generations are in `arms.tsv` and
+`arms2.tsv`.
 
 ### Disposition — UNRECORDED CORROBORATION, not a controlled arm
 

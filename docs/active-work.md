@@ -270,7 +270,7 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## GPU launcher / probe SIGINT teardown — MECHANISM FOUND, remedy not selected
+## GPU launcher / probe SIGINT teardown — MECHANISM FOUND, remedy SELECTED
 
 **Written with the branch's FIRST commit**, per the standing correction
 from #171 and #215.
@@ -480,22 +480,29 @@ from #171 and #215.
   contract below — a bare difference decides nothing. **(a) is DONE.**
   **(b) is RETIRED as a precondition** (2026-08-19) because D0a yielded
   a reliable direct reproduction and D1/D2 measure the mechanism
-  itself; **its obligation survives under A3** — if D1/D2 do not
+  itself. **Its obligation is now SATISFIED** by §4c's controlled
+  explanation of the subset/full difference, so **D0b is not owed and
+  will not run**. As originally written it said: its obligation
+  survives under A3 — if D1/D2 do not
   account for the subset-vs-full difference, D0b runs before the lane
   closes. It read: re-run
   the matrix at `main` under a harness capturing provenance **and the
   artifact hashes executed at run time**, since command shape silently
   changed the binary once already and a hash computed later reflects
   only what occupies that path now.
-- **Coherence: journey step 12(a), "closing is clean", IS touched** —
-  Ctrl-C teardown of a GPU session is that step, grade movement or not.
-  Revision 1 claimed no journey step, reasoning from grade movement,
-  which §20 explicitly warns against.
+- **Coherence: journey steps touched: NONE** (framing §9). Earlier
+  entries here assigned 12(a) "closing is clean" on the premise that
+  the lane repairs Ctrl-C teardown; §4c withdraws that premise, because
+  no product behaviour changes. What the lane affects is **gate
+  trustworthiness**.
 - **Gates:** `./scripts/gate --protocol --acceptance
-  gpu_invocation_acceptance` at minimum; A2 requires `sweep-crdt` green
-  **three consecutive runs on the reviewed fixed head of this branch**
-  — not "on main", which is unobtainable before approval and merge.
-  1/1 is not evidence for a defect that hid from every reduction.
+  gpu_invocation_acceptance` at minimum. **The old three-consecutive-
+  run A2 contract is SUPERSEDED** — it was written for a teardown fix
+  whose flakiness was unexplained. The mechanism is now known and
+  deterministic, so the acceptance set is framing §8's A1–A7: guard
+  bite, direct-test diagnosis, unaffected foreground success, mutation,
+  an otherwise unchanged gate, a distinct `error` outcome, and a
+  non-Linux-unix statement.
 
 ## `scripts/gate` TMPDIR isolation — PR #240 OPEN
 
