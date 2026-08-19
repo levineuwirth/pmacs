@@ -744,41 +744,71 @@ Consumers therefore validate the exact pair and treat every mismatch as
 decides, and the pair is what makes the helper's decision
 distinguishable from a shell's.
 
-Its complete POSIX-shell classification shape preserves failure rather
-than overwriting it:
+Its complete POSIX-shell shape. Each arm emits **exactly one token on
+stdout** and its diagnostic on stderr, so a status is never the only
+thing a consumer sees:
 
 ```sh
 probe_status=0
 sh -c 'trap "exit 23" 2 || exit 24; kill -INT "$$" || exit 24; exit 0' \
   || probe_status=$?
 case "$probe_status" in
-  23) exit 0 ;;
+  23)
+    echo 'pmacs-sigint-v1:safe'
+    exit 0
+    ;;
   0)
+    echo 'pmacs-sigint-v1:ignored'
     echo 'pmacs: SIGINT is ignored; run this command with SIGINT deliverable' >&2
     exit 1
     ;;
   *)
+    echo 'pmacs-sigint-v1:error'
     echo "pmacs: could not determine whether SIGINT is deliverable (probe status $probe_status)" >&2
     exit 2
     ;;
 esac
 ```
 
-The helper maps inner 23 → helper 0, inner 0 → helper 1, and every
-other status → helper 2. Consumers **do not parse the raw 23/0/24
-statuses and do not supply their own signal diagnosis**: they continue
-only on helper exit 0 and otherwise stop while surfacing the helper's
-stderr unchanged. Failure to execute the helper at all is mechanically
-an `error` at the call boundary, never evidence that `SIGINT` is
-ignored.
+The helper maps inner 23 → `(0, safe)`, inner 0 → `(1, ignored)`, and
+every other status → `(2, error)`. Consumers do not parse the inner
+23/0/24 statuses and do not supply their own signal diagnosis.
+
+**The consumer flow is pair-validation, not status inspection:**
+
+1. Run the helper, capturing **status**, **stdout** and **stderr**
+   separately. A spawn failure — the helper missing, not executable, or
+   unrunnable for any reason — is `error` immediately, with **no
+   status to inspect at all**.
+2. **Normalise stdout**: strip a single trailing newline, then trim
+   ASCII whitespace at both ends. The result must be **exactly one
+   line**. Anything else — empty, multi-line, or with interior
+   content — is `error`.
+3. Accept **only** these three pairs; every other combination is
+   `error`:
+
+   | status | normalised stdout | outcome |
+   |---|---|---|
+   | 0 | `pmacs-sigint-v1:safe` | `safe` |
+   | 1 | `pmacs-sigint-v1:ignored` | `ignored` |
+   | 2 | `pmacs-sigint-v1:error` | `error` |
+
+4. Proceed only on `safe`. Otherwise stop, surfacing the helper's
+   stderr unchanged plus the diagnostic context below.
+
+**`safe` is validated like the others.** Revision 12 let a consumer
+proceed on exit 0 alone; under revision 13, `0` with a missing or wrong
+token is `error` and the consumer stops. That is deliberate — a status
+that arrives without the token did not come from this helper.
 
 That produces one of three total outcomes:
 
-| outcome | meaning | how it is reached |
+| outcome | pair required | reached when |
 |---|---|---|
-| `safe` | `SIGINT` is deliverable | inner probe exits 23; helper exits 0 |
-| `ignored` | `SIGINT` is inherited as `SIG_IGN` | inner probe exits 0 after a successful `kill`; helper exits 1 |
-| `error` | the probe could not decide | `kill` failed, `sh` unavailable, unexpected exit, another signal, or helper execution failed; helper exits 2 or could not be executed |
+| `safe` | `(0, pmacs-sigint-v1:safe)` | inner probe exits 23 |
+| `ignored` | `(1, pmacs-sigint-v1:ignored)` | inner probe exits 0 after a successful `kill` |
+| `error` | `(2, pmacs-sigint-v1:error)` | `kill` failed, `sh` unavailable, unexpected exit, another signal |
+| `error` (boundary) | **anything else**, including *no* pair | helper missing or unexecutable; a status with a missing, mismatched, unknown or malformed token; **macOS's status 1 with no token** |
 
 `error` is **not** treated as `ignored`. It fails the gate too, but with
 a different diagnosis, because "your environment ignores SIGINT" and
@@ -792,8 +822,37 @@ that every supported Unix has already exercised it; A7 keeps the
 implementation record explicit about which platforms were actually
 tried.
 
-**Both consumers use the same helper**, so the guard and the test can
-never disagree about what "ignored" means:
+**Both consumers use the same helper — but that alone no longer makes
+them agree.** Under revision 12 the helper's exit status *was* the
+verdict, so a shared helper guaranteed a shared answer. Under
+revision 13 each consumer **independently validates the pair**, in a
+different language, so they can now disagree by validating differently.
+Revision 12's claim that they "can never disagree" is withdrawn.
+
+What replaces it is a **shared conformance matrix**: both validators
+are exercised against the same twelve cases, and must agree on every
+one.
+
+| # | status | stdout | expected |
+|---|---|---|---|
+| 1 | 0 | `pmacs-sigint-v1:safe` | `safe` |
+| 2 | 1 | `pmacs-sigint-v1:ignored` | `ignored` |
+| 3 | 2 | `pmacs-sigint-v1:error` | `error` |
+| 4 | 0 | *(empty)* | error |
+| 5 | 1 | *(empty)* | error — **the macOS case** |
+| 6 | 0 | `pmacs-sigint-v1:ignored` | error (mismatched) |
+| 7 | 1 | `pmacs-sigint-v1:safe` | error (mismatched) |
+| 8 | 0 | `pmacs-sigint-v2:safe` | error (unknown version) |
+| 9 | 0 | `pmacs-sigint-v1:safe\npmacs-sigint-v1:safe` | error (multi-line) |
+| 10 | 0 | `  pmacs-sigint-v1:safe  ` | `safe` (normalisation: trim) |
+| 11 | 126 | `pmacs-sigint-v1:safe` | error (status outside 0–2) |
+| 12 | — (spawn failure) | — | error, with no status inspected |
+
+Row 10 fixes normalisation: **strip one trailing newline, then trim
+ASCII whitespace, then require exactly one line.** Rows 4–9 and 11 are
+the ways a status can arrive without a trustworthy verdict.
+
+The two consumers:
 
 - **`scripts/gate` fails immediately**, before any stage, with an
   explicit ignored-`SIGINT` diagnosis.
@@ -866,7 +925,19 @@ show:
   | consumers accept a **missing** token (status only) | A6 and the macOS row — this is exactly the shipped defect |
   | consumers accept a **wrong** token for the status (e.g. `…:safe` with exit 1) | A6 |
   | consumers accept an **unknown** token (`pmacs-sigint-v2:safe`) | A6 |
-  | helper prints the token to **stderr** instead of stdout | A1–A3 — the pair no longer validates |
+  | helper prints the token to **stderr** instead of stdout | **A1 and A3** — see below |
+
+  **Why that last one maps to A1/A3 and not A2.** With the token on
+  stderr, stdout is empty, so *every* outcome becomes boundary `error`.
+  A1 (gate refuses under ignored `SIGINT`) still refuses but with the
+  wrong diagnosis, and A3 (foreground success unaffected) breaks
+  outright because `safe` no longer validates — both bite. **A2 does
+  not**, because A2 only requires the direct test to report *a*
+  precondition failure rather than the 5 s deadline, and a boundary
+  `error` satisfies that as written. Revision 13 listed A2 here
+  incorrectly. Either mapping is defensible; this framing keeps A2
+  broad — the property it protects is "never the misleading deadline
+  message" — and relies on A6 to pin *which* diagnosis appears.
 - **A5 — the gate is otherwise unchanged**: a normal foreground run
   reaches and passes every stage it did before, with no stage added,
   skipped, reordered, or made conditional.
@@ -877,27 +948,48 @@ show:
   revision 13 to cover the pair: a **missing**, **mismatched** or
   **unknown** token is `error` in both consumers, whatever the status
   accompanying it.
-- **A6a — the macOS row, stated as the concrete obligation it now is.**
-  An unexecutable helper on macOS yields **status 1 with no token**.
-  Both consumers must classify that as **boundary error → 2**, never
-  `ignored`. This is not a hypothetical: it is the observed CI failure
-  on `70f0bc9` (`Test (macos-latest / lua54)` and `… / luajit`), and
-  the row is only satisfied when that platform is green.
-- **A7 — SATISFIED BY DISCLOSURE**, which is the fallback this
-  criterion allows when no non-Linux unix is reachable. Revision 12
-  wrote A7 as "exercised there, **or** state what is claimed versus
-  what was tried"; an earlier draft of this line said A7 "stays open",
-  which **contradicted the approved contract** and is withdrawn.
-  - **Tried:** Linux `x86_64`, this machine, all three outcomes
-    (`safe` 0, `ignored` 1, `error` 2), for the helper, the gate and
-    the direct test.
-  - **Not tried:** every non-Linux unix. None was reachable.
-  - **Claimed:** the mechanism is POSIX, not Linux-specific — the
-    helper uses only `trap`, `kill -INT`, `$$`, `case` and `echo`, and
-    reads no `/proc` and calls no `sigaction`; the disposition
-    behaviour it detects is POSIX inheritance across `fork` and `exec`.
-  That is a contract argument, disclosed as such. Anyone porting to
-  BSD or macOS should re-run the three outcomes rather than trust it.
+- **A6a — the macOS row, SCOPED TO THE GATE.** An unexecutable helper
+  on macOS makes `/bin/sh` exit **1 with no token**; the gate must
+  classify that as **boundary error → 2**, never `ignored`. Not
+  hypothetical: it is the observed CI failure on `70f0bc9`
+  (`Test (macos-latest / lua54)` and `… / luajit`), and the row is
+  satisfied only when that platform is green.
+
+  **It does not apply to R-d, for two independent reasons**, and
+  revision 13 was wrong to state it for "both consumers":
+  - **R-d never sees that status.** The gate invokes the helper through
+    `/bin/sh`, which converts an exec failure into a shell exit status.
+    R-d uses Rust's `Command`, which returns a **spawn error with no
+    exit status at all** — a different code path reaching `error` by a
+    different route (conformance row 12, not row 5).
+  - **macOS CI does not compile R-d's test.** It lives inside
+    `#[cfg(feature = "crdt")] mod crdt`, and the macOS jobs run
+    `--no-default-features --features <lua>` with no `crdt`;
+    `Test (crdt)` is `runs-on: ubuntu-latest`.
+
+  So R-d's macOS behaviour is **unexercised**, and this framing does not
+  pretend otherwise. Closing that would need either a non-crdt-gated
+  R-d row or a macOS crdt job — **neither is proposed here**, and A7
+  records the gap instead of hiding it.
+- **A7 — PARTIALLY EXERCISED ON macOS, one defect found, R-d still
+  Linux-only.** Revision 12 closed this by disclosure because no
+  non-Linux unix was reachable. **That is now stale: macOS CI reached
+  it and measured it red**, so the disclosure fallback no longer
+  applies and the criterion is restated against evidence.
+  - **Exercised on macOS (`Test (macos-latest / lua54)` and
+    `… / luajit`, head `70f0bc9`):** five of the six helper/gate rows
+    pass — all three helper outcomes, gate refusal on `ignored`, and
+    gate refusal on a helper-reported `error`.
+  - **One known defect on macOS:**
+    `gate_maps_an_unexecutable_helper_to_error_not_ignored` fails,
+    status 1 with no token classified as `ignored`. This is the whole
+    reason for revision 13 (§4d), and A6a is the row that closes it.
+  - **R-d: Linux-only, unexercised on macOS**, because its test is
+    crdt-gated and the macOS jobs build without `crdt`. Stated as a
+    gap, not argued away.
+  - **Everything else remains a contract argument**: the helper is
+    POSIX shell only, reads no `/proc` and calls no `sigaction`. BSD
+    and other unixes are still untried.
 
 ## 8b. Superseded criteria, kept for the record
 

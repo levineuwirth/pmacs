@@ -288,18 +288,39 @@ from #171 and #215.
   otherwise exercised there.
   - **The gate returned 1 = `ignored` for a helper it could not
     execute** — the exact conflation §7c forbids.
-  - **Leading hypothesis, NOT yet established: the ABI's `1` is
-    ambiguous by construction.** `1` means "ignored", and `1` is also a
-    status shells return for assorted failures. On Linux an
-    unexecutable file yields 126, so the catch-all maps it to 2; if
-    macOS's `/bin/sh` returns 1, the two cases are **the same number**
-    at the call boundary and no catch-all can separate them. If that
-    holds, the fix is to move the verdicts out of the range shells
-    produce, or to carry them by something other than exit status
-    alone — a design change needing its own revision.
-  - The assertion now carries the gate's stderr, which prints the raw
-    probe status, because the first failure could not say which status
-    produced it.
+  - **ESTABLISHED, not a hypothesis.** The macOS log shows the shell's
+    `Permission denied` followed by the gate's `1 | 2)` message — so
+    `sigint_status` was **1**: macOS `/bin/sh` returns **1** for an
+    exec failure where Linux returns **126**. The status-only ABI
+    cannot separate that from the helper's own `ignored`.
+  - **The raw status was NOT printed.** An earlier entry here said the
+    stderr carries it; the gate interpolates the number only in its
+    catch-all branch, and this failure took the `1 | 2)` branch. The
+    path was identified by **which message text appeared**, not by a
+    number.
+  - **A proposed repair was REJECTED in review and is recorded so it is
+    not retried:** moving `ignored` from 1 to 3 relocates the collision
+    without closing it, because an exec failure can return **any**
+    nonzero status. The generalisation: **no exit status can prove the
+    helper ran.**
+  - **Framing revision 13 — AWAITING APPROVAL — replaces the ABI with a
+    validated `(status, token)` pair**: `0`/`1`/`2` with
+    `pmacs-sigint-v1:safe|ignored|error`, token alone on stdout,
+    diagnostics on stderr, and any other pair — including macOS's
+    status 1 with no token — a boundary error mapped to 2. Every
+    refusing branch must print the observed status and token state as
+    diagnostic context, never as the classifier. A shared **conformance
+    matrix** replaces revision 12's withdrawn "both consumers use the
+    same helper so they can never disagree", which stopped being true
+    once each consumer validates the pair independently.
+  - **A6a is scoped to the GATE.** R-d never sees a shell status: Rust's
+    `Command` returns a spawn error with no exit status, and R-d's test
+    is crdt-gated so macOS CI does not compile it. R-d on macOS is
+    **unexercised**, recorded as a gap.
+  - **A7 is no longer "satisfied by disclosure"** — macOS was reached
+    and measured: five of six helper/gate rows pass, one defect
+    (`gate_maps_an_unexecutable_helper_to_error_not_ignored`), R-d
+    Linux-only.
 - **PR #241** (`https://github.com/levineuwirth/pmacs/pull/241`), opened
   2026-08-19 from `gpu-probe-sigint-teardown` into `main`. **Not merged;
   awaiting review rounds.**
@@ -340,7 +361,8 @@ from #171 and #215.
   result line immediately below `gate_script_acceptance`'s in the sweep
   log, misread as this suite's.)
 - **Framing revision 12 at `docs/gpu-probe-sigint-framing.md`,
-  APPROVED 2026-08-19 at `1fc0df6`** — revision 10 was approved at
+  approved 2026-08-19 at `1fc0df6` and IMPLEMENTED; **superseded by
+  revision 13, awaiting approval** — revision 10 was approved at
   `4fba9f6` and revision 9 at `15c25ec`; neither approval covered the
   later mechanism finding and remedy selection. **D1/D2 HAVE RUN and
   found the mechanism: `SIGINT` was ignored group-wide
