@@ -274,9 +274,11 @@ distinguishes:
   `724b785`.
 
 And an older ancestor outside the interval behaving badly is simply
-**irrelevant** to whether `7599661..724b785` contains a regression —
-that question is settled by the endpoints themselves, under the N = 5
-clean-split contract in §7 D0a. (Revision 6 wrote "needs only that the
+**irrelevant** to whether `7599661..724b785` contains a regression. The
+endpoints, under the N = 5 contract in §7 D0a, settle only **whether a
+bisect is currently justified** — not whether the interval contains a
+regression. Those are different questions, and D0a's outcome
+(both-uniform-red) answers the first and leaves the second open. (Revision 6 wrote "needs only that the
 two clean endpoints differ *now*", which is the superseded one-run
 rule; a bare difference decides nothing.)
 
@@ -284,12 +286,17 @@ rule; a bare difference decides nothing.)
 move**, as endpoint reproduction — which is a decision procedure, not a
 prediction.
 
-## 4b. D0a result — the source hypothesis is eliminated
+## 4b. D0a result — the commits do not discriminate today
 
-Executed 2026-08-19 under the approved contract: 10 runs,
+Executed 2026-08-19 under the approved contract **with one departure,
+stated up front**: the contract's captured-conditions list names
+`uptime`, and the harness kept only the load averages from it. `uptime`
+is therefore `UNKNOWN` for all ten runs. Everything else held — 10 runs,
 counterbalanced `A B B A A B B A A B`, N = 5 per endpoint, clean
 detached worktrees, isolated target directories, `dirty=0` verified per
-run. **Zero voids, zero splits.**
+run, **zero voids, zero splits** — and no classification depends on the
+missing field, so the verdict stands. D1/D2's harness must capture the
+full list.
 
 **A (`7599661`) uniform-red. B (`724b785`) uniform-red.** By the
 endpoint table this is *both endpoints uniform the same way*: the

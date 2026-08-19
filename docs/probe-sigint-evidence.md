@@ -181,8 +181,8 @@ precondition then the `sweep-crdt` command. `dirty=0` verified per run.
 **Exact commands.** Every run, in full. `<WT>` is
 `/home/jeans/Repos/personal/pmacs-d0a-A` (detached at `7599661`) or
 `/home/jeans/Repos/personal/pmacs-d0a-B` (detached at `724b785`);
-`<TD>` is `/home/jeans/build/pmacs-gate-targets/d0a-A` or `…/d0a-B`
-correspondingly:
+`<TD>` is `/home/jeans/build/pmacs-gate-targets/d0a-A` or
+`/home/jeans/build/pmacs-gate-targets/d0a-B` correspondingly:
 
 ```
 env TMPDIR=/home/jeans/build/pmacs-gate-targets/tmp/d0a \
