@@ -777,9 +777,11 @@ every other status → `(2, error)`. Consumers do not parse the inner
 **The consumer flow is pair-validation, not status inspection:**
 
 1. Run the helper, capturing **status**, **stdout** and **stderr**
-   separately. A spawn failure — the helper missing, not executable, or
-   unrunnable for any reason — is `error` immediately, with **no
-   status to inspect at all**.
+   separately. The two process boundaries differ and the contract keeps
+   that difference explicit: the shell consumer always receives a shell
+   status, including when `exec` fails; Rust's `Command` instead returns a
+   spawn error with **no status to inspect at all**. Either route can
+   produce boundary `error`, but they are not the same input.
 2. **Compare stdout as BYTES against an exact grammar. There is no
    trimming.**
 
@@ -811,17 +813,20 @@ every other status → `(2, error)`. Consumers do not parse the inner
      (verified). So `TOKEN NUL` validates in one shell and not another
      — a contract two consumers cannot implement identically.
 
-   **Both consumers therefore capture to files and compare bytes.**
+   **The shell consumer therefore captures to files and compares bytes.**
+   Rust already receives byte vectors from `Command::output()` and compares
+   those directly; it does not need or create capture files.
 
    ```sh
    # The guard runs BEFORE the gate's own temporary roots exist, so it
    # creates and owns its capture directory --- and arms the cleanup
    # BEFORE the helper can be invoked, so no path can leave residue.
    capture=$(mktemp -d "${TMPDIR:-/tmp}/pmacs-sigint.XXXXXX") || {
-       echo 'gate: could not create the SIGINT guard capture directory' >&2
+       echo 'gate: could not create the SIGINT guard capture directory (status=unavailable token=missing)' >&2
        exit 2
    }
-   trap 'rm -rf "$capture"' EXIT HUP INT TERM
+   cleanup_sigint_capture() { rm -rf "$capture"; }
+   trap cleanup_sigint_capture EXIT HUP INT TERM
 
    # `|| status=$?` IS LOAD-BEARING under `set -eu`: a bare invocation
    # dies at the helper's non-zero exit and never reaches the
@@ -830,16 +835,59 @@ every other status → `(2, error)`. Consumers do not parse the inner
    status=0
    "$helper" >"$capture/out" 2>"$capture/err" || status=$?
 
-   printf '%s'    "$expected_token" >"$capture/want"
-   printf '%s\n'  "$expected_token" >"$capture/want_lf"
-   if cmp -s "$capture/out" "$capture/want" \
-      || cmp -s "$capture/out" "$capture/want_lf"
-   then token_ok=1; else token_ok=0; fi
+   # Select an expected token only for public helper statuses. This case
+   # MUST precede any use of expected_token: the gate runs under `set -u`,
+   # and an out-of-range shell status has no expected token.
+   expected_token=
+   case "$status" in
+       0) expected_token=pmacs-sigint-v1:safe ;;
+       1) expected_token=pmacs-sigint-v1:ignored ;;
+       2) expected_token=pmacs-sigint-v1:error ;;
+   esac
 
-   # On the SAFE path the guard tidies up and disarms, so the gate's own
-   # later trap installation is undisturbed. Every refusing path exits,
-   # and the armed trap removes the directory for it.
-   # rm -rf "$capture"; trap - EXIT HUP INT TERM
+   token_ok=0
+   if [ -n "$expected_token" ]; then
+       printf '%s'   "$expected_token" >"$capture/want"
+       printf '%s\n' "$expected_token" >"$capture/want_lf"
+       if cmp -s "$capture/out" "$capture/want" \
+          || cmp -s "$capture/out" "$capture/want_lf"
+       then token_ok=1; fi
+   fi
+
+   if [ ! -s "$capture/out" ]; then
+       token_state=missing
+   elif [ "$token_ok" -eq 1 ]; then
+       token_state=valid
+   else
+       token_state=unexpected
+   fi
+
+   case "$status:$token_ok" in
+       0:1)
+           # SAFE is the sole continuing path. Remove the guard-local
+           # directory and disarm its trap BEFORE the gate installs its
+           # later, unrelated cleanup trap.
+           cleanup_sigint_capture
+           trap - EXIT HUP INT TERM
+           ;;
+       1:1)
+           cat "$capture/err" >&2
+           printf 'gate: SIGINT guard status=1 token=valid\n' >&2
+           exit 1
+           ;;
+       2:1)
+           cat "$capture/err" >&2
+           printf 'gate: SIGINT guard status=2 token=valid\n' >&2
+           exit 2
+           ;;
+       *)
+           # The captured stderr is untrusted here and is not surfaced as
+           # the diagnosis. EXIT runs cleanup_sigint_capture.
+           printf 'gate: SIGINT guard boundary error (status=%s token=%s)\n' \
+               "$status" "$token_state" >&2
+           exit 2
+           ;;
+   esac
    ```
 
    **The capture directory is guard-local by necessity.** The guard sits
@@ -850,7 +898,7 @@ every other status → `(2, error)`. Consumers do not parse the inner
    honour: a refused run leaves nothing behind.
 
    Files preserve every byte including NUL, `cmp` compares bytes, and
-   `status` is the helper's own. Rust does the same by comparing
+   `status` is the helper's own. Rust performs the same comparison on
    `out.stdout` against `TOKEN` and `TOKEN + b"\n"`. Neither consumer
    trims, and neither routes stdout through a shell variable.
 
@@ -862,7 +910,7 @@ every other status → `(2, error)`. Consumers do not parse the inner
 3. Accept **only** these three pairs; every other combination is
    `error`:
 
-   | status | normalised stdout | outcome |
+   | status | stdout bytes | outcome |
    |---|---|---|
    | 0 | `pmacs-sigint-v1:safe` | `safe` |
    | 1 | `pmacs-sigint-v1:ignored` | `ignored` |
@@ -920,9 +968,10 @@ revision 13 each consumer **independently validates the pair**, in a
 different language, so they can now disagree by validating differently.
 Revision 12's claim that they "can never disagree" is withdrawn.
 
-What replaces it is a **shared conformance matrix**: both validators
-are exercised against the same generated case set below, and must agree
-on every case.
+What replaces it is a **shared conformance matrix plus one
+consumer-specific boundary case**. Both validators exercise the shared
+set and must agree on it; Rust alone exercises the no-status spawn-error
+case that the shell boundary cannot represent.
 
 **Two distinct failing outcomes**, which an earlier draft collapsed:
 
@@ -977,20 +1026,22 @@ Only **V validates** — `(0,safe)` → `safe`, `(1,ignored)` → `ignored`,
 `(2,error)` → `error (validated)`. The other **36** are
 `error (boundary)`.
 
-Out-of-band cases, which have no `(status, token)` form:
+Out-of-band cases and their applicable consumers:
 
-| # | case | expected |
-|---|---|---|
-| X1 | status 126 with a correct token | `error (boundary)` — status outside 0–2 |
-| X2 | spawn failure (missing / unexecutable helper) | `error (boundary)`, **no status inspected** |
-| X3 | status 1, empty stdout, stderr = canonical ignored text | `error (boundary)`, and the output **must not** present "SIGINT is ignored" as the diagnosis |
-| X4 | status 0, correct token, plus extra bytes on **stderr** | `safe` — stderr is not consulted for classification |
+| # | consumers | case | expected |
+|---|---|---|---|
+| X1 | shell + Rust | status 126 with a correct token | `error (boundary)` — status outside 0–2 |
+| X2 | **Rust only** | spawn failure (missing / unexecutable helper) | `error (boundary)`, **no status inspected** |
+| X3 | shell + Rust | status 1, empty stdout, stderr = canonical ignored text | `error (boundary)`, and the output **must not** present "SIGINT is ignored" as the diagnosis |
+| X4 | shell + Rust | status 0, correct token, plus extra bytes on **stderr** | `safe` — stderr is not consulted for classification |
 
-**Truthful total: 42 + 4 = 46 concrete cases.** Earlier drafts said
-twelve, then twenty-three, then thirty-four; each was a count of a set
-that had not actually been enumerated. Both validators are exercised
-against all forty-six and must agree on every one, including the
-distinction between validated and boundary error.
+**Truthful totals:** the shared set is **45 cases** — the 42-case
+cross-product plus X1, X3 and X4 — and both validators must agree on all
+45. Rust additionally exercises X2, for **46 distinct cases overall**;
+the shell exercises 45 because an `exec` failure there necessarily
+becomes a shell status. Earlier drafts said twelve, then twenty-three,
+then thirty-four; each was a count of a set that had not actually been
+enumerated.
 
 The two consumers:
 
@@ -1068,7 +1119,7 @@ show:
   | helper prints the token to **stderr** instead of stdout | **A1 and A3** — see below |
   | consumer surfaces child stderr as the diagnosis on a **boundary** failure | **A6b** |
   | consumer accepts any status 2 regardless of token | **A6c** |
-  | consumer trims whitespace before comparing | **A6c** via rows 18–19 |
+  | consumer trims whitespace before comparing | the **S/C classes** in the shared 42-case cross-product |
 
   **Why that last one maps to A1/A3 and not A2.** With the token on
   stderr, stdout is empty, so *every* outcome becomes boundary `error`.
@@ -1104,14 +1155,15 @@ show:
   `SIGINT is ignored` text on stderr** classifies as boundary `error`
   in both consumers, **and neither presents "SIGINT is ignored" as the
   diagnosis** — the child's stderr is omitted or explicitly labelled
-  untrusted. Conformance row 23. Without this, A6 is satisfiable in the
+  untrusted. Shared case X3. Without this, A6 is satisfiable in the
   classification while being violated in the message the operator
   actually reads.
 - **A6c — exact-pair validation at status 2.** `(2, …:error)` is
   `error (validated)`; `(2, missing)`, `(2, …:safe)`, `(2, …:ignored)`
-  and `(2, unknown-version)` are each **boundary** errors. Conformance
-  rows 3, 6, 11, 12, 14. A validator that accepts any status 2
-  regardless of token must fail this row.
+  and `(2, unknown-version)` are each **boundary** errors. The status-2
+  slice of the shared cross-product exercises both permitted encodings,
+  every mismatched valid token and every malformed class. A validator
+  that accepts any status 2 regardless of token must fail this row.
 - **A6a — the macOS row, SCOPED TO THE GATE.** An unexecutable helper
   on macOS makes `/bin/sh` exit **1 with no token**; the gate must
   classify that as **boundary error → 2**, never `ignored`. Not
