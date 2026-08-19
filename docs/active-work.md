@@ -282,17 +282,22 @@ from #171 and #215.
 - **PR #241** (`https://github.com/levineuwirth/pmacs/pull/241`), opened
   2026-08-19 from `gpu-probe-sigint-teardown` into `main`. **Not merged;
   awaiting review rounds.**
-- **CHECKPOINT: implementation landed at `3206433`; this entry's own
-  commit adds the A6 consumer rows on top.** The branch head is the
-  authority — a literal SHA naming a branch's own tip goes stale the
+- **CHECKPOINT — immutable event SHAs, because "this entry's own
+  commit" goes stale exactly the way a tip SHA does:** implementation
+  landed at **`3206433`**; the A6 both-consumer rows and the bounded
+  negative path at **`167d830`**; the two factual corrections at
+  **`c9cc8dd`**; the gate-run record at **`7cef9ca`**; the PR record at
+  **`d64d300`**. Only the **branch tip** stays symbolic — a literal SHA
+  naming a branch's own tip goes stale the
   moment the next commit lands, which this ledger has already recorded
   once. State at `3206433`: pushed, signed `G`, worktree clean,
   `git diff --check` clean, **full default gate green (8/8) in the
   foreground**, 31 gate-acceptance rows passing. After this commit:
   **33 gate-acceptance rows and 16 `gpu_invocation_acceptance` rows**.
 - **FULL GATE GREEN ON THE COMMITTED HEAD `c9cc8dd`** — all 8 stages,
-  log `20260819T160220Z-2339958`, started at load 3.90. This entry's
-  own commit adds only that record.
+  log `20260819T160220Z-2339958`, started at load 3.90. Recorded at
+  `7cef9ca`, which is docs-only on top of the gated tree; that
+  exemption is what stops gate-result records recursing forever.
 - **The preceding attempt on the same head was RED, and is kept.**
   Log `20260819T152209Z-2073040`: `04-lib-crdt` and `07-sweep` failed
   on four wall-clock rows —
@@ -313,7 +318,7 @@ from #171 and #215.
   draft said 35: that figure was the `git_status_stage1_acceptance`
   result line immediately below `gate_script_acceptance`'s in the sweep
   log, misread as this suite's.)
-- **No PR. Framing revision 12 at `docs/gpu-probe-sigint-framing.md`,
+- **Framing revision 12 at `docs/gpu-probe-sigint-framing.md`,
   APPROVED 2026-08-19 at `1fc0df6`** — revision 10 was approved at
   `4fba9f6` and revision 9 at `15c25ec`; neither approval covered the
   later mechanism finding and remedy selection. **D1/D2 HAVE RUN and
