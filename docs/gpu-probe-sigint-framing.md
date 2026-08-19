@@ -1,7 +1,14 @@
 # GPU launcher / probe SIGINT teardown — framing
 
-Revision 10. Status: **APPROVED 2026-08-19 at `4fba9f6`. No fix
-implemented; mechanism still unknown.**
+Revision 11. Status: **MECHANISM FOUND (§4c). Awaiting approval — the
+problem statement has changed, so the remedy in §7/§8 no longer
+follows.**
+
+Revision 10 was approved 2026-08-19 at `4fba9f6`, authorising
+diagnostic-only D1/D2. They ran, and found the mechanism on the first
+reproducing sweep. It is not what this document was built around: bet 1
+is falsified, A5 is struck, and nothing is wrong with the probe's
+shutdown path.
 
 Revision 9 was approved 2026-08-19 at `15c25ec`. **That approval did
 not extend to revision 10**, because retiring D0b (§7) materially
@@ -324,6 +331,95 @@ difference is **not captured by those two commits**.
   direct measurement dominates archaeology.
 
 Per-run provenance: `docs/probe-sigint-evidence.md` §D0a.
+
+## 4c. D1/D2 RESULT — the mechanism, and it is my own artifact
+
+**`SIGINT` was ignored by every process in the target group, because I
+launched the test runner in the background.**
+
+Captured at the moment of the test's own `kill`:
+
+```
+test parent  pid 8252                       SigIgn=0000000000001007
+launcher     pid 8281 ppid=8252 pgid=8281   SigIgn=0000000000001007
+                                            SigCgt=0000000000000440  wchan=do_wait
+probe        pid 8284 ppid=8281 pgid=8281   SigIgn=0000000000001007
+```
+
+`SigIgn=0x1007` is signals 1, 2, 3 and 13 — and **signal 2 is
+`SIGINT`**. The launcher's `SigCgt=0x440` is signals 7 and 11 only,
+Rust's SIGBUS/SIGSEGV handlers; there is no `SIGINT` handler anywhere.
+Every `SigPnd`/`ShdPnd` is zero and every per-thread `SigBlk` is zero,
+so this is **ignored** delivery, not **blocked** delivery. Launcher and
+probe share `pgid=8281`, so nothing escaped the group either. All three
+candidates D1/D2 was built to separate are thereby separated.
+
+`kill(-pgid, SIGINT)` is a **no-op for every member**. The launcher
+waits in `do_wait` for a child that was never told to stop, and the 5 s
+deadline fires.
+
+### Where the ignore comes from — measured in both directions
+
+| invocation | child's `SigIgn` | `SIGINT` |
+|---|---|---|
+| foreground | `0000000000001000` | bit 12 only (SIGPIPE) — **deliverable** |
+| `setsid nohup … &` | `0000000000000007` | SIGHUP, SIGINT, SIGQUIT — **ignored** |
+
+A shell running a command in the background without job control sets
+`SIGINT`/`SIGQUIT` to `SIG_IGN` in the child; `nohup` adds `SIGHUP`.
+**`SIG_IGN` is inherited across `fork` and survives `exec`**, so it
+propagates shell → `cargo` → test binary → launcher → probe.
+
+### The controlled experiment
+
+Same command, same tree, same target directory, minutes apart — only
+the invocation differs:
+
+| arm | invocation | both target copies |
+|---|---|---|
+| 1 | foreground | **ok** |
+| 2 | `setsid nohup … &` | **FAILED** |
+
+### This invalidates most of this lane's investigation, and I caused it
+
+I adopted `setsid nohup … &` on 08-16 to stop the Bash tool's
+ten-minute cap truncating gate runs. **That is the "onset".**
+
+- **The subset-vs-full distinction was never real.** Every reduction I
+  ran was foreground; every full sweep was backgrounded. The two
+  variables were perfectly confounded, so §4's matrix measured my
+  invocation method rather than the code, and R9's "paradox" dissolves.
+- **The 08-15 → 08-16 window** dates my method change, not the machine
+  and not the source.
+- **D0a's both-uniform-red is consistent and was right** — its harness
+  backgrounded both arms, so both were red; the cause was invisible to
+  a comparison in which it did not vary.
+- **"Pre-existing on `main`" is true but trivial**: `main` fails the
+  same way backgrounded and passes foreground.
+
+### Consequences for the contract
+
+- **Bet 1 is FALSIFIED, and A5 is struck** under its own D4 condition.
+  An interactive terminal does not ignore `SIGINT`, so Ctrl-C on a real
+  `pmacs --gpu` session behaves correctly. This is not a defect a user
+  can meet.
+- **The §7/§8 remedy no longer follows.** What remains is narrower and
+  genuinely real:
+  1. **The gate must not be invoked so that `SIGINT` is ignored** — a
+     runner practice, and the direct cause of all seven red sweeps.
+  2. **The test should not fail obscurely when its precondition is
+     absent.** "child did not exit within 5s" sent this lane chasing a
+     teardown defect for nine revisions. It should detect an ignored
+     `SIGINT` and say so. Silently skipping is not acceptable —
+     `scripts/gate`'s own comments record that self-skipping tests
+     "void coverage silently".
+- **A3's subset/full obligation is discharged by explanation**, not by
+  D0b: the difference was invocation mode, demonstrated in both
+  directions.
+
+`#![forbid(unsafe_code)]` rules out `pre_exec`, so remedy 2 is a
+precondition assertion rather than a repair — but that is a design
+question for the next revision, not a decision taken here.
 
 ## 5. Two retracted claims, both mine, kept as warnings
 
