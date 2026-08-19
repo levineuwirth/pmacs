@@ -814,13 +814,40 @@ every other status → `(2, error)`. Consumers do not parse the inner
    **Both consumers therefore capture to files and compare bytes.**
 
    ```sh
-   "$helper" >"$tmp/out" 2>"$tmp/err"
-   status=$?
-   printf '%s'   "$expected_token" >"$tmp/want"
-   printf '%s\n' "$expected_token" >"$tmp/want_lf"
-   if cmp -s "$tmp/out" "$tmp/want" || cmp -s "$tmp/out" "$tmp/want_lf"
+   # The guard runs BEFORE the gate's own temporary roots exist, so it
+   # creates and owns its capture directory --- and arms the cleanup
+   # BEFORE the helper can be invoked, so no path can leave residue.
+   capture=$(mktemp -d "${TMPDIR:-/tmp}/pmacs-sigint.XXXXXX") || {
+       echo 'gate: could not create the SIGINT guard capture directory' >&2
+       exit 2
+   }
+   trap 'rm -rf "$capture"' EXIT HUP INT TERM
+
+   # `|| status=$?` IS LOAD-BEARING under `set -eu`: a bare invocation
+   # dies at the helper's non-zero exit and never reaches the
+   # assignment. This is the original shipped bug, and an earlier draft
+   # of THIS SECTION reintroduced it.
+   status=0
+   "$helper" >"$capture/out" 2>"$capture/err" || status=$?
+
+   printf '%s'    "$expected_token" >"$capture/want"
+   printf '%s\n'  "$expected_token" >"$capture/want_lf"
+   if cmp -s "$capture/out" "$capture/want" \
+      || cmp -s "$capture/out" "$capture/want_lf"
    then token_ok=1; else token_ok=0; fi
+
+   # On the SAFE path the guard tidies up and disarms, so the gate's own
+   # later trap installation is undisturbed. Every refusing path exits,
+   # and the armed trap removes the directory for it.
+   # rm -rf "$capture"; trap - EXIT HUP INT TERM
    ```
+
+   **The capture directory is guard-local by necessity.** The guard sits
+   immediately after the worktree resolves and deliberately *precedes*
+   the gate's log directory, ambient root and `GATE_TMPDIR`, so none of
+   those exist yet. It must therefore create its own, and it inherits
+   the same **no-residue invariant** the guard was placed early to
+   honour: a refused run leaves nothing behind.
 
    Files preserve every byte including NUL, `cmp` compares bytes, and
    `status` is the helper's own. Rust does the same by comparing
@@ -904,31 +931,51 @@ on every case.
 - **`error (boundary)`** — anything else. Nothing trustworthy was
   returned, so the consumer owns the wording (see step 4).
 
-**The matrix is a generated cross-product: ten token classes × three
-statuses, plus four out-of-band cases.** An earlier draft applied the
+**The matrix is a generated cross-product over token class, encoding
+and status, plus four out-of-band cases — enumerated below and counted
+honestly.** An earlier draft applied the
 malformed classes only at status 0, so a validator that checked tokens
 strictly for `0` and accepted arbitrary output at `1` passed every row.
 
-Token classes, written `T0`–`T9`:
+**Encodings matter, and one of them is what production actually
+emits.** The helper prints with `echo`, so the real output is
+**`TOKEN` + LF**. Both encodings validate:
 
-| class | stdout content |
+```
+E1 := TOKEN          (bare)
+E2 := TOKEN LF       (what the shipped helper emits)
+```
+
+Per status, the cases are:
+
+| class | stdout | count | expected |
+|---|---|---|---|
+| **V** | the **correct** token for this status, in `E1` and `E2` | 2 | **validates** |
+| **M** | each of the **two other valid tokens**, in `E1` and `E2` | 4 | boundary |
+| **E** | empty | 1 | boundary |
+| **U** | `pmacs-sigint-v2:…` | 1 | boundary |
+| **L** | LF + token | 1 | boundary |
+| **X** | token + LF + LF | 1 | boundary |
+| **S** | `␠` token `␠` | 1 | boundary |
+| **C** | token + CR + LF | 1 | boundary |
+| **D** | token token (one line) | 1 | boundary |
+| **N** | token + NUL | 1 | boundary |
+
+That is **14 per status × 3 statuses = 42**.
+
+The **six mismatched valid-token pairs** are enumerated rather than
+sampled, because choosing one per status would leave half of them
+untested:
+
+| status | wrong tokens (each in `E1` and `E2`) |
 |---|---|
-| `T0` | the token **correct for the status under test** |
-| `T1` | empty |
-| `T2` | a different *valid* token (mismatched) |
-| `T3` | `pmacs-sigint-v2:…` (unknown version) |
-| `T4` | LF + token (leading newline) |
-| `T5` | token + LF + LF (extra newline) |
-| `T6` | `␠` token `␠` (surrounding spaces) |
-| `T7` | token + CR + LF |
-| `T8` | token token (doubled, one line) |
-| `T9` | token + NUL |
+| 0 | `…:ignored`, `…:error` |
+| 1 | `…:safe`, `…:error` |
+| 2 | `…:safe`, `…:ignored` |
 
-**The rule is the whole table:** for statuses 0, 1 and 2, **only `T0`
-validates** — giving `safe`, `ignored` and `error (validated)`
-respectively. **All other 27 combinations are `error (boundary)`.**
-`T0` with a single trailing LF also validates, at every status, since
-the grammar admits it.
+Only **V validates** — `(0,safe)` → `safe`, `(1,ignored)` → `ignored`,
+`(2,error)` → `error (validated)`. The other **36** are
+`error (boundary)`.
 
 Out-of-band cases, which have no `(status, token)` form:
 
@@ -936,12 +983,14 @@ Out-of-band cases, which have no `(status, token)` form:
 |---|---|---|
 | X1 | status 126 with a correct token | `error (boundary)` — status outside 0–2 |
 | X2 | spawn failure (missing / unexecutable helper) | `error (boundary)`, **no status inspected** |
-| X3 | status 1, `T1`, stderr = canonical ignored text | `error (boundary)`, and the output **must not** present "SIGINT is ignored" as the diagnosis |
-| X4 | status 0, `T0`, plus extra bytes on **stderr** | `safe` — stderr is not consulted for classification |
+| X3 | status 1, empty stdout, stderr = canonical ignored text | `error (boundary)`, and the output **must not** present "SIGINT is ignored" as the diagnosis |
+| X4 | status 0, correct token, plus extra bytes on **stderr** | `safe` — stderr is not consulted for classification |
 
-That is **34 cases**: 30 from the cross-product plus X1–X4. Both
-validators are exercised against all of them and must agree on every
-one, including the distinction between validated and boundary error.
+**Truthful total: 42 + 4 = 46 concrete cases.** Earlier drafts said
+twelve, then twenty-three, then thirty-four; each was a count of a set
+that had not actually been enumerated. Both validators are exercised
+against all forty-six and must agree on every one, including the
+distinction between validated and boundary error.
 
 The two consumers:
 
@@ -1042,6 +1091,14 @@ show:
   revision 13 to cover the pair: a **missing**, **mismatched** or
   **unknown** token is `error` in both consumers, whatever the status
   accompanying it.
+- **A8 — the guard leaves no residue, on every path.** The guard
+  creates its own capture directory because it runs before the gate's
+  temporary roots exist, and arms its cleanup **before** invoking the
+  helper. After `safe`, `ignored`, validated `error`, boundary `error`,
+  and a failure to create the directory at all, **no capture directory
+  survives**. This is the same no-residue invariant that put the guard
+  early in the first place; adding a capture directory must not weaken
+  it.
 - **A6b — a boundary failure never speaks with the helper's voice.**
   A helper exiting **1 with no token but the canonical
   `SIGINT is ignored` text on stderr** classifies as boundary `error`
