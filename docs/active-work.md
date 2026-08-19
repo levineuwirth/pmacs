@@ -416,10 +416,11 @@ from #171 and #215.
   **Verified to bite** — mutating the gate back to either shipped bug
   fails `gate_refuses_to_start_when_sigint_is_ignored` and nothing
   else. Their absence is why 27 passing tests missed both.
-- **A7 satisfied by disclosure**: Linux `x86_64` only, all three
-  outcomes, no non-Linux unix reachable; the POSIX argument is labelled
-  a contract claim rather than a measurement. Revisions 1, 2 and 3 were each rejected on findings, all
-  upheld; run provenance lives in `docs/probe-sigint-evidence.md`.
+- **A7 — revision-12 HISTORY, superseded.** It then read: satisfied by
+  disclosure, Linux `x86_64` only, no non-Linux unix reachable. **That
+  is no longer true** — macOS CI reached it and measured it red. The
+  live record is the CI entry above: five of six helper/gate rows pass
+  on macOS, one defect, R-d Linux-only because its test is crdt-gated.
 - **D0a EXECUTED 2026-08-19 — verdict: difference NOT captured by the
   two commits.** 10 runs, counterbalanced, N=5 per endpoint, clean
   detached worktrees with isolated target dirs, `dirty=0` per run, zero

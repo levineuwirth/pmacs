@@ -780,10 +780,35 @@ every other status → `(2, error)`. Consumers do not parse the inner
    separately. A spawn failure — the helper missing, not executable, or
    unrunnable for any reason — is `error` immediately, with **no
    status to inspect at all**.
-2. **Normalise stdout**: strip a single trailing newline, then trim
-   ASCII whitespace at both ends. The result must be **exactly one
-   line**. Anything else — empty, multi-line, or with interior
-   content — is `error`.
+2. **Compare stdout as BYTES against an exact grammar. There is no
+   trimming.**
+
+   ```
+   stdout := TOKEN | TOKEN LF
+   TOKEN  := "pmacs-sigint-v1:" ("safe" | "ignored" | "error")
+   LF     := 0x0A
+   ```
+
+   Nothing else validates: not leading whitespace, not a second
+   newline, not CR, not interior or trailing spaces, not empty.
+
+   **Revision 13's first grammar was unimplementable identically.** It
+   said "strip one trailing newline, then trim ASCII whitespace" — but
+   trimming removes *further* newlines, so `TOKEN\n\n` would have
+   validated while the same clause demanded single-line output. Worse,
+   POSIX command substitution `$(cmd)` strips **all** trailing
+   newlines while Rust's `Command` returns raw bytes, so the two
+   consumers could not have agreed even on a correct rule.
+
+   **Both consumers must therefore preserve trailing bytes.** In shell
+   that requires the sentinel idiom, because `$()` alone destroys the
+   evidence:
+
+   ```sh
+   out=$("$helper"; printf x); out=${out%x}
+   ```
+
+   In Rust, compare `out.stdout` directly. Neither consumer trims.
 3. Accept **only** these three pairs; every other combination is
    `error`:
 
@@ -793,8 +818,24 @@ every other status → `(2, error)`. Consumers do not parse the inner
    | 1 | `pmacs-sigint-v1:ignored` | `ignored` |
    | 2 | `pmacs-sigint-v1:error` | `error` |
 
-4. Proceed only on `safe`. Otherwise stop, surfacing the helper's
-   stderr unchanged plus the diagnostic context below.
+4. Proceed only on `safe`. Otherwise stop — and **which stderr is
+   authoritative depends on whether the pair validated**:
+
+   - **Validated pair** (`ignored` or `error`): the helper's stderr
+     *is* the diagnosis. Surface it unchanged.
+   - **Boundary failure** (any invalid pair, or no pair at all): the
+     helper's stderr is **untrusted and must not be presented as the
+     diagnosis.** The consumer emits its own boundary wording, and
+     either omits the child's stderr or reproduces it under an explicit
+     untrusted label.
+
+   **This closes a hole revision 13 left open.** A helper exiting
+   **1 with no token but the canonical `SIGINT is ignored` text on
+   stderr** would classify as boundary `error` — correctly — and then
+   tell the operator their environment ignores `SIGINT`, which is A6's
+   prohibition arriving through the diagnostic instead of the
+   classification. A verdict that cannot be trusted cannot supply
+   trusted wording either.
 
 **`safe` is validated like the others.** Revision 12 let a consumer
 proceed on exit 0 alone; under revision 13, `0` with a missing or wrong
@@ -833,24 +874,50 @@ What replaces it is a **shared conformance matrix**: both validators
 are exercised against the same twelve cases, and must agree on every
 one.
 
+**Two distinct failing outcomes**, which revision 13 collapsed:
+
+- **`error (validated)`** — the pair `(2, …:error)`. The helper ran and
+  reported that it could not decide.
+- **`error (boundary)`** — anything else. Nothing trustworthy was
+  returned, so the consumer owns the wording (see step 4).
+
+Collapsing them let a validator that accepts **every** status 2
+regardless of token pass the whole matrix. The cross-product below
+closes that.
+
 | # | status | stdout | expected |
 |---|---|---|---|
-| 1 | 0 | `pmacs-sigint-v1:safe` | `safe` |
-| 2 | 1 | `pmacs-sigint-v1:ignored` | `ignored` |
-| 3 | 2 | `pmacs-sigint-v1:error` | `error` |
-| 4 | 0 | *(empty)* | error |
-| 5 | 1 | *(empty)* | error — **the macOS case** |
-| 6 | 0 | `pmacs-sigint-v1:ignored` | error (mismatched) |
-| 7 | 1 | `pmacs-sigint-v1:safe` | error (mismatched) |
-| 8 | 0 | `pmacs-sigint-v2:safe` | error (unknown version) |
-| 9 | 0 | `pmacs-sigint-v1:safe\npmacs-sigint-v1:safe` | error (multi-line) |
-| 10 | 0 | `  pmacs-sigint-v1:safe  ` | `safe` (normalisation: trim) |
-| 11 | 126 | `pmacs-sigint-v1:safe` | error (status outside 0–2) |
-| 12 | — (spawn failure) | — | error, with no status inspected |
+| 1 | 0 | `…:safe` | `safe` |
+| 2 | 1 | `…:ignored` | `ignored` |
+| 3 | 2 | `…:error` | **`error (validated)`** |
+| 4 | 0 | *(empty)* | error (boundary) |
+| 5 | 1 | *(empty)* | error (boundary) — **the macOS case** |
+| 6 | **2** | *(empty)* | **error (boundary)** — not validated |
+| 7 | 0 | `…:ignored` | error (boundary) — mismatched |
+| 8 | 0 | `…:error` | error (boundary) — mismatched |
+| 9 | 1 | `…:safe` | error (boundary) — mismatched |
+| 10 | 1 | `…:error` | error (boundary) — mismatched |
+| 11 | **2** | `…:safe` | **error (boundary)** — mismatched |
+| 12 | **2** | `…:ignored` | **error (boundary)** — mismatched |
+| 13 | 0 | `pmacs-sigint-v2:safe` | error (boundary) — unknown version |
+| 14 | **2** | `pmacs-sigint-v2:error` | **error (boundary)** — unknown version |
+| 15 | 0 | `…:safe` + LF | `safe` — the one permitted trailing byte |
+| 16 | 0 | `…:safe` + LF + LF | error (boundary) — extra newline |
+| 17 | 0 | LF + `…:safe` | error (boundary) — leading newline |
+| 18 | 0 | `␠…:safe␠` | error (boundary) — **no trimming** |
+| 19 | 0 | `…:safe` + CR + LF | error (boundary) — CR is not in the grammar |
+| 20 | 0 | `…:safe` twice on one line | error (boundary) |
+| 21 | 126 | `…:safe` | error (boundary) — status outside 0–2 |
+| 22 | — (spawn failure) | — | error (boundary), no status inspected |
+| 23 | 1 | *(empty)*, stderr = canonical ignored text | error (boundary), and the output **must not** present "SIGINT is ignored" as the diagnosis |
 
-Row 10 fixes normalisation: **strip one trailing newline, then trim
-ASCII whitespace, then require exactly one line.** Rows 4–9 and 11 are
-the ways a status can arrive without a trustworthy verdict.
+Rows 6, 11, 12 and 14 are what force *exact-pair* validation at
+status 2. Rows 15–20 pin the byte grammar. Row 23 pins the stderr-trust
+rule.
+
+Both validators are exercised against **all twenty-three** cases and
+must agree on every one, including the distinction between validated
+and boundary error.
 
 The two consumers:
 
@@ -926,6 +993,9 @@ show:
   | consumers accept a **wrong** token for the status (e.g. `…:safe` with exit 1) | A6 |
   | consumers accept an **unknown** token (`pmacs-sigint-v2:safe`) | A6 |
   | helper prints the token to **stderr** instead of stdout | **A1 and A3** — see below |
+  | consumer surfaces child stderr as the diagnosis on a **boundary** failure | **A6b** |
+  | consumer accepts any status 2 regardless of token | **A6c** |
+  | consumer trims whitespace before comparing | **A6c** via rows 18–19 |
 
   **Why that last one maps to A1/A3 and not A2.** With the token on
   stderr, stdout is empty, so *every* outcome becomes boundary `error`.
@@ -948,6 +1018,19 @@ show:
   revision 13 to cover the pair: a **missing**, **mismatched** or
   **unknown** token is `error` in both consumers, whatever the status
   accompanying it.
+- **A6b — a boundary failure never speaks with the helper's voice.**
+  A helper exiting **1 with no token but the canonical
+  `SIGINT is ignored` text on stderr** classifies as boundary `error`
+  in both consumers, **and neither presents "SIGINT is ignored" as the
+  diagnosis** — the child's stderr is omitted or explicitly labelled
+  untrusted. Conformance row 23. Without this, A6 is satisfiable in the
+  classification while being violated in the message the operator
+  actually reads.
+- **A6c — exact-pair validation at status 2.** `(2, …:error)` is
+  `error (validated)`; `(2, missing)`, `(2, …:safe)`, `(2, …:ignored)`
+  and `(2, unknown-version)` are each **boundary** errors. Conformance
+  rows 3, 6, 11, 12, 14. A validator that accepts any status 2
+  regardless of token must fail this row.
 - **A6a — the macOS row, SCOPED TO THE GATE.** An unexecutable helper
   on macOS makes `/bin/sh` exit **1 with no token**; the gate must
   classify that as **boundary error → 2**, never `ignored`. Not
