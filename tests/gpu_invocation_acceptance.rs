@@ -190,32 +190,78 @@ mod crdt {
     /// helper's own stderr. A helper that cannot be executed is an
     /// `error` at this boundary, never evidence that `SIGINT` is
     /// ignored.
-    /// The diagnosis for one helper invocation: `Ok` to proceed, `Err`
-    /// with the message a caller should fail on.
+    const SIGINT_TOKEN_SAFE: &[u8] = b"pmacs-sigint-v1:safe";
+    const SIGINT_TOKEN_IGNORED: &[u8] = b"pmacs-sigint-v1:ignored";
+    const SIGINT_TOKEN_ERROR: &[u8] = b"pmacs-sigint-v1:error";
+
+    /// Does `stdout` carry exactly `token`, in one of the two permitted
+    /// encodings? Grammar is `TOKEN | TOKEN LF` **as bytes** — no
+    /// trimming, so a leading newline, a second newline, surrounding
+    /// spaces, CRLF, a doubled token or a trailing NUL all fail.
+    fn sigint_token_matches(stdout: &[u8], token: &[u8]) -> bool {
+        stdout == token
+            || (stdout.len() == token.len() + 1
+                && stdout.starts_with(token)
+                && stdout[token.len()] == b'\n')
+    }
+
+    /// The diagnosis for one helper invocation, validating the
+    /// `(status, token)` pair rather than the status alone.
     ///
-    /// Split from the assertion so the message itself is testable.
-    /// A6 requires this consumer to distinguish `error` from `ignored`,
-    /// and a diagnosis reachable only through a panic in a test that
-    /// cannot run under the condition it describes is not a witness.
+    /// A status arriving without its token did not come from this
+    /// helper — not hypothetical: on macOS a shell that cannot execute
+    /// the helper exits 1, which a status-only ABI read as `ignored`
+    /// (§4d). Rust compares `Command::output()` bytes directly; only
+    /// the shell consumer needs capture files.
     fn sigint_diagnosis(helper: &Path) -> Result<(), String> {
         let out = match Command::new(helper).output() {
-            Ok(out) => out,
-            // Failure to execute the helper is an `error` AT THIS
-            // BOUNDARY, never evidence that SIGINT is ignored.
+            // Rust's boundary differs from the shell's: a spawn error
+            // has NO status, where a shell turns the same failure into
+            // one. Conformance X2, Rust-only.
             Err(error) => {
                 return Err(format!(
-                    "precondition undecidable --- could not execute {}: {error}",
+                    "precondition undecidable --- SIGINT guard boundary error \
+                     (status=unavailable token=missing): could not execute {}: {error}",
                     helper.display()
                 ));
             }
+            Ok(out) => out,
         };
-        if out.status.success() {
-            return Ok(());
+        let expected: &[u8] = match out.status.code() {
+            Some(0) => SIGINT_TOKEN_SAFE,
+            Some(1) => SIGINT_TOKEN_IGNORED,
+            Some(2) => SIGINT_TOKEN_ERROR,
+            _ => b"",
+        };
+        let token_ok = !expected.is_empty() && sigint_token_matches(&out.stdout, expected);
+        let token_state = if out.stdout.is_empty() {
+            "missing"
+        } else if token_ok {
+            "valid"
+        } else {
+            "unexpected"
+        };
+        let status = out
+            .status
+            .code()
+            .map_or_else(|| "signal".to_owned(), |c| c.to_string());
+        match (out.status.code(), token_ok) {
+            (Some(0), true) => Ok(()),
+            // A VALIDATED verdict: the helper's stderr is the diagnosis.
+            (Some(1) | Some(2), true) => Err(format!(
+                "precondition failed --- this is NOT a teardown defect. \
+                 (status={status} token={token_state})\n{}",
+                String::from_utf8_lossy(&out.stderr).trim_end()
+            )),
+            // BOUNDARY: the child's stderr is UNTRUSTED and is not shown,
+            // or a helper exiting 1 with no token but the canonical
+            // ignored wording would still mislead the reader (A6b).
+            _ => Err(format!(
+                "precondition undecidable --- SIGINT guard boundary error \
+                 (status={status} token={token_state}). The helper's own \
+                 output is not trusted here and is not shown."
+            )),
         }
-        Err(format!(
-            "precondition failed --- this is NOT a teardown defect.\n{}",
-            String::from_utf8_lossy(&out.stderr).trim_end()
-        ))
     }
 
     fn sigint_helper_path() -> PathBuf {
@@ -228,54 +274,132 @@ mod crdt {
         }
     }
 
-    /// A6, R-d consumer: the direct test distinguishes `error` from
-    /// `ignored`, and neither message claims a teardown defect.
+    /// The shared conformance set, generated rather than listed
+    /// (§7c): ten classes, two encodings where applicable, three
+    /// statuses = 42, plus X1/X3/X4. Only the diagonal validates.
+    fn sigint_conformance_cases() -> Vec<(String, i32, Vec<u8>, bool)> {
+        let toks: [(&str, &[u8]); 3] = [
+            ("safe", SIGINT_TOKEN_SAFE),
+            ("ignored", SIGINT_TOKEN_IGNORED),
+            ("error", SIGINT_TOKEN_ERROR),
+        ];
+        let mut out = Vec::new();
+        for (idx, (name, correct)) in toks.iter().enumerate() {
+            let status = i32::try_from(idx).expect("0..=2");
+            let ok = status == 0;
+            let mut lf = correct.to_vec();
+            lf.push(b'\n');
+            out.push((
+                format!("{status}/V/{name}/bare"),
+                status,
+                correct.to_vec(),
+                ok,
+            ));
+            out.push((format!("{status}/V/{name}/lf"), status, lf, ok));
+            // Every OTHER valid token, both encodings: enumerated, not
+            // sampled, since sampling one leaves half untested.
+            for (other, bytes) in &toks {
+                if other == name {
+                    continue;
+                }
+                let mut olf = bytes.to_vec();
+                olf.push(b'\n');
+                out.push((
+                    format!("{status}/M/{other}/bare"),
+                    status,
+                    bytes.to_vec(),
+                    false,
+                ));
+                out.push((format!("{status}/M/{other}/lf"), status, olf, false));
+            }
+            let mut leading = vec![b'\n'];
+            leading.extend_from_slice(correct);
+            let mut extra = correct.to_vec();
+            extra.extend_from_slice(b"\n\n");
+            let mut spaces = b" ".to_vec();
+            spaces.extend_from_slice(correct);
+            spaces.push(b' ');
+            let mut crlf = correct.to_vec();
+            crlf.extend_from_slice(b"\r\n");
+            let mut doubled = correct.to_vec();
+            doubled.extend_from_slice(correct);
+            let mut nul = correct.to_vec();
+            nul.push(0);
+            for (cls, bytes) in [
+                ("E/empty", Vec::new()),
+                ("U/unknown", b"pmacs-sigint-v2:safe".to_vec()),
+                ("L/leading-lf", leading),
+                ("X/extra-lf", extra),
+                ("S/spaces", spaces),
+                ("C/crlf", crlf),
+                ("D/doubled", doubled),
+                ("N/nul", nul),
+            ] {
+                out.push((format!("{status}/{cls}"), status, bytes, false));
+            }
+        }
+        out.push((
+            "X1/status-126".to_owned(),
+            126,
+            SIGINT_TOKEN_SAFE.to_vec(),
+            false,
+        ));
+        out.push(("X3/ignored-text-no-token".to_owned(), 1, Vec::new(), false));
+        out.push((
+            "X4/stderr-noise".to_owned(),
+            0,
+            SIGINT_TOKEN_SAFE.to_vec(),
+            true,
+        ));
+        out
+    }
+
+    /// A6/A6b/A6c, R-d consumer: the whole shared set, plus Rust's X2.
     #[test]
-    fn rd_precondition_distinguishes_ignored_from_error() {
-        // `safe` proceeds silently.
-        assert!(
-            sigint_diagnosis(&sigint_helper_path()).is_ok(),
-            "the foreground case must proceed"
-        );
-
+    fn rd_precondition_validates_the_whole_conformance_set() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let stub = |name: &str, body: &str, mode: u32| {
-            let path = dir.path().join(name);
-            fs::write(&path, body).expect("write stub");
-            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).expect("chmod stub");
-            path
-        };
+        let cases = sigint_conformance_cases();
+        assert_eq!(cases.len(), 45, "the shared set is 45 cases");
 
-        let ignored = stub(
-            "ignored",
-            "#!/bin/sh\necho 'pmacs: SIGINT is ignored; run this command with SIGINT deliverable' >&2\nexit 1\n",
-            0o755,
-        );
-        let message = sigint_diagnosis(&ignored).expect_err("exit 1 must be refused");
-        assert!(message.contains("SIGINT is ignored"), "{message}");
-        assert!(
-            message.contains("NOT a teardown defect"),
-            "the whole point is not to read as a teardown defect: {message}"
-        );
+        for (name, status, stdout, expect_ok) in cases {
+            let path = dir.path().join(name.replace('/', "_"));
+            let extra = if name.starts_with("X3") {
+                "echo 'pmacs: SIGINT is ignored; run this command with SIGINT deliverable' >&2\n"
+            } else if name.starts_with("X4") {
+                "echo 'chatter on stderr' >&2\n"
+            } else {
+                ""
+            };
+            let octal = stdout.iter().fold(String::new(), |mut acc, b| {
+                use std::fmt::Write as _;
+                let _ = write!(acc, "\\{b:03o}");
+                acc
+            });
+            fs::write(
+                &path,
+                format!("#!/bin/sh\nprintf '{octal}'\n{extra}exit {status}\n"),
+            )
+            .expect("write stub");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
 
-        let erroring = stub(
-            "erroring",
-            "#!/bin/sh\necho 'pmacs: could not determine whether SIGINT is deliverable (probe status 42)' >&2\nexit 2\n",
-            0o755,
-        );
-        let message = sigint_diagnosis(&erroring).expect_err("exit 2 must be refused");
-        assert!(message.contains("could not determine"), "{message}");
-        assert!(
-            !message.contains("SIGINT is ignored"),
-            "an undecidable probe is not evidence that SIGINT is ignored: {message}"
-        );
+            let got = sigint_diagnosis(&path);
+            assert_eq!(got.is_ok(), expect_ok, "case {name}: got {got:?}");
+            if let Err(message) = got {
+                let validated = name.contains("/V/") && (status == 1 || status == 2);
+                assert!(
+                    validated || !message.contains("SIGINT is ignored"),
+                    "case {name}: a boundary failure must not speak with the \
+                     helper's voice: {message}"
+                );
+            }
+        }
 
-        // Not executable at all: an `error` at the boundary.
-        let unrunnable = stub("unrunnable", "#!/bin/sh\nexit 0\n", 0o644);
-        let message = sigint_diagnosis(&unrunnable).expect_err("an unrunnable helper must refuse");
+        // X2 — Rust only: a shell exec failure becomes a status, so the
+        // shell consumer cannot present this input at all.
+        let message = sigint_diagnosis(&dir.path().join("absent")).expect_err("must not validate");
         assert!(
-            message.contains("undecidable") && !message.contains("SIGINT is ignored"),
-            "boundary failure is undecidable, never ignored: {message}"
+            message.contains("status=unavailable") && !message.contains("SIGINT is ignored"),
+            "X2: {message}"
         );
     }
 

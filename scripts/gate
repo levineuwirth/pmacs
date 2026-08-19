@@ -539,22 +539,78 @@ cd "$WT"
 # evidence, so a flag to proceed anyway would only manufacture red gates
 # that mean nothing.
 if [ "$MODE" != plan ] && [ "$MODE" != plannamed ] && [ "$MODE" != printdir ]; then
+    # The guard owns its capture directory: it runs BEFORE the log dir,
+    # ambient root and GATE_TMPDIR exist, and must still leave nothing
+    # behind (A8).
+    capture=$(mktemp -d "${TMPDIR:-/tmp}/pmacs-sigint.XXXXXX") || {
+        echo 'gate: could not create the SIGINT guard capture directory (status=unavailable token=missing)' >&2
+        echo 'gate: REFUSING TO RUN --- no stage has run.' >&2
+        exit 2
+    }
+    cleanup_sigint_capture() { rm -rf "$capture"; }
+    trap cleanup_sigint_capture EXIT HUP INT TERM
+
+    # `|| sigint_status=$?` IS LOAD-BEARING under `set -eu`: a bare
+    # invocation dies at the helper's non-zero exit and never reaches
+    # the assignment. That was the originally shipped bug.
     sigint_status=0
-    "$WT/scripts/check-sigint-deliverable" || sigint_status=$?
-    # 1 and 2 are the helper's own verdicts and pass through unchanged.
-    # Anything else --- 126/127 for an unexecutable or missing helper, a
-    # signal death, any future status --- is an `error` AT THIS
-    # BOUNDARY, never evidence that SIGINT is ignored.
+    "$WT/scripts/check-sigint-deliverable" \
+        >"$capture/out" 2>"$capture/err" || sigint_status=$?
+
+    # Select an expected token only for public statuses. This MUST
+    # precede any use of expected_token: `set -u` is on, and an
+    # out-of-range status has no expected token.
+    expected_token=
     case "$sigint_status" in
-        0) ;;
-        1 | 2)
-            echo "gate: REFUSING TO RUN --- see the diagnosis above." >&2
-            echo "gate: no stage has run; this is not a test failure." >&2
+        0) expected_token=pmacs-sigint-v1:safe ;;
+        1) expected_token=pmacs-sigint-v1:ignored ;;
+        2) expected_token=pmacs-sigint-v1:error ;;
+    esac
+
+    # Byte comparison against both permitted encodings. Files preserve
+    # every byte including NUL; a shell variable would not, and command
+    # substitution's NUL handling differs between sh and zsh.
+    sigint_token_ok=0
+    if [ -n "$expected_token" ]; then
+        printf '%s' "$expected_token" >"$capture/want"
+        printf '%s\n' "$expected_token" >"$capture/want_lf"
+        if cmp -s "$capture/out" "$capture/want" ||
+            cmp -s "$capture/out" "$capture/want_lf"; then
+            sigint_token_ok=1
+        fi
+    fi
+
+    if [ ! -s "$capture/out" ]; then
+        sigint_token_state=missing
+    elif [ "$sigint_token_ok" -eq 1 ]; then
+        sigint_token_state=valid
+    else
+        sigint_token_state=unexpected
+    fi
+
+    case "$sigint_status:$sigint_token_ok" in
+        0:1)
+            # The sole continuing path. Tidy up and disarm before the
+            # gate installs its own, unrelated cleanup trap.
+            cleanup_sigint_capture
+            trap - EXIT HUP INT TERM
+            ;;
+        1:1 | 2:1)
+            # A VALIDATED verdict: the helper's stderr IS the diagnosis
+            # and is surfaced unchanged.
+            cat "$capture/err" >&2
+            printf 'gate: REFUSING TO RUN (status=%s token=%s) --- no stage has run.\n' \
+                "$sigint_status" "$sigint_token_state" >&2
             exit "$sigint_status"
             ;;
         *)
-            echo "gate: could not run the SIGINT guard (status $sigint_status)" >&2
-            echo "gate: REFUSING TO RUN --- no stage has run." >&2
+            # BOUNDARY error. The captured stderr is UNTRUSTED and is
+            # deliberately not surfaced: a helper exiting 1 with no
+            # token but the canonical ignored wording would otherwise
+            # tell the operator their environment ignores SIGINT (A6b).
+            printf 'gate: SIGINT guard boundary error (status=%s token=%s)\n' \
+                "$sigint_status" "$sigint_token_state" >&2
+            printf 'gate: REFUSING TO RUN --- no stage has run.\n' >&2
             exit 2
             ;;
     esac

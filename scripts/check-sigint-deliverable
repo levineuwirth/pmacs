@@ -10,12 +10,23 @@
 # teardown defect. One lane spent nine framing revisions on exactly that
 # misreading; see docs/gpu-probe-sigint-framing.md §4c.
 #
-# INTERFACE (docs/gpu-probe-sigint-framing.md §7c). Callers rely on
-# these three statuses and MUST NOT re-derive the classification:
+# INTERFACE (docs/gpu-probe-sigint-framing.md §7c) --- a validated
+# (status, token) PAIR. Callers rely on both halves and MUST NOT
+# re-derive the classification:
 #
-#   0  safe     SIGINT is deliverable.        No diagnostic.
-#   1  ignored  SIGINT is inherited SIG_IGN.  Canonical diagnostic.
-#   2  error    Undecidable.                  Distinct diagnostic.
+#   0  safe     stdout: pmacs-sigint-v1:safe      no diagnostic
+#   1  ignored  stdout: pmacs-sigint-v1:ignored   canonical diagnostic
+#   2  error    stdout: pmacs-sigint-v1:error     distinct diagnostic
+#
+# The token is the ONLY thing on stdout; diagnostics go to stderr. Any
+# other pair --- including a plausible status with no token --- is a
+# BOUNDARY error for the caller, mapped to 2.
+#
+# WHY A TOKEN AND NOT A STATUS ALONE. CI proved a status-only ABI
+# unsound: on macOS a shell that cannot execute this file exits 1,
+# which the old ABI read as `ignored`, so a broken guard told the
+# operator their environment ignores SIGINT. No exit status can prove
+# this script ran; a token it must have printed can.
 #
 # `error` is never folded into `ignored`. "Your environment ignores
 # SIGINT" and "the guard could not run" are different problems, and
@@ -35,12 +46,17 @@ sh -c 'trap "exit 23" 2 || exit 24; kill -INT "$$" || exit 24; exit 0' \
   || probe_status=$?
 
 case "$probe_status" in
-    23) exit 0 ;;
+    23)
+        echo 'pmacs-sigint-v1:safe'
+        exit 0
+        ;;
     0)
+        echo 'pmacs-sigint-v1:ignored'
         echo 'pmacs: SIGINT is ignored; run this command with SIGINT deliverable' >&2
         exit 1
         ;;
     *)
+        echo 'pmacs-sigint-v1:error'
         echo "pmacs: could not determine whether SIGINT is deliverable (probe status $probe_status)" >&2
         exit 2
         ;;

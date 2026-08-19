@@ -279,6 +279,27 @@ from #171 and #215.
   **`72da24a`**, worktree
   `/home/jeans/Repos/personal/pmacs-probe-sigint`. Recover with
   `git fetch githubsucks && git checkout gpu-probe-sigint-teardown`.
+- **REVISION 13 IMPLEMENTED (this commit).** Helper emits the token on
+  stdout; both consumers validate the `(status, token)` pair. The gate
+  owns a guard-local capture dir, keeps `|| status=$?` under `set -eu`,
+  selects `expected_token` before any `set -u`-sensitive use, compares
+  bytes with `cmp` against both permitted encodings, surfaces the
+  helper's stderr **only** for validated verdicts, and prints
+  `status=`/`token=` on every refusing branch. R-d validates the same
+  pair from `Command::output()` bytes — no capture files, since only
+  the shell needs them.
+- **Conformance: 45 shared cases, generated as a cross-product, run by
+  BOTH validators** (`gate_validates_the_whole_shared_conformance_set`,
+  `rd_precondition_validates_the_whole_conformance_set`), plus Rust's
+  X2 no-status spawn error = 46. **34 gate rows, 16 GPU rows, full gate
+  green.**
+- **A4 mutations, each biting:** accepting any status 2 regardless of
+  token → `gate_refuses_on_helper_error_…`; surfacing child stderr on a
+  boundary failure → the conformance row **and** that row; token to
+  stderr → `sigint_helper_reports_safe_…`. Noted for the record: the
+  first mutation is caught by the dedicated row rather than by the
+  conformance set, because the set's boundary cases mostly have empty
+  stderr and so cannot see which branch produced the exit 2.
 - **CI ON `916007b`: 12 GREEN, 2 RED — both macOS `Test` jobs**, and it
   is the **pre-declared A7 portability finding**, not an environment
   excuse. Exactly one row:
