@@ -280,11 +280,18 @@ run. **Zero voids, zero splits.**
 endpoint table this is *both endpoints uniform the same way*: the
 difference is **not captured by those two commits**.
 
-- **No bisect of `7599661..724b785` is justified, and none will run.**
-  `7599661` passed inside `sweep-crdt` on 08-15 and fails 5/5 clean
-  today, so the interval cannot contain the transition.
-- **The onset window is demoted.** Still a true observation, but not
-  reachable by source.
+- **No bisect of `7599661..724b785` is justified UNDER CURRENT
+  CONDITIONS**, and none will run. `7599661` passed inside `sweep-crdt`
+  on 08-15 and fails 5/5 clean today, so the two commits **do not
+  discriminate now**.
+- **That is the entire causal claim.** Earlier wording here — "the
+  source hypothesis is eliminated", "the interval cannot contain the
+  transition", "not reachable by source" — is **withdrawn**.
+  Uniform-red today says nothing about 08-15: a historical source
+  regression could be **masked** by a later environmental effect, or by
+  a source/environment interaction under which both commits now fail.
+  **Failing to discriminate is not the same as not differing.**
+- **The onset window is deprioritised, not excluded.**
 - **A reliable reproduction now exists** — 10/10 today across two
   commits, ~4 minutes per run. This is D0a's most useful product:
   **D1/D2 no longer wait on a rare event.**
@@ -417,8 +424,8 @@ group.
   |---|---|---|
   | uniform green | uniform red | **clean split → bisect `7599661..724b785` permitted** |
   | uniform red | uniform green | clean split, **direction inverted** — a real difference, but it falsifies which endpoint was believed good; record loudly and re-examine the onset reading before bisecting |
-  | uniform green | uniform green | **no difference captured**: the failure does not reproduce at either commit under current conditions → not a source question at these two commits; ask what else changed across the window |
-  | uniform red | uniform red | **no difference captured**: both reproduce, so the interval does not contain the transition → same next step |
+  | uniform green | uniform green | **the commits do not discriminate under current conditions** → no bisect now; ask what else changed across the window. This does **not** exclude a source difference that current conditions mask |
+  | uniform red | uniform red | **the commits do not discriminate under current conditions** → same. A historical regression masked by a later environmental effect, or a source/environment interaction, remains possible |
   | mixed | any | **intermittent under fixed source → no bisect**; back to D1/D2 |
   | any | mixed | as above |
 
@@ -432,7 +439,21 @@ group.
     agrees. A bisect whose steps are cheaper than its endpoints would
     inherit exactly the weakness this contract exists to remove.
 
-- **D0b — re-run the §4 matrix with captured provenance**, at `main`,
+- **D0b — RETIRED as a precondition on 2026-08-19, kept as a
+  contingency.** It existed to make the §4 reduction matrix trustworthy
+  so the subset-vs-full comparison could locate the mechanism
+  *indirectly*. D0a has since produced a **reliable direct
+  reproduction** (10/10 across two commits, ~4 min/run), and D1/D2
+  measure the mechanism itself. Sharpening an indirect instrument while
+  a direct one is in hand is the wrong order of work.
+
+  **The obligation is not discharged.** A3 still binds: if D1/D2 do not
+  account for why every subset passed while the full sweep fails,
+  **D0b runs before this lane closes**, and its result is recorded
+  either way. Retiring it as a *precondition* does not retire the
+  question.
+
+  As written, the retired step read: re-run the §4 matrix, at `main`,
   recording the artifact hashes actually executed **at run time**.
   Revision 2's strongest claim collapsed because command shape silently
   changed the binary; no further reduction should be trusted until each
