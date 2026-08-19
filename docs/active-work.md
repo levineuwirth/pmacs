@@ -279,11 +279,12 @@ from #171 and #215.
   **`72da24a`**, worktree
   `/home/jeans/Repos/personal/pmacs-probe-sigint`. Recover with
   `git fetch githubsucks && git checkout gpu-probe-sigint-teardown`.
-- **No PR. Framing revision 10 at `docs/gpu-probe-sigint-framing.md`,
-  APPROVED 2026-08-19 at `4fba9f6`** — revision 9 was approved at
-  `15c25ec`, but did **not** cover retiring D0b. Revision 10 does, with
-  the A3 contingency preserved. **D1/D2 HAVE RUN and found the
-  mechanism: `SIGINT` was ignored group-wide (`SigIgn=0x1007`) because
+- **No PR. Framing revision 12 at `docs/gpu-probe-sigint-framing.md`,
+  APPROVED 2026-08-19 at `1fc0df6`** — revision 10 was approved at
+  `4fba9f6` and revision 9 at `15c25ec`; neither approval covered the
+  later mechanism finding and remedy selection. **D1/D2 HAVE RUN and
+  found the mechanism: `SIGINT` was ignored group-wide
+  (`SigIgn=0x1007`) because
   the test runner was launched in the background — `SIG_IGN` is
   inherited across `fork` and survives `exec`, so it reached the
   launcher and probe, and `kill(-pgid, SIGINT)` was a no-op.**
@@ -298,8 +299,8 @@ from #171 and #215.
   never executed**, so no claim is made that a real session behaves
   correctly, only that no evidence of a user-facing defect survives.
   **A3/D0b are SATISFIED by that explanation** — D0b is not owed and
-  will not run. Framing **revision 12 AWAITING APPROVAL**, and it
-  **selects the remedy**: R-b + R-d via one checked-in helper,
+  will not run. The approved revision 12 **selects the remedy**: R-b +
+  R-d via one checked-in helper,
   `scripts/check-sigint-deliverable`. Its preserved-status inner probe
   maps to one complete ABI: helper exit **0** = `safe`, **1** =
   `ignored`, **2** = probe `error`; the helper owns the two failure
