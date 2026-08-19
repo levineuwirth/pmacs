@@ -1,14 +1,15 @@
 # GPU launcher / probe SIGINT teardown — framing
 
-Revision 10. Status: **AWAITING APPROVAL. No fix implemented;
-mechanism still unknown.**
+Revision 10. Status: **APPROVED 2026-08-19 at `4fba9f6`. No fix
+implemented; mechanism still unknown.**
 
-Revision 9 was approved 2026-08-19 at `15c25ec`. **That approval does
-not extend to this revision**, because retiring D0b (§7) materially
-changes the approved diagnostic sequence — the approved text made D0b
-mandatory before every other diagnostic. D0a's execution and result
-(§4b) are reported under it, and D1/D2 do not begin until this revision
-is approved.
+Revision 9 was approved 2026-08-19 at `15c25ec`. **That approval did
+not extend to revision 10**, because retiring D0b (§7) materially
+changed the approved diagnostic sequence — the revision 9 text made
+D0b mandatory before every other diagnostic. Revision 10's approval
+covers that retirement and the A3 contingency that preserves its
+obligation. D0a's execution and result (§4b) are reported; D1/D2 are
+authorised but have not started.
 
 Revisions 1 and 2 were each rejected on five findings. Every correction
 is recorded in place rather than quietly rewritten, because three of

@@ -280,11 +280,13 @@ from #171 and #215.
   `/home/jeans/Repos/personal/pmacs-probe-sigint`. Recover with
   `git fetch githubsucks && git checkout gpu-probe-sigint-teardown`.
 - **No PR. Framing revision 10 at `docs/gpu-probe-sigint-framing.md`,
-  AWAITING APPROVAL** — revision 9 was approved at `15c25ec`, but that
-  approval does **not** cover retiring D0b, which changes the approved
-  diagnostic sequence. **D1/D2 do not begin until revision 10 is
-  approved.** Also: NO IMPLEMENTATION and no fix
-  proposed** — the mechanism is not known yet, and the framing says so
+  APPROVED 2026-08-19 at `4fba9f6`** — revision 9 was approved at
+  `15c25ec`, but did **not** cover retiring D0b. Revision 10 does, with
+  the A3 contingency preserved: if the demonstrated D1/D2 mechanism
+  does not account for the subset/full difference, D0b runs before
+  closure. **D1/D2 are authorised but have not started.** Also: **NO
+  IMPLEMENTATION and no fix proposed** — the mechanism is not known yet,
+  and the framing says so
   rather than guessing. Revisions 1, 2 and 3 were each rejected on
   findings, all upheld; run provenance lives in
   `docs/probe-sigint-evidence.md`.
