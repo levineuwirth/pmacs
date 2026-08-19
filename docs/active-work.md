@@ -286,8 +286,27 @@ from #171 and #215.
   once. State at `3206433`: pushed, signed `G`, worktree clean,
   `git diff --check` clean, **full default gate green (8/8) in the
   foreground**, 31 gate-acceptance rows passing. After this commit:
-  **33 gate-acceptance rows and 16 `gpu_invocation_acceptance` rows**,
-  with the full gate re-run **on the committed head**. (An earlier
+  **33 gate-acceptance rows and 16 `gpu_invocation_acceptance` rows**.
+- **FULL GATE GREEN ON THE COMMITTED HEAD `c9cc8dd`** — all 8 stages,
+  log `20260819T160220Z-2339958`, started at load 3.90. This entry's
+  own commit adds only that record.
+- **The preceding attempt on the same head was RED, and is kept.**
+  Log `20260819T152209Z-2073040`: `04-lib-crdt` and `07-sweep` failed
+  on four wall-clock rows —
+  `composition_overhead_under_ten_percent`,
+  `full_buffer_summary_flatten_scales_on_large_grammar_file`,
+  `dired_renders_10k_entries_within_200ms`,
+  `file_progress_notification_is_recorded_for_its_document` — none
+  touching this lane's change. Load average was **49.6**, and
+  `./verify_task_state.sh review/my-ruff-task golden` was running under
+  a separate toolchain at `/usr/local/rustup` with four `rustc`
+  processes, having started about three minutes into the run and
+  overlapping exactly the two stages that failed.
+  **That is evidence of WHEN, not proof of WHY**, and it was recorded
+  as "not valid evidence" rather than "environmental" — this lane has
+  already retracted one confident environmental attribution. The green
+  run on the same commit is what settles it; had any of the four failed
+  again on a quiet machine, it would have been a real finding here. (An earlier
   draft said 35: that figure was the `git_status_stage1_acceptance`
   result line immediately below `gate_script_acceptance`'s in the sweep
   log, misread as this suite's.)
