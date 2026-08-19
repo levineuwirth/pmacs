@@ -1,6 +1,6 @@
 # GPU launcher / probe SIGINT teardown — framing
 
-Revision 8. Status: **awaiting approval. No implementation.**
+Revision 9. Status: **awaiting approval. No implementation.**
 
 Revisions 1 and 2 were each rejected on five findings. Every correction
 is recorded in place rather than quietly rewritten, because three of
@@ -20,6 +20,11 @@ them were claims this document itself had advanced:
   (manifest); ledgers still carried the falsified R9 conclusions (§11).
   **And a finding that reframes the lane: the failure has a datable
   onset (§4a) and is not long-standing.**
+- r8 → r9: D0a's classifier was not total — it named only "clean
+  split" and "mixed", leaving both-green, both-red, non-execution,
+  copy-disagreement and unrelated-failure outcomes unprescribed, all of
+  which occur in the historical logs (§7); and strict A/B/A/B does not
+  equalise drift (§7).
 - r7 → r8: the superseded one-run D0 rule survived in three places
   (§4a, §7, manifest, ledger); D0a still overstated its rates and left
   the bisect's own classifier unspecified (§7); residual artifact
@@ -332,24 +337,73 @@ group.
     read as such: of the seven reds only F6 ran at `724b785`, and of
     the greens only the last ran at `7599661`, both with **unknown
     cleanliness**.
-  - **Interleaved**, alternating endpoints A/B/A/B…, so any drift in
-    machine state across the session hits both arms equally instead of
-    landing entirely on whichever ran second.
+  - **Counterbalanced order**, not strict alternation. Runs go in
+    `AB BA AB BA AB` pairs, so neither endpoint systematically follows
+    the other. Revision 8 claimed strict `A/B/A/B…` makes session drift
+    "hit both arms equally"; **it does not** — under strict
+    alternation B always follows A and owns the final time point. What
+    counterbalancing buys is the removal of *systematic order
+    confounding*; with an even run count one arm still holds the last
+    slot, and that residue is accepted and stated rather than papered
+    over.
   - **Identical captured conditions per run**: same harness as D0b —
     argv, worktree, `git rev-parse HEAD`, `git status --porcelain`
     emptiness, the Cargo suffixes executed, result, log digest — plus
     the machine facts that have already misled this lane once
     (`uptime`, `free`, `/tmp` usage, leaked-daemon count).
-  - **Permitting a bisect requires a clean split**: all N of one
-    endpoint red and all N of the other green. A mixed result means the
-    failure is intermittent under fixed source, and **no bisect is
-    justified at all** — that outcome sends the lane back to D1/D2.
+
+  **Classifying a single run.** The unit is *the two copies of the
+  target test* — `crdt::ctrl_c_…` and
+  `gpu_invocation_acceptance::crdt::ctrl_c_…` — and nothing else in the
+  sweep:
+
+  | run outcome | definition |
+  |---|---|
+  | **green** | both copies executed and both `... ok` |
+  | **red** | both copies executed and both `FAILED` |
+  | **split** | both executed, copies **disagree** |
+  | **void** | either copy **did not execute** |
+
+  Two of these are not hypothetical. `20260815T182846Z-708693` is a
+  **void**: the stage died compiling `pmacs` (`error[E0308]`) and
+  neither copy ran. And sweeps red on *unrelated* rows are ordinary —
+  `…-2839374` and `…-830195` both failed other tests while both target
+  copies passed. **A sweep red only on unrelated tests is a `green`
+  run** under this classifier, because the classifier reads the two
+  copies and nothing else. Unrelated failures are still recorded, as
+  evidence about environment stability.
+
+  **Handling each outcome:**
+
+  - **void** — discard and re-run, up to **3 voids across the whole
+    procedure**. Beyond that the environment is too unstable to
+    classify anything and D0a **stops**; that is itself the finding.
+  - **split** — **stop immediately.** Two copies of the same source in
+    different binaries disagreeing within one run is a distinct defect,
+    and characterising it takes priority over the endpoint question.
+
+  **Endpoint verdicts**, from 5 valid (non-void) runs each: *uniform
+  green* (5/5), *uniform red* (5/5), or **mixed** (anything else).
+
+  | `7599661` | `724b785` | conclusion |
+  |---|---|---|
+  | uniform green | uniform red | **clean split → bisect `7599661..724b785` permitted** |
+  | uniform red | uniform green | clean split, **direction inverted** — a real difference, but it falsifies which endpoint was believed good; record loudly and re-examine the onset reading before bisecting |
+  | uniform green | uniform green | **no difference captured**: the failure does not reproduce at either commit under current conditions → not a source question at these two commits; ask what else changed across the window |
+  | uniform red | uniform red | **no difference captured**: both reproduce, so the interval does not contain the transition → same next step |
+  | mixed | any | **intermittent under fixed source → no bisect**; back to D1/D2 |
+  | any | mixed | as above |
+
+  - **Permitting a bisect requires the clean-split row.** Every other
+    row forbids one.
   - **The bisect itself uses the same classifier.** Every intermediate
     commit is classified by the identical N = 5 protocol under the same
-    captured conditions; a commit that classifies mixed **aborts the
+    captured conditions; a commit that classifies **mixed** — or
+    produces a **split**, or exceeds the void budget — **aborts the
     bisect** rather than being guessed, skipped, or rerun until it
     agrees. A bisect whose steps are cheaper than its endpoints would
     inherit exactly the weakness this contract exists to remove.
+
 - **D0b — re-run the §4 matrix with captured provenance**, at `main`,
   recording the artifact hashes actually executed **at run time**.
   Revision 2's strongest claim collapsed because command shape silently

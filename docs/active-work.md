@@ -279,7 +279,7 @@ from #171 and #215.
   **`72da24a`**, worktree
   `/home/jeans/Repos/personal/pmacs-probe-sigint`. Recover with
   `git fetch githubsucks && git checkout gpu-probe-sigint-teardown`.
-- **No PR. Framing revision 8 at `docs/gpu-probe-sigint-framing.md`;
+- **No PR. Framing revision 9 at `docs/gpu-probe-sigint-framing.md`;
   NO IMPLEMENTATION and no fix proposed** — the mechanism is not known
   yet, and the framing says so rather than guessing. Revisions 1, 2 and
   3 were each rejected on findings, all upheld; run provenance lives in
@@ -399,9 +399,20 @@ from #171 and #215.
   run per endpoint decides nothing. That the failure has appeared only
   in the full sweep is **what has been observed so far**, not a
   property established of the defect.
-  **N = 5 full `sweep-crdt` runs per endpoint, interleaved A/B/A/B**,
-  under the same captured conditions as D0b plus `uptime`, `free`,
-  `/tmp` usage and leaked-daemon count. A bisect of
+  **N = 5 full `sweep-crdt` runs per endpoint, counterbalanced
+  `AB BA AB BA AB`** — not strict `A/B/A/B`, which leaves B always
+  following A and owning the final slot; counterbalancing removes
+  systematic order confounding, and the residual last-slot asymmetry is
+  accepted and stated. Same captured conditions as D0b plus `uptime`,
+  `free`, `/tmp` usage and leaked-daemon count.
+- **The run classifier is TOTAL**, and reads only the **two copies** of
+  the target test: **green** (both `... ok`), **red** (both `FAILED`),
+  **split** (copies disagree → stop; that is its own defect), **void**
+  (either copy never executed → discard and re-run, budget 3, then
+  D0a stops). A sweep red only on **unrelated** rows is a `green` run;
+  both outcomes occur in the historical logs — `…-708693` is a void
+  (compile failure), and `…-2839374`/`…-830195` are unrelated-red with
+  both copies passing. A bisect of
   `7599661..724b785` is permitted **only on a clean split** — all N red
   one side, all N green the other. A mixed result means the failure is
   intermittent under fixed source and **no bisect is justified**.
