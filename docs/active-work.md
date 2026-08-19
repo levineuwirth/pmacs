@@ -270,7 +270,7 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## GPU launcher / probe SIGINT teardown — FRAMING APPROVED, diagnostics not started
+## GPU launcher / probe SIGINT teardown — D0a DONE, mechanism unknown
 
 **Written with the branch's FIRST commit**, per the standing correction
 from #171 and #215.
@@ -285,6 +285,19 @@ from #171 and #215.
   rather than guessing. Revisions 1, 2 and 3 were each rejected on
   findings, all upheld; run provenance lives in
   `docs/probe-sigint-evidence.md`.
+- **D0a EXECUTED 2026-08-19 — verdict: difference NOT captured by the
+  two commits.** 10 runs, counterbalanced, N=5 per endpoint, clean
+  detached worktrees with isolated target dirs, `dirty=0` per run, zero
+  voids, zero splits. **A (`7599661`) uniform-red; B (`724b785`)
+  uniform-red.** So `7599661`, which passed inside `sweep-crdt` on
+  08-15, fails 5/5 clean today: **the source hypothesis is eliminated
+  and no bisect will run.** The onset window is demoted to a true but
+  unreachable-by-source observation. No package activity in the window
+  (`pacman.log`), which is a cheap negative and not pursued further.
+- **The useful product is a RELIABLE REPRODUCTION** — 10/10 across two
+  commits at ~4 min/run. D1/D2 no longer wait on a rare event and are
+  the next step. Per-run provenance in `docs/probe-sigint-evidence.md`
+  §D0a and `/home/jeans/build/pmacs-gate-targets/d0a/results.tsv`.
 - **Why it exists.** `ctrl_c_on_launcher_group_does_not_reach_spawned_daemon`
   fails in gate stage `sweep-crdt` with "child did not exit within 5s".
   **Pre-existing on `main`** — `72da24a` fails it in a clean worktree

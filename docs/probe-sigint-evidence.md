@@ -157,6 +157,69 @@ source/environment interaction, or a fix before `7599661` followed by a
 regression before `724b785`. And an ancestor outside the interval is
 irrelevant to whether the interval contains a regression.
 
+## D0a — EXECUTED 2026-08-19. Verdict: difference NOT captured
+
+Ten runs, counterbalanced `A B B A A B B A A B`, N = 5 per endpoint,
+**zero voids, zero splits**. Endpoints checked out detached and clean
+in dedicated worktrees (`pmacs-d0a-A`, `pmacs-d0a-B`), each with its own
+target directory, each run performing the gate's `build-crdt`
+precondition then the `sweep-crdt` command. `dirty=0` verified per run.
+
+| run | endpoint | HEAD | class | ctrl_c ok/failed | red bins | log |
+|---|---|---|---|---|---|---|
+| A#1 | A | `7599661` | **red** | 0 / 2 | 3 | `d0a/A-1.log` |
+| B#1 | B | `724b785` | **red** | 0 / 2 | 2 | `d0a/B-1.log` |
+| B#2 | B | `724b785` | **red** | 0 / 2 | 2 | `d0a/B-2.log` |
+| A#2 | A | `7599661` | **red** | 0 / 2 | 4 | `d0a/A-2.log` |
+| A#3 | A | `7599661` | **red** | 0 / 2 | 3 | `d0a/A-3.log` |
+| B#3 | B | `724b785` | **red** | 0 / 2 | 2 | `d0a/B-3.log` |
+| B#4 | B | `724b785` | **red** | 0 / 2 | 2 | `d0a/B-4.log` |
+| A#4 | A | `7599661` | **red** | 0 / 2 | 3 | `d0a/A-4.log` |
+| A#5 | A | `7599661` | **red** | 0 / 2 | 3 | `d0a/A-5.log` |
+| B#5 | B | `724b785` | **red** | 0 / 2 | 2 | `d0a/B-5.log` |
+
+Full per-run provenance — timestamp, HEAD, dirty count, exit, both copy
+results, unrelated red-bin count, Cargo suffixes, `uptime`, `free`,
+`/tmp` usage, leaked-daemon count, log digest — is in
+`/home/jeans/build/pmacs-gate-targets/d0a/results.tsv`.
+
+**Endpoint verdicts: A uniform-red, B uniform-red.** By the approved
+table this is the *both endpoints uniform the same way* row:
+
+> **the difference is not captured by those two commits** under current
+> conditions, and the question becomes what else changed across the
+> window.
+
+### What this settles
+
+- **The source hypothesis is eliminated for this interval.** `7599661`
+  passed inside `sweep-crdt` on 08-15 and now fails **5/5** clean. No
+  bisect of `7599661..724b785` is justified, and none will be run.
+- **The onset window is demoted as a lead.** It remains a true
+  observation, but since neither endpoint reproduces the old green, the
+  window cannot be probed by source at all.
+- **A reliable reproduction now exists.** 10/10 today, on two different
+  commits, at ~4 minutes per run. **This is the most useful thing D0a
+  produced**: the mechanism diagnostics D1/D2 no longer depend on a
+  rare event, and can proceed immediately.
+- **A's three extra failures are recorded, not swept up**:
+  `a54_real_daemon_real_pty_and_headless_gpu_render_one_panel_hosted_terminal`,
+  `one_daemon_serves_a_v21_panel_session_and_a_shipped_v20_client`, and
+  `m6_1_pty_mode_lifecycle_started_then_exited`. The v21/v20 row is
+  expected to differ at that older commit; the other two are
+  process/PTY-spawn rows, the same family as the target. They do not
+  affect classification, which reads only the two target copies.
+
+### What it does not settle
+
+Nothing about the mechanism. "What else changed across the window" has
+one cheap negative result so far: **no package activity in the window**
+(`/var/log/pacman.log` shows nothing between 08-15 19:57 and 08-16
+06:33; nearest is 08-18). The `1.88` rust toolchain directory has mtime
+08-15 22:39, inside the window, but the gate builds with `1.95.0`.
+Neither is pursued further, because with a reliable reproduction in
+hand **direct measurement (D1/D2) dominates archaeology**.
+
 ## D0 — re-run the matrix with captured provenance
 
 Before any §4 row is relied on for a conclusion, re-run the reductions

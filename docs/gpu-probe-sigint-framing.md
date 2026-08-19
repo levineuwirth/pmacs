@@ -1,6 +1,8 @@
 # GPU launcher / probe SIGINT teardown — framing
 
-Revision 9. Status: **approved 2026-08-19 at `15c25ec`. No implementation.**
+Revision 9, approved 2026-08-19 at `15c25ec`.
+Status: **D0a EXECUTED — see §4b. No fix implemented; mechanism still
+unknown.**
 
 Revisions 1 and 2 were each rejected on five findings. Every correction
 is recorded in place rather than quietly rewritten, because three of
@@ -266,6 +268,32 @@ rule; a bare difference decides nothing.)
 **This still supersedes the reduction matrix as the lane's first
 move**, as endpoint reproduction — which is a decision procedure, not a
 prediction.
+
+## 4b. D0a result — the source hypothesis is eliminated
+
+Executed 2026-08-19 under the approved contract: 10 runs,
+counterbalanced `A B B A A B B A A B`, N = 5 per endpoint, clean
+detached worktrees, isolated target directories, `dirty=0` verified per
+run. **Zero voids, zero splits.**
+
+**A (`7599661`) uniform-red. B (`724b785`) uniform-red.** By the
+endpoint table this is *both endpoints uniform the same way*: the
+difference is **not captured by those two commits**.
+
+- **No bisect of `7599661..724b785` is justified, and none will run.**
+  `7599661` passed inside `sweep-crdt` on 08-15 and fails 5/5 clean
+  today, so the interval cannot contain the transition.
+- **The onset window is demoted.** Still a true observation, but not
+  reachable by source.
+- **A reliable reproduction now exists** — 10/10 today across two
+  commits, ~4 minutes per run. This is D0a's most useful product:
+  **D1/D2 no longer wait on a rare event.**
+- One cheap negative on "what else changed": **no package activity in
+  the window** (`/var/log/pacman.log`, 08-15 19:57 → 08-16 06:33;
+  nearest 08-18). Not pursued further — with a reproduction in hand,
+  direct measurement dominates archaeology.
+
+Per-run provenance: `docs/probe-sigint-evidence.md` §D0a.
 
 ## 5. Two retracted claims, both mine, kept as warnings
 
