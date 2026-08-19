@@ -296,12 +296,21 @@ from #171 and #215.
   needed. **Bet 1 withdrawn by scope and A5 retired by scope — D4 was
   never executed**, so no claim is made that a real session behaves
   correctly, only that no evidence of a user-facing defect survives.
-  Framing revision 11 AWAITING APPROVAL; **no remedy selected** (§7b
-  weighs runner normalisation, a gate guard, fixture isolation and a
-  test-local assertion). Also: **NO
-  IMPLEMENTATION and no fix proposed** — the mechanism is not known yet,
-  and the framing says so
-  rather than guessing. Revisions 1, 2 and 3 were each rejected on
+  **A3/D0b are SATISFIED by that explanation** — D0b is not owed and
+  will not run. Framing **revision 12 AWAITING APPROVAL**, and it
+  **selects the remedy**: R-b + R-d via one checked-in helper wrapping
+  a portable behavioural probe,
+  `sh -c 'trap "exit 23" 2; kill -INT $$; exit 0'` — exit **23** when
+  `SIGINT` is deliverable, **0** when inherited as ignored. POSIX shell
+  only: no `/proc`, so not Linux-only; no `sigaction`, so no `unsafe`.
+  `scripts/gate` fails immediately with the explicit diagnosis; the
+  target test reports the same precondition failure if run directly;
+  **no override**, because a gate under ignored `SIGINT` cannot produce
+  valid evidence. R-c rejected. The Linux-only D1/D2 instrumentation is
+  removed once its evidence is portable. A1–A5 replaced by witnesses
+  for guard bite, direct-test diagnosis, unaffected foreground success,
+  mutation, and an otherwise unchanged gate. The mechanism is **known**
+  and the only implementation so far is the diagnostic instrument. Revisions 1, 2 and 3 were each rejected on
   findings, all upheld; run provenance lives in
   `docs/probe-sigint-evidence.md`.
 - **D0a EXECUTED 2026-08-19 — verdict: difference NOT captured by the
@@ -318,8 +327,8 @@ from #171 and #215.
   window is deprioritised, not excluded. No package activity in the
   window (`pacman.log`) — a cheap negative, not pursued further.
 - **The useful product is a RELIABLE REPRODUCTION** — 10/10 across two
-  commits at ~4 min/run. D1/D2 no longer wait on a rare event and are
-  the next step. Per-run provenance in `docs/probe-sigint-evidence.md`
+  commits at ~4 min/run — which is what let D1/D2 run at once. **D1/D2
+  are DONE**; the mechanism entry above supersedes this. Per-run provenance in `docs/probe-sigint-evidence.md`
   §D0a, transcribed in full into that committed document — after the
   first transcription corrupted every log digest by one hex character
   and dropped `/tmp` and `MemAvailable`. **`uptime` was never captured**
