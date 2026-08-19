@@ -175,10 +175,22 @@ log digest. Two constraints learned the hard way:
   `7599661` (last observed green) and `724b785` (first observed red) —
   each checked out clean, each in its **own isolated target
   directory**. A decision procedure with **no predicted outcome**, and
-  **not decided by one run per endpoint** — see the N = 5 clean-split
-  contract in the framing's §7 D0a, which governs. In summary: a clean
-  split (all 5 red one side, all 5 green the other) permits a bisect of
-  `7599661..724b785`; **any mixed classification forbids it**; the
-  difference is not captured by those two commits under current
-  conditions, and the question becomes what else changed across the
-  window.
+  **not decided by one run per endpoint**. The framing's §7 D0a holds
+  the governing contract — the total run classifier
+  (green / red / split / void), the void budget, the endpoint table and
+  the bisect-step policy. In summary, keeping the two conclusions with
+  the verdicts they actually belong to:
+
+  - **clean split** (one endpoint uniform green, the other uniform red)
+    → a bisect of `7599661..724b785` is permitted;
+  - **mixed at either endpoint** → the failure is **intermittent under
+    fixed source**; no bisect;
+  - **both endpoints uniform the same way**, green or red → **the
+    difference is not captured by those two commits** under current
+    conditions, and the question becomes what else changed across the
+    window.
+
+  Revision 8 attached "the difference is not captured" to the *mixed*
+  clause. That was wrong — mixed means intermittency, not absence of a
+  difference — and revision 9 corrected it in the framing but **left
+  this file untouched**, because the edit's anchor silently missed.
