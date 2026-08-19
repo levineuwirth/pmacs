@@ -1,8 +1,8 @@
 # GPU launcher / probe SIGINT teardown — framing
 
-Revision 12. Status: **APPROVED 2026-08-19 at `1fc0df6`.
-MECHANISM FOUND (§4c), REMEDY SELECTED (§7c); implementation may
-proceed under §8's A1–A7 contract.**
+Revision 12, approved 2026-08-19 at `7752bcb`.
+Status: **IMPLEMENTED — R-b + R-d landed and witnessed (§8). Mechanism
+in §4c; no product change.**
 
 Revision 10 was approved 2026-08-19 at `4fba9f6`, authorising
 diagnostic-only D1/D2. They ran, and found the mechanism on the first

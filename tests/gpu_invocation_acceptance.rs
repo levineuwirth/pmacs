@@ -190,21 +190,93 @@ mod crdt {
     /// helper's own stderr. A helper that cannot be executed is an
     /// `error` at this boundary, never evidence that `SIGINT` is
     /// ignored.
-    fn require_sigint_deliverable() {
-        let helper = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/check-sigint-deliverable");
-        let out = match Command::new(&helper).output() {
+    /// The diagnosis for one helper invocation: `Ok` to proceed, `Err`
+    /// with the message a caller should fail on.
+    ///
+    /// Split from the assertion so the message itself is testable.
+    /// A6 requires this consumer to distinguish `error` from `ignored`,
+    /// and a diagnosis reachable only through a panic in a test that
+    /// cannot run under the condition it describes is not a witness.
+    fn sigint_diagnosis(helper: &Path) -> Result<(), String> {
+        let out = match Command::new(helper).output() {
             Ok(out) => out,
-            Err(error) => panic!(
-                "precondition undecidable: could not execute {}: {error}",
-                helper.display()
-            ),
+            // Failure to execute the helper is an `error` AT THIS
+            // BOUNDARY, never evidence that SIGINT is ignored.
+            Err(error) => {
+                return Err(format!(
+                    "precondition undecidable --- could not execute {}: {error}",
+                    helper.display()
+                ));
+            }
         };
-        if !out.status.success() {
-            panic!(
-                "precondition failed --- this is NOT a teardown defect.\n{}",
-                String::from_utf8_lossy(&out.stderr).trim_end()
-            );
+        if out.status.success() {
+            return Ok(());
         }
+        Err(format!(
+            "precondition failed --- this is NOT a teardown defect.\n{}",
+            String::from_utf8_lossy(&out.stderr).trim_end()
+        ))
+    }
+
+    fn sigint_helper_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/check-sigint-deliverable")
+    }
+
+    fn require_sigint_deliverable() {
+        if let Err(diagnosis) = sigint_diagnosis(&sigint_helper_path()) {
+            panic!("{diagnosis}");
+        }
+    }
+
+    /// A6, R-d consumer: the direct test distinguishes `error` from
+    /// `ignored`, and neither message claims a teardown defect.
+    #[test]
+    fn rd_precondition_distinguishes_ignored_from_error() {
+        // `safe` proceeds silently.
+        assert!(
+            sigint_diagnosis(&sigint_helper_path()).is_ok(),
+            "the foreground case must proceed"
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stub = |name: &str, body: &str, mode: u32| {
+            let path = dir.path().join(name);
+            fs::write(&path, body).expect("write stub");
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).expect("chmod stub");
+            path
+        };
+
+        let ignored = stub(
+            "ignored",
+            "#!/bin/sh\necho 'pmacs: SIGINT is ignored; run this command with SIGINT deliverable' >&2\nexit 1\n",
+            0o755,
+        );
+        let message = sigint_diagnosis(&ignored).expect_err("exit 1 must be refused");
+        assert!(message.contains("SIGINT is ignored"), "{message}");
+        assert!(
+            message.contains("NOT a teardown defect"),
+            "the whole point is not to read as a teardown defect: {message}"
+        );
+
+        let erroring = stub(
+            "erroring",
+            "#!/bin/sh\necho 'pmacs: could not determine whether SIGINT is deliverable (probe status 42)' >&2\nexit 2\n",
+            0o755,
+        );
+        let message = sigint_diagnosis(&erroring).expect_err("exit 2 must be refused");
+        assert!(message.contains("could not determine"), "{message}");
+        assert!(
+            !message.contains("SIGINT is ignored"),
+            "an undecidable probe is not evidence that SIGINT is ignored: {message}"
+        );
+
+        // Not executable at all: an `error` at the boundary.
+        let unrunnable = stub("unrunnable", "#!/bin/sh\nexit 0\n", 0o644);
+        let message = sigint_diagnosis(&unrunnable).expect_err("an unrunnable helper must refuse");
+        assert!(
+            message.contains("undecidable") && !message.contains("SIGINT is ignored"),
+            "boundary failure is undecidable, never ignored: {message}"
+        );
     }
 
     fn wait_for_exit(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {

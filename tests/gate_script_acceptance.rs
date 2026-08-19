@@ -48,12 +48,57 @@ fn sigint_helper() -> PathBuf {
 /// inherited across `fork` **and survives `exec`** — which is the whole
 /// mechanism under test, so simulating it this way exercises the real
 /// thing rather than a stand-in.
-fn under_ignored_sigint(cmd: &str) -> std::process::Output {
-    Command::new("sh")
+fn under_ignored_sigint(
+    program: &Path,
+    args: &[&str],
+    cwd: &Path,
+    env: &[(&str, &str)],
+) -> std::process::Output {
+    // `exec "$@"` with the program and arguments passed POSITIONALLY.
+    // Interpolating them into the script text would break on any path
+    // containing a space or a shell metacharacter, and every path here
+    // comes from a `tempdir` or `CARGO_MANIFEST_DIR` — neither of which
+    // this test controls.
+    let mut command = Command::new("sh");
+    command
         .arg("-c")
-        .arg(format!("trap \"\" INT; {cmd}"))
-        .output()
-        .expect("spawn shell with SIGINT ignored")
+        .arg("trap \"\" INT; exec \"$@\"")
+        .arg("sh")
+        .arg(program)
+        .args(args)
+        .current_dir(cwd);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.output().expect("spawn shell with SIGINT ignored")
+}
+
+/// A minimal git worktree holding a copy of `scripts/gate` and a
+/// **stub** `check-sigint-deliverable`, so the gate's handling of each
+/// helper status can be driven on its real path without touching the
+/// checked-in helper.
+fn gate_with_stub_helper(stub_body: &str, executable: bool) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let scripts = dir.path().join("scripts");
+    std::fs::create_dir_all(&scripts).expect("scripts dir");
+    std::fs::copy(gate(), scripts.join("gate")).expect("copy gate");
+    let helper = scripts.join("check-sigint-deliverable");
+    std::fs::write(&helper, stub_body).expect("write stub helper");
+    let mode = if executable { 0o755 } else { 0o644 };
+    std::fs::set_permissions(&helper, std::os::unix::fs::PermissionsExt::from_mode(mode))
+        .expect("chmod stub helper");
+    std::fs::set_permissions(
+        scripts.join("gate"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .expect("chmod gate copy");
+    let ok = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir.path())
+        .status()
+        .expect("git init");
+    assert!(ok.success(), "the stub worktree must be a git worktree");
+    dir
 }
 
 fn gate() -> PathBuf {
@@ -114,6 +159,68 @@ fn run(root: &Path, args: &[&str]) -> (String, String, bool) {
 // §3, nothing else in the repository would notice. `--print-plan`
 // exists to make that checkable without executing anything.
 
+/// A6, gate consumer: a helper verdict of `error` (2) refuses the run
+/// with the ERROR wording, and never claims `SIGINT` is ignored.
+///
+/// Driven through a stub worktree so the gate's real code path runs
+/// against a controlled helper status; the helper's own classification
+/// is covered by its own rows above.
+#[test]
+fn gate_refuses_on_helper_error_without_claiming_sigint_is_ignored() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let repo = gate_with_stub_helper(
+        "#!/bin/sh\necho 'pmacs: could not determine whether SIGINT is deliverable (probe status 42)' >&2\nexit 2\n",
+        true,
+    );
+    let out = Command::new(repo.path().join("scripts/gate"))
+        .arg("--self-test")
+        .current_dir(repo.path())
+        .env("PMACS_GATE_TARGET_ROOT", root.path())
+        .output()
+        .expect("run the stub-worktree gate");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "an error verdict exits 2, not 1"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("could not determine"), "error wording: {err}");
+    assert!(
+        !err.contains("SIGINT is ignored"),
+        "an undecidable probe must never be reported as ignored: {err}"
+    );
+    assert!(err.contains("no stage has run"), "and no stage ran: {err}");
+}
+
+/// A6, gate boundary: a helper that cannot be EXECUTED is an `error` at
+/// the call boundary — mapped to 2 — never evidence that `SIGINT` is
+/// ignored.
+///
+/// This is the case the original guard got wrong twice: under `set -e`
+/// a bare invocation died before any mapping, and 126/127 would have
+/// escaped raw.
+#[test]
+fn gate_maps_an_unexecutable_helper_to_error_not_ignored() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let repo = gate_with_stub_helper("#!/bin/sh\nexit 0\n", false);
+    let out = Command::new(repo.path().join("scripts/gate"))
+        .arg("--self-test")
+        .current_dir(repo.path())
+        .env("PMACS_GATE_TARGET_ROOT", root.path())
+        .output()
+        .expect("run the stub-worktree gate");
+    assert_eq!(out.status.code(), Some(2), "boundary failures map to 2");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("could not run the SIGINT guard"),
+        "the boundary has its own wording: {err}"
+    );
+    assert!(
+        !err.contains("SIGINT is ignored"),
+        "an unrunnable guard is not evidence about the signal: {err}"
+    );
+}
+
 /// §7c: the helper answers `safe` when `SIGINT` is deliverable.
 #[test]
 fn sigint_helper_reports_safe_when_the_signal_is_deliverable() {
@@ -132,7 +239,7 @@ fn sigint_helper_reports_safe_when_the_signal_is_deliverable() {
 /// `SIGINT` is inherited as `SIG_IGN`.
 #[test]
 fn sigint_helper_reports_ignored_when_the_signal_is_inherited_ignored() {
-    let out = under_ignored_sigint(&format!("{}", sigint_helper().display()));
+    let out = under_ignored_sigint(&sigint_helper(), &[], &repo_root(), &[]);
     assert_eq!(out.status.code(), Some(1), "ignored is exit 1");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -179,12 +286,17 @@ fn sigint_helper_reports_error_and_never_ignored_when_the_probe_cannot_run() {
 #[test]
 fn gate_refuses_to_start_when_sigint_is_ignored() {
     let root = tempfile::tempdir().expect("tempdir");
-    let out = under_ignored_sigint(&format!(
-        "cd {} && PMACS_GATE_TARGET_ROOT={} {}",
-        repo_root().display(),
-        root.path().display(),
-        gate().display()
-    ));
+    // `--self-test`, NOT the ordinary gate. If the guard ever regresses,
+    // this row must not launch eight real gate stages inside the gate
+    // suite — the recursion constraint this file opens with. Self-test
+    // drives the same runner over a hardcoded synthetic plan, so the
+    // negative path stays bounded whatever the guard does.
+    let out = under_ignored_sigint(
+        &gate(),
+        &["--self-test"],
+        &repo_root(),
+        &[("PMACS_GATE_TARGET_ROOT", &root.path().display().to_string())],
+    );
     assert_eq!(
         out.status.code(),
         Some(1),

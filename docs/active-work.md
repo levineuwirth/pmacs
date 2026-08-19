@@ -279,6 +279,15 @@ from #171 and #215.
   **`72da24a`**, worktree
   `/home/jeans/Repos/personal/pmacs-probe-sigint`. Recover with
   `git fetch githubsucks && git checkout gpu-probe-sigint-teardown`.
+- **CHECKPOINT: implementation landed at `3206433`; this entry's own
+  commit adds the A6 consumer rows on top.** The branch head is the
+  authority — a literal SHA naming a branch's own tip goes stale the
+  moment the next commit lands, which this ledger has already recorded
+  once. State at `3206433`: pushed, signed `G`, worktree clean,
+  `git diff --check` clean, **full default gate green (8/8) in the
+  foreground**, 31 gate-acceptance rows passing. After this commit:
+  **35 gate-acceptance rows and 16 `gpu_invocation_acceptance` rows**,
+  with the full gate re-run.
 - **No PR. Framing revision 12 at `docs/gpu-probe-sigint-framing.md`,
   APPROVED 2026-08-19 at `1fc0df6`** — revision 10 was approved at
   `4fba9f6` and revision 9 at `15c25ec`; neither approval covered the
