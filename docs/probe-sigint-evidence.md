@@ -179,28 +179,64 @@ cargo test --features crdt --no-fail-fast \
   -- ctrl_c_on_launcher_group
 ```
 
-Outer invocation, the only difference:
+Outer invocation, the only difference. `arms.sh` is machine-local, so
+the commands are given **fully expanded** — a reader elsewhere needs no
+access to it:
 
 ```
-fg:  /home/jeans/build/pmacs-gate-targets/d0a/arms.sh fg
-bg:  setsid nohup /home/jeans/build/pmacs-gate-targets/d0a/arms.sh bg > /dev/null 2>&1 & disown
+# fg arm
+cd /home/jeans/Repos/personal/pmacs-probe-sigint && \
+env TMPDIR=/home/jeans/build/pmacs-gate-targets/tmp/arms \
+    CARGO_TARGET_DIR=/home/jeans/build/pmacs-gate-targets/pmacs-probe-sigint-84ed0f9e \
+    cargo test --features crdt --no-fail-fast \
+      --test gpu_invocation_acceptance --test gpu_initial_target_acceptance \
+      -- ctrl_c_on_launcher_group
+
+# bg arm — byte-identical inner command, wrapped:
+setsid nohup sh -c '<the fg command above>' > <log> 2>&1 & disown
 ```
+
+The wrapper additionally recorded `git rev-parse HEAD`,
+`git status --porcelain | wc -l`, the exit status, both copies'
+results, the executed suffixes, their hashes, and the log digest.
 
 | arm | outer | exit | ok | failed | `SigIgn` | binary hashes | log sha256/16 |
 |---|---|---|---|---|---|---|---|
-| fg | foreground | 0 | 2 | 0 | not captured (no failure ⇒ no dump) | `91f51d0b…`=`0890b78cca22ac1e`, `6b4b8223…`=`ef6ff1c15e11062a` | `aaec01673691479a` |
-| bg | `setsid nohup … &` | 101 | 0 | 2 | `0000000000001007` | **identical**: `0890b78cca22ac1e`, `ef6ff1c15e11062a` | `c744d85a84cb8683` |
+| fg | foreground | 0 | 2 | 0 | not captured (no failure ⇒ no dump) | `aaec01673691479a…` (prefix) |
+| bg | `setsid nohup … &` | 101 | 0 | 2 | `0000000000001007` | `c744d85a84cb8683…` (prefix) |
 
-**The binaries are byte-identical across arms** — same hashes, same
-head, same target directory, `dirty=0` — so nothing but the outer
-invocation varies. `arms.tsv` holds the raw rows.
+Both arms executed the same two binaries, whose **full** SHA-256 are:
 
-### Disposition, measured directly
+```
+gpu_initial_target_acceptance-91f51d0b5303ff9f
+  0890b78cca22ac1e80b79845f85fb6e88def3330db15ae123a2a672d3084124c
+gpu_invocation_acceptance-6b4b8223dea45247
+  ef6ff1c15e11062ab53a075763814f32c1bbc9be1b146d068c60e91fa247c696
+```
+
+Same head, same target directory, `dirty=0`, and the binaries were not
+rebuilt between arms — so nothing but the outer invocation varies. The
+**log** digests above are 16-character **prefixes**, not full values,
+and are identifiers only; no claim rests on them.
+
+### Disposition — UNRECORDED CORROBORATION, not a controlled arm
+
+This table was read ad hoc from `/proc/self/status` in the two shells
+and **its runs were not captured**: no head, no cleanliness, no log,
+no digest. It agrees with the arms above and with §4c's capture, and it
+is labelled separately for that reason — it corroborates, it does not
+evidence.
 
 | context | child `SigIgn` | `SIGINT` |
 |---|---|---|
 | foreground | `0000000000001000` | bit 12 (SIGPIPE) only — deliverable |
 | `setsid nohup … &` | `0000000000000007` | SIGHUP, SIGINT, SIGQUIT — ignored |
+
+The portable probe adopted as the remedy (framing §7c) supersedes it as
+the *recorded* mechanism check:
+`sh -c 'trap "exit 23" 2; kill -INT $$; exit 0'` exits **23** when
+`SIGINT` is deliverable and **0** when it is inherited as ignored.
+Verified in both contexts.
 
 ### The first D1/D2 capture, and why it is superseded
 

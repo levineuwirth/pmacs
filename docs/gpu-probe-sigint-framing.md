@@ -1,14 +1,14 @@
 # GPU launcher / probe SIGINT teardown — framing
 
-Revision 11. Status: **MECHANISM FOUND (§4c). Awaiting approval — the
-problem statement has changed, so the remedy in §7/§8 no longer
-follows.**
+Revision 12. Status: **MECHANISM FOUND (§4c), REMEDY SELECTED (§7c).
+Awaiting approval.**
 
 Revision 10 was approved 2026-08-19 at `4fba9f6`, authorising
 diagnostic-only D1/D2. They ran, and found the mechanism on the first
 reproducing sweep. It is not what this document was built around: bet 1
-is falsified, A5 is struck, and nothing is wrong with the probe's
-shutdown path.
+is **withdrawn by scope** and A5 **retired by scope** (D4 was never
+executed, so no claim is made about a real session either way), and
+nothing in the evidence implicates the probe's shutdown path.
 
 Revision 9 was approved 2026-08-19 at `15c25ec`. **That approval did
 not extend to revision 10**, because retiring D0b (§7) materially
@@ -399,10 +399,12 @@ ten-minute cap truncating gate runs. **That is the "onset".**
 
 ### Consequences for the contract
 
-- **Bet 1 is FALSIFIED, and A5 is struck** under its own D4 condition.
-  An interactive terminal does not ignore `SIGINT`, so Ctrl-C on a real
-  `pmacs --gpu` session behaves correctly. This is not a defect a user
-  can meet.
+- **Bet 1 is WITHDRAWN BY SCOPE; A5 is RETIRED BY SCOPE.** D4 was
+  never executed, so **nothing here establishes that a real
+  `pmacs --gpu` session behaves correctly** — only that no observed
+  evidence of a user-facing defect survives, every red run being
+  explained by the runner's invocation. Any user-facing claim needs its
+  own lane and its own evidence.
 - **The §7/§8 remedy no longer follows.** What remains is narrower and
   genuinely real:
   1. **The gate must not be invoked so that `SIGINT` is ignored** — a
@@ -417,9 +419,10 @@ ten-minute cap truncating gate runs. **That is the "onset".**
   D0b: the difference was invocation mode, demonstrated in both
   directions.
 
-`#![forbid(unsafe_code)]` rules out `pre_exec`, so remedy 2 is a
-precondition assertion rather than a repair — but that is a design
-question for the next revision, not a decision taken here.
+`#![forbid(unsafe_code)]` rules out `pre_exec` as one *mechanism*; it
+does **not** select the remedy, and revision 11's leap from the first to
+the second did not follow. §7b weighs the candidates and §7c records
+the decision.
 
 ## 5. Two retracted claims, both mine, kept as warnings
 
@@ -580,11 +583,12 @@ group.
   measure the mechanism itself. Sharpening an indirect instrument while
   a direct one is in hand is the wrong order of work.
 
-  **The obligation is not discharged.** A3 still binds: if D1/D2 do not
-  account for why every subset passed while the full sweep fails,
-  **D0b runs before this lane closes**, and its result is recorded
-  either way. Retiring it as a *precondition* does not retire the
-  question.
+  **The obligation is now SATISFIED, by explanation rather than by
+  running D0b.** A3 asked that the subset/full difference be accounted
+  for: §4c accounts for it — every subset ran foreground and every full
+  sweep backgrounded, and the controlled arms demonstrate the
+  difference in both directions with byte-identical binaries. **D0b is
+  therefore not owed and will not run.**
 
   As written, the retired step read: re-run the §4 matrix, at `main`,
   recording the artifact hashes actually executed **at run time**.
@@ -647,9 +651,76 @@ Whichever is chosen must state what it does on a non-`/proc` unix.
 
 No remedy is implemented, and none is selected here.
 
-## 8. Acceptance criteria for the eventual fix
+## 7c. Remedy — SELECTED: R-b + R-d, via one portable probe
 
-Written now so the fix cannot quietly become "make the test pass".
+**Decided 2026-08-19.** R-b (early gate guard) and R-d (test-local
+precondition diagnosis), implemented through a **single checked-in
+helper** built on a behavioural probe rather than `/proc` or `unsafe`:
+
+```sh
+sh -c 'trap "exit 23" 2; kill -INT $$; exit 0'
+```
+
+It sends itself `SIGINT`. If the signal is deliverable the trap runs and
+it exits **23**; if `SIGINT` was inherited as `SIG_IGN` the kill is a
+no-op and it exits **0**. Verified in both contexts: 23 foreground, 0
+under `setsid nohup … &`.
+
+This is **POSIX shell only** — `trap`, `kill`, `$$` — so it settles the
+portability question §7b raised: no `/proc`, hence not Linux-only, and
+no `sigaction`, hence no `unsafe`.
+
+**Both consumers use the same helper**, so the guard and the test can
+never disagree about what "ignored" means:
+
+- **`scripts/gate` fails immediately**, before any stage, with an
+  explicit ignored-`SIGINT` diagnosis.
+- **The target test invokes it** and reports the same precondition
+  failure if run directly, instead of "child did not exit within 5s".
+
+**No override.** A full gate run under ignored `SIGINT` cannot produce
+valid evidence, so there is no flag to proceed anyway — a switch that
+lets the gate run in a state where several suites are meaningless would
+recreate exactly the failure this lane spent nine revisions on.
+
+**R-c is rejected**: restoring the child's disposition needs
+`pre_exec`, which is `unsafe`, and dodging a project invariant to make
+one test invocation-independent is not a trade this lane will make.
+
+**The Linux-only D1/D2 instrumentation is removed** once its evidence is
+portable — it read `/proc`, it has produced its finding, and leaving it
+in place would carry a platform dependency for no further return.
+
+## 8. Acceptance criteria — REPLACED for the selected remedy
+
+The A1–A5 written for a teardown fix no longer describe this work; they
+are superseded wholesale. What the guard-and-diagnosis change must
+show:
+
+- **A1 — the guard bites.** `scripts/gate` invoked with `SIGINT`
+  ignored exits immediately, before any stage runs, naming the ignored
+  signal as the reason.
+- **A2 — the direct-test diagnosis bites.** The target test run
+  directly with `SIGINT` ignored fails with the precondition message,
+  **not** with "child did not exit within 5s".
+- **A3 — foreground success is unaffected.** Both target copies pass
+  foreground, and the guard does not fire, so the remedy costs nothing
+  in the normal case.
+- **A4 — mutation.** Removing the probe's `trap`, or treating exit 0 as
+  "deliverable", makes A1 and A2 fail; each mutation is named against
+  the row it must bite.
+- **A5 — the gate is otherwise unchanged**: a normal foreground run
+  reaches and passes every stage it did before, with no stage added,
+  skipped, reordered, or made conditional.
+
+## 8b. Superseded criteria, kept for the record
+
+These were written for a teardown fix that is no longer the work. They
+are retained so the change of target is visible rather than silent;
+**none of them binds.**
+
+Written when this lane still expected a teardown repair. **Superseded
+by §8**; kept verbatim below.
 
 - **A1.** The mechanism is stated and demonstrated, not inferred: a
   witness failing before the change and passing after, plus a mutation
@@ -694,9 +765,9 @@ Written now so the fix cannot quietly become "make the test pass".
 - **Interaction islands: none added.**
 - **Config registry: not touched. Background-work attribution: not
   touched.**
-- Beyond step 12(a), what this lane restores is every *other* lane's
-  ability to prove itself, since no branch can show a green gate while
-  stage 15 reds.
+- What the lane restores is every *other* lane's ability to prove
+  itself: while the gate can be run in a state where several suites are
+  meaningless, a red stage 15 tells you nothing about the branch.
 
 ## 10. Out of scope
 
