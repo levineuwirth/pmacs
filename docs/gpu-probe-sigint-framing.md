@@ -1,8 +1,13 @@
 # GPU launcher / probe SIGINT teardown — framing
 
-Revision 12, approved 2026-08-19 at `1fc0df6`.
-Status: **IMPLEMENTED — R-b + R-d landed and witnessed (§8). Mechanism
-in §4c; no product change.**
+Revision 13. Status: **AWAITING APPROVAL — the shipped ABI is
+defective on macOS (§4d), and revision 13 replaces it. No
+implementation of the replacement.**
+
+Revision 12 was approved at `1fc0df6` and implemented; CI then found its
+status-only ABI unsound on a platform this session could not reach.
+Mechanism in §4c; the ABI defect and its remedy in §4d and §7c. Still no
+product change — this remains gate/test correctness only.
 
 Revision 10 was approved 2026-08-19 at `4fba9f6`, authorising
 diagnostic-only D1/D2. They ran, and found the mechanism on the first
@@ -425,6 +430,37 @@ does **not** select the remedy, and revision 11's leap from the first to
 the second did not follow. §7b weighs the candidates and §7c records
 the decision.
 
+## 4d. The shipped ABI is defective on macOS — found by CI
+
+`70f0bc9`, `Test (macos-latest / lua54)` and `… / luajit`, one row:
+
+```
+scripts/gate: line 543: .../check-sigint-deliverable: Permission denied
+gate: no stage has run; this is not a test failure.
+  left: Some(1)   right: Some(2)
+```
+
+**macOS `/bin/sh` returns 1 when it cannot execute a file; Linux
+returns 126.** The gate took its `1 | 2)` branch — identifiable only
+because that branch's message text differs, since it withholds the
+number — so a helper that never ran was classified **`ignored`**. A
+broken guard told the operator their environment ignores `SIGINT`.
+
+That is the conflation §7c forbids, reached by a route §7c did not
+anticipate. Five of six SIGINT rows pass on macOS; this is the sixth.
+
+**A7 earned its keep here.** It was satisfied *by disclosure* precisely
+because the POSIX-portability claim was argued rather than measured.
+The first time it was measured, the claim was wrong in a specific,
+narrow way — which is the outcome a disclosed-but-untested criterion
+exists to make visible.
+
+**A rejected repair, recorded so it is not retried.** Moving `ignored`
+from 1 to 3 was proposed and refused: it relocates the collision
+without closing it, because an execution failure can return **any**
+nonzero status. The generalisation is the useful part —
+**no exit status can prove the helper ran.**
+
 ## 5. Two retracted claims, both mine, kept as warnings
 
 **Claim A — "mechanism located".** Reported the launcher blocked in
@@ -678,9 +714,35 @@ and send the next reader down this lane again.
 So the **helper owns the classification**. The checked-in executable is
 `scripts/check-sigint-deliverable`; this is its complete interface:
 
-- exit **0**, no diagnostic: `safe`;
-- exit **1**, canonical diagnostic on stderr: `ignored`;
-- exit **2**, a distinct canonical diagnostic on stderr: `error`.
+**Revision 13 replaces the status-only ABI with a validated
+`(status, token)` pair.** The interface is:
+
+| outcome | exit | token on **stdout** |
+|---|---|---|
+| `safe` | 0 | `pmacs-sigint-v1:safe` |
+| `ignored` | 1 | `pmacs-sigint-v1:ignored` |
+| `error` | 2 | `pmacs-sigint-v1:error` |
+
+**Any other pair is a boundary error, mapped to 2** — including a
+correct-looking status with no token, a token that does not match its
+status, an unknown token, or a status outside 0–2. Diagnostics stay on
+**stderr**; the token is the only thing on stdout, so parsing it cannot
+be confused by human-readable text.
+
+**Why the token, and why the earlier design was wrong.** Revision 12's
+ABI carried the verdict in the exit status alone. CI proved that
+insufficient: on macOS a shell that cannot execute the helper exits
+**1**, which the ABI already reads as `ignored`, so a broken guard told
+the operator their environment ignores `SIGINT`. The first proposed
+repair — move `ignored` to 3 — was **rejected, correctly**: it only
+relocates the collision, because an execution failure can return *any*
+nonzero status. **No exit status can prove the helper ran.** A token it
+must have printed can.
+
+Consumers therefore validate the exact pair and treat every mismatch as
+`error`. They still do not re-derive the classification: the helper
+decides, and the pair is what makes the helper's decision
+distinguishable from a shell's.
 
 Its complete POSIX-shell classification shape preserves failure rather
 than overwriting it:
@@ -738,6 +800,14 @@ never disagree about what "ignored" means:
 - **The target test invokes it** and reports the same precondition
   failure if run directly, instead of "child did not exit within 5s".
 
+**Every refusing branch must print the observed helper status AND the
+token state** — valid, missing, or unexpected. This is **diagnostic
+context, never the classifier**: the classification is the validated
+pair, and the printout exists so a failure is legible without another
+CI round-trip. Revision 12 printed the raw status only in its catch-all
+branch, so when macOS failed, the path had to be identified indirectly
+by which message text appeared — the log could not simply say.
+
 **One practical finding, measured after the guard was written:
 backgrounding is not the problem — one *way* of backgrounding is.** This
 session's tool-level background mode leaves `SIGINT` deliverable (helper
@@ -788,14 +858,31 @@ show:
   | remove the probe's `trap` | **2** | 1 | — | **A3** — foreground degrades to `error`; backgrounded classification unchanged |
   | treat inner exit 0 as `safe` | 0 | **0** | — | **A1 and A2** — inherited ignore passes through both consumers |
   | collapse `error` into `ignored` | — | — | **1** | **A6** — a forced failure reports the ignored wording |
+
+  **Revision 13 adds token mutations**, each of which must bite:
+
+  | mutation | must fail |
+  |---|---|
+  | consumers accept a **missing** token (status only) | A6 and the macOS row — this is exactly the shipped defect |
+  | consumers accept a **wrong** token for the status (e.g. `…:safe` with exit 1) | A6 |
+  | consumers accept an **unknown** token (`pmacs-sigint-v2:safe`) | A6 |
+  | helper prints the token to **stderr** instead of stdout | A1–A3 — the pair no longer validates |
 - **A5 — the gate is otherwise unchanged**: a normal foreground run
   reaches and passes every stage it did before, with no stage added,
   skipped, reordered, or made conditional.
-- **A6 — the `error` outcome is distinct.** With the probe forced to
-  fail (for example its inner `sh` made unavailable), **both the gate
-  and the direct target test** report the helper's **`error`**
-  diagnosis, not the `ignored` one, and neither claims the environment
-  ignores `SIGINT`.
+- **A6 — the `error` outcome is distinct, and cannot be counterfeited
+  by a status alone.** With the probe forced to fail, **both the gate
+  and the direct target test** report `error`, not `ignored`, and
+  neither claims the environment ignores `SIGINT`. Extended by
+  revision 13 to cover the pair: a **missing**, **mismatched** or
+  **unknown** token is `error` in both consumers, whatever the status
+  accompanying it.
+- **A6a — the macOS row, stated as the concrete obligation it now is.**
+  An unexecutable helper on macOS yields **status 1 with no token**.
+  Both consumers must classify that as **boundary error → 2**, never
+  `ignored`. This is not a hypothetical: it is the observed CI failure
+  on `70f0bc9` (`Test (macos-latest / lua54)` and `… / luajit`), and
+  the row is only satisfied when that platform is green.
 - **A7 — SATISFIED BY DISCLOSURE**, which is the fallback this
   criterion allows when no non-Linux unix is reachable. Revision 12
   wrote A7 as "exercised there, **or** state what is claimed versus
