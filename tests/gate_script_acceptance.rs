@@ -35,6 +35,27 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// The SIGINT-deliverability helper the gate and the panel suite share
+/// (`docs/gpu-probe-sigint-framing.md` §7c).
+fn sigint_helper() -> PathBuf {
+    repo_root().join("scripts/check-sigint-deliverable")
+}
+
+/// Run `cmd` with `SIGINT` set to `SIG_IGN`, the way a shell that
+/// backgrounds a job without job control does.
+///
+/// `trap "" INT` sets the ignore in the wrapper shell, and `SIG_IGN` is
+/// inherited across `fork` **and survives `exec`** — which is the whole
+/// mechanism under test, so simulating it this way exercises the real
+/// thing rather than a stand-in.
+fn under_ignored_sigint(cmd: &str) -> std::process::Output {
+    Command::new("sh")
+        .arg("-c")
+        .arg(format!("trap \"\" INT; {cmd}"))
+        .output()
+        .expect("spawn shell with SIGINT ignored")
+}
+
 fn gate() -> PathBuf {
     repo_root().join("scripts/gate")
 }
@@ -92,6 +113,99 @@ fn run(root: &Path, args: &[&str]) -> (String, String, bool) {
 // the script is authoritative for the FIXED gates, so if it drifts from
 // §3, nothing else in the repository would notice. `--print-plan`
 // exists to make that checkable without executing anything.
+
+/// §7c: the helper answers `safe` when `SIGINT` is deliverable.
+#[test]
+fn sigint_helper_reports_safe_when_the_signal_is_deliverable() {
+    let out = Command::new(sigint_helper())
+        .output()
+        .expect("run the sigint helper");
+    assert_eq!(out.status.code(), Some(0), "safe is exit 0");
+    assert!(
+        out.stderr.is_empty(),
+        "the safe path is silent, so a clean run says nothing: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// §7c: the helper answers `ignored` — exit 1, canonical wording — when
+/// `SIGINT` is inherited as `SIG_IGN`.
+#[test]
+fn sigint_helper_reports_ignored_when_the_signal_is_inherited_ignored() {
+    let out = under_ignored_sigint(&format!("{}", sigint_helper().display()));
+    assert_eq!(out.status.code(), Some(1), "ignored is exit 1");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("SIGINT is ignored"),
+        "the canonical ignored diagnosis is the helper's to own: {err}"
+    );
+}
+
+/// §7c: the helper answers `error` — exit 2, a DISTINCT diagnosis — when
+/// the probe cannot decide.
+///
+/// The probe shells out, so an empty `PATH` makes its inner `sh`
+/// unfindable. This is the case a naive `exit 0` would misreport as
+/// `ignored`, failing the caller for the wrong reason.
+#[test]
+fn sigint_helper_reports_error_and_never_ignored_when_the_probe_cannot_run() {
+    let out = Command::new(sigint_helper())
+        .env("PATH", "")
+        .output()
+        .expect("run the sigint helper with no PATH");
+    assert_eq!(out.status.code(), Some(2), "error is exit 2, never 1");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("could not determine"),
+        "error has its own wording: {err}"
+    );
+    assert!(
+        !err.contains("SIGINT is ignored"),
+        "error must NOT be reported as ignored --- they are different \
+         problems, and conflating them is the defect the helper exists \
+         to avoid: {err}"
+    );
+}
+
+/// R-b: the gate refuses under ignored `SIGINT`, **before any stage**.
+///
+/// This is the row whose absence let a real bug ship: the first
+/// implementation ran the helper as a bare command under `set -e`, so
+/// the shell died at the non-zero exit and the refusal never printed;
+/// the second captured `$?` inside `if !`, which is the status of the
+/// negated condition — always zero — so the gate printed the diagnosis
+/// and then ran the whole suite anyway. Both passed every other test in
+/// this file.
+#[test]
+fn gate_refuses_to_start_when_sigint_is_ignored() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let out = under_ignored_sigint(&format!(
+        "cd {} && PMACS_GATE_TARGET_ROOT={} {}",
+        repo_root().display(),
+        root.path().display(),
+        gate().display()
+    ));
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "the helper's verdict passes through"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("SIGINT is ignored"),
+        "the gate surfaces the helper's stderr unchanged rather than \
+         inventing its own wording: {err}"
+    );
+    assert!(
+        err.contains("no stage has run"),
+        "and says the run is not a test failure: {err}"
+    );
+    let combined = format!("{}{err}", String::from_utf8_lossy(&out.stdout));
+    assert!(
+        !combined.contains("[01]"),
+        "NO stage may run --- the guard sits before stage 1: {combined}"
+    );
+}
 
 #[test]
 fn the_plan_sweeps_the_workspace_and_never_only_the_tests() {

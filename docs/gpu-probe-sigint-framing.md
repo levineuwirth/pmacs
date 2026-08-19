@@ -796,16 +796,21 @@ show:
   and the direct target test** report the helper's **`error`**
   diagnosis, not the `ignored` one, and neither claims the environment
   ignores `SIGINT`.
-- **A7 — portability, recorded as exercised rather than claimed.**
-  **Exercised: Linux `x86_64` only, this machine**, in all three
-  outcomes (`safe` 0, `ignored` 1, `error` 2). **No non-Linux unix was
-  reachable from this session, so none was tried, and A7 stays OPEN
-  there.** What carries beyond Linux is a contract argument, not a
-  measurement: the helper uses only `trap`, `kill -INT`, `$$`, `case`
-  and `echo` — POSIX shell — and reads no `/proc` and calls no
-  `sigaction`. The behaviour it detects is POSIX, not a Linux
-  extension. Re-run the three outcomes on BSD or macOS before treating
-  A7 as closed.
+- **A7 — SATISFIED BY DISCLOSURE**, which is the fallback this
+  criterion allows when no non-Linux unix is reachable. Revision 12
+  wrote A7 as "exercised there, **or** state what is claimed versus
+  what was tried"; an earlier draft of this line said A7 "stays open",
+  which **contradicted the approved contract** and is withdrawn.
+  - **Tried:** Linux `x86_64`, this machine, all three outcomes
+    (`safe` 0, `ignored` 1, `error` 2), for the helper, the gate and
+    the direct test.
+  - **Not tried:** every non-Linux unix. None was reachable.
+  - **Claimed:** the mechanism is POSIX, not Linux-specific — the
+    helper uses only `trap`, `kill -INT`, `$$`, `case` and `echo`, and
+    reads no `/proc` and calls no `sigaction`; the disposition
+    behaviour it detects is POSIX inheritance across `fork` and `exec`.
+  That is a contract argument, disclosed as such. Anyone porting to
+  BSD or macOS should re-run the three outcomes rather than trust it.
 
 ## 8b. Superseded criteria, kept for the record
 

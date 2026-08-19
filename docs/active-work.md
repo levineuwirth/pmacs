@@ -315,9 +315,28 @@ from #171 and #215.
   removed once its evidence is portable. A1–A7 witness guard bite,
   direct-test diagnosis, unaffected foreground success, mutation, an
   otherwise unchanged gate, a distinct error outcome in **both**
-  consumers, and qualified non-Linux-unix portability. The mechanism is
-  **known** and the only implementation so far is the diagnostic
-  instrument. Revisions 1, 2 and 3 were each rejected on findings, all
+  consumers, and qualified non-Linux-unix portability.
+- **IMPLEMENTED.** `scripts/check-sigint-deliverable` is the shared
+  helper (0 safe / 1 ignored / 2 error); `scripts/gate` refuses before
+  any stage; the target test reports the precondition instead of the 5s
+  deadline; the Linux-only `/proc` instrument is removed.
+- **Two bugs shipped in the first guard, both caught in review.** A bare
+  invocation under `set -eu` killed the shell at the helper's non-zero
+  exit, so the refusal never printed. Replacing it with
+  `if ! helper; then status=$?` captured the status of the **negated
+  condition** — always 0 — so the gate printed the diagnosis and then
+  ran the whole suite anyway. The working shape is
+  `helper || status=$?`, the idiom the helper uses internally. The
+  guard also moved to immediately after the worktree resolves, so a
+  refused run leaves no log dir, ambient root or tmpdir behind.
+- **Four durable rows in `gate_script_acceptance`** (31, was 27):
+  helper safe / ignored / error, and gate refusal before stage 1.
+  **Verified to bite** — mutating the gate back to either shipped bug
+  fails `gate_refuses_to_start_when_sigint_is_ignored` and nothing
+  else. Their absence is why 27 passing tests missed both.
+- **A7 satisfied by disclosure**: Linux `x86_64` only, all three
+  outcomes, no non-Linux unix reachable; the POSIX argument is labelled
+  a contract claim rather than a measurement. Revisions 1, 2 and 3 were each rejected on findings, all
   upheld; run provenance lives in `docs/probe-sigint-evidence.md`.
 - **D0a EXECUTED 2026-08-19 — verdict: difference NOT captured by the
   two commits.** 10 runs, counterbalanced, N=5 per endpoint, clean
