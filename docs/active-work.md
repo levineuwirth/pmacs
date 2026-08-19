@@ -412,10 +412,13 @@ from #171 and #215.
   D0a stops). A sweep red only on **unrelated** rows is a `green` run;
   both outcomes occur in the historical logs — `…-708693` is a void
   (compile failure), and `…-2839374`/`…-830195` are unrelated-red with
-  both copies passing. A bisect of
-  `7599661..724b785` is permitted **only on a clean split** — all N red
-  one side, all N green the other. A mixed result means the failure is
-  intermittent under fixed source and **no bisect is justified**.
+  both copies passing. A bisect of `7599661..724b785` is permitted
+  **only on the expected-direction clean split** — all N green at
+  `7599661`, all N red at `724b785`. The inverted split is a real
+  difference but contradicts the onset reading, so it is recorded and
+  that reading is re-examined before any bisect. A mixed result means
+  the failure is intermittent under fixed source and **no bisect is
+  justified**.
 - **Red full-sweep count is SEVEN, not five** (F1–F7 in the manifest),
   each with its own log digest; revision 3 said 5/5 while the framing
   separately cited a gate run the manifest never listed.

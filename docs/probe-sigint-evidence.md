@@ -181,8 +181,13 @@ log digest. Two constraints learned the hard way:
   the bisect-step policy. In summary, keeping the two conclusions with
   the verdicts they actually belong to:
 
-  - **clean split** (one endpoint uniform green, the other uniform red)
-    → a bisect of `7599661..724b785` is permitted;
+  - **expected-direction clean split** (`7599661` uniform green,
+    `724b785` uniform red) → a bisect of `7599661..724b785` is
+    permitted;
+  - **inverted clean split** (`7599661` uniform red, `724b785` uniform
+    green) → the commits differ, but the observed direction contradicts
+    the onset reading; record it and re-examine that reading before any
+    bisect;
   - **mixed at either endpoint** → the failure is **intermittent under
     fixed source**; no bisect;
   - **both endpoints uniform the same way**, green or red → **the
