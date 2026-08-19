@@ -622,7 +622,7 @@ group.
   demonstrates a real session behaves correctly, only that no evidence
   of the contrary survives.
 
-## 7b. Remedy options — evaluated, none yet selected
+## 7b. Remedy options — revision 11 evaluation, superseded by §7c
 
 Revision 11 jumped from "`pre_exec` is `unsafe`" to "therefore a
 precondition assertion". That does not follow: ruling out one mechanism
@@ -649,7 +649,8 @@ that touches an `unsafe` prohibition, so it needs a separate decision.
 Linux; `sigaction`-based querying would be portable but is `unsafe`.
 Whichever is chosen must state what it does on a non-`/proc` unix.
 
-No remedy is implemented, and none is selected here.
+Revision 11 implemented no remedy and selected none. Section 7c records
+the later selection that governs implementation.
 
 ## 7c. Remedy — SELECTED: R-b + R-d, via one portable probe
 
@@ -673,23 +674,60 @@ status and lands on the same exit. Read naively, a broken probe reports
 "inherited `SIG_IGN`", which would fail the gate for the wrong reason
 and send the next reader down this lane again.
 
-So the **helper owns the classification**, and returns one of three
-outcomes; consumers only consume the verdict and never re-derive it:
+So the **helper owns the classification**. The checked-in executable is
+`scripts/check-sigint-deliverable`; this is its complete interface:
+
+- exit **0**, no diagnostic: `safe`;
+- exit **1**, canonical diagnostic on stderr: `ignored`;
+- exit **2**, a distinct canonical diagnostic on stderr: `error`.
+
+Its complete POSIX-shell classification shape preserves failure rather
+than overwriting it:
+
+```sh
+probe_status=0
+sh -c 'trap "exit 23" 2 || exit 24; kill -INT "$$" || exit 24; exit 0' \
+  || probe_status=$?
+case "$probe_status" in
+  23) exit 0 ;;
+  0)
+    echo 'pmacs: SIGINT is ignored; run this command with SIGINT deliverable' >&2
+    exit 1
+    ;;
+  *)
+    echo "pmacs: could not determine whether SIGINT is deliverable (probe status $probe_status)" >&2
+    exit 2
+    ;;
+esac
+```
+
+The helper maps inner 23 → helper 0, inner 0 → helper 1, and every
+other status → helper 2. Consumers **do not parse the raw 23/0/24
+statuses and do not supply their own signal diagnosis**: they continue
+only on helper exit 0 and otherwise stop while surfacing the helper's
+stderr unchanged. Failure to execute the helper at all is mechanically
+an `error` at the call boundary, never evidence that `SIGINT` is
+ignored.
+
+That produces one of three total outcomes:
 
 | outcome | meaning | how it is reached |
 |---|---|---|
-| `safe` | `SIGINT` is deliverable | probe exits 23 |
-| `ignored` | `SIGINT` is inherited as `SIG_IGN` | probe exits 0 **and** the `kill` itself reported success |
-| `error` | the probe could not decide | `kill` failed, `sh` unavailable, unexpected exit, or a signal other than the trap |
+| `safe` | `SIGINT` is deliverable | inner probe exits 23; helper exits 0 |
+| `ignored` | `SIGINT` is inherited as `SIG_IGN` | inner probe exits 0 after a successful `kill`; helper exits 1 |
+| `error` | the probe could not decide | `kill` failed, `sh` unavailable, unexpected exit, another signal, or helper execution failed; helper exits 2 or could not be executed |
 
 `error` is **not** treated as `ignored`. It fails the gate too, but with
 a different diagnosis, because "your environment ignores SIGINT" and
 "the guard could not run" are different problems and conflating them is
 what a naive `exit 0` would do.
 
-This is **POSIX shell only** — `trap`, `kill`, `$$` — so it settles the
-portability question §7b raised: no `/proc`, hence not Linux-only, and
-no `sigaction`, hence no `unsafe`.
+This is **POSIX shell only** — `trap`, `kill`, `$$` — so the mechanism
+does not depend on `/proc` or `sigaction`: it is not Linux-only and adds
+no `unsafe`. That is a contract-level portability argument, not a claim
+that every supported Unix has already exercised it; A7 keeps the
+implementation record explicit about which platforms were actually
+tried.
 
 **Both consumers use the same helper**, so the guard and the test can
 never disagree about what "ignored" means:
@@ -727,22 +765,25 @@ show:
 - **A3 — foreground success is unaffected.** Both target copies pass
   foreground, and the guard does not fire, so the remedy costs nothing
   in the normal case.
-- **A4 — mutation.** Removing the probe's `trap`, or treating exit 0 as
-  "deliverable", makes A1 and A2 fail; each mutation is named against
-  the row it must bite. Additionally, collapsing `error` into `ignored`
-  must fail A6.
+- **A4 — mutation.** Removing the probe's `trap` makes A3 fail: a
+  normal foreground signal terminates the inner shell and is classified
+  as `error`, not `safe`. Treating inner exit 0 as `safe` makes A1 and
+  A2 fail by allowing inherited ignore through. Collapsing `error` into
+  `ignored` makes A6 fail. Each mutation is named against the distinct
+  row it must bite.
+- **A5 — the gate is otherwise unchanged**: a normal foreground run
+  reaches and passes every stage it did before, with no stage added,
+  skipped, reordered, or made conditional.
 - **A6 — the `error` outcome is distinct.** With the probe forced to
-  fail (e.g. its interpreter made unavailable), the guard reports the
-  **`error`** diagnosis, not the `ignored` one, and does not claim the
-  environment ignores `SIGINT`.
+  fail (for example its inner `sh` made unavailable), **both the gate
+  and the direct target test** report the helper's **`error`**
+  diagnosis, not the `ignored` one, and neither claims the environment
+  ignores `SIGINT`.
 - **A7 — a supported non-Linux unix.** The helper is exercised on a
   non-`/proc` unix in the project's supported set, or — if none is
   reachable — the record states which platforms the guard is *claimed*
   to work on and which were actually tried. No unexercised portability
   claim ships unqualified.
-- **A5 — the gate is otherwise unchanged**: a normal foreground run
-  reaches and passes every stage it did before, with no stage added,
-  skipped, reordered, or made conditional.
 
 ## 8b. Superseded criteria, kept for the record
 

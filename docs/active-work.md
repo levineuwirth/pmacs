@@ -287,7 +287,8 @@ from #171 and #215.
   the test runner was launched in the background — `SIG_IGN` is
   inherited across `fork` and survives `exec`, so it reached the
   launcher and probe, and `kill(-pgid, SIGINT)` was a no-op.**
-  Controlled arms on committed head `38f2af4` with byte-identical
+  Controlled arms re-run on committed head `77b623c` with full SHA-256
+  captured per arm and byte-identical
   binaries: foreground both copies ok, `setsid nohup … &` both FAILED.
   **I caused this** by adopting background launches on 08-16 to evade
   the Bash tool's ten-minute cap — that is the "onset", and the
@@ -298,21 +299,25 @@ from #171 and #215.
   correctly, only that no evidence of a user-facing defect survives.
   **A3/D0b are SATISFIED by that explanation** — D0b is not owed and
   will not run. Framing **revision 12 AWAITING APPROVAL**, and it
-  **selects the remedy**: R-b + R-d via one checked-in helper wrapping
-  a portable behavioural probe,
-  `sh -c 'trap "exit 23" 2; kill -INT $$; exit 0'` — exit **23** when
-  `SIGINT` is deliverable, **0** when inherited as ignored. POSIX shell
-  only: no `/proc`, so not Linux-only; no `sigaction`, so no `unsafe`.
-  `scripts/gate` fails immediately with the explicit diagnosis; the
-  target test reports the same precondition failure if run directly;
+  **selects the remedy**: R-b + R-d via one checked-in helper,
+  `scripts/check-sigint-deliverable`. Its preserved-status inner probe
+  maps to one complete ABI: helper exit **0** = `safe`, **1** =
+  `ignored`, **2** = probe `error`; the helper owns the two failure
+  diagnostics, and both consumers surface its stderr rather than
+  interpreting raw probe statuses. Inability to execute the helper is
+  `error`, never evidence of `SIG_IGN`. POSIX shell only: no `/proc`,
+  so not Linux-only; no `sigaction`, so no `unsafe`. `scripts/gate`
+  fails immediately with the explicit diagnosis; the target test
+  reports the same precondition failure if run directly;
   **no override**, because a gate under ignored `SIGINT` cannot produce
   valid evidence. R-c rejected. The Linux-only D1/D2 instrumentation is
-  removed once its evidence is portable. A1–A5 replaced by witnesses
-  for guard bite, direct-test diagnosis, unaffected foreground success,
-  mutation, and an otherwise unchanged gate. The mechanism is **known**
-  and the only implementation so far is the diagnostic instrument. Revisions 1, 2 and 3 were each rejected on
-  findings, all upheld; run provenance lives in
-  `docs/probe-sigint-evidence.md`.
+  removed once its evidence is portable. A1–A7 witness guard bite,
+  direct-test diagnosis, unaffected foreground success, mutation, an
+  otherwise unchanged gate, a distinct error outcome in **both**
+  consumers, and qualified non-Linux-unix portability. The mechanism is
+  **known** and the only implementation so far is the diagnostic
+  instrument. Revisions 1, 2 and 3 were each rejected on findings, all
+  upheld; run provenance lives in `docs/probe-sigint-evidence.md`.
 - **D0a EXECUTED 2026-08-19 — verdict: difference NOT captured by the
   two commits.** 10 runs, counterbalanced, N=5 per endpoint, clean
   detached worktrees with isolated target dirs, `dirty=0` per run, zero

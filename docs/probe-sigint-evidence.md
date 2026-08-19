@@ -166,7 +166,7 @@ in this file are incomplete for that reason: they gave the inner
 
 ### Controlled arms, committed head, worktree-local target
 
-Head `38f2af4`, `dirty=0`, worktree
+Head `77b623c`, `dirty=0`, worktree
 `/home/jeans/Repos/personal/pmacs-probe-sigint`, target
 `/home/jeans/build/pmacs-gate-targets/pmacs-probe-sigint-84ed0f9e`,
 `TMPDIR=/home/jeans/build/pmacs-gate-targets/tmp/arms`.
@@ -179,31 +179,53 @@ cargo test --features crdt --no-fail-fast \
   -- ctrl_c_on_launcher_group
 ```
 
-Outer invocation — the only difference, written out with **no
-placeholders**:
+The **actual evidence-producing outer invocations** were:
 
 ```
-# fg arm — run directly in an interactive foreground shell
-cd /home/jeans/Repos/personal/pmacs-probe-sigint && \
-env TMPDIR=/home/jeans/build/pmacs-gate-targets/tmp/arms \
-    CARGO_TARGET_DIR=/home/jeans/build/pmacs-gate-targets/pmacs-probe-sigint-84ed0f9e \
-    cargo test --features crdt --no-fail-fast \
-      --test gpu_invocation_acceptance --test gpu_initial_target_acceptance \
-      -- ctrl_c_on_launcher_group
+# fg arm
+/home/jeans/build/pmacs-gate-targets/d0a/arms2.sh fg
 
-# bg arm — the identical command, wrapped
-setsid nohup sh -c 'cd /home/jeans/Repos/personal/pmacs-probe-sigint && \
-env TMPDIR=/home/jeans/build/pmacs-gate-targets/tmp/arms \
-    CARGO_TARGET_DIR=/home/jeans/build/pmacs-gate-targets/pmacs-probe-sigint-84ed0f9e \
-    cargo test --features crdt --no-fail-fast \
-      --test gpu_invocation_acceptance --test gpu_initial_target_acceptance \
-      -- ctrl_c_on_launcher_group' \
-  > /home/jeans/build/pmacs-gate-targets/d0a/arm2-bg.log 2>&1 & disown
+# bg arm
+setsid nohup /home/jeans/build/pmacs-gate-targets/d0a/arms2.sh bg \
+  > /dev/null 2>&1 & disown
+```
+
+`arms2.sh` is machine-local, so naming it is not portable provenance by
+itself. This is the complete body that produced `arms2.tsv`; it records
+the inner `cargo` exit rather than the status of the disowned outer job:
+
+```sh
+#!/bin/sh
+# D1/D2 controlled arms, v2: full binary SHA-256 captured PER RUN,
+# immediately after the run, before anything can rebuild them.
+set -u
+WT=/home/jeans/Repos/personal/pmacs-probe-sigint
+TD=/home/jeans/build/pmacs-gate-targets/pmacs-probe-sigint-84ed0f9e
+TMP=/home/jeans/build/pmacs-gate-targets/tmp/arms; mkdir -p "$TMP"
+OUT=/home/jeans/build/pmacs-gate-targets/d0a
+ARM="$1"; LOG="$OUT/arm2-$ARM.log"
+HEAD=$(git -C "$WT" rev-parse HEAD); DIRTY=$(git -C "$WT" status --porcelain | wc -l)
+env TMPDIR="$TMP" CARGO_TARGET_DIR="$TD" sh -c \
+  "cd $WT && cargo test --features crdt --no-fail-fast --test gpu_invocation_acceptance --test gpu_initial_target_acceptance -- ctrl_c_on_launcher_group" \
+  > "$LOG" 2>&1
+EXIT=$?
+OK=$(grep -c "ctrl_c_on_launcher_group_does_not_reach_spawned_daemon \.\.\. ok" "$LOG")
+BAD=$(grep -c "ctrl_c_on_launcher_group_does_not_reach_spawned_daemon \.\.\. FAILED" "$LOG")
+SIG=$(grep -m1 -o "SigIgn=[0-9a-f]*" "$LOG" || echo "SigIgn=not-captured")
+# Full digests of exactly the binaries this run executed, taken now.
+HASHES=""
+for b in $(grep -E "Running tests/gpu_" "$LOG" | sed 's|.*deps/||; s|)||'); do
+  HASHES="$HASHES $b=$(sha256sum "$TD/debug/deps/$b" | cut -d' ' -f1)"
+done
+printf '%s\tarm=%s\thead=%s\tdirty=%s\texit=%s\tok=%s\tfailed=%s\t%s\tlogsha=%s\thashes=%s\n' \
+  "$(date -Iseconds)" "$ARM" "$(echo $HEAD | cut -c1-7)" "$DIRTY" "$EXIT" "$OK" "$BAD" "$SIG" \
+  "$(sha256sum "$LOG" | cut -d' ' -f1)" "$HASHES" >> "$OUT/arms2.tsv"
+echo "arm2 $ARM: exit=$EXIT ok=$OK failed=$BAD $SIG"
 ```
 
 ### Result — head `77b623c`, `dirty=0`, digests captured PER RUN
 
-| arm | outer | exit | ok | failed | `SigIgn` | log sha256 (full) |
+| arm | outer | cargo exit | ok | failed | `SigIgn` | log sha256 (full) |
 |---|---|---|---|---|---|---|
 | fg | foreground | 0 | 2 | 0 | not captured (no failure ⇒ no dump) | `b6117619242f3dabadbe5826f59f11cef451cd09a2beb304e9a3dec1a4616465` |
 | bg | `setsid nohup … &` | 101 | 0 | 2 | `0000000000001007` | `30ac6568e345c485ddf23734a239d71bd06d4a3c2d549f1b4a8942a930527507` |
@@ -213,16 +235,17 @@ anything could rebuild them** — not read later from a reused path:
 
 | binary | fg arm | bg arm |
 |---|---|---|
-| `gpu_initial_target_acceptance-91f51d0b5303ff9f` | `0890b78cca22ac1e80b79845f85fb6e88def3330db15ae123a2a672d3084124c` | *(identical)* |
-| `gpu_invocation_acceptance-6b4b8223dea45247` | `ef6ff1c15e11062ab53a075763814f32c1bbc9be1b146d068c60e91fa247c696` | *(identical)* |
+| `gpu_initial_target_acceptance-91f51d0b5303ff9f` | `0890b78cca22ac1e80b79845f85fb6e88def3330db15ae123a2a672d3084124c` | `0890b78cca22ac1e80b79845f85fb6e88def3330db15ae123a2a672d3084124c` |
+| `gpu_invocation_acceptance-6b4b8223dea45247` | `ef6ff1c15e11062ab53a075763814f32c1bbc9be1b146d068c60e91fa247c696` | `ef6ff1c15e11062ab53a075763814f32c1bbc9be1b146d068c60e91fa247c696` |
 
 **These are byte-identical, and that claim is now carried by the
 capture rather than by inference.** The earlier arms table recorded only
 16-character prefixes at run time and its full values were read
 afterwards from reused paths — which is exactly the provenance rule
 §7/D0 states, applied against my own record. Those rows are superseded
-by the table above; raw rows for both generations are in `arms.tsv` and
-`arms2.tsv`.
+by the table above. The raw `arms.tsv` and `arms2.tsv` remain
+machine-local; the literal harness and full rows above are their
+portable transcription.
 
 ### Disposition — UNRECORDED CORROBORATION, not a controlled arm
 
@@ -237,11 +260,13 @@ evidence.
 | foreground | `0000000000001000` | bit 12 (SIGPIPE) only — deliverable |
 | `setsid nohup … &` | `0000000000000007` | SIGHUP, SIGINT, SIGQUIT — ignored |
 
-The portable probe adopted as the remedy (framing §7c) supersedes it as
-the *recorded* mechanism check:
+The raw behavioural probe underlying the selected helper (framing §7c)
+supersedes it as the *recorded* mechanism check:
 `sh -c 'trap "exit 23" 2; kill -INT $$; exit 0'` exits **23** when
 `SIGINT` is deliverable and **0** when it is inherited as ignored.
-Verified in both contexts.
+Verified in both contexts. It is **not itself the remedy** because it
+does not preserve `kill` failure; §7c specifies the total checked-in
+helper and its 0/1/2 consumer ABI.
 
 ### The first D1/D2 capture, and why it is superseded
 
