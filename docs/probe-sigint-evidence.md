@@ -178,10 +178,39 @@ precondition then the `sweep-crdt` command. `dirty=0` verified per run.
 | A#5 | A | `7599661` | **red** | 0 / 2 | 3 | `d0a/A-5.log` |
 | B#5 | B | `724b785` | **red** | 0 / 2 | 2 | `d0a/B-5.log` |
 
-Full per-run provenance — timestamp, HEAD, dirty count, exit, both copy
-results, unrelated red-bin count, Cargo suffixes, `uptime`, `free`,
-`/tmp` usage, leaked-daemon count, log digest — is in
-`/home/jeans/build/pmacs-gate-targets/d0a/results.tsv`.
+**Exact commands.** Per run, with `TMPDIR=…/tmp/d0a` and
+`CARGO_TARGET_DIR=…/d0a-A` or `…/d0a-B`, executed in
+`/home/jeans/Repos/personal/pmacs-d0a-A` (detached at `7599661`) or
+`…-d0a-B` (detached at `724b785`):
+
+```
+cargo build --workspace --no-default-features --features luajit,crdt \
+  && cargo test --workspace --features crdt --no-fail-fast -- --skip basedpyright
+```
+
+**Per-run provenance, transcribed** (all runs `exit=101`, `dirty=0`,
+`ok=0 failed=2`, suffixes `-5d9105cb` / `-d4dae4f0`). Times are local
+2026-08-19; `load` is the 1/5/15 average at run start; `freeMB` is
+`MemFree`; `daemons` counts live `pmacs --daemon` processes:
+
+| start | run | class | red bins | load | freeMB | daemons | log sha256/16 |
+|---|---|---|---|---|---|---|---|
+| 12:21:20 | A#1 | red | 3 | 2.51, 2.85, 3.57 | 1549 | 72 | `1c0fe47d55d8f5e…` |
+| 12:26:55 | B#1 | red | 2 | 7.86, 13.48, 8.97 | 9405 | 76 | `105794d515e6ec3…` |
+| 12:32:12 | B#2 | red | 2 | 8.04, 18.28, 13.23 | 9761 | 80 | `7a662fb5ca15687…` |
+| 12:35:39 | A#2 | red | 4 | 11.34, 21.23, 16.20 | 8933 | 84 | `50aacb9d15244c9…` |
+| 12:39:35 | A#3 | red | 3 | 13.40, 26.07, 20.45 | 10628 | 88 | `9156bbbc852e2d3…` |
+| 12:43:26 | B#3 | red | 2 | 8.66, 22.18, 20.82 | 8778 | 92 | `f0d768a76ed9cb0…` |
+| 12:47:20 | B#4 | red | 2 | 17.96, 33.10, 27.07 | 10403 | 96 | `5a043a3d5568598…` |
+| 12:50:49 | A#4 | red | 3 | 10.99, 27.07, 26.52 | 10702 | 100 | `1b6d88c08764d9a…` |
+| 12:54:47 | A#5 | red | 3 | 9.75, 28.50, 28.70 | 8494 | 104 | `ae21a3f53fc1a1a…` |
+| 12:58:38 | B#5 | red | 2 | 11.43, 26.69, 28.97 | 8562 | 108 | `2c5baa0c7e49e37…` |
+
+Note the leaked-daemon count climbing 72 → 108, four per run. Recorded,
+not implicated: it rises monotonically while every run classifies the
+same. Raw logs stay machine-local at
+`/home/jeans/build/pmacs-gate-targets/d0a/`; the table above is the
+portable record.
 
 **Endpoint verdicts: A uniform-red, B uniform-red.** By the approved
 table this is the *both endpoints uniform the same way* row:
@@ -192,12 +221,21 @@ table this is the *both endpoints uniform the same way* row:
 
 ### What this settles
 
-- **The source hypothesis is eliminated for this interval.** `7599661`
-  passed inside `sweep-crdt` on 08-15 and now fails **5/5** clean. No
-  bisect of `7599661..724b785` is justified, and none will be run.
-- **The onset window is demoted as a lead.** It remains a true
-  observation, but since neither endpoint reproduces the old green, the
-  window cannot be probed by source at all.
+- **The two commits do not discriminate under current conditions.**
+  `7599661` passed inside `sweep-crdt` on 08-15 and now fails **5/5**
+  clean. **No bisect of `7599661..724b785` is justified under current
+  conditions**, and none will be run.
+- **That is the whole of the causal claim.** An earlier wording here
+  said "the source hypothesis is eliminated" and that "the interval
+  cannot contain the transition"; both are **withdrawn**. Uniform-red
+  today is silent about what was true on 08-15 — a historical source
+  regression could be **masked** by a later environmental effect, or by
+  a source/environment interaction that makes both commits fail now.
+  Not discriminating is not the same as not differing.
+- **The onset window is deprioritised, not excluded.** It remains a
+  true observation, and it remains *possible* that source matters
+  within it; what is established is only that source cannot be
+  probed **by this comparison, now**.
 - **A reliable reproduction now exists.** 10/10 today, on two different
   commits, at ~4 minutes per run. **This is the most useful thing D0a
   produced**: the mechanism diagnostics D1/D2 no longer depend on a

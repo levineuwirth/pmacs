@@ -290,10 +290,14 @@ from #171 and #215.
   detached worktrees with isolated target dirs, `dirty=0` per run, zero
   voids, zero splits. **A (`7599661`) uniform-red; B (`724b785`)
   uniform-red.** So `7599661`, which passed inside `sweep-crdt` on
-  08-15, fails 5/5 clean today: **the source hypothesis is eliminated
-  and no bisect will run.** The onset window is demoted to a true but
-  unreachable-by-source observation. No package activity in the window
-  (`pacman.log`), which is a cheap negative and not pursued further.
+  08-15, fails 5/5 clean today: **the two commits do not discriminate
+  under current conditions, so no bisect will run.** That is the whole
+  claim — "source hypothesis eliminated" and "unreachable by source"
+  are **withdrawn**, since a historical regression could be masked by a
+  later environmental effect or a source/environment interaction.
+  Failing to discriminate is not the same as not differing. The onset
+  window is deprioritised, not excluded. No package activity in the
+  window (`pacman.log`) — a cheap negative, not pursued further.
 - **The useful product is a RELIABLE REPRODUCTION** — 10/10 across two
   commits at ~4 min/run. D1/D2 no longer wait on a rare event and are
   the next step. Per-run provenance in `docs/probe-sigint-evidence.md`
@@ -439,7 +443,12 @@ from #171 and #215.
 - **D0 precedes every other diagnostic**, in two parts: **(a)
   reproduce the onset endpoints `7599661` and `724b785` clean, in
   isolated target dirs**, under the N = 5 interleaved clean-split
-  contract below — a bare difference decides nothing; **(b)** re-run
+  contract below — a bare difference decides nothing. **(a) is DONE.**
+  **(b) is RETIRED as a precondition** (2026-08-19) because D0a yielded
+  a reliable direct reproduction and D1/D2 measure the mechanism
+  itself; **its obligation survives under A3** — if D1/D2 do not
+  account for the subset-vs-full difference, D0b runs before the lane
+  closes. It read: re-run
   the matrix at `main` under a harness capturing provenance **and the
   artifact hashes executed at run time**, since command shape silently
   changed the binary once already and a hash computed later reflects
