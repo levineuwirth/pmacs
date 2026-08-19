@@ -209,8 +209,16 @@ fn gate_maps_an_unexecutable_helper_to_error_not_ignored() {
         .env("PMACS_GATE_TARGET_ROOT", root.path())
         .output()
         .expect("run the stub-worktree gate");
-    assert_eq!(out.status.code(), Some(2), "boundary failures map to 2");
     let err = String::from_utf8_lossy(&out.stderr);
+    // The gate prints the raw probe status it saw. Carry it into every
+    // assertion message: this row failed on macOS with exit 1 where 2
+    // was expected, and the log could not say which status produced it
+    // because the message discarded stderr.
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "boundary failures map to 2; gate said:\n{err}"
+    );
     assert!(
         err.contains("could not run the SIGINT guard"),
         "the boundary has its own wording: {err}"

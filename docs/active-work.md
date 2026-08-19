@@ -279,6 +279,27 @@ from #171 and #215.
   **`72da24a`**, worktree
   `/home/jeans/Repos/personal/pmacs-probe-sigint`. Recover with
   `git fetch githubsucks && git checkout gpu-probe-sigint-teardown`.
+- **CI ON `916007b`: 12 GREEN, 2 RED — both macOS `Test` jobs**, and it
+  is the **pre-declared A7 portability finding**, not an environment
+  excuse. Exactly one row:
+  `gate_maps_an_unexecutable_helper_to_error_not_ignored`,
+  `left: Some(1)  right: Some(2)`. The other five SIGINT rows pass on
+  macOS, including both `error` cases, so helper and gate consumers are
+  otherwise exercised there.
+  - **The gate returned 1 = `ignored` for a helper it could not
+    execute** — the exact conflation §7c forbids.
+  - **Leading hypothesis, NOT yet established: the ABI's `1` is
+    ambiguous by construction.** `1` means "ignored", and `1` is also a
+    status shells return for assorted failures. On Linux an
+    unexecutable file yields 126, so the catch-all maps it to 2; if
+    macOS's `/bin/sh` returns 1, the two cases are **the same number**
+    at the call boundary and no catch-all can separate them. If that
+    holds, the fix is to move the verdicts out of the range shells
+    produce, or to carry them by something other than exit status
+    alone — a design change needing its own revision.
+  - The assertion now carries the gate's stderr, which prints the raw
+    probe status, because the first failure could not say which status
+    produced it.
 - **PR #241** (`https://github.com/levineuwirth/pmacs/pull/241`), opened
   2026-08-19 from `gpu-probe-sigint-teardown` into `main`. **Not merged;
   awaiting review rounds.**
