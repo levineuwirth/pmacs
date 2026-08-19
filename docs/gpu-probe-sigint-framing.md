@@ -1,6 +1,6 @@
 # GPU launcher / probe SIGINT teardown — framing
 
-Revision 12, approved 2026-08-19 at `7752bcb`.
+Revision 12, approved 2026-08-19 at `1fc0df6`.
 Status: **IMPLEMENTED — R-b + R-d landed and witnessed (§8). Mechanism
 in §4c; no product change.**
 

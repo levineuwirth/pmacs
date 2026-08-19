@@ -286,8 +286,11 @@ from #171 and #215.
   once. State at `3206433`: pushed, signed `G`, worktree clean,
   `git diff --check` clean, **full default gate green (8/8) in the
   foreground**, 31 gate-acceptance rows passing. After this commit:
-  **35 gate-acceptance rows and 16 `gpu_invocation_acceptance` rows**,
-  with the full gate re-run.
+  **33 gate-acceptance rows and 16 `gpu_invocation_acceptance` rows**,
+  with the full gate re-run **on the committed head**. (An earlier
+  draft said 35: that figure was the `git_status_stage1_acceptance`
+  result line immediately below `gate_script_acceptance`'s in the sweep
+  log, misread as this suite's.)
 - **No PR. Framing revision 12 at `docs/gpu-probe-sigint-framing.md`,
   APPROVED 2026-08-19 at `1fc0df6`** — revision 10 was approved at
   `4fba9f6` and revision 9 at `15c25ec`; neither approval covered the
