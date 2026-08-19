@@ -800,15 +800,38 @@ every other status → `(2, error)`. Consumers do not parse the inner
    newlines while Rust's `Command` returns raw bytes, so the two
    consumers could not have agreed even on a correct rule.
 
-   **Both consumers must therefore preserve trailing bytes.** In shell
-   that requires the sentinel idiom, because `$()` alone destroys the
-   evidence:
+   **Variable capture cannot implement this, for two independent
+   reasons — both measured, not reasoned:**
+
+   - **It destroys the status.** `out=$("$helper"; printf x)` returns
+     `printf`'s status, not the helper's: a helper exiting 1 yields
+     assignment status **0**. Revision 13 specified exactly this idiom.
+   - **It is not byte-preserving, and differs by shell.** Command
+     substitution drops NUL in POSIX `sh`/bash; **zsh keeps it**
+     (verified). So `TOKEN NUL` validates in one shell and not another
+     — a contract two consumers cannot implement identically.
+
+   **Both consumers therefore capture to files and compare bytes.**
 
    ```sh
-   out=$("$helper"; printf x); out=${out%x}
+   "$helper" >"$tmp/out" 2>"$tmp/err"
+   status=$?
+   printf '%s'   "$expected_token" >"$tmp/want"
+   printf '%s\n' "$expected_token" >"$tmp/want_lf"
+   if cmp -s "$tmp/out" "$tmp/want" || cmp -s "$tmp/out" "$tmp/want_lf"
+   then token_ok=1; else token_ok=0; fi
    ```
 
-   In Rust, compare `out.stdout` directly. Neither consumer trims.
+   Files preserve every byte including NUL, `cmp` compares bytes, and
+   `status` is the helper's own. Rust does the same by comparing
+   `out.stdout` against `TOKEN` and `TOKEN + b"\n"`. Neither consumer
+   trims, and neither routes stdout through a shell variable.
+
+   If a future consumer *must* use variable capture, the status has to
+   be carried out explicitly —
+   `out=$("$helper"; st=$?; printf x; exit "$st")` — and the NUL
+   divergence still bars it from claiming byte equality.
+
 3. Accept **only** these three pairs; every other combination is
    `error`:
 
@@ -871,53 +894,54 @@ different language, so they can now disagree by validating differently.
 Revision 12's claim that they "can never disagree" is withdrawn.
 
 What replaces it is a **shared conformance matrix**: both validators
-are exercised against the same twelve cases, and must agree on every
-one.
+are exercised against the same generated case set below, and must agree
+on every case.
 
-**Two distinct failing outcomes**, which revision 13 collapsed:
+**Two distinct failing outcomes**, which an earlier draft collapsed:
 
 - **`error (validated)`** — the pair `(2, …:error)`. The helper ran and
   reported that it could not decide.
 - **`error (boundary)`** — anything else. Nothing trustworthy was
   returned, so the consumer owns the wording (see step 4).
 
-Collapsing them let a validator that accepts **every** status 2
-regardless of token pass the whole matrix. The cross-product below
-closes that.
+**The matrix is a generated cross-product: ten token classes × three
+statuses, plus four out-of-band cases.** An earlier draft applied the
+malformed classes only at status 0, so a validator that checked tokens
+strictly for `0` and accepted arbitrary output at `1` passed every row.
 
-| # | status | stdout | expected |
-|---|---|---|---|
-| 1 | 0 | `…:safe` | `safe` |
-| 2 | 1 | `…:ignored` | `ignored` |
-| 3 | 2 | `…:error` | **`error (validated)`** |
-| 4 | 0 | *(empty)* | error (boundary) |
-| 5 | 1 | *(empty)* | error (boundary) — **the macOS case** |
-| 6 | **2** | *(empty)* | **error (boundary)** — not validated |
-| 7 | 0 | `…:ignored` | error (boundary) — mismatched |
-| 8 | 0 | `…:error` | error (boundary) — mismatched |
-| 9 | 1 | `…:safe` | error (boundary) — mismatched |
-| 10 | 1 | `…:error` | error (boundary) — mismatched |
-| 11 | **2** | `…:safe` | **error (boundary)** — mismatched |
-| 12 | **2** | `…:ignored` | **error (boundary)** — mismatched |
-| 13 | 0 | `pmacs-sigint-v2:safe` | error (boundary) — unknown version |
-| 14 | **2** | `pmacs-sigint-v2:error` | **error (boundary)** — unknown version |
-| 15 | 0 | `…:safe` + LF | `safe` — the one permitted trailing byte |
-| 16 | 0 | `…:safe` + LF + LF | error (boundary) — extra newline |
-| 17 | 0 | LF + `…:safe` | error (boundary) — leading newline |
-| 18 | 0 | `␠…:safe␠` | error (boundary) — **no trimming** |
-| 19 | 0 | `…:safe` + CR + LF | error (boundary) — CR is not in the grammar |
-| 20 | 0 | `…:safe` twice on one line | error (boundary) |
-| 21 | 126 | `…:safe` | error (boundary) — status outside 0–2 |
-| 22 | — (spawn failure) | — | error (boundary), no status inspected |
-| 23 | 1 | *(empty)*, stderr = canonical ignored text | error (boundary), and the output **must not** present "SIGINT is ignored" as the diagnosis |
+Token classes, written `T0`–`T9`:
 
-Rows 6, 11, 12 and 14 are what force *exact-pair* validation at
-status 2. Rows 15–20 pin the byte grammar. Row 23 pins the stderr-trust
-rule.
+| class | stdout content |
+|---|---|
+| `T0` | the token **correct for the status under test** |
+| `T1` | empty |
+| `T2` | a different *valid* token (mismatched) |
+| `T3` | `pmacs-sigint-v2:…` (unknown version) |
+| `T4` | LF + token (leading newline) |
+| `T5` | token + LF + LF (extra newline) |
+| `T6` | `␠` token `␠` (surrounding spaces) |
+| `T7` | token + CR + LF |
+| `T8` | token token (doubled, one line) |
+| `T9` | token + NUL |
 
-Both validators are exercised against **all twenty-three** cases and
-must agree on every one, including the distinction between validated
-and boundary error.
+**The rule is the whole table:** for statuses 0, 1 and 2, **only `T0`
+validates** — giving `safe`, `ignored` and `error (validated)`
+respectively. **All other 27 combinations are `error (boundary)`.**
+`T0` with a single trailing LF also validates, at every status, since
+the grammar admits it.
+
+Out-of-band cases, which have no `(status, token)` form:
+
+| # | case | expected |
+|---|---|---|
+| X1 | status 126 with a correct token | `error (boundary)` — status outside 0–2 |
+| X2 | spawn failure (missing / unexecutable helper) | `error (boundary)`, **no status inspected** |
+| X3 | status 1, `T1`, stderr = canonical ignored text | `error (boundary)`, and the output **must not** present "SIGINT is ignored" as the diagnosis |
+| X4 | status 0, `T0`, plus extra bytes on **stderr** | `safe` — stderr is not consulted for classification |
+
+That is **34 cases**: 30 from the cross-product plus X1–X4. Both
+validators are exercised against all of them and must agree on every
+one, including the distinction between validated and boundary error.
 
 The two consumers:
 
