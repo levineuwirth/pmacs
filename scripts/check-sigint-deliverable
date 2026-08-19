@@ -1,0 +1,47 @@
+#!/bin/sh
+# Is SIGINT deliverable to this process tree?
+#
+# WHY THIS EXISTS. A shell running a command in the background without
+# job control sets SIGINT (and SIGQUIT) to SIG_IGN in the child; nohup
+# adds SIGHUP. SIG_IGN is inherited across fork AND survives exec, so
+# the disposition reaches every descendant --- cargo, a test binary, and
+# anything either of them spawns. Tests that signal a child then wait
+# for it to die will hang until their own deadline and report that as a
+# teardown defect. One lane spent nine framing revisions on exactly that
+# misreading; see docs/gpu-probe-sigint-framing.md §4c.
+#
+# INTERFACE (docs/gpu-probe-sigint-framing.md §7c). Callers rely on
+# these three statuses and MUST NOT re-derive the classification:
+#
+#   0  safe     SIGINT is deliverable.        No diagnostic.
+#   1  ignored  SIGINT is inherited SIG_IGN.  Canonical diagnostic.
+#   2  error    Undecidable.                  Distinct diagnostic.
+#
+# `error` is never folded into `ignored`. "Your environment ignores
+# SIGINT" and "the guard could not run" are different problems, and
+# conflating them fails callers for the wrong reason.
+#
+# THE PROBE. A child sends itself SIGINT. Deliverable => the trap runs
+# => 23. Ignored => the kill is a no-op => the child falls through to
+# `exit 0`. The `|| exit 24` arms matter: without them a FAILED kill
+# would also fall through to `exit 0` and be misread as `ignored`,
+# which is the one wrong answer this helper exists to avoid.
+#
+# POSIX shell only --- trap, kill, $$ --- so no /proc and no sigaction:
+# the mechanism is not Linux-specific and adds no unsafe code.
+
+probe_status=0
+sh -c 'trap "exit 23" 2 || exit 24; kill -INT "$$" || exit 24; exit 0' \
+  || probe_status=$?
+
+case "$probe_status" in
+    23) exit 0 ;;
+    0)
+        echo 'pmacs: SIGINT is ignored; run this command with SIGINT deliverable' >&2
+        exit 1
+        ;;
+    *)
+        echo "pmacs: could not determine whether SIGINT is deliverable (probe status $probe_status)" >&2
+        exit 2
+        ;;
+esac

@@ -738,6 +738,13 @@ never disagree about what "ignored" means:
 - **The target test invokes it** and reports the same precondition
   failure if run directly, instead of "child did not exit within 5s".
 
+**One practical finding, measured after the guard was written:
+backgrounding is not the problem — one *way* of backgrounding is.** This
+session's tool-level background mode leaves `SIGINT` deliverable (helper
+exits 0); `setsid nohup … &` does not (helper exits 1). The construct
+that caused this lane was never necessary, which makes the guard cheap:
+it forbids only what was already avoidable.
+
 **No override.** A full gate run under ignored `SIGINT` cannot produce
 valid evidence, so there is no flag to proceed anyway — a switch that
 lets the gate run in a state where several suites are meaningless would
@@ -772,6 +779,15 @@ show:
   A2 fail by allowing inherited ignore through. Collapsing `error` into
   `ignored` makes A6 fail. Each mutation is named against the distinct
   row it must bite.
+
+  **Measured 2026-08-19; every prediction holds:**
+
+  | mutation | helper fg | helper bg | forced error | bites |
+  |---|---|---|---|---|
+  | baseline | 0 | 1 | 2 | — |
+  | remove the probe's `trap` | **2** | 1 | — | **A3** — foreground degrades to `error`; backgrounded classification unchanged |
+  | treat inner exit 0 as `safe` | 0 | **0** | — | **A1 and A2** — inherited ignore passes through both consumers |
+  | collapse `error` into `ignored` | — | — | **1** | **A6** — a forced failure reports the ignored wording |
 - **A5 — the gate is otherwise unchanged**: a normal foreground run
   reaches and passes every stage it did before, with no stage added,
   skipped, reordered, or made conditional.
@@ -780,11 +796,16 @@ show:
   and the direct target test** report the helper's **`error`**
   diagnosis, not the `ignored` one, and neither claims the environment
   ignores `SIGINT`.
-- **A7 — a supported non-Linux unix.** The helper is exercised on a
-  non-`/proc` unix in the project's supported set, or — if none is
-  reachable — the record states which platforms the guard is *claimed*
-  to work on and which were actually tried. No unexercised portability
-  claim ships unqualified.
+- **A7 — portability, recorded as exercised rather than claimed.**
+  **Exercised: Linux `x86_64` only, this machine**, in all three
+  outcomes (`safe` 0, `ignored` 1, `error` 2). **No non-Linux unix was
+  reachable from this session, so none was tried, and A7 stays OPEN
+  there.** What carries beyond Linux is a contract argument, not a
+  measurement: the helper uses only `trap`, `kill -INT`, `$$`, `case`
+  and `echo` — POSIX shell — and reads no `/proc` and calls no
+  `sigaction`. The behaviour it detects is POSIX, not a Linux
+  extension. Re-run the three outcomes on BSD or macOS before treating
+  A7 as closed.
 
 ## 8b. Superseded criteria, kept for the record
 

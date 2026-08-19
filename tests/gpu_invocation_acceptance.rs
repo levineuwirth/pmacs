@@ -171,119 +171,40 @@ mod crdt {
         let _ = kill(Pid::from_raw(pid.cast_signed()), signal);
     }
 
-    // ---- D1/D2 diagnostics (gpu-probe-sigint-teardown, framing rev 10) ----
-    //
-    // DIAGNOSTIC ONLY. Nothing here changes what the test asserts; it
-    // records why `wait_for_exit` below misses its deadline in a full
-    // `sweep-crdt`, and it is keyed on the PID this test already owns
-    // rather than by scanning for processes by age or command line ---
-    // the suite spawns root launchers from six call sites, so scanning
-    // cannot attribute one to this test.
-
-    /// Direct children of `pid`, from `/proc/<pid>/task/*/children`.
-    fn d12_children(pid: u32) -> Vec<u32> {
-        let mut out = Vec::new();
-        let Ok(tasks) = fs::read_dir(format!("/proc/{pid}/task")) else {
-            return out;
-        };
-        for task in tasks.flatten() {
-            if let Ok(kids) = fs::read_to_string(task.path().join("children")) {
-                out.extend(
-                    kids.split_ascii_whitespace()
-                        .filter_map(|k| k.parse::<u32>().ok()),
-                );
-            }
-        }
-        out.sort_unstable();
-        out.dedup();
-        out
-    }
-
-    /// One process's signal disposition and identity.
+    /// R-d (framing §7c): refuse to run this test when `SIGINT` is not
+    /// deliverable, and say so.
     ///
-    /// `SigBlk` is **per thread**, so it is read from every
-    /// `/proc/<pid>/task/*/status` rather than the process-wide file: a
-    /// delivery blocked on the one thread that matters would be
-    /// invisible in an aggregate reading. `SigPnd`/`ShdPnd` separate
-    /// "blocked but pending" from "ignored"; `SigIgn` distinguishes an
-    /// inherited `SIG_IGN` --- which survives both `fork` and `exec` ---
-    /// from a handler, which does not.
-    fn d12_facts(pid: u32) -> String {
-        let Ok(status) = fs::read_to_string(format!("/proc/{pid}/status")) else {
-            return format!("      pid {pid}: GONE\n");
-        };
-        let field = |name: &str| -> String {
-            status.lines().find(|l| l.starts_with(name)).map_or_else(
-                || "?".to_owned(),
-                |l| l.split_whitespace().nth(1).unwrap_or("?").to_owned(),
-            )
-        };
-        let mut out = format!(
-            "      pid {pid} ppid={} pgid={} sid={} state={} threads={}\n\
-             \x20       SigIgn={} SigCgt={} SigPnd={} ShdPnd={}\n",
-            field("PPid:"),
-            d12_stat_field_after_comm(pid, 2),
-            d12_stat_field_after_comm(pid, 3),
-            field("State:"),
-            field("Threads:"),
-            field("SigIgn:"),
-            field("SigCgt:"),
-            field("SigPnd:"),
-            field("ShdPnd:"),
-        );
-        if let Ok(tasks) = fs::read_dir(format!("/proc/{pid}/task")) {
-            for task in tasks.flatten() {
-                let tid = task.file_name().to_string_lossy().to_string();
-                if let Ok(ts) = fs::read_to_string(task.path().join("status")) {
-                    let get = |n: &str| {
-                        ts.lines()
-                            .find(|l| l.starts_with(n))
-                            .and_then(|l| l.split_whitespace().nth(1))
-                            .unwrap_or("?")
-                            .to_owned()
-                    };
-                    out.push_str(&format!(
-                        "        tid {tid}: SigBlk={} SigPnd={} wchan={}\n",
-                        get("SigBlk:"),
-                        get("SigPnd:"),
-                        fs::read_to_string(task.path().join("wchan"))
-                            .unwrap_or_else(|_| "?".to_owned())
-                    ));
-                }
-            }
-        }
-        out
-    }
-
-    /// Snapshot the test parent, the launcher, and the launcher's
-    /// children (the GPU probe), at one point in time.
-    fn d12_snapshot(tag: &str, launcher: u32) -> String {
-        let mut out = format!(
-            "  [D1/D2 {tag}]\n    test parent:\n{}",
-            d12_facts(std::process::id())
-        );
-        out.push_str(&format!("    launcher:\n{}", d12_facts(launcher)));
-        for kid in d12_children(launcher) {
-            out.push_str(&format!("    launcher child:\n{}", d12_facts(kid)));
-        }
-        out
-    }
-
-    /// Field `n` of `/proc/<pid>/stat`, counted from the first field
-    /// AFTER `comm`.
+    /// The test signals a process group and requires the launcher to
+    /// exit. If `SIGINT` is inherited as `SIG_IGN` --- which a shell
+    /// running a command in the background without job control sets,
+    /// and which survives `fork` and `exec` --- the signal is a no-op
+    /// and the launcher waits out the deadline. Without this the
+    /// failure reads "child did not exit within 5s", which names a
+    /// teardown defect that is not there; that misreading cost nine
+    /// framing revisions (§4c).
     ///
-    /// `comm` is parenthesised and may itself contain spaces and
-    /// parentheses, so the only safe anchor is the **last** `)`.
-    /// Counting from there: 0 = state, 1 = ppid, 2 = **pgrp**,
-    /// 3 = **session**.
-    fn d12_stat_field_after_comm(pid: u32, n: usize) -> String {
-        fs::read_to_string(format!("/proc/{pid}/stat"))
-            .ok()
-            .and_then(|st| {
-                st.rsplit_once(')')
-                    .and_then(|(_, rest)| rest.split_whitespace().nth(n).map(ToOwned::to_owned))
-            })
-            .unwrap_or_else(|| "?".to_owned())
+    /// The **same checked-in helper the gate uses** owns the
+    /// classification and the wording, so the two can never disagree
+    /// about what "ignored" means. This consumer does not re-derive
+    /// either: it proceeds only on exit 0 and otherwise panics with the
+    /// helper's own stderr. A helper that cannot be executed is an
+    /// `error` at this boundary, never evidence that `SIGINT` is
+    /// ignored.
+    fn require_sigint_deliverable() {
+        let helper = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/check-sigint-deliverable");
+        let out = match Command::new(&helper).output() {
+            Ok(out) => out,
+            Err(error) => panic!(
+                "precondition undecidable: could not execute {}: {error}",
+                helper.display()
+            ),
+        };
+        if !out.status.success() {
+            panic!(
+                "precondition failed --- this is NOT a teardown defect.\n{}",
+                String::from_utf8_lossy(&out.stderr).trim_end()
+            );
+        }
     }
 
     fn wait_for_exit(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
@@ -1198,6 +1119,7 @@ mod crdt {
 
     #[test]
     fn ctrl_c_on_launcher_group_does_not_reach_spawned_daemon() {
+        require_sigint_deliverable();
         let temp = secure_tempdir();
         let socket = temp.path().join("signal.sock");
         let report = temp.path().join("signal-report");
@@ -1225,32 +1147,9 @@ mod crdt {
         let daemon_pid = facts["daemon_pid"].parse::<u32>().expect("daemon pid");
         let (survivor_id, mut survivor) = attach_surviving_frontend(&socket);
 
-        // D1/D2: before, immediately after, and at the deadline.
-        let launcher_pid = launcher.id();
-        let before = d12_snapshot("before SIGINT", launcher_pid);
-        kill(Pid::from_raw(-launcher_pid.cast_signed()), Signal::SIGINT)
+        kill(Pid::from_raw(-launcher.id().cast_signed()), Signal::SIGINT)
             .expect("signal launcher group");
-        thread::sleep(Duration::from_millis(50));
-        let after = d12_snapshot("50ms after SIGINT", launcher_pid);
-
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let exited = loop {
-            if launcher.try_wait().expect("inspect launcher").is_some() {
-                break true;
-            }
-            if Instant::now() >= deadline {
-                break false;
-            }
-            thread::sleep(Duration::from_millis(20));
-        };
-        if !exited {
-            eprintln!(
-                "D1/D2 diagnostics --- launcher {launcher_pid} did not exit within 5s\n\
-                 {before}{after}{}",
-                d12_snapshot("at the 5s deadline", launcher_pid)
-            );
-        }
-        assert!(exited, "child did not exit within 5s");
+        let _ = wait_for_exit(&mut launcher, Duration::from_secs(5));
 
         write_message(
             &mut survivor,

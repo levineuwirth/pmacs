@@ -712,6 +712,34 @@ if [ "$MODE" = selftest ]; then
 fi
 echo
 
+# R-b (framing SS7c): refuse to start when SIGINT is not deliverable.
+#
+# BEFORE ANY STAGE, because the answer invalidates whole suites rather
+# than one row: a background shell without job control sets SIGINT to
+# SIG_IGN, that disposition is inherited across fork and survives exec,
+# and every test that signals a child then waits for it hangs to its own
+# deadline. Seven red sweeps were read as a product teardown defect
+# before this was found (SS4c).
+#
+# The helper owns the classification and the wording. This consumer does
+# NOT re-derive either: it continues only on exit 0, and otherwise
+# stops, having let the helper's stderr through untouched. A helper that
+# cannot run at all lands in the catch-all below as an `error`, never as
+# evidence that SIGINT is ignored.
+#
+# NO OVERRIDE, deliberately. A run in this state cannot produce valid
+# evidence, so a flag to proceed anyway would only manufacture red gates
+# that mean nothing --- which is the failure this guard exists to end.
+if [ "$MODE" != plan ] && [ "$MODE" != plannamed ] && [ "$MODE" != printdir ]; then
+    "$WT/scripts/check-sigint-deliverable"
+    sigint_status=$?
+    if [ "$sigint_status" -ne 0 ]; then
+        echo "gate: REFUSING TO RUN --- see the diagnosis above." >&2
+        echo "gate: no stage has run; this is not a test failure." >&2
+        exit "$sigint_status"
+    fi
+fi
+
 # The self-test hands the REAL runner loop below a different plan file.
 # Everything after this point is shared, which is the point: a witness
 # that exercised its own copy of the runner would witness nothing.
