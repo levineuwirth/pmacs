@@ -2,6 +2,8 @@
 
 #![cfg(unix)]
 
+mod common;
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -183,13 +185,17 @@ mod crdt {
     /// teardown defect that is not there; that misreading cost nine
     /// framing revisions (§4c).
     ///
-    /// The **same checked-in helper the gate uses** owns the
-    /// classification and the wording, so the two can never disagree
-    /// about what "ignored" means. This consumer does not re-derive
-    /// either: it proceeds only on exit 0 and otherwise panics with the
-    /// helper's own stderr. A helper that cannot be executed is an
-    /// `error` at this boundary, never evidence that `SIGINT` is
-    /// ignored.
+    /// Both consumers use the **same checked-in helper**, but that alone
+    /// no longer makes them agree: each validates the
+    /// `(status, token)` pair independently, in a different language.
+    /// Revision 12's "they can never disagree" is withdrawn, and the
+    /// shared matrix in `tests/common/sigint_conformance.rs` replaces
+    /// it — both validators run the same vectors.
+    ///
+    /// This consumer proceeds only on a validated `(0, safe)` pair. On a
+    /// **boundary** failure the helper's stderr is untrusted and is
+    /// withheld; only a validated verdict speaks with the helper's
+    /// voice.
     const SIGINT_TOKEN_SAFE: &[u8] = b"pmacs-sigint-v1:safe";
     const SIGINT_TOKEN_IGNORED: &[u8] = b"pmacs-sigint-v1:ignored";
     const SIGINT_TOKEN_ERROR: &[u8] = b"pmacs-sigint-v1:error";
@@ -274,131 +280,55 @@ mod crdt {
         }
     }
 
-    /// The shared conformance set, generated rather than listed
-    /// (§7c): ten classes, two encodings where applicable, three
-    /// statuses = 42, plus X1/X3/X4. Only the diagonal validates.
-    fn sigint_conformance_cases() -> Vec<(String, i32, Vec<u8>, bool)> {
-        let toks: [(&str, &[u8]); 3] = [
-            ("safe", SIGINT_TOKEN_SAFE),
-            ("ignored", SIGINT_TOKEN_IGNORED),
-            ("error", SIGINT_TOKEN_ERROR),
-        ];
-        let mut out = Vec::new();
-        for (idx, (name, correct)) in toks.iter().enumerate() {
-            let status = i32::try_from(idx).expect("0..=2");
-            let ok = status == 0;
-            let mut lf = correct.to_vec();
-            lf.push(b'\n');
-            out.push((
-                format!("{status}/V/{name}/bare"),
-                status,
-                correct.to_vec(),
-                ok,
-            ));
-            out.push((format!("{status}/V/{name}/lf"), status, lf, ok));
-            // Every OTHER valid token, both encodings: enumerated, not
-            // sampled, since sampling one leaves half untested.
-            for (other, bytes) in &toks {
-                if other == name {
-                    continue;
-                }
-                let mut olf = bytes.to_vec();
-                olf.push(b'\n');
-                out.push((
-                    format!("{status}/M/{other}/bare"),
-                    status,
-                    bytes.to_vec(),
-                    false,
-                ));
-                out.push((format!("{status}/M/{other}/lf"), status, olf, false));
-            }
-            let mut leading = vec![b'\n'];
-            leading.extend_from_slice(correct);
-            let mut extra = correct.to_vec();
-            extra.extend_from_slice(b"\n\n");
-            let mut spaces = b" ".to_vec();
-            spaces.extend_from_slice(correct);
-            spaces.push(b' ');
-            let mut crlf = correct.to_vec();
-            crlf.extend_from_slice(b"\r\n");
-            let mut doubled = correct.to_vec();
-            doubled.extend_from_slice(correct);
-            let mut nul = correct.to_vec();
-            nul.push(0);
-            for (cls, bytes) in [
-                ("E/empty", Vec::new()),
-                ("U/unknown", b"pmacs-sigint-v2:safe".to_vec()),
-                ("L/leading-lf", leading),
-                ("X/extra-lf", extra),
-                ("S/spaces", spaces),
-                ("C/crlf", crlf),
-                ("D/doubled", doubled),
-                ("N/nul", nul),
-            ] {
-                out.push((format!("{status}/{cls}"), status, bytes, false));
-            }
-        }
-        out.push((
-            "X1/status-126".to_owned(),
-            126,
-            SIGINT_TOKEN_SAFE.to_vec(),
-            false,
-        ));
-        out.push(("X3/ignored-text-no-token".to_owned(), 1, Vec::new(), false));
-        out.push((
-            "X4/stderr-noise".to_owned(),
-            0,
-            SIGINT_TOKEN_SAFE.to_vec(),
-            true,
-        ));
-        out
-    }
-
-    /// A6/A6b/A6c, R-d consumer: the whole shared set, plus Rust's X2.
+    /// A6/A6b/A6c, R-d consumer: the shared vectors, asserting the exact
+    /// branch.
+    ///
+    /// `ValidatedError` and `Boundary` both produce `Err`, so comparing
+    /// `is_ok()` alone would let a validator that accepts every status 2
+    /// pass. The stubs emit a sentinel on stderr; a validated verdict
+    /// surfaces it, a boundary failure must not.
     #[test]
     fn rd_precondition_validates_the_whole_conformance_set() {
+        use crate::common::sigint_conformance::{Outcome, SENTINEL, shared_cases, stub_script};
+
         let dir = tempfile::tempdir().expect("tempdir");
-        let cases = sigint_conformance_cases();
+        let cases = shared_cases();
         assert_eq!(cases.len(), 45, "the shared set is 45 cases");
 
-        for (name, status, stdout, expect_ok) in cases {
-            let path = dir.path().join(name.replace('/', "_"));
-            let extra = if name.starts_with("X3") {
-                "echo 'pmacs: SIGINT is ignored; run this command with SIGINT deliverable' >&2\n"
-            } else if name.starts_with("X4") {
-                "echo 'chatter on stderr' >&2\n"
-            } else {
-                ""
-            };
-            let octal = stdout.iter().fold(String::new(), |mut acc, b| {
-                use std::fmt::Write as _;
-                let _ = write!(acc, "\\{b:03o}");
-                acc
-            });
-            fs::write(
-                &path,
-                format!("#!/bin/sh\nprintf '{octal}'\n{extra}exit {status}\n"),
-            )
-            .expect("write stub");
+        for case in cases {
+            let path = dir.path().join(case.name.replace('/', "_"));
+            fs::write(&path, stub_script(&case)).expect("write stub");
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
-
             let got = sigint_diagnosis(&path);
-            assert_eq!(got.is_ok(), expect_ok, "case {name}: got {got:?}");
-            if let Err(message) = got {
-                let validated = name.contains("/V/") && (status == 1 || status == 2);
-                assert!(
-                    validated || !message.contains("SIGINT is ignored"),
-                    "case {name}: a boundary failure must not speak with the \
-                     helper's voice: {message}"
-                );
+            let name = &case.name;
+            match case.expect {
+                Outcome::Safe => assert!(got.is_ok(), "case {name}: {got:?}"),
+                Outcome::ValidatedIgnored | Outcome::ValidatedError => {
+                    let message = got.expect_err("a validated refusal");
+                    assert!(
+                        message.contains(SENTINEL),
+                        "case {name}: a validated verdict surfaces the helper's stderr: {message}"
+                    );
+                    assert!(message.contains("token=valid"), "case {name}: {message}");
+                }
+                Outcome::Boundary => {
+                    let message = got.expect_err("a boundary refusal");
+                    assert!(message.contains("boundary error"), "case {name}: {message}");
+                    assert!(
+                        !message.contains(SENTINEL),
+                        "case {name}: a boundary failure must NOT surface the child's \
+                         stderr --- that is what separates it from a validated error, \
+                         which shares its outcome type: {message}"
+                    );
+                }
             }
         }
 
-        // X2 — Rust only: a shell exec failure becomes a status, so the
-        // shell consumer cannot present this input at all.
+        // X2 --- Rust only: a shell exec failure becomes a status, so the
+        // shell consumer cannot present a status-less spawn error.
         let message = sigint_diagnosis(&dir.path().join("absent")).expect_err("must not validate");
         assert!(
-            message.contains("status=unavailable") && !message.contains("SIGINT is ignored"),
+            message.contains("status=unavailable") && !message.contains(SENTINEL),
             "X2: {message}"
         );
     }

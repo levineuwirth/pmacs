@@ -28,6 +28,8 @@
 //! `~/build/pmacs-gate-targets`, which matters most for the prune
 //! tests — a prune bug is unrecoverable.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -243,174 +245,130 @@ fn gate_maps_an_unexecutable_helper_to_error_not_ignored() {
     );
 }
 
-/// One stub-worktree gate run against a controlled `(status, stdout)`
-/// pair, returning the gate's own exit code and stderr.
+/// A6/A6b/A6c, shell consumer: the shared vectors, asserting the exact
+/// branch rather than only the exit code.
 ///
-/// The gate is the **shell consumer** of the pair ABI. Driving it
-/// through a stub worktree exercises its real code path — including
-/// the `set -eu` handling and the capture directory — against inputs
-/// no real helper would produce.
-fn gate_sees_pair(status: i32, stdout: &[u8], stderr_line: &str) -> (Option<i32>, String, PathBuf) {
-    let root = tempfile::tempdir().expect("tempdir");
-    let octal = stdout.iter().fold(String::new(), |mut acc, b| {
-        use std::fmt::Write as _;
-        let _ = write!(acc, "\\{b:03o}");
-        acc
-    });
-    let repo = gate_with_stub_helper(
-        &format!("#!/bin/sh\nprintf '{octal}'\n{stderr_line}exit {status}\n"),
-        true,
-    );
-    let out = Command::new(repo.path().join("scripts/gate"))
-        .arg("--self-test")
-        .current_dir(repo.path())
-        .env("PMACS_GATE_TARGET_ROOT", root.path())
-        .env("TMPDIR", root.path())
-        .output()
-        .expect("run the stub-worktree gate");
-    let code = out.status.code();
-    let err = String::from_utf8_lossy(&out.stderr).into_owned();
-    // Keep `root` alive for the residue check by returning its path
-    // after leaking the handle: the caller inspects it, then it is
-    // dropped with the TempDir at end of test.
-    let path = root.keep();
-    (code, err, path)
-}
-
-/// A6/A6b/A6c, shell consumer: the same 45 shared conformance cases the
-/// Rust validator runs, so the two cannot diverge.
-///
-/// X2 is absent by construction — a shell `exec` failure becomes a
-/// shell status, so the shell boundary cannot present a status-less
-/// spawn error.
+/// `ValidatedError` and `Boundary` both exit 2, so comparing codes
+/// alone would let a validator that accepts every status 2 pass. The
+/// stubs emit a sentinel on stderr; a validated verdict surfaces it, a
+/// boundary failure must withhold it.
 #[test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "the bulk is the generated case list, which is data; splitting \
-              it would put the cases and the expectations they encode in \
-              different places"
-)]
 fn gate_validates_the_whole_shared_conformance_set() {
-    const SAFE: &[u8] = b"pmacs-sigint-v1:safe";
-    const IGNORED: &[u8] = b"pmacs-sigint-v1:ignored";
-    const ERROR: &[u8] = b"pmacs-sigint-v1:error";
-    let toks: [(&str, &[u8]); 3] = [("safe", SAFE), ("ignored", IGNORED), ("error", ERROR)];
+    use common::sigint_conformance::{Outcome, SENTINEL, shared_cases, stub_script};
 
-    let mut cases: Vec<(String, i32, Vec<u8>, &str, bool)> = Vec::new();
-    for (idx, (name, correct)) in toks.iter().enumerate() {
-        let status = i32::try_from(idx).expect("0..=2");
-        let mut lf = correct.to_vec();
-        lf.push(b'\n');
-        // Only status 0's correct token is `safe`; the correct token at
-        // 1 and 2 is a VALIDATED verdict, which refuses with its own
-        // status rather than continuing.
-        let safe_here = status == 0;
-        cases.push((
-            format!("{status}/V/{name}/bare"),
-            status,
-            correct.to_vec(),
-            "",
-            safe_here,
-        ));
-        cases.push((format!("{status}/V/{name}/lf"), status, lf, "", safe_here));
-        for (other, bytes) in &toks {
-            if other == name {
-                continue;
-            }
-            let mut olf = bytes.to_vec();
-            olf.push(b'\n');
-            cases.push((
-                format!("{status}/M/{other}/bare"),
-                status,
-                bytes.to_vec(),
-                "",
-                false,
-            ));
-            cases.push((format!("{status}/M/{other}/lf"), status, olf, "", false));
-        }
-        let mut leading = vec![b'\n'];
-        leading.extend_from_slice(correct);
-        let mut extra = correct.to_vec();
-        extra.extend_from_slice(b"\n\n");
-        let mut spaces = b" ".to_vec();
-        spaces.extend_from_slice(correct);
-        spaces.push(b' ');
-        let mut crlf = correct.to_vec();
-        crlf.extend_from_slice(b"\r\n");
-        let mut doubled = correct.to_vec();
-        doubled.extend_from_slice(correct);
-        let mut nul = correct.to_vec();
-        nul.push(0);
-        for (cls, bytes) in [
-            ("E/empty", Vec::new()),
-            ("U/unknown", b"pmacs-sigint-v2:safe".to_vec()),
-            ("L/leading-lf", leading),
-            ("X/extra-lf", extra),
-            ("S/spaces", spaces),
-            ("C/crlf", crlf),
-            ("D/doubled", doubled),
-            ("N/nul", nul),
-        ] {
-            cases.push((format!("{status}/{cls}"), status, bytes, "", false));
-        }
-    }
-    cases.push(("X1/status-126".to_owned(), 126, SAFE.to_vec(), "", false));
-    cases.push((
-        "X3/ignored-text-no-token".to_owned(),
-        1,
-        Vec::new(),
-        "echo 'pmacs: SIGINT is ignored; run this command with SIGINT deliverable' >&2\n",
-        false,
-    ));
-    cases.push((
-        "X4/stderr-noise".to_owned(),
-        0,
-        SAFE.to_vec(),
-        "echo 'chatter on stderr' >&2\n",
-        true,
-    ));
+    let cases = shared_cases();
     assert_eq!(cases.len(), 45, "the shared set is 45 cases");
 
-    for (name, status, stdout, stderr_line, expect_pass) in cases {
-        let (code, err, dir) = gate_sees_pair(status, &stdout, stderr_line);
-        if expect_pass {
-            // `safe` continues into the self-test plan, which exits
-            // non-zero ON PURPOSE — what matters is that the guard did
-            // not refuse.
-            assert!(
+    for case in cases {
+        let root = tempfile::tempdir().expect("tempdir");
+        let repo = gate_with_stub_helper(&stub_script(&case), true);
+        let out = Command::new(repo.path().join("scripts/gate"))
+            .arg("--self-test")
+            .current_dir(repo.path())
+            .env("PMACS_GATE_TARGET_ROOT", root.path())
+            .env("TMPDIR", root.path())
+            .output()
+            .expect("run the stub-worktree gate");
+        let err = String::from_utf8_lossy(&out.stderr);
+        let name = &case.name;
+
+        match case.expect {
+            Outcome::Safe => assert!(
                 !err.contains("REFUSING TO RUN"),
-                "case {name}: the guard must not refuse a validated safe pair: {err}"
-            );
-        } else {
-            assert!(
-                err.contains("REFUSING TO RUN"),
-                "case {name}: the guard must refuse: {err}"
-            );
-            let validated = name.contains("/V/") && (status == 1 || status == 2);
-            if validated {
-                assert_eq!(
-                    code,
-                    Some(status),
-                    "case {name}: validated verdicts pass their status through"
-                );
-            } else {
-                assert_eq!(code, Some(2), "case {name}: boundary errors map to 2");
+                "case {name}: a validated safe pair must continue: {err}"
+            ),
+            Outcome::ValidatedIgnored => {
+                assert_eq!(out.status.code(), Some(1), "case {name}: {err}");
                 assert!(
-                    !err.contains("SIGINT is ignored"),
-                    "case {name}: a boundary failure must not speak with the \
+                    err.contains(SENTINEL),
+                    "case {name}: a validated verdict surfaces the helper's \
+                     stderr: {err}"
+                );
+                assert!(err.contains("token=valid"), "case {name}: {err}");
+            }
+            Outcome::ValidatedError => {
+                assert_eq!(out.status.code(), Some(2), "case {name}: {err}");
+                assert!(
+                    err.contains(SENTINEL),
+                    "case {name}: a validated error also speaks with the \
                      helper's voice: {err}"
+                );
+                assert!(err.contains("token=valid"), "case {name}: {err}");
+            }
+            Outcome::Boundary => {
+                assert_eq!(out.status.code(), Some(2), "case {name}: {err}");
+                assert!(
+                    err.contains("SIGINT guard boundary error"),
+                    "case {name}: {err}"
+                );
+                assert!(
+                    !err.contains(SENTINEL),
+                    "case {name}: a boundary failure must NOT surface the \
+                     child's stderr --- this is what separates it from a \
+                     validated error, which shares its exit code: {err}"
                 );
             }
         }
-        // A8: no capture directory survives, on any path.
-        let residue: Vec<_> = std::fs::read_dir(&dir)
+
+        // A8: no capture directory survives, on any path. `root` is RAII
+        // --- it is dropped at the end of this iteration.
+        let residue: Vec<_> = std::fs::read_dir(root.path())
             .expect("read tmpdir")
             .filter_map(Result::ok)
             .filter(|e| e.file_name().to_string_lossy().starts_with("pmacs-sigint."))
             .collect();
         assert!(residue.is_empty(), "case {name}: capture residue survived");
-        std::fs::remove_dir_all(&dir).ok();
     }
+}
+
+/// A8: the guard cannot create its capture directory.
+///
+/// Bounded --- it never reaches a stage. `TMPDIR` points at a path that
+/// does not exist, so `mktemp -d` fails and the guard must refuse
+/// before running the helper at all.
+#[test]
+fn gate_refuses_when_the_capture_directory_cannot_be_created() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let repo = gate_with_stub_helper("#!/bin/sh\nprintf 'pmacs-sigint-v1:safe'\nexit 0\n", true);
+    let out = Command::new(repo.path().join("scripts/gate"))
+        .arg("--self-test")
+        .current_dir(repo.path())
+        .env("PMACS_GATE_TARGET_ROOT", root.path())
+        .env("TMPDIR", root.path().join("absent-directory"))
+        .output()
+        .expect("run the stub-worktree gate");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "boundary error: {err}");
+    assert!(
+        err.contains("capture directory"),
+        "the failure names what could not be created: {err}"
+    );
+    assert!(err.contains("no stage has run"), "and no stage ran: {err}");
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("[01]"),
+        "no stage may run"
+    );
+}
+
+/// Each helper arm emits its exact token on stdout.
+#[test]
+fn sigint_helper_emits_the_exact_token_for_each_arm() {
+    use common::sigint_conformance::{TOKEN_ERROR, TOKEN_SAFE};
+
+    let safe = Command::new(sigint_helper()).output().expect("run helper");
+    assert_eq!(safe.status.code(), Some(0));
+    assert_eq!(
+        safe.stdout,
+        [TOKEN_SAFE, b"\n"].concat(),
+        "the safe arm emits exactly its token plus one LF"
+    );
+
+    let erroring = Command::new(sigint_helper())
+        .env("PATH", "")
+        .output()
+        .expect("run helper");
+    assert_eq!(erroring.status.code(), Some(2));
+    assert_eq!(erroring.stdout, [TOKEN_ERROR, b"\n"].concat());
 }
 
 /// §7c: the helper answers `safe` when `SIGINT` is deliverable.

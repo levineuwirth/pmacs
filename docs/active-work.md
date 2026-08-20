@@ -288,11 +288,20 @@ from #171 and #215.
   `status=`/`token=` on every refusing branch. R-d validates the same
   pair from `Command::output()` bytes — no capture files, since only
   the shell needs them.
-- **Conformance: 45 shared cases, generated as a cross-product, run by
-  BOTH validators** (`gate_validates_the_whole_shared_conformance_set`,
-  `rd_precondition_validates_the_whole_conformance_set`), plus Rust's
-  X2 no-status spawn error = 46. **34 gate rows, 16 GPU rows, full gate
-  green.**
+- **Conformance vectors live in `tests/common/sigint_conformance.rs`**
+  and are consumed by BOTH validators, so the two copies cannot drift
+  while each still reports "45 cases". Every stub emits a **sentinel on
+  stderr**, which is what separates `ValidatedError` from `Boundary` —
+  they share exit 2, so comparing codes alone let a validator that
+  accepted every status 2 pass the whole matrix. An `Outcome` enum
+  (Safe / ValidatedIgnored / ValidatedError / Boundary) is asserted
+  branch-exact in both suites, and each helper arm's exact stdout token
+  is asserted too.
+- **A8 is complete**: a bounded row points `TMPDIR` at a missing
+  directory so `mktemp -d` fails, and asserts boundary error 2, no
+  stage, and no residue. Temporary directories are RAII throughout;
+  the `keep()`-plus-manual-cleanup shape is gone.
+- **36 gate rows, 16 GPU rows, full gate green.**
 - **A4 mutations, each biting:** accepting any status 2 regardless of
   token → `gate_refuses_on_helper_error_…`; surfacing child stderr on a
   boundary failure → the conformance row **and** that row; token to
