@@ -272,13 +272,16 @@ waits for a signal that is not coming.
 
 ## Panel cell-mapping generation (v25) — REBASED, FULL GATE GREEN, review round 4 fixed
 
-- **REBASED onto `f13506c`** (post-#241 main); the rebase itself landed
-  at `3e68b76`, and everything after it is review-round work. One
-  conflict, in this file: main's merged-#241 block and this lane's own
+- **BASE IS `5f2015c`**, current `githubsucks/main`. Rebased there
+  cleanly, no conflicts; the two commits picked up are docs-only (the
+  `rd_precondition` occurrence record and the handoff's `timeout`
+  rule).
+- The **first** rebase, onto `f13506c` (post-#241 main), took one
+  conflict in this file: main's merged-#241 block and this lane's own
   first-commit block landed at the same position; both kept, active
-  lane above merged. No code file overlapped — #241 touched `scripts/`,
-  `tests/common/` and two test suites; this lane touches the protocol,
-  daemon and GPU sources.
+  lane above merged. No code file has overlapped across either rebase —
+  #241 touched `scripts/`, `tests/common/` and two test suites; this
+  lane touches the protocol, daemon and GPU sources.
 - **NO AHEAD-COUNT OR TIP SHA IS RECORDED HERE, deliberately.** Both
   were wrong within one commit the last two times they were written,
   because the commit that updates this file is itself the commit that
