@@ -285,8 +285,9 @@ mod crdt {
     ///
     /// `ValidatedError` and `Boundary` both produce `Err`, so comparing
     /// `is_ok()` alone would let a validator that accepts every status 2
-    /// pass. The stubs emit a sentinel on stderr; a validated verdict
-    /// surfaces it, a boundary failure must not.
+    /// pass. The branch-discriminating cases emit a sentinel on stderr;
+    /// a validated verdict surfaces it, while X3/X4 carry dedicated
+    /// payloads and a boundary failure must withhold untrusted stderr.
     #[test]
     fn rd_precondition_validates_the_whole_conformance_set() {
         // `super::` and NOT `crate::`: this file is ALSO compiled as a

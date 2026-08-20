@@ -250,8 +250,9 @@ fn gate_maps_an_unexecutable_helper_to_error_not_ignored() {
 ///
 /// `ValidatedError` and `Boundary` both exit 2, so comparing codes
 /// alone would let a validator that accepts every status 2 pass. The
-/// stubs emit a sentinel on stderr; a validated verdict surfaces it, a
-/// boundary failure must withhold it.
+/// branch-discriminating cases emit a sentinel on stderr; a validated
+/// verdict surfaces it, while X3/X4 carry dedicated payloads and a
+/// boundary failure must withhold untrusted stderr.
 #[test]
 fn gate_validates_the_whole_shared_conformance_set() {
     use common::sigint_conformance::{
