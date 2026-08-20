@@ -254,7 +254,9 @@ fn gate_maps_an_unexecutable_helper_to_error_not_ignored() {
 /// boundary failure must withhold it.
 #[test]
 fn gate_validates_the_whole_shared_conformance_set() {
-    use common::sigint_conformance::{Outcome, SENTINEL, shared_cases, stub_script};
+    use common::sigint_conformance::{
+        CANONICAL_IGNORED, Outcome, SENTINEL, shared_cases, stub_script,
+    };
 
     let cases = shared_cases();
     assert_eq!(cases.len(), 45, "the shared set is 45 cases");
@@ -307,6 +309,12 @@ fn gate_validates_the_whole_shared_conformance_set() {
                      child's stderr --- this is what separates it from a \
                      validated error, which shares its exit code: {err}"
                 );
+                assert!(
+                    !err.contains(CANONICAL_IGNORED),
+                    "case {name}: and it must never repeat the canonical \
+                     ignored wording --- X3 emits exactly that on stderr \
+                     with no token: {err}"
+                );
             }
         }
 
@@ -348,12 +356,24 @@ fn gate_refuses_when_the_capture_directory_cannot_be_created() {
         !String::from_utf8_lossy(&out.stdout).contains("[01]"),
         "no stage may run"
     );
+    // A8 on this path too: the temporary root is inspected BEFORE its
+    // RAII drop, and must contain nothing the guard left behind.
+    let residue: Vec<_> = std::fs::read_dir(root.path())
+        .expect("read tmpdir")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        residue.is_empty(),
+        "a guard that could not create its capture directory must leave \
+         nothing behind: {residue:?}"
+    );
 }
 
 /// Each helper arm emits its exact token on stdout.
 #[test]
 fn sigint_helper_emits_the_exact_token_for_each_arm() {
-    use common::sigint_conformance::{TOKEN_ERROR, TOKEN_SAFE};
+    use common::sigint_conformance::{TOKEN_ERROR, TOKEN_IGNORED, TOKEN_SAFE};
 
     let safe = Command::new(sigint_helper()).output().expect("run helper");
     assert_eq!(safe.status.code(), Some(0));
@@ -369,6 +389,16 @@ fn sigint_helper_emits_the_exact_token_for_each_arm() {
         .expect("run helper");
     assert_eq!(erroring.status.code(), Some(2));
     assert_eq!(erroring.stdout, [TOKEN_ERROR, b"\n"].concat());
+
+    // The ignored arm needs a shell that ignores SIGINT; assert its
+    // STDOUT, not merely its status and stderr.
+    let ignored = under_ignored_sigint(&sigint_helper(), &[], &repo_root(), &[]);
+    assert_eq!(ignored.status.code(), Some(1));
+    assert_eq!(
+        ignored.stdout,
+        [TOKEN_IGNORED, b"\n"].concat(),
+        "the ignored arm emits exactly its token plus one LF"
+    );
 }
 
 /// §7c: the helper answers `safe` when `SIGINT` is deliverable.

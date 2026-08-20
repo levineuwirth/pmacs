@@ -279,7 +279,7 @@ from #171 and #215.
   **`72da24a`**, worktree
   `/home/jeans/Repos/personal/pmacs-probe-sigint`. Recover with
   `git fetch githubsucks && git checkout gpu-probe-sigint-teardown`.
-- **REVISION 13 IMPLEMENTED (this commit).** Helper emits the token on
+- **REVISION 13 IMPLEMENTED at `bc7d776`.** Helper emits the token on
   stdout; both consumers validate the `(status, token)` pair. The gate
   owns a guard-local capture dir, keeps `|| status=$?` under `set -eu`,
   selects `expected_token` before any `set -u`-sensitive use, compares
@@ -313,13 +313,29 @@ from #171 and #215.
 - **The earlier `…-2647615` run is NOT head-exact evidence**: it
   finished about 30 seconds before `bc7d776` was committed, so it
   describes the implementation tree rather than a committed head.
-- **A4 mutations, each biting:** accepting any status 2 regardless of
-  token → `gate_refuses_on_helper_error_…`; surfacing child stderr on a
-  boundary failure → the conformance row **and** that row; token to
-  stderr → `sigint_helper_reports_safe_…`. Noted for the record: the
-  first mutation is caught by the dedicated row rather than by the
-  conformance set, because the set's boundary cases mostly have empty
-  stderr and so cannot see which branch produced the exit 2.
+- **A4 mutations, each biting the MATRIX now**, not a dedicated row:
+  accepting any status 2 regardless of token, and surfacing child
+  stderr on a boundary failure, both fail
+  `gate_validates_the_whole_shared_conformance_set`; token-to-stderr
+  fails `sigint_helper_reports_safe_…`. An earlier entry said the
+  status-2 mutation was caught only by the dedicated row — that was
+  true of the pre-sentinel matrix and is **superseded**: every stub now
+  emits a sentinel on stderr, so the matrix can see which branch
+  produced the exit 2.
+- **Two PRE-EXISTING crdt-only failures found while gating properly:**
+  `m4_24_bare_string_glob_stays_relative` and
+  `m4_24_d3_fallback_base_is_the_smallest_attachment_dir`. They
+  reproduce in isolation (so not load) and **fail identically at
+  `72da24a`**, so they are not this lane's. They are crdt-only — the
+  plain gate's `05-m4` stage runs without `crdt` and passes. Recorded,
+  not attributed; whether they are environment-specific is for CI to
+  say.
+- **My local gate did NOT cover what CI covers, and CI caught it.**
+  Plain `./scripts/gate` omits `sweep-crdt`, which is the only stage
+  that compiles the nested `gpu_initial_target_acceptance` under
+  `crdt`; `04-lib-crdt` builds the lib alone. A `crate::common` path
+  that cannot resolve when nested, and a clippy lint, both shipped
+  green locally. **This lane gates with `--protocol`.**
 - **CI ON `916007b`: 12 GREEN, 2 RED — both macOS `Test` jobs**, and it
   is the **pre-declared A7 portability finding**, not an environment
   excuse. Exactly one row:

@@ -33,10 +33,20 @@ pub const TOKEN_ERROR: &[u8] = b"pmacs-sigint-v1:error";
 /// searched for it: present ⇒ the child's stderr was surfaced.
 pub const SENTINEL: &str = "PMACS-CONFORMANCE-SENTINEL";
 
+/// The canonical wording the helper uses for `ignored`. X3 emits it
+/// **without** a valid token, so a consumer that surfaced untrusted
+/// stderr would repeat it — the defect A6b forbids.
+pub const CANONICAL_IGNORED: &str =
+    "pmacs: SIGINT is ignored; run this command with SIGINT deliverable";
+
 pub struct Case {
     pub name: String,
     pub status: i32,
     pub stdout: Vec<u8>,
+    /// Exact stderr this stub emits. Most cases use [`SENTINEL`]; X3
+    /// and X4 carry their own payloads, which is what makes them
+    /// distinct inputs rather than duplicates of other rows.
+    pub stderr: String,
     pub expect: Outcome,
 }
 
@@ -49,8 +59,8 @@ pub fn stub_script(case: &Case) -> String {
         acc
     });
     format!(
-        "#!/bin/sh\nprintf '{octal}'\necho '{SENTINEL}' >&2\nexit {}\n",
-        case.status
+        "#!/bin/sh\nprintf '{octal}'\necho '{}' >&2\nexit {}\n",
+        case.stderr, case.status
     )
 }
 
@@ -61,6 +71,12 @@ pub fn stub_script(case: &Case) -> String {
 /// shell boundary cannot represent it, because an `exec` failure there
 /// becomes a status. Rust exercises it separately.
 #[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the bulk is the generated vector list; splitting it would \
+              separate a case from the outcome it encodes, which is the \
+              one thing this file exists to keep together"
+)]
 pub fn shared_cases() -> Vec<Case> {
     let toks: [(&str, &[u8]); 3] = [
         ("safe", TOKEN_SAFE),
@@ -81,12 +97,14 @@ pub fn shared_cases() -> Vec<Case> {
             name: format!("{status}/V/{name}/bare"),
             status,
             stdout: correct.to_vec(),
+            stderr: SENTINEL.to_owned(),
             expect: diagonal,
         });
         out.push(Case {
             name: format!("{status}/V/{name}/lf"),
             status,
             stdout: lf,
+            stderr: SENTINEL.to_owned(),
             expect: diagonal,
         });
         for (other, bytes) in &toks {
@@ -99,12 +117,14 @@ pub fn shared_cases() -> Vec<Case> {
                 name: format!("{status}/M/{other}/bare"),
                 status,
                 stdout: bytes.to_vec(),
+                stderr: SENTINEL.to_owned(),
                 expect: Outcome::Boundary,
             });
             out.push(Case {
                 name: format!("{status}/M/{other}/lf"),
                 status,
                 stdout: olf,
+                stderr: SENTINEL.to_owned(),
                 expect: Outcome::Boundary,
             });
         }
@@ -135,6 +155,7 @@ pub fn shared_cases() -> Vec<Case> {
                 name: format!("{status}/{cls}"),
                 status,
                 stdout: bytes,
+                stderr: SENTINEL.to_owned(),
                 expect: Outcome::Boundary,
             });
         }
@@ -143,18 +164,25 @@ pub fn shared_cases() -> Vec<Case> {
         name: "X1/status-126".to_owned(),
         status: 126,
         stdout: TOKEN_SAFE.to_vec(),
+        stderr: SENTINEL.to_owned(),
         expect: Outcome::Boundary,
     });
     out.push(Case {
         name: "X3/ignored-text-no-token".to_owned(),
         status: 1,
         stdout: Vec::new(),
+        // The canonical ignored wording WITHOUT a token: a consumer
+        // that surfaced untrusted stderr would repeat it.
+        stderr: CANONICAL_IGNORED.to_owned(),
         expect: Outcome::Boundary,
     });
     out.push(Case {
         name: "X4/stderr-noise".to_owned(),
         status: 0,
         stdout: TOKEN_SAFE.to_vec(),
+        // Noise on stderr must not affect classification --- and this
+        // payload is what distinguishes X4 from 0/V/safe/bare.
+        stderr: "unrelated chatter on stderr".to_owned(),
         expect: Outcome::Safe,
     });
     out

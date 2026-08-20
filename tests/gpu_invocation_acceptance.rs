@@ -254,7 +254,7 @@ mod crdt {
         match (out.status.code(), token_ok) {
             (Some(0), true) => Ok(()),
             // A VALIDATED verdict: the helper's stderr is the diagnosis.
-            (Some(1) | Some(2), true) => Err(format!(
+            (Some(1 | 2), true) => Err(format!(
                 "precondition failed --- this is NOT a teardown defect. \
                  (status={status} token={token_state})\n{}",
                 String::from_utf8_lossy(&out.stderr).trim_end()
@@ -289,7 +289,15 @@ mod crdt {
     /// surfaces it, a boundary failure must not.
     #[test]
     fn rd_precondition_validates_the_whole_conformance_set() {
-        use crate::common::sigint_conformance::{Outcome, SENTINEL, shared_cases, stub_script};
+        // `self::` and NOT `crate::`: this file is ALSO compiled as a
+        // nested module of `gpu_initial_target_acceptance.rs`, where
+        // `crate::` is the outer test crate and has no `common`.
+        // `super::` and NOT `crate::`: this file is ALSO compiled as a
+        // nested module of `gpu_initial_target_acceptance.rs`, where
+        // `crate::` is the outer test crate and has no `common`.
+        use super::common::sigint_conformance::{
+            CANONICAL_IGNORED, Outcome, SENTINEL, shared_cases, stub_script,
+        };
 
         let dir = tempfile::tempdir().expect("tempdir");
         let cases = shared_cases();
@@ -314,6 +322,11 @@ mod crdt {
                 Outcome::Boundary => {
                     let message = got.expect_err("a boundary refusal");
                     assert!(message.contains("boundary error"), "case {name}: {message}");
+                    assert!(
+                        !message.contains(CANONICAL_IGNORED),
+                        "case {name}: never repeats the canonical ignored wording \
+                         --- X3 emits exactly that with no token: {message}"
+                    );
                     assert!(
                         !message.contains(SENTINEL),
                         "case {name}: a boundary failure must NOT surface the child's \
