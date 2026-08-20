@@ -284,6 +284,23 @@ waits for a signal that is not coming.
   test is crdt-gated and the macOS jobs build without `crdt`, while
   `Test (crdt)` is `runs-on: ubuntu-latest`. Recorded as an open gap,
   not closed.
+- **ONE UNEXPLAINED FAILURE, 2026-08-20, AND NO MECHANISM IS RECORDED
+  FOR IT.** The row was
+  `rd_precondition_validates_the_whole_conformance_set`.
+  The row failed once in a `sweep-crdt` run in the `pmacs-mapping-gen`
+  worktree and passed on the two sweeps after it. **The failure message
+  was not captured**, so there is nothing to reason from — which is
+  exactly why no cause is asserted here.
+  - **NOT REPRODUCED**: 30 consecutive runs at load ~10.5, 1,350
+    successful stub executions, no recurrence (user-run, 2026-08-20).
+  - **A "concurrent spawn pressure" explanation was offered and is
+    WITHDRAWN as false on its facts.** The test runs its **45 stubs
+    SEQUENTIALLY**, plus one intentional nonexistent-path spawn probe.
+    There is no concurrency to be pressured, and 46 was a miscount of
+    45-plus-a-probe.
+  - **ON RECURRENCE, CAPTURE THE EXACT CASE AND ERROR** before
+    theorising. A single uncaptured failure supports no diagnosis, and
+    the sequential design means the failing case is identifiable.
 - **What shipped:** `scripts/check-sigint-deliverable` (validated
   `(status, token)` pair, 0 safe / 1 ignored / 2 error), a gate guard
   that refuses before any stage with no override, a target test that
