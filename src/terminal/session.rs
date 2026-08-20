@@ -247,10 +247,21 @@ pub(super) struct EscapeCache {
     pub(super) reported_invalid: Option<String>,
 }
 
+/// What each child was sent, in order, while the G5k tap is armed.
+type ChildSendLog = Vec<(BufferId, Vec<u8>)>;
+
 /// Owns the one-buffer/one-process/one-screen terminal registry.
 #[derive(Default)]
 pub struct TerminalManager {
     pub(super) sessions: HashMap<BufferId, TerminalSession>,
+    /// An OPT-IN tap on child input, for parent 48 G5k's witnesses.
+    ///
+    /// The gesture-domain rows have to read what the child actually
+    /// received --- a release delivered in the recorded encoding, and
+    /// exactly one of it --- and no other seam exposes that. Off by
+    /// default, so production pays one `is_some` check per send and
+    /// never accumulates.
+    send_tap: RefCell<Option<ChildSendLog>>,
     /// Total escape-key parses performed (Q#TC4c observability).
     escape_parses: u64,
     process_to_buffer: HashMap<ProcessId, BufferId>,
@@ -564,9 +575,33 @@ impl TerminalManager {
             .sessions
             .get(&buffer_id)
             .ok_or(TerminalError::NotTerminal(buffer_id))?;
+        if let Some(tap) = self.send_tap.borrow_mut().as_mut() {
+            tap.push((buffer_id, bytes.to_vec()));
+        }
         supervisor
             .write_stdin(session.process_id, bytes)
             .map_err(TerminalError::Process)
+    }
+
+    /// Begin recording child input for G5k's witnesses.
+    #[doc(hidden)]
+    pub fn start_send_tap_for_test(&self) {
+        *self.send_tap.borrow_mut() = Some(Vec::new());
+    }
+
+    /// Take everything sent to children since the tap was started.
+    ///
+    /// Returns the sends in ORDER, because "one release, not two" and
+    /// "the old gesture's release before the new gesture's press" are
+    /// both ordering claims that a set cannot express.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn take_send_tap_for_test(&self) -> ChildSendLog {
+        self.send_tap
+            .borrow_mut()
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
     }
 
     /// Resolve this terminal's effective escape chord, parsing at most

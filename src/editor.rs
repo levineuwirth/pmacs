@@ -432,6 +432,82 @@ pub enum PanelPointerOutcome {
     Accepted,
 }
 
+/// The domain a live panel gesture was RESOLVED INTO at its accepted
+/// press, and which every tail and its completion must follow
+/// (parent 48 G5k).
+///
+/// **Re-deciding this per event is G5k's forbidden mutation.** The
+/// terminal adapter picks between reporting to the child and handling
+/// locally by reading Shift, the scrollback position and the child's
+/// current mouse modes — all three of which can change mid-gesture.
+/// A press reported to the child followed by a release re-evaluated
+/// after the child turned reporting off leaves that child holding a
+/// button down forever; the reverse transition sends a child an `Up`
+/// for a `Down` it never saw.
+///
+/// So the press records the contract and the tails obey it. The
+/// encoding travels with it for the same reason: the report must be
+/// framed the way the press was framed, not the way the child would
+/// ask for it now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelGestureDomain {
+    /// A document panel; every write is addressed to `window`.
+    Document {
+        /// The side window the gesture belongs to.
+        window: WindowId,
+    },
+    /// A terminal panel whose press REACHED THE CHILD.
+    TerminalChild {
+        /// The side window the gesture belongs to.
+        window: WindowId,
+        /// The terminal buffer the child is attached to.
+        buffer_id: crate::buffer::BufferId,
+        /// The modes the press was encoded under, replayed verbatim.
+        modes: crate::terminal::screen::TerminalModes,
+    },
+    /// A terminal panel handled LOCALLY — Shift, reporting off, or a
+    /// scrolled-back view at press time.
+    TerminalLocal {
+        /// The side window the gesture belongs to.
+        window: WindowId,
+        /// The terminal buffer whose local selection is being built.
+        buffer_id: crate::buffer::BufferId,
+    },
+}
+
+impl PanelGestureDomain {
+    /// The side window this gesture is addressed to.
+    #[must_use]
+    pub fn window(&self) -> WindowId {
+        match self {
+            Self::Document { window }
+            | Self::TerminalChild { window, .. }
+            | Self::TerminalLocal { window, .. } => *window,
+        }
+    }
+
+    /// Whether the press reached the child, so a release is OWED to it.
+    #[must_use]
+    pub fn reached_child(&self) -> bool {
+        matches!(self, Self::TerminalChild { .. })
+    }
+}
+
+/// Which way the shared terminal adapter routed one gesture.
+///
+/// Returned rather than recomputed so a panel press can RECORD the
+/// route it actually took (G5k). Other callers of the adapter ignore
+/// it — they have no gesture latch to bind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalGestureRoute {
+    /// Nothing ran: the view is gone or has no status at that size.
+    None,
+    /// Reported to the child, under these modes.
+    Child(crate::terminal::screen::TerminalModes),
+    /// Handled locally — scrollback, local selection, or the menu.
+    Local,
+}
+
 /// A classified panel gesture: the outcome, and the resolution it was
 /// decided from.
 ///
@@ -2952,10 +3028,11 @@ impl EditorState {
     /// Bare hover neither focuses nor claims, on either kind.
     ///
     /// **Only `Accepted` reaches a target.** A `Consumed` disposition
-    /// returns without effect: the claim was the effect. Returns whether
-    /// the gesture reached a CHILD, which is what the accepted-gesture
-    /// latch records — the framing requires arming "from the effect
-    /// result", so this is measured rather than assumed.
+    /// returns without effect: the claim was the effect.
+    ///
+    /// Returns the [`PanelGestureDomain`] the effect RESOLVED INTO, so
+    /// an accepted press can record the contract its tails must follow
+    /// (G5k). `None` means nothing ran and nothing may be recorded.
     pub fn apply_panel_pointer(
         &mut self,
         frontend_id: FrontendId,
@@ -2963,15 +3040,13 @@ impl EditorState {
         coord: CellCoord,
         kind: pmacs_protocol::MouseKind,
         mods: pmacs_protocol::Modifiers,
-    ) -> bool {
+    ) -> Option<PanelGestureDomain> {
         use pmacs_protocol::MouseKind as PKind;
 
         if disposition.outcome != PanelPointerOutcome::Accepted {
-            return false;
+            return None;
         }
-        let Some(target) = disposition.resolved.as_ref() else {
-            return false;
-        };
+        let target = disposition.resolved.as_ref()?;
 
         let activates = if target.is_terminal {
             !matches!(kind, PKind::Move)
@@ -2991,18 +3066,95 @@ impl EditorState {
             // cell and put every clamp one row out.
             let viewport = CellSize::new(target.content_rows, target.cols);
             let key = TerminalViewKey::new(frontend_id, target.side, target.buffer_id);
-            return self.apply_terminal_gesture(
+            return match self.apply_terminal_gesture(
                 key,
                 viewport,
                 coord,
                 kind,
                 mods,
                 (coord.row, coord.col),
-            );
+            ) {
+                TerminalGestureRoute::None => None,
+                TerminalGestureRoute::Child(modes) => Some(PanelGestureDomain::TerminalChild {
+                    window: target.side,
+                    buffer_id: target.buffer_id,
+                    modes,
+                }),
+                TerminalGestureRoute::Local => Some(PanelGestureDomain::TerminalLocal {
+                    window: target.side,
+                    buffer_id: target.buffer_id,
+                }),
+            };
         }
 
         self.replay_panel_document_gesture(frontend_id, target.side, coord, kind, mods);
-        false
+        Some(PanelGestureDomain::Document {
+            window: target.side,
+        })
+    }
+
+    /// Replay a tail or a completion in the gesture's RECORDED domain
+    /// (parent 48 G5k).
+    ///
+    /// **Nothing here re-decides the domain.** The press resolved it and
+    /// the record carries it, so Shift going down mid-drag, the view
+    /// scrolling back, or the child flipping its mouse modes cannot move
+    /// a live gesture from one target to another. Re-evaluating those
+    /// per event is G5k's forbidden mutation, and it strands a child
+    /// press in one direction and fabricates an unmatched child release
+    /// in the other.
+    ///
+    /// **The window is read from the record too.** An earlier version
+    /// re-derived the current side window and returned when it had
+    /// changed — which is exactly the set of transitions the stranding
+    /// rows must terminate, so the completion they need would have been
+    /// the one thing that refused to run.
+    pub fn replay_panel_gesture_in_domain(
+        &mut self,
+        frontend_id: FrontendId,
+        domain: PanelGestureDomain,
+        coord: CellCoord,
+        kind: pmacs_protocol::MouseKind,
+        mods: pmacs_protocol::Modifiers,
+    ) {
+        match domain {
+            PanelGestureDomain::Document { window } => {
+                self.replay_panel_document_gesture(frontend_id, window, coord, kind, mods);
+            }
+            PanelGestureDomain::TerminalChild {
+                window,
+                buffer_id,
+                modes,
+            } => {
+                // Encoded under the RECORDED modes, and gated on
+                // nothing: not Shift, not the scroll position, not the
+                // child's current modes. Those are precisely the three
+                // inputs G5k forbids re-reading.
+                let key = TerminalViewKey::new(frontend_id, window, buffer_id);
+                let _ = key;
+                if let Some(bytes) = crate::terminal::input::encode_mouse(kind, coord, mods, modes)
+                {
+                    self.send_terminal_bytes(buffer_id, &bytes);
+                }
+            }
+            PanelGestureDomain::TerminalLocal { window, buffer_id } => {
+                let Some(size) = self.core.borrow().panel_grid_size(frontend_id) else {
+                    return;
+                };
+                let viewport = CellSize::new(size.rows.saturating_sub(1), size.cols);
+                let key = TerminalViewKey::new(frontend_id, window, buffer_id);
+                let mut manager = self.terminal_manager.borrow_mut();
+                match kind {
+                    pmacs_protocol::MouseKind::Drag(pmacs_protocol::MouseButton::Left) => {
+                        let _ = manager.update_selection(key, viewport, coord);
+                    }
+                    pmacs_protocol::MouseKind::Up(pmacs_protocol::MouseButton::Left) => {
+                        let _ = manager.finish_selection(key, viewport, coord);
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     /// Deliver the RECORDED completion for a gesture the ordinary path
@@ -3014,69 +3166,23 @@ impl EditorState {
     /// already performed the ordinary in-content completion, and doing
     /// both is the duplicate P5 forbids.
     ///
-    /// **The domain is read from the record, not from where the pointer
-    /// is now.** `buffer_id` says which panel the gesture belongs to and
-    /// `reached_child` says whether a press was ever delivered, so the
-    /// three completions separate without a fourth field:
-    ///
-    /// * reporting terminal → the child gets its release;
-    /// * local terminal → the drag's selection is finalised;
-    /// * document → the gesture completes and an empty selection is
-    ///   cleared without moving point.
-    ///
-    /// Delivery goes through the SAME paths an in-content release uses,
-    /// at the record's last valid content cell (R-c2). A second
-    /// implementation of "what a release does" would drift from the
-    /// first, which is the whole reason the shared terminal path exists.
+    /// Delivery goes through the gesture's recorded domain at its last
+    /// valid content cell (R-c2), so the release is framed the way its
+    /// press was.
     pub fn complete_panel_gesture(
         &mut self,
         frontend_id: FrontendId,
         record: &crate::semantic_render::AcceptedPanelGesture,
         mods: pmacs_protocol::Modifiers,
     ) {
-        use pmacs_protocol::{MouseButton as PButton, MouseKind as PKind};
-
-        let release = PKind::Up(PButton::Left);
-        let Some(size) = self.core.borrow().panel_grid_size(frontend_id) else {
-            return;
-        };
-        let content_rows = size.rows.saturating_sub(1);
-        if content_rows == 0 {
-            return;
-        }
-        let side = {
-            let core = self.core.borrow();
-            let Some(side) = core.side_window_for(frontend_id) else {
-                return;
-            };
-            // The panel must still be showing the buffer the gesture
-            // belongs to. If it is not, the four stranding transitions
-            // own this record, not an ordinary completion.
-            if core.windows.get(&side).map(|window| window.buffer_id) != Some(record.buffer_id) {
-                return;
-            }
-            side
-        };
-
-        if self.terminal_manager.borrow().is_terminal(record.buffer_id) {
-            // Both terminal domains route here: `apply_terminal_gesture`
-            // reports to the child when the modes allow and finalises the
-            // local selection otherwise, which is exactly the split this
-            // completion needs.
-            let viewport = CellSize::new(content_rows, size.cols);
-            let key = TerminalViewKey::new(frontend_id, side, record.buffer_id);
-            let _ = self.apply_terminal_gesture(
-                key,
-                viewport,
-                record.coord,
-                release,
-                mods,
-                (record.coord.row, record.coord.col),
-            );
-            return;
-        }
-
-        self.replay_panel_document_gesture(frontend_id, side, record.coord, release, mods);
+        let release = pmacs_protocol::MouseKind::Up(pmacs_protocol::MouseButton::Left);
+        self.replay_panel_gesture_in_domain(
+            frontend_id,
+            record.domain,
+            record.coord,
+            release,
+            mods,
+        );
     }
 
     /// Replay one accepted gesture into a DOCUMENT panel (parent 48).
@@ -4047,13 +4153,12 @@ impl EditorState {
     /// A second copy of this precedence in the GPU lane is exactly how
     /// Shift-drag or scrolled-back selection would silently diverge
     /// between frontends.
-    /// Returns whether the gesture REACHED THE CHILD as a mouse report.
+    /// Returns WHICH WAY it routed the gesture (G5k).
     ///
-    /// Parent 48 Q#BP-R4 arms the accepted-gesture latch "from the
-    /// effect result", so `reached_child` has to be measured where the
-    /// branch is taken rather than predicted from the modes beforehand:
-    /// the report is gated on five conditions and `encode_mouse` can
-    /// still decline.
+    /// The route has to be measured where the branch is taken, not
+    /// predicted from the modes beforehand: the report is gated on five
+    /// conditions and `encode_mouse` can still decline. A panel press
+    /// records the answer and binds its whole gesture to it.
     fn apply_terminal_gesture(
         &mut self,
         key: TerminalViewKey,
@@ -4062,12 +4167,12 @@ impl EditorState {
         kind: TerminalMouseKind,
         modifiers: TerminalModifiers,
         global: (u32, u32),
-    ) -> bool {
+    ) -> TerminalGestureRoute {
         let shift = modifiers.contains(TerminalModifiers::SHIFT);
         let (at_bottom, modes, screen_size) = {
             let mut manager = self.terminal_manager.borrow_mut();
             let Some(status) = manager.view_status_for_size(key, viewport_size) else {
-                return false;
+                return TerminalGestureRoute::None;
             };
             let modes = manager.modes_for_view(key).unwrap_or_default();
             let screen_size = manager.screen_size_for_view(key).unwrap_or(viewport_size);
@@ -4097,7 +4202,7 @@ impl EditorState {
                 self.claim_terminal_controller(key);
             }
             self.send_terminal_bytes(key.buffer_id, &bytes);
-            return true;
+            return TerminalGestureRoute::Child(modes);
         }
 
         if claims_control {
@@ -4130,7 +4235,7 @@ impl EditorState {
         }
         // The local branch: scrollback, local selection or the menu. The
         // child heard nothing.
-        false
+        TerminalGestureRoute::Local
     }
 
     fn is_double_click(

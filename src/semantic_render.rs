@@ -174,11 +174,24 @@ pub struct AcceptedPanelGesture {
     pub coord: pmacs_protocol::CellCoord,
     /// The panel buffer the gesture belongs to.
     pub buffer_id: BufferId,
-    /// Whether the press actually REACHED the child, for a reporting
-    /// terminal. A release is owed only if a press was delivered;
-    /// synthesising one for a press the child never saw is the same
-    /// defect in the other direction.
-    pub reached_child: bool,
+    /// The domain the accepted press RESOLVED INTO, and which every
+    /// tail and the completion must follow (G5k).
+    ///
+    /// This replaces a bare `reached_child` flag. The flag said whether
+    /// a release was owed to a child but not how to frame it, nor which
+    /// window to address, so a tail had to re-derive both from state
+    /// that moves mid-gesture — Shift, the scroll position, the child's
+    /// modes, and the panel's own identity. Recording the resolution
+    /// is what makes the tail independent of all four.
+    pub domain: crate::editor::PanelGestureDomain,
+}
+
+impl AcceptedPanelGesture {
+    /// Whether the press reached the child, so a release is OWED to it.
+    #[must_use]
+    pub fn reached_child(&self) -> bool {
+        self.domain.reached_child()
+    }
 }
 
 /// Owns one `semantic_render` session's projection state: the last

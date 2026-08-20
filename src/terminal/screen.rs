@@ -619,6 +619,22 @@ impl TerminalScreen {
     pub fn modes(&self) -> TerminalModes {
         self.modes
     }
+
+    /// Turn SGR mouse reporting on or off, for parent 48 G5k.
+    ///
+    /// The domain matrix needs a child that reports and then STOPS
+    /// reporting mid-gesture. Driving that through the ANSI parser
+    /// would make the row depend on escape-sequence handling it is not
+    /// testing; this sets the two modes the adapter actually reads.
+    #[doc(hidden)]
+    pub fn set_mouse_reporting_for_test(&mut self, enabled: bool) {
+        self.modes.mouse_sgr = enabled;
+        self.modes.mouse_tracking = if enabled {
+            MouseTrackingMode::Button
+        } else {
+            MouseTrackingMode::Off
+        };
+    }
     /// Return whether the published active screen is alternate.
     #[must_use]
     pub fn alternate_active(&self) -> bool {

@@ -525,6 +525,14 @@ impl TerminalManager {
         state.selection.take().is_some() || state.drag.take().is_some()
     }
 
+    /// Turn SGR mouse reporting on or off for one session (G5k).
+    #[doc(hidden)]
+    pub fn set_mouse_reporting_for_test(&mut self, buffer_id: BufferId, enabled: bool) {
+        if let Some(session) = self.sessions.get_mut(&buffer_id) {
+            session.screen.set_mouse_reporting_for_test(enabled);
+        }
+    }
+
     /// Current child input modes for one session.
     #[must_use]
     pub fn modes_for_view(&self, key: TerminalViewKey) -> Option<TerminalModes> {

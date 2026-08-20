@@ -281,11 +281,31 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
   **`githubsucks/panel-pointer-replay` is the authoritative tip** (the
   ref, not a SHA). Recover with
   `git fetch githubsucks && git checkout panel-pointer-replay`.
-- **No PR yet. Checkpoint: §5a framing revision 16 and its GUI Stage
-  1b revision-13 ownership amendment AWAITING APPROVAL (revision 15
-  was reviewed, corrected and folded into this branch);
-  IMPLEMENTATION STILL PAUSED, now on approval rather than on a
-  blocker.** §5a's **pre-merge** replay contract was approved at
+- **No PR yet. Checkpoint: framing revision 16 APPROVED;
+  IMPLEMENTATION UNDER WAY.** Read the tip with
+  `git log --oneline githubsucks/main..HEAD`; no count or SHA is
+  recorded here, for the reason the §5b lane learned twice.
+  - **LANDED: Q#BP-R4's pre-effect disposition and the lifecycle
+    table** — `PanelPointerOutcome` (`Refused`/`Consumed`/`Accepted`)
+    decided before any target effect, with the resolution carried so
+    the daemon never re-derives.
+  - **LANDED: G5k's recorded gesture domain.** The first version was
+    reviewed and rejected: it drove tails through the mode-sensitive
+    adapter, which re-reads Shift, scroll position and the child's
+    modes per event — G5k's named mutation. The press now records
+    `PanelGestureDomain` (document / terminal-child-with-encoding /
+    terminal-local) and every tail and completion follows it.
+  - **Witnesses: G5k(a)–(d), P1, P3 both legs, P4, P5, P7, P8.** Each
+    reads a TARGET EFFECT — the child's byte stream, the terminal drag
+    state, or the document selection — never the latch alone. Each
+    bites its own mutation, including G5k's verbatim.
+  - **REMAINING, in order:** task 18's pending-release slot and drains,
+    task 19's four stranding transitions, then the full head-exact gate
+    and the PR.
+  - **Two test seams added for this:** an opt-in child-input tap
+    (`start_send_tap_for_test`) and a drag-state read
+    (`view_is_dragging_for_test`). Nothing else exposes what the child
+    actually received, which is what these rows must assert. §5a's **pre-merge** replay contract was approved at
   revision 12; revisions 14–16 are the post-merge amendment now under
   review. Revision 13 ruled Q#BP-R3 and blocked the lane on a
   protocol-bearing mapping generation; **that block is DISCHARGED** —
@@ -312,7 +332,8 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
     discarded the uncommitted stub edit as obsolete and missed that its
     **deletion** half was still owed. Removed; exactly one §5a and one
     §5b remain.
-  - **Collision, ruled by revision 14 and NOT yet fixed in code:**
+  - **Collision, ruled by revision 14 and NOW FIXED IN CODE** (see the
+    checkpoint above; this bullet records what it was):
     §5b and this lane gave `dispatch_semantic_panel_pointer`'s `bool`
     different meanings — accepted-as-a-gesture versus consumed-here. A
     mode-line press therefore **arms the latch** on this branch today.
