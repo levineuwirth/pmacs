@@ -332,9 +332,22 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
     `Accepted`, or is `Refused`) because four rows in these rounds
     passed vacuously: cells that were out of grid, or that clamped to
     byte 0, exercised a refusal instead of the path they named.
-  - **REMAINING, in order:** task 18's pending-release slot and drains,
-    task 19's four stranding transitions, then the full head-exact gate
-    and the PR.
+  - **LANDED: the pending-release SLOT and its drain order (task 18).**
+    Cancellation parks the record instead of returning it into a
+    context that drops it — two of the three cancellation sites are
+    inside frame production, where no target effect can run. The drain
+    pays it **before any subsequent panel-pointer effect**, **before
+    detach teardown**, and **at the projection seam** between
+    `render_frame` returning and its messages being written.
+    - **Witnessed: Q1, Q2, Q3, Q4, Q6.** Q3 asserts ORDER, not arrival,
+      and the mutation that keeps the drain but moves it after the
+      press effect fails exactly that assertion.
+    - **Q5 is OWED.** The projection-seam drain needs a row that drives
+      the real per-frontend frame loop; the unit rows call
+      `render_frame` directly and never enter it. Recorded rather than
+      treated as covered by its neighbours.
+  - **REMAINING, in order:** task 19's four stranding transitions, Q5's
+    acceptance-shaped row, then the full head-exact gate and the PR.
   - **Two test seams added for this:** an opt-in child-input tap
     (`start_send_tap_for_test`) and a drag-state read
     (`view_is_dragging_for_test`). Nothing else exposes what the child

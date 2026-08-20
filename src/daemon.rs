@@ -1019,6 +1019,40 @@ fn panel_event_epochs_are_current(
         .is_some_and(|geometry| geometry.geometry_epoch == geometry_epoch)
 }
 
+/// Deliver the release this frontend is owed, if any (parent 48).
+///
+/// **Order is the ruling, not just the existence of a slot.** A
+/// cancellation raised inside frame production cannot deliver its own
+/// release, so the record is parked; this is where it is paid. It runs
+/// at three points, and each is chosen against a specific way the
+/// release would otherwise arrive too late or not at all:
+///
+/// * **before any subsequent panel-pointer effect**, so the old
+///   gesture's release reaches the child ahead of the new gesture's
+///   press rather than after it;
+/// * **before detach teardown**, because detach removes the state that
+///   holds the record and there is no later opportunity;
+/// * **after semantic projection returns and before its messages are
+///   written**, so the successor frame cannot overtake the release its
+///   own new mapping required.
+///
+/// The synthetic release carries NO modifiers: nothing is physically
+/// held, and inventing a modifier state would report a chord the user
+/// never made.
+fn drain_pending_release(
+    editor: &mut EditorState,
+    semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+    source: FrontendId,
+) {
+    let Some(record) = semantic_states
+        .get_mut(&source)
+        .and_then(crate::semantic_render::SemanticRenderState::take_pending_release)
+    else {
+        return;
+    };
+    editor.complete_panel_gesture(source, &record, pmacs_protocol::Modifiers::default());
+}
+
 /// Parent 48 Q#BP-R4 — the authoritative lifecycle table.
 ///
 /// The disposition is decided BEFORE any target effect, and the live
@@ -1042,6 +1076,12 @@ fn replay_panel_pointer(
 ) {
     use crate::editor::PanelPointerOutcome as Outcome;
     use pmacs_protocol::{MouseButton, MouseKind};
+
+    // DRAIN FIRST. An owed release has to reach the child before this
+    // gesture's press does; draining afterwards would put them on the
+    // wire in the wrong order, which reads to the child as a press
+    // followed by a release of the gesture BEFORE it.
+    drain_pending_release(editor, semantic_states, source);
 
     let disposition = editor.classify_panel_pointer(source, buffer_id, coord, kind);
     let outcome = disposition.outcome();
@@ -1539,6 +1579,16 @@ fn dispatcher_loop(
                     .expect("render_state present for attached grid fid");
                 render_state.render_frame(editor, *fid, &terminal_snapshots, &other_presences)
             };
+
+            // Parent 48 — THE PROJECTION SEAM. A mapping-generation
+            // advance cancels the live gesture INSIDE `render_frame`,
+            // while the successor `PresentMapped` is still being built,
+            // so "before that frame is produced" is not a place that
+            // exists. This is the first point that is: projection has
+            // returned and none of what it returned has been written.
+            // Draining here keeps the release ahead of the frame whose
+            // own new mapping is what required it.
+            drain_pending_release(editor, &mut semantic_states, *fid);
 
             // Vterm Stage 3 — a semantic frontend showing a terminal has
             // no document cursor: the identity buffer is empty, so a
@@ -2928,6 +2978,9 @@ fn handle_dispatcher_event(
             }
         }
         DispatcherEvent::SessionDetached { frontend_id } => {
+            // Before ANY teardown: the next line drops the state that
+            // holds an owed release, and detach has no later chance.
+            drain_pending_release(editor, semantic_states, frontend_id);
             render_states.remove(&frontend_id);
             semantic_states.remove(&frontend_id);
             streams.remove(&frontend_id);
@@ -8388,6 +8441,304 @@ mod tests {
             "so nothing may be armed: the record would name a drag that \
              does not exist, and its completion would have nothing to \
              finish"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Q1-Q6 — the pending-release slot, and the ORDER it drains in.
+    //
+    // A cancellation raised inside frame production cannot deliver its
+    // own release. The slot is where the record waits; these rows are
+    // about it being paid, and paid at the right moment.
+    // -----------------------------------------------------------------
+
+    /// Drive a real `SessionDetached` through the dispatcher.
+    fn detach_session(
+        editor: &mut crate::editor::EditorState,
+        semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+        render_states: &mut HashMap<FrontendId, RenderState>,
+        fid: FrontendId,
+    ) {
+        let mut streams = HashMap::new();
+        let mut term_sizes = HashMap::new();
+        let mut last_idle = HashMap::new();
+        let mut last_active = HashMap::new();
+        let mut bells = HashMap::new();
+        let mut registry = SessionRegistry::new();
+        registry.register_session(fid, session(LEGACY_PANEL_VERSION, true));
+        handle_dispatcher_event(
+            DispatcherEvent::SessionDetached { frontend_id: fid },
+            editor,
+            render_states,
+            semantic_states,
+            &mut streams,
+            &mut term_sizes,
+            &mut last_idle,
+            &mut last_active,
+            &mut bells,
+            &mut registry,
+        );
+    }
+
+    /// Cancel the live gesture from INSIDE PROJECTION, by taking the
+    /// panel away.
+    ///
+    /// `publish_absent_panel` cancels while `render_frame` is building
+    /// the frame, which is the shape these rows are about: a
+    /// cancellation with nowhere to deliver its release.
+    ///
+    /// A mapping-generation advance is the other such trigger and would
+    /// read more naturally, but it cannot be driven on a TERMINAL
+    /// panel: that key tracks the screen and anchor, not the buffer, so
+    /// a foreign edit does not move it. `Absent` is family-independent
+    /// and reaches the same parking path.
+    /// Returns the epochs a later gesture must echo: re-showing the
+    /// panel ships a NEW declaration, and the old epochs are stale.
+    fn cancel_by_panel_absence(
+        editor: &crate::editor::EditorState,
+        states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+        fid: FrontendId,
+    ) -> (u64, u64) {
+        editor.hide_panel_for_test(fid);
+        {
+            let sem = states.get_mut(&fid).expect("projection");
+            let _ = sem.render_frame(editor);
+        }
+        // Re-shown and re-declared, because these rows are about what
+        // happens to the OWED RELEASE afterwards. A panel left `Absent`
+        // fails the inbound ladder, so no later gesture would reach the
+        // drain at all and the row would be observing the ladder rather
+        // than the slot.
+        editor.show_panel_for_test(fid);
+        shipped_declaration(editor, fid, states)
+    }
+
+    /// Q1/Q2 — a cancelled gesture's release is PARKED and then PAID.
+    ///
+    /// The cancellation happens inside projection, where no target
+    /// effect can run; dropping the record there is how the child ended
+    /// up holding a button with nothing left to lift it.
+    #[test]
+    fn q1_q2_a_cancelled_gesture_release_is_parked_then_delivered() {
+        let fid = FrontendId(810);
+        let (mut editor, mut states, mut render, _panel, buffer_id, epochs) =
+            terminal_panel_session(fid, true);
+        let cell = pmacs_protocol::CellCoord::new(1, 2);
+        let press = pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left);
+        let none = pmacs_protocol::Modifiers::default();
+
+        send_panel(
+            &mut editor,
+            &mut states,
+            &mut render,
+            fid,
+            epochs,
+            buffer_id,
+            cell,
+            press,
+            none,
+        );
+        assert_eq!(
+            child_stream(&editor),
+            vec![SGR_PRESS_1_2.to_vec()],
+            "fixture: the press reached the child"
+        );
+
+        let epochs = cancel_by_panel_absence(&editor, &mut states, fid);
+        assert!(
+            !states[&fid].has_accepted_gesture(),
+            "fixture: the advance cancelled the gesture"
+        );
+        assert!(
+            states[&fid].has_pending_release(),
+            "Q1: the record must be PARKED, not returned into a context \
+             that drops it"
+        );
+        assert!(
+            child_stream(&editor).is_empty(),
+            "and not delivered from inside projection, which cannot run \
+             a target effect"
+        );
+
+        // A later panel event: the drain runs ahead of it.
+        send_panel(
+            &mut editor,
+            &mut states,
+            &mut render,
+            fid,
+            epochs,
+            buffer_id,
+            cell,
+            press,
+            none,
+        );
+
+        let sent = child_stream(&editor);
+        assert!(
+            sent.contains(&SGR_RELEASE_1_2.to_vec()),
+            "Q2: the parked release must be PAID --- parking it and never \
+             draining leaves the child exactly as stranded, got {sent:?}"
+        );
+    }
+
+    /// Q3 — the owed release reaches the child BEFORE the next press.
+    ///
+    /// Draining after the dispatch instead of before puts them on the
+    /// wire reversed, which the child reads as a press followed by the
+    /// release of the gesture before it.
+    #[test]
+    fn q3_the_owed_release_precedes_the_next_press() {
+        let fid = FrontendId(811);
+        let (mut editor, mut states, mut render, _panel, buffer_id, epochs) =
+            terminal_panel_session(fid, true);
+        let cell = pmacs_protocol::CellCoord::new(1, 2);
+        let press = pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left);
+        let none = pmacs_protocol::Modifiers::default();
+
+        send_panel(
+            &mut editor,
+            &mut states,
+            &mut render,
+            fid,
+            epochs,
+            buffer_id,
+            cell,
+            press,
+            none,
+        );
+        let epochs = cancel_by_panel_absence(&editor, &mut states, fid);
+        let _ = child_stream(&editor);
+
+        send_panel(
+            &mut editor,
+            &mut states,
+            &mut render,
+            fid,
+            epochs,
+            buffer_id,
+            cell,
+            press,
+            none,
+        );
+
+        let sent = child_stream(&editor);
+        let release_at = sent.iter().position(|b| b == SGR_RELEASE_1_2);
+        let press_at = sent.iter().position(|b| b == SGR_PRESS_1_2);
+        assert!(
+            release_at.is_some() && press_at.is_some(),
+            "fixture: both the owed release and the new press must be on \
+             the wire, got {sent:?}"
+        );
+        assert!(
+            release_at < press_at,
+            "Q3: ORDER, not merely arrival --- the old gesture's release \
+             must precede the new gesture's press, got {sent:?}"
+        );
+    }
+
+    /// Q4 — detach pays what it owes before tearing the state down.
+    ///
+    /// `SessionDetached` drops `semantic_states` for the frontend, and
+    /// there is no later opportunity: a release not delivered here is
+    /// never delivered.
+    #[test]
+    fn q4_detach_delivers_an_owed_release_before_teardown() {
+        let fid = FrontendId(812);
+        let (mut editor, mut states, mut render, _panel, buffer_id, epochs) =
+            terminal_panel_session(fid, true);
+        let cell = pmacs_protocol::CellCoord::new(1, 2);
+        let press = pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left);
+        let none = pmacs_protocol::Modifiers::default();
+
+        send_panel(
+            &mut editor,
+            &mut states,
+            &mut render,
+            fid,
+            epochs,
+            buffer_id,
+            cell,
+            press,
+            none,
+        );
+        // Detach never sends another gesture, so the fresh epochs are
+        // not needed here --- only the parked release is.
+        let _ = cancel_by_panel_absence(&editor, &mut states, fid);
+        assert!(
+            states[&fid].has_pending_release(),
+            "fixture: a release is owed"
+        );
+        let _ = child_stream(&editor);
+
+        detach_session(&mut editor, &mut states, &mut render, fid);
+
+        assert_eq!(
+            child_stream(&editor),
+            vec![SGR_RELEASE_1_2.to_vec()],
+            "Q4: the owed release must be paid before teardown --- the \
+             next statement in that arm drops the state holding it"
+        );
+        assert!(
+            !states.contains_key(&fid),
+            "fixture: and the teardown really did run"
+        );
+    }
+
+    // Q5 IS NOT WITNESSED HERE, and this is why.
+    //
+    // The third drain sits in the daemon's per-frontend frame loop,
+    // between `sem.render_frame(editor)` returning and the loop that
+    // writes what it returned. These rows drive `render_frame`
+    // directly, so they never enter that loop and cannot observe the
+    // seam; the two drains they DO reach — before a panel-pointer
+    // effect, and before detach teardown — are witnessed by Q1-Q4.
+    //
+    // The seam is still load-bearing: a cancellation raised inside
+    // projection with no following panel event and no detach would
+    // otherwise let the successor frame reach the frontend ahead of the
+    // release its own new mapping required. Witnessing it needs a row
+    // that drives the real frame loop, which is acceptance-suite shaped
+    // rather than unit shaped. Recorded as OWED rather than assumed
+    // covered by its neighbours.
+
+    /// Q6 — the arm-over-pending invariant, as a BACKSTOP.
+    ///
+    /// The ordering is what prevents this; the assertion exists so that
+    /// a future path which cancels twice without draining is loud
+    /// rather than silently losing one release.
+    #[test]
+    fn q6_arming_never_happens_over_a_pending_release() {
+        let fid = FrontendId(813);
+        let (mut editor, mut states, mut render, _panel, buffer_id, epochs) =
+            terminal_panel_session(fid, true);
+        let cell = pmacs_protocol::CellCoord::new(1, 2);
+        let press = pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left);
+        let none = pmacs_protocol::Modifiers::default();
+
+        for _ in 0..3 {
+            send_panel(
+                &mut editor,
+                &mut states,
+                &mut render,
+                fid,
+                epochs,
+                buffer_id,
+                cell,
+                press,
+                none,
+            );
+            let _ = cancel_by_panel_absence(&editor, &mut states, fid);
+            assert!(
+                states[&fid].has_pending_release(),
+                "fixture: each round parks a release"
+            );
+        }
+
+        assert!(
+            !states[&fid].has_pending_release() || states[&fid].accepted_gesture().is_none(),
+            "Q6: a release may be owed, or a gesture armed, but arming \
+             OVER an owed release would lose one --- the drain before \
+             each effect is what keeps these from overlapping"
         );
     }
 

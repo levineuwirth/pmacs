@@ -2948,6 +2948,14 @@ impl EditorState {
         }
     }
 
+    /// Re-show this frontend's panel, for the Q rows.
+    #[doc(hidden)]
+    pub fn show_panel_for_test(&self, frontend_id: FrontendId) {
+        if let Some(view) = self.core.borrow_mut().views.get_mut(&frontend_id) {
+            view.panel_hidden = false;
+        }
+    }
+
     /// Classify an authenticated panel gesture, WITHOUT applying it
     /// (Q#BP-R4).
     ///

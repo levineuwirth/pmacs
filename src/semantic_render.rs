@@ -464,6 +464,21 @@ pub struct SemanticRenderState {
     /// match the press it ends, and a stale `Up` with no accepted
     /// `Down` must be inert rather than synthesising one.
     accepted_gesture: Option<AcceptedPanelGesture>,
+    /// §5b/parent 48 — a release this frontend is OWED, parked until
+    /// somewhere that can deliver it.
+    ///
+    /// Two of the three cancellation sites are inside frame production
+    /// — the mapping-generation advance and `publish_absent_panel` —
+    /// where no target effect can run. `cancel_accepted_gesture`
+    /// returned the record into those contexts and they dropped it, so
+    /// the gesture ended with the child still holding its button.
+    ///
+    /// **A SLOT, not a queue.** The latch holds at most one gesture per
+    /// frontend, so at most one release can be owed, and the bound is
+    /// structural rather than a cap someone had to choose. The drain
+    /// runs ahead of the next panel-pointer effect, so a second
+    /// cancellation cannot arrive while one is still parked.
+    pending_release: Option<AcceptedPanelGesture>,
     /// §5b — how many armed gestures an authority loss has ended this
     /// session.
     ///
@@ -686,6 +701,7 @@ impl SemanticRenderState {
             panel_mapping: None,
             panel_mapping_exhausted: false,
             accepted_gesture: None,
+            pending_release: None,
             panel_gesture_cancellations: 0,
             panel_epoch_used: 0,
             panel_presentation: None,
@@ -776,10 +792,40 @@ impl SemanticRenderState {
     /// without inventing a second cancellation.
     pub fn cancel_accepted_gesture(&mut self) -> Option<AcceptedPanelGesture> {
         let cancelled = self.accepted_gesture.take();
-        if cancelled.is_some() {
+        if let Some(record) = cancelled {
             self.panel_gesture_cancellations = self.panel_gesture_cancellations.saturating_add(1);
+            // PARKED, not just returned. Returning was the whole bug:
+            // the callers inside frame production cannot deliver a
+            // release, so the record went out of scope and the gesture
+            // ended with nothing terminated.
+            //
+            // Overwriting a still-parked release would lose one, so it
+            // is an invariant violation rather than a silent drop. It is
+            // a BACKSTOP: the ordering — drain before the next effect —
+            // is what actually prevents it.
+            debug_assert!(
+                self.pending_release.is_none(),
+                "a release was still owed when another gesture was \
+                 cancelled; the drain must run before any subsequent \
+                 panel-pointer effect"
+            );
+            self.pending_release = Some(record);
         }
         cancelled
+    }
+
+    /// Take the release this frontend is owed, if any.
+    ///
+    /// The RETURN of `cancel_accepted_gesture` is for inspection; THIS
+    /// is the delivery path.
+    pub fn take_pending_release(&mut self) -> Option<AcceptedPanelGesture> {
+        self.pending_release.take()
+    }
+
+    /// Whether a release is still owed, for assertions.
+    #[must_use]
+    pub fn has_pending_release(&self) -> bool {
+        self.pending_release.is_some()
     }
 
     /// The live gesture record, if any — parent 48 Q#BP-R4's
