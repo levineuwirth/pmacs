@@ -301,7 +301,18 @@ from #171 and #215.
   directory so `mktemp -d` fails, and asserts boundary error 2, no
   stage, and no residue. Temporary directories are RAII throughout;
   the `keep()`-plus-manual-cleanup shape is gone.
-- **36 gate rows, 16 GPU rows, full gate green.**
+- **36 gate rows, 16 GPU rows.**
+- **HEAD-EXACT GATE on `8802d6a`: green, all 8 stages**, log
+  `20260820T072102Z-3009434`. The first attempt on the same head
+  (`…-2931214`) failed `07-sweep` on
+  `composition_overhead_under_ten_percent` — a perf budget unrelated to
+  this lane, green in isolation, and a signature the
+  `panel-mapping-generation` ledger already records recurring. **Both
+  runs are recorded; no causal attribution is made** for the first,
+  only that the second is the head-exact evidence.
+- **The earlier `…-2647615` run is NOT head-exact evidence**: it
+  finished about 30 seconds before `bc7d776` was committed, so it
+  describes the implementation tree rather than a committed head.
 - **A4 mutations, each biting:** accepting any status 2 regardless of
   token → `gate_refuses_on_helper_error_…`; surfacing child stderr on a
   boundary failure → the conformance row **and** that row; token to
