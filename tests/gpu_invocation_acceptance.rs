@@ -289,9 +289,6 @@ mod crdt {
     /// surfaces it, a boundary failure must not.
     #[test]
     fn rd_precondition_validates_the_whole_conformance_set() {
-        // `self::` and NOT `crate::`: this file is ALSO compiled as a
-        // nested module of `gpu_initial_target_acceptance.rs`, where
-        // `crate::` is the outer test crate and has no `common`.
         // `super::` and NOT `crate::`: this file is ALSO compiled as a
         // nested module of `gpu_initial_target_acceptance.rs`, where
         // `crate::` is the outer test crate and has no `common`.

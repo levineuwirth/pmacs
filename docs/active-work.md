@@ -290,8 +290,9 @@ from #171 and #215.
   the shell needs them.
 - **Conformance vectors live in `tests/common/sigint_conformance.rs`**
   and are consumed by BOTH validators, so the two copies cannot drift
-  while each still reports "45 cases". Every stub emits a **sentinel on
-  stderr**, which is what separates `ValidatedError` from `Boundary` —
+  while each still reports "45 cases". The **branch-discriminating** cases emit a
+  sentinel on stderr, which is what separates `ValidatedError` from
+  `Boundary` —
   they share exit 2, so comparing codes alone let a validator that
   accepted every status 2 pass the whole matrix. An `Outcome` enum
   (Safe / ValidatedIgnored / ValidatedError / Boundary) is asserted
@@ -319,9 +320,15 @@ from #171 and #215.
   `gate_validates_the_whole_shared_conformance_set`; token-to-stderr
   fails `sigint_helper_reports_safe_…`. An earlier entry said the
   status-2 mutation was caught only by the dedicated row — that was
-  true of the pre-sentinel matrix and is **superseded**: every stub now
-  emits a sentinel on stderr, so the matrix can see which branch
-  produced the exit 2.
+  true of the pre-sentinel matrix and is **superseded**: the
+  branch-discriminating cases now carry a sentinel, so the matrix can
+  see which branch produced the exit 2.
+- **X3 and X4 deliberately carry their OWN stderr payloads**, not the
+  sentinel — X3 the canonical ignored wording with no token, X4 noise —
+  which is what makes them distinct inputs. `shared_cases()` asserts
+  uniqueness over `(status, stdout, stderr)`, so the earlier
+  45-entries-over-43-inputs collapse cannot recur silently; reverting
+  either payload now fails by name.
 - **Two PRE-EXISTING crdt-only failures found while gating properly:**
   `m4_24_bare_string_glob_stays_relative` and
   `m4_24_d3_fallback_base_is_the_smallest_attachment_dir`. They

@@ -29,8 +29,16 @@ pub const TOKEN_SAFE: &[u8] = b"pmacs-sigint-v1:safe";
 pub const TOKEN_IGNORED: &[u8] = b"pmacs-sigint-v1:ignored";
 pub const TOKEN_ERROR: &[u8] = b"pmacs-sigint-v1:error";
 
-/// Emitted on stderr by **every** stub, so a consumer's output can be
-/// searched for it: present ⇒ the child's stderr was surfaced.
+/// Emitted on stderr by the **branch-discriminating** cases — the
+/// cross-product rows and X1 — so a consumer's output can be searched
+/// for it: present ⇒ the child's stderr was surfaced.
+///
+/// **X3 and X4 deliberately carry their own payloads instead**, which
+/// is what makes them distinct inputs rather than duplicates of
+/// `1/E/empty` and `0/V/safe/bare`. An earlier revision gave every case
+/// this same sentinel and so shipped 45 entries over 43 distinct
+/// inputs; [`shared_cases`] now asserts uniqueness so that cannot
+/// recur silently.
 pub const SENTINEL: &str = "PMACS-CONFORMANCE-SENTINEL";
 
 /// The canonical wording the helper uses for `ignored`. X3 emits it
@@ -50,7 +58,8 @@ pub struct Case {
     pub expect: Outcome,
 }
 
-/// A `/bin/sh` stub reproducing one case, sentinel included.
+/// A `/bin/sh` stub reproducing one case exactly: its stdout bytes, its
+/// own stderr payload, and its status.
 #[must_use]
 pub fn stub_script(case: &Case) -> String {
     let octal = case.stdout.iter().fold(String::new(), |mut acc, b| {
@@ -185,5 +194,20 @@ pub fn shared_cases() -> Vec<Case> {
         stderr: "unrelated chatter on stderr".to_owned(),
         expect: Outcome::Safe,
     });
+    // The set must be 45 DISTINCT inputs, not merely 45 entries. A
+    // previous revision gave every case the same stderr, which silently
+    // collapsed X3 into `1/E/empty` and X4 into `0/V/safe/bare` — 45
+    // entries, 43 inputs, and two framing-specified cases quietly not
+    // exercised. Asserted here rather than in each suite so no consumer
+    // can forget it.
+    let mut seen = std::collections::HashSet::new();
+    for case in &out {
+        assert!(
+            seen.insert((case.status, case.stdout.clone(), case.stderr.clone())),
+            "duplicate conformance input at {}: (status, stdout, stderr) already present",
+            case.name
+        );
+    }
+    assert_eq!(seen.len(), out.len(), "every case must be a distinct input");
     out
 }
