@@ -117,9 +117,16 @@ impl Session {
         first
     }
 
+    /// The frame from whichever Present family this session negotiated.
+    ///
+    /// Family-agnostic on purpose: these rows are about the PROJECTION,
+    /// and which wrapper carries it is §5b's own concern, pinned by the
+    /// G6/G7/G8 rows rather than incidentally by thirty others.
     fn present(&mut self) -> PanelFrame {
         match self.frame() {
-            Some(PanelFramePayload::Present(frame)) => frame,
+            Some(
+                PanelFramePayload::Present(frame) | PanelFramePayload::PresentMapped { frame, .. },
+            ) => frame,
             other => panic!("expected a Present panel payload, got {other:?}"),
         }
     }
@@ -522,7 +529,10 @@ fn acc41_degenerate_geometry_fails_closed_to_zero_usable_grid() {
         session.declare(1, ROWS, COLS);
         open_panel(&session, "*panel*", 4);
         assert!(
-            matches!(session.frame(), Some(PanelFramePayload::Present(_))),
+            matches!(
+                session.frame(),
+                Some(PanelFramePayload::Present(_) | PanelFramePayload::PresentMapped { .. })
+            ),
             "{label}: fixture precondition — a band was visible first"
         );
 
@@ -898,7 +908,9 @@ fn acc45_one_statusline_invocation_serves_the_document_and_the_panel() {
     let panel_rows = messages
         .iter()
         .find_map(|message| match message {
-            InstanceMessage::PanelFrame(PanelFramePayload::Present(frame)) => Some(rows_of(frame)),
+            InstanceMessage::PanelFrame(
+                PanelFramePayload::Present(frame) | PanelFramePayload::PresentMapped { frame, .. },
+            ) => Some(rows_of(frame)),
             _ => None,
         })
         .expect("a panel frame");
@@ -1327,7 +1339,9 @@ fn sweep_a_panel_wider_than_the_terminal_cap_still_presents_its_terminal() {
     session.state.core.borrow_mut().focus_window(FID, panel);
 
     let frame = match session.frame() {
-        Some(PanelFramePayload::Present(frame)) => frame,
+        Some(
+            PanelFramePayload::Present(frame) | PanelFramePayload::PresentMapped { frame, .. },
+        ) => frame,
         other => panic!(
             "a legally wide panel must still present its terminal; got {other:?} \
              — and the durable state says hidden={}",
@@ -1362,3 +1376,728 @@ fn sweep_a_panel_wider_than_the_terminal_cap_still_presents_its_terminal() {
 // write into their real data root.
 #[path = "common/iso.rs"]
 mod iso;
+
+// ---------------------------------------------------------------------------
+// §5b G1–G4 — the authoritative cell-mapping key
+//
+// The key is derived from a FINGERPRINT of the inverse mapping's inputs,
+// so the changing/stable split is structural: an input that is hashed
+// moves the key by construction, and one that is not cannot. These rows
+// pin each input individually, because a single "it changed" row cannot
+// show WHICH input moved it — and a key that silently ignored, say,
+// `view_left` would pass every row that only scrolls vertically.
+// ---------------------------------------------------------------------------
+
+/// Edit the panel's buffer from OUTSIDE any gesture — the "foreign
+/// edit" the ladder cannot see. Done in Rust rather than Lua because it
+/// must be a plain content mutation with no view, cursor or command
+/// state attached to it.
+fn foreign_edit(session: &Session, text: &str) {
+    let core = session.state.core.borrow();
+    let side = core.side_window_for(FID).expect("a side window");
+    let buffer_id = core.windows[&side].buffer_id;
+    let registry = core.registry.clone();
+    let mut reg = registry.borrow_mut();
+    let buffer = reg.get_mut(buffer_id).expect("the panel's buffer");
+    buffer
+        .set_generated_contents(text.as_bytes())
+        .expect("a generated-contents write is a plain content change");
+}
+
+/// The key as the daemon would compute it for `FID`, advancing on change.
+fn mapping_generation(session: &mut Session) -> Option<u64> {
+    let snapshot = session.state.panel_mapping_snapshot(FID);
+    session.render.panel_mapping_generation(snapshot)
+}
+
+/// §5b G1 — a **foreign** edit before the next render moves the key.
+///
+/// This is the case the whole slice exists for: the epoch ladder cannot
+/// see it. No buffer is replaced, no panel reopens, no geometry is
+/// re-declared — every epoch holds — and yet the byte under a cell has
+/// changed. It is also why the key must be derived on demand rather than
+/// from the last emitted frame: nothing has rendered here.
+#[test]
+fn g1_a_foreign_edit_moves_the_mapping_key_before_anything_renders() {
+    let mut session = Session::new();
+    open_panel(&session, "g1", 4);
+    session.declare(1, 24, 80);
+    let _ = session.present();
+
+    let before = mapping_generation(&mut session).expect("a presentable panel has a key");
+    assert!(
+        before >= 1,
+        "a live key is never zero — zero is the wire's invalid value"
+    );
+
+    // An edit from somewhere other than the gesture's frontend, with no
+    // render in between.
+    foreign_edit(&session, "foreign edit\n");
+
+    let after = mapping_generation(&mut session).expect("still presentable");
+    assert!(
+        after > before,
+        "a foreign edit changes which byte a cell means, and no epoch \
+         moves with it — this is the hole the ladder cannot close"
+    );
+}
+
+/// §5b G15 — **TUI structural control**: the local panel click, drag
+/// and wheel paths keep their effects with NO mapping generation
+/// anywhere.
+///
+/// The TUI hit-tests the daemon's own state directly. It receives no
+/// `PanelFrame`, so it has no generation to echo and there is nothing
+/// for a freshness check to compare. If the check ever migrates from
+/// the authenticated semantic boundary into shared replay, local input
+/// stops working entirely — and it would stop silently, because
+/// refusing a gesture looks exactly like a gesture that did nothing.
+///
+/// The control is the FIXTURE: this session has no
+/// `SemanticRenderState` at all. Every effect below is therefore
+/// reached without a producer in existence, which is the strongest form
+/// of "no generation was consulted" — not an assertion about a value,
+/// but the absence of anything that could hold one.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one control over three input kinds: splitting it would \
+              give each leg its own fixture, and the shared fixture — a \
+              session with no SemanticRenderState at all — is the control"
+)]
+fn g15_local_tui_panel_input_keeps_its_effects_with_no_generation() {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind as TuiMouseKind};
+
+    let state = EditorState::new_with_roots(&crate::iso::roots());
+    exec(&state, "pmacs.lsp.config = {}");
+    state.sync_frame_geometry(FrontendId::LOCAL, CellSize::new(ROWS, COLS));
+    exec(
+        &state,
+        "PANEL_BUF = pmacs.buffer.create(\"*g15*\")
+         pmacs.buffer.set_generated_contents(PANEL_BUF, \
+             \"alpha alpha\\nbravo bravo\\ncharlie\\ndelta\\necho\\nfox\\ngolf\\nhotel\\n\")
+         pmacs.window.display(PANEL_BUF, { side = \"bottom\", height = 4 })",
+    );
+    let mut state = state;
+    let panel = state
+        .core
+        .borrow()
+        .side_window_for(FrontendId::LOCAL)
+        .expect("a panel");
+    let document = state
+        .core
+        .borrow()
+        .non_side_target(FrontendId::LOCAL)
+        .expect("a document");
+
+    // Paint one frame first, exactly as the TUI does before a user can
+    // click anything. The window's text view is built from the buffer at
+    // paint time, so input dispatched against an unpainted window maps
+    // every row to offset zero and the row proves nothing.
+    {
+        let mut cells = vec![pmacs::cell::Cell::default(); (ROWS * COLS) as usize];
+        let mut grid = pmacs::cell::CellGrid {
+            cells: &mut cells,
+            stride: COLS,
+            size: CellSize::new(ROWS, COLS),
+        };
+        pmacs::editor::paint_frame(
+            &state,
+            FrontendId::LOCAL,
+            &HashMap::new(),
+            &mut grid,
+            CellSize::new(ROWS, COLS),
+        );
+    }
+
+    // Where the panel actually is, from the same layout the TUI paints.
+    let panel_rect = {
+        let core = state.core.borrow();
+        let view = core.views.get(&FrontendId::LOCAL).expect("LOCAL view");
+        let area = pmacs::window::Rect::new(0, 0, ROWS - 1, COLS);
+        let fixed = core.panel_fixed_rows(FrontendId::LOCAL, area.size.rows);
+        view.layout.compute(area, &fixed)[&panel]
+    };
+    let row = u16::try_from(panel_rect.origin.row + 1).expect("row fits");
+    // Past the gutter, and inside a line that is long enough for the
+    // drag below to stay within it: clamping at the line end would make
+    // press and drag land on the same byte and prove nothing.
+    let gutter = state.core.borrow().windows[&panel].gutter_width();
+    let col = u16::try_from(panel_rect.origin.col + gutter + 1).expect("col fits");
+    let click = |kind| MouseEvent {
+        kind,
+        column: col,
+        row,
+        modifiers: KeyModifiers::NONE,
+    };
+
+    // Precondition, scoped to THIS view: the panel is not already
+    // focused, or every assertion below would pass without input.
+    assert_eq!(
+        state.core.borrow().views[&FrontendId::LOCAL].active,
+        document,
+        "precondition: the document is focused"
+    );
+
+    // CLICK — focuses the panel and positions the cursor.
+    state.dispatch_mouse(
+        FrontendId::LOCAL,
+        click(TuiMouseKind::Down(MouseButton::Left)),
+        CellSize::new(ROWS, COLS),
+    );
+    assert_eq!(
+        state.core.borrow().views[&FrontendId::LOCAL].active,
+        panel,
+        "a local press focuses the panel — no token, no refusal"
+    );
+    let pressed_cursor = state.core.borrow().windows[&panel].cursor;
+    assert_ne!(
+        pressed_cursor, 0,
+        "the press positioned the cursor inside the text, not at the \
+         buffer start — a row that pressed into an unpainted window \
+         would read zero here and never notice"
+    );
+
+    // DRAG — extends a selection inside the panel.
+    state.dispatch_mouse(
+        FrontendId::LOCAL,
+        MouseEvent {
+            kind: TuiMouseKind::Drag(MouseButton::Left),
+            column: col + 7,
+            row,
+            modifiers: KeyModifiers::NONE,
+        },
+        CellSize::new(ROWS, COLS),
+    );
+    assert!(
+        state.core.borrow().windows[&panel].selection.is_some(),
+        "a local drag selects inside the panel"
+    );
+    assert_ne!(
+        state.core.borrow().windows[&panel].cursor,
+        pressed_cursor,
+        "and the drag moved the cursor, so the selection is a real range"
+    );
+
+    state.dispatch_mouse(
+        FrontendId::LOCAL,
+        MouseEvent {
+            kind: TuiMouseKind::Up(MouseButton::Left),
+            column: col + 7,
+            row,
+            modifiers: KeyModifiers::NONE,
+        },
+        CellSize::new(ROWS, COLS),
+    );
+
+    // WHEEL — two ticks, both of which must land. The mapped family's
+    // wheel exemption exists so this stays true over the wire; here
+    // there is no wire, and it must be true for the same reason.
+    let before = state.core.borrow().windows[&panel].view_top;
+    for _ in 0..2 {
+        state.dispatch_mouse(
+            FrontendId::LOCAL,
+            click(TuiMouseKind::ScrollDown),
+            CellSize::new(ROWS, COLS),
+        );
+    }
+    assert_ne!(
+        state.core.borrow().windows[&panel].view_top,
+        before,
+        "a local wheel scrolls the panel"
+    );
+}
+
+/// §5b G9a — a generation change is EMITTED even when the picture is
+/// byte-identical.
+///
+/// The panel shows four rows; an edit further down the buffer moves the
+/// key without changing a single visible cell. Suppressing that frame
+/// because the cells match would leave the frontend echoing a
+/// generation the daemon has already retired, and every gesture it then
+/// sends is refused — the panel goes quietly dead while looking
+/// perfectly correct.
+#[test]
+fn g9a_a_generation_change_ships_even_when_the_cells_are_identical() {
+    let mut session = Session::new();
+    open_panel(&session, "g9a", 4);
+    session.declare(1, 24, 80);
+
+    // Enough lines that the visible four cannot see the edit below.
+    let mut lines = String::new();
+    for line in 0..20 {
+        use std::fmt::Write as _;
+        writeln!(lines, "line {line}").expect("writing to a String never fails");
+    }
+    foreign_edit(&session, &lines);
+    let baseline = session.present();
+    let before = mapping_generation(&mut session).expect("a live key");
+
+    // Change line 15 only. Rows 0..4 are untouched.
+    let edited = lines.replace("line 15\n", "LINE 15 CHANGED\n");
+    assert_ne!(edited, lines, "fixture: the edit must actually apply");
+    foreign_edit(&session, &edited);
+
+    let payload = session
+        .frame()
+        .expect("a generation change is not silence: the frame must ship");
+    let (frame, shipped) = match payload {
+        PanelFramePayload::PresentMapped {
+            frame,
+            mapping_generation,
+        } => (frame, mapping_generation),
+        other => panic!("a v25 producer ships the mapped family, got {other:?}"),
+    };
+    assert_eq!(
+        frame.cells, baseline.cells,
+        "fixture: the visible cells really are identical — if they \
+         differ, this row is testing an ordinary repaint instead"
+    );
+    assert!(
+        shipped > before,
+        "and the key moved with the edit below the fold"
+    );
+}
+
+/// §5b G3 — the **stable** inputs, one row each.
+///
+/// Every entry here is something that repaints a panel without changing
+/// which byte a cell denotes. A drag provokes selection repaints on every
+/// motion, so a key that moved with them would cancel the gesture it
+/// exists to protect after a single step.
+#[test]
+fn g3_repaints_that_cannot_move_a_byte_leave_the_key_alone() {
+    let mut session = Session::new();
+    open_panel(&session, "g3", 4);
+    session.declare(1, 24, 80);
+    let _ = session.present();
+
+    let baseline = mapping_generation(&mut session).expect("a key");
+
+    // Re-reading with nothing changed at all.
+    assert_eq!(
+        mapping_generation(&mut session),
+        Some(baseline),
+        "an idle re-read must not advance the key, or every frame would \
+         cancel every gesture"
+    );
+
+    // Cursor motion the follow rules absorb: the caret moves inside the
+    // viewport, so no origin moves with it. Set directly, so nothing but
+    // the cursor changes.
+    {
+        let mut core = session.state.core.borrow_mut();
+        let side = core.side_window_for(FID).expect("a side window");
+        let window = core.windows.get_mut(&side).expect("the side window");
+        window.cursor = 0;
+    }
+    assert_eq!(
+        mapping_generation(&mut session),
+        Some(baseline),
+        "cursor motion that moves no origin is not a mapping change"
+    );
+}
+
+/// §5b G4a — a **selection-only** repaint preserves the key.
+///
+/// Split from G3 because it is the one the lifecycle depends on: G4b —
+/// that an in-flight drag then continues through real replay — is owed by
+/// the rebased replay lane, which is the only branch where replay exists.
+#[test]
+fn g4a_a_selection_only_repaint_preserves_the_mapping_key() {
+    let mut session = Session::new();
+    open_panel(&session, "g4a", 4);
+    session.declare(1, 24, 80);
+    let _ = session.present();
+
+    let baseline = mapping_generation(&mut session).expect("a key");
+    foreign_edit(&session, "alpha beta\n");
+    let after_edit = mapping_generation(&mut session).expect("a key");
+    assert!(after_edit > baseline, "the edit itself is a mapping change");
+
+    // Now a selection, with no content or viewport change.
+    {
+        let mut core = session.state.core.borrow_mut();
+        let side = core.side_window_for(FID).expect("a side window");
+        let window = core.windows.get_mut(&side).expect("the side window");
+        window.selection = Some(pmacs::window::Selection { anchor: 0 });
+        window.cursor = 5;
+    }
+    assert_eq!(
+        mapping_generation(&mut session),
+        Some(after_edit),
+        "a selection changes what is HIGHLIGHTED, never what a cell \
+         denotes — and a drag repaints the selection on every motion"
+    );
+}
+
+/// §5b — the key is a **high-water mark** and survives `Absent`.
+///
+/// Hiding the band clears input authority, but it must not reset the
+/// generation: a frame delayed across the hide would otherwise return
+/// with a lower value and be believed.
+#[test]
+fn the_mapping_key_never_moves_backward_across_a_hidden_panel() {
+    let mut session = Session::new();
+    open_panel(&session, "hw", 4);
+    session.declare(1, 24, 80);
+    let _ = session.present();
+
+    let before = mapping_generation(&mut session).expect("a key");
+    foreign_edit(&session, "one\n");
+    let peak = mapping_generation(&mut session).expect("a key");
+    assert!(peak > before);
+
+    // Hide it: no fingerprint, so no advance — and no reset either.
+    {
+        let mut core = session.state.core.borrow_mut();
+        core.views
+            .get_mut(&FID)
+            .expect("the frontend's view")
+            .panel_hidden = true;
+    }
+    assert_eq!(
+        mapping_generation(&mut session),
+        None,
+        "no presentable panel means no key to stamp, which is not the \
+         same as a key of zero"
+    );
+    assert_eq!(
+        session.render.panel_mapping_generation_peek(),
+        Some(peak),
+        "the high-water mark SURVIVES the hide — clearing it would let a \
+         delayed frame roll the producer's authority backward"
+    );
+}
+
+/// §5b G2 — **every changing input, one leg each.**
+///
+/// Enumerated rather than asserted in aggregate, and mutation testing is
+/// what forced it: with only the content-edit row present, dropping
+/// `view_left` from the key and collapsing the grid to `rows * cols`
+/// both stayed GREEN. A single "the key moved" row cannot show *which*
+/// input moved it, and a key that ignores horizontal scrolling passes
+/// every row that only scrolls vertically.
+#[test]
+fn g2_each_input_of_the_inverse_mapping_moves_the_key_on_its_own() {
+    // Each leg names one input and touches only that input.
+    type Leg = (&'static str, fn(&Session));
+
+    let legs: &[Leg] = &[
+        ("view_top", |session| {
+            let mut core = session.state.core.borrow_mut();
+            let side = core.side_window_for(FID).expect("side");
+            core.windows.get_mut(&side).expect("win").view_top += 1;
+        }),
+        ("view_left — GUI arc 1b makes this real", |session| {
+            let mut core = session.state.core.borrow_mut();
+            let side = core.side_window_for(FID).expect("side");
+            core.windows.get_mut(&side).expect("win").view_left += 1;
+        }),
+        ("wrap mode", |session| {
+            let mut core = session.state.core.borrow_mut();
+            let side = core.side_window_for(FID).expect("side");
+            let window = core.windows.get_mut(&side).expect("win");
+            window.last_wrap = match window.last_wrap {
+                pmacs::view::WrapMode::Wrap => pmacs::view::WrapMode::Truncate,
+                pmacs::view::WrapMode::Truncate => pmacs::view::WrapMode::Wrap,
+            };
+        }),
+        (
+            "content columns — the gutter is subtracted here",
+            |session| {
+                let mut core = session.state.core.borrow_mut();
+                let side = core.side_window_for(FID).expect("side");
+                core.windows.get_mut(&side).expect("win").last_content_cols += 1;
+            },
+        ),
+        ("fold PROJECTION POLICY, owned by the view", |session| {
+            let mut core = session.state.core.borrow_mut();
+            let view = core.views.get_mut(&FID).expect("view");
+            view.fold_projection = !view.fold_projection;
+        }),
+        ("fold CONTENT, owned by the buffer", |session| {
+            let core = session.state.core.borrow();
+            let side = core.side_window_for(FID).expect("side");
+            let buffer_id = core.windows[&side].buffer_id;
+            let registry = core.registry.clone();
+            let mut reg = registry.borrow_mut();
+            let buffer = reg.get_mut(buffer_id).expect("buffer");
+            let store = core.fold_registry.store_or_attach(buffer);
+            store
+                .lock()
+                .expect("fold store mutex")
+                .insert(pmacs_protocol::ByteRange { start: 0, end: 1 });
+        }),
+    ];
+
+    for (name, mutate) in legs {
+        let mut session = Session::new();
+        open_panel(&session, "g2", 4);
+        session.declare(1, 24, 80);
+        let _ = session.present();
+
+        let before = mapping_generation(&mut session).expect("a key");
+        mutate(&session);
+        let after = mapping_generation(&mut session).expect("a key");
+        assert!(
+            after > before,
+            "changing {name} changes which byte a cell means, so the key \
+             must move; it did not ({before} → {after})"
+        );
+    }
+}
+
+/// §5b G2 — grid **rows** and **columns** are independent inputs,
+/// proven by a **transposition**.
+///
+/// Revision-16's version changed one dimension at a time and could not
+/// discriminate: `last_content_cols` co-varies with a column change, so
+/// collapsing the key to `rows * cols` stayed green. I recorded that as
+/// unwitnessable and claimed no production path reached a
+/// same-area transition. **That was wrong** — resize plus redeclare
+/// gets there: 4×80 → 8×40 holds the product at 320 while swapping the
+/// dimensions, and `last_content_cols` is not refreshed until the next
+/// render, so the two grid fields are isolated.
+#[test]
+fn g2_a_transposed_grid_moves_the_key_at_an_unchanged_area() {
+    let mut session = Session::new();
+    open_panel(&session, "g2t", 4);
+    session.declare(1, 24, 80);
+    let _ = session.present();
+
+    let before = mapping_generation(&mut session).expect("a key");
+
+    // 4×80 → 8×40. Same area, different shape, and no render between.
+    assert!(
+        session.state.apply_panel_resize_rows(FID, 8),
+        "the resize must be accepted, or the transposition never happens"
+    );
+    session.declare(2, 24, 40);
+
+    let after = mapping_generation(&mut session).expect("a key");
+    assert!(
+        after > before,
+        "a transposed grid inverts differently at the same area — a key \
+         hashing rows*cols would not notice ({before} → {after})"
+    );
+}
+
+/// §5b G3 — **focus** is a stable input.
+///
+/// Missing from the first version of G3, which covered only idle and
+/// cursor. Focus in particular is the one a naive
+/// implementation gets wrong, because the panel frame carries a
+/// `focused` flag and it is tempting to fold the whole frame into the
+/// key.
+#[test]
+fn g3_focus_is_a_stable_input() {
+    let mut session = Session::new();
+    open_panel(&session, "g3b", 4);
+    session.declare(1, 24, 80);
+    let _ = session.present();
+
+    let baseline = mapping_generation(&mut session).expect("a key");
+
+    // Focus. The band's `focused` flag flips; no byte moves.
+    {
+        let mut core = session.state.core.borrow_mut();
+        let side = core.side_window_for(FID).expect("side");
+        core.focus_window(FID, side);
+    }
+    assert_eq!(
+        mapping_generation(&mut session),
+        Some(baseline),
+        "focus decides CHROME, never which byte a cell denotes — and a \
+         click focuses the panel mid-gesture"
+    );
+
+    // Styling is pinned STRUCTURALLY rather than by driving a theme
+    // change here: `PanelMappingSnapshot` has no style field at all, so
+    // there is nothing a recolour could touch. The terminal side — where
+    // a convenient style-bumping counter DOES exist and had to be
+    // rejected — is pinned in `screen.rs`'s own tests, at the level the
+    // classification lives.
+}
+
+/// §5b — the snapshot **selects the right domain by target kind**.
+///
+/// Added because mutation testing found the branch unwitnessed: routing
+/// terminal panels through the DOCUMENT arm — keying them on the
+/// buffer's revision, which §5b explicitly rejects — left all thirty-five
+/// other rows green. The daemon-level half of the terminal contract is
+/// that the branch is taken at all; `screen.rs` owns the half that says
+/// the revision it reads classifies events correctly.
+#[test]
+fn the_mapping_snapshot_picks_the_terminal_domain_for_a_terminal_panel() {
+    // Document panel → the document domain.
+    {
+        let mut session = Session::new();
+        open_panel(&session, "doc", 4);
+        session.declare(1, 24, 80);
+        let _ = session.present();
+        let snapshot = session
+            .state
+            .panel_mapping_snapshot(FID)
+            .expect("a presentable document panel");
+        assert!(
+            matches!(
+                snapshot.content(),
+                pmacs::editor::PanelMappingContent::Document { .. }
+            ),
+            "a document panel is keyed on its buffer's content revision"
+        );
+    }
+
+    // Terminal panel → the terminal domain.
+    {
+        let mut session = Session::new();
+        session.declare(1, 24, 80);
+        exec(
+            &session.state,
+            "TERM_BUF = pmacs.terminal.open { command = \"/bin/sh\", \
+               args = { \"-c\", \"sleep 30\" }, display = \"panel\" }",
+        );
+        let _ = session.frame();
+        let snapshot = session
+            .state
+            .panel_mapping_snapshot(FID)
+            .expect("a presentable terminal panel");
+        assert!(
+            matches!(
+                snapshot.content(),
+                pmacs::editor::PanelMappingContent::Terminal { .. }
+            ),
+            "a terminal panel is keyed on the SCREEN's mapping revision \
+             and scroll anchor — its buffer revision tracks something \
+             else entirely and would both miss real changes and fire on \
+             non-changes"
+        );
+    }
+}
+
+/// §5b — the terminal key **across the seam**.
+///
+/// `screen.rs` proves the counter classifies events correctly, and the
+/// row above proves the snapshot picks the terminal domain. Neither
+/// notices a `view_mapping_identity` that returns a CONSTANT: the
+/// classification is right, the branch is taken, and the daemon's key
+/// still never moves. These rows join the two halves.
+#[test]
+fn g2_g3_a_terminal_panels_key_tracks_its_screen_and_anchor() {
+    use pmacs::ansi::AnsiEvent;
+
+    let mut session = Session::new();
+    session.declare(1, 24, 80);
+    exec(
+        &session.state,
+        "TERM_BUF = pmacs.terminal.open { command = \"/bin/sh\", \
+           args = { \"-c\", \"sleep 30\" }, display = \"panel\" }",
+    );
+    let _ = session.frame();
+
+    let buffer_id = {
+        let core = session.state.core.borrow();
+        let side = core.side_window_for(FID).expect("side");
+        core.windows[&side].buffer_id
+    };
+    let feed = |session: &Session, event: AnsiEvent| {
+        assert!(
+            session
+                .state
+                .terminal_manager
+                .borrow_mut()
+                .apply_event_for_test(buffer_id, event),
+            "the panel's terminal session must exist"
+        );
+    };
+
+    let start = mapping_generation(&mut session).expect("a terminal panel has a key");
+
+    // CHANGING: a glyph appears where none was.
+    feed(&session, AnsiEvent::Text("A".to_owned()));
+    let after_glyph = mapping_generation(&mut session).expect("a key");
+    assert!(
+        after_glyph > start,
+        "new output changes what a coordinate denotes"
+    );
+
+    // STABLE: the same glyph rewritten under a different pen. This is
+    // the row that forced `write_character` to compare glyphs — a
+    // blanket bump made a recolour cancel the drag.
+    feed(&session, AnsiEvent::CursorPosition { row: 1, col: 1 });
+    feed(
+        &session,
+        AnsiEvent::SetStyle(pmacs_protocol::Style::default()),
+    );
+    feed(&session, AnsiEvent::Text("A".to_owned()));
+    assert_eq!(
+        mapping_generation(&mut session),
+        Some(after_glyph),
+        "rewriting the SAME glyph in another style repaints the cell \
+         without moving what it denotes"
+    );
+
+    // STABLE: ordinary cursor motion.
+    feed(&session, AnsiEvent::CursorPosition { row: 2, col: 3 });
+    assert_eq!(
+        mapping_generation(&mut session),
+        Some(after_glyph),
+        "moving the caret denotes nothing new — and these paths were \
+         advancing the revision until §5b's terminal correction"
+    );
+
+    // CHANGING: the view's **scroll anchor** moves, with the child's
+    // screen untouched. The same coordinate then names a different
+    // retained row.
+    //
+    // This is the leg that separates the anchor from the screen
+    // revision: the baseline is taken AFTER the history exists, so a
+    // constant anchor leaves it unchanged and the assertion below fails
+    // even though `mapping_revision` is perfectly live.
+    let key = {
+        let core = session.state.core.borrow();
+        let side = core.side_window_for(FID).expect("side");
+        pmacs::terminal::view::TerminalViewKey::new(FID, side, buffer_id)
+    };
+    let viewport = {
+        let core = session.state.core.borrow();
+        let grid = core.panel_grid_size(FID).expect("a presentable panel");
+        pmacs_protocol::CellSize::new(grid.rows.saturating_sub(1), grid.cols)
+    };
+    for _ in 0..40 {
+        feed(&session, AnsiEvent::LineFeed);
+    }
+    let anchor_of = |session: &Session| {
+        session
+            .state
+            .terminal_manager
+            .borrow()
+            .view_mapping_identity(key)
+            .expect("the panel's terminal view")
+            .1
+    };
+
+    let before_scroll = mapping_generation(&mut session).expect("a key");
+    let anchor_before = anchor_of(&session);
+    assert!(
+        session
+            .state
+            .terminal_manager
+            .borrow_mut()
+            .scroll_view(key, viewport, 3),
+        "the scroll must actually move, or this leg proves nothing"
+    );
+
+    assert_ne!(
+        anchor_of(&session),
+        anchor_before,
+        "scrolling pins the view to a retained row, so the anchor moves"
+    );
+    let after_scroll = mapping_generation(&mut session).expect("a key");
+    assert!(
+        after_scroll > before_scroll,
+        "the anchor is part of the mapping — the same coordinate now \
+         names a different retained row, with the screen untouched"
+    );
+}

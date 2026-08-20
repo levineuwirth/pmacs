@@ -379,6 +379,28 @@ fn coalesce_kind(event: &FrontendEvent) -> Option<u8> {
             kind: MouseKind::Drag(_),
             ..
         } => Some(7),
+        // §5b G13a — the v25 mapped family needs its OWN tags. Falling
+        // through to `None` would make pixel-rate mapped motion lossless
+        // and fill the bounded queue, which is `OUTBOX_MAX` events of
+        // hover before the socket closes.
+        //
+        // Tail-replacement takes the whole newer event, so the surviving
+        // event carries the latest coordinate AND the latest
+        // `mapping_generation` together — a collapsed run can never pair
+        // a new coordinate with a stale generation.
+        //
+        // Distinct from the legacy tags 6/7 rather than shared with
+        // them. A session negotiates one family and never mixes the two,
+        // so sharing would buy nothing and would let a family confusion
+        // collapse silently instead of showing up as two queued events.
+        FrontendEvent::PanelPointerMapped {
+            kind: MouseKind::Move,
+            ..
+        } => Some(8),
+        FrontendEvent::PanelPointerMapped {
+            kind: MouseKind::Drag(_),
+            ..
+        } => Some(9),
         _ => None,
     }
 }
@@ -1098,6 +1120,36 @@ impl AttachClient {
         })
     }
 
+    /// §5b — the MAPPED gesture, echoing the generation of the frame
+    /// this frontend is displaying.
+    ///
+    /// A separate entry point rather than an `Option<u64>` on the one
+    /// above: the two variants are exclusive per session, and a
+    /// nullable field would let a caller send the mapped family with no
+    /// generation, which is the shape the daemon refuses.
+    #[allow(clippy::too_many_arguments)] // mirrors `PanelPointerMapped`'s wire shape exactly.
+    pub fn send_panel_pointer_mapped(
+        &self,
+        geometry_epoch: u64,
+        panel_epoch: u64,
+        buffer_id: BufferId,
+        coord: CellCoord,
+        kind: MouseKind,
+        mods: Modifiers,
+        mapping_generation: u64,
+    ) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::PanelPointerMapped {
+            frontend_id: self.frontend_id,
+            geometry_epoch,
+            panel_epoch,
+            buffer_id,
+            coord,
+            kind,
+            mods,
+            mapping_generation,
+        })
+    }
+
     /// Send a `FrontendEvent::PanelPointer` (Q#BP16): a gesture
     /// hit-tested locally to a panel CELL. Callers gate on
     /// [`Self::session_protocol_version`] `>= 21`.
@@ -1450,6 +1502,115 @@ mod tests {
             kind,
             mods: Modifiers::NONE,
         }
+    }
+
+    fn fe_panel_mapped(kind: MouseKind, row: u32, col: u32, generation: u64) -> FrontendEvent {
+        FrontendEvent::PanelPointerMapped {
+            frontend_id: FrontendId(1),
+            buffer_id: BufferId::from_raw(1),
+            coord: CellCoord::new(row, col),
+            kind,
+            mods: Modifiers::NONE,
+            geometry_epoch: 1,
+            panel_epoch: 1,
+            mapping_generation: generation,
+        }
+    }
+
+    /// §5b G13a/G13b — the mapped family keeps the legacy family's
+    /// coalescing contract: `Move` and `Drag` collapse to the latest
+    /// coordinate AND generation together; press, release and every
+    /// wheel kind stay lossless and ordered.
+    #[test]
+    fn mapped_panel_motion_coalesces_carrying_its_latest_generation() {
+        let mut ob = Outbox::new();
+        ob.enqueue(fe_panel_mapped(MouseKind::Down(MouseButton::Left), 0, 0, 4));
+        ob.enqueue(fe_panel_mapped(MouseKind::Drag(MouseButton::Left), 0, 1, 4));
+        ob.enqueue(fe_panel_mapped(MouseKind::Drag(MouseButton::Left), 0, 2, 5));
+        ob.enqueue(fe_panel_mapped(MouseKind::Drag(MouseButton::Left), 0, 3, 6));
+        ob.enqueue(fe_panel_mapped(MouseKind::Up(MouseButton::Left), 0, 3, 6));
+        assert_eq!(
+            ob.queue.len(),
+            3,
+            "the drag run collapsed to one; without a tag of its own the \
+             mapped family is lossless and this is five"
+        );
+        // The whole event is replaced, so coordinate and generation
+        // advance TOGETHER. A tag that replaced only the coordinate
+        // would leave generation 4 on a cell measured under 6, which the
+        // daemon then refuses as stale.
+        assert!(
+            matches!(
+                &ob.queue[1],
+                FrontendEvent::PanelPointerMapped {
+                    kind: MouseKind::Drag(MouseButton::Left),
+                    coord: CellCoord { row: 0, col: 3 },
+                    mapping_generation: 6,
+                    ..
+                }
+            ),
+            "surviving drag: {:?}",
+            &ob.queue[1]
+        );
+
+        // G13b — wheel ticks carry scroll DISTANCE. Two ticks in one
+        // generation must both survive the queue, or the panel scrolls
+        // once and stops.
+        let mut wheel = Outbox::new();
+        wheel.enqueue(fe_panel_mapped(MouseKind::ScrollUp, 1, 1, 7));
+        wheel.enqueue(fe_panel_mapped(MouseKind::ScrollUp, 1, 1, 7));
+        wheel.enqueue(fe_panel_mapped(MouseKind::ScrollDown, 1, 1, 7));
+        wheel.enqueue(fe_panel_mapped(MouseKind::ScrollLeft, 1, 1, 7));
+        wheel.enqueue(fe_panel_mapped(MouseKind::ScrollRight, 1, 1, 7));
+        assert_eq!(wheel.queue.len(), 5, "every wheel kind stays lossless");
+
+        // Repeated presses are what the daemon reads as a multi-click,
+        // and a right press is the context gesture.
+        let mut presses = Outbox::new();
+        presses.enqueue(fe_panel_mapped(MouseKind::Down(MouseButton::Left), 2, 2, 8));
+        presses.enqueue(fe_panel_mapped(MouseKind::Down(MouseButton::Left), 2, 2, 8));
+        presses.enqueue(fe_panel_mapped(
+            MouseKind::Down(MouseButton::Right),
+            2,
+            2,
+            8,
+        ));
+        assert_eq!(presses.queue.len(), 3, "presses stay lossless");
+
+        // Motion does not collapse ACROSS an intervening lossless event.
+        let mut mixed = Outbox::new();
+        mixed.enqueue(fe_panel_mapped(MouseKind::Move, 3, 1, 9));
+        mixed.enqueue(fe_panel_mapped(MouseKind::Move, 3, 2, 9));
+        assert_eq!(mixed.queue.len(), 1);
+        mixed.enqueue(fe_panel_mapped(MouseKind::ScrollDown, 3, 2, 9));
+        mixed.enqueue(fe_panel_mapped(MouseKind::Move, 3, 3, 9));
+        assert_eq!(
+            mixed.queue.len(),
+            3,
+            "the wheel tick between them must not be jumped"
+        );
+
+        // And Move does not fold into a Drag tail: they are separate
+        // gestures, and one tag for both would turn a hover into part of
+        // a selection.
+        let mut kinds = Outbox::new();
+        kinds.enqueue(fe_panel_mapped(MouseKind::Drag(MouseButton::Left), 4, 1, 9));
+        kinds.enqueue(fe_panel_mapped(MouseKind::Move, 4, 2, 9));
+        assert_eq!(kinds.queue.len(), 2);
+
+        // The two FAMILIES do not coalesce into each other either.
+        let mut families = Outbox::new();
+        families.enqueue(FrontendEvent::PanelPointer {
+            frontend_id: FrontendId(1),
+            buffer_id: BufferId::from_raw(1),
+            coord: CellCoord::new(5, 1),
+            kind: MouseKind::Move,
+            mods: Modifiers::NONE,
+            geometry_epoch: 1,
+            panel_epoch: 1,
+        });
+        families.enqueue(fe_panel_mapped(MouseKind::Move, 5, 2, 9));
+        assert_eq!(families.queue.len(), 2);
     }
 
     /// Acceptance 34: terminal move/drag runs coalesce to the latest

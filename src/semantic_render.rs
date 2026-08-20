@@ -158,6 +158,29 @@ fn minibuffer_window<T: Clone>(candidates: &[T], selected: Option<usize>) -> (Ve
     (window, selected_in_window)
 }
 
+/// §5b G5 — what an accepted panel `Down` established, and what a
+/// cancellation must therefore terminate.
+///
+/// A release has to MATCH the press it ends: same button, same
+/// encoding, at a coordinate the child was actually told about. A
+/// cancellation that guessed any of those would put bytes in a child's
+/// input stream describing an event that never happened.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AcceptedPanelGesture {
+    /// The button the accepted `Down` carried.
+    pub button: pmacs_protocol::MouseButton,
+    /// The last coordinate known valid for this gesture — where a
+    /// release is delivered when the pointer has since left content.
+    pub coord: pmacs_protocol::CellCoord,
+    /// The panel buffer the gesture belongs to.
+    pub buffer_id: BufferId,
+    /// Whether the press actually REACHED the child, for a reporting
+    /// terminal. A release is owed only if a press was delivered;
+    /// synthesising one for a press the child never saw is the same
+    /// defect in the other direction.
+    pub reached_child: bool,
+}
+
 /// Owns one `semantic_render` session's projection state: the last
 /// viewport the frontend declared, and the diff baseline per buffer
 /// for the `StyleSpans` and `Decorations` families.
@@ -254,6 +277,15 @@ pub struct SemanticRenderState {
     /// rows form. Also gates the per-row detail lookup: a peer that
     /// cannot carry a detail does not pay to resolve one.
     peer_knows_minibuffer_rows: bool,
+    /// §5b — whether the peer negotiated `>= v25` and therefore takes
+    /// the **mapped** panel family.
+    ///
+    /// The families are exclusive in both directions: a `>= v25` peer
+    /// receives `PresentMapped` and never legacy `Present`, and a
+    /// `<= v24` peer the reverse. "Send whichever and let the receiver
+    /// cope" would make negotiation a sender convention rather than a
+    /// gate.
+    peer_knows_mapped_panel: bool,
     /// Last emitted `CompletionPopup` payload per buffer (Arc 1a
     /// Q#C5), for cached-compare suppression (see
     /// [`CompletionPopupFacts`]).
@@ -377,6 +409,61 @@ pub struct SemanticRenderState {
     /// retains its last valid frame and silence would leave a stale band
     /// on screen indefinitely (Q#BP15).
     last_panel_payload: Option<PanelFramePayload>,
+    /// §5b — the authoritative **cell-mapping key** for this frontend.
+    ///
+    /// `(fingerprint, generation)`. The generation advances whenever the
+    /// fingerprint changes, and **both projection and inbound
+    /// validation read it through the same accessor**, so "what the
+    /// frontend was shown" and "what the daemon checks" cannot drift.
+    ///
+    /// It is deliberately **not** recomputed from the last emitted
+    /// frame: a mapping mutation that has not yet been painted has still
+    /// changed the inverse, and a gesture arriving in that gap must be
+    /// refused. Advancing on demand at both seams is what makes
+    /// "advances before the next inbound pointer, whether or not
+    /// anything rendered" true rather than aspirational.
+    ///
+    /// **Nondecreasing, and never cleared** — not even by `Absent`. A
+    /// delayed lower frame must not roll the producer's authority
+    /// backward, so this is a high-water mark for the session.
+    /// `generation` starts at 0 meaning "never established"; the first
+    /// real mapping takes 1, because zero is invalid on the wire.
+    panel_mapping: Option<(crate::editor::PanelMappingSnapshot, u64)>,
+    /// §5b G11a — set once the mapping generation cannot advance, and
+    /// never cleared for the session.
+    ///
+    /// Exhaustion fails **closed**: no key means no authority, so the
+    /// band is published `Absent` and every inbound panel event is
+    /// refused. The latch is what makes that permanent. Without it the
+    /// next projection finds an UNCHANGED snapshot, takes the
+    /// "unchanged" arm, and hands back the frozen ceiling — resurrecting
+    /// the band with a key that can no longer distinguish anything.
+    panel_mapping_exhausted: bool,
+    /// §5b G5 — the panel gesture this frontend has an ACCEPTED `Down`
+    /// for, if any.
+    ///
+    /// Per frontend, never global: two frontends can hold gestures on
+    /// distinct panels at once, and one global slot would make either
+    /// one's authority loss cancel or erase the other's (G5p).
+    ///
+    /// Cancellation needs this to exist at all. Without a record of
+    /// what was accepted there is nothing to terminate: a release must
+    /// match the press it ends, and a stale `Up` with no accepted
+    /// `Down` must be inert rather than synthesising one.
+    accepted_gesture: Option<AcceptedPanelGesture>,
+    /// §5b — how many armed gestures an authority loss has ended this
+    /// session.
+    ///
+    /// A COUNT, not a queue of records. The records are what replay
+    /// consumes to deliver each release, and replay is the branch that
+    /// introduces their reader — a queue landed here would grow one
+    /// entry per cancelled drag for the life of the daemon with nothing
+    /// ever draining it. A saturating count is bounded and still
+    /// distinguishes the two ways a latch empties: an ordinary `Up`
+    /// consumes it and leaves this alone, an authority loss ends it and
+    /// bumps it. It also does not collapse two losses in one dispatcher
+    /// burst the way a boolean flag would.
+    panel_gesture_cancellations: u64,
     /// Highest presentation epoch allocated for this session; `0` means
     /// none has been. Advanced only when a frame is actually shipped, so
     /// a frame that fails validation does not burn an identity the peer
@@ -516,11 +603,15 @@ impl SemanticRenderState {
         s.peer_knows_statusline_segments = negotiated_protocol_version >= 18;
         s.peer_knows_terminal_frames = negotiated_protocol_version >= 19;
         s.peer_knows_panel_frames = negotiated_protocol_version >= PANEL_MIN_VERSION;
+        s.peer_knows_mapped_panel =
+            negotiated_protocol_version >= pmacs_protocol::PANEL_MAPPING_MIN_VERSION;
         s
     }
 
     /// Fresh session state for frontend `frontend_id`: no viewport
-    /// declared, nothing sent. Assumes a current-build peer (>= 18);
+    /// declared, nothing sent. Assumes a current-build peer (>= 18, and
+    /// current for every later capability too, including §5b's mapped
+    /// panel family);
     /// daemon sessions with a real negotiated version use
     /// [`Self::for_peer`].
     #[must_use]
@@ -536,6 +627,10 @@ impl SemanticRenderState {
             last_menu_prompt: HashMap::new(),
             last_minibuffer: None,
             peer_knows_minibuffer_rows: true,
+            // A current-build peer, like every other capability here.
+            // Leaving this `false` made `new()` contradict its own doc
+            // and emit the LEGACY family to an implicitly v25 peer.
+            peer_knows_mapped_panel: true,
             last_completion_popup: HashMap::new(),
             last_summary: HashMap::new(),
             last_status: HashMap::new(),
@@ -575,6 +670,10 @@ impl SemanticRenderState {
             // peer already holds. Seeding the baseline keeps the first
             // frame from shipping a redundant authoritative `Absent`.
             last_panel_payload: Some(PanelFramePayload::Absent),
+            panel_mapping: None,
+            panel_mapping_exhausted: false,
+            accepted_gesture: None,
+            panel_gesture_cancellations: 0,
             panel_epoch_used: 0,
             panel_presentation: None,
             panel_error_latched: false,
@@ -592,9 +691,192 @@ impl SemanticRenderState {
     #[must_use]
     pub fn panel_declaration(&self) -> Option<&PanelFrame> {
         match self.last_panel_payload.as_ref()? {
-            PanelFramePayload::Present(frame) => Some(frame),
+            PanelFramePayload::Present(frame) | PanelFramePayload::PresentMapped { frame, .. } => {
+                Some(frame)
+            }
             PanelFramePayload::Absent => None,
         }
+    }
+
+    /// The panel payload most recently shipped, for the family rows.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn last_panel_payload_for_test(&self) -> Option<PanelFramePayload> {
+        self.last_panel_payload.clone()
+    }
+
+    /// §5b — how many armed gestures an authority loss has ended.
+    ///
+    /// Counts rather than collapses: two losses in one dispatcher burst
+    /// read as two. Coincident causes on ONE transition are a different
+    /// matter — those take the latch once, so the count moves once.
+    #[must_use]
+    pub fn panel_gesture_cancellations(&self) -> u64 {
+        self.panel_gesture_cancellations
+    }
+
+    /// §5b — arm the latch, and ONLY for an accepted left press.
+    ///
+    /// A right press opens a menu and ends there; `Move`, wheel and the
+    /// other buttons begin nothing. Arming on any accepted pointer
+    /// event would let one of them manufacture a delayed release at the
+    /// next authority loss.
+    ///
+    /// This is the SUBSTRATE for the framing's G5g. G5g itself — the
+    /// table-driven non-gesture events followed by an authority loss,
+    /// asserted to emit no synthetic release — is `panel-pointer-replay`'s
+    /// per §5b's split table, because the release it denies does not
+    /// exist on this branch.
+    pub fn arm_accepted_gesture(&mut self, gesture: AcceptedPanelGesture) {
+        // A second accepted press while one is already armed means the
+        // first gesture's release never arrived — a dropped `Up`, or an
+        // outbox that closed under a stall. END it rather than
+        // overwrite it: overwriting discards the record silently, and
+        // once replay attaches effects to that record the child is left
+        // holding a button down with nothing left to release it.
+        self.cancel_accepted_gesture();
+        self.accepted_gesture = Some(gesture);
+    }
+
+    /// §5b — an ordinary accepted release CONSUMES the latch, WITHOUT
+    /// counting as a cancellation.
+    ///
+    /// Otherwise a later invalidation finds a gesture it believes is
+    /// still live and synthesises a duplicate release for a button
+    /// already up. Substrate for the framing's G5c/G5d, whose duplicate-
+    /// release assertions are replay's.
+    pub fn consume_accepted_gesture(&mut self) -> Option<AcceptedPanelGesture> {
+        self.accepted_gesture.take()
+    }
+
+    /// §5b G5a — cancellation: end the live gesture, if any, and return
+    /// its record so the caller can terminate it.
+    ///
+    /// Returning the record rather than acting is deliberate. The
+    /// EFFECTS — clearing an empty selection, clearing the click chain,
+    /// delivering the child's release — live in panel replay, which is
+    /// `panel-pointer-replay`'s. This is the trigger and the state; the
+    /// two meet at that rebase.
+    ///
+    /// Idempotent on an empty latch: no gesture, no count. That is what
+    /// lets a duplicate `Absent` and a coincident advance both call it
+    /// without inventing a second cancellation.
+    pub fn cancel_accepted_gesture(&mut self) -> Option<AcceptedPanelGesture> {
+        let cancelled = self.accepted_gesture.take();
+        if cancelled.is_some() {
+            self.panel_gesture_cancellations = self.panel_gesture_cancellations.saturating_add(1);
+        }
+        cancelled
+    }
+
+    /// Whether a gesture is currently accepted, for assertions.
+    #[must_use]
+    pub fn has_accepted_gesture(&self) -> bool {
+        self.accepted_gesture.is_some()
+    }
+
+    /// Advance-if-changed, then read: the authoritative mapping key.
+    ///
+    /// **The single seam §5b requires.** Projection stamps the frame
+    /// with what this returns, and inbound validation compares against
+    /// what this returns; there is no second derivation to disagree
+    /// with.
+    ///
+    /// `fingerprint` is `None` when no panel is presentable. That does
+    /// **not** reset the key — the high-water mark survives `Absent`,
+    /// so a frame delayed across a hide cannot come back with a lower
+    /// generation and be believed.
+    pub fn panel_mapping_generation(
+        &mut self,
+        snapshot: Option<crate::editor::PanelMappingSnapshot>,
+    ) -> Option<u64> {
+        if self.panel_mapping_exhausted {
+            return None;
+        }
+        let snapshot = snapshot?;
+        // Matched by value, not by reference: the changed arm CANCELS,
+        // and cancelling needs `&mut self`.
+        let seen = self
+            .panel_mapping
+            .as_ref()
+            .map(|(seen, generation)| (*seen == snapshot, *generation));
+        let next = match seen {
+            // Compared STRUCTURALLY above. A hash would make this
+            // probabilistic, and a collision here silently accepts a
+            // stale gesture — the exact failure the key exists for.
+            Some((true, generation)) => generation,
+            Some((false, generation)) => {
+                // §5b G5a — the key advancing IS the cancellation
+                // trigger, raised here rather than waiting for another
+                // pointer event. Reactive cancellation loses a race: if
+                // the successor frame reaches the frontend before the
+                // physical `Up`, the producer clears its latch and the
+                // cancelling event never arrives.
+                self.cancel_accepted_gesture();
+                let Some(next) = generation.checked_add(1) else {
+                    // §5b G11a — fail CLOSED, and return BEFORE the
+                    // store below. A saturating add would freeze the key
+                    // at the ceiling while the mapping kept moving
+                    // underneath it, which is precisely the stale-gesture
+                    // hole the key exists to close, with the check still
+                    // looking like it passes.
+                    //
+                    // Returning BEFORE the store below is a second,
+                    // redundant guard against the same zombie band:
+                    // recording `(snapshot, MAX)` here would make the
+                    // next read take the unchanged arm and hand back the
+                    // ceiling. Measured, the two are ALTERNATIVES —
+                    // either alone keeps the band down, and only
+                    // removing both resurrects it. The latch is kept as
+                    // the primary because it has a job the ordering
+                    // does not: it is what makes `peek` and the
+                    // authoritative read agree that this session has no
+                    // key, rather than reporting the ceiling it stopped
+                    // at.
+                    self.panel_mapping_exhausted = true;
+                    return None;
+                };
+                next
+            }
+            // First establishment takes 1, never 0: zero is the wire's
+            // "uninitialised" value and is refused on sight.
+            None => 1,
+        };
+        self.panel_mapping = Some((snapshot, next));
+        Some(next)
+    }
+
+    /// §5b G11a — whether this session's key is exhausted.
+    #[must_use]
+    pub fn panel_mapping_generation_exhausted(&self) -> bool {
+        self.panel_mapping_exhausted
+    }
+
+    /// Place the key one advance below the ceiling, so exhaustion is
+    /// reachable in a test without 2^64 mutations.
+    #[doc(hidden)]
+    pub fn seed_panel_mapping_generation_for_test(
+        &mut self,
+        snapshot: crate::editor::PanelMappingSnapshot,
+        generation: u64,
+    ) {
+        self.panel_mapping = Some((snapshot, generation));
+    }
+
+    /// The current key without advancing it, for assertions and for
+    /// callers that must not have a side effect.
+    ///
+    /// `None` once exhausted, matching the authoritative read. The
+    /// stored pair still holds the ceiling it stopped at, and reporting
+    /// that would name a key no frame carries and no gesture may echo.
+    #[must_use]
+    pub fn panel_mapping_generation_peek(&self) -> Option<u64> {
+        if self.panel_mapping_exhausted {
+            return None;
+        }
+        self.panel_mapping
+            .as_ref()
+            .map(|(_, generation)| *generation)
     }
 
     /// Whether the last shipped declaration is a `Present` whose epochs
@@ -1374,7 +1656,7 @@ impl SemanticRenderState {
             self.publish_absent_panel(out);
             return;
         };
-        let payload = PanelFramePayload::Present(PanelFrame {
+        let frame = PanelFrame {
             buffer_id: projection.buffer_id,
             panel_epoch,
             geometry_epoch: geometry.geometry_epoch,
@@ -1382,7 +1664,28 @@ impl SemanticRenderState {
             cells: projection.cells,
             cursor: projection.cursor,
             focused: projection.focused,
-        });
+        };
+        // §5b — ORDER MATTERS. The projection is prepared above, THEN
+        // the key is captured, THEN the payload is built. A terminal
+        // projection registers the view whose scroll anchor the key
+        // reads, so capturing earlier would stamp a frame with a key
+        // derived from an unregistered anchor.
+        let payload = if self.peer_knows_mapped_panel {
+            let snapshot = state.panel_mapping_snapshot(self.frontend_id);
+            let Some(mapping_generation) = self.panel_mapping_generation(snapshot) else {
+                // No presentable mapping means nothing to stamp. Falling
+                // back to the legacy variant here would hand a v25 peer
+                // the family it did not negotiate.
+                self.publish_absent_panel(out);
+                return;
+            };
+            PanelFramePayload::PresentMapped {
+                frame,
+                mapping_generation,
+            }
+        } else {
+            PanelFramePayload::Present(frame)
+        };
         // Complete-payload comparison FIRST, like the terminal pass: only
         // validated payloads are ever stored, so a payload equal to the
         // baseline has already passed and re-running the per-cell width
@@ -1391,8 +1694,10 @@ impl SemanticRenderState {
             self.panel_error_latched = false;
             return;
         }
-        let PanelFramePayload::Present(frame) = &payload else {
-            unreachable!("the Present payload was constructed immediately above");
+        let (PanelFramePayload::Present(frame) | PanelFramePayload::PresentMapped { frame, .. }) =
+            &payload
+        else {
+            unreachable!("a Present payload was constructed immediately above");
         };
         match frame.validate() {
             Ok(()) => {
@@ -1433,6 +1738,22 @@ impl SemanticRenderState {
     /// deliberately survives: it is answered by the frontend, not by the
     /// panel's presence.
     fn publish_absent_panel(&mut self, out: &mut Vec<InstanceMessage>) {
+        // §5b — `Absent` is a loss of gesture authority: it clears
+        // `panel_presentation` two lines below, so every later inbound
+        // event for that gesture is refused and its release can never
+        // arrive. Cancelled even on a DUPLICATE `Absent`, which does no
+        // wire work but must still leave no live gesture behind — the
+        // clears below are idempotent for the same reason.
+        //
+        // Only the producer half lands here. The framing's G5b matrix —
+        // the panel-epoch, buffer-replacement, same-size geometry and
+        // detach transitions, each with its v24 and v25 legs and its
+        // document and terminal effects — is `panel-pointer-replay`'s per
+        // §5b's split table. Those transitions leave the latch armed on
+        // this branch, which is inert here (nothing consumes it) and
+        // becomes a defect only once replay gives it effects, in the
+        // branch that owns the row.
+        self.cancel_accepted_gesture();
         self.panel_presentation = None;
         // `Absent` also clears the peer's retained mode line. A later
         // `Present` under `NoMessage` therefore has nothing it can

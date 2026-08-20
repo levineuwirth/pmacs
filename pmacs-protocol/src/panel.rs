@@ -103,6 +103,29 @@ pub enum PanelFramePayload {
     Present(PanelFrame),
     /// No panel is visible; clear any retained frame.
     Absent,
+    /// §5b (protocol v25): a visible panel **plus the identity of the
+    /// inverse mapping** it was painted from.
+    ///
+    /// **APPENDED AFTER `Absent`, not beside `Present`.** postcard
+    /// encodes variants positionally, so inserting adjacent to
+    /// `Present` would shift `Absent`'s discriminant and silently
+    /// re-interpret every older peer's "hide the band" as something
+    /// else.
+    ///
+    /// `Absent` is deliberately **shared by both families** — hiding a
+    /// band carries no mapping, so it needs no mapped twin.
+    PresentMapped {
+        /// The frame, reused whole and unchanged.
+        frame: PanelFrame,
+        /// Identity of the inverse mapping this frame was painted from.
+        ///
+        /// A `PanelPointerMapped` echoes it, and the daemon refuses a
+        /// gesture whose echo no longer matches. **Zero is invalid**;
+        /// a live key starts at 1 and is **nondecreasing**, including
+        /// across `Absent` — a delayed lower frame must not roll the
+        /// producer's authority backward.
+        mapping_generation: u64,
+    },
 }
 
 /// Why a [`PanelFrame`] is not structurally valid.

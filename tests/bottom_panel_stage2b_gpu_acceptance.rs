@@ -182,8 +182,13 @@ fn press_and_await_panel(session: &mut Session) -> bool {
         }),
     )
     .expect("write panel-open key");
+    // §5b — whichever Present family this session negotiated. These
+    // rows are about the band ARRIVING; which wrapper carries it is
+    // pinned by the G6/G7/G8 rows, not incidentally here.
     drain_until(&mut session.stream, "panel", |message| match message {
-        InstanceMessage::PanelFrame(PanelFramePayload::Present(frame)) => Some(frame.size),
+        InstanceMessage::PanelFrame(
+            PanelFramePayload::Present(frame) | PanelFramePayload::PresentMapped { frame, .. },
+        ) => Some(frame.size),
         _ => None,
     })
     .is_some()
@@ -251,8 +256,8 @@ fn one_daemon_serves_a_v21_panel_session_and_a_shipped_v20_client() {
     );
     assert!(
         press_and_await_panel(&mut current),
-        "a v21-negotiated semantic session must be panel-capable and receive \
-         a Present panel frame"
+        "a current-wire semantic session must be panel-capable and \
+         receive a Present-family panel frame"
     );
 
     // Half 3 — a semantic session that echoed the baseline is NOT
@@ -337,10 +342,11 @@ fn one_daemon_serves_a_v21_panel_session_and_a_shipped_v20_client() {
 #[test]
 fn the_baseline_stays_and_the_counter_offer_activates() {
     // A deliberate tripwire: bumping the wire must be a conscious edit
-    // here, not a silent one. v24 is `TextInput` (GUI arc Stage 1a);
-    // v23 was `MinibufferPromptRows` (Discovery Stage 2); v22 was
-    // `LineWrapFacts` (long-lines Stage 3).
-    assert_eq!(PROTOCOL_VERSION, 24);
+    // here, not a silent one. v25 is the mapped panel family
+    // (`PanelPointerMapped` + `PresentMapped`, bottom-panel §5b); v24 is
+    // `TextInput` (GUI arc Stage 1a); v23 was `MinibufferPromptRows`
+    // (Discovery Stage 2); v22 was `LineWrapFacts` (long-lines Stage 3).
+    assert_eq!(PROTOCOL_VERSION, 25);
     assert_eq!(
         ADVERTISED_PROTOCOL_VERSION, 20,
         "moving this is the incompatible act the mechanism exists to avoid"

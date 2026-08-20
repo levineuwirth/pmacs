@@ -1683,7 +1683,7 @@ mod tests {
     // --- M5.5a handshake & postcard round-trips ---
 
     #[test]
-    fn protocol_version_is_twenty_four_for_text_input() {
+    fn protocol_version_is_twenty_five_for_the_mapped_panel_family() {
         // Pin the value: T M10.5 bumped 1→2 (v1.0 wire: CrdtOp /
         // PresenceUpdate). T M11.1 bumped 2→3 (v1.1 wire: the
         // SemanticFrame family + FrontendEvent::Viewport). T M11.6
@@ -1741,10 +1741,11 @@ mod tests {
         // minibuffer at all. `MinibufferPrompt` is therefore frozen and
         // pinned by literal bytes below.
         //
-        // v24 is `FrontendEvent::TextInput` (GUI arc Stage 1a) — an
-        // APPENDED variant, which is why the freeze above survives it
+        // v24 is `FrontendEvent::TextInput` (GUI arc Stage 1a) and v25
+        // is the mapped panel family (bottom-panel §5b) — both APPENDED
+        // variants, which is why the freeze above survives them
         // untouched: nothing in `MinibufferPrompt`'s encoding moved.
-        assert_eq!(PROTOCOL_VERSION, 24);
+        assert_eq!(PROTOCOL_VERSION, 25);
     }
 
     #[test]
@@ -1822,18 +1823,19 @@ mod tests {
         // v18 (`StatuslineSegments`), v19 (the vterm terminal family),
         // v20 (semantic initial-target bootstrap), v21 (the bottom
         // panel band), v22 (`LineWrapFacts`), v23
-        // (`MinibufferPromptRows`), and v24 (`TextInput`, GUI arc Stage
-        // 1a) all interoperate.
-        for accepted in 6..=24 {
+        // (`MinibufferPromptRows`), v24 (`TextInput`, GUI arc Stage 1a)
+        // and v25 (`PanelPointerMapped` + `PresentMapped`, bottom-panel
+        // §5b) all interoperate.
+        for accepted in 6..=PROTOCOL_VERSION {
             assert!(
                 is_supported_protocol_version(accepted),
                 "v{accepted} must be accepted"
             );
         }
-        for rejected in [0, 1, 2, 3, 4, 5, 25, u32::MAX] {
+        for rejected in [0, 1, 2, 3, 4, 5, PROTOCOL_VERSION + 1, u32::MAX] {
             assert!(
                 !is_supported_protocol_version(rejected),
-                "v{rejected} must be rejected by a v24 binary"
+                "v{rejected} must be rejected by the current binary"
             );
         }
     }
@@ -2005,6 +2007,167 @@ mod tests {
             "PanelPointer's v23 wire bytes changed — a variant was \
              inserted before it; append new FrontendEvent variants at \
              the end"
+        );
+    }
+
+    /// §5b G0a — the **previous-final `FrontendEvent`** is now
+    /// `TextInput`, and it gets its own exact pin.
+    ///
+    /// Pins ACCUMULATE rather than move. The `PanelPointer` pin above
+    /// still protects the v21–v23 population; this one protects v24's,
+    /// and appending `PanelPointerMapped` is exactly the edit that would
+    /// shift it if it were inserted rather than appended.
+    #[test]
+    fn text_input_encoding_is_unchanged_by_the_v25_build() {
+        let ev = FrontendEvent::TextInput {
+            frontend_id: FrontendId(2),
+            text: "hi".to_owned(),
+        };
+        assert_eq!(
+            postcard::to_allocvec(&ev).expect("encode"),
+            [16, 2, 2, 104, 105],
+            "TextInput's v24 wire bytes changed — a variant was inserted \
+             before it; append new FrontendEvent variants at the end"
+        );
+    }
+
+    /// §5b G0a — the **previous-final `PanelFramePayload`** is `Absent`,
+    /// pinned through its real nesting inside `InstanceMessage`.
+    ///
+    /// Nested deliberately: `PanelFramePayload` never travels alone, and
+    /// a pin on the bare enum would miss a shift in the message
+    /// discriminant that carries it.
+    #[test]
+    fn absent_panel_payload_encoding_is_unchanged_by_the_v25_build() {
+        let msg = InstanceMessage::PanelFrame(pmacs_protocol::panel::PanelFramePayload::Absent);
+        assert_eq!(
+            postcard::to_allocvec(&msg).expect("encode"),
+            [28, 1],
+            "Absent's wire bytes changed — a PanelFramePayload variant \
+             was inserted before it, or InstanceMessage's discriminant \
+             moved; append PresentMapped AFTER Absent"
+        );
+    }
+
+    /// §5b G0b — exact **encode and decode** for the mapped pointer.
+    ///
+    /// **Every adjacent same-typed field carries a different value**, so
+    /// a reordering is visible. `geometry_epoch`, `panel_epoch` and
+    /// `mapping_generation` are all `u64` and all distinct (3, 7, 11);
+    /// `coord.row`/`coord.col` likewise (5, 9). A round-trip alone would
+    /// stay green through any swap of those — it is self-consistent by
+    /// construction — which is why the exact bytes are asserted in both
+    /// directions.
+    #[test]
+    fn panel_pointer_mapped_encodes_and_decodes_exactly() {
+        const WIRE: [u8; 11] = [17, 2, 3, 7, 4, 5, 9, 0, 0, 0, 11];
+        let ev = FrontendEvent::PanelPointerMapped {
+            frontend_id: FrontendId(2),
+            geometry_epoch: 3,
+            panel_epoch: 7,
+            buffer_id: pmacs_protocol::BufferId::from_raw(4),
+            coord: CellCoord { row: 5, col: 9 },
+            kind: pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left),
+            mods: Modifiers::NONE,
+            mapping_generation: 11,
+        };
+
+        assert_eq!(
+            postcard::to_allocvec(&ev).expect("encode"),
+            WIRE,
+            "PanelPointerMapped's v25 wire bytes changed — it must be \
+             APPENDED after TextInput, with mapping_generation last"
+        );
+        let decoded: FrontendEvent = postcard::from_bytes(&WIRE).expect("decode");
+        assert_eq!(
+            decoded, ev,
+            "the frozen historical bytes must decode back to the same \
+             value — round-trip alone would only witness the current \
+             encoder and decoder agreeing with each other"
+        );
+    }
+
+    /// §5b G0b — exact **encode and decode** for the mapped frame,
+    /// through its real nesting.
+    ///
+    /// Reordering named variant fields still compiles and changes
+    /// postcard's positional bytes, so the exact pin is load-bearing.
+    /// The frame's own `panel_epoch` (8) and `geometry_epoch` (12) are
+    /// adjacent `u64`s and are pinned distinct for the same reason as
+    /// above.
+    #[test]
+    fn present_mapped_encodes_and_decodes_exactly() {
+        const WIRE: [u8; 33] = [
+            28, 2, 6, 8, 12, 1, 2, 2, 0, 1, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 32, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 1, 13,
+        ];
+        let frame = pmacs_protocol::panel::PanelFrame {
+            buffer_id: pmacs_protocol::BufferId::from_raw(6),
+            panel_epoch: 8,
+            geometry_epoch: 12,
+            size: CellSize::new(1, 2),
+            cells: vec![Cell::default(); 2],
+            cursor: None,
+            focused: true,
+        };
+        let msg =
+            InstanceMessage::PanelFrame(pmacs_protocol::panel::PanelFramePayload::PresentMapped {
+                frame,
+                mapping_generation: 13,
+            });
+
+        assert_eq!(
+            postcard::to_allocvec(&msg).expect("encode"),
+            WIRE,
+            "PresentMapped's v25 wire bytes changed — it must be APPENDED \
+             after Absent, with mapping_generation last"
+        );
+        let decoded: InstanceMessage = postcard::from_bytes(&WIRE).expect("decode");
+        assert_eq!(decoded, msg, "the frozen bytes must decode back");
+    }
+
+    /// §5b G14a — the version constants move together, and the
+    /// advertised baseline does not move at all.
+    #[test]
+    fn the_mapping_slice_takes_v25_and_the_advertised_baseline_stays_pinned() {
+        assert_eq!(pmacs_protocol::PROTOCOL_VERSION, 25);
+        assert_eq!(pmacs_protocol::PANEL_MAPPING_MIN_VERSION, 25);
+        assert!(
+            pmacs_protocol::SUPPORTED_PROTOCOL_VERSIONS.contains(&pmacs_protocol::PROTOCOL_VERSION),
+            "a wire version the handshake does not support fails against \
+             this daemon's own peers"
+        );
+        assert_eq!(
+            pmacs_protocol::ADVERTISED_PROTOCOL_VERSION,
+            20,
+            "the advertised baseline is PERMANENT — it is not bumped to \
+             chase the wire version"
+        );
+    }
+
+    /// §5b G14b — the supported set's boundary, and the family boundary,
+    /// are both literal.
+    #[test]
+    fn the_supported_set_ends_at_the_current_wire_version() {
+        assert!(pmacs_protocol::is_supported_protocol_version(25));
+        assert!(
+            !pmacs_protocol::is_supported_protocol_version(26),
+            "an unreleased version must not negotiate"
+        );
+        // The family boundary is stated against a LITERAL, not against
+        // `PROTOCOL_VERSION`: expressing it arithmetically would drag
+        // this feature forward on the next bump, so v24 sessions would
+        // silently start being offered a family they never negotiated.
+        //
+        // Asserted as equality rather than `24 < MIN`, which clippy
+        // correctly calls a compile-time tautology — it holds for every
+        // value above 24 and so pins nothing.
+        assert_eq!(25, pmacs_protocol::PANEL_MAPPING_MIN_VERSION);
+        assert_ne!(
+            pmacs_protocol::PANEL_MAPPING_MIN_VERSION,
+            pmacs_protocol::TEXT_INPUT_MIN_VERSION,
+            "the mapped family must not share v24's gate — that would \
+             admit it on sessions that negotiated only TextInput"
         );
     }
 

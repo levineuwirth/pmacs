@@ -25,3 +25,4 @@
 pub mod daemon;
 pub mod iso;
 pub mod pty;
+pub mod sigint_conformance;

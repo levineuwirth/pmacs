@@ -2,6 +2,8 @@
 
 #![cfg(unix)]
 
+mod common;
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -169,6 +171,177 @@ mod crdt {
 
     fn signal_pid(pid: u32, signal: Signal) {
         let _ = kill(Pid::from_raw(pid.cast_signed()), signal);
+    }
+
+    /// R-d (framing §7c): refuse to run this test when `SIGINT` is not
+    /// deliverable, and say so.
+    ///
+    /// The test signals a process group and requires the launcher to
+    /// exit. If `SIGINT` is inherited as `SIG_IGN` --- which a shell
+    /// running a command in the background without job control sets,
+    /// and which survives `fork` and `exec` --- the signal is a no-op
+    /// and the launcher waits out the deadline. Without this the
+    /// failure reads "child did not exit within 5s", which names a
+    /// teardown defect that is not there; that misreading cost nine
+    /// framing revisions (§4c).
+    ///
+    /// Both consumers use the **same checked-in helper**, but that alone
+    /// no longer makes them agree: each validates the
+    /// `(status, token)` pair independently, in a different language.
+    /// Revision 12's "they can never disagree" is withdrawn, and the
+    /// shared matrix in `tests/common/sigint_conformance.rs` replaces
+    /// it — both validators run the same vectors.
+    ///
+    /// This consumer proceeds only on a validated `(0, safe)` pair. On a
+    /// **boundary** failure the helper's stderr is untrusted and is
+    /// withheld; only a validated verdict speaks with the helper's
+    /// voice.
+    const SIGINT_TOKEN_SAFE: &[u8] = b"pmacs-sigint-v1:safe";
+    const SIGINT_TOKEN_IGNORED: &[u8] = b"pmacs-sigint-v1:ignored";
+    const SIGINT_TOKEN_ERROR: &[u8] = b"pmacs-sigint-v1:error";
+
+    /// Does `stdout` carry exactly `token`, in one of the two permitted
+    /// encodings? Grammar is `TOKEN | TOKEN LF` **as bytes** — no
+    /// trimming, so a leading newline, a second newline, surrounding
+    /// spaces, CRLF, a doubled token or a trailing NUL all fail.
+    fn sigint_token_matches(stdout: &[u8], token: &[u8]) -> bool {
+        stdout == token
+            || (stdout.len() == token.len() + 1
+                && stdout.starts_with(token)
+                && stdout[token.len()] == b'\n')
+    }
+
+    /// The diagnosis for one helper invocation, validating the
+    /// `(status, token)` pair rather than the status alone.
+    ///
+    /// A status arriving without its token did not come from this
+    /// helper — not hypothetical: on macOS a shell that cannot execute
+    /// the helper exits 1, which a status-only ABI read as `ignored`
+    /// (§4d). Rust compares `Command::output()` bytes directly; only
+    /// the shell consumer needs capture files.
+    fn sigint_diagnosis(helper: &Path) -> Result<(), String> {
+        let out = match Command::new(helper).output() {
+            // Rust's boundary differs from the shell's: a spawn error
+            // has NO status, where a shell turns the same failure into
+            // one. Conformance X2, Rust-only.
+            Err(error) => {
+                return Err(format!(
+                    "precondition undecidable --- SIGINT guard boundary error \
+                     (status=unavailable token=missing): could not execute {}: {error}",
+                    helper.display()
+                ));
+            }
+            Ok(out) => out,
+        };
+        let expected: &[u8] = match out.status.code() {
+            Some(0) => SIGINT_TOKEN_SAFE,
+            Some(1) => SIGINT_TOKEN_IGNORED,
+            Some(2) => SIGINT_TOKEN_ERROR,
+            _ => b"",
+        };
+        let token_ok = !expected.is_empty() && sigint_token_matches(&out.stdout, expected);
+        let token_state = if out.stdout.is_empty() {
+            "missing"
+        } else if token_ok {
+            "valid"
+        } else {
+            "unexpected"
+        };
+        let status = out
+            .status
+            .code()
+            .map_or_else(|| "signal".to_owned(), |c| c.to_string());
+        match (out.status.code(), token_ok) {
+            (Some(0), true) => Ok(()),
+            // A VALIDATED verdict: the helper's stderr is the diagnosis.
+            (Some(1 | 2), true) => Err(format!(
+                "precondition failed --- this is NOT a teardown defect. \
+                 (status={status} token={token_state})\n{}",
+                String::from_utf8_lossy(&out.stderr).trim_end()
+            )),
+            // BOUNDARY: the child's stderr is UNTRUSTED and is not shown,
+            // or a helper exiting 1 with no token but the canonical
+            // ignored wording would still mislead the reader (A6b).
+            _ => Err(format!(
+                "precondition undecidable --- SIGINT guard boundary error \
+                 (status={status} token={token_state}). The helper's own \
+                 output is not trusted here and is not shown."
+            )),
+        }
+    }
+
+    fn sigint_helper_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/check-sigint-deliverable")
+    }
+
+    fn require_sigint_deliverable() {
+        if let Err(diagnosis) = sigint_diagnosis(&sigint_helper_path()) {
+            panic!("{diagnosis}");
+        }
+    }
+
+    /// A6/A6b/A6c, R-d consumer: the shared vectors, asserting the exact
+    /// branch.
+    ///
+    /// `ValidatedError` and `Boundary` both produce `Err`, so comparing
+    /// `is_ok()` alone would let a validator that accepts every status 2
+    /// pass. The branch-discriminating cases emit a sentinel on stderr;
+    /// a validated verdict surfaces it, while X3/X4 carry dedicated
+    /// payloads and a boundary failure must withhold untrusted stderr.
+    #[test]
+    fn rd_precondition_validates_the_whole_conformance_set() {
+        // `super::` and NOT `crate::`: this file is ALSO compiled as a
+        // nested module of `gpu_initial_target_acceptance.rs`, where
+        // `crate::` is the outer test crate and has no `common`.
+        use super::common::sigint_conformance::{
+            CANONICAL_IGNORED, Outcome, SENTINEL, shared_cases, stub_script,
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cases = shared_cases();
+        assert_eq!(cases.len(), 45, "the shared set is 45 cases");
+
+        for case in cases {
+            let path = dir.path().join(case.name.replace('/', "_"));
+            fs::write(&path, stub_script(&case)).expect("write stub");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+            let got = sigint_diagnosis(&path);
+            let name = &case.name;
+            match case.expect {
+                Outcome::Safe => assert!(got.is_ok(), "case {name}: {got:?}"),
+                Outcome::ValidatedIgnored | Outcome::ValidatedError => {
+                    let message = got.expect_err("a validated refusal");
+                    assert!(
+                        message.contains(SENTINEL),
+                        "case {name}: a validated verdict surfaces the helper's stderr: {message}"
+                    );
+                    assert!(message.contains("token=valid"), "case {name}: {message}");
+                }
+                Outcome::Boundary => {
+                    let message = got.expect_err("a boundary refusal");
+                    assert!(message.contains("boundary error"), "case {name}: {message}");
+                    assert!(
+                        !message.contains(CANONICAL_IGNORED),
+                        "case {name}: never repeats the canonical ignored wording \
+                         --- X3 emits exactly that with no token: {message}"
+                    );
+                    assert!(
+                        !message.contains(SENTINEL),
+                        "case {name}: a boundary failure must NOT surface the child's \
+                         stderr --- that is what separates it from a validated error, \
+                         which shares its outcome type: {message}"
+                    );
+                }
+            }
+        }
+
+        // X2 --- Rust only: a shell exec failure becomes a status, so the
+        // shell consumer cannot present a status-less spawn error.
+        let message = sigint_diagnosis(&dir.path().join("absent")).expect_err("must not validate");
+        assert!(
+            message.contains("status=unavailable") && !message.contains(SENTINEL),
+            "X2: {message}"
+        );
     }
 
     fn wait_for_exit(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
@@ -1083,6 +1256,7 @@ mod crdt {
 
     #[test]
     fn ctrl_c_on_launcher_group_does_not_reach_spawned_daemon() {
+        require_sigint_deliverable();
         let temp = secure_tempdir();
         let socket = temp.path().join("signal.sock");
         let report = temp.path().join("signal-report");

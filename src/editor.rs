@@ -375,6 +375,76 @@ const DOUBLE_CLICK_MAX_DELAY: Duration = Duration::from_millis(500);
 /// column and clobbers no information.
 const DIVIDER_HANDLE_GLYPH: char = '⇕';
 
+/// The panel's **inverse mapping**, captured exactly (§5b,
+/// Q#BP-R3).
+///
+/// A STRUCT compared structurally, not a hash. A hash would make
+/// authoritative equality probabilistic: a collision silently
+/// accepts a stale gesture, which is the precise failure this key
+/// exists to prevent. The emitted `mapping_generation` is still a
+/// `u64` on the wire — only the daemon's own comparison is exact.
+///
+/// **Deliberately EXCLUDED**, each an explicit contract: focus,
+/// styling and theme, the cursor, and the selection. None changes
+/// which byte a cell denotes, and a drag repaints the selection on
+/// every motion — a key that moved with them would cancel the
+/// gesture it protects after one step.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PanelMappingSnapshot {
+    buffer_id: crate::buffer::BufferId,
+    /// Rows and columns held apart, never multiplied: a 2×6 panel
+    /// inverts nothing like a 6×2 one.
+    rows: u32,
+    cols: u32,
+    content: PanelMappingContent,
+}
+
+impl PanelMappingSnapshot {
+    /// Which domain decided this mapping. Exposed for the row that pins
+    /// the branch is taken by target kind.
+    #[must_use]
+    pub fn content(&self) -> &PanelMappingContent {
+        &self.content
+    }
+}
+
+/// What decides the mapping BELOW the geometry, which differs by
+/// target kind.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum PanelMappingContent {
+    /// A document panel: the buffer's content revision.
+    Document {
+        /// The buffer's content revision, or `None` if it is gone.
+        revision: Option<u64>,
+        /// Vertical viewport origin.
+        view_top: usize,
+        /// Horizontal viewport origin. GUI arc 1b makes this move.
+        view_left: u32,
+        /// Wrap mode: it decides how a source line becomes display rows.
+        wrap: crate::view::WrapMode,
+        /// Text width with the gutter reservation already subtracted.
+        content_cols: u32,
+        /// The owning frontend's fold projection policy.
+        fold_projection: bool,
+        /// Fold content, read at its source.
+        folds: Vec<pmacs_protocol::ByteRange>,
+    },
+    /// A terminal panel: the screen's **mapping revision** and the
+    /// view's scroll anchor.
+    ///
+    /// **Not the buffer's revision**, which tracks something else
+    /// entirely, and **not `Screen::generation`**, which advances
+    /// for style, title, bell, tab stops and cursor motion — none
+    /// of which changes what a coordinate denotes.
+    Terminal {
+        /// Content and topology identity, excluding style, title, bell,
+        /// tab stops and cursor motion.
+        mapping_revision: u64,
+        /// The view's scroll anchor; `None` follows the live tail.
+        anchor: Option<crate::terminal::view::LogicalCellAnchor>,
+    },
+}
+
 impl EditorState {
     /// Construct a fresh editor for an unnamed scratch buffer.
     ///
@@ -2452,6 +2522,66 @@ impl EditorState {
         true
     }
 
+    /// Capture the panel's inverse mapping for one frontend.
+    ///
+    /// `None` when no panel is presentable — the absence of a mapping,
+    /// which is not the same as a mapping of zero.
+    pub fn panel_mapping_snapshot(&self, frontend_id: FrontendId) -> Option<PanelMappingSnapshot> {
+        let core = self.core.borrow();
+        let size = core.panel_grid_size(frontend_id)?;
+        let side = core.side_window_for(frontend_id)?;
+        let window = core.windows.get(&side)?;
+        let buffer_id = window.buffer_id;
+
+        let content = if self.terminal_manager.borrow().is_terminal(buffer_id) {
+            let key = TerminalViewKey::new(frontend_id, side, buffer_id);
+            let (mapping_revision, anchor) = self
+                .terminal_manager
+                .borrow()
+                .view_mapping_identity(key)
+                .unwrap_or((0, None));
+            PanelMappingContent::Terminal {
+                mapping_revision,
+                anchor,
+            }
+        } else {
+            let registry = core.registry.clone();
+            let revision = registry
+                .borrow()
+                .get(buffer_id)
+                .ok()
+                .map(crate::buffer::Buffer::revision);
+            PanelMappingContent::Document {
+                revision,
+                view_top: window.view_top,
+                view_left: window.view_left,
+                wrap: window.last_wrap,
+                content_cols: window.last_content_cols,
+                fold_projection: core
+                    .views
+                    .get(&frontend_id)
+                    .is_some_and(|view| view.fold_projection),
+                // Read at their SOURCE — the registry's ranges — rather
+                // than through the derived `VisibleLineMap`, whose only
+                // public summary is `is_identity()`. Too coarse: a fold
+                // edit leaving the map non-identity still changes which
+                // source line a row shows.
+                folds: core.fold_registry.folds(buffer_id),
+            }
+        };
+
+        // Only COMMON geometry lives out here. Everything below is
+        // domain-specific: `view_top`, `view_left`, wrap, gutter width
+        // and folds describe a DOCUMENT projection and take no part in a
+        // terminal's, where the child's screen decides the mapping.
+        Some(PanelMappingSnapshot {
+            buffer_id,
+            rows: size.rows,
+            cols: size.cols,
+            content,
+        })
+    }
+
     /// Paint one semantic frontend's side window into a panel-sized grid
     /// (Q#BP8, Q#BP15, Q#BP15a, Q#BP17).
     ///
@@ -2671,6 +2801,11 @@ impl EditorState {
     /// which needs the GPU band and lands in Stage 2B-3.
     ///
     /// Returns whether the gesture was accepted.
+    ///
+    /// `#[must_use]` because the accepted-gesture latch is driven off
+    /// this answer, and discarding it silently arms on rejected presses
+    /// and consumes on rejected releases.
+    #[must_use]
     pub fn dispatch_semantic_panel_pointer(
         &mut self,
         frontend_id: FrontendId,

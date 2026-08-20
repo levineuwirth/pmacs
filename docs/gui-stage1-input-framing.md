@@ -11,6 +11,13 @@ review overturned; revision 11 retracts it and P2 is implemented as
 written** (§6). **Q#S1-8, Q#S1-9 and Q#S1-10 are RULED.** **1-pre is
 IMPLEMENTED**; 1a onward may begin from this document.
 
+**v26, not v25 — corrected by the panel mapping-generation slice.**
+That slice (`docs/bottom-panel-framing.md` §5b) takes **v25** for
+`PanelFramePayload::PresentMapped` / `FrontendEvent::PanelPointerMapped`,
+and it lands ahead of 1e because panel-pointer replay blocks 1b.
+Protocol slices stay serialized; one was inserted in front.
+`ADVERTISED_PROTOCOL_VERSION` remains pinned at **20**.
+
 **Verification base:** §2 is **re-measured at `4f77491`** (2026-08-12),
 the tip after 1-pre; it was originally taken at `a994f37`. Sections
 other than §2 were written against `a994f37` and their *rulings* are
@@ -350,7 +357,7 @@ says nothing about glyphs or hit tests staying at scale 1.
 | D5 | Overlay clears on **empty `Preedit`, `Ime::Disabled`, and focus loss** — all three | no overlay | clear on focus loss only → `Disabled` row leaves stale text |
 | D6 | Dead-key state owned here; 1a buffers nothing | dead keys dropped | buffer in 1a → D6 by construction |
 
-### 1e — `OpenTarget` (v25)
+### 1e — `OpenTarget` (v26)
 
 | # | Contract | Witness (fails today because) | Mutation |
 |---|---|---|---|
@@ -560,11 +567,11 @@ and flushed to the socket**. **Bound: 250 ms.**
 
 | | **1a — `TextInput`** | **1e — `OpenTarget` + `OpenTargetResult`** |
 |---|---|---|
-| **floor** | **v24** | **v25**, after v24, serialized |
+| **floor** | **v24** | **v26**, after v25's mapping generation, serialized |
 | **encoding** | **appended variant**; never widen a field in place — postcard is positional | appended variants |
 | **byte pin** | frozen-byte fixture on the **previous final variant** | same |
-| **gate** | daemon accepts from `>= 24`; producer withholds below | `>= 25`; producer withholds below |
-| **old peer** | a `< 24` frontend **retains its existing `Key` behaviour and its existing limitations** — it truncates multi-scalar input today and ignores IME, and continues to. **The guarantee is NO REGRESSION, not retroactive correctness** | a `< 25` frontend cannot drop-open; nothing it already had degrades |
+| **gate** | daemon accepts from `>= 24`; producer withholds below | **`>= 26`**; producer withholds below |
+| **old peer** | a `< 24` frontend **retains its existing `Key` behaviour and its existing limitations** — it truncates multi-scalar input today and ignores IME, and continues to. **The guarantee is NO REGRESSION, not retroactive correctness** | a **`< 26`** frontend cannot drop-open; nothing it already had degrades |
 | **bounds** | **64 KiB** UTF-8; oversize **rejected** | **32 KiB** per raw path; non-empty path; absolute non-empty cwd; **embedded NUL rejected**; `Failed.message` capped at the **existing 4 KiB** error cap |
 | **pins** | frozen bytes on `FrontendEvent`'s previous final variant | **two independent pins** — `FrontendEvent` for `OpenTarget`, `InstanceMessage` for `OpenTargetResult` |
 

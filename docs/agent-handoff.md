@@ -2547,6 +2547,51 @@ its own step, never `&&`-chained.
 
 **Run it with `scripts/gate`. Do not retype it.**
 
+**NEVER start the gate — or `cargo test` — from a shell that ignores
+`SIGINT`.** A shell backgrounding a job without job control sets
+`SIGINT` (and `SIGQUIT`) to `SIG_IGN`; `nohup` adds `SIGHUP`. `SIG_IGN`
+is **inherited across `fork` and survives `exec`**, so it reaches
+`cargo`, the test binary, and everything they spawn. Any test that
+signals a child and waits for it then hangs to its own deadline and
+reports a *product* defect that is not there.
+
+Concretely: `setsid nohup ./scripts/gate … &` is **forbidden**. This
+cost one lane seven red full sweeps and nine framing revisions chasing
+a GPU teardown bug that never existed
+(`docs/gpu-probe-sigint-framing.md` §4c). Long runs do not need it —
+measured, an ordinary tool-level background launch leaves `SIGINT`
+deliverable.
+
+`scripts/gate` now refuses to start in that state, before any stage,
+and **there is no override**: a run under ignored `SIGINT` cannot
+produce valid evidence. If you see
+
+```
+pmacs: SIGINT is ignored; run this command with SIGINT deliverable
+gate: REFUSING TO RUN --- see the diagnosis above.
+```
+
+the fix is to re-run it in the foreground, not to work around the
+guard. `scripts/check-sigint-deliverable` answers the question on its
+own: exit **0** deliverable, **1** ignored, **2** undecidable.
+
+**AND NEVER WRAP THE GATE IN `timeout` TO FIT AN AGENT COMMAND CAP.**
+The full 16-stage suite outruns a ten-minute cap, and a `timeout 580`
+around it kills `sweep` mid-run; the runner then records that stage as
+a **failure**, which reads in the log exactly like a real red. This
+already produced one false §5b gate result. It is the same defect as
+the one above in a different costume: a harness convenience silently
+becoming evidence.
+
+The supported way to run past the cap is the **tool-level background
+launch**, which is measured `safe` by
+`scripts/check-sigint-deliverable`, so the guard admits it and the run
+is valid. Check it directly if in doubt --- the helper is one command
+and answers for whatever shell actually invoked it. Failing that, run
+the suite in labelled pieces and say in the record which piece produced
+which result. **A truncated run is not a result, and must never be
+reported as one.**
+
 ```
 scripts/gate [--acceptance SUITE]... [--protocol]
 ```

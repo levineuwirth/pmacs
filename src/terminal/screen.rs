@@ -114,6 +114,15 @@ pub struct ScreenProjection {
     pub title: Option<String>,
     /// Screen generation represented by this projection.
     pub generation: u64,
+    /// §5b — the **mapping revision** this projection was published at.
+    ///
+    /// Carried here, not read live, because the two diverge while
+    /// synchronized output is held: `projection_ref` keeps returning the
+    /// last PUBLISHED cells while the live screen races ahead, so
+    /// stamping a frame with the live revision would give displayed
+    /// cells authority they were never painted under — a frontend would
+    /// then echo a generation that matches nothing it can see.
+    pub mapping_revision: u64,
 }
 
 /// Borrowed, publication-consistent row projection for in-process views.
@@ -128,6 +137,8 @@ pub(crate) struct BorrowedScreenProjection<'a> {
     pub cursor: Option<CellCoord>,
     pub title: Option<&'a str>,
     pub generation: u64,
+    /// §5b — the mapping revision this projection was published at.
+    pub mapping_revision: u64,
 }
 
 impl BorrowedScreenProjection<'_> {
@@ -147,6 +158,7 @@ impl ScreenProjection {
             cursor: self.cursor,
             title: self.title.as_deref(),
             generation: self.generation,
+            mapping_revision: self.mapping_revision,
         }
     }
 }
@@ -192,6 +204,9 @@ pub struct TerminalScreen {
     tab_stops: BTreeSet<usize>,
     title: Option<String>,
     generation: u64,
+    /// §5b — see [`Screen::mapping_revision`]. Separate from
+    /// `generation`, which advances for style and title too.
+    mapping_revision: u64,
     published: ScreenProjection,
     sync_started: Option<Instant>,
     next_line_id: u64,
@@ -221,6 +236,7 @@ impl TerminalScreen {
             cursor: Some(CellCoord::new(0, 0)),
             title: None,
             generation: 0,
+            mapping_revision: 0,
         };
         Ok(Self {
             size,
@@ -240,6 +256,7 @@ impl TerminalScreen {
             tab_stops: default_tab_stops(size.cols as usize),
             title: None,
             generation: 0,
+            mapping_revision: 0,
             published,
             sync_started: None,
             next_line_id,
@@ -269,24 +286,24 @@ impl TerminalScreen {
             }
             AnsiEvent::SetStyle(style) => {
                 self.style = style;
-                self.changed();
+                self.display_only_changed();
                 None
             }
             AnsiEvent::CarriageReturn => {
                 self.cursor.col = 0;
                 self.cursor.pending_wrap = false;
-                self.changed();
+                self.display_only_changed();
                 None
             }
             AnsiEvent::Backspace => {
                 self.cursor.col = self.cursor.col.saturating_sub(1);
                 self.cursor.pending_wrap = false;
-                self.changed();
+                self.display_only_changed();
                 None
             }
             AnsiEvent::Bell => {
                 self.bell_count = self.bell_count.saturating_add(1);
-                self.changed();
+                self.display_only_changed();
                 None
             }
             AnsiEvent::LineFeed | AnsiEvent::Index => {
@@ -308,17 +325,17 @@ impl TerminalScreen {
             }
             AnsiEvent::SetTabStop => {
                 self.tab_stops.insert(self.cursor.col);
-                self.changed();
+                self.display_only_changed();
                 None
             }
             AnsiEvent::ClearTabStop => {
                 self.tab_stops.remove(&self.cursor.col);
-                self.changed();
+                self.display_only_changed();
                 None
             }
             AnsiEvent::ClearAllTabStops => {
                 self.tab_stops.clear();
-                self.changed();
+                self.display_only_changed();
                 None
             }
             AnsiEvent::CursorUp(n) => {
@@ -432,23 +449,23 @@ impl TerminalScreen {
                     CharacterSetSlot::G0 => self.g0 = charset,
                     CharacterSetSlot::G1 => self.g1 = charset,
                 }
-                self.changed();
+                self.display_only_changed();
                 None
             }
             AnsiEvent::ShiftOut => {
                 self.use_g1 = true;
-                self.changed();
+                self.display_only_changed();
                 None
             }
             AnsiEvent::ShiftIn => {
                 self.use_g1 = false;
-                self.changed();
+                self.display_only_changed();
                 None
             }
             AnsiEvent::DeviceRequest(request) => Some(self.device_reply(request)),
             AnsiEvent::SetTitle(title) => {
                 self.title = Some(sanitize_title(&title));
-                self.changed();
+                self.display_only_changed();
                 None
             }
             AnsiEvent::EraseToEol => {
@@ -595,6 +612,7 @@ impl TerminalScreen {
                 .then(|| CellCoord::new(self.cursor.row as u32, self.cursor.col as u32)),
             title: self.title.as_deref(),
             generation: self.generation,
+            mapping_revision: self.mapping_revision,
         }
     }
 
@@ -654,7 +672,7 @@ impl TerminalScreen {
         self.g0 = saved.g0;
         self.g1 = saved.g1;
         self.use_g1 = saved.use_g1;
-        self.changed();
+        self.display_only_changed();
     }
 
     fn write_text(&mut self, text: &str) {
@@ -808,6 +826,24 @@ impl TerminalScreen {
         if self.modes.insert {
             self.insert_characters(width as u32);
         }
+        // §5b — did the GLYPH change, or only the pen? Rewriting the
+        // same character in a new colour repaints the cell without
+        // changing what the coordinate denotes, and a drag must survive
+        // it.
+        //
+        // Sampled BEFORE `clear_wide_at`, which blanks the cell when it
+        // is part of a wide pair — sampling after would compare the new
+        // glyph against a default and call every rewrite a change.
+        let glyph_changed = {
+            let row = self.cursor.row;
+            let col = self.cursor.col;
+            let cells = &self.active().rows[row].cells;
+            cells[col].glyph != Glyph::Char(ch)
+                || (width == 2
+                    && cells
+                        .get(col + 1)
+                        .is_none_or(|next| next.glyph != Glyph::Continuation))
+        };
         self.clear_wide_at(self.cursor.row, self.cursor.col);
         if width == 2 {
             self.clear_wide_at(self.cursor.row, self.cursor.col + 1);
@@ -828,7 +864,11 @@ impl TerminalScreen {
             self.cursor.pending_wrap = false;
         }
         self.last_grapheme = Some((row, col));
-        self.changed();
+        if glyph_changed {
+            self.changed();
+        } else {
+            self.display_only_changed();
+        }
     }
 
     fn soft_wrap(&mut self) {
@@ -882,7 +922,7 @@ impl TerminalScreen {
             .copied()
             .unwrap_or(cols - 1);
         self.cursor.pending_wrap = false;
-        self.changed();
+        self.display_only_changed();
     }
 
     fn move_vertical(&mut self, delta: i64) {
@@ -899,7 +939,7 @@ impl TerminalScreen {
         };
         self.cursor.row = moved.clamp(lo, hi);
         self.cursor.pending_wrap = false;
-        self.changed();
+        self.display_only_changed();
     }
 
     fn move_horizontal(&mut self, delta: i64) {
@@ -911,13 +951,13 @@ impl TerminalScreen {
         };
         self.cursor.col = moved.min(self.size.cols as usize - 1);
         self.cursor.pending_wrap = false;
-        self.changed();
+        self.display_only_changed();
     }
 
     fn set_col(&mut self, col: u32) {
         self.cursor.col = col.saturating_sub(1).min(self.size.cols - 1) as usize;
         self.cursor.pending_wrap = false;
-        self.changed();
+        self.display_only_changed();
     }
     fn set_row(&mut self, row: u32) {
         let base = if self.modes.origin {
@@ -932,7 +972,7 @@ impl TerminalScreen {
         };
         self.cursor.row = (base + row.saturating_sub(1) as usize).min(hi);
         self.cursor.pending_wrap = false;
-        self.changed();
+        self.display_only_changed();
     }
     fn set_position(&mut self, row: u32, col: u32) {
         self.set_row(row);
@@ -1466,6 +1506,32 @@ impl TerminalScreen {
 
     fn changed(&mut self) {
         self.generation = self.generation.saturating_add(1);
+        // §5b: by DEFAULT a change also moves the mapping. Anything not
+        // explicitly classified as display-only is treated as content,
+        // which fails in the safe direction — over-cancelling a gesture
+        // is a nuisance, under-cancelling one lets a stale coordinate
+        // reach a child.
+        self.mapping_revision = self.mapping_revision.saturating_add(1);
+    }
+
+    /// A change that repaints but **cannot move what a coordinate
+    /// denotes** (§5b's stable controls).
+    ///
+    /// Style, title, bell, tab stops and pure cursor motion all land
+    /// here. The existing `generation` still advances — the screen does
+    /// look different — but `mapping_revision` does not, so a drag
+    /// survives them. Keying the panel's mapping on `generation` was
+    /// rejected for exactly this reason: it moves for all of these.
+    fn display_only_changed(&mut self) {
+        self.generation = self.generation.saturating_add(1);
+    }
+
+    /// §5b — identity of what a terminal coordinate DENOTES.
+    ///
+    /// Advances with content and topology, and holds across the display
+    /// changes above.
+    pub fn mapping_revision(&self) -> u64 {
+        self.mapping_revision
     }
     fn current_snapshot(&self) -> ScreenSnapshot {
         ScreenSnapshot {
@@ -1495,8 +1561,20 @@ impl TerminalScreen {
                 .then(|| CellCoord::new(self.cursor.row as u32, self.cursor.col as u32)),
             title: self.title.clone(),
             generation: self.generation,
+            mapping_revision: self.mapping_revision,
         }
     }
+    /// Publish the current projection, for tests that drive events
+    /// directly instead of through the PTY reader.
+    ///
+    /// `#[doc(hidden)]` rather than `#[cfg(test)]`: the rows that need
+    /// it are integration tests, which link the library WITHOUT
+    /// `cfg(test)` and so cannot see a gated item.
+    #[doc(hidden)]
+    pub fn publish_for_test(&mut self) {
+        self.publish();
+    }
+
     fn publish(&mut self) {
         self.published = self.current_projection();
     }
@@ -1908,6 +1986,67 @@ mod tests {
         s.apply_event(AnsiEvent::NextLine);
         assert_eq!(&text(&s.snapshot()), "aaaabbbb    dddd");
         assert_eq!(s.snapshot().cursor, Some(CellCoord::new(2, 0)));
+    }
+
+    /// §5b G3 — the terminal **stable controls**.
+    ///
+    /// These are exactly the events that make `generation` unusable as a
+    /// mapping key: each one advances it. `mapping_revision` must hold
+    /// across all of them, or a drag over a panel terminal dies the
+    /// moment the child recolours a character or rings the bell.
+    #[test]
+    fn display_only_events_advance_the_generation_but_not_the_mapping() {
+        for (name, event) in [
+            ("style", AnsiEvent::SetStyle(Style::default())),
+            ("title", AnsiEvent::SetTitle("t".to_owned())),
+            ("bell", AnsiEvent::Bell),
+            ("tab stop", AnsiEvent::SetTabStop),
+            ("clear tab stops", AnsiEvent::ClearAllTabStops),
+            ("carriage return", AnsiEvent::CarriageReturn),
+        ] {
+            let mut s = screen(2, 16);
+            let before_generation = s.snapshot().generation;
+            let before_mapping = s.mapping_revision();
+
+            s.apply_event(event);
+
+            assert!(
+                s.snapshot().generation > before_generation,
+                "{name} repaints, so the display generation must advance \
+                 — otherwise this row proves nothing about the split"
+            );
+            assert_eq!(
+                s.mapping_revision(),
+                before_mapping,
+                "{name} cannot change what a coordinate denotes, so the \
+                 MAPPING revision must hold"
+            );
+        }
+    }
+
+    /// §5b G2 — content and topology **do** move the mapping revision.
+    ///
+    /// The positive half. Without it, a `mapping_revision` that never
+    /// advanced at all would pass every stable control above.
+    #[test]
+    fn content_events_advance_the_mapping_revision() {
+        for (name, event) in [
+            ("text", AnsiEvent::Text("hi".to_owned())),
+            ("line feed", AnsiEvent::LineFeed),
+            (
+                "erase display",
+                AnsiEvent::EraseDisplay(crate::ansi::EraseMode::ToEnd),
+            ),
+            ("scroll up", AnsiEvent::ScrollUp(1)),
+        ] {
+            let mut s = screen(2, 16);
+            let before = s.mapping_revision();
+            s.apply_event(event);
+            assert!(
+                s.mapping_revision() > before,
+                "{name} changes what a coordinate denotes"
+            );
+        }
     }
 
     #[test]

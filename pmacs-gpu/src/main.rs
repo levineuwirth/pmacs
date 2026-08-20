@@ -849,11 +849,50 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
                     facts.last_frame_text = frame_probe_text(frame);
                     facts.last_title.clone_from(&frame.title);
                 }
-                match msg.as_ref() {
-                    InstanceMessage::PanelFrame(
-                        pmacs_protocol::panel::PanelFramePayload::Present(frame),
-                    ) => {
+                // §5b — a panel message is only NOTED here; its facts
+                // are read from the retained state AFTER
+                // `apply_attach_message` has ruled on it.
+                //
+                // Reading the raw payload was a false-positive
+                // generator: once one valid frame had landed, a
+                // REJECTED frame — wrong family, invalid, stale
+                // generation — still supplied the expected text while
+                // the retained old frame supplied the rendering. The
+                // probe would report the band showing something it does
+                // not show.
+                // The payload KIND is kept only to tell a real `Absent`
+                // apart from a refusal; every fact below comes from the
+                // accepted state.
+                let panel_absent_payload = matches!(
+                    msg.as_ref(),
+                    InstanceMessage::PanelFrame(pmacs_protocol::panel::PanelFramePayload::Absent)
+                );
+                let panel_message = matches!(msg.as_ref(), InstanceMessage::PanelFrame(_));
+                // The COMPLETE accepted authority, both halves. An
+                // epoch/size triple is not enough: ordinary content,
+                // focus, cursor and mapping-generation updates all leave
+                // it unchanged, so accepted frames would go uncounted —
+                // including the identical-frame/higher-generation case
+                // this slice requires — and a fixture waiting for two
+                // frames would wait forever.
+                let authority_before = state
+                    .panel
+                    .presented()
+                    .cloned()
+                    .map(|frame| (frame, state.panel.mapping_generation));
+
+                state.apply_attach_message(*msg);
+
+                if panel_message {
+                    let authority_after = state
+                        .panel
+                        .presented()
+                        .cloned()
+                        .map(|frame| (frame, state.panel.mapping_generation));
+                    if authority_before != authority_after {
                         facts.panel_frames += 1;
+                    }
+                    if let Some((frame, _)) = authority_after.as_ref() {
                         facts.panel_rows = frame.size.rows;
                         facts.panel_cols = frame.size.cols;
                         facts.panel_focused = frame.focused;
@@ -864,12 +903,15 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
                             facts.panel_text_observed = true;
                         }
                     }
-                    InstanceMessage::PanelFrame(
-                        pmacs_protocol::panel::PanelFramePayload::Absent,
-                    ) => facts.panel_absent_observed = true,
-                    _ => {}
+                    // Absence is only ever reported for an actual
+                    // `Absent`. Inferring it from `presented() == None`
+                    // turns a REFUSAL with nothing retained into "the
+                    // daemon says there is no band", which is a
+                    // different fact entirely.
+                    if panel_absent_payload {
+                        facts.panel_absent_observed = true;
+                    }
                 }
-                state.apply_attach_message(*msg);
                 if is_snapshot {
                     // The dual declaration: a byte viewport for a
                     // document, a cell size for a terminal. The daemon
@@ -1972,7 +2014,7 @@ struct State {
     /// Whether the negotiated session carries the panel wire at all.
     ///
     /// Keyed on the NEGOTIATED version, never the `Hello` baseline.
-    panel_wire: bool,
+    panel_family: PanelFamily,
     /// Set when a font/scale transaction has invalidated the panel's
     /// geometry declaration, so the caller that owns the client knows to
     /// re-declare under a `Metrics` trigger.
@@ -2084,9 +2126,60 @@ struct PanelDrag {
     sent_rows: u32,
 }
 
+/// §5b — which panel family this session negotiated.
+///
+/// **One value, derived once from `session_protocol_version`, used for
+/// BOTH payload acceptance and pointer production.** Deriving the two
+/// independently is how a frontend ends up accepting one family while
+/// producing the other, which is a bypass with extra steps: the peer
+/// would be speaking v25 inbound and v24 outbound and neither side
+/// could tell.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum PanelFamily {
+    /// Below `PANEL_MIN_VERSION`: no panel at all.
+    #[default]
+    Unsupported,
+    /// v21–v24: `Present` in, `PanelPointer` out.
+    Legacy,
+    /// v25 and later: `PresentMapped` in, `PanelPointerMapped` out.
+    Mapped,
+}
+
+impl PanelFamily {
+    /// Classify a negotiated session version.
+    ///
+    /// Read from the NEGOTIATED version, never the `Hello` baseline:
+    /// that stays at the compatibility floor forever, so reading it
+    /// would leave the band permanently dark.
+    fn from_session_version(session_protocol_version: u32) -> Self {
+        if session_protocol_version >= pmacs_protocol::PANEL_MAPPING_MIN_VERSION {
+            Self::Mapped
+        } else if session_protocol_version >= PANEL_MIN_VERSION {
+            Self::Legacy
+        } else {
+            Self::Unsupported
+        }
+    }
+
+    /// Whether a panel exists on this session at all.
+    fn carries_panel(self) -> bool {
+        !matches!(self, Self::Unsupported)
+    }
+}
+
 /// The GPU frontend's half of the bottom panel (Q#BP15, Q#BP15a, Q#BP16).
 #[derive(Default)]
 struct PanelBand {
+    /// §5b — the mapping generation the retained frame was published
+    /// at, echoed by every `PanelPointerMapped` this frontend sends.
+    ///
+    /// Moves ATOMICALLY with `frame`: a generation naming a frame that
+    /// was never installed would be authority for something the user
+    /// cannot see.
+    ///
+    /// **Nondecreasing, and NOT cleared by `Absent`** — a frame delayed
+    /// across a hide must not roll this frontend's authority backward.
+    mapping_generation: Option<u64>,
     /// The last **valid** frame received, retained until an authoritative
     /// `Absent`.
     ///
@@ -2141,6 +2234,15 @@ struct PanelBand {
     /// suppress it. This one is a TERMINATION FALLBACK with a different
     /// lifetime, and `panel_motion_is_new` never consults it.
     gesture_last_content_cell: Option<CellCoord>,
+    /// §5b G9b — the mapping generation `last_pointer_cell` was measured
+    /// under, so the dedupe re-arms across a mapping change.
+    ///
+    /// Comparing the cell alone EATS the first motion after the mapping
+    /// moves: the pointer has not travelled, but the cell now denotes
+    /// different text, and that is exactly the motion the daemon needs.
+    /// `None` for a legacy session, where it is constant and the dedupe
+    /// behaves as it always did.
+    last_pointer_generation: Option<u64>,
     /// Whether the pointer is currently over the divider strip, which
     /// decides the `RowResize` cursor icon.
     hover_divider: bool,
@@ -2504,15 +2606,56 @@ impl App {
         else {
             return false;
         };
-        let Some(client) = self.attach_client.as_ref() else {
-            return false;
+        // §5b — production reads the SAME negotiated family as
+        // acceptance. Deriving them separately is how a frontend ends
+        // up accepting one family and producing the other.
+        self.send_panel_gesture(geometry_epoch, panel_epoch, buffer_id, coord, kind, mods);
+        true
+    }
+
+    /// Ship one panel gesture in whichever family this session
+    /// negotiated (§5b).
+    ///
+    /// The single place that chooses, so acceptance and production
+    /// cannot disagree. A mapped session with no retained generation
+    /// sends NOTHING rather than falling back to the legacy variant:
+    /// falling back would be the frontend half of the bypass, and the
+    /// daemon would refuse it anyway.
+    fn send_panel_gesture(
+        &self,
+        geometry_epoch: u64,
+        panel_epoch: u64,
+        buffer_id: pmacs_protocol::BufferId,
+        coord: CellCoord,
+        kind: ProtocolMouseKind,
+        mods: Modifiers,
+    ) {
+        let (Some(client), Some(state)) = (self.attach_client.as_ref(), self.state.as_ref()) else {
+            return;
         };
-        if let Err(e) =
-            client.send_panel_pointer(geometry_epoch, panel_epoch, buffer_id, coord, kind, mods)
-        {
+        let sent = match state.panel_family {
+            PanelFamily::Unsupported => return,
+            PanelFamily::Legacy => {
+                client.send_panel_pointer(geometry_epoch, panel_epoch, buffer_id, coord, kind, mods)
+            }
+            PanelFamily::Mapped => {
+                let Some(mapping_generation) = state.panel.mapping_generation else {
+                    return;
+                };
+                client.send_panel_pointer_mapped(
+                    geometry_epoch,
+                    panel_epoch,
+                    buffer_id,
+                    coord,
+                    kind,
+                    mods,
+                    mapping_generation,
+                )
+            }
+        };
+        if let Err(e) = sent {
             eprintln!("pmacs-gpu: send_panel_pointer failed: {e}");
         }
-        true
     }
 
     /// Ship a panel gesture at an explicitly chosen cell.
@@ -2543,16 +2686,11 @@ impl App {
         let Some(coord) = coord else {
             return false;
         };
-        if let Err(e) = client.send_panel_pointer(
-            frame.geometry_epoch,
-            frame.panel_epoch,
-            frame.buffer_id,
-            coord,
-            kind,
-            mods,
-        ) {
-            eprintln!("pmacs-gpu: send_panel_pointer failed: {e}");
-        }
+        // §5b — through the one family-aware sender, so this site
+        // cannot drift from the other into producing the wrong variant.
+        let (geometry_epoch, panel_epoch, buffer_id) =
+            (frame.geometry_epoch, frame.panel_epoch, frame.buffer_id);
+        self.send_panel_gesture(geometry_epoch, panel_epoch, buffer_id, coord, kind, mods);
         true
     }
 
@@ -5541,7 +5679,7 @@ impl State {
             terminal: None,
             panel: PanelBand::default(),
             panel_text_buffers: Vec::new(),
-            panel_wire: false,
+            panel_family: PanelFamily::Unsupported,
             panel_metrics_changed: false,
             last_terminal_size_sent: None,
             terminal_frame_error_latched: false,
@@ -6879,7 +7017,7 @@ impl State {
     /// `Hello` baseline: the baseline stays at the compatibility floor
     /// forever, so reading it here would leave the band permanently dark.
     fn set_panel_wire(&mut self, session_protocol_version: u32) {
-        self.panel_wire = session_protocol_version >= PANEL_MIN_VERSION;
+        self.panel_family = PanelFamily::from_session_version(session_protocol_version);
     }
 
     /// The band inset the document boundary is computed from.
@@ -6997,7 +7135,7 @@ impl State {
     /// the attach client, so the whole state machine — dedup, exhaustion,
     /// the latch — is reachable without a daemon.
     fn next_geometry_declaration(&mut self, trigger: GeometryTrigger) -> Option<(u64, CellSize)> {
-        if !self.panel_wire || self.panel.exhausted {
+        if !self.panel_family.carries_panel() || self.panel.exhausted {
             return None;
         }
         let (total, advance) = self.declared_cell_total();
@@ -7047,6 +7185,13 @@ impl State {
             return false;
         }
         match payload {
+            // §5b G8d — a mapped frame is accepted ONLY by a session
+            // that negotiated the mapped family. Retention is ATOMIC on
+            // refusal: nothing about the previous frame, its generation
+            // or the pointer state is touched on the way out.
+            PanelFramePayload::PresentMapped { .. } if self.panel_family != PanelFamily::Mapped => {
+                false
+            }
             PanelFramePayload::Absent => {
                 // Authoritative removal, and always safe. Note this does
                 // NOT clear the geometry declaration: the frontend's frame
@@ -7061,7 +7206,65 @@ impl State {
                 self.panel.pointer_held = false;
                 self.panel.last_pointer_cell = None;
                 self.panel.gesture_last_content_cell = None;
+                self.panel.last_pointer_generation = None;
                 had
+            }
+            // §5b G8b — a mapped session REJECTS the legacy family
+            // rather than painting a band it cannot safely hit-test. A
+            // frame with no mapping identity is one whose cells cannot
+            // be inverted safely, so accepting it would reintroduce the
+            // hole from the receiving side.
+            // Gated on the POSITIVE family, not on "not mapped".
+            // `Unsupported` is neither, and a `!= Mapped` test let it
+            // through — a session below `PANEL_MIN_VERSION` accepting a
+            // band it never negotiated. `carries_panel()` guards the
+            // geometry declaration, not this seam.
+            PanelFramePayload::Present(_) if self.panel_family != PanelFamily::Legacy => false,
+            PanelFramePayload::PresentMapped {
+                frame,
+                mapping_generation,
+            } => {
+                // §5b — zero is the wire's uninitialised value and is
+                // refused like any mismatch, and the generation is
+                // NONDECREASING: a delayed lower frame must not roll
+                // this frontend's authority backward.
+                if mapping_generation == 0
+                    || self
+                        .panel
+                        .mapping_generation
+                        .is_some_and(|held| mapping_generation < held)
+                {
+                    return false;
+                }
+                if let Err(error) = frame.validate() {
+                    eprintln!("pmacs-gpu: rejecting invalid mapped panel frame: {error}");
+                    return false;
+                }
+                // A duplicate frame at the SAME generation does no work.
+                // A duplicate at a HIGHER one still updates authority:
+                // the daemon has re-keyed the mapping, and echoing the
+                // old generation would have every gesture refused.
+                if self.panel.frame.as_ref() == Some(&frame)
+                    && self.panel.mapping_generation == Some(mapping_generation)
+                {
+                    return false;
+                }
+                // NOTE: the gesture-latch reset on an identity change is
+                // R-d, owned by `panel-pointer-replay`. It is not
+                // duplicated here — two branches resetting the same
+                // latch would conflict at the rebase and neither would
+                // own the contract.
+                let plan = TerminalPaintPlan::build_grid(
+                    frame.size,
+                    &frame.cells,
+                    frame.cursor,
+                    Self::terminal_palette(),
+                );
+                self.panel.frame = Some(frame);
+                self.panel.mapping_generation = Some(mapping_generation);
+                self.panel.plan = Some(plan);
+                self.rebuild_panel_text_buffers();
+                true
             }
             PanelFramePayload::Present(frame) => {
                 if let Err(error) = frame.validate() {
@@ -7435,10 +7638,18 @@ impl State {
     /// traffic and every one of those is a daemon-side gesture — the same
     /// reason the terminal path dedupes.
     fn panel_motion_is_new(&mut self, coord: CellCoord) -> bool {
-        if self.panel.last_pointer_cell == Some(coord) {
+        // §5b G9b — keyed by generation as well as cell. Deliberately
+        // read here rather than reset from the frame path: resetting on
+        // every accepted repaint would re-arm within one generation and
+        // bring pixel-rate traffic back, and the dedupe would stop
+        // being a dedupe.
+        if self.panel.last_pointer_cell == Some(coord)
+            && self.panel.last_pointer_generation == self.panel.mapping_generation
+        {
             return false;
         }
         self.panel.last_pointer_cell = Some(coord);
+        self.panel.last_pointer_generation = self.panel.mapping_generation;
         true
     }
 
@@ -7451,6 +7662,7 @@ impl State {
         // Safe in both directions: the press path rewrites it immediately
         // after arming, and a release READS it before this runs.
         self.panel.gesture_last_content_cell = None;
+        self.panel.last_pointer_generation = None;
     }
 
     /// Begin a divider drag at surface pixel `y`, if the pointer is on the
@@ -20010,6 +20222,460 @@ mod tests {
                 "the remainder is band background, not a cell and not the document"
             );
         }
+    }
+
+    /// A mapped session with a real installed frame, and the frame.
+    ///
+    /// The baseline is installed in the CORRECT family, so every
+    /// assertion below has real authority to preserve rather than a
+    /// `None` that was never set.
+    fn mapped_panel_session(rows: u32, generation: u64) -> Option<(State, PanelFrame)> {
+        let mut state = headless_or_skip(800, 600, "alpha")?;
+        let frame = present_panel(&mut state, rows);
+        state.set_panel_wire(pmacs_protocol::PANEL_MAPPING_MIN_VERSION);
+        let mut mapped = frame;
+        mapped.panel_epoch += 1;
+        assert!(
+            state.apply_panel_payload(PanelFramePayload::PresentMapped {
+                frame: mapped.clone(),
+                mapping_generation: generation,
+            }),
+            "fixture: the mapped baseline must install"
+        );
+        Some((state, mapped))
+    }
+
+    /// §5b G9b — motion dedupe suppresses a repeat WITHIN one generation
+    /// and RE-ARMS across one.
+    ///
+    /// The pointer has not moved in either case. What differs is whether
+    /// the cell still denotes the same text: comparing the cell alone
+    /// eats the first motion after the mapping moves, which is precisely
+    /// the motion the daemon needs to re-anchor the gesture.
+    #[test]
+    fn g9b_motion_dedupe_is_keyed_by_generation_not_by_cell_alone() {
+        let Some((mut state, frame)) = mapped_panel_session(4, 5) else {
+            return;
+        };
+        let cell = pmacs_protocol::CellCoord::new(1, 1);
+
+        assert!(
+            state.panel_motion_is_new(cell),
+            "the first motion at a cell is always new"
+        );
+        assert!(
+            !state.panel_motion_is_new(cell),
+            "a repeat within one generation is suppressed — without this \
+             sub-cell motion becomes pixel-rate wire traffic"
+        );
+
+        // A same-generation repaint: a different frame, same key. The
+        // dedupe must NOT re-arm, or the suppression above is defeated
+        // by any style or selection repaint.
+        let mut repaint = frame.clone();
+        repaint.focused = !frame.focused;
+        assert!(
+            state.apply_panel_payload(PanelFramePayload::PresentMapped {
+                frame: repaint,
+                mapping_generation: 5,
+            }),
+            "fixture: the repaint must be accepted, or it proves nothing"
+        );
+        assert!(
+            !state.panel_motion_is_new(cell),
+            "a same-generation repaint does not re-arm the dedupe"
+        );
+
+        // The mapping MOVES. The pointer still has not.
+        let mut rekeyed = frame.clone();
+        rekeyed.focused = frame.focused;
+        assert!(
+            state.apply_panel_payload(PanelFramePayload::PresentMapped {
+                frame: rekeyed,
+                mapping_generation: 6,
+            }),
+            "fixture: the re-keyed frame must be accepted"
+        );
+        assert!(
+            state.panel_motion_is_new(cell),
+            "and across a generation the same cell IS new: it denotes \
+             different text now"
+        );
+    }
+
+    /// §5b G9c — a byte-identical frame at a HIGHER generation still
+    /// updates authority.
+    ///
+    /// The visual result is nothing, which is what makes this easy to
+    /// get wrong: returning early on frame equality leaves the frontend
+    /// echoing a generation the daemon has already retired, and every
+    /// gesture it sends is then refused.
+    #[test]
+    fn g9c_an_identical_frame_at_a_higher_generation_still_updates_authority() {
+        let Some((mut state, frame)) = mapped_panel_session(4, 5) else {
+            return;
+        };
+
+        // Byte-identical, and the same generation: no work at all.
+        assert!(
+            !state.apply_panel_payload(PanelFramePayload::PresentMapped {
+                frame: frame.clone(),
+                mapping_generation: 5,
+            }),
+            "a true duplicate does nothing"
+        );
+        assert_eq!(state.panel.mapping_generation, Some(5));
+
+        // Byte-identical, HIGHER generation: authority moves.
+        assert!(
+            state.apply_panel_payload(PanelFramePayload::PresentMapped {
+                frame: frame.clone(),
+                mapping_generation: 6,
+            }),
+            "the daemon has re-keyed the mapping under an unchanged \
+             picture — a fold or an edit off-screen does exactly that"
+        );
+        assert_eq!(
+            state.panel.mapping_generation,
+            Some(6),
+            "echoing 5 from here would have every gesture refused"
+        );
+        assert_eq!(
+            state.panel.frame.as_ref(),
+            Some(&frame),
+            "and the frame is unchanged, because it was identical"
+        );
+    }
+
+    /// §5b G10 — a structurally invalid mapped frame is refused
+    /// ATOMICALLY: previous frame and previous generation both retained.
+    ///
+    /// Updating one without the other leaves a valid generation naming a
+    /// frame that was never shown, which is the same stale-mapping hole
+    /// from the receiving side.
+    #[test]
+    fn g10_an_invalid_mapped_frame_is_refused_atomically() {
+        let Some((mut state, frame)) = mapped_panel_session(4, 5) else {
+            return;
+        };
+        state.set_panel_pointer_held(true);
+        state.panel.last_pointer_cell = Some(pmacs_protocol::CellCoord::new(1, 1));
+
+        // G10 — structurally invalid: the cell count contradicts `size`.
+        let mut invalid = frame.clone();
+        invalid.cells.pop();
+        assert!(
+            invalid.validate().is_err(),
+            "fixture: the frame must actually be invalid"
+        );
+        assert!(
+            !state.apply_panel_payload(PanelFramePayload::PresentMapped {
+                frame: invalid,
+                mapping_generation: 9,
+            })
+        );
+        assert_eq!(state.panel.frame.as_ref(), Some(&frame), "frame retained");
+        assert_eq!(
+            state.panel.mapping_generation,
+            Some(5),
+            "and its generation with it — a valid 9 here would name a \
+             frame this frontend never received"
+        );
+
+        // G10a — structurally VALID, generation zero. Zero is what a
+        // sender that never initialised the field produces; accepting it
+        // once disables the check for the session.
+        let mut zeroed = frame.clone();
+        zeroed.panel_epoch += 7;
+        assert!(
+            zeroed.validate().is_ok(),
+            "fixture: this one is structurally fine, so the refusal is \
+             about the zero"
+        );
+        assert!(
+            !state.apply_panel_payload(PanelFramePayload::PresentMapped {
+                frame: zeroed,
+                mapping_generation: 0,
+            })
+        );
+        assert_eq!(state.panel.frame.as_ref(), Some(&frame));
+        assert_eq!(state.panel.mapping_generation, Some(5));
+        assert!(state.panel.pointer_held, "a refusal ends no live gesture");
+        assert_eq!(
+            state.panel.last_pointer_cell,
+            Some(pmacs_protocol::CellCoord::new(1, 1)),
+            "nor discards its dedupe baseline"
+        );
+    }
+
+    /// §5b G10a — a ZERO generation is refused when NO authority is
+    /// held yet.
+    ///
+    /// This is the only setup that isolates the zero check. With a
+    /// generation already held, zero is also *lower* than it, so the
+    /// nondecreasing clause refuses the frame and a row built that way
+    /// stays green with the zero check deleted — measured, not assumed.
+    ///
+    /// The case is the one the framing names: a sender that never
+    /// initialised the field. Accepting it once records `Some(0)`, and
+    /// from there no later frame is ever "lower", so the check is
+    /// disabled for the whole session.
+    #[test]
+    fn g10a_a_zero_generation_is_refused_before_any_authority_is_held() {
+        let Some(mut state) = headless_or_skip(800, 600, "alpha") else {
+            return;
+        };
+        // A legacy frame first, so there is a real retained band to
+        // preserve, then the family switch. `mapping_generation` is
+        // genuinely `None` here — that is the state under test, not an
+        // accident of the fixture.
+        let baseline = present_panel(&mut state, 4);
+        state.set_panel_wire(pmacs_protocol::PANEL_MAPPING_MIN_VERSION);
+        assert_eq!(
+            state.panel.mapping_generation, None,
+            "fixture: no authority held yet"
+        );
+
+        let mut zeroed = baseline.clone();
+        zeroed.panel_epoch += 1;
+        assert!(
+            zeroed.validate().is_ok(),
+            "fixture: structurally fine, so the refusal is about the zero"
+        );
+        assert!(
+            !state.apply_panel_payload(PanelFramePayload::PresentMapped {
+                frame: zeroed,
+                mapping_generation: 0,
+            }),
+            "zero is the wire's uninitialised value and is never authority"
+        );
+        assert_eq!(
+            state.panel.mapping_generation, None,
+            "and nothing is recorded — `Some(0)` would make every later \
+             frame non-lower and disable the check for the session"
+        );
+        assert_eq!(
+            state.panel.frame.as_ref().map(|f| f.panel_epoch),
+            Some(baseline.panel_epoch),
+            "the retained band survives the refusal"
+        );
+
+        // POSITIVE CONTROL — the same frame with a real generation
+        // installs, so the refusal is about the zero and not about the
+        // family switch.
+        let mut real = baseline.clone();
+        real.panel_epoch += 2;
+        assert!(state.apply_panel_payload(PanelFramePayload::PresentMapped {
+            frame: real,
+            mapping_generation: 1,
+        }));
+        assert_eq!(state.panel.mapping_generation, Some(1));
+    }
+
+    /// §5b G10c — the generation is NONDECREASING, and `Absent` does not
+    /// erase the high-water mark.
+    ///
+    /// Values may SKIP: the daemon advances the key on mapping changes,
+    /// not on frames, so a frontend that misses two repaints legitimately
+    /// jumps. What may never happen is going backward — a delayed frame
+    /// must not roll this frontend's authority back to a mapping that is
+    /// gone.
+    #[test]
+    fn g10c_generation_is_nondecreasing_and_survives_absent() {
+        let Some((mut state, frame)) = mapped_panel_session(4, 5) else {
+            return;
+        };
+
+        // A SKIP forward is fine.
+        let mut skipped = frame.clone();
+        skipped.panel_epoch += 1;
+        assert!(state.apply_panel_payload(PanelFramePayload::PresentMapped {
+            frame: skipped.clone(),
+            mapping_generation: 9,
+        }));
+        assert_eq!(state.panel.mapping_generation, Some(9));
+
+        // A LOWER one is refused, atomically.
+        let mut delayed = frame.clone();
+        delayed.panel_epoch += 2;
+        assert!(
+            !state.apply_panel_payload(PanelFramePayload::PresentMapped {
+                frame: delayed.clone(),
+                mapping_generation: 8,
+            })
+        );
+        assert_eq!(
+            state.panel.frame.as_ref().map(|f| f.panel_epoch),
+            Some(skipped.panel_epoch),
+            "the retained frame survives"
+        );
+        assert_eq!(state.panel.mapping_generation, Some(9));
+
+        // An EQUAL generation with a different frame is accepted: a
+        // style or selection repaint does not move the mapping, and
+        // refusing it would freeze the band.
+        let mut repaint = skipped.clone();
+        repaint.focused = !skipped.focused;
+        assert!(
+            state.apply_panel_payload(PanelFramePayload::PresentMapped {
+                frame: repaint,
+                mapping_generation: 9,
+            }),
+            "an equal-generation repaint is valid"
+        );
+        assert_eq!(state.panel.mapping_generation, Some(9));
+
+        // `Absent` hides the band but must NOT erase the high-water
+        // mark: a frame delayed across the hide would otherwise come
+        // back believed.
+        assert!(state.apply_panel_payload(PanelFramePayload::Absent));
+        assert!(state.panel.presented().is_none(), "the band is down");
+        assert_eq!(
+            state.panel.mapping_generation,
+            Some(9),
+            "and the high-water mark stands"
+        );
+        assert!(
+            !state.apply_panel_payload(PanelFramePayload::PresentMapped {
+                frame: delayed,
+                mapping_generation: 8,
+            }),
+            "so the delayed frame is still refused after the hide"
+        );
+        assert!(state.panel.presented().is_none(), "and stays down");
+    }
+
+    /// §5b G8b — a MAPPED frontend refuses the legacy family, and the
+    /// refusal is ATOMIC.
+    ///
+    /// The baseline is accepted in the CORRECT family first, so there is
+    /// real authority to preserve: a row that installs a legacy frame
+    /// and then switches to mapped has `mapping_generation == None`
+    /// throughout, and asserting it stayed `None` proves nothing. The
+    /// pointer latches are primed for the same reason — untouched state
+    /// that was never set is not evidence of atomicity.
+    #[test]
+    fn g8b_a_mapped_frontend_refuses_legacy_atomically() {
+        let Some(mut state) = headless_or_skip(800, 600, "alpha") else {
+            return;
+        };
+        let frame = present_panel(&mut state, 4);
+        state.set_panel_wire(pmacs_protocol::PANEL_MAPPING_MIN_VERSION);
+
+        // A correct-family baseline, so the retained authority is real.
+        let mut baseline = frame.clone();
+        baseline.panel_epoch = frame.panel_epoch + 1;
+        assert!(
+            state.apply_panel_payload(PanelFramePayload::PresentMapped {
+                frame: baseline.clone(),
+                mapping_generation: 5,
+            }),
+            "fixture: the mapped baseline must install"
+        );
+        state.set_panel_pointer_held(true);
+        state.panel.last_pointer_cell = Some(pmacs_protocol::CellCoord::new(1, 1));
+
+        let mut intruder = frame.clone();
+        intruder.panel_epoch = frame.panel_epoch + 2;
+        assert!(
+            !state.apply_panel_payload(PanelFramePayload::Present(intruder)),
+            "a v25 frontend must not paint a band it cannot safely \
+             hit-test — the frame carries no mapping identity"
+        );
+
+        assert_eq!(
+            state.panel.frame.as_ref().map(|f| f.panel_epoch),
+            Some(baseline.panel_epoch),
+            "the retained frame survives the refusal"
+        );
+        assert_eq!(
+            state.panel.mapping_generation,
+            Some(5),
+            "and so does its authority — this is the half a switched \
+             baseline could not have shown"
+        );
+        assert!(state.panel.pointer_held, "a refusal ends no live gesture");
+        assert_eq!(
+            state.panel.last_pointer_cell,
+            Some(pmacs_protocol::CellCoord::new(1, 1)),
+            "nor discards its dedupe baseline"
+        );
+    }
+
+    /// §5b G8d — a LEGACY frontend refuses the mapped family, atomically.
+    ///
+    /// An independent state, not a continuation of G8b: sharing one
+    /// would let the second direction inherit whatever the first left
+    /// behind.
+    #[test]
+    fn g8d_a_legacy_frontend_refuses_mapped_atomically() {
+        let Some(mut state) = headless_or_skip(800, 600, "alpha") else {
+            return;
+        };
+        let frame = present_panel(&mut state, 4);
+        state.set_panel_wire(PANEL_MIN_VERSION);
+
+        let mut baseline = frame.clone();
+        baseline.panel_epoch = frame.panel_epoch + 1;
+        assert!(
+            state.apply_panel_payload(PanelFramePayload::Present(baseline.clone())),
+            "fixture: the legacy baseline must install"
+        );
+        state.set_panel_pointer_held(true);
+        state.panel.last_pointer_cell = Some(pmacs_protocol::CellCoord::new(2, 2));
+
+        let mut intruder = frame.clone();
+        intruder.panel_epoch = frame.panel_epoch + 2;
+        assert!(
+            !state.apply_panel_payload(PanelFramePayload::PresentMapped {
+                frame: intruder,
+                mapping_generation: 9,
+            }),
+            "a v24 frontend must reject a family it never negotiated"
+        );
+
+        assert_eq!(
+            state.panel.frame.as_ref().map(|f| f.panel_epoch),
+            Some(baseline.panel_epoch),
+            "the retained frame survives"
+        );
+        assert_eq!(
+            state.panel.mapping_generation, None,
+            "and no authority is acquired from a refused frame"
+        );
+        assert!(state.panel.pointer_held, "a refusal ends no live gesture");
+        assert_eq!(
+            state.panel.last_pointer_cell,
+            Some(pmacs_protocol::CellCoord::new(2, 2))
+        );
+    }
+
+    /// §5b — an UNSUPPORTED session accepts neither family.
+    ///
+    /// The case a `!= Mapped` gate let through: `Unsupported` is neither
+    /// family, so a negative test admitted a band the session never
+    /// negotiated.
+    #[test]
+    fn an_unsupported_session_accepts_neither_panel_family() {
+        let Some(mut state) = headless_or_skip(800, 600, "alpha") else {
+            return;
+        };
+        let frame = present_panel(&mut state, 4);
+        state.set_panel_wire(PANEL_MIN_VERSION - 1);
+
+        let mut orphan = frame.clone();
+        orphan.panel_epoch = frame.panel_epoch + 1;
+        assert!(
+            !state.apply_panel_payload(PanelFramePayload::Present(orphan.clone())),
+            "a sub-panel session has no band at all"
+        );
+        assert!(
+            !state.apply_panel_payload(PanelFramePayload::PresentMapped {
+                frame: orphan,
+                mapping_generation: 9,
+            }),
+            "in either family"
+        );
     }
 
     /// Parent 48 R-c — the band's MODE-LINE row is chrome, and the

@@ -67,10 +67,11 @@ use common::daemon::{TestDaemon, build_default_caps};
 /// server-first, so moving it locks out every already-shipped frontend
 /// before it can counter-offer. An additive family never needs it.
 #[test]
-fn the_wire_is_v24_and_the_advertised_baseline_is_unmoved() {
+fn the_wire_is_v25_and_the_advertised_baseline_is_unmoved() {
     assert_eq!(
-        PROTOCOL_VERSION, 24,
-        "v24 is TextInput (GUI arc Stage 1a); v23 was MinibufferPromptRows"
+        PROTOCOL_VERSION, 25,
+        "v25 is the mapped panel family (bottom-panel §5b); v24 was \
+         TextInput (GUI arc Stage 1a); v23 was MinibufferPromptRows"
     );
     assert_eq!(
         ADVERTISED_PROTOCOL_VERSION, 20,
@@ -618,7 +619,7 @@ fn one_daemon_serves_a_v23_rows_session_and_a_frozen_v22_session() {
     // rather than after the interesting half has already passed.
     let (mut legacy, _legacy_fid) = attach_semantic(&daemon, 22);
     let (mut current, current_fid) = attach_semantic(&daemon, PROTOCOL_VERSION);
-    assert_eq!(PROTOCOL_VERSION, 24);
+    assert_eq!(PROTOCOL_VERSION, 25);
 
     // Open the real `M-x` through the real key path, then narrow to the
     // probe command by typing it — the candidate window is ten rows out

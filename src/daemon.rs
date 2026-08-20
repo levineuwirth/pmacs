@@ -70,8 +70,8 @@ use crate::protocol::{
     ADVERTISED_PROTOCOL_VERSION, AttachRequest, FrontendEvent, FrontendId, GoodbyeReason, Hello,
     InitialTarget, InitialTargetResult, InstanceCapabilities, InstanceIdentity, InstanceMessage,
     InstanceSignal, MAX_INITIAL_TARGET_ERROR_BYTES, MAX_INITIAL_TARGET_PATH_BYTES,
-    PANEL_MIN_VERSION, PointerKind, SelectionSnapshot, SessionBootstrapRequest,
-    TEXT_INPUT_MAX_BYTES, TEXT_INPUT_MIN_VERSION,
+    PANEL_MAPPING_MIN_VERSION, PANEL_MIN_VERSION, PointerKind, SelectionSnapshot,
+    SessionBootstrapRequest, TEXT_INPUT_MAX_BYTES, TEXT_INPUT_MIN_VERSION,
 };
 use crate::socket_path::{SocketPathError, ensure_runtime_subdir};
 use crate::transport::{read_message, write_message};
@@ -1017,6 +1017,128 @@ fn panel_event_epochs_are_current(
     }) && core
         .frame_geometry_for(source)
         .is_some_and(|geometry| geometry.geometry_epoch == geometry_epoch)
+}
+
+/// §5b — which panel-pointer family this session speaks.
+///
+/// **Read from the AUTHENTICATED source, never from the payload's
+/// `frontend_id`.** That field is untrusted on every inbound variant,
+/// and looking the negotiation up by it would let a peer claim another
+/// session's family — the forged cross-session claim G8e mutates for.
+///
+/// Consulted BEFORE the payload is trusted, before any generation is
+/// validated and before any mutation: the family decides which variant
+/// is even admissible, so it cannot depend on the variant's contents.
+/// §5b G5c/G5d/G5g — update the accepted-gesture latch for one
+/// ACCEPTED panel gesture.
+///
+/// Called only after every gate has passed, so "accepted" means exactly
+/// that. Three rules, and each closes its own hole:
+///
+/// * only a left `Down` ARMS — a right press opens a menu and ends
+///   there, and `Move`, wheel and the other buttons begin nothing, so
+///   arming on them would manufacture a delayed release at the next
+///   authority loss (G5g);
+/// * a left `Up` CONSUMES, or a later invalidation finds a gesture it
+///   believes live and duplicates its release (G5c);
+/// * an `Up` with no armed gesture is INERT — it terminates nothing,
+///   because nothing began (G5d).
+fn update_accepted_gesture(
+    semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+    source: FrontendId,
+    kind: pmacs_protocol::MouseKind,
+    coord: pmacs_protocol::CellCoord,
+    buffer_id: crate::buffer::BufferId,
+    reached_child: bool,
+) {
+    use pmacs_protocol::{MouseButton, MouseKind};
+    let Some(state) = semantic_states.get_mut(&source) else {
+        return;
+    };
+    match kind {
+        MouseKind::Down(MouseButton::Left) => {
+            state.arm_accepted_gesture(crate::semantic_render::AcceptedPanelGesture {
+                button: MouseButton::Left,
+                coord,
+                buffer_id,
+                reached_child,
+            });
+        }
+        MouseKind::Up(MouseButton::Left) => {
+            // Inert when nothing was armed: `take` on `None` is the
+            // whole of G5d.
+            let _ = state.consume_accepted_gesture();
+        }
+        _ => {}
+    }
+}
+
+fn peer_uses_mapped_panel_family(session_registry: &SessionRegistry, source: FrontendId) -> bool {
+    session_registry
+        .session_state(source)
+        .is_some_and(|state| state.negotiated_protocol_version >= PANEL_MAPPING_MIN_VERSION)
+}
+
+/// §5b — whether an echoed mapping generation still names the mapping
+/// the daemon holds.
+///
+/// The last rung of the ladder and the finest: `buffer_id` catches an
+/// A→B replacement, `panel_epoch` a close/reopen, `geometry_epoch` a
+/// declaration race, and this catches **the text under that cell
+/// changing** — a foreign edit, a fold, a reload, none of which moves
+/// an epoch.
+///
+/// **Zero is refused outright, and BEFORE the wheel exemption.** Zero is
+/// what a default-constructed or half-initialised sender produces, so
+/// accepting it would let a peer opt out of the check by sending
+/// nothing. Ordering the exemption first would reopen that opt-out
+/// through the exempt path: a sender emitting zeroed wheels would face
+/// no check at all (G10b).
+///
+/// **Coordinate-free wheels are then EXEMPT from the freshness
+/// comparison.** A wheel tick changes `view_top`, which advances the
+/// key; the next tick already queued behind it echoes the previous
+/// generation and would be refused, so the panel would scroll exactly
+/// once per frame and appear dead. The exemption is safe because the
+/// coordinate is not what a wheel means — the tick is. It returns
+/// before the read, so a wheel does not advance the key either;
+/// advancing would make the wheel invalidate the press after it.
+///
+/// The carve-out the framing states for **child-reported** terminal
+/// wheels, where SGR does carry row and column, is
+/// `panel-pointer-replay`'s. Whether a wheel is forwarded to a child is
+/// decided by the reporting mode, and no panel pointer coordinate is
+/// consumed on this base at all — `dispatch_semantic_panel_pointer`
+/// bounds-checks and routes focus. Re-imposing the check belongs in the
+/// branch that introduces the forwarding it protects.
+///
+/// Read through the SAME accessor projection stamps with, so "what the
+/// frontend was shown" and "what the daemon checks" cannot drift.
+fn panel_mapping_is_current(
+    editor: &EditorState,
+    semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+    source: FrontendId,
+    kind: pmacs_protocol::MouseKind,
+    echoed: u64,
+) -> bool {
+    // ORDER IS LOAD-BEARING: nonzero first, exemption second.
+    if echoed == 0 {
+        return false;
+    }
+    if matches!(
+        kind,
+        pmacs_protocol::MouseKind::ScrollUp
+            | pmacs_protocol::MouseKind::ScrollDown
+            | pmacs_protocol::MouseKind::ScrollLeft
+            | pmacs_protocol::MouseKind::ScrollRight
+    ) {
+        return true;
+    }
+    let snapshot = editor.panel_mapping_snapshot(source);
+    semantic_states
+        .get_mut(&source)
+        .and_then(|state| state.panel_mapping_generation(snapshot))
+        .is_some_and(|current| current == echoed)
 }
 
 /// Whether an authenticated source may send the v21 panel event family
@@ -2445,7 +2567,19 @@ fn handle_dispatcher_event(
                     // the daemon's own state inside the dispatcher. Any
                     // failure drops the event before any view, controller,
                     // selection, menu, or PTY mutation.
-                    if peer_may_send_panel_events(editor, session_registry, semantic_states, source)
+                    // §5b G8a — the family is decided FIRST, from the
+                    // AUTHENTICATED session, and a `>= v25` session
+                    // sending the bare variant is REFUSED rather than
+                    // handled under legacy semantics. Handling it would
+                    // leave the mapping hole reachable by choosing a
+                    // discriminant, which is the whole of the bypass.
+                    if !peer_uses_mapped_panel_family(session_registry, source)
+                        && peer_may_send_panel_events(
+                            editor,
+                            session_registry,
+                            semantic_states,
+                            source,
+                        )
                         && panel_event_epochs_are_current(
                             editor,
                             semantic_states,
@@ -2454,8 +2588,100 @@ fn handle_dispatcher_event(
                             panel_epoch,
                         )
                     {
-                        editor
-                            .dispatch_semantic_panel_pointer(source, buffer_id, coord, kind, mods);
+                        // THE LATCH FOLLOWS THE DISPATCH. The ladder
+                        // above authenticates the SENDER; the dispatcher
+                        // re-derives the TARGET and refuses an
+                        // out-of-grid coordinate, an absent side window,
+                        // or a buffer that is no longer the one shown
+                        // there. Those refusals are not hypothetical --
+                        // a stale coordinate outlives the frame it was
+                        // hit-tested against.
+                        //
+                        // Arming on a refusal lets a rejected press
+                        // manufacture a cancellation, and -- once replay
+                        // attaches effects -- a release for a child that
+                        // was never pressed. Consuming on a refusal is
+                        // worse: a rejected release swallows a REAL
+                        // armed gesture, so the authority loss that
+                        // should have ended it finds nothing, and the
+                        // child holds the button down forever.
+                        if editor
+                            .dispatch_semantic_panel_pointer(source, buffer_id, coord, kind, mods)
+                        {
+                            update_accepted_gesture(
+                                semantic_states,
+                                source,
+                                kind,
+                                coord,
+                                buffer_id,
+                                // Whether the press reached a child is
+                                // replay's to know; until replay exists
+                                // no press does.
+                                false,
+                            );
+                        }
+                    }
+                }
+                FrontendEvent::PanelPointerMapped {
+                    geometry_epoch,
+                    panel_epoch,
+                    buffer_id,
+                    coord,
+                    kind,
+                    mapping_generation,
+                    ..
+                } => {
+                    // §5b — the mapped family, in this order:
+                    //
+                    //   1. family, from the AUTHENTICATED session
+                    //   2. the existing epoch ladder
+                    //   3. the mapping generation
+                    //   4. only then, dispatch
+                    //
+                    // G8c is the first line: a `<= v24` session sending
+                    // this variant is refused even though a peer built
+                    // from this crate can encode the discriminant.
+                    // Negotiation is a gate, not a sender convention.
+                    if peer_uses_mapped_panel_family(session_registry, source)
+                        && peer_may_send_panel_events(
+                            editor,
+                            session_registry,
+                            semantic_states,
+                            source,
+                        )
+                        && panel_event_epochs_are_current(
+                            editor,
+                            semantic_states,
+                            source,
+                            geometry_epoch,
+                            panel_epoch,
+                        )
+                        && panel_mapping_is_current(
+                            editor,
+                            semantic_states,
+                            source,
+                            kind,
+                            mapping_generation,
+                        )
+                    {
+                        // The latch follows the dispatch, for the
+                        // reason spelled out on the legacy arm above.
+                        // The mapping rung narrows WHICH coordinates
+                        // survive the ladder; it does not make a
+                        // surviving one land, so this arm needs the same
+                        // gate.
+                        if editor
+                            .dispatch_semantic_panel_pointer(source, buffer_id, coord, kind, mods)
+                        {
+                            update_accepted_gesture(
+                                semantic_states,
+                                source,
+                                kind,
+                                coord,
+                                buffer_id,
+                                false,
+                            );
+                        }
                     }
                 }
                 FrontendEvent::Pointer {
@@ -3615,6 +3841,13 @@ fn apply_semantic_input_event(
             let ct_mouse = mouse_to_crossterm(&pmacs_mouse);
             editor.dispatch_mouse(source, ct_mouse, term_size);
         }
+        // Everything else, including BOTH panel-pointer families. Panel
+        // gestures are dispatched from their own arm in
+        // `handle_dispatcher_event`, behind the epoch ladder; reaching
+        // them from here would route around it. §5b's mapped variant is
+        // dropped for the same reason, and specifically NOT unwrapped to
+        // its legacy meaning — that is the bypass the family gate exists
+        // to close.
         _ => {}
     }
 }
@@ -3655,6 +3888,12 @@ fn apply_event(
         // client-supplied `frontend_id` this function would believe.
         FrontendEvent::Paste { .. }
         | FrontendEvent::TextInput { .. }
+        // §5b: listed here for the same reason as the two above — a
+        // mapped panel gesture must not reach a payload-trusting path.
+        // Its own dispatcher arm authenticates the source and checks
+        // the family gate; arriving here it is dropped, never unwrapped
+        // to the legacy family.
+        | FrontendEvent::PanelPointerMapped { .. }
         | FrontendEvent::FocusGained(_)
         | FrontendEvent::FocusLost(_)
         // T M11.1: the semantic-frontend viewport declaration. Its
@@ -5966,6 +6205,28 @@ mod tests {
     ///
     /// The session is registered because the dispatcher drops any event
     /// from an uninstalled session before it reaches a handler.
+    /// §5b G8e — the frontend a forged payload claims to be. Registered
+    /// in every dispatch fixture at the MAPPED version, so "the claimed
+    /// id speaks the other family" is a real condition rather than an
+    /// absent session.
+    const FORGERY_TARGET_FID: FrontendId = FrontendId(767);
+
+    /// §5b G8e, the other direction: a frontend that speaks the LEGACY
+    /// family, for a mapped session to try to borrow.
+    const FORGERY_TARGET_LEGACY_FID: FrontendId = FrontendId(768);
+
+    /// §5b — a session that negotiated the LEGACY panel family.
+    ///
+    /// These rows drive `FrontendEvent::PanelPointer`, which a `>= v25`
+    /// session may not send at all, so they must say which family they
+    /// are exercising. Naming it here also makes them explicit legacy
+    /// positive controls rather than tests that happened to pass.
+    /// Stated as a LITERAL, not `PANEL_MAPPING_MIN_VERSION - 1`:
+    /// G6/G14 make the family boundary absolute, and arithmetic against
+    /// a moving constant would drag these rows forward on the next bump
+    /// — they would silently start testing v25 as "legacy".
+    const LEGACY_PANEL_VERSION: u32 = 24;
+
     fn dispatch_panel_event(
         editor: &mut crate::editor::EditorState,
         fid: FrontendId,
@@ -5982,6 +6243,23 @@ mod tests {
         let mut bells = HashMap::new();
         let mut registry = SessionRegistry::new();
         registry.register_session(fid, session(version, !render_states.contains_key(&fid)));
+        // §5b G8e — a SECOND session that speaks the mapped family, so a
+        // payload claiming its id has something real to borrow. Without
+        // it, a payload-keyed lookup would fail for want of a session
+        // rather than for want of authority, and the mutation that
+        // swaps `source` for the payload's id would be invisible.
+        if fid != FORGERY_TARGET_FID {
+            registry.register_session(
+                FORGERY_TARGET_FID,
+                session(pmacs_protocol::PANEL_MAPPING_MIN_VERSION, true),
+            );
+        }
+        if fid != FORGERY_TARGET_LEGACY_FID {
+            registry.register_session(
+                FORGERY_TARGET_LEGACY_FID,
+                session(LEGACY_PANEL_VERSION, true),
+            );
+        }
         handle_dispatcher_event(
             DispatcherEvent::FrontendEvent { source: fid, event },
             editor,
@@ -6185,6 +6463,1124 @@ mod tests {
         (frame.geometry_epoch, frame.panel_epoch)
     }
 
+    // -----------------------------------------------------------------
+    // §5b G6–G8 — the family gate, both directions, all four quadrants.
+    //
+    // Every row negotiates ONE version for both the session registry and
+    // the retained producer: a control that negotiates two proves
+    // nothing about either.
+    // -----------------------------------------------------------------
+
+    /// A panel session at one negotiated version: the editor, its
+    /// producer, its render states, the side window, and the epochs a
+    /// gesture must echo.
+    type PanelSessionFixture = (
+        crate::editor::EditorState,
+        HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+        HashMap<FrontendId, RenderState>,
+        crate::window::WindowId,
+        crate::window::WindowId,
+        (u64, u64),
+    );
+
+    /// Build a panel session at one negotiated version and ship its
+    /// declaration, returning the epochs a gesture must echo.
+    fn panel_session_at(version: u32, fid: FrontendId) -> PanelSessionFixture {
+        let editor = crate::editor::EditorState::new();
+        let (document, panel) = semantic_panel_view(&editor, fid, true);
+        let panel = panel.expect("panel window");
+        let mut semantic_states = HashMap::new();
+        semantic_states.insert(
+            fid,
+            crate::semantic_render::SemanticRenderState::for_peer(fid, version),
+        );
+        editor.accept_semantic_frame_geometry(fid, 1, CellSize::new(24, 80));
+        let epochs = shipped_declaration(&editor, fid, &mut semantic_states);
+        (
+            editor,
+            semantic_states,
+            HashMap::new(),
+            document,
+            panel,
+            epochs,
+        )
+    }
+
+    /// An edit this frontend did NOT make: the case `view_top` cannot
+    /// catch, because nothing about the frontend's own state moves.
+    fn foreign_edit(
+        editor: &crate::editor::EditorState,
+        buffer_id: crate::buffer::BufferId,
+        text: &[u8],
+    ) {
+        let core = editor.core.borrow();
+        let registry = core.registry.clone();
+        let mut reg = registry.borrow_mut();
+        reg.get_mut(buffer_id)
+            .expect("the panel's buffer")
+            .set_generated_contents(text)
+            .expect("a generated-contents write is a plain content change");
+    }
+
+    /// The mapping generation this session's producer most recently
+    /// stamped, which a mapped gesture must echo.
+    fn stamped_generation(
+        semantic_states: &HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+        fid: FrontendId,
+    ) -> u64 {
+        semantic_states
+            .get(&fid)
+            .expect("semantic projection")
+            .panel_mapping_generation_peek()
+            .expect("a stamped mapping generation")
+    }
+
+    fn legacy_pointer(
+        fid: FrontendId,
+        epochs: (u64, u64),
+        buffer_id: crate::buffer::BufferId,
+    ) -> FrontendEvent {
+        FrontendEvent::PanelPointer {
+            frontend_id: fid,
+            geometry_epoch: epochs.0,
+            panel_epoch: epochs.1,
+            buffer_id,
+            coord: pmacs_protocol::CellCoord::new(0, 0),
+            kind: pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left),
+            mods: pmacs_protocol::Modifiers::default(),
+        }
+    }
+
+    fn mapped_pointer(
+        fid: FrontendId,
+        epochs: (u64, u64),
+        buffer_id: crate::buffer::BufferId,
+        mapping_generation: u64,
+    ) -> FrontendEvent {
+        FrontendEvent::PanelPointerMapped {
+            frontend_id: fid,
+            geometry_epoch: epochs.0,
+            panel_epoch: epochs.1,
+            buffer_id,
+            coord: pmacs_protocol::CellCoord::new(0, 0),
+            kind: pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left),
+            mods: pmacs_protocol::Modifiers::default(),
+            mapping_generation,
+        }
+    }
+
+    /// §5b G6a — **legacy OUTBOUND**: a v24 peer receives exactly
+    /// `Present`, never the mapped family.
+    #[test]
+    fn g6a_a_legacy_peer_receives_the_legacy_present_family() {
+        let fid = FrontendId(760);
+        let (_editor, semantic_states, _render, _document, _panel, _epochs) =
+            panel_session_at(LEGACY_PANEL_VERSION, fid);
+        let declaration = semantic_states
+            .get(&fid)
+            .expect("projection")
+            .last_panel_payload_for_test();
+        assert!(
+            matches!(
+                declaration,
+                Some(pmacs_protocol::panel::PanelFramePayload::Present(_))
+            ),
+            "a v24 session must receive the legacy family and only it; \
+             got {declaration:?}"
+        );
+    }
+
+    /// §5b G7a — **mapped OUTBOUND**: a v25 peer receives
+    /// `PresentMapped` carrying a live, nonzero generation.
+    #[test]
+    fn g7a_a_mapped_peer_receives_present_mapped_with_a_live_generation() {
+        let fid = FrontendId(761);
+        let (_editor, semantic_states, _render, _document, _panel, _epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        let declaration = semantic_states
+            .get(&fid)
+            .expect("projection")
+            .last_panel_payload_for_test();
+        match declaration {
+            Some(pmacs_protocol::panel::PanelFramePayload::PresentMapped {
+                mapping_generation,
+                ..
+            }) => assert!(
+                mapping_generation >= 1,
+                "zero is the wire's uninitialised value and is refused on \
+                 sight, so a stamped frame must never carry it"
+            ),
+            other => panic!("a v25 session must receive the mapped family; got {other:?}"),
+        }
+    }
+
+    /// §5b G6b — **legacy INBOUND routing**: a current legacy gesture
+    /// reaches the dispatcher and performs the landed focus activation.
+    #[test]
+    fn g6b_a_legacy_gesture_routes_and_activates() {
+        let fid = FrontendId(762);
+        let (mut editor, mut semantic_states, mut render, document, panel, epochs) =
+            panel_session_at(LEGACY_PANEL_VERSION, fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        // THIS view's active window, asserted directly. The ambient
+        // `active_window_id()` tracks `active_frontend` too, so a row
+        // reading it can be satisfied by a frontend switch that never
+        // routed anything to the panel.
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            document,
+            "precondition: this frontend's active window is the document"
+        );
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            LEGACY_PANEL_VERSION,
+            &mut semantic_states,
+            &mut render,
+            legacy_pointer(fid, epochs, buffer_id),
+        );
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            panel,
+            "a legacy gesture from a legacy session must still route and \
+             activate — the gate must not break the family it kept"
+        );
+    }
+
+    /// §5b G7b — **mapped INBOUND routing**: a current mapped gesture
+    /// reaches the dispatcher and activates.
+    #[test]
+    fn g7b_a_mapped_gesture_routes_and_activates() {
+        let fid = FrontendId(763);
+        let (mut editor, mut semantic_states, mut render, document, panel, epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        let generation = stamped_generation(&semantic_states, fid);
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            document,
+            "precondition: this frontend's active window is the document"
+        );
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut render,
+            mapped_pointer(fid, epochs, buffer_id, generation),
+        );
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            panel,
+            "a mapped gesture echoing the current generation must route"
+        );
+    }
+
+    /// §5b G8a — a **bare `PanelPointer` from a v25 session is
+    /// REFUSED**, not handled under legacy semantics.
+    #[test]
+    fn g8a_a_legacy_gesture_from_a_mapped_session_is_refused() {
+        let fid = FrontendId(764);
+        let (mut editor, mut semantic_states, mut render, document, panel, epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            document,
+            "precondition: this frontend's active window is the document"
+        );
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut render,
+            legacy_pointer(fid, epochs, buffer_id),
+        );
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            document,
+            "handling it under legacy semantics would leave the mapping \
+             hole reachable by choosing a discriminant"
+        );
+    }
+
+    /// §5b G8c — a **`PanelPointerMapped` from a v24 session is
+    /// REFUSED**, even though a peer built from this crate can encode
+    /// the discriminant. Negotiation is a gate, not a convention.
+    #[test]
+    fn g8c_a_mapped_gesture_from_a_legacy_session_is_refused() {
+        let fid = FrontendId(765);
+        let (mut editor, mut semantic_states, mut render, document, panel, epochs) =
+            panel_session_at(LEGACY_PANEL_VERSION, fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            document,
+            "precondition: this frontend's active window is the document"
+        );
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            LEGACY_PANEL_VERSION,
+            &mut semantic_states,
+            &mut render,
+            // Any generation at all: the family gate refuses before the
+            // generation is even looked at.
+            mapped_pointer(fid, epochs, buffer_id, 1),
+        );
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            document,
+            "inbound negotiation is a gate, not a sender convention"
+        );
+    }
+
+    /// §5b G8e — **authenticated-session authority**: claiming another
+    /// frontend whose session negotiated the desired family still
+    /// refuses.
+    ///
+    /// The mutation this row exists for is one line: look the
+    /// negotiation up by the payload's `frontend_id` instead of the
+    /// authenticated `source`, and the forged cross-session claim
+    /// succeeds.
+    #[test]
+    fn g8e_a_forged_frontend_id_cannot_borrow_another_sessions_family() {
+        let legacy_fid = FrontendId(766);
+        let mapped_fid = FORGERY_TARGET_FID;
+        let (mut editor, mut semantic_states, mut render, document, panel, epochs) =
+            panel_session_at(LEGACY_PANEL_VERSION, legacy_fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        assert_eq!(
+            editor.core.borrow().views[&legacy_fid].active,
+            document,
+            "precondition: this frontend's active window is the document"
+        );
+
+        // The AUTHENTICATED source is the legacy session; the payload
+        // claims a frontend that speaks the mapped family.
+        dispatch_panel_event(
+            &mut editor,
+            legacy_fid,
+            LEGACY_PANEL_VERSION,
+            &mut semantic_states,
+            &mut render,
+            mapped_pointer(mapped_fid, epochs, buffer_id, 1),
+        );
+        assert_eq!(
+            editor.core.borrow().views[&legacy_fid].active,
+            document,
+            "the family comes from the AUTHENTICATED session; a payload \
+             id is untrusted and must not borrow another's negotiation"
+        );
+    }
+
+    /// §5b G8e, the OTHER direction — a mapped session cannot borrow a
+    /// legacy identity to smuggle the bare variant through.
+    ///
+    /// Both directions, because an authority check that only holds one
+    /// way is one a peer walks around by choosing which identity to
+    /// forge. The claimed frontend has a REAL legacy session, so a
+    /// payload-keyed lookup succeeds far enough to expose the defect
+    /// rather than failing for want of a session.
+    #[test]
+    fn g8e_a_mapped_session_cannot_forge_a_legacy_identity() {
+        let fid = FrontendId(769);
+        let (mut editor, mut semantic_states, mut render, document, panel, epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            document,
+            "precondition: this frontend's active window is the document"
+        );
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut render,
+            // Authenticated as the MAPPED session; the payload claims a
+            // frontend whose session speaks legacy.
+            legacy_pointer(FORGERY_TARGET_LEGACY_FID, epochs, buffer_id),
+        );
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            document,
+            "a mapped session may not send the bare variant, and cannot \
+             acquire permission by naming someone who may"
+        );
+    }
+
+    /// §5b G10b — **zero is refused BEFORE the wheel exemption**.
+    ///
+    /// The ordering is the row. Zero is what a sender that never
+    /// initialised the field produces; the exemption is a liveness
+    /// carve-out for coordinate-free wheels. Run the carve-out first and
+    /// a zeroed wheel faces no check at all — an inbound opt-out through
+    /// the exempt path.
+    ///
+    /// The predicate is called directly because a wheel has **no
+    /// dispatcher-visible effect on this base**: a document panel
+    /// focuses on `Down` only, and no panel pointer coordinate is
+    /// consumed anywhere, so an accepted wheel and a refused one are
+    /// indistinguishable downstream. Asserting focus for a wheel would
+    /// be a witness that proves nothing. The end-to-end leg below uses a
+    /// press, which does have an effect, so the predicate is shown to be
+    /// wired into the production arm rather than merely correct in
+    /// isolation.
+    #[test]
+    fn g10b_generation_zero_is_refused_before_the_wheel_exemption_applies() {
+        use pmacs_protocol::{MouseButton, MouseKind};
+        let fid = FrontendId(774);
+        let (mut editor, mut semantic_states, mut render, _document, panel, epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        let generation = stamped_generation(&semantic_states, fid);
+
+        // The exempt kind with an INVALID generation: refused.
+        assert!(
+            !panel_mapping_is_current(&editor, &mut semantic_states, fid, MouseKind::ScrollDown, 0),
+            "a zeroed wheel is refused: the exemption must not run first"
+        );
+        // A non-exempt kind with the same zero: also refused, so the
+        // above is the zero and not the kind.
+        assert!(!panel_mapping_is_current(
+            &editor,
+            &mut semantic_states,
+            fid,
+            MouseKind::Down(MouseButton::Left),
+            0
+        ));
+        // POSITIVE CONTROL — the same wheel with a real generation
+        // passes, so the refusal is not a dead predicate.
+        assert!(
+            panel_mapping_is_current(
+                &editor,
+                &mut semantic_states,
+                fid,
+                MouseKind::ScrollDown,
+                generation
+            ),
+            "a wheel with a real generation passes"
+        );
+
+        // And the predicate is WIRED: a press is the kind whose
+        // acceptance is visible, so it carries the end-to-end leg.
+        let baseline = editor.core.borrow().views[&fid].active;
+        assert_ne!(
+            baseline, panel,
+            "fixture: the panel must NOT already be focused, or the \
+             refusal below is indistinguishable from acceptance"
+        );
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut render,
+            mapped_pointer(fid, epochs, buffer_id, 0),
+        );
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            baseline,
+            "a zeroed press never reaches the focus path"
+        );
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut render,
+            mapped_pointer(fid, epochs, buffer_id, generation),
+        );
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            panel,
+            "and a real one does"
+        );
+    }
+
+    /// §5b G10b — a coordinate-free wheel is EXEMPT from the freshness
+    /// comparison, so a second queued tick is not refused.
+    ///
+    /// Only the GATE is proven here. The framing's G12 — that both ticks
+    /// apply their scrolls — is `panel-pointer-replay`'s, because no
+    /// panel wheel moves a view on this base. What this pins is that the
+    /// second tick is not refused, which is the half that would
+    /// otherwise make G12 unreachable.
+    ///
+    /// The exemption must also NOT advance the key. Returning early
+    /// before the read is what gives that; advancing on a wheel would
+    /// make the wheel invalidate the press that follows it.
+    #[test]
+    fn g10b_a_stale_generation_on_a_wheel_is_exempt_but_fatal_on_a_press() {
+        use pmacs_protocol::{MouseButton, MouseKind};
+        let fid = FrontendId(775);
+        let (editor, mut semantic_states, _render, _document, panel, _epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        let stale = stamped_generation(&semantic_states, fid);
+
+        // Move the mapping, so `stale` now names a mapping that is gone —
+        // exactly the state the first of two queued ticks leaves behind.
+        foreign_edit(&editor, buffer_id, b"moved\n");
+
+        // The wheel FIRST, while the key has not yet been re-read: the
+        // exempt path must neither compare nor advance.
+        let before = semantic_states[&fid]
+            .panel_mapping_generation_peek()
+            .expect("a stamped key");
+        assert!(
+            panel_mapping_is_current(
+                &editor,
+                &mut semantic_states,
+                fid,
+                MouseKind::ScrollDown,
+                stale
+            ),
+            "the second queued tick still lands — without the exemption \
+             the first tick advances the key and the panel scrolls once \
+             and dies"
+        );
+        assert_eq!(
+            semantic_states[&fid].panel_mapping_generation_peek(),
+            Some(before),
+            "and the exempt path does not advance the key: a wheel that \
+             advanced it would invalidate the press that follows"
+        );
+
+        // NEGATIVE CONTROL — a press echoing the SAME stale value is
+        // refused, so the acceptance above is the exemption and not a
+        // check that never fires.
+        assert!(
+            !panel_mapping_is_current(
+                &editor,
+                &mut semantic_states,
+                fid,
+                MouseKind::Down(MouseButton::Left),
+                stale
+            ),
+            "a press against a stale mapping is refused"
+        );
+
+        // Every coordinate-free wheel kind is exempt, not just the two
+        // vertical ones.
+        for kind in [
+            MouseKind::ScrollUp,
+            MouseKind::ScrollDown,
+            MouseKind::ScrollLeft,
+            MouseKind::ScrollRight,
+        ] {
+            assert!(
+                panel_mapping_is_current(&editor, &mut semantic_states, fid, kind, stale),
+                "{kind:?} is coordinate-free and exempt"
+            );
+        }
+    }
+
+    /// §5b G11a — **exhaustion fails CLOSED and does not leave a zombie
+    /// band**.
+    ///
+    /// Three obligations, and each has its own failure: publish
+    /// `Absent`, clear input authority, and LATCH so the next frame
+    /// cannot resurrect the band.
+    #[test]
+    fn g11a_generation_exhaustion_publishes_absent_and_latches_for_the_session() {
+        let fid = FrontendId(776);
+        let (mut editor, mut semantic_states, mut render, _document, panel, epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+
+        // Precondition: a live band, and a gesture the exhaustion must
+        // not silently strand.
+        assert!(
+            matches!(
+                semantic_states[&fid].last_panel_payload_for_test(),
+                Some(pmacs_protocol::PanelFramePayload::PresentMapped { .. })
+            ),
+            "fixture: the band is live and mapped"
+        );
+
+        // Park the key one below the ceiling against the CURRENT
+        // snapshot, so the next mapping change is the advance that
+        // overflows. Seeding the snapshot too keeps the "unchanged" arm
+        // from firing instead.
+        let snapshot = editor
+            .panel_mapping_snapshot(fid)
+            .expect("a presentable mapping");
+        semantic_states
+            .get_mut(&fid)
+            .expect("projection")
+            .seed_panel_mapping_generation_for_test(snapshot, u64::MAX);
+
+        foreign_edit(&editor, buffer_id, b"one edit too many\n");
+        let messages = semantic_states
+            .get_mut(&fid)
+            .expect("projection")
+            .render_frame(&editor);
+
+        assert!(
+            messages.iter().any(|msg| matches!(
+                msg,
+                InstanceMessage::PanelFrame(pmacs_protocol::PanelFramePayload::Absent)
+            )),
+            "the band is published Absent: refusing input alone leaves a \
+             stale panel painted and permanently inert"
+        );
+        assert!(
+            semantic_states[&fid].panel_declaration().is_none(),
+            "and input authority is cleared with it"
+        );
+        assert!(
+            semantic_states[&fid].panel_mapping_generation_exhausted(),
+            "and the session latches"
+        );
+        assert_eq!(
+            semantic_states[&fid].panel_mapping_generation_peek(),
+            None,
+            "an exhausted session reports NO key: the stored pair still \
+             holds the ceiling it stopped at, and naming it would \
+             describe a key no frame carries and no gesture may echo"
+        );
+
+        // The NEXT frame must not resurrect the band. Without the latch
+        // the snapshot is unchanged, the "unchanged" arm returns the
+        // frozen ceiling, and a `PresentMapped` ships with a key that can
+        // no longer distinguish anything.
+        let next = semantic_states
+            .get_mut(&fid)
+            .expect("projection")
+            .render_frame(&editor);
+        assert!(
+            !next.iter().any(|msg| matches!(
+                msg,
+                InstanceMessage::PanelFrame(
+                    pmacs_protocol::PanelFramePayload::PresentMapped { .. }
+                )
+            )),
+            "no zombie band on the following frame"
+        );
+
+        // And inbound stays refused for the rest of the session.
+        let baseline = editor.core.borrow().views[&fid].active;
+        assert_ne!(baseline, panel, "fixture: the panel is not focused");
+        for echoed in [1, u64::MAX] {
+            dispatch_panel_event(
+                &mut editor,
+                fid,
+                PROTOCOL_VERSION,
+                &mut semantic_states,
+                &mut render,
+                mapped_pointer(fid, epochs, buffer_id, echoed),
+            );
+            assert_eq!(
+                editor.core.borrow().views[&fid].active,
+                baseline,
+                "an exhausted session accepts no gesture, whatever it echoes"
+            );
+        }
+    }
+
+    /// §5b G5a — the key advancing RAISES cancellation, without waiting
+    /// for another pointer event.
+    ///
+    /// The daemon-side half. The EFFECTS — clearing an empty selection,
+    /// clearing the click chain, delivering the child's release — are
+    /// owed by `panel-pointer-replay`, which is the only branch where
+    /// replay exists; this pins the trigger and the record it produces.
+    #[test]
+    fn g5a_a_mapping_change_cancels_a_live_gesture_with_no_further_event() {
+        let fid = FrontendId(770);
+        let (mut editor, mut semantic_states, mut render, _document, panel, epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        let generation = stamped_generation(&semantic_states, fid);
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut render,
+            mapped_pointer(fid, epochs, buffer_id, generation),
+        );
+        assert!(
+            semantic_states[&fid].has_accepted_gesture(),
+            "fixture: an accepted left press arms the latch"
+        );
+
+        // A FOREIGN edit — nothing this frontend did, and no further
+        // pointer event. The key moves on the next read.
+        foreign_edit(&editor, buffer_id, b"moved\n");
+        let snapshot = editor.panel_mapping_snapshot(fid);
+        let state = semantic_states.get_mut(&fid).expect("projection");
+        let advanced = state.panel_mapping_generation(snapshot);
+        assert_ne!(advanced, Some(generation), "the key must have moved");
+
+        assert!(
+            !state.has_accepted_gesture(),
+            "the advance itself ends the gesture — waiting for another \
+             event loses the race where the successor frame lands first"
+        );
+        assert_eq!(
+            state.panel_gesture_cancellations(),
+            1,
+            "and it records exactly one cancellation for replay to \
+             terminate — an ordinary consume would leave this at zero"
+        );
+    }
+
+    /// §5b — SUBSTRATE for the framing's G5c/G5d/G5g: the latch's
+    /// arming rules, as this branch's inbound arms decide them.
+    ///
+    /// Deliberately not named for those rows. G5c, G5d and G5g are
+    /// `panel-pointer-replay`'s per §5b's split table, and each asserts
+    /// something about a synthetic release that does not exist on this
+    /// branch. What is provable here is narrower and still worth
+    /// pinning, because `update_accepted_gesture` decides it: which
+    /// events arm, which consume, and that a consume is not a
+    /// cancellation.
+    #[test]
+    fn g5_substrate_only_an_accepted_left_press_arms_and_a_release_consumes() {
+        let fid = FrontendId(771);
+        let (mut editor, mut semantic_states, mut render, _document, panel, epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        let generation = stamped_generation(&semantic_states, fid);
+        let mut send = |kind, semantic_states: &mut HashMap<_, _>, editor: &mut _| {
+            let mut event = mapped_pointer(fid, epochs, buffer_id, generation);
+            if let FrontendEvent::PanelPointerMapped { kind: k, .. } = &mut event {
+                *k = kind;
+            }
+            dispatch_panel_event(
+                editor,
+                fid,
+                PROTOCOL_VERSION,
+                semantic_states,
+                &mut render,
+                event,
+            );
+        };
+
+        // G5d — a release with nothing armed is INERT.
+        send(
+            pmacs_protocol::MouseKind::Up(pmacs_protocol::MouseButton::Left),
+            &mut semantic_states,
+            &mut editor,
+        );
+        assert!(
+            !semantic_states[&fid].has_accepted_gesture(),
+            "a stale release terminates nothing, because nothing began"
+        );
+
+        // G5g — a RIGHT press does not arm.
+        send(
+            pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Right),
+            &mut semantic_states,
+            &mut editor,
+        );
+        assert!(
+            !semantic_states[&fid].has_accepted_gesture(),
+            "a right press opens a menu and ends there — arming would \
+             manufacture a delayed release at the next authority loss"
+        );
+
+        // G5g — nor does a wheel step.
+        send(
+            pmacs_protocol::MouseKind::ScrollDown,
+            &mut semantic_states,
+            &mut editor,
+        );
+        assert!(!semantic_states[&fid].has_accepted_gesture());
+
+        // Arming, then G5c — an ordinary release CONSUMES.
+        send(
+            pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left),
+            &mut semantic_states,
+            &mut editor,
+        );
+        assert!(semantic_states[&fid].has_accepted_gesture());
+        send(
+            pmacs_protocol::MouseKind::Up(pmacs_protocol::MouseButton::Left),
+            &mut semantic_states,
+            &mut editor,
+        );
+        assert!(
+            !semantic_states[&fid].has_accepted_gesture(),
+            "leaving it armed lets a later invalidation duplicate the \
+             release for a button already up"
+        );
+        assert_eq!(
+            semantic_states[&fid].panel_gesture_cancellations(),
+            0,
+            "an ordinary release is not a cancellation — counting it \
+             would make replay deliver a release for a button the user \
+             already lifted"
+        );
+    }
+
+    /// §5b — SUBSTRATE: a second accepted press ENDS the gesture it
+    /// replaces rather than overwriting it.
+    ///
+    /// Found by reading the arming path back, not by a failing row: a
+    /// dropped `Up` — one lost to a closed outbox under a stall — is
+    /// followed by the next press, and a plain overwrite discards the
+    /// first gesture's record without counting it. Inert on this base,
+    /// where records are only counted; once replay attaches a child
+    /// release to each record, the discarded one leaves a button held
+    /// down with nothing left to release it.
+    #[test]
+    fn g5_substrate_a_second_press_ends_the_gesture_it_replaces() {
+        let fid = FrontendId(777);
+        let (mut editor, mut semantic_states, mut render, _document, panel, epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        let generation = stamped_generation(&semantic_states, fid);
+        let press = || mapped_pointer(fid, epochs, buffer_id, generation);
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut render,
+            press(),
+        );
+        assert!(semantic_states[&fid].has_accepted_gesture());
+        assert_eq!(
+            semantic_states[&fid].panel_gesture_cancellations(),
+            0,
+            "fixture: the first press cancels nothing"
+        );
+
+        // The `Up` never arrives; the next press does.
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut render,
+            press(),
+        );
+        assert!(
+            semantic_states[&fid].has_accepted_gesture(),
+            "the new gesture is armed"
+        );
+        assert_eq!(
+            semantic_states[&fid].panel_gesture_cancellations(),
+            1,
+            "and the one it displaced was ENDED, not dropped on the floor"
+        );
+    }
+
+    /// §5b — SUBSTRATE for the framing's G5p: per-frontend gesture
+    /// ownership.
+    ///
+    /// A and B hold gestures on their own panels; B losing authority
+    /// cancels B exactly once and leaves A's gesture intact. One global
+    /// latch would make either frontend's lifecycle cancel or erase the
+    /// other's.
+    ///
+    /// G5p itself is replay's per §5b's split table — it requires A's
+    /// next valid Drag to still APPLY, which needs replay. The
+    /// ownership shape underneath it is decided here, by putting the
+    /// latch on `SemanticRenderState` rather than beside the dispatcher,
+    /// so it is pinned here.
+    #[test]
+    fn g5_substrate_one_frontends_authority_loss_leaves_anothers_gesture_alone() {
+        let fid_a = FrontendId(772);
+        let fid_b = FrontendId(773);
+        let (mut editor_a, mut states_a, mut render_a, _doc_a, panel_a, epochs_a) =
+            panel_session_at(PROTOCOL_VERSION, fid_a);
+        let buffer_a = editor_a.core.borrow().windows[&panel_a].buffer_id;
+        let generation_a = stamped_generation(&states_a, fid_a);
+
+        // B lives in the same projection map, so a global latch would be
+        // shared between them.
+        states_a.insert(
+            fid_b,
+            crate::semantic_render::SemanticRenderState::for_peer(fid_b, PROTOCOL_VERSION),
+        );
+        states_a.get_mut(&fid_b).expect("B").arm_accepted_gesture(
+            crate::semantic_render::AcceptedPanelGesture {
+                button: pmacs_protocol::MouseButton::Left,
+                coord: pmacs_protocol::CellCoord::new(0, 0),
+                buffer_id: buffer_a,
+                reached_child: false,
+            },
+        );
+
+        dispatch_panel_event(
+            &mut editor_a,
+            fid_a,
+            PROTOCOL_VERSION,
+            &mut states_a,
+            &mut render_a,
+            mapped_pointer(fid_a, epochs_a, buffer_a, generation_a),
+        );
+        assert!(states_a[&fid_a].has_accepted_gesture(), "A is armed");
+        assert!(states_a[&fid_b].has_accepted_gesture(), "B is armed");
+
+        // B loses authority.
+        states_a
+            .get_mut(&fid_b)
+            .expect("B")
+            .cancel_accepted_gesture();
+
+        assert!(
+            !states_a[&fid_b].has_accepted_gesture(),
+            "B's own gesture ends"
+        );
+        assert_eq!(
+            states_a[&fid_b].panel_gesture_cancellations(),
+            1,
+            "exactly once"
+        );
+        assert!(
+            states_a[&fid_a].has_accepted_gesture(),
+            "and A's survives — a global latch would have erased it"
+        );
+        assert_eq!(
+            states_a[&fid_a].panel_gesture_cancellations(),
+            0,
+            "with no cancellation attributed to A"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // §5b review round 4 — THE LATCH FOLLOWS THE DISPATCH.
+    //
+    // Both inbound arms discarded the dispatcher's answer and updated
+    // the accepted-gesture latch unconditionally. The ladder
+    // authenticates the SENDER; only the dispatcher re-derives the
+    // TARGET, so an event that clears every rung can still be refused —
+    // for an out-of-grid coordinate, an absent side window, or a buffer
+    // that is no longer the one shown there.
+    //
+    // Each row drives the refusal from a coordinate ONE PAST the last
+    // row of the live grid, which also pins the dispatcher's `>=`
+    // against a `>`. Each ends in a POSITIVE CONTROL differing from the
+    // refused event ONLY in that coordinate: without one, a row would
+    // pass just as well if some unrelated rung had dropped the event,
+    // which is how a negative test of this shape usually rots.
+    // -----------------------------------------------------------------
+
+    /// Which inbound arm a latch row exercises.
+    #[derive(Clone, Copy)]
+    enum PanelArm {
+        Legacy,
+        Mapped,
+    }
+
+    impl PanelArm {
+        fn version(self) -> u32 {
+            match self {
+                PanelArm::Legacy => LEGACY_PANEL_VERSION,
+                PanelArm::Mapped => PROTOCOL_VERSION,
+            }
+        }
+    }
+
+    /// The mapping key the validator will compare against, read through
+    /// the SAME accessor it reads through.
+    ///
+    /// Peeking the last STAMPED value instead would let a mapped row be
+    /// refused at the mapping rung whenever the preceding dispatch moved
+    /// the fingerprint — a ladder refusal wearing a dispatcher refusal's
+    /// clothes. Legacy events carry no generation and never read this.
+    fn live_generation(
+        arm: PanelArm,
+        editor: &crate::editor::EditorState,
+        semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+        fid: FrontendId,
+    ) -> u64 {
+        match arm {
+            PanelArm::Legacy => 0,
+            PanelArm::Mapped => {
+                let snapshot = editor.panel_mapping_snapshot(fid);
+                semantic_states
+                    .get_mut(&fid)
+                    .expect("semantic projection")
+                    .panel_mapping_generation(snapshot)
+                    .expect("a stamped mapping generation")
+            }
+        }
+    }
+
+    /// One pointer event on whichever arm the row is testing.
+    fn arm_pointer(
+        arm: PanelArm,
+        fid: FrontendId,
+        epochs: (u64, u64),
+        buffer_id: crate::buffer::BufferId,
+        mapping_generation: u64,
+        coord: pmacs_protocol::CellCoord,
+        kind: pmacs_protocol::MouseKind,
+    ) -> FrontendEvent {
+        match arm {
+            PanelArm::Legacy => FrontendEvent::PanelPointer {
+                frontend_id: fid,
+                geometry_epoch: epochs.0,
+                panel_epoch: epochs.1,
+                buffer_id,
+                coord,
+                kind,
+                mods: pmacs_protocol::Modifiers::default(),
+            },
+            PanelArm::Mapped => FrontendEvent::PanelPointerMapped {
+                frontend_id: fid,
+                geometry_epoch: epochs.0,
+                panel_epoch: epochs.1,
+                buffer_id,
+                coord,
+                kind,
+                mods: pmacs_protocol::Modifiers::default(),
+                mapping_generation,
+            },
+        }
+    }
+
+    /// The panel's buffer, and a coordinate one row past its grid.
+    fn panel_buffer_and_outside_coord(
+        editor: &crate::editor::EditorState,
+        fid: FrontendId,
+        panel: crate::window::WindowId,
+    ) -> (crate::buffer::BufferId, pmacs_protocol::CellCoord) {
+        let core = editor.core.borrow();
+        let grid = core.panel_grid_size(fid).expect("a live panel grid");
+        (
+            core.windows[&panel].buffer_id,
+            pmacs_protocol::CellCoord::new(grid.rows, 0),
+        )
+    }
+
+    /// A press the dispatcher refuses must leave the latch exactly as it
+    /// found it — neither armed, nor displaced.
+    fn a_refused_press_never_arms(arm: PanelArm, fid: FrontendId) {
+        let (mut editor, mut states, mut render, _document, panel, epochs) =
+            panel_session_at(arm.version(), fid);
+        let (buffer_id, outside) = panel_buffer_and_outside_coord(&editor, fid, panel);
+        let inside = pmacs_protocol::CellCoord::new(0, 0);
+        let press = pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left);
+        let mut send =
+            |editor: &mut crate::editor::EditorState,
+             states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+             coord| {
+                let generation = live_generation(arm, editor, states, fid);
+                let event = arm_pointer(arm, fid, epochs, buffer_id, generation, coord, press);
+                dispatch_panel_event(editor, fid, arm.version(), states, &mut render, event);
+            };
+
+        send(&mut editor, &mut states, outside);
+        assert!(
+            !states[&fid].has_accepted_gesture(),
+            "a refused press must not arm: an authority loss would then \
+             count a cancellation for a gesture that never began, and \
+             replay would release a child that was never pressed"
+        );
+        assert_eq!(
+            states[&fid].panel_gesture_cancellations(),
+            0,
+            "and it must not count one on the way in either"
+        );
+
+        send(&mut editor, &mut states, inside);
+        assert!(
+            states[&fid].has_accepted_gesture(),
+            "control: the same event one row up clears the ladder, so the \
+             refusal above came from the DISPATCHER and not from a rung"
+        );
+
+        // `arm_accepted_gesture` ends whatever it overwrites, so an
+        // unconditional update also destroys a live gesture.
+        send(&mut editor, &mut states, outside);
+        assert!(
+            states[&fid].has_accepted_gesture(),
+            "the live gesture survives a refused press"
+        );
+        assert_eq!(
+            states[&fid].panel_gesture_cancellations(),
+            0,
+            "and the refused press ends nothing"
+        );
+    }
+
+    /// A release the dispatcher refuses must not consume a live gesture.
+    fn a_refused_release_never_consumes(arm: PanelArm, fid: FrontendId) {
+        let (mut editor, mut states, mut render, _document, panel, epochs) =
+            panel_session_at(arm.version(), fid);
+        let (buffer_id, outside) = panel_buffer_and_outside_coord(&editor, fid, panel);
+        let inside = pmacs_protocol::CellCoord::new(0, 0);
+        let mut send =
+            |editor: &mut crate::editor::EditorState,
+             states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+             coord,
+             kind| {
+                let generation = live_generation(arm, editor, states, fid);
+                let event = arm_pointer(arm, fid, epochs, buffer_id, generation, coord, kind);
+                dispatch_panel_event(editor, fid, arm.version(), states, &mut render, event);
+            };
+        let press = pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left);
+        let release = pmacs_protocol::MouseKind::Up(pmacs_protocol::MouseButton::Left);
+
+        send(&mut editor, &mut states, inside, press);
+        assert!(
+            states[&fid].has_accepted_gesture(),
+            "fixture: a real gesture is live"
+        );
+
+        send(&mut editor, &mut states, outside, release);
+        assert!(
+            states[&fid].has_accepted_gesture(),
+            "a refused release must not consume the live gesture: the \
+             authority loss that should have ended it would find nothing \
+             armed, and the child would hold the button down for good"
+        );
+        assert_eq!(
+            states[&fid].panel_gesture_cancellations(),
+            0,
+            "and a refused release ends nothing"
+        );
+
+        send(&mut editor, &mut states, inside, release);
+        assert!(
+            !states[&fid].has_accepted_gesture(),
+            "control: the same release one row up DOES consume it, so the \
+             refusal above came from the DISPATCHER and not from a rung"
+        );
+        assert_eq!(
+            states[&fid].panel_gesture_cancellations(),
+            0,
+            "an ordinary release is a consume, never a cancellation"
+        );
+    }
+
+    #[test]
+    fn g5_substrate_a_refused_press_never_arms_on_the_legacy_arm() {
+        a_refused_press_never_arms(PanelArm::Legacy, FrontendId(778));
+    }
+
+    #[test]
+    fn g5_substrate_a_refused_press_never_arms_on_the_mapped_arm() {
+        a_refused_press_never_arms(PanelArm::Mapped, FrontendId(779));
+    }
+
+    #[test]
+    fn g5_substrate_a_refused_release_never_consumes_on_the_legacy_arm() {
+        a_refused_release_never_consumes(PanelArm::Legacy, FrontendId(780));
+    }
+
+    #[test]
+    fn g5_substrate_a_refused_release_never_consumes_on_the_mapped_arm() {
+        a_refused_release_never_consumes(PanelArm::Mapped, FrontendId(781));
+    }
+
     /// Criterion 50: a gesture from a source whose latest declaration is
     /// not a visible `Present` is dropped.
     #[test]
@@ -6238,7 +7634,7 @@ mod tests {
         let mut semantic_states = HashMap::new();
         semantic_states.insert(
             fid,
-            crate::semantic_render::SemanticRenderState::for_peer(fid, PROTOCOL_VERSION),
+            crate::semantic_render::SemanticRenderState::for_peer(fid, LEGACY_PANEL_VERSION),
         );
         editor.accept_semantic_frame_geometry(fid, 1, CellSize::new(24, 80));
         let (geometry_epoch, panel_epoch) = shipped_declaration(&editor, fid, &mut semantic_states);
@@ -6266,7 +7662,7 @@ mod tests {
             dispatch_panel_event(
                 &mut editor,
                 fid,
-                PROTOCOL_VERSION,
+                LEGACY_PANEL_VERSION,
                 &mut semantic_states,
                 &mut HashMap::new(),
                 event,
@@ -6281,7 +7677,7 @@ mod tests {
         dispatch_panel_event(
             &mut editor,
             fid,
-            PROTOCOL_VERSION,
+            LEGACY_PANEL_VERSION,
             &mut semantic_states,
             &mut HashMap::new(),
             down(geometry_epoch, panel_epoch),
@@ -6312,7 +7708,7 @@ mod tests {
         let mut semantic_states = HashMap::new();
         semantic_states.insert(
             fid,
-            crate::semantic_render::SemanticRenderState::for_peer(fid, PROTOCOL_VERSION),
+            crate::semantic_render::SemanticRenderState::for_peer(fid, LEGACY_PANEL_VERSION),
         );
         editor.accept_semantic_frame_geometry(fid, 1, CellSize::new(24, 80));
         let (geometry_epoch, panel_epoch) = shipped_declaration(&editor, fid, &mut semantic_states);
@@ -6337,7 +7733,7 @@ mod tests {
         dispatch_panel_event(
             &mut editor,
             fid,
-            PROTOCOL_VERSION,
+            LEGACY_PANEL_VERSION,
             &mut semantic_states,
             &mut HashMap::new(),
             FrontendEvent::PanelPointer {
@@ -6364,7 +7760,7 @@ mod tests {
         dispatch_panel_event(
             &mut editor,
             fid,
-            PROTOCOL_VERSION,
+            LEGACY_PANEL_VERSION,
             &mut semantic_states,
             &mut HashMap::new(),
             FrontendEvent::PanelPointer {
@@ -6536,7 +7932,7 @@ mod tests {
         let mut semantic_states = HashMap::new();
         semantic_states.insert(
             fid,
-            crate::semantic_render::SemanticRenderState::for_peer(fid, PROTOCOL_VERSION),
+            crate::semantic_render::SemanticRenderState::for_peer(fid, LEGACY_PANEL_VERSION),
         );
         editor.accept_semantic_frame_geometry(fid, 1, CellSize::new(24, 80));
         let (geometry_epoch, panel_epoch) = shipped_declaration(&editor, fid, &mut semantic_states);
@@ -6582,7 +7978,7 @@ mod tests {
         dispatch_panel_event(
             &mut editor,
             fid,
-            PROTOCOL_VERSION,
+            LEGACY_PANEL_VERSION,
             &mut semantic_states,
             &mut HashMap::new(),
             FrontendEvent::PanelPointer {
@@ -6609,7 +8005,7 @@ mod tests {
         dispatch_panel_event(
             &mut editor,
             fid,
-            PROTOCOL_VERSION,
+            LEGACY_PANEL_VERSION,
             &mut semantic_states,
             &mut HashMap::new(),
             FrontendEvent::PanelResizeRows {
@@ -6638,7 +8034,7 @@ mod tests {
         dispatch_panel_event(
             &mut editor,
             fid,
-            PROTOCOL_VERSION,
+            LEGACY_PANEL_VERSION,
             &mut semantic_states,
             &mut HashMap::new(),
             FrontendEvent::PanelPointer {
@@ -6677,7 +8073,7 @@ mod tests {
         let mut semantic_states = HashMap::new();
         semantic_states.insert(
             fid,
-            crate::semantic_render::SemanticRenderState::for_peer(fid, PROTOCOL_VERSION),
+            crate::semantic_render::SemanticRenderState::for_peer(fid, LEGACY_PANEL_VERSION),
         );
         editor.accept_semantic_frame_geometry(fid, 1, CellSize::new(24, 80));
         let (geometry_epoch, panel_epoch) = shipped_declaration(&editor, fid, &mut semantic_states);
@@ -6695,7 +8091,7 @@ mod tests {
         dispatch_panel_event(
             &mut editor,
             fid,
-            PROTOCOL_VERSION,
+            LEGACY_PANEL_VERSION,
             &mut semantic_states,
             &mut HashMap::new(),
             wheel(buffer_id, geometry_epoch, panel_epoch),
@@ -6711,7 +8107,7 @@ mod tests {
         dispatch_panel_event(
             &mut editor,
             fid,
-            PROTOCOL_VERSION,
+            LEGACY_PANEL_VERSION,
             &mut semantic_states,
             &mut HashMap::new(),
             FrontendEvent::PanelPointer {
@@ -6764,7 +8160,7 @@ mod tests {
         let mut semantic_states = HashMap::new();
         semantic_states.insert(
             fid,
-            crate::semantic_render::SemanticRenderState::for_peer(fid, PROTOCOL_VERSION),
+            crate::semantic_render::SemanticRenderState::for_peer(fid, LEGACY_PANEL_VERSION),
         );
         editor.accept_semantic_frame_geometry(fid, 1, CellSize::new(24, 80));
         let (geometry_epoch, panel_epoch) = shipped_declaration(&editor, fid, &mut semantic_states);
@@ -6777,7 +8173,7 @@ mod tests {
         dispatch_panel_event(
             &mut editor,
             fid,
-            PROTOCOL_VERSION,
+            LEGACY_PANEL_VERSION,
             &mut semantic_states,
             &mut HashMap::new(),
             wheel(terminal_buffer, geometry_epoch, panel_epoch),
