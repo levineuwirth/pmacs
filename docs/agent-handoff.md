@@ -2575,6 +2575,23 @@ the fix is to re-run it in the foreground, not to work around the
 guard. `scripts/check-sigint-deliverable` answers the question on its
 own: exit **0** deliverable, **1** ignored, **2** undecidable.
 
+**AND NEVER WRAP THE GATE IN `timeout` TO FIT AN AGENT COMMAND CAP.**
+The full 16-stage suite outruns a ten-minute cap, and a `timeout 580`
+around it kills `sweep` mid-run; the runner then records that stage as
+a **failure**, which reads in the log exactly like a real red. This
+already produced one false §5b gate result. It is the same defect as
+the one above in a different costume: a harness convenience silently
+becoming evidence.
+
+The supported way to run past the cap is the **tool-level background
+launch**, which is measured `safe` by
+`scripts/check-sigint-deliverable`, so the guard admits it and the run
+is valid. Check it directly if in doubt --- the helper is one command
+and answers for whatever shell actually invoked it. Failing that, run
+the suite in labelled pieces and say in the record which piece produced
+which result. **A truncated run is not a result, and must never be
+reported as one.**
+
 ```
 scripts/gate [--acceptance SUITE]... [--protocol]
 ```
