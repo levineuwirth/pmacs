@@ -8332,25 +8332,130 @@ mod tests {
         );
     }
 
-    // P10 IS DELIBERATELY ABSENT, and this note is why.
-    //
-    // The press path also gates arming on `begin_selection` actually
-    // starting a drag, so a local terminal press that begins nothing
-    // records nothing. That gate has NO WITNESS because it has no
-    // reachable false branch through the daemon: `begin_selection`
-    // returns `false` only when the session is missing or the cell maps
-    // to no retained row, and by the time the daemon reaches the press
-    // path `classify_panel_pointer` has already established that the
-    // buffer IS the side window's live terminal, while `anchor_at`
-    // resolves every in-grid cell of a live view — measured, not
-    // assumed: a press at every content row of the 4-row fixture
-    // anchors.
-    //
-    // The gate is kept as insurance against a future view that can
-    // refuse, and it is recorded as UNWITNESSED rather than covered by
-    // a row that would pass whether or not the gate existed. A row at
-    // an out-of-grid cell looks like it tests this and does not: such a
-    // press is `Refused` long before the local path.
+    /// P10 — a LOCAL terminal press that begins no drag does not arm.
+    ///
+    /// **The panel is wider than its terminal.** The fixture's band is
+    /// 80 columns while the child's screen is 20, so columns 20..79 are
+    /// painted padding: inside accepted panel content, and behind no
+    /// terminal cell. `anchor_at` refuses them
+    /// (`coord.col >= row.cells.len()`), `begin_selection` returns
+    /// `false`, and nothing begins.
+    ///
+    /// An earlier round recorded this gate as UNWITNESSED, claiming
+    /// `anchor_at` resolves every in-grid cell of a live view. That was
+    /// measured on ROWS and generalised to cells, which is a different
+    /// statement and a false one.
+    #[test]
+    fn r4_p10_a_local_press_that_begins_no_drag_does_not_arm() {
+        let fid = FrontendId(803);
+        let (mut editor, mut states, mut render, panel, buffer_id, epochs) =
+            terminal_panel_session(fid, false);
+        let press = pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left);
+        let none = pmacs_protocol::Modifiers::default();
+        let key = crate::terminal::view::TerminalViewKey::new(fid, panel, buffer_id);
+        // Column 20 of an 80-column band over a 20-column child.
+        let padding = pmacs_protocol::CellCoord::new(1, 20);
+        assert_eq!(
+            editor
+                .classify_panel_pointer(fid, buffer_id, padding, press)
+                .outcome(),
+            crate::editor::PanelPointerOutcome::Accepted,
+            "fixture: the cell is ACCEPTED content, so a refusal cannot \
+             be what this row observes"
+        );
+
+        send_panel(
+            &mut editor,
+            &mut states,
+            &mut render,
+            fid,
+            epochs,
+            buffer_id,
+            padding,
+            press,
+            none,
+        );
+
+        assert!(
+            !editor
+                .terminal_manager
+                .borrow()
+                .view_is_dragging_for_test(key),
+            "fixture: no local drag began --- the cell is painted padding"
+        );
+        assert!(
+            !states[&fid].has_accepted_gesture(),
+            "so nothing may be armed: the record would name a drag that \
+             does not exist, and its completion would have nothing to \
+             finish"
+        );
+    }
+
+    /// P12 — a panel WIDER THAN 512 COLUMNS still routes pointer input.
+    ///
+    /// A panel deliberately does not inherit the terminal's per-axis PTY
+    /// caps (Bet B5'): a 4K surface at a small font is legitimately
+    /// wider than `MAX_TERMINAL_COLS`, and the renderer clamps through
+    /// `terminal_projection_size` so the band paints. Pointer routing
+    /// passed the RAW panel width, and `view_status_for_size` refuses
+    /// anything over the cap — so on exactly those panels a click
+    /// squarely inside the visible terminal resolved to nothing and the
+    /// whole band was dead to the mouse while looking perfectly normal.
+    ///
+    /// A POSITIVE control: the gesture must land, not merely fail
+    /// safely.
+    #[test]
+    fn r4_p12_a_panel_wider_than_the_terminal_cap_still_routes_pointer_input() {
+        let fid = FrontendId(805);
+        let (mut editor, mut states, mut render, panel, buffer_id, _epochs) =
+            terminal_panel_session(fid, true);
+
+        // Re-declare the surface far wider than MAX_TERMINAL_COLS.
+        let wide = u32::from(crate::terminal::MAX_TERMINAL_COLS) + 128;
+        editor.accept_semantic_frame_geometry(fid, 2, CellSize::new(24, wide));
+        let epochs = shipped_declaration(&editor, fid, &mut states);
+        {
+            let core = editor.core.borrow();
+            let grid = core.panel_grid_size(fid).expect("a live panel grid");
+            assert!(
+                grid.cols > u32::from(crate::terminal::MAX_TERMINAL_COLS),
+                "fixture: the band must actually exceed the terminal cap, \
+                 got {} columns",
+                grid.cols
+            );
+        }
+
+        let cell = pmacs_protocol::CellCoord::new(1, 2);
+        let press = pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left);
+        let none = pmacs_protocol::Modifiers::default();
+        let _ = child_stream(&editor);
+
+        send_panel(
+            &mut editor,
+            &mut states,
+            &mut render,
+            fid,
+            epochs,
+            buffer_id,
+            cell,
+            press,
+            none,
+        );
+
+        assert_eq!(
+            child_stream(&editor),
+            vec![SGR_PRESS_1_2.to_vec()],
+            "the press must reach the child on a wide band: routing has \
+             to use the SAME projection clamp the renderer uses, or the \
+             two disagree and the panel paints while ignoring the mouse"
+        );
+        assert!(
+            states[&fid].has_accepted_gesture(),
+            "and it must arm --- this is a positive control, so failing \
+             safely is still failing"
+        );
+        let _ = panel;
+    }
 
     /// P11 — a recorded LOCAL completion still runs with the panel
     /// HIDDEN.
@@ -8432,6 +8537,19 @@ mod tests {
             pmacs_protocol::CellCoord::new(grid.rows, 0)
         };
         let key = crate::terminal::view::TerminalViewKey::new(fid, panel, buffer_id);
+        let active_before = editor.core.borrow().active_frontend;
+        let controller_before = editor
+            .terminal_manager
+            .borrow()
+            .controller_view_for_frontend(fid);
+        assert_eq!(
+            editor
+                .classify_panel_pointer(fid, buffer_id, outside, press)
+                .outcome(),
+            crate::editor::PanelPointerOutcome::Refused,
+            "fixture: this press really is refused --- asserted, because \
+             every effect assertion below is vacuous if it is not"
+        );
 
         send_panel(
             &mut editor,
@@ -8449,6 +8567,21 @@ mod tests {
             child_stream(&editor).is_empty(),
             "a refused press must send the child NOTHING --- a press it \
              receives is one it will expect a release for"
+        );
+        assert_eq!(
+            editor.core.borrow().active_frontend,
+            active_before,
+            "and it must not ACTIVATE the panel: a misclassified press \
+             focuses before its out-of-range anchor fails, so byte and \
+             latch assertions alone stay green while focus has moved"
+        );
+        assert_eq!(
+            editor
+                .terminal_manager
+                .borrow()
+                .controller_view_for_frontend(fid),
+            controller_before,
+            "and it must not claim the terminal CONTROLLER"
         );
         assert!(
             !editor

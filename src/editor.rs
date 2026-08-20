@@ -526,21 +526,41 @@ pub enum TerminalGestureRoute {
 /// authority for that derivation; handing the daemon a bare outcome
 /// and letting it re-derive chrome or target kind would be the hole
 /// §5b closed, reopened beside the dispatcher.
-pub struct PanelPointerDisposition {
-    outcome: PanelPointerOutcome,
-    resolved: Option<ResolvedPanelTarget>,
+pub enum PanelPointerDisposition {
+    /// Not addressable as this panel. **Carries no target**, which is
+    /// the point: as two independent fields, `Refused` plus a resolved
+    /// target stayed representable inside this module, and the only
+    /// thing preventing a refused gesture from reaching a target was
+    /// that no code currently built that pair.
+    Refused,
+    /// Claimed by this panel, but deliberately not a content gesture.
+    Consumed(ResolvedPanelTarget),
+    /// A content gesture for the resolved target.
+    Accepted(ResolvedPanelTarget),
 }
 
 impl PanelPointerDisposition {
     /// The disposition, for the daemon's lifecycle table.
     #[must_use]
     pub fn outcome(&self) -> PanelPointerOutcome {
-        self.outcome
+        match self {
+            Self::Refused => PanelPointerOutcome::Refused,
+            Self::Consumed(_) => PanelPointerOutcome::Consumed,
+            Self::Accepted(_) => PanelPointerOutcome::Accepted,
+        }
     }
 }
 
 /// The panel target a disposition resolved to, derived once.
-struct ResolvedPanelTarget {
+///
+/// **Public as a type, opaque as a value.** It has to be nameable
+/// because `PanelPointerDisposition`'s variants carry it, but every
+/// field stays private: the daemon receives a disposition and hands it
+/// back, and cannot read the side window, the target kind or the
+/// content bounds out of it. That is Q#BP-R4's first fixed fact — the
+/// editor is the only authority for the derivation — enforced by
+/// visibility rather than by convention.
+pub struct ResolvedPanelTarget {
     side: WindowId,
     buffer_id: crate::buffer::BufferId,
     is_terminal: bool,
@@ -2963,10 +2983,7 @@ impl EditorState {
     ) -> PanelPointerDisposition {
         use pmacs_protocol::MouseKind as PKind;
 
-        let refused = PanelPointerDisposition {
-            outcome: PanelPointerOutcome::Refused,
-            resolved: None,
-        };
+        let refused = PanelPointerDisposition::Refused;
 
         let Some(size) = self.core.borrow().panel_grid_size(frontend_id) else {
             return refused;
@@ -2994,13 +3011,13 @@ impl EditorState {
             side
         };
 
-        let resolved = Some(ResolvedPanelTarget {
+        let resolved = ResolvedPanelTarget {
             side,
             buffer_id,
             is_terminal,
             content_rows,
             cols: size.cols,
-        });
+        };
         let on_chrome = coord.row >= content_rows;
         let is_wheel = matches!(
             kind,
@@ -3009,7 +3026,7 @@ impl EditorState {
 
         // Everything below is CLAIMED by this panel — the cell is ours —
         // and the only question left is whether it is a content gesture.
-        let outcome = if on_chrome {
+        let consumed = if on_chrome {
             // Q#BP-R2, step 3 of the ordering: a terminal panel's chrome
             // wheel is consumed BEFORE focus, before `active_frontend`,
             // and before any controller claim. Placing it after
@@ -3022,16 +3039,16 @@ impl EditorState {
             // rule — presses and motion are reserved, while `Up` and the
             // wheel fall through, because an `Up` must still terminate a
             // gesture begun in content and a chrome wheel still scrolls.
-            if is_terminal || matches!(kind, PKind::Down(_) | PKind::Drag(_) | PKind::Move) {
-                let _ = is_wheel;
-                PanelPointerOutcome::Consumed
-            } else {
-                PanelPointerOutcome::Accepted
-            }
+            let _ = is_wheel;
+            is_terminal || matches!(kind, PKind::Down(_) | PKind::Drag(_) | PKind::Move)
         } else {
-            PanelPointerOutcome::Accepted
+            false
         };
-        PanelPointerDisposition { outcome, resolved }
+        if consumed {
+            PanelPointerDisposition::Consumed(resolved)
+        } else {
+            PanelPointerDisposition::Accepted(resolved)
+        }
     }
 
     /// Apply a classified panel gesture to its target (Q#BP-R4).
@@ -3070,10 +3087,11 @@ impl EditorState {
     ) -> Option<PanelGestureDomain> {
         use pmacs_protocol::MouseKind as PKind;
 
-        if disposition.outcome != PanelPointerOutcome::Accepted {
+        // Only `Accepted` carries a target into an effect, and the type
+        // is what enforces it: there is no `Refused` value holding one.
+        let PanelPointerDisposition::Accepted(target) = disposition else {
             return None;
-        }
-        let target = disposition.resolved.as_ref()?;
+        };
 
         let activates = if target.is_terminal {
             !matches!(kind, PKind::Move)
@@ -3091,7 +3109,17 @@ impl EditorState {
             // document terminal. The viewport is `content_rows`, never the
             // full grid: passing the frame would make the mode line a child
             // cell and put every clamp one row out.
-            let viewport = CellSize::new(target.content_rows, target.cols);
+            // THROUGH THE RENDERER'S OWN CLAMP. A panel deliberately does
+            // not inherit the terminal's per-axis PTY caps (Bet B5'), so
+            // a 4K surface at a small font is legitimately wider than
+            // `MAX_TERMINAL_COLS` — and `view_status_for_size` refuses
+            // anything over that cap. Passing the raw panel width made
+            // every gesture on such a panel resolve to `None`: a click
+            // squarely inside the visible terminal did nothing at all,
+            // while the same panel rendered fine because projection
+            // clamps and pointer routing did not agree.
+            let viewport =
+                terminal_projection_size(CellSize::new(target.content_rows, target.cols));
             let key = TerminalViewKey::new(frontend_id, target.side, target.buffer_id);
             return match self.apply_terminal_gesture(
                 key,

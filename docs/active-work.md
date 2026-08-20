@@ -295,10 +295,26 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
     modes per event — G5k's named mutation. The press now records
     `PanelGestureDomain` (document / terminal-child-with-encoding /
     terminal-local) and every tail and completion follows it.
-  - **Witnesses: G5k(a)–(d), P1, P3 both legs, P4, P5, P7, P8.** Each
-    reads a TARGET EFFECT — the child's byte stream, the terminal drag
-    state, or the document selection — never the latch alone. Each
-    bites its own mutation, including G5k's verbatim.
+  - **LANDED: the record is SELF-CONTAINED.** `TerminalLocal` carries
+    the accepted content **viewport** (ambient geometry is `None`
+    exactly when a hidden panel needs completing); a press that anchors
+    nothing no longer arms on either target; and pointer routing goes
+    through the renderer's own `terminal_projection_size` clamp — a
+    band wider than `MAX_TERMINAL_COLS` painted fine while every click
+    inside it resolved to nothing.
+  - **LANDED: `PanelPointerDisposition` is an ENUM.** As
+    `{outcome, Option<target>}` the invalid pair — refused, yet
+    carrying a target — stayed representable inside `editor.rs`. Now
+    `Refused` holds no target at all.
+  - **Witnesses: G5k(a)–(d), P1, P2, P3 both legs, P4, P5, P7, P8, P9,
+    P10, P11, P12.** Each reads a TARGET EFFECT — the child's byte
+    stream (**exact bytes**, not a count), the terminal drag state, the
+    document selection, or focus and controller ownership — never the
+    latch alone. Each bites its own mutation, including G5k's verbatim.
+  - **Every fixture asserts its own precondition** (the disposition is
+    `Accepted`, or is `Refused`) because four rows in these rounds
+    passed vacuously: cells that were out of grid, or that clamped to
+    byte 0, exercised a refusal instead of the path they named.
   - **REMAINING, in order:** task 18's pending-release slot and drains,
     task 19's four stranding transitions, then the full head-exact gate
     and the PR.
