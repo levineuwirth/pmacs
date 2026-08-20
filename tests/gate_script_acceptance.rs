@@ -28,11 +28,79 @@
 //! `~/build/pmacs-gate-targets`, which matters most for the prune
 //! tests — a prune bug is unrecoverable.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+/// The SIGINT-deliverability helper the gate and the panel suite share
+/// (`docs/gpu-probe-sigint-framing.md` §7c).
+fn sigint_helper() -> PathBuf {
+    repo_root().join("scripts/check-sigint-deliverable")
+}
+
+/// Run `cmd` with `SIGINT` set to `SIG_IGN`, the way a shell that
+/// backgrounds a job without job control does.
+///
+/// `trap "" INT` sets the ignore in the wrapper shell, and `SIG_IGN` is
+/// inherited across `fork` **and survives `exec`** — which is the whole
+/// mechanism under test, so simulating it this way exercises the real
+/// thing rather than a stand-in.
+fn under_ignored_sigint(
+    program: &Path,
+    args: &[&str],
+    cwd: &Path,
+    env: &[(&str, &str)],
+) -> std::process::Output {
+    // `exec "$@"` with the program and arguments passed POSITIONALLY.
+    // Interpolating them into the script text would break on any path
+    // containing a space or a shell metacharacter, and every path here
+    // comes from a `tempdir` or `CARGO_MANIFEST_DIR` — neither of which
+    // this test controls.
+    let mut command = Command::new("sh");
+    command
+        .arg("-c")
+        .arg("trap \"\" INT; exec \"$@\"")
+        .arg("sh")
+        .arg(program)
+        .args(args)
+        .current_dir(cwd);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.output().expect("spawn shell with SIGINT ignored")
+}
+
+/// A minimal git worktree holding a copy of `scripts/gate` and a
+/// **stub** `check-sigint-deliverable`, so the gate's handling of each
+/// helper status can be driven on its real path without touching the
+/// checked-in helper.
+fn gate_with_stub_helper(stub_body: &str, executable: bool) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let scripts = dir.path().join("scripts");
+    std::fs::create_dir_all(&scripts).expect("scripts dir");
+    std::fs::copy(gate(), scripts.join("gate")).expect("copy gate");
+    let helper = scripts.join("check-sigint-deliverable");
+    std::fs::write(&helper, stub_body).expect("write stub helper");
+    let mode = if executable { 0o755 } else { 0o644 };
+    std::fs::set_permissions(&helper, std::os::unix::fs::PermissionsExt::from_mode(mode))
+        .expect("chmod stub helper");
+    std::fs::set_permissions(
+        scripts.join("gate"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .expect("chmod gate copy");
+    let ok = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir.path())
+        .status()
+        .expect("git init");
+    assert!(ok.success(), "the stub worktree must be a git worktree");
+    dir
 }
 
 fn gate() -> PathBuf {
@@ -92,6 +160,345 @@ fn run(root: &Path, args: &[&str]) -> (String, String, bool) {
 // the script is authoritative for the FIXED gates, so if it drifts from
 // §3, nothing else in the repository would notice. `--print-plan`
 // exists to make that checkable without executing anything.
+
+/// A6, gate consumer: a helper verdict of `error` (2) refuses the run
+/// with the ERROR wording, and never claims `SIGINT` is ignored.
+///
+/// Driven through a stub worktree so the gate's real code path runs
+/// against a controlled helper status; the helper's own classification
+/// is covered by its own rows above.
+#[test]
+fn gate_refuses_on_helper_error_without_claiming_sigint_is_ignored() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let repo = gate_with_stub_helper(
+        "#!/bin/sh\necho 'pmacs: could not determine whether SIGINT is deliverable (probe status 42)' >&2\nexit 2\n",
+        true,
+    );
+    let out = Command::new(repo.path().join("scripts/gate"))
+        .arg("--self-test")
+        .current_dir(repo.path())
+        .env("PMACS_GATE_TARGET_ROOT", root.path())
+        .output()
+        .expect("run the stub-worktree gate");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "an error verdict exits 2, not 1"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    // This stub emits the error TEXT but no token, so under the pair
+    // ABI it is a BOUNDARY error --- and its stderr is untrusted, hence
+    // deliberately not surfaced.
+    assert!(
+        err.contains("SIGINT guard boundary error"),
+        "an unvalidated pair is a boundary error: {err}"
+    );
+    assert!(
+        !err.contains("could not determine"),
+        "and the untrusted child stderr is NOT shown: {err}"
+    );
+    assert!(
+        !err.contains("SIGINT is ignored"),
+        "an undecidable probe must never be reported as ignored: {err}"
+    );
+    assert!(err.contains("no stage has run"), "and no stage ran: {err}");
+}
+
+/// A6, gate boundary: a helper that cannot be EXECUTED is an `error` at
+/// the call boundary — mapped to 2 — never evidence that `SIGINT` is
+/// ignored.
+///
+/// This is the case the original guard got wrong twice: under `set -e`
+/// a bare invocation died before any mapping, and 126/127 would have
+/// escaped raw.
+#[test]
+fn gate_maps_an_unexecutable_helper_to_error_not_ignored() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let repo = gate_with_stub_helper("#!/bin/sh\nexit 0\n", false);
+    let out = Command::new(repo.path().join("scripts/gate"))
+        .arg("--self-test")
+        .current_dir(repo.path())
+        .env("PMACS_GATE_TARGET_ROOT", root.path())
+        .output()
+        .expect("run the stub-worktree gate");
+    let err = String::from_utf8_lossy(&out.stderr);
+    // The gate prints the raw probe status it saw. Carry it into every
+    // assertion message: this row failed on macOS with exit 1 where 2
+    // was expected, and the log could not say which status produced it
+    // because the message discarded stderr.
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "boundary failures map to 2; gate said:\n{err}"
+    );
+    assert!(
+        err.contains("SIGINT guard boundary error"),
+        "the boundary has its own wording: {err}"
+    );
+    assert!(
+        err.contains("token=missing"),
+        "and names the token state, not just the status: {err}"
+    );
+    assert!(
+        !err.contains("SIGINT is ignored"),
+        "an unrunnable guard is not evidence about the signal: {err}"
+    );
+}
+
+/// A6/A6b/A6c, shell consumer: the shared vectors, asserting the exact
+/// branch rather than only the exit code.
+///
+/// `ValidatedError` and `Boundary` both exit 2, so comparing codes
+/// alone would let a validator that accepts every status 2 pass. The
+/// branch-discriminating cases emit a sentinel on stderr; a validated
+/// verdict surfaces it, while X3/X4 carry dedicated payloads and a
+/// boundary failure must withhold untrusted stderr.
+#[test]
+fn gate_validates_the_whole_shared_conformance_set() {
+    use common::sigint_conformance::{
+        CANONICAL_IGNORED, Outcome, SENTINEL, shared_cases, stub_script,
+    };
+
+    let cases = shared_cases();
+    assert_eq!(cases.len(), 45, "the shared set is 45 cases");
+
+    for case in cases {
+        let root = tempfile::tempdir().expect("tempdir");
+        let repo = gate_with_stub_helper(&stub_script(&case), true);
+        let out = Command::new(repo.path().join("scripts/gate"))
+            .arg("--self-test")
+            .current_dir(repo.path())
+            .env("PMACS_GATE_TARGET_ROOT", root.path())
+            .env("TMPDIR", root.path())
+            .output()
+            .expect("run the stub-worktree gate");
+        let err = String::from_utf8_lossy(&out.stderr);
+        let name = &case.name;
+
+        match case.expect {
+            Outcome::Safe => assert!(
+                !err.contains("REFUSING TO RUN"),
+                "case {name}: a validated safe pair must continue: {err}"
+            ),
+            Outcome::ValidatedIgnored => {
+                assert_eq!(out.status.code(), Some(1), "case {name}: {err}");
+                assert!(
+                    err.contains(SENTINEL),
+                    "case {name}: a validated verdict surfaces the helper's \
+                     stderr: {err}"
+                );
+                assert!(err.contains("token=valid"), "case {name}: {err}");
+            }
+            Outcome::ValidatedError => {
+                assert_eq!(out.status.code(), Some(2), "case {name}: {err}");
+                assert!(
+                    err.contains(SENTINEL),
+                    "case {name}: a validated error also speaks with the \
+                     helper's voice: {err}"
+                );
+                assert!(err.contains("token=valid"), "case {name}: {err}");
+            }
+            Outcome::Boundary => {
+                assert_eq!(out.status.code(), Some(2), "case {name}: {err}");
+                assert!(
+                    err.contains("SIGINT guard boundary error"),
+                    "case {name}: {err}"
+                );
+                assert!(
+                    !err.contains(SENTINEL),
+                    "case {name}: a boundary failure must NOT surface the \
+                     child's stderr --- this is what separates it from a \
+                     validated error, which shares its exit code: {err}"
+                );
+                assert!(
+                    !err.contains(CANONICAL_IGNORED),
+                    "case {name}: and it must never repeat the canonical \
+                     ignored wording --- X3 emits exactly that on stderr \
+                     with no token: {err}"
+                );
+            }
+        }
+
+        // A8: no capture directory survives, on any path. `root` is RAII
+        // --- it is dropped at the end of this iteration.
+        let residue: Vec<_> = std::fs::read_dir(root.path())
+            .expect("read tmpdir")
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with("pmacs-sigint."))
+            .collect();
+        assert!(residue.is_empty(), "case {name}: capture residue survived");
+    }
+}
+
+/// A8: the guard cannot create its capture directory.
+///
+/// Bounded --- it never reaches a stage. `TMPDIR` points at a path that
+/// does not exist, so `mktemp -d` fails and the guard must refuse
+/// before running the helper at all.
+#[test]
+fn gate_refuses_when_the_capture_directory_cannot_be_created() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let repo = gate_with_stub_helper("#!/bin/sh\nprintf 'pmacs-sigint-v1:safe'\nexit 0\n", true);
+    let out = Command::new(repo.path().join("scripts/gate"))
+        .arg("--self-test")
+        .current_dir(repo.path())
+        .env("PMACS_GATE_TARGET_ROOT", root.path())
+        .env("TMPDIR", root.path().join("absent-directory"))
+        .output()
+        .expect("run the stub-worktree gate");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "boundary error: {err}");
+    assert!(
+        err.contains("capture directory"),
+        "the failure names what could not be created: {err}"
+    );
+    assert!(err.contains("no stage has run"), "and no stage ran: {err}");
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("[01]"),
+        "no stage may run"
+    );
+    // A8 on this path too: the temporary root is inspected BEFORE its
+    // RAII drop, and must contain nothing the guard left behind.
+    let residue: Vec<_> = std::fs::read_dir(root.path())
+        .expect("read tmpdir")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        residue.is_empty(),
+        "a guard that could not create its capture directory must leave \
+         nothing behind: {residue:?}"
+    );
+}
+
+/// Each helper arm emits its exact token on stdout.
+#[test]
+fn sigint_helper_emits_the_exact_token_for_each_arm() {
+    use common::sigint_conformance::{TOKEN_ERROR, TOKEN_IGNORED, TOKEN_SAFE};
+
+    let safe = Command::new(sigint_helper()).output().expect("run helper");
+    assert_eq!(safe.status.code(), Some(0));
+    assert_eq!(
+        safe.stdout,
+        [TOKEN_SAFE, b"\n"].concat(),
+        "the safe arm emits exactly its token plus one LF"
+    );
+
+    let erroring = Command::new(sigint_helper())
+        .env("PATH", "")
+        .output()
+        .expect("run helper");
+    assert_eq!(erroring.status.code(), Some(2));
+    assert_eq!(erroring.stdout, [TOKEN_ERROR, b"\n"].concat());
+
+    // The ignored arm needs a shell that ignores SIGINT; assert its
+    // STDOUT, not merely its status and stderr.
+    let ignored = under_ignored_sigint(&sigint_helper(), &[], &repo_root(), &[]);
+    assert_eq!(ignored.status.code(), Some(1));
+    assert_eq!(
+        ignored.stdout,
+        [TOKEN_IGNORED, b"\n"].concat(),
+        "the ignored arm emits exactly its token plus one LF"
+    );
+}
+
+/// §7c: the helper answers `safe` when `SIGINT` is deliverable.
+#[test]
+fn sigint_helper_reports_safe_when_the_signal_is_deliverable() {
+    let out = Command::new(sigint_helper())
+        .output()
+        .expect("run the sigint helper");
+    assert_eq!(out.status.code(), Some(0), "safe is exit 0");
+    assert!(
+        out.stderr.is_empty(),
+        "the safe path is silent, so a clean run says nothing: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// §7c: the helper answers `ignored` — exit 1, canonical wording — when
+/// `SIGINT` is inherited as `SIG_IGN`.
+#[test]
+fn sigint_helper_reports_ignored_when_the_signal_is_inherited_ignored() {
+    let out = under_ignored_sigint(&sigint_helper(), &[], &repo_root(), &[]);
+    assert_eq!(out.status.code(), Some(1), "ignored is exit 1");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("SIGINT is ignored"),
+        "the canonical ignored diagnosis is the helper's to own: {err}"
+    );
+}
+
+/// §7c: the helper answers `error` — exit 2, a DISTINCT diagnosis — when
+/// the probe cannot decide.
+///
+/// The probe shells out, so an empty `PATH` makes its inner `sh`
+/// unfindable. This is the case a naive `exit 0` would misreport as
+/// `ignored`, failing the caller for the wrong reason.
+#[test]
+fn sigint_helper_reports_error_and_never_ignored_when_the_probe_cannot_run() {
+    let out = Command::new(sigint_helper())
+        .env("PATH", "")
+        .output()
+        .expect("run the sigint helper with no PATH");
+    assert_eq!(out.status.code(), Some(2), "error is exit 2, never 1");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("could not determine"),
+        "error has its own wording: {err}"
+    );
+    assert!(
+        !err.contains("SIGINT is ignored"),
+        "error must NOT be reported as ignored --- they are different \
+         problems, and conflating them is the defect the helper exists \
+         to avoid: {err}"
+    );
+}
+
+/// R-b: the gate refuses under ignored `SIGINT`, **before any stage**.
+///
+/// This is the row whose absence let a real bug ship: the first
+/// implementation ran the helper as a bare command under `set -e`, so
+/// the shell died at the non-zero exit and the refusal never printed;
+/// the second captured `$?` inside `if !`, which is the status of the
+/// negated condition — always zero — so the gate printed the diagnosis
+/// and then ran the whole suite anyway. Both passed every other test in
+/// this file.
+#[test]
+fn gate_refuses_to_start_when_sigint_is_ignored() {
+    let root = tempfile::tempdir().expect("tempdir");
+    // `--self-test`, NOT the ordinary gate. If the guard ever regresses,
+    // this row must not launch eight real gate stages inside the gate
+    // suite — the recursion constraint this file opens with. Self-test
+    // drives the same runner over a hardcoded synthetic plan, so the
+    // negative path stays bounded whatever the guard does.
+    let out = under_ignored_sigint(
+        &gate(),
+        &["--self-test"],
+        &repo_root(),
+        &[("PMACS_GATE_TARGET_ROOT", &root.path().display().to_string())],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "the helper's verdict passes through"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("SIGINT is ignored"),
+        "the gate surfaces the helper's stderr unchanged rather than \
+         inventing its own wording: {err}"
+    );
+    assert!(
+        err.contains("no stage has run"),
+        "and says the run is not a test failure: {err}"
+    );
+    let combined = format!("{}{err}", String::from_utf8_lossy(&out.stdout));
+    assert!(
+        !combined.contains("[01]"),
+        "NO stage may run --- the guard sits before stage 1: {combined}"
+    );
+}
 
 #[test]
 fn the_plan_sweeps_the_workspace_and_never_only_the_tests() {

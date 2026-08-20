@@ -270,6 +270,413 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
+## GPU launcher / probe SIGINT teardown — PR #241 OPEN
+
+**Written with the branch's FIRST commit**, per the standing correction
+from #171 and #215.
+
+- **Branch `gpu-probe-sigint-teardown`**, base `githubsucks/main` @
+  **`72da24a`**, worktree
+  `/home/jeans/Repos/personal/pmacs-probe-sigint`. Recover with
+  `git fetch githubsucks && git checkout gpu-probe-sigint-teardown`.
+- **REVISION 13 IMPLEMENTED at `bc7d776`.** Helper emits the token on
+  stdout; both consumers validate the `(status, token)` pair. The gate
+  owns a guard-local capture dir, keeps `|| status=$?` under `set -eu`,
+  selects `expected_token` before any `set -u`-sensitive use, compares
+  bytes with `cmp` against both permitted encodings, surfaces the
+  helper's stderr **only** for validated verdicts, and prints
+  `status=`/`token=` on every refusing branch. R-d validates the same
+  pair from `Command::output()` bytes — no capture files, since only
+  the shell needs them.
+- **Conformance vectors live in `tests/common/sigint_conformance.rs`**
+  and are consumed by BOTH validators, so the two copies cannot drift
+  while each still reports "45 cases". The **branch-discriminating** cases emit a
+  sentinel on stderr, which is what separates `ValidatedError` from
+  `Boundary` —
+  they share exit 2, so comparing codes alone let a validator that
+  accepted every status 2 pass the whole matrix. An `Outcome` enum
+  (Safe / ValidatedIgnored / ValidatedError / Boundary) is asserted
+  branch-exact in both suites, and each helper arm's exact stdout token
+  is asserted too.
+- **A8 is complete**: a bounded row points `TMPDIR` at a missing
+  directory so `mktemp -d` fails, and asserts boundary error 2, no
+  stage, and no residue. Temporary directories are RAII throughout;
+  the `keep()`-plus-manual-cleanup shape is gone.
+- **36 gate rows, 16 GPU rows.**
+- **HEAD-EXACT GATE on `8802d6a`: green, all 8 stages**, log
+  `20260820T072102Z-3009434`. The first attempt on the same head
+  (`…-2931214`) failed `07-sweep` on
+  `composition_overhead_under_ten_percent` — a perf budget unrelated to
+  this lane, green in isolation, and a signature the
+  `panel-mapping-generation` ledger already records recurring. **Both
+  runs are recorded; no causal attribution is made** for the first,
+  only that the second is the head-exact evidence.
+- **The earlier `…-2647615` run is NOT head-exact evidence**: it
+  finished about 30 seconds before `bc7d776` was committed, so it
+  describes the implementation tree rather than a committed head.
+- **A4 mutations, each biting the MATRIX now**, not a dedicated row:
+  accepting any status 2 regardless of token, and surfacing child
+  stderr on a boundary failure, both fail
+  `gate_validates_the_whole_shared_conformance_set`; token-to-stderr
+  fails `sigint_helper_reports_safe_…`. An earlier entry said the
+  status-2 mutation was caught only by the dedicated row — that was
+  true of the pre-sentinel matrix and is **superseded**: the
+  branch-discriminating cases now carry a sentinel, so the matrix can
+  see which branch produced the exit 2.
+- **X3 and X4 deliberately carry their OWN stderr payloads**, not the
+  sentinel — X3 the canonical ignored wording with no token, X4 noise —
+  which is what makes them distinct inputs. `shared_cases()` asserts
+  uniqueness over `(status, stdout, stderr)`, so the earlier
+  45-entries-over-43-inputs collapse cannot recur silently; reverting
+  either payload now fails by name.
+- **Two PRE-EXISTING crdt-only failures found while gating properly:**
+  `m4_24_bare_string_glob_stays_relative` and
+  `m4_24_d3_fallback_base_is_the_smallest_attachment_dir`. They
+  reproduce in isolation (so not load) and **fail identically at
+  `72da24a`**, so they are not this lane's. They are crdt-only — the
+  plain gate's `05-m4` stage runs without `crdt` and passes. Recorded,
+  not attributed; whether they are environment-specific is for CI to
+  say.
+- **My local gate did NOT cover what CI covers, and CI caught it.**
+  Plain `./scripts/gate` omits `sweep-crdt`, which is the only stage
+  that compiles the nested `gpu_initial_target_acceptance` under
+  `crdt`; `04-lib-crdt` builds the lib alone. A `crate::common` path
+  that cannot resolve when nested, and a clippy lint, both shipped
+  green locally. **This lane gates with `--protocol`.**
+- **CI ON `916007b`: 12 GREEN, 2 RED — both macOS `Test` jobs**, and it
+  is the **pre-declared A7 portability finding**, not an environment
+  excuse. Exactly one row:
+  `gate_maps_an_unexecutable_helper_to_error_not_ignored`,
+  `left: Some(1)  right: Some(2)`. The other five SIGINT rows pass on
+  macOS, including both `error` cases, so helper and gate consumers are
+  otherwise exercised there.
+  - **The gate returned 1 = `ignored` for a helper it could not
+    execute** — the exact conflation §7c forbids.
+  - **ESTABLISHED, not a hypothesis.** The macOS log shows the shell's
+    `Permission denied` followed by the gate's `1 | 2)` message — so
+    `sigint_status` was **1**: macOS `/bin/sh` returns **1** for an
+    exec failure where Linux returns **126**. The status-only ABI
+    cannot separate that from the helper's own `ignored`.
+  - **The raw status was NOT printed.** An earlier entry here said the
+    stderr carries it; the gate interpolates the number only in its
+    catch-all branch, and this failure took the `1 | 2)` branch. The
+    path was identified by **which message text appeared**, not by a
+    number.
+  - **A proposed repair was REJECTED in review and is recorded so it is
+    not retried:** moving `ignored` from 1 to 3 relocates the collision
+    without closing it, because an exec failure can return **any**
+    nonzero status. The generalisation: **no exit status can prove the
+    helper ran.**
+  - **Framing revision 13 — APPROVED 2026-08-19 at `5dece3e` —
+    replaces the ABI with a validated `(status, token)` pair**:
+    `0`/`1`/`2` with
+    `pmacs-sigint-v1:safe|ignored|error`, token alone on stdout,
+    diagnostics on stderr, and any other pair — including macOS's
+    status 1 with no token — a boundary error mapped to 2. Every
+    refusing branch must print the observed status and token state as
+    diagnostic context, never as the classifier. A shared **conformance
+    matrix** replaces revision 12's withdrawn "both consumers use the
+    same helper so they can never disagree", which stopped being true
+    once each consumer validates the pair independently.
+  - **A6a is scoped to the GATE.** R-d never sees a shell status: Rust's
+    `Command` returns a spawn error with no exit status, and R-d's test
+    is crdt-gated so macOS CI does not compile it. R-d on macOS is
+    **unexercised**, recorded as a gap.
+  - **A7 is no longer "satisfied by disclosure"** — macOS was reached
+    and measured: five of six helper/gate rows pass, one defect
+    (`gate_maps_an_unexecutable_helper_to_error_not_ignored`), R-d
+    Linux-only.
+- **PR #241** (`https://github.com/levineuwirth/pmacs/pull/241`), opened
+  2026-08-19 from `gpu-probe-sigint-teardown` into `main`. **Not merged;
+  awaiting review rounds.**
+- **CHECKPOINT — immutable event SHAs, because "this entry's own
+  commit" goes stale exactly the way a tip SHA does:** implementation
+  landed at **`3206433`**; the A6 both-consumer rows and the bounded
+  negative path at **`167d830`**; the two factual corrections at
+  **`c9cc8dd`**; the gate-run record at **`7cef9ca`**; the PR record at
+  **`d64d300`**. Only the **branch tip** stays symbolic — a literal SHA
+  naming a branch's own tip goes stale the
+  moment the next commit lands, which this ledger has already recorded
+  once. State at `3206433`: pushed, signed `G`, worktree clean,
+  `git diff --check` clean, **full default gate green (8/8) in the
+  foreground**, 31 gate-acceptance rows passing. After this commit:
+  **33 gate-acceptance rows and 16 `gpu_invocation_acceptance` rows**.
+- **FULL GATE GREEN ON THE COMMITTED HEAD `c9cc8dd`** — all 8 stages,
+  log `20260819T160220Z-2339958`, started at load 3.90. Recorded at
+  `7cef9ca`, which is docs-only on top of the gated tree; that
+  exemption is what stops gate-result records recursing forever.
+- **The preceding attempt on the same head was RED, and is kept.**
+  Log `20260819T152209Z-2073040`: `04-lib-crdt` and `07-sweep` failed
+  on four wall-clock rows —
+  `composition_overhead_under_ten_percent`,
+  `full_buffer_summary_flatten_scales_on_large_grammar_file`,
+  `dired_renders_10k_entries_within_200ms`,
+  `file_progress_notification_is_recorded_for_its_document` — none
+  touching this lane's change. Load average was **49.6**, and
+  `./verify_task_state.sh review/my-ruff-task golden` was running under
+  a separate toolchain at `/usr/local/rustup` with four `rustc`
+  processes, having started about three minutes into the run and
+  overlapping exactly the two stages that failed.
+  **That is evidence of WHEN, not proof of WHY**, and it was recorded
+  as "not valid evidence" rather than "environmental" — this lane has
+  already retracted one confident environmental attribution. The green
+  run on the same commit is what settles it; had any of the four failed
+  again on a quiet machine, it would have been a real finding here. (An earlier
+  draft said 35: that figure was the `git_status_stage1_acceptance`
+  result line immediately below `gate_script_acceptance`'s in the sweep
+  log, misread as this suite's.)
+- **Framing revision 12 at `docs/gpu-probe-sigint-framing.md`,
+  approved 2026-08-19 at `1fc0df6` and IMPLEMENTED; **superseded by
+  revision 13, approved 2026-08-19 at `5dece3e`** — revision 10 was
+  approved at `4fba9f6` and revision 9 at `15c25ec`; neither approval covered the
+  later mechanism finding and remedy selection. **D1/D2 HAVE RUN and
+  found the mechanism: `SIGINT` was ignored group-wide
+  (`SigIgn=0x1007`) because
+  the test runner was launched in the background — `SIG_IGN` is
+  inherited across `fork` and survives `exec`, so it reached the
+  launcher and probe, and `kill(-pgid, SIGINT)` was a no-op.**
+  Controlled arms re-run on committed head `77b623c` with full SHA-256
+  captured per arm and byte-identical
+  binaries: foreground both copies ok, `setsid nohup … &` both FAILED.
+  **I caused this** by adopting background launches on 08-16 to evade
+  the Bash tool's ten-minute cap — that is the "onset", and the
+  subset-vs-full matrix was confounded with it throughout. A3's
+  subset/full obligation is discharged by explanation, so D0b is not
+  needed. **Bet 1 withdrawn by scope and A5 retired by scope — D4 was
+  never executed**, so no claim is made that a real session behaves
+  correctly, only that no evidence of a user-facing defect survives.
+  **A3/D0b are SATISFIED by that explanation** — D0b is not owed and
+  will not run. The approved revision 12 **selects the remedy**: R-b +
+  R-d via one checked-in helper,
+  `scripts/check-sigint-deliverable`. Its preserved-status inner probe
+  maps to one complete ABI: helper exit **0** = `safe`, **1** =
+  `ignored`, **2** = probe `error`; the helper owns the two failure
+  diagnostics, and both consumers surface its stderr rather than
+  interpreting raw probe statuses. Inability to execute the helper is
+  `error`, never evidence of `SIG_IGN`. POSIX shell only: no `/proc`,
+  so not Linux-only; no `sigaction`, so no `unsafe`. `scripts/gate`
+  fails immediately with the explicit diagnosis; the target test
+  reports the same precondition failure if run directly;
+  **no override**, because a gate under ignored `SIGINT` cannot produce
+  valid evidence. R-c rejected. The Linux-only D1/D2 instrumentation is
+  removed once its evidence is portable. A1–A7 witness guard bite,
+  direct-test diagnosis, unaffected foreground success, mutation, an
+  otherwise unchanged gate, a distinct error outcome in **both**
+  consumers, and qualified non-Linux-unix portability.
+- **IMPLEMENTED.** `scripts/check-sigint-deliverable` is the shared
+  helper (0 safe / 1 ignored / 2 error); `scripts/gate` refuses before
+  any stage; the target test reports the precondition instead of the 5s
+  deadline; the Linux-only `/proc` instrument is removed.
+- **Two bugs shipped in the first guard, both caught in review.** A bare
+  invocation under `set -eu` killed the shell at the helper's non-zero
+  exit, so the refusal never printed. Replacing it with
+  `if ! helper; then status=$?` captured the status of the **negated
+  condition** — always 0 — so the gate printed the diagnosis and then
+  ran the whole suite anyway. The working shape is
+  `helper || status=$?`, the idiom the helper uses internally. The
+  guard also moved to immediately after the worktree resolves, so a
+  refused run leaves no log dir, ambient root or tmpdir behind.
+- **Four durable rows in `gate_script_acceptance`** (31, was 27):
+  helper safe / ignored / error, and gate refusal before stage 1.
+  **Verified to bite** — mutating the gate back to either shipped bug
+  fails `gate_refuses_to_start_when_sigint_is_ignored` and nothing
+  else. Their absence is why 27 passing tests missed both.
+- **A7 — revision-12 HISTORY, superseded.** It then read: satisfied by
+  disclosure, Linux `x86_64` only, no non-Linux unix reachable. **That
+  is no longer true** — macOS CI reached it and measured it red. The
+  live record is the CI entry above: five of six helper/gate rows pass
+  on macOS, one defect, R-d Linux-only because its test is crdt-gated.
+- **D0a EXECUTED 2026-08-19 — verdict: difference NOT captured by the
+  two commits.** 10 runs, counterbalanced, N=5 per endpoint, clean
+  detached worktrees with isolated target dirs, `dirty=0` per run, zero
+  voids, zero splits. **A (`7599661`) uniform-red; B (`724b785`)
+  uniform-red.** So `7599661`, which passed inside `sweep-crdt` on
+  08-15, fails 5/5 clean today: **the two commits do not discriminate
+  under current conditions, so no bisect will run.** That is the whole
+  claim — "source hypothesis eliminated" and "unreachable by source"
+  are **withdrawn**, since a historical regression could be masked by a
+  later environmental effect or a source/environment interaction.
+  Failing to discriminate is not the same as not differing. The onset
+  window is deprioritised, not excluded. No package activity in the
+  window (`pacman.log`) — a cheap negative, not pursued further.
+- **The useful product is a RELIABLE REPRODUCTION** — 10/10 across two
+  commits at ~4 min/run — which is what let D1/D2 run at once. **D1/D2
+  are DONE**; the mechanism entry above supersedes this. Per-run provenance in `docs/probe-sigint-evidence.md`
+  §D0a, transcribed in full into that committed document — after the
+  first transcription corrupted every log digest by one hex character
+  and dropped `/tmp` and `MemAvailable`. **`uptime` was never captured**
+  and is `UNKNOWN` for all ten runs: §7 names it, the harness kept only
+  the load averages, so that condition list was **not fully
+  satisfied**. The classifications stand; D1/D2's harness must capture
+  the whole list.
+- **Why it exists.** `ctrl_c_on_launcher_group_does_not_reach_spawned_daemon`
+  fails in gate stage `sweep-crdt` with "child did not exit within 5s".
+  **Pre-existing on `main`** — `72da24a` fails it in a clean worktree
+  with its own target dir. The correct count is **119 green result
+  summaries and TWO red binaries**: `gpu_initial_target_acceptance`
+  includes the suite as a module, so a reproducing sweep reds twice
+  (log `…-2144707/09-sweep-crdt.log:3097` and `:3131`). While it reds,
+  **no branch can present a green sixteen-stage gate, `main`
+  included.**
+- **`panel-mapping-generation` (§5b) is HELD BEHIND THIS LANE** by
+  explicit instruction. That lane is code-complete at `5174f73` with
+  its own fifteen stages green; its sixteenth stage is this defect.
+- **Reproduction is 7/7 across full sweeps (F1–F7); every reduction
+  R1–R10 is green.** Each run is enumerated with exact command, worktree, HEAD,
+  cleanliness and log digest in `docs/probe-sigint-evidence.md` — "0/N"
+  is not a record.
+- **But R9 did NOT run the same compilations as the sweep.** It
+  executed `…-91f51d0b…` / `…-6b4b8223…`; the sweeps executed
+  `…-5d9105cb…` / `…-d4dae4f0…`. **Differing Cargo suffixes mean
+  differing metadata hashes — different compilations.** Historical byte
+  identity is **UNKNOWN** and is never claimed: target dirs have been
+  overwritten, so a hash computed today is the current occupant's. R9
+  establishes **same target names and order**, not same compilations. What the evidence is **consistent
+  with**, not what it isolates: prior targets alone (R9) green,
+  workspace selection alone (R10) green, both together (F1–F7) red.
+  That is an observation, not a finding. `--workspace` selection
+  is **not sufficient by itself and not ruled out** — later-selected
+  packages can affect the build graph before their tests ever run, so
+  "their targets execute after the failure" does not exonerate them.
+- **Ruled out by measurement — do not re-run:** machine load; tmpfs
+  starving RAM (settled by experiment, not argument — `/tmp` 21G→1.2G,
+  available 27G→45G, still red); leaked daemons; inotify.
+- **NOT ruled out, contrary to earlier entries here:** `--workspace`
+  artifact selection, and the preceding tests. R9 appeared to clear
+  them but ran **different Cargo compilations**, so the comparison was
+  never made. Both are open.
+- **Ground truth, and what it does NOT establish.** `run_gpu`'s own
+  path installs no handler: `run_gpu` (`src/main.rs:324`) blocks
+  in `command.status()` with no handler, and grepping all of
+  `pmacs-gpu/src` for signal machinery returns nothing. **But the
+  `pmacs` binary DOES contain signal machinery** —
+  `install_signal_handlers` (`src/daemon.rs:628`) registers `SIGINT`
+  and `SIGTERM`; it is simply not on `run_gpu`'s path. A source grep
+  also cannot exclude a runtime or dependency installing a disposition.
+  So the established fact is only: **no explicit installation on
+  `run_gpu`'s path**, and "whatever disposition they hold was
+  inherited" stays a **hypothesis** until D2 measures it. The probe's
+  **event loop** wakes at least every 50ms
+  (`pmacs-gpu/src/main.rs:1065`) — but the process is **not** bounded:
+  its stdin reader blocks in `read_to_end` (`:1109`) and, once ready,
+  the loop leaves only when stdin closes (`:1212`).
+  **No claim is made that either process holds the DEFAULT
+  disposition** — absence of handler code cannot establish that, and
+  inherited ignore is the leading hypothesis precisely because the
+  source is silent.
+- **TWO retracted claims, both mine.** (a) "Mechanism located" —
+  launcher in `do_wait`, probe child in `futex_do_wait`. (b) The
+  retraction of (a), which argued the failing launcher "must live ≥8s".
+  **(b)'s arithmetic is false**: both reproducing binaries finish in
+  ~5.19s *including* the 5s timeout, so the failing launcher lives
+  about **5.1s** — inside what the sampler saw, and a ">6s" selector
+  would have captured nothing, repeating the error it was meant to
+  correct. (a) is therefore not refuted by (b); it stays **unproven for
+  a different reason** — under `--features crdt` the suite spawns root
+  launchers from **six** call sites, so command line alone cannot
+  attribute one to this test. The six (`:509, :534, :544,
+  :574, :725, :1097`, all inside `#[cfg(feature = "crdt")] mod crdt`);
+  the other two `--gpu` arguments sit under `#[cfg(not(…))]` and are
+  compiled out. **Do not key on process age. Key on the PID the test
+  records.**
+- **Diagnostics must DISCRIMINATE** blocked delivery, inherited ignore,
+  and an escaped process group: snapshots **before and after** the
+  signal, for test parent / launcher / probe; **per-thread** `SigBlk`
+  from `/proc/<pid>/task/*/status`; `SigPnd`/`ShdPnd`; and
+  `PID`/`PPID`/`PGID`/`SID`. A post-failure snapshot cannot prove
+  inheritance.
+- **Why that matters:** `SIG_IGN` is inherited across `fork` and
+  survives `exec`, while handlers do not. So a runtime disposition can
+  arrive from the test harness, `cargo`, or the invoking shell without
+  appearing anywhere in the source. Revision 1's "two processes with
+  default disposition" contradicted its own hypothesis and is
+  withdrawn; the assertion no longer appears above it either.
+- **Run provenance is a pushed document**, `docs/probe-sigint-evidence.md`:
+  exact command, worktree, HEAD, cleanliness, the Cargo suffixes
+  executed, result and log digest per physical run. Three caveats stated there rather
+  than smoothed over — **R1 and R2 have no preserved log** (revision 2
+  double-counted one log as both R2 and R6), **cleanliness is UNKNOWN**
+  for every pre-manifest run, and **R1–R10 ran in the
+  `panel-mapping-generation` worktree**, not at `main`. Log bodies are
+  machine-local under
+  `/home/jeans/build/pmacs-gate-targets/probe-sigint-evidence/`; `/tmp`
+  is a tmpfs and they were nearly lost to a cleanup mid-lane.
+- **THE ONSET IS DATABLE, and it reframes the lane.** `sweep-crdt`
+  has **17** logs here. Counted per test copy: **13** with both copies
+  `... ok`, **1** where neither executed (stage died compiling `pmacs`,
+  `error[E0308]`, `…-708693`), **3** with both `FAILED`. Last observed
+  green `20260815T185708Z`, first observed red `20260816T063330Z`; boot
+  began 08-14 09:30, so no reboot between. "Pre-existing on `main`"
+  holds (F1 at `72da24a`) but **"always broken" is contradicted**.
+- **The onset is NOT a source boundary.** Reflog/commit times put HEAD
+  at `7599661` during the last green (`3c06176` landed 40s after it
+  finished) and `724b785` during the first red (`5174f73` landed
+  08:45:41, after that run ended 08:42:01). **Cleanliness captured for
+  neither.** `72da24a` is an **ancestor** of `7599661` yet fails today
+  while `7599661` passed on 08-15 — but those two observations differ
+  in commit AND environment AND time, so they are **non-comparable and
+  support no causal conclusion of any kind**. Earlier wordings here
+  ("no source-monotonic cause does that", "outcome is not determined by
+  commit alone") are both **withdrawn**: different commits can
+  deterministically produce different outcomes, so the pair says
+  nothing about determinism either.
+- **D0a is a decision procedure with no predicted outcome**, and one
+  run per endpoint decides nothing. That the failure has appeared only
+  in the full sweep is **what has been observed so far**, not a
+  property established of the defect.
+  **N = 5 full `sweep-crdt` runs per endpoint, counterbalanced
+  `AB BA AB BA AB`** — not strict `A/B/A/B`, which leaves B always
+  following A and owning the final slot; counterbalancing removes
+  systematic order confounding, and the residual last-slot asymmetry is
+  accepted and stated. Same captured conditions as D0b plus `uptime`,
+  `free`, `/tmp` usage and leaked-daemon count.
+- **The run classifier is TOTAL**, and reads only the **two copies** of
+  the target test: **green** (both `... ok`), **red** (both `FAILED`),
+  **split** (copies disagree → stop; that is its own defect), **void**
+  (either copy never executed → discard and re-run, budget 3, then
+  D0a stops). A sweep red only on **unrelated** rows is a `green` run;
+  both outcomes occur in the historical logs — `…-708693` is a void
+  (compile failure), and `…-2839374`/`…-830195` are unrelated-red with
+  both copies passing. A bisect of `7599661..724b785` is permitted
+  **only on the expected-direction clean split** — all N green at
+  `7599661`, all N red at `724b785`. The inverted split is a real
+  difference but contradicts the onset reading, so it is recorded and
+  that reading is re-examined before any bisect. A mixed result means
+  the failure is intermittent under fixed source and **no bisect is
+  justified**.
+- **Red full-sweep count is SEVEN, not five** (F1–F7 in the manifest),
+  each with its own log digest; revision 3 said 5/5 while the framing
+  separately cited a gate run the manifest never listed.
+- **D0 precedes every other diagnostic**, in two parts: **(a)
+  reproduce the onset endpoints `7599661` and `724b785` clean, in
+  isolated target dirs**, under the N = 5 interleaved clean-split
+  contract below — a bare difference decides nothing. **(a) is DONE.**
+  **(b) is RETIRED as a precondition** (2026-08-19) because D0a yielded
+  a reliable direct reproduction and D1/D2 measure the mechanism
+  itself. **Its obligation is now SATISFIED** by §4c's controlled
+  explanation of the subset/full difference, so **D0b is not owed and
+  will not run**. As originally written it said: its obligation
+  survives under A3 — if D1/D2 do not
+  account for the subset-vs-full difference, D0b runs before the lane
+  closes. It read: re-run
+  the matrix at `main` under a harness capturing provenance **and the
+  artifact hashes executed at run time**, since command shape silently
+  changed the binary once already and a hash computed later reflects
+  only what occupies that path now.
+- **Coherence: journey steps touched: NONE** (framing §9). Earlier
+  entries here assigned 12(a) "closing is clean" on the premise that
+  the lane repairs Ctrl-C teardown; §4c withdraws that premise, because
+  no product behaviour changes. What the lane affects is **gate
+  trustworthiness**.
+- **Gates:** `./scripts/gate --protocol --acceptance
+  gpu_invocation_acceptance` at minimum. **The old three-consecutive-
+  run A2 contract is SUPERSEDED** — it was written for a teardown fix
+  whose flakiness was unexplained. The mechanism is now known and
+  deterministic, so the acceptance set is framing §8's A1–A7: guard
+  bite, direct-test diagnosis, unaffected foreground success, mutation,
+  an otherwise unchanged gate, a distinct `error` outcome, and a
+  non-Linux-unix statement.
+
 ## `scripts/gate` TMPDIR isolation — PR #240 OPEN
 
 **Written with the branch's first commit**, per the standing correction

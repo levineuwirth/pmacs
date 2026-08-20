@@ -506,6 +506,116 @@ esac
 WT=$(canon "$(worktree_root)")
 cd "$WT"
 
+# R-b (framing SS7c): refuse to start when SIGINT is not deliverable.
+#
+# HERE, immediately after the worktree resolves and BEFORE any log
+# directory, ambient root or temporary dir exists: a refused run should
+# leave nothing behind to clean up or mistake for evidence.
+#
+# WHY AT ALL. A shell running a command in the background without job
+# control sets SIGINT to SIG_IGN; that survives fork AND exec, so every
+# test which signals a child and waits for it hangs to its own
+# deadline. Seven red sweeps were read as a product teardown defect
+# before this was found (framing SS4c).
+#
+# The helper owns the classification and the wording; this consumer
+# re-derives neither. It continues only on 0, and otherwise stops after
+# letting the helper's stderr through untouched.
+#
+# `|| sigint_status=$?` IS LOAD-BEARING, and two wrong shapes were tried
+# before this one:
+#
+#   * a bare invocation dies under `set -e` at the helper's non-zero
+#     exit, so the refusal below never prints;
+#   * `if ! helper; then sigint_status=$?; fi` captures the status of
+#     the NEGATED condition --- always 0 --- so the guard printed the
+#     diagnosis and then ran the whole gate anyway.
+#
+# In a `cmd || assignment` list the failure is handled, so `set -e` does
+# not fire and `$?` is the helper's own status. This is the same shape
+# the helper uses internally.
+#
+# NO OVERRIDE, deliberately: a run in this state cannot produce valid
+# evidence, so a flag to proceed anyway would only manufacture red gates
+# that mean nothing.
+if [ "$MODE" != plan ] && [ "$MODE" != plannamed ] && [ "$MODE" != printdir ]; then
+    # The guard owns its capture directory: it runs BEFORE the log dir,
+    # ambient root and GATE_TMPDIR exist, and must still leave nothing
+    # behind (A8).
+    capture=$(mktemp -d "${TMPDIR:-/tmp}/pmacs-sigint.XXXXXX") || {
+        echo 'gate: could not create the SIGINT guard capture directory (status=unavailable token=missing)' >&2
+        echo 'gate: REFUSING TO RUN --- no stage has run.' >&2
+        exit 2
+    }
+    cleanup_sigint_capture() { rm -rf "$capture"; }
+    trap cleanup_sigint_capture EXIT HUP INT TERM
+
+    # `|| sigint_status=$?` IS LOAD-BEARING under `set -eu`: a bare
+    # invocation dies at the helper's non-zero exit and never reaches
+    # the assignment. That was the originally shipped bug.
+    sigint_status=0
+    "$WT/scripts/check-sigint-deliverable" \
+        >"$capture/out" 2>"$capture/err" || sigint_status=$?
+
+    # Select an expected token only for public statuses. This MUST
+    # precede any use of expected_token: `set -u` is on, and an
+    # out-of-range status has no expected token.
+    expected_token=
+    case "$sigint_status" in
+        0) expected_token=pmacs-sigint-v1:safe ;;
+        1) expected_token=pmacs-sigint-v1:ignored ;;
+        2) expected_token=pmacs-sigint-v1:error ;;
+    esac
+
+    # Byte comparison against both permitted encodings. Files preserve
+    # every byte including NUL; a shell variable would not, and command
+    # substitution's NUL handling differs between sh and zsh.
+    sigint_token_ok=0
+    if [ -n "$expected_token" ]; then
+        printf '%s' "$expected_token" >"$capture/want"
+        printf '%s\n' "$expected_token" >"$capture/want_lf"
+        if cmp -s "$capture/out" "$capture/want" ||
+            cmp -s "$capture/out" "$capture/want_lf"; then
+            sigint_token_ok=1
+        fi
+    fi
+
+    if [ ! -s "$capture/out" ]; then
+        sigint_token_state=missing
+    elif [ "$sigint_token_ok" -eq 1 ]; then
+        sigint_token_state=valid
+    else
+        sigint_token_state=unexpected
+    fi
+
+    case "$sigint_status:$sigint_token_ok" in
+        0:1)
+            # The sole continuing path. Tidy up and disarm before the
+            # gate installs its own, unrelated cleanup trap.
+            cleanup_sigint_capture
+            trap - EXIT HUP INT TERM
+            ;;
+        1:1 | 2:1)
+            # A VALIDATED verdict: the helper's stderr IS the diagnosis
+            # and is surfaced unchanged.
+            cat "$capture/err" >&2
+            printf 'gate: REFUSING TO RUN (status=%s token=%s) --- no stage has run.\n' \
+                "$sigint_status" "$sigint_token_state" >&2
+            exit "$sigint_status"
+            ;;
+        *)
+            # BOUNDARY error. The captured stderr is UNTRUSTED and is
+            # deliberately not surfaced: a helper exiting 1 with no
+            # token but the canonical ignored wording would otherwise
+            # tell the operator their environment ignores SIGINT (A6b).
+            printf 'gate: SIGINT guard boundary error (status=%s token=%s)\n' \
+                "$sigint_status" "$sigint_token_state" >&2
+            printf 'gate: REFUSING TO RUN --- no stage has run.\n' >&2
+            exit 2
+            ;;
+    esac
+fi
+
 TARGET=$(ensure_target_dir "$WT")
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 # $$ as well as the timestamp: two invocations in the same worktree
