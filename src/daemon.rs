@@ -2629,6 +2629,12 @@ fn handle_dispatcher_event(
                     coord,
                     kind,
                     mapping_generation,
+                    // Bound for the same reason as the legacy arm above,
+                    // and NOT optional here: the mapped family carries
+                    // the same modifiers, so leaving them in `..` would
+                    // give a v25 session the inverted Shift behaviour
+                    // that parent 48 R-a fixed for v24.
+                    mods,
                     ..
                 } => {
                     // §5b — the mapped family, in this order:
