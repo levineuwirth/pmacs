@@ -318,10 +318,16 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
       for a gesture that never began, so the record IS the artifact.
       Manufacturing an effect assertion for them would not distinguish
       their mutations.
-    **P2 is a third case**: its falsifiable claim is the
-    classification; its focus, controller and byte assertions are
-    defence in depth, because the precondition asserting `Refused`
-    fires first under the only mutation that would reach them.
+    **P2 is a third case**: its FOCUS assertion is witnessed —
+    removing the buffer check accepts the press, which activates the
+    panel before replaying — and its classification is checked LAST so
+    the row still fails if it stops testing a refusal. Only its
+    controller and byte assertions are defence in depth, because that
+    mutation routes through a document buffer and touches neither. An
+    earlier version asserted the refusal first, which aborted the row
+    before dispatch and made every effect assertion unreachable; I
+    recorded that ordering limit as a limit of the type boundary, and
+    it was not one.
   - **Every fixture asserts its own precondition** (the disposition is
     `Accepted`, or is `Refused`) because four rows in these rounds
     passed vacuously: cells that were out of grid, or that clamped to

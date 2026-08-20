@@ -8520,15 +8520,18 @@ mod tests {
 
     /// P2, effect half — a REFUSED press reaches no target at all.
     ///
-    /// **What is falsifiable here is the CLASSIFICATION.** Removing the
-    /// buffer check makes this press `Accepted`, and the row fails. The
-    /// focus, controller and byte assertions cannot fail under that
-    /// same mutation, because the precondition asserting `Refused`
-    /// fires first — and no other mutation reaches them, since the
-    /// daemon calls `apply_panel_pointer` only on `Accepted` and the
-    /// disposition enum gives `Refused` no target to apply. They are
-    /// **defence in depth against a future refactor**, kept and
-    /// labelled rather than presented as witnessed coverage.
+    /// **The FOCUS assertion is witnessed.** Removing the buffer check
+    /// makes this press `Accepted`; it then activates the panel before
+    /// replaying, and the focus assertion fails. An earlier version
+    /// asserted the refusal BEFORE dispatch, which aborted the row
+    /// first and made every effect assertion unreachable — a limit of
+    /// ordering that I mistook for a limit of the type boundary. The
+    /// classification is now checked LAST, so it still catches a row
+    /// that has stopped testing a refusal.
+    ///
+    /// The controller and byte assertions remain **defence in depth**:
+    /// the mutation that reaches them routes through a document buffer,
+    /// which touches neither.
     ///
     /// §5b's four `g5_substrate_a_refused_*` rows read the latch and the
     /// cancellation count; none of them reads the target. A refusal that
@@ -8573,14 +8576,14 @@ mod tests {
             .terminal_manager
             .borrow()
             .controller_view_for_frontend(fid);
-        assert_eq!(
-            editor
-                .classify_panel_pointer(fid, foreign_buffer, in_content, press)
-                .outcome(),
-            crate::editor::PanelPointerOutcome::Refused,
-            "fixture: this press really is refused --- asserted, because \
-             every effect assertion below is vacuous if it is not"
-        );
+        // CAPTURED, not asserted yet. Asserting the refusal here aborted
+        // the row before dispatch, so the effect assertions below could
+        // never fail under the one mutation that reaches them. The
+        // precondition still runs --- at the END --- so the row cannot go
+        // vacuous either.
+        let observed_outcome = editor
+            .classify_panel_pointer(fid, foreign_buffer, in_content, press)
+            .outcome();
 
         send_panel(
             &mut editor,
@@ -8602,9 +8605,10 @@ mod tests {
         assert_eq!(
             editor.core.borrow().views[&fid].active,
             focused_before,
-            "and it must not FOCUS the panel: a misclassified press
-             focuses before its out-of-range anchor fails, so byte and \
-             latch assertions alone stay green while focus has moved"
+            "and it must not FOCUS the panel: an accepted press \
+             activates BEFORE it replays, so a misclassified one moves \
+             focus to the panel whatever its replay then does with a \
+             buffer that is not the one on screen"
         );
         assert_eq!(
             editor
@@ -8613,6 +8617,14 @@ mod tests {
                 .controller_view_for_frontend(fid),
             controller_before,
             "and it must not claim the terminal CONTROLLER"
+        );
+        assert_eq!(
+            observed_outcome,
+            crate::editor::PanelPointerOutcome::Refused,
+            "and the press really was refused --- checked LAST so that a \
+             mutation which accepts it is caught by the effects above \
+             rather than aborting the row here, while still failing if \
+             this row ever stops testing a refusal at all"
         );
         assert!(
             !editor
