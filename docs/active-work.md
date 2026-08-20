@@ -270,35 +270,103 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## Panel cell-mapping generation (v25) — REBASED, GATE GREEN except two pre-existing rows
+## Panel cell-mapping generation (v25) — REBASED, FULL GATE GREEN, review round 4 fixed
 
-- **REBASED onto `f13506c`** (post-#241 main) at `3e68b76`, 31 ahead, 0
-  behind, signed, clean. One conflict, in this file: main's merged-#241
-  block and this lane's own first-commit block landed at the same
-  position; both kept, active lane above merged. The other 30 commits
-  applied cleanly, and no code file overlapped — #241 touched
-  `scripts/`, `tests/common/` and two test suites; this lane touches
-  the protocol, daemon and GPU sources.
+- **REBASED onto `f13506c`** (post-#241 main); the rebase itself landed
+  at `3e68b76`, and everything after it is review-round work. One
+  conflict, in this file: main's merged-#241 block and this lane's own
+  first-commit block landed at the same position; both kept, active
+  lane above merged. No code file overlapped — #241 touched `scripts/`,
+  `tests/common/` and two test suites; this lane touches the protocol,
+  daemon and GPU sources.
+- **NO AHEAD-COUNT OR TIP SHA IS RECORDED HERE, deliberately.** Both
+  were wrong within one commit the last two times they were written,
+  because the commit that updates this file is itself the commit that
+  invalidates them. Read them instead:
+  `git log --oneline githubsucks/main..HEAD | wc -l` and
+  `git rev-parse HEAD`. Immutable EVENT shas — the rebase, a fix, a
+  merge — are recorded; the moving tip is not.
+- **REVIEW ROUND 4 (2026-08-20) — three blockers, all fixed.**
+  - **FUNCTIONAL: rejected gestures mutated the accepted-gesture
+    latch.** Both inbound arms discarded the bool from
+    `dispatch_semantic_panel_pointer` and called
+    `update_accepted_gesture` unconditionally. The ladder authenticates
+    the SENDER; only the dispatcher re-derives the TARGET, so an event
+    can clear every rung and still be refused for an out-of-grid
+    coordinate, an absent side window, or a buffer that is no longer
+    the one in the side window. **A rejected `Down` therefore ARMED** —
+    so a later authority loss counted a cancellation for a gesture that
+    never began, and once replay attaches effects it would release a
+    child that was never pressed. **A rejected `Up` CONSUMED a real
+    armed gesture** — so the authority loss that should have ended it
+    found nothing, and that child holds the button down for good. A
+    rejected `Down` on top of a live gesture was worse still:
+    `arm_accepted_gesture` ends what it overwrites, so it also counted
+    a spurious cancellation.
+  - **Fixed** by gating both arms on the return, and by marking the
+    dispatcher `#[must_use]` so the class cannot recur silently —
+    clippy runs with `-D warnings`, so a future discarded answer is a
+    build failure rather than a review finding.
+  - **Four new rows**, `g5_substrate_a_refused_{press_never_arms,
+    release_never_consumes}_on_the_{legacy,mapped}_arm`. Each drives
+    the refusal from a coordinate ONE PAST the last grid row and **ends
+    in a positive control differing only in that coordinate** —
+    without it a row would pass just as well if an unrelated rung had
+    dropped the event, which is how a negative test of this shape rots.
+    Mapped rows read the generation through the validator's own
+    accessor, so a mapping-rung refusal cannot masquerade as a
+    dispatcher refusal. **Three mutations, each biting its named rows:**
+    ungating the legacy arm fails exactly the two legacy rows, ungating
+    the mapped arm exactly the two mapped rows, and relaxing the
+    dispatcher's `>=` to `>` fails all four.
+  - **DOCS: committed conflict residue** — an orphaned diff3
+    `|||||||` ancestor line survived an earlier resolution in this
+    file, with the other three markers removed and both sides' content
+    kept. Deleted; the section below it was the only copy.
+  - **THE GATE CANNOT SEE THAT CLASS, and this is not fixed here.**
+    `git diff --check` compares the WORKTREE against the index, so a
+    marker that is already committed passes a clean-worktree gate
+    forever. `git diff --check githubsucks/main...HEAD` exits 2 on it.
+    Widening the gate's check to the branch range is a **candidate
+    lane** — a gate change owes a framing doc, and it should not ride
+    in on a §5b review round.
 - **The blocker is gone.** #241 fixed the `sweep-crdt` defect this lane
   was held behind, and the SIGINT guard now refuses a gate run started
   with `SIGINT` ignored — which is what made stage 15 unreachable.
-- **GATE, run in two labelled pieces** because 16 stages exceed this
-  session's 10-minute command cap and the guard rightly forbids the
-  backgrounding that would evade it:
-  - **14 stages green** — plain gate plus all six `--acceptance`
-    suites, log `20260820T143050Z-3909596`, started at load 5.28.
-  - **`build-crdt` green**; **`sweep-crdt` red on two rows only**:
-    `m4_24_bare_string_glob_stays_relative` and
-    `m4_24_d3_fallback_base_is_the_smallest_attachment_dir`.
-- **Those two rows are PRE-EXISTING and local-only.** They fail
-  identically at **current main `f13506c`**, and they **passed in CI**
-  on #241's `Test (crdt)` job. Not this lane's, and not a code defect —
-  local-environment-specific.
+- **FULL 16-STAGE GATE GREEN**, log `20260820T153017Z-147411`, one
+  unsplit `./scripts/gate --protocol` run with all six touched
+  acceptance suites. `sweep-crdt` reports **zero** failures.
+- **THE TWO `m4_24_*` FAILURES WERE MY OWN MEASUREMENT ERROR, and the
+  "CI is the arbiter" framing built on them is WITHDRAWN.** I had run
+  the CRDT sweep OUTSIDE `scripts/gate`, so it inherited
+  `TMPDIR=/tmp` instead of the gate's isolated one, and I then reported
+  the local sweep as unable to go green for pre-existing reasons. It
+  goes green. CI never needed to substitute for it.
+  - **MECHANISM, and it is the exact hazard #240 fixed:** `/tmp/.git`
+    exists on this machine (an empty directory, 2026-08-15). Project
+    detection **walks upward**, so every `tempfile::tempdir()` under
+    `/tmp` inherits `/tmp` as a project root. Both failing rows are
+    base-resolution rows — `m4_24_bare_string_glob_stays_relative` and
+    `m4_24_d3_fallback_base_is_the_smallest_attachment_dir` — so both
+    resolve against the wrong base and fail. CI's `/tmp` carries no
+    such marker, which is why they passed there.
+  - **The gate's `TMPDIR` is disk-backed under `<gate-root>/tmp/` on
+    btrfs, in a directory the gate owns**, with no stray ancestor.
+    Running the sweep by hand defeats exactly the isolation #240 built
+    for this signature.
+  - **`/tmp/.git` IS STILL THERE and is not mine to delete** — it is
+    outside the repo and I did not create it. Any hand-run test that
+    resolves a project root from a temp dir will keep failing on this
+    machine until it is removed.
 - **A prior gate attempt is NOT evidence**: I wrapped it in
-  `timeout 580` to fit the command cap, which killed the sweep mid-run
-  (`Terminated` in its log) and reported it as a stage failure. Its
-  two perf-budget failures also ran at load 36.9 with a foreign
-  workload present. Recorded so the log is not mistaken for a result.
+  `timeout 580` to fit the session's command cap, which killed the
+  sweep mid-run (`Terminated` in its log) and reported it as a stage
+  failure. Its two perf-budget failures also ran at load 36.9 with a
+  foreign workload present. Recorded so the log is not mistaken for a
+  result. The supported way past the cap is the tool-level background
+  launch, which measures `safe` under
+  `scripts/check-sigint-deliverable`; `docs/agent-handoff.md` §3 now
+  says so.
 
 **Written with the branch's FIRST commit**, per the standing correction
 from #171 and #215.
@@ -1189,7 +1257,6 @@ from #171 and #215.
   bite, direct-test diagnosis, unaffected foreground success, mutation,
   an otherwise unchanged gate, a distinct `error` outcome, and a
   non-Linux-unix statement.
-||||||| parent of 8a4711e (docs(framing): the panel cell-mapping generation (v25) --- SS5b revision 14)
 
 ## `scripts/gate` TMPDIR isolation — PR #240 OPEN
 

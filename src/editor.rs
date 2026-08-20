@@ -2801,6 +2801,11 @@ impl EditorState {
     /// which needs the GPU band and lands in Stage 2B-3.
     ///
     /// Returns whether the gesture was accepted.
+    ///
+    /// `#[must_use]` because the accepted-gesture latch is driven off
+    /// this answer, and discarding it silently arms on rejected presses
+    /// and consumes on rejected releases.
+    #[must_use]
     pub fn dispatch_semantic_panel_pointer(
         &self,
         frontend_id: FrontendId,

@@ -2581,18 +2581,36 @@ fn handle_dispatcher_event(
                             panel_epoch,
                         )
                     {
-                        editor.dispatch_semantic_panel_pointer(source, buffer_id, coord, kind);
-                        update_accepted_gesture(
-                            semantic_states,
-                            source,
-                            kind,
-                            coord,
-                            buffer_id,
-                            // Whether the press reached a child is
-                            // replay's to know; until replay exists no
-                            // press does.
-                            false,
-                        );
+                        // THE LATCH FOLLOWS THE DISPATCH. The ladder
+                        // above authenticates the SENDER; the dispatcher
+                        // re-derives the TARGET and refuses an
+                        // out-of-grid coordinate, an absent side window,
+                        // or a buffer that is no longer the one shown
+                        // there. Those refusals are not hypothetical --
+                        // a stale coordinate outlives the frame it was
+                        // hit-tested against.
+                        //
+                        // Arming on a refusal lets a rejected press
+                        // manufacture a cancellation, and -- once replay
+                        // attaches effects -- a release for a child that
+                        // was never pressed. Consuming on a refusal is
+                        // worse: a rejected release swallows a REAL
+                        // armed gesture, so the authority loss that
+                        // should have ended it finds nothing, and the
+                        // child holds the button down forever.
+                        if editor.dispatch_semantic_panel_pointer(source, buffer_id, coord, kind) {
+                            update_accepted_gesture(
+                                semantic_states,
+                                source,
+                                kind,
+                                coord,
+                                buffer_id,
+                                // Whether the press reached a child is
+                                // replay's to know; until replay exists
+                                // no press does.
+                                false,
+                            );
+                        }
                     }
                 }
                 FrontendEvent::PanelPointerMapped {
@@ -2637,15 +2655,22 @@ fn handle_dispatcher_event(
                             mapping_generation,
                         )
                     {
-                        editor.dispatch_semantic_panel_pointer(source, buffer_id, coord, kind);
-                        update_accepted_gesture(
-                            semantic_states,
-                            source,
-                            kind,
-                            coord,
-                            buffer_id,
-                            false,
-                        );
+                        // The latch follows the dispatch, for the
+                        // reason spelled out on the legacy arm above.
+                        // The mapping rung narrows WHICH coordinates
+                        // survive the ladder; it does not make a
+                        // surviving one land, so this arm needs the same
+                        // gate.
+                        if editor.dispatch_semantic_panel_pointer(source, buffer_id, coord, kind) {
+                            update_accepted_gesture(
+                                semantic_states,
+                                source,
+                                kind,
+                                coord,
+                                buffer_id,
+                                false,
+                            );
+                        }
                     }
                 }
                 FrontendEvent::Pointer {
@@ -7315,6 +7340,234 @@ mod tests {
             0,
             "with no cancellation attributed to A"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // §5b review round 4 — THE LATCH FOLLOWS THE DISPATCH.
+    //
+    // Both inbound arms discarded the dispatcher's answer and updated
+    // the accepted-gesture latch unconditionally. The ladder
+    // authenticates the SENDER; only the dispatcher re-derives the
+    // TARGET, so an event that clears every rung can still be refused —
+    // for an out-of-grid coordinate, an absent side window, or a buffer
+    // that is no longer the one shown there.
+    //
+    // Each row drives the refusal from a coordinate ONE PAST the last
+    // row of the live grid, which also pins the dispatcher's `>=`
+    // against a `>`. Each ends in a POSITIVE CONTROL differing from the
+    // refused event ONLY in that coordinate: without one, a row would
+    // pass just as well if some unrelated rung had dropped the event,
+    // which is how a negative test of this shape usually rots.
+    // -----------------------------------------------------------------
+
+    /// Which inbound arm a latch row exercises.
+    #[derive(Clone, Copy)]
+    enum PanelArm {
+        Legacy,
+        Mapped,
+    }
+
+    impl PanelArm {
+        fn version(self) -> u32 {
+            match self {
+                PanelArm::Legacy => LEGACY_PANEL_VERSION,
+                PanelArm::Mapped => PROTOCOL_VERSION,
+            }
+        }
+    }
+
+    /// The mapping key the validator will compare against, read through
+    /// the SAME accessor it reads through.
+    ///
+    /// Peeking the last STAMPED value instead would let a mapped row be
+    /// refused at the mapping rung whenever the preceding dispatch moved
+    /// the fingerprint — a ladder refusal wearing a dispatcher refusal's
+    /// clothes. Legacy events carry no generation and never read this.
+    fn live_generation(
+        arm: PanelArm,
+        editor: &crate::editor::EditorState,
+        semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+        fid: FrontendId,
+    ) -> u64 {
+        match arm {
+            PanelArm::Legacy => 0,
+            PanelArm::Mapped => {
+                let snapshot = editor.panel_mapping_snapshot(fid);
+                semantic_states
+                    .get_mut(&fid)
+                    .expect("semantic projection")
+                    .panel_mapping_generation(snapshot)
+                    .expect("a stamped mapping generation")
+            }
+        }
+    }
+
+    /// One pointer event on whichever arm the row is testing.
+    fn arm_pointer(
+        arm: PanelArm,
+        fid: FrontendId,
+        epochs: (u64, u64),
+        buffer_id: crate::buffer::BufferId,
+        mapping_generation: u64,
+        coord: pmacs_protocol::CellCoord,
+        kind: pmacs_protocol::MouseKind,
+    ) -> FrontendEvent {
+        match arm {
+            PanelArm::Legacy => FrontendEvent::PanelPointer {
+                frontend_id: fid,
+                geometry_epoch: epochs.0,
+                panel_epoch: epochs.1,
+                buffer_id,
+                coord,
+                kind,
+                mods: pmacs_protocol::Modifiers::default(),
+            },
+            PanelArm::Mapped => FrontendEvent::PanelPointerMapped {
+                frontend_id: fid,
+                geometry_epoch: epochs.0,
+                panel_epoch: epochs.1,
+                buffer_id,
+                coord,
+                kind,
+                mods: pmacs_protocol::Modifiers::default(),
+                mapping_generation,
+            },
+        }
+    }
+
+    /// The panel's buffer, and a coordinate one row past its grid.
+    fn panel_buffer_and_outside_coord(
+        editor: &crate::editor::EditorState,
+        fid: FrontendId,
+        panel: crate::window::WindowId,
+    ) -> (crate::buffer::BufferId, pmacs_protocol::CellCoord) {
+        let core = editor.core.borrow();
+        let grid = core.panel_grid_size(fid).expect("a live panel grid");
+        (
+            core.windows[&panel].buffer_id,
+            pmacs_protocol::CellCoord::new(grid.rows, 0),
+        )
+    }
+
+    /// A press the dispatcher refuses must leave the latch exactly as it
+    /// found it — neither armed, nor displaced.
+    fn a_refused_press_never_arms(arm: PanelArm, fid: FrontendId) {
+        let (mut editor, mut states, mut render, _document, panel, epochs) =
+            panel_session_at(arm.version(), fid);
+        let (buffer_id, outside) = panel_buffer_and_outside_coord(&editor, fid, panel);
+        let inside = pmacs_protocol::CellCoord::new(0, 0);
+        let press = pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left);
+        let mut send =
+            |editor: &mut crate::editor::EditorState,
+             states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+             coord| {
+                let generation = live_generation(arm, editor, states, fid);
+                let event = arm_pointer(arm, fid, epochs, buffer_id, generation, coord, press);
+                dispatch_panel_event(editor, fid, arm.version(), states, &mut render, event);
+            };
+
+        send(&mut editor, &mut states, outside);
+        assert!(
+            !states[&fid].has_accepted_gesture(),
+            "a refused press must not arm: an authority loss would then \
+             count a cancellation for a gesture that never began, and \
+             replay would release a child that was never pressed"
+        );
+        assert_eq!(
+            states[&fid].panel_gesture_cancellations(),
+            0,
+            "and it must not count one on the way in either"
+        );
+
+        send(&mut editor, &mut states, inside);
+        assert!(
+            states[&fid].has_accepted_gesture(),
+            "control: the same event one row up clears the ladder, so the \
+             refusal above came from the DISPATCHER and not from a rung"
+        );
+
+        // `arm_accepted_gesture` ends whatever it overwrites, so an
+        // unconditional update also destroys a live gesture.
+        send(&mut editor, &mut states, outside);
+        assert!(
+            states[&fid].has_accepted_gesture(),
+            "the live gesture survives a refused press"
+        );
+        assert_eq!(
+            states[&fid].panel_gesture_cancellations(),
+            0,
+            "and the refused press ends nothing"
+        );
+    }
+
+    /// A release the dispatcher refuses must not consume a live gesture.
+    fn a_refused_release_never_consumes(arm: PanelArm, fid: FrontendId) {
+        let (mut editor, mut states, mut render, _document, panel, epochs) =
+            panel_session_at(arm.version(), fid);
+        let (buffer_id, outside) = panel_buffer_and_outside_coord(&editor, fid, panel);
+        let inside = pmacs_protocol::CellCoord::new(0, 0);
+        let mut send =
+            |editor: &mut crate::editor::EditorState,
+             states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+             coord,
+             kind| {
+                let generation = live_generation(arm, editor, states, fid);
+                let event = arm_pointer(arm, fid, epochs, buffer_id, generation, coord, kind);
+                dispatch_panel_event(editor, fid, arm.version(), states, &mut render, event);
+            };
+        let press = pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left);
+        let release = pmacs_protocol::MouseKind::Up(pmacs_protocol::MouseButton::Left);
+
+        send(&mut editor, &mut states, inside, press);
+        assert!(
+            states[&fid].has_accepted_gesture(),
+            "fixture: a real gesture is live"
+        );
+
+        send(&mut editor, &mut states, outside, release);
+        assert!(
+            states[&fid].has_accepted_gesture(),
+            "a refused release must not consume the live gesture: the \
+             authority loss that should have ended it would find nothing \
+             armed, and the child would hold the button down for good"
+        );
+        assert_eq!(
+            states[&fid].panel_gesture_cancellations(),
+            0,
+            "and a refused release ends nothing"
+        );
+
+        send(&mut editor, &mut states, inside, release);
+        assert!(
+            !states[&fid].has_accepted_gesture(),
+            "control: the same release one row up DOES consume it, so the \
+             refusal above came from the DISPATCHER and not from a rung"
+        );
+        assert_eq!(
+            states[&fid].panel_gesture_cancellations(),
+            0,
+            "an ordinary release is a consume, never a cancellation"
+        );
+    }
+
+    #[test]
+    fn g5_substrate_a_refused_press_never_arms_on_the_legacy_arm() {
+        a_refused_press_never_arms(PanelArm::Legacy, FrontendId(778));
+    }
+
+    #[test]
+    fn g5_substrate_a_refused_press_never_arms_on_the_mapped_arm() {
+        a_refused_press_never_arms(PanelArm::Mapped, FrontendId(779));
+    }
+
+    #[test]
+    fn g5_substrate_a_refused_release_never_consumes_on_the_legacy_arm() {
+        a_refused_release_never_consumes(PanelArm::Legacy, FrontendId(780));
+    }
+
+    #[test]
+    fn g5_substrate_a_refused_release_never_consumes_on_the_mapped_arm() {
+        a_refused_release_never_consumes(PanelArm::Mapped, FrontendId(781));
     }
 
     /// Criterion 50: a gesture from a source whose latest declaration is
