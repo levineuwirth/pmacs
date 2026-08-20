@@ -336,7 +336,8 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
     checkpoint above; this bullet records what it was):
     §5b and this lane gave `dispatch_semantic_panel_pointer`'s `bool`
     different meanings — accepted-as-a-gesture versus consumed-here. A
-    mode-line press therefore **arms the latch** on this branch today.
+    mode-line press therefore **armed the latch** --- past tense: the
+    fix landed with Q#BP-R4, and P1 pins it.
     **Q#BP-R4** rules a three-state `PanelPointerOutcome`, classified
     **before** target effects. Only an `Accepted` `Down(Left)` arms;
     left `Drag`/`Up` require a live record; an accepted `Up` performs

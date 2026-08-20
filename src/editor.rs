@@ -472,6 +472,15 @@ pub enum PanelGestureDomain {
         window: WindowId,
         /// The terminal buffer whose local selection is being built.
         buffer_id: crate::buffer::BufferId,
+        /// The CONTENT viewport the press was accepted against.
+        ///
+        /// Recorded, not re-fetched. `panel_grid_size` is `None` while
+        /// the panel is hidden or absent, so a completion that asked
+        /// for it could not finish a drag during exactly the
+        /// cancellations that need finishing — and a size-changing
+        /// cancellation would finish against the SUCCESSOR's geometry,
+        /// putting the selection somewhere the user never dragged.
+        viewport: CellSize,
     },
 }
 
@@ -2901,6 +2910,24 @@ impl EditorState {
             .is_some_and(|now| now != current)
     }
 
+    /// The byte behind a panel cell, for P9.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn panel_cell_byte_for_test(&self, win_id: WindowId, coord: CellCoord) -> Option<u64> {
+        self.panel_cell_byte(win_id, coord)
+    }
+
+    /// Hide this frontend's panel, for P11.
+    ///
+    /// `panel_grid_size` returns `None` once hidden, which is the state
+    /// a recorded completion has to survive.
+    #[doc(hidden)]
+    pub fn hide_panel_for_test(&self, frontend_id: FrontendId) {
+        if let Some(view) = self.core.borrow_mut().views.get_mut(&frontend_id) {
+            view.panel_hidden = true;
+        }
+    }
+
     /// Classify an authenticated panel gesture, WITHOUT applying it
     /// (Q#BP-R4).
     ///
@@ -3083,14 +3110,19 @@ impl EditorState {
                 TerminalGestureRoute::Local => Some(PanelGestureDomain::TerminalLocal {
                     window: target.side,
                     buffer_id: target.buffer_id,
+                    viewport,
                 }),
             };
         }
 
-        self.replay_panel_document_gesture(frontend_id, target.side, coord, kind, mods);
-        Some(PanelGestureDomain::Document {
-            window: target.side,
-        })
+        // A press that placed no anchor began NOTHING, and arming over
+        // it records a gesture whose completion has nothing to
+        // complete. `panel_cell_byte` is `None` past the end of a short
+        // line and on an empty panel, which is not a rare shape.
+        self.replay_panel_document_gesture(frontend_id, target.side, coord, kind, mods)
+            .then_some(PanelGestureDomain::Document {
+                window: target.side,
+            })
     }
 
     /// Replay a tail or a completion in the gesture's RECORDED domain
@@ -3137,11 +3169,11 @@ impl EditorState {
                     self.send_terminal_bytes(buffer_id, &bytes);
                 }
             }
-            PanelGestureDomain::TerminalLocal { window, buffer_id } => {
-                let Some(size) = self.core.borrow().panel_grid_size(frontend_id) else {
-                    return;
-                };
-                let viewport = CellSize::new(size.rows.saturating_sub(1), size.cols);
+            PanelGestureDomain::TerminalLocal {
+                window,
+                buffer_id,
+                viewport,
+            } => {
                 let key = TerminalViewKey::new(frontend_id, window, buffer_id);
                 let mut manager = self.terminal_manager.borrow_mut();
                 match kind {
@@ -3192,6 +3224,9 @@ impl EditorState {
     /// frontend's input can interleave between a `Down` and its tail, so
     /// a replay reading `active_window_mut()` would act on whatever
     /// happened to be active at that moment (R-b).
+    /// Returns whether a left press ANCHORED a gesture. Every other
+    /// kind returns `false`: only a press can begin one, so only a
+    /// press has an answer to give.
     fn replay_panel_document_gesture(
         &mut self,
         frontend_id: FrontendId,
@@ -3199,7 +3234,7 @@ impl EditorState {
         coord: CellCoord,
         kind: pmacs_protocol::MouseKind,
         mods: pmacs_protocol::Modifiers,
-    ) {
+    ) -> bool {
         use pmacs_protocol::{MouseButton as PButton, MouseKind as PKind};
 
         match kind {
@@ -3210,7 +3245,8 @@ impl EditorState {
                 self.core.borrow_mut().break_command_chain(frontend_id);
                 let is_double = self.is_double_click(frontend_id, side, coord);
                 let Some(byte) = self.panel_cell_byte(side, coord) else {
-                    return;
+                    // No anchor: nothing began, so nothing may arm.
+                    return false;
                 };
                 let extending = mods.contains(pmacs_protocol::Modifiers::SHIFT);
                 let prev = self.core.borrow().windows[&side].cursor;
@@ -3233,7 +3269,9 @@ impl EditorState {
                     // window-targeted writers instead.
                     if self.core.borrow_mut().select_word_at_cursor() {
                         self.mouse_click = None;
-                        return;
+                        // A double-click word selection IS an anchored
+                        // gesture: its release still has to complete.
+                        return true;
                     }
                 }
                 if extending {
@@ -3249,6 +3287,11 @@ impl EditorState {
                     cell: coord,
                     at: Instant::now(),
                 });
+                // Anchored. Stated here rather than inferred from
+                // selection state afterwards, which a later change
+                // could stop setting without anyone noticing arming had
+                // gone quiet.
+                return true;
             }
             PKind::Drag(PButton::Left) => {
                 self.mouse_click = None;
@@ -3289,6 +3332,9 @@ impl EditorState {
             | PKind::Up(_)
             | PKind::Drag(_) => {}
         }
+        // Only a left press can anchor, and it returns `true` above.
+        // Every other kind reaching here handled something already live.
+        false
     }
 
     /// Byte under a panel cell, resolved against the SIDE window's own
@@ -4208,6 +4254,7 @@ impl EditorState {
         if claims_control {
             self.claim_terminal_controller(key);
         }
+        let mut began_local_gesture = false;
         let mut manager = self.terminal_manager.borrow_mut();
         match kind {
             TerminalMouseKind::ScrollUp => {
@@ -4217,7 +4264,12 @@ impl EditorState {
                 let _ = manager.scroll_view(key, viewport_size, -SCROLL_LINES);
             }
             TerminalMouseKind::Down(TerminalMouseButton::Left) => {
-                let _ = manager.begin_selection(key, viewport_size, coord);
+                // The ONE local kind that begins a gesture, so its
+                // answer decides whether there is anything to arm. A
+                // press against a view that cannot start a drag began
+                // nothing, and arming over it records a gesture whose
+                // completion has nothing to finish.
+                began_local_gesture = manager.begin_selection(key, viewport_size, coord);
             }
             TerminalMouseKind::Drag(TerminalMouseButton::Left) => {
                 let _ = manager.update_selection(key, viewport_size, coord);
@@ -4235,6 +4287,16 @@ impl EditorState {
         }
         // The local branch: scrollback, local selection or the menu. The
         // child heard nothing.
+        //
+        // A left press reports `Local` only when it actually began a
+        // drag; otherwise it began nothing and the caller must not arm.
+        // Every other kind is not an arming event, so `Local` is the
+        // honest answer for it either way.
+        if matches!(kind, TerminalMouseKind::Down(TerminalMouseButton::Left))
+            && !began_local_gesture
+        {
+            return TerminalGestureRoute::None;
+        }
         TerminalGestureRoute::Local
     }
 

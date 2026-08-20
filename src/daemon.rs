@@ -7842,6 +7842,16 @@ mod tests {
         );
     }
 
+    /// The exact SGR bytes a left press at cell (1, 2) produces:
+    /// `ESC [ < 0 ; col+1 ; row+1 M`. Written as a LITERAL rather than
+    /// built with the encoder's own formula, which would assert only
+    /// that the encoder agrees with itself.
+    const SGR_PRESS_1_2: &[u8] = b"\x1b[<0;3;2M";
+    /// The matching release, `m` rather than `M`.
+    const SGR_RELEASE_1_2: &[u8] = b"\x1b[<0;3;2m";
+    /// The same release with SHIFT held: the button code gains 4.
+    const SGR_RELEASE_1_2_SHIFT: &[u8] = b"\x1b[<4;3;2m";
+
     /// A panel session whose side window holds a live TERMINAL, with
     /// the send tap armed.
     ///
@@ -7966,8 +7976,11 @@ mod tests {
             press,
             none,
         );
-        let after_press = child_stream(&editor);
-        assert_eq!(after_press.len(), 1, "fixture: the press reached the child");
+        assert_eq!(
+            child_stream(&editor),
+            vec![SGR_PRESS_1_2.to_vec()],
+            "fixture: the press reached the child, in SGR"
+        );
         assert!(
             states[&fid]
                 .accepted_gesture()
@@ -7994,11 +8007,11 @@ mod tests {
         );
 
         assert_eq!(
-            child_stream(&editor).len(),
-            1,
-            "the release must still reach the child: it holds a button \
-             down that only this release can lift, and re-reading the \
-             modes here is what strands it"
+            child_stream(&editor),
+            vec![SGR_RELEASE_1_2.to_vec()],
+            "the release must still reach the child AS A RELEASE at the \
+             gesture's cell: it holds a button down that only this can \
+             lift, and re-reading the modes here is what strands it"
         );
         let key = crate::terminal::view::TerminalViewKey::new(fid, panel, buffer_id);
         assert!(
@@ -8035,9 +8048,9 @@ mod tests {
             none,
         );
         assert_eq!(
-            child_stream(&editor).len(),
-            1,
-            "fixture: press reached the child"
+            child_stream(&editor),
+            vec![SGR_PRESS_1_2.to_vec()],
+            "fixture: the press reached the child, in SGR"
         );
 
         send_panel(
@@ -8053,10 +8066,12 @@ mod tests {
         );
 
         assert_eq!(
-            child_stream(&editor).len(),
-            1,
+            child_stream(&editor),
+            vec![SGR_RELEASE_1_2_SHIFT.to_vec()],
             "Shift is the LOCAL-HANDLING override for a NEW gesture, not \
-             a way to abandon one already delivered to the child"
+             a way to abandon one already delivered to the child. The SGR \
+             framing comes from the record; the modifier bits still report \
+             live state, so the code is 4 rather than 0"
         );
         let key = crate::terminal::view::TerminalViewKey::new(fid, panel, buffer_id);
         assert!(
@@ -8228,9 +8243,9 @@ mod tests {
             none,
         );
         assert_eq!(
-            child_stream(&editor).len(),
-            1,
-            "fixture: press reached the child"
+            child_stream(&editor),
+            vec![SGR_PRESS_1_2.to_vec()],
+            "fixture: the press reached the child, in SGR"
         );
 
         send_panel(
@@ -8245,18 +8260,204 @@ mod tests {
             none,
         );
 
-        let sent = child_stream(&editor);
         assert_eq!(
-            sent.len(),
-            1,
-            "the chrome release must still terminate the child's gesture \
-             --- the terminal path returns before replay, so without the \
+            child_stream(&editor),
+            vec![SGR_RELEASE_1_2.to_vec()],
+            "the chrome release must terminate the child's gesture AT THE \
+             GESTURE'S OWN CELL, not the chrome cell it landed on (R-c2). \
+             The terminal path returns before replay, so without the \
              recorded completion the child holds the button forever"
         );
         assert!(
             !states[&fid].has_accepted_gesture(),
             "and the record is taken"
         );
+    }
+
+    /// P9 — a document press that ANCHORS NOTHING does not arm.
+    ///
+    /// `panel_cell_byte` is `None` past the end of a short line and on
+    /// an empty panel, and the press then places no cursor and opens no
+    /// selection. Arming over it records a gesture whose completion has
+    /// nothing to complete — and, once cancellations deliver effects,
+    /// one that fires a release for a press that did nothing.
+    #[test]
+    fn r4_p9_a_document_press_that_anchors_nothing_does_not_arm() {
+        let fid = FrontendId(802);
+        let (mut editor, mut states, mut render, _document, panel, epochs) =
+            panel_session_at(LEGACY_PANEL_VERSION, fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        let press = pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left);
+        let none = pmacs_protocol::Modifiers::default();
+        // The panel grid is 4 rows, so content is rows 0..=2 and row 3
+        // is the mode line. The `*panel*` buffer is created EMPTY --- one
+        // zero-length line --- so row 1 is IN CONTENT and still past the
+        // buffer's only line.
+        //
+        // Two cells that do NOT work, and the row asserts its way past
+        // both: a column past the end of row 0 clamps to the line end
+        // and yields byte 0, and any row >= 4 is out of grid, so the
+        // press is refused before the document path is reached at all.
+        let unanchorable = pmacs_protocol::CellCoord::new(1, 0);
+        assert!(
+            editor
+                .classify_panel_pointer(fid, buffer_id, unanchorable, press)
+                .outcome()
+                == crate::editor::PanelPointerOutcome::Accepted,
+            "fixture: the cell must be ACCEPTED content, or this row \
+             passes because the press was refused for an unrelated reason"
+        );
+        assert!(
+            editor
+                .panel_cell_byte_for_test(panel, unanchorable)
+                .is_none(),
+            "fixture: this cell must genuinely have no byte behind it"
+        );
+
+        send_panel(
+            &mut editor,
+            &mut states,
+            &mut render,
+            fid,
+            epochs,
+            buffer_id,
+            unanchorable,
+            press,
+            none,
+        );
+
+        assert!(
+            !states[&fid].has_accepted_gesture(),
+            "a press that anchored nothing must not arm"
+        );
+    }
+
+    // P10 IS DELIBERATELY ABSENT, and this note is why.
+    //
+    // The press path also gates arming on `begin_selection` actually
+    // starting a drag, so a local terminal press that begins nothing
+    // records nothing. That gate has NO WITNESS because it has no
+    // reachable false branch through the daemon: `begin_selection`
+    // returns `false` only when the session is missing or the cell maps
+    // to no retained row, and by the time the daemon reaches the press
+    // path `classify_panel_pointer` has already established that the
+    // buffer IS the side window's live terminal, while `anchor_at`
+    // resolves every in-grid cell of a live view — measured, not
+    // assumed: a press at every content row of the 4-row fixture
+    // anchors.
+    //
+    // The gate is kept as insurance against a future view that can
+    // refuse, and it is recorded as UNWITNESSED rather than covered by
+    // a row that would pass whether or not the gate existed. A row at
+    // an out-of-grid cell looks like it tests this and does not: such a
+    // press is `Refused` long before the local path.
+
+    /// P11 — a recorded LOCAL completion still runs with the panel
+    /// HIDDEN.
+    ///
+    /// `panel_grid_size` is `None` for a hidden panel, so a completion
+    /// that fetched the current geometry could not finish a drag during
+    /// exactly the cancellations that need finishing. The viewport is
+    /// recorded at the press for this reason, and the row hides the
+    /// panel between the press and the completion to prove it.
+    #[test]
+    fn r4_p11_a_recorded_local_completion_survives_a_hidden_panel() {
+        let fid = FrontendId(804);
+        let (mut editor, mut states, mut render, panel, buffer_id, epochs) =
+            terminal_panel_session(fid, false);
+        let press = pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left);
+        let none = pmacs_protocol::Modifiers::default();
+        let cell = pmacs_protocol::CellCoord::new(1, 2);
+        let key = crate::terminal::view::TerminalViewKey::new(fid, panel, buffer_id);
+
+        send_panel(
+            &mut editor,
+            &mut states,
+            &mut render,
+            fid,
+            epochs,
+            buffer_id,
+            cell,
+            press,
+            none,
+        );
+        assert!(
+            editor
+                .terminal_manager
+                .borrow()
+                .view_is_dragging_for_test(key),
+            "fixture: a local drag is live"
+        );
+        let record = states[&fid]
+            .accepted_gesture()
+            .copied()
+            .expect("fixture: the gesture is armed");
+
+        // The panel goes away. `panel_grid_size` is now `None`.
+        editor.hide_panel_for_test(fid);
+        assert!(
+            editor.core.borrow().panel_grid_size(fid).is_none(),
+            "fixture: the panel is hidden, so ambient geometry is gone"
+        );
+
+        editor.complete_panel_gesture(fid, &record, none);
+
+        assert!(
+            !editor
+                .terminal_manager
+                .borrow()
+                .view_is_dragging_for_test(key),
+            "the completion must still finish the drag --- it replays \
+             against the viewport RECORDED at the press, because the \
+             ambient one is exactly what a cancellation removes"
+        );
+    }
+
+    /// P2, effect half — a REFUSED press reaches no target at all.
+    ///
+    /// §5b's four `g5_substrate_a_refused_*` rows read the latch and the
+    /// cancellation count; none of them reads the target. A refusal that
+    /// armed nothing while still sending the child a press, or starting
+    /// a local drag, would pass every one of them.
+    #[test]
+    fn r4_p2_a_refused_press_reaches_no_target() {
+        let fid = FrontendId(801);
+        let (mut editor, mut states, mut render, panel, buffer_id, epochs) =
+            terminal_panel_session(fid, true);
+        let press = pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left);
+        let none = pmacs_protocol::Modifiers::default();
+        let outside = {
+            let core = editor.core.borrow();
+            let grid = core.panel_grid_size(fid).expect("grid");
+            pmacs_protocol::CellCoord::new(grid.rows, 0)
+        };
+        let key = crate::terminal::view::TerminalViewKey::new(fid, panel, buffer_id);
+
+        send_panel(
+            &mut editor,
+            &mut states,
+            &mut render,
+            fid,
+            epochs,
+            buffer_id,
+            outside,
+            press,
+            none,
+        );
+
+        assert!(
+            child_stream(&editor).is_empty(),
+            "a refused press must send the child NOTHING --- a press it \
+             receives is one it will expect a release for"
+        );
+        assert!(
+            !editor
+                .terminal_manager
+                .borrow()
+                .view_is_dragging_for_test(key),
+            "and it must not begin a local drag either"
+        );
+        assert!(!states[&fid].has_accepted_gesture(), "and it must not arm");
     }
 
     /// P5 — an accepted in-content release delivers EXACTLY ONE child
@@ -8283,9 +8484,9 @@ mod tests {
             none,
         );
         assert_eq!(
-            child_stream(&editor).len(),
-            1,
-            "fixture: press reached the child"
+            child_stream(&editor),
+            vec![SGR_PRESS_1_2.to_vec()],
+            "fixture: the press reached the child, in SGR"
         );
 
         send_panel(
@@ -8301,11 +8502,11 @@ mod tests {
         );
 
         assert_eq!(
-            child_stream(&editor).len(),
-            1,
-            "EXACTLY ONE release: the in-content path already completed \
-             the gesture, so running the recorded completion as well \
-             sends the child two Ups for one Down"
+            child_stream(&editor),
+            vec![SGR_RELEASE_1_2.to_vec()],
+            "EXACTLY ONE release, and its exact bytes: the in-content path \
+             already completed the gesture, so running the recorded \
+             completion as well sends the child two Ups for one Down"
         );
     }
 
@@ -8338,9 +8539,9 @@ mod tests {
             none,
         );
         assert_eq!(
-            child_stream(&editor).len(),
-            1,
-            "fixture: press reached the child"
+            child_stream(&editor),
+            vec![SGR_PRESS_1_2.to_vec()],
+            "fixture: the press reached the child, in SGR"
         );
 
         send_panel(
