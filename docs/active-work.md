@@ -281,13 +281,15 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
   **`githubsucks/panel-pointer-replay` is the authoritative tip** (the
   ref, not a SHA). Recover with
   `git fetch githubsucks && git checkout panel-pointer-replay`.
-- **No PR yet. Checkpoint: framing revision 15 AWAITING APPROVAL
-  (revision 14 was reviewed and had four blocking gaps, all answered);
+- **No PR yet. Checkpoint: §5a framing revision 16 and its GUI Stage
+  1b revision-13 ownership amendment AWAITING APPROVAL (revision 15
+  was reviewed, corrected and folded into this branch);
   IMPLEMENTATION STILL PAUSED, now on approval rather than on a
-  blocker.** §5a's replay contract is approved at revision 12; revision
-  13 ruled Q#BP-R3 and blocked the lane on a protocol-bearing mapping
-  generation; **that block is DISCHARGED** — the slice merged as #242
-  (`47b5463`).
+  blocker.** §5a's **pre-merge** replay contract was approved at
+  revision 12; revisions 14–16 are the post-merge amendment now under
+  review. Revision 13 ruled Q#BP-R3 and blocked the lane on a
+  protocol-bearing mapping generation; **that block is DISCHARGED** —
+  the slice merged as #242 (`47b5463`).
 - **MERGED main into this branch** at `b758c2e` rather than rebasing:
   the lane's 12 commits include 10 framing revisions over the same
   800–1000 line doc regions, so a rebase meant twelve rounds of
@@ -314,14 +316,22 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
     §5b and this lane gave `dispatch_semantic_panel_pointer`'s `bool`
     different meanings — accepted-as-a-gesture versus consumed-here. A
     mode-line press therefore **arms the latch** on this branch today.
-    **Q#BP-R4** rules a three-state `PanelPointerOutcome`, with an
-    asymmetric latch rule: arm only on `Accepted` + `Down(Left)`,
-    consume on any `Up(Left)` that was not `Refused`.
-- **Revision 14 also carries** the rows §5b's split table assigned
-  here, a **pending-release slot** for the cancellation record §5b
-  leaves nowhere to wait, the **four transitions** that strand a live
-  gesture once effects attach, and a **re-measurement obligation**:
-  every production anchor in §5a has moved, evidenced in the revision.
+    **Q#BP-R4** rules a three-state `PanelPointerOutcome`, classified
+    **before** target effects. Only an `Accepted` `Down(Left)` arms;
+    left `Drag`/`Up` require a live record; an accepted `Up` performs
+    ordinary replay once, a consumed/chrome `Up` performs the recorded
+    completion once, and a refused `Up` preserves the record.
+- **Revision 16 carries** the rows §5b's split table assigned here, a
+  **pending-release slot** for the cancellation record §5b leaves
+  nowhere to wait, and the **four transitions** that strand a live
+  gesture once effects attach. Drain order is executable: before the
+  next panel-pointer effect; before detach teardown; and, for a
+  projection-raised cancellation, after `render_frame` returns but
+  before any returned message is written. Ground truth is re-measured
+  at `2c0d3ff`. Document-panel horizontal scrolling is a named deferral
+  to GUI Stage 1b B1–B3; a horizontal tick whose terminal precedence
+  selects child reporting already emits SGR, and the local terminal
+  branch has no horizontal viewport effect.
 - **THE BLOCKER, and why the earlier acceptance failed.** A
   `PanelPointer` names a cell; nothing on the wire says which inverse
   mapping the frontend saw, so the daemon inverts against whatever is
@@ -387,32 +397,26 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
   **controller identity** catches the shared-path mutation, since
   `apply_terminal_gesture` claims at `src/editor.rs:3571` before local
   handling and activation alone claims nothing.
-- **Why this lane exists.** `PanelPointer` **replays nothing**:
-  `dispatch_semantic_panel_pointer` (`src/editor.rs:2674`) validates,
-  focuses, returns. A panel wheel is dead on both axes and so is every
-  gesture past focus. **GUI arc 1b is BLOCKED on this lane and rebases
-  onto its merge commit.**
+- **Why this lane exists, re-measured at `2c0d3ff`.** The branch now
+  replays document selection, terminal mouse reporting and vertical
+  wheels; the remaining acceptance-48 effect is **listview row
+  selection**. Q#BP-R4 and §5b's inherited rows still need
+  implementation: pre-effect disposition/latch ordering, fixed-domain
+  gesture tails, exact-once termination, cancellation effects and the
+  pending-release drains. **GUI arc 1b is BLOCKED on this lane and
+  rebases onto its merge commit.**
 - **No new framing document.** Acceptance 48 is already ruled in
   `docs/bottom-panel-framing.md`; §5a adds ground truth to it.
-- **The measurement's headline: AC48 is HALF implemented**, and nothing
-  had written the halves down separately.
-  - **DONE:** click-to-focus and the terminal activation rule
-    (`src/editor.rs:2701` and its `activates`); the focused-only
-    auto-scroll clamp with passive `view_top` preserved (`:2568`–`:2571`, which
-    already cites parent 48); the coalescing rules — `Move`/`Drag`
-    tails coalesce, press/release/context/wheel lossless
-    (`pmacs-gpu/src/attach.rs:374`).
-  - **MISSING:** listview row selection, panel selection, terminal
-    mouse reporting, wheel replay.
-- **The replay is mostly WIRING; both mechanisms exist.**
-  `apply_terminal_gesture` (`src/editor.rs:3525`) is *"the one terminal
-  pointer path, shared by both frontend kinds"* and already drives
-  child reporting, selection and scrollback — a panel terminal needs
-  the same call, with `side_window_for` + `TerminalViewKey` +
-  `panel_grid_size` (which the dispatcher already fetches).
-  `scroll_window` (`:3845`) is window-scoped, cursor carry included.
-  **A wheel-only bridge is the wrong shape** — the shared path takes
-  every kind at once.
+- **Current clause split.** DONE: click/focus and terminal activation;
+  focused-only auto-scroll with passive `view_top` preserved; lossless
+  and coalesced event delivery; panel document selection; terminal
+  child reporting/local selection; vertical document and terminal
+  wheel effects. MISSING here: listview row selection and the
+  lifecycle/cancellation effects above. Horizontal wheel is split:
+  child-reporting terminal ticks already emit codes 66/67; the local
+  terminal branch is deliberately inert; document-panel `view_left`
+  is explicitly GUI Stage 1b B1–B3's effect, matching the production
+  comment in `src/editor.rs:2999`–`:3003`.
 - **The scoping hazard.** `set_cursor_byte` (`src/editor_core.rs:1216`),
   `begin_selection` (`:4691`) and `clear_selection` are
   **active-window scoped**; used naively they would move the

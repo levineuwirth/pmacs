@@ -1,5 +1,13 @@
 # Bottom panel — framing (window placement + side windows)
 
+**Revision 16 — 2026-08-20, AWAITING APPROVAL.** Revision 16 closes
+review of 15: Q#BP-R4 is one pre-effect disposition/gesture-lifecycle
+table; projection-raised releases drain after `render_frame` returns
+and before its messages are written; horizontal-wheel ground truth is
+split by target/domain and the missing document effect is explicitly
+owned by GUI Stage 1b; superseded current-state text is removed from
+this section and the active-work ledger.
+
 **Revision 4 — pre-implementation, DRAFT after review round 3 plus landed-state
 audit. Ground truth: canonical `main` @ `ddaa80d` (documentation landing #152;
 runtime @ `0dd16a5`, GPU initial target / #148 after folding Stage 2 / #149),
@@ -7,7 +15,7 @@ protocol v20, 2026-07-24. Amended by the pre-implementation dependency
 verification in §0.6: the folding dependency is cleared, and one geometry
 caller-census error is corrected.**
 
-**Revision 13 — 2026-08-14, AWAITING APPROVAL. Q#BP-R3 is OVERRULED:
+**Previously, revision 13 — 2026-08-14. Q#BP-R3 was OVERRULED:
 the lane BLOCKS on a protocol-bearing cell-mapping generation (new
 §5b).** Revision 12 accepted current-state hit semantics on three
 bounds, and all three were wrong — a **foreign** edit moves the mapping
@@ -1970,12 +1978,21 @@ cannot preserve the old panel-focused attach leak.
 
 ## 5a. Acceptance 48 — ground truth, RE-MEASURED at `2c0d3ff` (2026-08-20)
 
-**Status: revision 15 — AWAITING APPROVAL.** Revision 13 ruled Q#BP-R3
+**Status: revision 16 — AWAITING APPROVAL.** Revision 13 ruled Q#BP-R3
 and **blocked** this lane on a protocol-bearing mapping generation.
 That slice was framed as §5b, approved at revision 16, and **merged as
 #242 (`47b5463`)**, so **revision 13's block is DISCHARGED** and its
 ruling stands as history rather than as a gate. Revision 14 answered
 what the lane inherits from a substrate that changed underneath it.
+
+**Revision 16 closes review of 15.** It replaces the two competing
+Q#BP-R4 matrices with one pre-effect disposition/lifecycle table;
+names the projection drain at the only enforceable seam — after
+`render_frame` returns and before its messages are written; splits
+horizontal-wheel ground truth by target and gesture domain; records
+GUI Stage 1b as the owner of document-panel horizontal scrolling; and
+removes revision 14's now-false remeasurement obligation from the live
+section and ledger.
 
 **Revision 15 answers review of 14, and four of its five changes are
 corrections rather than additions:**
@@ -1995,7 +2012,8 @@ corrections rather than additions:**
 - **The ground truth was knowingly false and is now RE-MEASURED**, at
   `2c0d3ff`, rather than deferred to implementation. Two clauses the
   old table called MISSING are DONE, and a third — the horizontal
-  wheel — turns out to be an unruled gap.
+  wheel — exposed an ownership gap that revision 16 now splits and
+  assigns explicitly.
 - **"This lane MOVES the grade" was wrong.** Step 5/GPU is floored
   `Partial` by 5(a) IME and step 8 is already `Works`; no journey cell
   moves. The draft had read this section's own MISSING column as if it
@@ -2024,19 +2042,24 @@ kept below as history; **this table is the current one**:
 | move/drag tails coalesce; press/release/context/wheel lossless and ordered | **DONE** | `coalesce_kind` (`pmacs-gpu/src/attach.rs:338`) |
 | **panel selection** | **DONE — was MISSING** | `replay_panel_document_gesture` (`src/editor.rs:2914`), called at `:2903`: `Down`/`Drag`/`Up(Left)`, shift-extend, double-click word select, right-press |
 | **terminal mouse reporting** | **DONE — was MISSING** | `apply_terminal_gesture` called at `src/editor.rs:2899`, viewport `content_rows` |
-| **wheel moves the panel's viewport** | **VERTICAL DONE — was MISSING** | `ScrollUp`/`ScrollDown` → `scroll_window` (`src/editor.rs:2925`) |
-| **horizontal wheel** | **INERT, AND UNRULED** | `ScrollLeft`/`ScrollRight` fall into the catch-all no-op arm (`src/editor.rs:3004`) **with no comment and no ruling** — the old table's "dead on both axes" became half-true without anyone deciding the other half |
+| **vertical wheel moves the panel's viewport** | **DONE — was MISSING** | document `ScrollUp`/`ScrollDown` → `scroll_window` (`src/editor.rs:2925`); reporting and local terminal paths share `apply_terminal_gesture` |
+| **horizontal wheel, terminal precedence selects child reporting** | **RECEIVER DONE; PRODUCER AWAITS GUI 1b** | `apply_terminal_gesture` reaches `encode_mouse`, whose `ScrollLeft`/`ScrollRight` codes are 66/67 (`src/terminal/input.rs:130`–`:131`) |
+| **horizontal wheel, terminal precedence selects local handling** | **RULED INERT** | Shift, reporting-off or a scrolled-back view can select the local branch; terminal scrollback is vertical and there is no local horizontal viewport, so the shared path deliberately has no `ScrollLeft`/`ScrollRight` arm |
+| **horizontal wheel, document panel** | **NAMED DEFERRAL: GUI Stage 1b B1–B3** | `ScrollLeft`/`ScrollRight` are claimed and dropped at `src/editor.rs:3004`; the comment at `:2999`–`:3003` already assigns horizontal panel scrolling to 1b, whose framing now explicitly includes the panel-document surface |
 | **listview row selection** | **MISSING** | — no listview handling on the replay path; Q#BP-R1 ruled the semantics (single click selects only), and nothing implements them |
 | without disturbing the document mirror | **the constraint on all of the above** | — |
 
 **Two findings the re-measurement produced**, neither of which a
 line-number patch would have surfaced:
 
-- **The horizontal wheel is an unruled gap, not a deferral.** It sits
-  in a catch-all arm beside `Move` and the non-left buttons, so it
-  reads as deliberate and is not. **Revision 14 does not rule it** —
-  it names it, because inventing a ruling inside a re-measurement is
-  how an unexamined default becomes a decision.
+- **"Horizontal wheel" was not one verdict.** A tick for which terminal
+  precedence selects child reporting already sends the horizontal SGR
+  code; the local terminal branch has no horizontal viewport to move;
+  only a document panel lacks an effect. That last leg is a **named
+  deferral to GUI Stage 1b B1–B3**,
+  not an unexplained catch-all: 1b owns horizontal tick production,
+  sign, per-surface residuals and the window-targeted `view_left`
+  effect. The panel-replay lane remains 1b's prerequisite.
 - **Two of the four "MISSING" effects are DONE on this branch.** The
   section had been telling every reader that replay does nothing while
   the branch it describes had implemented most of it.
@@ -2694,7 +2717,7 @@ R-d's orphan is distinct from R-b's: **R-b's arrives from a passive
 panel, R-d's from a replaced or re-declared one**, and an
 implementation can fix either alone.
 
-### Revision 14 — what §5b changed underneath this lane
+### Revisions 14–16 — what §5b changed underneath this lane
 
 #### Q#BP-R4 — what does `dispatch_semantic_panel_pointer`'s answer MEAN? **RULED: a three-state outcome, not a bool**
 
@@ -2722,30 +2745,49 @@ fixed, re-entering by merge rather than by edit.
 | **a three-state outcome** | **RULED** |
 
 ```rust
-/// What the dispatcher did with a panel gesture.
+/// How an authenticated panel event relates to the authoritative
+/// panel surface, decided BEFORE any target effect.
 pub enum PanelPointerOutcome {
-    /// Neither this panel's nor well-formed: no grid, out of grid, no
-    /// side window, or a buffer that is not the one shown there.
+    /// Not addressable as this panel: no grid, out of grid, no side
+    /// window, or a buffer that is not the one shown there.
     Refused,
-    /// This panel's, and handled HERE deliberately --- the chrome
-    /// swallows of Q#BP-R2 and R-c. Not a content gesture.
+    /// This panel owns the cell/event, but it is deliberately not a
+    /// content gesture --- the chrome claims of Q#BP-R2 and R-c.
     Consumed,
-    /// Reached the target as a content gesture.
+    /// A content gesture for the resolved target.
     Accepted,
 }
 ```
 
-**The latch rule, and it is NOT "arm and consume on `Accepted`".** The
-two halves are asymmetric, because a release ends a gesture wherever
-the pointer happens to be:
+**The outcome is a DISPOSITION, not proof that an effect already ran.**
+It is decided before replay. The current function combines validation,
+classification and mutation, but that ordering cannot implement §5b's
+stale-tail rule: an `Up` or `Drag` with no accepted `Down` has already
+reached the child/selection before the daemon consults the latch. The
+implementation may split the function into classify/apply helpers or
+use an equivalent single wrapper, but these two facts are fixed:
 
-- **ARM** only on `Accepted` **and** `Down(Left)`. A chrome press
-  begins nothing.
-- **TERMINATE** on any `Up(Left)` that was **not `Refused`** — so
-  `Accepted` **or** `Consumed`. A **`Refused`** release is different in
-  kind: out-of-grid or wrong-buffer means the daemon cannot tell the
-  event is even about this gesture, and §5b already pinned that it must
-  not consume.
+1. the editor remains the **only** authority that derives
+   `Refused`/`Consumed`/`Accepted`; the daemon never re-derives chrome,
+   target kind or content bounds;
+2. disposition and the live-gesture check both complete **before** a
+   left `Drag`/`Up` target effect.
+
+**One transition table is authoritative:**
+
+| event | `Refused` | `Consumed` | `Accepted` |
+|---|---|---|---|
+| `Down(Left)` | no effect; do not arm | no target effect; do not arm | apply the content press, then arm **from the effect result** so target/domain/encoding and `reached_child` describe what actually happened |
+| `Drag(Left)` | no effect; retain any live record | no target effect; retain any live record | no live record → inert; live record → continue in the **recorded domain**, update its last valid content cell |
+| `Up(Left)` | no effect; retain any live record for a later authoritative cancellation | no live record → inert; live record → deliver the **recorded completion** at its last valid content cell, then take it | no live record → inert; live record → apply the ordinary in-content completion **once**, then take it; do **not** also run recorded completion |
+| every other kind | no effect; no latch change | no target effect; no latch change | apply its one-shot content effect; never arm or consume the left-gesture latch |
+
+This is the required asymmetry. A chrome press begins nothing. A
+chrome release can end a live gesture, but a refused release cannot be
+known to concern it. An accepted release already performs the ordinary
+target effect; a consumed release has not, so it terminates from the
+record. A stale `Drag`/`Up` with no accepted `Down` is inert rather than
+sending a child tail or changing selection.
 
 **"TERMINATE", not "consume", and the distinction is the whole of
 review finding 1.** An earlier draft of this ruling said consume, and
@@ -2760,42 +2802,42 @@ anything. A latch that empties while the child stays pressed is
 *exactly* the failure the draft claimed to prevent, now invisible
 because the bookkeeping looks right.
 
-**RULED: a non-`Refused` `Up(Left)` must produce the target's
-completion effect, and the row asserts the EFFECT, not the latch.**
+**RULED: a live gesture plus non-`Refused` `Up(Left)` must produce the
+target's completion effect exactly once, and the row asserts the
+EFFECT, not the latch.**
 
 | target | required completion effect |
 |---|---|
-| terminal panel, child reporting on | the **release is reported to the child** — the same report an in-content `Up` produces, at the gesture's last content cell per R-c2 |
+| terminal panel, child reporting on | the **release is reported to the child in the recorded encoding** — an accepted content `Up` uses its accepted cell; a consumed/chrome `Up` uses the gesture's last content cell per R-c2 |
 | terminal panel, child reporting off | the **local terminal selection completes** — the selection the drag built is finalised, not abandoned |
 | document panel | the document gesture completes at the last content cell; an empty selection is cleared **without moving point** (the effect §5b's split table already assigns here) |
 
-**And exactly once.** A completion delivered here must not be delivered
-again by a later cancellation of the same gesture, which is reachable
-because the four stranding transitions below can fire afterwards.
+**And exactly once.** An accepted `Up` must not replay normally and
+then also run the record-driven completion. Any completion must take
+the record, so a later cancellation of the same gesture — reachable
+through the four stranding transitions below — cannot repeat it.
 
 | # | mutation | must bite |
 |---|---|---|
 | P1 | chrome press returns `Accepted` | a chrome `Down(Left)` does not arm |
-| P2 | `Refused` treated as `Accepted` | §5b's four `g5_substrate_a_refused_*` rows |
+| P2 | `Refused` treated as `Accepted` | §5b's four `g5_substrate_a_refused_*` rows plus their no-target-effect assertions |
 | P3 | chrome `Up` empties the latch but delivers **no** completion | the child-release / selection-completion row — **the latch-only assertion must NOT satisfy this** |
 | P4 | `Refused` release delivers a completion | a refused release leaves both the latch and the child untouched |
-| P5 | completion delivered, then a later cancellation delivers another | the no-duplicate-release row |
+| P5 | an accepted content `Up` replays normally **and** invokes record-driven completion | the exact child stream contains one release, not two |
+| P6 | completion delivered, then a later cancellation delivers another | the no-duplicate-release row |
+| P7 | an accepted `Up` with no live record reaches the target | the stale-release row: no child bytes and no local/document selection mutation |
+| P8 | an accepted `Drag` with no live record reaches the target | the orphan-drag row: no child bytes and no cursor/selection mutation |
 
 **P3 is written against the earlier draft's own weakness.** A row that
 asserts only `has_accepted_gesture() == false` passes while the child
 receives nothing, so the row must read the child's reported bytes or
 the terminal's selection state.
 
-**That asymmetry is what earns the third state.** Under it, all three
-outcomes are behaviourally distinct at the latch, so each is
-falsifiable:
-
-| # | mutation | must bite |
-|---|---|---|
-| P1 | chrome press returns `Accepted` | a chrome `Down(Left)` does not arm |
-| P2 | `Refused` treated as `Accepted` | §5b's four `g5_substrate_a_refused_*` rows |
-| P3 | `Consumed` treated as `Refused` for `Up` | a chrome `Up(Left)` consumes a live gesture |
-| P4 | consume gated on `Accepted` alone | the same chrome-release row as P3, from the other side |
+**That asymmetry is what earns the third state.** `Refused` preserves a
+live gesture, `Consumed` owns the surface but runs only a recorded
+completion, and `Accepted` reaches content. Each is behaviourally
+distinct at the effect/lifecycle seam, and the single matrix above is
+the witness contract.
 
 **R-c2 does not discharge P3.** The producer normalizes a release that
 lands on chrome back to the last content cell, so a conforming
@@ -2869,9 +2911,15 @@ effect too late.
 2. **before detach teardown**, so a frontend that goes away does not
    take an owed release with it — detach is one of the four stranding
    transitions below, and it is the one with no later opportunity;
-3. **before the frontend's next frame is produced**, so a cancellation
-   raised during projection cannot be overtaken by the frame that
-   caused it.
+3. **after semantic projection returns and before any message it
+   returned is filtered or written.** Mapping cancellation is
+   discovered *inside* `SemanticRenderState::render_frame`, while the
+   successor `PresentMapped` is being constructed, so "before that
+   frame is produced" is impossible. The enforceable daemon seam is
+   immediately after `sem.render_frame(editor)` returns
+   (`src/daemon.rs:1428`–`:1430`) and before `for msg in &messages`
+   (`:1591`). The pending termination drains there, so the successor
+   frame cannot overtake the release its new mapping required.
 
 | # | mutation | must bite |
 |---|---|---|
@@ -2879,7 +2927,8 @@ effect too late.
 | Q2 | park it but never drain | the same row, from the delivery side |
 | Q3 | drain **after** `dispatch_semantic_panel_pointer` instead of before | the **old-release-before-new-press ordering row** — assert the child's byte stream carries the release ahead of the press, not merely that both arrive |
 | Q4 | skip the drain on detach | the detach row: an owed release is delivered before teardown |
-| Q5 | allow arming over a pending release | the invariant witness — kept, now as a **backstop** behind the ordering rows rather than as the guarantee |
+| Q5 | enter the returned-message write loop before draining a projection-raised release | the daemon-order witness records the termination effect before the first successor-frame write |
+| Q6 | allow arming over a pending release | the invariant witness — kept, now as a **backstop** behind the ordering rows rather than as the guarantee |
 
 #### Four transitions strand a live gesture, and they become defects HERE
 
@@ -2899,23 +2948,13 @@ motion. The daemon side has the same shape and needs the same
 independently discriminating legs rather than one shared "resets
 something" assertion.
 
-#### The ground truth must be RE-MEASURED, and this is evidenced
+#### Re-measurement closed in revision 16
 
-This section's heading says `72da24a`. **Every production anchor in it
-has moved**, measured at `b758c2e`:
-
-| §5a claims | actually |
-|---|---|
-| `dispatch_semantic_panel_pointer` at `src/editor.rs:2674` | `:2809` |
-| `apply_terminal_gesture` at `src/editor.rs:3525` | `:3875` |
-| `scroll_window` at `src/editor.rs:3845` | `:4195` |
-| `Absent` clears the latch at `pmacs-gpu/src/main.rs:6909` | `:7206` |
-
-**The clause table itself is NOT assumed to have survived.** §5b
-rewrote the dispatcher this lane measured, so each DONE/MISSING verdict
-is owed a re-measurement before implementation, not a line-number
-patch. A table that is right about *what* is missing and wrong about
-*where* is the kind of record that gets trusted and then misleads.
+The authoritative clause table is now the `2c0d3ff` table at the start
+of §5a. The `72da24a` table is retained only under its explicit
+**Superseded** heading. Revision 14's line-movement inventory did its
+job by forcing a clause-by-clause scout; it is no longer a live
+implementation obligation.
 
 #### Coherence impact (`COHERENCE.md` §20)
 
@@ -2926,11 +2965,12 @@ patch. A table that is right about *what* is missing and wrong about
   inferred from this section's own MISSING column:
   - **Step 5 / GPU is `Partial`, and stays `Partial`.** It is floored
     by **5(a)** — no IME, no `set_ime_allowed`, so composed and CJK
-    input is impossible (`COHERENCE.md:462`). Completing 5(c) inside a
+    input is impossible (`COHERENCE.md:468`). Completing 5(c) inside a
     panel cannot lift a cell held down by a different clause. That is
     §2a's aggregation rule working as designed.
-  - **Step 8 is already `Works` on all three columns.** There is no
-    grade left to move; 8(b) is hardened, not opened.
+  - **Step 8 is already `Works` on all three columns**
+    (`COHERENCE.md:471`). There is no grade left to move; 8(b) is
+    hardened, not opened.
   - The draft's error was reading §5a's MISSING column as if it were
     the scorecard. **A section-local gap list is not a journey grade**,
     and the one place that decides grades is `COHERENCE.md`.
@@ -2941,7 +2981,7 @@ patch. A table that is right about *what* is missing and wrong about
 - **Background work: none started**, and no existing attribution
   changes.
 
-#### What revision 14 does NOT do
+#### What revisions 14–16 do NOT reopen
 
 It does not re-open Q#BP-R1 (single click selects only), Q#BP-R2 (a
 terminal panel's chrome wheel is consumed, not clamped), or R-a/R-b/
