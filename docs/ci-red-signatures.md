@@ -496,11 +496,38 @@ Stage 4; the lane touches no `pmacs-gpu` code at all.
 | **selector** | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
 | **job / flavor** | local (Linux), `cargo test --workspace --features crdt --no-fail-fast`, i.e. under full-sweep load |
 | **required fragments** | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
-| **status** | **FOURTH OCCURRENCE 2026-08-13 — causal status still UNRESOLVED. A NEW candidate mechanism is introduced by the observing lane and is NOT excluded (see below)** |
+| **status** | **FIFTH OCCURRENCE 2026-08-15 — causal status still UNRESOLVED.** The fifth carries the strongest tree exclusion this row has had: a **documentation-only diff** |
 | **what IS established** | **three** occurrences at `pmacs-gpu/src/attach.rs:1680`, the second and third with all three fragments **verified** rather than inferred; the test drives a scripted transient-then-success sequence over a real socket pair. **The added GPU test is not the mechanism** — see the third-occurrence control below |
 | **what is NOT** | whether the broken pipe is the *fixture's* writer closing early or a real retry-path defect. **This row is not a claim that it is harmless** |
 | **rerun evidence** | occurrence 1: 6 isolated runs green, plus a full `--workspace --features crdt` sweep green (113 targets). Occurrence 2: **30 green on the observing branch** (15 isolated selector, 15 full `-p pmacs-gpu`) **plus a 15-run merge-base control, also green**. Occurrence 3: 5 isolated selector runs green, 10 full `-p pmacs-gpu` runs green **with** the added test, and **1 failure in 10 with the added test `#[ignore]`d** — the first rerun in this row's history that reproduced anything. Per the rerun rule the green runs establish intermittence only; the red control run is what carries the exclusion |
 | **retirement** | hardening that removes the named mechanism plus a discriminating witness — or a diagnosis showing the fixture, not the code, closes the pipe |
+
+**Fifth occurrence — panel cell-mapping generation (§5b) framing,
+2026-08-15, local (Linux).** The `scripts/gate` **`gpu` step** again,
+the same flavor as occurrence 2, inside a `--protocol` run
+(log `20260815T072601Z-2230169`).
+
+* **All three fragments verified** from the durable log, not a filtered
+  stream: `transient sequence must attach: Attach(Handshake(Io(Os {
+  code: 32, kind: BrokenPipe, message: "Broken pipe" })))`.
+* **The line moved and that is not a fragment.** It is
+  `pmacs-gpu/src/attach.rs:1728` here against `:1680` in the earlier
+  occurrences — `attach.rs` has changed since, and this row's
+  convention already treats a `:LINE` suffix as occurrence-specific.
+* **The tree exclusion is the strongest available in this row's
+  history: the branch's entire diff is DOCUMENTATION.** No Rust, no
+  wire surface, no `pmacs-gpu` file. Occurrences 1 and 4 argued
+  "unrelated lane"; this one cannot be related at all.
+* **Rerun: isolated selector green** (`1 passed`, 0.01 s). Per this
+  file's rerun rule that establishes **intermittence only** and does
+  not exonerate the tree — though here there is no tree change to
+  exonerate.
+
+**What five occurrences now support, stated carefully:** the failure is
+**not lane-correlated**. It has appeared under three flavors across
+five unrelated lanes, once on a diff that touches no code whatsoever.
+That is evidence about *where the cause is not*, and still says nothing
+about what it is. **The retirement condition is unchanged.**
 
 **Not attributed to the observing lane**, and in neither case is the
 reasoning merely "my diff looks unrelated": long-lines Stage 4 added no
@@ -866,3 +893,39 @@ claim is the one a later reader would otherwise reach for.*
 | **relation to U2 — a NEAR MISS, do not match it there** | the PTY fragment is U2's exact family (`stty -a output was: ""`), but U2's selector field names only `m6_1_pty_raw_mode_disables_kernel_echo`. U2's occurrence 2 saw raw **and** canonical fail together; here **canonical redded alone and raw passed**, which U2's evidence has never shown. It is recorded here rather than folded into U2 so that the "canonical alone" case stays visible |
 | **relation to U6 — its own instruction, honoured** | `composition_overhead_under_ten_percent` is one of U6's two selectors, and U6 says plainly: "If a future run reds **one** of these without the other, that is a different incident and should be judged as one." It redded without `criterion_1_end_of_line_typing…`, in a different step, at a far larger margin (1.613× here against U6's 1.297×). Judged as a different incident, as instructed |
 | **what this row does NOT assert** | that the two selectors share a mechanism. They failed together once; they belong to different subsystems; and U7 already refused this exact merge for U6. The **co-failure inside one step with an in-run green control** is the signature — not either name, and not a shared cause |
+
+### U10 — the budget red ROTATES between two consecutive runs of one commit
+
+Recorded during §5b review round 4, 2026-08-20. **Two consecutive
+`scripts/gate` runs at the same commit with a clean worktree verified
+at both ends of each run** — `70b334d`, `git status --porcelain` empty
+before and after, both times. Each run was 15/16 green. Each red is a
+**wall-clock budget assertion in a different step**, and **each is
+green in the other run**.
+
+| field | value |
+| --- | --- |
+| **run A** | log `20260820T155616Z-359755`, step `13-sweep` red: `dired_open_renders_10k_entries_under_200ms`, **263.961465ms against 200ms** (32% over). Step `15-sweep-crdt` **green** |
+| **run B** | log `20260820T160806Z-578046`, step `15-sweep-crdt` red: `optimistic::tests::criterion_1_end_of_line_typing_completes_sub_frame_per_keystroke`, **1.044609ms against 1ms** (4.5% over), 2148 passed. Step `13-sweep` **green** |
+| **required fragments** | `M8.2 spec: 10K entries must render within 200ms; took ` / `criterion 1: per-keystroke orchestrator time` + `exceeds 1ms` |
+| **status** | **two occurrences, neither reproduced; every selector green on rerun** |
+| **isolated controls** | both green in an isolated rerun of their own selector at load average 9.34, through the gate's target directory — the same control shape U6 and U7 each used |
+| **what IS established** | **the tree is excluded, as strongly as this repository can exclude it.** Not "the diff touches no render path" — the **same commit** produced a pass and a fail of each row, with the worktree verified clean at both ends of both runs. Neither failing path is touched by the branch under test (`src/optimistic.rs`, `tests/m8_2_acceptance.rs` and the dired paths are all absent from `git diff --name-only githubsucks/main...HEAD`) |
+| **what is NOT** | **that load caused it.** Load was **not sampled during either failing step**. A 76.63 reading exists for run A but was taken later in the same run, while step 15 was compiling; run B began at 23.46. Neither figure measures the failing moment, and this row does not pretend otherwise |
+| **rival CLOSED since U7** | the shared `CARGO_TARGET_DIR` confound U7 left "real and again unmeasured". Each worktree now gets its own gate target directory (`pmacs-mapping-gen-8cb089c8`); no sibling shared it. Excluded **for these occurrences only** — it says nothing about U7's |
+| **machine context, NOT a cause** | 150 leaked `pmacs` daemons were live throughout, 1.9 GB resident, oldest ~6.3 days — the standing "Leaked daemons — NEEDS A LANE" item. Their instantaneous CPU sampled at ~0%. Recorded because it is true of the machine, **not** because anything here shows it mattered |
+| **relation to U7 — its escalation rule, honoured and CUT BOTH WAYS** | U7 says "a future run that reds the **same** one of these twice is a different incident and should be judged as one." Run A redded `dired_open_renders_10k_entries_under_200ms`, which was U7's run-1 selector, so that selector has now redded twice, 11 days apart — filed here rather than appended to U7, as instructed. **But within this pair the selector ROTATED**, which is U7's own core signature, and run B's selector is U6's. The repeat and the rotation are both true, and this row asserts neither as the finding |
+| **relation to U6** | run B's selector is one of U6's two, redding **without** `composition_overhead_under_ten_percent`. U6 instructs that one-without-the-other is a different incident; honoured here |
+| **what this row does NOT assert** | a shared mechanism between the two rows, or any mechanism at all. **The signature is the rotation across an identical commit** — not either name |
+
+**Why this family keeps recurring, stated plainly.** Every row in it is
+a wall-clock budget asserted **inside a workspace-wide parallel test
+run**. `cargo test --workspace` starts many test binaries at once, so
+each budget competes with the rest of the sweep in **every** run,
+including the ones that pass. A 4.5% overshoot on a 1ms budget is not a
+signal about the code. **U9 already named the discriminating control**
+— pin test-binary concurrency to 1 and separately load a lone `--lib`
+binary — and it remains unrun. Until it runs, this family should not
+consume another review round.
+
+**Widening a budget is not the fix**, and R1 already rejected it.

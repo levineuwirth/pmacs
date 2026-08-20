@@ -888,10 +888,11 @@ fn terminal_mode_keeps_reporting_presence_so_peers_drop_the_stale_caret() {
         panic!("timed out waiting for {what}");
     }
 
-    // Tripwire: a wire bump must be a conscious edit here. v24 is
-    // `TextInput` (GUI arc Stage 1a); v23 was `MinibufferPromptRows`
-    // (Discovery Stage 2); v22 was `LineWrapFacts` (long-lines Stage 3).
-    assert_eq!(PROTOCOL_VERSION, 24);
+    // Tripwire: a wire bump must be a conscious edit here. v25 is the
+    // mapped panel family (bottom-panel §5b); v24 is `TextInput` (GUI
+    // arc Stage 1a); v23 was `MinibufferPromptRows` (Discovery Stage 2);
+    // v22 was `LineWrapFacts` (long-lines Stage 3).
+    assert_eq!(PROTOCOL_VERSION, 25);
     let daemon = common::daemon::TestDaemon::spawn_with_env_and_init(
         &[
             ("PMACS_INSTANCE_SEMANTIC_RENDER", "1"),

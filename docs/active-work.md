@@ -270,6 +270,558 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
+## Panel cell-mapping generation (v25) — REBASED, FULL GATE GREEN, review round 4 fixed
+
+- **BASE IS `5f2015c`**, current `githubsucks/main`. Rebased there
+  cleanly, no conflicts; the two commits picked up are docs-only (the
+  `rd_precondition` occurrence record and the handoff's `timeout`
+  rule).
+- The **first** rebase, onto `f13506c` (post-#241 main), took one
+  conflict in this file: main's merged-#241 block and this lane's own
+  first-commit block landed at the same position; both kept, active
+  lane above merged. No code file has overlapped across either rebase —
+  #241 touched `scripts/`, `tests/common/` and two test suites; this
+  lane touches the protocol, daemon and GPU sources.
+- **NO AHEAD-COUNT OR TIP SHA IS RECORDED HERE, deliberately.** Both
+  were wrong within one commit the last two times they were written,
+  because the commit that updates this file is itself the commit that
+  invalidates them. Read them instead:
+  `git log --oneline githubsucks/main..HEAD | wc -l` and
+  `git rev-parse HEAD`. Immutable EVENT shas — the rebase, a fix, a
+  merge — are recorded; the moving tip is not.
+- **REVIEW ROUND 4 (2026-08-20) — three blockers, all fixed.**
+  - **FUNCTIONAL: rejected gestures mutated the accepted-gesture
+    latch.** Both inbound arms discarded the bool from
+    `dispatch_semantic_panel_pointer` and called
+    `update_accepted_gesture` unconditionally. The ladder authenticates
+    the SENDER; only the dispatcher re-derives the TARGET, so an event
+    can clear every rung and still be refused for an out-of-grid
+    coordinate, an absent side window, or a buffer that is no longer
+    the one in the side window. **A rejected `Down` therefore ARMED** —
+    so a later authority loss counted a cancellation for a gesture that
+    never began, and once replay attaches effects it would release a
+    child that was never pressed. **A rejected `Up` CONSUMED a real
+    armed gesture** — so the authority loss that should have ended it
+    found nothing, and that child holds the button down for good. A
+    rejected `Down` on top of a live gesture was worse still:
+    `arm_accepted_gesture` ends what it overwrites, so it also counted
+    a spurious cancellation.
+  - **Fixed** by gating both arms on the return, and by marking the
+    dispatcher `#[must_use]` so the class cannot recur silently —
+    clippy runs with `-D warnings`, so a future discarded answer is a
+    build failure rather than a review finding.
+  - **Four new rows**, `g5_substrate_a_refused_{press_never_arms,
+    release_never_consumes}_on_the_{legacy,mapped}_arm`. Each drives
+    the refusal from a coordinate ONE PAST the last grid row and **ends
+    in a positive control differing only in that coordinate** —
+    without it a row would pass just as well if an unrelated rung had
+    dropped the event, which is how a negative test of this shape rots.
+    Mapped rows read the generation through the validator's own
+    accessor, so a mapping-rung refusal cannot masquerade as a
+    dispatcher refusal. **Three mutations, each biting its named rows:**
+    ungating the legacy arm fails exactly the two legacy rows, ungating
+    the mapped arm exactly the two mapped rows, and relaxing the
+    dispatcher's `>=` to `>` fails all four.
+  - **DOCS: committed conflict residue** — an orphaned diff3
+    `|||||||` ancestor line survived an earlier resolution in this
+    file, with the other three markers removed and both sides' content
+    kept. Deleted; the section below it was the only copy.
+  - **THE GATE CANNOT SEE THAT CLASS, and this is not fixed here.**
+    `git diff --check` compares the WORKTREE against the index, so a
+    marker that is already committed passes a clean-worktree gate
+    forever. `git diff --check githubsucks/main...HEAD` exits 2 on it.
+    Widening the gate's check to the branch range is a **candidate
+    lane** — a gate change owes a framing doc, and it should not ride
+    in on a §5b review round.
+- **The blocker is gone.** #241 fixed the `sweep-crdt` defect this lane
+  was held behind, and the SIGINT guard now refuses a gate run started
+  with `SIGINT` ignored — which is what made stage 15 unreachable.
+- **FULL 16-STAGE GATE GREEN**, log `20260820T153017Z-147411`, one
+  unsplit `./scripts/gate --protocol` run with all six touched
+  acceptance suites. `sweep-crdt` reports **zero** failures.
+- **THE TWO `m4_24_*` FAILURES WERE MY OWN MEASUREMENT ERROR, and the
+  "CI is the arbiter" framing built on them is WITHDRAWN.** I had run
+  the CRDT sweep OUTSIDE `scripts/gate`, so it inherited
+  `TMPDIR=/tmp` instead of the gate's isolated one, and I then reported
+  the local sweep as unable to go green for pre-existing reasons. It
+  goes green. CI never needed to substitute for it.
+  - **MECHANISM, and it is the exact hazard #240 fixed:** `/tmp/.git`
+    exists on this machine (an empty directory, 2026-08-15). Project
+    detection **walks upward**, so every `tempfile::tempdir()` under
+    `/tmp` inherits `/tmp` as a project root. Both failing rows are
+    base-resolution rows — `m4_24_bare_string_glob_stays_relative` and
+    `m4_24_d3_fallback_base_is_the_smallest_attachment_dir` — so both
+    resolve against the wrong base and fail. CI's `/tmp` carries no
+    such marker, which is why they passed there.
+  - **The gate's `TMPDIR` is disk-backed under `<gate-root>/tmp/` on
+    btrfs, in a directory the gate owns**, with no stray ancestor.
+    Running the sweep by hand defeats exactly the isolation #240 built
+    for this signature.
+  - **`/tmp/.git` IS STILL THERE and is not mine to delete** — it is
+    outside the repo and I did not create it. Any hand-run test that
+    resolves a project root from a temp dir will keep failing on this
+    machine until it is removed.
+- **HEAD-EXACT GATING IS BLOCKED BY THE BUDGET-ROW FAMILY, recorded as
+  `docs/ci-red-signatures.md` U10.** Two consecutive gate runs at
+  `70b334d`, worktree verified clean before and after each, were
+  **15/16 green each** — and the red **rotated**: run A took
+  `13-sweep` (`dired_open_renders_10k_entries_under_200ms`,
+  263.961465ms against 200ms), run B took `15-sweep-crdt`
+  (`criterion_1_end_of_line_typing_completes_sub_frame_per_keystroke`,
+  1.044609ms against 1ms). **Each red is green in the other run**, and
+  both are green isolated at load 9.34. Neither path is touched by this
+  branch. The earlier `20260820T153017Z-147411` all-green run was on
+  the same code, one docs commit earlier.
+- **No PR was opened on that evidence.** The standing condition is a
+  head-exact GREEN gate, and 15/16-twice-with-a-rotating-red is not it,
+  however well the rotation is explained.
+- **A prior gate attempt is NOT evidence**: I wrapped it in
+  `timeout 580` to fit the session's command cap, which killed the
+  sweep mid-run (`Terminated` in its log) and reported it as a stage
+  failure. Its two perf-budget failures also ran at load 36.9 with a
+  foreign workload present. Recorded so the log is not mistaken for a
+  result. The supported way past the cap is the tool-level background
+  launch, which measures `safe` under
+  `scripts/check-sigint-deliverable`; `docs/agent-handoff.md` §3 now
+  says so.
+
+**Written with the branch's FIRST commit**, per the standing correction
+from #171 and #215.
+
+- **Branch `panel-mapping-generation`**, base `githubsucks/main` @
+  **`72da24a`**, worktree
+  `/home/jeans/Repos/personal/pmacs-mapping-gen`.
+  **`githubsucks/panel-mapping-generation` is the authoritative tip.**
+  Recover with `git fetch githubsucks && git checkout
+  panel-mapping-generation`.
+- **No PR yet. Code-complete at `5174f73`; the slice-completion gate is
+  RED.** The ledger tip is **the branch head itself**
+  (`githubsucks/panel-mapping-generation`) — a literal SHA here goes
+  stale the moment the next commit lands, which is exactly how this
+  line came to name `fb40d88` while the branch was four commits past
+  it. Framing revision 16 (§5b)
+  APPROVED 2026-08-15 at `7e85a6f`, then eleven implementation commits:
+  wire shapes and pins (G0), the authoritative key with its terminal
+  half (G1–G4), outbound family selection, inbound family gating, the
+  GPU's negotiated family enum, and the nine family-gate rows
+  (G6a–b, G7a–b, G8). **Full `--protocol` gate green at `3c06176`.**
+  Then three more: G5a's trigger and its latch, the wheel exemption
+  with exhaustion and mapped coalescing, and the receiver rows.
+  **Every row this slice owns is now witnessed** — G0, G1–G4a, G5a plus
+  latch substrate, G6–G8, G9a–c, G10/G10a–c, G11a, G13a–b, G14a–b, G15
+  — with G4b, G5b–e/g/i–p, G6c, G7c, G11b and G12a–b left to the replay
+  lane per §5b's split table.
+- **PROTOCOL-BEARING — v25, and it runs alone.**
+  `ADVERTISED_PROTOCOL_VERSION` stays pinned at **20**.
+- **Why it exists.** A `PanelPointer` names a cell and nothing on the
+  wire says which inverse mapping the frontend saw, so the daemon
+  inverts against whatever is current. `buffer_id` catches
+  replacement, `panel_epoch` close/reopen, `geometry_epoch` a
+  declaration race — **nothing catches "the text under that cell
+  changed"**. Q#BP-R3 first accepted this as narrow; that was
+  **overruled**, because a **foreign** edit moves the mapping with
+  `view_top` untouched, the error is unbounded, and the window lasts
+  until the frontend **presents** the new frame.
+- **Semantic seam only.** The TUI hit-tests current daemon state
+  directly, receives no `PanelFrame`, and carries no mapping token. Its
+  existing panel click/drag/wheel effects are a structural control
+  against moving the generation gate into shared replay.
+- **A generation, not a per-frame token.** A token moving with the
+  frame would cancel a drag on the next repaint — the mistake
+  `panel_epoch` is stable to avoid. The key moves with the inverse
+  mapping (`view_top`, **`view_left`**, grid size, folds, wrap/gutter
+  geometry, buffer content, terminal output/scrollback) and holds
+  across focus, styling, selection-only repaints and cursor motion
+  **that the follow rules absorb**.
+- **One authoritative per-frontend key**, used by projection AND
+  inbound validation, advanced after any mapping mutation and
+  **before** the next inbound pointer — comparing against the last
+  emitted frame recreates the hole.
+- **Gating is REFUSAL, not fallback.** A ≥ v25 session sending bare
+  `PanelPointer` is refused; a ≥ v25 frontend rejects legacy
+  `Present`. Only ≤ v24 sessions keep legacy semantics; `Absent` is
+  common. The reciprocal wrong-family cases are witnessed too: a v24
+  daemon refuses `PanelPointerMapped`, and a v24 frontend rejects
+  `PresentMapped`. Compiling the variant in the same crate never
+  overrides the negotiated family.
+- **Stale tails TERMINATE, they do not vanish.** A dropped `Up` leaves
+  an empty selection armed and a reporting child holding a button
+  forever, so cancellation is a ruled outcome: producer latch reset,
+  daemon selection cleanup, and the child's release delivered.
+  Click-chain invalidation is a separate mapping-identity transition;
+  it also runs when no gesture is held.
+- **Pins ACCUMULATE**: keep `PanelPointer`, add exact `TextInput`
+  bytes (previous-final `FrontendEvent`) and the complete nested
+  `PanelFrame(Absent)` bytes (previous-final `PanelFramePayload`), then
+  add exact encode/decode pins for both new mapped variants with
+  distinct same-typed field values. Previous-final pins protect append
+  position; new-variant pins protect their own frozen field order.
+  **The `PanelPointer` pin DOES exist** at `src/protocol.rs:1975` —
+  revision 14 recorded it as missing, which was wrong: it lives in the
+  root crate's test module, not under `pmacs-protocol/` or `tests/`.
+- **Appended means LAST**: `PresentMapped` after `Absent`,
+  `PanelPointerMapped` after `TextInput`. `mapping_generation` is a
+  `u64`, **zero invalid**, gated by `PANEL_MAPPING_MIN_VERSION = 25`.
+- **Frontend generation is a session high-water mark.** Higher values
+  may skip, equal-generation style/selection repaints are valid, lower
+  values are rejected atomically, and `Absent` does not erase the
+  high-water mark. Detach does.
+- **Coordinate-free wheels are EXEMPT** from the freshness check —
+  otherwise the first tick advances the key and the next queued tick is
+  refused, so the panel scrolls once and dies. Child-reported terminal
+  wheels keep the check, because SGR carries row and column.
+- **Cancellation is PROACTIVE**, at the transition that revokes
+  authority: mapped-generation advance before its frame, before
+  daemon-authored `Absent` or panel/buffer replacement, when a new
+  geometry declaration is accepted, and at detach. The last four apply
+  to both v24 legacy and v25 mapped gestures. It is taken exactly once;
+  no producer cancellation tail is sent.
+- **Producer reset has cause-specific signals**, not one generic
+  replacement frame: accept the valid generation/identity frame;
+  accept `Absent`; locally advance the geometry declaration; or tear
+  down the frontend. Invalid frames and same-identity repaints retain
+  the latch.
+- **The accepted-gesture latch is left-button-only and common to both
+  wire families.** It arms only after accepted `Down(Left)` and dies on
+  accepted `Up(Left)` or any authority loss. Move, wheel, context, and
+  right/middle presses do not arm it; otherwise the GPU's press-only
+  right path manufactures a later release. A terminal Down also fixes
+  child-reporting versus local-selection domain through Drag/Up, so a
+  later Shift or reporting-mode change cannot orphan or invent a child
+  release.
+- **Click-chain state is independent and per frontend.** It survives
+  an ordinary `Up` by design, but every mapping identity change clears
+  or re-keys it even when no gesture is held. A completed click followed
+  by a foreign edit and same-cell click is single, not double; an
+  intervening click from another frontend does not erase the first
+  frontend's legitimate chain.
+- **Terminal identity EXCLUDES style.** Wire `Cell` equality covers
+  `glyph`, `style` and `attachment`
+  (`pmacs-protocol/src/cell.rs:153`), so keying on it would move the
+  revision on a recolour and contradict the stable control. It is
+  glyph/row topology plus the view anchor.
+- **The terminal key is NOT `Screen`'s generation** — that advances
+  from 39 sites including style, bell, tab-stops and cursor-only
+  motion, none of which change what a coordinate denotes.
+- **G5 is now an explicit transition matrix.** It crosses every common
+  authority loss with v24 and v25, distinguishes each producer reset
+  signal from invalid/same-identity controls, pins ordinary-Up
+  exact-once and left-only arming, and tests click identity without a
+  live gesture. This slice owns only the new mapping-generation signal
+  and mapped-frame state; the rebased replay lane owns the common
+  invalidations and every document, terminal, complete producer-latch
+  and click-chain effect through real call sites. No dead
+  classification helper is added on a base without replay.
+- **G5's latch lands here under SUBSTRATE names, not the deferred
+  IDs.** G5a needs something to cancel, so the per-frontend
+  `AcceptedPanelGesture` latch and its arming from the accepted inbound
+  arms are this slice's. Writing that code decides which events arm,
+  that an ordinary `Up` consumes without counting as a cancellation,
+  and that the latch is per frontend — pinned as `g5_substrate_*`
+  rather than as G5c/G5d/G5g/G5p, which stay on the replay lane per
+  §5b's split table. **Claiming an ID in two branches is the merge
+  hazard**, and this file already records duplicate ids surviving a
+  clean merge once. Cancellations are **counted, not queued**: the
+  record queue is what replay drains, and landing it here would grow
+  one entry per cancelled drag with no reader. The other G5b
+  transitions (panel epoch, buffer replacement, same-size geometry,
+  detach) deliberately leave the latch armed on this base — inert
+  while nothing consumes it, and a defect only once replay supplies
+  effects, in the branch that owns the row.
+- **Routing and effects are separate controls.** This slice can prove
+  v24/v25 events reach the existing focus path, but selection,
+  terminal reporting, stable-generation drag continuation, two-tick
+  wheels and exhaustion cancellation remain explicit replay-lane rows;
+  no classification-only result is reported as end-to-end input.
+- **Review-process correction — carry into the next handoff
+  absorption.** Revision 16 replaces finding-at-a-time review with one
+  closure pass for this chain and future framings: verify cited ground
+  truth; enumerate trigger × protocol family × target × lifecycle;
+  separate producer, route, receiver and effect; prove every witness's
+  discriminating setup and positive control; check that each proposed
+  mutation is actually defective; and assign every row to the branch
+  that can reach its real call site. Protocol work also checks all four
+  wrong-family quadrants, exact pins and version fallout. Findings are
+  returned as one batch. If three revisions do not close a framing,
+  stop serial review and perform/fold this complete audit rather than
+  opening another one-finding round. The overdue #239/#240 handoff
+  absorption must promote this rule; this feature branch does not edit
+  the deliberately lagging canonical handoff.
+- **Owns the version correction.** `docs/gui-stage1-input-framing.md`
+  moves 1e's `OpenTarget` to **v26** here — an expected rebase
+  conflict on `gui-stage1b-pointer-scroll` is not grounds for leaving
+  the canonical document false.
+- **Chain: this slice → `panel-pointer-replay` (rebases onto it) →
+  GUI arc 1b.**
+- **CI-red observations on this branch, NOT yet in the registry — and
+  deliberately so.** `docs/ci-red-signatures.md` here ends at **U9**;
+  the `panel-pointer-replay` branch already added a **U10** that has
+  not merged. Adding a row from this branch would either duplicate that
+  id or invent U11 against an unseen neighbour — and this file's own
+  history records exactly that going wrong once already, when two
+  branches' entries "merged **without a conflict**, producing duplicate
+  ids across four sites". **The rows below are owed to the registry by
+  whichever branch merges second**, numbered after the other's.
+  - **R7, two occurrences on this branch** (2026-08-15, `gpu` step,
+    logs `20260815T095532Z` and `20260815T100719Z`). Fragments verified
+    both times: `transient sequence must attach: Attach(Handshake(Io(Os
+    { code: 32, kind: BrokenPipe, message: "Broken pipe" })))` at
+    `pmacs-gpu/src/attach.rs:1728`. One machine, one day, one branch,
+    with a green full-gate run between them. Isolated reruns green.
+  - **`composition_overhead_under_ten_percent`, once** (log
+    `20260815T102527Z`, step **`04-lib-crdt`**). Fragment:
+    `composition machinery added more than 10% overhead: 1.146
+    (single=227350 ns, dispatch=260497 ns)`. **`criterion_1` ran in the
+    same step and PASSED**, so per U6's own instruction this is one
+    selector redding without the other and is a different incident.
+    **1.146× is the smallest margin this budget has ever failed by**
+    (U6 1.297×, U10 1.343×, U9 1.613×), and the "realistic" figure was
+    **negative** (−25.8%) in the same run. Isolated rerun green.
+  - **`setsid_escapee_is_not_reaped_and_teardown_reclaims_readers`,
+    once** (log `20260815T184808Z`, step `08-sweep`). Fragment: `live
+    runtime probe` at `src/process.rs:5155` — `active_reader_probe`
+    returned `None` for a process that had just reported `Started`. A
+    live-process race under sweep load. Isolated rerun green. **Not in
+    the registry under any id**, so it is a new signature, owed like
+    the two above.
+  - **`composition_overhead_under_ten_percent`, a SECOND time**
+    (2026-08-15, plain `cargo test --lib`, not a gate step). Isolated
+    rerun green. Same budget as the occurrence above, now seen in two
+    different selectors on one branch in one day.
+  - **RESOLVED ATTRIBUTION: the sweep-crdt red is PRE-EXISTING ON
+    MAIN.** The identical `build-crdt && sweep-crdt` pair run at the
+    merge base **`72da24a`**, in the primary worktree with its own
+    target dir, fails the SAME test,
+    `ctrl_c_on_launcher_group_does_not_reach_spawned_daemon`: **119
+    green result summaries and TWO red binaries** —
+    `gpu_initial_target_acceptance` includes the suite as a module, so a
+    reproducing sweep reds twice (`…-2144707/09-sweep-crdt.log:3097`
+    and `:3131`). **This branch is not implicated**, and no branch can
+    pass this gate stage on this machine until the underlying defect is
+    fixed.
+  - **THE ONSET IS DATABLE.** `sweep-crdt` has 17 logs here. Counted
+    per test copy: **13** both copies `... ok`, **1** where neither
+    executed (the stage died compiling `pmacs`, `error[E0308]`), **3**
+    both `FAILED`. Last observed green `20260815T185708Z`, first
+    observed red `20260816T063330Z`; boot began 08-14 09:30, so no
+    reboot between. So "pre-existing on `main`" holds,
+    but **"always broken" is contradicted**. The window is **not yet a
+    bisect target**: cleanliness was captured at neither endpoint, so
+    the lane's first move is to reproduce `7599661` and `724b785`
+    clean, in isolated target dirs, and decide from that.
+  - **The red full-sweep count is SEVEN**, not five; each run is
+    enumerated with its own log digest in the teardown lane's
+    `docs/probe-sigint-evidence.md`.
+  - **The defect now has its own lane:
+    `gpu-probe-sigint-teardown`** (pushed; framing revision 9 at
+    `docs/gpu-probe-sigint-framing.md` (revision 9), run provenance at
+    `docs/probe-sigint-evidence.md`). **§5b is held behind it.** That
+    lane's framing supersedes every diagnostic claim below; the entries
+    here are kept only as the record of how it was found.
+  - **MECHANISM STILL NOT ESTABLISHED — and the RETRACTION below was
+    itself wrong.** Two corrections, in order:
+    - A "mechanism located" claim (launcher in `do_wait`, probe child
+      in `futex_do_wait`) was retracted on the argument that the
+      failing launcher "must live 8s or more" while the sampler's
+      longest-lived was 5s.
+    - **That arithmetic is false.** Both reproducing binaries finish in
+      **~5.19s including the 5s timeout** (`:3097`, `:3131`), so
+      `phase=ready` lands in about a tenth of a second and the failing
+      launcher lives roughly **5.1s** — inside what the sampler
+      observed. A ">6s selector", proposed as the remedy, would have
+      captured **nothing**.
+    - So the "located" claim is **not refuted by that argument**. It
+      stays **unproven for a different reason**: under `--features
+      crdt` the suite spawns root launchers from **six** call sites, so
+      a launcher captured by command line alone cannot be attributed to
+      this test.
+    - **Do not key on process age. Key on the PID the test records**,
+      with snapshots before and after its own `kill`.
+  - **Five further explanations were tested and REFUTED.** Recorded so
+    nobody re-runs them:
+    - *Machine load*: refuted. Red on a quiet machine (load 2.77 at
+      launch, foreign workload gone).
+    - *Memory pressure*: refuted, **by correcting my own instrument**.
+      A sampler showed free memory falling to 543 MB and that looked
+      damning — but it recorded `free`, which on Linux is not the
+      meaningful figure. `available` was **27 G**. The 543 MB was
+      reclaimable cache.
+    - *Leaked daemons*: refuted. Peak 58 during the sweep, up only 8
+      from the resting 50, and the green standalone runs already ran
+      at 46-50.
+    - *tmpfs starving the box*: refuted **by experiment**, not
+      argument. `/tmp` went from 21G used to 1.2G (available memory
+      27G -> 45G) and the sweep stayed red, same test. Note the
+      earlier `available`-based dismissal was itself unsound — tmpfs
+      pages are NOT reclaimable yet still appear in `buff/cache` — so
+      the hypothesis deserved the experiment it eventually got.
+    - *inotify exhaustion*: refuted. 47 instances in use of 1024.
+    - *`--workspace` artifact selection*: **NOT refuted.** Two targets
+      under `--workspace` are green, and the preceding targets without
+      `--workspace` are green, but neither run isolates the factor —
+      see below.
+    - *A specific preceding test*: **NOT refuted, and the earlier entry
+      here was wrong.** It claimed all 37 preceding targets plus the
+      suite run green "same binaries, same order, same tests". The
+      **compilations** were not the same: that run executed
+      `gpu_initial_target_acceptance-91f51d0b` and
+      `gpu_invocation_acceptance-6b4b8223`, while the failing sweeps
+      executed `-5d9105cb` and `-d4dae4f0`. Differing Cargo suffixes
+      mean differing metadata hashes, so command shape changed the
+      compilation and the comparison was never made. **Historical byte
+      identity is UNKNOWN** and is not claimed — target dirs have been
+      overwritten since.
+    - Also withdrawn: that other packages "cannot be implicated"
+      because their targets run after the failure. Later-selected
+      packages can affect Cargo's build graph and fingerprints
+      **before** their tests execute.
+    - Also withdrawn: that the cause is "cumulative across the
+      preceding 37 binaries". Nothing established that.
+    - Note the test exists in **two** binaries: `tests/gpu_initial_
+      target_acceptance.rs` includes it as a module, so a reproducing
+      sweep fails it twice, at log lines 3083 and 3117.
+  - **What the reductions established, and what they did NOT** — they
+    were never a bisect, since no run isolated a variable. Green in
+    every smaller context tried — the test alone (x3, 0.15s against its
+    5s deadline); its whole 15-test suite; a workspace-wide run
+    FILTERED to just this test; the lib binary (2145 tests) then the
+    suite; the three GPU suites in sweep order — and red in every full
+    workspace sweep, seven of them across two trees.
+    **No cumulative cause follows from that.** The subset runs and the
+    sweeps executed **different Cargo compilations** — differing
+    suffixes, hence differing metadata hashes — so the reductions never
+    made the comparison they appeared to make. (Calling them
+    "byte-different" is withdrawn: the bytes a historical run executed
+    are not knowable now, only the suffixes.) What is established is
+    only: reproducible in the full sweep, not reproduced in any subset
+    attempted so far.
+  - **`/tmp` is a 30G tmpfs holding 21G**, almost all stale
+    `levshell-*-target` cargo directories belonging to an unrelated
+    project, 3-4 days old. Recorded as an observation about this
+    machine, **not** as the cause — `available` memory refutes that.
+    Not touched: they are not this project's to delete.
+  - **The earlier signature entry below overstated its case** and is
+    kept only for its measurements. It read the isolation runs as
+    proof of an environmental cause; they establish intermittence at
+    most, and the base-comparison above is what actually settled
+    attribution.
+  - **`ctrl_c_on_launcher_group_does_not_reach_spawned_daemon`, a NEW
+    signature, red TWICE and reproducibly** (2026-08-16, logs
+    `20260816T063330Z` and `20260816T064549Z`, step `09-sweep-crdt`
+    both times). Fragment: `child did not exit within 5s` at
+    `tests/gpu_invocation_acceptance.rs:180`. **Not in
+    `docs/ci-red-signatures.md` under any id.** Green in isolation and
+    green with all fourteen of its suite siblings, the latter in
+    **0.15s against its own 5s deadline** — a 33x margin. It reds only
+    inside the full-workspace crdt sweep.
+    - **The row is marginal by construction, and the sweep is the
+      worst place for it.** It holds a FIXED 5s wall-clock deadline for
+      a spawned child to exit after a signal, and it runs inside the
+      heaviest stage the gate has — `cargo test --workspace --features
+      crdt`, which saturates all 16 cores by itself. Nothing about it
+      touches panels or the wire.
+    - **Sweep contention could not be separated from foreign load**,
+      and the attempt is recorded as inconclusive rather than dressed
+      up: running `09-sweep-crdt`'s exact command alone red the same
+      row, but `uptime` hit **59.51** during that run, so the control
+      proved nothing it was meant to. Part of that number is the
+      sweep's own parallelism.
+  - **Three wall-clock-deadline rows red in ONE run, under a MEASURED
+    foreign load** (2026-08-16, log `20260816T063330Z`). Steps
+    `04-lib-crdt` and `09-sweep-crdt`. Fragments:
+    `criterion_1_end_of_line_typing_completes_sub_frame_per_keystroke`
+    — "per-keystroke orchestrator time **1.001196ms** exceeds 1ms",
+    **0.12% over**, the smallest margin any budget on this lane has
+    failed by; `m6_1_pty_mode_lifecycle_started_then_exited` — "must
+    observe stdout 'done'"; and
+    `ctrl_c_on_launcher_group_does_not_reach_spawned_daemon` — "child
+    did not exit within 5s". All three green in isolation, the last in
+    **0.15s against its 5s deadline**, a 33x margin.
+  - **This is the first entry on this lane with a NAMED confound rather
+    than the standing uncontrolled one.** `uptime` during the run:
+    load average **14.02 → 28.35**, from an unrelated `turso` test
+    suite on the same machine (`./verify_task_state.sh
+    turso-without-rowid`, target dir `/opt/target`, one test binary at
+    **693% CPU**). It is not a controlled experiment, but it is the
+    same evidence U9's synthetic-load control was meant to produce, and
+    it points at load. U9 stays owed; its value is now lower.
+  - **Two process traps this cost, both worth carrying forward.** The
+    Bash tool caps a command at 10 minutes and SIGTERMs it, which the
+    gate reports as `FAILED (exit 143)` on whatever stage was running —
+    indistinguishable from a real failure in the summary line. Run the
+    protocol gate under `setsid` and watch the log. And `pkill -f
+    <pattern>` kills the invoking shell when the pattern appears in its
+    own command line, so the intended target survives and the operator
+    believes it died. **Both mistakes were made here**; the second
+    nearly killed an unrelated project's build, because
+    `pkill -f "cargo test"` would have matched it. Identify by PID.
+  - **Three consecutive full-gate runs, three DIFFERENT unrelated
+    failures** (composition budget in `04-lib-crdt`, then composition
+    again in `10-sweep-crdt`, then this in `08-sweep`), against a diff
+    that touches panels and the wire. Recorded as a rate observation
+    only: no mechanism is claimed, and the standing leaked-daemon
+    confound is uncontrolled as always.
+  - **Cost, stated plainly:** four `--protocol` gate runs on one commit,
+    three of them lost to these two signatures. U9's synthetic-load
+    control remains unrun and is the cheapest thing that would either
+    implicate load or clear it.
+- **Rustdoc split, FOUR occurrences on this branch** (`screen_size`,
+  `peer_may_send_panel_events`, `send_panel_pointer`, and
+  `SemanticRenderState`). Always the same mechanism: inserting an item
+  at what reads as a blank gap when the lines directly above are the
+  NEXT item's doc comment, which the insertion then adopts. The fourth
+  also stole an `#[allow(clippy::struct_excessive_bools)]`, silently
+  un-suppressing a lint on the struct that needed it. Three were caught
+  by the user in review, one by a `missing_docs` warning. **The check
+  is to look UP from the insertion point before writing, not down.**
+- **SLICE-COMPLETION GATE STATUS — read before assuming this is
+  mergeable.** Nine of ten stages green at `5174f73`; `09-sweep-crdt`
+  red on the row above, twice. **A gate with a red stage is a red gate,
+  and no PR was opened on it.**
+  - **The cause is UNRESOLVED.** The row is **intermittent**: green
+    alone, green with all fourteen of its suite siblings, red inside
+    the full-workspace crdt sweep. Foreign load is a **measured
+    confound**, not an explanation — establishing intermittence is not
+    establishing an environmental cause, and no experiment here
+    separated sweep contention, foreign load, and a genuine defect in
+    the row. Do not record it as environmental until something does.
+  - **The gate cannot pass on this machine for ANY branch**, main
+    included, until the pre-existing sweep-crdt defect is fixed. That
+    is a decision point, not a thing to keep re-running: either the
+    defect gets its own lane, or this lane's readiness bar is restated
+    against a gate that main itself can pass.
+  - **Clean evidence is not obtainable on this machine right
+  now** — an unrelated `turso` workload
+  (`./verify_task_state.sh turso-without-rowid`, target `/opt/target`)
+  is running in a LOOP, holding a 16-core box at load 20-60. The
+  remaining work on this lane is one clean gate run, on a quiet
+  machine, and nothing else.
+- **Gates — THE EXACT INVOCATION, not a list of suites.** Naming the
+  suites without the flag form is what let two full runs go by with
+  bare `--protocol` and **no acceptance stage at all**; the suites were
+  verified by hand instead, which is not the gate and is exactly the
+  substitution these records exist to prevent. `--acceptance` is an
+  EXPLICIT repeated flag — the gate derives nothing from the diff.
+
+  ```
+  ./scripts/gate --protocol \
+    --acceptance bottom_panel_stage1_acceptance \
+    --acceptance bottom_panel_stage2a_acceptance \
+    --acceptance bottom_panel_stage2b_daemon_acceptance \
+    --acceptance bottom_panel_stage2b_gpu_acceptance \
+    --acceptance bottom_panel_stage2b_protocol_acceptance \
+    --acceptance gui_stage1a_wire_acceptance
+  ```
+
+  Sixteen stages: ten from `--protocol` plus one per suite. **A run
+  that prints ten stages is missing every acceptance stage**, and a run
+  that prints eleven is the older single-suite form.
+- **The "four `bottom_panel_*` suites" phrasing was WRONG — there are
+  five.** `bottom_panel_stage2b_protocol_acceptance` is the fifth and
+  belongs in a protocol-bearing lane above all others. The block above
+  runs all five rather than guessing which four an earlier writer
+  meant; a superset is the safe reading of an ambiguous record.
+
 ## GPU launcher / probe SIGINT teardown — MERGED as #241 (`f8033bc`)
 
 - **MERGED 2026-08-20** at approved head `5089715`, merge commit

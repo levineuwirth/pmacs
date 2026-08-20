@@ -550,7 +550,74 @@ pub enum FrontendEvent {
         /// The committed text. Non-empty; see [`TEXT_INPUT_MAX_BYTES`].
         text: String,
     },
+    /// Bottom panel §5b (protocol v25): a panel-cell gesture that also
+    /// names the **inverse mapping** the frontend was looking at.
+    ///
+    /// **APPENDED LAST, after [`Self::TextInput`].** "Beside
+    /// `PanelPointer`" would be adjacent insertion, which shifts every
+    /// discriminant below it; postcard encodes variants positionally, so
+    /// only the end of the enum is safe.
+    ///
+    /// **Why the mapping and not the epochs.** A cell must be inverted
+    /// to a byte, and the existing ladder cannot tell whether the text
+    /// under that cell still means what it meant: `buffer_id` catches an
+    /// A→B replacement, `panel_epoch` catches close/reopen,
+    /// `geometry_epoch` catches a declaration race, and **nothing
+    /// catches a foreign edit** — which moves the mapping while every
+    /// epoch holds. `mapping_generation` closes exactly that.
+    ///
+    /// **Not a per-frame token.** A token moving with each frame would
+    /// invalidate a gesture on every repaint and break drags outright,
+    /// which is why [`crate::panel::PanelFrame::panel_epoch`] is stable
+    /// across ordinary frames. This identifies the *mapping*: it moves
+    /// with the viewport, folds, wrap and gutter geometry, buffer
+    /// content and terminal topology, and holds across focus, styling,
+    /// selection-only repaints and absorbed cursor motion.
+    ///
+    /// **Gated bilaterally on [`PANEL_MAPPING_MIN_VERSION`]**, and the
+    /// gate is a REFUSAL rather than a fallback: a `>= v25` session
+    /// sending the bare [`Self::PanelPointer`] is refused, and a
+    /// `<= v24` session sending this variant is refused too. Treating
+    /// either as "handled under the other family's semantics" would
+    /// leave the hole reachable by choosing a discriminant.
+    PanelPointerMapped {
+        /// Which frontend produced the gesture (untrusted, as above).
+        frontend_id: FrontendId,
+        /// Geometry declaration this gesture was hit-tested against.
+        geometry_epoch: u64,
+        /// Presentation identity this gesture addresses.
+        panel_epoch: u64,
+        /// Buffer the frontend believed the panel was displaying.
+        buffer_id: crate::BufferId,
+        /// Cell the pointer is over, within the declared panel grid.
+        coord: CellCoord,
+        /// Which gesture step this is.
+        kind: MouseKind,
+        /// Modifiers held during the gesture.
+        mods: Modifiers,
+        /// The inverse mapping the frontend was displaying.
+        ///
+        /// **Zero is invalid** and is refused like a mismatch: it is
+        /// what a default-constructed or half-initialised sender
+        /// produces, so accepting it would let a peer opt out of the
+        /// check by sending nothing. A live key starts at 1.
+        ///
+        /// Appended **last within the variant**, so this mirrors
+        /// [`Self::PanelPointer`]'s field order exactly and the two stay
+        /// diffable by eye.
+        mapping_generation: u64,
+    },
 }
+
+/// First protocol version carrying the **mapped panel family** —
+/// [`FrontendEvent::PanelPointerMapped`] and
+/// [`crate::panel::PanelFramePayload::PresentMapped`].
+///
+/// Read as a constant rather than compared against a literal, and
+/// **not** derived from [`PROTOCOL_VERSION`]: expressing the boundary
+/// against a moving ceiling would silently drag this feature forward
+/// on the next bump.
+pub const PANEL_MAPPING_MIN_VERSION: u32 = 25;
 
 /// First protocol version carrying [`FrontendEvent::TextInput`].
 ///
@@ -617,7 +684,8 @@ impl FrontendEvent {
             | Self::FrontendCellGeometry { frontend_id, .. }
             | Self::PanelResizeRows { frontend_id, .. }
             | Self::PanelPointer { frontend_id, .. }
-            | Self::TextInput { frontend_id, .. } => *frontend_id,
+            | Self::TextInput { frontend_id, .. }
+            | Self::PanelPointerMapped { frontend_id, .. } => *frontend_id,
         }
     }
 }
@@ -1920,7 +1988,18 @@ pub enum ResourceBody {
 /// negotiated version. What is unusual here is only that the extension
 /// is **inbound-only** — there is no outbound counterpart to withhold,
 /// so the receiver check is the whole of the daemon's half.
-pub const PROTOCOL_VERSION: u32 = 24;
+///
+/// Bottom panel §5b: bumped 24 → 25 for the mapped panel family,
+/// [`FrontendEvent::PanelPointerMapped`] and
+/// [`crate::panel::PanelFramePayload::PresentMapped`]. Both variants are
+/// appended after their enum's v24 final variant. The family is gated in
+/// both directions from the authenticated session's negotiated version:
+/// v6–v24 sessions use only `PanelPointer`/`Present`, while v25 sessions
+/// use only the mapped pair; choosing the other discriminant is refused,
+/// not reinterpreted. [`crate::panel::PanelFramePayload::Absent`] remains
+/// common because hiding a band carries no mapping. The advertised
+/// baseline remains 20.
+pub const PROTOCOL_VERSION: u32 = 25;
 
 /// Protocol version placed in the daemon's server-first [`Hello`].
 ///
@@ -2108,8 +2187,16 @@ pub fn negotiated_session_version(frontend_offer: u32) -> u32 {
 /// cannot rely on the producer withholding. [`ADVERTISED_PROTOCOL_VERSION`] does not move: a v23
 /// frontend negotiates v23, never sends the variant, and keeps today's
 /// first-scalar behaviour.
+///
+/// Bottom panel §5b: extended to `[6, ..., 25]` for
+/// [`FrontendEvent::PanelPointerMapped`] and
+/// [`crate::panel::PanelFramePayload::PresentMapped`]. The authenticated
+/// negotiated version selects exactly one legacy/mapped family in each
+/// direction; a peer compiled from this crate can encode either variant,
+/// so receiver-side refusal is load-bearing. `Absent` is common, and
+/// [`ADVERTISED_PROTOCOL_VERSION`] remains 20.
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[
-    6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+    6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
 ];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if
