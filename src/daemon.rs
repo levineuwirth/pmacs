@@ -1019,6 +1019,112 @@ fn panel_event_epochs_are_current(
         .is_some_and(|geometry| geometry.geometry_epoch == geometry_epoch)
 }
 
+/// Parent 48 Q#BP-R4 — the authoritative lifecycle table.
+///
+/// The disposition is decided BEFORE any target effect, and the live
+/// record is consulted before a left tail reaches a child or a
+/// selection. That ordering is the point: the old shape validated,
+/// classified and mutated in one pass, so an `Up` or `Drag` with no
+/// accepted `Down` had already landed by the time the latch was read.
+///
+/// Exactly one completion per gesture. An `Accepted` release performs
+/// the ordinary in-content completion and takes the record; a
+/// `Consumed` release did not reach content, so it delivers the
+/// RECORDED completion and takes the record. Running both is P5.
+fn replay_panel_pointer(
+    editor: &mut EditorState,
+    semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+    source: FrontendId,
+    buffer_id: crate::buffer::BufferId,
+    coord: pmacs_protocol::CellCoord,
+    kind: pmacs_protocol::MouseKind,
+    mods: pmacs_protocol::Modifiers,
+) {
+    use crate::editor::PanelPointerOutcome as Outcome;
+    use pmacs_protocol::{MouseButton, MouseKind};
+
+    let disposition = editor.classify_panel_pointer(source, buffer_id, coord, kind);
+    let outcome = disposition.outcome();
+    if outcome == Outcome::Refused {
+        // No effect, and the latch is left exactly as it was: a refused
+        // event cannot be known to concern the live gesture at all.
+        return;
+    }
+    let live = semantic_states
+        .get(&source)
+        .is_some_and(crate::semantic_render::SemanticRenderState::has_accepted_gesture);
+
+    match kind {
+        MouseKind::Down(MouseButton::Left) => {
+            if outcome != Outcome::Accepted {
+                // A chrome press begins nothing.
+                return;
+            }
+            let reached_child = editor.apply_panel_pointer(source, &disposition, coord, kind, mods);
+            if let Some(state) = semantic_states.get_mut(&source) {
+                // Armed FROM THE EFFECT RESULT: `reached_child` is
+                // measured where the report branch is taken, not
+                // predicted from the modes beforehand.
+                state.arm_accepted_gesture(crate::semantic_render::AcceptedPanelGesture {
+                    button: MouseButton::Left,
+                    coord,
+                    buffer_id,
+                    reached_child,
+                });
+            }
+        }
+        MouseKind::Drag(MouseButton::Left) => {
+            if outcome != Outcome::Accepted || !live {
+                // Stale tail, or a drag over chrome: inert. Any live
+                // record is retained rather than advanced, because the
+                // pointer is not over content.
+                return;
+            }
+            let _ = editor.apply_panel_pointer(source, &disposition, coord, kind, mods);
+            if let Some(state) = semantic_states.get_mut(&source) {
+                state.note_gesture_content_cell(coord);
+            }
+        }
+        MouseKind::Up(MouseButton::Left) => {
+            if !live {
+                // A release with no accepted press is inert. Letting it
+                // through would send a child tail or mutate a selection
+                // for a gesture that never began.
+                return;
+            }
+            match outcome {
+                Outcome::Accepted => {
+                    let _ = editor.apply_panel_pointer(source, &disposition, coord, kind, mods);
+                    if let Some(state) = semantic_states.get_mut(&source) {
+                        // Taken WITHOUT counting a cancellation, and
+                        // without also running the recorded completion.
+                        let _ = state.consume_accepted_gesture();
+                    }
+                }
+                Outcome::Consumed => {
+                    // The release landed on chrome, so the content path
+                    // never ran. Terminate from the record, at its last
+                    // valid content cell.
+                    let record = semantic_states.get_mut(&source).and_then(
+                        crate::semantic_render::SemanticRenderState::consume_accepted_gesture,
+                    );
+                    if let Some(record) = record {
+                        editor.complete_panel_gesture(source, &record, mods);
+                    }
+                }
+                Outcome::Refused => unreachable!("refused returned above"),
+            }
+        }
+        _ => {
+            // Every other kind: a one-shot content effect, and it never
+            // touches the left-gesture latch.
+            if outcome == Outcome::Accepted {
+                let _ = editor.apply_panel_pointer(source, &disposition, coord, kind, mods);
+            }
+        }
+    }
+}
+
 /// §5b — which panel-pointer family this session speaks.
 ///
 /// **Read from the AUTHENTICATED source, never from the payload's
@@ -1029,50 +1135,11 @@ fn panel_event_epochs_are_current(
 /// Consulted BEFORE the payload is trusted, before any generation is
 /// validated and before any mutation: the family decides which variant
 /// is even admissible, so it cannot depend on the variant's contents.
-/// §5b G5c/G5d/G5g — update the accepted-gesture latch for one
-/// ACCEPTED panel gesture.
 ///
-/// Called only after every gate has passed, so "accepted" means exactly
-/// that. Three rules, and each closes its own hole:
-///
-/// * only a left `Down` ARMS — a right press opens a menu and ends
-///   there, and `Move`, wheel and the other buttons begin nothing, so
-///   arming on them would manufacture a delayed release at the next
-///   authority loss (G5g);
-/// * a left `Up` CONSUMES, or a later invalidation finds a gesture it
-///   believes live and duplicates its release (G5c);
-/// * an `Up` with no armed gesture is INERT — it terminates nothing,
-///   because nothing began (G5d).
-fn update_accepted_gesture(
-    semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
-    source: FrontendId,
-    kind: pmacs_protocol::MouseKind,
-    coord: pmacs_protocol::CellCoord,
-    buffer_id: crate::buffer::BufferId,
-    reached_child: bool,
-) {
-    use pmacs_protocol::{MouseButton, MouseKind};
-    let Some(state) = semantic_states.get_mut(&source) else {
-        return;
-    };
-    match kind {
-        MouseKind::Down(MouseButton::Left) => {
-            state.arm_accepted_gesture(crate::semantic_render::AcceptedPanelGesture {
-                button: MouseButton::Left,
-                coord,
-                buffer_id,
-                reached_child,
-            });
-        }
-        MouseKind::Up(MouseButton::Left) => {
-            // Inert when nothing was armed: `take` on `None` is the
-            // whole of G5d.
-            let _ = state.consume_accepted_gesture();
-        }
-        _ => {}
-    }
-}
-
+/// **Re-homed here.** This paragraph documented THIS function but sat
+/// above `update_accepted_gesture`, whose own doc followed it in the
+/// same block. Deleting that function's doc with it made the
+/// misplacement visible.
 fn peer_uses_mapped_panel_family(session_registry: &SessionRegistry, source: FrontendId) -> bool {
     session_registry
         .session_state(source)
@@ -2605,21 +2672,15 @@ fn handle_dispatcher_event(
                         // armed gesture, so the authority loss that
                         // should have ended it finds nothing, and the
                         // child holds the button down forever.
-                        if editor
-                            .dispatch_semantic_panel_pointer(source, buffer_id, coord, kind, mods)
-                        {
-                            update_accepted_gesture(
-                                semantic_states,
-                                source,
-                                kind,
-                                coord,
-                                buffer_id,
-                                // Whether the press reached a child is
-                                // replay's to know; until replay exists
-                                // no press does.
-                                false,
-                            );
-                        }
+                        replay_panel_pointer(
+                            editor,
+                            semantic_states,
+                            source,
+                            buffer_id,
+                            coord,
+                            kind,
+                            mods,
+                        );
                     }
                 }
                 FrontendEvent::PanelPointerMapped {
@@ -2676,18 +2737,15 @@ fn handle_dispatcher_event(
                         // survive the ladder; it does not make a
                         // surviving one land, so this arm needs the same
                         // gate.
-                        if editor
-                            .dispatch_semantic_panel_pointer(source, buffer_id, coord, kind, mods)
-                        {
-                            update_accepted_gesture(
-                                semantic_states,
-                                source,
-                                kind,
-                                coord,
-                                buffer_id,
-                                false,
-                            );
-                        }
+                        replay_panel_pointer(
+                            editor,
+                            semantic_states,
+                            source,
+                            buffer_id,
+                            coord,
+                            kind,
+                            mods,
+                        );
                     }
                 }
                 FrontendEvent::Pointer {
@@ -7450,6 +7508,309 @@ mod tests {
                 mapping_generation,
             },
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Parent 48 Q#BP-R4 — the lifecycle table's witnesses.
+    //
+    // Every row here reads a TARGET EFFECT, never the latch alone. The
+    // framing is explicit that a latch-only assertion must not satisfy
+    // these: emptying the latch is bookkeeping, and the defect being
+    // fenced is precisely a gesture whose bookkeeping looks right while
+    // the target heard nothing.
+    // -----------------------------------------------------------------
+
+    /// The panel's buffer, an in-content cell, and a cell on its CHROME
+    /// (the mode line, which is the grid's last row per R-c).
+    fn panel_buffer_and_chrome_coord(
+        editor: &crate::editor::EditorState,
+        fid: FrontendId,
+        panel: crate::window::WindowId,
+    ) -> (crate::buffer::BufferId, pmacs_protocol::CellCoord) {
+        let core = editor.core.borrow();
+        let grid = core.panel_grid_size(fid).expect("a live panel grid");
+        let content_rows = grid.rows.saturating_sub(1);
+        assert!(
+            content_rows > 0,
+            "fixture: the panel must have content rows"
+        );
+        (
+            core.windows[&panel].buffer_id,
+            pmacs_protocol::CellCoord::new(content_rows, 0),
+        )
+    }
+
+    /// The side window's cursor, for reading a replayed effect.
+    fn panel_cursor(editor: &crate::editor::EditorState, panel: crate::window::WindowId) -> u64 {
+        editor.core.borrow().windows[&panel].cursor
+    }
+
+    /// P1 — a press on the band's MODE LINE begins nothing.
+    ///
+    /// The merge made this arm the latch, because `Consumed` and
+    /// `Accepted` were the same `true`. The row reads the cursor as well
+    /// as the latch: a chrome press must not move point either.
+    #[test]
+    fn r4_p1_a_chrome_press_neither_arms_nor_moves_point() {
+        let fid = FrontendId(790);
+        let (mut editor, mut states, mut render, _document, panel, epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        let (buffer_id, chrome) = panel_buffer_and_chrome_coord(&editor, fid, panel);
+        let press = pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left);
+        let before = panel_cursor(&editor, panel);
+
+        let generation = live_generation(PanelArm::Mapped, &editor, &mut states, fid);
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut states,
+            &mut render,
+            arm_pointer(
+                PanelArm::Mapped,
+                fid,
+                epochs,
+                buffer_id,
+                generation,
+                chrome,
+                press,
+            ),
+        );
+
+        assert!(
+            !states[&fid].has_accepted_gesture(),
+            "a chrome press must not arm: the mode line is not content, \
+             and a gesture armed there would be cancelled or released \
+             for a press the target never saw"
+        );
+        assert_eq!(
+            panel_cursor(&editor, panel),
+            before,
+            "and it must not move point --- `Consumed` means the panel \
+             claimed the cell, not that it replayed anything"
+        );
+    }
+
+    /// P7 — a release with no accepted press reaches nothing.
+    ///
+    /// This is the stale-tail case the pre-effect disposition exists
+    /// for. The document `Up` arm clears an ACTIVE BUT EMPTY selection,
+    /// so the fixture arms one and asserts it SURVIVES: an inert release
+    /// must not run that clear.
+    #[test]
+    fn r4_p7_a_release_with_no_accepted_press_is_inert() {
+        let fid = FrontendId(791);
+        let (mut editor, mut states, mut render, _document, panel, epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        let release = pmacs_protocol::MouseKind::Up(pmacs_protocol::MouseButton::Left);
+        let inside = pmacs_protocol::CellCoord::new(0, 0);
+
+        // An empty selection is exactly what an accepted release would
+        // clear, so it is the discriminator for "did the effect run".
+        {
+            let mut core = editor.core.borrow_mut();
+            let cursor = core.windows[&panel].cursor;
+            core.windows.get_mut(&panel).expect("panel").selection =
+                Some(crate::window::Selection { anchor: cursor });
+        }
+        assert!(
+            !states[&fid].has_accepted_gesture(),
+            "fixture: no gesture is live"
+        );
+
+        let generation = live_generation(PanelArm::Mapped, &editor, &mut states, fid);
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut states,
+            &mut render,
+            arm_pointer(
+                PanelArm::Mapped,
+                fid,
+                epochs,
+                buffer_id,
+                generation,
+                inside,
+                release,
+            ),
+        );
+
+        assert!(
+            editor.core.borrow().windows[&panel].selection.is_some(),
+            "a release with no accepted press must reach NOTHING --- it \
+             cleared a selection it never began, which on a terminal is \
+             a child tail for a press that never happened"
+        );
+    }
+
+    /// P8 — a drag with no accepted press reaches nothing.
+    ///
+    /// The document `Drag` arm moves point unconditionally, so an
+    /// orphan drag used to drive the cursor from a gesture that never
+    /// began.
+    #[test]
+    fn r4_p8_an_orphan_drag_does_not_move_point() {
+        let fid = FrontendId(792);
+        let (mut editor, mut states, mut render, _document, panel, epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        let drag = pmacs_protocol::MouseKind::Drag(pmacs_protocol::MouseButton::Left);
+        // THE PANEL BUFFER MUST HAVE CONTENT. `*panel*` is created empty,
+        // so `panel_cell_byte` returns `None` for every interesting cell
+        // and the drag cannot move point whether it is gated or not —
+        // the row would pass vacuously. Caught by the gating mutation
+        // failing to bite.
+        foreign_edit(&editor, buffer_id, b"alpha beta gamma\ndelta\n");
+        // A cell the cursor is NOT already on, or the row cannot fail.
+        let elsewhere = pmacs_protocol::CellCoord::new(0, 6);
+        let before = panel_cursor(&editor, panel);
+        assert_eq!(before, 0, "fixture: point starts at the buffer head");
+
+        let generation = live_generation(PanelArm::Mapped, &editor, &mut states, fid);
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut states,
+            &mut render,
+            arm_pointer(
+                PanelArm::Mapped,
+                fid,
+                epochs,
+                buffer_id,
+                generation,
+                elsewhere,
+                drag,
+            ),
+        );
+
+        assert_eq!(
+            panel_cursor(&editor, panel),
+            before,
+            "an orphan drag must not move point"
+        );
+        assert!(
+            !states[&fid].has_accepted_gesture(),
+            "and it must not manufacture a record by writing to one"
+        );
+    }
+
+    /// P3 — a chrome release on a TERMINAL panel completes the gesture
+    /// from the record.
+    ///
+    /// **The document leg cannot test this, and an earlier version of
+    /// this row tried.** R-c lets document chrome `Up` fall THROUGH to
+    /// content, so it classifies `Accepted` and takes the ordinary path;
+    /// the row passed with the recorded completion deleted. Only a
+    /// terminal panel returns `Consumed` for a chrome release — which is
+    /// exactly the path the framing named, where the dispatcher returns
+    /// before `apply_terminal_gesture`.
+    ///
+    /// The observable is the terminal view's DRAG STATE, not the latch:
+    /// `finish_selection` is what takes it, so a gesture that ended
+    /// without a delivered completion stays mid-drag forever.
+    #[test]
+    fn r4_p3_a_chrome_release_completes_a_terminal_gesture_from_the_record() {
+        use crate::terminal::{TerminalSpec, view::TerminalViewKey};
+
+        // LEGACY, deliberately. This row is about the Consumed/terminal
+        // completion, which is family-independent — and the mapped arm
+        // cannot express it, because reading the live mapping generation
+        // ADVANCES the key, and §5b wired a key advance to cancel the
+        // live gesture (G5a). The fixture would destroy the gesture it
+        // is trying to complete, which is how an earlier version of this
+        // row failed while the implementation was correct.
+        let fid = FrontendId(793);
+        let (mut editor, mut states, mut render, _document, panel, _epochs) =
+            panel_session_at(LEGACY_PANEL_VERSION, fid);
+
+        let mut spec = TerminalSpec::new("/bin/sh");
+        spec.args = vec!["-c".into(), "sleep 30".into()];
+        spec.rows = 4;
+        spec.cols = 20;
+        let terminal_buffer = editor
+            .terminal_manager
+            .borrow_mut()
+            .open(
+                spec,
+                &mut editor.core.borrow_mut(),
+                &mut editor.process_supervisor.borrow_mut(),
+            )
+            .expect("open panel terminal");
+        {
+            let mut core = editor.core.borrow_mut();
+            let view = {
+                let registry = core.registry.clone();
+                let registry = registry.borrow();
+                crate::text_view::TextView::new(
+                    registry.get(terminal_buffer).expect("terminal buffer"),
+                )
+            };
+            let window = core.windows.get_mut(&panel).expect("panel window");
+            window.buffer_id = terminal_buffer;
+            window.text_view = view;
+        }
+        // Re-ship the declaration so the epochs match the terminal panel.
+        let epochs = shipped_declaration(&editor, fid, &mut states);
+        let (buffer_id, chrome) = panel_buffer_and_chrome_coord(&editor, fid, panel);
+        assert_eq!(
+            buffer_id, terminal_buffer,
+            "fixture: the panel is the terminal"
+        );
+        let inside = pmacs_protocol::CellCoord::new(0, 0);
+        let press = pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left);
+        let release = pmacs_protocol::MouseKind::Up(pmacs_protocol::MouseButton::Left);
+        let key = TerminalViewKey::new(fid, panel, terminal_buffer);
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            LEGACY_PANEL_VERSION,
+            &mut states,
+            &mut render,
+            arm_pointer(PanelArm::Legacy, fid, epochs, buffer_id, 0, inside, press),
+        );
+        assert!(
+            states[&fid].has_accepted_gesture(),
+            "fixture: the content press armed"
+        );
+        assert!(
+            editor
+                .terminal_manager
+                .borrow()
+                .view_is_dragging_for_test(key),
+            "fixture: the press began a local terminal drag"
+        );
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            LEGACY_PANEL_VERSION,
+            &mut states,
+            &mut render,
+            arm_pointer(PanelArm::Legacy, fid, epochs, buffer_id, 0, chrome, release),
+        );
+
+        assert!(
+            !editor
+                .terminal_manager
+                .borrow()
+                .view_is_dragging_for_test(key),
+            "the RECORDED completion must run: a terminal chrome release \
+             returns before the replay path, so without it the drag never \
+             finishes while the latch looks correctly empty"
+        );
+        assert!(
+            !states[&fid].has_accepted_gesture(),
+            "and the record is taken"
+        );
+        assert_eq!(
+            states[&fid].panel_gesture_cancellations(),
+            0,
+            "a completion is not a cancellation"
+        );
     }
 
     /// The panel's buffer, and a coordinate one row past its grid.

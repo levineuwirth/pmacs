@@ -408,6 +408,62 @@ impl PanelMappingSnapshot {
     }
 }
 
+/// How an authenticated panel event relates to the authoritative panel
+/// surface, decided BEFORE any target effect (parent 48 Q#BP-R4).
+///
+/// Two branches once agreed on `bool` while disagreeing on its meaning
+/// — §5b read it as "the gesture was accepted" and drove the
+/// accepted-gesture latch off it, while panel replay read it as "the
+/// event was consumed here", chrome swallows included. Merged, a press
+/// on the band's mode line armed a gesture that never began in content.
+/// **This type exists so that collision cannot be re-created silently:**
+/// a two-state answer with the corrected meaning would be right today
+/// and would let the next author restore the bug without touching a
+/// test.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum PanelPointerOutcome {
+    /// Not addressable as this panel: no grid, out of grid, no side
+    /// window, or a buffer that is not the one shown there.
+    Refused,
+    /// This panel owns the cell/event, but it is deliberately not a
+    /// content gesture — the chrome claims of Q#BP-R2 and R-c.
+    Consumed,
+    /// A content gesture for the resolved target.
+    Accepted,
+}
+
+/// A classified panel gesture: the outcome, and the resolution it was
+/// decided from.
+///
+/// The resolution travels with the outcome so that
+/// `EditorState::apply_panel_pointer` acts on the SAME derivation the
+/// disposition was decided by. Q#BP-R4 fixes the editor as the only
+/// authority for that derivation; handing the daemon a bare outcome
+/// and letting it re-derive chrome or target kind would be the hole
+/// §5b closed, reopened beside the dispatcher.
+pub struct PanelPointerDisposition {
+    outcome: PanelPointerOutcome,
+    resolved: Option<ResolvedPanelTarget>,
+}
+
+impl PanelPointerDisposition {
+    /// The disposition, for the daemon's lifecycle table.
+    #[must_use]
+    pub fn outcome(&self) -> PanelPointerOutcome {
+        self.outcome
+    }
+}
+
+/// The panel target a disposition resolved to, derived once.
+struct ResolvedPanelTarget {
+    side: WindowId,
+    buffer_id: crate::buffer::BufferId,
+    is_terminal: bool,
+    /// The grid's rows MINUS the mode line — never the frame (R-c).
+    content_rows: u32,
+    cols: u32,
+}
+
 /// What decides the mapping BELOW the geometry, which differs by
 /// target kind.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -2769,7 +2825,8 @@ impl EditorState {
             .is_some_and(|now| now != current)
     }
 
-    /// Apply an accepted `FrontendEvent::PanelPointer` gesture (Q#BP16).
+    /// Classify an authenticated panel gesture, WITHOUT applying it
+    /// (Q#BP-R4).
     ///
     /// Steps 2, 5, and 6 of Q#BP16's ladder are re-derived here from the
     /// daemon's own state — a live, non-hidden side window whose current
@@ -2777,6 +2834,104 @@ impl EditorState {
     /// daemon derived. Steps 1, 3, and 4 (source authentication and both
     /// epochs) belong to the caller, because only the session holds the
     /// declaration the frontend was actually looking at.
+    ///
+    /// **The answer is a DISPOSITION, decided before any target
+    /// effect.** Q#BP-R4 fixes two facts and this split exists to hold
+    /// them: the editor is the **only** authority that derives
+    /// `Refused`/`Consumed`/`Accepted`, and the disposition completes
+    /// before a left `Drag`/`Up` reaches a child or a selection. The old
+    /// single function could not honour the second — it validated,
+    /// classified and mutated in one pass, so a tail with no accepted
+    /// press had already landed by the time the daemon consulted the
+    /// latch.
+    ///
+    /// The returned value carries the resolution it was decided from, so
+    /// [`Self::apply_panel_pointer`] acts on the same derivation rather
+    /// than repeating it. **A second derivation is the hole §5b closed**;
+    /// reopening it beside the dispatcher would be the same defect in a
+    /// new place.
+    #[must_use]
+    pub fn classify_panel_pointer(
+        &self,
+        frontend_id: FrontendId,
+        buffer_id: crate::buffer::BufferId,
+        coord: CellCoord,
+        kind: pmacs_protocol::MouseKind,
+    ) -> PanelPointerDisposition {
+        use pmacs_protocol::MouseKind as PKind;
+
+        let refused = PanelPointerDisposition {
+            outcome: PanelPointerOutcome::Refused,
+            resolved: None,
+        };
+
+        let Some(size) = self.core.borrow().panel_grid_size(frontend_id) else {
+            return refused;
+        };
+        if coord.row >= size.rows || coord.col >= size.cols {
+            return refused;
+        }
+        // Parent 48 R-c: the panel's LAST ROW IS ITS MODE LINE. Projection
+        // derives content as `rows - 1` while the frontend hit-tests the
+        // whole frame, so a `PanelPointer` can legitimately name chrome —
+        // and chrome is never a content cell for either target.
+        let content_rows = size.rows.saturating_sub(1);
+        if content_rows == 0 {
+            return refused;
+        }
+        let is_terminal = self.terminal_manager.borrow().is_terminal(buffer_id);
+        let side = {
+            let core = self.core.borrow();
+            let Some(side) = core.side_window_for(frontend_id) else {
+                return refused;
+            };
+            if core.windows.get(&side).map(|window| window.buffer_id) != Some(buffer_id) {
+                return refused;
+            }
+            side
+        };
+
+        let resolved = Some(ResolvedPanelTarget {
+            side,
+            buffer_id,
+            is_terminal,
+            content_rows,
+            cols: size.cols,
+        });
+        let on_chrome = coord.row >= content_rows;
+        let is_wheel = matches!(
+            kind,
+            PKind::ScrollUp | PKind::ScrollDown | PKind::ScrollLeft | PKind::ScrollRight
+        );
+
+        // Everything below is CLAIMED by this panel — the cell is ours —
+        // and the only question left is whether it is a content gesture.
+        let outcome = if on_chrome {
+            // Q#BP-R2, step 3 of the ordering: a terminal panel's chrome
+            // wheel is consumed BEFORE focus, before `active_frontend`,
+            // and before any controller claim. Placing it after
+            // activation would leave the wheel changing focus while
+            // scrolling nothing.
+            //
+            // TUI parity for the rest: a terminal never sees a chrome
+            // coordinate (`dispatch_mouse` rejects every kind above
+            // `inner_rows`). Document chrome mirrors the TUI's PER-KIND
+            // rule — presses and motion are reserved, while `Up` and the
+            // wheel fall through, because an `Up` must still terminate a
+            // gesture begun in content and a chrome wheel still scrolls.
+            if is_terminal || matches!(kind, PKind::Down(_) | PKind::Drag(_) | PKind::Move) {
+                let _ = is_wheel;
+                PanelPointerOutcome::Consumed
+            } else {
+                PanelPointerOutcome::Accepted
+            }
+        } else {
+            PanelPointerOutcome::Accepted
+        };
+        PanelPointerDisposition { outcome, resolved }
+    }
+
+    /// Apply a classified panel gesture to its target (Q#BP-R4).
     ///
     /// **Activation is not uniform, and Q#BP16 says so explicitly.** A
     /// **press** focuses any panel — that is click-to-focus, and
@@ -2796,112 +2951,132 @@ impl EditorState {
     /// Review round 1 (R2-5) found the terminal clause applied to both.
     /// Bare hover neither focuses nor claims, on either kind.
     ///
-    /// **Replay is out of scope in Stage 2B-2.** Driving selection,
-    /// listview rows, or child SGR reporting is parent acceptance 48,
-    /// which needs the GPU band and lands in Stage 2B-3.
-    ///
-    /// Returns whether the gesture was accepted.
-    ///
-    /// `#[must_use]` because the accepted-gesture latch is driven off
-    /// this answer, and discarding it silently arms on rejected presses
-    /// and consumes on rejected releases.
-    #[must_use]
-    pub fn dispatch_semantic_panel_pointer(
+    /// **Only `Accepted` reaches a target.** A `Consumed` disposition
+    /// returns without effect: the claim was the effect. Returns whether
+    /// the gesture reached a CHILD, which is what the accepted-gesture
+    /// latch records — the framing requires arming "from the effect
+    /// result", so this is measured rather than assumed.
+    pub fn apply_panel_pointer(
         &mut self,
         frontend_id: FrontendId,
-        buffer_id: crate::buffer::BufferId,
+        disposition: &PanelPointerDisposition,
         coord: CellCoord,
         kind: pmacs_protocol::MouseKind,
         mods: pmacs_protocol::Modifiers,
     ) -> bool {
         use pmacs_protocol::MouseKind as PKind;
 
-        let Some(size) = self.core.borrow().panel_grid_size(frontend_id) else {
+        if disposition.outcome != PanelPointerOutcome::Accepted {
+            return false;
+        }
+        let Some(target) = disposition.resolved.as_ref() else {
             return false;
         };
-        if coord.row >= size.rows || coord.col >= size.cols {
-            return false;
-        }
-        // Parent 48 R-c: the panel's LAST ROW IS ITS MODE LINE. Projection
-        // derives content as `rows - 1` while the frontend hit-tests the
-        // whole frame, so a `PanelPointer` can legitimately name chrome —
-        // and chrome is never a content cell for either target.
-        let content_rows = size.rows.saturating_sub(1);
-        if content_rows == 0 {
-            return false;
-        }
-        let on_chrome = coord.row >= content_rows;
-        let is_wheel = matches!(
-            kind,
-            PKind::ScrollUp | PKind::ScrollDown | PKind::ScrollLeft | PKind::ScrollRight
-        );
 
-        let is_terminal = self.terminal_manager.borrow().is_terminal(buffer_id);
-        let side = {
-            let core = self.core.borrow();
-            let Some(side) = core.side_window_for(frontend_id) else {
-                return false;
-            };
-            if core.windows.get(&side).map(|window| window.buffer_id) != Some(buffer_id) {
-                return false;
-            }
-            side
-        };
-
-        // Q#BP-R2, step 3 of the ordering: a terminal panel's CHROME WHEEL
-        // is not a terminal gesture at all, so it is consumed HERE —
-        // before `focus_window`, before `active_frontend`, before any
-        // controller claim, and before the shared terminal path.
-        //
-        // Placing this below the activation block would leave the wheel
-        // CHANGING FOCUS while scrolling nothing and claiming no
-        // controller: `activates` is `!Move` for a terminal, so the wheel
-        // already activates. That half-state is what the
-        // activate-then-claim rule exists to prevent.
-        if is_terminal && on_chrome && is_wheel {
-            return true;
-        }
-        if on_chrome {
-            if is_terminal {
-                // TUI parity: a terminal never sees a chrome coordinate
-                // (`dispatch_mouse` rejects every kind above `inner_rows`
-                // for a terminal window). The wheel left above; the rest
-                // stops here.
-                return true;
-            }
-            // Document chrome mirrors the TUI's PER-KIND rule: presses and
-            // motion are reserved, while `Up` and the wheel fall through —
-            // an `Up` must still terminate a gesture begun in content, and
-            // a chrome wheel still scrolls.
-            if matches!(kind, PKind::Down(_) | PKind::Drag(_) | PKind::Move) {
-                return true;
-            }
-        }
-
-        let activates = if is_terminal {
+        let activates = if target.is_terminal {
             !matches!(kind, PKind::Move)
         } else {
             matches!(kind, PKind::Down(_))
         };
         if activates {
             let mut core = self.core.borrow_mut();
-            core.focus_window(frontend_id, side);
+            core.focus_window(frontend_id, target.side);
             core.active_frontend = frontend_id;
         }
 
-        if is_terminal {
+        if target.is_terminal {
             // The ONE terminal pointer path, shared with the TUI and the
             // document terminal. The viewport is `content_rows`, never the
             // full grid: passing the frame would make the mode line a child
             // cell and put every clamp one row out.
-            let viewport = CellSize::new(content_rows, size.cols);
-            let key = TerminalViewKey::new(frontend_id, side, buffer_id);
-            self.apply_terminal_gesture(key, viewport, coord, kind, mods, (coord.row, coord.col));
-            return true;
+            let viewport = CellSize::new(target.content_rows, target.cols);
+            let key = TerminalViewKey::new(frontend_id, target.side, target.buffer_id);
+            return self.apply_terminal_gesture(
+                key,
+                viewport,
+                coord,
+                kind,
+                mods,
+                (coord.row, coord.col),
+            );
         }
 
-        self.replay_panel_document_gesture(frontend_id, side, coord, kind, mods);
-        true
+        self.replay_panel_document_gesture(frontend_id, target.side, coord, kind, mods);
+        false
+    }
+
+    /// Deliver the RECORDED completion for a gesture the ordinary path
+    /// did not complete (parent 48 Q#BP-R4).
+    ///
+    /// Used when a release is `Consumed` — it landed on chrome, so the
+    /// content path never ran — or when an authority loss cancels a
+    /// live gesture. An `Accepted` release must NOT come here: it
+    /// already performed the ordinary in-content completion, and doing
+    /// both is the duplicate P5 forbids.
+    ///
+    /// **The domain is read from the record, not from where the pointer
+    /// is now.** `buffer_id` says which panel the gesture belongs to and
+    /// `reached_child` says whether a press was ever delivered, so the
+    /// three completions separate without a fourth field:
+    ///
+    /// * reporting terminal → the child gets its release;
+    /// * local terminal → the drag's selection is finalised;
+    /// * document → the gesture completes and an empty selection is
+    ///   cleared without moving point.
+    ///
+    /// Delivery goes through the SAME paths an in-content release uses,
+    /// at the record's last valid content cell (R-c2). A second
+    /// implementation of "what a release does" would drift from the
+    /// first, which is the whole reason the shared terminal path exists.
+    pub fn complete_panel_gesture(
+        &mut self,
+        frontend_id: FrontendId,
+        record: &crate::semantic_render::AcceptedPanelGesture,
+        mods: pmacs_protocol::Modifiers,
+    ) {
+        use pmacs_protocol::{MouseButton as PButton, MouseKind as PKind};
+
+        let release = PKind::Up(PButton::Left);
+        let Some(size) = self.core.borrow().panel_grid_size(frontend_id) else {
+            return;
+        };
+        let content_rows = size.rows.saturating_sub(1);
+        if content_rows == 0 {
+            return;
+        }
+        let side = {
+            let core = self.core.borrow();
+            let Some(side) = core.side_window_for(frontend_id) else {
+                return;
+            };
+            // The panel must still be showing the buffer the gesture
+            // belongs to. If it is not, the four stranding transitions
+            // own this record, not an ordinary completion.
+            if core.windows.get(&side).map(|window| window.buffer_id) != Some(record.buffer_id) {
+                return;
+            }
+            side
+        };
+
+        if self.terminal_manager.borrow().is_terminal(record.buffer_id) {
+            // Both terminal domains route here: `apply_terminal_gesture`
+            // reports to the child when the modes allow and finalises the
+            // local selection otherwise, which is exactly the split this
+            // completion needs.
+            let viewport = CellSize::new(content_rows, size.cols);
+            let key = TerminalViewKey::new(frontend_id, side, record.buffer_id);
+            let _ = self.apply_terminal_gesture(
+                key,
+                viewport,
+                record.coord,
+                release,
+                mods,
+                (record.coord.row, record.coord.col),
+            );
+            return;
+        }
+
+        self.replay_panel_document_gesture(frontend_id, side, record.coord, release, mods);
     }
 
     /// Replay one accepted gesture into a DOCUMENT panel (parent 48).
@@ -3872,6 +4047,13 @@ impl EditorState {
     /// A second copy of this precedence in the GPU lane is exactly how
     /// Shift-drag or scrolled-back selection would silently diverge
     /// between frontends.
+    /// Returns whether the gesture REACHED THE CHILD as a mouse report.
+    ///
+    /// Parent 48 Q#BP-R4 arms the accepted-gesture latch "from the
+    /// effect result", so `reached_child` has to be measured where the
+    /// branch is taken rather than predicted from the modes beforehand:
+    /// the report is gated on five conditions and `encode_mouse` can
+    /// still decline.
     fn apply_terminal_gesture(
         &mut self,
         key: TerminalViewKey,
@@ -3880,12 +4062,12 @@ impl EditorState {
         kind: TerminalMouseKind,
         modifiers: TerminalModifiers,
         global: (u32, u32),
-    ) {
+    ) -> bool {
         let shift = modifiers.contains(TerminalModifiers::SHIFT);
         let (at_bottom, modes, screen_size) = {
             let mut manager = self.terminal_manager.borrow_mut();
             let Some(status) = manager.view_status_for_size(key, viewport_size) else {
-                return;
+                return false;
             };
             let modes = manager.modes_for_view(key).unwrap_or_default();
             let screen_size = manager.screen_size_for_view(key).unwrap_or(viewport_size);
@@ -3915,7 +4097,7 @@ impl EditorState {
                 self.claim_terminal_controller(key);
             }
             self.send_terminal_bytes(key.buffer_id, &bytes);
-            return;
+            return true;
         }
 
         if claims_control {
@@ -3946,6 +4128,9 @@ impl EditorState {
             }
             _ => {}
         }
+        // The local branch: scrollback, local selection or the menu. The
+        // child heard nothing.
+        false
     }
 
     fn is_double_click(

@@ -769,6 +769,25 @@ impl SemanticRenderState {
         cancelled
     }
 
+    /// The live gesture record, if any — parent 48 Q#BP-R4's
+    /// "live record" test, and the source of the recorded completion.
+    #[must_use]
+    pub fn accepted_gesture(&self) -> Option<&AcceptedPanelGesture> {
+        self.accepted_gesture.as_ref()
+    }
+
+    /// Q#BP-R4: an accepted `Drag` continues the gesture and moves its
+    /// LAST VALID CONTENT CELL, which is where a release that later
+    /// lands on chrome gets delivered (R-c2).
+    ///
+    /// Inert with nothing armed. A drag with no accepted press is a
+    /// stale tail and must not create a record by writing to one.
+    pub fn note_gesture_content_cell(&mut self, coord: pmacs_protocol::CellCoord) {
+        if let Some(gesture) = self.accepted_gesture.as_mut() {
+            gesture.coord = coord;
+        }
+    }
+
     /// Whether a gesture is currently accepted, for assertions.
     #[must_use]
     pub fn has_accepted_gesture(&self) -> bool {

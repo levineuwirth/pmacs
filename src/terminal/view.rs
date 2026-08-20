@@ -501,6 +501,22 @@ impl TerminalManager {
         moved || was_dragging
     }
 
+    /// Whether a view is mid-drag, for parent 48 Q#BP-R4's completion
+    /// witnesses.
+    ///
+    /// A local terminal gesture is "finished" exactly when
+    /// `finish_selection` takes `drag`, so this is the observable that
+    /// separates a delivered completion from a latch that merely
+    /// emptied — which is the distinction the framing requires those
+    /// rows to assert.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn view_is_dragging_for_test(&self, key: TerminalViewKey) -> bool {
+        self.views
+            .get(&key)
+            .is_some_and(|state| state.drag.is_some())
+    }
+
     /// Clear one view's terminal selection without changing its scroll anchor.
     pub fn clear_selection(&mut self, key: TerminalViewKey) -> bool {
         let Some(state) = self.views.get_mut(&key) else {
