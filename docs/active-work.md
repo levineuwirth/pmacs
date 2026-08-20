@@ -281,11 +281,37 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
   **`githubsucks/panel-pointer-replay` is the authoritative tip** (the
   ref, not a SHA). Recover with
   `git fetch githubsucks && git checkout panel-pointer-replay`.
-- **No PR yet. Checkpoint: framing revision 13 AWAITING APPROVAL;
-  IMPLEMENTATION PAUSED.** §5a's replay contract is approved at
-  revision 12 and partly implemented, but **Q#BP-R3 was OVERRULED** and
-  the lane now **blocks on a protocol-bearing cell-mapping
-  generation**, framed in **§5b**.
+- **No PR yet. Checkpoint: framing revision 14 AWAITING APPROVAL;
+  IMPLEMENTATION STILL PAUSED, now on approval rather than on a
+  blocker.** §5a's replay contract is approved at revision 12; revision
+  13 ruled Q#BP-R3 and blocked the lane on a protocol-bearing mapping
+  generation; **that block is DISCHARGED** — the slice merged as #242
+  (`47b5463`).
+- **MERGED main into this branch** at `b758c2e` rather than rebasing:
+  the lane's 12 commits include 10 framing revisions over the same
+  800–1000 line doc regions, so a rebase meant twelve rounds of
+  large-block resolution — the operation that produced a committed
+  diff3 marker on the last lane. Workspace compiles clean, **1964 lib
+  and 284 GPU tests pass**. Base is no longer `72da24a`; read it with
+  `git merge-base githubsucks/main HEAD`.
+- **THE MERGE CREATED ONE DEFECT AND SURFACED ONE COLLISION.**
+  - **Defect, fixed:** the merge kept BOTH copies of §5b — this
+    branch's stale pre-split one and main's authoritative one. I
+    discarded the uncommitted stub edit as obsolete and missed that its
+    **deletion** half was still owed. Removed; exactly one §5a and one
+    §5b remain.
+  - **Collision, ruled by revision 14 and NOT yet fixed in code:**
+    §5b and this lane gave `dispatch_semantic_panel_pointer`'s `bool`
+    different meanings — accepted-as-a-gesture versus consumed-here. A
+    mode-line press therefore **arms the latch** on this branch today.
+    **Q#BP-R4** rules a three-state `PanelPointerOutcome`, with an
+    asymmetric latch rule: arm only on `Accepted` + `Down(Left)`,
+    consume on any `Up(Left)` that was not `Refused`.
+- **Revision 14 also carries** the rows §5b's split table assigned
+  here, a **pending-release slot** for the cancellation record §5b
+  leaves nowhere to wait, the **four transitions** that strand a live
+  gesture once effects attach, and a **re-measurement obligation**:
+  every production anchor in §5a has moved, evidenced in the revision.
 - **THE BLOCKER, and why the earlier acceptance failed.** A
   `PanelPointer` names a cell; nothing on the wire says which inverse
   mapping the frontend saw, so the daemon inverts against whatever is

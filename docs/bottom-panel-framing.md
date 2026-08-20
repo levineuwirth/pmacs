@@ -1970,6 +1970,18 @@ cannot preserve the old panel-focused attach leak.
 
 ## 5a. Acceptance 48 — ground truth, MEASURED at `72da24a` (2026-08-14)
 
+**Status: revision 14 — AWAITING APPROVAL.** Revision 13 ruled Q#BP-R3
+and **blocked** this lane on a protocol-bearing mapping generation.
+That slice was framed as §5b, approved at revision 16, and **merged as
+#242 (`47b5463`)**, so **revision 13's block is DISCHARGED** and its
+ruling stands as history rather than as a gate. Revision 14 answers
+what the lane inherits from a substrate that changed underneath it:
+the meaning of the dispatcher's answer (**Q#BP-R4**, new), the rows
+§5b's split table assigned here, the cancellation record's missing
+resting place, four transitions that strand a live gesture, and a
+ground truth whose every anchor has moved. **The measurement date in
+this heading is now false and revision 14 owes its replacement.**
+
 **Why this section exists.** GUI arc Stage 1b's ground-truth pass found
 that `PanelPointer` **replays nothing**: `dispatch_semantic_panel_pointer`
 (`src/editor.rs:2674`) validates the coord, resolves the side window,
@@ -2628,105 +2640,189 @@ R-d's orphan is distinct from R-b's: **R-b's arrives from a passive
 panel, R-d's from a replaced or re-declared one**, and an
 implementation can fix either alone.
 
-## 5b. The cell-mapping generation — a protocol-bearing slice (Q#BP-R3)
+### Revision 14 — what §5b changed underneath this lane
 
-**Status: framing, AWAITING APPROVAL. Nothing implemented.** This slice
-**blocks** panel-pointer replay, which in turn blocks GUI arc 1b.
+#### Q#BP-R4 — what does `dispatch_semantic_panel_pointer`'s answer MEAN? **RULED: a three-state outcome, not a bool**
 
-### What it fixes
+**This question did not exist before the merge, and it was created by
+two branches agreeing on a type while disagreeing on its meaning.**
 
-A `PanelPointer` names a **cell**; the daemon must invert that to a
-**byte**. Nothing on the wire says which inverse mapping the frontend
-was looking at, so the daemon inverts against whatever is current. The
-mapping can move for reasons the clicking frontend neither caused nor
-can observe — **a foreign edit**, a fold, a reload — and the epochs do
-not move with it, so every existing gate accepts the gesture.
-
-This is the one hole in the ladder: `buffer_id` catches replacement,
-`panel_epoch` catches close/reopen, `geometry_epoch` catches a
-declaration race, and **nothing catches "the text under that cell
-changed"**.
-
-### The generation, and why not a token
-
-**A per-frame token is the wrong object.** Panels repaint constantly —
-focus, cursor blink, styling — and a token that moved with the frame
-would invalidate a live drag on the next repaint. That is precisely why
-`panel_epoch` is stable across ordinary frames, and the same reasoning
-applies one level down.
-
-**`mapping_generation` is an identity of the INVERSE MAPPING.**
-
-| changes it | leaves it alone |
+| branch | what `true` meant |
 |---|---|
-| `view_top` | focus gained or lost |
-| panel grid size | styling, theme, face changes |
-| fold state | cursor movement |
-| wrap mode, gutter geometry | selection-only changes |
-| **buffer content — any edit, from any source** | a re-emitted identical frame |
+| §5b | the gesture was **ACCEPTED** — and §5b's review round 4 made the accepted-gesture latch follow exactly this answer |
+| this lane | the event was **CONSUMED HERE** — including the chrome swallows Q#BP-R2 and R-c introduced |
 
-**The stability half is load-bearing, not an optimisation.** A drag
-provokes selection repaints on every motion; if those moved the
-generation, the drag would cancel itself after one step.
+Both were right in their own tree. Merged, they are one `bool` that
+means two things, and the daemon reads it as §5b's. **The consequence
+is live in `b758c2e`:** a press on the band's **mode line** returns
+`true`, so the latch **arms** for a gesture that never began in
+content. That is the precise defect class §5b's round 4 found and
+fixed, re-entering by merge rather than by edit.
 
-### Wire shape — appended variants, never widened
+**Three candidates were considered.**
 
-Postcard encodes enums **positionally**, so a variant's field list is
-frozen once shipped. Both messages therefore gain **new variants
-alongside the existing ones**:
+| candidate | why not |
+|---|---|
+| keep `bool`, make chrome swallows return `false` | behaviourally correct **today**, and that is the whole problem — it silently merges "refused as malformed" with "handled and deliberately stopped", so the next author restores the collision without touching a test |
+| keep `bool`, re-derive "was this content?" in the daemon | **violates the seam §5b established.** One authoritative derivation, read through one accessor, is why the mapping generation works at all; a second derivation beside the dispatcher is the same hole in a new place |
+| **a three-state outcome** | **RULED** |
 
-- `PanelFramePayload::PresentMapped { .. }` beside `Present`, carrying
-  the frame plus its `mapping_generation`.
-- `FrontendEvent::PanelPointerMapped { .. }` beside `PanelPointer`,
-  echoing the generation the frontend was displaying.
+```rust
+/// What the dispatcher did with a panel gesture.
+pub enum PanelPointerOutcome {
+    /// Neither this panel's nor well-formed: no grid, out of grid, no
+    /// side window, or a buffer that is not the one shown there.
+    Refused,
+    /// This panel's, and handled HERE deliberately --- the chrome
+    /// swallows of Q#BP-R2 and R-c. Not a content gesture.
+    Consumed,
+    /// Reached the target as a content gesture.
+    Accepted,
+}
+```
 
-The existing variants stay **byte-frozen** and keep their current
-meaning, and the frozen-byte pin moves to what is then the previous
-final variant of each enum.
+**The latch rule, and it is NOT "arm and consume on `Accepted`".** The
+two halves are asymmetric, because a release ends a gesture wherever
+the pointer happens to be:
 
-### Bilateral gating
+- **ARM** only on `Accepted` **and** `Down(Left)`. A chrome press
+  begins nothing.
+- **CONSUME** on any `Up(Left)` that was **not `Refused`** — so
+  `Accepted` **or** `Consumed`. A button-up over the mode line still
+  ends the gesture; declining to consume it would strand the gesture
+  and leave the child holding the button down, which is the same
+  failure §5b's round 4 named. A **`Refused`** release is different in
+  kind: out-of-grid or wrong-buffer means the daemon cannot tell the
+  event is even about this gesture, and §5b already pinned that it
+  must not consume.
 
-Both directions gate on the negotiated version, and **neither side may
-assume the other's support**:
+**That asymmetry is what earns the third state.** Under it, all three
+outcomes are behaviourally distinct at the latch, so each is
+falsifiable:
 
-- The daemon sends `PresentMapped` **only** to a peer whose negotiated
-  version reaches the new floor; every older peer keeps receiving
-  `Present`.
-- The frontend sends `PanelPointerMapped` **only** when the session
-  negotiated it; otherwise it sends `PanelPointer` as today.
-- **A daemon that receives the bare `PanelPointer` from a
-  new-enough peer must not silently upgrade it.** The gesture carries
-  no generation, so it is handled under the old semantics — the
-  version gate decides the shape, not a guess about intent.
+| # | mutation | must bite |
+|---|---|---|
+| P1 | chrome press returns `Accepted` | a chrome `Down(Left)` does not arm |
+| P2 | `Refused` treated as `Accepted` | §5b's four `g5_substrate_a_refused_*` rows |
+| P3 | `Consumed` treated as `Refused` for `Up` | a chrome `Up(Left)` consumes a live gesture |
+| P4 | consume gated on `Accepted` alone | the same chrome-release row as P3, from the other side |
 
-### Enforcement
+**R-c2 does not discharge P3.** The producer normalizes a release that
+lands on chrome back to the last content cell, so a conforming
+frontend should not send one — but the daemon's contract cannot rest
+on the producer's good behaviour, and a TUI or legacy peer reaches the
+same path. Producer-side normalization and daemon-side consumption are
+**both** required, and the existing GPU row
+(`a_press_on_the_bands_mode_line_neither_arms_nor_reports_content`)
+covers only the producer half.
 
-On `PanelPointerMapped`, the daemon compares the echoed generation with
-the panel's current one and **drops the gesture before any mutation**
-when they differ — the same position in the ladder as the epoch checks,
-one level finer.
+#### The rows §5b's split table assigned here
 
-**Dropping mid-drag is correct.** If the mapping changed, the cells the
-user is dragging across no longer mean what they meant when the drag
-began, and continuing would select text they never pointed at.
+§5b states its own split rather than leaving it to whoever runs the
+tests, and this lane is the other column. Inherited, verbatim in
+substance:
 
-### Consequence for the GUI arc
+- the **document cancellation effect** — an empty selection cleared
+  without moving point;
+- **real stable-generation drag continuation**, G5a's **effects**, and
+  the v24/v25 replay-effect controls **G4b, G6c, G7c**;
+- the **complete producer reset lifecycle** — geometry, `Absent`,
+  identity and detach — whose fields this lane introduces (**G5f**);
+- **every** common legacy/mapped cancellation transition and the real
+  gesture/click lifecycle (**G5b–e, G5g, G5i–p**), exhaustion
+  cancellation (**G11b**), and both two-tick wheel effects (**G12**).
 
-This slice takes the **next** protocol version, so **GUI arc 1e's
-`OpenTarget` moves to the one after it**. The arc's serialization rule
-is unchanged — protocol-bearing slices run alone — and this is simply a
-new one inserted ahead of 1e.
+**The IDs stay as §5b wrote them.** §5b deliberately pinned its own
+three decisions under `g5_substrate_*` names precisely so these IDs
+would be unclaimed here; taking them is the point, not a collision.
 
-**The edit belongs to the 1b branch, not to this one.**
-`docs/gui-stage1-input-framing.md` says *"1e — `OpenTarget` (v25)"*
-(`:1011`) and *"floor: v25, after v24, serialized"* (`:1221`), and that
-document is heavily revised on `gui-stage1b-pointer-scroll`
-(revisions 13–18). **This paragraph is superseded.** It argued the bump
-should be recorded rather than made, to avoid colliding at 1b's
-scheduled rebase. §5b **made it**, and merged as #242 — an expected
-rebase conflict was not grounds for leaving a canonical document
-saying v25 after v25 was taken. Kept, struck, because the reasoning it
-records was overruled rather than forgotten.
+#### The cancellation record has nowhere to wait
+
+§5b landed cancellation as a **saturating count**, and said why: a
+queue drained by nobody grows one entry per cancelled drag. It also
+left the record itself reachable — `cancel_accepted_gesture` **returns**
+the `AcceptedPanelGesture` it ends.
+
+**The gap is not the count, it is the caller.** Two of the three
+cancellation sites are inside `semantic_render.rs`, reached during
+**frame production**, where a release cannot be delivered. So the
+record is returned into a context that cannot act on it and is
+dropped.
+
+**RULED: one pending-release SLOT per frontend, not a queue.** The
+latch holds at most one gesture per frontend, so at most one release
+can be owed at a time, and the slot is bounded by construction rather
+than by a cap someone has to choose. **The invariant is load-bearing
+and therefore owed a witness**: arming while a release is still
+pending must be impossible. If that witness fails, the slot is the
+wrong shape and this ruling is wrong — which is the point of asserting
+it rather than assuming it.
+
+| # | mutation | must bite |
+|---|---|---|
+| Q1 | drop the record instead of parking it | the cancelled-gesture release row |
+| Q2 | park it but never drain | the same row, from the delivery side |
+| Q3 | allow arming over a pending release | the invariant witness above |
+
+#### Four transitions strand a live gesture, and they become defects HERE
+
+§5b recorded this as inert and named the branch that owns it: a
+**panel-epoch change**, a **buffer replacement**, a **same-size
+geometry change** and a **detach** all leave the latch armed with a
+release that can never be accepted. Only `Absent` was wired, because
+`publish_absent_panel` already cleared input authority two lines
+later and omitting it would have been an inconsistency inside one
+function.
+
+**Inert became a defect the moment this lane attaches effects.** Each
+of the four needs its own leg, and they fail differently — R-d already
+established that for the producer side, where clearing `pointer_held`
+without `last_pointer_cell` silently eats the successor's first
+motion. The daemon side has the same shape and needs the same
+independently discriminating legs rather than one shared "resets
+something" assertion.
+
+#### The ground truth must be RE-MEASURED, and this is evidenced
+
+This section's heading says `72da24a`. **Every production anchor in it
+has moved**, measured at `b758c2e`:
+
+| §5a claims | actually |
+|---|---|
+| `dispatch_semantic_panel_pointer` at `src/editor.rs:2674` | `:2809` |
+| `apply_terminal_gesture` at `src/editor.rs:3525` | `:3875` |
+| `scroll_window` at `src/editor.rs:3845` | `:4195` |
+| `Absent` clears the latch at `pmacs-gpu/src/main.rs:6909` | `:7206` |
+
+**The clause table itself is NOT assumed to have survived.** §5b
+rewrote the dispatcher this lane measured, so each DONE/MISSING verdict
+is owed a re-measurement before implementation, not a line-number
+patch. A table that is right about *what* is missing and wrong about
+*where* is the kind of record that gets trusted and then misleads.
+
+#### Coherence impact (`COHERENCE.md` §20)
+
+- **Journey steps touched: 5** — Edit, clause (c) selection, kill and
+  yank — **and 8** — Open terminal, clause (b) input and output
+  round-trip. **Unlike §5b, this lane MOVES the grade.** §5b hardened
+  steps that already worked; §5a's own table lists panel selection,
+  listview row selection, terminal mouse reporting and the wheel as
+  **MISSING**, and this lane is what supplies them.
+- **Interaction islands: none added.** It **completes** the existing
+  panel island rather than opening a new one — the same gestures the
+  band already advertises, finally reaching their target.
+- **Config registry: no entry.** Nothing here is tunable.
+- **Background work: none started**, and no existing attribution
+  changes.
+
+#### What revision 14 does NOT do
+
+It does not re-open Q#BP-R1 (single click selects only), Q#BP-R2 (a
+terminal panel's chrome wheel is consumed, not clamped), or R-a/R-b/
+R-c/R-c2/R-d. Those are approved at revision 12 and unaffected by §5b
+— **except** where R-c's chrome swallows now feed Q#BP-R4's outcome,
+which changes their return value and not their behaviour.
+
 ## 5b. The cell-mapping generation — a protocol slice (Q#BP-R3)
 
 **Status: revision 16 — APPROVED 2026-08-15. Nothing implemented.**
