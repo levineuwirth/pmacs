@@ -929,3 +929,37 @@ binary — and it remains unrun. Until it runs, this family should not
 consume another review round.
 
 **Widening a budget is not the fix**, and R1 already rejected it.
+
+### U11 — `dispatch_parse_round_trips_a_rust_source_file`, macOS `lua54`, one occurrence, green on rerun
+
+Recorded from PR #242, 2026-08-20, on head `61f0faf` — the head that
+merged as `47b5463`. **Deferred to post-merge absorption by decision**,
+so that no docs commit would invalidate that PR's head-exact gate
+evidence; the fragments lived in
+[PR #242's comment](https://github.com/levineuwirth/pmacs/pull/242#issuecomment-5359360750)
+in the interim, because the raw job log is machine-local and **not
+portable evidence**.
+
+| field | value |
+| --- | --- |
+| **selector** | `--lib async_runtime::tests::dispatch_parse_round_trips_a_rust_source_file` |
+| **job / flavor** | `Test (macos-latest / lua54)`, run `32393462318` |
+| **required fragment** | `trivial parse should be fast`, panicking at `src/async_runtime.rs:3328` |
+| **counts** | `1960 passed; 1 failed; 3 ignored`, finished in 64.49s |
+| **attempt 1** | job `96504773333` — **failure** |
+| **attempt 2, rerun** | job `96511228345` — **success** |
+| **status** | **one occurrence, not reproduced** |
+| **THE MARGIN IS UNRECOVERABLE** | the assertion is `assert!(duration_ms < 100, "trivial parse should be fast")` — a 100ms wall-clock budget on a 30-byte source, **with `duration_ms` omitted from the message**. The red cannot say whether it missed by 1ms or by 900ms, and **no future occurrence can be compared against this one**. This is a property of the assertion, not of the observation |
+| **what IS established** | **non-determinism across these observations, and nothing more.** Four passes of the same selector on the exact head in local gate `20260820T163107Z-879828` — one each in `03-lib`, `04-lib-crdt`, `13-sweep`, `15-sweep-crdt`. Two `Test (macos-latest / luajit)` greens on the same commit and OS, jobs `96504773331` and `96511275402`. `src/async_runtime.rs` **byte-identical to `main`**, blob `9310ce3fca8c5fd8ebd39a68c29ad6985e256049` on both sides — not merely an empty diff |
+| **what is NOT** | environmental cause, or harmlessness. The luajit greens narrow the red below "macOS at this commit"; they do not explain it. **A green rerun establishes intermittence only** |
+| **relation to U10** | **not U10.** Different selector, different fragment, different subsystem, and remote rather than local. Filed separately for the same reason U10 was filed apart from U6 and U7 |
+
+**A recurrence is not another instance of this row.** Because the margin
+was never captured, a second red cannot be compared with the first, so
+it owes a **merge-base control** before any claim is made about the
+tree.
+
+**The one-line fix that would make this family diagnosable** — include
+the measured `duration_ms` in the assertion message — is **owed its own
+small lane**. It was deliberately kept out of #242, whose diff does not
+touch `src/async_runtime.rs`.

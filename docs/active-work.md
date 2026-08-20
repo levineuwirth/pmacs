@@ -270,7 +270,33 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## Panel cell-mapping generation (v25) — REBASED, FULL GATE GREEN, review round 4 fixed
+## Panel cell-mapping generation (v25) — MERGED as #242 (`47b5463`)
+
+- **MERGED 2026-08-20T17:25:01Z** at approved head `61f0faf`, merge
+  commit `47b5463`, via `--match-head-commit` so the merge is provably
+  of the reviewed head. **14/14 CI green on that exact head**, and the
+  full 16-stage local gate green on it too (log
+  `20260820T163107Z-879828`), with `HEAD` and a clean worktree captured
+  before and after the run.
+- **`PROTOCOL_VERSION` is now 25.** `PANEL_MAPPING_MIN_VERSION` is a
+  literal 25; `ADVERTISED_PROTOCOL_VERSION` stays pinned at **20**. GUI
+  arc 1e's `OpenTarget` moved to **v26**, corrected in
+  `docs/gui-stage1-input-framing.md` by the slice itself.
+- **Replay effects remain `panel-pointer-replay`'s** — this slice
+  shipped the trigger and the state, not the effects. That lane is now
+  unblocked and is the next step in the arc.
+- **Review round 4 fixed one functional defect**: both inbound arms
+  discarded the dispatcher's bool and updated the accepted-gesture
+  latch unconditionally, so a rejected `Down` armed and a rejected `Up`
+  consumed a real gesture. Both arms now gate on the return, and
+  `dispatch_semantic_panel_pointer` is `#[must_use]` so a future
+  discarded answer is a clippy failure. Four rows cover it, each with a
+  positive control, and three mutations each bite their named rows.
+- **`docs/ci-red-signatures.md` gained U10** from this lane's gating.
+- **U11 is recorded below from PR #242's comment**, per the deferral
+  agreed during review.
+
+### Superseded lane state, kept only for the record
 
 - **BASE IS `5f2015c`**, current `githubsucks/main`. Rebased there
   cleanly, no conflicts; the two commits picked up are docs-only (the
@@ -1275,7 +1301,19 @@ from #171 and #215.
   an otherwise unchanged gate, a distinct `error` outcome, and a
   non-Linux-unix statement.
 
-## `scripts/gate` TMPDIR isolation — PR #240 OPEN
+## `scripts/gate` TMPDIR isolation — MERGED as #240 (`72da24a`)
+
+- **MERGED 2026-08-13T20:12:58Z** at head `cf09f5a`, merge commit
+  `72da24a`. Absorbed 2026-08-20; the block below was written while the
+  PR was open and is kept for its reasoning, not its status.
+- **Its isolation earned itself back during §5b review round 4.** Two
+  `m4_24_*` base-resolution rows were reported as pre-existing local
+  failures that only CI could arbitrate. They were neither: the sweep
+  had been run BY HAND, outside `scripts/gate`, so it inherited
+  `TMPDIR=/tmp` — and `/tmp/.git` exists on that machine, which project
+  detection walks up into. Run through the gate, both rows pass. **The
+  hazard this lane fixed is exactly the one that reappeared the moment
+  the gate was bypassed.**
 
 **Written with the branch's first commit**, per the standing correction
 from #171 and #215.
@@ -1368,7 +1406,11 @@ from #171 and #215.
 - **Out of scope, deliberately:** the overdue absorption of #239. This
   lane is the gate fix and nothing else.
 
-## GUI arc Stage 1a — `TextInput` at v24 — PR #239 OPEN
+## GUI arc Stage 1a — `TextInput` at v24 — MERGED as #239 (`ca92796`)
+
+- **MERGED 2026-08-13T13:00:14Z** at head `36a3296`, merge commit
+  `ca92796`. Absorbed 2026-08-20; the block below was written while the
+  PR was open and is kept for its reasoning, not its status.
 
 **Written with the branch's first commit**, per the standing correction
 from #171 and #215.
