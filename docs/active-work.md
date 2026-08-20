@@ -281,7 +281,8 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
   **`githubsucks/panel-pointer-replay` is the authoritative tip** (the
   ref, not a SHA). Recover with
   `git fetch githubsucks && git checkout panel-pointer-replay`.
-- **No PR yet. Checkpoint: framing revision 14 AWAITING APPROVAL;
+- **No PR yet. Checkpoint: framing revision 15 AWAITING APPROVAL
+  (revision 14 was reviewed and had four blocking gaps, all answered);
   IMPLEMENTATION STILL PAUSED, now on approval rather than on a
   blocker.** §5a's replay contract is approved at revision 12; revision
   13 ruled Q#BP-R3 and blocked the lane on a protocol-bearing mapping
@@ -332,11 +333,15 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
   inverse mapping, stable across focus/styling/cursor/selection-only
   repaints so drags survive — as **appended** wire variants with
   bilateral gating.
-- **Chain: §5b (protocol) → panel replay → GUI arc 1b.** §5b takes the
-  next protocol version, so **1e's `OpenTarget` moves to the one
-  after**. **That edit is OWED BY THE 1b BRANCH**, which already
-  revises `docs/gui-stage1-input-framing.md` (`:1011`, `:1221` still
-  say v25); making it here would collide at 1b's scheduled rebase. Commit one was the ground-truth
+- **Chain: ~~§5b (protocol) →~~ panel replay → GUI arc 1b.** §5b took
+  **v25**, so 1e's `OpenTarget` is **v26**. **That edit is NOT owed by
+  the 1b branch** — this bullet said it was, and said making it here
+  would collide at 1b's rebase. **§5b made it, in
+  `docs/gui-stage1-input-framing.md`, and merged as #242**: a canonical
+  document saying v25 is false the moment v25 is taken, and an expected
+  rebase conflict was not grounds for leaving it wrong. Corrected here
+  because this bullet and the merged-#242 block below it were saying
+  opposite things. Commit one was the ground-truth
   re-measurement; 6 added the four replay edges; **7 answers review of
   6; **8 answers review of 7** — R-c is target × gesture-ORIGIN
   (terminals reject all chrome kinds and raw chrome coords fail the
