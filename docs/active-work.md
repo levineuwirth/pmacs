@@ -270,7 +270,35 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## Panel cell-mapping generation (v25) — CODE-COMPLETE, GATE RED
+## Panel cell-mapping generation (v25) — REBASED, GATE GREEN except two pre-existing rows
+
+- **REBASED onto `f13506c`** (post-#241 main) at `3e68b76`, 31 ahead, 0
+  behind, signed, clean. One conflict, in this file: main's merged-#241
+  block and this lane's own first-commit block landed at the same
+  position; both kept, active lane above merged. The other 30 commits
+  applied cleanly, and no code file overlapped — #241 touched
+  `scripts/`, `tests/common/` and two test suites; this lane touches
+  the protocol, daemon and GPU sources.
+- **The blocker is gone.** #241 fixed the `sweep-crdt` defect this lane
+  was held behind, and the SIGINT guard now refuses a gate run started
+  with `SIGINT` ignored — which is what made stage 15 unreachable.
+- **GATE, run in two labelled pieces** because 16 stages exceed this
+  session's 10-minute command cap and the guard rightly forbids the
+  backgrounding that would evade it:
+  - **14 stages green** — plain gate plus all six `--acceptance`
+    suites, log `20260820T143050Z-3909596`, started at load 5.28.
+  - **`build-crdt` green**; **`sweep-crdt` red on two rows only**:
+    `m4_24_bare_string_glob_stays_relative` and
+    `m4_24_d3_fallback_base_is_the_smallest_attachment_dir`.
+- **Those two rows are PRE-EXISTING and local-only.** They fail
+  identically at **current main `f13506c`**, and they **passed in CI**
+  on #241's `Test (crdt)` job. Not this lane's, and not a code defect —
+  local-environment-specific.
+- **A prior gate attempt is NOT evidence**: I wrapped it in
+  `timeout 580` to fit the command cap, which killed the sweep mid-run
+  (`Terminated` in its log) and reported it as a stage failure. Its
+  two perf-budget failures also ran at load 36.9 with a foreign
+  workload present. Recorded so the log is not mistaken for a result.
 
 **Written with the branch's FIRST commit**, per the standing correction
 from #171 and #215.
