@@ -270,7 +270,36 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## GPU launcher / probe SIGINT teardown — PR #241 OPEN
+## GPU launcher / probe SIGINT teardown — MERGED as #241 (`f8033bc`)
+
+- **MERGED 2026-08-20** at approved head `5089715`, merge commit
+  `f8033bc`. **14/14 CI checks green on that exact head**, including
+  `Test (crdt)` and **both** macOS jobs.
+- **A6a CLOSED BY MEASUREMENT**: `status 1 + no token → boundary error,
+  never ignored`, green on macOS — the platform whose shell exits 1 for
+  an exec failure, which is what produced the original defect.
+- **A7 is no longer "satisfied by disclosure".** Both macOS flavours
+  (`lua54`, `luajit`) exercised the helper and gate consumers across the
+  full 45-case shared set. **The R-d consumer stays Linux-only** — its
+  test is crdt-gated and the macOS jobs build without `crdt`, while
+  `Test (crdt)` is `runs-on: ubuntu-latest`. Recorded as an open gap,
+  not closed.
+- **What shipped:** `scripts/check-sigint-deliverable` (validated
+  `(status, token)` pair, 0 safe / 1 ignored / 2 error), a gate guard
+  that refuses before any stage with no override, a target test that
+  reports the precondition instead of a phantom deadline, and the rule
+  in `docs/agent-handoff.md` §3 forbidding `setsid nohup … &` for the
+  gate and `cargo test`. **No product behaviour changed** — this was
+  gate/test correctness only.
+- **Two `m4_24_*` rows fail locally under `crdt` and DO NOT reproduce in
+  CI**, on this branch and at `72da24a` alike: local-environment
+  -specific, not a code defect and not this lane's.
+- **`panel-mapping-generation` (§5b) is UNBLOCKED** by this merge. Its
+  sixteen-stage gate must run **in the foreground** — the condition its
+  stage 15 always needed, and the reason this lane existed.
+
+**Written with the branch's FIRST commit**, per the standing correction
+from #171 and #215.
 
 **Written with the branch's FIRST commit**, per the standing correction
 from #171 and #215.
