@@ -295,6 +295,15 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
   and 284 GPU tests pass**. Base is no longer `72da24a`; read it with
   `git merge-base githubsucks/main HEAD`.
 - **THE MERGE CREATED ONE DEFECT AND SURFACED ONE COLLISION.**
+  - **Defect, fixed at `cf78385`: `b758c2e` DOES NOT COMPILE**, and its
+    message claims "Workspace compiles clean". **That claim is
+    withdrawn.** I staged the resolution, hit `cannot find value mods`
+    at the mapped arm, fixed it, re-checked clean — and committed
+    without re-staging, so the verification and the commit were of
+    different trees. Not amended away: `b758c2e` keeps its false claim
+    with the withdrawal attached, because erasing a bad record is worse
+    than carrying a corrected one. **Anything bisecting across
+    `b758c2e`..`3cd7b8a` will fail to build.**
   - **Defect, fixed:** the merge kept BOTH copies of §5b — this
     branch's stale pre-split one and main's authoritative one. I
     discarded the uncommitted stub edit as obsolete and missed that its
