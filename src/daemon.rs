@@ -8520,6 +8520,16 @@ mod tests {
 
     /// P2, effect half — a REFUSED press reaches no target at all.
     ///
+    /// **What is falsifiable here is the CLASSIFICATION.** Removing the
+    /// buffer check makes this press `Accepted`, and the row fails. The
+    /// focus, controller and byte assertions cannot fail under that
+    /// same mutation, because the precondition asserting `Refused`
+    /// fires first — and no other mutation reaches them, since the
+    /// daemon calls `apply_panel_pointer` only on `Accepted` and the
+    /// disposition enum gives `Refused` no target to apply. They are
+    /// **defence in depth against a future refactor**, kept and
+    /// labelled rather than presented as witnessed coverage.
+    ///
     /// §5b's four `g5_substrate_a_refused_*` rows read the latch and the
     /// cancellation count; none of them reads the target. A refusal that
     /// armed nothing while still sending the child a press, or starting
@@ -8531,20 +8541,41 @@ mod tests {
             terminal_panel_session(fid, true);
         let press = pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left);
         let none = pmacs_protocol::Modifiers::default();
-        let outside = {
-            let core = editor.core.borrow();
-            let grid = core.panel_grid_size(fid).expect("grid");
-            pmacs_protocol::CellCoord::new(grid.rows, 0)
-        };
+        // THE REFUSAL LEVER IS A WRONG BUFFER, at an IN-CONTENT cell.
+        //
+        // An out-of-grid cell cannot serve here: with the row bound
+        // removed it becomes `on_chrome`, so the press classifies
+        // `Consumed` and still reaches no target. The row would "bite"
+        // on its own precondition while never exercising focus at all.
+        // A foreign buffer at a content cell is the refusal whose
+        // mis-gating yields `Accepted`, which is the misclassification
+        // these assertions are written against.
+        let foreign_buffer = editor
+            .core
+            .borrow()
+            .registry
+            .borrow_mut()
+            .create("*not-the-panel*");
+        let in_content = pmacs_protocol::CellCoord::new(1, 2);
         let key = crate::terminal::view::TerminalViewKey::new(fid, panel, buffer_id);
-        let active_before = editor.core.borrow().active_frontend;
+        // FOCUS is `views[&fid].active`, not `active_frontend`: the
+        // latter says which frontend is current, and `focus_window`
+        // moves the former. An earlier version of this row recorded the
+        // wrong one and would have watched a panel steal focus without
+        // noticing.
+        let focused_before = editor.core.borrow().views[&fid].active;
+        assert_ne!(
+            focused_before, panel,
+            "fixture: the panel must start PASSIVE, or 'focus did not \
+             move to the panel' asserts nothing"
+        );
         let controller_before = editor
             .terminal_manager
             .borrow()
             .controller_view_for_frontend(fid);
         assert_eq!(
             editor
-                .classify_panel_pointer(fid, buffer_id, outside, press)
+                .classify_panel_pointer(fid, foreign_buffer, in_content, press)
                 .outcome(),
             crate::editor::PanelPointerOutcome::Refused,
             "fixture: this press really is refused --- asserted, because \
@@ -8557,8 +8588,8 @@ mod tests {
             &mut render,
             fid,
             epochs,
-            buffer_id,
-            outside,
+            foreign_buffer,
+            in_content,
             press,
             none,
         );
@@ -8569,9 +8600,9 @@ mod tests {
              receives is one it will expect a release for"
         );
         assert_eq!(
-            editor.core.borrow().active_frontend,
-            active_before,
-            "and it must not ACTIVATE the panel: a misclassified press \
+            editor.core.borrow().views[&fid].active,
+            focused_before,
+            "and it must not FOCUS the panel: a misclassified press
              focuses before its out-of-range anchor fails, so byte and \
              latch assertions alone stay green while focus has moved"
         );

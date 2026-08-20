@@ -307,10 +307,21 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
     carrying a target — stayed representable inside `editor.rs`. Now
     `Refused` holds no target at all.
   - **Witnesses: G5k(a)–(d), P1, P2, P3 both legs, P4, P5, P7, P8, P9,
-    P10, P11, P12.** Each reads a TARGET EFFECT — the child's byte
-    stream (**exact bytes**, not a count), the terminal drag state, the
-    document selection, or focus and controller ownership — never the
-    latch alone. Each bites its own mutation, including G5k's verbatim.
+    P10, P11, P12**, each biting its own mutation, including G5k's
+    verbatim. **They do NOT all read a target effect, and an earlier
+    version of this line said they did.** Two kinds:
+    - **Effect rows** — G5k(a)–(d), P1, P3 both legs, P4, P5, P7, P8,
+      P11, P12 — read the child's byte stream (**exact bytes**, not a
+      count), the terminal drag state, or the document selection.
+    - **Arming-gate rows** — **P9 and P10** — read the LATCH, and that
+      is correct for them: the defect they fence is a record existing
+      for a gesture that never began, so the record IS the artifact.
+      Manufacturing an effect assertion for them would not distinguish
+      their mutations.
+    **P2 is a third case**: its falsifiable claim is the
+    classification; its focus, controller and byte assertions are
+    defence in depth, because the precondition asserting `Refused`
+    fires first under the only mutation that would reach them.
   - **Every fixture asserts its own precondition** (the disposition is
     `Accepted`, or is `Refused`) because four rows in these rounds
     passed vacuously: cells that were out of grid, or that clamped to
