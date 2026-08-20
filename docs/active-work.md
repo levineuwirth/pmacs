@@ -361,6 +361,20 @@ waits for a signal that is not coming.
     outside the repo and I did not create it. Any hand-run test that
     resolves a project root from a temp dir will keep failing on this
     machine until it is removed.
+- **HEAD-EXACT GATING IS BLOCKED BY THE BUDGET-ROW FAMILY, recorded as
+  `docs/ci-red-signatures.md` U10.** Two consecutive gate runs at
+  `70b334d`, worktree verified clean before and after each, were
+  **15/16 green each** — and the red **rotated**: run A took
+  `13-sweep` (`dired_open_renders_10k_entries_under_200ms`,
+  263.961465ms against 200ms), run B took `15-sweep-crdt`
+  (`criterion_1_end_of_line_typing_completes_sub_frame_per_keystroke`,
+  1.044609ms against 1ms). **Each red is green in the other run**, and
+  both are green isolated at load 9.34. Neither path is touched by this
+  branch. The earlier `20260820T153017Z-147411` all-green run was on
+  the same code, one docs commit earlier.
+- **No PR was opened on that evidence.** The standing condition is a
+  head-exact GREEN gate, and 15/16-twice-with-a-rotating-red is not it,
+  however well the rotation is explained.
 - **A prior gate attempt is NOT evidence**: I wrapped it in
   `timeout 580` to fit the session's command cap, which killed the
   sweep mid-run (`Terminated` in its log) and reported it as a stage
