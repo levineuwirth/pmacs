@@ -963,3 +963,31 @@ tree.
 the measured `duration_ms` in the assertion message — is **owed its own
 small lane**. It was deliberately kept out of #242, whose diff does not
 touch `src/async_runtime.rs`.
+
+### U12 — U9's shape in `04-lib-crdt`: a budget test and a PTY test, together
+
+Recorded during the panel-replay lane's gate, 2026-08-21, on head
+`6142acc`. **Filed rather than folded into U6 or U9**, because both of
+those tell it to be: U6 says one of its selectors redding without the
+other is a different incident, and this is `composition_overhead_under_ten_percent`
+alone again; U9 is that same shape but in `11-sweep` with a different
+PTY selector.
+
+| field | value |
+| --- | --- |
+| **selectors** | `--lib --features crdt editor::tests::composition_overhead_under_ten_percent` **and** `process::tests::setsid_escapee_is_not_reaped_and_teardown_reclaims_readers`, failing in the same step |
+| **job / step** | local (Linux), `scripts/gate` step `04-lib-crdt`, log `20260821T122852Z-2922631` |
+| **required fragments** | `composition machinery added more than 10% overhead` / `live runtime probe` |
+| **observed** | **1.247×** against the 1.10× budget (single 192493 ns, dispatch 240130 ns); the PTY row failed at `src/process.rs:5155`, where `active_reader_probe` found no live reader within the 2s `Started` window |
+| **status** | **one occurrence, both selectors green on isolated rerun** |
+| **the rest of the run** | **15 of 16 stages green**, including `sweep`, `m4`, `gpu`, `diff-check` and all eight touched acceptance suites |
+| **what IS established** | both are timing-dependent by construction — one a wall-clock ratio, the other a 2-second liveness window — and each passed alone immediately afterwards. **`src/process.rs` is NOT touched by the observing branch at all**; `src/editor.rs` is, but only in the panel-replay paths, not in composition |
+| **what is NOT** | that load caused it. Load was **11.04 at the gate's start and 27.79 (5-minute) at its end**, with two foreign `python` processes at ~2 cores throughout and an `apt`/`dpkg` install shortly before. Those are conditions, not a measurement of the mechanism, and the run was **knowingly taken on a machine that was quieter but not quiet** |
+| **relation to U6** | its selector, alone again, in U6's own step. U6's instruction to judge that separately is honoured for the second time — see U9, which did the same |
+| **relation to U9** | the same budget-plus-PTY co-failure, in `04-lib-crdt` rather than `11-sweep`, with `setsid_escapee…` where U9 had `m6_1_pty_raw_mode…` |
+
+**This family has now produced U6, U9, U10 and U12, and the
+discriminating control U9 named is STILL UNRUN**: pin test-binary
+concurrency to 1, and separately load a lone `--lib` binary. Four
+incidents is enough evidence that the family will keep costing review
+rounds until someone runs it.

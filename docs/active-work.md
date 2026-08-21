@@ -406,7 +406,17 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
       gone, so the completion has nothing left to clear and the
       gesture ending is the whole effect. Written into the row rather
       than left as a silently absent assertion.
-  - **REMAINING: the full head-exact gate, then the PR.** The gate
+  - **GATE RUN 1, head-exact at `6142acc`: 15/16, red on `04-lib-crdt`
+    only.** `composition_overhead_under_ten_percent` (1.247× against
+    1.10×) and `setsid_escapee_is_not_reaped_and_teardown_reclaims_readers`
+    failed together; both green on isolated rerun. Recorded as **U12**.
+    `src/process.rs` is not touched by this branch at all. **The run
+    was knowingly taken on a machine that was quieter but not quiet** —
+    load 11.04 at start, 27.79 five-minute at end, two foreign `python`
+    processes throughout — so it is reported as a red under stated
+    conditions rather than dismissed.
+  - **REMAINING: a head-exact gate on a genuinely quiet machine, then
+    the PR.** The gate
     wants a QUIET machine: a foreign C++/java build has been running at
     load 114+ through this work, and the wall-clock rows
     (`composition_overhead_under_ten_percent`,
