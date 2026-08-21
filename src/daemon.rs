@@ -8831,6 +8831,12 @@ mod tests {
     /// Which authority loss a matrix row drives.
     #[derive(Clone, Copy, Debug)]
     enum LossCause {
+        /// The panel stops being presentable at all.
+        ///
+        /// §5b wired this one, so it is the matrix's CONTROL as much as
+        /// its fifth row: if the four this lane added regressed while
+        /// `Absent` still worked, the matrix would say so.
+        Absent,
         WindowReplaced,
         BufferReplaced,
         GeometrySameSize,
@@ -8948,16 +8954,24 @@ mod tests {
     )]
     #[test]
     fn g5b_the_authority_loss_matrix() {
-        use LossCause::{BufferReplaced, Detach, GeometrySameSize, WindowReplaced};
+        use LossCause::{Absent, BufferReplaced, Detach, GeometrySameSize, WindowReplaced};
         use LossTarget::{Document, ReportingTerminal};
 
         let mut next_fid = 830u64;
-        for cause in [WindowReplaced, BufferReplaced, GeometrySameSize, Detach] {
+        let mut quadrants = 0usize;
+        for cause in [
+            Absent,
+            WindowReplaced,
+            BufferReplaced,
+            GeometrySameSize,
+            Detach,
+        ] {
             for target in [Document, ReportingTerminal] {
                 for version in [LEGACY_PANEL_VERSION, PROTOCOL_VERSION] {
                     let fid = FrontendId(next_fid);
                     next_fid += 1;
                     let label = format!("{cause:?}/{target:?}/v{version}");
+                    quadrants += 1;
 
                     let (mut editor, mut states, mut render, panel, buffer_id, epochs) =
                         loss_fixture(fid, version, target);
@@ -8999,6 +9013,10 @@ mod tests {
                     let selection_before = editor.core.borrow().windows[&panel].selection;
 
                     match cause {
+                        Absent => {
+                            editor.hide_panel_for_test(fid);
+                            render_and_redeclare(&editor, &mut states, fid);
+                        }
                         WindowReplaced => {
                             replace_panel_window(&editor, fid, panel, buffer_id);
                             render_and_redeclare(&editor, &mut states, fid);
@@ -9064,7 +9082,9 @@ mod tests {
                                 None => assert!(
                                     matches!(cause, WindowReplaced),
                                     "{label}: the panel window vanished for \
-                                     a cause that should not remove it"
+                                     a cause that should not remove it --- \
+                                     `Absent` hides the panel and leaves the \
+                                     window, so only a replacement may land here"
                                 ),
                             }
                         }
@@ -9072,6 +9092,12 @@ mod tests {
                 }
             }
         }
+        assert_eq!(
+            quadrants, 20,
+            "FIVE transitions x two families x two targets. Asserted \
+             because a loop that silently stops covering a combination \
+             passes exactly as loudly as one that covers them all"
+        );
     }
 
     /// G5m — coincident invalidations produce ONE completion effect.
@@ -9106,12 +9132,25 @@ mod tests {
                 "{label}: fixture --- the press reached the child"
             );
 
+            // The composite is only a composite if the MAPPING moves
+            // too. Peeked, not read through the authoritative accessor,
+            // which would advance the key and manufacture the very
+            // second cause this row is supposed to observe.
+            let mapping_before = stamped_generation(&states, fid);
             if changed_size {
                 editor.accept_semantic_frame_geometry(fid, 2, CellSize::new(20, 60));
             } else {
                 replace_panel_buffer(&editor, panel);
             }
             render_and_redeclare(&editor, &mut states, fid);
+            assert_ne!(
+                stamped_generation(&states, fid),
+                mapping_before,
+                "{label}: fixture --- the mapping generation must actually \
+                 ADVANCE, or this is a single-cause transition wearing a \
+                 composite's name and the row proves nothing about \
+                 coincidence"
+            );
             drain_pending_release(&mut editor, &mut states, fid);
 
             assert_eq!(
@@ -9214,7 +9253,7 @@ mod tests {
         let _ = sem.render_frame(editor);
     }
 
-    /// P12 — a panel WIDER THAN 512 COLUMNS still routes pointer input.    /// P12 — a panel WIDER THAN 512 COLUMNS still routes pointer input.
+    /// P12 — a panel WIDER THAN 512 COLUMNS still routes pointer input.
     ///
     /// A panel deliberately does not inherit the terminal's per-axis PTY
     /// caps (Bet B5'): a 4K surface at a small font is legitimately

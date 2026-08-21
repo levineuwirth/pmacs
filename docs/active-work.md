@@ -366,8 +366,13 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
     needed a retained `geometry_epoch` because nothing else the
     producer holds moves with it); **detach** cancels in the dispatcher
     before any teardown.
-    - **Witnessed by a TABLE-DRIVEN matrix**: four transitions × two
-      families × two targets, sixteen quadrants, each **draining
+    - **Witnessed by a TABLE-DRIVEN matrix**: **five** transitions ×
+      two families × two targets, **twenty quadrants** — `Absent`
+      included, both as the fifth row and as a CONTROL on §5b's own
+      cancellation, which a mutation confirms it catches. The count is
+      asserted in the row, because a loop that quietly stops covering a
+      combination passes exactly as loudly as one that covers them all.
+      Each quadrant **drains
       explicitly** and asserting the effect — the exact release bytes
       for a reporting terminal, the cleared empty selection for a
       document, and an empty slot afterwards. An earlier version
@@ -384,6 +389,12 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
       replacement that also moves the mapping — and reads the child's
       stream rather than a cancellation count, because a count of one
       proves the latch was taken once, not that one release went out.
+      It also **asserts the mapping generation actually advances**:
+      without that, a same-size geometry change passes as a
+      "composite" while being a single cause, and the row would prove
+      nothing about coincidence. Peeked rather than read through the
+      authoritative accessor, which would advance the key and
+      manufacture the second cause.
     - **G5j has two legs and they differ**: an empty selection is
       cleared without moving point, a REAL dragged region survives
       anchor-and-cursor exact. Clearing every selection fails the
