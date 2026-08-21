@@ -366,19 +366,33 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
     needed a retained `geometry_epoch` because nothing else the
     producer holds moves with it); **detach** cancels in the dispatcher
     before any teardown.
-    - **Witnessed: G5b(a)–(d), G5m, G5j**, each reading the CHILD'S
-      STREAM or the document's selection rather than the latch. The
-      mutations discriminate exactly: dropping the window half of the
-      identity check fails only the buffer leg, dropping the buffer
-      half fails only the window leg, dropping the geometry check fails
-      only that leg, and dropping detach's cancel fails only detach.
-    - **G5m survives all four**, correctly: two coincident causes take
-      the same latch, so one release, and removing either cause still
-      leaves one.
+    - **Witnessed by a TABLE-DRIVEN matrix**: four transitions × two
+      families × two targets, sixteen quadrants, each **draining
+      explicitly** and asserting the effect — the exact release bytes
+      for a reporting terminal, the cleared empty selection for a
+      document, and an empty slot afterwards. An earlier version
+      stopped at `has_pending_release()` and would have passed while
+      delivery was broken; the mutation that parks a release and never
+      delivers it now fails every row.
+    - **Mutation labels, stated correctly this time**: dropping the
+      BUFFER comparison misses the buffer transition; dropping the
+      WINDOW comparison misses the window transition; dropping the
+      geometry comparison misses that one; dropping detach's cancel
+      misses detach. Each fails the matrix.
+    - **G5m takes both composites the framing names** — changed-size
+      geometry (epoch **and** mapping generation) and a buffer
+      replacement that also moves the mapping — and reads the child's
+      stream rather than a cancellation count, because a count of one
+      proves the latch was taken once, not that one release went out.
     - **G5j has two legs and they differ**: an empty selection is
       cleared without moving point, a REAL dragged region survives
       anchor-and-cursor exact. Clearing every selection fails the
       second.
+    - **One quadrant asserts less, and says so**: for window
+      replacement on a document, the window the gesture belonged to is
+      gone, so the completion has nothing left to clear and the
+      gesture ending is the whole effect. Written into the row rather
+      than left as a silently absent assertion.
   - **REMAINING:** Q5's acceptance-shaped row, then the full head-exact
     gate and the PR.
   - **Two test seams added for this:** an opt-in child-input tap

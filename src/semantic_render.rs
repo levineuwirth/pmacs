@@ -1876,14 +1876,12 @@ impl SemanticRenderState {
         // wire work but must still leave no live gesture behind — the
         // clears below are idempotent for the same reason.
         //
-        // Only the producer half lands here. The framing's G5b matrix —
-        // the panel-epoch, buffer-replacement, same-size geometry and
-        // detach transitions, each with its v24 and v25 legs and its
-        // document and terminal effects — is `panel-pointer-replay`'s per
-        // §5b's split table. Those transitions leave the latch armed on
-        // this branch, which is inert here (nothing consumes it) and
-        // becomes a defect only once replay gives it effects, in the
-        // branch that owns the row.
+        // `Absent` is one of G5b's five transitions. THE OTHER FOUR ARE
+        // NOW WIRED TOO, on this branch: window replacement, buffer
+        // replacement and a geometry-epoch change are handled where the
+        // declaration is built above, and detach in the dispatcher's
+        // teardown. This comment used to say they were left armed — true
+        // of §5b, false here since the authority-loss matrix landed.
         self.cancel_accepted_gesture();
         self.panel_presentation = None;
         // `Absent` also clears the peer's retained mode line. A later

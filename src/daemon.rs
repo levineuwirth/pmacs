@@ -7948,10 +7948,23 @@ mod tests {
     );
 
     fn terminal_panel_session(fid: FrontendId, reporting: bool) -> TerminalPanelFixture {
+        terminal_panel_session_at(fid, reporting, LEGACY_PANEL_VERSION)
+    }
+
+    /// The same fixture at a chosen negotiated version.
+    ///
+    /// G5b's matrix runs every transition across BOTH families, so the
+    /// version has to be a parameter rather than the legacy default the
+    /// earlier rows could assume.
+    fn terminal_panel_session_at(
+        fid: FrontendId,
+        reporting: bool,
+        version: u32,
+    ) -> TerminalPanelFixture {
         use crate::terminal::TerminalSpec;
 
         let (editor, mut states, render, _document, panel, _epochs) =
-            panel_session_at(LEGACY_PANEL_VERSION, fid);
+            panel_session_at(version, fid);
         let mut spec = TerminalSpec::new("/bin/sh");
         spec.args = vec!["-c".into(), "sleep 30".into()];
         spec.rows = 4;
@@ -8801,61 +8814,109 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // G5b — the common authority-loss matrix.
+    // G5b — the common authority-loss matrix, table-driven.
     //
-    // A live gesture belongs to the presentation it was pressed on.
-    // Five transitions end that presentation; §5b wired `Absent` and
-    // left the other four armed, inert while nothing consumed the
-    // latch. They became defects the moment cancellation gained an
-    // effect, and each has its own cause even though they share one
-    // consequence.
+    // Four transitions x two families x two targets. §5b wired `Absent`
+    // and left these armed --- inert while nothing consumed the latch,
+    // defects the moment cancellation gained an effect.
     //
-    // Every row reads the CHILD'S STREAM: the release is the effect,
-    // and a latch that empties without one is the exact failure §5b's
-    // round four named.
+    // Every quadrant asserts the EFFECT, drained explicitly: the exact
+    // release bytes for a reporting terminal, the cleared empty
+    // selection for a document, and an empty pending slot afterwards.
+    // Stopping at `has_pending_release()` would pass while delivery or
+    // recorded-domain routing was broken, which is what an earlier
+    // version of these rows did.
     // -----------------------------------------------------------------
 
-    /// Render one frame, which is where the producer notices an
-    /// authority loss, and re-declare so a later gesture can be sent.
-    fn render_and_redeclare(
-        editor: &crate::editor::EditorState,
-        states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
-        fid: FrontendId,
-    ) {
-        let sem = states.get_mut(&fid).expect("projection");
-        let _ = sem.render_frame(editor);
+    /// Which authority loss a matrix row drives.
+    #[derive(Clone, Copy, Debug)]
+    enum LossCause {
+        WindowReplaced,
+        BufferReplaced,
+        GeometrySameSize,
+        Detach,
     }
 
-    /// G5b(a) — the side WINDOW is replaced: a close/reopen of the same
-    /// buffer takes a fresh identity, and the old gesture ends.
-    #[test]
-    fn g5b_a_a_window_replacement_cancels_and_pays() {
-        let fid = FrontendId(820);
-        let (mut editor, mut states, mut render, panel, buffer_id, epochs) =
-            terminal_panel_session(fid, true);
-        let cell = pmacs_protocol::CellCoord::new(1, 2);
+    /// Which target the gesture was pressed on.
+    #[derive(Clone, Copy, Debug)]
+    enum LossTarget {
+        Document,
+        ReportingTerminal,
+    }
+
+    /// A panel session of the requested target kind and family.
+    fn loss_fixture(fid: FrontendId, version: u32, target: LossTarget) -> TerminalPanelFixture {
+        match target {
+            LossTarget::ReportingTerminal => terminal_panel_session_at(fid, true, version),
+            LossTarget::Document => {
+                let (editor, mut states, render, _document, panel, _epochs) =
+                    panel_session_at(version, fid);
+                let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+                // A press must ANCHOR, or the row never arms.
+                foreign_edit(&editor, buffer_id, b"alpha beta gamma\ndelta\n");
+                let epochs = shipped_declaration(&editor, fid, &mut states);
+                (editor, states, render, panel, buffer_id, epochs)
+            }
+        }
+    }
+
+    /// Send one press in whichever family `version` negotiated.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one call shape for every matrix quadrant"
+    )]
+    fn send_press(
+        editor: &mut crate::editor::EditorState,
+        states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+        render: &mut HashMap<FrontendId, RenderState>,
+        fid: FrontendId,
+        version: u32,
+        epochs: (u64, u64),
+        buffer_id: crate::buffer::BufferId,
+        coord: pmacs_protocol::CellCoord,
+    ) {
         let press = pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left);
         let none = pmacs_protocol::Modifiers::default();
+        if version >= pmacs_protocol::PANEL_MAPPING_MIN_VERSION {
+            let generation = live_generation(PanelArm::Mapped, editor, states, fid);
+            let event = arm_pointer(
+                PanelArm::Mapped,
+                fid,
+                epochs,
+                buffer_id,
+                generation,
+                coord,
+                press,
+            );
+            dispatch_panel_event(editor, fid, version, states, render, event);
+        } else {
+            send_panel(
+                editor, states, render, fid, epochs, buffer_id, coord, press, none,
+            );
+        }
+    }
 
-        send_panel(
-            &mut editor,
-            &mut states,
-            &mut render,
-            fid,
-            epochs,
-            buffer_id,
-            cell,
-            press,
-            none,
-        );
-        assert_eq!(
-            child_stream(&editor),
-            vec![SGR_PRESS_1_2.to_vec()],
-            "fixture: the press reached the child"
-        );
+    /// Replace the side window's buffer, keeping the window.
+    fn replace_panel_buffer(editor: &crate::editor::EditorState, panel: crate::window::WindowId) {
+        let mut core = editor.core.borrow_mut();
+        let replacement = core.registry.borrow_mut().create("*replacement*");
+        let view = {
+            let registry = core.registry.clone();
+            let registry = registry.borrow();
+            crate::text_view::TextView::new(registry.get(replacement).expect("replacement"))
+        };
+        let window = core.windows.get_mut(&panel).expect("panel window");
+        window.buffer_id = replacement;
+        window.text_view = view;
+    }
 
-        // Close and reopen the SAME buffer: a different window, so a
-        // fresh panel identity.
+    /// Close and reopen the panel on the same buffer: a new window.
+    fn replace_panel_window(
+        editor: &crate::editor::EditorState,
+        fid: FrontendId,
+        panel: crate::window::WindowId,
+        buffer_id: crate::buffer::BufferId,
+    ) {
         {
             let mut core = editor.core.borrow_mut();
             core.active_frontend = fid;
@@ -8877,211 +8938,194 @@ mod tests {
             panel,
             "fixture: the successor really is a different window"
         );
-
-        render_and_redeclare(&editor, &mut states, fid);
-
-        assert!(
-            !states[&fid].has_accepted_gesture(),
-            "the gesture must END: it belongs to a presentation that no \
-             longer exists"
-        );
-        assert!(
-            states[&fid].has_pending_release()
-                || child_stream(&editor) == vec![SGR_RELEASE_1_2.to_vec()],
-            "and its release must be owed or already paid, never dropped"
-        );
     }
 
-    /// G5b(b) — the side window's BUFFER is replaced.
-    ///
-    /// The release still goes to the buffer the gesture was pressed on,
-    /// because the domain is recorded --- delivering it to whatever is on
-    /// screen now would tell the wrong child to lift a button.
+    /// G5b — every transition, every family, every target.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one table whose quadrants read together; splitting it \
+                  hides which combinations are covered"
+    )]
     #[test]
-    fn g5b_b_a_buffer_replacement_cancels_and_pays_the_old_child() {
-        let fid = FrontendId(821);
-        let (mut editor, mut states, mut render, panel, buffer_id, epochs) =
-            terminal_panel_session(fid, true);
-        let cell = pmacs_protocol::CellCoord::new(1, 2);
-        let press = pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left);
-        let none = pmacs_protocol::Modifiers::default();
+    fn g5b_the_authority_loss_matrix() {
+        use LossCause::{BufferReplaced, Detach, GeometrySameSize, WindowReplaced};
+        use LossTarget::{Document, ReportingTerminal};
 
-        send_panel(
-            &mut editor,
-            &mut states,
-            &mut render,
-            fid,
-            epochs,
-            buffer_id,
-            cell,
-            press,
-            none,
-        );
-        let _ = child_stream(&editor);
+        let mut next_fid = 830u64;
+        for cause in [WindowReplaced, BufferReplaced, GeometrySameSize, Detach] {
+            for target in [Document, ReportingTerminal] {
+                for version in [LEGACY_PANEL_VERSION, PROTOCOL_VERSION] {
+                    let fid = FrontendId(next_fid);
+                    next_fid += 1;
+                    let label = format!("{cause:?}/{target:?}/v{version}");
 
-        // Same window, different buffer.
-        {
-            let mut core = editor.core.borrow_mut();
-            let replacement = core.registry.borrow_mut().create("*replacement*");
-            let view = {
-                let registry = core.registry.clone();
-                let registry = registry.borrow();
-                crate::text_view::TextView::new(registry.get(replacement).expect("replacement"))
-            };
-            let window = core.windows.get_mut(&panel).expect("panel window");
-            window.buffer_id = replacement;
-            window.text_view = view;
+                    let (mut editor, mut states, mut render, panel, buffer_id, epochs) =
+                        loss_fixture(fid, version, target);
+                    // The terminal legs use (1, 2), whose exact SGR
+                    // bytes the constants above pin. A document panel
+                    // uses row 0: `foreign_edit` replaces the buffer's
+                    // contents without refreshing the window's cached
+                    // line index, so only the first display row resolves
+                    // to a byte --- and a press that anchors nothing does
+                    // not arm, which would make every document leg
+                    // vacuous.
+                    let cell = match target {
+                        ReportingTerminal => pmacs_protocol::CellCoord::new(1, 2),
+                        Document => pmacs_protocol::CellCoord::new(0, 2),
+                    };
+
+                    send_press(
+                        &mut editor,
+                        &mut states,
+                        &mut render,
+                        fid,
+                        version,
+                        epochs,
+                        buffer_id,
+                        cell,
+                    );
+                    assert!(
+                        states[&fid].has_accepted_gesture(),
+                        "{label}: fixture --- the press must arm, or the row \
+                         proves nothing"
+                    );
+                    if matches!(target, ReportingTerminal) {
+                        assert_eq!(
+                            child_stream(&editor),
+                            vec![SGR_PRESS_1_2.to_vec()],
+                            "{label}: fixture --- the press reached the child"
+                        );
+                    }
+                    let selection_before = editor.core.borrow().windows[&panel].selection;
+
+                    match cause {
+                        WindowReplaced => {
+                            replace_panel_window(&editor, fid, panel, buffer_id);
+                            render_and_redeclare(&editor, &mut states, fid);
+                        }
+                        BufferReplaced => {
+                            replace_panel_buffer(&editor, panel);
+                            render_and_redeclare(&editor, &mut states, fid);
+                        }
+                        GeometrySameSize => {
+                            editor.accept_semantic_frame_geometry(fid, 2, CellSize::new(24, 80));
+                            render_and_redeclare(&editor, &mut states, fid);
+                        }
+                        Detach => {
+                            detach_session(&mut editor, &mut states, &mut render, fid);
+                        }
+                    }
+                    // Detach drains inside its own teardown; the producer
+                    // transitions park and are paid at the next drain.
+                    if !matches!(cause, Detach) {
+                        assert!(
+                            !states[&fid].has_accepted_gesture(),
+                            "{label}: the gesture must END --- it belongs to \
+                             a presentation that no longer exists"
+                        );
+                        drain_pending_release(&mut editor, &mut states, fid);
+                        assert!(
+                            !states[&fid].has_pending_release(),
+                            "{label}: and the slot must be empty afterwards"
+                        );
+                    }
+
+                    match target {
+                        ReportingTerminal => assert_eq!(
+                            child_stream(&editor),
+                            vec![SGR_RELEASE_1_2.to_vec()],
+                            "{label}: EXACTLY the recorded release, to the \
+                             child the gesture was pressed on --- routing it \
+                             by what occupies the panel now would tell the \
+                             wrong child to lift a button"
+                        ),
+                        Document => {
+                            assert!(
+                                selection_before.is_some(),
+                                "{label}: fixture --- the press anchored an \
+                                 empty selection for the cancellation to clear"
+                            );
+                            let core = editor.core.borrow();
+                            match core.windows.get(&panel) {
+                                Some(window) => assert!(
+                                    window.selection.is_none(),
+                                    "{label}: the empty selection must be \
+                                     cleared, or its stale anchor captures \
+                                     the next shift-motion"
+                                ),
+                                // WINDOW REPLACED: the window the gesture
+                                // belonged to is gone, so the completion
+                                // has nothing left to clear and the
+                                // gesture ENDING is the whole of the
+                                // effect --- already asserted above. Said
+                                // out loud rather than skipped, because a
+                                // silently absent assertion is how a
+                                // quadrant stops testing anything.
+                                None => assert!(
+                                    matches!(cause, WindowReplaced),
+                                    "{label}: the panel window vanished for \
+                                     a cause that should not remove it"
+                                ),
+                            }
+                        }
+                    }
+                }
+            }
         }
-
-        render_and_redeclare(&editor, &mut states, fid);
-
-        assert!(!states[&fid].has_accepted_gesture(), "the gesture must END");
-        assert!(
-            states[&fid].has_pending_release(),
-            "with its release owed to the buffer it was PRESSED on, not \
-             to whatever occupies the panel now"
-        );
     }
 
-    /// G5b(c) — a geometry change at an UNCHANGED cell size.
+    /// G5m — coincident invalidations produce ONE completion effect.
     ///
-    /// Nothing else the producer holds moves: not the panel epoch, not
-    /// the identity, and on a legacy peer not a mapping key either. The
-    /// retained geometry epoch is the only thing that can see it.
+    /// Both composites the framing names, and each reads the effect
+    /// rather than the cancellation count: a count of one proves the
+    /// latch was taken once, not that exactly one release went out.
     #[test]
-    fn g5b_c_a_same_size_geometry_change_cancels_and_pays() {
-        let fid = FrontendId(822);
-        let (mut editor, mut states, mut render, _panel, buffer_id, epochs) =
-            terminal_panel_session(fid, true);
-        let cell = pmacs_protocol::CellCoord::new(1, 2);
-        let press = pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left);
-        let none = pmacs_protocol::Modifiers::default();
-        let size_before = editor.core.borrow().panel_grid_size(fid).expect("grid");
+    fn g5m_coincident_invalidations_emit_one_release() {
+        // (a) changed-size geometry, which moves the geometry epoch AND
+        //     the mapping generation; (b) buffer replacement, which
+        //     moves the identity AND the mapping.
+        for (label, changed_size) in [("changed-size geometry", true), ("buffer replaced", false)] {
+            let fid = FrontendId(if changed_size { 850 } else { 851 });
+            let (mut editor, mut states, mut render, panel, buffer_id, epochs) =
+                terminal_panel_session_at(fid, true, PROTOCOL_VERSION);
+            let cell = pmacs_protocol::CellCoord::new(1, 2);
 
-        send_panel(
-            &mut editor,
-            &mut states,
-            &mut render,
-            fid,
-            epochs,
-            buffer_id,
-            cell,
-            press,
-            none,
-        );
-        let _ = child_stream(&editor);
+            send_press(
+                &mut editor,
+                &mut states,
+                &mut render,
+                fid,
+                PROTOCOL_VERSION,
+                epochs,
+                buffer_id,
+                cell,
+            );
+            assert_eq!(
+                child_stream(&editor),
+                vec![SGR_PRESS_1_2.to_vec()],
+                "{label}: fixture --- the press reached the child"
+            );
 
-        // A new geometry epoch at the SAME total size --- a font or scale
-        // change that leaves `CellSize` identical.
-        editor.accept_semantic_frame_geometry(fid, 2, CellSize::new(24, 80));
-        render_and_redeclare(&editor, &mut states, fid);
-        assert_eq!(
-            editor.core.borrow().panel_grid_size(fid).expect("grid"),
-            size_before,
-            "fixture: the SIZE must be unchanged, or this row is testing \
-             a resize instead"
-        );
+            if changed_size {
+                editor.accept_semantic_frame_geometry(fid, 2, CellSize::new(20, 60));
+            } else {
+                replace_panel_buffer(&editor, panel);
+            }
+            render_and_redeclare(&editor, &mut states, fid);
+            drain_pending_release(&mut editor, &mut states, fid);
 
-        assert!(
-            !states[&fid].has_accepted_gesture(),
-            "the gesture must END: the same cells now sit on a different \
-             grid, and the epochs the frontend echoes have moved under it"
-        );
-        assert!(
-            states[&fid].has_pending_release(),
-            "and its release is owed"
-        );
-    }
-
-    /// G5b(d) — DETACH ends a live gesture and pays it before teardown.
-    ///
-    /// Q4 proved detach pays a release that was ALREADY owed. This one
-    /// starts from a live gesture, which is the case with no later
-    /// opportunity of any kind.
-    #[test]
-    fn g5b_d_detach_cancels_a_live_gesture_and_pays_it() {
-        let fid = FrontendId(823);
-        let (mut editor, mut states, mut render, _panel, buffer_id, epochs) =
-            terminal_panel_session(fid, true);
-        let cell = pmacs_protocol::CellCoord::new(1, 2);
-        let press = pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left);
-        let none = pmacs_protocol::Modifiers::default();
-
-        send_panel(
-            &mut editor,
-            &mut states,
-            &mut render,
-            fid,
-            epochs,
-            buffer_id,
-            cell,
-            press,
-            none,
-        );
-        assert!(
-            states[&fid].has_accepted_gesture(),
-            "fixture: the gesture is LIVE, not merely owed"
-        );
-        let _ = child_stream(&editor);
-
-        detach_session(&mut editor, &mut states, &mut render, fid);
-
-        assert_eq!(
-            child_stream(&editor),
-            vec![SGR_RELEASE_1_2.to_vec()],
-            "detach must end the gesture AND pay it --- the frontend is \
-             gone, so a release not sent here is never sent"
-        );
-    }
-
-    /// G5m — coincident causes cancel ONCE.
-    ///
-    /// Identity and geometry both change in one transition. Taking the
-    /// shared latch is what makes this one release rather than two.
-    #[test]
-    fn g5m_coincident_causes_emit_one_release() {
-        let fid = FrontendId(824);
-        let (mut editor, mut states, mut render, panel, buffer_id, epochs) =
-            terminal_panel_session(fid, true);
-        let cell = pmacs_protocol::CellCoord::new(1, 2);
-        let press = pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left);
-        let none = pmacs_protocol::Modifiers::default();
-
-        send_panel(
-            &mut editor,
-            &mut states,
-            &mut render,
-            fid,
-            epochs,
-            buffer_id,
-            cell,
-            press,
-            none,
-        );
-        let _ = child_stream(&editor);
-
-        // BOTH at once: a replaced buffer and a moved geometry epoch.
-        {
-            let mut core = editor.core.borrow_mut();
-            let replacement = core.registry.borrow_mut().create("*both*");
-            let view = {
-                let registry = core.registry.clone();
-                let registry = registry.borrow();
-                crate::text_view::TextView::new(registry.get(replacement).expect("replacement"))
-            };
-            let window = core.windows.get_mut(&panel).expect("panel window");
-            window.buffer_id = replacement;
-            window.text_view = view;
+            assert_eq!(
+                child_stream(&editor),
+                vec![SGR_RELEASE_1_2.to_vec()],
+                "{label}: TWO causes, ONE release --- they take the same \
+                 latch, and a per-cause flag would send the child two \
+                 releases for one press"
+            );
+            assert!(
+                !states[&fid].has_pending_release(),
+                "{label}: with nothing left owed"
+            );
         }
-        editor.accept_semantic_frame_geometry(fid, 2, CellSize::new(24, 80));
-        render_and_redeclare(&editor, &mut states, fid);
-
-        assert_eq!(
-            states[&fid].panel_gesture_cancellations(),
-            1,
-            "TWO causes, ONE cancellation: they take the same latch, and \
-             counting per cause would emit a duplicate release"
-        );
     }
 
     /// G5j — document cancellation has two legs, and they differ.
@@ -9093,25 +9137,21 @@ mod tests {
     #[test]
     fn g5j_document_cancellation_clears_only_an_empty_selection() {
         for dragged in [false, true] {
-            let fid = FrontendId(if dragged { 826 } else { 825 });
-            let (mut editor, mut states, mut render, _document, panel, epochs) =
-                panel_session_at(LEGACY_PANEL_VERSION, fid);
-            let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
-            foreign_edit(&editor, buffer_id, b"alpha beta gamma\ndelta\n");
-            let press = pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left);
+            let fid = FrontendId(if dragged { 861 } else { 860 });
+            let (mut editor, mut states, mut render, panel, buffer_id, epochs) =
+                loss_fixture(fid, LEGACY_PANEL_VERSION, LossTarget::Document);
             let drag = pmacs_protocol::MouseKind::Drag(pmacs_protocol::MouseButton::Left);
             let none = pmacs_protocol::Modifiers::default();
 
-            send_panel(
+            send_press(
                 &mut editor,
                 &mut states,
                 &mut render,
                 fid,
+                LEGACY_PANEL_VERSION,
                 epochs,
                 buffer_id,
                 pmacs_protocol::CellCoord::new(0, 0),
-                press,
-                none,
             );
             if dragged {
                 send_panel(
@@ -9163,7 +9203,18 @@ mod tests {
         }
     }
 
-    /// P12 — a panel WIDER THAN 512 COLUMNS still routes pointer input.
+    /// Render one frame, which is where the producer notices an
+    /// authority loss.
+    fn render_and_redeclare(
+        editor: &crate::editor::EditorState,
+        states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+        fid: FrontendId,
+    ) {
+        let sem = states.get_mut(&fid).expect("projection");
+        let _ = sem.render_frame(editor);
+    }
+
+    /// P12 — a panel WIDER THAN 512 COLUMNS still routes pointer input.    /// P12 — a panel WIDER THAN 512 COLUMNS still routes pointer input.
     ///
     /// A panel deliberately does not inherit the terminal's per-axis PTY
     /// caps (Bet B5'): a 4K surface at a small font is legitimately
