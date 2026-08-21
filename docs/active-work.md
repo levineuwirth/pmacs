@@ -353,10 +353,13 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
       and with that assert compiled out the byte-order assertion
       catches the same defect — which is what a release build relies
       on.
-    - **Q5 is OWED.** The projection-seam drain needs a row that drives
-      the real per-frontend frame loop; the unit rows call
-      `render_frame` directly and never enter it. Recorded rather than
-      treated as covered by its neighbours.
+    - **Q5 is CLOSED.** The projection seam is extracted as
+      `project_semantic_frame`, which returns its messages **unwritten**
+      — so a caller holding them has by construction not sent the
+      successor frame, and a release already delivered at that moment
+      provably precedes it. The row bites its own drain and no other:
+      removing it fails Q5 while Q1–Q4 stay green on the other two
+      drain points.
   - **LANDED: the authority-loss matrix (task 19).** §5b wired `Absent`
     and left the other four transitions armed — inert while nothing
     consumed the latch, defects the moment cancellation gained an
@@ -372,8 +375,7 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
       cancellation, which a mutation confirms it catches. The count is
       asserted in the row, because a loop that quietly stops covering a
       combination passes exactly as loudly as one that covers them all.
-      Each quadrant **drains
-      explicitly** and asserting the effect — the exact release bytes
+      Each quadrant **drains explicitly and asserts the effect** — the exact release bytes
       for a reporting terminal, the cleared empty selection for a
       document, and an empty slot afterwards. An earlier version
       stopped at `has_pending_release()` and would have passed while
@@ -404,8 +406,15 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
       gone, so the completion has nothing left to clear and the
       gesture ending is the whole effect. Written into the row rather
       than left as a silently absent assertion.
-  - **REMAINING:** Q5's acceptance-shaped row, then the full head-exact
-    gate and the PR.
+  - **REMAINING: the full head-exact gate, then the PR.** The gate
+    wants a QUIET machine: a foreign C++/java build has been running at
+    load 114+ through this work, and the wall-clock rows
+    (`composition_overhead_under_ten_percent`,
+    `m6_2_pty_streaming_respects_byte_ceiling`,
+    `full_buffer_summary_flatten_scales_on_large_grammar_file`) redded
+    under it and were green in isolation every time. That is U6/U9/U10
+    territory and running the gate into it would manufacture another
+    rotating-red incident.
   - **Two test seams added for this:** an opt-in child-input tap
     (`start_send_tap_for_test`) and a drag-state read
     (`view_is_dragging_for_test`). Nothing else exposes what the child

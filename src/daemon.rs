@@ -1019,6 +1019,36 @@ fn panel_event_epochs_are_current(
         .is_some_and(|geometry| geometry.geometry_epoch == geometry_epoch)
 }
 
+/// Project one SEMANTIC frontend's frame, paying any release that
+/// projection itself raised before the caller can write the result
+/// (parent 48, drain point three).
+///
+/// **The seam exists because the cancellation happens too deep to pay
+/// itself.** A mapping-generation advance cancels the live gesture
+/// INSIDE `render_frame`, while the successor `PresentMapped` is still
+/// being built, so "before that frame is produced" is not a place that
+/// exists. This is the first place that is: projection has returned,
+/// and none of what it returned has been written.
+///
+/// Returning the messages UNWRITTEN is what makes the ordering
+/// testable — a caller holding them has, by construction, not yet sent
+/// the successor frame, so a release already delivered at that moment
+/// provably precedes it.
+///
+/// Grid sessions do not come here: they hold no panel and no gesture.
+fn project_semantic_frame(
+    editor: &mut EditorState,
+    semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+    fid: FrontendId,
+) -> Vec<InstanceMessage> {
+    let messages = semantic_states
+        .get_mut(&fid)
+        .map(|sem| sem.render_frame(editor))
+        .unwrap_or_default();
+    drain_pending_release(editor, semantic_states, fid);
+    messages
+}
+
 /// Deliver the release this frontend is owed, if any (parent 48).
 ///
 /// **Order is the ruling, not just the existence of a slot.** A
@@ -1578,8 +1608,8 @@ fn dispatcher_loop(
             // out locally); it still receives `CursorByte` below
             // (semantic implies `crdt_replica`) and participates in
             // presence. A grid session takes the M5.2 cell path.
-            let messages = if let Some(sem) = semantic_states.get_mut(fid) {
-                sem.render_frame(editor)
+            let messages = if semantic_states.contains_key(fid) {
+                project_semantic_frame(editor, &mut semantic_states, *fid)
             } else {
                 // T M10.9 — gather other-frontend presences for the
                 // overlay paint. Reads `last_broadcast` (updated by
@@ -1596,16 +1626,6 @@ fn dispatcher_loop(
                     .expect("render_state present for attached grid fid");
                 render_state.render_frame(editor, *fid, &terminal_snapshots, &other_presences)
             };
-
-            // Parent 48 — THE PROJECTION SEAM. A mapping-generation
-            // advance cancels the live gesture INSIDE `render_frame`,
-            // while the successor `PresentMapped` is still being built,
-            // so "before that frame is produced" is not a place that
-            // exists. This is the first point that is: projection has
-            // returned and none of what it returned has been written.
-            // Draining here keeps the release ahead of the frame whose
-            // own new mapping is what required it.
-            drain_pending_release(editor, &mut semantic_states, *fid);
 
             // Vterm Stage 3 — a semantic frontend showing a terminal has
             // no document cursor: the identity buffer is empty, so a
@@ -8739,6 +8759,69 @@ mod tests {
     // that drives the real frame loop, which is acceptance-suite shaped
     // rather than unit shaped. Recorded as OWED rather than assumed
     // covered by its neighbours.
+
+    /// Q5 — a release raised by PROJECTION is paid before the frame
+    /// that raised it can be written.
+    ///
+    /// This is the third drain, and the only one a unit row could not
+    /// reach before: it sits inside the daemon's per-frontend frame
+    /// loop. `project_semantic_frame` is that seam, extracted --- it
+    /// returns the messages UNWRITTEN, so a caller holding them has by
+    /// construction not sent the successor frame yet, and a release
+    /// already delivered at that moment provably precedes it.
+    ///
+    /// Recorded as OWED through tasks 18 and 19; this closes it.
+    #[test]
+    fn q5_a_projection_raised_release_precedes_the_frame_that_raised_it() {
+        let fid = FrontendId(870);
+        let (mut editor, mut states, mut render, _panel, buffer_id, epochs) =
+            terminal_panel_session_at(fid, true, PROTOCOL_VERSION);
+        let cell = pmacs_protocol::CellCoord::new(1, 2);
+
+        send_press(
+            &mut editor,
+            &mut states,
+            &mut render,
+            fid,
+            PROTOCOL_VERSION,
+            epochs,
+            buffer_id,
+            cell,
+        );
+        assert_eq!(
+            child_stream(&editor),
+            vec![SGR_PRESS_1_2.to_vec()],
+            "fixture: the press reached the child"
+        );
+        assert!(
+            states[&fid].has_accepted_gesture(),
+            "fixture: the gesture is live"
+        );
+
+        // The panel stops being presentable. `publish_absent_panel`
+        // cancels from INSIDE projection, which cannot deliver.
+        editor.hide_panel_for_test(fid);
+
+        let messages = project_semantic_frame(&mut editor, &mut states, fid);
+
+        assert_eq!(
+            child_stream(&editor),
+            vec![SGR_RELEASE_1_2.to_vec()],
+            "the release must already be delivered when projection hands \
+             its messages back --- the caller has not written them, so \
+             this is the release preceding the successor frame, not \
+             merely both arriving"
+        );
+        assert!(
+            !messages.is_empty(),
+            "fixture: projection really did produce the successor frame \
+             whose own transition required that release"
+        );
+        assert!(
+            !states[&fid].has_pending_release(),
+            "and nothing is left owed"
+        );
+    }
 
     /// Q6 — a SECOND PRESS with the first still live: the old release
     /// reaches the child before the new press.
