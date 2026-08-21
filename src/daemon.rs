@@ -8813,9 +8813,16 @@ mod tests {
              merely both arriving"
         );
         assert!(
-            !messages.is_empty(),
-            "fixture: projection really did produce the successor frame \
-             whose own transition required that release"
+            messages.iter().any(|message| matches!(
+                message,
+                InstanceMessage::PanelFrame(pmacs_protocol::panel::PanelFramePayload::Absent)
+            )),
+            "fixture: the unwritten messages must contain THE SUCCESSOR \
+             FRAME --- the `Absent` payload whose own transition raised \
+             the release. A non-empty vec proves nothing: any unrelated \
+             semantic message would satisfy it, and the row would then \
+             assert an ordering against a frame that was never there. \
+             Got {messages:?}"
         );
         assert!(
             !states[&fid].has_pending_release(),
