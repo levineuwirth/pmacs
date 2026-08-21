@@ -1100,6 +1100,23 @@ fn replay_panel_pointer(
                 // A chrome press begins nothing.
                 return;
             }
+            // A SECOND PRESS WITH THE FIRST STILL LIVE. The entry drain
+            // above saw nothing, because the old gesture had not been
+            // cancelled yet --- it was live, not owed. Arming used to do
+            // the cancelling, which happens AFTER this press has already
+            // reached the target, so the child received
+            // `old press, new press, old release`.
+            //
+            // End the old gesture and PAY it here, before the
+            // replacement lands, so the wire carries
+            // `old press, old release, new press`.
+            if live {
+                if let Some(state) = semantic_states.get_mut(&source) {
+                    let _ = state.cancel_accepted_gesture();
+                }
+                drain_pending_release(editor, semantic_states, source);
+            }
+
             // ARMED FROM THE EFFECT RESULT, and only if there was one.
             // `None` means the target refused the press --- a terminal
             // view that is gone, for instance --- and arming over that
@@ -7904,6 +7921,8 @@ mod tests {
     const SGR_RELEASE_1_2: &[u8] = b"\x1b[<0;3;2m";
     /// The same release with SHIFT held: the button code gains 4.
     const SGR_RELEASE_1_2_SHIFT: &[u8] = b"\x1b[<4;3;2m";
+    /// A left press at cell (2, 4), the replacement gesture's cell.
+    const SGR_PRESS_2_4: &[u8] = b"\x1b[<0;5;3M";
 
     /// A panel session whose side window holds a live TERMINAL, with
     /// the send tap armed.
@@ -8701,48 +8720,80 @@ mod tests {
     // rather than unit shaped. Recorded as OWED rather than assumed
     // covered by its neighbours.
 
-    /// Q6 — the arm-over-pending invariant, as a BACKSTOP.
+    /// Q6 — a SECOND PRESS with the first still live: the old release
+    /// reaches the child before the new press.
     ///
-    /// The ordering is what prevents this; the assertion exists so that
-    /// a future path which cancels twice without draining is loud
-    /// rather than silently losing one release.
+    /// This is the ordering the entry drain alone cannot give. That
+    /// drain looks for an OWED release, and a live gesture owes
+    /// nothing yet — it is cancelled by arming, which happens after the
+    /// replacement press has already reached the target. The child then
+    /// saw `old press, new press, old release`: two presses
+    /// outstanding, and a release arriving for the wrong one.
+    ///
+    /// An earlier version of this row never sent a second press while
+    /// the first was live, so it could not observe any of that.
     #[test]
-    fn q6_arming_never_happens_over_a_pending_release() {
+    fn q6_a_second_press_pays_the_first_before_it_lands() {
         let fid = FrontendId(813);
         let (mut editor, mut states, mut render, _panel, buffer_id, epochs) =
             terminal_panel_session(fid, true);
-        let cell = pmacs_protocol::CellCoord::new(1, 2);
+        let first = pmacs_protocol::CellCoord::new(1, 2);
+        let second = pmacs_protocol::CellCoord::new(2, 4);
         let press = pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left);
         let none = pmacs_protocol::Modifiers::default();
 
-        for _ in 0..3 {
-            send_panel(
-                &mut editor,
-                &mut states,
-                &mut render,
-                fid,
-                epochs,
-                buffer_id,
-                cell,
-                press,
-                none,
-            );
-            let _ = cancel_by_panel_absence(&editor, &mut states, fid);
-            assert!(
-                states[&fid].has_pending_release(),
-                "fixture: each round parks a release"
-            );
-        }
-
+        send_panel(
+            &mut editor,
+            &mut states,
+            &mut render,
+            fid,
+            epochs,
+            buffer_id,
+            first,
+            press,
+            none,
+        );
+        assert_eq!(
+            child_stream(&editor),
+            vec![SGR_PRESS_1_2.to_vec()],
+            "fixture: the first press reached the child"
+        );
         assert!(
-            !states[&fid].has_pending_release() || states[&fid].accepted_gesture().is_none(),
-            "Q6: a release may be owed, or a gesture armed, but arming \
-             OVER an owed release would lose one --- the drain before \
-             each effect is what keeps these from overlapping"
+            states[&fid].has_accepted_gesture(),
+            "fixture: and it is still LIVE --- no release was sent"
+        );
+
+        // The second press, with the first never released.
+        send_panel(
+            &mut editor,
+            &mut states,
+            &mut render,
+            fid,
+            epochs,
+            buffer_id,
+            second,
+            press,
+            none,
+        );
+
+        assert_eq!(
+            child_stream(&editor),
+            vec![SGR_RELEASE_1_2.to_vec(), SGR_PRESS_2_4.to_vec()],
+            "the first gesture's release must reach the child BEFORE the \
+             replacement press --- the release is at the first gesture's \
+             own cell, and it comes first"
+        );
+        assert!(
+            states[&fid].has_accepted_gesture(),
+            "and the replacement is armed"
+        );
+        assert!(
+            !states[&fid].has_pending_release(),
+            "with nothing left owed"
         );
     }
 
-    /// P12 — a panel WIDER THAN 512 COLUMNS still routes pointer input.
+    /// P12 — a panel WIDER THAN 512 COLUMNS still routes pointer input.    /// P12 — a panel WIDER THAN 512 COLUMNS still routes pointer input.
     ///
     /// A panel deliberately does not inherit the terminal's per-axis PTY
     /// caps (Bet B5'): a 4K surface at a small font is legitimately

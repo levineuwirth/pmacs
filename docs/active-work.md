@@ -339,9 +339,20 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
     pays it **before any subsequent panel-pointer effect**, **before
     detach teardown**, and **at the projection seam** between
     `render_frame` returning and its messages being written.
-    - **Witnessed: Q1, Q2, Q3, Q4, Q6.** Q3 asserts ORDER, not arrival,
-      and the mutation that keeps the drain but moves it after the
-      press effect fails exactly that assertion.
+    - **A LIVE gesture is ended and PAID before a replacement press
+      lands.** The entry drain alone was not enough: it looks for an
+      OWED release, and a live gesture owes nothing yet — arming was
+      what cancelled it, which happens after the replacement has
+      already reached the target. The child saw `old press, new press,
+      old release`.
+    - **Witnessed: Q1, Q2, Q3, Q4, Q6.** Q3 asserts ORDER, not arrival.
+      Q6 sends a second press with the first still live and expects
+      exactly `old release, new press` in the child's stream. Both
+      layers of Q6 are proven separately: the invariant now asserts at
+      the point of ARMING (not inside cancellation) and fires in debug,
+      and with that assert compiled out the byte-order assertion
+      catches the same defect — which is what a release build relies
+      on.
     - **Q5 is OWED.** The projection-seam drain needs a row that drives
       the real per-frontend frame loop; the unit rows call
       `render_frame` directly and never enter it. Recorded rather than

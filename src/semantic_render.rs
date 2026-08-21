@@ -757,12 +757,30 @@ impl SemanticRenderState {
     /// per §5b's split table, because the release it denies does not
     /// exist on this branch.
     pub fn arm_accepted_gesture(&mut self, gesture: AcceptedPanelGesture) {
-        // A second accepted press while one is already armed means the
-        // first gesture's release never arrived — a dropped `Up`, or an
-        // outbox that closed under a stall. END it rather than
-        // overwrite it: overwriting discards the record silently, and
-        // once replay attaches effects to that record the child is left
-        // holding a button down with nothing left to release it.
+        // THE INVARIANT IS ASSERTED WHERE IT IS RELIED ON. A caller must
+        // have ended AND paid any live gesture before arming a
+        // replacement: a second accepted press while one is armed means
+        // the first gesture's release never arrived, and its release has
+        // to reach the target before this press does. Cancelling here
+        // instead is too late by exactly one effect --- the replacement
+        // has already landed.
+        //
+        // Checked at the point of arming rather than inside
+        // cancellation, because arming is what the ordering protects.
+        debug_assert!(
+            self.accepted_gesture.is_none(),
+            "arming over a LIVE gesture: the caller must cancel and \
+             drain it first, or the replacement press overtakes the old \
+             gesture's release"
+        );
+        debug_assert!(
+            self.pending_release.is_none(),
+            "arming over an OWED release: the drain must run before the \
+             effect that arms"
+        );
+        // Defensive in release builds: ending it parks the record for a
+        // later drain, which is late but not lost. Overwriting would
+        // discard it outright and leave the child holding a button.
         self.cancel_accepted_gesture();
         self.accepted_gesture = Some(gesture);
     }
