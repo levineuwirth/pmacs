@@ -357,8 +357,30 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
       the real per-frontend frame loop; the unit rows call
       `render_frame` directly and never enter it. Recorded rather than
       treated as covered by its neighbours.
-  - **REMAINING, in order:** task 19's four stranding transitions, Q5's
-    acceptance-shaped row, then the full head-exact gate and the PR.
+  - **LANDED: the authority-loss matrix (task 19).** §5b wired `Absent`
+    and left the other four transitions armed — inert while nothing
+    consumed the latch, defects the moment cancellation gained an
+    effect. Three are visible in the producer where the declaration is
+    built (**window replacement**, **buffer replacement**, and a
+    **geometry-epoch change including at an unchanged size**, which
+    needed a retained `geometry_epoch` because nothing else the
+    producer holds moves with it); **detach** cancels in the dispatcher
+    before any teardown.
+    - **Witnessed: G5b(a)–(d), G5m, G5j**, each reading the CHILD'S
+      STREAM or the document's selection rather than the latch. The
+      mutations discriminate exactly: dropping the window half of the
+      identity check fails only the buffer leg, dropping the buffer
+      half fails only the window leg, dropping the geometry check fails
+      only that leg, and dropping detach's cancel fails only detach.
+    - **G5m survives all four**, correctly: two coincident causes take
+      the same latch, so one release, and removing either cause still
+      leaves one.
+    - **G5j has two legs and they differ**: an empty selection is
+      cleared without moving point, a REAL dragged region survives
+      anchor-and-cursor exact. Clearing every selection fails the
+      second.
+  - **REMAINING:** Q5's acceptance-shaped row, then the full head-exact
+    gate and the PR.
   - **Two test seams added for this:** an opt-in child-input tap
     (`start_send_tap_for_test`) and a drag-state read
     (`view_is_dragging_for_test`). Nothing else exposes what the child

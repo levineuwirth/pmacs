@@ -532,6 +532,15 @@ struct PanelPresentation {
     window_id: WindowId,
     buffer_id: BufferId,
     panel_epoch: u64,
+    /// The geometry epoch this presentation was shipped under.
+    ///
+    /// Retained for parent 48's authority-loss matrix: a geometry
+    /// change at an UNCHANGED `CellSize` moves nothing else the
+    /// producer holds — not the panel epoch, not the identity, and on a
+    /// legacy peer not a mapping key either — so without this the
+    /// transition is invisible and a live gesture survives a grid it no
+    /// longer belongs to.
+    geometry_epoch: u64,
 }
 
 /// One [`SemanticRenderState::diag_line_cache`] entry: the line-start
@@ -1720,6 +1729,31 @@ impl SemanticRenderState {
             return;
         };
         let identity = (projection.window_id, projection.buffer_id);
+
+        // Parent 48 G5b — AUTHORITY LOSS. A live gesture belongs to the
+        // presentation it was pressed on. Three of the matrix's five
+        // transitions are visible right here, and each is a separate
+        // cause with one shared consequence:
+        //
+        //   * the side WINDOW was replaced (panel-epoch change),
+        //   * its BUFFER was replaced,
+        //   * the GEOMETRY epoch moved, including at an unchanged size.
+        //
+        // §5b left these armed deliberately — inert while nothing
+        // consumed the latch — and they became defects the moment this
+        // lane gave cancellation an effect. Taking the latch parks the
+        // release; the drain pays it.
+        //
+        // G5m: coincident causes take the latch ONCE. `cancel_accepted_gesture`
+        // is idempotent on an empty latch, so a transition that trips
+        // two of these conditions still emits one release.
+        if let Some(presentation) = self.panel_presentation
+            && ((presentation.window_id, presentation.buffer_id) != identity
+                || presentation.geometry_epoch != geometry.geometry_epoch)
+        {
+            self.cancel_accepted_gesture();
+        }
+
         let panel_epoch = match self.panel_presentation {
             Some(presentation) if (presentation.window_id, presentation.buffer_id) == identity => {
                 Some(presentation.panel_epoch)
@@ -1803,6 +1837,7 @@ impl SemanticRenderState {
                     window_id: projection.window_id,
                     buffer_id: projection.buffer_id,
                     panel_epoch,
+                    geometry_epoch: geometry.geometry_epoch,
                 });
                 self.last_panel_payload = Some(payload.clone());
                 out.push(InstanceMessage::PanelFrame(payload));
