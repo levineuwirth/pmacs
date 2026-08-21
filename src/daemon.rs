@@ -8793,7 +8793,7 @@ mod tests {
         );
     }
 
-    /// P12 — a panel WIDER THAN 512 COLUMNS still routes pointer input.    /// P12 — a panel WIDER THAN 512 COLUMNS still routes pointer input.
+    /// P12 — a panel WIDER THAN 512 COLUMNS still routes pointer input.
     ///
     /// A panel deliberately does not inherit the terminal's per-axis PTY
     /// caps (Bet B5'): a 4K surface at a small font is legitimately
