@@ -8743,23 +8743,6 @@ mod tests {
         );
     }
 
-    // Q5 IS NOT WITNESSED HERE, and this is why.
-    //
-    // The third drain sits in the daemon's per-frontend frame loop,
-    // between `sem.render_frame(editor)` returning and the loop that
-    // writes what it returned. These rows drive `render_frame`
-    // directly, so they never enter that loop and cannot observe the
-    // seam; the two drains they DO reach — before a panel-pointer
-    // effect, and before detach teardown — are witnessed by Q1-Q4.
-    //
-    // The seam is still load-bearing: a cancellation raised inside
-    // projection with no following panel event and no detach would
-    // otherwise let the successor frame reach the frontend ahead of the
-    // release its own new mapping required. Witnessing it needs a row
-    // that drives the real frame loop, which is acceptance-suite shaped
-    // rather than unit shaped. Recorded as OWED rather than assumed
-    // covered by its neighbours.
-
     /// Q5 — a release raised by PROJECTION is paid before the frame
     /// that raised it can be written.
     ///
