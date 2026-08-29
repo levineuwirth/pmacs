@@ -496,11 +496,40 @@ Stage 4; the lane touches no `pmacs-gpu` code at all.
 | **selector** | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
 | **job / flavor** | local (Linux), `cargo test --workspace --features crdt --no-fail-fast`, i.e. under full-sweep load |
 | **required fragments** | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
-| **status** | **FIFTH OCCURRENCE 2026-08-15 — causal status still UNRESOLVED.** The fifth carries the strongest tree exclusion this row has had: a **documentation-only diff** |
+| **status** | **SIXTH OCCURRENCE 2026-08-29 — causal status still UNRESOLVED.** The fifth carries the strongest tree exclusion this row has had: a **documentation-only diff** |
 | **what IS established** | **three** occurrences at `pmacs-gpu/src/attach.rs:1680`, the second and third with all three fragments **verified** rather than inferred; the test drives a scripted transient-then-success sequence over a real socket pair. **The added GPU test is not the mechanism** — see the third-occurrence control below |
 | **what is NOT** | whether the broken pipe is the *fixture's* writer closing early or a real retry-path defect. **This row is not a claim that it is harmless** |
 | **rerun evidence** | occurrence 1: 6 isolated runs green, plus a full `--workspace --features crdt` sweep green (113 targets). Occurrence 2: **30 green on the observing branch** (15 isolated selector, 15 full `-p pmacs-gpu`) **plus a 15-run merge-base control, also green**. Occurrence 3: 5 isolated selector runs green, 10 full `-p pmacs-gpu` runs green **with** the added test, and **1 failure in 10 with the added test `#[ignore]`d** — the first rerun in this row's history that reproduced anything. Per the rerun rule the green runs establish intermittence only; the red control run is what carries the exclusion |
 | **retirement** | hardening that removes the named mechanism plus a discriminating witness — or a diagnosis showing the fixture, not the code, closes the pipe |
+
+**Sixth occurrence — the parse-budget diagnosability lane, 2026-08-29,
+local (Linux), `gpu` step.** All three required fragments present in the
+durable log
+(`pmacs-parse-budget-9c27ecfe/gate-logs/20260829T144541Z-350549/06-gpu.log`):
+
+```
+transient sequence must attach: Attach(Handshake(Io(Os { code: 32,
+kind: BrokenPipe, message: "Broken pipe" })))
+```
+
+at `pmacs-gpu/src/attach.rs:1889`, `283 passed; 1 failed`.
+
+* **The tree exclusion is as strong as the fifth's.** The observing
+  lane's entire diff is `src/async_runtime.rs`,
+  `tests/m4_acceptance.rs` and two docs — **no `pmacs-gpu` file, and no
+  file `pmacs-gpu` links against beyond the workspace it always did.**
+  The change is two `assert!` message strings.
+* **Rerun: isolated selector green three times** (`1 passed`, 0.01 s
+  each), which is this row's established control shape.
+* **THE SAME RUN'S `sweep` STAGE WAS TRUNCATED, and is not evidence.**
+  The gate was running in a background task that was killed at 314s;
+  `07-sweep.log` ends in `Terminated`. That stage's absence says
+  nothing, and the run as a whole is **not** a gate result. Only the
+  `gpu` stage's failure is, because it completed and reported.
+* **Causal status: still UNRESOLVED**, and this occurrence does not
+  change it. It adds one more data point to "not lane-correlated" — a
+  sixth lane, touching a sixth unrelated surface, seeing the same
+  three fragments.
 
 **Fifth occurrence — panel cell-mapping generation (§5b) framing,
 2026-08-15, local (Linux).** The `scripts/gate` **`gpu` step** again,

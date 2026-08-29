@@ -311,6 +311,16 @@ from #171 and #215.
   wide enough to be complete also catches `Instant::now() < deadline`
   loop guards and `eval::<bool>` turbofish, and a sweep narrow enough
   to be accurate proves nothing about completeness.
+- **GATE RUN 1 IS NOT A RESULT.** It ran in a background task that was
+  killed at 314s; `07-sweep.log` ends in `Terminated`. Stages 1–5 and 8
+  were green and stage 6 (`gpu`) genuinely failed — that one completed
+  and reported — but the run as a whole proves nothing and must not be
+  read as a gate outcome.
+- **That `gpu` failure is R7's SIXTH occurrence**, recorded in
+  `docs/ci-red-signatures.md`. All three required fragments, isolated
+  selector green three times, and **this lane touches no `pmacs-gpu`
+  file at all** — its whole diff is two `assert!` message strings and
+  two docs.
 - **Still owed, separately:** `workflow_dispatch` on `ci.yml`, and U9's
   discriminating control — pin test-binary concurrency to 1, then load
   a lone `--lib` binary — which has been named since 2026-08-09 and
