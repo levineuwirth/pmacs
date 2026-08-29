@@ -3325,7 +3325,11 @@ mod tests {
             .expect("parse handoff must hold a bundle on Complete");
         match rt.take_result(id) {
             Some(JobOutcome::Complete(JobResult::Parse { duration_ms })) => {
-                assert!(duration_ms < 100, "trivial parse should be fast");
+                assert!(
+                    duration_ms < 100,
+                    "trivial parse should be fast: took {duration_ms}ms \
+                     against a 100ms budget"
+                );
             }
             other => panic!("unexpected outcome: {other:?}"),
         }

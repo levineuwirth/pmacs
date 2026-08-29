@@ -270,6 +270,91 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
+## Parse-budget diagnosability — ACTIVE
+
+**Written with the branch's FIRST commit**, per the standing correction
+from #171 and #215.
+
+- **Branch `parse-budget-diagnosability`**, base `githubsucks/main` @
+  **`3557779`** exactly, in worktree
+  `/home/jeans/Repos/personal/pmacs-parse-budget`.
+  **`githubsucks/parse-budget-diagnosability` is the authoritative
+  tip** (the ref, not a SHA). Recover with `git fetch githubsucks &&
+  git checkout parse-budget-diagnosability`.
+- **Framing `docs/parse-budget-diagnosability-framing.md`, revision 2 —
+  APPROVED.** Revision 1 was reviewed and had two defects worth
+  keeping: it claimed `dispatch_parse_round_trips_a_rust_source_file`
+  was the codebase's **sole** measurement-omitting assertion (false —
+  `tests/m4_acceptance.rs:244` is the same budget on the same
+  measurement), and it bundled `workflow_dispatch`, which this ledger
+  had already recorded as its own lane.
+- **What it does:** both `duration_ms < 100` assertions now report the
+  observed value and the budget. **Neither budget moves.**
+- **Why:** `dispatch_parse_round_trips_a_rust_source_file` redded twice
+  on macOS/`lua54` — U11, then again on #243 — and **both margins were
+  unrecoverable**, so the second red could not be compared with the
+  first. A 1ms overshoot and a 900ms overshoot are different failures
+  and produced identical logs.
+- **D1/D2 verified against REAL PANIC MESSAGES**, by forcing only the
+  comparison bound to `0` in a scratch build:
+  - `trivial parse should be fast: took 0ms against a 100ms budget`
+  - `200-line parse should be quick: took 11ms against a 100ms budget`
+  The second is the stronger demonstration: a non-zero observed value
+  cannot be mistaken for a literal.
+- **THE SCRATCH PANIC PROVES ONLY HALF.** It exercises a budget of
+  **0** while printing `100ms`, so it says nothing about the committed
+  threshold. **D3 carries that half separately** by pinning the literal
+  `100` in both files. The two are a proof together; neither
+  substitutes for the other.
+- **NOT an assertion-hygiene audit.** The framing's §3 withdraws
+  revision 1's completeness claim rather than repairing it: a sweep
+  wide enough to be complete also catches `Instant::now() < deadline`
+  loop guards and `eval::<bool>` turbofish, and a sweep narrow enough
+  to be accurate proves nothing about completeness.
+- **GATE RUN 1 IS NOT A RESULT.** It ran in a background task that was
+  killed at 314s; `07-sweep.log` ends in `Terminated`. Stages 1–5 and 8
+  were green and stage 6 (`gpu`) genuinely failed — that one completed
+  and reported — but the run as a whole proves nothing and must not be
+  read as a gate outcome.
+- **Those `gpu` failures are R7's SIXTH and SEVENTH occurrences**, in
+  `docs/ci-red-signatures.md`. All three required fragments, isolated
+  selector green three times, and **this lane touches no `pmacs-gpu`
+  file at all** — its whole diff is two `assert!` message strings and
+  three docs.
+- **GATE RUN 2: 7/8, `gpu` red on R7 again** (head `45d438c`, log
+  `20260829T150011Z-429115`). `sweep` ran fully green this time.
+  **Two consecutive in-gate R7 failures prompted a narrowing**: 17 green
+  runs outside the gate, in four configurations, never reproduced it.
+  **A third in-gate run was then GREEN**, so "in-gate always fails" is
+  false and the registry's first write-up — which called those runs
+  *exclusions* — is corrected there: nothing outside the gate has ever
+  reproduced this, so matching one gate condition at a time outside it
+  cannot isolate an in-gate cause. In-gate is 2 failures in 4;
+  out-of-gate is 0 in 17, over a **bounded observation window** the
+  registry defines so the ratio cannot drift with review activity.
+  Recorded there; **not this lane's to solve**.
+- **PR #244** — https://github.com/levineuwirth/pmacs/pull/244.
+- **Every review round ends with a head-exact 8-stage gate**, green
+  each time, with `HEAD` and a clean worktree captured before and after
+  and the result read from the eight stage logs rather than inferred
+  from stage exits. **The PR body carries the current head and log
+  id**; they are not duplicated here, because a docs commit answering a
+  review moves both, and a ledger line naming them is stale the moment
+  it is written — the lesson §5b learned twice.
+- **Review follow-up found U13, separately recorded.** On signed head
+  `756c2b8`, gate `20260829T171606Z-1087848` was 7/8: `07-sweep`
+  reddened only
+  `gate_script_acceptance::skipped_directories_are_reported_with_a_reason`.
+  The child command's stdout was empty, but the row discards its stderr
+  and status, so the mechanism is unrecoverable. The exact selector and
+  the full 36-test binary both passed immediately afterwards —
+  intermittence only. This lane changes neither the gate script nor
+  that acceptance binary; diagnostic hardening is a separate lane.
+- **Still owed, separately:** `workflow_dispatch` on `ci.yml`, and U9's
+  discriminating control — pin test-binary concurrency to 1, then load
+  a lone `--lib` binary — which has been named since 2026-08-09 and
+  never run.
+
 ## Panel-pointer replay (parent acceptance 48) — MERGED as #243 (`6c9bae6`)
 
 - **MERGED 2026-08-29T10:37:10Z** at approved head `b8c51b7`, merge

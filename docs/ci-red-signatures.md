@@ -496,11 +496,96 @@ Stage 4; the lane touches no `pmacs-gpu` code at all.
 | **selector** | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
 | **job / flavor** | local (Linux), `cargo test --workspace --features crdt --no-fail-fast`, i.e. under full-sweep load |
 | **required fragments** | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
-| **status** | **FIFTH OCCURRENCE 2026-08-15 — causal status still UNRESOLVED.** The fifth carries the strongest tree exclusion this row has had: a **documentation-only diff** |
+| **status** | **SEVENTH OCCURRENCE 2026-08-29 — causal status still UNRESOLVED.** The sixth and seventh came back to back on one lane and are written up together below; the fifth carries the strongest tree exclusion this row has had, a **documentation-only diff** |
 | **what IS established** | **three** occurrences at `pmacs-gpu/src/attach.rs:1680`, the second and third with all three fragments **verified** rather than inferred; the test drives a scripted transient-then-success sequence over a real socket pair. **The added GPU test is not the mechanism** — see the third-occurrence control below |
 | **what is NOT** | whether the broken pipe is the *fixture's* writer closing early or a real retry-path defect. **This row is not a claim that it is harmless** |
 | **rerun evidence** | occurrence 1: 6 isolated runs green, plus a full `--workspace --features crdt` sweep green (113 targets). Occurrence 2: **30 green on the observing branch** (15 isolated selector, 15 full `-p pmacs-gpu`) **plus a 15-run merge-base control, also green**. Occurrence 3: 5 isolated selector runs green, 10 full `-p pmacs-gpu` runs green **with** the added test, and **1 failure in 10 with the added test `#[ignore]`d** — the first rerun in this row's history that reproduced anything. Per the rerun rule the green runs establish intermittence only; the red control run is what carries the exclusion |
 | **retirement** | hardening that removes the named mechanism plus a discriminating witness — or a diagnosis showing the fixture, not the code, closes the pipe |
+
+**Sixth occurrence — the parse-budget diagnosability lane, 2026-08-29,
+local (Linux), `gpu` step.** All three required fragments present in the
+durable log
+(`pmacs-parse-budget-9c27ecfe/gate-logs/20260829T144541Z-350549/06-gpu.log`):
+
+```
+transient sequence must attach: Attach(Handshake(Io(Os { code: 32,
+kind: BrokenPipe, message: "Broken pipe" })))
+```
+
+at `pmacs-gpu/src/attach.rs:1889`, `283 passed; 1 failed`.
+
+* **The tree exclusion is as strong as the fifth's.** The observing
+  lane's entire diff is `src/async_runtime.rs`,
+  `tests/m4_acceptance.rs` and three docs — **no `pmacs-gpu` file, and no
+  file `pmacs-gpu` links against beyond the workspace it always did.**
+  The change is two `assert!` message strings.
+* **Rerun: isolated selector green three times** (`1 passed`, 0.01 s
+  each), which is this row's established control shape.
+* **THE SAME RUN'S `sweep` STAGE WAS TRUNCATED, and is not evidence.**
+  The gate was running in a background task that was killed at 314s;
+  `07-sweep.log` ends in `Terminated`. That stage's absence says
+  nothing, and the run as a whole is **not** a gate result. Only the
+  `gpu` stage's failure is, because it completed and reported.
+**A SEVENTH OCCURRENCE FOLLOWED IMMEDIATELY**, on the next gate run of
+the same worktree at head `45d438c`
+(`20260829T150011Z-429115/06-gpu.log`), same selector, same three
+fragments, `283 passed; 1 failed`. **That run's other seven stages were
+green**, `sweep` included and complete — 121 result lines, none with a
+failure — so this pair is not confounded by a truncation the way the
+sixth was.
+
+**Two consecutive in-gate failures is new for this row**, whose prior
+five were spread across lanes and months. It prompted a narrowing, and
+the narrowing is the useful part.
+
+**A THIRD IN-GATE RUN WAS GREEN** (head `68a16f9`, log
+`20260829T152024Z-563254`, all eight stages, zero failures anywhere).
+So "in-gate always fails" is **false**, and the paragraph below was
+written before that run and is corrected rather than deleted.
+
+**Seventeen green runs outside the gate, in four configurations, all at
+head `45d438c` on the failing worktree:**
+
+| condition reproduced outside the gate | runs | result |
+|---|---|---|
+| isolated selector | 3 | green |
+| full `-p pmacs-gpu` binary | 6 | green |
+| full binary under a gate-shaped 61-character `TMPDIR` (tested because this project already knows socket-path length matters) | 6 | green |
+| `m4` then `gpu` back to back, as the gate orders them | 2 pairs | green |
+
+**THESE ARE NOT EXCLUSIONS, and an earlier version of this entry called
+them that.** The reasoning was wrong: **nothing outside the gate has
+ever reproduced this failure**, in 17 runs across four configurations —
+so matching one gate condition at a time *outside* the gate cannot
+isolate an in-gate cause. All these runs establish is that none of the
+four conditions **by itself** reproduces the failure. They do not show
+that any of them is uninvolved when the gate supplies the rest.
+
+**THE OBSERVATION WINDOW IS BOUNDED, deliberately.** It is the first
+four in-gate runs of 2026-08-29 —
+`20260829T144541Z`, `T150011Z`, `T152024Z`, `T152824Z` — plus the 17
+out-of-gate runs taken between them. **Later head-exact verification
+gates on this lane are NOT part of it and do not move these numbers.**
+Without that boundary the tally re-counts itself every time a review
+round adds a docs commit and the gate is re-run, which is a ratio that
+drifts with review activity rather than with the phenomenon.
+
+**What the window supports**, at the strength it carries: in-gate
+**2 failures in 4**; out-of-gate **0 failures in 17**. That asymmetry
+is suggestive and it is not a clean split,
+because the third in-gate run passed.
+
+**The method for the next occurrence follows from that.** Varying
+conditions outside the gate cannot answer this question. It has to be
+varied INSIDE — the gate's ambient root, its exported environment, and
+process state carried across stage boundaries are the uneliminated
+candidates, and each would need a gate run with that one thing changed.
+
+**Causal status: still UNRESOLVED.** What these occurrences add is a
+sharper question and a method, not a cause: previous entries compared
+lanes and trees, and these locate the asymmetry in the *runner* while
+showing that the obvious way to probe it — reproducing gate conditions
+outside the gate — cannot work.
 
 **Fifth occurrence — panel cell-mapping generation (§5b) framing,
 2026-08-15, local (Linux).** The `scripts/gate` **`gpu` step** again,
@@ -991,3 +1076,20 @@ discriminating control U9 named is STILL UNRUN**: pin test-binary
 concurrency to 1, and separately load a lone `--lib` binary. Four
 incidents is enough evidence that the family will keep costing review
 rounds until someone runs it.
+
+### U13 — gate prune-reporting row receives empty child stdout in `sweep`
+
+Recorded during PR #244 review, 2026-08-29, on signed head `756c2b8`.
+The first six gate stages were green; `07-sweep` produced this one red;
+`08-diff-check` remained green.
+
+| field | value |
+| --- | --- |
+| **selector** | `--test gate_script_acceptance skipped_directories_are_reported_with_a_reason` |
+| **job / step** | local (Linux), `scripts/gate` step `07-sweep`, log `20260829T171606Z-1087848` |
+| **required fragments** | `skipped_directories_are_reported_with_a_reason` + `the unmarked directory must be named with its reason; output was:` followed by empty output |
+| **status** | **one occurrence; exact selector and the full 36-test binary both green on immediate rerun** |
+| **what IS established** | the test observed empty stdout from its `scripts/gate --prune` child even though its fixture had created an unmarked lookalike which a successful prune must name. The row discards the child's stderr and success status (`let (out, _, _)`), so the durable failure cannot distinguish wrong successful output from a refused or failed child invocation |
+| **what is NOT** | any mechanism. Another row in the same test binary mutates shared git-worktree metadata, but concurrent execution is only a candidate; this occurrence did not capture the child status or stderr needed to support it |
+| **why this branch is excluded** | the lane changes two assertion-message strings and three docs. `scripts/gate` and `tests/gate_script_acceptance.rs` are byte-identical to the base; the `async_runtime` edit is inside its unit-test module, and the other Rust edit belongs to a different integration-test binary |
+| **next occurrence** | preserve the child success status and stderr in the assertion before rerunning. A green rerun establishes intermittence only; it cannot reconstruct why stdout was empty |
