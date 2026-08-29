@@ -241,7 +241,11 @@ fn m4_1_dispatch_parse_round_trips_via_runtime() {
         .expect("parse handoff holds bundle on Complete");
     match rt.take_result(id) {
         Some(JobOutcome::Complete(JobResult::Parse { duration_ms })) => {
-            assert!(duration_ms < 100, "200-line parse should be quick");
+            assert!(
+                duration_ms < 100,
+                "200-line parse should be quick: took {duration_ms}ms \
+                 against a 100ms budget"
+            );
         }
         other => panic!("unexpected outcome: {other:?}"),
     }

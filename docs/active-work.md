@@ -270,6 +270,52 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
+## Parse-budget diagnosability — ACTIVE
+
+**Written with the branch's FIRST commit**, per the standing correction
+from #171 and #215.
+
+- **Branch `parse-budget-diagnosability`**, base `githubsucks/main` @
+  **`3557779`** exactly, in worktree
+  `/home/jeans/Repos/personal/pmacs-parse-budget`.
+  **`githubsucks/parse-budget-diagnosability` is the authoritative
+  tip** (the ref, not a SHA). Recover with `git fetch githubsucks &&
+  git checkout parse-budget-diagnosability`.
+- **Framing `docs/parse-budget-diagnosability-framing.md`, revision 2 —
+  APPROVED.** Revision 1 was reviewed and had two defects worth
+  keeping: it claimed `dispatch_parse_round_trips_a_rust_source_file`
+  was the codebase's **sole** measurement-omitting assertion (false —
+  `tests/m4_acceptance.rs:244` is the same budget on the same
+  measurement), and it bundled `workflow_dispatch`, which this ledger
+  had already recorded as its own lane.
+- **What it does:** both `duration_ms < 100` assertions now report the
+  observed value and the budget. **Neither budget moves.**
+- **Why:** `dispatch_parse_round_trips_a_rust_source_file` redded twice
+  on macOS/`lua54` — U11, then again on #243 — and **both margins were
+  unrecoverable**, so the second red could not be compared with the
+  first. A 1ms overshoot and a 900ms overshoot are different failures
+  and produced identical logs.
+- **D1/D2 verified against REAL PANIC MESSAGES**, by forcing only the
+  comparison bound to `0` in a scratch build:
+  - `trivial parse should be fast: took 0ms against a 100ms budget`
+  - `200-line parse should be quick: took 11ms against a 100ms budget`
+  The second is the stronger demonstration: a non-zero observed value
+  cannot be mistaken for a literal.
+- **THE SCRATCH PANIC PROVES ONLY HALF.** It exercises a budget of
+  **0** while printing `100ms`, so it says nothing about the committed
+  threshold. **D3 carries that half separately** by pinning the literal
+  `100` in both files. The two are a proof together; neither
+  substitutes for the other.
+- **NOT an assertion-hygiene audit.** The framing's §3 withdraws
+  revision 1's completeness claim rather than repairing it: a sweep
+  wide enough to be complete also catches `Instant::now() < deadline`
+  loop guards and `eval::<bool>` turbofish, and a sweep narrow enough
+  to be accurate proves nothing about completeness.
+- **Still owed, separately:** `workflow_dispatch` on `ci.yml`, and U9's
+  discriminating control — pin test-binary concurrency to 1, then load
+  a lone `--lib` binary — which has been named since 2026-08-09 and
+  never run.
+
 ## Panel-pointer replay (parent acceptance 48) — MERGED as #243 (`6c9bae6`)
 
 - **MERGED 2026-08-29T10:37:10Z** at approved head `b8c51b7`, merge
