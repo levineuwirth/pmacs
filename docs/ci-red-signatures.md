@@ -526,10 +526,42 @@ at `pmacs-gpu/src/attach.rs:1889`, `283 passed; 1 failed`.
   `07-sweep.log` ends in `Terminated`. That stage's absence says
   nothing, and the run as a whole is **not** a gate result. Only the
   `gpu` stage's failure is, because it completed and reported.
-* **Causal status: still UNRESOLVED**, and this occurrence does not
-  change it. It adds one more data point to "not lane-correlated" — a
-  sixth lane, touching a sixth unrelated surface, seeing the same
-  three fragments.
+**A SEVENTH OCCURRENCE FOLLOWED IMMEDIATELY**, on the next gate run of
+the same worktree at head `45d438c`
+(`20260829T150011Z-429115/06-gpu.log`), same selector, same three
+fragments, `283 passed; 1 failed`. **That run's other seven stages were
+green**, `sweep` included and complete — 121 result lines, none with a
+failure — so this pair is not confounded by a truncation the way the
+sixth was.
+
+**Two consecutive in-gate failures is new for this row**, whose prior
+five were spread across lanes and months. It prompted a narrowing, and
+the narrowing is the useful part.
+
+**Four hypotheses EXCLUDED, 17 green runs, all at head `45d438c` on the
+failing worktree:**
+
+| hypothesis | test | result |
+|---|---|---|
+| the selector is simply flaky | isolated selector | **3 green** |
+| the full `-p pmacs-gpu` binary's own concurrency | full binary, outside the gate | **6 green** |
+| the gate's isolated `TMPDIR` (this project already knows socket-path length matters) | full binary under a gate-shaped 61-character `TMPDIR` | **6 green** |
+| residue from `m4`, which the gate runs immediately before `gpu` and which spawns fake LSP servers and PTYs | `m4` then `gpu` back to back, twice | **2 pairs green** |
+
+**So the discriminator is "inside `scripts/gate`" versus "outside it",
+and it is NOT the TMPDIR, NOT the preceding stage, and NOT the
+binary's own concurrency.** Something else about the gate's execution
+context remains, and this row does not guess at it.
+
+**Causal status: still UNRESOLVED.** What these two occurrences add is
+a sharper question than the row had before: previous entries compared
+lanes and trees, and this one says the difference is in the *runner*,
+with the three most obvious runner differences already ruled out.
+
+* **Next occurrence should start from that**, not from another tree
+  exclusion. The remaining candidates are the gate's ambient root, its
+  exported environment, and process state carried across stage
+  boundaries — none of which has been isolated.
 
 **Fifth occurrence — panel cell-mapping generation (§5b) framing,
 2026-08-15, local (Linux).** The `scripts/gate` **`gpu` step** again,

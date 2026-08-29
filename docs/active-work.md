@@ -321,6 +321,14 @@ from #171 and #215.
   selector green three times, and **this lane touches no `pmacs-gpu`
   file at all** — its whole diff is two `assert!` message strings and
   two docs.
+- **GATE RUN 2: 7/8, `gpu` red on R7 again** (head `45d438c`, log
+  `20260829T150011Z-429115`). `sweep` ran fully green this time.
+  **Two consecutive in-gate R7 failures prompted a narrowing**: 17 green
+  runs outside the gate excluded the selector being flaky, the gpu
+  binary's own concurrency, the gate's TMPDIR, and residue from the
+  preceding `m4` stage. The discriminator is in-gate versus out, and
+  the three obvious runner differences are ruled out. Recorded in the
+  registry; **not this lane's to solve**.
 - **Still owed, separately:** `workflow_dispatch` on `ci.yml`, and U9's
   discriminating control — pin test-binary concurrency to 1, then load
   a lone `--lib` binary — which has been named since 2026-08-09 and
