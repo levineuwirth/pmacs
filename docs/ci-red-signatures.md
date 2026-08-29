@@ -538,30 +538,45 @@ sixth was.
 five were spread across lanes and months. It prompted a narrowing, and
 the narrowing is the useful part.
 
-**Four hypotheses EXCLUDED, 17 green runs, all at head `45d438c` on the
-failing worktree:**
+**A THIRD IN-GATE RUN WAS GREEN** (head `68a16f9`, log
+`20260829T152024Z-563254`, all eight stages, zero failures anywhere).
+So "in-gate always fails" is **false**, and the paragraph below was
+written before that run and is corrected rather than deleted.
 
-| hypothesis | test | result |
+**Seventeen green runs outside the gate, in four configurations, all at
+head `45d438c` on the failing worktree:**
+
+| condition reproduced outside the gate | runs | result |
 |---|---|---|
-| the selector is simply flaky | isolated selector | **3 green** |
-| the full `-p pmacs-gpu` binary's own concurrency | full binary, outside the gate | **6 green** |
-| the gate's isolated `TMPDIR` (this project already knows socket-path length matters) | full binary under a gate-shaped 61-character `TMPDIR` | **6 green** |
-| residue from `m4`, which the gate runs immediately before `gpu` and which spawns fake LSP servers and PTYs | `m4` then `gpu` back to back, twice | **2 pairs green** |
+| isolated selector | 3 | green |
+| full `-p pmacs-gpu` binary | 6 | green |
+| full binary under a gate-shaped 61-character `TMPDIR` (tested because this project already knows socket-path length matters) | 6 | green |
+| `m4` then `gpu` back to back, as the gate orders them | 2 pairs | green |
 
-**So the discriminator is "inside `scripts/gate`" versus "outside it",
-and it is NOT the TMPDIR, NOT the preceding stage, and NOT the
-binary's own concurrency.** Something else about the gate's execution
-context remains, and this row does not guess at it.
+**THESE ARE NOT EXCLUSIONS, and an earlier version of this entry called
+them that.** The reasoning was wrong: **nothing outside the gate has
+ever reproduced this failure**, in 17 runs across four configurations —
+so matching one gate condition at a time *outside* the gate cannot
+isolate an in-gate cause. All these runs establish is that none of the
+four conditions **by itself** reproduces the failure. They do not show
+that any of them is uninvolved when the gate supplies the rest.
 
-**Causal status: still UNRESOLVED.** What these two occurrences add is
-a sharper question than the row had before: previous entries compared
-lanes and trees, and this one says the difference is in the *runner*,
-with the three most obvious runner differences already ruled out.
+**What the observations actually support**, stated at the strength they
+carry: in-gate is **2 failures in 3 runs**; out-of-gate is **0 failures
+in 17**. That asymmetry is suggestive and it is not a clean split,
+because the third in-gate run passed.
 
-* **Next occurrence should start from that**, not from another tree
-  exclusion. The remaining candidates are the gate's ambient root, its
-  exported environment, and process state carried across stage
-  boundaries — none of which has been isolated.
+**The method for the next occurrence follows from that.** Varying
+conditions outside the gate cannot answer this question. It has to be
+varied INSIDE — the gate's ambient root, its exported environment, and
+process state carried across stage boundaries are the uneliminated
+candidates, and each would need a gate run with that one thing changed.
+
+**Causal status: still UNRESOLVED.** What these occurrences add is a
+sharper question and a method, not a cause: previous entries compared
+lanes and trees, and these locate the asymmetry in the *runner* while
+showing that the obvious way to probe it — reproducing gate conditions
+outside the gate — cannot work.
 
 **Fifth occurrence — panel cell-mapping generation (§5b) framing,
 2026-08-15, local (Linux).** The `scripts/gate` **`gpu` step** again,

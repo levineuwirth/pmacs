@@ -324,11 +324,14 @@ from #171 and #215.
 - **GATE RUN 2: 7/8, `gpu` red on R7 again** (head `45d438c`, log
   `20260829T150011Z-429115`). `sweep` ran fully green this time.
   **Two consecutive in-gate R7 failures prompted a narrowing**: 17 green
-  runs outside the gate excluded the selector being flaky, the gpu
-  binary's own concurrency, the gate's TMPDIR, and residue from the
-  preceding `m4` stage. The discriminator is in-gate versus out, and
-  the three obvious runner differences are ruled out. Recorded in the
-  registry; **not this lane's to solve**.
+  runs outside the gate, in four configurations, never reproduced it.
+  **A third in-gate run was then GREEN**, so "in-gate always fails" is
+  false and the registry's first write-up — which called those runs
+  *exclusions* — is corrected there: nothing outside the gate has ever
+  reproduced this, so matching one gate condition at a time outside it
+  cannot isolate an in-gate cause. In-gate is 2 failures in 3;
+  out-of-gate is 0 in 17. Recorded in the registry; **not this lane's
+  to solve**.
 - **Still owed, separately:** `workflow_dispatch` on `ci.yml`, and U9's
   discriminating control — pin test-binary concurrency to 1, then load
   a lone `--lib` binary — which has been named since 2026-08-09 and
