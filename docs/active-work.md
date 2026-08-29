@@ -270,7 +270,41 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## Panel-pointer replay (parent acceptance 48) — ACTIVE, 1b's prerequisite
+## Panel-pointer replay (parent acceptance 48) — MERGED as #243 (`6c9bae6`)
+
+- **MERGED 2026-08-29T10:37:10Z** at approved head `b8c51b7`, merge
+  commit `6c9bae6`, via `--match-head-commit` so the merge is provably
+  of the reviewed head. **14/14 CI green on that exact head**, and the
+  16-stage local gate green on it too (log
+  `20260828T083948Z-492737`), with `HEAD` and a clean worktree
+  captured before and after the run.
+- **Acceptance 48 is now implemented.** Panel selection, terminal
+  mouse reporting and the vertical wheel all replay; the gesture also
+  *ends* correctly, which was the larger half. The horizontal
+  document-panel wheel remains a **named deferral to GUI Stage 1b
+  B1–B3**, not a gap.
+- **GUI arc 1b is UNBLOCKED** and rebases onto this merge.
+  `docs/gui-stage1-input-framing.md` revision 13 already amends B1–B3
+  to own the panel-document horizontal surface that this lane's
+  re-measurement exposed as unowned.
+- **`docs/ci-red-signatures.md` gained U12** through this lane, and it
+  arrived with the merge rather than needing separate absorption.
+- **Two follow-ups are OWED and deliberately unstarted**, both their
+  own lanes:
+  - **`workflow_dispatch` on `ci.yml`.** A merge-base control could
+    only be obtained by re-running an existing week-old job; there is
+    no way to run CI on `main` on demand. That shaped the whole U11
+    recurrence handling.
+  - **The `duration_ms` diagnostic.** `dispatch_parse_round_trips_a_rust_source_file`
+    has now redded twice on macOS/`lua54` (U11, then again on #243)
+    and passed on rerun both times, with `src/async_runtime.rs`
+    byte-identical to main throughout. **Both margins are
+    unrecoverable**, because the assertion omits the measured value —
+    so occurrence two cannot be compared with occurrence one, and a
+    third will be no better. Intermittence is established; cause and
+    magnitude are not.
+
+### Superseded lane state, kept for the record
 
 **Written with the branch's FIRST commit**, per the standing correction
 from #171 and #215 — the correction the 1b lane missed, honoured here.
@@ -278,13 +312,9 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
 - **Branch `panel-pointer-replay`**, base `githubsucks/main` @
   **`72da24a`** exactly, in worktree
   `/home/jeans/Repos/personal/pmacs-panel-replay`.
-  **`githubsucks/panel-pointer-replay` is the authoritative tip** (the
-  ref, not a SHA). Recover with
-  `git fetch githubsucks && git checkout panel-pointer-replay`.
-- **No PR yet. Checkpoint: framing revision 16 APPROVED;
-  IMPLEMENTATION UNDER WAY.** Read the tip with
-  `git log --oneline githubsucks/main..HEAD`; no count or SHA is
-  recorded here, for the reason the §5b lane learned twice.
+- **Checkpoint at merge: framing revision 16 APPROVED, implementation
+  complete.** No count or SHA was recorded here while the lane ran,
+  for the reason the §5b lane learned twice.
   - **LANDED: Q#BP-R4's pre-effect disposition and the lifecycle
     table** — `PanelPointerOutcome` (`Refused`/`Consumed`/`Accepted`)
     decided before any target effect, with the resolution carried so
