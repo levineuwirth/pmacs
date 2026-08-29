@@ -1076,3 +1076,20 @@ discriminating control U9 named is STILL UNRUN**: pin test-binary
 concurrency to 1, and separately load a lone `--lib` binary. Four
 incidents is enough evidence that the family will keep costing review
 rounds until someone runs it.
+
+### U13 — gate prune-reporting row receives empty child stdout in `sweep`
+
+Recorded during PR #244 review, 2026-08-29, on signed head `756c2b8`.
+The first six gate stages were green; `07-sweep` produced this one red;
+`08-diff-check` remained green.
+
+| field | value |
+| --- | --- |
+| **selector** | `--test gate_script_acceptance skipped_directories_are_reported_with_a_reason` |
+| **job / step** | local (Linux), `scripts/gate` step `07-sweep`, log `20260829T171606Z-1087848` |
+| **required fragments** | `skipped_directories_are_reported_with_a_reason` + `the unmarked directory must be named with its reason; output was:` followed by empty output |
+| **status** | **one occurrence; exact selector and the full 36-test binary both green on immediate rerun** |
+| **what IS established** | the test observed empty stdout from its `scripts/gate --prune` child even though its fixture had created an unmarked lookalike which a successful prune must name. The row discards the child's stderr and success status (`let (out, _, _)`), so the durable failure cannot distinguish wrong successful output from a refused or failed child invocation |
+| **what is NOT** | any mechanism. Another row in the same test binary mutates shared git-worktree metadata, but concurrent execution is only a candidate; this occurrence did not capture the child status or stderr needed to support it |
+| **why this branch is excluded** | the lane changes two assertion-message strings and three docs. `scripts/gate` and `tests/gate_script_acceptance.rs` are byte-identical to the base; the `async_runtime` edit is inside its unit-test module, and the other Rust edit belongs to a different integration-test binary |
+| **next occurrence** | preserve the child success status and stderr in the assertion before rerunning. A green rerun establishes intermittence only; it cannot reconstruct why stdout was empty |

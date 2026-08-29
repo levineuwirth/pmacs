@@ -341,6 +341,15 @@ from #171 and #215.
   id**; they are not duplicated here, because a docs commit answering a
   review moves both, and a ledger line naming them is stale the moment
   it is written — the lesson §5b learned twice.
+- **Review follow-up found U13, separately recorded.** On signed head
+  `756c2b8`, gate `20260829T171606Z-1087848` was 7/8: `07-sweep`
+  reddened only
+  `gate_script_acceptance::skipped_directories_are_reported_with_a_reason`.
+  The child command's stdout was empty, but the row discards its stderr
+  and status, so the mechanism is unrecoverable. The exact selector and
+  the full 36-test binary both passed immediately afterwards —
+  intermittence only. This lane changes neither the gate script nor
+  that acceptance binary; diagnostic hardening is a separate lane.
 - **Still owed, separately:** `workflow_dispatch` on `ci.yml`, and U9's
   discriminating control — pin test-binary concurrency to 1, then load
   a lone `--lib` binary — which has been named since 2026-08-09 and
