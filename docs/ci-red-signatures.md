@@ -561,8 +561,8 @@ isolate an in-gate cause. All these runs establish is that none of the
 four conditions **by itself** reproduces the failure. They do not show
 that any of them is uninvolved when the gate supplies the rest.
 
-**THE OBSERVATION WINDOW IS BOUNDED, deliberately.** It is the four
-in-gate runs of 2026-08-29 up to and including the first green —
+**THE OBSERVATION WINDOW IS BOUNDED, deliberately.** It is the first
+four in-gate runs of 2026-08-29 —
 `20260829T144541Z`, `T150011Z`, `T152024Z`, `T152824Z` — plus the 17
 out-of-gate runs taken between them. **Later head-exact verification
 gates on this lane are NOT part of it and do not move these numbers.**
