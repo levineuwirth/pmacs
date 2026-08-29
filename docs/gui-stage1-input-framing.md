@@ -1,6 +1,13 @@
 # GUI arc, Stage 1 — input foundation (framing)
 
-**Status: revision 12 — APPROVED.** Revision 12 is §2's ground-truth
+**Status: revision 13 — AWAITING APPROVAL with bottom-panel §5a
+revision 16.** Revision 13 changes no previously ruled outcome. It
+makes B1–B3's “per surface” scope explicit for the panel-document
+surface, closing the ownership gap exposed by §5a's remeasurement:
+panel replay is the prerequisite, while GUI 1b owns horizontal tick
+production, residuals and the document-panel `view_left` effect.
+
+**Previously, revision 12 — APPROVED.** Revision 12 is §2's ground-truth
 re-measurement for Stage 1a and changes no ruling; it carries two
 corrections to claims that were wrong at the original anchor too.
 
@@ -308,9 +315,9 @@ The crate has **exactly one** executable `event_loop.exit()`, in
 
 | # | Contract | Witness | Mutation |
 |---|---|---|---|
-| B1 | Residual per **axis and surface** | deltas discarded | share one accumulator → surface-switch jump |
-| B2 | Wheel-right raises leftmost column; wheel-down raises top line | `x` discarded | invert a sign → that axis's row |
-| B3 | Clamps at content bounds; never a negative origin | no horizontal scroll to clamp | remove clamp → **at-bounds row: origin goes negative and the view blanks** |
+| B1 | Residual per **axis and surface** — primary document, panel document and minimap are distinct owners | deltas discarded | share one accumulator → primary↔panel or document↔minimap surface-switch jump |
+| B2 | Wheel-right raises the leftmost column of the **document surface under the pointer**; wheel-down raises its top line. Primary-document horizontal state stays frontend-local; a panel-document tick reaches the daemon's window-targeted `view_left` path | `x` discarded; panel replay currently claims and drops document `ScrollLeft`/`ScrollRight` | invert a sign → that axis's row; omit the panel effect → primary moves while the panel remains inert |
+| B3 | Each document surface clamps at its own content bounds; never a negative origin, and wrap pins horizontal origin to zero | no horizontal scroll to clamp | remove a clamp → **at-bounds row: that surface's origin goes negative and the view blanks**; reuse primary bounds for a panel → unequal-width surface row fails |
 | B4 | Middle-click paste uses **PRIMARY on Linux** | no middle-click path | use `CLIPBOARD` → B4 only |
 | B5 | I-beam over text content only | no I-beam | extend over the gutter → B5 only |
 | B6 | Wheel over the minimap scrolls the **document viewport** with **its own residual accumulator**; click/drag remains scrub | **a FULL tick already scrolls today** — minimap pixels are `Elsewhere` (`main.rs:2061`) and the wheel falls through to `scroll_by_lines` (`main.rs:3373`). What fails is **fractional accumulation**, and **residual ownership distinct from the document's**: sub-tick minimap deltas are discarded, and a **surface-switch fractional witness** (part-tick over the minimap, then over the document) must not carry residue across | share the document's accumulator → the surface-switch fractional row jumps |
@@ -321,6 +328,18 @@ lets the origin pass every glyph and leave the viewport **entirely
 blank**. The bound is *width − viewport*, saturating at zero for buffers
 narrower than the viewport, and **the right-bound witness asserts the
 final display column is still visible**.
+
+**Panel-replay consequence, ruled after §5a's 2026-08-20
+re-measurement.** “Horizontal panel wheel” has three receiver outcomes,
+not one. When terminal precedence selects child reporting it already
+forwards `ScrollLeft` and `ScrollRight` as SGR codes 66/67. The local
+terminal branch — selected by Shift, reporting-off or a scrolled-back
+view — has no horizontal viewport and remains inert. **B1–B3 own the missing
+document-panel leg**: fractional production/residuals in the GPU, the
+lossless `PanelPointer` tick, and the daemon's window-targeted
+`view_left` effect and clamp. This is a named deferral from panel replay,
+whose source comment already assigned it here; it does not make the
+prerequisite lane implement half of 1b early.
 
 **Why B6 changed — and revision 5's reason was wrong.** Scrubbing on
 wheel is not *impossible*: the wheel handler already reads the cached

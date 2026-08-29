@@ -174,11 +174,24 @@ pub struct AcceptedPanelGesture {
     pub coord: pmacs_protocol::CellCoord,
     /// The panel buffer the gesture belongs to.
     pub buffer_id: BufferId,
-    /// Whether the press actually REACHED the child, for a reporting
-    /// terminal. A release is owed only if a press was delivered;
-    /// synthesising one for a press the child never saw is the same
-    /// defect in the other direction.
-    pub reached_child: bool,
+    /// The domain the accepted press RESOLVED INTO, and which every
+    /// tail and the completion must follow (G5k).
+    ///
+    /// This replaces a bare `reached_child` flag. The flag said whether
+    /// a release was owed to a child but not how to frame it, nor which
+    /// window to address, so a tail had to re-derive both from state
+    /// that moves mid-gesture — Shift, the scroll position, the child's
+    /// modes, and the panel's own identity. Recording the resolution
+    /// is what makes the tail independent of all four.
+    pub domain: crate::editor::PanelGestureDomain,
+}
+
+impl AcceptedPanelGesture {
+    /// Whether the press reached the child, so a release is OWED to it.
+    #[must_use]
+    pub fn reached_child(&self) -> bool {
+        self.domain.reached_child()
+    }
 }
 
 /// Owns one `semantic_render` session's projection state: the last
@@ -451,6 +464,21 @@ pub struct SemanticRenderState {
     /// match the press it ends, and a stale `Up` with no accepted
     /// `Down` must be inert rather than synthesising one.
     accepted_gesture: Option<AcceptedPanelGesture>,
+    /// §5b/parent 48 — a release this frontend is OWED, parked until
+    /// somewhere that can deliver it.
+    ///
+    /// Two of the three cancellation sites are inside frame production
+    /// — the mapping-generation advance and `publish_absent_panel` —
+    /// where no target effect can run. `cancel_accepted_gesture`
+    /// returned the record into those contexts and they dropped it, so
+    /// the gesture ended with the child still holding its button.
+    ///
+    /// **A SLOT, not a queue.** The latch holds at most one gesture per
+    /// frontend, so at most one release can be owed, and the bound is
+    /// structural rather than a cap someone had to choose. The drain
+    /// runs ahead of the next panel-pointer effect, so a second
+    /// cancellation cannot arrive while one is still parked.
+    pending_release: Option<AcceptedPanelGesture>,
     /// §5b — how many armed gestures an authority loss has ended this
     /// session.
     ///
@@ -504,6 +532,15 @@ struct PanelPresentation {
     window_id: WindowId,
     buffer_id: BufferId,
     panel_epoch: u64,
+    /// The geometry epoch this presentation was shipped under.
+    ///
+    /// Retained for parent 48's authority-loss matrix: a geometry
+    /// change at an UNCHANGED `CellSize` moves nothing else the
+    /// producer holds — not the panel epoch, not the identity, and on a
+    /// legacy peer not a mapping key either — so without this the
+    /// transition is invisible and a live gesture survives a grid it no
+    /// longer belongs to.
+    geometry_epoch: u64,
 }
 
 /// One [`SemanticRenderState::diag_line_cache`] entry: the line-start
@@ -673,6 +710,7 @@ impl SemanticRenderState {
             panel_mapping: None,
             panel_mapping_exhausted: false,
             accepted_gesture: None,
+            pending_release: None,
             panel_gesture_cancellations: 0,
             panel_epoch_used: 0,
             panel_presentation: None,
@@ -728,12 +766,30 @@ impl SemanticRenderState {
     /// per §5b's split table, because the release it denies does not
     /// exist on this branch.
     pub fn arm_accepted_gesture(&mut self, gesture: AcceptedPanelGesture) {
-        // A second accepted press while one is already armed means the
-        // first gesture's release never arrived — a dropped `Up`, or an
-        // outbox that closed under a stall. END it rather than
-        // overwrite it: overwriting discards the record silently, and
-        // once replay attaches effects to that record the child is left
-        // holding a button down with nothing left to release it.
+        // THE INVARIANT IS ASSERTED WHERE IT IS RELIED ON. A caller must
+        // have ended AND paid any live gesture before arming a
+        // replacement: a second accepted press while one is armed means
+        // the first gesture's release never arrived, and its release has
+        // to reach the target before this press does. Cancelling here
+        // instead is too late by exactly one effect --- the replacement
+        // has already landed.
+        //
+        // Checked at the point of arming rather than inside
+        // cancellation, because arming is what the ordering protects.
+        debug_assert!(
+            self.accepted_gesture.is_none(),
+            "arming over a LIVE gesture: the caller must cancel and \
+             drain it first, or the replacement press overtakes the old \
+             gesture's release"
+        );
+        debug_assert!(
+            self.pending_release.is_none(),
+            "arming over an OWED release: the drain must run before the \
+             effect that arms"
+        );
+        // Defensive in release builds: ending it parks the record for a
+        // later drain, which is late but not lost. Overwriting would
+        // discard it outright and leave the child holding a button.
         self.cancel_accepted_gesture();
         self.accepted_gesture = Some(gesture);
     }
@@ -763,10 +819,59 @@ impl SemanticRenderState {
     /// without inventing a second cancellation.
     pub fn cancel_accepted_gesture(&mut self) -> Option<AcceptedPanelGesture> {
         let cancelled = self.accepted_gesture.take();
-        if cancelled.is_some() {
+        if let Some(record) = cancelled {
             self.panel_gesture_cancellations = self.panel_gesture_cancellations.saturating_add(1);
+            // PARKED, not just returned. Returning was the whole bug:
+            // the callers inside frame production cannot deliver a
+            // release, so the record went out of scope and the gesture
+            // ended with nothing terminated.
+            //
+            // Overwriting a still-parked release would lose one, so it
+            // is an invariant violation rather than a silent drop. It is
+            // a BACKSTOP: the ordering — drain before the next effect —
+            // is what actually prevents it.
+            debug_assert!(
+                self.pending_release.is_none(),
+                "a release was still owed when another gesture was \
+                 cancelled; the drain must run before any subsequent \
+                 panel-pointer effect"
+            );
+            self.pending_release = Some(record);
         }
         cancelled
+    }
+
+    /// Take the release this frontend is owed, if any.
+    ///
+    /// The RETURN of `cancel_accepted_gesture` is for inspection; THIS
+    /// is the delivery path.
+    pub fn take_pending_release(&mut self) -> Option<AcceptedPanelGesture> {
+        self.pending_release.take()
+    }
+
+    /// Whether a release is still owed, for assertions.
+    #[must_use]
+    pub fn has_pending_release(&self) -> bool {
+        self.pending_release.is_some()
+    }
+
+    /// The live gesture record, if any — parent 48 Q#BP-R4's
+    /// "live record" test, and the source of the recorded completion.
+    #[must_use]
+    pub fn accepted_gesture(&self) -> Option<&AcceptedPanelGesture> {
+        self.accepted_gesture.as_ref()
+    }
+
+    /// Q#BP-R4: an accepted `Drag` continues the gesture and moves its
+    /// LAST VALID CONTENT CELL, which is where a release that later
+    /// lands on chrome gets delivered (R-c2).
+    ///
+    /// Inert with nothing armed. A drag with no accepted press is a
+    /// stale tail and must not create a record by writing to one.
+    pub fn note_gesture_content_cell(&mut self, coord: pmacs_protocol::CellCoord) {
+        if let Some(gesture) = self.accepted_gesture.as_mut() {
+            gesture.coord = coord;
+        }
     }
 
     /// Whether a gesture is currently accepted, for assertions.
@@ -1624,6 +1729,31 @@ impl SemanticRenderState {
             return;
         };
         let identity = (projection.window_id, projection.buffer_id);
+
+        // Parent 48 G5b — AUTHORITY LOSS. A live gesture belongs to the
+        // presentation it was pressed on. Three of the matrix's five
+        // transitions are visible right here, and each is a separate
+        // cause with one shared consequence:
+        //
+        //   * the side WINDOW was replaced (panel-epoch change),
+        //   * its BUFFER was replaced,
+        //   * the GEOMETRY epoch moved, including at an unchanged size.
+        //
+        // §5b left these armed deliberately — inert while nothing
+        // consumed the latch — and they became defects the moment this
+        // lane gave cancellation an effect. Taking the latch parks the
+        // release; the drain pays it.
+        //
+        // G5m: coincident causes take the latch ONCE. `cancel_accepted_gesture`
+        // is idempotent on an empty latch, so a transition that trips
+        // two of these conditions still emits one release.
+        if let Some(presentation) = self.panel_presentation
+            && ((presentation.window_id, presentation.buffer_id) != identity
+                || presentation.geometry_epoch != geometry.geometry_epoch)
+        {
+            self.cancel_accepted_gesture();
+        }
+
         let panel_epoch = match self.panel_presentation {
             Some(presentation) if (presentation.window_id, presentation.buffer_id) == identity => {
                 Some(presentation.panel_epoch)
@@ -1707,6 +1837,7 @@ impl SemanticRenderState {
                     window_id: projection.window_id,
                     buffer_id: projection.buffer_id,
                     panel_epoch,
+                    geometry_epoch: geometry.geometry_epoch,
                 });
                 self.last_panel_payload = Some(payload.clone());
                 out.push(InstanceMessage::PanelFrame(payload));
@@ -1745,14 +1876,12 @@ impl SemanticRenderState {
         // wire work but must still leave no live gesture behind — the
         // clears below are idempotent for the same reason.
         //
-        // Only the producer half lands here. The framing's G5b matrix —
-        // the panel-epoch, buffer-replacement, same-size geometry and
-        // detach transitions, each with its v24 and v25 legs and its
-        // document and terminal effects — is `panel-pointer-replay`'s per
-        // §5b's split table. Those transitions leave the latch armed on
-        // this branch, which is inert here (nothing consumes it) and
-        // becomes a defect only once replay gives it effects, in the
-        // branch that owns the row.
+        // `Absent` is one of G5b's five transitions. THE OTHER FOUR ARE
+        // NOW WIRED TOO, on this branch: window replacement, buffer
+        // replacement and a geometry-epoch change are handled where the
+        // declaration is built above, and detach in the dispatcher's
+        // teardown. This comment used to say they were left armed — true
+        // of §5b, false here since the authority-loss matrix landed.
         self.cancel_accepted_gesture();
         self.panel_presentation = None;
         // `Absent` also clears the peer's retained mode line. A later

@@ -270,6 +270,362 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
+## Panel-pointer replay (parent acceptance 48) — ACTIVE, 1b's prerequisite
+
+**Written with the branch's FIRST commit**, per the standing correction
+from #171 and #215 — the correction the 1b lane missed, honoured here.
+
+- **Branch `panel-pointer-replay`**, base `githubsucks/main` @
+  **`72da24a`** exactly, in worktree
+  `/home/jeans/Repos/personal/pmacs-panel-replay`.
+  **`githubsucks/panel-pointer-replay` is the authoritative tip** (the
+  ref, not a SHA). Recover with
+  `git fetch githubsucks && git checkout panel-pointer-replay`.
+- **No PR yet. Checkpoint: framing revision 16 APPROVED;
+  IMPLEMENTATION UNDER WAY.** Read the tip with
+  `git log --oneline githubsucks/main..HEAD`; no count or SHA is
+  recorded here, for the reason the §5b lane learned twice.
+  - **LANDED: Q#BP-R4's pre-effect disposition and the lifecycle
+    table** — `PanelPointerOutcome` (`Refused`/`Consumed`/`Accepted`)
+    decided before any target effect, with the resolution carried so
+    the daemon never re-derives.
+  - **LANDED: G5k's recorded gesture domain.** The first version was
+    reviewed and rejected: it drove tails through the mode-sensitive
+    adapter, which re-reads Shift, scroll position and the child's
+    modes per event — G5k's named mutation. The press now records
+    `PanelGestureDomain` (document / terminal-child-with-encoding /
+    terminal-local) and every tail and completion follows it.
+  - **LANDED: the record is SELF-CONTAINED.** `TerminalLocal` carries
+    the accepted content **viewport** (ambient geometry is `None`
+    exactly when a hidden panel needs completing); a press that anchors
+    nothing no longer arms on either target; and pointer routing goes
+    through the renderer's own `terminal_projection_size` clamp — a
+    band wider than `MAX_TERMINAL_COLS` painted fine while every click
+    inside it resolved to nothing.
+  - **LANDED: `PanelPointerDisposition` is an ENUM.** As
+    `{outcome, Option<target>}` the invalid pair — refused, yet
+    carrying a target — stayed representable inside `editor.rs`. Now
+    `Refused` holds no target at all.
+  - **Witnesses: G5k(a)–(d), P1, P2, P3 both legs, P4, P5, P7, P8, P9,
+    P10, P11, P12**, each biting its own mutation, including G5k's
+    verbatim. **They do NOT all read a target effect, and an earlier
+    version of this line said they did.** Two kinds:
+    - **Effect rows** — G5k(a)–(d), P1, P3 both legs, P4, P5, P7, P8,
+      P11, P12 — read the child's byte stream (**exact bytes**, not a
+      count), the terminal drag state, or the document selection.
+    - **Arming-gate rows** — **P9 and P10** — read the LATCH, and that
+      is correct for them: the defect they fence is a record existing
+      for a gesture that never began, so the record IS the artifact.
+      Manufacturing an effect assertion for them would not distinguish
+      their mutations.
+    **P2 is a third case**: its FOCUS assertion is witnessed —
+    removing the buffer check accepts the press, which activates the
+    panel before replaying — and its classification is checked LAST so
+    the row still fails if it stops testing a refusal. Only its
+    controller and byte assertions are defence in depth, because that
+    mutation routes through a document buffer and touches neither. An
+    earlier version asserted the refusal first, which aborted the row
+    before dispatch and made every effect assertion unreachable; I
+    recorded that ordering limit as a limit of the type boundary, and
+    it was not one.
+  - **Every fixture asserts its own precondition** (the disposition is
+    `Accepted`, or is `Refused`) because four rows in these rounds
+    passed vacuously: cells that were out of grid, or that clamped to
+    byte 0, exercised a refusal instead of the path they named.
+  - **LANDED: the pending-release SLOT and its drain order (task 18).**
+    Cancellation parks the record instead of returning it into a
+    context that drops it — two of the three cancellation sites are
+    inside frame production, where no target effect can run. The drain
+    pays it **before any subsequent panel-pointer effect**, **before
+    detach teardown**, and **at the projection seam** between
+    `render_frame` returning and its messages being written.
+    - **A LIVE gesture is ended and PAID before a replacement press
+      lands.** The entry drain alone was not enough: it looks for an
+      OWED release, and a live gesture owes nothing yet — arming was
+      what cancelled it, which happens after the replacement has
+      already reached the target. The child saw `old press, new press,
+      old release`.
+    - **Witnessed: Q1, Q2, Q3, Q4, Q6.** Q3 asserts ORDER, not arrival.
+      Q6 sends a second press with the first still live and expects
+      exactly `old release, new press` in the child's stream. Both
+      layers of Q6 are proven separately: the invariant now asserts at
+      the point of ARMING (not inside cancellation) and fires in debug,
+      and with that assert compiled out the byte-order assertion
+      catches the same defect — which is what a release build relies
+      on.
+    - **Q5 is CLOSED.** The projection seam is extracted as
+      `project_semantic_frame`, which returns its messages **unwritten**
+      — so a caller holding them has by construction not sent the
+      successor frame, and a release already delivered at that moment
+      provably precedes it. The row bites its own drain and no other:
+      removing it fails Q5 while Q1–Q4 stay green on the other two
+      drain points.
+  - **LANDED: the authority-loss matrix (task 19).** §5b wired `Absent`
+    and left the other four transitions armed — inert while nothing
+    consumed the latch, defects the moment cancellation gained an
+    effect. Three are visible in the producer where the declaration is
+    built (**window replacement**, **buffer replacement**, and a
+    **geometry-epoch change including at an unchanged size**, which
+    needed a retained `geometry_epoch` because nothing else the
+    producer holds moves with it); **detach** cancels in the dispatcher
+    before any teardown.
+    - **Witnessed by a TABLE-DRIVEN matrix**: **five** transitions ×
+      two families × two targets, **twenty quadrants** — `Absent`
+      included, both as the fifth row and as a CONTROL on §5b's own
+      cancellation, which a mutation confirms it catches. The count is
+      asserted in the row, because a loop that quietly stops covering a
+      combination passes exactly as loudly as one that covers them all.
+      Each quadrant **drains explicitly and asserts the effect** — the exact release bytes
+      for a reporting terminal, the cleared empty selection for a
+      document, and an empty slot afterwards. An earlier version
+      stopped at `has_pending_release()` and would have passed while
+      delivery was broken; the mutation that parks a release and never
+      delivers it now fails every row.
+    - **Mutation labels, stated correctly this time**: dropping the
+      BUFFER comparison misses the buffer transition; dropping the
+      WINDOW comparison misses the window transition; dropping the
+      geometry comparison misses that one; dropping detach's cancel
+      misses detach. Each fails the matrix.
+    - **G5m takes both composites the framing names** — changed-size
+      geometry (epoch **and** mapping generation) and a buffer
+      replacement that also moves the mapping — and reads the child's
+      stream rather than a cancellation count, because a count of one
+      proves the latch was taken once, not that one release went out.
+      It also **asserts the mapping generation actually advances**:
+      without that, a same-size geometry change passes as a
+      "composite" while being a single cause, and the row would prove
+      nothing about coincidence. Peeked rather than read through the
+      authoritative accessor, which would advance the key and
+      manufacture the second cause.
+    - **G5j has two legs and they differ**: an empty selection is
+      cleared without moving point, a REAL dragged region survives
+      anchor-and-cursor exact. Clearing every selection fails the
+      second.
+    - **One quadrant asserts less, and says so**: for window
+      replacement on a document, the window the gesture belonged to is
+      gone, so the completion has nothing left to clear and the
+      gesture ending is the whole effect. Written into the row rather
+      than left as a silently absent assertion.
+  - **GATE RUN 1, head-exact at `6142acc`: 15/16, red on `04-lib-crdt`
+    only.** `composition_overhead_under_ten_percent` (1.247× against
+    1.10×) and `setsid_escapee_is_not_reaped_and_teardown_reclaims_readers`
+    failed together; both green on isolated rerun. Recorded as **U12**.
+    `src/process.rs` is not touched by this branch at all. **The run
+    was knowingly taken on a machine that was quieter but not quiet** —
+    load 11.04 at start, 27.79 five-minute at end, two foreign `python`
+    processes throughout — so it is reported as a red under stated
+    conditions rather than dismissed.
+  - **REMAINING: a head-exact gate on a genuinely quiet machine, then
+    the PR.** The gate
+    wants a QUIET machine: a foreign C++/java build has been running at
+    load 114+ through this work, and the wall-clock rows
+    (`composition_overhead_under_ten_percent`,
+    `m6_2_pty_streaming_respects_byte_ceiling`,
+    `full_buffer_summary_flatten_scales_on_large_grammar_file`) redded
+    under it and were green in isolation every time. That is U6/U9/U10
+    territory and running the gate into it would manufacture another
+    rotating-red incident.
+  - **Two test seams added for this:** an opt-in child-input tap
+    (`start_send_tap_for_test`) and a drag-state read
+    (`view_is_dragging_for_test`). Nothing else exposes what the child
+    actually received, which is what these rows must assert. §5a's **pre-merge** replay contract was approved at
+  revision 12; revisions 14–16 are the post-merge amendment now under
+  review. Revision 13 ruled Q#BP-R3 and blocked the lane on a
+  protocol-bearing mapping generation; **that block is DISCHARGED** —
+  the slice merged as #242 (`47b5463`).
+- **MERGED main into this branch** at `b758c2e` rather than rebasing:
+  the lane's 12 commits include 10 framing revisions over the same
+  800–1000 line doc regions, so a rebase meant twelve rounds of
+  large-block resolution — the operation that produced a committed
+  diff3 marker on the last lane. Workspace compiles clean, **1964 lib
+  and 284 GPU tests pass**. Base is no longer `72da24a`; read it with
+  `git merge-base githubsucks/main HEAD`.
+- **THE MERGE CREATED ONE DEFECT AND SURFACED ONE COLLISION.**
+  - **Defect, fixed at `cf78385`: `b758c2e` DOES NOT COMPILE**, and its
+    message claims "Workspace compiles clean". **That claim is
+    withdrawn.** I staged the resolution, hit `cannot find value mods`
+    at the mapped arm, fixed it, re-checked clean — and committed
+    without re-staging, so the verification and the commit were of
+    different trees. Not amended away: `b758c2e` keeps its false claim
+    with the withdrawal attached, because erasing a bad record is worse
+    than carrying a corrected one. **Anything bisecting across
+    `b758c2e`..`3cd7b8a` will fail to build.**
+  - **Defect, fixed:** the merge kept BOTH copies of §5b — this
+    branch's stale pre-split one and main's authoritative one. I
+    discarded the uncommitted stub edit as obsolete and missed that its
+    **deletion** half was still owed. Removed; exactly one §5a and one
+    §5b remain.
+  - **Collision, ruled by revision 14 and NOW FIXED IN CODE** (see the
+    checkpoint above; this bullet records what it was):
+    §5b and this lane gave `dispatch_semantic_panel_pointer`'s `bool`
+    different meanings — accepted-as-a-gesture versus consumed-here. A
+    mode-line press therefore **armed the latch** --- past tense: the
+    fix landed with Q#BP-R4, and P1 pins it.
+    **Q#BP-R4** rules a three-state `PanelPointerOutcome`, classified
+    **before** target effects. Only an `Accepted` `Down(Left)` arms;
+    left `Drag`/`Up` require a live record; an accepted `Up` performs
+    ordinary replay once, a consumed/chrome `Up` performs the recorded
+    completion once, and a refused `Up` preserves the record.
+- **Revision 16 carries** the rows §5b's split table assigned here, a
+  **pending-release slot** for the cancellation record §5b leaves
+  nowhere to wait, and the **four transitions** that strand a live
+  gesture once effects attach. Drain order is executable: before the
+  next panel-pointer effect; before detach teardown; and, for a
+  projection-raised cancellation, after `render_frame` returns but
+  before any returned message is written. Ground truth is re-measured
+  at `2c0d3ff`. Document-panel horizontal scrolling is a named deferral
+  to GUI Stage 1b B1–B3; a horizontal tick whose terminal precedence
+  selects child reporting already emits SGR, and the local terminal
+  branch has no horizontal viewport effect.
+- **THE BLOCKER, and why the earlier acceptance failed.** A
+  `PanelPointer` names a cell; nothing on the wire says which inverse
+  mapping the frontend saw, so the daemon inverts against whatever is
+  current. Revision 12 accepted that on three bounds and **all three
+  were wrong**: a **foreign** edit moves the mapping with `view_top`
+  untouched, the error is **unbounded** once ticks/folds/edits/reloads
+  accumulate, and the window lasts until the frontend **presents** the
+  new frame. §5b adds a **cell-mapping generation** — moves with the
+  inverse mapping, stable across focus/styling/cursor/selection-only
+  repaints so drags survive — as **appended** wire variants with
+  bilateral gating.
+- **Chain: ~~§5b (protocol) →~~ panel replay → GUI arc 1b.** §5b took
+  **v25**, so 1e's `OpenTarget` is **v26**. **That edit is NOT owed by
+  the 1b branch** — this bullet said it was, and said making it here
+  would collide at 1b's rebase. **§5b made it, in
+  `docs/gui-stage1-input-framing.md`, and merged as #242**: a canonical
+  document saying v25 is false the moment v25 is taken, and an expected
+  rebase conflict was not grounds for leaving it wrong. Corrected here
+  because this bullet and the merged-#242 block below it were saying
+  opposite things. Commit one was the ground-truth
+  re-measurement; 6 added the four replay edges; **7 answers review of
+  6; **8 answers review of 7** — R-c is target × gesture-ORIGIN
+  (terminals reject all chrome kinds and raw chrome coords fail the
+  reporting bounds check), R-c2 retains the `Down` cell, A3–A5 add
+  positive SGR controls, and four witness seams are tightened. **New
+  ruling Q#BP-R2**: a chrome wheel over a terminal panel clamps into
+  content rather than dropping — a deliberate divergence from the TUI,
+  flagged for overrule — **and overruled in 9**.
+  **Revision 9** reverses two of 8's decisions: a terminal-chrome wheel
+  is **CONSUMED, not clamped** (SGR wheel input is coordinate-bearing,
+  so clamping fabricates a hit the user never made, and a wheel has no
+  liveness obligation), and the `Down`-cell fallback lives in a
+  **separate `gesture_last_content_cell`** rather than
+  `last_pointer_cell`, which is cleared on press precisely so the first
+  same-cell `Drag` reaches the daemon (`pmacs-gpu/src/main.rs:19841`).
+  **`Up` is the only crossing event promised unconditionally**; a
+  crossing `Drag` is normalized and then deduped.
+  **Revision 10** keeps Q#BP-R2's outcome and moves its **enforcement
+  point**: the GPU **cannot know a panel holds a terminal** —
+  `PanelFrame` has no target-kind field
+  (`pmacs-protocol/src/panel.rs:73`) and `state.terminal` is the
+  primary full-window terminal — so a producer-side rule needed a new
+  wire field this lane must not add. **The producer is target-blind**
+  and sends the chrome wheel for every panel; **the daemon** resolves
+  the side window and decides: document → `scroll_window`, terminal →
+  consume. Witness: one frontend across a document→terminal
+  replacement.
+  **Revision 11** fixes the ORDERING: the terminal-chrome wheel is
+  consumed **before activation**, not merely before
+  `apply_terminal_gesture`. `activates` is `!matches!(kind, Move)` for
+  a terminal (`src/editor.rs:2695`), so the wheel already writes focus
+  and `active_frontend` at `:2699` ahead of any replay decision — a
+  consume check below that would change focus while scrolling nothing
+  and claiming no controller. Four-step order, consumption at step 3;
+  the witness now asserts **focus and controller identity unchanged**.
+  **Revision 12** makes that setup discriminating: leg 2 must **start
+  PASSIVE** — primary document window active, terminal side window
+  distinct and passive, controller baseline captured — because "focus
+  unchanged" is vacuous if the panel is already focused, and the
+  below-activation mutation would then call `focus_window` on the
+  already-active window and pass. The two assertions are **not
+  interchangeable**: **focus** catches the ordering mutation;
+  **controller identity** catches the shared-path mutation, since
+  `apply_terminal_gesture` claims at `src/editor.rs:3571` before local
+  handling and activation alone claims nothing.
+- **Why this lane exists, re-measured at `2c0d3ff`.** The branch now
+  replays document selection, terminal mouse reporting and vertical
+  wheels; the remaining acceptance-48 effect is **listview row
+  selection**. Q#BP-R4 and §5b's inherited rows still need
+  implementation: pre-effect disposition/latch ordering, fixed-domain
+  gesture tails, exact-once termination, cancellation effects and the
+  pending-release drains. **GUI arc 1b is BLOCKED on this lane and
+  rebases onto its merge commit.**
+- **No new framing document.** Acceptance 48 is already ruled in
+  `docs/bottom-panel-framing.md`; §5a adds ground truth to it.
+- **Current clause split.** DONE: click/focus and terminal activation;
+  focused-only auto-scroll with passive `view_top` preserved; lossless
+  and coalesced event delivery; panel document selection; terminal
+  child reporting/local selection; vertical document and terminal
+  wheel effects. MISSING here: listview row selection and the
+  lifecycle/cancellation effects above. Horizontal wheel is split:
+  child-reporting terminal ticks already emit codes 66/67; the local
+  terminal branch is deliberately inert; document-panel `view_left`
+  is explicitly GUI Stage 1b B1–B3's effect, matching the production
+  comment in `src/editor.rs:2999`–`:3003`.
+- **The scoping hazard.** `set_cursor_byte` (`src/editor_core.rs:1216`),
+  `begin_selection` (`:4691`) and `clear_selection` are
+  **active-window scoped**; used naively they would move the
+  DOCUMENT's point, which AC48 forbids. Activation runs before replay
+  in the same dispatch — **necessary but NOT sufficient**, which is
+  what revision 5 got wrong.
+- **FOUR REPLAY EDGES (revision 6), each a place a plausible
+  implementation is silently wrong. Three have a precedent in the tree
+  the panel path simply does not use.**
+  - **R-a — modifiers dropped.** The daemon destructures `mods` into
+    `..` (`src/daemon.rs:2425`) and the dispatcher has no modifier
+    parameter, but `apply_terminal_gesture` gates child reporting on
+    `!shift && … && modes.mouse_sgr` (`src/editor.rs:3534`). **Shift is
+    the user's local-selection override**, so a Shift-drag over a
+    reporting terminal panel would send SGR to the child. Thread
+    `mods`; row: Shift-drag selects locally, child receives no bytes.
+  - **R-b — `Drag`/`Up` do not activate**, and another frontend can
+    interleave between them, so replay must not read ambient
+    active-window state. Name a **side-window cell→byte adapter** and a
+    window-TARGETED selection path. `activate_and_position`
+    (`src/editor.rs:3795`) is the precedent *and* the trap: its
+    conversion is window-scoped, but it calls `set_active_window_id`.
+    Rows: interleaved frontend B between A's Down and Drag/Up; orphan
+    Drag/Up on a passive panel leaves the document mirror
+    byte-identical.
+  - **R-c — `panel_grid_size` is the FRAME, not the viewport.** Content
+    is `rows − 1` (`src/editor.rs:2499`–`:2500`) but `panel_hit_test`
+    reports across the whole frame (`pmacs-gpu/src/main.rs:7184`), so a
+    `PanelPointer` can name the **mode-line row**. Terminal viewport is
+    `rows − 1`. **The document rule is PER KIND, not "the row is
+    inert"** — the TUI guards `Down(Left)`/`Drag(Left)`/`Down(Right)`
+    and deliberately not `Up(Left)` or the wheel, so a blanket rule
+    would stop mode-line scrolling and leave a content-started gesture
+    unterminated. **The producer must also not arm** on a mode-line
+    press (`pmacs-gpu/src/main.rs:2878`); a receiver-only rule cannot
+    stop the resulting orphan.
+  - **R-d — replacement leaves the gesture latch armed.** `Absent`
+    clears `pointer_held`/`last_pointer_cell`
+    (`pmacs-gpu/src/main.rs:6909`) but **`Present`→`Present` does not**
+    (`:6913`). A press on A then A→B emits a Drag/release for B with no
+    B press, and **acceptance 49 cannot reject it** — the event carries
+    B's *current* epochs. The **divider** drag latch already
+    epoch-scopes itself (`:7288`); the pointer latch never did. **Both
+    epochs**: a font/scale change advances `geometry_epoch` while
+    `panel_epoch` holds (`pmacs-protocol/src/panel.rs:61`) and clears
+    neither field, so a held gesture resumes under a new grid with
+    valid epochs. **Both fields**: clearing only `pointer_held` leaves
+    the successor's first same-cell `Move` suppressed as a duplicate
+    (`:7238`). Four mutations, including the negative one — an ordinary
+    same-identity refresh must NOT cancel a live gesture.
+- **RULED: Q#BP-R1** — a single click **SELECTS a listview row only**.
+  RET/SPC remain activation (`listview.lua:610`); no click-to-visit and
+  no double-click-to-visit. Keeps document navigation from becoming an
+  incidental consequence of replay.
+- **Gates:** the four `bottom_panel_*` acceptance suites plus
+  `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`. **No `--protocol`** —
+  `PanelPointer` and every `MouseKind` it carries already exist on the
+  wire.
+- **Expected rebase conflict, flagged deliberately:** the `gui-stage1b`
+  branch inserts its own lane at this same position and corrects three
+  stale headers below (#239/#240 still marked OPEN, "1a is next").
+  Those corrections are **left to that branch**; this lane does not
+  duplicate them. The conflict is a normal insertion collision.
+
 ## Panel cell-mapping generation (v25) — MERGED as #242 (`47b5463`)
 
 - **MERGED 2026-08-20T17:25:01Z** at approved head `61f0faf`, merge

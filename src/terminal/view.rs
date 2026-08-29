@@ -501,12 +501,36 @@ impl TerminalManager {
         moved || was_dragging
     }
 
+    /// Whether a view is mid-drag, for parent 48 Q#BP-R4's completion
+    /// witnesses.
+    ///
+    /// A local terminal gesture is "finished" exactly when
+    /// `finish_selection` takes `drag`, so this is the observable that
+    /// separates a delivered completion from a latch that merely
+    /// emptied — which is the distinction the framing requires those
+    /// rows to assert.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn view_is_dragging_for_test(&self, key: TerminalViewKey) -> bool {
+        self.views
+            .get(&key)
+            .is_some_and(|state| state.drag.is_some())
+    }
+
     /// Clear one view's terminal selection without changing its scroll anchor.
     pub fn clear_selection(&mut self, key: TerminalViewKey) -> bool {
         let Some(state) = self.views.get_mut(&key) else {
             return false;
         };
         state.selection.take().is_some() || state.drag.take().is_some()
+    }
+
+    /// Turn SGR mouse reporting on or off for one session (G5k).
+    #[doc(hidden)]
+    pub fn set_mouse_reporting_for_test(&mut self, buffer_id: BufferId, enabled: bool) {
+        if let Some(session) = self.sessions.get_mut(&buffer_id) {
+            session.screen.set_mouse_reporting_for_test(enabled);
+        }
     }
 
     /// Current child input modes for one session.
