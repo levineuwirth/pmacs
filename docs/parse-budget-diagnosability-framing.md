@@ -1,6 +1,6 @@
 # Parse-budget diagnosability — reporting the measurement that failed
 
-**Status: revision 2 — AWAITING APPROVAL. Nothing implemented.**
+**Status: revision 2 — APPROVED 2026-08-29, IMPLEMENTED, PR #244.**
 
 Revision 2 answers review of 1. Three of its four changes are
 corrections, and one is a scope reduction:

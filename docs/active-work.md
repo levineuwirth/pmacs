@@ -316,11 +316,11 @@ from #171 and #215.
   were green and stage 6 (`gpu`) genuinely failed — that one completed
   and reported — but the run as a whole proves nothing and must not be
   read as a gate outcome.
-- **That `gpu` failure is R7's SIXTH occurrence**, recorded in
+- **Those `gpu` failures are R7's SIXTH and SEVENTH occurrences**, in
   `docs/ci-red-signatures.md`. All three required fragments, isolated
   selector green three times, and **this lane touches no `pmacs-gpu`
   file at all** — its whole diff is two `assert!` message strings and
-  two docs.
+  three docs.
 - **GATE RUN 2: 7/8, `gpu` red on R7 again** (head `45d438c`, log
   `20260829T150011Z-429115`). `sweep` ran fully green this time.
   **Two consecutive in-gate R7 failures prompted a narrowing**: 17 green
@@ -329,9 +329,17 @@ from #171 and #215.
   false and the registry's first write-up — which called those runs
   *exclusions* — is corrected there: nothing outside the gate has ever
   reproduced this, so matching one gate condition at a time outside it
-  cannot isolate an in-gate cause. In-gate is 2 failures in 3;
-  out-of-gate is 0 in 17. Recorded in the registry; **not this lane's
-  to solve**.
+  cannot isolate an in-gate cause. In-gate is 2 failures in 4;
+  out-of-gate is 0 in 17 — **and a fourth in-gate run, this lane's
+  final verification gate, was also green, so the cumulative figure is
+  2 in 4**. Recorded in the registry; **not this lane's to solve**.
+- **PR #244** — https://github.com/levineuwirth/pmacs/pull/244, opened
+  at head **`2d76984`**, which is exactly the head the gate ran on.
+- **GATE GREEN, head-exact**: all 8 stages, log
+  `20260829T152824Z-673477`, with `HEAD` and a clean worktree captured
+  before and after. Zero `FAILED` lines and zero non-zero-failure
+  result lines across all eight stage logs, read from them rather than
+  inferred from stage exits.
 - **Still owed, separately:** `workflow_dispatch` on `ci.yml`, and U9's
   discriminating control — pin test-binary concurrency to 1, then load
   a lone `--lib` binary — which has been named since 2026-08-09 and

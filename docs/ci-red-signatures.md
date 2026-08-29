@@ -496,7 +496,7 @@ Stage 4; the lane touches no `pmacs-gpu` code at all.
 | **selector** | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
 | **job / flavor** | local (Linux), `cargo test --workspace --features crdt --no-fail-fast`, i.e. under full-sweep load |
 | **required fragments** | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
-| **status** | **SIXTH OCCURRENCE 2026-08-29 — causal status still UNRESOLVED.** The fifth carries the strongest tree exclusion this row has had: a **documentation-only diff** |
+| **status** | **SEVENTH OCCURRENCE 2026-08-29 — causal status still UNRESOLVED.** The sixth and seventh came back to back on one lane and are written up together below; the fifth carries the strongest tree exclusion this row has had, a **documentation-only diff** |
 | **what IS established** | **three** occurrences at `pmacs-gpu/src/attach.rs:1680`, the second and third with all three fragments **verified** rather than inferred; the test drives a scripted transient-then-success sequence over a real socket pair. **The added GPU test is not the mechanism** — see the third-occurrence control below |
 | **what is NOT** | whether the broken pipe is the *fixture's* writer closing early or a real retry-path defect. **This row is not a claim that it is harmless** |
 | **rerun evidence** | occurrence 1: 6 isolated runs green, plus a full `--workspace --features crdt` sweep green (113 targets). Occurrence 2: **30 green on the observing branch** (15 isolated selector, 15 full `-p pmacs-gpu`) **plus a 15-run merge-base control, also green**. Occurrence 3: 5 isolated selector runs green, 10 full `-p pmacs-gpu` runs green **with** the added test, and **1 failure in 10 with the added test `#[ignore]`d** — the first rerun in this row's history that reproduced anything. Per the rerun rule the green runs establish intermittence only; the red control run is what carries the exclusion |
@@ -516,7 +516,7 @@ at `pmacs-gpu/src/attach.rs:1889`, `283 passed; 1 failed`.
 
 * **The tree exclusion is as strong as the fifth's.** The observing
   lane's entire diff is `src/async_runtime.rs`,
-  `tests/m4_acceptance.rs` and two docs — **no `pmacs-gpu` file, and no
+  `tests/m4_acceptance.rs` and three docs — **no `pmacs-gpu` file, and no
   file `pmacs-gpu` links against beyond the workspace it always did.**
   The change is two `assert!` message strings.
 * **Rerun: isolated selector green three times** (`1 passed`, 0.01 s
@@ -562,8 +562,11 @@ four conditions **by itself** reproduces the failure. They do not show
 that any of them is uninvolved when the gate supplies the rest.
 
 **What the observations actually support**, stated at the strength they
-carry: in-gate is **2 failures in 3 runs**; out-of-gate is **0 failures
-in 17**. That asymmetry is suggestive and it is not a clean split,
+carry: in-gate is **2 failures in 4 runs** — the failing pair, then two
+greens, the second of which is this lane's final head-exact
+verification gate (`20260829T152824Z-673477`) — while out-of-gate is
+**0 failures in 17**. That asymmetry is suggestive and it is not a
+clean split,
 because the third in-gate run passed.
 
 **The method for the next occurrence follows from that.** Varying
