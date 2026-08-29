@@ -270,7 +270,32 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## Parse-budget diagnosability — ACTIVE
+## Parse-budget diagnosability — MERGED as #244 (`a85205a`)
+
+- **MERGED 2026-08-29T22:04:17Z** at approved head `7b50682`, merge
+  commit `a85205a`, via `--match-head-commit`. **14/14 CI green** on
+  that head and the 8-stage local gate green on it too.
+- **Both `duration_ms < 100` assertions now report the observed value
+  and the budget.** Neither budget moved.
+- **THREE ROWS IN ONE SESSION were written to assert a condition
+  without keeping what would explain its violation** — the two parse
+  budgets fixed here, and **U13**'s `let (out, _, _)`, which discards a
+  child's success status and stderr so its durable failure cannot
+  distinguish wrong-but-successful output from a refused invocation.
+  U13 is not this lane's and is left as recorded, but the pattern is
+  now a pattern rather than an oversight, and each occurrence costs a
+  review round to establish nothing.
+- **R7 gained its sixth and seventh occurrences here**, on a branch
+  touching no `pmacs-gpu` file, and the registry gained a **bounded
+  observation window** so the in-gate/out-of-gate ratio cannot drift
+  with review activity — plus a correction: seventeen green
+  out-of-gate runs are **not** exclusions, because nothing outside the
+  gate has ever reproduced R7 at all.
+- **U13 was recorded during this lane's review** and is unrelated to
+  it: `scripts/gate` and `tests/gate_script_acceptance.rs` are
+  byte-identical to the base.
+
+### Superseded lane state, kept for the record
 
 **Written with the branch's FIRST commit**, per the standing correction
 from #171 and #215.
