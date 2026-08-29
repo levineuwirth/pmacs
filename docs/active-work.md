@@ -330,16 +330,17 @@ from #171 and #215.
   *exclusions* — is corrected there: nothing outside the gate has ever
   reproduced this, so matching one gate condition at a time outside it
   cannot isolate an in-gate cause. In-gate is 2 failures in 4;
-  out-of-gate is 0 in 17 — **and a fourth in-gate run, this lane's
-  final verification gate, was also green, so the cumulative figure is
-  2 in 4**. Recorded in the registry; **not this lane's to solve**.
-- **PR #244** — https://github.com/levineuwirth/pmacs/pull/244, opened
-  at head **`2d76984`**, which is exactly the head the gate ran on.
-- **GATE GREEN, head-exact**: all 8 stages, log
-  `20260829T152824Z-673477`, with `HEAD` and a clean worktree captured
-  before and after. Zero `FAILED` lines and zero non-zero-failure
-  result lines across all eight stage logs, read from them rather than
-  inferred from stage exits.
+  out-of-gate is 0 in 17, over a **bounded observation window** the
+  registry defines so the ratio cannot drift with review activity.
+  Recorded there; **not this lane's to solve**.
+- **PR #244** — https://github.com/levineuwirth/pmacs/pull/244.
+- **Every review round ends with a head-exact 8-stage gate**, green
+  each time, with `HEAD` and a clean worktree captured before and after
+  and the result read from the eight stage logs rather than inferred
+  from stage exits. **The PR body carries the current head and log
+  id**; they are not duplicated here, because a docs commit answering a
+  review moves both, and a ledger line naming them is stale the moment
+  it is written — the lesson §5b learned twice.
 - **Still owed, separately:** `workflow_dispatch` on `ci.yml`, and U9's
   discriminating control — pin test-binary concurrency to 1, then load
   a lone `--lib` binary — which has been named since 2026-08-09 and

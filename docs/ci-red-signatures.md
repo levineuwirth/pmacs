@@ -561,12 +561,18 @@ isolate an in-gate cause. All these runs establish is that none of the
 four conditions **by itself** reproduces the failure. They do not show
 that any of them is uninvolved when the gate supplies the rest.
 
-**What the observations actually support**, stated at the strength they
-carry: in-gate is **2 failures in 4 runs** — the failing pair, then two
-greens, the second of which is this lane's final head-exact
-verification gate (`20260829T152824Z-673477`) — while out-of-gate is
-**0 failures in 17**. That asymmetry is suggestive and it is not a
-clean split,
+**THE OBSERVATION WINDOW IS BOUNDED, deliberately.** It is the four
+in-gate runs of 2026-08-29 up to and including the first green —
+`20260829T144541Z`, `T150011Z`, `T152024Z`, `T152824Z` — plus the 17
+out-of-gate runs taken between them. **Later head-exact verification
+gates on this lane are NOT part of it and do not move these numbers.**
+Without that boundary the tally re-counts itself every time a review
+round adds a docs commit and the gate is re-run, which is a ratio that
+drifts with review activity rather than with the phenomenon.
+
+**What the window supports**, at the strength it carries: in-gate
+**2 failures in 4**; out-of-gate **0 failures in 17**. That asymmetry
+is suggestive and it is not a clean split,
 because the third in-gate run passed.
 
 **The method for the next occurrence follows from that.** Varying
