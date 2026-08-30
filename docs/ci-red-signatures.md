@@ -925,7 +925,7 @@ was lost.
 | **selector** | `--lib --features crdt optimistic::tests::criterion_1_end_of_line_typing_completes_sub_frame_per_keystroke` **and** `editor::tests::composition_overhead_under_ten_percent`, failing in the same run |
 | **job / flavor** | local (Linux), `scripts/gate` step `04-lib-crdt`, with sibling worktrees building concurrently |
 | **required fragments** | `criterion 1: per-keystroke orchestrator time` + `exceeds 1ms`; and `composition machinery added more than 10% overhead` |
-| **status** | **SECOND OCCURRENCE 2026-08-30, and the first time it REPRODUCED — twice in a row.** Still no mechanism; see the block below |
+| **status** | **THIRD OCCURRENCE 2026-08-30 — the first time it has REPRODUCED, three times in one afternoon, twice out of gate and once in.** Still no mechanism; see the block below |
 | **what IS established** | both are **wall-clock budget assertions** — 1.264ms against a 1ms budget, and 1.297× against a 1.10× budget — so both are load-sensitive by construction. Both green in an isolated rerun of exactly those two selectors, and both green in the next full gate run of the same command (2105 passed) |
 | **what is NOT** | whether the machine's concurrent load caused it. The confound is real (this machine runs one shared `CARGO_TARGET_DIR` and several worktrees) but **was not measured**, so it is a rival explanation, not a finding |
 | **rival explanation not excluded** | a genuine regression in either path. Nothing in the observing diff touches the optimistic-echo orchestrator or the composition pipeline, but "my diff looks unrelated" is not evidence, and this row does not treat it as such |
@@ -948,14 +948,17 @@ So the composition margin grew and the keystroke margin grew, but
 neither by an order that separates load from regression. Both selectors
 were green in isolated single-selector reruns.
 
-**The asymmetry runs the OPPOSITE way to R7, and that is the useful
-part.** Both failures were **out of gate** — a bare
-`cargo test --lib --features crdt` in the worktree — while the same
-command as `scripts/gate`'s `04-lib-crdt` step was **green in all four
-of this lane's gate runs** (`20260830T154827Z`, `T155621Z`, `T160242Z`,
-`T160824Z`). R7 fails in-gate and has never reproduced outside it; U6
-here did the reverse. Whatever the two rows share, it is not a
-direction.
+**A DIRECTION CLAIM WAS MADE HERE AND IS WITHDRAWN, within the hour.**
+This block first said the asymmetry "runs the OPPOSITE way to R7":
+both failures were out of gate, while `04-lib-crdt` was green in all
+four of this lane's gate runs to that point (`20260830T154827Z`,
+`T155621Z`, `T160242Z`, `T160824Z`). **The very next gate run redded
+`04-lib-crdt` with this exact pair** (`20260830T171941Z-3509751`,
+margins `1.689259ms` against 1ms and `1.592×` against 1.10×) — see U14,
+which records that run whole. So U6 fails **both** in and out of gate,
+the four green stages were a run of four and not a property, and the
+only honest reading is the one the first occurrence already gave: these
+are wall-clock budgets on a loaded machine.
 
 **No mechanism is claimed, and the load confound is again unmeasured.**
 The machine was running the agent session's own build and test traffic;
@@ -1219,6 +1222,56 @@ discriminating control U9 named is STILL UNRUN**: pin test-binary
 concurrency to 1, and separately load a lone `--lib` binary. Four
 incidents is enough evidence that the family will keep costing review
 rounds until someone runs it.
+
+### U14 — three unrelated tests red in ONE gate run, in three stages
+
+Recorded on the CRDT identity-undo lane, 2026-08-30, local (Linux),
+`scripts/gate` log `20260830T171941Z-3509751`. **The co-occurrence is
+the signature**, as it is for U6, U9 and U12: three unrelated
+subsystems failing in one run is far less likely than one loaded
+machine, and no single selector here reds twice.
+
+| field | value |
+|---|---|
+| **selectors** | `03-lib`: `async_runtime::tests::grep_supersede_cancels_predecessor_within_50ms`. `04-lib-crdt`: U6's pair. `07-sweep`: `lsp_dispatch_seams_acceptance::acc34_purge_reaches_a_server_that_is_in_no_attachment` |
+| **job / flavor** | local (Linux), one `scripts/gate` run, three different steps |
+| **required fragments** | `grep supersede did not cancel within 50ms` + an `elapsed:` value; `criterion 1: per-keystroke orchestrator time` + `exceeds 1ms`; `composition machinery added more than 10% overhead`; `is not ready for requests (state: initializing)` |
+| **status** | **new incident, one occurrence** |
+| **what IS established** | all four fragments captured from the durable stage logs. Margins: `52.44341ms` against 50ms (4.9% over); `1.689259ms` against 1ms; `1.592×` against 1.10×. The `07-sweep` failure is **not** a budget — an LSP server was asked for a request while still `initializing` |
+| **what is NOT** | any shared mechanism. Three stages, three subsystems, and one of the three is a readiness race rather than a clock |
+| **the observing tree** | the lane's revision-5 commits: an enumeration in a `#[cfg(test)]` predicate and documentation. It touches `async_runtime`, `optimistic`, `editor` and the LSP dispatch seam **not at all** |
+
+**Relation to R1, and it is NOT a match.** The `03-lib` failure carries
+R1's required fragment `supersede did not cancel within 50ms`, but R1's
+selector is `supersede_cancels_in_flight_job_within_50ms` and this is
+`grep_supersede_cancels_predecessor_within_50ms` — **a different test**.
+This registry matches on selector *and* fragments, and U6's own
+instruction ("one without the other is a different incident") points the
+same way. Recorded as a sibling, not an occurrence.
+
+**One thing the sibling shows for free, and R1 should have it.** R1's
+row records that its assertion "still omits its measurement —
+`started.elapsed()` is in hand at the panic and the message reports none
+of it, so this occurrence's margin is as unrecoverable as every prior
+one's." **The sibling test already reports it**: `(elapsed:
+52.44341ms)`, which is how the 4.9% margin above is known at all. The
+measurement-design question R1 defers to the async-runtime lane is
+untouched by this — but the cheap half of it is demonstrably already
+written, next door in the same module.
+
+**Reruns: all four selectors green in isolation** — `grep_supersede…`
+`1 passed`, U6's two `1 passed` each, and the whole
+`lsp_dispatch_seams_acceptance` binary `15 passed`. Per this file's
+rerun rule that establishes **intermittence only**; it exonerates
+nothing, and in particular it does not show the tree is innocent, only
+that the failures do not reproduce alone.
+
+**The readiness failure is the one worth watching.** A budget test on a
+loaded machine is a known shape here; `server LspServerId(1) is not
+ready for requests (state: initializing)` is a **race between a test and
+a state machine**, and load makes it more likely without being its
+cause. If it recurs it should be judged on its own, not folded into this
+row's co-occurrence.
 
 ### U13 — gate prune-reporting row receives empty child stdout in `sweep`
 
