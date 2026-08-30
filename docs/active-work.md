@@ -301,66 +301,59 @@ waits for a signal that is not coming.
 - **THE FIRST DISPATCH IMMEDIATELY FOUND A RED ON `main`**, which is
   what this lane was built for. See the proptest entry below.
 
-## CRDT identity-replace undo — the proptest invariant may be MIS-SCOPED — NEEDS A LANE
+## CRDT identity-replace undo — LANE TAKEN, PR #246 OPEN
 
-**CORRECTION.** An earlier version of this entry called the dispatched
-run's red "a DETERMINISTIC red" and "not like anything else in this
-registry — a property violation with a concrete witness, not a load
-artefact", and proposed committing the proptest seed as the first
-step. **All of that was wrong**, and it was wrong because I recorded a
-finding without checking whether `main` already documented it.
+**Branch `crdt-identity-undo`, based on `aae5b35`; implemented at
+`db24ae3`.** Framing `docs/crdt-identity-undo-framing.md`, **APPROVED at
+revision 4** after four review rounds. Gate green **head-exact**, all 8
+stages, log `20260830T154827Z-2907414`; `HEAD` and
+`git status --porcelain` identical before and after.
 
-**It is a randomly sampled recurrence of known #157 behaviour.**
-`src/buffer.rs:3005` carries an `#[ignore]`d deterministic fixture,
-`crdt_undo_of_an_identity_replace_reports_a_no_op_edit_carrying_an_op`,
-which reduces this exact case and records its mechanism:
+**The decision, ruled:** a visible TEXT delta and a CRDT-VERSION delta
+are **independent dimensions** of `Edit`. The invariant is narrowed to
+key on **provenance**, not shape — a forward version-only edit must
+still carry no op (and still cannot produce one, because the three
+syntactically empty `EditOp` forms short-circuit at `is_no_op_edit`); a
+history version-only edit may carry one, and must, or the version
+advance the replicas need is lost.
 
-1. the inserts produce `aaaaa `;
-2. `Replace(5, 1, " ")` replaces the trailing space **with itself** — a
-   textual no-op but a real CRDT delete-plus-insert;
-3. `Undo` therefore emits a **version-advancing CRDT operation with no
-   visible text change**, and `derive_replacement_edit` yields an empty
-   edit that still carries its `crdt_op`.
+**Two claims THIS BLOCK made are corrected by measurement:**
 
-**Committing the seed is NOT the first step**, and proposing it was a
-second error: it duplicates a deterministic fixture that already
-exists, and its only effect would be to make a disputed assertion fail
-permanently instead of occasionally.
+- it said the fixture had verified that *"replicas stay converged — the
+  op IS broadcast"*. **That was inspection of the call sites, not
+  execution.** Nothing had ever replayed the op on a replica, and text
+  equality alone cannot detect a lost version advance — the drop-the-op
+  mutant leaves the text identical, and the failure that catches it
+  reads `version vector diverged undo`. C3 establishes convergence
+  properly, by seeding a replica with the forward ops first;
+- it said the buffer-end range location was *"genuinely arbitrary either
+  way"*. **The §4 census rules it**: five consumers inert, three
+  permitted, none harmed — and for `TextView`, the one whose cost
+  depends on the location, the buffer end is the **cheapest** rebuild.
 
-**What the fixture already verified**, so the lane does not redo it:
-content stays correct (rope and CRDT projection agree), replicas stay
-converged (**the op IS broadcast** — both `crdt_op` consumers read it
-unconditionally and neither short-circuits on an empty range), and the
-cursor does not jump.
+**What the four review rounds caught, none of it by me.** Revision 1
+posed the decision instead of answering it, and its C3 passed its own
+drop-op mutant. Revision 2's C4 contradicted the implementation
+(`mark_stale` is unconditional and range-independent) and named two
+consumers out of six. Revision 3's C4 claimed guard mutations that
+**survive** — at the buffer end, deleting the fold or style guard
+changes nothing — and its C9 guarded a file set and a count, which a
+same-file substitution walks straight through.
 
-**THE ACTUAL DECISION** is whether a **visible text delta** and a
-**CRDT-version delta** are independent dimensions of `Edit`. The
-proptest's invariant assumes they are the same dimension. It was
-written for the FORWARD `apply_edit` short-circuit, which returns
-before producing an op at all — and **CRDT-mode undo/redo never reach
-that path**.
+**15 mutation checks were run, each on a clean tree and reverted.** All
+behaved as the framing predicted, including the two asymmetries the
+framing states rather than assumes: C2b is **masked** for the Insert and
+Delete forms by their defensive early returns (`buffer.rs:1177`,
+`:1192`) and **dies** for Replace, which has none; and C4b **survives**
+the style-guard deletion, which is why C4c injects an INTERIOR empty
+edit where the fragmenting is reachable.
 
-**What the lane owes as evidence:**
+**Deliberately not done:** the proptest regression seed is NOT
+committed. It duplicates a deterministic fixture and would make a
+disputed assertion fail permanently rather than occasionally.
 
-- **forward textual no-ops still produce NO operation** — whatever the
-  resolution, the short-circuit the invariant was actually written for
-  must keep holding;
-- **any permitted empty-text undo operation carries valid bytes and
-  preserves remote replay convergence** — permitting the shape must not
-  become permitting a malformed op;
-- **an explicit disposition of the arbitrary artifact**:
-  `derive_replacement_edit` reports the empty range at the **buffer
-  end** rather than at the edit site. The fixture calls this genuinely
-  arbitrary either way; the lane must say which it is choosing, not
-  leave it unexamined.
-
-**Un-ignoring that fixture is the first step of whichever resolution
-wins**, as its own doc comment says.
-
-**Why it is worth a bounded interruption:** a mis-scoped property can
-now randomly redden `main`, and the dispatched run proved it. **It does
-NOT reorder the roadmap** — GUI arc 1b remains the next product lane
-per `COHERENCE.md` §20's priority order.
+**It does NOT reorder the roadmap.** GUI arc 1b remains the next product
+lane per `COHERENCE.md` §20.
 
 ### Superseded lane state, kept for the record
 
