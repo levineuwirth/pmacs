@@ -4,6 +4,19 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Run CI on demand, on any ref.
+  #
+  # A CI-side red on a platform this project has no machine for --- U11
+  # is macOS/`lua54` --- cannot have its merge-base control run locally.
+  # Without this trigger the only way to get a contemporaneous `main`
+  # run is to re-run a job from whenever `main` last happened to be
+  # pushed, which on PR #243 meant a run EIGHT DAYS OLD.
+  #
+  # No inputs, deliberately. This runs exactly what a push runs; it is
+  # not a hook for varying commands. Experiments that need that ---
+  # U9's test-binary concurrency control, R7's gate conditions --- need
+  # their own changes, and CI does not invoke `scripts/gate` at all.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always

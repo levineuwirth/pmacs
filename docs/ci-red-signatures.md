@@ -119,6 +119,45 @@ runs, and only reds that were still readable.
 
 ### R1 — supersede cancellation budget
 
+**Occurrence on PR #245, 2026-08-30, with a merge-base control run the
+same hour.** Recorded together because the control is what the
+occurrence owed.
+
+| field | value |
+| --- | --- |
+| **occurrence** | `Test (macos-latest / lua54)`, run `33303043179`, job `99234587352`, head `d9cc0fa`. `1984 passed; 1 failed`, panic at `src/async_runtime.rs:2444` with the row's required fragment `supersede did not cancel within 50ms` |
+| **merge-base control** | the SAME job at the branch's **exact** merge base `2e9f62b` — run `33277675008`, attempt 2, job `99239538960` — **GREEN**, `1985 passed; 0 failed`, the selector reading `... ok` in its log |
+| **both logs preserved** | before the rerun, so neither is reconstructed from a conclusion |
+
+**THIS IS R1, and the new Lua flavor does not change that.** The row
+records `macOS / luajit`; this occurrence is `macOS / lua54`. **Flavor
+is not part of signature matching** — the selector and the required
+fragment are, and both match exactly.
+
+**What the GREEN control establishes, and what it does not:**
+
+* **It does NOT establish environmental cause**, and it does **NOT**
+  retire R1. A green control shows only that the merge base can pass
+  the same job in the same hour.
+* **A RED control would have established something specific** — that
+  the branch did not introduce the occurrence. This control was green,
+  so that inference is unavailable and is not claimed.
+* **R1 remains LIVE either way**, under its existing
+  **measurement-design** disposition. Its retirement condition is
+  unchanged: the async-runtime lane replaces or justifies the
+  measurement (Q#MCI3).
+
+**The assertion still omits its measurement.** `started.elapsed()` is
+in hand at the panic and the message reports none of it, so this
+occurrence's margin is as unrecoverable as every prior one's.
+**Recording that is not the same as proposing to fix it here.** Adding
+the elapsed value would improve the NEXT failure's evidence and would
+repair nothing about the measurement design this row is actually about
+— the premise that a `thread::sleep(15ms)` means the worker picked the
+job up. That belongs to the async-runtime lane, with the rest of
+Q#MCI3.
+
+
 | field | value |
 |---|---|
 | **selector** | `--lib async_runtime::tests::supersede_cancels_in_flight_job_within_50ms` |
