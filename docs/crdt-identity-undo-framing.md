@@ -1,8 +1,29 @@
 # Identity-replace undo — a CRDT-version delta is not a text delta
 
-**Status: revision 4 — AWAITING APPROVAL. Nothing implemented.**
+**Status: revision 5 — APPROVED at revision 4 and IMPLEMENTED**
+(PR #246, branch `crdt-identity-undo`). Revision 5 is a correction pass
+answering implementation review; it changes the invariant's shape, not
+its ruling.
 
-Revision 4 answers review of 3, which found one substantive gap: **C9
+Revision 5 answers three findings against the implementation:
+
+1. **the predicate conflated an empty TEXT delta with a version
+   delta.** It called every empty-range/zero-insertion edit
+   `version_only` and then accepted `(History, empty, None)` through a
+   wildcard arm — which contradicts this framing's own "the op must
+   survive". The rule is now a full enumeration over three independent
+   axes (§1a), and C5 asserts all four empty-delta quadrants rather
+   than two;
+2. **the public `Edit` doc was factually false**, saying forward
+   `apply_edit` never produces the empty-delta shape while C2b proves
+   all three forward empty forms do. The shape is now named an **empty
+   text delta**, reachable on both paths, with `crdt_op` as the
+   discriminator;
+3. **R7's write-up overstated what the paired gate runs exclude** — see
+   `docs/ci-red-signatures.md`; the pair excludes the source tree and
+   nothing else.
+
+Revision 4 answered review of 3, which found one substantive gap: **C9
 guarded the census by file set and count, which a same-file substitution
 walks straight through.** C9 now asserts the exact
 `(file, impl target)` pairs, and its claim is scoped to in-tree
@@ -22,12 +43,34 @@ that is too loose:** an `Edit` carries no provenance marker, so if the
 shape alone were legitimate the invariant would have nothing left to
 assert. The precise answer:
 
-> **The version-only shape is legitimate when the `Edit` came from
-> `undo`/`redo`. On the FORWARD path it remains a bug, and stays
-> asserted.**
+> **An empty TEXT delta carrying a CRDT op is legitimate when the
+> `Edit` came from `undo`/`redo`, and REQUIRED there. On the FORWARD
+> path the same shape carrying an op is a bug, and stays asserted.**
 
 That is a real narrowing, not a repeal, and it is what makes C5
 testable at all.
+
+### 1a. The three axes, enumerated
+
+Revision 4 wrote this as one predicate with a default, and the
+implementation inherited the gap: `(History, empty delta, None)` fell
+through a wildcard and was accepted. The axes are independent — that is
+the lane's whole claim — so the rule is a full enumeration:
+
+| provenance | text delta | `crdt_op` | verdict |
+|---|---|---|---|
+| forward | empty | `None` | **valid** — a syntactic no-op |
+| forward | empty | `Some` | **invalid** — the original bug |
+| forward | real | `Some` | valid |
+| forward | real | `None` | invalid |
+| history | empty | `Some` | **valid** — a version-only edit |
+| history | empty | `None` | **invalid** — the version advance is gone |
+| history | real | `Some` | valid |
+| history | real | `None` | invalid |
+
+**An empty text delta is a SHAPE, not a verdict.** Both paths reach it.
+`crdt_op` is what separates them, and each direction of that separation
+is asserted.
 
 **Why this answer:**
 
@@ -38,11 +81,13 @@ testable at all.
   `derive_replacement_edit` (`:1440`, `:1525`) and attach the op
   `crdt.undo()` produced (`:1454`), so identical ropes yield an empty
   range describing a real operation.
-- **On the forward path the shape is unreachable**, which is what lets
-  the invariant keep its full strength there. A forward empty form
-  short-circuits to `(None, None)`; a forward non-empty form has a
-  non-empty range or `inserted_len > 0`. So forward "empty range and
-  zero insertion" implies `crdt_op == None`, still.
+- **Forward edits reach the empty-delta shape routinely** — each of
+  the three syntactically empty `EditOp` forms produces exactly it, as
+  C2b asserts. What is unreachable forward is the shape **carrying an
+  op**: an empty form short-circuits to `(None, None)`, and a
+  real-delta form is not empty. So forward "empty range and zero
+  insertion" implies `crdt_op == None`, still — which is what lets the
+  invariant keep its full strength there.
 - The op must survive. Dropping it would lose a version advance the
   replicas need — which is what C3 now actually tests, and revision 1's
   C3 did not.
@@ -215,9 +260,9 @@ one of the four already classified.
 | C4a | the history edit is **broadcast at all**, for both `undo` and `redo` | attach a counting view (the `RecorderView` shape, `buffer.rs:2218`) and assert **exactly one** `on_edit` per history op | **delete `self.broadcast_on_edit(&inverse_edit)?`** at `buffer.rs:1456` (undo) or `:1537` (redo) → the count is 0 → C4a fires |
 | C4b | the classified consumers are unchanged by the real history edit | attach `FoldStoreTranslator`, `BufferStyleSpanTranslator` and `ParseView`; run the identity-replace op; assert fold store unchanged, span vector unchanged, **parse tree identical**, and `pending_edit_count()` returns to 0 after the drain (`syntax.rs:712`, `:737`) | see the note below — **C4b claims no guard mutation**, and C4a is what makes it non-vacuous |
 | C4c | the style-span guard's own contract, pinned where it can fire | call `BufferStyleSpanTranslator::on_edit` with a **synthetic INTERIOR 0→0 `Edit`** whose position falls strictly inside an existing span, and assert the span vector is **byte-identical** — not merely equal in coverage | delete `overlay.rs:261`–`:263` → the span splits into two adjacent fragments and the vector differs → C4c fires |
-| C5 | the invariant is keyed on **provenance**, and still rejects a version-only `Edit` on the FORWARD path | preserve the `GenOp` classification (`buffer.rs:3101`, where `op` is currently moved before it can be classified) as an operation class; extract the shape check to take `(class, &Edit)`; then **inject** `(Forward, version-only Edit)` and assert it is rejected, and `(History, version-only Edit)` and assert it is accepted | widen the `Forward` branch to permit the version-only shape → C5 fires. **The proptest alone cannot catch this**, because no forward input produces that shape — which is why C5 is a directed injection, not a property |
+| C5 | the invariant is keyed on **provenance**, and covers **all four** empty-text-delta quadrants of §1a | preserve the `GenOp` classification (`buffer.rs:3101`, where `op` is moved before it can be classified) as an operation class; extract the shape check to take `(class, &Edit)`; then **inject** all four: `(Forward, empty, None)` accepted, `(Forward, empty, Some)` rejected, `(History, empty, Some)` accepted, `(History, empty, None)` rejected | widen the forward rule → C5 fires; accept `(History, empty, None)` → C5 fires, and **revision 4's two-assertion C5 did not**. **The proptest alone catches neither**, because no generated input reaches either row — which is why C5 is a directed injection, not a property |
 | C6 | the executed history-case set **is** `{Undo, Redo}` | after the parameterized loop, assert the collected set of cases actually run equals the literal `{Undo, Redo}`; a `match` over the case enum keeps a future variant from being added silently | drop `Redo` from the case list → the **set assertion** fires. Without it the suite simply runs one case and stays green, which is why revision 3's C6 was a zero-execution witness |
-| C7 | the public contract admits the fourth shape | `src/rope.rs:301`–`:303` (in the `Edit` doc from `:292`) gains the empty-range/zero-inserted case, and the `crdt_op` field doc (`:316`) stops asserting that no-op edits have no op | leave the doc → it contradicts the code the lane just blessed |
+| C7 | the public contract names the **empty text delta** and says which path produces which `crdt_op` | the `Edit` doc (from `src/rope.rs:292`) gains the empty-delta shape **as reachable on BOTH paths** — `None` forward, `Some` from history — and the `crdt_op` field doc stops asserting that no-op edits have no op | leave the doc → it contradicts the code the lane just blessed. **An earlier version of this row said forward `apply_edit` never produces the shape; C2b proves all three forward empty forms do**, so the doc it produced was false and is corrected in revision 5 |
 | C8 | **the fixture's own doc comment is corrected**, not just its attribute | rewrite `buffer.rs:3005`–`:3040`: convergence is **established by C3**, not "verified" (`:3023`–`:3026`); the buffer-end range is **ruled and weakly preferable** per §4, not "genuinely arbitrary" (`:3034`–`:3036`); "**The open question**" (`:3030`) becomes the ruling; and the `#[ignore]` reason string (`:3042`–`:3043`) goes with the attribute | leave the comment → the repository's most-read record of this defect still says the decision is open and that convergence was already checked, contradicting §1, §2 and C3 |
 | C9 | §4's census stays closed **for in-tree implementations** | walk `CARGO_MANIFEST_DIR/src` and assert the set of **`(file, impl target)` pairs** carrying a non-`#[cfg(test)]` `fn on_edit` override is exactly `{(syntax.rs, ParseView), (text_view.rs, TextView), (fold.rs, FoldStoreTranslator), (overlay.rs, BufferStyleSpanTranslator)}` — pairs, not file set and count, and by name rather than line number | **replace `ParseView`'s override with an unclassified type in the SAME file** → file set and count are both unchanged, and only the pair set catches it. Adding a fifth override anywhere under `src/` fires it too, naming the file and the type |
 

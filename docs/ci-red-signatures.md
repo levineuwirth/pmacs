@@ -593,13 +593,23 @@ and nothing else: `283 passed; 1 failed` in each.
   the rerun rule a green run establishes intermittence only, and the
   seventh occurrence already falsified "in-gate always fails".
 
-**What this changes about the method.** The seventh occurrence's
-narrowing said the remaining candidates must be varied INSIDE the gate,
-one per run. This pair says something stronger about which candidates
-are live: the gate's own per-run state — its ambient root, its fresh
-`TMPDIR`, and process state carried across stage boundaries — is now the
-only place the difference can be, because the tree was held fixed to
-within a markdown file across a green/red boundary.
+**What this changes about the method, stated at the strength it
+carries.** The seventh occurrence's narrowing said the remaining
+candidates must be varied INSIDE the gate, one per run. This pair
+sharpens **one** exclusion and nothing else: **the Rust source tree is
+not the variable.**
+
+It does **not** narrow the cause to three things. The gate's per-run
+state — its ambient root, its fresh `TMPDIR`, and process state carried
+across stage boundaries — remains the set of candidates this project can
+actually vary one at a time, which is why they are the ones to try. But
+**they are not an exhaustive causal set**, and an earlier version of
+this paragraph said they were. Everything unrelated to the repository
+also differed between the two runs: scheduler load and CPU contention,
+kernel and socket timing, page cache and memory pressure, and whatever
+else the machine was doing at 15:48 versus 15:56. A socket handshake
+racing a `BrokenPipe` is exactly the kind of failure those can drive,
+and holding the tree fixed says nothing about any of them.
 
 **Sixth occurrence — the parse-budget diagnosability lane, 2026-08-29,
 local (Linux), `gpu` step.** All three required fragments present in the
@@ -915,10 +925,44 @@ was lost.
 | **selector** | `--lib --features crdt optimistic::tests::criterion_1_end_of_line_typing_completes_sub_frame_per_keystroke` **and** `editor::tests::composition_overhead_under_ten_percent`, failing in the same run |
 | **job / flavor** | local (Linux), `scripts/gate` step `04-lib-crdt`, with sibling worktrees building concurrently |
 | **required fragments** | `criterion 1: per-keystroke orchestrator time` + `exceeds 1ms`; and `composition machinery added more than 10% overhead` |
-| **status** | **new incident, one occurrence, not reproduced** |
+| **status** | **SECOND OCCURRENCE 2026-08-30, and the first time it REPRODUCED — twice in a row.** Still no mechanism; see the block below |
 | **what IS established** | both are **wall-clock budget assertions** — 1.264ms against a 1ms budget, and 1.297× against a 1.10× budget — so both are load-sensitive by construction. Both green in an isolated rerun of exactly those two selectors, and both green in the next full gate run of the same command (2105 passed) |
 | **what is NOT** | whether the machine's concurrent load caused it. The confound is real (this machine runs one shared `CARGO_TARGET_DIR` and several worktrees) but **was not measured**, so it is a rival explanation, not a finding |
 | **rival explanation not excluded** | a genuine regression in either path. Nothing in the observing diff touches the optimistic-echo orchestrator or the composition pipeline, but "my diff looks unrelated" is not evidence, and this row does not treat it as such |
+
+**Second occurrence — the CRDT identity-undo lane, 2026-08-30, local
+(Linux).** Both required fragments captured, both selectors, one run:
+
+```
+criterion 1: per-keystroke orchestrator time 1.343883ms exceeds 1ms
+composition machinery added more than 10% overhead: 1.182
+```
+
+**It reproduced on the immediately following run**, which is new for
+this row — the first occurrence explicitly recorded "not reproduced".
+
+Margins are recorded because U11 taught this registry what their absence
+costs. Here: **1.343883ms against a 1ms budget** (1.34×) and **1.182×
+against a 1.10× budget**; at the first occurrence, 1.264ms and 1.297×.
+So the composition margin grew and the keystroke margin grew, but
+neither by an order that separates load from regression. Both selectors
+were green in isolated single-selector reruns.
+
+**The asymmetry runs the OPPOSITE way to R7, and that is the useful
+part.** Both failures were **out of gate** — a bare
+`cargo test --lib --features crdt` in the worktree — while the same
+command as `scripts/gate`'s `04-lib-crdt` step was **green in all four
+of this lane's gate runs** (`20260830T154827Z`, `T155621Z`, `T160242Z`,
+`T160824Z`). R7 fails in-gate and has never reproduced outside it; U6
+here did the reverse. Whatever the two rows share, it is not a
+direction.
+
+**No mechanism is claimed, and the load confound is again unmeasured.**
+The machine was running the agent session's own build and test traffic;
+that is a rival explanation, not a finding, exactly as the first
+occurrence recorded. What is worth having is that **this row is now
+reproducible under some condition**, which the first occurrence could
+not say.
 
 **Two budget tests failing in one run and neither in the next is the
 signature worth matching**, more than either name alone: a real

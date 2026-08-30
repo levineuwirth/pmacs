@@ -303,19 +303,45 @@ waits for a signal that is not coming.
 
 ## CRDT identity-replace undo — LANE TAKEN, PR #246 OPEN
 
-**Branch `crdt-identity-undo`, based on `aae5b35`; implemented at
-`db24ae3`.** Framing `docs/crdt-identity-undo-framing.md`, **APPROVED at
-revision 4** after four review rounds. Gate green **head-exact**, all 8
-stages, log `20260830T154827Z-2907414`; `HEAD` and
-`git status --porcelain` identical before and after.
+**Branch `crdt-identity-undo`, PR #246, based on `aae5b35`.** Framing
+`docs/crdt-identity-undo-framing.md`, **APPROVED at revision 4** after
+four review rounds, then **revision 5** as a correction pass answering
+implementation review. Gate green **head-exact at the current head**,
+all 8 stages; the `db24ae3` run recorded here earlier was head-exact for
+that commit only and the branch has moved since.
 
 **The decision, ruled:** a visible TEXT delta and a CRDT-VERSION delta
-are **independent dimensions** of `Edit`. The invariant is narrowed to
-key on **provenance**, not shape — a forward version-only edit must
-still carry no op (and still cannot produce one, because the three
-syntactically empty `EditOp` forms short-circuit at `is_no_op_edit`); a
-history version-only edit may carry one, and must, or the version
-advance the replicas need is lost.
+are **independent dimensions** of `Edit`. The invariant is keyed on
+**provenance**, and enumerated over three axes rather than defaulted:
+an **empty text delta** is a shape both paths reach, and `crdt_op` is
+what separates them — `None` forward (the three syntactically empty
+`EditOp` forms short-circuit at `is_no_op_edit`), `Some` from
+`undo`/`redo`, **required** there, because the op is the whole content
+of such an edit.
+
+**Revision 5 fixed three things review caught in the implementation:**
+
+- the predicate **conflated the empty text delta with a version delta**,
+  calling every empty-range/zero-insertion edit `version_only` and then
+  accepting `(History, empty, None)` through a wildcard — contradicting
+  the lane's own "the op must survive". It is now a full enumeration,
+  and C5 asserts all four empty-delta quadrants instead of two. **Both
+  new quadrants were mutation-checked, and neither is caught by the
+  proptest** — no generated input reaches either;
+- the **public `Edit` doc was factually false**: it said forward
+  `apply_edit` never produces the empty-delta shape, while C2b proves
+  all three forward empty forms do;
+- **R7's write-up overstated what the paired gate runs exclude.** They
+  exclude the source tree. They do not narrow the cause to three
+  candidates — scheduler load, kernel and socket timing, and unrelated
+  machine state all varied too, and a `BrokenPipe` on a socket handshake
+  is exactly what those can drive.
+
+**Two registry rows gained occurrences on this lane**: R7's eighth (the
+green/red pair whose heads differ by one markdown file) and **U6's
+second — the first time U6 has ever reproduced**, twice in a row, and
+running the OPPOSITE way to R7: out of gate, while `04-lib-crdt` was
+green in all four of this lane's gate runs.
 
 **Two claims THIS BLOCK made are corrected by measurement:**
 
