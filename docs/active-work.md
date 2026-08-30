@@ -306,9 +306,11 @@ waits for a signal that is not coming.
 **Branch `crdt-identity-undo`, PR #246, based on `aae5b35`.** Framing
 `docs/crdt-identity-undo-framing.md`, **APPROVED at revision 4** after
 four review rounds, then **revision 5** as a correction pass answering
-implementation review. Gate green **head-exact at the current head**,
-all 8 stages; the `db24ae3` run recorded here earlier was head-exact for
-that commit only and the branch has moved since.
+implementation review. **Gate green head-exact at `2c24303`, all 8
+stages, log `20260830T193305Z-4167110`**, taken at loadavg 0.90 with
+`HEAD` and `git status --porcelain` identical before and after; **CI
+14/14 green at the same commit.** Earlier gate runs recorded here named
+`db24ae3`, which the branch has long since moved past.
 
 **The decision, ruled:** a visible TEXT delta and a CRDT-VERSION delta
 are **independent dimensions** of `Edit`. The invariant is keyed on
@@ -355,11 +357,32 @@ infrastructure and belongs in its own lane, alongside U9's still-unrun
 discriminating control. Recorded so the next lane touching
 crdt-gated code does not rediscover it at CI.
 
-**Two registry rows gained occurrences on this lane**: R7's eighth (the
-green/red pair whose heads differ by one markdown file) and **U6's
-second — the first time U6 has ever reproduced**, twice in a row, and
-running the OPPOSITE way to R7: out of gate, while `04-lib-crdt` was
-green in all four of this lane's gate runs.
+**Four registry rows moved on this lane:**
+
+- **R7's eighth occurrence** — the green/red pair whose heads differ by
+  one markdown file. It excludes the SOURCE TREE and nothing more; an
+  earlier write-up of mine narrowed the cause to three gate-state
+  candidates and that overstatement is withdrawn in the row;
+- **U6 went from one occurrence to five** — four on 2026-08-30, two out
+  of gate and two in. Its first reproduction ever. **A direction claim I
+  made here ("runs the OPPOSITE way to R7", resting on four green
+  `04-lib-crdt` stages) was falsified by the next gate run and is
+  withdrawn in the row;**
+- **U14, new** — four selectors red in one gate run across three stages;
+- **U15, new** — the rotated cluster 40 minutes later. It carries the
+  single `/proc/loadavg` reading of **34.04**, which makes severe
+  unrelated load a **measured presence contemporaneous with a multi-red
+  run — not a measured cause.** The reading is one point taken after the
+  fact and the margins are not monotonic
+  (`composition_overhead` ran 1.182x, 1.592x, 1.527x), so no
+  dose-response is claimed. An earlier version of that write-up said a
+  load average of 34 "explains it without any help"; it does not, and
+  that is corrected in place.
+
+U14 and U15 are two rows rather than one because the second run's
+selector set had **rotated**, and this registry matches on the exact
+set — recording it as a second U14 occurrence was a matching-rule
+violation, caught in review.
 
 **Two claims THIS BLOCK made are corrected by measurement:**
 

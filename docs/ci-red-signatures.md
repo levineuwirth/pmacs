@@ -925,7 +925,7 @@ was lost.
 | **selector** | `--lib --features crdt optimistic::tests::criterion_1_end_of_line_typing_completes_sub_frame_per_keystroke` **and** `editor::tests::composition_overhead_under_ten_percent`, failing in the same run |
 | **job / flavor** | local (Linux), `scripts/gate` step `04-lib-crdt`, with sibling worktrees building concurrently |
 | **required fragments** | `criterion 1: per-keystroke orchestrator time` + `exceeds 1ms`; and `composition machinery added more than 10% overhead` |
-| **status** | **THIRD OCCURRENCE 2026-08-30 — the first time it has REPRODUCED, three times in one afternoon, twice out of gate and once in.** Still no mechanism; see the block below |
+| **status** | **FIVE OCCURRENCES — one on 2026-08-09 and FOUR on 2026-08-30**, the first time this row has ever reproduced. Two of the four out of gate, two in gate (`20260830T171941Z`, `T175657Z`). Still no mechanism; see the block below |
 | **what IS established** | both are **wall-clock budget assertions** — 1.264ms against a 1ms budget, and 1.297× against a 1.10× budget — so both are load-sensitive by construction. Both green in an isolated rerun of exactly those two selectors, and both green in the next full gate run of the same command (2105 passed) |
 | **what is NOT** | whether the machine's concurrent load caused it. The confound is real (this machine runs one shared `CARGO_TARGET_DIR` and several worktrees) but **was not measured**, so it is a rival explanation, not a finding |
 | **rival explanation not excluded** | a genuine regression in either path. Nothing in the observing diff touches the optimistic-echo orchestrator or the composition pipeline, but "my diff looks unrelated" is not evidence, and this row does not treat it as such |
@@ -948,24 +948,30 @@ So the composition margin grew and the keystroke margin grew, but
 neither by an order that separates load from regression. Both selectors
 were green in isolated single-selector reruns.
 
+**Fourth and fifth occurrences — both IN gate, both `04-lib-crdt`,
+both the exact pair.** `20260830T171941Z-3509751` (`1.689259ms` against
+1ms; `1.592×` against 1.10×) and `20260830T175657Z-3881334`
+(`2.269247ms`; `1.527×`). Those two runs also redded other selectors in
+other steps; **those clusters are U14 and U15 respectively**, and only
+the `04-lib-crdt` pair belongs to this row.
+
 **A DIRECTION CLAIM WAS MADE HERE AND IS WITHDRAWN, within the hour.**
 This block first said the asymmetry "runs the OPPOSITE way to R7":
 both failures were out of gate, while `04-lib-crdt` was green in all
 four of this lane's gate runs to that point (`20260830T154827Z`,
 `T155621Z`, `T160242Z`, `T160824Z`). **The very next gate run redded
-`04-lib-crdt` with this exact pair** (`20260830T171941Z-3509751`,
-margins `1.689259ms` against 1ms and `1.592×` against 1.10×) — see U14,
-which records that run whole. So U6 fails **both** in and out of gate,
-the four green stages were a run of four and not a property, and the
-only honest reading is the one the first occurrence already gave: these
-are wall-clock budgets on a loaded machine.
+`04-lib-crdt` with this exact pair.** So U6 fails **both** in and out of
+gate, the four green stages were a run of four and not a property, and
+the only honest reading is the one the first occurrence already gave:
+these are wall-clock budget assertions.
 
-**No mechanism is claimed, and the load confound is again unmeasured.**
-The machine was running the agent session's own build and test traffic;
-that is a rival explanation, not a finding, exactly as the first
-occurrence recorded. What is worth having is that **this row is now
-reproducible under some condition**, which the first occurrence could
-not say.
+**No mechanism is claimed.** The load confound was unmeasured at the
+second and third occurrences and at the fourth; **U15 records a single
+`/proc/loadavg` reading of `34.04` taken after the fifth**, which makes
+severe unrelated load a measured presence rather than a measured cause —
+see that row for why the difference matters. What is worth having here
+is that **this row is now reproducible under some condition**, which the
+first occurrence could not say.
 
 **Two budget tests failing in one run and neither in the next is the
 signature worth matching**, more than either name alone: a real
@@ -1223,60 +1229,33 @@ concurrency to 1, and separately load a lone `--lib` binary. Four
 incidents is enough evidence that the family will keep costing review
 rounds until someone runs it.
 
-### U14 — three unrelated tests red in ONE gate run, in three stages
+### U14 — FOUR selectors red in ONE gate run, across three stages
 
 Recorded on the CRDT identity-undo lane, 2026-08-30, local (Linux),
 `scripts/gate` log `20260830T171941Z-3509751`. **The co-occurrence is
-the signature**, as it is for U6, U9 and U12: three unrelated
-subsystems failing in one run is far less likely than one loaded
-machine, and no single selector here reds twice.
+the signature**, as it is for U6, U9 and U12: four selectors in three
+unrelated subsystems failing in one run is less likely than one loaded
+machine, and no single selector reds twice within the run.
 
 | field | value |
 |---|---|
-| **selectors** | `03-lib`: `async_runtime::tests::grep_supersede_cancels_predecessor_within_50ms`. `04-lib-crdt`: U6's pair. `07-sweep`: `lsp_dispatch_seams_acceptance::acc34_purge_reaches_a_server_that_is_in_no_attachment` |
+| **selectors** | **four.** `03-lib`: `async_runtime::tests::grep_supersede_cancels_predecessor_within_50ms`. `04-lib-crdt`: `optimistic::tests::criterion_1_end_of_line_typing_completes_sub_frame_per_keystroke` **and** `editor::tests::composition_overhead_under_ten_percent` (U6's pair — see below). `07-sweep`: `lsp_dispatch_seams_acceptance::acc34_purge_reaches_a_server_that_is_in_no_attachment` |
 | **job / flavor** | local (Linux), one `scripts/gate` run, three different steps |
 | **required fragments** | `grep supersede did not cancel within 50ms` + an `elapsed:` value; `criterion 1: per-keystroke orchestrator time` + `exceeds 1ms`; `composition machinery added more than 10% overhead`; `is not ready for requests (state: initializing)` |
-| **status** | **two occurrences, 2026-08-30, and the SECOND ONE MEASURES THE LOAD CONFOUND** that U6 and U7 have each recorded as unmeasured since 2026-08-09 |
+| **status** | **new incident, ONE occurrence** |
 | **what IS established** | all four fragments captured from the durable stage logs. Margins: `52.44341ms` against 50ms (4.9% over); `1.689259ms` against 1ms; `1.592×` against 1.10×. The `07-sweep` failure is **not** a budget — an LSP server was asked for a request while still `initializing` |
-| **what is NOT** | any shared mechanism. Three stages, three subsystems, and one of the three is a readiness race rather than a clock |
+| **what is NOT** | any shared mechanism, and **any load measurement**: no `/proc/loadavg` reading was taken during or after this run. Three stages, three subsystems, and one of the four is a readiness race rather than a clock |
 | **the observing tree** | the lane's revision-5 commits: an enumeration in a `#[cfg(test)]` predicate and documentation. It touches `async_runtime`, `optimistic`, `editor` and the LSP dispatch seam **not at all** |
 
-**Second occurrence, 40 minutes later — and this one has the number.**
-`scripts/gate` log `20260830T175657Z-3881334`, same lane, same three
-stages red, **a partly different selector set**: `03-lib` took
-`composition_overhead_under_ten_percent` *and*
-`semantic_render::tests::full_buffer_summary_flatten_scales_on_large_grammar_file`;
-`04-lib-crdt` took U6's pair again; `07-sweep` took
-`dired_renders_10k_entries_within_200ms`, **which is one of U7's three
-selectors**.
-
-**`/proc/loadavg` read immediately after: `34.04 38.45 26.29`.** The
-CPU was saturated by `lean` processes — an unrelated workload on this
-shared machine, nothing this session started, and no `cargo`, `rustc`
-or `scripts/gate` process of mine was left running.
-
-**U6 and U7 have both said, since 2026-08-09, that the load confound
-"was not measured, so it is a rival explanation, not a finding."** Here
-it is measured, and the margins move with it monotonically across three
-runs of the same tree:
-
-| run | `criterion_1` per-keystroke | `composition_overhead` |
-|---|---|---|
-| out of gate, ~17:05 | 1.343883ms | 1.182× |
-| gate `T171941Z` | 1.689259ms | 1.592× |
-| gate `T175657Z`, loadavg 34.04 | **2.269247ms** | 1.527× |
-
-Against a 1ms and a 1.10× budget. **A regression does not get 69% worse
-between two runs of an unchanged tree; a load average of 34 explains it
-without any help.** That is a finding about these budget rows, not about
-the tree — and it is the first time this registry can say so with a
-number rather than a suspicion.
-
-**What it does NOT do:** it does not retire U6, U7 or this row. The
-budgets remain wall-clock assertions whose measurement design nobody has
-defended, which is the same disposition R1 carries. What changes is that
-"one loaded machine" stops being a rival explanation offered in good
-faith and becomes a measured one.
+**An earlier version of this row claimed a SECOND occurrence, and that
+was a matching-rule violation.** The run 40 minutes later
+(`20260830T175657Z-3881334`) redded a **different selector set** —
+`full_buffer_summary_flatten_scales_on_large_grammar_file` and
+`dired_renders_10k_entries_within_200ms` in place of
+`grep_supersede…` and `acc34_purge…`. Under "How a row matches" above,
+the exact selectors must match; a rotated set is a **new incident**.
+It is now **U15**, and the `04-lib-crdt` pair the two runs do share is
+recorded where it belongs, as U6's own occurrence.
 
 **Relation to R1, and it is NOT a match.** The `03-lib` failure carries
 R1's required fragment `supersede did not cancel within 50ms`, but R1's
@@ -1303,12 +1282,67 @@ rerun rule that establishes **intermittence only**; it exonerates
 nothing, and in particular it does not show the tree is innocent, only
 that the failures do not reproduce alone.
 
-**The readiness failure is the one worth watching.** A budget test on a
-loaded machine is a known shape here; `server LspServerId(1) is not
-ready for requests (state: initializing)` is a **race between a test and
-a state machine**, and load makes it more likely without being its
-cause. If it recurs it should be judged on its own, not folded into this
-row's co-occurrence.
+### U15 — a rotated multi-red cluster, with the load MEASURED for once
+
+Recorded on the CRDT identity-undo lane, 2026-08-30, local (Linux),
+`scripts/gate` log `20260830T175657Z-3881334` — 40 minutes after U14's
+run, on the same tree. **A new incident rather than a U14 occurrence**,
+because the selectors rotated and this file matches on the exact set.
+
+| field | value |
+|---|---|
+| **selectors** | `03-lib` (**default features**): `editor::tests::composition_overhead_under_ten_percent` **and** `semantic_render::tests::full_buffer_summary_flatten_scales_on_large_grammar_file`. `07-sweep`: `dired_acceptance::dired_renders_10k_entries_within_200ms` |
+| **job / flavor** | local (Linux), one `scripts/gate` run, steps `03-lib` and `07-sweep` |
+| **required fragments** | `composition machinery added more than 10% overhead`; `full-buffer flatten took` + `the event sweep must stay ~linear`; `10K entries must render within 200ms; took ` |
+| **status** | **new incident, one occurrence** |
+| **what IS established** | margins `1.450×` against 1.10×, `1.274901136s` against a ~linear expectation, and `221.459827ms` against 200ms (10.7% over). **`/proc/loadavg` read immediately after the run: `34.04 38.45 26.29`**, with the CPU saturated by unrelated `lean` processes — nothing this session started, and no `cargo`, `rustc` or `scripts/gate` process of mine left running |
+| **what is NOT** | that the load caused any of it. See below |
+
+**Two selectors here belong to other rows and are deliberately NOT
+claimed as their occurrences.** `composition_overhead_under_ten_percent`
+is one of U6's two, and it redded in `03-lib` **without** its partner
+and under **default features**, not U6's `04-lib-crdt`/`crdt` flavor —
+U6's own instruction is that one-without-the-other is a different
+incident. `dired_renders_10k_entries_within_200ms` is one of U7's three,
+and this is the **second** time that same selector has redded — U7's own
+instruction is that a repeat of one selector is a different incident.
+Both instructions are honoured rather than quoted and ignored.
+
+*(The same run's `04-lib-crdt` step redded U6's pair together, in U6's
+flavor and step. That IS a U6 occurrence and is recorded there.)*
+
+**What the load number establishes, stated at its real strength.** U6
+and U7 have each recorded, since 2026-08-09, that the load confound
+"was not measured, so it is a rival explanation, not a finding." **It is
+measured now — once, after this run.** That makes it a **measured
+confound present contemporaneously with a multi-red run**. It does not
+make it the cause, and three specific things stop it short:
+
+* **the reading is a single point, taken after the fact.** No
+  `/proc/loadavg` was captured during U14's run or the two out-of-gate
+  runs, so there is no series to correlate margins against;
+* **the margins are not monotonic.**
+  `composition_overhead_under_ten_percent` went `1.182×` → `1.592×` →
+  `1.527×` across the three runs, and in this run alone it reports
+  `1.450×` in `03-lib` and `1.527×` in `04-lib-crdt`. Only
+  `criterion_1`'s three points rise monotonically (`1.343883ms`,
+  `1.689259ms`, `2.269247ms`), and three points with one load reading
+  is not a dose-response;
+* **an earlier version of this write-up said "a load average of 34
+  explains it without any help."** That overstates it. Severe unrelated
+  load was present; whether it produced these particular margins is
+  unmeasured.
+
+**What it does change:** "one loaded machine" stops being a hypothesis
+offered in good faith and becomes a **quantity on the record**, which is
+what a future correlation would need as its first data point. It retires
+nothing — U6, U7, U14 and R1 all keep their dispositions, and the
+budgets remain wall-clock assertions whose measurement design nobody has
+defended.
+
+**Reruns: green in isolation** — `composition_overhead…` `1 passed`,
+and the `dired_acceptance` selector had already been shown green in
+isolation by U7. Intermittence only, per the rerun rule.
 
 ### U13 — gate prune-reporting row receives empty child stdout in `sweep`
 
