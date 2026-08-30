@@ -535,11 +535,71 @@ Stage 4; the lane touches no `pmacs-gpu` code at all.
 | **selector** | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
 | **job / flavor** | local (Linux), `cargo test --workspace --features crdt --no-fail-fast`, i.e. under full-sweep load |
 | **required fragments** | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
-| **status** | **SEVENTH OCCURRENCE 2026-08-29 — causal status still UNRESOLVED.** The sixth and seventh came back to back on one lane and are written up together below; the fifth carries the strongest tree exclusion this row has had, a **documentation-only diff** |
+| **status** | **EIGHTH OCCURRENCE 2026-08-30 — causal status still UNRESOLVED.** The eighth carries the strongest tree exclusion this row has had, and it supersedes the fifth's: two consecutive gate runs on ONE worktree whose heads differ by a single markdown file, the first all-green and the second red |
 | **what IS established** | **three** occurrences at `pmacs-gpu/src/attach.rs:1680`, the second and third with all three fragments **verified** rather than inferred; the test drives a scripted transient-then-success sequence over a real socket pair. **The added GPU test is not the mechanism** — see the third-occurrence control below |
 | **what is NOT** | whether the broken pipe is the *fixture's* writer closing early or a real retry-path defect. **This row is not a claim that it is harmless** |
 | **rerun evidence** | occurrence 1: 6 isolated runs green, plus a full `--workspace --features crdt` sweep green (113 targets). Occurrence 2: **30 green on the observing branch** (15 isolated selector, 15 full `-p pmacs-gpu`) **plus a 15-run merge-base control, also green**. Occurrence 3: 5 isolated selector runs green, 10 full `-p pmacs-gpu` runs green **with** the added test, and **1 failure in 10 with the added test `#[ignore]`d** — the first rerun in this row's history that reproduced anything. Per the rerun rule the green runs establish intermittence only; the red control run is what carries the exclusion |
 | **retirement** | hardening that removes the named mechanism plus a discriminating witness — or a diagnosis showing the fixture, not the code, closes the pipe |
+
+**Eighth occurrence — the CRDT identity-undo lane, 2026-08-30, local
+(Linux), `gpu` step.** All three required fragments present in the
+durable log
+(`pmacs-fdccc423/gate-logs/20260830T155621Z-3005460/06-gpu.log`):
+
+```
+transient sequence must attach: Attach(Handshake(Io(Os { code: 32,
+kind: BrokenPipe, message: "Broken pipe" })))
+```
+
+at `pmacs-gpu/src/attach.rs:1889`, `283 passed; 1 failed`.
+
+**This occurrence discriminates tree from runner more sharply than any
+before it, and the reason is the pair, not the diff.** Two consecutive
+`scripts/gate` runs, same worktree, minutes apart:
+
+| run | head | delta from the previous run | result |
+|---|---|---|---|
+| `20260830T154827Z-2907414` | `db24ae3` | — | **all 8 stages green** |
+| `20260830T155621Z-3005460` | `96bf2c3` | **one commit, touching one file: `docs/active-work.md`** | **`gpu` and `sweep` FAILED** |
+
+The fifth occurrence excluded the observing tree *relative to `main`*
+by having a documentation-only diff. This pair excludes it relative to
+**the immediately preceding green run of the same gate on the same
+worktree**, where the entire delta is a markdown file that no Rust
+target reads. Whatever varies between those two runs, it is not the
+source tree.
+
+**`sweep` failed with the SAME single test**, so this run is one failure
+surfacing in two stages, not two failures. Both stage logs name
+`attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream`
+and nothing else: `283 passed; 1 failed` in each.
+
+* **Rerun: isolated selector green five times** (`1 passed`, 0.00s
+  each). Per this file's rerun rule that establishes **intermittence
+  only** — and per the seventh occurrence's correction, running the
+  selector outside the gate excludes nothing at all, because nothing
+  outside the gate has ever reproduced this failure.
+* **No ratio is claimed from this occurrence.** It is one in-gate
+  failure following one in-gate pass, on a lane whose gate runs exist to
+  verify a head rather than to observe this row. Folding them into the
+  2026-08-29 window would be exactly the drift that window was bounded
+  to prevent.
+* **The observing lane touches no `pmacs-gpu` file**: its whole diff is
+  `src/buffer.rs`, `src/rope.rs`, `src/overlay.rs`, `src/view.rs` — tests
+  and doc comments — plus three docs.
+* **The NEXT in-gate run was green**, all eight stages
+  (`20260830T160242Z-3095339`), one commit later. Recorded because
+  omitting it would be selective, not because it resolves anything: per
+  the rerun rule a green run establishes intermittence only, and the
+  seventh occurrence already falsified "in-gate always fails".
+
+**What this changes about the method.** The seventh occurrence's
+narrowing said the remaining candidates must be varied INSIDE the gate,
+one per run. This pair says something stronger about which candidates
+are live: the gate's own per-run state — its ambient root, its fresh
+`TMPDIR`, and process state carried across stage boundaries — is now the
+only place the difference can be, because the tree was held fixed to
+within a markdown file across a green/red boundary.
 
 **Sixth occurrence — the parse-budget diagnosability lane, 2026-08-29,
 local (Linux), `gpu` step.** All three required fragments present in the
