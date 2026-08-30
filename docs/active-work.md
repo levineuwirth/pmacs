@@ -306,11 +306,21 @@ waits for a signal that is not coming.
 **Branch `crdt-identity-undo`, PR #246, based on `aae5b35`.** Framing
 `docs/crdt-identity-undo-framing.md`, **APPROVED at revision 4** after
 four review rounds, then **revision 5** as a correction pass answering
-implementation review. **Gate green head-exact at `2c24303`, all 8
-stages, log `20260830T193305Z-4167110`**, taken at loadavg 0.90 with
-`HEAD` and `git status --porcelain` identical before and after; **CI
-14/14 green at the same commit.** Earlier gate runs recorded here named
-`db24ae3`, which the branch has long since moved past.
+implementation review.
+
+**Every head of this branch is gated head-exact**, with `HEAD` and
+`git status --porcelain` captured before and after each run and
+identical. The two that matter:
+
+| commit | what it carries | gate | CI |
+|---|---|---|---|
+| `2c24303` | the code, and the framing at revision 5 | all 8 green, `20260830T193305Z-4167110`, loadavg 0.90 | 14/14 |
+| `6ddce0f` | the registry corrections (U14/U15 split, load claim narrowed) | all 8 green, `20260830T201908Z-84597` | 14/14 |
+
+**This line goes stale the moment another commit lands, which is the
+defect review already caught here once** — it named `db24ae3` long after
+the branch had moved past it. It is written as a table so the next
+update is an added row rather than a rewrite.
 
 **The decision, ruled:** a visible TEXT delta and a CRDT-VERSION delta
 are **independent dimensions** of `Edit`. The invariant is keyed on
