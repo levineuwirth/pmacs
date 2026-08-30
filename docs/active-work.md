@@ -301,44 +301,66 @@ waits for a signal that is not coming.
 - **THE FIRST DISPATCH IMMEDIATELY FOUND A RED ON `main`**, which is
   what this lane was built for. See the proptest entry below.
 
-## CRDT undo proptest — a DETERMINISTIC red on `main` — NEEDS A LANE
+## CRDT identity-replace undo — the proptest invariant may be MIS-SCOPED — NEEDS A LANE
 
-**Found by the first `workflow_dispatch` run**, `33307137965`, job
-`99247616970`, at `main` = `7b82e14`. Log preserved at
-`/home/jeans/build/pmacs-ci-logs/`.
+**CORRECTION.** An earlier version of this entry called the dispatched
+run's red "a DETERMINISTIC red" and "not like anything else in this
+registry — a property violation with a concrete witness, not a load
+artefact", and proposed committing the proptest seed as the first
+step. **All of that was wrong**, and it was wrong because I recorded a
+finding without checking whether `main` already documented it.
 
-- **Selector:** `--lib --features crdt
-  buffer::tests::proptests::rope_matches_crdt_projection_after_arbitrary_edits`
-- **Assertion:** `src/buffer.rs:3120` —
-  `no-op edit must have crdt_op = None (Undo)`
-- **`2172 passed; 1 failed`**, failing after 17 successes.
+**It is a randomly sampled recurrence of known #157 behaviour.**
+`src/buffer.rs:3005` carries an `#[ignore]`d deterministic fixture,
+`crdt_undo_of_an_identity_replace_reports_a_no_op_edit_carrying_an_op`,
+which reduces this exact case and records its mechanism:
 
-**THIS IS NOT LIKE THE OTHER ROWS IN THIS REGISTRY.** Every red this
-session has been timing-dependent and green on rerun. This one is a
-**proptest failure that SHRANK to a minimal input**, which means it is
-a property violation with a concrete witness, not a load artefact:
+1. the inserts produce `aaaaa `;
+2. `Replace(5, 1, " ")` replaces the trailing space **with itself** — a
+   textual no-op but a real CRDT delete-plus-insert;
+3. `Undo` therefore emits a **version-advancing CRDT operation with no
+   visible text change**, and `derive_replacement_edit` yields an empty
+   edit that still carries its `crdt_op`.
 
-```
-ops = [ Insert(0, "aa"), Insert(2, "aaa "), Replace(5, 1, " "), Undo ]
-```
+**Committing the seed is NOT the first step**, and proposing it was a
+second error: it duplicates a deterministic fixture that already
+exists, and its only effect would be to make a disputed assertion fail
+permanently instead of occasionally.
 
-proptest also emitted its regression seed:
-`cc fbc94ffbf80519d277eb49aa7ee46c726e1adc3a319d44cf32509d122d6ab5be`
+**What the fixture already verified**, so the lane does not redo it:
+content stays correct (rope and CRDT projection agree), replicas stay
+converged (**the op IS broadcast** — both `crdt_op` consumers read it
+unconditionally and neither short-circuits on an empty range), and the
+cursor does not jump.
 
-- **It did NOT reproduce in one local `--features crdt` run**, which
-  proves nothing: proptest draws fresh cases each run and **no
-  `.proptest-regressions` file is committed** for `src/buffer.rs`, so
-  the failing case is not replayed automatically.
-- **The reproduction path is therefore known and cheap**: drive the
-  shrunken `ops` sequence directly as a unit test, or commit the
-  regression seed so proptest replays it.
-- **Committing that regression file may be the first thing the lane
-  does**, since without it this exact input is only reachable by luck.
+**THE ACTUAL DECISION** is whether a **visible text delta** and a
+**CRDT-version delta** are independent dimensions of `Edit`. The
+proptest's invariant assumes they are the same dimension. It was
+written for the FORWARD `apply_edit` short-circuit, which returns
+before producing an op at all — and **CRDT-mode undo/redo never reach
+that path**.
 
-**Not investigated here.** This lane's scope was one workflow key, and
-a CRDT/undo property violation is nowhere near it. Recorded with
-everything needed to start: selector, assertion, minimal input, seed,
-and the reason a local pass is not evidence.
+**What the lane owes as evidence:**
+
+- **forward textual no-ops still produce NO operation** — whatever the
+  resolution, the short-circuit the invariant was actually written for
+  must keep holding;
+- **any permitted empty-text undo operation carries valid bytes and
+  preserves remote replay convergence** — permitting the shape must not
+  become permitting a malformed op;
+- **an explicit disposition of the arbitrary artifact**:
+  `derive_replacement_edit` reports the empty range at the **buffer
+  end** rather than at the edit site. The fixture calls this genuinely
+  arbitrary either way; the lane must say which it is choosing, not
+  leave it unexamined.
+
+**Un-ignoring that fixture is the first step of whichever resolution
+wins**, as its own doc comment says.
+
+**Why it is worth a bounded interruption:** a mis-scoped property can
+now randomly redden `main`, and the dispatched run proved it. **It does
+NOT reorder the roadmap** — GUI arc 1b remains the next product lane
+per `COHERENCE.md` §20's priority order.
 
 ### Superseded lane state, kept for the record
 
