@@ -1236,10 +1236,47 @@ machine, and no single selector here reds twice.
 | **selectors** | `03-lib`: `async_runtime::tests::grep_supersede_cancels_predecessor_within_50ms`. `04-lib-crdt`: U6's pair. `07-sweep`: `lsp_dispatch_seams_acceptance::acc34_purge_reaches_a_server_that_is_in_no_attachment` |
 | **job / flavor** | local (Linux), one `scripts/gate` run, three different steps |
 | **required fragments** | `grep supersede did not cancel within 50ms` + an `elapsed:` value; `criterion 1: per-keystroke orchestrator time` + `exceeds 1ms`; `composition machinery added more than 10% overhead`; `is not ready for requests (state: initializing)` |
-| **status** | **new incident, one occurrence** |
+| **status** | **two occurrences, 2026-08-30, and the SECOND ONE MEASURES THE LOAD CONFOUND** that U6 and U7 have each recorded as unmeasured since 2026-08-09 |
 | **what IS established** | all four fragments captured from the durable stage logs. Margins: `52.44341ms` against 50ms (4.9% over); `1.689259ms` against 1ms; `1.592×` against 1.10×. The `07-sweep` failure is **not** a budget — an LSP server was asked for a request while still `initializing` |
 | **what is NOT** | any shared mechanism. Three stages, three subsystems, and one of the three is a readiness race rather than a clock |
 | **the observing tree** | the lane's revision-5 commits: an enumeration in a `#[cfg(test)]` predicate and documentation. It touches `async_runtime`, `optimistic`, `editor` and the LSP dispatch seam **not at all** |
+
+**Second occurrence, 40 minutes later — and this one has the number.**
+`scripts/gate` log `20260830T175657Z-3881334`, same lane, same three
+stages red, **a partly different selector set**: `03-lib` took
+`composition_overhead_under_ten_percent` *and*
+`semantic_render::tests::full_buffer_summary_flatten_scales_on_large_grammar_file`;
+`04-lib-crdt` took U6's pair again; `07-sweep` took
+`dired_renders_10k_entries_within_200ms`, **which is one of U7's three
+selectors**.
+
+**`/proc/loadavg` read immediately after: `34.04 38.45 26.29`.** The
+CPU was saturated by `lean` processes — an unrelated workload on this
+shared machine, nothing this session started, and no `cargo`, `rustc`
+or `scripts/gate` process of mine was left running.
+
+**U6 and U7 have both said, since 2026-08-09, that the load confound
+"was not measured, so it is a rival explanation, not a finding."** Here
+it is measured, and the margins move with it monotonically across three
+runs of the same tree:
+
+| run | `criterion_1` per-keystroke | `composition_overhead` |
+|---|---|---|
+| out of gate, ~17:05 | 1.343883ms | 1.182× |
+| gate `T171941Z` | 1.689259ms | 1.592× |
+| gate `T175657Z`, loadavg 34.04 | **2.269247ms** | 1.527× |
+
+Against a 1ms and a 1.10× budget. **A regression does not get 69% worse
+between two runs of an unchanged tree; a load average of 34 explains it
+without any help.** That is a finding about these budget rows, not about
+the tree — and it is the first time this registry can say so with a
+number rather than a suspicion.
+
+**What it does NOT do:** it does not retire U6, U7 or this row. The
+budgets remain wall-clock assertions whose measurement design nobody has
+defended, which is the same disposition R1 carries. What changes is that
+"one loaded machine" stops being a rival explanation offered in good
+faith and becomes a measured one.
 
 **Relation to R1, and it is NOT a match.** The `03-lib` failure carries
 R1's required fragment `supersede did not cancel within 50ms`, but R1's
