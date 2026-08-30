@@ -301,17 +301,27 @@ impl<'a> Iterator for Chunks<'a> {
 /// A pure insert has `range.start == range.end` and `inserted_len > 0`.
 /// A pure delete has `range.start < range.end` and `inserted_len == 0`.
 /// A replace has both nonzero.
-/// A **version-only** edit has `range.start == range.end` and
-/// `inserted_len == 0` — no bytes changed at all. CRDT-mode `undo` and
-/// `redo` produce this shape when the operation being inverted was
-/// itself a textual no-op (replacing bytes with identical bytes), and
-/// it still carries a [`CrdtOp`]: a CRDT VERSION delta is a separate
-/// dimension from a TEXT delta. Forward `apply_edit` never produces it,
-/// because the three syntactically empty `EditOp` forms short-circuit
-/// before the CRDT path exists. Its `range` sits at the buffer end,
-/// which is where `derive_replacement_edit` reports a no-difference
-/// diff; see `docs/crdt-identity-undo-framing.md` for the consumer
-/// census that ruled that location harmless.
+/// An **empty text delta** has `range.start == range.end` and
+/// `inserted_len == 0` — no bytes changed at all.
+///
+/// That last shape is produced on BOTH paths, and `crdt_op` is what
+/// tells them apart:
+///
+/// * **forward** `apply_edit` reaches it whenever the `EditOp` is one of
+///   the three syntactically empty forms (an empty insert, an
+///   empty-range delete, an empty-range/empty-bytes replace). Those
+///   short-circuit before the CRDT path exists, so `crdt_op` is `None`
+///   — nothing happened;
+/// * **CRDT-mode `undo`/`redo`** reach it when the operation being
+///   inverted was itself a textual no-op (replacing bytes with
+///   identical bytes). Here `crdt_op` is `Some`, and **must be**: a CRDT
+///   VERSION delta is a separate dimension from a TEXT delta, and the
+///   op is the whole content of such an edit.
+///
+/// The history case's `range` sits at the buffer end, which is where
+/// `derive_replacement_edit` reports a no-difference diff; see
+/// `docs/crdt-identity-undo-framing.md` for the consumer census that
+/// ruled that location harmless.
 #[derive(Clone, Debug)]
 pub struct Edit {
     /// The rope after the edit. `Send + Sync`; safe to hand to a worker.
@@ -328,10 +338,12 @@ pub struct Edit {
     /// syntactically empty `EditOp` forms, which `is_no_op_edit`
     /// short-circuits before the CRDT path runs.
     ///
-    /// A **version-only** edit is NOT one of those: an empty range with
-    /// zero insertion coming out of `undo`/`redo` carries `Some`, and
-    /// must, or the version advance the replicas need is lost. See the
-    /// shape list on [`Edit`] above.
+    /// An empty text delta is therefore NOT by itself a `None` signal:
+    /// forward, it means the edit short-circuited and `crdt_op` is
+    /// `None`; from `undo`/`redo` it means an identity operation was
+    /// inverted, and `crdt_op` is `Some` — and must be, or the version
+    /// advance the replicas need is lost. See the shape list on
+    /// [`Edit`] above.
     ///
     /// `Box` indirection: keeps Edit's None-case cost to 8 bytes
     /// (Box has a niche-optimized None) rather than the ~32 bytes

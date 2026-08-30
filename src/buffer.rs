@@ -2986,28 +2986,45 @@ mod tests {
             }
         }
 
-        /// The `crdt_op` shape invariant, as a function of provenance.
+        /// The `crdt_op` shape invariant, over three independent axes.
         ///
-        /// Four rules, checked in order:
+        /// The axes are **provenance** (forward vs. history), the
+        /// **text delta** (empty vs. real), and whether a **CRDT op** is
+        /// carried. They are independent, which is the whole point of
+        /// this lane, so the rule is a full enumeration rather than a
+        /// default with exceptions:
         ///
-        /// 1. a present `crdt_op` carries the buffer's peer id and
-        ///    non-empty wire bytes;
-        /// 2. an edit that changed text must carry an op;
-        /// 3. a **forward** version-only edit (empty range, zero
-        ///    insertion) must NOT carry one — the three syntactically
-        ///    empty `EditOp` forms short-circuit at `is_no_op_edit`
-        ///    before the CRDT path exists;
-        /// 4. a **history** version-only edit MAY carry one. Undo and
-        ///    redo diff two ropes; an identity replace makes those
-        ///    ropes equal, so the empty range describes a real version
-        ///    advance rather than the absence of one.
+        /// | provenance | text delta | `crdt_op` | verdict |
+        /// |---|---|---|---|
+        /// | forward | empty | `None` | **valid** — a syntactic no-op |
+        /// | forward | empty | `Some` | **invalid** |
+        /// | forward | real | `Some` | **valid** |
+        /// | forward | real | `None` | **invalid** |
+        /// | history | empty | `Some` | **valid** — a version-only edit |
+        /// | history | empty | `None` | **invalid** |
+        /// | history | real | `Some` | **valid** |
+        /// | history | real | `None` | **invalid** |
+        ///
+        /// An **empty text delta** — `range.is_empty() && inserted_len
+        /// == 0` — is a SHAPE, and forward edits reach it routinely:
+        /// each of the three syntactically empty `EditOp` forms produces
+        /// exactly this shape. What separates the two empty-delta cases
+        /// is the op. Forward, `is_no_op_edit` short-circuits before the
+        /// CRDT path exists, so there is nothing to carry. History
+        /// diffs two ropes; an identity replace makes them equal, so the
+        /// op IS the content of the edit and **dropping it loses the
+        /// version advance**. That is why the history row demands
+        /// `Some` rather than merely tolerating it.
+        ///
+        /// A present op is separately required to carry the buffer's
+        /// peer id and non-empty wire bytes.
         ///
         /// Returns `Err(reason)` rather than asserting, so the same
         /// predicate serves the proptest (over generated sequences) and
-        /// a directed injection. The injection is not optional: rule 3
-        /// is **unreachable from any generated forward input**, because
-        /// a forward empty form short-circuits and a forward non-empty
-        /// form has a non-empty range or a non-zero `inserted_len`.
+        /// a directed injection. The injection is not optional: the
+        /// `(forward, empty, Some)` row is **unreachable from any
+        /// generated forward input**, because a forward empty form
+        /// short-circuits and a forward real-delta form is not empty.
         fn check_crdt_op_shape(
             class: OperationClass,
             edit: &Edit,
@@ -3024,22 +3041,25 @@ mod tests {
                     return Err("wire bytes must be non-empty".to_owned());
                 }
             }
-            let version_only = edit.range.is_empty() && edit.inserted_len == 0;
-            if !version_only {
-                if edit.crdt_op.is_none() {
-                    return Err(
-                        "a text-changing CRDT-mode edit must have crdt_op = Some".to_owned()
-                    );
-                }
-                return Ok(());
-            }
-            match class {
-                OperationClass::Forward if edit.crdt_op.is_some() => {
-                    Err("a FORWARD version-only edit must have crdt_op = None (see \
-                     is_no_op_edit)"
-                        .to_owned())
-                }
-                _ => Ok(()),
+            let empty_text_delta = edit.range.is_empty() && edit.inserted_len == 0;
+            match (class, empty_text_delta, edit.crdt_op.is_some()) {
+                (OperationClass::Forward, true, false) => Ok(()),
+                (OperationClass::Forward, true, true) => Err(
+                    "a FORWARD edit with an empty text delta must have crdt_op = None: the \
+                     three syntactically empty EditOp forms short-circuit at is_no_op_edit"
+                        .to_owned(),
+                ),
+                (OperationClass::History, true, true) => Ok(()),
+                (OperationClass::History, true, false) => Err(
+                    "a HISTORY edit with an empty text delta must have crdt_op = Some: the \
+                     op is the version advance, and without it the edit carries nothing"
+                        .to_owned(),
+                ),
+                (_, false, true) => Ok(()),
+                (_, false, false) => Err(
+                    "an edit with a real text delta must have crdt_op = Some in CRDT mode"
+                        .to_owned(),
+                ),
             }
         }
 
@@ -3283,33 +3303,52 @@ mod tests {
             }
         }
 
-        /// C5: the invariant is keyed on PROVENANCE, and still rejects a
-        /// version-only `Edit` on the forward path.
+        /// C5: the invariant is keyed on PROVENANCE, and covers all
+        /// four empty-text-delta quadrants.
         ///
-        /// This must be a directed injection rather than a property.
-        /// `check_crdt_op_shape`'s forward rule is **unreachable from
-        /// any generated forward input** — an empty form short-circuits
-        /// before the CRDT path, and a non-empty form has a non-empty
-        /// range or a non-zero `inserted_len` — so the proptest alone
-        /// cannot tell a narrowed rule from a deleted one.
+        /// Two of these must be a directed injection rather than a
+        /// property. `(forward, empty, Some)` is **unreachable from any
+        /// generated forward input** — an empty form short-circuits
+        /// before the CRDT path, and a real-delta form is not empty — so
+        /// the proptest alone cannot tell a narrowed rule from a deleted
+        /// one. `(history, empty, None)` is equally unreachable, because
+        /// `undo_crdt_mode` and `redo_crdt_mode` always attach the op;
+        /// it is asserted so that a future change which stops attaching
+        /// it fails here rather than silently losing version advances.
         #[test]
-        fn the_shape_invariant_rejects_a_version_only_edit_on_the_forward_path() {
-            let version_only = Edit {
+        fn the_shape_invariant_covers_all_four_empty_text_delta_quadrants() {
+            let with_op = |op: Option<Box<crate::rope::CrdtOp>>| Edit {
                 new_rope: crate::rope::Rope::from_bytes(b"hello"),
                 range: Range::new(5, 5),
                 inserted_len: 0,
-                crdt_op: Some(Box::new(crate::rope::CrdtOp {
+                crdt_op: op,
+            };
+            let carrying = || {
+                Some(Box::new(crate::rope::CrdtOp {
                     peer_id: 1,
                     bytes: vec![0xAB],
-                })),
+                }))
             };
+
+            // Forward + empty delta + None: a syntactic no-op. Valid.
             assert!(
-                check_crdt_op_shape(OperationClass::Forward, &version_only, 1).is_err(),
-                "C5: a forward version-only edit carrying an op is still a bug"
+                check_crdt_op_shape(OperationClass::Forward, &with_op(None), 1).is_ok(),
+                "C5: a forward syntactic no-op carries no op, and that is correct"
             );
+            // Forward + empty delta + Some: the original bug.
             assert!(
-                check_crdt_op_shape(OperationClass::History, &version_only, 1).is_ok(),
+                check_crdt_op_shape(OperationClass::Forward, &with_op(carrying()), 1).is_err(),
+                "C5: a forward edit with an empty text delta must not carry an op"
+            );
+            // History + empty delta + Some: a version-only edit. Valid.
+            assert!(
+                check_crdt_op_shape(OperationClass::History, &with_op(carrying()), 1).is_ok(),
                 "C5: the same shape from undo/redo is a legitimate version advance"
+            );
+            // History + empty delta + None: the version advance is gone.
+            assert!(
+                check_crdt_op_shape(OperationClass::History, &with_op(None), 1).is_err(),
+                "C5: a history edit with an empty text delta and no op carries nothing at all"
             );
         }
 
