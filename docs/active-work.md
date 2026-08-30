@@ -337,6 +337,24 @@ of such an edit.
   machine state all varied too, and a `BrokenPipe` on a socket handshake
   is exactly what those can drive.
 
+**A GATE COVERAGE GAP, found the expensive way.** The local gate's
+clippy step is `cargo clippy --workspace --all-targets -- -D warnings`
+— **default features**, so **no `#[cfg(feature = "crdt")]` code is ever
+linted locally**. CI lints it (`--no-default-features --features
+luajit,crdt`), so a crdt-only lint passes eight green gate stages and
+then reds `Test (crdt)`. That is what happened here: a
+`clippy::match_same_arms` on the new enumeration, invisible to five
+consecutive local gate runs.
+
+The lint itself is `#[allow]`ed with a reason — collapsing the three
+`Ok(())` arms is exactly the conflation this lane removes, and would
+hide that `(forward, empty, None)` and `(history, empty, Some)` are
+valid for opposite reasons. **The gap is not fixed here**: adding a
+second clippy flavor to `scripts/gate` is a change to shared
+infrastructure and belongs in its own lane, alongside U9's still-unrun
+discriminating control. Recorded so the next lane touching
+crdt-gated code does not rediscover it at CI.
+
 **Two registry rows gained occurrences on this lane**: R7's eighth (the
 green/red pair whose heads differ by one markdown file) and **U6's
 second — the first time U6 has ever reproduced**, twice in a row, and

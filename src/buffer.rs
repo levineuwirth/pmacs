@@ -3025,6 +3025,14 @@ mod tests {
         /// `(forward, empty, Some)` row is **unreachable from any
         /// generated forward input**, because a forward empty form
         /// short-circuits and a forward real-delta form is not empty.
+        // The enumeration IS the contract. `match_same_arms` would have
+        // the three `Ok(())` rows collapsed into one alternation, which
+        // is exactly the conflation this lane exists to remove: it would
+        // stop the table from showing that `(forward, empty, None)` and
+        // `(history, empty, Some)` are valid for OPPOSITE reasons, and a
+        // future reader would have no way to see which quadrant a change
+        // moved.
+        #[allow(clippy::match_same_arms)]
         fn check_crdt_op_shape(
             class: OperationClass,
             edit: &Edit,
