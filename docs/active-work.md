@@ -270,6 +270,40 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
+## Manual CI dispatch — ACTIVE
+
+**Written with the branch's FIRST commit**, per the standing correction
+from #171 and #215.
+
+- **Branch `ci-manual-dispatch`**, base `githubsucks/main` @
+  **`2e9f62b`** exactly, in worktree
+  `/home/jeans/Repos/personal/pmacs-ci-dispatch`.
+  **`githubsucks/ci-manual-dispatch` is the authoritative tip** (the
+  ref, not a SHA).
+- **Framing `docs/ci-manual-dispatch-framing.md`, revision 3 —
+  APPROVED.** It took three revisions and every one was a correction:
+  revision 1 claimed four registry rows needed this (**one does**),
+  revision 2's D2 could pass without the two runs ever overlapping, and
+  its D3 accepted an aborted job as proof the matrix ran.
+- **What it does:** adds `workflow_dispatch:` to `ci.yml`. One key. No
+  job, matrix, step, permission or timeout changes, and **no inputs**.
+- **Why, and the scope is ONE ROW.** **CI never invokes `scripts/gate`
+  — zero occurrences.** Every local-gate red therefore has a merge-base
+  control needing no CI at all. **U11 alone needs this**, because it is
+  macOS-specific and this project has no Mac: when it recurred on #243
+  the only contemporaneous `main` control available was a re-run of a
+  run **eight days old**.
+- **D1 PASSES pre-merge and BITES**: the working-tree file parses, and
+  `workflow_dispatch` is a key under `on` — dropping it fails the
+  assertion. Note `on:` parses as the **boolean `True`** under YAML 1.1,
+  so the witness looks up both keys; a naive `d['on']` would raise
+  before it ever checked anything.
+- **D2 AND D3 ARE OWED POST-MERGE**, not skipped. GitHub offers
+  `workflow_dispatch` only for a workflow already on the default
+  branch, so neither can run before this lands. Their exact procedures
+  are in the framing §6, including the void-and-retry rule that stops
+  D2 passing when the two runs never overlap.
+
 ## Parse-budget diagnosability — MERGED as #244 (`a85205a`)
 
 - **MERGED 2026-08-29T22:04:17Z** at approved head `7b50682`, merge
