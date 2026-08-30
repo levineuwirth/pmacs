@@ -270,7 +270,77 @@ hazard in a shape that looks committed. **A documented error message
 that never appears is worse than no documentation**, because the reader
 waits for a signal that is not coming.
 
-## Manual CI dispatch — ACTIVE
+## Manual CI dispatch — MERGED as #245 (`7b82e14`); D2 and D3 DISCHARGED
+
+- **MERGED 2026-08-30T10:42:18Z** at approved head `c21eee6`, merge
+  commit `7b82e14`, via `--match-head-commit`. 14/14 CI green on that
+  head; 8-stage local gate green on it too.
+- **D3 PASS** — dispatched run `33307137965` on `main`. **All 14 jobs
+  started and concluded `success` or `failure`**; none `skipped`,
+  `cancelled` or `timed_out`. The run's own conclusion was `failure`,
+  which D3 permits by design: its contract is that the matrix RAN, not
+  that it passed.
+- **D2 PASS**, with every guard the framing demanded actually
+  exercised:
+  - A = `33308891808`, dispatched and reaching `in_progress`;
+  - B = `33308921103`, dispatched while A ran;
+  - **the required overlap was OBSERVED** — A `in_progress`, B
+    `pending` — so the witness is not the vacuous version that passes
+    when A finishes first;
+  - `headSha(A) == headSha(B) == 7b82e14`, so both really shared
+    `ci-<sha>`;
+  - **A concluded `success`, not `cancelled`.**
+  - B was cancelled by hand afterwards to save macOS minutes; B's fate
+    is not part of D2.
+- **An unplanned observation, worth more than either witness.** A
+  `main` PUSH run was already `in_progress` at `7b82e14` when the first
+  dispatch was issued. The dispatch **queued behind it and did not
+  cancel it**, then started when the push finished. That is the
+  same-SHA push/dispatch interaction §5a described and no witness
+  covered.
+- **THE FIRST DISPATCH IMMEDIATELY FOUND A RED ON `main`**, which is
+  what this lane was built for. See the proptest entry below.
+
+## CRDT undo proptest — a DETERMINISTIC red on `main` — NEEDS A LANE
+
+**Found by the first `workflow_dispatch` run**, `33307137965`, job
+`99247616970`, at `main` = `7b82e14`. Log preserved at
+`/home/jeans/build/pmacs-ci-logs/`.
+
+- **Selector:** `--lib --features crdt
+  buffer::tests::proptests::rope_matches_crdt_projection_after_arbitrary_edits`
+- **Assertion:** `src/buffer.rs:3120` —
+  `no-op edit must have crdt_op = None (Undo)`
+- **`2172 passed; 1 failed`**, failing after 17 successes.
+
+**THIS IS NOT LIKE THE OTHER ROWS IN THIS REGISTRY.** Every red this
+session has been timing-dependent and green on rerun. This one is a
+**proptest failure that SHRANK to a minimal input**, which means it is
+a property violation with a concrete witness, not a load artefact:
+
+```
+ops = [ Insert(0, "aa"), Insert(2, "aaa "), Replace(5, 1, " "), Undo ]
+```
+
+proptest also emitted its regression seed:
+`cc fbc94ffbf80519d277eb49aa7ee46c726e1adc3a319d44cf32509d122d6ab5be`
+
+- **It did NOT reproduce in one local `--features crdt` run**, which
+  proves nothing: proptest draws fresh cases each run and **no
+  `.proptest-regressions` file is committed** for `src/buffer.rs`, so
+  the failing case is not replayed automatically.
+- **The reproduction path is therefore known and cheap**: drive the
+  shrunken `ops` sequence directly as a unit test, or commit the
+  regression seed so proptest replays it.
+- **Committing that regression file may be the first thing the lane
+  does**, since without it this exact input is only reachable by luck.
+
+**Not investigated here.** This lane's scope was one workflow key, and
+a CRDT/undo property violation is nowhere near it. Recorded with
+everything needed to start: selector, assertion, minimal input, seed,
+and the reason a local pass is not evidence.
+
+### Superseded lane state, kept for the record
 
 **Written with the branch's FIRST commit**, per the standing correction
 from #171 and #215.
