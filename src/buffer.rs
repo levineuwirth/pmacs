@@ -2962,6 +2962,87 @@ mod tests {
             ]
         }
 
+        /// Provenance of the `Edit` a [`GenOp`] produced.
+        ///
+        /// The `crdt_op` shape invariant is keyed on THIS, not on the
+        /// `Edit`'s shape alone. An `Edit` carries no provenance
+        /// marker, so the classification has to be taken from the
+        /// operation *before* it is applied — see the call site, where
+        /// `op` is moved into `apply_capturing`.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum OperationClass {
+            /// `apply_edit` — `Insert` / `Delete` / `Replace`.
+            Forward,
+            /// `undo` / `redo`.
+            History,
+        }
+
+        impl OperationClass {
+            fn of(op: &GenOp) -> Self {
+                match op {
+                    GenOp::Insert(..) | GenOp::Delete(..) | GenOp::Replace(..) => Self::Forward,
+                    GenOp::Undo | GenOp::Redo => Self::History,
+                }
+            }
+        }
+
+        /// The `crdt_op` shape invariant, as a function of provenance.
+        ///
+        /// Four rules, checked in order:
+        ///
+        /// 1. a present `crdt_op` carries the buffer's peer id and
+        ///    non-empty wire bytes;
+        /// 2. an edit that changed text must carry an op;
+        /// 3. a **forward** version-only edit (empty range, zero
+        ///    insertion) must NOT carry one — the three syntactically
+        ///    empty `EditOp` forms short-circuit at `is_no_op_edit`
+        ///    before the CRDT path exists;
+        /// 4. a **history** version-only edit MAY carry one. Undo and
+        ///    redo diff two ropes; an identity replace makes those
+        ///    ropes equal, so the empty range describes a real version
+        ///    advance rather than the absence of one.
+        ///
+        /// Returns `Err(reason)` rather than asserting, so the same
+        /// predicate serves the proptest (over generated sequences) and
+        /// a directed injection. The injection is not optional: rule 3
+        /// is **unreachable from any generated forward input**, because
+        /// a forward empty form short-circuits and a forward non-empty
+        /// form has a non-empty range or a non-zero `inserted_len`.
+        fn check_crdt_op_shape(
+            class: OperationClass,
+            edit: &Edit,
+            expected_peer_id: u64,
+        ) -> Result<(), String> {
+            if let Some(op) = edit.crdt_op.as_ref() {
+                if op.peer_id != expected_peer_id {
+                    return Err(format!(
+                        "peer_id must thread from CrdtState: got {}, want {expected_peer_id}",
+                        op.peer_id
+                    ));
+                }
+                if op.bytes.is_empty() {
+                    return Err("wire bytes must be non-empty".to_owned());
+                }
+            }
+            let version_only = edit.range.is_empty() && edit.inserted_len == 0;
+            if !version_only {
+                if edit.crdt_op.is_none() {
+                    return Err(
+                        "a text-changing CRDT-mode edit must have crdt_op = Some".to_owned()
+                    );
+                }
+                return Ok(());
+            }
+            match class {
+                OperationClass::Forward if edit.crdt_op.is_some() => {
+                    Err("a FORWARD version-only edit must have crdt_op = None (see \
+                     is_no_op_edit)"
+                        .to_owned())
+                }
+                _ => Ok(()),
+            }
+        }
+
         // T M10.2 Day 3 helper: applies a `GenOp` and returns the
         // resulting Edit so the proptest can assert per-op shape.
         // Each op is best-effort: out-of-range positions are clamped
@@ -3012,35 +3093,43 @@ mod tests {
         /// version while leaving the materialized text unchanged, so
         /// `undo_crdt_mode` derives an EMPTY replacement edit — and
         /// still attaches the `crdt_op` that `crdt.undo()` produced.
-        /// That trips the proptest's `crdt_op` shape invariant, "a
-        /// no-op edit must have `crdt_op = None`".
         ///
-        /// **What was verified about the consequences**, so the next
-        /// reader does not have to redo it:
+        /// **The ruling** (`docs/crdt-identity-undo-framing.md`, and
+        /// this is no longer an open question): a visible TEXT delta
+        /// and a CRDT-VERSION delta are INDEPENDENT dimensions of
+        /// `Edit`, so the behavior is right and the *invariant* was
+        /// mis-scoped. It was written for [`is_no_op_edit`], a
+        /// pre-check on the forward `EditOp` that returns before the
+        /// CRDT path exists; `undo_crdt_mode` and `redo_crdt_mode`
+        /// never reach it. The invariant is now keyed on **provenance**
+        /// — see `check_crdt_op_shape` — and still rejects this shape
+        /// on the forward path, where it remains unreachable.
+        ///
+        /// **What is established, and by what:**
         ///
         /// * content stays correct — rope and CRDT projection agree
         ///   before and after (asserted below);
-        /// * replicas stay converged — both `crdt_op` consumers
-        ///   (`EditorCore::queue_daemon_origin_crdt_op` and the remote-op
-        ///   path) read `edit.crdt_op` unconditionally and do **not**
-        ///   short-circuit on an empty range, so the op is broadcast;
-        /// * the cursor does not jump — `EditorCore::undo` only clamps
-        ///   to buffer length and never seeks `edit.range.start`.
+        /// * replicas stay converged — established by
+        ///   `identity_replace_history_op_replays_convergently_on_a_remote_replica`,
+        ///   which seeds a second replica with the forward ops and then
+        ///   replays the history op, asserting the materialized text
+        ///   **and** the version vector. Before that witness existed
+        ///   this comment asserted convergence from call-site
+        ///   inspection alone, which cannot see a lost version advance:
+        ///   dropping the op leaves the text identical;
+        /// * every consumer of the resulting `Edit` is classified inert
+        ///   or permitted — the census is §4 of the framing, and
+        ///   `identity_replace_history_op_leaves_classified_consumers_unchanged`
+        ///   executes it.
         ///
-        /// **The open question** is therefore whether the *invariant* is
-        /// simply mis-scoped rather than the behavior being wrong. It
-        /// was written for the FORWARD `apply_edit` short-circuit, which
-        /// returns before ever producing an op; CRDT-mode undo/redo
-        /// never reach that path. One artifact is genuinely arbitrary
-        /// either way: `derive_replacement_edit` reports the empty range
-        /// at the buffer END rather than at the edit site.
-        ///
-        /// Ignored, not deleted: it documents a real, reproducible
-        /// asymmetry that nothing else on `main` records, and un-ignoring
-        /// it is the first step of whichever resolution wins.
+        /// **The empty range's location is ruled, not arbitrary.**
+        /// `derive_replacement_edit` reports it at the buffer END. No
+        /// consumer is harmed there, and for the one consumer whose
+        /// cost depends on it — `TextView::on_edit`, which rebuilds
+        /// from `line_at_offset(range.start)` — the buffer end is the
+        /// cheapest possible choice. An earlier version of this comment
+        /// called it genuinely arbitrary; it is weakly preferable.
         #[test]
-        #[ignore = "known pre-existing main behavior; see the doc comment \
-                    for the verified consequences and the open question"]
         fn crdt_undo_of_an_identity_replace_reports_a_no_op_edit_carrying_an_op() {
             let mut buffer =
                 Buffer::new_with_crdt(BufferId::next(), "*identity-undo*", 1).expect("crdt");
@@ -3084,6 +3173,465 @@ mod tests {
             );
         }
 
+        /// C1: the fixture above must not be silently re-ignored.
+        ///
+        /// A restored `#[ignore]` is invisible to a green suite — the
+        /// run simply reports one fewer test. This reads the source and
+        /// asserts the attribute's ABSENCE, which is the only form that
+        /// fails rather than quietly reporting.
+        #[test]
+        fn the_identity_replace_fixture_carries_no_ignore_attribute() {
+            const SOURCE: &str = include_str!("buffer.rs");
+            const FIXTURE: &str =
+                "fn crdt_undo_of_an_identity_replace_reports_a_no_op_edit_carrying_an_op";
+            let at = SOURCE
+                .find(FIXTURE)
+                .expect("the fixture is present by name");
+            let attrs: Vec<&str> = SOURCE[..at]
+                .lines()
+                .rev()
+                .map(str::trim)
+                .skip_while(|l| l.is_empty())
+                .take_while(|l| l.starts_with("#["))
+                .collect();
+            assert!(
+                attrs.iter().any(|a| a.starts_with("#[test]")),
+                "the fixture should still be a #[test]: {attrs:?}"
+            );
+            assert!(
+                !attrs.iter().any(|a| a.starts_with("#[ignore")),
+                "C1: the identity-replace fixture is ignored again — {attrs:?}"
+            );
+        }
+
+        /// C2a: the classifier itself, with nothing between the
+        /// assertion and it.
+        ///
+        /// Two of the three end-to-end paths mask a classifier
+        /// regression (see C2b), so this row exists to be unmaskable.
+        #[test]
+        fn is_no_op_edit_classifies_all_three_syntactically_empty_forms() {
+            assert!(is_no_op_edit(&EditOp::Insert { pos: 0, bytes: b"" }));
+            assert!(is_no_op_edit(&EditOp::Delete {
+                range: Range::new(0, 0)
+            }));
+            assert!(is_no_op_edit(&EditOp::Replace {
+                range: Range::new(0, 0),
+                bytes: b"",
+            }));
+            // …and does not over-classify: each form with any content
+            // is a real edit.
+            assert!(!is_no_op_edit(&EditOp::Insert {
+                pos: 0,
+                bytes: b"x"
+            }));
+            assert!(!is_no_op_edit(&EditOp::Delete {
+                range: Range::new(0, 1)
+            }));
+            assert!(!is_no_op_edit(&EditOp::Replace {
+                range: Range::new(0, 1),
+                bytes: b"",
+            }));
+        }
+
+        /// C2b: end to end, each syntactically empty form still
+        /// produces no CRDT op.
+        ///
+        /// **This witness is masked for two of the three forms**, which
+        /// is why C2a exists. `apply_to_crdt_then_normalize_bytes`
+        /// returns `(None, None)` early for an empty `Insert` and an
+        /// empty `Delete`, so flipping `is_no_op_edit`'s arm for either
+        /// leaves `crdt_op == None` and this test still passes. Killing
+        /// it there needs a compound mutant: flip the arm AND delete
+        /// that variant's defensive early return. The empty `Replace`
+        /// has no such return and falls through to the unconditional
+        /// `Some(crdt_op)`, so there the simple mutant does die here.
+        #[test]
+        fn each_syntactically_empty_form_yields_no_crdt_op_end_to_end() {
+            let mut b = Buffer::new_with_crdt(BufferId::next(), "*empty-forms*", 1).expect("crdt");
+            b.apply_edit(EditOp::Insert {
+                pos: 0,
+                bytes: b"seed",
+            })
+            .expect("seed");
+
+            for (label, op) in [
+                ("Insert{bytes:[]}", EditOp::Insert { pos: 0, bytes: b"" }),
+                (
+                    "Delete{range:empty}",
+                    EditOp::Delete {
+                        range: Range::new(1, 1),
+                    },
+                ),
+                (
+                    "Replace{range:empty,bytes:[]}",
+                    EditOp::Replace {
+                        range: Range::new(1, 1),
+                        bytes: b"",
+                    },
+                ),
+            ] {
+                let edit = b.apply_edit(op).expect("empty form applies");
+                assert!(
+                    edit.crdt_op.is_none(),
+                    "C2b: {label} must produce no CRDT op"
+                );
+                assert!(
+                    edit.range.is_empty() && edit.inserted_len == 0,
+                    "C2b: {label} must be version-only in shape too"
+                );
+            }
+        }
+
+        /// C5: the invariant is keyed on PROVENANCE, and still rejects a
+        /// version-only `Edit` on the forward path.
+        ///
+        /// This must be a directed injection rather than a property.
+        /// `check_crdt_op_shape`'s forward rule is **unreachable from
+        /// any generated forward input** — an empty form short-circuits
+        /// before the CRDT path, and a non-empty form has a non-empty
+        /// range or a non-zero `inserted_len` — so the proptest alone
+        /// cannot tell a narrowed rule from a deleted one.
+        #[test]
+        fn the_shape_invariant_rejects_a_version_only_edit_on_the_forward_path() {
+            let version_only = Edit {
+                new_rope: crate::rope::Rope::from_bytes(b"hello"),
+                range: Range::new(5, 5),
+                inserted_len: 0,
+                crdt_op: Some(Box::new(crate::rope::CrdtOp {
+                    peer_id: 1,
+                    bytes: vec![0xAB],
+                })),
+            };
+            assert!(
+                check_crdt_op_shape(OperationClass::Forward, &version_only, 1).is_err(),
+                "C5: a forward version-only edit carrying an op is still a bug"
+            );
+            assert!(
+                check_crdt_op_shape(OperationClass::History, &version_only, 1).is_ok(),
+                "C5: the same shape from undo/redo is a legitimate version advance"
+            );
+        }
+
+        /// The two history operations every history witness must cover.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+        enum HistoryCase {
+            Undo,
+            Redo,
+        }
+
+        impl HistoryCase {
+            const ALL: [HistoryCase; 2] = [HistoryCase::Undo, HistoryCase::Redo];
+
+            /// The `match` is the growth guard: a new variant fails to
+            /// compile here rather than going silently unexercised.
+            fn label(self) -> &'static str {
+                match self {
+                    Self::Undo => "undo",
+                    Self::Redo => "redo",
+                }
+            }
+        }
+
+        /// C6: assert the executed case set IS `{Undo, Redo}`.
+        ///
+        /// Narrowing a parameterized loop from two cases to one
+        /// ordinarily leaves a passing test — the suite just runs less,
+        /// which no assertion inside the loop can notice. The expected
+        /// set is spelled out literally rather than derived from
+        /// `HistoryCase::ALL`, which would make the check circular.
+        fn assert_executed_both_history_cases(executed: &[HistoryCase]) {
+            let mut got = executed.to_vec();
+            got.sort();
+            got.dedup();
+            assert_eq!(
+                got,
+                vec![HistoryCase::Undo, HistoryCase::Redo],
+                "C6: the history witnesses must execute BOTH cases"
+            );
+        }
+
+        /// A buffer holding "hello" whose last edit was an identity
+        /// replace — the shape whose undo and redo are version-only.
+        fn seeded_identity_replace_buffer() -> Buffer {
+            let mut b =
+                Buffer::new_with_crdt(BufferId::next(), "*identity-history*", 1).expect("crdt");
+            b.apply_edit(EditOp::Insert {
+                pos: 0,
+                bytes: b"hello",
+            })
+            .expect("seed insert");
+            b.apply_edit(EditOp::Replace {
+                range: Range::new(1, 2),
+                bytes: b"e",
+            })
+            .expect("identity replace");
+            b
+        }
+
+        /// Run `case`'s history operation, asserting it is version-only.
+        fn take_history_edit(b: &mut Buffer, case: HistoryCase) -> Edit {
+            let edit = match case {
+                HistoryCase::Undo => b.undo().expect("undo"),
+                HistoryCase::Redo => b.redo().expect("redo"),
+            };
+            assert!(
+                edit.range.is_empty() && edit.inserted_len == 0,
+                "{}: expected a version-only edit, got {:?}/{}",
+                case.label(),
+                edit.range,
+                edit.inserted_len
+            );
+            edit
+        }
+
+        fn assert_converged(a: &Buffer, replica: &crate::crdt::CrdtState, when: &str) {
+            let doc = a.crdt_state().expect("crdt");
+            assert_eq!(
+                doc.materialize_string(),
+                replica.materialize_string(),
+                "text diverged {when}"
+            );
+            // The VERSION is the discriminator, and `version_scalar` is
+            // documented as unusable for exactly this comparison
+            // (equal scalars do not imply equal states across
+            // replicas). `VersionVector`'s `PartialEq` compares logical
+            // content.
+            assert_eq!(
+                doc.version(),
+                replica.version(),
+                "version vector diverged {when}"
+            );
+        }
+
+        /// C3: an empty-text history op replays convergently on a
+        /// REMOTE replica, for both `undo` and `redo`.
+        ///
+        /// The existing round-trip proptest deliberately excludes
+        /// history ops, because replaying one onto a replica that never
+        /// saw the forward history is ill-posed. Seeding the replica
+        /// with the forward ops first is what makes this case well
+        /// posed — and is the shape the wire protocol actually uses.
+        ///
+        /// **Text equality alone does not discriminate.** Dropping the
+        /// history op leaves the replica's text identical, because the
+        /// op advances the version without changing bytes. The version
+        /// vector is what catches it.
+        #[test]
+        fn identity_replace_history_op_replays_convergently_on_a_remote_replica() {
+            let mut executed = Vec::new();
+            for case in HistoryCase::ALL {
+                let mut a = Buffer::new_with_crdt(BufferId::next(), "*replay*", 1).expect("crdt");
+                let replica = crate::crdt::CrdtState::new(2).expect("replica");
+
+                for op in [
+                    EditOp::Insert {
+                        pos: 0,
+                        bytes: b"hello",
+                    },
+                    EditOp::Replace {
+                        range: Range::new(1, 2),
+                        bytes: b"e",
+                    },
+                ] {
+                    let edit = a.apply_edit(op).expect("forward edit");
+                    let carried = edit.crdt_op.as_ref().expect("a forward edit carries an op");
+                    replica
+                        .import_updates(&carried.bytes)
+                        .expect("seed the replica");
+                }
+                assert_converged(&a, &replica, "after seeding the forward ops");
+
+                // Redo needs an undo first — and that undo is itself a
+                // version-only edit, so it is replayed the same way.
+                if case == HistoryCase::Redo {
+                    let undone = take_history_edit(&mut a, HistoryCase::Undo);
+                    replica
+                        .import_updates(&undone.crdt_op.as_ref().expect("op").bytes)
+                        .expect("replay the preparatory undo");
+                    assert_converged(&a, &replica, "after the preparatory undo");
+                }
+
+                let history = take_history_edit(&mut a, case);
+                let carried = history
+                    .crdt_op
+                    .as_ref()
+                    .expect("the history op carries a version advance");
+                replica
+                    .import_updates(&carried.bytes)
+                    .expect("replay the history op");
+                assert_converged(&a, &replica, case.label());
+
+                // Corroboration: a causally dependent op still lands.
+                let follow = a
+                    .apply_edit(EditOp::Insert {
+                        pos: a.len(),
+                        bytes: b"!",
+                    })
+                    .expect("dependent edit");
+                replica
+                    .import_updates(&follow.crdt_op.as_ref().expect("op").bytes)
+                    .expect("replay the dependent op");
+                assert_converged(&a, &replica, "after a causally dependent op");
+
+                executed.push(case);
+            }
+            assert_executed_both_history_cases(&executed);
+        }
+
+        /// C4a: the history edit is BROADCAST at all.
+        ///
+        /// This is what makes C4b non-vacuous. C4b asserts that the
+        /// classified consumers are unchanged, and "unchanged" is also
+        /// what a missing broadcast produces — so the census's whole
+        /// broadcast branch rests on this count.
+        #[test]
+        fn identity_replace_history_op_is_broadcast_to_attached_views() {
+            let mut executed = Vec::new();
+            for case in HistoryCase::ALL {
+                let mut b = seeded_identity_replace_buffer();
+                let events = std::sync::Arc::new(Mutex::new(Vec::new()));
+                b.attach_view(Box::new(RecorderView {
+                    events: std::sync::Arc::clone(&events),
+                }));
+                if case == HistoryCase::Redo {
+                    take_history_edit(&mut b, HistoryCase::Undo);
+                }
+                events.lock().unwrap().clear();
+
+                take_history_edit(&mut b, case);
+
+                let broadcasts = events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|e| matches!(e, RecorderEvent::OnEdit { .. }))
+                    .count();
+                assert_eq!(
+                    broadcasts,
+                    1,
+                    "C4a: {} must broadcast exactly one on_edit",
+                    case.label()
+                );
+                executed.push(case);
+            }
+            assert_executed_both_history_cases(&executed);
+        }
+
+        /// C4b: §4's classification, executed.
+        ///
+        /// The three production views that override `on_edit` are
+        /// attached to one buffer, the identity-replace history op runs,
+        /// and each consumer's classified outcome is asserted: the fold
+        /// store and the span vector unchanged (INERT), and `ParseView`
+        /// left with an identical parse and a queue that drains
+        /// (PERMITTED — one degenerate `InputEdit`, describing no
+        /// change).
+        #[test]
+        fn identity_replace_history_op_leaves_classified_consumers_unchanged() {
+            use crate::overlay::{
+                BufferStyleSpan, BufferStyleSpanTranslator, SharedBufferStyleSpans,
+            };
+            use pmacs_protocol::ByteRange;
+
+            let registry = crate::syntax::SyntaxRegistry::new();
+            let Some(language) = registry.language("rust") else {
+                panic!("the rust grammar must load for C4b");
+            };
+
+            let mut executed = Vec::new();
+            for case in HistoryCase::ALL {
+                let mut b = seeded_identity_replace_buffer();
+
+                let folds = crate::fold::FoldRegistry::default();
+                let store = folds.store_or_attach(&mut b);
+                assert!(
+                    store.lock().unwrap().insert(ByteRange { start: 1, end: 4 }),
+                    "a fold to observe"
+                );
+
+                let spans: SharedBufferStyleSpans =
+                    std::sync::Arc::new(Mutex::new(vec![BufferStyleSpan {
+                        start: 1,
+                        end: 4,
+                        style: crate::cell::Style::default(),
+                    }]));
+                b.attach_view(Box::new(BufferStyleSpanTranslator::new(
+                    std::sync::Arc::clone(&spans),
+                )));
+
+                let parse_view = crate::syntax::ParseView::new(&b, language.clone(), "rust".into());
+                let handle = parse_view.handle();
+                b.attach_view(Box::new(parse_view));
+
+                if case == HistoryCase::Redo {
+                    take_history_edit(&mut b, HistoryCase::Undo);
+                }
+
+                // Baselines, taken after any preparatory op so the
+                // comparison is against the state the op under test
+                // actually starts from.
+                let folds_before = store.lock().unwrap().folds();
+                let spans_before = spans.lock().unwrap().clone();
+                let source_before = handle.source_snapshot();
+                let baseline = std::sync::Arc::new(
+                    crate::syntax::run_parse(handle.make_request()).expect("baseline parse"),
+                );
+                handle.install(std::sync::Arc::clone(&baseline));
+                let tree_before = baseline.root_tree().root_node().to_sexp();
+                assert_eq!(
+                    handle.pending_edit_count(),
+                    0,
+                    "the baseline parse drains the queue"
+                );
+
+                take_history_edit(&mut b, case);
+
+                assert_eq!(
+                    store.lock().unwrap().folds(),
+                    folds_before,
+                    "C4b: FoldStoreTranslator is INERT for {}",
+                    case.label()
+                );
+                assert_eq!(
+                    *spans.lock().unwrap(),
+                    spans_before,
+                    "C4b: BufferStyleSpanTranslator is INERT for {}",
+                    case.label()
+                );
+                assert_eq!(
+                    handle.source_snapshot(),
+                    source_before,
+                    "C4b: ParseView's source mirror is unchanged for {}",
+                    case.label()
+                );
+                // The permitted effect, bounded: exactly one degenerate
+                // InputEdit is queued, and the next request drains it.
+                assert_eq!(
+                    handle.pending_edit_count(),
+                    1,
+                    "C4b: one degenerate InputEdit for {}",
+                    case.label()
+                );
+                let after = crate::syntax::run_parse(handle.make_request()).expect("parse again");
+                assert_eq!(
+                    handle.pending_edit_count(),
+                    0,
+                    "C4b: the queue drains for {}",
+                    case.label()
+                );
+                assert_eq!(
+                    after.root_tree().root_node().to_sexp(),
+                    tree_before,
+                    "C4b: the parse is identical for {}",
+                    case.label()
+                );
+
+                executed.push(case);
+            }
+            assert_executed_both_history_cases(&executed);
+        }
+
         proptest! {
             // Smaller proptest case count than the default (64) to keep
             // CI overhead modest; the per-op invariant check is the
@@ -3098,6 +3646,10 @@ mod tests {
                     .expect("crdt construction");
                 for op in ops {
                     let op_repr = format!("{op:?}");
+                    // C5: classify BEFORE the move. This is the only
+                    // point at which forward and history are
+                    // distinguishable; the resulting `Edit` is not.
+                    let class = OperationClass::of(&op);
                     let edit = apply_capturing(&mut b, op);
                     // Per-op invariant check: catches drift the moment
                     // it happens, with the failing op visible in the
@@ -3109,37 +3661,13 @@ mod tests {
                         "invariant violated after op {}: rope={:?} crdt={:?}",
                         op_repr, rope, crdt
                     );
-                    // Day 3: crdt_op shape invariant.
-                    // - real edits in CRDT mode populate crdt_op
-                    // - no-op short-circuits leave crdt_op = None
-                    // - history-stack-empty errors return None Edit
-                    if let Some(edit) = edit {
-                        let is_no_op_edit_result =
-                            edit.range.is_empty() && edit.inserted_len == 0;
-                        if is_no_op_edit_result {
-                            prop_assert!(
-                                edit.crdt_op.is_none(),
-                                "no-op edit must have crdt_op = None ({})",
-                                op_repr
-                            );
-                        } else {
-                            prop_assert!(
-                                edit.crdt_op.is_some(),
-                                "non-no-op CRDT-mode edit must have crdt_op = Some ({})",
-                                op_repr
-                            );
-                            let crdt_op = edit.crdt_op.as_ref().unwrap();
-                            prop_assert_eq!(
-                                crdt_op.peer_id, 1,
-                                "peer_id must thread from CrdtState ({})",
-                                op_repr
-                            );
-                            prop_assert!(
-                                !crdt_op.bytes.is_empty(),
-                                "wire bytes must be non-empty ({})",
-                                op_repr
-                            );
-                        }
+                    // Day 3: crdt_op shape invariant, now keyed on
+                    // provenance rather than on the Edit's shape alone.
+                    // A history-stack-empty error returns no Edit.
+                    if let Some(edit) = edit
+                        && let Err(why) = check_crdt_op_shape(class, &edit, 1)
+                    {
+                        prop_assert!(false, "{} ({})", why, op_repr);
                     }
                 }
             }

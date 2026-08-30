@@ -597,4 +597,119 @@ mod tests {
         assert_eq!(vp.row_offset_of(0, 3), None, "hidden lines have no row");
         assert_eq!(vp.row_offset_of(0, 5), Some(2), "rows below shift up");
     }
+
+    /// C9: §4 of `docs/crdt-identity-undo-framing.md` enumerates every
+    /// in-tree `on_edit` override so that the consumers of a
+    /// version-only history `Edit` are a closed set. This asserts the
+    /// set is still what the census measured.
+    ///
+    /// **It asserts PAIRS, not a file set and a count.** Replacing
+    /// `ParseView`'s override with an unclassified type in the same
+    /// file leaves both the file set and the total unchanged, and only
+    /// the pair set catches it.
+    ///
+    /// **Its reach is in-tree, and that is a real limit.** [`View`] and
+    /// `Buffer::attach_view` are both public, so a downstream crate may
+    /// implement `on_edit` and attach it; no in-tree measurement can
+    /// enumerate that. What speaks to those implementors is the
+    /// documented contract on `Edit` itself.
+    ///
+    /// It also guards only the census's CLOSURE condition — that the
+    /// override set is unchanged — not the classifications inside it.
+    /// Those are executed by
+    /// `identity_replace_history_op_leaves_classified_consumers_unchanged`.
+    #[test]
+    fn every_in_tree_on_edit_override_is_one_the_census_classified() {
+        /// `(file, impl target)`, as measured by the census.
+        const CLASSIFIED: [(&str, &str); 4] = [
+            ("fold.rs", "FoldStoreTranslator"),
+            ("overlay.rs", "BufferStyleSpanTranslator"),
+            ("syntax.rs", "ParseView"),
+            ("text_view.rs", "TextView"),
+        ];
+
+        fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("src is readable") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    rs_files(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let mut files = Vec::new();
+        rs_files(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        files.sort();
+
+        let mut found: Vec<(String, String)> = Vec::new();
+        for path in &files {
+            let name = path
+                .file_name()
+                .expect("file name")
+                .to_string_lossy()
+                .into_owned();
+            let text = std::fs::read_to_string(path).expect("source is readable");
+            let lines: Vec<&str> = text.lines().collect();
+            // The test module boundary: the first `#[cfg(test)]` that
+            // introduces a `mod`. Overrides below it are test fixtures
+            // and are out of scope, as the census says.
+            let boundary = lines.iter().enumerate().find_map(|(i, l)| {
+                (l.trim() == "#[cfg(test)]"
+                    && lines
+                        .get(i + 1)
+                        .is_some_and(|n| n.trim_start().starts_with("mod ")))
+                .then_some(i)
+            });
+            for (i, line) in lines.iter().enumerate() {
+                if boundary.is_some_and(|b| i > b) {
+                    break;
+                }
+                if !line.contains("fn on_edit") {
+                    continue;
+                }
+                // Walk back to the enclosing `impl … for <Type>`. A hit
+                // on a trait declaration first means this is the
+                // trait's own default, which is not an override.
+                for j in (0..=i).rev() {
+                    let l = lines[j].trim_start();
+                    if let Some(rest) = l.strip_prefix("impl")
+                        && let Some(after) = rest.split(" for ").nth(1)
+                    {
+                        let target = after
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or("")
+                            .trim_end_matches('{')
+                            .rsplit("::")
+                            .next()
+                            .unwrap_or("")
+                            .to_owned();
+                        found.push((name.clone(), target));
+                        break;
+                    }
+                    if l.starts_with("trait ") || l.starts_with("pub trait ") {
+                        break;
+                    }
+                }
+            }
+        }
+        found.sort();
+
+        let expected: Vec<(String, String)> = CLASSIFIED
+            .iter()
+            .map(|(f, t)| ((*f).to_owned(), (*t).to_owned()))
+            .collect();
+        assert_eq!(
+            found, expected,
+            "C9: the in-tree `on_edit` override set no longer matches the \
+             census in docs/crdt-identity-undo-framing.md §4. Every \
+             override is a consumer of the version-only history `Edit` \
+             and needs classifying there."
+        );
+    }
 }

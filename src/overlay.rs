@@ -753,6 +753,52 @@ mod tests {
         virt.render(&buf, viewport(1, 5), &mut grid);
     }
 
+    /// C4c: the empty/empty guard's own contract, pinned where it
+    /// can actually fire.
+    ///
+    /// **The history edit this guard was written for cannot test it.**
+    /// That edit sits at the buffer END, and with
+    /// `old_start == old_end == len` the loop below emits a left
+    /// fragment `[s, min(e, len)) == [s, e)` for every span within the
+    /// buffer and no right fragment — the vector is unchanged with or
+    /// without the guard, so deleting the guard is a surviving mutant
+    /// there. An INTERIOR empty edit is where the fragmenting the
+    /// guard prevents is reachable: a span straddling the position
+    /// splits into two adjacent fragments covering the same bytes.
+    ///
+    /// So the assertion is on the span VECTOR, not on coverage.
+    #[test]
+    fn an_interior_empty_edit_does_not_fragment_a_straddled_span() {
+        let buf = Buffer::from_bytes(BufferId::next(), "t", b"abcdef");
+        let store: SharedBufferStyleSpans = Arc::new(Mutex::new(vec![BufferStyleSpan {
+            start: 1,
+            end: 5,
+            style: red(),
+        }]));
+        let before = store.lock().unwrap().clone();
+        let mut translator = BufferStyleSpanTranslator::new(Arc::clone(&store));
+
+        // A synthetic 0→0 edit strictly inside the span. Built by hand:
+        // no forward EditOp produces this shape, and the history edit
+        // that does produce it lands at the buffer end.
+        let interior = crate::rope::Edit {
+            new_rope: buf.snapshot_rope(),
+            range: crate::rope::Range::new(3, 3),
+            inserted_len: 0,
+            crdt_op: None,
+        };
+        translator
+            .on_edit(&buf, &interior)
+            .expect("the translator accepts the edit");
+
+        assert_eq!(
+            *store.lock().unwrap(),
+            before,
+            "C4c: an interior no-op edit must leave the span vector \
+             byte-identical, not split it into adjacent fragments"
+        );
+    }
+
     fn red() -> Style {
         Style {
             fg: crate::cell::Color::Indexed(1),

@@ -301,6 +301,17 @@ impl<'a> Iterator for Chunks<'a> {
 /// A pure insert has `range.start == range.end` and `inserted_len > 0`.
 /// A pure delete has `range.start < range.end` and `inserted_len == 0`.
 /// A replace has both nonzero.
+/// A **version-only** edit has `range.start == range.end` and
+/// `inserted_len == 0` — no bytes changed at all. CRDT-mode `undo` and
+/// `redo` produce this shape when the operation being inverted was
+/// itself a textual no-op (replacing bytes with identical bytes), and
+/// it still carries a [`CrdtOp`]: a CRDT VERSION delta is a separate
+/// dimension from a TEXT delta. Forward `apply_edit` never produces it,
+/// because the three syntactically empty `EditOp` forms short-circuit
+/// before the CRDT path exists. Its `range` sits at the buffer end,
+/// which is where `derive_replacement_edit` reports a no-difference
+/// diff; see `docs/crdt-identity-undo-framing.md` for the consumer
+/// census that ruled that location harmless.
 #[derive(Clone, Debug)]
 pub struct Edit {
     /// The rope after the edit. `Send + Sync`; safe to hand to a worker.
@@ -312,9 +323,15 @@ pub struct Edit {
     /// T M10.2 Day 3: optional CRDT-op metadata.
     ///
     /// `Some` when this Edit was produced by a CRDT-backed Buffer's
-    /// edit path (`apply_edit` / `undo` / `redo`); `None` otherwise — both
-    /// in v0.1 mode (no CRDT) and for no-op edits in CRDT mode (an
-    /// empty insert at an empty range produces no CRDT op).
+    /// edit path (`apply_edit` / `undo` / `redo`); `None` otherwise —
+    /// in v0.1 mode (no CRDT), and in CRDT mode for the three
+    /// syntactically empty `EditOp` forms, which `is_no_op_edit`
+    /// short-circuits before the CRDT path runs.
+    ///
+    /// A **version-only** edit is NOT one of those: an empty range with
+    /// zero insertion coming out of `undo`/`redo` carries `Some`, and
+    /// must, or the version advance the replicas need is lost. See the
+    /// shape list on [`Edit`] above.
     ///
     /// `Box` indirection: keeps Edit's None-case cost to 8 bytes
     /// (Box has a niche-optimized None) rather than the ~32 bytes
