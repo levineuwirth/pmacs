@@ -298,6 +298,23 @@ from #171 and #215.
   assertion. Note `on:` parses as the **boolean `True`** under YAML 1.1,
   so the witness looks up both keys; a naive `d['on']` would raise
   before it ever checked anything.
+- **PR #245 CI: 13/14, red on `Test (macos-latest / lua54)`.** The
+  failure is **R1** — `supersede_cancels_in_flight_job_within_50ms`,
+  fragment `supersede did not cancel within 50ms` — an existing row,
+  matched by selector and fragment. Its recorded flavor is `luajit` and
+  this is `lua54`; **flavor is not part of signature matching**.
+- **The merge-base control was run rather than the PR job.** The same
+  job at the branch's exact base `2e9f62b`, rerun the same hour: green,
+  `1985 passed; 0 failed`, both logs preserved. **A green control does
+  not establish environmental cause and does not retire R1**; a red one
+  would have shown the branch did not introduce the occurrence, and
+  that inference is unavailable. R1 stays live under its
+  measurement-design disposition.
+- **R1's assertion also omits its measurement**, which surfaced in the
+  #244 sweep I discarded as noise. **It is deliberately NOT fixed
+  here**: it would sharpen the next failure and repair nothing about
+  the measurement design R1 is actually about. That is the
+  async-runtime lane's, with Q#MCI3.
 - **D2 AND D3 ARE OWED POST-MERGE**, not skipped. GitHub offers
   `workflow_dispatch` only for a workflow already on the default
   branch, so neither can run before this lands. Their exact procedures
