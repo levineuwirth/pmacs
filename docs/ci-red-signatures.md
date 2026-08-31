@@ -595,26 +595,26 @@ Stage 4; the lane touches no `pmacs-gpu` code at all.
 | **selector** | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
 | **job / flavor** | local (Linux), `cargo test --workspace --features crdt --no-fail-fast`, i.e. under full-sweep load |
 | **required fragments** | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
-| **status** | **NINTH OCCURRENCE 2026-08-31 — causal status still UNRESOLVED.** The eighth carries the strongest tree exclusion this row has had, and it supersedes the fifth's: two consecutive gate runs on ONE worktree whose heads differ by a single markdown file, the first all-green and the second red |
-| **what IS established** | **three** occurrences at `pmacs-gpu/src/attach.rs:1680`, the second and third with all three fragments **verified** rather than inferred; the test drives a scripted transient-then-success sequence over a real socket pair. **The added GPU test is not the mechanism** — see the third-occurrence control below |
+| **status** | **TENTH OCCURRENCE 2026-08-31 — causal status still UNRESOLVED.** The ninth carries the strongest tree exclusion this row has had, and it supersedes the sixth's: two consecutive gate runs on ONE worktree whose heads differ by a single markdown file, the first all-green and the second red. **NOTE: this row carried TWO blocks numbered "fourth" — D3 on 2026-08-11 and TMPDIR isolation on 2026-08-13 — so every later ordinal was one low until 2026-08-31. Renumbered by date; the count below is the total** |
+| **what IS established** | **TEN occurrences**, of which the first three sit at `pmacs-gpu/src/attach.rs:1680` (the line moves as `attach.rs` changes; this row treats a `:LINE` suffix as occurrence-specific), the second and third with all three fragments **verified** rather than inferred. The test drives a scripted transient-then-success sequence over a real socket pair. **The added GPU test is not the mechanism** — see the third-occurrence control below |
 | **what is NOT** | whether the broken pipe is the *fixture's* writer closing early or a real retry-path defect. **This row is not a claim that it is harmless** |
 | **rerun evidence** | occurrence 1: 6 isolated runs green, plus a full `--workspace --features crdt` sweep green (113 targets). Occurrence 2: **30 green on the observing branch** (15 isolated selector, 15 full `-p pmacs-gpu`) **plus a 15-run merge-base control, also green**. Occurrence 3: 5 isolated selector runs green, 10 full `-p pmacs-gpu` runs green **with** the added test, and **1 failure in 10 with the added test `#[ignore]`d** — the first rerun in this row's history that reproduced anything. Per the rerun rule the green runs establish intermittence only; the red control run is what carries the exclusion |
 | **retirement** | hardening that removes the named mechanism plus a discriminating witness — or a diagnosis showing the fixture, not the code, closes the pipe |
 
-**Ninth occurrence — the same lane, 2026-08-31, local (Linux), `gpu`
+**Tenth occurrence — the same lane, 2026-08-31, local (Linux), `gpu`
 step**, log `20260831T141818Z-2974002`. All three required fragments,
 same selector, same `pmacs-gpu/src/attach.rs:1889`, same
 `283 passed; 1 failed`. The other seven stages were green.
 
 **Recorded, and it adds nothing but a count — deliberately.** The
-eighth occurrence's method note says the remaining candidates have to be
+ninth occurrence's method note says the remaining candidates have to be
 varied **inside** the gate, one per run; that has not been done here and
 this lane is not the place to start. `/proc/loadavg` at the failure read
 `3.35 8.88 5.93` — a condition, recorded because U15 made load a
 measured quantity in this file, **not** a cause, and R7 is not a budget
 row. The observing commit is documentation only.
 
-**Eighth occurrence — the CRDT identity-undo lane, 2026-08-30, local
+**Ninth occurrence — the CRDT identity-undo lane, 2026-08-30, local
 (Linux), `gpu` step.** All three required fragments present in the
 durable log
 (`pmacs-fdccc423/gate-logs/20260830T155621Z-3005460/06-gpu.log`):
@@ -635,7 +635,7 @@ before it, and the reason is the pair, not the diff.** Two consecutive
 | `20260830T154827Z-2907414` | `db24ae3` | — | **all 8 stages green** |
 | `20260830T155621Z-3005460` | `96bf2c3` | **one commit, touching one file: `docs/active-work.md`** | **`gpu` and `sweep` FAILED** |
 
-The fifth occurrence excluded the observing tree *relative to `main`*
+The sixth occurrence excluded the observing tree *relative to `main`*
 by having a documentation-only diff. This pair excludes it relative to
 **the immediately preceding green run of the same gate on the same
 worktree**, where the entire delta is a markdown file that no Rust
@@ -649,7 +649,7 @@ and nothing else: `283 passed; 1 failed` in each.
 
 * **Rerun: isolated selector green five times** (`1 passed`, 0.00s
   each). Per this file's rerun rule that establishes **intermittence
-  only** — and per the seventh occurrence's correction, running the
+  only** — and per the eighth occurrence's correction, running the
   selector outside the gate excludes nothing at all, because nothing
   outside the gate has ever reproduced this failure.
 * **No ratio is claimed from this occurrence.** It is one in-gate
@@ -664,10 +664,10 @@ and nothing else: `283 passed; 1 failed` in each.
   (`20260830T160242Z-3095339`), one commit later. Recorded because
   omitting it would be selective, not because it resolves anything: per
   the rerun rule a green run establishes intermittence only, and the
-  seventh occurrence already falsified "in-gate always fails".
+  eighth occurrence already falsified "in-gate always fails".
 
 **What this changes about the method, stated at the strength it
-carries.** The seventh occurrence's narrowing said the remaining
+carries.** The eighth occurrence's narrowing said the remaining
 candidates must be varied INSIDE the gate, one per run. This pair
 sharpens **one** exclusion and nothing else: **the Rust source tree is
 not the variable.**
@@ -684,7 +684,7 @@ else the machine was doing at 15:48 versus 15:56. A socket handshake
 racing a `BrokenPipe` is exactly the kind of failure those can drive,
 and holding the tree fixed says nothing about any of them.
 
-**Sixth occurrence — the parse-budget diagnosability lane, 2026-08-29,
+**Seventh occurrence — the parse-budget diagnosability lane, 2026-08-29,
 local (Linux), `gpu` step.** All three required fragments present in the
 durable log
 (`pmacs-parse-budget-9c27ecfe/gate-logs/20260829T144541Z-350549/06-gpu.log`):
@@ -696,7 +696,7 @@ kind: BrokenPipe, message: "Broken pipe" })))
 
 at `pmacs-gpu/src/attach.rs:1889`, `283 passed; 1 failed`.
 
-* **The tree exclusion is as strong as the fifth's.** The observing
+* **The tree exclusion is as strong as the sixth's.** The observing
   lane's entire diff is `src/async_runtime.rs`,
   `tests/m4_acceptance.rs` and three docs — **no `pmacs-gpu` file, and no
   file `pmacs-gpu` links against beyond the workspace it always did.**
@@ -708,13 +708,13 @@ at `pmacs-gpu/src/attach.rs:1889`, `283 passed; 1 failed`.
   `07-sweep.log` ends in `Terminated`. That stage's absence says
   nothing, and the run as a whole is **not** a gate result. Only the
   `gpu` stage's failure is, because it completed and reported.
-**A SEVENTH OCCURRENCE FOLLOWED IMMEDIATELY**, on the next gate run of
+**AN EIGHTH OCCURRENCE FOLLOWED IMMEDIATELY**, on the next gate run of
 the same worktree at head `45d438c`
 (`20260829T150011Z-429115/06-gpu.log`), same selector, same three
 fragments, `283 passed; 1 failed`. **That run's other seven stages were
 green**, `sweep` included and complete — 121 result lines, none with a
 failure — so this pair is not confounded by a truncation the way the
-sixth was.
+seventh was.
 
 **Two consecutive in-gate failures is new for this row**, whose prior
 five were spread across lanes and months. It prompted a narrowing, and
@@ -769,7 +769,7 @@ lanes and trees, and these locate the asymmetry in the *runner* while
 showing that the obvious way to probe it — reproducing gate conditions
 outside the gate — cannot work.
 
-**Fifth occurrence — panel cell-mapping generation (§5b) framing,
+**Sixth occurrence — panel cell-mapping generation (§5b) framing,
 2026-08-15, local (Linux).** The `scripts/gate` **`gpu` step** again,
 the same flavor as occurrence 2, inside a `--protocol` run
 (log `20260815T072601Z-2230169`).
@@ -790,9 +790,9 @@ the same flavor as occurrence 2, inside a `--protocol` run
   not exonerate the tree — though here there is no tree change to
   exonerate.
 
-**What five occurrences now support, stated carefully:** the failure is
+**What six occurrences now support, stated carefully:** the failure is
 **not lane-correlated**. It has appeared under three flavors across
-five unrelated lanes, once on a diff that touches no code whatsoever.
+six unrelated lanes, once on a diff that touches no code whatsoever.
 That is evidence about *where the cause is not*, and still says nothing
 about what it is. **The retirement condition is unchanged.**
 
@@ -831,7 +831,7 @@ one-second deadline. Contention is a plausible mechanism for a
 lands, **run the control with the added test removed** rather than at the
 merge base — that is the discriminating comparison this one was not.
 
-**Fourth occurrence — the `scripts/gate` TMPDIR isolation lane,
+**Fifth occurrence — the `scripts/gate` TMPDIR isolation lane,
 2026-08-13, local (Linux). Same selector, same `gpu`-step flavor
 (`PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`), all three fragments
 verified** against the durable gate log
@@ -868,7 +868,7 @@ with no new mechanism.** What it adds is the corroboration above. Three
 isolated re-runs on the current tree were green, which by this file's
 own rule establishes intermittence only.
 
-**The discriminating comparison for a fifth occurrence** remains the
+**The discriminating comparison for a SIXTH occurrence** remains the
 one the third occurrence prescribed. One occurrence, with no supported
 mechanism, is not grounds to reverse a fix that closes two observed
 hazards.
@@ -906,7 +906,7 @@ the lane's only `pmacs-gpu` addition is the arm that went red.
 The next agent to touch this row should reproduce at 1-in-10 and
 instrument which side closes the pipe, rather than re-running for green.
 
-**Fourth occurrence — D3 file-watch scheduler (PR #235), 2026-08-11,
+**Fourth occurrence by date — D3 file-watch scheduler (PR #235), 2026-08-11,
 local (Linux), at the gate's SWEEP step** (`cargo test --workspace
 --no-fail-fast`, default features — U3's flavor, this time with the
 fragments captured). All three required fragments verified against the
@@ -1199,7 +1199,7 @@ claim is the one a later reader would otherwise reach for.*
 | **status** | **one occurrence; INTERMITTENT — the identical sweep command on the same tree was green (118 targets, 1928 passed, exit 0)** |
 | **what IS established** | intermittence, with the strongest available exclusion of the tree: green in two earlier steps of the **same run**, green isolated afterwards (`2 passed`, 1.70 s), green on a full sweep rerun. Both assertions are **timing-sensitive by construction** — one reads collected child output within a deadline, the other measures wall-clock composition overhead (observed 1.613× against a 1.10× budget; 61.3% dispatch and 124.6% realistic overhead) |
 | **what is NOT** | cause, and the load confound is **partially measured but NOT controlled**. The failing sweep ran inside a full gate; the green rerun started at load average 1.98 with the 5-minute figure still at 8.03 from that gate. Different conditions is not a measurement of the mechanism, and this row does not treat it as one |
-| **the structural difference worth testing next — PREMISE FALSIFIED 2026-08-31** | This cell claimed `cargo test --workspace` runs **many test binaries concurrently** while `--lib` runs one, and derived a control from it: "pin test-binary concurrency to 1". **Cargo runs test targets SERIALLY**, one executable at a time, so that concurrency is already 1 and the control pins nothing. Measured in this project's own logs: `20260831T093655Z-857818/07-sweep.log` alternates `Running` and `test result:` strictly, 119 to 121, with **zero** overlapping starts. `--test-threads=1` is a *different* knob — it serializes test functions **within** one executable — and does not stand in for the control either. **The real difference between the steps is which binaries run and how long the whole step takes, not how many run at once.** A replacement control has to be designed; this row no longer has one |
+| **the structural difference worth testing next — PREMISE FALSIFIED 2026-08-31** | This cell claimed `cargo test --workspace` runs **many test binaries concurrently** while `--lib` runs one, and derived a control from it: "pin test-binary concurrency to 1". **Cargo runs test targets SERIALLY**, one executable at a time, so that concurrency is already 1 and the control pins nothing. Measured in this project's own logs: in `20260831T093655Z-857818/07-sweep.log` the **119 ordinary targets** each report before the next starts — **zero** overlapping starts — and the two trailing result lines (numbers 120 and 121 of 121) are the `Doc-tests` groups, not targets. *An earlier version of this cell said "alternates strictly, 119 to 121", which is the very claim the paragraph below retracts.* `--test-threads=1` is a *different* knob — it serializes test functions **within** one executable — and does not stand in for the control either. **The real difference between the steps is which binaries run and how long the whole step takes, not how many run at once.** A replacement control has to be designed; this row no longer has one |
 | **relation to U2 — a NEAR MISS, do not match it there** | the PTY fragment is U2's exact family (`stty -a output was: ""`), but U2's selector field names only `m6_1_pty_raw_mode_disables_kernel_echo`. U2's occurrence 2 saw raw **and** canonical fail together; here **canonical redded alone and raw passed**, which U2's evidence has never shown. It is recorded here rather than folded into U2 so that the "canonical alone" case stays visible |
 | **relation to U6 — its own instruction, honoured** | `composition_overhead_under_ten_percent` is one of U6's two selectors, and U6 says plainly: "If a future run reds **one** of these without the other, that is a different incident and should be judged as one." It redded without `criterion_1_end_of_line_typing…`, in a different step, at a far larger margin (1.613× here against U6's 1.297×). Judged as a different incident, as instructed |
 | **what this row does NOT assert** | that the two selectors share a mechanism. They failed together once; they belong to different subsystems; and U7 already refused this exact merge for U6. The **co-failure inside one step with an in-run green control** is the signature — not either name, and not a shared cause |
@@ -1237,12 +1237,17 @@ this project's own gate logs measure it. In
 `20260831T093655Z-857818/07-sweep.log` (and reproduced on
 `20260831T130742Z-2805186`): **119 ordinary targets, each of which
 reports its result before the next one starts** — zero cases of one
-`Running` line following another. **The 121st and 122nd result lines are
-not targets**: they belong to the two doc-test groups, `Doc-tests pmacs`
-and `Doc-tests pmacs_protocol`, which cargo labels differently and runs
-after everything else. An earlier version of this paragraph called the
-whole thing "strictly `RTRTRT…`" with 119 and 121, which cannot be
-strict — the count itself gave it away.
+`Running` line following another. There are **121 result lines in total**, and the last two —
+**numbers 120 and 121** — are not targets: they belong to the doc-test
+groups `Doc-tests pmacs` and `Doc-tests pmacs_protocol`, which cargo
+labels differently and runs after everything else. So the alternation is
+119 `Running`/result pairs, then two doc-test results.
+
+**Two earlier versions of this paragraph got the arithmetic wrong**,
+which is worth leaving on the record in a file about not trusting
+unverified numbers: the first called the whole thing "strictly
+`RTRTRT…`" with 119 and 121, which cannot be strict; the second called
+the doc-test results the 121st and 122nd, when there is no 122nd.
 
 So the budgets do **not** compete with the rest of the sweep in the way
 this family assumed.
@@ -1250,8 +1255,14 @@ this family assumed.
 **And the first replacement for that premise did not describe U9
 either.** It said a budget "runs at an arbitrary point in a multi-minute
 step". **U9's two selectors are both in the root lib target** —
-`m6_1_pty_raw_mode_disables_kernel_echo` (`src/process.rs:3945`) and
+`m6_1_pty_canonical_mode_keeps_kernel_echo` (`src/process.rs:3967`) and
 `composition_overhead_under_ten_percent` (`src/editor.rs:9717`) — and
+**note the selector**: U9's row names the CANONICAL test, not
+`m6_1_pty_raw_mode_disables_kernel_echo` (`:3945`), and an earlier
+version of this paragraph named the raw one. U9's own "relation to U2"
+cell turns on exactly that distinction — canonical redded alone while
+raw passed — so getting it backwards would have undercut the row it was
+trying to correct.
 the sweep runs that target **first**, finishing it in about 12 seconds
 of a multi-minute step. The sweep's later minutes cannot reach them.
 
@@ -1636,9 +1647,27 @@ fragments name `sum.golang.org` — Google's checksum database — returning
 an HTTP/2 stream error. Nothing in this repository can produce that.
 What this repository *does* control is whether a transient upstream
 outage fails a whole matrix leg, and that is a real question this row
-does not answer: `GOFLAGS=-mod=mod`, `GONOSUMDB`/`GONOSUMCHECK`, a
-vendored `gopls`, or simply retrying the step are all options with
-different costs, and choosing among them is not this lane's work.
+does not answer.
+
+**An earlier version of this paragraph listed three options, and all
+three were wrong.** They are corrected here rather than deleted:
+
+* **`GONOSUMCHECK` is not a Go environment variable.** It was invented
+  by that sentence;
+* **`GOFLAGS=-mod=mod` does not bypass checksum-database
+  authentication.** It selects the module *update* mode, which is a
+  different thing;
+* **vendoring does not follow from "a vendored `gopls`".** The step is a
+  version-suffixed `go install …@v0.16.2`, and that form **ignores
+  vendor directories**, so pinning that way needs a different
+  installation path entirely.
+
+**No replacement knob is named, because none was verified.** The one
+option above that certainly applies is **retrying the step**; anything
+else requires someone to check the current toolchain's actual switches
+first. Choosing among them is not this lane's work — but inventing an
+environment variable to fill a sentence is the failure this file exists
+to catch, so it is recorded as one.
 
 **No rerun was performed**, and deliberately: U3's lesson is to read the
 log first, and the log is now read and quoted above. Whether a rerun

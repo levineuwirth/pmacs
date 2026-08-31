@@ -366,12 +366,17 @@ second clippy flavor to `scripts/gate` is a change to shared
 infrastructure and belongs in its own lane. Recorded so the next lane
 touching crdt-gated code does not rediscover it at CI.
 
-**Four registry rows moved on this lane:**
+**EIGHT registry rows moved on this lane** — R7, R6, U6, U14, U15, U16,
+U17 and U18. *(This heading said "four" while listing more; corrected.)*
 
-- **R7's eighth occurrence** — the green/red pair whose heads differ by
-  one markdown file. It excludes the SOURCE TREE and nothing more; an
-  earlier write-up of mine narrowed the cause to three gate-state
-  candidates and that overstatement is withdrawn in the row;
+- **R7's ninth and TENTH occurrences** — the ninth is the green/red
+  pair whose heads differ by one markdown file, which excludes the
+  SOURCE TREE and nothing more; an earlier write-up of mine narrowed the
+  cause to three gate-state candidates and that overstatement is
+  withdrawn in the row. **The row also carried TWO blocks numbered
+  "fourth"** — D3 on 2026-08-11 and TMPDIR isolation on 2026-08-13 — so
+  every later ordinal was one low. Renumbered by date, and the row's
+  summary now states the total rather than "three";
 - **U6 went from one occurrence to five** — four on 2026-08-30, two out
   of gate and two in. Its first reproduction ever. **A direction claim I
   made here ("runs the OPPOSITE way to R7", resting on four green
@@ -1534,9 +1539,15 @@ from #171 and #215.
     load average **14.02 → 28.35**, from an unrelated `turso` test
     suite on the same machine (`./verify_task_state.sh
     turso-without-rowid`, target dir `/opt/target`, one test binary at
-    **693% CPU**). It is not a controlled experiment, but it is the
-    same evidence U9's synthetic-load control was meant to produce, and
-    it points at load. U9 stays owed; its value is now lower.
+    **693% CPU**). It is not a controlled experiment, and **an earlier
+    version of this bullet called it "the same evidence U9's
+    synthetic-load control was meant to produce" and said "U9 stays
+    owed". Both are withdrawn.** Uncontrolled foreign load is *not* the
+    same evidence as an experiment that applies load deliberately, and
+    U9's control is now **VOID** in its concurrency arm and a
+    non-discriminator in its load arm — see the correction on U9 in
+    `docs/ci-red-signatures.md`. What this reading is: a **named
+    confound**, recorded, pointing at load without establishing it.
   - **Two process traps this cost, both worth carrying forward.** The
     Bash tool caps a command at 10 minutes and SIGTERMs it, which the
     gate reports as `FAILED (exit 143)` on whatever stage was running —
