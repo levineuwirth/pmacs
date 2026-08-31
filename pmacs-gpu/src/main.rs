@@ -2221,6 +2221,18 @@ impl WheelResiduals {
         (ticks_x as i64, ticks_y as i64)
     }
 
+    /// Drop the document's bank (shared with chrome) — R4's reset.
+    fn clear_document(&mut self) {
+        self.banks.remove(&ResidualOwner::Document);
+    }
+
+    /// Drop the minimap's bank — R5's reset, separate from R4's because
+    /// B6 gives the minimap its own accumulator and a single combined
+    /// clear would let one omission hide behind the other.
+    fn clear_minimap(&mut self) {
+        self.banks.remove(&ResidualOwner::Minimap);
+    }
+
     /// Drop every panel bank. Panel chrome consumes both axes and must
     /// leave nothing that could combine with cell input later.
     fn clear_panels(&mut self) {
@@ -3426,23 +3438,28 @@ impl App {
         let Some(state) = self.state.as_ref() else {
             return;
         };
-        // Fractional deltas, in the units each axis scrolls by: lines
-        // for y, columns for x. Positive winit y = scroll up = smaller
-        // scroll_top, hence the negation.
-        let line_height = state.fm.code_line_height();
-        let column_width = state.mono_advance();
+        // **Fractional deltas in NOTCHES, not lines or columns.** The
+        // notch is the unit that survives the wire: a receiver applies
+        // its own per-notch step (`SCROLL_LINES`), so banking in lines
+        // here would apply the step twice — one notch would move a
+        // panel nine lines while the document moved three. The step is
+        // applied exactly once, at the point of effect; the wire carries
+        // notches.
+        //
+        // Positive winit y = scroll up = smaller scroll_top, hence the
+        // negation.
+        let notch_px_y = state.fm.code_line_height() * WHEEL_LINES_PER_TICK;
+        let notch_px_x = state.mono_advance() * WHEEL_COLUMNS_PER_TICK;
         let (dx, dy) = match delta {
-            winit::event::MouseScrollDelta::LineDelta(x, y) => {
-                (x * WHEEL_LINES_PER_TICK, -y * WHEEL_LINES_PER_TICK)
-            }
+            winit::event::MouseScrollDelta::LineDelta(x, y) => (x, -y),
             winit::event::MouseScrollDelta::PixelDelta(p) => (
-                if column_width > 0.0 {
-                    p.x as f32 / column_width
+                if notch_px_x > 0.0 {
+                    p.x as f32 / notch_px_x
                 } else {
                     0.0
                 },
-                if line_height > 0.0 {
-                    -(p.y as f32) / line_height
+                if notch_px_y > 0.0 {
+                    -(p.y as f32) / notch_px_y
                 } else {
                     0.0
                 },
@@ -3490,11 +3507,14 @@ impl App {
                 }
             }
             WheelTarget::Minimap | WheelTarget::Document | WheelTarget::Chrome => {
+                // The local step, applied exactly once: notches become
+                // lines here and nowhere else.
                 if ticks_y != 0 {
+                    let lines = ticks_y * WHEEL_LINES_PER_TICK as i64;
                     let vp = self
                         .state
                         .as_mut()
-                        .and_then(|state| state.scroll_by_lines(ticks_y));
+                        .and_then(|state| state.scroll_by_lines(lines));
                     if let Some(vp) = vp
                         && let Some(client) = self.attach_client.as_ref()
                         && let Err(e) =
@@ -3503,10 +3523,16 @@ impl App {
                         eprintln!("pmacs-gpu: wheel send_viewport failed: {e}");
                     }
                 }
+                // **The minimap's horizontal axis is INERT** (§2a's
+                // enumeration rules it so). It banks vertically like any
+                // other target — B6 gives it its own accumulator — but a
+                // horizontal notch over the minimap must not scroll the
+                // document sideways.
                 if ticks_x != 0
+                    && !matches!(target, WheelTarget::Minimap)
                     && let Some(state) = self.state.as_mut()
                 {
-                    state.scroll_by_columns(ticks_x);
+                    state.scroll_by_columns(ticks_x * WHEEL_COLUMNS_PER_TICK as i64);
                 }
             }
         }
@@ -5259,6 +5285,10 @@ const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_milli
 /// Wheel lines scrolled per `MouseScrollDelta::LineDelta` unit.
 const WHEEL_LINES_PER_TICK: f32 = 3.0;
 
+/// Columns per horizontal wheel notch — B7's "three columns per wheel
+/// tick", the horizontal twin of [`WHEEL_LINES_PER_TICK`].
+const WHEEL_COLUMNS_PER_TICK: f32 = 3.0;
+
 /// The wire scroll kinds for a banked `(x, y)` tick count, in order.
 ///
 /// One event per whole tick: a single wheel notch that banks two ticks
@@ -6452,6 +6482,20 @@ impl State {
                 // cursor motion repairs it — a symptom nothing about
                 // the new buffer explains.
                 self.code_scroll_left = 0.0;
+                // GUI Stage 1b R4/R5 — the wheel residuals for the
+                // DOCUMENT and the MINIMAP live in this long-lived
+                // `State` and outlive the buffer, so they reset here
+                // for the same reason `code_scroll_left` does: a new
+                // buffer must not inherit banked motion from the old
+                // one. Two separate lines rather than one clear, so a
+                // mutation that omits either is individually visible —
+                // chrome shares the document's owner, so that one line
+                // serves both.
+                self.wheel_residuals.clear_document();
+                self.wheel_residuals.clear_minimap();
+                // Manual horizontal authority is viewport state tied to
+                // the document being shown (lifetime clause 5).
+                self.manual_left_authority = false;
                 self.last_viewport_sent = None;
                 // Vterm Stage 3 — a snapshot ALWAYS leaves terminal
                 // mode, including a terminal→terminal switch. The prior
@@ -8318,27 +8362,29 @@ impl State {
         self.request_redraw();
     }
 
-    /// Widest display line, in columns — B7's upper-bound input.
+    /// Widest display line **in the whole document**, in columns —
+    /// B7's upper-bound input.
     ///
-    /// Scans the laid-out lines; `line_layout` caches, so a repeat scan
-    /// on an unchanged buffer re-reads the cache rather than reshaping.
-    /// **Cost is proportional to the buffer's line count**, which is a
-    /// real consideration on a per-tick path and is called out for
-    /// review rather than optimised speculatively.
-    fn widest_display_columns(&mut self) -> u32 {
-        let advance = self.mono_advance();
-        if advance <= 0.0 {
-            return 0;
-        }
-        let mut widest = 0.0f32;
-        for line_i in 0..self.buffer.lines.len() {
-            if let Some(layout) = self.buffer.line_layout(&mut self.font_system, line_i) {
-                for layout_line in layout {
-                    widest = widest.max(layout_line.w);
-                }
-            }
-        }
-        (widest / advance).ceil().max(0.0) as u32
+    /// **It must not read `self.buffer.lines`.** That holds only the
+    /// visible byte slice plus overscan (`rebuild_code_slice`, session
+    /// S1), so a bound taken from it excludes every off-screen line:
+    /// horizontal scrolling would clamp prematurely and the bound would
+    /// change as the view moved vertically. B3 asks for the widest
+    /// display line of the document, so this reads `current_text`.
+    ///
+    /// **Cost is O(document) per call**, and this sits on the wheel
+    /// path. That is a real risk against this project's wall-clock
+    /// budget rows and is recorded rather than pre-optimised: a cache
+    /// needs an invalidation key, and the wrong key is a worse defect
+    /// than a measurable scan.
+    fn widest_display_columns(&self) -> u32 {
+        let widest = self
+            .current_text
+            .split('\n')
+            .map(|line| line.chars().fold(0usize, advance_display_col))
+            .max()
+            .unwrap_or(0);
+        u32::try_from(widest).unwrap_or(u32::MAX)
     }
 
     /// GUI Stage 1b B3/B7: move the horizontal origin by whole columns.
@@ -12803,7 +12849,7 @@ fn minimap_line_shape(line: &str) -> MinimapLineShape {
     let mut indent_cols = 0usize;
     let mut in_indent = true;
     for ch in line.trim_end_matches('\r').chars() {
-        let next_col = advance_minimap_col(total_cols, ch);
+        let next_col = advance_display_col(total_cols, ch);
         if in_indent && (ch == ' ' || ch == '\t') {
             indent_cols = next_col;
         } else {
@@ -12817,7 +12863,14 @@ fn minimap_line_shape(line: &str) -> MinimapLineShape {
     }
 }
 
-fn advance_minimap_col(col: usize, ch: char) -> usize {
+/// Advance a display column past one character: tab stops, then
+/// Unicode terminal width.
+///
+/// Shared by the minimap and by B3's widest-line bound so the two
+/// cannot disagree about what a column is. It is the same rule as the
+/// TUI's `display_width::advance_char`; that copy lives in the other
+/// crate.
+fn advance_display_col(col: usize, ch: char) -> usize {
     if ch == '\t' {
         let tab_stop = TAB_STOP_COLUMNS as usize;
         col + tab_stop - col % tab_stop
@@ -14393,14 +14446,17 @@ mod tests {
         BufferId::next()
     }
 
-    /// B1/R1 — the producer itself: sub-tick deltas are banked, not
-    /// rounded away, and they reach a tick together.
+    /// B1's producer itself: sub-tick deltas are banked, not rounded
+    /// away, and they reach a tick together.
+    ///
+    /// **Not a framed R-row.** The framing's R1 is the CROSS-AXIS row;
+    /// this is the basic accumulation this slice rests on.
     ///
     /// This is the row #243 cannot satisfy. Its receiver only ever saw
     /// whole ticks, so a producer that discards every fraction is
     /// invisible to it.
     #[test]
-    fn r1_sub_tick_deltas_bank_and_then_spend_exactly_one_tick() {
+    fn sub_tick_deltas_bank_and_then_spend_exactly_one_tick() {
         let mut r = WheelResiduals::default();
         let owner = ResidualOwner::Document;
         assert_eq!(
@@ -14425,18 +14481,30 @@ mod tests {
         );
     }
 
-    /// B1 — the two axes are independent accumulators, not one.
+    /// **R1 — cross-axis.** A sub-tick horizontal motion followed by a
+    /// sub-tick vertical motion over the *same* surface reaches no tick
+    /// on either axis.
+    ///
+    /// *Mutation: one residual per surface instead of one per (surface,
+    /// axis)* — the two half-ticks combine and this row sees a tick.
     #[test]
-    fn b1_axes_bank_independently() {
+    fn r1_cross_axis_half_ticks_do_not_combine() {
         let mut r = WheelResiduals::default();
         let owner = ResidualOwner::Document;
-        assert_eq!(r.accumulate(owner, 0.6, 0.0), (0, 0));
-        assert_eq!(r.accumulate(owner, 0.0, 0.6), (0, 0));
         assert_eq!(
-            r.accumulate(owner, 0.6, 0.6),
-            (1, 1),
-            "each axis reaches its own tick on its own schedule"
+            r.accumulate(owner, 0.6, 0.0),
+            (0, 0),
+            "a sub-tick horizontal motion moves nothing"
         );
+        assert_eq!(
+            r.accumulate(owner, 0.0, 0.6),
+            (0, 0),
+            "and a sub-tick vertical motion over the SAME surface still \
+             reaches no tick on either axis — one accumulator per \
+             surface would have combined 0.6 + 0.6 into a tick here"
+        );
+        // Each axis still reaches its own tick on its own schedule.
+        assert_eq!(r.accumulate(owner, 0.5, 0.5), (1, 1));
     }
 
     /// R2 — panel A's bank is not spent on panel B.
@@ -14463,10 +14531,13 @@ mod tests {
         assert_eq!(r.accumulate(b, 0.0, 0.2), (0, 0));
     }
 
-    /// R4 — document and chrome SHARE, deliberately: a gesture that
+    /// Document and chrome SHARE one bank, deliberately: a gesture that
     /// strays onto the gutter must not lose its banked motion.
+    ///
+    /// **Not the framing's R4.** That row is the document/chrome
+    /// BUFFER-REPLACEMENT reset, which is still owed.
     #[test]
-    fn r4_document_and_chrome_share_one_bank() {
+    fn document_and_chrome_share_one_bank() {
         assert_eq!(
             WheelTarget::Document.residual_owner(),
             WheelTarget::Chrome.residual_owner(),
@@ -14484,10 +14555,13 @@ mod tests {
         );
     }
 
-    /// R5 — the minimap moves the document viewport but banks
-    /// independently of it.
+    /// The minimap moves the document viewport but banks independently
+    /// of it.
+    ///
+    /// **Not the framing's R5.** That row is the minimap's
+    /// BUFFER-REPLACEMENT reset, which is still owed.
     #[test]
-    fn r5_minimap_bank_is_independent_of_the_documents() {
+    fn minimap_bank_is_independent_of_the_documents() {
         let mut r = WheelResiduals::default();
         assert_eq!(r.accumulate(ResidualOwner::Minimap, 0.0, 0.9), (0, 0));
         assert_eq!(
@@ -14516,6 +14590,30 @@ mod tests {
             (0, 0),
             "a gesture that scrolled nothing must not complete a tick on arrival"
         );
+    }
+
+    /// R4 and R5's resets exist and are SEPARATE, so a mutation that
+    /// omits one is individually visible.
+    ///
+    /// **This is not R4/R5's witness.** Those rows require an actual
+    /// buffer replacement through the harness — bank a sub-tick over
+    /// document A, replace the buffer, and see motion over B start from
+    /// zero. That row is still owed; this only pins that the two clears
+    /// are distinct operations rather than one.
+    #[test]
+    fn document_and_minimap_resets_are_separate_operations() {
+        let mut r = WheelResiduals::default();
+        assert_eq!(r.accumulate(ResidualOwner::Document, 0.0, 0.9), (0, 0));
+        assert_eq!(r.accumulate(ResidualOwner::Minimap, 0.0, 0.9), (0, 0));
+        r.clear_document();
+        assert_eq!(r.bank_of(ResidualOwner::Document), None);
+        assert!(
+            r.bank_of(ResidualOwner::Minimap).is_some(),
+            "clearing the document must not clear the minimap, or one \
+             omission hides behind the other"
+        );
+        r.clear_minimap();
+        assert_eq!(r.bank_of(ResidualOwner::Minimap), None);
     }
 
     /// One event per whole tick, in a stable order.
