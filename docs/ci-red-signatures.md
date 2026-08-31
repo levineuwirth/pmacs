@@ -595,11 +595,24 @@ Stage 4; the lane touches no `pmacs-gpu` code at all.
 | **selector** | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
 | **job / flavor** | local (Linux), `cargo test --workspace --features crdt --no-fail-fast`, i.e. under full-sweep load |
 | **required fragments** | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
-| **status** | **EIGHTH OCCURRENCE 2026-08-30 — causal status still UNRESOLVED.** The eighth carries the strongest tree exclusion this row has had, and it supersedes the fifth's: two consecutive gate runs on ONE worktree whose heads differ by a single markdown file, the first all-green and the second red |
+| **status** | **NINTH OCCURRENCE 2026-08-31 — causal status still UNRESOLVED.** The eighth carries the strongest tree exclusion this row has had, and it supersedes the fifth's: two consecutive gate runs on ONE worktree whose heads differ by a single markdown file, the first all-green and the second red |
 | **what IS established** | **three** occurrences at `pmacs-gpu/src/attach.rs:1680`, the second and third with all three fragments **verified** rather than inferred; the test drives a scripted transient-then-success sequence over a real socket pair. **The added GPU test is not the mechanism** — see the third-occurrence control below |
 | **what is NOT** | whether the broken pipe is the *fixture's* writer closing early or a real retry-path defect. **This row is not a claim that it is harmless** |
 | **rerun evidence** | occurrence 1: 6 isolated runs green, plus a full `--workspace --features crdt` sweep green (113 targets). Occurrence 2: **30 green on the observing branch** (15 isolated selector, 15 full `-p pmacs-gpu`) **plus a 15-run merge-base control, also green**. Occurrence 3: 5 isolated selector runs green, 10 full `-p pmacs-gpu` runs green **with** the added test, and **1 failure in 10 with the added test `#[ignore]`d** — the first rerun in this row's history that reproduced anything. Per the rerun rule the green runs establish intermittence only; the red control run is what carries the exclusion |
 | **retirement** | hardening that removes the named mechanism plus a discriminating witness — or a diagnosis showing the fixture, not the code, closes the pipe |
+
+**Ninth occurrence — the same lane, 2026-08-31, local (Linux), `gpu`
+step**, log `20260831T141818Z-2974002`. All three required fragments,
+same selector, same `pmacs-gpu/src/attach.rs:1889`, same
+`283 passed; 1 failed`. The other seven stages were green.
+
+**Recorded, and it adds nothing but a count — deliberately.** The
+eighth occurrence's method note says the remaining candidates have to be
+varied **inside** the gate, one per run; that has not been done here and
+this lane is not the place to start. `/proc/loadavg` at the failure read
+`3.35 8.88 5.93` — a condition, recorded because U15 made load a
+measured quantity in this file, **not** a cause, and R7 is not a budget
+row. The observing commit is documentation only.
 
 **Eighth occurrence — the CRDT identity-undo lane, 2026-08-30, local
 (Linux), `gpu` step.** All three required fragments present in the
