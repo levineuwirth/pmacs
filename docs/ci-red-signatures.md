@@ -1515,7 +1515,7 @@ which is why it is worth more than its one occurrence.
 | **selector** | `--lib packages::fetcher::tests::cache_survives_across_fetcher_instances` |
 | **job / flavor** | local (Linux), `scripts/gate` step `07-sweep` (`cargo test --workspace --no-fail-fast`) |
 | **required fragments** | `Unable to read current working directory: No such file or directory` + `remote did not send all necessary objects` |
-| **status** | **new incident, one occurrence, not reproduced** |
+| **status** | **SECOND OCCURRENCE 2026-08-31 — it reproduced, in the same step, with the same fragments** |
 | **what IS established** | the fragments, captured from the durable stage log at `src/packages/fetcher.rs:929`. `1989 passed; 1 failed`. The test spawns `git` against a `file://` remote in a temp dir |
 | **what is NOT** | that the mechanism below is what happened. It is a candidate with a citation, not a demonstrated chain |
 | **the observing tree** | the lane's docs-only commit. It touches `src/packages/` not at all |
@@ -1569,6 +1569,16 @@ An earlier version added "and here it also says the window is narrow" —
 **it does not**. Non-reproduction over eight runs says the failure did
 not recur in eight runs. It says nothing about the width of *this
 candidate's* window, which no measurement here has sized.
+
+**SECOND OCCURRENCE, 2026-08-31, log `20260831T174104Z-3438184`, step
+`07-sweep`** — same selector, same panic site `fetcher.rs:929`, both
+required fragments, `1988 passed; 2 failed`. **This is the first time
+the row has reproduced, and it settles the point above in the right
+direction**: withdrawing "the window is narrow" was correct, because
+eight green runs had not measured it, and the failure returned within
+the day. The candidate mechanism in §"child inheritance" above is
+unchanged and still a candidate — nothing in this occurrence
+demonstrates the chain either.
 
 **Not folded into U14 or U15.** Different selector, different fragments,
 different step, and a different kind of failure: those are wall-clock
@@ -1712,6 +1722,41 @@ log first, and the log is now read and quoted above. Whether a rerun
 would pass is uninteresting — a transient network error is *expected* to
 pass on retry, and doing so would establish nothing while destroying
 nothing either. It is left for whoever next pushes to this branch.
+
+### U19 — a terminal bell never arrives within a 5s poll
+
+Recorded on the CRDT identity-undo lane, 2026-08-31, local (Linux),
+`scripts/gate` step `07-sweep`, log `20260831T174104Z-3438184` — the
+**same run** that produced U16's second occurrence, and recorded
+separately because the selectors and fragments differ.
+
+| field | value |
+|---|---|
+| **selector** | `--lib daemon::tests::terminal_bell_baseline_suppresses_history_and_delivers_each_new_bell_once` |
+| **job / flavor** | local (Linux), `scripts/gate` step `07-sweep` (`cargo test --workspace --no-fail-fast`) |
+| **required fragments** | `initial terminal bell timed out` |
+| **status** | **new incident, one occurrence** |
+| **what IS established** | panic at `src/daemon.rs:5296`, `1988 passed; 2 failed`. The assertion is a **5-second poll**: `while bell_count(buffer_id) != Some(1) { tick_processes(); assert!(Instant::now() < deadline); sleep(10ms) }` (`src/daemon.rs:5293`–`:5298`) |
+| **what is NOT** | whether the bell never arrived or arrived late. The loop cannot tell those apart, and **the panic reports no elapsed value** — R1's complaint about its own assertion, in a second place |
+| **the observing tree** | a documentation-only commit |
+
+**It is a deadline, but not the budget family's kind.** U6, U7, U9, U10,
+U12 and U15 assert that work finishes *fast* — 1ms, 1.10×, 200ms. This
+asserts that an event **arrives at all** inside five seconds, which is
+three orders of magnitude of slack. A 4.5% overshoot on a 1ms budget is
+a scheduling story; a 5-second wait for a bell that never comes is not
+the same shape, and folding it into that family would blur the one
+distinction those rows have.
+
+**What it shares with R1 is the missing measurement.** `Instant::now()`
+is in hand at the panic and the message reports none of it, so this
+occurrence's margin is unrecoverable — exactly what R1's row records
+about itself, and what U11 cost this project once already. **A future
+occurrence would be comparable to this one only if the assertion carried
+its elapsed value**, and it does not.
+
+**No rerun was performed on this selector**, and the row does not claim
+intermittence it has not observed.
 
 ### U13 — gate prune-reporting row receives empty child stdout in `sweep`
 

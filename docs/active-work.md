@@ -366,8 +366,8 @@ second clippy flavor to `scripts/gate` is a change to shared
 infrastructure and belongs in its own lane. Recorded so the next lane
 touching crdt-gated code does not rediscover it at CI.
 
-**EIGHT registry rows moved on this lane** — R7, R6, U6, U14, U15, U16,
-U17 and U18. *(This heading said "four" while listing more; corrected.)*
+**NINE registry rows moved on this lane** — R7, R6, U6, U14, U15, U16,
+U17, U18 and U19. *(This heading said "four" while listing more; corrected.)*
 
 - **R7's eleventh and TWELFTH occurrences** — the eleventh is the
   green/red pair whose heads differ by one markdown file, which excludes
@@ -427,6 +427,19 @@ U17 and U18. *(This heading said "four" while listing more; corrected.)*
   control**, which is the case U11 motivated it for. It came back **green on the macOS legs**, so the
   inference it could have supplied is **unavailable**; recorded as a
   null result, as R1's row had to record its own;
+- **U16 REPRODUCED** — second occurrence 2026-08-31, same step, same
+  fragments. It settles the earlier withdrawal in the right direction:
+  "the window is narrow" was wrong to claim from eight green runs, and
+  the failure returned within the day. The child-inheritance chain
+  stays a candidate; this occurrence demonstrates it no more than the
+  first did.
+- **U19, new** — `terminal_bell_baseline_…` timed out on a **5-second**
+  poll for a bell that never arrived, in the same run as U16's second.
+  A deadline but **not** the budget family's kind — those assert work
+  finishes in 1ms or 200ms; this asserts an event arrives at all inside
+  five seconds. Like R1, **its assertion reports no elapsed value**, so
+  the margin is unrecoverable and a future occurrence will not be
+  comparable to it.
 - **U18, new** — `Test (ubuntu-latest / luajit)` died in **toolchain
   setup**, before any `cargo` command ran: `go install gopls@v0.16.2`
   hit `INTERNAL_ERROR` from `sum.golang.org` while verifying
