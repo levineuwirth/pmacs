@@ -394,6 +394,17 @@ crdt-gated code does not rediscover it at CI.
   of 34 "explains it without any help", the other that U6 and U7 had
   both wanted a number since August. Both are corrected in place.
 
+- **U16, new** — a `git` invocation in `packages::fetcher` found its
+  working directory **deleted**. Not a budget: the only row in the
+  registry that arrives with a **named candidate mechanism inside the
+  test suite**. `src/file_io.rs:434` mutates process-global cwd inside a
+  parallel test and points it at a `TempDir` that then drops, and
+  libtest runs tests in threads of one process. Candidate, not a
+  demonstrated chain — 8 full parallel `--lib` runs did not reproduce
+  it. Two controls that would settle it are written into the row and
+  **neither is run here**; the structural fix belongs to whoever owns
+  `file_io`, not to a CRDT invariant lane.
+
 U14 and U15 are two rows rather than one because the second run's
 selector set had **rotated**, and this registry matches on the exact
 set — recording it as a second U14 occurrence was a matching-rule

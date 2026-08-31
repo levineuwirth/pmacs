@@ -1356,6 +1356,59 @@ measurement design nobody has defended.
 and the `dired_acceptance` selector had already been shown green in
 isolation by U7. Intermittence only, per the rerun rule.
 
+### U16 — a git invocation finds its working directory deleted
+
+Recorded on the CRDT identity-undo lane, 2026-08-31, local (Linux),
+`scripts/gate` log `20260831T083021Z-272257`, step `07-sweep`. **Not a
+budget row** — nothing here is a clock. It is the only row in this file
+that arrives with a **named candidate mechanism inside the test suite**,
+which is why it is worth more than its one occurrence.
+
+| field | value |
+|---|---|
+| **selector** | `--lib packages::fetcher::tests::cache_survives_across_fetcher_instances` |
+| **job / flavor** | local (Linux), `scripts/gate` step `07-sweep` (`cargo test --workspace --no-fail-fast`) |
+| **required fragments** | `Unable to read current working directory: No such file or directory` + `remote did not send all necessary objects` |
+| **status** | **new incident, one occurrence, not reproduced** |
+| **what IS established** | the fragments, captured from the durable stage log at `src/packages/fetcher.rs:929`. `1989 passed; 1 failed`. The test spawns `git` against a `file://` remote in a temp dir |
+| **what is NOT** | that the mechanism below is what happened. It is a candidate with a citation, not a demonstrated chain |
+| **the observing tree** | the lane's docs-only commit. It touches `src/packages/` not at all |
+
+**The candidate mechanism, and it is specific.**
+`src/file_io.rs:434` — `bare_filename_saves_in_cwd` — calls
+`std::env::set_current_dir(dir.path())`, which mutates **process-global**
+state, points it at a `TempDir`, and lets that `TempDir` drop at end of
+test. The libtest harness runs tests **in parallel threads within one
+process**, so during that window every other test in the binary shares
+the mutated cwd, and after the drop that cwd is a **deleted directory**.
+`fatal: Unable to read current working directory` is exactly what a
+process with a deleted cwd gets from `git`.
+
+The test restores the cwd before its assertions, deliberately and with a
+comment saying so — **the hazard is not the restore, it is that the
+window exists at all**, and no amount of care inside one test closes a
+window that is process-wide.
+
+**What would settle it**, and neither has been run:
+
+* run the two selectors concurrently in a tight loop until the failure
+  reproduces, which converts the candidate into a demonstration;
+* or make the hazard structural rather than probabilistic — a serial
+  guard around every `set_current_dir` test, or removing the
+  process-global mutation from `bare_filename_saves_in_cwd` entirely
+  (`save_atomic` could take the directory rather than inheriting it).
+
+**Reruns: green in three isolated runs of the selector, and in EIGHT
+full parallel `cargo test --lib` runs** (1990 passed each). Per this
+file's rerun rule that establishes **intermittence only** — and here it
+also says the window is narrow, not that it is absent.
+
+**Not folded into U14 or U15.** Different selector, different fragments,
+different step, and a different kind of failure: those are wall-clock
+budgets under load, this is a race over process-global state. U14's
+`acc34_purge` readiness failure is the nearest relative in kind, and even
+that is a different mechanism.
+
 ### U13 — gate prune-reporting row receives empty child stdout in `sweep`
 
 Recorded during PR #244 review, 2026-08-29, on signed head `756c2b8`.
