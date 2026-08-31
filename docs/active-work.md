@@ -301,12 +301,18 @@ waits for a signal that is not coming.
 - **THE FIRST DISPATCH IMMEDIATELY FOUND A RED ON `main`**, which is
   what this lane was built for. See the proptest entry below.
 
-## CRDT identity-replace undo — LANE TAKEN, PR #246 OPEN
+## CRDT identity-replace undo — MERGED as #246 (`78346de`)
 
-**Branch `crdt-identity-undo`, PR #246, based on `aae5b35`.** Framing
+- **MERGED 2026-08-31T18:56:09Z** at approved head `093d677`, merge
+  commit `78346de`, via `--match-head-commit`. 14/14 CI green on that
+  head; 8-stage local gate green on it too.
+
+**Branch `crdt-identity-undo`, based on `aae5b35`.** Framing
 `docs/crdt-identity-undo-framing.md`, **APPROVED at revision 4** after
 four review rounds, then **revision 5** as a correction pass answering
-implementation review.
+implementation review — followed by **six further review rounds against
+the implementation**, almost all of them against RECORDS rather than
+code.
 
 **Every head of this branch is gated head-exact**, with `HEAD` and
 `git status --porcelain` captured before and after each run and
