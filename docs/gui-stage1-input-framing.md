@@ -1,6 +1,41 @@
 # GUI arc, Stage 1 — input foundation (framing)
 
-**Status: revision 18 — APPROVED (2026-08-14).** §2a is the 1b ground
+**Status: revision 19 — RECONCILES TWO LINEAGES THAT BOTH NUMBERED
+THEMSELVES 13.** This document was advanced independently by two
+branches, and both called their change "revision 13" — the second
+block at `revision 13` below is the other lineage's, left exactly as it
+was written. **Nothing is renumbered retroactively**, because rewriting
+those numbers would falsify sentences like revision 15's "three defects
+in 14".
+
+| lineage | revisions | contribution | approval |
+|---|---|---|---|
+| `gui-stage1b-pointer-scroll` | 13 → 18 | **§2a, 503 lines** — six corrections, B1's wheel-target enumeration, Q#S1-11 ruled (B, viewport only), the five-clause lifetime contract with L1–L8 | **APPROVED at 18** |
+| the panel-replay lane (`1fc3af6`, #243) | its own 13 | the enriched **B1/B2/B3 rows** and the 12-line "Panel-replay consequence" paragraph in §1b | **approved by merge** — #243 landed it on `main`; its status line was never updated and still reads "AWAITING APPROVAL" |
+
+**Both are kept in full, and that was verified rather than assumed:**
+the enriched rows, the panel-replay paragraph, `wrap pins horizontal
+origin to zero`, §2a, the six-target enumeration and L1–L8 are all
+present after the rebase.
+
+**They are complementary, and the one place they could have collided is
+worth naming.** The panel-replay lane's B1 row names **three** residual
+owners — primary document, panel document, minimap. §2a's model is a
+**superset**: R2 panel, R3 terminal, R4 document *(sharing chrome's
+residual)*, R5 minimap. So §2a adds the **terminal** as an owner and
+**rules that chrome shares the document's**; it does not overturn the
+three the table names.
+
+**Where the table and §2a disagree, §2a wins**, exactly as §1b's own
+blockquote already says: it replaces B1's undefined "surface" with the
+enumeration and B3's "content bounds" with B7's saturated upper bound.
+The enriched rows stand for everything else they add — notably B2's
+window-targeted `view_left` path and B3's wrap-pins-to-zero.
+
+**Nothing in revision 19 changes a ruling.** It is a reconciliation and
+a record.
+
+**Previously, revision 18 — APPROVED (2026-08-14).** §2a is the 1b ground
 truth and its rulings are settled: **Q#S1-11 (B)**, the five-clause
 lifetime contract with witnesses L1–L8, B1's six-target enumeration
 with discriminators **R1–R5**, and B3's exact saturated bound. Revision
@@ -125,6 +160,10 @@ field as empty when it is occupied**, and that **B7 re-opens a question
 another framing deliberately deferred**. Its claim that the snap-back
 lands on the next *caret event* was corrected by 14 to the next
 **paint**, and by 15 to *per-frontend* drivers.
+
+**Previously, revision 13 (the PANEL-REPLAY lineage) — approved by
+merge in #243; the status line it shipped with is preserved verbatim
+below and was never updated.**
 
 **Status: revision 13 — AWAITING APPROVAL with bottom-panel §5a
 revision 16.** Revision 13 changes no previously ruled outcome. It
