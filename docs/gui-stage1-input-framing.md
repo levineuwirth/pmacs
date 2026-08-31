@@ -57,9 +57,19 @@ panel paint call (`src/editor.rs:2863`), `OwnCursor`'s **type doc**
 residual's. **Every live citation is now identity-checked against the
 construct its prose names**, not merely bounds-checked.
 
-**No ruling changes in revision 20.** It is a re-measurement, three
-corrections, a discharge, and one conceptual separation — implementation
-already present is not evidence already owed.
+**One contract IS sharpened, and it had to be.** Step 3's both-axis
+witness said only that "a wheel" moves the panel. **A whole tick passes
+straight through #243's existing vertical receiver even if B1's new
+accumulator discards every sub-tick it is given** — so the witness was
+satisfiable with the very mechanism it exists to protect completely
+broken. It now requires **fractional input end to end, per axis**: a
+first sub-threshold delta produces no effect, and accumulated
+same-panel deltas produce **exactly one**. That is a strengthening of a
+witness, not a change to a ruling.
+
+**Otherwise no ruling changes in revision 20.** It is a re-measurement,
+three corrections, a discharge, and one conceptual separation —
+implementation already present is not evidence already owed.
 
 **Previously, revision 19 — RECONCILES TWO LINEAGES THAT BOTH NUMBERED
 THEMSELVES 13.** This document was advanced independently by two
@@ -249,10 +259,12 @@ written** (§6). **Q#S1-8, Q#S1-9 and Q#S1-10 are RULED.** **1-pre is
 IMPLEMENTED**; 1a onward may begin from this document.
 
 **v26, not v25 — corrected by the panel mapping-generation slice.**
-That slice (`docs/bottom-panel-framing.md` §5b) takes **v25** for
+That slice (`docs/bottom-panel-framing.md` §5b) **took v25** for
 `PanelFramePayload::PresentMapped` / `FrontendEvent::PanelPointerMapped`,
-and it lands ahead of 1e because panel-pointer replay blocks 1b.
-Protocol slices stay serialized; one was inserted in front.
+and **it landed ahead of 1e (as #242) because panel-pointer replay
+blocked 1b at the time.** Both have since landed and neither blocks
+anything now; the version numbering is what survives. Protocol slices
+stay serialized; one was inserted in front.
 `ADVERTISED_PROTOCOL_VERSION` remains pinned at **20**.
 
 **Verification base: `0ec13b3`** (revision 20). §2 was re-measured at
@@ -618,9 +630,24 @@ nothing about whether a panel wheel scrolls.
    contains #243. §2a's other measurements were unaffected by that
    lane, as predicted — it touched the daemon side.
 3. **1b carries an END-TO-END panel-wheel EFFECT witness, on BOTH
-   axes**: a wheel over a panel cell moves that panel's viewport
-   vertically, and a horizontal wheel moves it horizontally. Not "a
-   `PanelPointer` was emitted" — the observable effect.
+   axes, driven by FRACTIONAL input.** Per axis, over a panel cell:
+   - **a first individually sub-threshold delta produces NO viewport
+     effect** — nothing moves, and nothing is emitted that would move
+     it;
+   - **further same-panel sub-threshold deltas, once they accumulate
+     past a tick, produce EXACTLY ONE viewport effect** — the panel's
+     viewport moves once, not zero times and not twice.
+
+   Not "a `PanelPointer` was emitted" — the observable effect on the
+   panel's viewport.
+
+   **A whole-tick witness would NOT do, and that is the point.** A full
+   tick passes straight through #243's existing vertical receiver even
+   if B1's new accumulator discards every sub-tick delta it is given.
+   The justification for owing this witness at all is that **B1's
+   producer is new**; a witness that never exercises the producer is
+   satisfiable with the new mechanism completely broken, which is the
+   vacuous shape this document has rejected elsewhere.
 
 **Why BOTH axes are still owed, when #243 already supplies the vertical
 receiver.** These are different things and revision 20's first draft
@@ -1158,8 +1185,15 @@ blank**. The bound is *width − viewport*, saturating at zero for buffers
 narrower than the viewport, and **the right-bound witness asserts the
 final display column is still visible**.
 
-**Panel-replay consequence, ruled after §5a's 2026-08-20
-re-measurement.** “Horizontal panel wheel” has three receiver outcomes,
+**Panel-replay consequence — the prerequisite is DISCHARGED (#243, in
+base `0ec13b3`), the WITNESS is not.** B1's producer is new, so the
+end-to-end panel-wheel effect witness is owed on **both** axes and must
+be driven by **fractional** input: a first sub-threshold delta moves
+nothing, and accumulated same-panel deltas move the viewport **exactly
+once**. A whole-tick witness passes through #243's receiver with B1's
+accumulator broken. See §3's step 3.
+
+**Ruled after §5a's 2026-08-20 re-measurement.** “Horizontal panel wheel” has three receiver outcomes,
 not one. When terminal precedence selects child reporting it already
 forwards `ScrollLeft` and `ScrollRight` as SGR codes 66/67. The local
 terminal branch — selected by Shift, reporting-off or a scrolled-back
