@@ -595,26 +595,26 @@ Stage 4; the lane touches no `pmacs-gpu` code at all.
 | **selector** | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
 | **job / flavor** | local (Linux), `cargo test --workspace --features crdt --no-fail-fast`, i.e. under full-sweep load |
 | **required fragments** | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
-| **status** | **TENTH OCCURRENCE 2026-08-31 — causal status still UNRESOLVED.** The ninth carries the strongest tree exclusion this row has had, and it supersedes the sixth's: two consecutive gate runs on ONE worktree whose heads differ by a single markdown file, the first all-green and the second red. **NOTE: this row carried TWO blocks numbered "fourth" — D3 on 2026-08-11 and TMPDIR isolation on 2026-08-13 — so every later ordinal was one low until 2026-08-31. Renumbered by date; the count below is the total** |
-| **what IS established** | **TEN occurrences**, of which the first three sit at `pmacs-gpu/src/attach.rs:1680` (the line moves as `attach.rs` changes; this row treats a `:LINE` suffix as occurrence-specific), the second and third with all three fragments **verified** rather than inferred. The test drives a scripted transient-then-success sequence over a real socket pair. **The added GPU test is not the mechanism** — see the third-occurrence control below |
+| **status** | **TWELFTH OCCURRENCE 2026-08-31 — causal status still UNRESOLVED.** The eleventh carries the strongest tree exclusion this row has had, and it supersedes the sixth's: two consecutive gate runs on ONE worktree whose heads differ by a single markdown file, the first all-green and the second red. **NOTE: the numbering was wrong twice over.** The row carried TWO blocks labelled "fourth" (D3 on 2026-08-11, TMPDIR isolation on 2026-08-13), and **two further full-fragment occurrences of 2026-08-15 sat in `docs/active-work.md` marked "owed to the registry" and were never absorbed** (logs `20260815T095532Z`, `20260815T100719Z`). Renumbered by date with both defects fixed; the count below is the total |
+| **what IS established** | **TWELVE occurrences.** The line moves as `attach.rs` changes and this row treats a `:LINE` suffix as occurrence-specific: occurrences **one through four** report `pmacs-gpu/src/attach.rs:1680`, the sixth through eighth `:1728`, and the ninth through twelfth `:1889`. The second and third carry all three fragments **verified** rather than inferred; so do the seventh and eighth. The test drives a scripted transient-then-success sequence over a real socket pair. **The added GPU test is not the mechanism** — see the third-occurrence control below |
 | **what is NOT** | whether the broken pipe is the *fixture's* writer closing early or a real retry-path defect. **This row is not a claim that it is harmless** |
 | **rerun evidence** | occurrence 1: 6 isolated runs green, plus a full `--workspace --features crdt` sweep green (113 targets). Occurrence 2: **30 green on the observing branch** (15 isolated selector, 15 full `-p pmacs-gpu`) **plus a 15-run merge-base control, also green**. Occurrence 3: 5 isolated selector runs green, 10 full `-p pmacs-gpu` runs green **with** the added test, and **1 failure in 10 with the added test `#[ignore]`d** — the first rerun in this row's history that reproduced anything. Per the rerun rule the green runs establish intermittence only; the red control run is what carries the exclusion |
 | **retirement** | hardening that removes the named mechanism plus a discriminating witness — or a diagnosis showing the fixture, not the code, closes the pipe |
 
-**Tenth occurrence — the same lane, 2026-08-31, local (Linux), `gpu`
+**Twelfth occurrence — the same lane, 2026-08-31, local (Linux), `gpu`
 step**, log `20260831T141818Z-2974002`. All three required fragments,
 same selector, same `pmacs-gpu/src/attach.rs:1889`, same
 `283 passed; 1 failed`. The other seven stages were green.
 
 **Recorded, and it adds nothing but a count — deliberately.** The
-ninth occurrence's method note says the remaining candidates have to be
+eleventh occurrence's method note says the remaining candidates have to be
 varied **inside** the gate, one per run; that has not been done here and
 this lane is not the place to start. `/proc/loadavg` at the failure read
 `3.35 8.88 5.93` — a condition, recorded because U15 made load a
 measured quantity in this file, **not** a cause, and R7 is not a budget
 row. The observing commit is documentation only.
 
-**Ninth occurrence — the CRDT identity-undo lane, 2026-08-30, local
+**Eleventh occurrence — the CRDT identity-undo lane, 2026-08-30, local
 (Linux), `gpu` step.** All three required fragments present in the
 durable log
 (`pmacs-fdccc423/gate-logs/20260830T155621Z-3005460/06-gpu.log`):
@@ -649,7 +649,7 @@ and nothing else: `283 passed; 1 failed` in each.
 
 * **Rerun: isolated selector green five times** (`1 passed`, 0.00s
   each). Per this file's rerun rule that establishes **intermittence
-  only** — and per the eighth occurrence's correction, running the
+  only** — and per the tenth occurrence's correction, running the
   selector outside the gate excludes nothing at all, because nothing
   outside the gate has ever reproduced this failure.
 * **No ratio is claimed from this occurrence.** It is one in-gate
@@ -664,10 +664,10 @@ and nothing else: `283 passed; 1 failed` in each.
   (`20260830T160242Z-3095339`), one commit later. Recorded because
   omitting it would be selective, not because it resolves anything: per
   the rerun rule a green run establishes intermittence only, and the
-  eighth occurrence already falsified "in-gate always fails".
+  tenth occurrence already falsified "in-gate always fails".
 
 **What this changes about the method, stated at the strength it
-carries.** The eighth occurrence's narrowing said the remaining
+carries.** The tenth occurrence's narrowing said the remaining
 candidates must be varied INSIDE the gate, one per run. This pair
 sharpens **one** exclusion and nothing else: **the Rust source tree is
 not the variable.**
@@ -684,7 +684,7 @@ else the machine was doing at 15:48 versus 15:56. A socket handshake
 racing a `BrokenPipe` is exactly the kind of failure those can drive,
 and holding the tree fixed says nothing about any of them.
 
-**Seventh occurrence — the parse-budget diagnosability lane, 2026-08-29,
+**Ninth occurrence — the parse-budget diagnosability lane, 2026-08-29,
 local (Linux), `gpu` step.** All three required fragments present in the
 durable log
 (`pmacs-parse-budget-9c27ecfe/gate-logs/20260829T144541Z-350549/06-gpu.log`):
@@ -696,7 +696,7 @@ kind: BrokenPipe, message: "Broken pipe" })))
 
 at `pmacs-gpu/src/attach.rs:1889`, `283 passed; 1 failed`.
 
-* **The tree exclusion is as strong as the sixth's.** The observing
+* **The tree exclusion is as strong as the sixth's.** (Occurrences seven and eight, below, are on that same lane's branch.) The observing
   lane's entire diff is `src/async_runtime.rs`,
   `tests/m4_acceptance.rs` and three docs — **no `pmacs-gpu` file, and no
   file `pmacs-gpu` links against beyond the workspace it always did.**
@@ -708,13 +708,13 @@ at `pmacs-gpu/src/attach.rs:1889`, `283 passed; 1 failed`.
   `07-sweep.log` ends in `Terminated`. That stage's absence says
   nothing, and the run as a whole is **not** a gate result. Only the
   `gpu` stage's failure is, because it completed and reported.
-**AN EIGHTH OCCURRENCE FOLLOWED IMMEDIATELY**, on the next gate run of
+**A TENTH OCCURRENCE FOLLOWED IMMEDIATELY**, on the next gate run of
 the same worktree at head `45d438c`
 (`20260829T150011Z-429115/06-gpu.log`), same selector, same three
 fragments, `283 passed; 1 failed`. **That run's other seven stages were
 green**, `sweep` included and complete — 121 result lines, none with a
 failure — so this pair is not confounded by a truncation the way the
-seventh was.
+ninth was.
 
 **Two consecutive in-gate failures is new for this row**, whose prior
 five were spread across lanes and months. It prompted a narrowing, and
@@ -769,6 +769,30 @@ lanes and trees, and these locate the asymmetry in the *runner* while
 showing that the obvious way to probe it — reproducing gate conditions
 outside the gate — cannot work.
 
+**Seventh and eighth occurrences — the same §5b branch, later the same
+day, 2026-08-15, local (Linux), `gpu` step.** Logs
+`20260815T095532Z` and `20260815T100719Z`. **All three fragments
+verified both times** —
+`transient sequence must attach: Attach(Handshake(Io(Os { code: 32,
+kind: BrokenPipe, message: "Broken pipe" })))` at
+`pmacs-gpu/src/attach.rs:1728`, the same line as the sixth. One machine,
+one day, one branch, **with a green full-gate run between them**.
+Isolated reruns green.
+
+**These sat unabsorbed for sixteen days, and that is the finding worth
+keeping.** `docs/active-work.md` recorded them under a heading saying
+they were "**owed to the registry by whichever branch merges second**",
+deliberately held back to avoid inventing a row id against an unseen
+neighbour — a real hazard this file has been bitten by, when two
+branches' entries merged without a conflict and produced duplicate ids
+across four sites. **The deferral was reasonable; not discharging it was
+not.** Both branches merged, and nothing carried them across, so R7's
+count read two low until 2026-08-31.
+
+*The lesson is narrower than "absorb faster": an entry parked under
+"owed to the registry" needs an owner named in the same sentence, or it
+belongs to nobody.*
+
 **Sixth occurrence — panel cell-mapping generation (§5b) framing,
 2026-08-15, local (Linux).** The `scripts/gate` **`gpu` step** again,
 the same flavor as occurrence 2, inside a `--protocol` run
@@ -790,9 +814,11 @@ the same flavor as occurrence 2, inside a `--protocol` run
   not exonerate the tree — though here there is no tree change to
   exonerate.
 
-**What six occurrences now support, stated carefully:** the failure is
-**not lane-correlated**. It has appeared under three flavors across
-six unrelated lanes, once on a diff that touches no code whatsoever.
+**What the first six occurrences supported, stated carefully** — and it
+is unchanged by the six that followed: the failure is **not
+lane-correlated**. It has appeared under three flavors across six
+unrelated lanes by this point, once on a diff that touches no code
+whatsoever.
 That is evidence about *where the cause is not*, and still says nothing
 about what it is. **The retirement condition is unchanged.**
 
@@ -1662,12 +1688,24 @@ three were wrong.** They are corrected here rather than deleted:
   vendor directories**, so pinning that way needs a different
   installation path entirely.
 
-**No replacement knob is named, because none was verified.** The one
-option above that certainly applies is **retrying the step**; anything
-else requires someone to check the current toolchain's actual switches
-first. Choosing among them is not this lane's work — but inventing an
-environment variable to fill a sentence is the failure this file exists
-to catch, so it is recorded as one.
+**`GONOSUMDB` was thrown out with them, and should not have been.** It
+is real, and `go help environment` on the toolchain in this checkout
+documents `GOPRIVATE, GONOPROXY, GONOSUMDB` as glob patterns of module
+prefixes "that should always be fetched directly **or that should not be
+compared against the checksum database**" — precisely the step that
+failed here. So it is **technically applicable**. Whether exempting a
+dependency from checksum verification is an acceptable authentication
+tradeoff to buy CI stability is a real question, and a different one
+from whether the knob exists. The same page notes `GOINSECURE` does
+**not** disable that validation, which is the kind of near-miss that
+made the original sentence wrong.
+
+**The options that stand, then:** `GONOSUMDB`/`GOPRIVATE` with the
+tradeoff stated, or **retrying the step**. Choosing between them is not
+this lane's work. Both directions of this paragraph's history are
+recorded because both were errors: **inventing an environment variable
+to fill a sentence**, and then **discarding a real one while correcting
+it**.
 
 **No rerun was performed**, and deliberately: U3's lesson is to read the
 log first, and the log is now read and quoted above. Whether a rerun

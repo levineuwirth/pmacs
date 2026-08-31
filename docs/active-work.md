@@ -369,14 +369,16 @@ touching crdt-gated code does not rediscover it at CI.
 **EIGHT registry rows moved on this lane** — R7, R6, U6, U14, U15, U16,
 U17 and U18. *(This heading said "four" while listing more; corrected.)*
 
-- **R7's ninth and TENTH occurrences** — the ninth is the green/red
-  pair whose heads differ by one markdown file, which excludes the
-  SOURCE TREE and nothing more; an earlier write-up of mine narrowed the
-  cause to three gate-state candidates and that overstatement is
-  withdrawn in the row. **The row also carried TWO blocks numbered
-  "fourth"** — D3 on 2026-08-11 and TMPDIR isolation on 2026-08-13 — so
-  every later ordinal was one low. Renumbered by date, and the row's
-  summary now states the total rather than "three";
+- **R7's eleventh and TWELFTH occurrences** — the eleventh is the
+  green/red pair whose heads differ by one markdown file, which excludes
+  the SOURCE TREE and nothing more; an earlier write-up of mine narrowed
+  the cause to three gate-state candidates and that overstatement is
+  withdrawn in the row. **The row's numbering was wrong twice over**: it
+  carried TWO blocks labelled "fourth" (D3 2026-08-11, TMPDIR
+  2026-08-13), **and** two full-fragment occurrences of 2026-08-15 sat
+  in this file marked "owed to the registry" and were never absorbed.
+  Renumbered by date with both fixed, and the row's summary now states
+  the total and which `attach.rs` line each group reports;
 - **U6 went from one occurrence to five** — four on 2026-08-30, two out
   of gate and two in. Its first reproduction ever. **A direction claim I
   made here ("runs the OPPOSITE way to R7", resting on four green
@@ -556,7 +558,7 @@ from #171 and #215.
   U13 is not this lane's and is left as recorded, but the pattern is
   now a pattern rather than an oversight, and each occurrence costs a
   review round to establish nothing.
-- **R7 gained its sixth and seventh occurrences here**, on a branch
+- **R7 gained its ninth and tenth occurrences here** (recorded at the time as its sixth and seventh; the row was renumbered on 2026-08-31 after two duplicate ordinals and two unabsorbed 2026-08-15 occurrences were found), on a branch
   touching no `pmacs-gpu` file, and the registry gained a **bounded
   observation window** so the in-gate/out-of-gate ratio cannot drift
   with review activity — plus a correction: seventeen green
@@ -1359,8 +1361,12 @@ from #171 and #215.
   branches' entries "merged **without a conflict**, producing duplicate
   ids across four sites". **The rows below are owed to the registry by
   whichever branch merges second**, numbered after the other's.
-  - **R7, two occurrences on this branch** (2026-08-15, `gpu` step,
-    logs `20260815T095532Z` and `20260815T100719Z`). Fragments verified
+  - **R7, two occurrences on this branch — ABSORBED 2026-08-31 as the
+    row's seventh and eighth** (2026-08-15, `gpu` step,
+    logs `20260815T095532Z` and `20260815T100719Z`). **They sat here
+    unabsorbed for sixteen days** while both branches merged, which is
+    why R7's count read two low; the deferral was reasonable, not
+    discharging it was not. Fragments verified
     both times: `transient sequence must attach: Attach(Handshake(Io(Os
     { code: 32, kind: BrokenPipe, message: "Broken pipe" })))` at
     `pmacs-gpu/src/attach.rs:1728`. One machine, one day, one branch,
