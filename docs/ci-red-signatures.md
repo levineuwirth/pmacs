@@ -1233,9 +1233,13 @@ rounds until someone runs it.
 
 Recorded on the CRDT identity-undo lane, 2026-08-30, local (Linux),
 `scripts/gate` log `20260830T171941Z-3509751`. **The co-occurrence is
-the signature**, as it is for U6, U9 and U12: four selectors in three
-unrelated subsystems failing in one run is less likely than one loaded
-machine, and no single selector reds twice within the run.
+the signature**, as it is for U6, U9 and U12: four selectors in **four
+unrelated subsystems** — the async runtime, the optimistic-echo
+orchestrator, editor composition, and the LSP dispatch seam — failing in
+one run is less likely than one loaded machine, and no single selector
+reds twice within the run. **U6's own row treats its two selectors as
+unrelated subsystems**, so the `04-lib-crdt` pair is two of the four
+here, not one.
 
 | field | value |
 |---|---|
@@ -1244,7 +1248,7 @@ machine, and no single selector reds twice within the run.
 | **required fragments** | `grep supersede did not cancel within 50ms` + an `elapsed:` value; `criterion 1: per-keystroke orchestrator time` + `exceeds 1ms`; `composition machinery added more than 10% overhead`; `is not ready for requests (state: initializing)` |
 | **status** | **new incident, ONE occurrence** |
 | **what IS established** | all four fragments captured from the durable stage logs. Margins: `52.44341ms` against 50ms (4.9% over); `1.689259ms` against 1ms; `1.592×` against 1.10×. The `07-sweep` failure is **not** a budget — an LSP server was asked for a request while still `initializing` |
-| **what is NOT** | any shared mechanism, and **any load measurement**: no `/proc/loadavg` reading was taken during or after this run. Three stages, three subsystems, and one of the four is a readiness race rather than a clock |
+| **what is NOT** | any shared mechanism, and **any load measurement**: no `/proc/loadavg` reading was taken during or after this run. Three stages, **four subsystems**, and one of the four selectors is a readiness race rather than a clock |
 | **the observing tree** | the lane's revision-5 commits: an enumeration in a `#[cfg(test)]` predicate and documentation. It touches `async_runtime`, `optimistic`, `editor` and the LSP dispatch seam **not at all** |
 
 **An earlier version of this row claimed a SECOND occurrence, and that
@@ -1282,7 +1286,7 @@ rerun rule that establishes **intermittence only**; it exonerates
 nothing, and in particular it does not show the tree is innocent, only
 that the failures do not reproduce alone.
 
-### U15 — a rotated multi-red cluster, with the load MEASURED for once
+### U15 — a rotated multi-red cluster, with a contemporaneous load reading
 
 Recorded on the CRDT identity-undo lane, 2026-08-30, local (Linux),
 `scripts/gate` log `20260830T175657Z-3881334` — 40 minutes after U14's
@@ -1311,12 +1315,20 @@ Both instructions are honoured rather than quoted and ignored.
 *(The same run's `04-lib-crdt` step redded U6's pair together, in U6's
 flavor and step. That IS a U6 occurrence and is recorded there.)*
 
-**What the load number establishes, stated at its real strength.** U6
-and U7 have each recorded, since 2026-08-09, that the load confound
-"was not measured, so it is a rival explanation, not a finding." **It is
-measured now — once, after this run.** That makes it a **measured
-confound present contemporaneously with a multi-red run**. It does not
-make it the cause, and three specific things stop it short:
+**What the load number establishes, stated at its real strength — and
+it is NOT this registry's first.** **U7 has carried a load average since
+2026-08-09** (`12.9 / 23.9`, in its job/flavor field); what U7 records as
+unmeasured is something narrower, whether the shared
+`CARGO_TARGET_DIR` and its sibling worktree builds *produced* that load.
+An earlier version of this block said U6 and U7 had both wanted a number
+since 2026-08-09. Half of that was wrong.
+
+What `34.04` is: **the first contemporaneous load reading for a U6
+occurrence** — U6's row has said since 2026-08-09 that its confound "was
+not measured" — and **a new reading alongside a recurring U7 selector**,
+not U7's first. That makes load a **measured confound present
+contemporaneously with a multi-red run**. It does not make it the cause,
+and three specific things stop it short:
 
 * **the reading is a single point, taken after the fact.** No
   `/proc/loadavg` was captured during U14's run or the two out-of-gate
@@ -1333,12 +1345,12 @@ make it the cause, and three specific things stop it short:
   load was present; whether it produced these particular margins is
   unmeasured.
 
-**What it does change:** "one loaded machine" stops being a hypothesis
-offered in good faith and becomes a **quantity on the record**, which is
-what a future correlation would need as its first data point. It retires
-nothing — U6, U7, U14 and R1 all keep their dispositions, and the
-budgets remain wall-clock assertions whose measurement design nobody has
-defended.
+**What it does change:** for U6, "one loaded machine" stops being a
+hypothesis offered in good faith and becomes a **quantity on the
+record** — a second data point for the correlation U7's reading started.
+It retires nothing: **U15 itself**, U6, U7, U14 and R1 all keep their
+dispositions, and the budgets remain wall-clock assertions whose
+measurement design nobody has defended.
 
 **Reruns: green in isolation** — `composition_overhead…` `1 passed`,
 and the `dired_acceptance` selector had already been shown green in

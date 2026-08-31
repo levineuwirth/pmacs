@@ -378,16 +378,21 @@ crdt-gated code does not rediscover it at CI.
   made here ("runs the OPPOSITE way to R7", resting on four green
   `04-lib-crdt` stages) was falsified by the next gate run and is
   withdrawn in the row;**
-- **U14, new** — four selectors red in one gate run across three stages;
-- **U15, new** — the rotated cluster 40 minutes later. It carries the
+- **U14, new** — four selectors across **four** unrelated subsystems
+  (async runtime, optimistic orchestration, editor composition, LSP
+  dispatch) red in one gate run, spread over three stages;
+- **U15, new** — the rotated cluster 40 minutes later. It carries a
   single `/proc/loadavg` reading of **34.04**, which makes severe
   unrelated load a **measured presence contemporaneous with a multi-red
   run — not a measured cause.** The reading is one point taken after the
   fact and the margins are not monotonic
   (`composition_overhead` ran 1.182x, 1.592x, 1.527x), so no
-  dose-response is claimed. An earlier version of that write-up said a
-  load average of 34 "explains it without any help"; it does not, and
-  that is corrected in place.
+  dose-response is claimed. **It is the first contemporaneous load
+  reading for a U6 occurrence, and a second data point beside the one
+  U7 has carried since 2026-08-09** — not this registry's first. Two
+  earlier versions of that write-up overreached: one said a load average
+  of 34 "explains it without any help", the other that U6 and U7 had
+  both wanted a number since August. Both are corrected in place.
 
 U14 and U15 are two rows rather than one because the second run's
 selector set had **rotated**, and this registry matches on the exact
