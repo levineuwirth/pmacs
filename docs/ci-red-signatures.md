@@ -239,9 +239,62 @@ happened and had a signature, which is the entire bar for a row.
 | **selector** | `--test bottom_panel_stage1_acceptance acc28_child_input_and_the_c_c_escape_work_unchanged_in_a_panel` |
 | **job / flavor** | macOS / lua54 |
 | **required fragments** | `timed out waiting for` **and** `/ready` |
-| **causal status** | **UNRESOLVED — no diagnosis** |
-| **evidence** | #217 [run 31023651701](https://github.com/levineuwirth/pmacs/actions/runs/31023651701), 2026-08-05 |
+| **causal status** | **UNRESOLVED — no diagnosis. SECOND OCCURRENCE 2026-08-31**, 26 days after the first |
+| **evidence** | #217 [run 31023651701](https://github.com/levineuwirth/pmacs/actions/runs/31023651701), 2026-08-05. Second: PR #246 [job 99431791766](https://github.com/levineuwirth/pmacs/actions/runs/33374169011/job/99431791766), head `e87d227` |
 | **retirement** | the readiness helpers are audited and reconciled, with a witness. **Never a green rerun** — the next push was green and that retires nothing. |
+
+**Second occurrence — the CRDT identity-undo lane, 2026-08-31,
+`Test (macos-latest / lua54)` on PR #246.** **A full three-condition
+match**, which this file requires and which is worth spelling out
+because the last occurrence of this selector could not be matched at
+all:
+
+1. **selector** — `acc28_child_input_and_the_c_c_escape_work_unchanged_in_a_panel`;
+2. **job / flavor** — macOS / `lua54`, the same leg;
+3. **both required fragments** — `timed out waiting for /var/folders/df/djsxfhc17x95674wsm_g8s980000gn/T/.tmpyBcHeZ/ready`.
+
+Panic at `tests/bottom_panel_stage1_acceptance.rs:2454`,
+`46 passed; 1 failed`.
+
+**The log was read BEFORE anything was rerun.** U3 named that lesson,
+U8 recorded its fourth violation, and this is the first occurrence in
+this file's history where the rule was followed on a macOS job at the
+moment it mattered. The fragments above exist because of it.
+
+**Not attributed to the observing lane, and a merge-base control was
+dispatched rather than argued.** The branch's whole diff is
+`src/buffer.rs`, `src/rope.rs`, `src/overlay.rs`, `src/view.rs` (tests
+and doc comments) plus three docs — **no file under `tests/`, and
+nothing in the panel, process or terminal paths**. But "my diff looks
+unrelated" is not evidence, so
+[run 33375945966](https://github.com/levineuwirth/pmacs/actions/runs/33375945966)
+was dispatched at `aae5b35`, **the branch's exact merge base**, via the
+`workflow_dispatch` key #245 landed for precisely this. **This is that
+key's first real use**, and U11 — the row that motivated it — is why it
+exists.
+
+**THE CONTROL LANDED GREEN on the macOS legs**, and the meaning was
+pre-registered above before the result was seen:
+`Test (macos-latest / lua54)` **succeeded** at `aae5b35`. So the
+inference this control could have supplied — that the branch did not
+introduce the failure — **is unavailable**. What is established is only
+that the merge base can pass the same job in the same hour. That is
+exactly what R1's row had to record about its own green control, and it
+is recorded the same way here: **a null result, not an exculpation.**
+
+**The control run was not otherwise clean, and that is its own finding.**
+`Test (crdt)` **failed on `main` at `aae5b35`** — see **U17**. A red on
+the merge base is not something a PR run can show you; it took a
+dispatch on `main` to see it at all.
+
+**Circumstantial alignment with U8, deliberately NOT a merge.** U8 has
+the same selector, panicking at the **same line** `:2454` with the
+**same** `46 passed; 1 failed`, on macOS `luajit` at base `0190102`.
+That is suggestive. It is also unconfirmable: **U8's fragments were
+destroyed**, and a row with no fragments cannot be matched — which is
+exactly what U8's own entry says it is for. The alignment is recorded
+here so a future reader sees it; U8 stays a separate row, and the
+inference stays unavailable.
 
 **A THIRD copy of the readiness helper.** R4's disposition already
 recorded that the empty-file predicate lived in a second helper
@@ -1408,6 +1461,56 @@ different step, and a different kind of failure: those are wall-clock
 budgets under load, this is a race over process-global state. U14's
 `acc34_purge` readiness failure is the nearest relative in kind, and even
 that is a different mechanism.
+
+### U17 — a supersede race lost the OTHER way, on `main`, single-threaded
+
+Surfaced 2026-08-31 by the **merge-base control dispatched for R6's
+second occurrence** — so it is a red on `main` at `aae5b35`, on no
+branch at all. **No PR run can show this**; it took a `workflow_dispatch`
+on `main` to see it.
+
+| field | value |
+|---|---|
+| **selector** | `--test m8_1_acceptance read_dir_supersede_cancels_in_flight_predecessor` |
+| **job / flavor** | GitHub Actions, `Test (crdt)`: `cargo test --all-targets --no-default-features --features luajit,crdt -- --test-threads=1` |
+| **required fragments** | `first read_dir must be superseded; got ok` |
+| **status** | **new incident, one occurrence, ON `main`** |
+| **what IS established** | `9 passed; 1 failed`, panic at `tests/m8_1_acceptance.rs:278`, [run 33375945966](https://github.com/levineuwirth/pmacs/actions/runs/33375945966) job 99437344558, head `aae5b35` |
+| **what is NOT** | any mechanism. The candidate below is a reading of the assertion, not a diagnosis |
+| **attribution** | **none available, and none needed** — `aae5b35` is `main`. There is no observing branch to suspect |
+
+**It fails the OPPOSITE way to R1 and R5, and that is the interesting
+part.** Both of those are **deadline** failures — a cancellation that
+did not arrive in time (`supersede did not cancel within 50ms`, `async
+pump deadline exceeded`). This one reports `got ok`: the first
+`read_dir` **completed successfully** instead of being cancelled. The
+supersede did not arrive late; it arrived after there was nothing left
+to supersede.
+
+**Candidate mechanism, stated as one.** The job runs
+**`--test-threads=1`**. A test that dispatches a job and then supersedes
+it "in flight" depends on the predecessor still being in flight; with no
+other test competing for the runtime, the predecessor is at its
+*fastest*, and the window in which it can be superseded is at its
+narrowest. That is a reading of the assertion and the flag together — it
+is **not** a diagnosis, and nothing here rules out a real supersede
+defect.
+
+**Worth noting for U9.** U9's still-unrun discriminating control is
+"pin test-binary concurrency to 1". This job **already does that**, in
+CI, on every run. That does not run U9's control — different binary,
+different selectors — but it does mean the single-threaded condition is
+not hypothetical in this project, and a row now exists where it may be
+load-bearing in the opposite direction from every budget row here.
+
+**Not R1 and not R5**, on this file's own matching rule: different
+selector, different module, different assertion. R5's row draws exactly
+this distinction against R1 and the same reasoning applies again —
+sharing a subject is not sharing a signature.
+
+**No rerun was performed.** U3's lesson and R6's "never a green rerun"
+disposition both apply, and there is no branch here whose merge this
+would gate.
 
 ### U13 — gate prune-reporting row receives empty child stdout in `sweep`
 

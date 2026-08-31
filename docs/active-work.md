@@ -405,6 +405,24 @@ crdt-gated code does not rediscover it at CI.
   **neither is run here**; the structural fix belongs to whoever owns
   `file_io`, not to a CRDT invariant lane.
 
+- **R6's SECOND occurrence** — 26 days after the first, macOS `lua54`,
+  a **full three-condition match** including both required fragments.
+  **The log was read before anything was rerun**, which is U3's lesson
+  and U8's fourth-violation warning finally honoured on a macOS job. A
+  **merge-base control was dispatched** at `aae5b35` rather than
+  arguing from an unrelated diff — **the first real use of the
+  `workflow_dispatch` key #245 landed**, and exactly the case U11
+  motivated it for. It came back **green on the macOS legs**, so the
+  inference it could have supplied is **unavailable**; recorded as a
+  null result, as R1's row had to record its own;
+- **U17, new** — that same control run **redded `Test (crdt)` on `main`
+  at `aae5b35`**: `read_dir_supersede_cancels_in_flight_predecessor`,
+  `first read_dir must be superseded; got ok`. It fails the **opposite**
+  way to R1 and R5 — not a missed deadline, but a predecessor that had
+  already finished. The job runs `--test-threads=1`, which is the
+  condition **U9's still-unrun control names**. A red on the merge base
+  is invisible to any PR run; it took the dispatch to see it.
+
 U14 and U15 are two rows rather than one because the second run's
 selector set had **rotated**, and this registry matches on the exact
 set — recording it as a second U14 occurrence was a matching-rule
