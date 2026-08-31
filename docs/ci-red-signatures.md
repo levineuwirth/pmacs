@@ -1521,7 +1521,7 @@ which is why it was worth recording before it had reproduced.
 | **selector** | `--lib packages::fetcher::tests::cache_survives_across_fetcher_instances` |
 | **job / flavor** | local (Linux), `scripts/gate` step `07-sweep` (`cargo test --workspace --no-fail-fast`) |
 | **required fragments** | `Unable to read current working directory: No such file or directory` + `remote did not send all necessary objects` |
-| **status** | **SECOND OCCURRENCE 2026-08-31 — it reproduced, in the same step, with the same fragments** |
+| **status** | **THREE OCCURRENCES, all 2026-08-31, within about eleven hours** — and the third is **on `main`** |
 | **what IS established** | the fragments, captured from the durable stage log at `src/packages/fetcher.rs:929`. `1989 passed; 1 failed`. The test spawns `git` against a `file://` remote in a temp dir |
 | **what is NOT** | that the mechanism below is what happened. It is a candidate with a citation, not a demonstrated chain |
 | **the observing tree** | the lane's docs-only commit. It touches `src/packages/` not at all |
@@ -1588,10 +1588,28 @@ demonstrates the chain either.
 
 **And it passed again immediately after**, in all three stages of the
 next gate run — `03-lib`, `04-lib-crdt` and the same `07-sweep` context
-— at `ea786a2`, log `20260831T174716Z-3535694`. Two reds and many greens
+— at `ea786a2`, log `20260831T174716Z-3535694`. Reds and greens
 **all on 2026-08-31**: **intermittent**, at a rate nothing here has
 measured. *(An earlier version said "across two days"; every run cited
 by this row is the same day, as the sentences above it already said.)*
+
+**THIRD OCCURRENCE, 2026-08-31, log `20260831T185716Z-4031066`, step
+`07-sweep` — and this one is ON `main`.** Same selector, same panic site
+`fetcher.rs:929`, both required fragments, `1989 passed; 1 failed`. The
+run was the post-merge gate of `90238fb`, a **documentation-only**
+commit on `main` after #246 landed.
+
+**That removes the last attribution question this row could have had.**
+The first two occurrences were on a branch whose diff touched no file
+under `src/packages/`; this one is on `main`, where there is no
+observing branch to suspect at all — the same distinction U17 draws.
+Three occurrences in about eleven hours, against eight consecutive
+green `--lib` runs earlier the same day, is also the closest this row
+has to a rate, and it is still not a measurement: nobody has counted
+runs and failures over a fixed window.
+
+**Isolated reruns after it: green three times** (`1 passed` each).
+Intermittence only, as before.
 
 **Not folded into U14 or U15.** Different selector, different fragments,
 different step, and a different kind of failure: those are wall-clock

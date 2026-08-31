@@ -439,8 +439,15 @@ U17, U18 and U19. *(This heading said "four" while listing more; corrected.)*
   the failure returned within the day. The child-inheritance chain
   stays a candidate; this occurrence demonstrates it no more than the
   first did. **It then passed in all three stages of the next gate
-  run** — two reds and many greens **all on 2026-08-31**, intermittent at
-  a rate nothing has measured.
+  run** — reds and greens **all on 2026-08-31**, intermittent at a rate
+  nothing has measured. **A THIRD occurrence followed on `main`**
+  (log `20260831T185716Z-4031066`, the post-merge gate of a docs-only
+  commit), which removes the last attribution question: there is no
+  observing branch to suspect. Three in about eleven hours against
+  eight consecutive green `--lib` runs the same morning — the closest
+  this row has to a rate, and still not a measurement.
+  **The structural fix in `file_io` is now the thing worth doing**, and
+  it is not this lane's.
 - **U19, new** — `terminal_bell_baseline_…` timed out on a **5-second**
   poll, in the same run as U16's second. The evidence is that **no bell
   was observed within five seconds** — not that one never came, and not
