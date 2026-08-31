@@ -433,8 +433,8 @@ U17, U18 and U19. *(This heading said "four" while listing more; corrected.)*
   the failure returned within the day. The child-inheritance chain
   stays a candidate; this occurrence demonstrates it no more than the
   first did. **It then passed in all three stages of the next gate
-  run** — two reds and many greens across two days, intermittent at a
-  rate nothing has measured.
+  run** — two reds and many greens **all on 2026-08-31**, intermittent at
+  a rate nothing has measured.
 - **U19, new** — `terminal_bell_baseline_…` timed out on a **5-second**
   poll, in the same run as U16's second. The evidence is that **no bell
   was observed within five seconds** — not that one never came, and not

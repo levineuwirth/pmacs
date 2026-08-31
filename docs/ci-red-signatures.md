@@ -1589,8 +1589,9 @@ demonstrates the chain either.
 **And it passed again immediately after**, in all three stages of the
 next gate run — `03-lib`, `04-lib-crdt` and the same `07-sweep` context
 — at `ea786a2`, log `20260831T174716Z-3535694`. Two reds and many greens
-across two days: **intermittent**, at a rate nothing here has
-measured.
+**all on 2026-08-31**: **intermittent**, at a rate nothing here has
+measured. *(An earlier version said "across two days"; every run cited
+by this row is the same day, as the sentences above it already said.)*
 
 **Not folded into U14 or U15.** Different selector, different fragments,
 different step, and a different kind of failure: those are wall-clock
@@ -1735,7 +1736,7 @@ would pass is uninteresting — a transient network error is *expected* to
 pass on retry, and doing so would establish nothing while destroying
 nothing either. It is left for whoever next pushes to this branch.
 
-### U19 — a terminal bell never arrives within a 5s poll
+### U19 — a terminal bell is not observed within a 5s poll
 
 Recorded on the CRDT identity-undo lane, 2026-08-31, local (Linux),
 `scripts/gate` step `07-sweep`, log `20260831T174104Z-3438184` — the
