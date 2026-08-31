@@ -239,9 +239,69 @@ happened and had a signature, which is the entire bar for a row.
 | **selector** | `--test bottom_panel_stage1_acceptance acc28_child_input_and_the_c_c_escape_work_unchanged_in_a_panel` |
 | **job / flavor** | macOS / lua54 |
 | **required fragments** | `timed out waiting for` **and** `/ready` |
-| **causal status** | **UNRESOLVED — no diagnosis** |
-| **evidence** | #217 [run 31023651701](https://github.com/levineuwirth/pmacs/actions/runs/31023651701), 2026-08-05 |
+| **causal status** | **UNRESOLVED — no diagnosis. SECOND OCCURRENCE 2026-08-31**, 26 days after the first |
+| **evidence** | #217 [run 31023651701](https://github.com/levineuwirth/pmacs/actions/runs/31023651701), 2026-08-05. Second: PR #246 [job 99431791766](https://github.com/levineuwirth/pmacs/actions/runs/33374169011/job/99431791766), head `e87d227` |
 | **retirement** | the readiness helpers are audited and reconciled, with a witness. **Never a green rerun** — the next push was green and that retires nothing. |
+
+**Second occurrence — the CRDT identity-undo lane, 2026-08-31,
+`Test (macos-latest / lua54)` on PR #246.** **A full three-condition
+match**, which this file requires and which is worth spelling out
+because the last occurrence of this selector could not be matched at
+all:
+
+1. **selector** — `acc28_child_input_and_the_c_c_escape_work_unchanged_in_a_panel`;
+2. **job / flavor** — macOS / `lua54`, the same leg;
+3. **both required fragments** — `timed out waiting for /var/folders/df/djsxfhc17x95674wsm_g8s980000gn/T/.tmpyBcHeZ/ready`.
+
+Panic at `tests/bottom_panel_stage1_acceptance.rs:2454`,
+`46 passed; 1 failed`.
+
+**The log was read BEFORE anything was rerun.** U3 named that lesson,
+U8 recorded its fourth violation, and this is the first occurrence in
+this file's history where the rule was followed on a macOS job at the
+moment it mattered. The fragments above exist because of it.
+
+**Not attributed to the observing lane, and a merge-base control was
+dispatched rather than argued.** The branch's whole diff is
+`src/buffer.rs`, `src/rope.rs`, `src/overlay.rs`, `src/view.rs` (tests
+and doc comments) plus three docs — **no file under `tests/`, and
+nothing in the panel, process or terminal paths**. But "my diff looks
+unrelated" is not evidence, so
+[run 33375945966](https://github.com/levineuwirth/pmacs/actions/runs/33375945966)
+was dispatched at `aae5b35`, **the branch's exact merge base**, via the
+`workflow_dispatch` key #245 landed for precisely this.
+
+**It is NOT that key's first use, and an earlier version of this block
+said so.** #245's own owed witnesses D2 and D3 dispatched three runs
+(`33307137965`, `33308891808`, `33308921103`) immediately after it
+merged, and the first of those already found a red on `main`. What this
+is: **the first use for a live merge-base CONTROL** — a contemporaneous
+`main`-side run obtained to answer a specific branch-side red, which is
+the case U11 motivated the key for.
+
+**THE CONTROL LANDED GREEN on the macOS legs**, and the meaning was
+pre-registered above before the result was seen:
+`Test (macos-latest / lua54)` **succeeded** at `aae5b35`. So the
+inference this control could have supplied — that the branch did not
+introduce the failure — **is unavailable**. What is established is only
+that the merge base can pass the same job in the same hour. That is
+exactly what R1's row had to record about its own green control, and it
+is recorded the same way here: **a null result, not an exculpation.**
+
+**The control run was not otherwise clean, and that is its own finding.**
+`Test (crdt)` **failed on `main` at `aae5b35`** — see **U17**. **A PR
+run can show the identical red**, and an earlier version of this block
+denied it; what only the `main` dispatch establishes is that the failure
+occurred **on the merge base**, with no observing branch to suspect.
+
+**Circumstantial alignment with U8, deliberately NOT a merge.** U8 has
+the same selector, panicking at the **same line** `:2454` with the
+**same** `46 passed; 1 failed`, on macOS `luajit` at base `0190102`.
+That is suggestive. It is also unconfirmable: **U8's fragments were
+destroyed**, and a row with no fragments cannot be matched — which is
+exactly what U8's own entry says it is for. The alignment is recorded
+here so a future reader sees it; U8 stays a separate row, and the
+inference stays unavailable.
 
 **A THIRD copy of the readiness helper.** R4's disposition already
 recorded that the empty-file predicate lived in a second helper
@@ -535,13 +595,96 @@ Stage 4; the lane touches no `pmacs-gpu` code at all.
 | **selector** | `-p pmacs-gpu attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream` |
 | **job / flavor** | local (Linux), `cargo test --workspace --features crdt --no-fail-fast`, i.e. under full-sweep load |
 | **required fragments** | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
-| **status** | **SEVENTH OCCURRENCE 2026-08-29 — causal status still UNRESOLVED.** The sixth and seventh came back to back on one lane and are written up together below; the fifth carries the strongest tree exclusion this row has had, a **documentation-only diff** |
-| **what IS established** | **three** occurrences at `pmacs-gpu/src/attach.rs:1680`, the second and third with all three fragments **verified** rather than inferred; the test drives a scripted transient-then-success sequence over a real socket pair. **The added GPU test is not the mechanism** — see the third-occurrence control below |
+| **status** | **TWELFTH OCCURRENCE 2026-08-31 — causal status still UNRESOLVED.** The eleventh carries the strongest tree exclusion this row has had, and it supersedes the sixth's: two consecutive gate runs on ONE worktree whose heads differ by a single markdown file, the first all-green and the second red. **NOTE: the numbering was wrong twice over.** The row carried TWO blocks labelled "fourth" (D3 on 2026-08-11, TMPDIR isolation on 2026-08-13), and **two further full-fragment occurrences of 2026-08-15 sat in `docs/active-work.md` marked "owed to the registry" and were never absorbed** (logs `20260815T095532Z`, `20260815T100719Z`). Renumbered by date with both defects fixed; the count below is the total |
+| **what IS established** | **TWELVE occurrences.** The line moves as `attach.rs` changes and this row treats a `:LINE` suffix as occurrence-specific: occurrences **one through four** report `pmacs-gpu/src/attach.rs:1680`; the **fifth records no line at all** — its block never captured one, and it is marked unrecorded rather than guessed; **six through eight** report `:1728`; **nine through twelve** report `:1889`. The second and third carry all three fragments **verified** rather than inferred; so do the seventh and eighth. The test drives a scripted transient-then-success sequence over a real socket pair. **The added GPU test is not the mechanism** — see the third-occurrence control below |
 | **what is NOT** | whether the broken pipe is the *fixture's* writer closing early or a real retry-path defect. **This row is not a claim that it is harmless** |
 | **rerun evidence** | occurrence 1: 6 isolated runs green, plus a full `--workspace --features crdt` sweep green (113 targets). Occurrence 2: **30 green on the observing branch** (15 isolated selector, 15 full `-p pmacs-gpu`) **plus a 15-run merge-base control, also green**. Occurrence 3: 5 isolated selector runs green, 10 full `-p pmacs-gpu` runs green **with** the added test, and **1 failure in 10 with the added test `#[ignore]`d** — the first rerun in this row's history that reproduced anything. Per the rerun rule the green runs establish intermittence only; the red control run is what carries the exclusion |
 | **retirement** | hardening that removes the named mechanism plus a discriminating witness — or a diagnosis showing the fixture, not the code, closes the pipe |
 
-**Sixth occurrence — the parse-budget diagnosability lane, 2026-08-29,
+**Twelfth occurrence — the same lane, 2026-08-31, local (Linux), `gpu`
+step**, log `20260831T141818Z-2974002`. All three required fragments,
+same selector, same `pmacs-gpu/src/attach.rs:1889`, same
+`283 passed; 1 failed`. The other seven stages were green.
+
+**Recorded, and it adds nothing but a count — deliberately.** The
+eleventh occurrence's method note says the remaining candidates have to be
+varied **inside** the gate, one per run; that has not been done here and
+this lane is not the place to start. `/proc/loadavg` at the failure read
+`3.35 8.88 5.93` — a condition, recorded because U15 made load a
+measured quantity in this file, **not** a cause, and R7 is not a budget
+row. The observing commit is documentation only.
+
+**Eleventh occurrence — the CRDT identity-undo lane, 2026-08-30, local
+(Linux), `gpu` step.** All three required fragments present in the
+durable log
+(`pmacs-fdccc423/gate-logs/20260830T155621Z-3005460/06-gpu.log`):
+
+```
+transient sequence must attach: Attach(Handshake(Io(Os { code: 32,
+kind: BrokenPipe, message: "Broken pipe" })))
+```
+
+at `pmacs-gpu/src/attach.rs:1889`, `283 passed; 1 failed`.
+
+**This occurrence discriminates tree from runner more sharply than any
+before it, and the reason is the pair, not the diff.** Two consecutive
+`scripts/gate` runs, same worktree, minutes apart:
+
+| run | head | delta from the previous run | result |
+|---|---|---|---|
+| `20260830T154827Z-2907414` | `db24ae3` | — | **all 8 stages green** |
+| `20260830T155621Z-3005460` | `96bf2c3` | **one commit, touching one file: `docs/active-work.md`** | **`gpu` and `sweep` FAILED** |
+
+The sixth occurrence excluded the observing tree *relative to `main`*
+by having a documentation-only diff. This pair excludes it relative to
+**the immediately preceding green run of the same gate on the same
+worktree**, where the entire delta is a markdown file that no Rust
+target reads. Whatever varies between those two runs, it is not the
+source tree.
+
+**`sweep` failed with the SAME single test**, so this run is one failure
+surfacing in two stages, not two failures. Both stage logs name
+`attach::tests::managed_retry_survives_transients_and_uses_the_successful_stream`
+and nothing else: `283 passed; 1 failed` in each.
+
+* **Rerun: isolated selector green five times** (`1 passed`, 0.00s
+  each). Per this file's rerun rule that establishes **intermittence
+  only** — and per the tenth occurrence's correction, running the
+  selector outside the gate excludes nothing at all, because nothing
+  outside the gate has ever reproduced this failure.
+* **No ratio is claimed from this occurrence.** It is one in-gate
+  failure following one in-gate pass, on a lane whose gate runs exist to
+  verify a head rather than to observe this row. Folding them into the
+  2026-08-29 window would be exactly the drift that window was bounded
+  to prevent.
+* **The observing lane touches no `pmacs-gpu` file**: its whole diff is
+  `src/buffer.rs`, `src/rope.rs`, `src/overlay.rs`, `src/view.rs` — tests
+  and doc comments — plus three docs.
+* **The NEXT in-gate run was green**, all eight stages
+  (`20260830T160242Z-3095339`), one commit later. Recorded because
+  omitting it would be selective, not because it resolves anything: per
+  the rerun rule a green run establishes intermittence only, and the
+  tenth occurrence already falsified "in-gate always fails".
+
+**What this changes about the method, stated at the strength it
+carries.** The tenth occurrence's narrowing said the remaining
+candidates must be varied INSIDE the gate, one per run. This pair
+sharpens **one** exclusion and nothing else: **the Rust source tree is
+not the variable.**
+
+It does **not** narrow the cause to three things. The gate's per-run
+state — its ambient root, its fresh `TMPDIR`, and process state carried
+across stage boundaries — remains the set of candidates this project can
+actually vary one at a time, which is why they are the ones to try. But
+**they are not an exhaustive causal set**, and an earlier version of
+this paragraph said they were. Everything unrelated to the repository
+also differed between the two runs: scheduler load and CPU contention,
+kernel and socket timing, page cache and memory pressure, and whatever
+else the machine was doing at 15:48 versus 15:56. A socket handshake
+racing a `BrokenPipe` is exactly the kind of failure those can drive,
+and holding the tree fixed says nothing about any of them.
+
+**Ninth occurrence — the parse-budget diagnosability lane, 2026-08-29,
 local (Linux), `gpu` step.** All three required fragments present in the
 durable log
 (`pmacs-parse-budget-9c27ecfe/gate-logs/20260829T144541Z-350549/06-gpu.log`):
@@ -553,7 +696,7 @@ kind: BrokenPipe, message: "Broken pipe" })))
 
 at `pmacs-gpu/src/attach.rs:1889`, `283 passed; 1 failed`.
 
-* **The tree exclusion is as strong as the fifth's.** The observing
+* **The tree exclusion is as strong as the sixth's.** (Occurrences seven and eight, below, are on that same lane's branch.) The observing
   lane's entire diff is `src/async_runtime.rs`,
   `tests/m4_acceptance.rs` and three docs — **no `pmacs-gpu` file, and no
   file `pmacs-gpu` links against beyond the workspace it always did.**
@@ -565,17 +708,22 @@ at `pmacs-gpu/src/attach.rs:1889`, `283 passed; 1 failed`.
   `07-sweep.log` ends in `Terminated`. That stage's absence says
   nothing, and the run as a whole is **not** a gate result. Only the
   `gpu` stage's failure is, because it completed and reported.
-**A SEVENTH OCCURRENCE FOLLOWED IMMEDIATELY**, on the next gate run of
+**A TENTH OCCURRENCE FOLLOWED IMMEDIATELY**, on the next gate run of
 the same worktree at head `45d438c`
 (`20260829T150011Z-429115/06-gpu.log`), same selector, same three
 fragments, `283 passed; 1 failed`. **That run's other seven stages were
 green**, `sweep` included and complete — 121 result lines, none with a
 failure — so this pair is not confounded by a truncation the way the
-sixth was.
+ninth was.
 
 **Two consecutive in-gate failures is new for this row**, whose prior
-five were spread across lanes and months. It prompted a narrowing, and
-the narrowing is the useful part.
+**eight** were spread across lanes and weeks — **though not evenly**:
+three of the eight fall on 2026-08-15, on one branch and one machine.
+*(This sentence said "prior five … across lanes and months" until the
+renumbering of 2026-08-31; it was written before the 2026-08-15 pair was
+absorbed and before the duplicate "fourth" was found, and it was wrong
+about the count and the spread.)* It prompted a narrowing, and the
+narrowing is the useful part.
 
 **A THIRD IN-GATE RUN WAS GREEN** (head `68a16f9`, log
 `20260829T152024Z-563254`, all eight stages, zero failures anywhere).
@@ -626,7 +774,31 @@ lanes and trees, and these locate the asymmetry in the *runner* while
 showing that the obvious way to probe it — reproducing gate conditions
 outside the gate — cannot work.
 
-**Fifth occurrence — panel cell-mapping generation (§5b) framing,
+**Seventh and eighth occurrences — the same §5b branch, later the same
+day, 2026-08-15, local (Linux), `gpu` step.** Logs
+`20260815T095532Z` and `20260815T100719Z`. **All three fragments
+verified both times** —
+`transient sequence must attach: Attach(Handshake(Io(Os { code: 32,
+kind: BrokenPipe, message: "Broken pipe" })))` at
+`pmacs-gpu/src/attach.rs:1728`, the same line as the sixth. One machine,
+one day, one branch, **with a green full-gate run between them**.
+Isolated reruns green.
+
+**These sat unabsorbed for sixteen days, and that is the finding worth
+keeping.** `docs/active-work.md` recorded them under a heading saying
+they were "**owed to the registry by whichever branch merges second**",
+deliberately held back to avoid inventing a row id against an unseen
+neighbour — a real hazard this file has been bitten by, when two
+branches' entries merged without a conflict and produced duplicate ids
+across four sites. **The deferral was reasonable; not discharging it was
+not.** Both branches merged, and nothing carried them across, so R7's
+count read two low until 2026-08-31.
+
+*The lesson is narrower than "absorb faster": an entry parked under
+"owed to the registry" needs an owner named in the same sentence, or it
+belongs to nobody.*
+
+**Sixth occurrence — panel cell-mapping generation (§5b) framing,
 2026-08-15, local (Linux).** The `scripts/gate` **`gpu` step** again,
 the same flavor as occurrence 2, inside a `--protocol` run
 (log `20260815T072601Z-2230169`).
@@ -647,9 +819,11 @@ the same flavor as occurrence 2, inside a `--protocol` run
   not exonerate the tree — though here there is no tree change to
   exonerate.
 
-**What five occurrences now support, stated carefully:** the failure is
-**not lane-correlated**. It has appeared under three flavors across
-five unrelated lanes, once on a diff that touches no code whatsoever.
+**What the first six occurrences supported, stated carefully** — and it
+is unchanged by the six that followed: the failure is **not
+lane-correlated**. It has appeared under three flavors across six
+unrelated lanes by this point, once on a diff that touches no code
+whatsoever.
 That is evidence about *where the cause is not*, and still says nothing
 about what it is. **The retirement condition is unchanged.**
 
@@ -688,7 +862,7 @@ one-second deadline. Contention is a plausible mechanism for a
 lands, **run the control with the added test removed** rather than at the
 merge base — that is the discriminating comparison this one was not.
 
-**Fourth occurrence — the `scripts/gate` TMPDIR isolation lane,
+**Fifth occurrence — the `scripts/gate` TMPDIR isolation lane,
 2026-08-13, local (Linux). Same selector, same `gpu`-step flavor
 (`PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`), all three fragments
 verified** against the durable gate log
@@ -725,7 +899,7 @@ with no new mechanism.** What it adds is the corroboration above. Three
 isolated re-runs on the current tree were green, which by this file's
 own rule establishes intermittence only.
 
-**The discriminating comparison for a fifth occurrence** remains the
+**The discriminating comparison for a SIXTH occurrence** remains the
 one the third occurrence prescribed. One occurrence, with no supported
 mechanism, is not grounds to reverse a fix that closes two observed
 hazards.
@@ -763,7 +937,7 @@ the lane's only `pmacs-gpu` addition is the arm that went red.
 The next agent to touch this row should reproduce at 1-in-10 and
 instrument which side closes the pipe, rather than re-running for green.
 
-**Fourth occurrence — D3 file-watch scheduler (PR #235), 2026-08-11,
+**Fourth occurrence by date — D3 file-watch scheduler (PR #235), 2026-08-11,
 local (Linux), at the gate's SWEEP step** (`cargo test --workspace
 --no-fail-fast`, default features — U3's flavor, this time with the
 fragments captured). All three required fragments verified against the
@@ -855,10 +1029,53 @@ was lost.
 | **selector** | `--lib --features crdt optimistic::tests::criterion_1_end_of_line_typing_completes_sub_frame_per_keystroke` **and** `editor::tests::composition_overhead_under_ten_percent`, failing in the same run |
 | **job / flavor** | local (Linux), `scripts/gate` step `04-lib-crdt`, with sibling worktrees building concurrently |
 | **required fragments** | `criterion 1: per-keystroke orchestrator time` + `exceeds 1ms`; and `composition machinery added more than 10% overhead` |
-| **status** | **new incident, one occurrence, not reproduced** |
+| **status** | **FIVE OCCURRENCES — one on 2026-08-09 and FOUR on 2026-08-30**, the first time this row has ever reproduced. Two of the four out of gate, two in gate (`20260830T171941Z`, `T175657Z`). Still no mechanism; see the block below |
 | **what IS established** | both are **wall-clock budget assertions** — 1.264ms against a 1ms budget, and 1.297× against a 1.10× budget — so both are load-sensitive by construction. Both green in an isolated rerun of exactly those two selectors, and both green in the next full gate run of the same command (2105 passed) |
 | **what is NOT** | whether the machine's concurrent load caused it. The confound is real (this machine runs one shared `CARGO_TARGET_DIR` and several worktrees) but **was not measured**, so it is a rival explanation, not a finding |
 | **rival explanation not excluded** | a genuine regression in either path. Nothing in the observing diff touches the optimistic-echo orchestrator or the composition pipeline, but "my diff looks unrelated" is not evidence, and this row does not treat it as such |
+
+**Second occurrence — the CRDT identity-undo lane, 2026-08-30, local
+(Linux).** Both required fragments captured, both selectors, one run:
+
+```
+criterion 1: per-keystroke orchestrator time 1.343883ms exceeds 1ms
+composition machinery added more than 10% overhead: 1.182
+```
+
+**It reproduced on the immediately following run**, which is new for
+this row — the first occurrence explicitly recorded "not reproduced".
+
+Margins are recorded because U11 taught this registry what their absence
+costs. Here: **1.343883ms against a 1ms budget** (1.34×) and **1.182×
+against a 1.10× budget**; at the first occurrence, 1.264ms and 1.297×.
+So the composition margin grew and the keystroke margin grew, but
+neither by an order that separates load from regression. Both selectors
+were green in isolated single-selector reruns.
+
+**Fourth and fifth occurrences — both IN gate, both `04-lib-crdt`,
+both the exact pair.** `20260830T171941Z-3509751` (`1.689259ms` against
+1ms; `1.592×` against 1.10×) and `20260830T175657Z-3881334`
+(`2.269247ms`; `1.527×`). Those two runs also redded other selectors in
+other steps; **those clusters are U14 and U15 respectively**, and only
+the `04-lib-crdt` pair belongs to this row.
+
+**A DIRECTION CLAIM WAS MADE HERE AND IS WITHDRAWN, within the hour.**
+This block first said the asymmetry "runs the OPPOSITE way to R7":
+both failures were out of gate, while `04-lib-crdt` was green in all
+four of this lane's gate runs to that point (`20260830T154827Z`,
+`T155621Z`, `T160242Z`, `T160824Z`). **The very next gate run redded
+`04-lib-crdt` with this exact pair.** So U6 fails **both** in and out of
+gate, the four green stages were a run of four and not a property, and
+the only honest reading is the one the first occurrence already gave:
+these are wall-clock budget assertions.
+
+**No mechanism is claimed.** The load confound was unmeasured at the
+second and third occurrences and at the fourth; **U15 records a single
+`/proc/loadavg` reading of `34.04` taken after the fifth**, which makes
+severe unrelated load a measured presence rather than a measured cause —
+see that row for why the difference matters. What is worth having here
+is that **this row is now reproducible under some condition**, which the
+first occurrence could not say.
 
 **Two budget tests failing in one run and neither in the next is the
 signature worth matching**, more than either name alone: a real
@@ -1013,7 +1230,7 @@ claim is the one a later reader would otherwise reach for.*
 | **status** | **one occurrence; INTERMITTENT — the identical sweep command on the same tree was green (118 targets, 1928 passed, exit 0)** |
 | **what IS established** | intermittence, with the strongest available exclusion of the tree: green in two earlier steps of the **same run**, green isolated afterwards (`2 passed`, 1.70 s), green on a full sweep rerun. Both assertions are **timing-sensitive by construction** — one reads collected child output within a deadline, the other measures wall-clock composition overhead (observed 1.613× against a 1.10× budget; 61.3% dispatch and 124.6% realistic overhead) |
 | **what is NOT** | cause, and the load confound is **partially measured but NOT controlled**. The failing sweep ran inside a full gate; the green rerun started at load average 1.98 with the 5-minute figure still at 8.03 from that gate. Different conditions is not a measurement of the mechanism, and this row does not treat it as one |
-| **the structural difference worth testing next** | `cargo test --workspace` runs **many test binaries concurrently**; `--lib` runs **one**. That is a difference in kind between the passing steps and the failing one, not merely a difference in load average — and it is the first candidate this family has had that is checkable rather than atmospheric. **Discriminating control:** rerun the sweep with test-binary concurrency pinned to 1, and separately run the `--lib` binary alone under synthetic load. A red under synthetic load at low sweep concurrency implicates load; a red at high concurrency and low load implicates the concurrency itself |
+| **the structural difference worth testing next — PREMISE FALSIFIED 2026-08-31** | This cell claimed `cargo test --workspace` runs **many test binaries concurrently** while `--lib` runs one, and derived a control from it: "pin test-binary concurrency to 1". **Cargo runs test targets SERIALLY**, one executable at a time, so that concurrency is already 1 and the control pins nothing. Measured in this project's own logs: in `20260831T093655Z-857818/07-sweep.log` the **119 ordinary targets** each report before the next starts — **zero** overlapping starts — and the two trailing result lines (numbers 120 and 121 of 121) are the `Doc-tests` groups, not targets. *An earlier version of this cell said "alternates strictly, 119 to 121", which is the very claim the paragraph below retracts.* `--test-threads=1` is a *different* knob — it serializes test functions **within** one executable — and does not stand in for the control either. **The real difference between the steps is which binaries run and how long the whole step takes, not how many run at once.** A replacement control has to be designed; this row no longer has one |
 | **relation to U2 — a NEAR MISS, do not match it there** | the PTY fragment is U2's exact family (`stty -a output was: ""`), but U2's selector field names only `m6_1_pty_raw_mode_disables_kernel_echo`. U2's occurrence 2 saw raw **and** canonical fail together; here **canonical redded alone and raw passed**, which U2's evidence has never shown. It is recorded here rather than folded into U2 so that the "canonical alone" case stays visible |
 | **relation to U6 — its own instruction, honoured** | `composition_overhead_under_ten_percent` is one of U6's two selectors, and U6 says plainly: "If a future run reds **one** of these without the other, that is a different incident and should be judged as one." It redded without `criterion_1_end_of_line_typing…`, in a different step, at a far larger margin (1.613× here against U6's 1.297×). Judged as a different incident, as instructed |
 | **what this row does NOT assert** | that the two selectors share a mechanism. They failed together once; they belong to different subsystems; and U7 already refused this exact merge for U6. The **co-failure inside one step with an in-run green control** is the signature — not either name, and not a shared cause |
@@ -1042,15 +1259,54 @@ green in the other run**.
 | **relation to U6** | run B's selector is one of U6's two, redding **without** `composition_overhead_under_ten_percent`. U6 instructs that one-without-the-other is a different incident; honoured here |
 | **what this row does NOT assert** | a shared mechanism between the two rows, or any mechanism at all. **The signature is the rotation across an identical commit** — not either name |
 
-**Why this family keeps recurring, stated plainly.** Every row in it is
-a wall-clock budget asserted **inside a workspace-wide parallel test
-run**. `cargo test --workspace` starts many test binaries at once, so
-each budget competes with the rest of the sweep in **every** run,
-including the ones that pass. A 4.5% overshoot on a 1ms budget is not a
-signal about the code. **U9 already named the discriminating control**
-— pin test-binary concurrency to 1 and separately load a lone `--lib`
-binary — and it remains unrun. Until it runs, this family should not
-consume another review round.
+**Why this family keeps recurring — with its stated premise CORRECTED,
+because it was false.** Every row in it is a wall-clock budget asserted
+inside a workspace-wide test run. This paragraph used to add that
+"`cargo test --workspace` starts many test binaries at once". **It does
+not. Cargo runs test targets SERIALLY, one executable at a time**, and
+this project's own gate logs measure it. In
+`20260831T093655Z-857818/07-sweep.log` (and reproduced on
+`20260831T130742Z-2805186`): **119 ordinary targets, each of which
+reports its result before the next one starts** — zero cases of one
+`Running` line following another. There are **121 result lines in total**, and the last two —
+**numbers 120 and 121** — are not targets: they belong to the doc-test
+groups `Doc-tests pmacs` and `Doc-tests pmacs_protocol`, which cargo
+labels differently and runs after everything else. So the alternation is
+119 `Running`/result pairs, then two doc-test results.
+
+**Two earlier versions of this paragraph got the arithmetic wrong**,
+which is worth leaving on the record in a file about not trusting
+unverified numbers: the first called the whole thing "strictly
+`RTRTRT…`" with 119 and 121, which cannot be strict; the second called
+the doc-test results the 121st and 122nd, when there is no 122nd.
+
+So the budgets do **not** compete with the rest of the sweep in the way
+this family assumed.
+
+**And the first replacement for that premise did not describe U9
+either.** It said a budget "runs at an arbitrary point in a multi-minute
+step". **U9's two selectors are both in the root lib target** —
+`m6_1_pty_canonical_mode_keeps_kernel_echo` (`src/process.rs:3967`) and
+`composition_overhead_under_ten_percent` (`src/editor.rs:9717`) — and
+**note the selector**: U9's row names the CANONICAL test, not
+`m6_1_pty_raw_mode_disables_kernel_echo` (`:3945`), and an earlier
+version of this paragraph named the raw one. U9's own "relation to U2"
+cell turns on exactly that distinction — canonical redded alone while
+raw passed — so getting it backwards would have undercut the row it was
+trying to correct.
+the sweep runs that target **first**, finishing it in about 12 seconds
+of a multi-minute step. The sweep's later minutes cannot reach them.
+
+What survives is narrower still: **the sweep re-runs the lib target late
+in the overall gate invocation**, after `03-lib` and `04-lib-crdt` have
+already run it, under machine state nobody measured. A 4.5% overshoot on
+a 1ms budget remains not a signal about the code.
+
+**And U9's named control does not discriminate what it claimed** —
+"pin test-binary concurrency to 1" pins something that is *already* 1.
+See the correction on U9 itself. This family still should not consume
+another review round, but it now needs a control someone has to design,
+not one already written down.
 
 **Widening a budget is not the fix**, and R1 already rejected it.
 
@@ -1110,11 +1366,424 @@ PTY selector.
 | **relation to U6** | its selector, alone again, in U6's own step. U6's instruction to judge that separately is honoured for the second time — see U9, which did the same |
 | **relation to U9** | the same budget-plus-PTY co-failure, in `04-lib-crdt` rather than `11-sweep`, with `setsid_escapee…` where U9 had `m6_1_pty_raw_mode…` |
 
-**This family has now produced U6, U9, U10 and U12, and the
-discriminating control U9 named is STILL UNRUN**: pin test-binary
-concurrency to 1, and separately load a lone `--lib` binary. Four
-incidents is enough evidence that the family will keep costing review
-rounds until someone runs it.
+**This family has now produced U6, U9, U10 and U12 — and the control
+U9 named no longer exists to run.** It had two halves. *Pin test-binary
+concurrency to 1* is **VOID**: cargo already runs targets serially, so
+it pins nothing (see U9). *Separately load a lone `--lib` binary under
+synthetic load* survives as an experiment but is **not a discriminator**
+— with concurrency fixed at 1 there is no second arm to compare against,
+so a red would show load is **sufficient** to produce one, and a green
+would show nothing at all. **It could never "clear" load**, and this
+file's own rerun rule says why.
+
+Four incidents is enough evidence that the family will keep costing
+review rounds. What it needs is a control someone designs, not the one
+written down.
+
+### U14 — FOUR selectors red in ONE gate run, across three stages
+
+Recorded on the CRDT identity-undo lane, 2026-08-30, local (Linux),
+`scripts/gate` log `20260830T171941Z-3509751`. **The co-occurrence is
+the signature**, as it is for U6, U9 and U12: four selectors in **four
+unrelated subsystems** — the async runtime, the optimistic-echo
+orchestrator, editor composition, and the LSP dispatch seam — failing in
+one run is less likely than one loaded machine, and no single selector
+reds twice within the run. **U6's own row treats its two selectors as
+unrelated subsystems**, so the `04-lib-crdt` pair is two of the four
+here, not one.
+
+| field | value |
+|---|---|
+| **selectors** | **four.** `03-lib`: `async_runtime::tests::grep_supersede_cancels_predecessor_within_50ms`. `04-lib-crdt`: `optimistic::tests::criterion_1_end_of_line_typing_completes_sub_frame_per_keystroke` **and** `editor::tests::composition_overhead_under_ten_percent` (U6's pair — see below). `07-sweep`: `lsp_dispatch_seams_acceptance::acc34_purge_reaches_a_server_that_is_in_no_attachment` |
+| **job / flavor** | local (Linux), one `scripts/gate` run, three different steps |
+| **required fragments** | `grep supersede did not cancel within 50ms` + an `elapsed:` value; `criterion 1: per-keystroke orchestrator time` + `exceeds 1ms`; `composition machinery added more than 10% overhead`; `is not ready for requests (state: initializing)` |
+| **status** | **new incident, ONE occurrence** |
+| **what IS established** | all four fragments captured from the durable stage logs. Margins: `52.44341ms` against 50ms (4.9% over); `1.689259ms` against 1ms; `1.592×` against 1.10×. The `07-sweep` failure is **not** a budget — an LSP server was asked for a request while still `initializing` |
+| **what is NOT** | any shared mechanism, and **any load measurement**: no `/proc/loadavg` reading was taken during or after this run. Three stages, **four subsystems**, and one of the four selectors is a readiness race rather than a clock |
+| **the observing tree** | the lane's revision-5 commits: an enumeration in a `#[cfg(test)]` predicate and documentation. It touches `async_runtime`, `optimistic`, `editor` and the LSP dispatch seam **not at all** |
+
+**An earlier version of this row claimed a SECOND occurrence, and that
+was a matching-rule violation.** The run 40 minutes later
+(`20260830T175657Z-3881334`) redded a **different selector set** —
+`full_buffer_summary_flatten_scales_on_large_grammar_file` and
+`dired_renders_10k_entries_within_200ms` in place of
+`grep_supersede…` and `acc34_purge…`. Under "How a row matches" above,
+the exact selectors must match; a rotated set is a **new incident**.
+It is now **U15**, and the `04-lib-crdt` pair the two runs do share is
+recorded where it belongs, as U6's own occurrence.
+
+**Relation to R1, and it is NOT a match.** The `03-lib` failure carries
+R1's required fragment `supersede did not cancel within 50ms`, but R1's
+selector is `supersede_cancels_in_flight_job_within_50ms` and this is
+`grep_supersede_cancels_predecessor_within_50ms` — **a different test**.
+This registry matches on selector *and* fragments, and U6's own
+instruction ("one without the other is a different incident") points the
+same way. Recorded as a sibling, not an occurrence.
+
+**One thing the sibling shows for free, and R1 should have it.** R1's
+row records that its assertion "still omits its measurement —
+`started.elapsed()` is in hand at the panic and the message reports none
+of it, so this occurrence's margin is as unrecoverable as every prior
+one's." **The sibling test already reports it**: `(elapsed:
+52.44341ms)`, which is how the 4.9% margin above is known at all. The
+measurement-design question R1 defers to the async-runtime lane is
+untouched by this — but the cheap half of it is demonstrably already
+written, next door in the same module.
+
+**Reruns: all four selectors green in isolation** — `grep_supersede…`
+`1 passed`, U6's two `1 passed` each, and the whole
+`lsp_dispatch_seams_acceptance` binary `15 passed`. Per this file's
+rerun rule that establishes **intermittence only**; it exonerates
+nothing, and in particular it does not show the tree is innocent, only
+that the failures do not reproduce alone.
+
+### U15 — a rotated multi-red cluster, with a contemporaneous load reading
+
+Recorded on the CRDT identity-undo lane, 2026-08-30, local (Linux),
+`scripts/gate` log `20260830T175657Z-3881334` — 40 minutes after U14's
+run, on the same tree. **A new incident rather than a U14 occurrence**,
+because the selectors rotated and this file matches on the exact set.
+
+| field | value |
+|---|---|
+| **selectors** | `03-lib` (**default features**): `editor::tests::composition_overhead_under_ten_percent` **and** `semantic_render::tests::full_buffer_summary_flatten_scales_on_large_grammar_file`. `07-sweep`: `dired_acceptance::dired_renders_10k_entries_within_200ms` |
+| **job / flavor** | local (Linux), one `scripts/gate` run, steps `03-lib` and `07-sweep` |
+| **required fragments** | `composition machinery added more than 10% overhead`; `full-buffer flatten took` + `the event sweep must stay ~linear`; `10K entries must render within 200ms; took ` |
+| **status** | **new incident, one occurrence** |
+| **what IS established** | margins `1.450×` against 1.10×, `1.274901136s` against a ~linear expectation, and `221.459827ms` against 200ms (10.7% over). **`/proc/loadavg` read immediately after the run: `34.04 38.45 26.29`**, with the CPU saturated by unrelated `lean` processes — nothing this session started, and no `cargo`, `rustc` or `scripts/gate` process of mine left running |
+| **what is NOT** | that the load caused any of it. See below |
+
+**Two selectors here belong to other rows and are deliberately NOT
+claimed as their occurrences.** `composition_overhead_under_ten_percent`
+is one of U6's two, and it redded in `03-lib` **without** its partner
+and under **default features**, not U6's `04-lib-crdt`/`crdt` flavor —
+U6's own instruction is that one-without-the-other is a different
+incident. `dired_renders_10k_entries_within_200ms` is one of U7's three,
+and this is the **second** time that same selector has redded — U7's own
+instruction is that a repeat of one selector is a different incident.
+Both instructions are honoured rather than quoted and ignored.
+
+*(The same run's `04-lib-crdt` step redded U6's pair together, in U6's
+flavor and step. That IS a U6 occurrence and is recorded there.)*
+
+**What the load number establishes, stated at its real strength — and
+it is NOT this registry's first.** **U7 has carried a load average since
+2026-08-09** (`12.9 / 23.9`, in its job/flavor field); what U7 records as
+unmeasured is something narrower, whether the shared
+`CARGO_TARGET_DIR` and its sibling worktree builds *produced* that load.
+An earlier version of this block said U6 and U7 had both wanted a number
+since 2026-08-09. Half of that was wrong.
+
+What `34.04` is: **the first contemporaneous load reading for a U6
+occurrence** — U6's row has said since 2026-08-09 that its confound "was
+not measured" — and **a new reading alongside a recurring U7 selector**,
+not U7's first. That makes load a **measured confound present
+contemporaneously with a multi-red run**. It does not make it the cause,
+and three specific things stop it short:
+
+* **the reading is a single point, taken after the fact.** No
+  `/proc/loadavg` was captured during U14's run or the two out-of-gate
+  runs, so there is no series to correlate margins against;
+* **the margins are not monotonic.**
+  `composition_overhead_under_ten_percent` went `1.182×` → `1.592×` →
+  `1.527×` across the three runs, and in this run alone it reports
+  `1.450×` in `03-lib` and `1.527×` in `04-lib-crdt`. Only
+  `criterion_1`'s three points rise monotonically (`1.343883ms`,
+  `1.689259ms`, `2.269247ms`), and three points with one load reading
+  is not a dose-response;
+* **an earlier version of this write-up said "a load average of 34
+  explains it without any help."** That overstates it. Severe unrelated
+  load was present; whether it produced these particular margins is
+  unmeasured.
+
+**What it does change:** for U6, "one loaded machine" stops being a
+hypothesis offered in good faith and becomes a **quantity on the
+record** — a second data point for the correlation U7's reading started.
+It retires nothing: **U15 itself**, U6, U7, U14 and R1 all keep their
+dispositions, and the budgets remain wall-clock assertions whose
+measurement design nobody has defended.
+
+**Reruns: green in isolation** — `composition_overhead…` `1 passed`,
+and the `dired_acceptance` selector had already been shown green in
+isolation by U7. Intermittence only, per the rerun rule.
+
+### U16 — a git invocation finds its working directory deleted
+
+Recorded on the CRDT identity-undo lane, 2026-08-31, local (Linux),
+`scripts/gate` log `20260831T083021Z-272257`, step `07-sweep`, **and
+again the same day** — see the second occurrence below. **Not a budget
+row** — nothing here is a clock. It is the only row in this file that
+arrives with a **named candidate mechanism inside the test suite**,
+which is why it was worth recording before it had reproduced.
+
+| field | value |
+|---|---|
+| **selector** | `--lib packages::fetcher::tests::cache_survives_across_fetcher_instances` |
+| **job / flavor** | local (Linux), `scripts/gate` step `07-sweep` (`cargo test --workspace --no-fail-fast`) |
+| **required fragments** | `Unable to read current working directory: No such file or directory` + `remote did not send all necessary objects` |
+| **status** | **SECOND OCCURRENCE 2026-08-31 — it reproduced, in the same step, with the same fragments** |
+| **what IS established** | the fragments, captured from the durable stage log at `src/packages/fetcher.rs:929`. `1989 passed; 1 failed`. The test spawns `git` against a `file://` remote in a temp dir |
+| **what is NOT** | that the mechanism below is what happened. It is a candidate with a citation, not a demonstrated chain |
+| **the observing tree** | the lane's docs-only commit. It touches `src/packages/` not at all |
+
+**The candidate mechanism, and the load-bearing step is CHILD
+INHERITANCE.** An earlier version of this row stopped at "the window
+exists", which misses why restoring the cwd does not close it:
+
+1. `src/file_io.rs:434` — `bare_filename_saves_in_cwd` — calls
+   `std::env::set_current_dir(dir.path())`, mutating **process-global**
+   state and pointing it at a `TempDir`;
+2. concurrently, `cache_survives_across_fetcher_instances` reaches
+   `f1.fetch(&url)` (`fetcher.rs:929`), which clones via `run_git`
+   (`:305`). `run_git` calls `run_git_inner(None, …)`, and
+   `run_git_inner` (`:322`) sets `cmd.current_dir` **only when `cwd` is
+   `Some`** — `if let Some(d) = cwd { cmd.current_dir(d); }`,
+   `:329`–`:330`. With `None`, **the spawned `git` INHERITS the
+   parent's cwd** — the temp directory;
+3. the parent then restores its own cwd. **That does nothing for the
+   child**, which already has its working directory;
+4. the `TempDir` drops. `git` is now a live process whose cwd is a
+   **deleted directory**, and `fatal: Unable to read current working
+   directory` is exactly what that produces.
+
+So the restore in `bare_filename_saves_in_cwd` is not merely
+insufficiently early — it is **irrelevant to the child**, which is why
+care inside that one test cannot close this.
+
+**What would settle it**, and neither has been run:
+
+* run the two selectors concurrently in a tight loop until the failure
+  reproduces, which converts the candidate into a demonstration;
+* or make the hazard structural rather than probabilistic. **A serial
+  guard around `set_current_dir` tests is NOT one of the options**, and
+  an earlier version of this row offered it: the child outlives the
+  guard, so any unguarded test that spawns a process inheriting the cwd
+  is still exposed. What does work:
+  * **remove the process-global mutation** — `bare_filename_saves_in_cwd`
+    exists to check that a bare filename resolves against the cwd, and
+    `save_atomic` could take the directory rather than inheriting it;
+  * **run that test in a subprocess**, so its cwd is its own;
+  * **serialize the whole lib-test binary** (`--test-threads=1`), which
+    removes the concurrency the race needs — at the cost of the whole
+    binary's wall clock, and note U17, where that same flag is a
+    candidate for causing a different failure.
+
+**Reruns: green in three isolated runs of the selector, and in EIGHT
+full parallel `cargo test --lib` runs** (1990 passed each). Per this
+file's rerun rule that establishes **intermittence, and nothing more**.
+An earlier version added "and here it also says the window is narrow" —
+**it does not**. Non-reproduction over eight runs says the failure did
+not recur in eight runs. It says nothing about the width of *this
+candidate's* window, which no measurement here has sized.
+
+**SECOND OCCURRENCE, 2026-08-31, log `20260831T174104Z-3438184`, step
+`07-sweep`** — same selector, same panic site `fetcher.rs:929`, both
+required fragments, `1988 passed; 2 failed`. **This is the first time
+the row has reproduced, and it settles the point above in the right
+direction**: withdrawing "the window is narrow" was correct, because
+eight green runs had not measured it, and the failure returned within
+the day. The candidate mechanism in §"child inheritance" above is
+unchanged and still a candidate — nothing in this occurrence
+demonstrates the chain either.
+
+**And it passed again immediately after**, in all three stages of the
+next gate run — `03-lib`, `04-lib-crdt` and the same `07-sweep` context
+— at `ea786a2`, log `20260831T174716Z-3535694`. Two reds and many greens
+**all on 2026-08-31**: **intermittent**, at a rate nothing here has
+measured. *(An earlier version said "across two days"; every run cited
+by this row is the same day, as the sentences above it already said.)*
+
+**Not folded into U14 or U15.** Different selector, different fragments,
+different step, and a different kind of failure: those are wall-clock
+budgets under load, this is a race over process-global state. U14's
+`acc34_purge` readiness failure is the nearest relative in kind, and even
+that is a different mechanism.
+
+### U17 — a supersede race lost the OTHER way, on `main`, single-threaded
+
+Surfaced 2026-08-31 by the **merge-base control dispatched for R6's
+second occurrence** — so it is a red on `main` at `aae5b35`, on no
+branch at all.
+
+**An earlier version said "no PR run can show this." That is wrong**: a
+PR run exercises the same test and could fail it identically. What only
+a `main`-side run can establish is that it fails **on `main`** — that
+there is no observing branch to suspect — and that is the distinction
+the dispatch actually bought.
+
+| field | value |
+|---|---|
+| **selector** | `--test m8_1_acceptance read_dir_supersede_cancels_in_flight_predecessor` |
+| **job / flavor** | GitHub Actions, `Test (crdt)`: `cargo test --all-targets --no-default-features --features luajit,crdt -- --test-threads=1` |
+| **required fragments** | `first read_dir must be superseded; got ok` |
+| **status** | **new incident, one occurrence, ON `main`** |
+| **what IS established** | `9 passed; 1 failed`, panic at `tests/m8_1_acceptance.rs:278`, [run 33375945966](https://github.com/levineuwirth/pmacs/actions/runs/33375945966) job 99437344558, head `aae5b35` |
+| **what is NOT** | any mechanism. The candidate below is a reading of the assertion, not a diagnosis |
+| **attribution** | **none available, and none needed** — `aae5b35` is `main`. There is no observing branch to suspect |
+
+**It fails the OPPOSITE way to R1 and R5, and that is the interesting
+part.** Both of those are **deadline** failures — a cancellation that
+did not arrive in time (`supersede did not cancel within 50ms`, `async
+pump deadline exceeded`). This one reports `got ok`: the first
+`read_dir` **completed successfully** rather than reporting cancellation.
+
+**What `got ok` proves, precisely:** the predecessor **completed
+successfully before the cancellation took effect**. It does **not**
+establish when the supersede arrived — an earlier version of this row
+said "it arrived after there was nothing left to supersede", which
+assumes a late arrival the assertion cannot see. A supersede that
+arrived in time and whose cancellation simply did not take effect first
+produces the identical message.
+
+**Candidate mechanism, stated as one — and stated smaller than an
+earlier version had it.** The job runs **`--test-threads=1`**, which
+serializes the **test functions inside one libtest executable**. A test
+that supersedes a job "in flight" depends on the predecessor still being
+in flight, and removing sibling test functions from the same process
+**removes one source of contention** for it.
+
+That is all it supports. The earlier wording said the predecessor is at
+its *fastest* and the window at its *narrowest*; neither follows. Other
+contention remains — the rest of the machine, the CI runner's own load,
+and every other process — and nothing here measured the predecessor's
+duration with the flag on versus off. It is **not** a diagnosis, and
+nothing rules out a real supersede defect.
+
+**Worth noting for U9 — and NOT as an instance of its control.** An
+earlier version said this job "already does" what U9's control asks. It
+does not, and the distinction is the whole point of U9's premise:
+**`--test-threads=1` serializes test FUNCTIONS within one executable; it
+does not pin test-BINARY concurrency.** Those are different knobs. See
+the correction recorded against U9 and U12 below, which is larger than
+this note.
+
+**Not R1 and not R5**, on this file's own matching rule: different
+selector, different module, different assertion. R5's row draws exactly
+this distinction against R1 and the same reasoning applies again —
+sharing a subject is not sharing a signature.
+
+**No rerun was performed.** U3's lesson and R6's "never a green rerun"
+disposition both apply, and there is no branch here whose merge this
+would gate.
+
+### U18 — a Go module checksum fetch fails before anything is built
+
+Recorded on the CRDT identity-undo lane, 2026-08-31,
+`Test (ubuntu-latest / luajit)` on PR #246 at `a7c4b3a`
+([job 99499800716](https://github.com/levineuwirth/pmacs/actions/runs/33395769472/job/99499800716)).
+**A new class for this file: nothing was built and no test ran.** The
+job died in its toolchain-setup step.
+
+| field | value |
+|---|---|
+| **selector** | none — this is not a test. The failing step is `go install golang.org/x/tools/gopls@v0.16.2`, part of the LSP fixture setup |
+| **job / flavor** | GitHub Actions, `Test (ubuntu-latest / luajit)` |
+| **required fragments** | `sum.golang.org/tile/` + `stream error` + `INTERNAL_ERROR; received from peer`, while `verifying module: golang.org/x/telemetry` |
+| **status** | **new incident, one occurrence** |
+| **what IS established** | the failure is a **checksum-database read over HTTP/2**: `reading https://sum.golang.org/tile/8/0/x114/644: stream error: stream ID 41; INTERNAL_ERROR; received from peer`. `gopls@v0.16.2` and the `x/telemetry` pin both downloaded successfully first; only the sum-database verification failed. Job duration 1m45s, exit code 1 |
+| **what is NOT** | anything about this repository. **No `cargo` command ran**, no test executed, and the pinned versions are the point — the workflow comments say the pin exists so "CI behaviour" does not "drift with upstream releases" |
+| **attribution** | **none to the branch.** The step runs before any pmacs code is compiled, and the other 13 checks passed on the same head |
+
+**Why it gets a row at all.** Every other row here is a test that
+failed. This is **infrastructure the workflow depends on failing to
+answer**, and it presents as a red check indistinguishable from a real
+one at a glance. A future occurrence should be recognisable as this
+rather than investigated as a product defect, which is the whole
+purpose of a signature.
+
+**It is genuinely external, and that is a claim with a limit.** The
+fragments name `sum.golang.org` — Google's checksum database — returning
+an HTTP/2 stream error. Nothing in this repository can produce that.
+What this repository *does* control is whether a transient upstream
+outage fails a whole matrix leg, and that is a real question this row
+does not answer.
+
+**An earlier version of this paragraph listed three options, and all
+three were wrong.** They are corrected here rather than deleted:
+
+* **`GONOSUMCHECK` is not a Go environment variable.** It was invented
+  by that sentence;
+* **`GOFLAGS=-mod=mod` does not bypass checksum-database
+  authentication.** It selects the module *update* mode, which is a
+  different thing;
+* **vendoring does not follow from "a vendored `gopls`".** The step is a
+  version-suffixed `go install …@v0.16.2`, and that form **ignores
+  vendor directories**, so pinning that way needs a different
+  installation path entirely.
+
+**`GONOSUMDB` was thrown out with them, and should not have been.** It
+is real, and `go help environment` on the toolchain in this checkout
+documents `GOPRIVATE, GONOPROXY, GONOSUMDB` as glob patterns of module
+prefixes "that should always be fetched directly **or that should not be
+compared against the checksum database**" — precisely the step that
+failed here. So it is **technically applicable**. Whether exempting a
+dependency from checksum verification is an acceptable authentication
+tradeoff to buy CI stability is a real question, and a different one
+from whether the knob exists. The same page notes `GOINSECURE` does
+**not** disable that validation, which is the kind of near-miss that
+made the original sentence wrong.
+
+**The options that stand, then:** `GONOSUMDB`/`GOPRIVATE` with the
+tradeoff stated, or **retrying the step**. Choosing between them is not
+this lane's work. Both directions of this paragraph's history are
+recorded because both were errors: **inventing an environment variable
+to fill a sentence**, and then **discarding a real one while correcting
+it**.
+
+**No rerun was performed**, and deliberately: U3's lesson is to read the
+log first, and the log is now read and quoted above. Whether a rerun
+would pass is uninteresting — a transient network error is *expected* to
+pass on retry, and doing so would establish nothing while destroying
+nothing either. It is left for whoever next pushes to this branch.
+
+### U19 — a terminal bell is not observed within a 5s poll
+
+Recorded on the CRDT identity-undo lane, 2026-08-31, local (Linux),
+`scripts/gate` step `07-sweep`, log `20260831T174104Z-3438184` — the
+**same run** that produced U16's second occurrence, and recorded
+separately because the selectors and fragments differ.
+
+| field | value |
+|---|---|
+| **selector** | `--lib daemon::tests::terminal_bell_baseline_suppresses_history_and_delivers_each_new_bell_once` |
+| **job / flavor** | local (Linux), `scripts/gate` step `07-sweep` (`cargo test --workspace --no-fail-fast`) |
+| **required fragments** | `initial terminal bell timed out` |
+| **status** | **new incident, one occurrence** |
+| **what IS established** | panic at `src/daemon.rs:5296`, `1988 passed; 2 failed`. The assertion is a **5-second poll**: `while bell_count(buffer_id) != Some(1) { tick_processes(); assert!(Instant::now() < deadline); sleep(10ms) }` (`src/daemon.rs:5293`–`:5298`) |
+| **what is NOT** | whether the bell never arrived or arrived late. The loop cannot tell those apart, and **the panic reports no elapsed value** — R1's complaint about its own assertion, in a second place |
+| **the observing tree** | a documentation-only commit |
+
+**It is a deadline, but a much slacker one than the budget family's.**
+U6, U7, U9, U10, U12 and U15 assert that work finishes *fast* — 1ms,
+1.10×, 200ms. This one allows **five seconds** for an event to be
+observed at all: 5000× the 1ms budget, but only **25×** the 200ms one.
+*(An earlier version said "three orders of magnitude", which does not
+hold against the 200ms row it was comparing to.)* Folding this into that
+family would still blur a real distinction, but the distinction is one
+of degree, not of kind.
+
+**What the evidence supports is narrower than the earlier wording.** It
+shows that **no bell was observed within five seconds** — not that the
+bell "never comes", and **not that scheduling cannot explain it**. Five
+seconds is a long time on an idle machine and a short one on a loaded
+one, and nothing here measured which this was.
+
+**What it shares with R1 is the missing measurement.** `Instant::now()`
+is in hand at the panic and the message reports none of it, so **this**
+occurrence's margin is unrecoverable — exactly what R1's row records
+about itself, and what U11 cost this project once already. **Adding the
+elapsed value would not make a future occurrence comparable to this
+one** — that margin is gone for good. It would make future occurrences
+comparable **to each other**, which is the whole of what the change buys
+and is still worth having.
+
+**Reruns: it PASSED in all three stages of the next gate run** — `03-lib`,
+`04-lib-crdt` and the exact `07-sweep` context it failed in — at
+`ea786a2`, log `20260831T174716Z-3535694`. **So it is intermittent.**
+An earlier version of this row said "no rerun was performed"; the very
+next gate run was one, and the row said otherwise until review caught
+it. Per this file's rerun rule, three green runs establish
+**intermittence only**.
 
 ### U13 — gate prune-reporting row receives empty child stdout in `sweep`
 

@@ -301,66 +301,214 @@ waits for a signal that is not coming.
 - **THE FIRST DISPATCH IMMEDIATELY FOUND A RED ON `main`**, which is
   what this lane was built for. See the proptest entry below.
 
-## CRDT identity-replace undo — the proptest invariant may be MIS-SCOPED — NEEDS A LANE
+## CRDT identity-replace undo — LANE TAKEN, PR #246 OPEN
 
-**CORRECTION.** An earlier version of this entry called the dispatched
-run's red "a DETERMINISTIC red" and "not like anything else in this
-registry — a property violation with a concrete witness, not a load
-artefact", and proposed committing the proptest seed as the first
-step. **All of that was wrong**, and it was wrong because I recorded a
-finding without checking whether `main` already documented it.
+**Branch `crdt-identity-undo`, PR #246, based on `aae5b35`.** Framing
+`docs/crdt-identity-undo-framing.md`, **APPROVED at revision 4** after
+four review rounds, then **revision 5** as a correction pass answering
+implementation review.
 
-**It is a randomly sampled recurrence of known #157 behaviour.**
-`src/buffer.rs:3005` carries an `#[ignore]`d deterministic fixture,
-`crdt_undo_of_an_identity_replace_reports_a_no_op_edit_carrying_an_op`,
-which reduces this exact case and records its mechanism:
+**Every head of this branch is gated head-exact**, with `HEAD` and
+`git status --porcelain` captured before and after each run and
+identical. The two that matter:
 
-1. the inserts produce `aaaaa `;
-2. `Replace(5, 1, " ")` replaces the trailing space **with itself** — a
-   textual no-op but a real CRDT delete-plus-insert;
-3. `Undo` therefore emits a **version-advancing CRDT operation with no
-   visible text change**, and `derive_replacement_edit` yields an empty
-   edit that still carries its `crdt_op`.
+| commit | what it carries | gate | CI |
+|---|---|---|---|
+| `2c24303` | the code, and the framing at revision 5 | all 8 green, `20260830T193305Z-4167110`, loadavg 0.90 | 14/14 |
+| `6ddce0f` | the registry corrections (U14/U15 split, load claim narrowed) | all 8 green, `20260830T201908Z-84597` | 14/14 |
 
-**Committing the seed is NOT the first step**, and proposing it was a
-second error: it duplicates a deterministic fixture that already
-exists, and its only effect would be to make a disputed assertion fail
-permanently instead of occasionally.
+**This line goes stale the moment another commit lands, which is the
+defect review already caught here once** — it named `db24ae3` long after
+the branch had moved past it. It is written as a table so the next
+update is an added row rather than a rewrite.
 
-**What the fixture already verified**, so the lane does not redo it:
-content stays correct (rope and CRDT projection agree), replicas stay
-converged (**the op IS broadcast** — both `crdt_op` consumers read it
-unconditionally and neither short-circuits on an empty range), and the
-cursor does not jump.
+**The decision, ruled:** a visible TEXT delta and a CRDT-VERSION delta
+are **independent dimensions** of `Edit`. The invariant is keyed on
+**provenance**, and enumerated over three axes rather than defaulted:
+an **empty text delta** is a shape both paths reach, and `crdt_op` is
+what separates them — `None` forward (the three syntactically empty
+`EditOp` forms short-circuit at `is_no_op_edit`), `Some` from
+`undo`/`redo`, **required** there, because the op is the whole content
+of such an edit.
 
-**THE ACTUAL DECISION** is whether a **visible text delta** and a
-**CRDT-version delta** are independent dimensions of `Edit`. The
-proptest's invariant assumes they are the same dimension. It was
-written for the FORWARD `apply_edit` short-circuit, which returns
-before producing an op at all — and **CRDT-mode undo/redo never reach
-that path**.
+**Revision 5 fixed three things review caught in the implementation:**
 
-**What the lane owes as evidence:**
+- the predicate **conflated the empty text delta with a version delta**,
+  calling every empty-range/zero-insertion edit `version_only` and then
+  accepting `(History, empty, None)` through a wildcard — contradicting
+  the lane's own "the op must survive". It is now a full enumeration,
+  and C5 asserts all four empty-delta quadrants instead of two. **Both
+  new quadrants were mutation-checked, and neither is caught by the
+  proptest** — no generated input reaches either;
+- the **public `Edit` doc was factually false**: it said forward
+  `apply_edit` never produces the empty-delta shape, while C2b proves
+  all three forward empty forms do;
+- **R7's write-up overstated what the paired gate runs exclude.** They
+  exclude the source tree. They do not narrow the cause to three
+  candidates — scheduler load, kernel and socket timing, and unrelated
+  machine state all varied too, and a `BrokenPipe` on a socket handshake
+  is exactly what those can drive.
 
-- **forward textual no-ops still produce NO operation** — whatever the
-  resolution, the short-circuit the invariant was actually written for
-  must keep holding;
-- **any permitted empty-text undo operation carries valid bytes and
-  preserves remote replay convergence** — permitting the shape must not
-  become permitting a malformed op;
-- **an explicit disposition of the arbitrary artifact**:
-  `derive_replacement_edit` reports the empty range at the **buffer
-  end** rather than at the edit site. The fixture calls this genuinely
-  arbitrary either way; the lane must say which it is choosing, not
-  leave it unexamined.
+**A GATE COVERAGE GAP, found the expensive way.** The local gate's
+clippy step is `cargo clippy --workspace --all-targets -- -D warnings`
+— **default features**, so **no `#[cfg(feature = "crdt")]` code is ever
+linted locally**. CI lints it (`--no-default-features --features
+luajit,crdt`), so a crdt-only lint passes eight green gate stages and
+then reds `Test (crdt)`. That is what happened here: a
+`clippy::match_same_arms` on the new enumeration, invisible to five
+consecutive local gate runs.
 
-**Un-ignoring that fixture is the first step of whichever resolution
-wins**, as its own doc comment says.
+The lint itself is `#[allow]`ed with a reason — collapsing the three
+`Ok(())` arms is exactly the conflation this lane removes, and would
+hide that `(forward, empty, None)` and `(history, empty, Some)` are
+valid for opposite reasons. **The gap is not fixed here**: adding a
+second clippy flavor to `scripts/gate` is a change to shared
+infrastructure and belongs in its own lane. Recorded so the next lane
+touching crdt-gated code does not rediscover it at CI.
 
-**Why it is worth a bounded interruption:** a mis-scoped property can
-now randomly redden `main`, and the dispatched run proved it. **It does
-NOT reorder the roadmap** — GUI arc 1b remains the next product lane
-per `COHERENCE.md` §20's priority order.
+**NINE registry rows moved on this lane** — R7, R6, U6, U14, U15, U16,
+U17, U18 and U19. *(This heading said "four" while listing more; corrected.)*
+
+- **R7's eleventh and TWELFTH occurrences** — the eleventh is the
+  green/red pair whose heads differ by one markdown file, which excludes
+  the SOURCE TREE and nothing more; an earlier write-up of mine narrowed
+  the cause to three gate-state candidates and that overstatement is
+  withdrawn in the row. **The row's numbering was wrong twice over**: it
+  carried TWO blocks labelled "fourth" (D3 2026-08-11, TMPDIR
+  2026-08-13), **and** two full-fragment occurrences of 2026-08-15 sat
+  in this file marked "owed to the registry" and were never absorbed.
+  Renumbered by date with both fixed, and the row's summary now states
+  the total and which `attach.rs` line each group reports;
+- **U6 went from one occurrence to five** — four on 2026-08-30, two out
+  of gate and two in. Its first reproduction ever. **A direction claim I
+  made here ("runs the OPPOSITE way to R7", resting on four green
+  `04-lib-crdt` stages) was falsified by the next gate run and is
+  withdrawn in the row;**
+- **U14, new** — four selectors across **four** unrelated subsystems
+  (async runtime, optimistic orchestration, editor composition, LSP
+  dispatch) red in one gate run, spread over three stages;
+- **U15, new** — the rotated cluster 40 minutes later. It carries a
+  single `/proc/loadavg` reading of **34.04**, which makes severe
+  unrelated load a **measured presence contemporaneous with a multi-red
+  run — not a measured cause.** The reading is one point taken after the
+  fact and the margins are not monotonic
+  (`composition_overhead` ran 1.182x, 1.592x, 1.527x), so no
+  dose-response is claimed. **It is the first contemporaneous load
+  reading for a U6 occurrence, and a second data point beside the one
+  U7 has carried since 2026-08-09** — not this registry's first. Two
+  earlier versions of that write-up overreached: one said a load average
+  of 34 "explains it without any help", the other that U6 and U7 had
+  both wanted a number since August. Both are corrected in place.
+
+- **U16, new** — a `git` invocation in `packages::fetcher` found its
+  working directory **deleted**. Not a budget: the only row in the
+  registry that arrives with a **named candidate mechanism inside the
+  test suite**, and the load-bearing step is **child inheritance**.
+  `src/file_io.rs:434` mutates process-global cwd; concurrently
+  `run_git` calls `run_git_inner(None, …)`, which sets `current_dir`
+  only when `cwd` is `Some` (`fetcher.rs:329`–`:330`), so the spawned
+  `git` **inherits** the temp cwd. **Restoring the parent's cwd does
+  nothing for that child**, and the `TempDir` then drops underneath it.
+  Candidate, not a demonstrated chain — 8 full parallel `--lib` runs did
+  not reproduce it, which establishes **intermittence and nothing
+  more**. The controls that would settle it are in the row and **none is
+  run here**; note that a serial guard around `set_current_dir` tests is
+  *not* among them, since the child outlives the guard. The structural
+  fix belongs to whoever owns `file_io`, not to a CRDT invariant lane.
+
+- **R6's SECOND occurrence** — 26 days after the first, macOS `lua54`,
+  a **full three-condition match** including both required fragments.
+  **The log was read before anything was rerun**, which is U3's lesson
+  and U8's fourth-violation warning finally honoured on a macOS job. A
+  **merge-base control was dispatched** at `aae5b35` rather than
+  arguing from an unrelated diff. **Not the `workflow_dispatch` key's
+  first use** — #245's own D2/D3 witnesses dispatched three runs right
+  after it merged — but **the first use for a live merge-base
+  control**, which is the case U11 motivated it for. It came back **green on the macOS legs**, so the
+  inference it could have supplied is **unavailable**; recorded as a
+  null result, as R1's row had to record its own;
+- **U16 REPRODUCED** — second occurrence 2026-08-31, same step, same
+  fragments. It settles the earlier withdrawal in the right direction:
+  "the window is narrow" was wrong to claim from eight green runs, and
+  the failure returned within the day. The child-inheritance chain
+  stays a candidate; this occurrence demonstrates it no more than the
+  first did. **It then passed in all three stages of the next gate
+  run** — two reds and many greens **all on 2026-08-31**, intermittent at
+  a rate nothing has measured.
+- **U19, new** — `terminal_bell_baseline_…` timed out on a **5-second**
+  poll, in the same run as U16's second. The evidence is that **no bell
+  was observed within five seconds** — not that one never came, and not
+  that scheduling cannot explain it. A much slacker deadline than the
+  budget family's (5000× the 1ms budget, but only **25×** the 200ms
+  one), so the distinction is of degree rather than kind. Like R1, **its
+  assertion reports no elapsed value**, so **this** margin is gone for
+  good; adding it later would make future occurrences comparable **to
+  each other**, not to this one. **It passed in all three stages of the
+  next gate run**, so it is intermittent.
+- **U18, new** — `Test (ubuntu-latest / luajit)` died in **toolchain
+  setup**, before any `cargo` command ran: `go install gopls@v0.16.2`
+  hit `INTERNAL_ERROR` from `sum.golang.org` while verifying
+  `x/telemetry`. A new class for the registry — every other row is a
+  test that failed; this is infrastructure the workflow depends on
+  failing to answer, and it presents as a red check indistinguishable
+  from a real one. No attribution to the branch is possible: the step
+  precedes compilation, and the other 13 checks passed on the same head.
+  **Not rerun** — a transient network error is expected to pass on
+  retry, which would establish nothing.
+- **U17, new** — that same control run **redded `Test (crdt)` on `main`
+  at `aae5b35`**: `read_dir_supersede_cancels_in_flight_predecessor`,
+  `first read_dir must be superseded; got ok`. It fails the **opposite**
+  way to R1 and R5 — not a missed deadline. What `got ok` proves is
+  narrow: the predecessor **completed successfully before cancellation
+  took effect**, which does not say when the supersede arrived. The job
+  runs `--test-threads=1`, which serializes test **functions within one
+  executable** — **not** the test-**binary** concurrency U9's control
+  named, and cargo runs binaries serially anyway. A PR run could show
+  this failure too; what only a `main`-side run establishes is that it
+  fails **on `main`**, with no observing branch to suspect.
+
+U14 and U15 are two rows rather than one because the second run's
+selector set had **rotated**, and this registry matches on the exact
+set — recording it as a second U14 occurrence was a matching-rule
+violation, caught in review.
+
+**Two claims THIS BLOCK made are corrected by measurement:**
+
+- it said the fixture had verified that *"replicas stay converged — the
+  op IS broadcast"*. **That was inspection of the call sites, not
+  execution.** Nothing had ever replayed the op on a replica, and text
+  equality alone cannot detect a lost version advance — the drop-the-op
+  mutant leaves the text identical, and the failure that catches it
+  reads `version vector diverged undo`. C3 establishes convergence
+  properly, by seeding a replica with the forward ops first;
+- it said the buffer-end range location was *"genuinely arbitrary either
+  way"*. **The §4 census rules it**: five consumers inert, three
+  permitted, none harmed — and for `TextView`, the one whose cost
+  depends on the location, the buffer end is the **cheapest** rebuild.
+
+**What the four review rounds caught, none of it by me.** Revision 1
+posed the decision instead of answering it, and its C3 passed its own
+drop-op mutant. Revision 2's C4 contradicted the implementation
+(`mark_stale` is unconditional and range-independent) and named two
+consumers out of six. Revision 3's C4 claimed guard mutations that
+**survive** — at the buffer end, deleting the fold or style guard
+changes nothing — and its C9 guarded a file set and a count, which a
+same-file substitution walks straight through.
+
+**15 mutation checks were run, each on a clean tree and reverted.** All
+behaved as the framing predicted, including the two asymmetries the
+framing states rather than assumes: C2b is **masked** for the Insert and
+Delete forms by their defensive early returns (`buffer.rs:1177`,
+`:1192`) and **dies** for Replace, which has none; and C4b **survives**
+the style-guard deletion, which is why C4c injects an INTERIOR empty
+edit where the fragmenting is reachable.
+
+**Deliberately not done:** the proptest regression seed is NOT
+committed. It duplicates a deterministic fixture and would make a
+disputed assertion fail permanently rather than occasionally.
+
+**It does NOT reorder the roadmap.** GUI arc 1b remains the next product
+lane per `COHERENCE.md` §20.
 
 ### Superseded lane state, kept for the record
 
@@ -428,7 +576,7 @@ from #171 and #215.
   U13 is not this lane's and is left as recorded, but the pattern is
   now a pattern rather than an oversight, and each occurrence costs a
   review round to establish nothing.
-- **R7 gained its sixth and seventh occurrences here**, on a branch
+- **R7 gained its ninth and tenth occurrences here** (recorded at the time as its sixth and seventh; the row was renumbered on 2026-08-31 after two duplicate ordinals and two unabsorbed 2026-08-15 occurrences were found), on a branch
   touching no `pmacs-gpu` file, and the registry gained a **bounded
   observation window** so the in-gate/out-of-gate ratio cannot drift
   with review activity — plus a correction: seventeen green
@@ -518,10 +666,14 @@ from #171 and #215.
   the full 36-test binary both passed immediately afterwards —
   intermittence only. This lane changes neither the gate script nor
   that acceptance binary; diagnostic hardening is a separate lane.
-- **Still owed, separately:** `workflow_dispatch` on `ci.yml`, and U9's
-  discriminating control — pin test-binary concurrency to 1, then load
-  a lone `--lib` binary — which has been named since 2026-08-09 and
-  never run.
+- **Still owed, separately:** `workflow_dispatch` on `ci.yml` (**landed
+  as #245**), and U9's discriminating control — named since 2026-08-09,
+  never run, and now **VOID**: its premise that `cargo test --workspace`
+  runs many test binaries at once is false, cargo runs test targets
+  serially, so "pin test-binary concurrency to 1" pins something already
+  1. See the correction on U9 in `docs/ci-red-signatures.md`. **A
+  replacement control has to be designed**; the budget family no longer
+  has one written down.
 
 ## Panel-pointer replay (parent acceptance 48) — MERGED as #243 (`6c9bae6`)
 
@@ -1227,8 +1379,12 @@ from #171 and #215.
   branches' entries "merged **without a conflict**, producing duplicate
   ids across four sites". **The rows below are owed to the registry by
   whichever branch merges second**, numbered after the other's.
-  - **R7, two occurrences on this branch** (2026-08-15, `gpu` step,
-    logs `20260815T095532Z` and `20260815T100719Z`). Fragments verified
+  - **R7, two occurrences on this branch — ABSORBED 2026-08-31 as the
+    row's seventh and eighth** (2026-08-15, `gpu` step,
+    logs `20260815T095532Z` and `20260815T100719Z`). **They sat here
+    unabsorbed for sixteen days** while both branches merged, which is
+    why R7's count read two low; the deferral was reasonable, not
+    discharging it was not. Fragments verified
     both times: `transient sequence must attach: Attach(Handshake(Io(Os
     { code: 32, kind: BrokenPipe, message: "Broken pipe" })))` at
     `pmacs-gpu/src/attach.rs:1728`. One machine, one day, one branch,
@@ -1407,9 +1563,15 @@ from #171 and #215.
     load average **14.02 → 28.35**, from an unrelated `turso` test
     suite on the same machine (`./verify_task_state.sh
     turso-without-rowid`, target dir `/opt/target`, one test binary at
-    **693% CPU**). It is not a controlled experiment, but it is the
-    same evidence U9's synthetic-load control was meant to produce, and
-    it points at load. U9 stays owed; its value is now lower.
+    **693% CPU**). It is not a controlled experiment, and **an earlier
+    version of this bullet called it "the same evidence U9's
+    synthetic-load control was meant to produce" and said "U9 stays
+    owed". Both are withdrawn.** Uncontrolled foreign load is *not* the
+    same evidence as an experiment that applies load deliberately, and
+    U9's control is now **VOID** in its concurrency arm and a
+    non-discriminator in its load arm — see the correction on U9 in
+    `docs/ci-red-signatures.md`. What this reading is: a **named
+    confound**, recorded, pointing at load without establishing it.
   - **Two process traps this cost, both worth carrying forward.** The
     Bash tool caps a command at 10 minutes and SIGTERMs it, which the
     gate reports as `FAILED (exit 143)` on whatever stage was running —
@@ -1427,9 +1589,14 @@ from #171 and #215.
     only: no mechanism is claimed, and the standing leaked-daemon
     confound is uncontrolled as always.
   - **Cost, stated plainly:** four `--protocol` gate runs on one commit,
-    three of them lost to these two signatures. U9's synthetic-load
-    control remains unrun and is the cheapest thing that would either
-    implicate load or clear it.
+    three of them lost to these two signatures. **This sentence used to
+    add that U9's synthetic-load control "would either implicate load or
+    clear it". It would not.** With cargo running test targets serially,
+    U9's concurrency arm is void and there is no second arm to compare
+    against: a red under synthetic load shows load is **sufficient**, and
+    a green shows nothing — non-reproduction never clears anything under
+    this file's own rerun rule. See the correction on U9 in
+    `docs/ci-red-signatures.md`.
 - **Rustdoc split, FOUR occurrences on this branch** (`screen_size`,
   `peer_may_send_panel_events`, `send_panel_pointer`, and
   `SemanticRenderState`). Always the same mechanism: inserting an item
