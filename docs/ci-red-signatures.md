@@ -1220,16 +1220,32 @@ because it was false.** Every row in it is a wall-clock budget asserted
 inside a workspace-wide test run. This paragraph used to add that
 "`cargo test --workspace` starts many test binaries at once". **It does
 not. Cargo runs test targets SERIALLY, one executable at a time**, and
-this project's own gate logs measure it: in
-`20260831T093655Z-857818/07-sweep.log`, 119 `Running` markers and 121
-`test result:` lines alternate strictly — **zero** cases of one binary
-starting before the previous one reported. The pattern is `RTRTRT…`.
+this project's own gate logs measure it. In
+`20260831T093655Z-857818/07-sweep.log` (and reproduced on
+`20260831T130742Z-2805186`): **119 ordinary targets, each of which
+reports its result before the next one starts** — zero cases of one
+`Running` line following another. **The 121st and 122nd result lines are
+not targets**: they belong to the two doc-test groups, `Doc-tests pmacs`
+and `Doc-tests pmacs_protocol`, which cargo labels differently and runs
+after everything else. An earlier version of this paragraph called the
+whole thing "strictly `RTRTRT…`" with 119 and 121, which cannot be
+strict — the count itself gave it away.
 
 So the budgets do **not** compete with the rest of the sweep in the way
-this family assumed. What is still true is smaller: a sweep is a long
-sequence of binaries, so any budget inside it runs at an arbitrary point
-in a multi-minute step, on whatever the machine is doing then. A 4.5%
-overshoot on a 1ms budget remains not a signal about the code.
+this family assumed.
+
+**And the first replacement for that premise did not describe U9
+either.** It said a budget "runs at an arbitrary point in a multi-minute
+step". **U9's two selectors are both in the root lib target** —
+`m6_1_pty_raw_mode_disables_kernel_echo` (`src/process.rs:3945`) and
+`composition_overhead_under_ten_percent` (`src/editor.rs:9717`) — and
+the sweep runs that target **first**, finishing it in about 12 seconds
+of a multi-minute step. The sweep's later minutes cannot reach them.
+
+What survives is narrower still: **the sweep re-runs the lib target late
+in the overall gate invocation**, after `03-lib` and `04-lib-crdt` have
+already run it, under machine state nobody measured. A 4.5% overshoot on
+a 1ms budget remains not a signal about the code.
 
 **And U9's named control does not discriminate what it claimed** —
 "pin test-binary concurrency to 1" pins something that is *already* 1.
@@ -1295,11 +1311,19 @@ PTY selector.
 | **relation to U6** | its selector, alone again, in U6's own step. U6's instruction to judge that separately is honoured for the second time — see U9, which did the same |
 | **relation to U9** | the same budget-plus-PTY co-failure, in `04-lib-crdt` rather than `11-sweep`, with `setsid_escapee…` where U9 had `m6_1_pty_raw_mode…` |
 
-**This family has now produced U6, U9, U10 and U12, and the
-discriminating control U9 named is STILL UNRUN**: pin test-binary
-concurrency to 1, and separately load a lone `--lib` binary. Four
-incidents is enough evidence that the family will keep costing review
-rounds until someone runs it.
+**This family has now produced U6, U9, U10 and U12 — and the control
+U9 named no longer exists to run.** It had two halves. *Pin test-binary
+concurrency to 1* is **VOID**: cargo already runs targets serially, so
+it pins nothing (see U9). *Separately load a lone `--lib` binary under
+synthetic load* survives as an experiment but is **not a discriminator**
+— with concurrency fixed at 1 there is no second arm to compare against,
+so a red would show load is **sufficient** to produce one, and a green
+would show nothing at all. **It could never "clear" load**, and this
+file's own rerun rule says why.
+
+Four incidents is enough evidence that the family will keep costing
+review rounds. What it needs is a control someone designs, not the one
+written down.
 
 ### U14 — FOUR selectors red in ONE gate run, across three stages
 
@@ -1568,6 +1592,46 @@ sharing a subject is not sharing a signature.
 **No rerun was performed.** U3's lesson and R6's "never a green rerun"
 disposition both apply, and there is no branch here whose merge this
 would gate.
+
+### U18 — a Go module checksum fetch fails before anything is built
+
+Recorded on the CRDT identity-undo lane, 2026-08-31,
+`Test (ubuntu-latest / luajit)` on PR #246 at `a7c4b3a`
+([job 99499800716](https://github.com/levineuwirth/pmacs/actions/runs/33395769472/job/99499800716)).
+**A new class for this file: nothing was built and no test ran.** The
+job died in its toolchain-setup step.
+
+| field | value |
+|---|---|
+| **selector** | none — this is not a test. The failing step is `go install golang.org/x/tools/gopls@v0.16.2`, part of the LSP fixture setup |
+| **job / flavor** | GitHub Actions, `Test (ubuntu-latest / luajit)` |
+| **required fragments** | `sum.golang.org/tile/` + `stream error` + `INTERNAL_ERROR; received from peer`, while `verifying module: golang.org/x/telemetry` |
+| **status** | **new incident, one occurrence** |
+| **what IS established** | the failure is a **checksum-database read over HTTP/2**: `reading https://sum.golang.org/tile/8/0/x114/644: stream error: stream ID 41; INTERNAL_ERROR; received from peer`. `gopls@v0.16.2` and the `x/telemetry` pin both downloaded successfully first; only the sum-database verification failed. Job duration 1m45s, exit code 1 |
+| **what is NOT** | anything about this repository. **No `cargo` command ran**, no test executed, and the pinned versions are the point — the workflow comments say the pin exists so "CI behaviour" does not "drift with upstream releases" |
+| **attribution** | **none to the branch.** The step runs before any pmacs code is compiled, and the other 13 checks passed on the same head |
+
+**Why it gets a row at all.** Every other row here is a test that
+failed. This is **infrastructure the workflow depends on failing to
+answer**, and it presents as a red check indistinguishable from a real
+one at a glance. A future occurrence should be recognisable as this
+rather than investigated as a product defect, which is the whole
+purpose of a signature.
+
+**It is genuinely external, and that is a claim with a limit.** The
+fragments name `sum.golang.org` — Google's checksum database — returning
+an HTTP/2 stream error. Nothing in this repository can produce that.
+What this repository *does* control is whether a transient upstream
+outage fails a whole matrix leg, and that is a real question this row
+does not answer: `GOFLAGS=-mod=mod`, `GONOSUMDB`/`GONOSUMCHECK`, a
+vendored `gopls`, or simply retrying the step are all options with
+different costs, and choosing among them is not this lane's work.
+
+**No rerun was performed**, and deliberately: U3's lesson is to read the
+log first, and the log is now read and quoted above. Whether a rerun
+would pass is uninteresting — a transient network error is *expected* to
+pass on retry, and doing so would establish nothing while destroying
+nothing either. It is left for whoever next pushes to this branch.
 
 ### U13 — gate prune-reporting row receives empty child stdout in `sweep`
 

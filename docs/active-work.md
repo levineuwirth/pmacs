@@ -420,6 +420,16 @@ touching crdt-gated code does not rediscover it at CI.
   control**, which is the case U11 motivated it for. It came back **green on the macOS legs**, so the
   inference it could have supplied is **unavailable**; recorded as a
   null result, as R1's row had to record its own;
+- **U18, new** — `Test (ubuntu-latest / luajit)` died in **toolchain
+  setup**, before any `cargo` command ran: `go install gopls@v0.16.2`
+  hit `INTERNAL_ERROR` from `sum.golang.org` while verifying
+  `x/telemetry`. A new class for the registry — every other row is a
+  test that failed; this is infrastructure the workflow depends on
+  failing to answer, and it presents as a red check indistinguishable
+  from a real one. No attribution to the branch is possible: the step
+  precedes compilation, and the other 13 checks passed on the same head.
+  **Not rerun** — a transient network error is expected to pass on
+  retry, which would establish nothing.
 - **U17, new** — that same control run **redded `Test (crdt)` on `main`
   at `aae5b35`**: `read_dir_supersede_cancels_in_flight_predecessor`,
   `first read_dir must be superseded; got ok`. It fails the **opposite**
@@ -1544,9 +1554,14 @@ from #171 and #215.
     only: no mechanism is claimed, and the standing leaked-daemon
     confound is uncontrolled as always.
   - **Cost, stated plainly:** four `--protocol` gate runs on one commit,
-    three of them lost to these two signatures. U9's synthetic-load
-    control remains unrun and is the cheapest thing that would either
-    implicate load or clear it.
+    three of them lost to these two signatures. **This sentence used to
+    add that U9's synthetic-load control "would either implicate load or
+    clear it". It would not.** With cargo running test targets serially,
+    U9's concurrency arm is void and there is no second arm to compare
+    against: a red under synthetic load shows load is **sufficient**, and
+    a green shows nothing — non-reproduction never clears anything under
+    this file's own rerun rule. See the correction on U9 in
+    `docs/ci-red-signatures.md`.
 - **Rustdoc split, FOUR occurrences on this branch** (`screen_size`,
   `peer_may_send_panel_events`, `send_panel_pointer`, and
   `SemanticRenderState`). Always the same mechanism: inserting an item
