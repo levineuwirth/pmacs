@@ -269,9 +269,15 @@ nothing in the panel, process or terminal paths**. But "my diff looks
 unrelated" is not evidence, so
 [run 33375945966](https://github.com/levineuwirth/pmacs/actions/runs/33375945966)
 was dispatched at `aae5b35`, **the branch's exact merge base**, via the
-`workflow_dispatch` key #245 landed for precisely this. **This is that
-key's first real use**, and U11 — the row that motivated it — is why it
-exists.
+`workflow_dispatch` key #245 landed for precisely this.
+
+**It is NOT that key's first use, and an earlier version of this block
+said so.** #245's own owed witnesses D2 and D3 dispatched three runs
+(`33307137965`, `33308891808`, `33308921103`) immediately after it
+merged, and the first of those already found a red on `main`. What this
+is: **the first use for a live merge-base CONTROL** — a contemporaneous
+`main`-side run obtained to answer a specific branch-side red, which is
+the case U11 motivated the key for.
 
 **THE CONTROL LANDED GREEN on the macOS legs**, and the meaning was
 pre-registered above before the result was seen:
@@ -283,9 +289,10 @@ exactly what R1's row had to record about its own green control, and it
 is recorded the same way here: **a null result, not an exculpation.**
 
 **The control run was not otherwise clean, and that is its own finding.**
-`Test (crdt)` **failed on `main` at `aae5b35`** — see **U17**. A red on
-the merge base is not something a PR run can show you; it took a
-dispatch on `main` to see it at all.
+`Test (crdt)` **failed on `main` at `aae5b35`** — see **U17**. **A PR
+run can show the identical red**, and an earlier version of this block
+denied it; what only the `main` dispatch establishes is that the failure
+occurred **on the merge base**, with no observing branch to suspect.
 
 **Circumstantial alignment with U8, deliberately NOT a merge.** U8 has
 the same selector, panicking at the **same line** `:2454` with the
@@ -1179,7 +1186,7 @@ claim is the one a later reader would otherwise reach for.*
 | **status** | **one occurrence; INTERMITTENT — the identical sweep command on the same tree was green (118 targets, 1928 passed, exit 0)** |
 | **what IS established** | intermittence, with the strongest available exclusion of the tree: green in two earlier steps of the **same run**, green isolated afterwards (`2 passed`, 1.70 s), green on a full sweep rerun. Both assertions are **timing-sensitive by construction** — one reads collected child output within a deadline, the other measures wall-clock composition overhead (observed 1.613× against a 1.10× budget; 61.3% dispatch and 124.6% realistic overhead) |
 | **what is NOT** | cause, and the load confound is **partially measured but NOT controlled**. The failing sweep ran inside a full gate; the green rerun started at load average 1.98 with the 5-minute figure still at 8.03 from that gate. Different conditions is not a measurement of the mechanism, and this row does not treat it as one |
-| **the structural difference worth testing next** | `cargo test --workspace` runs **many test binaries concurrently**; `--lib` runs **one**. That is a difference in kind between the passing steps and the failing one, not merely a difference in load average — and it is the first candidate this family has had that is checkable rather than atmospheric. **Discriminating control:** rerun the sweep with test-binary concurrency pinned to 1, and separately run the `--lib` binary alone under synthetic load. A red under synthetic load at low sweep concurrency implicates load; a red at high concurrency and low load implicates the concurrency itself |
+| **the structural difference worth testing next — PREMISE FALSIFIED 2026-08-31** | This cell claimed `cargo test --workspace` runs **many test binaries concurrently** while `--lib` runs one, and derived a control from it: "pin test-binary concurrency to 1". **Cargo runs test targets SERIALLY**, one executable at a time, so that concurrency is already 1 and the control pins nothing. Measured in this project's own logs: `20260831T093655Z-857818/07-sweep.log` alternates `Running` and `test result:` strictly, 119 to 121, with **zero** overlapping starts. `--test-threads=1` is a *different* knob — it serializes test functions **within** one executable — and does not stand in for the control either. **The real difference between the steps is which binaries run and how long the whole step takes, not how many run at once.** A replacement control has to be designed; this row no longer has one |
 | **relation to U2 — a NEAR MISS, do not match it there** | the PTY fragment is U2's exact family (`stty -a output was: ""`), but U2's selector field names only `m6_1_pty_raw_mode_disables_kernel_echo`. U2's occurrence 2 saw raw **and** canonical fail together; here **canonical redded alone and raw passed**, which U2's evidence has never shown. It is recorded here rather than folded into U2 so that the "canonical alone" case stays visible |
 | **relation to U6 — its own instruction, honoured** | `composition_overhead_under_ten_percent` is one of U6's two selectors, and U6 says plainly: "If a future run reds **one** of these without the other, that is a different incident and should be judged as one." It redded without `criterion_1_end_of_line_typing…`, in a different step, at a far larger margin (1.613× here against U6's 1.297×). Judged as a different incident, as instructed |
 | **what this row does NOT assert** | that the two selectors share a mechanism. They failed together once; they belong to different subsystems; and U7 already refused this exact merge for U6. The **co-failure inside one step with an in-run green control** is the signature — not either name, and not a shared cause |
@@ -1208,15 +1215,27 @@ green in the other run**.
 | **relation to U6** | run B's selector is one of U6's two, redding **without** `composition_overhead_under_ten_percent`. U6 instructs that one-without-the-other is a different incident; honoured here |
 | **what this row does NOT assert** | a shared mechanism between the two rows, or any mechanism at all. **The signature is the rotation across an identical commit** — not either name |
 
-**Why this family keeps recurring, stated plainly.** Every row in it is
-a wall-clock budget asserted **inside a workspace-wide parallel test
-run**. `cargo test --workspace` starts many test binaries at once, so
-each budget competes with the rest of the sweep in **every** run,
-including the ones that pass. A 4.5% overshoot on a 1ms budget is not a
-signal about the code. **U9 already named the discriminating control**
-— pin test-binary concurrency to 1 and separately load a lone `--lib`
-binary — and it remains unrun. Until it runs, this family should not
-consume another review round.
+**Why this family keeps recurring — with its stated premise CORRECTED,
+because it was false.** Every row in it is a wall-clock budget asserted
+inside a workspace-wide test run. This paragraph used to add that
+"`cargo test --workspace` starts many test binaries at once". **It does
+not. Cargo runs test targets SERIALLY, one executable at a time**, and
+this project's own gate logs measure it: in
+`20260831T093655Z-857818/07-sweep.log`, 119 `Running` markers and 121
+`test result:` lines alternate strictly — **zero** cases of one binary
+starting before the previous one reported. The pattern is `RTRTRT…`.
+
+So the budgets do **not** compete with the rest of the sweep in the way
+this family assumed. What is still true is smaller: a sweep is a long
+sequence of binaries, so any budget inside it runs at an arbitrary point
+in a multi-minute step, on whatever the machine is doing then. A 4.5%
+overshoot on a 1ms budget remains not a signal about the code.
+
+**And U9's named control does not discriminate what it claimed** —
+"pin test-binary concurrency to 1" pins something that is *already* 1.
+See the correction on U9 itself. This family still should not consume
+another review round, but it now needs a control someone has to design,
+not one already written down.
 
 **Widening a budget is not the fix**, and R1 already rejected it.
 
@@ -1519,21 +1538,27 @@ assumes a late arrival the assertion cannot see. A supersede that
 arrived in time and whose cancellation simply did not take effect first
 produces the identical message.
 
-**Candidate mechanism, stated as one.** The job runs
-**`--test-threads=1`**. A test that dispatches a job and then supersedes
-it "in flight" depends on the predecessor still being in flight; with no
-other test competing for the runtime, the predecessor is at its
-*fastest*, and the window in which it can be superseded is at its
-narrowest. That is a reading of the assertion and the flag together — it
-is **not** a diagnosis, and nothing here rules out a real supersede
-defect.
+**Candidate mechanism, stated as one — and stated smaller than an
+earlier version had it.** The job runs **`--test-threads=1`**, which
+serializes the **test functions inside one libtest executable**. A test
+that supersedes a job "in flight" depends on the predecessor still being
+in flight, and removing sibling test functions from the same process
+**removes one source of contention** for it.
 
-**Worth noting for U9.** U9's still-unrun discriminating control is
-"pin test-binary concurrency to 1". This job **already does that**, in
-CI, on every run. That does not run U9's control — different binary,
-different selectors — but it does mean the single-threaded condition is
-not hypothetical in this project, and a row now exists where it may be
-load-bearing in the opposite direction from every budget row here.
+That is all it supports. The earlier wording said the predecessor is at
+its *fastest* and the window at its *narrowest*; neither follows. Other
+contention remains — the rest of the machine, the CI runner's own load,
+and every other process — and nothing here measured the predecessor's
+duration with the flag on versus off. It is **not** a diagnosis, and
+nothing rules out a real supersede defect.
+
+**Worth noting for U9 — and NOT as an instance of its control.** An
+earlier version said this job "already does" what U9's control asks. It
+does not, and the distinction is the whole point of U9's premise:
+**`--test-threads=1` serializes test FUNCTIONS within one executable; it
+does not pin test-BINARY concurrency.** Those are different knobs. See
+the correction recorded against U9 and U12 below, which is larger than
+this note.
 
 **Not R1 and not R5**, on this file's own matching rule: different
 selector, different module, different assertion. R5's row draws exactly

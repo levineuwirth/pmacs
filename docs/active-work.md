@@ -363,9 +363,8 @@ The lint itself is `#[allow]`ed with a reason — collapsing the three
 hide that `(forward, empty, None)` and `(history, empty, Some)` are
 valid for opposite reasons. **The gap is not fixed here**: adding a
 second clippy flavor to `scripts/gate` is a change to shared
-infrastructure and belongs in its own lane, alongside U9's still-unrun
-discriminating control. Recorded so the next lane touching
-crdt-gated code does not rediscover it at CI.
+infrastructure and belongs in its own lane. Recorded so the next lane
+touching crdt-gated code does not rediscover it at CI.
 
 **Four registry rows moved on this lane:**
 
@@ -415,9 +414,10 @@ crdt-gated code does not rediscover it at CI.
   **The log was read before anything was rerun**, which is U3's lesson
   and U8's fourth-violation warning finally honoured on a macOS job. A
   **merge-base control was dispatched** at `aae5b35` rather than
-  arguing from an unrelated diff — **the first real use of the
-  `workflow_dispatch` key #245 landed**, and exactly the case U11
-  motivated it for. It came back **green on the macOS legs**, so the
+  arguing from an unrelated diff. **Not the `workflow_dispatch` key's
+  first use** — #245's own D2/D3 witnesses dispatched three runs right
+  after it merged — but **the first use for a live merge-base
+  control**, which is the case U11 motivated it for. It came back **green on the macOS legs**, so the
   inference it could have supplied is **unavailable**; recorded as a
   null result, as R1's row had to record its own;
 - **U17, new** — that same control run **redded `Test (crdt)` on `main`
@@ -426,10 +426,11 @@ crdt-gated code does not rediscover it at CI.
   way to R1 and R5 — not a missed deadline. What `got ok` proves is
   narrow: the predecessor **completed successfully before cancellation
   took effect**, which does not say when the supersede arrived. The job
-  runs `--test-threads=1`, the condition **U9's still-unrun control
-  names**. A PR run could show this failure too; what only a `main`-side
-  run establishes is that it fails **on `main`**, with no observing
-  branch to suspect.
+  runs `--test-threads=1`, which serializes test **functions within one
+  executable** — **not** the test-**binary** concurrency U9's control
+  named, and cargo runs binaries serially anyway. A PR run could show
+  this failure too; what only a `main`-side run establishes is that it
+  fails **on `main`**, with no observing branch to suspect.
 
 U14 and U15 are two rows rather than one because the second run's
 selector set had **rotated**, and this registry matches on the exact
@@ -630,10 +631,14 @@ from #171 and #215.
   the full 36-test binary both passed immediately afterwards —
   intermittence only. This lane changes neither the gate script nor
   that acceptance binary; diagnostic hardening is a separate lane.
-- **Still owed, separately:** `workflow_dispatch` on `ci.yml`, and U9's
-  discriminating control — pin test-binary concurrency to 1, then load
-  a lone `--lib` binary — which has been named since 2026-08-09 and
-  never run.
+- **Still owed, separately:** `workflow_dispatch` on `ci.yml` (**landed
+  as #245**), and U9's discriminating control — named since 2026-08-09,
+  never run, and now **VOID**: its premise that `cargo test --workspace`
+  runs many test binaries at once is false, cargo runs test targets
+  serially, so "pin test-binary concurrency to 1" pins something already
+  1. See the correction on U9 in `docs/ci-red-signatures.md`. **A
+  replacement control has to be designed**; the budget family no longer
+  has one written down.
 
 ## Panel-pointer replay (parent acceptance 48) — MERGED as #243 (`6c9bae6`)
 
