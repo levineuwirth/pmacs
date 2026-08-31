@@ -432,14 +432,19 @@ U17, U18 and U19. *(This heading said "four" while listing more; corrected.)*
   "the window is narrow" was wrong to claim from eight green runs, and
   the failure returned within the day. The child-inheritance chain
   stays a candidate; this occurrence demonstrates it no more than the
-  first did.
+  first did. **It then passed in all three stages of the next gate
+  run** — two reds and many greens across two days, intermittent at a
+  rate nothing has measured.
 - **U19, new** — `terminal_bell_baseline_…` timed out on a **5-second**
-  poll for a bell that never arrived, in the same run as U16's second.
-  A deadline but **not** the budget family's kind — those assert work
-  finishes in 1ms or 200ms; this asserts an event arrives at all inside
-  five seconds. Like R1, **its assertion reports no elapsed value**, so
-  the margin is unrecoverable and a future occurrence will not be
-  comparable to it.
+  poll, in the same run as U16's second. The evidence is that **no bell
+  was observed within five seconds** — not that one never came, and not
+  that scheduling cannot explain it. A much slacker deadline than the
+  budget family's (5000× the 1ms budget, but only **25×** the 200ms
+  one), so the distinction is of degree rather than kind. Like R1, **its
+  assertion reports no elapsed value**, so **this** margin is gone for
+  good; adding it later would make future occurrences comparable **to
+  each other**, not to this one. **It passed in all three stages of the
+  next gate run**, so it is intermittent.
 - **U18, new** — `Test (ubuntu-latest / luajit)` died in **toolchain
   setup**, before any `cargo` command ran: `go install gopls@v0.16.2`
   hit `INTERNAL_ERROR` from `sum.golang.org` while verifying

@@ -596,7 +596,7 @@ Stage 4; the lane touches no `pmacs-gpu` code at all.
 | **job / flavor** | local (Linux), `cargo test --workspace --features crdt --no-fail-fast`, i.e. under full-sweep load |
 | **required fragments** | `transient sequence must attach` + `Handshake(Io(` + `BrokenPipe` (or `code: 32`) |
 | **status** | **TWELFTH OCCURRENCE 2026-08-31 — causal status still UNRESOLVED.** The eleventh carries the strongest tree exclusion this row has had, and it supersedes the sixth's: two consecutive gate runs on ONE worktree whose heads differ by a single markdown file, the first all-green and the second red. **NOTE: the numbering was wrong twice over.** The row carried TWO blocks labelled "fourth" (D3 on 2026-08-11, TMPDIR isolation on 2026-08-13), and **two further full-fragment occurrences of 2026-08-15 sat in `docs/active-work.md` marked "owed to the registry" and were never absorbed** (logs `20260815T095532Z`, `20260815T100719Z`). Renumbered by date with both defects fixed; the count below is the total |
-| **what IS established** | **TWELVE occurrences.** The line moves as `attach.rs` changes and this row treats a `:LINE` suffix as occurrence-specific: occurrences **one through four** report `pmacs-gpu/src/attach.rs:1680`, the sixth through eighth `:1728`, and the ninth through twelfth `:1889`. The second and third carry all three fragments **verified** rather than inferred; so do the seventh and eighth. The test drives a scripted transient-then-success sequence over a real socket pair. **The added GPU test is not the mechanism** — see the third-occurrence control below |
+| **what IS established** | **TWELVE occurrences.** The line moves as `attach.rs` changes and this row treats a `:LINE` suffix as occurrence-specific: occurrences **one through four** report `pmacs-gpu/src/attach.rs:1680`; the **fifth records no line at all** — its block never captured one, and it is marked unrecorded rather than guessed; **six through eight** report `:1728`; **nine through twelve** report `:1889`. The second and third carry all three fragments **verified** rather than inferred; so do the seventh and eighth. The test drives a scripted transient-then-success sequence over a real socket pair. **The added GPU test is not the mechanism** — see the third-occurrence control below |
 | **what is NOT** | whether the broken pipe is the *fixture's* writer closing early or a real retry-path defect. **This row is not a claim that it is harmless** |
 | **rerun evidence** | occurrence 1: 6 isolated runs green, plus a full `--workspace --features crdt` sweep green (113 targets). Occurrence 2: **30 green on the observing branch** (15 isolated selector, 15 full `-p pmacs-gpu`) **plus a 15-run merge-base control, also green**. Occurrence 3: 5 isolated selector runs green, 10 full `-p pmacs-gpu` runs green **with** the added test, and **1 failure in 10 with the added test `#[ignore]`d** — the first rerun in this row's history that reproduced anything. Per the rerun rule the green runs establish intermittence only; the red control run is what carries the exclusion |
 | **retirement** | hardening that removes the named mechanism plus a discriminating witness — or a diagnosis showing the fixture, not the code, closes the pipe |
@@ -717,8 +717,13 @@ failure — so this pair is not confounded by a truncation the way the
 ninth was.
 
 **Two consecutive in-gate failures is new for this row**, whose prior
-five were spread across lanes and months. It prompted a narrowing, and
-the narrowing is the useful part.
+**eight** were spread across lanes and weeks — **though not evenly**:
+three of the eight fall on 2026-08-15, on one branch and one machine.
+*(This sentence said "prior five … across lanes and months" until the
+renumbering of 2026-08-31; it was written before the 2026-08-15 pair was
+absorbed and before the duplicate "fourth" was found, and it was wrong
+about the count and the spread.)* It prompted a narrowing, and the
+narrowing is the useful part.
 
 **A THIRD IN-GATE RUN WAS GREEN** (head `68a16f9`, log
 `20260829T152024Z-563254`, all eight stages, zero failures anywhere).
@@ -1505,10 +1510,11 @@ isolation by U7. Intermittence only, per the rerun rule.
 ### U16 — a git invocation finds its working directory deleted
 
 Recorded on the CRDT identity-undo lane, 2026-08-31, local (Linux),
-`scripts/gate` log `20260831T083021Z-272257`, step `07-sweep`. **Not a
-budget row** — nothing here is a clock. It is the only row in this file
-that arrives with a **named candidate mechanism inside the test suite**,
-which is why it is worth more than its one occurrence.
+`scripts/gate` log `20260831T083021Z-272257`, step `07-sweep`, **and
+again the same day** — see the second occurrence below. **Not a budget
+row** — nothing here is a clock. It is the only row in this file that
+arrives with a **named candidate mechanism inside the test suite**,
+which is why it was worth recording before it had reproduced.
 
 | field | value |
 |---|---|
@@ -1579,6 +1585,12 @@ eight green runs had not measured it, and the failure returned within
 the day. The candidate mechanism in §"child inheritance" above is
 unchanged and still a candidate — nothing in this occurrence
 demonstrates the chain either.
+
+**And it passed again immediately after**, in all three stages of the
+next gate run — `03-lib`, `04-lib-crdt` and the same `07-sweep` context
+— at `ea786a2`, log `20260831T174716Z-3535694`. Two reds and many greens
+across two days: **intermittent**, at a rate nothing here has
+measured.
 
 **Not folded into U14 or U15.** Different selector, different fragments,
 different step, and a different kind of failure: those are wall-clock
@@ -1740,23 +1752,37 @@ separately because the selectors and fragments differ.
 | **what is NOT** | whether the bell never arrived or arrived late. The loop cannot tell those apart, and **the panic reports no elapsed value** — R1's complaint about its own assertion, in a second place |
 | **the observing tree** | a documentation-only commit |
 
-**It is a deadline, but not the budget family's kind.** U6, U7, U9, U10,
-U12 and U15 assert that work finishes *fast* — 1ms, 1.10×, 200ms. This
-asserts that an event **arrives at all** inside five seconds, which is
-three orders of magnitude of slack. A 4.5% overshoot on a 1ms budget is
-a scheduling story; a 5-second wait for a bell that never comes is not
-the same shape, and folding it into that family would blur the one
-distinction those rows have.
+**It is a deadline, but a much slacker one than the budget family's.**
+U6, U7, U9, U10, U12 and U15 assert that work finishes *fast* — 1ms,
+1.10×, 200ms. This one allows **five seconds** for an event to be
+observed at all: 5000× the 1ms budget, but only **25×** the 200ms one.
+*(An earlier version said "three orders of magnitude", which does not
+hold against the 200ms row it was comparing to.)* Folding this into that
+family would still blur a real distinction, but the distinction is one
+of degree, not of kind.
+
+**What the evidence supports is narrower than the earlier wording.** It
+shows that **no bell was observed within five seconds** — not that the
+bell "never comes", and **not that scheduling cannot explain it**. Five
+seconds is a long time on an idle machine and a short one on a loaded
+one, and nothing here measured which this was.
 
 **What it shares with R1 is the missing measurement.** `Instant::now()`
-is in hand at the panic and the message reports none of it, so this
+is in hand at the panic and the message reports none of it, so **this**
 occurrence's margin is unrecoverable — exactly what R1's row records
-about itself, and what U11 cost this project once already. **A future
-occurrence would be comparable to this one only if the assertion carried
-its elapsed value**, and it does not.
+about itself, and what U11 cost this project once already. **Adding the
+elapsed value would not make a future occurrence comparable to this
+one** — that margin is gone for good. It would make future occurrences
+comparable **to each other**, which is the whole of what the change buys
+and is still worth having.
 
-**No rerun was performed on this selector**, and the row does not claim
-intermittence it has not observed.
+**Reruns: it PASSED in all three stages of the next gate run** — `03-lib`,
+`04-lib-crdt` and the exact `07-sweep` context it failed in — at
+`ea786a2`, log `20260831T174716Z-3535694`. **So it is intermittent.**
+An earlier version of this row said "no rerun was performed"; the very
+next gate run was one, and the row said otherwise until review caught
+it. Per this file's rerun rule, three green runs establish
+**intermittence only**.
 
 ### U13 — gate prune-reporting row receives empty child stdout in `sweep`
 
