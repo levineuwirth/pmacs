@@ -1869,6 +1869,15 @@ struct State {
     /// selection, until release. Never sends `Pointer` events —
     /// the viewport is frontend-owned.
     minimap_scrub_active: bool,
+    /// GUI Stage 1b, Q#S1-11 clause 2: a horizontal wheel that
+    /// EFFECTIVELY moved the origin makes it authoritative, and the
+    /// caret follow leaves it alone until the cursor position actually
+    /// changes. A move fully absorbed by the clamp arms nothing.
+    manual_left_authority: bool,
+    /// GUI Stage 1b B1: per-target, per-axis fractional wheel residual.
+    /// Sub-tick deltas are banked here instead of being rounded away
+    /// before routing knows where they were going.
+    wheel_residuals: WheelResiduals,
     /// Q#M7 — `Some(±1)` while a drag sits in the top/bottom edge
     /// band; `about_to_wait` ticks the viewport one line toward the
     /// pointer per [`EDGE_SCROLL_TICK`] and re-runs the drag
@@ -2107,6 +2116,122 @@ enum PointerSurface {
     PanelBackground,
     /// Not the band: the document, the terminal, the minimap, or the chrome.
     Elsewhere,
+}
+
+/// The six wheel targets GUI Stage 1b's B1 owns a residual for.
+///
+/// **`PointerSurface` cannot name these**, which is why this exists
+/// (framing §2a CORRECTION 5): that classifier resolves panel geometry
+/// only, and collapses the document, the terminal, the minimap and the
+/// chrome into a single `Elsewhere` — three of which B1 and B6 must
+/// keep apart.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WheelTarget {
+    /// A cell inside the band. Residual **per panel**, keyed by the
+    /// panel's buffer.
+    PanelCell { buffer: BufferId, coord: CellCoord },
+    /// The divider or the band's background. **The band owns the
+    /// pixel**, so both axes are consumed — and nothing is banked.
+    PanelChrome,
+    /// The terminal clip. Residual **per terminal**, keyed by buffer.
+    Terminal { buffer: BufferId, coord: CellCoord },
+    /// The minimap band. **Its own** residual (B6).
+    Minimap,
+    /// Document text. Shares its residual with [`WheelTarget::Chrome`].
+    Document,
+    /// Anything else outside the band: gutter, margins, status chrome.
+    /// **Shares the document's residual, deliberately** — a wheel that
+    /// strays onto the gutter mid-gesture must not lose the motion.
+    Chrome,
+}
+
+/// Which accumulator a [`WheelTarget`] banks into.
+///
+/// Two targets map to `Document` on purpose, and one target maps to
+/// nothing at all: panel chrome consumes without banking, because a
+/// residual it could share with a cell would let motion over an inert
+/// strip complete a tick the moment the pointer entered a live one —
+/// **a surface-switch jump manufactured by the accumulator itself**,
+/// which is exactly what B1 exists to forbid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+enum ResidualOwner {
+    /// R2's identity: two panels are two owners.
+    Panel(BufferId),
+    /// R3's identity: two terminals are two owners.
+    Terminal(BufferId),
+    /// R5: independent of the document's, though it moves the document.
+    Minimap,
+    /// R4: the document's, shared with chrome.
+    Document,
+}
+
+impl WheelTarget {
+    /// The accumulator this target banks into, or `None` when it banks
+    /// nowhere.
+    fn residual_owner(self) -> Option<ResidualOwner> {
+        match self {
+            Self::PanelCell { buffer, .. } => Some(ResidualOwner::Panel(buffer)),
+            Self::Terminal { buffer, .. } => Some(ResidualOwner::Terminal(buffer)),
+            Self::Minimap => Some(ResidualOwner::Minimap),
+            Self::Document | Self::Chrome => Some(ResidualOwner::Document),
+            Self::PanelChrome => None,
+        }
+    }
+}
+
+/// B1's per-owner, per-axis fractional wheel residual.
+///
+/// **The producer 1b adds.** Before this, `apply_wheel` rounded to
+/// whole lines and returned on zero *before* it knew where the delta
+/// was going, so every sub-tick motion bound for the panel or the
+/// terminal was discarded by a decision taken upstream of routing.
+///
+/// Identity has two halves. The first is the key: a panel residual is
+/// keyed to *that* panel, so a gesture that crosses from panel A to
+/// panel B does not spend A's bank on B (R2, and R3 for terminals).
+/// The second is **disposal** — a residual keyed to a surface that goes
+/// away must go away with it, or it is spent on whatever later takes
+/// that identity.
+///
+/// **Disposal is NOT implemented yet, and is owed before this slice
+/// ships.** It needs a signal for "this panel/terminal buffer is gone",
+/// which this frontend does not currently track, and it needs its own
+/// witness. It is recorded here rather than stubbed, because a helper
+/// nothing calls reads as a contract met.
+#[derive(Debug, Default)]
+struct WheelResiduals {
+    /// `(owner) -> (x, y)` in fractional ticks, each in `(-1.0, 1.0)`.
+    banks: HashMap<ResidualOwner, (f32, f32)>,
+}
+
+impl WheelResiduals {
+    /// Bank `(dx, dy)` fractional ticks for `owner` and return the whole
+    /// ticks that fall out, keeping the remainder.
+    ///
+    /// `trunc`, not `round`: rounding would spend a half-tick that was
+    /// never delivered and leave a negative remainder behind.
+    fn accumulate(&mut self, owner: ResidualOwner, dx: f32, dy: f32) -> (i64, i64) {
+        let bank = self.banks.entry(owner).or_insert((0.0, 0.0));
+        bank.0 += dx;
+        bank.1 += dy;
+        let ticks_x = bank.0.trunc();
+        let ticks_y = bank.1.trunc();
+        bank.0 -= ticks_x;
+        bank.1 -= ticks_y;
+        (ticks_x as i64, ticks_y as i64)
+    }
+
+    /// Drop every panel bank. Panel chrome consumes both axes and must
+    /// leave nothing that could combine with cell input later.
+    fn clear_panels(&mut self) {
+        self.banks
+            .retain(|owner, _| !matches!(owner, ResidualOwner::Panel(_)));
+    }
+
+    #[cfg(test)]
+    fn bank_of(&self, owner: ResidualOwner) -> Option<(f32, f32)> {
+        self.banks.get(&owner).copied()
+    }
 }
 
 /// A live divider drag (Q#BP15a, parent acceptance 47).
@@ -3242,73 +3367,148 @@ impl App {
         }
     }
 
+    /// Resolve a pointer position to the wheel target that owns it.
+    ///
+    /// **This runs BEFORE quantization**, which is the whole point:
+    /// §2a CORRECTION 5 measured that rounding and the `lines == 0`
+    /// return happened upstream of routing, so a sub-tick delta bound
+    /// for the panel or the terminal was discarded before anything knew
+    /// where it was going.
+    ///
+    /// `Chrome` is the fallthrough rather than `Document` so the
+    /// enumeration stays total: every pixel outside the band is one of
+    /// terminal, minimap, document or chrome, and the first three are
+    /// each tested explicitly.
+    fn classify_wheel_target(&mut self, x: f64, y: f64) -> WheelTarget {
+        match self
+            .state
+            .as_ref()
+            .map(|s| s.classify_pointer_surface(x as f32, y as f32))
+        {
+            Some(PointerSurface::PanelCell(_)) => {
+                if let Some((_, _, buffer, coord)) = self.panel_pointer_hit(x, y) {
+                    return WheelTarget::PanelCell { buffer, coord };
+                }
+                // The band owns the pixel even when it maps to no cell.
+                return WheelTarget::PanelChrome;
+            }
+            Some(PointerSurface::PanelDivider | PointerSurface::PanelBackground) => {
+                return WheelTarget::PanelChrome;
+            }
+            Some(PointerSurface::Elsewhere) | None => {}
+        }
+        if let Some((buffer, coord)) = self.terminal_pointer_hit(x, y) {
+            return WheelTarget::Terminal { buffer, coord };
+        }
+        let Some(state) = self.state.as_mut() else {
+            return WheelTarget::Chrome;
+        };
+        if state.in_minimap_band(x, y) {
+            return WheelTarget::Minimap;
+        }
+        if state.hit_test_source_byte(x, y).is_some() {
+            return WheelTarget::Document;
+        }
+        WheelTarget::Chrome
+    }
+
     /// Perform [`PointerRoute::Wheel`].
+    ///
+    /// **GUI Stage 1b B1 reorders this pipeline.** It used to round to
+    /// whole lines and return on zero *before* consulting the pointer,
+    /// so a sub-tick delta bound for the panel or the terminal was
+    /// discarded by a decision taken upstream of routing. The order is
+    /// now: classify the target, bank the fractional delta against
+    /// **that target's** accumulator, and route only the whole ticks
+    /// that fall out.
     #[allow(clippy::too_many_lines)] // one linear gesture pipeline; splitting hides the order.
     fn apply_wheel(&mut self, delta: MouseScrollDelta) {
-        let Some(state) = self.state.as_mut() else {
+        let Some(state) = self.state.as_ref() else {
             return;
         };
-        // Wheel scroll is local-only: the GPU owns the
-        // viewport. Positive winit y = scroll up = smaller
-        // scroll_top.
-        let lines = match delta {
-            winit::event::MouseScrollDelta::LineDelta(_, y) => {
-                (-y * WHEEL_LINES_PER_TICK).round() as i64
+        // Fractional deltas, in the units each axis scrolls by: lines
+        // for y, columns for x. Positive winit y = scroll up = smaller
+        // scroll_top, hence the negation.
+        let line_height = state.fm.code_line_height();
+        let column_width = state.mono_advance();
+        let (dx, dy) = match delta {
+            winit::event::MouseScrollDelta::LineDelta(x, y) => {
+                (x * WHEEL_LINES_PER_TICK, -y * WHEEL_LINES_PER_TICK)
             }
-            winit::event::MouseScrollDelta::PixelDelta(p) => {
-                (-(p.y as f32) / state.fm.code_line_height()).round() as i64
-            }
-        };
-        if lines == 0 {
-            return;
-        }
-        // Bottom panel Stage 2B-3 — a wheel tick over the band scrolls
-        // the PANEL's window, which is daemon-side state, so it
-        // crosses the wire instead of moving this frontend's local
-        // document `scroll_top`. Falling through would scroll the
-        // document while the pointer is inside the panel.
-        if let Some((x, y)) = state.pointer_pos
-            && matches!(
-                state.classify_pointer_surface(x as f32, y as f32),
-                PointerSurface::PanelCell(_)
-            )
-        {
-            let mods = translate_mods(self.modifiers);
-            let kind = if lines < 0 {
-                ProtocolMouseKind::ScrollUp
-            } else {
-                ProtocolMouseKind::ScrollDown
-            };
-            self.send_panel_pointer_at(x, y, kind, mods);
-            return;
-        }
-        let Some(state) = self.state.as_mut() else {
-            return;
-        };
-        // Vterm Stage 3 — the terminal's scrollback belongs to
-        // the daemon-side view, not to this frontend's local
-        // scroll, so a wheel tick crosses the wire as a
-        // terminal gesture instead of moving `scroll_top`.
-        if state.terminal.is_some() {
-            if let Some((x, y)) = state.pointer_pos
-                && let Some((buffer_id, coord)) = self.terminal_pointer_hit(x, y)
-            {
-                let mods = translate_mods(self.modifiers);
-                let kind = if lines < 0 {
-                    ProtocolMouseKind::ScrollUp
+            winit::event::MouseScrollDelta::PixelDelta(p) => (
+                if column_width > 0.0 {
+                    p.x as f32 / column_width
                 } else {
-                    ProtocolMouseKind::ScrollDown
-                };
-                self.send_terminal_pointer(buffer_id, coord, kind, mods);
+                    0.0
+                },
+                if line_height > 0.0 {
+                    -(p.y as f32) / line_height
+                } else {
+                    0.0
+                },
+            ),
+        };
+        // No pointer position yet — a wheel before the first cursor
+        // motion. The document is the target, which is what this path
+        // did before 1b; dropping the input instead would be a
+        // regression B1 never asked for.
+        let (target, x, y) = match state.pointer_pos {
+            Some((x, y)) => (self.classify_wheel_target(x, y), x, y),
+            None => (WheelTarget::Document, 0.0, 0.0),
+        };
+
+        // The band owns the pixel: consume both axes and bank nothing.
+        // Panel banks are cleared so this motion can never combine with
+        // cell input later, which is the surface-switch jump B1 forbids.
+        if matches!(target, WheelTarget::PanelChrome) {
+            if let Some(state) = self.state.as_mut() {
+                state.wheel_residuals.clear_panels();
             }
             return;
         }
-        let vp = state.scroll_by_lines(lines);
-        if let Some(vp) = vp
-            && let Some(client) = self.attach_client.as_ref()
-            && let Err(e) = client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
-        {
-            eprintln!("pmacs-gpu: wheel send_viewport failed: {e}");
+        let Some(owner) = target.residual_owner() else {
+            return;
+        };
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        let (ticks_x, ticks_y) = state.wheel_residuals.accumulate(owner, dx, dy);
+        if ticks_x == 0 && ticks_y == 0 {
+            return;
+        }
+        let mods = translate_mods(self.modifiers);
+        match target {
+            WheelTarget::PanelChrome => unreachable!("consumed above"),
+            WheelTarget::PanelCell { .. } => {
+                for kind in wheel_kinds(ticks_x, ticks_y) {
+                    self.send_panel_pointer_at(x, y, kind, mods);
+                }
+            }
+            WheelTarget::Terminal { buffer, coord } => {
+                for kind in wheel_kinds(ticks_x, ticks_y) {
+                    self.send_terminal_pointer(buffer, coord, kind, mods);
+                }
+            }
+            WheelTarget::Minimap | WheelTarget::Document | WheelTarget::Chrome => {
+                if ticks_y != 0 {
+                    let vp = self
+                        .state
+                        .as_mut()
+                        .and_then(|state| state.scroll_by_lines(ticks_y));
+                    if let Some(vp) = vp
+                        && let Some(client) = self.attach_client.as_ref()
+                        && let Err(e) =
+                            client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+                    {
+                        eprintln!("pmacs-gpu: wheel send_viewport failed: {e}");
+                    }
+                }
+                if ticks_x != 0
+                    && let Some(state) = self.state.as_mut()
+                {
+                    state.scroll_by_columns(ticks_x);
+                }
+            }
         }
     }
 
@@ -5059,6 +5259,32 @@ const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_milli
 /// Wheel lines scrolled per `MouseScrollDelta::LineDelta` unit.
 const WHEEL_LINES_PER_TICK: f32 = 3.0;
 
+/// The wire scroll kinds for a banked `(x, y)` tick count, in order.
+///
+/// One event per whole tick: a single wheel notch that banks two ticks
+/// must move the receiver twice, and a receiver that coalesces is
+/// making its own decision rather than being handed a rounded one.
+fn wheel_kinds(ticks_x: i64, ticks_y: i64) -> Vec<ProtocolMouseKind> {
+    let mut kinds = Vec::new();
+    let vertical = if ticks_y < 0 {
+        ProtocolMouseKind::ScrollUp
+    } else {
+        ProtocolMouseKind::ScrollDown
+    };
+    for _ in 0..ticks_y.unsigned_abs() {
+        kinds.push(vertical);
+    }
+    let horizontal = if ticks_x < 0 {
+        ProtocolMouseKind::ScrollLeft
+    } else {
+        ProtocolMouseKind::ScrollRight
+    };
+    for _ in 0..ticks_x.unsigned_abs() {
+        kinds.push(horizontal);
+    }
+    kinds
+}
+
 /// Byte range an optimistic Backspace/Delete removes at `cursor`, or
 /// `None` when it can't be predicted locally: buffer edge (the
 /// daemon's behavior is a no-op there anyway), a modifier variant
@@ -5637,6 +5863,8 @@ impl State {
             last_pointer_sent_byte: None,
             last_pointer_down: None,
             minimap_scrub_active: false,
+            manual_left_authority: false,
+            wheel_residuals: WheelResiduals::default(),
             edge_scroll_dir: None,
             edge_scroll_last: None,
             styled_redraw_deadline: None,
@@ -8088,6 +8316,66 @@ impl State {
         self.normalize_code_scroll();
         self.horizontal_follow(byte);
         self.request_redraw();
+    }
+
+    /// Widest display line, in columns — B7's upper-bound input.
+    ///
+    /// Scans the laid-out lines; `line_layout` caches, so a repeat scan
+    /// on an unchanged buffer re-reads the cache rather than reshaping.
+    /// **Cost is proportional to the buffer's line count**, which is a
+    /// real consideration on a per-tick path and is called out for
+    /// review rather than optimised speculatively.
+    fn widest_display_columns(&mut self) -> u32 {
+        let advance = self.mono_advance();
+        if advance <= 0.0 {
+            return 0;
+        }
+        let mut widest = 0.0f32;
+        for line_i in 0..self.buffer.lines.len() {
+            if let Some(layout) = self.buffer.line_layout(&mut self.font_system, line_i) {
+                for layout_line in layout {
+                    widest = widest.max(layout_line.w);
+                }
+            }
+        }
+        (widest / advance).ceil().max(0.0) as u32
+    }
+
+    /// GUI Stage 1b B3/B7: move the horizontal origin by whole columns.
+    ///
+    /// The bound is B7's, stated exactly: `0 ..= widest − viewport`,
+    /// **saturating at zero** for buffers narrower than the viewport.
+    /// Clamping at the widest line's *full* width would let the origin
+    /// pass every glyph and leave the viewport blank.
+    ///
+    /// **Wrap pins the origin to zero** and clears manual authority
+    /// (lifetime clause 5): a wrapped buffer has nothing past the right
+    /// edge, so an origin — and a latch that would defend it — must not
+    /// survive.
+    ///
+    /// Returns whether the origin actually moved. Clause 2's "effective
+    /// move": one fully absorbed by the clamp arms nothing.
+    fn scroll_by_columns(&mut self, columns: i64) -> bool {
+        if self.buffer.wrap() != Wrap::None {
+            self.code_scroll_left = 0.0;
+            self.manual_left_authority = false;
+            return false;
+        }
+        let advance = self.mono_advance();
+        let width = self.text_bounds_right() as f32 - self.text_left();
+        if advance <= 0.0 || width <= 0.0 {
+            return false;
+        }
+        let viewport_cols = (width / advance).floor().max(0.0) as u32;
+        let max_left = self.widest_display_columns().saturating_sub(viewport_cols);
+        let current = (self.code_scroll_left / advance).round().max(0.0) as i64;
+        let next = (current + columns).clamp(0, i64::from(max_left));
+        if next == current {
+            return false;
+        }
+        self.code_scroll_left = next as f32 * advance;
+        self.manual_left_authority = true;
+        true
     }
 
     /// Move `code_scroll_left` so the caret's column is on screen
@@ -14095,6 +14383,156 @@ fn decoration_kind_to_bg_color(kind: DecorationKind) -> Option<[f32; 4]> {
 
 #[cfg(test)]
 mod tests {
+    use super::{BufferId, ResidualOwner, WheelResiduals, WheelTarget, wheel_kinds};
+    use pmacs_protocol::MouseKind as ProtocolMouseKind;
+
+    /// Distinct ids. `BufferId::next` is the only constructor — the
+    /// inner field is private on purpose — so identity comes from
+    /// allocation order rather than a literal.
+    fn buf(_n: u64) -> BufferId {
+        BufferId::next()
+    }
+
+    /// B1/R1 — the producer itself: sub-tick deltas are banked, not
+    /// rounded away, and they reach a tick together.
+    ///
+    /// This is the row #243 cannot satisfy. Its receiver only ever saw
+    /// whole ticks, so a producer that discards every fraction is
+    /// invisible to it.
+    #[test]
+    fn r1_sub_tick_deltas_bank_and_then_spend_exactly_one_tick() {
+        let mut r = WheelResiduals::default();
+        let owner = ResidualOwner::Document;
+        assert_eq!(
+            r.accumulate(owner, 0.0, 0.4),
+            (0, 0),
+            "first sub-tick moves nothing"
+        );
+        assert_eq!(
+            r.accumulate(owner, 0.0, 0.4),
+            (0, 0),
+            "still short of a tick"
+        );
+        assert_eq!(
+            r.accumulate(owner, 0.0, 0.4),
+            (0, 1),
+            "1.2 banked spends exactly one tick, not two"
+        );
+        let (_, y) = r.bank_of(owner).expect("bank survives");
+        assert!(
+            (y - 0.2).abs() < 1e-5,
+            "the remainder is kept, not dropped: {y}"
+        );
+    }
+
+    /// B1 — the two axes are independent accumulators, not one.
+    #[test]
+    fn b1_axes_bank_independently() {
+        let mut r = WheelResiduals::default();
+        let owner = ResidualOwner::Document;
+        assert_eq!(r.accumulate(owner, 0.6, 0.0), (0, 0));
+        assert_eq!(r.accumulate(owner, 0.0, 0.6), (0, 0));
+        assert_eq!(
+            r.accumulate(owner, 0.6, 0.6),
+            (1, 1),
+            "each axis reaches its own tick on its own schedule"
+        );
+    }
+
+    /// R2 — panel A's bank is not spent on panel B.
+    #[test]
+    fn r2_panel_identity_does_not_leak_across_panels() {
+        let mut r = WheelResiduals::default();
+        let a = ResidualOwner::Panel(buf(1));
+        let b = ResidualOwner::Panel(buf(2));
+        assert_eq!(r.accumulate(a, 0.0, 0.9), (0, 0));
+        assert_eq!(
+            r.accumulate(b, 0.0, 0.2),
+            (0, 0),
+            "panel B starts from zero; sharing would spend A's 0.9 here"
+        );
+    }
+
+    /// R3 — the same, across two terminals.
+    #[test]
+    fn r3_terminal_identity_does_not_leak_across_terminals() {
+        let mut r = WheelResiduals::default();
+        let a = ResidualOwner::Terminal(buf(7));
+        let b = ResidualOwner::Terminal(buf(8));
+        assert_eq!(r.accumulate(a, 0.0, 0.9), (0, 0));
+        assert_eq!(r.accumulate(b, 0.0, 0.2), (0, 0));
+    }
+
+    /// R4 — document and chrome SHARE, deliberately: a gesture that
+    /// strays onto the gutter must not lose its banked motion.
+    #[test]
+    fn r4_document_and_chrome_share_one_bank() {
+        assert_eq!(
+            WheelTarget::Document.residual_owner(),
+            WheelTarget::Chrome.residual_owner(),
+            "chrome banks into the document's accumulator"
+        );
+        let mut r = WheelResiduals::default();
+        let owner = WheelTarget::Document
+            .residual_owner()
+            .expect("document banks");
+        assert_eq!(r.accumulate(owner, 0.0, 0.7), (0, 0));
+        assert_eq!(
+            r.accumulate(WheelTarget::Chrome.residual_owner().unwrap(), 0.0, 0.7),
+            (0, 1),
+            "the strayed half completes the tick instead of being lost"
+        );
+    }
+
+    /// R5 — the minimap moves the document viewport but banks
+    /// independently of it.
+    #[test]
+    fn r5_minimap_bank_is_independent_of_the_documents() {
+        let mut r = WheelResiduals::default();
+        assert_eq!(r.accumulate(ResidualOwner::Minimap, 0.0, 0.9), (0, 0));
+        assert_eq!(
+            r.accumulate(ResidualOwner::Document, 0.0, 0.2),
+            (0, 0),
+            "the document starts from zero despite the minimap's 0.9"
+        );
+    }
+
+    /// The crossing witness §2a requires: partial motion over the band's
+    /// chrome, then partial motion over a cell, **must not reach a
+    /// tick**. Panel chrome banks nowhere and clears what a cell banked.
+    #[test]
+    fn panel_chrome_banks_nothing_and_cannot_combine_with_cell_input() {
+        assert_eq!(
+            WheelTarget::PanelChrome.residual_owner(),
+            None,
+            "the band owns the pixel and banks nothing"
+        );
+        let mut r = WheelResiduals::default();
+        let cell = ResidualOwner::Panel(buf(3));
+        assert_eq!(r.accumulate(cell, 0.0, 0.9), (0, 0));
+        r.clear_panels();
+        assert_eq!(
+            r.accumulate(cell, 0.0, 0.2),
+            (0, 0),
+            "a gesture that scrolled nothing must not complete a tick on arrival"
+        );
+    }
+
+    /// One event per whole tick, in a stable order.
+    #[test]
+    fn wheel_kinds_emits_one_event_per_banked_tick() {
+        assert_eq!(wheel_kinds(0, 0), Vec::new());
+        assert_eq!(
+            wheel_kinds(0, 2),
+            vec![ProtocolMouseKind::ScrollDown, ProtocolMouseKind::ScrollDown]
+        );
+        assert_eq!(wheel_kinds(0, -1), vec![ProtocolMouseKind::ScrollUp]);
+        assert_eq!(
+            wheel_kinds(-1, 1),
+            vec![ProtocolMouseKind::ScrollDown, ProtocolMouseKind::ScrollLeft]
+        );
+    }
+
     use super::*;
     use pmacs_protocol::cell::Style;
 
