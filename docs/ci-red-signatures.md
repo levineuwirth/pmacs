@@ -1427,34 +1427,55 @@ which is why it is worth more than its one occurrence.
 | **what is NOT** | that the mechanism below is what happened. It is a candidate with a citation, not a demonstrated chain |
 | **the observing tree** | the lane's docs-only commit. It touches `src/packages/` not at all |
 
-**The candidate mechanism, and it is specific.**
-`src/file_io.rs:434` — `bare_filename_saves_in_cwd` — calls
-`std::env::set_current_dir(dir.path())`, which mutates **process-global**
-state, points it at a `TempDir`, and lets that `TempDir` drop at end of
-test. The libtest harness runs tests **in parallel threads within one
-process**, so during that window every other test in the binary shares
-the mutated cwd, and after the drop that cwd is a **deleted directory**.
-`fatal: Unable to read current working directory` is exactly what a
-process with a deleted cwd gets from `git`.
+**The candidate mechanism, and the load-bearing step is CHILD
+INHERITANCE.** An earlier version of this row stopped at "the window
+exists", which misses why restoring the cwd does not close it:
 
-The test restores the cwd before its assertions, deliberately and with a
-comment saying so — **the hazard is not the restore, it is that the
-window exists at all**, and no amount of care inside one test closes a
-window that is process-wide.
+1. `src/file_io.rs:434` — `bare_filename_saves_in_cwd` — calls
+   `std::env::set_current_dir(dir.path())`, mutating **process-global**
+   state and pointing it at a `TempDir`;
+2. concurrently, `cache_survives_across_fetcher_instances` reaches
+   `f1.fetch(&url)` (`fetcher.rs:929`), which clones via `run_git`
+   (`:305`). `run_git` calls `run_git_inner(None, …)`, and
+   `run_git_inner` (`:322`) sets `cmd.current_dir` **only when `cwd` is
+   `Some`** — `if let Some(d) = cwd { cmd.current_dir(d); }`,
+   `:329`–`:330`. With `None`, **the spawned `git` INHERITS the
+   parent's cwd** — the temp directory;
+3. the parent then restores its own cwd. **That does nothing for the
+   child**, which already has its working directory;
+4. the `TempDir` drops. `git` is now a live process whose cwd is a
+   **deleted directory**, and `fatal: Unable to read current working
+   directory` is exactly what that produces.
+
+So the restore in `bare_filename_saves_in_cwd` is not merely
+insufficiently early — it is **irrelevant to the child**, which is why
+care inside that one test cannot close this.
 
 **What would settle it**, and neither has been run:
 
 * run the two selectors concurrently in a tight loop until the failure
   reproduces, which converts the candidate into a demonstration;
-* or make the hazard structural rather than probabilistic — a serial
-  guard around every `set_current_dir` test, or removing the
-  process-global mutation from `bare_filename_saves_in_cwd` entirely
-  (`save_atomic` could take the directory rather than inheriting it).
+* or make the hazard structural rather than probabilistic. **A serial
+  guard around `set_current_dir` tests is NOT one of the options**, and
+  an earlier version of this row offered it: the child outlives the
+  guard, so any unguarded test that spawns a process inheriting the cwd
+  is still exposed. What does work:
+  * **remove the process-global mutation** — `bare_filename_saves_in_cwd`
+    exists to check that a bare filename resolves against the cwd, and
+    `save_atomic` could take the directory rather than inheriting it;
+  * **run that test in a subprocess**, so its cwd is its own;
+  * **serialize the whole lib-test binary** (`--test-threads=1`), which
+    removes the concurrency the race needs — at the cost of the whole
+    binary's wall clock, and note U17, where that same flag is a
+    candidate for causing a different failure.
 
 **Reruns: green in three isolated runs of the selector, and in EIGHT
 full parallel `cargo test --lib` runs** (1990 passed each). Per this
-file's rerun rule that establishes **intermittence only** — and here it
-also says the window is narrow, not that it is absent.
+file's rerun rule that establishes **intermittence, and nothing more**.
+An earlier version added "and here it also says the window is narrow" —
+**it does not**. Non-reproduction over eight runs says the failure did
+not recur in eight runs. It says nothing about the width of *this
+candidate's* window, which no measurement here has sized.
 
 **Not folded into U14 or U15.** Different selector, different fragments,
 different step, and a different kind of failure: those are wall-clock
@@ -1466,8 +1487,13 @@ that is a different mechanism.
 
 Surfaced 2026-08-31 by the **merge-base control dispatched for R6's
 second occurrence** — so it is a red on `main` at `aae5b35`, on no
-branch at all. **No PR run can show this**; it took a `workflow_dispatch`
-on `main` to see it.
+branch at all.
+
+**An earlier version said "no PR run can show this." That is wrong**: a
+PR run exercises the same test and could fail it identically. What only
+a `main`-side run can establish is that it fails **on `main`** — that
+there is no observing branch to suspect — and that is the distinction
+the dispatch actually bought.
 
 | field | value |
 |---|---|
@@ -1483,9 +1509,15 @@ on `main` to see it.
 part.** Both of those are **deadline** failures — a cancellation that
 did not arrive in time (`supersede did not cancel within 50ms`, `async
 pump deadline exceeded`). This one reports `got ok`: the first
-`read_dir` **completed successfully** instead of being cancelled. The
-supersede did not arrive late; it arrived after there was nothing left
-to supersede.
+`read_dir` **completed successfully** rather than reporting cancellation.
+
+**What `got ok` proves, precisely:** the predecessor **completed
+successfully before the cancellation took effect**. It does **not**
+establish when the supersede arrived — an earlier version of this row
+said "it arrived after there was nothing left to supersede", which
+assumes a late arrival the assertion cannot see. A supersede that
+arrived in time and whose cancellation simply did not take effect first
+produces the identical message.
 
 **Candidate mechanism, stated as one.** The job runs
 **`--test-threads=1`**. A test that dispatches a job and then supersedes

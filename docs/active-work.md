@@ -397,13 +397,18 @@ crdt-gated code does not rediscover it at CI.
 - **U16, new** — a `git` invocation in `packages::fetcher` found its
   working directory **deleted**. Not a budget: the only row in the
   registry that arrives with a **named candidate mechanism inside the
-  test suite**. `src/file_io.rs:434` mutates process-global cwd inside a
-  parallel test and points it at a `TempDir` that then drops, and
-  libtest runs tests in threads of one process. Candidate, not a
-  demonstrated chain — 8 full parallel `--lib` runs did not reproduce
-  it. Two controls that would settle it are written into the row and
-  **neither is run here**; the structural fix belongs to whoever owns
-  `file_io`, not to a CRDT invariant lane.
+  test suite**, and the load-bearing step is **child inheritance**.
+  `src/file_io.rs:434` mutates process-global cwd; concurrently
+  `run_git` calls `run_git_inner(None, …)`, which sets `current_dir`
+  only when `cwd` is `Some` (`fetcher.rs:329`–`:330`), so the spawned
+  `git` **inherits** the temp cwd. **Restoring the parent's cwd does
+  nothing for that child**, and the `TempDir` then drops underneath it.
+  Candidate, not a demonstrated chain — 8 full parallel `--lib` runs did
+  not reproduce it, which establishes **intermittence and nothing
+  more**. The controls that would settle it are in the row and **none is
+  run here**; note that a serial guard around `set_current_dir` tests is
+  *not* among them, since the child outlives the guard. The structural
+  fix belongs to whoever owns `file_io`, not to a CRDT invariant lane.
 
 - **R6's SECOND occurrence** — 26 days after the first, macOS `lua54`,
   a **full three-condition match** including both required fragments.
@@ -418,10 +423,13 @@ crdt-gated code does not rediscover it at CI.
 - **U17, new** — that same control run **redded `Test (crdt)` on `main`
   at `aae5b35`**: `read_dir_supersede_cancels_in_flight_predecessor`,
   `first read_dir must be superseded; got ok`. It fails the **opposite**
-  way to R1 and R5 — not a missed deadline, but a predecessor that had
-  already finished. The job runs `--test-threads=1`, which is the
-  condition **U9's still-unrun control names**. A red on the merge base
-  is invisible to any PR run; it took the dispatch to see it.
+  way to R1 and R5 — not a missed deadline. What `got ok` proves is
+  narrow: the predecessor **completed successfully before cancellation
+  took effect**, which does not say when the supersede arrived. The job
+  runs `--test-threads=1`, the condition **U9's still-unrun control
+  names**. A PR run could show this failure too; what only a `main`-side
+  run establishes is that it fails **on `main`**, with no observing
+  branch to suspect.
 
 U14 and U15 are two rows rather than one because the second run's
 selector set had **rotated**, and this registry matches on the exact
