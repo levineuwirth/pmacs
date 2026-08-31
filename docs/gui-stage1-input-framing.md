@@ -32,19 +32,34 @@ which §2a's own history predicted would happen.
   this base**: the dispatcher is split into `classify_panel_pointer`
   (`src/editor.rs:2985`) and `apply_panel_pointer` (`:3088`), and the
   vertical axis replays for real at `:3277`–`:3278`. **The prerequisite
-  is DISCHARGED.** What does not lapse is the witness: 1b still owes an
-  end-to-end panel-wheel **effect** witness on **both** axes, of which
-  #243 discharges only the vertical half.
+  is DISCHARGED** — completely, within its scope, and it supplies the
+  vertical receiver path. **It discharges none of B1's witness**: 1b
+  still owes an end-to-end panel-wheel **effect** witness on **both**
+  axes, because B1's fractional accumulator is NEW and no #243 test
+  exercises it. Implementation already present is not evidence already
+  owed.
 
 **Citation policy, applied throughout:** a citation that makes a claim
-about the tree **as it is** was re-measured and renumbered — 45 of
-them. A citation that records **what an earlier revision cited** is
+about the tree **as it is** was re-measured and renumbered — 45 in the
+first pass, plus **six the first pass got wrong**. A citation that records **what an earlier revision cited** is
 left exactly as written and its block is labelled *"citations are
 HISTORICAL (`72da24a`)"*. Renumbering those would have falsified
 sentences whose whole point is that an earlier citation was wrong.
 
+**The first pass verified RANGE, not IDENTITY, and that was the wrong
+check.** Every citation landed inside its file, and six still pointed at
+the wrong construct: B4's `UnusedButton`/`route_pointer` (`:3803`,
+`:3811`, misfiled against `editor.rs` when they are `main.rs`), the
+panel paint call (`src/editor.rs:2863`), `OwnCursor`'s **type doc**
+(`:2448`) as against its field (`:1774`), the GPU **wrap branch**
+(`:8120`) as against the `horizontal_follow` call (`:8089`), and
+`scroll_top`'s zeroing (`:6217`), which sits one line before the
+residual's. **Every live citation is now identity-checked against the
+construct its prose names**, not merely bounds-checked.
+
 **No ruling changes in revision 20.** It is a re-measurement, three
-corrections, and a discharge.
+corrections, a discharge, and one conceptual separation — implementation
+already present is not evidence already owed.
 
 **Previously, revision 19 — RECONCILES TWO LINEAGES THAT BOTH NUMBERED
 THEMSELVES 13.** This document was advanced independently by two
@@ -240,10 +255,15 @@ and it lands ahead of 1e because panel-pointer replay blocks 1b.
 Protocol slices stay serialized; one was inserted in front.
 `ADVERTISED_PROTOCOL_VERSION` remains pinned at **20**.
 
-**Verification base:** §2 is **re-measured at `4f77491`** (2026-08-12),
+**Verification base: `0ec13b3`** (revision 20). §2 was re-measured at
+`4f77491` (2026-08-12) and §2a **originally** at `72da24a`
+(2026-08-13); both are historical anchors now, kept so the
+re-measurements can be checked against what they replaced.
+§2 is **re-measured at `4f77491`** (2026-08-12),
 the tip after 1-pre; it was originally taken at `a994f37`. **§2a is
-measured at `72da24a`** (2026-08-13), the tip after 1a and #240, and it
-is the base for **1b only**; it carries Q#S1-11's ruling. Sections
+measured at `0ec13b3`** (revision 20) — originally at `72da24a`
+(2026-08-13), the tip after 1a and #240 — and it is the base for **1b
+only**; it carries Q#S1-11's ruling. Sections
 other than §2/§2a were written against `a994f37` and their *rulings*
 are unaffected by 1-pre, which changed no behaviour — but **any line
 number outside §2 and §2a
@@ -336,7 +356,7 @@ survives A4**: a native close still returns `Exit`, and
 keyboard input is truncated to its first scalar, and an IME commit
 produces nothing.
 
-## 2a. Ground truth for 1b — MEASURED at `72da24a` (2026-08-13)
+## 2a. Ground truth for 1b — RE-MEASURED at `0ec13b3` (revision 20); originally at `72da24a` (2026-08-13)
 
 §2 above was measured for **1a**, at `4f77491`. 1a (#239) has since
 merged and #240 landed on top, so **every coordinate the 1b table cites
@@ -471,7 +491,7 @@ minimap do not get replaced — their state OUTLIVES the buffer.** A
 panel or terminal residual can be keyed to a surface that goes away; the
 document's and the minimap's live in the long-lived GPU `State`, which
 survives a buffer switch. **Their reset is manual, and there is a list
-to be forgotten from.** Buffer replacement (`pmacs-gpu/src/main.rs:6218`
+to be forgotten from.** Buffer replacement (`pmacs-gpu/src/main.rs:6217`
 onward) zeroes `scroll_top`, `code_scroll_residual` and
 `code_scroll_left` **one explicit line at a time**, each with its own
 comment — including `code_scroll_left`, added later precisely because a
@@ -557,10 +577,10 @@ remains is narrower and was already assigned here: **the horizontal
 document-panel leg is B1–B3's**, per the "Panel-replay consequence"
 paragraph in §1b.
 
-**Ruling: 1b does not absorb it, and 1b does not ship before it.** The
-replay is repaired in a **prerequisite lane** carrying parent
-acceptance 48, and **1b depends on that lane** — see the ordering
-below. Two reasons, and the one revision 15 gave was wrong:
+**Ruling as made (historical): 1b does not absorb it, and 1b does not
+ship before it.** The replay was to be repaired in a **prerequisite
+lane** carrying parent acceptance 48, with **1b depending on that
+lane**. Two reasons were given, and the one revision 15 gave was wrong:
 
 1. **Replay is broader than 1b, and already owned.** Acceptance 48
    (`docs/bottom-panel-framing.md:1719`) has `PanelPointer` driving
@@ -569,9 +589,15 @@ below. Two reasons, and the one revision 15 gave was wrong:
    activation ordering and coalescing rules. A wheel is one gesture in
    that set. Implementing it alone from an input slice would deliver a
    fragment of an acceptance criterion owned elsewhere.
-2. **The defect predates 1b** and is not horizontal-specific: vertical
-   panel scrolling is equally dead today. A fix belongs where the
-   contract lives, not bolted to the slice that happened to find it.
+2. **The defect predates 1b** and was not horizontal-specific:
+   vertical panel scrolling was **equally dead at `72da24a`**. A fix
+   belongs where the contract lives, not bolted to the slice that
+   happened to find it.
+
+**STATUS AT `0ec13b3`: the ruling was carried out and the dependency is
+DISCHARGED.** #243 was that prerequisite lane, it merged, and this base
+contains it. The two reasons above are why the work went there rather
+than here; they are not live obligations.
 
 **Revision 15 said "it is not input work". That was wrong** — replay
 includes terminal mouse reporting and click-to-focus, which is exactly
@@ -585,18 +611,36 @@ works and cannot see the half that does not — *it reproduces the blind
 spot that let this sit undetected.* Passing panel rows would again mean
 nothing about whether a panel wheel scrolls.
 
-So the dependency is **hard, and ordered**:
+**Steps 1 and 2 are DONE. Step 3 is 1b's, undiminished.**
 
-1. **The replay lane merges first.**
-2. **1b rebases onto it**, and its base moves from `72da24a` to that
-   merge commit. §2a's other measurements are unaffected — the replay
-   lane touches the daemon side.
+1. ~~The replay lane merges first.~~ **#243 merged.**
+2. ~~1b rebases onto it.~~ **Done: 1b's base is `0ec13b3`**, which
+   contains #243. §2a's other measurements were unaffected by that
+   lane, as predicted — it touched the daemon side.
 3. **1b carries an END-TO-END panel-wheel EFFECT witness, on BOTH
    axes**: a wheel over a panel cell moves that panel's viewport
    vertically, and a horizontal wheel moves it horizontally. Not "a
-   `PanelPointer` was emitted" — the observable effect. The horizontal
-   leg is not optional garnish: it is the axis with **no handler at
-   all**, which is exactly where the emit-and-discard defect lived.
+   `PanelPointer` was emitted" — the observable effect.
+
+**Why BOTH axes are still owed, when #243 already supplies the vertical
+receiver.** These are different things and revision 20's first draft
+conflated them:
+
+- **The receiver path** for a vertical panel wheel exists now
+  (`src/editor.rs:3277`–`:3278`). That is implementation, and #243
+  discharges it completely within its scope;
+- **B1's evidence** is not discharged by any of it, on either axis,
+  **because B1's producer is NEW**. 1b introduces a per-surface
+  fractional residual accumulator that did not exist when #243 was
+  written and that no #243 test exercises. A vertical panel wheel
+  routed through a new accumulator can fail in ways the old whole-tick
+  path could not — dropped sub-ticks, residue carried across a surface
+  switch, a residual keyed to a panel that is gone.
+
+So: **#243 discharges the PREREQUISITE. It discharges none of the
+WITNESS.** The horizontal leg additionally has no handler at all, which
+is where the emit-and-discard defect lived — but the vertical leg is
+owed for its own reason, not as a formality.
 
 **Panel inertness is therefore NOT an option and is not claimed.** The
 panel's contract is "emit both axes with its own residual, and the
@@ -625,10 +669,10 @@ contracts are unaffected; the **implementation shape** is.
   written as a separate site would be **clobbered by that else branch**.
   B5 must extend this function, not join it.
 - **B4 — "no middle-click path".** 1-pre already built the landing
-  site and named this row in it: `PointerRoute::UnusedButton` (`:3623`)
+  site and named this row in it: `PointerRoute::UnusedButton` (`:3803`)
   is documented *"Stage 1b's B4 gives the middle button a meaning
   (PRIMARY-selection paste on Linux) and lands here."* `route_pointer`
-  (`:3631`) sends every non-left, non-right-press button there. B4
+  (`:3811`) sends every non-left, non-right-press button there. B4
   splits a variant that already exists.
 
 ### CORRECTION 4 — B7 re-opens a deferred question, and the table does not say so
@@ -668,7 +712,7 @@ the GPU's `horizontal_follow` (`:8117`) has the same shape.
 **And it happens on the next PAINT, not the next caret event.**
 `prepare_window_cursor_visible` (`src/editor.rs:5256`) calls
 `horizontal_follow` unconditionally as its **first** act (`:5277`), and
-`paint_frame` (`:5485`) calls it every frame (`:5590`, and `:2572` for
+`paint_frame` (`:5485`) calls it every frame (`:5590`, and `:2863` for
 the panel). Revision 13 said "the next caret event"; that was wrong and
 understated the exposure — the origin is overwritten by a redraw with
 no input at all.
@@ -682,7 +726,8 @@ viewport that is overwritten on the next frame.
 **(A) is not viable in 1b, and the vertical precedent does not reach
 it.** `scroll_window` carries point because it is **TUI-side**, where
 the editor owns the cursor directly. The GPU has no such power:
-`OwnCursor` (`pmacs-gpu/src/main.rs:1774`) is *"pmacs-gpu's own cursor
+`OwnCursor` (type doc `pmacs-gpu/src/main.rs:2448`; the field is
+`:1774`) is *"pmacs-gpu's own cursor
 position, **mirrored** from `CursorByte`"* — a read-only reflection of
 daemon state. The only wire operation that positions it is `Pointer`,
 and `dispatch_pointer` (`src/editor.rs:4376`) sets `active_frontend`,
@@ -721,7 +766,8 @@ undefined, which is the part that decides whether the feature works.
    *changing*, never by elapsed time or by the follow running.
 5. **Wrap and buffer replacement clear it and pin the origin to zero.**
    This is the existing rule (`horizontal_follow`'s wrap branch, and
-   the GPU's at `:8089`); authority must not survive either.
+   the GPU's wrap branch at `:8120`; `:8089` is only the
+`horizontal_follow` call); authority must not survive either.
 
 ##### What B7 and B3 must witness
 
@@ -876,13 +922,19 @@ panel-wheel replay (`:3277`–`:3278`). **1b has no outstanding
 prerequisite**, and the rebase this revision was written on is the one
 the order below called for.
 
-**What does NOT lapse is the witness.** The reason for demanding it
-stands unchanged: 1b's B1 makes the panel a first-class wheel target
-with its own residual, and **the original defect was exactly "frontend
-emits, receiver discards"** — so a 1b that witnessed emission alone
-would repeat the blind spot that hid it. **1b still owes an end-to-end
-panel-wheel EFFECT witness on BOTH axes**, and #243 discharges only the
-vertical half of what that witness must show.
+**What does NOT lapse is the witness, on EITHER axis.** The reason for
+demanding it stands unchanged: 1b's B1 makes the panel a first-class
+wheel target **with its own residual**, and **the original defect was
+exactly "frontend emits, receiver discards"** — so a 1b that witnessed
+emission alone would repeat the blind spot that hid it.
+
+**#243 supplies the vertical RECEIVER; it does not supply B1's
+EVIDENCE.** B1's producer — a per-surface fractional accumulator — did
+not exist when #243 was written, and no #243 test exercises it. So
+**1b owes the end-to-end effect witness on BOTH axes**: the horizontal
+leg because it has no handler at all, and the vertical leg because it
+now runs through a new accumulator that can drop sub-ticks or carry
+residue across a surface switch.
 
 **Order, as it now stands: the prerequisite is met; 1b implements
 B1–B7 on this base and lands the both-axis effect witness.** 1b's base
@@ -1077,9 +1129,12 @@ The crate has **exactly one** executable `event_loop.exit()`, in
 
 ### 1b — pointer and scroll
 
-> **Read §2a first, and note that it CHANGES two of these rows.** Every
+> **Read §2a first, and note that it CHANGES two of these rows.** §2a
+> is measured at **`0ec13b3`**; the line numbers it replaced were
+> `72da24a`-era. Every
 > line number below was measured before 1-pre and is stale. §2a
-> re-measures them at `72da24a`; records three rows whose "nothing
+> re-measures them — at `72da24a` when this note was written, and at
+> `0ec13b3` since revision 20; records three rows whose "nothing
 > exists yet" is wrong (B3, B4, B5); **replaces B1's undefined
 > "surface" with a normative six-target enumeration**; **replaces B3's
 > "content bounds" with B7's exact saturated upper bound**; and rules
