@@ -347,9 +347,12 @@ At `175cc7b` — B5's own checkpoint, not the lane's current one — all
 fmt and `git diff --check` are clean. Four mutations were executed and
 each fires its named row: omit accepted-frame reflow, omit
 epoch-invalidation reflow, reshape content-only frames, and retain
-divider hover on `Absent`. **The lane's current head is `f441d3d` at
-312 GPU rows**; recover from the authoritative remote ref above, not
-from this commit.
+divider hover on `Absent`. **The latest verified code head is `f441d3d`
+at 312 GPU rows**; the authoritative remote ref above may be ahead with
+documentation-only commits and remains the recovery source. Calling
+`f441d3d` the lane's "current head" here would become false in the
+commit carrying the sentence — the self-certifying checkpoint defect
+this ledger has already recorded elsewhere.
 
 **Landed but NOT yet witnessed** — recovery needs this split, because
 "L1–L8 owed" reads as though none of the mechanism exists:
