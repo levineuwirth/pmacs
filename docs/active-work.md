@@ -303,7 +303,18 @@ waits for a signal that is not coming.
 
 ## GUI arc Stage 1b — pointer and scroll — IMPLEMENTING
 
-**Branch `gui-stage1b-pointer-scroll`, rebased onto `0ec13b3`.** Framing
+**Branch `gui-stage1b-pointer-scroll`, rebased onto `0ec13b3`.** The
+**remote ref `githubsucks/gui-stage1b-pointer-scroll` is
+authoritative**; recover with
+`git fetch githubsucks && git checkout -B gui-stage1b-pointer-scroll githubsucks/gui-stage1b-pointer-scroll`.
+
+**The rebase rewrote history**, so that ref was force-pushed. The seven
+pre-rebase framing commits are preserved on
+**`githubsucks/gui-stage1b-prerebase-backup`** (`5c83b15`) — pushed
+before the rewrite, not after, so nothing depended on a local-only ref
+surviving.
+
+Framing
 `docs/gui-stage1-input-framing.md`, **revision 20** — §2a re-measured at
 this base, the panel-replay prerequisite recorded as DISCHARGED by #243,
 and the both-axis effect witness still owed.
@@ -313,10 +324,22 @@ producer), B2's daemon-side horizontal panel leg, B3/B7's shared
 `scroll_window_columns` with its saturated bound and wrap pin, and B4's
 middle-click PRIMARY paste.
 
-**Still owed:** B5, B6's routing row, the L1–L8 lifetime rows, step 3's
-fractional both-axis panel witness, and **B1's disposal half** — a
-residual keyed to a surface that goes away must go with it, and this
-frontend does not yet track "that buffer is gone".
+**Landed but NOT yet witnessed** — recovery needs this split, because
+"L1–L8 owed" reads as though none of the mechanism exists:
+
+- the **manual horizontal authority latch** (`manual_left_authority`),
+  armed only by an *effective* move (clause 2);
+- **wrap and buffer-replacement clearing** of that latch and the origin
+  (clause 5), on both the GPU's `scroll_by_columns` and the buffer
+  replacement path;
+- **R4 and R5's residual resets**, as two separate clears beside
+  `code_scroll_left` so omitting either is individually visible.
+
+**Owed outright:** B5, B6's routing row, the **L1–L8 rows** for the
+latch above, step 3's fractional both-axis panel witness, R4/R5's own
+replacement witnesses, and **B1's disposal half** — a residual keyed to
+a surface that goes away must go with it, and this frontend does not yet
+track "that buffer is gone".
 
 ### Two gate gaps this lane found, neither fixed here
 
@@ -341,9 +364,13 @@ the next lane does not rediscover them at review.
 appears exactly once in `ci.yml`, in the Ubuntu-only `gpu-render` job;
 the macOS matrix tests the workspace default member only. B4's
 off-Linux contract would therefore have been asserted nowhere that
-executes, so **the platform decision is a parameter rather than a
-`cfg!` read** and both outcomes are driven on this host. Adding a macOS
-`pmacs-gpu` leg is the real fix and is not this lane's.
+executes. **Production still reads `cfg!(target_os = "linux")`**
+(`pmacs-gpu/src/main.rs:3450`); what became injectable is the
+**selection decision taken after** that target fact — `is_linux` is
+obtained from `cfg!` in a non-test build and from a test override
+otherwise, and `paste_source_for(is_linux)` is the part a row can drive
+both ways. Adding a macOS `pmacs-gpu` leg is the real fix and is not
+this lane's.
 
 ## CRDT identity-replace undo — MERGED as #246 (`78346de`)
 
