@@ -301,6 +301,50 @@ waits for a signal that is not coming.
 - **THE FIRST DISPATCH IMMEDIATELY FOUND A RED ON `main`**, which is
   what this lane was built for. See the proptest entry below.
 
+## GUI arc Stage 1b — pointer and scroll — IMPLEMENTING
+
+**Branch `gui-stage1b-pointer-scroll`, rebased onto `0ec13b3`.** Framing
+`docs/gui-stage1-input-framing.md`, **revision 20** — §2a re-measured at
+this base, the panel-replay prerequisite recorded as DISCHARGED by #243,
+and the both-axis effect witness still owed.
+
+**Landed so far:** B1's per-target fractional wheel residual (the
+producer), B2's daemon-side horizontal panel leg, B3/B7's shared
+`scroll_window_columns` with its saturated bound and wrap pin, and B4's
+middle-click PRIMARY paste.
+
+**Still owed:** B5, B6's routing row, the L1–L8 lifetime rows, step 3's
+fractional both-axis panel witness, and **B1's disposal half** — a
+residual keyed to a surface that goes away must go with it, and this
+frontend does not yet track "that buffer is gone".
+
+### Two gate gaps this lane found, neither fixed here
+
+Both are shared infrastructure and belong in their own lane; recorded so
+the next lane does not rediscover them at review.
+
+- **`scripts/gate`'s clippy step runs DEFAULT FEATURES only**, so no
+  `#[cfg(feature = "crdt")]` code is ever linted locally. A
+  `clippy::match_same_arms` on the CRDT lane's new enumeration passed
+  five consecutive all-green gate runs and then redded `Test (crdt)`.
+- **NOTHING RUNS `cargo doc`** — not `scripts/gate`, not any `ci.yml`
+  job — so **broken intra-doc links are ungated across this
+  repository**. `git diff --check` cannot see them (they are
+  syntactically valid) and clippy does not read them. Found when
+  deleting a helper left a dangling `[`link`]` that review caught
+  instead. Running it by hand also surfaces a pre-existing unresolved
+  link, `MathNode` at `pmacs-gpu/src/math_layout.rs:314`.
+
+### And one coverage gap in CI, which shaped B4's design
+
+**No non-Linux leg runs this crate's tests.** `cargo test -p pmacs-gpu`
+appears exactly once in `ci.yml`, in the Ubuntu-only `gpu-render` job;
+the macOS matrix tests the workspace default member only. B4's
+off-Linux contract would therefore have been asserted nowhere that
+executes, so **the platform decision is a parameter rather than a
+`cfg!` read** and both outcomes are driven on this host. Adding a macOS
+`pmacs-gpu` leg is the real fix and is not this lane's.
+
 ## CRDT identity-replace undo — MERGED as #246 (`78346de`)
 
 - **MERGED 2026-08-31T18:56:09Z** at approved head `093d677`, merge
