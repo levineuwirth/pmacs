@@ -319,7 +319,7 @@ Framing
 this base, the panel-replay prerequisite recorded as DISCHARGED by #243,
 and the both-axis effect witness still owed.
 
-**Landed so far** (latest verified code head `deb3f0b`)**:** B1's per-target fractional
+**Landed so far** (latest verified code head `ec6444e`)**:** B1's per-target fractional
 wheel residual (the producer), B2's daemon-side horizontal panel leg,
 B3/B7's shared `scroll_window_columns` with its saturated bound and wrap
 pin, B4's middle-click PRIMARY paste, **B6's minimap wheel routing**,
@@ -430,9 +430,36 @@ assertion that looked strict and was not:
   origin, which is exactly the state the row claims cannot
   discriminate. The probe requires `col < last_content_cols`.
 
-**Still owed on this axis: L7b (content shrink), and the GPU's entire
-read side with L2 and L5's GPU leg.** The GPU's four writes remain
-inert until something consults them.
+**L7b landed at `feda851`** — clause 3's content half, the shrink that
+lowers `widest − viewport` with the viewport untouched, asserted on the
+exact new bound and firing on both the release mutation and an
+off-by-one.
+
+### The GPU's latch is unreachable, and its real gap was the clamp
+
+`ec6444e`. **The framing's L2 cannot witness what it is offered for.**
+It proposes wheel-sideways then a height-only resize as the GPU's
+manual-authority row. Measured before anything was added: the origin
+survives that resize with `manual_left_authority` **never read anywhere
+in the frontend**. Q#F6's painted-before policy is what preserves it —
+`resize` runs `ensure_caret_painted` only when the caret was painted,
+and a caret scrolled off screen is not painted, so the follow that
+would snap the origin back never runs. When the caret IS painted it is
+inside the viewport, where `follow_left` returns the origin it was
+given. **The latch is unreachable on this frontend by either branch.**
+
+What the GPU actually lacked was clause 3's clamp, for the same reason:
+nothing brought the origin DOWN when the maximum fell, because the only
+code that would is the follow that is skipped in that state.
+**Measured: scroll to the right bound at 640px, widen to 1600px, and
+the origin stayed 960px past the new maximum** — most of the viewport
+blank, the text off its left edge. `clamp_code_scroll_left` now sits at
+`reshape`'s tail, beside B5's icon hook and for the same reason.
+
+**Owed to the framing, not to the code: L2's wording**, which promises a
+witness this frontend cannot provide. The GPU's four `manual_left_authority`
+writes are still read by nothing; whether they should be deleted or given
+a reader is a framing decision, not one to take in passing.
 
 **Landed but NOT yet witnessed:**
 
