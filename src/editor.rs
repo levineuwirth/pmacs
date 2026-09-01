@@ -10660,46 +10660,57 @@ mod tests {
 
         let active = s.core.borrow().active_window_id();
         let other = *ids.iter().find(|id| **id != active).expect("a second pane");
-        // A 50/50 vertical split: column 60 is inside the right pane.
-        // Whichever pane that is, it must be the one that moves.
-        let target_col: u16 = 60;
-        let under_pointer = {
+
+        // **Find a cell the hit-test actually resolves to the INACTIVE
+        // pane**, rather than assuming a column lands there. A row that
+        // adapts to whichever pane it hits cannot fail an
+        // active-window-routing mutant, and its focus assertion becomes
+        // a tautology.
+        let size = term_size_24x80();
+        let target = {
             let core = s.core.borrow();
-            window_at_cell(
-                &core,
-                FrontendId::LOCAL,
-                term_size_24x80(),
-                5,
-                u32::from(target_col),
-            )
-            .map_or(other, |(id, _)| id)
+            (0..size.rows.saturating_sub(1))
+                .flat_map(|row| (0..size.cols).map(move |col| (row, col)))
+                .find(|(row, col)| {
+                    window_at_cell(&core, FrontendId::LOCAL, size, *row, *col)
+                        .is_some_and(|(id, _)| id == other)
+                })
         };
+        let (target_row, target_col) = target.expect("some cell must resolve to the inactive pane");
+        {
+            let core = s.core.borrow();
+            let (under_pointer, _) =
+                window_at_cell(&core, FrontendId::LOCAL, size, target_row, target_col)
+                    .expect("the cell resolves to a pane");
+            assert_eq!(
+                under_pointer, other,
+                "setup: the pointer must be over the INACTIVE pane"
+            );
+        }
 
         let before_active = s.core.borrow().windows[&active].view_left;
         let before_other = s.core.borrow().windows[&other].view_left;
 
         s.dispatch_mouse(
             FrontendId::LOCAL,
-            mouse(MouseEventKind::ScrollRight, 5, target_col),
-            term_size_24x80(),
+            mouse(
+                MouseEventKind::ScrollRight,
+                u16::try_from(target_row).unwrap_or(0),
+                u16::try_from(target_col).unwrap_or(0),
+            ),
+            size,
         );
 
-        let after_active = s.core.borrow().windows[&active].view_left;
-        let after_other = s.core.borrow().windows[&other].view_left;
-        let (moved, still) = if under_pointer == active {
-            ((after_active, before_active), (after_other, before_other))
-        } else {
-            ((after_other, before_other), (after_active, before_active))
-        };
         assert_eq!(
-            moved.0 - moved.1,
+            s.core.borrow().windows[&other].view_left - before_other,
             SCROLL_COLUMNS as u32,
-            "the pane under the pointer moves by one notch"
+            "the INACTIVE pane, under the pointer, moves by one notch"
         );
         assert_eq!(
-            still.0, still.1,
-            "and the other pane's origin is untouched — horizontal state \
-             is per-window"
+            s.core.borrow().windows[&active].view_left,
+            before_active,
+            "the ACTIVE pane's origin is untouched — horizontal state is \
+             per-window, and routing to the active pane would move this"
         );
         assert_eq!(
             s.core.borrow().active_window_id(),
