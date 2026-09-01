@@ -319,7 +319,7 @@ Framing
 this base, the panel-replay prerequisite recorded as DISCHARGED by #243,
 and the both-axis effect witness still owed.
 
-**Landed so far** (latest verified code head `ec6444e`)**:** B1's per-target fractional
+**Landed so far** (latest verified code head `269c52e`)**:** B1's per-target fractional
 wheel residual (the producer), B2's daemon-side horizontal panel leg,
 B3/B7's shared `scroll_window_columns` with its saturated bound and wrap
 pin, B4's middle-click PRIMARY paste, **B6's minimap wheel routing**,
@@ -457,21 +457,41 @@ blank, the text off its left edge. `clamp_code_scroll_left` now sits at
 `reshape`'s tail, beside B5's icon hook and for the same reason.
 
 **Owed to the framing, not to the code: L2's wording**, which promises a
-witness this frontend cannot provide. The GPU's four `manual_left_authority`
-writes are still read by nothing; whether they should be deleted or given
-a reader is a framing decision, not one to take in passing.
+witness this frontend cannot provide.
+
+**Settled (user decision, 2026-09-02): the GPU latch is deleted, not
+completed.** The contract is behavioral, and the two frontends are not
+required to share a representation; a reader would have duplicated the
+painted-before policy and needed a cursor baseline of its own to avoid
+suppressing genuine cursor movement. `manual_left_authority`, its
+initializer and its four writes are gone, and `scroll_by_columns`
+no longer returns an unused `bool`. **GPU authority is structural**,
+and the framing now says so.
+
+The GPU's four rows: **L2** (height-only preserves — the policy, not a
+latch), **L7a** (widening clamps to the exact bound), **L7b** (a
+content shrink clamps **through the incremental edit path**), and
+**L3** (a moved `CursorByte` pulls the viewport back). Each fires on
+its own mutation; L2's also necessarily bites L7a, which its doc names.
+
+**L7b, GPU, is the one that found a live gap.** Q#R1's keystroke case
+re-shapes only the affected line through `try_reshape_line` and skips
+the full `reshape` — **and skipped clause 3's clamp with it**. A
+one-line delete shortening the widest line could leave the viewport
+past the end of the text with no later event to repair it. The clamp
+now runs on that branch too.
 
 **Landed but NOT yet witnessed:**
 
-- **wrap and buffer-replacement clearing** of that latch and the origin
-  (clause 5), on both the GPU's `scroll_by_columns` and the buffer
-  replacement path;
 - **R4 and R5's residual resets**, as two separate clears beside
   `code_scroll_left` so omitting either is individually visible.
 
-**Owed outright:** L7b and the GPU's whole read side (above), step 3's
-fractional both-axis panel witness, R4/R5's own replacement witnesses,
-and **B1's disposal half** — a residual keyed to a surface that goes
+(The wrap and buffer-replacement clearing that stood here is done: the
+TUI's four replacement paths carry L8b–L8e, wrap carries L8, and the
+GPU half of that bullet described the latch that no longer exists.)
+
+**Owed outright:** step 3's fractional both-axis panel witness, R4/R5's
+own replacement witnesses, and **B1's disposal half** — a residual keyed to a surface that goes
 away must go with it, and this frontend does not yet track "that buffer
 is gone".
 
@@ -557,12 +577,14 @@ error: could not compile `pmacs-gpu` (bin "pmacs-gpu" test)
        due to 4 previous errors
 ```
 
-**THREE occurrences now**, all local. The third (at `9cb610e`) gave the
+**FOUR occurrences now**, all local. The third (at `9cb610e`) gave the
 complete set of four sites, which the second's captured tail had cut to
 three: at that head they were `main.rs:9049`, `:13546`, `:14772` and
 `:14833` — every use of the module the 1b branch added in `9e54cd2`.
-Line numbers drift as the file grows; the module path is the stable
-part of the signature.
+The fourth (2026-09-02, mid-edit) hit the same four uses at
+`:9109`, `:13658`, `:14884` and `:14945`. **Line numbers drift as the
+file grows and are not part of the signature; the module path is**, and
+the count of four is stable across all of them.
 
 An earlier draft of this entry guessed the missing fourth site was
 `widest_display_columns`. The third occurrence shows that guess was

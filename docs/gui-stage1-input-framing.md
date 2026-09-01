@@ -841,9 +841,39 @@ released snaps to the caret's.
 **L2 is height-only for the same reason L3 leaves the viewport.** A
 resize that changes width also changes the clamp, so the origin could
 move for a reason unrelated to authority and the row would not
-discriminate. Height-only invokes the real follow path
-(`resize` → `ensure_caret_painted` → `horizontal_follow`) while leaving
-horizontal geometry fixed.
+discriminate.
+
+**CORRECTION (revision 21, implementation).** This paragraph said
+height-only "invokes the real follow path
+(`resize` → `ensure_caret_painted` → `horizontal_follow`)". **That is
+false in the setup L2 itself requires.** `resize` runs
+`ensure_caret_painted` only when the caret was painted, and L2's caret
+is deliberately outside the manual viewport — so Q#F6's painted-before
+policy skips the follow, and no follow runs at all.
+
+**The consequence is that the GPU needs no authority flag.** The TUI
+does: `horizontal_follow` runs on every paint there and would drag the
+origin back, so only a latch can outrank it. On the GPU the follow
+reaches the origin only through `ensure_caret_painted`, which is
+skipped exactly when the user has scrolled the caret off screen — and
+when the caret IS on screen it is inside the viewport, where
+`follow_left` returns the origin it was handed. **GPU authority is
+structural: there is no follow to outrank.**
+
+A flag was carried there for a while, written in four places and read
+in none. **It has been removed rather than completed** (user decision,
+2026-09-02): giving it a reader would have duplicated the
+painted-before policy and needed a cursor baseline of its own to avoid
+suppressing genuine cursor movement. **The contract is behavioral; the
+two frontends are not required to share a representation.**
+
+So the GPU's rows are: **L2** (height-only preserves, witnessing the
+policy — mutation: follow unconditionally), **L7a** (widening clamps to
+the exact bound), **L7b** (a content shrink clamps **through the
+incremental edit path**, which bypasses `reshape` and so bypassed the
+clamp), and **L3** (a moved `CursorByte` pulls the viewport back —
+the "until the cursor changes" boundary, which without a flag is the
+only thing that marks it).
 
 **L7 needs both legs.** Clause 3 promises re-clamping on *geometry and
 content* changes; widening the viewport witnesses only the geometry
