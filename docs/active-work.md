@@ -397,10 +397,15 @@ and flavor; that was false, and review caught it.
 What actually keeps it out is that the registry is live triage policy
 for judging a red *run*, and every occurrence of this one has been on
 this machine, from bypassing `scripts/gate`. **If it ever appears in
-CI it belongs in the registry**, flavored as above — and that is not
-impossible: CI restores artifacts through `Swatinem/rust-cache@v2` from
-a cache shared across branches, so the same mixing has a plausible CI
-analogue. It has simply never been observed there.
+CI, that is a new incident and belongs in the registry under the
+actual job and flavor that observed it** — not under this local
+flavor. This evidence neither predicts nor excludes such an
+occurrence. An earlier correction tried to keep that possibility open
+by pointing at `Swatinem/rust-cache@v2`, but that mechanism was not
+verified: the action's default does not cache workspace crates, and
+GitHub cache visibility is scoped rather than shared indiscriminately
+across branches. The unsupported mechanism is withdrawn instead of
+being replaced with the equally unverified claim that CI builds fresh.
 
 It has now fired **twice in this lane**.
 
