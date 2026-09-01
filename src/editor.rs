@@ -4134,6 +4134,20 @@ impl EditorState {
                 self.mouse_click = None;
                 self.scroll_window(win_id, SCROLL_LINES);
             }
+            // GUI Stage 1b B7 — the TUI's horizontal axis, which these
+            // events reached and which dropped them into the catch-all
+            // below. `scroll_window_columns` carries B7's bound and its
+            // wrap pin, and is the same helper the panel's horizontal
+            // leg uses: one contract, one implementation, so the two
+            // surfaces cannot clamp differently.
+            MouseEventKind::ScrollLeft => {
+                self.mouse_click = None;
+                self.scroll_window_columns(win_id, -SCROLL_COLUMNS);
+            }
+            MouseEventKind::ScrollRight => {
+                self.mouse_click = None;
+                self.scroll_window_columns(win_id, SCROLL_COLUMNS);
+            }
             _ => {
                 self.mouse_click = None;
             }
@@ -7007,6 +7021,31 @@ mod tests {
         // Row 11 = line 12.
         assert_eq!(glyph(11, 1), Glyph::Char('1'));
         assert_eq!(glyph(11, 2), Glyph::Char('2'));
+    }
+
+    /// Paint once, so `last_content_cols` is a real viewport width.
+    ///
+    /// B7's bound is `widest − viewport`, and a window that has never
+    /// painted has no viewport: a row that skips this measures against
+    /// zero and cannot see the blanking the bound exists to prevent.
+    fn paint_once(s: &EditorState, size: pmacs_protocol::CellSize) {
+        use crate::cell::{Cell, CellGrid};
+        let mut backing = vec![Cell::default(); (size.rows * size.cols) as usize];
+        let mut grid = CellGrid {
+            cells: &mut backing,
+            stride: size.cols,
+            size,
+        };
+        let _ = paint_frame(s, FrontendId::LOCAL, &HashMap::new(), &mut grid, size);
+        // B7's bound only exists under truncate: a wrapped line has
+        // nothing past the right edge, and clause 5 pins the origin to
+        // zero. Set AFTER the paint, which writes `last_wrap` from the
+        // view config — a row about the bound must be a truncate row.
+        let mut core = s.core.borrow_mut();
+        let id = core.active_window_id();
+        if let Some(window) = core.windows.get_mut(&id) {
+            window.last_wrap = crate::view::WrapMode::Truncate;
+        }
     }
 
     fn fresh_with(content: &[u8]) -> EditorState {
@@ -10370,6 +10409,158 @@ mod tests {
         );
         assert_eq!(s.core.borrow().cursor(), 2);
         assert!(s.core.borrow().active_window().selection.is_none());
+    }
+
+    /// GUI Stage 1b B7 — a horizontal wheel notch moves the TUI
+    /// document's origin by **three columns**, and these events used to
+    /// fall into `dispatch_mouse`'s catch-all and vanish.
+    ///
+    /// *Mutation: a step of one → this row.*
+    #[test]
+    fn b7_a_horizontal_notch_moves_the_origin_three_columns() {
+        use crossterm::event::MouseEventKind;
+        // Wide enough that the bound cannot absorb the move: B7's
+        // maximum is `widest − viewport`, so a document that fits has a
+        // maximum of zero and a dropped event reads as correct.
+        let mut content = b"short\n".to_vec();
+        content.extend_from_slice(&b"w".repeat(400));
+        content.push(b'\n');
+        let mut s = fresh_with(&content);
+        paint_once(&s, term_size_24x80());
+        let before = s.core.borrow().active_window().view_left;
+
+        s.dispatch_mouse(
+            FrontendId::LOCAL,
+            mouse(MouseEventKind::ScrollRight, 5, 5),
+            term_size_24x80(),
+        );
+
+        let after = s.core.borrow().active_window().view_left;
+        assert_eq!(
+            after - before,
+            SCROLL_COLUMNS as u32,
+            "one notch moves three columns, and must move at all"
+        );
+    }
+
+    /// B7/B3 — the origin never goes negative, and a left notch at the
+    /// left edge is absorbed rather than wrapping around.
+    #[test]
+    fn b7_the_origin_saturates_at_zero_rather_than_going_negative() {
+        use crossterm::event::MouseEventKind;
+        let mut content = b"short\n".to_vec();
+        content.extend_from_slice(&b"w".repeat(400));
+        content.push(b'\n');
+        let mut s = fresh_with(&content);
+        paint_once(&s, term_size_24x80());
+
+        s.dispatch_mouse(
+            FrontendId::LOCAL,
+            mouse(MouseEventKind::ScrollLeft, 5, 5),
+            term_size_24x80(),
+        );
+
+        assert_eq!(
+            s.core.borrow().active_window().view_left,
+            0,
+            "already at the left bound: the notch is absorbed, not wrapped"
+        );
+    }
+
+    /// B7's right bound is `widest − viewport`, **saturating at zero**.
+    ///
+    /// The row that discriminates: scroll far past the end and assert
+    /// the **final display column is still visible**. Clamping at the
+    /// widest line's FULL width would let the origin pass every glyph
+    /// and leave the viewport blank, which a "the origin stopped
+    /// somewhere" assertion cannot see.
+    ///
+    /// *Mutation: clamp at the widest line's full width → this row.*
+    #[test]
+    fn b7_the_right_bound_keeps_the_final_display_column_visible() {
+        use crossterm::event::MouseEventKind;
+        let width = 400usize;
+        let mut content = b"short\n".to_vec();
+        content.extend_from_slice(&b"w".repeat(width));
+        content.push(b'\n');
+        let mut s = fresh_with(&content);
+        paint_once(&s, term_size_24x80());
+
+        // Far more notches than the bound can absorb.
+        for _ in 0..500 {
+            s.dispatch_mouse(
+                FrontendId::LOCAL,
+                mouse(MouseEventKind::ScrollRight, 5, 5),
+                term_size_24x80(),
+            );
+        }
+
+        let window = s.core.borrow();
+        let window = window.active_window();
+        let viewport = window.last_content_cols;
+        assert!(
+            viewport > 0,
+            "fixture: the window must have content columns"
+        );
+        assert!(
+            u64::from(window.view_left) + u64::from(viewport) >= width as u64,
+            "the final display column must still be reachable: origin {} + \
+             viewport {viewport} against a widest line of {width}",
+            window.view_left
+        );
+        assert!(
+            u64::from(window.view_left) < width as u64,
+            "and the origin must not pass every glyph: {} against {width}",
+            window.view_left
+        );
+    }
+
+    /// B7's wrap clause — **wrap pins the origin to zero**, and a
+    /// horizontal notch under wrap moves nothing.
+    ///
+    /// A wrapped line has nothing past the right edge, so an origin
+    /// there would scroll a buffer sideways that has no sideways.
+    ///
+    /// *Mutation: drop the wrap guard in `scroll_window_columns` → this
+    /// row, and only this row.*
+    #[test]
+    fn b7_wrap_pins_the_origin_to_zero_and_a_notch_moves_nothing() {
+        use crossterm::event::MouseEventKind;
+        let mut content = b"short\n".to_vec();
+        content.extend_from_slice(&b"w".repeat(400));
+        content.push(b'\n');
+        let mut s = fresh_with(&content);
+        paint_once(&s, term_size_24x80());
+        // Scroll sideways first, so the row can see the pin rather than
+        // an origin that merely never left zero.
+        s.dispatch_mouse(
+            FrontendId::LOCAL,
+            mouse(MouseEventKind::ScrollRight, 5, 5),
+            term_size_24x80(),
+        );
+        assert!(
+            s.core.borrow().active_window().view_left > 0,
+            "setup: the origin must be off zero before wrap is applied"
+        );
+        {
+            let mut core = s.core.borrow_mut();
+            let id = core.active_window_id();
+            if let Some(window) = core.windows.get_mut(&id) {
+                window.last_wrap = crate::view::WrapMode::Wrap;
+            }
+        }
+
+        s.dispatch_mouse(
+            FrontendId::LOCAL,
+            mouse(MouseEventKind::ScrollRight, 5, 5),
+            term_size_24x80(),
+        );
+
+        assert_eq!(
+            s.core.borrow().active_window().view_left,
+            0,
+            "wrap pins the origin to zero; a notch under wrap moves nothing"
+        );
     }
 
     /// Mouse-wheel scrolls advance `view_top` and drag the cursor
