@@ -7380,12 +7380,15 @@ impl State {
             }
             InstanceMessage::PanelFrame(payload) => {
                 // The band changes the DOCUMENT's pixel height, so a panel
-                // that appears or disappears has to reshape the document
-                // buffers as well as request a repaint. Skipping the
-                // reshape leaves the code layer sized to the old boundary
-                // and the last lines painting under the band.
-                if self.apply_panel_payload(payload) {
-                    self.sync_buffer_dimensions();
+                // that appears, disappears, or changes row count has to
+                // reshape the document buffers. A content-only frame keeps
+                // the same inset and needs only a repaint — reshaping every
+                // live panel frame would put document work on the panel's
+                // ordinary repaint path.
+                let band_before = self.band_inset();
+                if self.apply_panel_payload(payload)
+                    && !self.reshape_if_panel_band_changed(band_before)
+                {
                     self.request_redraw();
                 }
                 None
@@ -7617,6 +7620,21 @@ impl State {
             })
     }
 
+    /// Reshape after a panel transition changed the document's bottom.
+    ///
+    /// Both directions terminate here: accepting/removing a frame in
+    /// `apply_attach_message`, and invalidating a retained frame by advancing
+    /// its geometry epoch. Content-only panel frames keep the same inset and
+    /// deliberately avoid the document reshape cost.
+    fn reshape_if_panel_band_changed(&mut self, before: PanelBandInset) -> bool {
+        if self.band_inset() == before {
+            return false;
+        }
+        self.sync_buffer_dimensions();
+        self.reshape();
+        true
+    }
+
     /// The panel band's content rectangle in surface pixels:
     /// `(x, y, width, height)`, cells only — the divider sits above `y`.
     fn panel_content_rect(&self) -> Option<(f32, f32, f32, f32)> {
@@ -7722,6 +7740,7 @@ impl State {
         if !self.panel_family.carries_panel() || self.panel.exhausted {
             return None;
         }
+        let band_before = self.band_inset();
         let (total, advance) = self.declared_cell_total();
         if trigger == GeometryTrigger::Surface
             && self.panel.geometry_epoch != 0
@@ -7742,18 +7761,24 @@ impl State {
             self.panel.drag = None;
             self.panel.hover_divider = false;
             self.panel.declared_advance = None;
+            self.reshape_if_panel_band_changed(band_before);
             return None;
         };
         self.panel.geometry_epoch = next;
         self.panel.declared = Some(total);
         self.panel.declared_advance = advance;
+        // Advancing the epoch makes a retained frame stop being
+        // `presented()` until the daemon answers the new declaration.
+        // That removes its band after resize/font handling has already
+        // performed its own reshape, so settle the final visibility change.
+        self.reshape_if_panel_band_changed(band_before);
         Some((next, total))
     }
 
     /// Apply an inbound `PanelFrame` payload.
     ///
-    /// Returns `true` when the band's appearance changed, so the caller
-    /// can request a redraw without guessing.
+    /// Returns `true` when the retained panel payload changed, so the caller
+    /// can distinguish a repaint/reflow from an atomic rejection or duplicate.
     ///
     /// Validation is atomic: a rejected frame leaves the retained one
     /// exactly as it was, because `PanelFrame::validate` is pure and runs
@@ -15363,6 +15388,184 @@ mod tests {
             Some(CursorIcon::Default),
             "the gutter appeared under a stationary pointer, so the pixel \
              is chrome now and the icon must say so"
+        );
+    }
+
+    /// B5 — accepted panel messages settle the cursor icon through the same
+    /// geometry hook as every other document-boundary change.
+    ///
+    /// The pointer does not move across either transition. A first `Present`
+    /// turns a document pixel into panel content; `Absent` removes a divider
+    /// from under the pointer and clears its hover authority. Both messages
+    /// enter through `apply_attach_message`, the production receiver path.
+    ///
+    /// Content-only frames deliberately do not reshape: the discriminator is
+    /// the panel inset before/after the accepted payload, not merely a changed
+    /// frame.
+    ///
+    /// *Mutations: replace the band-change reshape in the `PanelFrame` arm
+    /// with `request_redraw()` → the appearance leg; omit the `hover_divider`
+    /// clear from `PanelFramePayload::Absent` → the removal leg.*
+    #[test]
+    fn b5_panel_messages_rederive_the_icon_without_pointer_motion() {
+        use winit::window::CursorIcon;
+        let document = "fn main() {}\n".repeat(40);
+        let Some(mut state) = State::new_headless(640, 480, &document) else {
+            return;
+        };
+        state.set_panel_wire(PANEL_MIN_VERSION);
+        let (geometry_epoch, total) = state
+            .next_geometry_declaration(GeometryTrigger::Surface)
+            .expect("a panel session declares its surface");
+        let rows = 4;
+        let frame = panel_frame_of(rows, total.cols.max(1), geometry_epoch, 1);
+
+        // Before the panel appears, a pixel in its future first row belongs
+        // to the document text area.
+        let future_band = PanelBandInset::installed(rows, state.fm);
+        let x = state.text_left() + 8.0;
+        let y = document_text_bottom(state.config.height, state.fm, future_band)
+            + state.fm.divider_height()
+            + state.fm.code_line_height() / 2.0;
+        state.pointer_pos = Some((f64::from(x), f64::from(y)));
+        state.apply_panel_cursor_icon();
+        assert!(
+            state.pointer_over_text_content(),
+            "setup: text before Present"
+        );
+        assert_eq!(state.last_cursor_icon, Some(CursorIcon::Text));
+
+        let _ = state.apply_attach_message(InstanceMessage::PanelFrame(
+            PanelFramePayload::Present(frame),
+        ));
+        assert!(
+            matches!(
+                state.classify_pointer_surface(x, y),
+                PointerSurface::PanelCell(_)
+            ),
+            "setup: Present must put panel content under the stationary pointer"
+        );
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Default),
+            "panel appearance moves the stationary pointer off document text"
+        );
+
+        // Move once onto the divider, then keep the pointer stationary while
+        // Absent removes both the divider and its hover authority.
+        let (_, dy, _, dh) = state.panel_divider_rect().expect("present divider");
+        let divider_point = (state.text_left() + 8.0, dy + dh / 2.0);
+        assert!(state.panel_divider_contains(divider_point.0, divider_point.1));
+        state.pointer_pos = Some((f64::from(divider_point.0), f64::from(divider_point.1)));
+        assert!(state.set_panel_divider_hover(true));
+        state.apply_panel_cursor_icon();
+        assert_eq!(state.last_cursor_icon, Some(CursorIcon::RowResize));
+
+        let _ = state.apply_attach_message(InstanceMessage::PanelFrame(PanelFramePayload::Absent));
+        assert!(state.panel.presented().is_none());
+        assert!(!state.panel.hover_divider);
+        assert!(
+            state.pointer_over_text_content(),
+            "setup: the former divider pixel becomes document text"
+        );
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Text),
+            "panel removal replaces the stale resize icon without pointer motion"
+        );
+    }
+
+    /// B5 — a content-only panel frame does not reshape the document.
+    ///
+    /// Panel content can repaint continuously while its row count and inset
+    /// stay fixed. Routing every accepted frame through `reshape` would put a
+    /// full document rebuild on that ordinary path and would also release the
+    /// post-jump styled-redraw deadline. The deadline is the existing
+    /// observable effect used here to discriminate repaint from reshape.
+    ///
+    /// *Mutation: replace the inset comparison in the `PanelFrame` arm with
+    /// an unconditional `sync_buffer_dimensions(); reshape();` → this row.*
+    #[test]
+    fn b5_a_content_only_panel_frame_repaints_without_reshaping_the_document() {
+        let Some(mut state) = State::new_headless(640, 480, "document\n") else {
+            return;
+        };
+        state.set_panel_wire(PANEL_MIN_VERSION);
+        let (geometry_epoch, total) = state
+            .next_geometry_declaration(GeometryTrigger::Surface)
+            .expect("a panel session declares its surface");
+        let frame = panel_frame_of(4, total.cols.max(1), geometry_epoch, 1);
+        let _ = state.apply_attach_message(InstanceMessage::PanelFrame(
+            PanelFramePayload::Present(frame.clone()),
+        ));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        state.styled_redraw_deadline = Some(deadline);
+        let mut repainted = frame;
+        repainted.cells[0] = terminal_cell(pmacs_protocol::Glyph::Char('y'), CellStyle::default());
+        let inset_before = state.band_inset();
+        let _ = state.apply_attach_message(InstanceMessage::PanelFrame(
+            PanelFramePayload::Present(repainted),
+        ));
+
+        assert_eq!(
+            state.band_inset(),
+            inset_before,
+            "the row count is unchanged"
+        );
+        assert_eq!(
+            state.styled_redraw_deadline,
+            Some(deadline),
+            "a content repaint must not perform a document reshape"
+        );
+    }
+
+    /// B5 — a new geometry declaration temporarily disowns the retained
+    /// panel frame, which is a panel-removal transition of its own.
+    ///
+    /// Resize and font handling reshape before the declaration is advanced.
+    /// Once its epoch changes, `presented()` rejects the old frame and the
+    /// panel inset disappears. This row isolates that later transition from
+    /// frame acceptance by installing the setup frame directly.
+    ///
+    /// *Mutation: omit `reshape_if_panel_band_changed(band_before)` after
+    /// advancing `geometry_epoch` → this row.*
+    #[test]
+    fn b5_geometry_redeclaration_rederives_the_icon_after_disowning_the_panel() {
+        use winit::window::CursorIcon;
+        let document = "fn main() {}\n".repeat(40);
+        let Some(mut state) = State::new_headless(640, 480, &document) else {
+            return;
+        };
+        present_panel(&mut state, 4);
+        let (x, y, _, _) = state.panel_content_rect().expect("present panel");
+        let point = (
+            x + state.text_left() + 8.0,
+            y + state.fm.code_line_height() / 2.0,
+        );
+        assert!(matches!(
+            state.classify_pointer_surface(point.0, point.1),
+            PointerSurface::PanelCell(_)
+        ));
+        state.pointer_pos = Some((f64::from(point.0), f64::from(point.1)));
+        state.apply_panel_cursor_icon();
+        assert_eq!(state.last_cursor_icon, Some(CursorIcon::Default));
+
+        let _ = state
+            .next_geometry_declaration(GeometryTrigger::Metrics)
+            .expect("metrics always advance the panel geometry epoch");
+        assert!(
+            state.panel.presented().is_none(),
+            "the retained frame answers the prior declaration"
+        );
+        assert!(
+            state.pointer_over_text_content(),
+            "setup: without the disowned panel, its former cell is document text"
+        );
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Text),
+            "declaration invalidation settles the icon after its final geometry change"
         );
     }
 
