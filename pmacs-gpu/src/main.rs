@@ -5075,6 +5075,63 @@ mod input_routing_tests {
         );
     }
 
+    /// L5, GPU leg — a horizontal wheel moves the **viewport only**.
+    ///
+    /// Q#S1-11 ruled (B): carrying point would be a new wire operation,
+    /// which 1b's non-protocol scope forbids. The TUI leg asserts point
+    /// and selection directly; here the stronger statement is available
+    /// — **the wire stays silent**, because on this frontend moving
+    /// point means telling the daemon.
+    ///
+    /// *Mutation: have the horizontal leg send a cursor event → this
+    /// row.*
+    #[test]
+    fn l5_a_horizontal_wheel_on_the_gpu_moves_neither_point_nor_the_wire() {
+        let mut h = EffectHarness::with_document(&format!("{}\n", "wide ".repeat(120)).repeat(200));
+        {
+            let buffer_id = h
+                .app
+                .state
+                .as_ref()
+                .expect("harness state")
+                .current_buffer_id
+                .expect("the harness stands in a buffer");
+            let state = h.app.state.as_mut().expect("harness state");
+            let _ = state.apply_attach_message(InstanceMessage::LineWrapFacts {
+                buffer_id,
+                wrap: false,
+            });
+            assert_eq!(state.buffer.wrap(), Wrap::None, "setup: wrap is off");
+        }
+        let document = document_probe(&h);
+        move_pointer(&mut h, document);
+        assert_eq!(
+            h.app.classify_wheel_target(document.0, document.1),
+            WheelTarget::Document,
+            "setup: document text"
+        );
+        let cursor_before = h.app.state.as_ref().expect("state").own_cursor;
+
+        let step = h.feed(&wheel(1.0, 0.0));
+
+        assert!(
+            h.app.state.as_ref().expect("state").code_scroll_left > 0.0,
+            "setup: the notch must actually have scrolled, or this row \
+             passes by doing nothing"
+        );
+        assert_eq!(
+            h.app.state.as_ref().expect("state").own_cursor,
+            cursor_before,
+            "the horizontal wheel is a viewport gesture"
+        );
+        assert!(
+            step.outbound.is_empty(),
+            "and it tells the daemon nothing: moving point here would be \
+             a wire operation, got {:?}",
+            step.outbound
+        );
+    }
+
     /// B6 — the minimap banks into **its own** accumulator, so a
     /// part-notch over it cannot complete a notch over the document.
     ///
@@ -11000,7 +11057,49 @@ impl State {
         // them all at once instead of leaving each new geometry path to
         // remember a call it will not remember.
         self.apply_panel_cursor_icon();
+        // GUI Stage 1b, lifetime clause 3 — the horizontal origin is
+        // **clamped** by the same settling, for the same reason.
+        self.clamp_code_scroll_left();
         self.request_redraw();
+    }
+
+    /// Bring the horizontal origin back inside `0 ..= widest − viewport`
+    /// (lifetime clause 3).
+    ///
+    /// Geometry and content both move that bound: a **wider** viewport
+    /// lowers it, and so does a shortened widest line.
+    ///
+    /// **Nothing else brings the origin down.** `horizontal_follow`
+    /// would, but it runs only when the caret is painted (Q#F6's
+    /// painted-before policy) — and the caret is not painted precisely
+    /// when the user has scrolled it off screen, which is exactly the
+    /// state a stale origin survives in. Measured before this existed:
+    /// after a scroll to the right bound at 640px and a widen to
+    /// 1600px, the origin stayed 960px past the new maximum, leaving
+    /// most of the viewport blank with the text off its left edge.
+    ///
+    /// Gated on a non-zero origin because it scans the document for the
+    /// widest line, and every reshape paying for that would be a steep
+    /// price for a state most windows are never in.
+    fn clamp_code_scroll_left(&mut self) {
+        if self.code_scroll_left <= 0.0 {
+            return;
+        }
+        if self.buffer.wrap() != Wrap::None {
+            self.code_scroll_left = 0.0;
+            return;
+        }
+        let advance = self.mono_advance();
+        let width = self.text_bounds_right() as f32 - self.text_left();
+        if advance <= 0.0 || width <= 0.0 {
+            return;
+        }
+        let cols = (width / advance).floor().max(0.0) as u32;
+        let max_left = self.widest_display_columns().saturating_sub(cols);
+        let current = (self.code_scroll_left / advance).round().max(0.0) as u32;
+        if current > max_left {
+            self.code_scroll_left = max_left as f32 * advance;
+        }
     }
 
     /// Ask the window to repaint. A no-op headless (no window), where the
@@ -15825,6 +15924,99 @@ mod tests {
             state.last_cursor_icon,
             Some(CursorIcon::Text),
             "declaration invalidation settles the icon after its final geometry change"
+        );
+    }
+
+    /// L2 — **the GPU's horizontal origin across geometry changes.**
+    ///
+    /// Two legs, and the framing's expectation about the first was
+    /// wrong in a way worth recording.
+    ///
+    /// *Preserved by a height-only resize.* The framing offers this as
+    /// the row that witnesses **manual authority** on this frontend. It
+    /// does not, and cannot: measured at the head that introduced this
+    /// row, the origin survives a height-only resize with
+    /// `manual_left_authority` **never read anywhere in the frontend**.
+    /// What preserves it is Q#F6's painted-before policy — `resize`
+    /// runs `ensure_caret_painted` only when the caret was painted, and
+    /// a caret the user has scrolled off screen is not painted. So the
+    /// follow that would snap the origin back never runs. The leg is
+    /// kept because the behaviour is required; it is documented here as
+    /// **not** a witness of the latch.
+    ///
+    /// *Clamped by a widening resize* (clause 3). A wider viewport
+    /// LOWERS the maximum `widest − viewport`, and nothing else brings
+    /// the origin down — precisely because the follow is skipped in
+    /// this state. Before `clamp_code_scroll_left` existed, a scroll to
+    /// the right bound at 640px followed by a widen to 1600px left the
+    /// origin **960px past the new maximum**, most of the viewport
+    /// blank and the text off its left edge.
+    ///
+    /// *Mutation: drop `clamp_code_scroll_left()` from `reshape`'s tail
+    /// → the widening leg. Clamp to `max_left - 1` → its exact bound.*
+    #[test]
+    fn l2_the_horizontal_origin_survives_height_and_is_clamped_by_width() {
+        let mut text = "w".repeat(400);
+        text.push('\n');
+        for _ in 0..200 {
+            text.push_str("filler\n");
+        }
+        let Some(mut state) = State::new_headless(640, 480, &text) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 0,
+        });
+        // Wrapping is on by default and pins the origin to zero, so
+        // without this both legs would measure nothing.
+        let _ = state.apply_attach_message(InstanceMessage::LineWrapFacts {
+            buffer_id: bid,
+            wrap: false,
+        });
+        assert_eq!(state.buffer.wrap(), Wrap::None, "setup: wrap is off");
+
+        // Out to the right bound.
+        state.scroll_by_columns(1000);
+        let scrolled = state.code_scroll_left;
+        assert!(scrolled > 0.0, "setup: the origin must have moved");
+        assert!(
+            !state.caret_painted_in_code_clip(),
+            "setup: the caret is off screen, which is the state in which \
+             the follow is skipped — and so the state the origin has to \
+             survive on its own"
+        );
+
+        // Leg 1: a height-only resize leaves the origin alone.
+        state.resize(640, 600);
+        assert!(
+            (state.code_scroll_left - scrolled).abs() < f32::EPSILON,
+            "a taller window is not a horizontal event: {scrolled} -> {}",
+            state.code_scroll_left
+        );
+
+        // Leg 2: a wider one lowers the maximum, and the origin comes
+        // down to meet it — exactly, not merely somewhere lower.
+        state.resize(1600, 600);
+        let advance = state.mono_advance();
+        let width = state.text_bounds_right() as f32 - state.text_left();
+        let cols = (width / advance).floor().max(0.0) as u32;
+        let max_left = state.widest_display_columns().saturating_sub(cols);
+        assert!(
+            state.code_scroll_left < scrolled,
+            "a wider viewport must bring the origin down"
+        );
+        assert!(
+            (state.code_scroll_left - max_left as f32 * advance).abs() < advance / 2.0,
+            "and it must land on `widest − viewport` exactly: {} vs {}",
+            state.code_scroll_left,
+            max_left as f32 * advance
+        );
+        assert!(
+            state.code_scroll_left > 0.0,
+            "clamped, NOT discarded — the gesture survives at the new bound"
         );
     }
 
