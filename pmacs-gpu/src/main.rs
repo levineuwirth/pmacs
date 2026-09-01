@@ -4239,6 +4239,20 @@ impl EffectHarness {
     /// failure; without it the harness still panics rather than skips,
     /// because these rows are the whole of P2.
     fn new() -> Self {
+        // A document tall enough to scroll. A two-line fixture made the
+        // wheel row pass vacuously: `scroll_by_lines` returns `None`
+        // when there is nothing below the fold, so the row asserted
+        // "every outbound event is a Viewport" over an EMPTY transcript.
+        // Mutation M22 surfaced the first half of that and this fixture
+        // is the second.
+        Self::with_document(&"line\n".repeat(200))
+    }
+
+    /// The same harness over a caller-chosen document, for rows whose
+    /// claim depends on the text's shape — B6's horizontal contrast
+    /// needs lines wider than the viewport, which the default fixture's
+    /// four columns can never provide.
+    fn with_document(document: &str) -> Self {
         let (client_stream, mut daemon) =
             std::os::unix::net::UnixStream::pair().expect("socketpair");
 
@@ -4260,14 +4274,7 @@ impl EffectHarness {
             .set_read_timeout(Some(Self::READ_CEILING))
             .expect("arm the outbound read ceiling");
 
-        // A document tall enough to scroll. A two-line fixture made the
-        // wheel row pass vacuously: `scroll_by_lines` returns `None`
-        // when there is nothing below the fold, so the row asserted
-        // "every outbound event is a Viewport" over an EMPTY transcript.
-        // Mutation M22 surfaced the first half of that and this fixture
-        // is the second.
-        let document = "line\n".repeat(200);
-        let state = State::new_headless(640, 480, &document);
+        let state = State::new_headless(640, 480, document);
         assert!(
             state.is_some(),
             "no wgpu adapter: the 1-pre effect rows are P2's only witness and must not be skipped"
@@ -4982,6 +4989,225 @@ mod input_routing_tests {
             step.outbound.is_empty(),
             "a zero-line wheel must send nothing, got {:?}",
             step.outbound
+        );
+    }
+
+    /// A pixel inside the minimap band, and one inside the document
+    /// text. Both are asserted by their rows before use, so a fixture
+    /// whose geometry drifts fails loudly instead of quietly measuring
+    /// the wrong surface.
+    fn minimap_probe(h: &EffectHarness) -> (f64, f64) {
+        let state = h.app.state.as_ref().expect("harness state");
+        let left = minimap_left(state.config.width).expect("the fixture has a minimap band");
+        (f64::from(left + 2.0), f64::from(MINIMAP_TOP + 4.0))
+    }
+
+    fn document_probe(h: &EffectHarness) -> (f64, f64) {
+        let state = h.app.state.as_ref().expect("harness state");
+        (
+            f64::from(state.text_left() + 8.0),
+            f64::from(TEXT_TOP + 4.0),
+        )
+    }
+
+    fn move_pointer(h: &mut EffectHarness, (x, y): (f64, f64)) {
+        h.feed(&WindowEvent::CursorMoved {
+            device_id: DeviceId::dummy(),
+            position: PhysicalPosition::new(x, y),
+        });
+    }
+
+    fn wheel(dx: f32, dy: f32) -> WindowEvent {
+        WindowEvent::MouseWheel {
+            device_id: DeviceId::dummy(),
+            delta: MouseScrollDelta::LineDelta(dx, -dy),
+            phase: TouchPhase::Moved,
+        }
+    }
+
+    /// B6 — a wheel over the **minimap** scrolls the **document
+    /// viewport**, the same effect a wheel over the text has.
+    ///
+    /// The minimap is not a scrollable surface of its own: it is a
+    /// picture of the document, and turning the wheel over a picture of
+    /// the document moves the document. Click and drag over it remain
+    /// scrub, which is a different gesture on the same pixels.
+    ///
+    /// This is the routing half of B6. It reaches `apply_wheel` through
+    /// `dispatch_window_event`, so the classifier, the accumulator and
+    /// the local step are all production code here.
+    ///
+    /// *Mutation: give `WheelTarget::Minimap` its own inert arm ahead of
+    /// the one that applies the local line step → this row. (Deleting it
+    /// from that arm outright would not compile, so the mutation run is
+    /// the compiling equivalent: the minimap reaches no line step.)*
+    #[test]
+    fn b6_a_wheel_over_the_minimap_scrolls_the_document_viewport() {
+        let mut h = EffectHarness::new();
+        let probe = minimap_probe(&h);
+        move_pointer(&mut h, probe);
+        assert_eq!(
+            h.app.classify_wheel_target(probe.0, probe.1),
+            WheelTarget::Minimap,
+            "setup: the probe pixel must be minimap, or this row measures \
+             the document twice"
+        );
+
+        let step = h.feed(&wheel(0.0, 1.0));
+        assert_eq!(
+            step.local,
+            vec![LocalEffect::Scroll {
+                top: WHEEL_LINES_PER_TICK as usize
+            }],
+            "one notch over the minimap moves the document one notch"
+        );
+        assert!(
+            !step.outbound.is_empty(),
+            "a minimap wheel must re-declare the viewport, like any other \
+             document scroll"
+        );
+        assert!(
+            step.outbound
+                .iter()
+                .all(|e| matches!(e, pmacs_protocol::FrontendEvent::Viewport { .. })),
+            "got {:?}",
+            step.outbound
+        );
+    }
+
+    /// B6 — the minimap banks into **its own** accumulator, so a
+    /// part-notch over it cannot complete a notch over the document.
+    ///
+    /// This is the surface-switch case B1 exists to forbid, and the
+    /// minimap is its sharpest instance precisely *because* both
+    /// surfaces move the same viewport: sharing one bank would look
+    /// harmless and produce a jump the user's last gesture does not
+    /// explain. Two part-notches on different surfaces must stay two
+    /// part-notches.
+    ///
+    /// The third step proves the row is not passing by measuring
+    /// nothing: the same document bank, given the rest of its notch,
+    /// does fire.
+    ///
+    /// *Mutation: map `WheelTarget::Minimap` to `ResidualOwner::Document`
+    /// → this row, at the second step.*
+    #[test]
+    fn b6_a_part_notch_over_the_minimap_does_not_complete_one_over_the_document() {
+        let mut h = EffectHarness::new();
+        let minimap = minimap_probe(&h);
+        let document = document_probe(&h);
+
+        move_pointer(&mut h, minimap);
+        assert_eq!(
+            h.app.classify_wheel_target(minimap.0, minimap.1),
+            WheelTarget::Minimap,
+            "setup: minimap pixel"
+        );
+        let step = h.feed(&wheel(0.0, 0.6));
+        assert!(
+            step.local.is_empty() && step.outbound.is_empty(),
+            "0.6 of a notch is not a notch: {:?} {:?}",
+            step.local,
+            step.outbound
+        );
+
+        move_pointer(&mut h, document);
+        assert_eq!(
+            h.app.classify_wheel_target(document.0, document.1),
+            WheelTarget::Document,
+            "setup: document pixel"
+        );
+        let step = h.feed(&wheel(0.0, 0.6));
+        assert!(
+            step.local.is_empty() && step.outbound.is_empty(),
+            "the minimap's 0.6 must not have been waiting in the \
+             document's bank: {:?} {:?}",
+            step.local,
+            step.outbound
+        );
+
+        // The document's own bank still works: 0.6 + 0.6 completes it.
+        let step = h.feed(&wheel(0.0, 0.6));
+        assert_eq!(
+            step.local,
+            vec![LocalEffect::Scroll {
+                top: WHEEL_LINES_PER_TICK as usize
+            }],
+            "the document's accumulator must still accumulate, or the \
+             step above proves nothing"
+        );
+    }
+
+    /// B6 — the minimap's **horizontal** axis is inert.
+    ///
+    /// It banks vertically like any other target, but a sideways notch
+    /// over a fixed-width picture of the document has nothing to mean,
+    /// so §2a's enumeration rules it inert. The contrast is the point:
+    /// the identical event over document text does scroll sideways.
+    ///
+    /// *Mutation: drop the `!matches!(target, WheelTarget::Minimap)`
+    /// guard from the horizontal leg → this row.*
+    #[test]
+    fn b6_a_horizontal_wheel_over_the_minimap_is_inert() {
+        // Lines far wider than the viewport, so the saturated right
+        // bound leaves somewhere to scroll. The default fixture's four
+        // columns pin `max_left` to zero, which would make the contrast
+        // below vacuous — the setup assertion caught exactly that.
+        let mut h = EffectHarness::with_document(&format!("{}\n", "wide ".repeat(120)).repeat(200));
+        // Wrapping is on by default, and `scroll_by_columns` pins the
+        // left edge to zero while it is — so with wrap left alone, BOTH
+        // legs below would sit still and the row would report inertness
+        // it never tested. Turned off through the daemon message that
+        // production uses.
+        {
+            let buffer_id = h
+                .app
+                .state
+                .as_ref()
+                .expect("harness state")
+                .current_buffer_id
+                .expect("the harness stands in a buffer");
+            let state = h.app.state.as_mut().expect("harness state");
+            let _ = state.apply_attach_message(InstanceMessage::LineWrapFacts {
+                buffer_id,
+                wrap: false,
+            });
+            assert_eq!(
+                state.buffer.wrap(),
+                Wrap::None,
+                "setup: the wrap-off message must have landed on this buffer"
+            );
+        }
+        let minimap = minimap_probe(&h);
+        let document = document_probe(&h);
+
+        let left_of = |h: &EffectHarness| {
+            h.app
+                .state
+                .as_ref()
+                .expect("harness state")
+                .code_scroll_left
+        };
+        move_pointer(&mut h, minimap);
+        let before = left_of(&h);
+        h.feed(&wheel(1.0, 0.0));
+        // Unchanged, not merely small: any real horizontal scroll is at
+        // least one character advance, which is orders above this.
+        assert!(
+            (left_of(&h) - before).abs() < f32::EPSILON,
+            "a horizontal notch over the minimap must not move the \
+             document sideways: {before} -> {}",
+            left_of(&h)
+        );
+
+        // The same event over text, to show the delta was real and the
+        // row is not asserting that horizontal wheels do nothing at all.
+        move_pointer(&mut h, document);
+        h.feed(&wheel(1.0, 0.0));
+        assert!(
+            left_of(&h) > before,
+            "setup: the same notch over text must scroll, else the \
+             assertion above is vacuous"
         );
     }
 
