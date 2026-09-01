@@ -4971,8 +4971,6 @@ mod input_routing_tests {
         );
     }
 
-    /// P2 — a button the frontend has no semantics for reaches no body:
-    /// nothing local, nothing outbound. The counterpart to the routing
     /// B4 END TO END — a middle press driven through
     /// `dispatch_window_event` sends **exactly one** `Paste`, carrying
     /// the **PRIMARY** payload, and its release sends none.
@@ -4986,8 +4984,22 @@ mod input_routing_tests {
     /// The two selections carry **distinguishable** contents, which is
     /// the whole point — a row whose PRIMARY and CLIPBOARD stubs said
     /// the same thing would pass with the wrong one read.
+    ///
+    /// **It asserts the whole transcript on BOTH platforms**, not just
+    /// Linux. A Linux-only row leaves the off-Linux contract to a helper
+    /// test, and
+    /// `middle_click_paste_source().unwrap_or(PasteSource::Clipboard)`
+    /// at the call site then restores the rejected clipboard fallback
+    /// while every row stays green: the helper still returns `None` and
+    /// Linux still gets PRIMARY. The inertness has to be asserted where
+    /// the effect would appear.
+    ///
+    /// **Where that mutant is actually caught, stated honestly:** on a
+    /// Linux host the `unwrap_or` never engages — the source is already
+    /// `Some(Primary)` — so no row on this machine can fire it, and a
+    /// green local run is not evidence about it. The `else` branch below
+    /// is what catches it, and it runs on the **non-Linux CI legs**.
     #[test]
-    #[cfg(target_os = "linux")]
     fn b4_a_middle_press_sends_exactly_one_paste_carrying_primary() {
         use winit::event::{ElementState, MouseButton};
         let mut h = EffectHarness::new();
@@ -5003,19 +5015,34 @@ mod input_routing_tests {
             .iter()
             .filter(|e| matches!(e, pmacs_protocol::FrontendEvent::Paste { .. }))
             .collect();
-        assert_eq!(
-            pastes.len(),
-            1,
-            "exactly one paste, got {:?}",
-            step.outbound
-        );
-        match pastes[0] {
-            pmacs_protocol::FrontendEvent::Paste { data, .. } => assert_eq!(
-                data.as_slice(),
-                b"PRIMARY-payload",
-                "B4 pastes the PRIMARY selection, not the clipboard"
-            ),
-            other => panic!("expected a Paste, got {other:?}"),
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                pastes.len(),
+                1,
+                "exactly one paste, got {:?}",
+                step.outbound
+            );
+            match pastes[0] {
+                pmacs_protocol::FrontendEvent::Paste { data, .. } => assert_eq!(
+                    data.as_slice(),
+                    b"PRIMARY-payload",
+                    "B4 pastes the PRIMARY selection, not the clipboard"
+                ),
+                other => panic!("expected a Paste, got {other:?}"),
+            }
+        } else {
+            assert!(
+                pastes.is_empty(),
+                "off Linux the gesture is INERT: B4 rules PRIMARY on Linux \
+                 and nothing else, so no paste of any selection may appear \
+                 here. Got {:?}",
+                step.outbound
+            );
+            assert!(
+                step.local.is_empty(),
+                "and no local effect either: {:?}",
+                step.local
+            );
         }
 
         let release = h.feed(&mouse_input(ElementState::Released, MouseButton::Middle));
@@ -5028,6 +5055,8 @@ mod input_routing_tests {
         );
     }
 
+    /// P2 — a button the frontend has no semantics for reaches no body:
+    /// nothing local, nothing outbound. The counterpart to the routing
     /// row that calls it claimed-and-dropped.
     #[test]
     fn an_unused_button_produces_no_effect_of_any_kind() {
