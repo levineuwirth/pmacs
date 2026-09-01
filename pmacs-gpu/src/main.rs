@@ -3022,6 +3022,11 @@ impl App {
         // highlight; send a hover when the item under the pointer
         // changes from the daemon's current active row.
         if state.menu.is_some() {
+            // B5 — the menu owns this pointer path, and it is not text.
+            // Without this the I-beam that was showing when the menu
+            // opened stays on screen over the menu indefinitely: the
+            // early return below skips the icon application entirely.
+            state.apply_panel_cursor_icon();
             let hit = state.menu_hit(x, y);
             let active = state.menu.as_ref().and_then(|m| m.active);
             if let Some((row, true)) = hit
@@ -4995,6 +5000,56 @@ mod input_routing_tests {
         assert_eq!(
             h.app.state.as_ref().expect("harness state").pointer_pos,
             Some((30.0, 40.0))
+        );
+    }
+
+    /// B5 — the icon is re-applied on **every** motion, not only when
+    /// divider hover flips.
+    ///
+    /// Crossing from text into the gutter changes the icon and does not
+    /// touch `hover_divider`, so the old divider-change gate left the
+    /// I-beam on screen for exactly the transitions B5 is about. The
+    /// unit rows cannot see this: they call `desired_cursor_icon`
+    /// directly and never exercise the gate.
+    ///
+    /// *Mutation: gate the call on `set_panel_divider_hover(..)` again →
+    /// this row.*
+    #[test]
+    fn b5_the_icon_follows_motion_between_text_and_chrome() {
+        let mut h = EffectHarness::new();
+        let (text_x, gutter_x, y) = {
+            let state = h.app.state.as_mut().expect("harness state");
+            state.line_numbers = crate::LineNumberMode::Absolute;
+            let text_left = state.text_left();
+            assert!(
+                text_left > crate::TEXT_LEFT,
+                "fixture: a gutter must exist for this row to discriminate"
+            );
+            (
+                f64::from(text_left + 8.0),
+                f64::from(crate::TEXT_LEFT.midpoint(text_left)),
+                f64::from(crate::TEXT_TOP + 4.0),
+            )
+        };
+
+        h.app.apply_cursor_moved(text_x, y);
+        assert_eq!(
+            h.app.state.as_ref().expect("state").last_cursor_icon,
+            Some(winit::window::CursorIcon::Text),
+            "motion into text sets the I-beam"
+        );
+        assert!(
+            !h.app.state.as_ref().expect("state").panel.hover_divider,
+            "setup: divider hover stays false throughout, so a \
+             divider-gated apply would never run"
+        );
+
+        h.app.apply_cursor_moved(gutter_x, y);
+        assert_eq!(
+            h.app.state.as_ref().expect("state").last_cursor_icon,
+            Some(winit::window::CursorIcon::Default),
+            "motion into the gutter clears it — the gate would have left \
+             the I-beam showing"
         );
     }
 
@@ -8258,12 +8313,17 @@ impl State {
         }
     }
 
-    /// Apply the divider hover cursor icon to the real window.
+    /// Apply the cursor icon [`Self::desired_cursor_icon`] chose to the
+    /// real window.
     ///
-    /// `RowResize` while the pointer is on the strip, the default arrow
-    /// otherwise. Driven from the same `hover_divider` bit the hit test
-    /// sets, so the icon cannot advertise a drag target the press would
-    /// miss.
+    /// **Three outcomes, not two**, since GUI Stage 1b's B5:
+    /// `RowResize` on the divider strip, `Text` over document text
+    /// content, and the default arrow otherwise. The divider half is
+    /// driven from the same `hover_divider` bit the hit test sets, so
+    /// the icon cannot advertise a drag target the press would miss.
+    ///
+    /// Idempotent: it writes only when the icon actually changed, which
+    /// is what makes calling it on every pointer motion cheap.
     fn apply_panel_cursor_icon(&mut self) {
         let icon = self.desired_cursor_icon();
         if self.last_cursor_icon == Some(icon) {
@@ -8311,6 +8371,12 @@ impl State {
     /// and a byte test would flicker the cursor along a ragged right
     /// margin.
     fn pointer_over_text_content(&self) -> bool {
+        // An open context menu covers the document and owns the
+        // pointer; its pixels are chrome however text-like whatever is
+        // painted beneath them may be.
+        if self.menu.is_some() {
+            return false;
+        }
         let Some((x, y)) = self.pointer_pos else {
             return false;
         };
@@ -14980,6 +15046,81 @@ mod tests {
             state.desired_cursor_icon(),
             CursorIcon::RowResize,
             "the divider is a drag handle and is never text"
+        );
+    }
+
+    /// B5 — the I-beam covers text-area BLANK too, not only glyphs.
+    ///
+    /// The ruling is that `pointer_over_text_content` is **geometric**
+    /// rather than a byte hit-test: an I-beam belongs over the text
+    /// area including the space past a short line's end, and a byte test
+    /// would flicker the cursor along a ragged right margin.
+    ///
+    /// A row whose only positive point sits over an actual glyph cannot
+    /// see that: replacing the geometry with a byte hit-test passes it.
+    ///
+    /// *Mutation: decide by `hit_test_source_byte` → this row.*
+    #[test]
+    fn b5_the_i_beam_covers_the_blank_past_a_short_lines_end() {
+        use winit::window::CursorIcon;
+        // One very short line, so most of the text rectangle's first row
+        // is blank — and the row asks for the I-beam there.
+        let Some(mut state) = State::new_headless(640, 480, "ab\n\n\n") else {
+            return;
+        };
+        state.line_numbers = LineNumberMode::Absolute;
+        let far_right = state.text_bounds_right() as f32 - 8.0;
+        assert!(
+            far_right > state.text_left() + 40.0,
+            "fixture: the row needs blank space well past the line's end"
+        );
+        state.pointer_pos = Some((f64::from(far_right), f64::from(TEXT_TOP + 4.0)));
+        assert_eq!(
+            state.desired_cursor_icon(),
+            CursorIcon::Text,
+            "the text AREA carries the I-beam, not just the glyphs in it"
+        );
+    }
+
+    /// B5 — an open context menu owns its pixels, and they are not text.
+    ///
+    /// The menu's motion path returns before the icon is applied, so an
+    /// I-beam showing when the menu opened would stay on screen over the
+    /// menu indefinitely.
+    ///
+    /// *Mutation: drop the `menu.is_some()` guard → this row.*
+    #[test]
+    fn b5_an_open_menu_is_not_text() {
+        use winit::window::CursorIcon;
+        let document = "fn main() {}\n".repeat(40);
+        let Some(mut state) = State::new_headless(640, 480, &document) else {
+            return;
+        };
+        state.line_numbers = LineNumberMode::Absolute;
+        let over_text = (
+            f64::from(state.text_left() + 8.0),
+            f64::from(TEXT_TOP + 4.0),
+        );
+        state.pointer_pos = Some(over_text);
+        assert_eq!(
+            state.desired_cursor_icon(),
+            CursorIcon::Text,
+            "setup: an I-beam is showing before the menu opens"
+        );
+
+        state.menu = Some(MenuLocal {
+            rows: vec![MenuPromptRow {
+                label: "an item".to_owned(),
+                separator: false,
+            }],
+            active: Some(0),
+            anchor_px: (10.0, 10.0),
+        });
+
+        assert_eq!(
+            state.desired_cursor_icon(),
+            CursorIcon::Default,
+            "the menu owns the pointer; its pixels are chrome"
         );
     }
 
