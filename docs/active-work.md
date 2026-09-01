@@ -319,23 +319,33 @@ Framing
 this base, the panel-replay prerequisite recorded as DISCHARGED by #243,
 and the both-axis effect witness still owed.
 
-**Landed so far** (head `a4627cd`)**:** B1's per-target fractional
+**Landed so far** (code head `175cc7b`)**:** B1's per-target fractional
 wheel residual (the producer), B2's daemon-side horizontal panel leg,
 B3/B7's shared `scroll_window_columns` with its saturated bound and wrap
 pin, B4's middle-click PRIMARY paste, and **B5's I-beam**, whose icon is
-re-derived in **`reshape`'s tail** — the one point every geometry settle
-already passes through, reached by the line-number mode, minimap
-arrival, panel appearance, resize and font metrics alike. Three
-production appliers remain, one per cause (pointer motion, menu
-ownership without geometry, geometry), and each fires a disjoint set of
-rows under its own removal.
+re-derived in **`reshape`'s tail**. Panel inset transitions now terminate
+at `reshape_if_panel_band_changed`: accepted `Present`/`Absent`/row-count
+changes and a geometry declaration disowning the retained frame all
+reach the hook, while a content-only frame repaints without rebuilding
+the document. Three production appliers remain, one per cause (pointer
+motion, menu ownership without geometry, geometry).
 
-B5 took three rounds to get there. The first two patched the paths that
-had been noticed — the snapshot arm, then a `set_menu` helper — and both
-times the two appliers masked each other, so a row's documented mutation
-named something the row could not see. **A witness whose mutation is
-masked is not weaker evidence than a real one; it is evidence of
-nothing, and it reads identically in the diff.**
+B5's central-hook correction needed one more pass. Counting ten
+`reshape` call sites did **not** establish that every boundary-changing
+transition reached one: `PanelFrame` synchronized dimensions and
+redrew without reshaping, and advancing `geometry_epoch` disowned the
+retained frame *after* resize/font handling had reshaped against its old
+presentation. The earlier two path patches — the snapshot arm, then a
+`set_menu` helper — had the dual defect: each masked the other, so a
+row's documented mutation named something the row could not see. **A
+witness whose mutation is masked is not weaker evidence than a real
+one; it is evidence of nothing, and it reads identically in the diff.**
+
+At `175cc7b`, all 309 GPU rows pass; workspace clippy with all targets
+and `-D warnings`, fmt and `git diff --check` are clean. Four mutations
+were executed and each fires its named row: omit accepted-frame reflow,
+omit epoch-invalidation reflow, reshape content-only frames, and retain
+divider hover on `Absent`.
 
 **Landed but NOT yet witnessed** — recovery needs this split, because
 "L1–L8 owed" reads as though none of the mechanism exists:
