@@ -1083,6 +1083,40 @@ regression in two unrelated subsystems at once is far less likely than
 one loaded machine. If a future run reds **one** of these without the
 other, that is a different incident and should be judged as one.
 
+### U20 — U6's composition test reds ALONE, which U6 says is a new incident
+
+Recorded during GUI Stage 1b, 2026-09-01, local (Linux). **This row
+exists because U6's closing rule says it must**: *"If a future run reds
+one of these without the other, that is a different incident and should
+be judged as one."* This is that run. It is filed separately rather than
+as a sixth U6 occurrence, because U6's selector requires **both** tests
+failing together and its whole argument rests on the pair — a real
+regression in two unrelated subsystems at once being less likely than
+one loaded machine. One test alone does not carry that argument.
+
+| field | value |
+|---|---|
+| **selector** | `--lib editor::tests::composition_overhead_under_ten_percent`, **alone** — `optimistic::tests::criterion_1_end_of_line_typing_completes_sub_frame_per_keystroke` passed in the same run |
+| **job / flavor** | local (Linux), bare `cargo test --lib` (default features), full-lib load, **not** `scripts/gate` |
+| **required fragments** | `composition machinery added more than 10% overhead` + a ratio; the run also printed `dispatch overhead : 87.9%` and `realistic overhead : 82.1%` |
+| **status** | **ONE occurrence.** Not reproduced in six subsequent full-lib runs — three on the observing tree and three on the same tree with the observing diff reverted |
+| **margin** | **1.879 against a 1.10 budget** (`single=158789 ns, dispatch=298366 ns`). Recorded because U11 taught this registry what a missing margin costs. This is far the largest margin any occurrence of this selector has shown: U6's five were 1.297, 1.182, 1.592, 1.527 and one unrecorded |
+| **what IS established** | the observing diff (`9cb610e`, the TUI horizontal-authority latch) adds work to the paint path, so it was a live suspect. It was tested rather than argued about: three full-lib runs with the diff and three with `src/editor.rs` and `src/window.rs` restored to HEAD. **All six green.** The single failure is therefore not reproducible either way |
+| **what is NOT** | why it fired. The load confound is once again unmeasured — no `/proc/loadavg` reading was taken at the moment of failure, which is the same gap U15 exists to close |
+
+**The margin is the part that does not fit.** 1.879 is not a budget
+missed by a hair; it is the machinery costing nearly twice what the
+budget allows, and it is a third again worse than U6's worst. A
+load-sensitive assertion can produce that, but so can a real
+regression, and this row does not pretend the size of the margin
+resolves the question. What it does establish is that the observing
+diff is not the cause, because six controlled runs say so.
+
+**If this selector reds alone again, this row is where it goes**, and
+the first thing to capture is a contemporaneous load reading — the one
+piece of evidence that would separate the two explanations and that
+neither U6 nor this row has at the moment of failure.
+
 ### U7 — a *different* wall-clock render-budget test reds each sweep
 
 Recorded during worker identity Stage 1 review round 3, 2026-08-09.

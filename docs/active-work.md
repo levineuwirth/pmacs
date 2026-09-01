@@ -319,7 +319,7 @@ Framing
 this base, the panel-replay prerequisite recorded as DISCHARGED by #243,
 and the both-axis effect witness still owed.
 
-**Landed so far** (code head `f441d3d`)**:** B1's per-target fractional
+**Landed so far** (latest verified code head `9cb610e`)**:** B1's per-target fractional
 wheel residual (the producer), B2's daemon-side horizontal panel leg,
 B3/B7's shared `scroll_window_columns` with its saturated bound and wrap
 pin, B4's middle-click PRIMARY paste, **B6's minimap wheel routing**,
@@ -354,18 +354,58 @@ documentation-only commits and remains the recovery source. Calling
 commit carrying the sentence — the self-certifying checkpoint defect
 this ledger has already recorded elsewhere.
 
-**Landed but NOT yet witnessed** — recovery needs this split, because
-"L1–L8 owed" reads as though none of the mechanism exists:
+### The latch was never the thing the ledger said it was
 
-- the **manual horizontal authority latch** (`manual_left_authority`),
-  armed only by an *effective* move (clause 2);
+**This entry was wrong, and the correction is the recovery-relevant
+part.** It listed the manual horizontal authority latch as "landed but
+not yet witnessed". Writing L1 showed otherwise:
+`manual_left_authority` existed on the GPU, was **written in four
+places and read in none**, and did not exist on the TUI at all. What
+had landed was the arming. The preservation the latch exists for was
+nowhere, on either frontend.
+
+L1 measured it before anything changed: a sideways wheel moved the TUI
+origin to 30, and the next paint put it back to 0. **A horizontal
+scroll was undone by the following frame.** An unread `bool` preserves
+nothing, and "landed but unwitnessed" is exactly how that reads from
+the outside.
+
+**`9cb610e` implements clauses 2–5 for the TUI** and witnesses each:
+L1 preservation across a real `paint_frame`, L3 release on a genuine
+cursor move, L4 a vertical wheel preserving authority, L5 viewport-only,
+L6 an absorbed notch arming nothing, L7a re-clamp on widening, L8 wrap
+clearing the latch. Seven mutations run, each biting its named rows.
+
+Three things the framing's L-table did not anticipate, all surfaced by
+setup assertions rather than by reading:
+
+- **L4's stated hazard cannot arise in the setup the same table
+  mandates.** The vertical wheel carries point only when the caret is
+  INSIDE the viewport — `pos_to_display` returns `None` left of the
+  edge (Q#HS7(c′)) — and every other L-row requires it outside. L4
+  places the caret inside and uses the **latch** as its discriminator,
+  because the origin cannot discriminate there.
+- **Clause 3 needs a mechanism, not an exemption.** `scroll_window`
+  refreshes `manual_left_cursor` to the point it dragged along, so
+  clause 4's "genuine cursor change" stays false. Keying release on the
+  cursor byte alone releases exactly where clause 3 forbids it.
+- **`paint_frame` runs the follow BEFORE resolving the frame's wrap
+  mode and content width**, so a geometry or wrap change reaches the
+  follow one frame late. L7a and L8 paint twice and say why.
+
+**Still owed on this axis: L7b (content shrink), and the GPU's entire
+read side with L2 and L5's GPU leg.** The GPU's four writes remain
+inert until something consults them.
+
+**Landed but NOT yet witnessed:**
+
 - **wrap and buffer-replacement clearing** of that latch and the origin
   (clause 5), on both the GPU's `scroll_by_columns` and the buffer
   replacement path;
 - **R4 and R5's residual resets**, as two separate clears beside
   `code_scroll_left` so omitting either is individually visible.
 
-**Owed outright:** the **L1–L8 rows** for the latch above, step 3's
+**Owed outright:** L7b and the GPU's whole read side (above), step 3's
 fractional both-axis panel witness, R4/R5's own replacement witnesses,
 and **B1's disposal half** — a residual keyed to a surface that goes
 away must go with it, and this frontend does not yet track "that buffer
@@ -453,10 +493,17 @@ error: could not compile `pmacs-gpu` (bin "pmacs-gpu" test)
        due to 4 previous errors
 ```
 
-Three of the four were read off the second occurrence's output —
-`main.rs:13291`, `:14517`, `:14578`; the fourth scrolled past the
-captured tail and is **not** recorded here rather than guessed. All are
-uses of the module the 1b branch added in `9e54cd2`.
+**THREE occurrences now**, all local. The third (at `9cb610e`) gave the
+complete set of four sites, which the second's captured tail had cut to
+three: at that head they were `main.rs:9049`, `:13546`, `:14772` and
+`:14833` — every use of the module the 1b branch added in `9e54cd2`.
+Line numbers drift as the file grows; the module path is the stable
+part of the signature.
+
+An earlier draft of this entry guessed the missing fourth site was
+`widest_display_columns`. The third occurrence shows that guess was
+right — and it was still right not to record it, because a signature
+that is *usually* right is one nobody can match against.
 
 **Why it is false.** Both times, the module was fully present:
 `pmacs-protocol/src/columns.rs` existed and matched HEAD, and
