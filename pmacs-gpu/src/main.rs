@@ -1873,6 +1873,9 @@ struct State {
     /// caret follow leaves it alone until the cursor position actually
     /// changes. A move fully absorbed by the clamp arms nothing.
     manual_left_authority: bool,
+    /// Stub selections for tests; see [`Self::set_test_selection`].
+    #[cfg(test)]
+    test_selections: HashMap<PasteSource, Vec<u8>>,
     /// GUI Stage 1b B1: per-target, per-axis fractional wheel residual.
     /// Sub-tick deltas are banked here instead of being rounded away
     /// before routing knows where they were going.
@@ -3429,7 +3432,9 @@ impl App {
     /// it as a `Paste`, the same wire operation Ctrl-V uses. The daemon
     /// inserts it; this frontend never edits the document itself.
     fn apply_middle_press(&mut self) {
-        let source = middle_click_paste_source();
+        let Some(source) = middle_click_paste_source() else {
+            return;
+        };
         let bytes = self
             .state
             .as_mut()
@@ -4968,6 +4973,61 @@ mod input_routing_tests {
 
     /// P2 — a button the frontend has no semantics for reaches no body:
     /// nothing local, nothing outbound. The counterpart to the routing
+    /// B4 END TO END — a middle press driven through
+    /// `dispatch_window_event` sends **exactly one** `Paste`, carrying
+    /// the **PRIMARY** payload, and its release sends none.
+    ///
+    /// The two seam rows below cannot see this: mutating
+    /// `middle_click_paste_source` or replacing the dispatch arm with a
+    /// no-op leaves both of them green, because each asserts a function
+    /// in isolation rather than the effect the gesture produces. This
+    /// row drives the production path and asserts the payload.
+    ///
+    /// The two selections carry **distinguishable** contents, which is
+    /// the whole point — a row whose PRIMARY and CLIPBOARD stubs said
+    /// the same thing would pass with the wrong one read.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn b4_a_middle_press_sends_exactly_one_paste_carrying_primary() {
+        use winit::event::{ElementState, MouseButton};
+        let mut h = EffectHarness::new();
+        if let Some(state) = h.app.state.as_mut() {
+            state.set_test_selection(crate::PasteSource::Primary, b"PRIMARY-payload");
+            state.set_test_selection(crate::PasteSource::Clipboard, b"CLIPBOARD-payload");
+        }
+
+        let step = h.feed(&mouse_input(ElementState::Pressed, MouseButton::Middle));
+
+        let pastes: Vec<&pmacs_protocol::FrontendEvent> = step
+            .outbound
+            .iter()
+            .filter(|e| matches!(e, pmacs_protocol::FrontendEvent::Paste { .. }))
+            .collect();
+        assert_eq!(
+            pastes.len(),
+            1,
+            "exactly one paste, got {:?}",
+            step.outbound
+        );
+        match pastes[0] {
+            pmacs_protocol::FrontendEvent::Paste { data, .. } => assert_eq!(
+                data.as_slice(),
+                b"PRIMARY-payload",
+                "B4 pastes the PRIMARY selection, not the clipboard"
+            ),
+            other => panic!("expected a Paste, got {other:?}"),
+        }
+
+        let release = h.feed(&mouse_input(ElementState::Released, MouseButton::Middle));
+        assert!(
+            !release
+                .outbound
+                .iter()
+                .any(|e| matches!(e, pmacs_protocol::FrontendEvent::Paste { .. })),
+            "the release pastes nothing; the gesture fires once, on the press"
+        );
+    }
+
     /// row that calls it claimed-and-dropped.
     #[test]
     fn an_unused_button_produces_no_effect_of_any_kind() {
@@ -5333,7 +5393,7 @@ const WHEEL_COLUMNS_PER_TICK: f32 = 3.0;
 /// copy, and the PRIMARY selection, written merely by selecting text.
 /// **They are different selections with different contents**, and the
 /// platform convention pairs them with different gestures.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 enum PasteSource {
     /// What Ctrl-V reads.
     Clipboard,
@@ -5341,16 +5401,20 @@ enum PasteSource {
     Primary,
 }
 
-/// The selection a middle click pastes from.
+/// The selection a middle click pastes from, or `None` where the
+/// gesture has no ruled meaning.
 ///
-/// **PRIMARY on Linux** — B4's whole content. Elsewhere there is no
-/// PRIMARY selection, so the gesture falls back to the clipboard rather
-/// than doing nothing, which is the closest available meaning.
-const fn middle_click_paste_source() -> PasteSource {
+/// **B4 rules PRIMARY on Linux, and rules nothing else.** Off Linux
+/// there is no PRIMARY selection, and the gesture was inert before this
+/// slice; making it paste the CLIPBOARD instead would be a new
+/// behaviour on every other platform that no framing approved. It stays
+/// inert, and a fallback needs framing and re-approval rather than a
+/// default chosen here.
+const fn middle_click_paste_source() -> Option<PasteSource> {
     if cfg!(target_os = "linux") {
-        PasteSource::Primary
+        Some(PasteSource::Primary)
     } else {
-        PasteSource::Clipboard
+        None
     }
 }
 
@@ -5959,6 +6023,8 @@ impl State {
             last_pointer_down: None,
             minimap_scrub_active: false,
             manual_left_authority: false,
+            #[cfg(test)]
+            test_selections: HashMap::new(),
             wheel_residuals: WheelResiduals::default(),
             edge_scroll_dir: None,
             edge_scroll_last: None,
@@ -6444,6 +6510,20 @@ impl State {
         self.read_os_selection(PasteSource::Clipboard)
     }
 
+    /// Stub selection contents for tests, consulted by
+    /// [`Self::read_os_selection`] before the OS clipboard.
+    ///
+    /// **A test seam in production code, and deliberately so.** B4's
+    /// contract is *which selection* a middle click reads, and the two
+    /// selections cannot be told apart through a real clipboard in a
+    /// unit test — a row that asserts "a paste happened" passes with the
+    /// wrong selection read. This is the smallest seam that lets the row
+    /// assert the payload rather than the seam that chose it.
+    #[cfg(test)]
+    fn set_test_selection(&mut self, source: PasteSource, bytes: &[u8]) {
+        self.test_selections.insert(source, bytes.to_vec());
+    }
+
     /// Read one named OS selection.
     ///
     /// GUI Stage 1b B4 needs the **PRIMARY** selection, which on Linux
@@ -6453,6 +6533,10 @@ impl State {
     /// selected — a plausible-looking wrong answer, which is why B4's
     /// row asserts the source rather than that "a paste happened".
     fn read_os_selection(&mut self, source: PasteSource) -> Option<Vec<u8>> {
+        #[cfg(test)]
+        if let Some(bytes) = self.test_selections.get(&source) {
+            return Some(bytes.clone());
+        }
         let clipboard = self.os_clipboard()?;
         let read = match source {
             PasteSource::Clipboard => clipboard.get_text(),
@@ -14718,15 +14802,15 @@ mod tests {
         if cfg!(target_os = "linux") {
             assert_eq!(
                 source,
-                super::PasteSource::Primary,
+                Some(super::PasteSource::Primary),
                 "B4: the middle button reads PRIMARY on Linux"
             );
         } else {
             assert_eq!(
-                source,
-                super::PasteSource::Clipboard,
-                "off Linux there is no PRIMARY selection; the clipboard is \
-                 the closest available meaning"
+                source, None,
+                "B4 rules PRIMARY on Linux and nothing else; off Linux the \
+                 gesture stays inert rather than acquiring an unframed \
+                 clipboard meaning"
             );
         }
     }
