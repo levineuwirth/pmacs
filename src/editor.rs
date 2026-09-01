@@ -3400,6 +3400,10 @@ impl EditorState {
         if window.last_wrap == crate::view::WrapMode::Wrap {
             if let Some(window) = core.windows.get_mut(&win_id) {
                 window.view_left = 0;
+                // Clause 5: a wrapped buffer has nothing past the right
+                // edge, so neither an origin nor a latch defending one
+                // may survive.
+                window.manual_left_authority = false;
             }
             return false;
         }
@@ -3427,6 +3431,12 @@ impl EditorState {
         }
         if let Some(window) = core.windows.get_mut(&win_id) {
             window.view_left = next;
+            // Clause 2, and only on an EFFECTIVE move: the early return
+            // above has already rejected a notch the clamp absorbed, so
+            // scrolling into a bound arms nothing and the next follow
+            // behaves normally.
+            window.manual_left_authority = true;
+            window.manual_left_cursor = window.cursor;
         }
         true
     }
@@ -4725,6 +4735,16 @@ impl EditorState {
         if let Some(p) = new_cursor {
             aw.cursor = p;
             aw.goal_col = None;
+            // Lifetime clause 3 — **a vertical wheel PRESERVES manual
+            // horizontal authority**, and in this frontend the vertical
+            // wheel carries point. Clause 4 releases on a *genuine*
+            // cursor change, so the baseline moves with the point this
+            // viewport gesture dragged along; keying release on the
+            // cursor byte alone would release here, which clause 3
+            // forbids outright.
+            if aw.manual_left_authority {
+                aw.manual_left_cursor = p;
+            }
         }
     }
 }
@@ -5314,10 +5334,32 @@ impl CompletionPopupKey {
 /// what happened to the scroll indicator earlier in this very arc. What
 /// stays here is the part that is genuinely the TUI's: which window,
 /// which wrap mode, and which width.
-fn horizontal_follow(window: &mut crate::window::Window, cursor_col: u32) {
+fn horizontal_follow(window: &mut crate::window::Window, cursor_col: u32, max_left: Option<u32>) {
     if window.last_wrap == crate::view::WrapMode::Wrap {
         window.view_left = 0;
+        // Clause 5 again, on the path a wrap toggle actually takes: the
+        // origin-zeroing above is visible, a latch surviving it is not
+        // — until the return to `truncate`, where the caret rule should
+        // have resumed and would not.
+        window.manual_left_authority = false;
         return;
+    }
+    if window.manual_left_authority {
+        if window.cursor == window.manual_left_cursor {
+            // Clause 3 — the origin is preserved, but not frozen: a
+            // narrower viewport or a shortened widest line lowers the
+            // maximum, and an origin past it would scroll the text off
+            // the screen entirely. Re-clamp and keep authority.
+            if let Some(max_left) = max_left {
+                window.view_left = window.view_left.min(max_left);
+            }
+            return;
+        }
+        // Clause 4 — a GENUINE cursor change releases, and normal
+        // following resumes on this same event rather than the next
+        // one. Release is driven by the cursor moving, never by this
+        // function running.
+        window.manual_left_authority = false;
     }
     window.view_left =
         pmacs_protocol::scroll::follow_left(window.view_left, cursor_col, window.last_content_cols);
@@ -5358,7 +5400,17 @@ fn prepare_window_cursor_visible(
         .text_view
         .pos_to_display(buf, window.cursor, unscrolled);
     let cursor_row = coord.map_or(0, |d| d.row as usize);
-    horizontal_follow(window, coord.map_or(0, |d| d.col));
+    // The clause-3 bound, computed ONLY while the latch is held: it
+    // reads the whole rope, and every paint paying for that would be a
+    // steep price for state most windows are never in.
+    let max_left = window.manual_left_authority.then(|| {
+        let len = buf.len();
+        let mut bytes = vec![0u8; len as usize];
+        buf.snapshot_rope().slice(0, len, &mut bytes);
+        crate::display_width::widest_line_columns(&String::from_utf8_lossy(&bytes))
+            .saturating_sub(window.last_content_cols)
+    });
+    horizontal_follow(window, coord.map_or(0, |d| d.col), max_left);
     match folds {
         // The logical cursor may sit on a hidden line (a shared fold, or
         // goto-line into one); the row that actually renders — and so
@@ -10583,6 +10635,365 @@ mod tests {
     /// A wrapped line has nothing past the right edge, so an origin
     /// there would scroll a buffer sideways that has no sideways.
     ///
+    /// A buffer with one line far wider than any viewport these rows
+    /// use, so B7's `widest − viewport` bound can never absorb their
+    /// gestures and read as correct.
+    fn wide_fixture() -> EditorState {
+        let mut content = b"short\n".to_vec();
+        content.extend_from_slice(&b"w".repeat(400));
+        content.push(b'\n');
+        // Tall as well as wide. L3 needs a line to move DOWN to and L4
+        // needs somewhere to scroll: in a two-line document the vertical
+        // wheel has nothing to do, carries no point, and L4's setup
+        // assertion fires — which is how this was found.
+        content.extend_from_slice(&b"filler\n".repeat(200));
+        fresh_with(&content)
+    }
+
+    fn wheel(s: &mut EditorState, kind: crossterm::event::MouseEventKind, times: u32) {
+        for _ in 0..times {
+            s.dispatch_mouse(FrontendId::LOCAL, mouse(kind, 5, 5), term_size_24x80());
+        }
+    }
+
+    /// The state every L-row starts from: a real sideways wheel gesture
+    /// with the caret left at column 0 — **outside** the resulting
+    /// viewport. That is what makes the rows discriminate: with the
+    /// caret inside, `follow_left` returns the origin it was handed and
+    /// a held latch is indistinguishable from a released one.
+    fn scrolled_sideways() -> (EditorState, u32) {
+        let mut s = wide_fixture();
+        paint_truncated(&s, term_size_24x80());
+        assert_eq!(
+            s.core.borrow().cursor(),
+            0,
+            "setup: the caret must be at column 0, left of the manual \
+             viewport, or every assertion below passes either way"
+        );
+        wheel(&mut s, crossterm::event::MouseEventKind::ScrollRight, 10);
+        let manual = s.core.borrow().active_window().view_left;
+        assert!(
+            manual > 0,
+            "setup: the wheel must have moved the origin, else these \
+             rows measure nothing"
+        );
+        assert!(
+            s.core.borrow().active_window().manual_left_authority,
+            "setup: an effective move arms authority (clause 2)"
+        );
+        (s, manual)
+    }
+
+    /// L1 — **preservation, TUI.** A horizontal wheel origin survives a
+    /// real paint.
+    ///
+    /// The driver has to be a genuine `paint_frame`, because that is
+    /// what runs `prepare_window_cursor_visible` → `horizontal_follow`,
+    /// the code that would overwrite the origin. A unit call to the
+    /// helper cannot see a follow that runs inside a frame.
+    ///
+    /// **The cursor sits OUTSIDE the manual viewport**, which is what
+    /// makes the row discriminate at all: with the caret inside,
+    /// `follow_left` returns the origin it was given and held authority
+    /// looks identical to released authority.
+    ///
+    /// *Mutation: make the follow ignore manual authority (overwrite
+    /// unconditionally) → this row.*
+    #[test]
+    fn l1_a_manual_horizontal_origin_survives_a_tui_paint() {
+        use crossterm::event::MouseEventKind;
+        let mut content = b"short\n".to_vec();
+        content.extend_from_slice(&b"w".repeat(400));
+        content.push(b'\n');
+        let mut s = fresh_with(&content);
+        paint_truncated(&s, term_size_24x80());
+        assert_eq!(
+            s.core.borrow().cursor(),
+            0,
+            "setup: the caret is at column 0, so a released latch snaps \
+             the origin back to 0 and a held one does not"
+        );
+
+        for _ in 0..10 {
+            s.dispatch_mouse(
+                FrontendId::LOCAL,
+                mouse(MouseEventKind::ScrollRight, 5, 5),
+                term_size_24x80(),
+            );
+        }
+        let manual = s.core.borrow().active_window().view_left;
+        assert!(
+            manual > 0,
+            "setup: the wheel must have moved the origin, else this row \
+             measures nothing"
+        );
+
+        // The real paint, and the whole point of the row.
+        paint_once(&s, term_size_24x80());
+
+        assert_eq!(
+            s.core.borrow().active_window().view_left,
+            manual,
+            "a paint must not drag the viewport back to the caret after \
+             a deliberate horizontal scroll"
+        );
+    }
+
+    /// L3 — **release.** A genuine cursor move gives the caret back its
+    /// authority, on that same event.
+    ///
+    /// *Mutation: make manual authority never release → this row, and
+    /// only this row.*
+    #[test]
+    fn l3_a_genuine_cursor_move_releases_the_manual_origin() {
+        let (mut s, manual) = scrolled_sideways();
+
+        // A real cursor command, landing FAR RIGHT of the manual
+        // viewport. `Down` will not do: with the origin at 30 the caret
+        // renders at the left edge, so `Down` lands on column 30 —
+        // inside the manual viewport, where `follow_left` returns the
+        // origin it was handed and held and released are identical.
+        s.dispatch_key(FrontendId::LOCAL, plain(KeyCode::End));
+        paint_once(&s, term_size_24x80());
+
+        // The caret leaves the manual viewport, so a released latch
+        // moves the origin and a held one does not. Asserted as
+        // "different", not "smaller": which side it lands on depends on
+        // the caret's line, and a row that pinned the direction would
+        // break under mutations that have nothing to do with release.
+        assert_ne!(
+            s.core.borrow().active_window().view_left,
+            manual,
+            "a deliberate cursor move outranks a deliberate scroll: the \
+             viewport must chase the caret again"
+        );
+        assert!(
+            !s.core.borrow().active_window().manual_left_authority,
+            "and the latch is gone, not merely overridden once"
+        );
+    }
+
+    /// L4 — **cross-axis, TUI only.** A vertical wheel preserves the
+    /// horizontal origin (clause 3).
+    ///
+    /// This frontend's vertical wheel *carries point* — `scroll_window`
+    /// drags the caret along with the viewport — so a latch that
+    /// released on any cursor write would release here, and the user's
+    /// sideways gesture would evaporate on an unrelated scroll. The GPU
+    /// has no such row because its vertical wheel does not move point.
+    ///
+    /// *Mutation: stop refreshing `manual_left_cursor` in
+    /// `scroll_window` → this row.*
+    #[test]
+    fn l4_a_vertical_wheel_preserves_the_manual_horizontal_origin() {
+        let mut s = wide_fixture();
+        paint_truncated(&s, term_size_24x80());
+        // **The caret must be INSIDE the manual viewport here**, unlike
+        // every other L-row. `scroll_window` carries point through
+        // `pos_to_display`, which returns `None` for a position left of
+        // the edge (Q#HS7(c′)) — so with the caret outside, the vertical
+        // wheel carries no point at all and the hazard this row exists
+        // for cannot arise. Put it at column 40, inside the 30-and-right
+        // viewport the gesture below produces.
+        s.dispatch_key(FrontendId::LOCAL, plain(KeyCode::Down));
+        for _ in 0..40 {
+            s.dispatch_key(FrontendId::LOCAL, plain(KeyCode::Right));
+        }
+        wheel(&mut s, crossterm::event::MouseEventKind::ScrollRight, 10);
+        let manual = s.core.borrow().active_window().view_left;
+        assert!(
+            manual > 0 && s.core.borrow().active_window().manual_left_authority,
+            "setup: an effective sideways gesture, authority armed"
+        );
+        let cursor_before = s.core.borrow().cursor();
+
+        wheel(&mut s, crossterm::event::MouseEventKind::ScrollDown, 1);
+        assert_ne!(
+            s.core.borrow().cursor(),
+            cursor_before,
+            "setup: the vertical wheel must actually carry point, else \
+             the row does not exercise what it is about"
+        );
+        paint_once(&s, term_size_24x80());
+
+        // **Authority is the discriminator, not the origin.** With the
+        // caret inside the viewport `follow_left` returns the origin it
+        // was handed, so held and released look alike there; the latch
+        // does not.
+        assert!(
+            s.core.borrow().active_window().manual_left_authority,
+            "a vertical wheel preserves horizontal authority (clause 3); \
+             releasing here would discard the user's sideways gesture on \
+             an unrelated scroll"
+        );
+        assert_eq!(
+            s.core.borrow().active_window().view_left,
+            manual,
+            "and the origin itself is untouched"
+        );
+    }
+
+    /// L5 — a horizontal wheel moves the **viewport only** (clause 1).
+    ///
+    /// Q#S1-11 ruled (B): carrying point would be a new wire operation,
+    /// which 1b's non-protocol scope forbids outright.
+    ///
+    /// *Mutation: have the wheel path write point or selection → this
+    /// row, and only this row.*
+    #[test]
+    fn l5_a_horizontal_wheel_moves_neither_point_nor_selection() {
+        let mut s = wide_fixture();
+        paint_truncated(&s, term_size_24x80());
+        let cursor_before = s.core.borrow().cursor();
+        let selection_before = s.core.borrow().active_window().selection;
+
+        wheel(&mut s, crossterm::event::MouseEventKind::ScrollRight, 10);
+
+        assert_eq!(
+            s.core.borrow().cursor(),
+            cursor_before,
+            "the horizontal wheel is a viewport gesture"
+        );
+        assert_eq!(
+            s.core.borrow().active_window().selection,
+            selection_before,
+            "and it does not touch the selection either"
+        );
+        assert!(
+            s.core.borrow().active_window().view_left > 0,
+            "setup: it must still have scrolled, or this row passes by \
+             doing nothing at all"
+        );
+    }
+
+    /// L6 — a notch the clamp **absorbs** arms nothing (clause 2's
+    /// "effective").
+    ///
+    /// The distinction matters because an inert gesture that armed
+    /// authority would freeze the viewport against the caret for the
+    /// rest of the session, with nothing on screen to explain it.
+    ///
+    /// *Mutation: arm authority on any wheel event, effective or not →
+    /// this row, and only this row.*
+    #[test]
+    fn l6_a_notch_absorbed_by_the_clamp_arms_no_authority() {
+        let mut s = wide_fixture();
+        paint_truncated(&s, term_size_24x80());
+        // The caret far out along the wide line, so a normal follow has
+        // somewhere to go and "the follow ran" is observable.
+        {
+            let mut core = s.core.borrow_mut();
+            let id = core.active_window_id();
+            core.windows.get_mut(&id).expect("live window").cursor = 6 + 300;
+        }
+
+        // Already at the left bound: this notch changes nothing.
+        wheel(&mut s, crossterm::event::MouseEventKind::ScrollLeft, 1);
+        assert_eq!(
+            s.core.borrow().active_window().view_left,
+            0,
+            "setup: the notch must be absorbed, not merely small"
+        );
+        assert!(
+            !s.core.borrow().active_window().manual_left_authority,
+            "a gesture with no effect confers no authority"
+        );
+
+        paint_once(&s, term_size_24x80());
+        assert!(
+            s.core.borrow().active_window().view_left > 0,
+            "so the next follow moves the viewport normally"
+        );
+    }
+
+    /// L7a — **re-clamp on viewport widening**, authority retained
+    /// (clause 3).
+    ///
+    /// The maximum origin is `widest − viewport`, so a *wider* viewport
+    /// LOWERS it. Revision 14 had this backwards; narrowing raises the
+    /// ceiling and needs no clamp. The gesture is preserved at the new
+    /// bound rather than discarded.
+    ///
+    /// *Mutation: have the re-clamp release authority instead of
+    /// preserving it → this row and L7b.*
+    #[test]
+    fn l7a_widening_the_viewport_reclamps_the_origin_and_keeps_authority() {
+        let mut s = wide_fixture();
+        paint_truncated(&s, term_size_24x80());
+        // Out to the right bound, so any lowering of the maximum must
+        // move the origin.
+        wheel(&mut s, crossterm::event::MouseEventKind::ScrollRight, 200);
+        let narrow_origin = s.core.borrow().active_window().view_left;
+        assert!(narrow_origin > 0, "setup: scrolled somewhere");
+
+        // TWO paints, and not as a fudge: `paint_frame` runs the follow
+        // (`prepare_window_cursor_visible`) BEFORE it resolves this
+        // frame's wrap mode and content width, so a geometry change
+        // reaches the follow on the frame after the one that carries it.
+        let wide = crate::cell::CellSize::new(24, 240);
+        paint_once(&s, wide);
+        paint_once(&s, wide);
+
+        let after = s.core.borrow().active_window().view_left;
+        assert!(
+            after < narrow_origin,
+            "a wider viewport lowers the maximum origin, so the origin \
+             must come down with it: {narrow_origin} -> {after}"
+        );
+        assert!(
+            s.core.borrow().active_window().manual_left_authority,
+            "clamped, NOT released — the gesture survives at the new bound"
+        );
+    }
+
+    /// L8 — **wrap clears the latch**, not merely the origin (clause 5).
+    ///
+    /// The existing wrap rows assert the origin is zeroed. None of them
+    /// can see a **stale latch** surviving the wrap, because under wrap
+    /// the origin is pinned either way. It surfaces only on the return
+    /// to `truncate`, where the caret rule should govern again — and
+    /// would not.
+    ///
+    /// *Mutation: zero the origin on wrap but leave the latch set →
+    /// this row, and only this row.*
+    #[test]
+    fn l8_wrap_clears_the_latch_and_not_only_the_origin() {
+        let (s, _) = scrolled_sideways();
+        let id = s.core.borrow().active_window_id();
+
+        set_line_wrap(&s, id, "wrap");
+        // Twice, for the ordering reason L7a states: the follow runs
+        // before the frame resolves `last_wrap`, so the toggle reaches
+        // it on the next frame.
+        paint_once(&s, term_size_24x80());
+        paint_once(&s, term_size_24x80());
+        assert_eq!(
+            s.core.borrow().active_window().view_left,
+            0,
+            "setup: wrap pins the origin — the part the existing rows \
+             already cover"
+        );
+        assert!(
+            !s.core.borrow().active_window().manual_left_authority,
+            "and the latch goes with it"
+        );
+
+        // Back to truncate: with the latch gone the caret rule governs,
+        // and the caret is at column 0.
+        paint_truncated(&s, term_size_24x80());
+        {
+            let mut core = s.core.borrow_mut();
+            let win = core.windows.get_mut(&id).expect("live window");
+            win.cursor = 6 + 300;
+        }
+        paint_once(&s, term_size_24x80());
+        assert!(
+            s.core.borrow().active_window().view_left > 0,
+            "a stale latch would have frozen the viewport at zero while \
+             the caret sat 300 columns off-screen"
+        );
+    }
+
     /// *Mutation: drop the wrap guard in `scroll_window_columns` → this
     /// row, and only this row.*
     #[test]

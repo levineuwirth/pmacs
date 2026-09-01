@@ -384,6 +384,24 @@ pub struct Window {
     /// Always `0` while this window's buffer wraps; see
     /// [`LayoutCtx::effective_left`](crate::view::LayoutCtx::effective_left).
     pub view_left: u32,
+    /// GUI Stage 1b, lifetime clause 2 — **the user's horizontal origin
+    /// outranks the caret's**.
+    ///
+    /// Set when a deliberate horizontal scroll *effectively* moves
+    /// [`Self::view_left`]; while set, the caret-following pass
+    /// re-clamps the origin but does not drag it back. Without it a
+    /// sideways wheel is undone by the very next paint, because
+    /// `horizontal_follow` runs on every frame and knows only the
+    /// caret.
+    ///
+    /// Cleared by a genuine cursor move (clause 4), by wrap, and by
+    /// buffer replacement (clause 5).
+    pub manual_left_authority: bool,
+    /// The cursor as it stood when [`Self::manual_left_authority`] was
+    /// armed, so clause 4 can tell a *genuine* cursor change from the
+    /// follow merely running again. Meaningless while the latch is
+    /// clear.
+    pub manual_left_cursor: Position,
     /// Sticky display column for vertical motion.
     pub goal_col: Option<u32>,
     /// Number of text rows that fit in this window's viewport at last
@@ -439,6 +457,8 @@ impl Window {
             selection: None,
             view_top: 0,
             view_left: 0,
+            manual_left_authority: false,
+            manual_left_cursor: 0,
             goal_col: None,
             last_visible_rows: 0,
             last_content_cols: 0,
