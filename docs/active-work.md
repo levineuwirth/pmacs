@@ -381,6 +381,61 @@ the next lane does not rediscover them at review.
   instead. Running it by hand also surfaces a pre-existing unresolved
   link, `MathNode` at `pmacs-gpu/src/math_layout.rs:314`.
 
+### A local false compile red from the shared target directory
+
+Not a CI signature, so it is **not** in `docs/ci-red-signatures.md` —
+that registry is for CI reds, and a row there would claim a job and
+flavor this has never had. It is a hazard of running a bare cargo
+command instead of `scripts/gate`, and it has now fired **twice in this
+lane**.
+
+**Signature.** From `cargo test -p pmacs-gpu`, four errors against the
+bin `pmacs-gpu` test target:
+
+```
+error[E0433]: cannot find `columns` in `pmacs_protocol`
+     --> pmacs-gpu/src/main.rs:13291:21
+error: could not compile `pmacs-gpu` (bin "pmacs-gpu" test)
+       due to 4 previous errors
+```
+
+Three of the four were read off the second occurrence's output —
+`main.rs:13291`, `:14517`, `:14578`; the fourth scrolled past the
+captured tail and is **not** recorded here rather than guessed. All are
+uses of the module the 1b branch added in `9e54cd2`.
+
+**Why it is false.** Both times, the module was fully present:
+`pmacs-protocol/src/columns.rs` existed and matched HEAD, and
+`pub mod columns;` stood at `pmacs-protocol/src/lib.rs:40` in both the
+worktree and HEAD. Nothing was missing to find.
+
+**What it actually is.** `CARGO_TARGET_DIR` is exported globally on this
+machine — `/home/jeans/build/cargo-target`, one directory shared by
+every checkout — and `main` has no `columns` module at all (the sharing
+refactor is unmerged 1b work). A `pmacs-protocol` artifact built without
+the module therefore sits in the same target directory as the branch
+that needs it, and gets reused. The confirmed facts are the shared
+directory, the module's absence on `main`, and that the red cleared;
+which build deposited the stale artifact — the `main` checkout, or this
+worktree before `9e54cd2` — was not determined, and either has the same
+shape.
+
+**Control.** `touch pmacs-protocol/src/lib.rs` forces the rebuild and
+clears it. **But check before touching**: confirm `pub mod columns;` and
+`columns.rs` are actually present and match HEAD first, because the
+touch would just as happily paper over a real deletion, and this red is
+indistinguishable by eye from that one. The durable fix is not to touch
+at all but to run **`scripts/gate`**, whose per-worktree
+`CARGO_TARGET_DIR` is exactly this problem's remedy — see
+`docs/agent-handoff.md:2609`, which documents the general bare-cargo
+hazard and the environment variable's override of `build.target-dir`,
+but not this signature, its count, or its control.
+
+**The cost of misreading it.** It presents as a compile error naming a
+missing module, which reads as a real regression — a deleted file, a
+dropped `mod` line, a bad rebase. Both times the first instinct was to
+look for what had been removed. Nothing had been.
+
 ### And one coverage gap in CI, which shaped B4's design
 
 **No non-Linux leg runs this crate's tests.** `cargo test -p pmacs-gpu`
