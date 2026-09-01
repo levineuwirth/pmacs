@@ -3356,21 +3356,79 @@ impl EditorState {
                 }
                 self.open_context_menu(side, coord.row, coord.col, (coord.row, coord.col));
             }
-            // Claimed and dropped, for two different reasons kept in one
-            // arm because their bodies are identical: horizontal panel
-            // scrolling belongs to GUI arc Stage 1b's B-rows rather than
-            // parent 48, bare `Move` neither focuses nor claims, and the
-            // remaining buttons have no panel semantics at all.
-            PKind::ScrollLeft
-            | PKind::ScrollRight
-            | PKind::Move
-            | PKind::Down(_)
-            | PKind::Up(_)
-            | PKind::Drag(_) => {}
+            // GUI Stage 1b B2 — the horizontal leg, which this arm used
+            // to claim and drop. One notch is `SCROLL_COLUMNS`; the
+            // frontend banks fractions and sends whole notches, so the
+            // step is applied here exactly once.
+            PKind::ScrollLeft => {
+                self.scroll_window_columns(side, -SCROLL_COLUMNS);
+            }
+            PKind::ScrollRight => {
+                self.scroll_window_columns(side, SCROLL_COLUMNS);
+            }
+            // Bare `Move` neither focuses nor claims, and the remaining
+            // buttons have no panel semantics at all.
+            PKind::Move | PKind::Down(_) | PKind::Up(_) | PKind::Drag(_) => {}
         }
         // Only a left press can anchor, and it returns `true` above.
         // Every other kind reaching here handled something already live.
         false
+    }
+
+    /// GUI Stage 1b B2/B3/B7 — move one window's horizontal origin by
+    /// `columns`, the daemon-side effect a panel-document horizontal
+    /// wheel reaches.
+    ///
+    /// This closes the leg §2a named: `ScrollLeft`/`ScrollRight` were
+    /// **claimed and dropped** here, which is the "frontend emits,
+    /// receiver discards" shape the panel-replay lane was opened to fix
+    /// and that B1–B3 inherited for the horizontal axis.
+    ///
+    /// The bound is B7's, stated exactly — `0 ..= widest − viewport`,
+    /// **saturating at zero** — so the final display column stays
+    /// visible; clamping at the widest line's full width would let the
+    /// origin pass every glyph and blank the viewport. **Wrap pins the
+    /// origin to zero**, matching `horizontal_follow`.
+    ///
+    /// Returns whether the origin actually moved, which is clause 2's
+    /// "effective move".
+    fn scroll_window_columns(&mut self, win_id: WindowId, columns: i32) -> bool {
+        let mut core = self.core.borrow_mut();
+        let Some(window) = core.windows.get(&win_id) else {
+            return false;
+        };
+        if window.last_wrap == crate::view::WrapMode::Wrap {
+            if let Some(window) = core.windows.get_mut(&win_id) {
+                window.view_left = 0;
+            }
+            return false;
+        }
+        let buffer_id = window.buffer_id;
+        let viewport_cols = window.last_content_cols;
+        let old_left = window.view_left;
+        let registry = core.registry.clone();
+        let widest = {
+            let reg = registry.borrow();
+            let Ok(buf) = reg.get(buffer_id) else {
+                return false;
+            };
+            let len = buf.len();
+            let mut bytes = vec![0u8; len as usize];
+            buf.snapshot_rope().slice(0, len, &mut bytes);
+            crate::display_width::widest_line_columns(&String::from_utf8_lossy(&bytes))
+        };
+        let max_left = widest.saturating_sub(viewport_cols);
+        let next = i64::from(old_left)
+            .saturating_add(i64::from(columns))
+            .clamp(0, i64::from(max_left));
+        let next = u32::try_from(next).unwrap_or(0);
+        if next == old_left {
+            return false;
+        }
+        if let Some(window) = core.windows.get_mut(&win_id) {
+            window.view_left = next;
+        }
+        true
     }
 
     /// Byte under a panel cell, resolved against the SIDE window's own
@@ -4653,6 +4711,11 @@ impl EditorState {
 /// Lines to scroll per mouse-wheel notch. Three matches the GNU
 /// readline / Emacs default and is what most terminal users expect.
 const SCROLL_LINES: i32 = 3;
+
+/// Columns one horizontal wheel notch moves a window's origin — B7's
+/// "three columns per wheel tick", the horizontal twin of
+/// [`SCROLL_LINES`].
+const SCROLL_COLUMNS: i32 = 3;
 
 /// Gutter marker drawn on a collapsed region's head row (Arc 6 Stage 2,
 /// Q#FD20). Occupies the gutter's leading pad cell — the same cell the

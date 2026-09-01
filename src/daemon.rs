@@ -7673,6 +7673,70 @@ mod tests {
 
     /// P1 — a press on the band's MODE LINE begins nothing.
     ///
+    /// GUI Stage 1b B2 — a horizontal panel notch reaches the daemon's
+    /// window-targeted `view_left` path and MOVES it.
+    ///
+    /// This arm used to be claimed and dropped, which is the
+    /// "frontend emits, receiver discards" shape §2a named. The row
+    /// asserts the **effect**, not the emission: `view_left` before and
+    /// after.
+    #[test]
+    fn b2_a_horizontal_panel_notch_moves_the_side_windows_view_left() {
+        let fid = FrontendId(791);
+        let (mut editor, mut states, mut render, _document, panel, epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        // A CONTENT cell, not chrome: row 0 is inside the grid.
+        let (buffer_id, cell) = {
+            let core = editor.core.borrow();
+            (
+                core.windows[&panel].buffer_id,
+                pmacs_protocol::CellCoord::new(0, 0),
+            )
+        };
+        // **The discriminating setup.** B7's bound is
+        // `widest − viewport`, so a panel whose content fits has a
+        // maximum origin of zero and the move is absorbed by the
+        // clamp — correct behaviour that would read here as a dropped
+        // event. The row needs content wider than the viewport.
+        foreign_edit(&editor, buffer_id, "x".repeat(400).as_bytes());
+        let before = editor
+            .core
+            .borrow()
+            .windows
+            .get(&panel)
+            .map_or(0, |w| w.view_left);
+
+        let generation = live_generation(PanelArm::Mapped, &editor, &mut states, fid);
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut states,
+            &mut render,
+            arm_pointer(
+                PanelArm::Mapped,
+                fid,
+                epochs,
+                buffer_id,
+                generation,
+                cell,
+                pmacs_protocol::MouseKind::ScrollRight,
+            ),
+        );
+
+        let after = editor
+            .core
+            .borrow()
+            .windows
+            .get(&panel)
+            .map_or(0, |w| w.view_left);
+        assert_ne!(
+            after, before,
+            "a horizontal panel notch must move the side window's origin, \
+             not be claimed and dropped"
+        );
+    }
+
     /// The merge made this arm the latch, because `Consumed` and
     /// `Accepted` were the same `true`. The row reads the cursor as well
     /// as the latch: a chrome press must not move point either.

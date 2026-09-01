@@ -23,6 +23,24 @@ pub fn advance_char(column: u32, ch: char) -> u32 {
     column.saturating_add(width)
 }
 
+/// Widest line in `text`, in display columns.
+///
+/// GUI Stage 1b B7's upper-bound input, shared by both frontends so
+/// they cannot disagree about where the right bound is — the same
+/// reason `scroll::follow_left` is shared.
+///
+/// **This measures SOURCE-TEXT display columns**: tab stops and Unicode
+/// width. Rendered projections — inline adornments, math substitutions
+/// — can occupy a different width on screen and are deliberately not
+/// counted, matching the column rule the rest of this module states.
+#[must_use]
+pub fn widest_line_columns(text: &str) -> u32 {
+    text.split('\n')
+        .map(|line| line.chars().fold(0, advance_char))
+        .max()
+        .unwrap_or(0)
+}
+
 /// Display width of the valid UTF-8 prefix of `bytes`.
 ///
 /// Invalid input is conservatively truncated at the first invalid byte. This

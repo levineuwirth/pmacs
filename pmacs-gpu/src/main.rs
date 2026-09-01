@@ -8377,6 +8377,17 @@ impl State {
     /// budget rows and is recorded rather than pre-optimised: a cache
     /// needs an invalidation key, and the wrong key is a worse defect
     /// than a measurable scan.
+    ///
+    /// **Which "display line" this measures is a boundary B3's witness
+    /// must settle.** This counts SOURCE-TEXT display columns — tab
+    /// stops and Unicode width — and therefore excludes rendered
+    /// projections such as inline adornments and math substitutions,
+    /// which can occupy a different width on screen than the bytes they
+    /// stand for. That is consistent with the TUI-derived column rule
+    /// the two frontends share, and it is a choice, not an oversight:
+    /// "widest display line" is readable the other way. Recorded here
+    /// so the witness states which meaning governs rather than
+    /// discovering it.
     fn widest_display_columns(&self) -> u32 {
         let widest = self
             .current_text
