@@ -6764,7 +6764,7 @@ impl State {
                 // global core instance, matching the producer's
                 // surviving `last_minibuffer` baseline.
                 self.search_prompt = None;
-                self.menu = None;
+                self.set_menu(None);
                 self.status_facts = None;
                 self.statusline_segments = None;
                 self.status_runs = None;
@@ -6818,6 +6818,14 @@ impl State {
                     self.sync_buffer_dimensions();
                     self.reshape();
                 }
+                // B5 — re-derive the icon AFTER the geometry settles.
+                // `set_menu(None)` above ran before the reshape, so it
+                // decided against the OLD text bounds; a snapshot can
+                // move `text_left` (a different line count changes the
+                // gutter) and the minimap clip. This is not a second
+                // writer of menu state — it is the same rule applied to
+                // the other input the decision reads.
+                self.apply_panel_cursor_icon();
                 self.viewport_send_if_changed(buffer_id)
             }
             InstanceMessage::CrdtOp { buffer_id, op } => {
@@ -7215,7 +7223,7 @@ impl State {
             // close it; otherwise anchor the popup at the remembered
             // right-click pixel.
             InstanceMessage::MenuPrompt { rows, active, .. } => {
-                self.menu = if rows.is_empty() {
+                let menu = if rows.is_empty() {
                     None
                 } else {
                     Some(MenuLocal {
@@ -7224,13 +7232,7 @@ impl State {
                         anchor_px: self.menu_anchor_px,
                     })
                 };
-                // B5 — menu ownership changes HERE, with no pointer
-                // motion. Opening while an I-beam is showing would leave
-                // it on screen over the menu until the pointer happened
-                // to move; closing would leave the arrow over text for
-                // just as long. The icon is a function of the state, so
-                // it is re-derived where the state changes.
-                self.apply_panel_cursor_icon();
+                self.set_menu(menu);
                 self.request_redraw();
                 None
             }
@@ -8318,6 +8320,25 @@ impl State {
         if let Some(drag) = self.panel.drag.as_mut() {
             drag.sent_rows = rows;
         }
+    }
+
+    /// **The single writer of menu state**, so the cursor icon cannot
+    /// drift out of step with it.
+    ///
+    /// GUI Stage 1b B5 makes the icon a function of menu ownership, and
+    /// menu state changes with **no pointer motion**: `MenuPrompt`
+    /// opens and closes it, and a `BufferSnapshot` clears it because a
+    /// popup anchored in the prior buffer would hijack input. Two call
+    /// sites setting the field directly is how one of them ends up
+    /// leaving a stale cursor — which is exactly what happened: the
+    /// snapshot path was missed, and an open-menu arrow survived a
+    /// buffer replacement over document text until the pointer moved.
+    ///
+    /// Routing both through here means a third site added later gets the
+    /// icon for free rather than reintroducing the same defect.
+    fn set_menu(&mut self, menu: Option<MenuLocal>) {
+        self.menu = menu;
+        self.apply_panel_cursor_icon();
     }
 
     /// Apply the cursor icon [`Self::desired_cursor_icon`] chose to the
@@ -15152,6 +15173,151 @@ mod tests {
             Some(CursorIcon::Text),
             "and closing it restores the I-beam, the pointer never having \
              moved"
+        );
+    }
+
+    /// B5 — a **buffer snapshot** closes the menu too, and the icon has
+    /// to follow that as well.
+    ///
+    /// `MenuPrompt` is not the only path that clears the menu: a
+    /// snapshot clears it because a popup anchored in the prior buffer
+    /// would hijack input. Missing that path left an open-menu arrow on
+    /// screen over document text until the pointer moved.
+    ///
+    /// *Mutation: set `self.menu` directly in the snapshot arm instead
+    /// of through `set_menu` → this row.*
+    #[test]
+    fn b5_a_buffer_snapshot_closes_the_menu_and_restores_the_i_beam() {
+        use winit::window::CursorIcon;
+        let text = "fn main() {}\n".repeat(40);
+        let Some(mut state) = State::new_headless(640, 480, &text) else {
+            return;
+        };
+        state.line_numbers = LineNumberMode::Absolute;
+        state.pointer_pos = Some((
+            f64::from(state.text_left() + 8.0),
+            f64::from(TEXT_TOP + 4.0),
+        ));
+
+        let _ = state.apply_attach_message(InstanceMessage::MenuPrompt {
+            buffer_id: BufferId::next(),
+            rows: vec![MenuPromptRow {
+                label: "Cut".into(),
+                separator: false,
+            }],
+            active: Some(0),
+        });
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Default),
+            "setup: the open menu owns the pointer"
+        );
+
+        let bid = BufferId::next();
+        let doc = loro::LoroDoc::new();
+        doc.get_text(LORO_TEXT_CONTAINER)
+            .insert(0, &text)
+            .expect("insert snapshot text");
+        let _ = state.apply_attach_message(InstanceMessage::BufferSnapshot {
+            buffer_id: bid,
+            crdt_snapshot: doc.export(loro::ExportMode::Snapshot).expect("export"),
+        });
+
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Text),
+            "the snapshot closed the menu, so the I-beam returns without \
+             the pointer moving"
+        );
+    }
+
+    /// B5 — a snapshot that changes GEOMETRY moves the I-beam boundary,
+    /// with no menu and no pointer motion involved.
+    ///
+    /// `text_left` is `TEXT_LEFT + gutter_width_px`, and the gutter is
+    /// sized from the line count. A snapshot that changes the number of
+    /// lines therefore moves the text boundary under a stationary
+    /// pointer: a pixel that was gutter becomes text, or the reverse.
+    ///
+    /// **This is the row that carries the post-reshape application.**
+    /// The menu row above cannot: on the snapshot path `set_menu`'s
+    /// apply and the post-reshape apply both fire, so each masks the
+    /// other and removing either alone leaves that row green. Removing
+    /// this one fires here.
+    ///
+    /// *Mutation: drop `apply_panel_cursor_icon()` after the reshape →
+    /// this row.*
+    #[test]
+    fn b5_a_snapshot_that_moves_the_gutter_moves_the_i_beam_boundary() {
+        use winit::window::CursorIcon;
+        // Ten lines: a one-digit gutter.
+        let narrow = "x\n".repeat(9);
+        let Some(mut state) = State::new_headless(640, 480, &narrow) else {
+            return;
+        };
+        state.line_numbers = LineNumberMode::Absolute;
+        let narrow_left = state.text_left();
+
+        // A pixel just left of the current boundary: chrome now.
+        let probe = f64::from(narrow_left - 1.0);
+        state.pointer_pos = Some((probe, f64::from(TEXT_TOP + 4.0)));
+        state.apply_panel_cursor_icon();
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Default),
+            "setup: the probe pixel is gutter under the narrow gutter"
+        );
+
+        // Now a four-digit line count, which widens the gutter and
+        // pushes `text_left` further right — the probe stays chrome —
+        // then back to a one-digit count, which narrows it again.
+        let wide = "x\n".repeat(1200);
+        let bid = BufferId::next();
+        let doc = loro::LoroDoc::new();
+        doc.get_text(LORO_TEXT_CONTAINER)
+            .insert(0, &wide)
+            .expect("insert snapshot text");
+        let _ = state.apply_attach_message(InstanceMessage::BufferSnapshot {
+            buffer_id: bid,
+            crdt_snapshot: doc.export(loro::ExportMode::Snapshot).expect("export"),
+        });
+        assert!(
+            state.text_left() > narrow_left,
+            "setup: a larger line count must widen the gutter, else this \
+             row measures nothing"
+        );
+
+        // A pixel that WAS text under the narrow gutter and is gutter
+        // under the wide one.
+        let inside_wide_gutter = f64::from(narrow_left + 2.0);
+        assert!(
+            inside_wide_gutter < f64::from(state.text_left()),
+            "setup: the probe must now fall inside the wider gutter"
+        );
+        state.pointer_pos = Some((inside_wide_gutter, f64::from(TEXT_TOP + 4.0)));
+        state.apply_panel_cursor_icon();
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Default),
+            "setup: chrome under the wide gutter"
+        );
+
+        // Back to few lines: the same stationary pixel becomes text, and
+        // only the post-reshape application can notice.
+        let doc2 = loro::LoroDoc::new();
+        doc2.get_text(LORO_TEXT_CONTAINER)
+            .insert(0, &narrow)
+            .expect("insert snapshot text");
+        let _ = state.apply_attach_message(InstanceMessage::BufferSnapshot {
+            buffer_id: BufferId::next(),
+            crdt_snapshot: doc2.export(loro::ExportMode::Snapshot).expect("export"),
+        });
+
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Text),
+            "the gutter narrowed under a stationary pointer, so the pixel \
+             is text now and the icon must say so"
         );
     }
 
