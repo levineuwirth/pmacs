@@ -15255,7 +15255,11 @@ mod tests {
     /// separate so a failure says which route broke.
     ///
     /// *Mutation: drop `apply_panel_cursor_icon()` from `reshape`'s tail
-    /// → this row, the menu row, and the line-number row below.*
+    /// → every row that reaches the hook through geometry: this one, the
+    /// menu row above, the line-number row, and the two panel rows
+    /// below. That list grows with each new geometry route, which is the
+    /// point of having one hook; the rows are separate so a failure
+    /// names the route.*
     #[test]
     fn b5_a_snapshot_that_moves_the_gutter_moves_the_i_beam_boundary() {
         use winit::window::CursorIcon;
