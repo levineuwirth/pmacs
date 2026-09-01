@@ -11002,6 +11002,72 @@ mod tests {
         );
     }
 
+    /// L7b — **re-clamp on CONTENT shrink**, authority retained
+    /// (clause 3).
+    ///
+    /// L7a moves the viewport; this moves the content. The maximum is
+    /// `widest − viewport`, so shortening the widest line lowers it
+    /// with the viewport untouched — the other half of clause 3's
+    /// promise, which widening alone cannot witness.
+    ///
+    /// The shrink goes through `apply_active_edit`, the production edit
+    /// path, rather than the registry directly: an edit that left the
+    /// window's `TextView` stale would have this row measuring a
+    /// document state the running editor never holds.
+    ///
+    /// *Mutation: have the re-clamp release authority instead of
+    /// preserving it → this row and L7a. An off-by-one on the clamp →
+    /// this row's exact bound.*
+    /// What L7b shortens the widest line to. Above the 120-column
+    /// filler, so it stays the widest line and the row measures a
+    /// maximum it actually set.
+    const SHRUNK_TO: u32 = 150;
+
+    #[test]
+    fn l7b_shrinking_the_widest_line_reclamps_the_origin_and_keeps_authority() {
+        let mut s = wide_fixture();
+        paint_truncated(&s, term_size_24x80());
+        wheel(&mut s, crossterm::event::MouseEventKind::ScrollRight, 200);
+        let before = s.core.borrow().active_window().view_left;
+        assert!(before > 0, "setup: scrolled somewhere");
+
+        // Cut the 400-column line down to `SHRUNK_TO`, leaving the
+        // 120-column filler lines below it — so the new widest is that
+        // width and the viewport never changed.
+        let line_start = 6u64;
+        s.core
+            .borrow_mut()
+            .apply_active_edit(crate::buffer::EditOp::Delete {
+                range: crate::rope::Range::new(
+                    line_start + u64::from(SHRUNK_TO),
+                    line_start + u64::from(WIDEST_COLUMNS),
+                ),
+            })
+            .expect("shorten the widest line");
+
+        // Twice, for the ordering L7a states.
+        paint_once(&s, term_size_24x80());
+        paint_once(&s, term_size_24x80());
+
+        let after = s.core.borrow().active_window().view_left;
+        let cols = s.core.borrow().active_window().last_content_cols;
+        assert!(
+            after < before,
+            "a shorter widest line lowers the maximum origin: \
+             {before} -> {after}"
+        );
+        assert_eq!(
+            after,
+            SHRUNK_TO.saturating_sub(cols),
+            "and it lands on the NEW `widest − viewport` exactly \
+             ({SHRUNK_TO} − {cols})"
+        );
+        assert!(
+            s.core.borrow().active_window().manual_left_authority,
+            "clamped, NOT released — the gesture survives at the new bound"
+        );
+    }
+
     /// L8 — **wrap clears the latch**, not merely the origin (clause 5).
     ///
     /// The existing wrap rows assert the origin is zeroed. None of them
