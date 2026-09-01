@@ -3847,6 +3847,7 @@ fn align_primary_document_window(
         win.cursor = 0;
         win.selection = None;
         win.overlays.clear();
+        win.forget_manual_horizontal_origin();
     }
     Some(win_id)
 }
@@ -5554,6 +5555,98 @@ mod tests {
             "a semantic frontend's printable Key must self-insert and advance its window cursor \
              (pre-B1 the dispatcher dropped it)"
         );
+    }
+
+    /// GUI Stage 1b, lifetime clause 5 — **the daemon's alignment path
+    /// is a buffer replacement too**, and must forget a manual
+    /// horizontal origin like the other two.
+    ///
+    /// `align_primary_document_window` re-points a window at the buffer
+    /// its frontend declares. That is a replacement by any measure: a
+    /// sideways origin carried across it renders the successor scrolled
+    /// with nothing about that buffer to explain it. This row lives
+    /// here rather than beside L8b/L8c because the function is private
+    /// to this module.
+    ///
+    /// The latch is armed the production way — a real wheel gesture
+    /// through `dispatch_mouse` — not by writing the fields, so the row
+    /// cannot pass against a state the running editor never reaches.
+    ///
+    /// **Not `crdt`-gated**, unlike its neighbour above: nothing here
+    /// needs the feature, and gating it would keep it out of the
+    /// default `--lib` leg for no reason — the same blind spot that
+    /// already lets `crdt`-only code go unlinted locally.
+    ///
+    /// *Mutation: drop the `forget_manual_horizontal_origin()` call
+    /// from `align_primary_document_window` → this row.*
+    #[test]
+    fn l8d_the_alignment_path_clears_a_manual_horizontal_origin() {
+        use crate::editor::EditorState;
+        use crate::protocol::FrontendId;
+        use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+
+        let mut editor = EditorState::new();
+        let wide = |name: &str| {
+            let core = editor.core.borrow();
+            let mut content = b"wide\n".to_vec();
+            content.extend_from_slice(&b"w".repeat(400));
+            content.push(b'\n');
+            core.registry
+                .borrow_mut()
+                .create_from_bytes(name.to_owned(), &content)
+        };
+        let first = wide("first");
+        let second = wide("second");
+        let fid = FrontendId(99);
+        let view = build_fresh_frontend_view(&mut editor, false, false);
+        editor.core.borrow_mut().register_frontend_view(fid, view);
+
+        // The window starts on LOCAL's narrow scratch buffer, where
+        // B7's `widest − viewport` bound is zero and every notch is
+        // absorbed. Put a wide buffer under it first — through the very
+        // function under test — so the gesture below can be effective.
+        align_primary_document_window(&mut editor, fid, first);
+
+        for _ in 0..10 {
+            editor.dispatch_mouse(
+                fid,
+                MouseEvent {
+                    kind: MouseEventKind::ScrollRight,
+                    column: 5,
+                    row: 5,
+                    modifiers: KeyModifiers::NONE,
+                },
+                crate::cell::CellSize::new(24, 80),
+            );
+        }
+        let armed = editor
+            .core
+            .borrow()
+            .active_window_for(fid)
+            .expect("the semantic frontend has a window")
+            .view_left;
+        assert!(
+            armed > 0
+                && editor
+                    .core
+                    .borrow()
+                    .active_window_for(fid)
+                    .expect("window")
+                    .manual_left_authority,
+            "setup: a real wheel gesture must have moved the origin and \
+             armed authority, else this row measures nothing"
+        );
+
+        align_primary_document_window(&mut editor, fid, second);
+
+        let win = editor.core.borrow();
+        let win = win.active_window_for(fid).expect("window");
+        assert_eq!(
+            win.view_left, 0,
+            "the successor must not inherit the predecessor's sideways \
+             viewport"
+        );
+        assert!(!win.manual_left_authority, "nor the authority defending it");
     }
 
     /// B1 input/display alignment: a semantic frontend's window is bound

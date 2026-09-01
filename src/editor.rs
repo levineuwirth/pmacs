@@ -10638,15 +10638,29 @@ mod tests {
     /// A buffer with one line far wider than any viewport these rows
     /// use, so B7's `widest − viewport` bound can never absorb their
     /// gestures and read as correct.
+    /// The fixture's widest line, in columns. Named so L7a's exact
+    /// bound and the fixture that produces it cannot drift apart.
+    const WIDEST_COLUMNS: u32 = 400;
+
     fn wide_fixture() -> EditorState {
         let mut content = b"short\n".to_vec();
-        content.extend_from_slice(&b"w".repeat(400));
+        content.extend_from_slice(&b"w".repeat(WIDEST_COLUMNS as usize));
         content.push(b'\n');
         // Tall as well as wide. L3 needs a line to move DOWN to and L4
         // needs somewhere to scroll: in a two-line document the vertical
         // wheel has nothing to do, carries no point, and L4's setup
         // assertion fires — which is how this was found.
-        content.extend_from_slice(&b"filler\n".repeat(200));
+        //
+        // The filler lines are **wide too**, and that is L4's
+        // requirement specifically: a caret landing on a SHORT line
+        // clamps to its end, which is left of the manual origin and so
+        // outside the viewport — the very state in which the vertical
+        // wheel carries no point. 120 columns keeps them clear of the
+        // 400-column line that fixes `widest`.
+        for _ in 0..200 {
+            content.extend_from_slice(&b"f".repeat(120));
+            content.push(b'\n');
+        }
         fresh_with(&content)
     }
 
@@ -10654,6 +10668,22 @@ mod tests {
         for _ in 0..times {
             s.dispatch_mouse(FrontendId::LOCAL, mouse(kind, 5, 5), term_size_24x80());
         }
+    }
+
+    /// Whether the caret is inside the window's horizontal viewport,
+    /// asked the way production asks it: `pos_to_display` returns
+    /// `None` for a position LEFT of the edge (Q#HS7(c′)), which is the
+    /// exact condition that decides whether a vertical wheel can carry
+    /// point at all.
+    fn caret_inside_viewport(s: &EditorState) -> bool {
+        let core = s.core.borrow();
+        let win = core.active_window();
+        let registry = core.registry.clone();
+        let reg = registry.borrow();
+        let buf = reg.get(win.buffer_id).expect("live buffer");
+        win.text_view
+            .pos_to_display(buf, win.cursor, win.layout_ctx())
+            .is_some()
     }
 
     /// The state every L-row starts from: a real sideways wheel gesture
@@ -10814,6 +10844,14 @@ mod tests {
             "setup: the vertical wheel must actually carry point, else \
              the row does not exercise what it is about"
         );
+        assert!(
+            caret_inside_viewport(&s),
+            "setup: and it must still be INSIDE the viewport afterwards. \
+             A caret that landed on a short line would clamp to that \
+             line's end, left of the origin — and then the origin would \
+             discriminate too, so the claim below about the latch being \
+             the only discriminator would be false"
+        );
         paint_once(&s, term_size_24x80());
 
         // **Authority is the discriminator, not the origin.** With the
@@ -10934,11 +10972,23 @@ mod tests {
         paint_once(&s, wide);
         paint_once(&s, wide);
 
+        // **The exact bound, not merely a smaller number.** `widest −
+        // viewport` is the whole content of clause 3's re-clamp; an
+        // assertion that the origin merely fell would accept any
+        // arbitrary reduction, including an off-by-one that leaves a
+        // column of text permanently unreachable.
         let after = s.core.borrow().active_window().view_left;
+        let cols = s.core.borrow().active_window().last_content_cols;
+        let expected = WIDEST_COLUMNS.saturating_sub(cols);
         assert!(
             after < narrow_origin,
             "a wider viewport lowers the maximum origin, so the origin \
              must come down with it: {narrow_origin} -> {after}"
+        );
+        assert_eq!(
+            after, expected,
+            "and it must land on `widest − viewport` exactly \
+             ({WIDEST_COLUMNS} − {cols})"
         );
         assert!(
             s.core.borrow().active_window().manual_left_authority,
@@ -10991,6 +11041,98 @@ mod tests {
             s.core.borrow().active_window().view_left > 0,
             "a stale latch would have frozen the viewport at zero while \
              the caret sat 300 columns off-screen"
+        );
+    }
+
+    /// A second wide buffer, so a successor window has somewhere to
+    /// scroll and "the origin came back to zero" is not just the only
+    /// value available.
+    fn other_wide_buffer(s: &EditorState) -> crate::buffer::BufferId {
+        let mut content = b"other\n".to_vec();
+        content.extend_from_slice(&b"o".repeat(WIDEST_COLUMNS as usize));
+        content.push(b'\n');
+        s.lua_host
+            .registry()
+            .borrow_mut()
+            .create_from_bytes("other", &content)
+    }
+
+    /// L8, replacement leg — **a buffer switch clears the origin AND
+    /// the latch** (clause 5's second half).
+    ///
+    /// The origin describes the document being shown. Carried into a
+    /// successor it renders the new buffer scrolled sideways with
+    /// nothing about that buffer to explain it. The GPU has had this
+    /// reset since it hit the symptom; the TUI's three replacement
+    /// paths had neither half.
+    ///
+    /// *Mutation: drop the `forget_manual_horizontal_origin()` call
+    /// from `switch_active_buffer_for` → this row.*
+    #[test]
+    fn l8b_switching_the_active_buffer_clears_the_origin_and_the_latch() {
+        let (s, _) = scrolled_sideways();
+        let other = other_wide_buffer(&s);
+
+        s.core
+            .borrow_mut()
+            .switch_active_buffer(other)
+            .expect("switch to the successor buffer");
+
+        assert_eq!(
+            s.core.borrow().active_window().view_left,
+            0,
+            "the successor must not inherit the predecessor's sideways \
+             viewport"
+        );
+        assert!(
+            !s.core.borrow().active_window().manual_left_authority,
+            "nor the authority defending it"
+        );
+
+        // And the latch is really gone, not merely the origin: put the
+        // caret far out in the NEW buffer and the follow must move.
+        {
+            let mut core = s.core.borrow_mut();
+            let id = core.active_window_id();
+            core.windows.get_mut(&id).expect("live window").cursor = 6 + 300;
+        }
+        paint_once(&s, term_size_24x80());
+        assert!(
+            s.core.borrow().active_window().view_left > 0,
+            "a stale latch would have frozen the successor's viewport at \
+             zero with its caret 300 columns off-screen"
+        );
+    }
+
+    /// L8, replacement leg — the same for **`install_buffer_in_window`**,
+    /// the path that targets an explicit window rather than the active
+    /// one.
+    ///
+    /// A separate row because the clear is a separate call: one helper
+    /// on `Window`, but each call site removable on its own, so a
+    /// forgotten one is individually visible.
+    ///
+    /// *Mutation: drop the `forget_manual_horizontal_origin()` call
+    /// from `install_buffer_in_window` → this row.*
+    #[test]
+    fn l8c_installing_a_buffer_in_a_window_clears_the_origin_and_the_latch() {
+        let (s, _) = scrolled_sideways();
+        let other = other_wide_buffer(&s);
+        let win = s.core.borrow().active_window_id();
+
+        s.core
+            .borrow_mut()
+            .install_buffer_in_window(win, other)
+            .expect("install the successor buffer");
+
+        assert_eq!(
+            s.core.borrow().active_window().view_left,
+            0,
+            "an explicit install inherits nothing either"
+        );
+        assert!(
+            !s.core.borrow().active_window().manual_left_authority,
+            "and drops the latch with it"
         );
     }
 

@@ -487,6 +487,26 @@ impl Window {
         }
     }
 
+    /// Forget a manual horizontal origin because this window is
+    /// adopting a **different buffer** (lifetime clause 5).
+    ///
+    /// The origin is a fact about the document being shown, not about
+    /// the window. Carried into a successor it renders the new buffer
+    /// scrolled sideways with nothing about that buffer to explain it,
+    /// until some later cursor motion repairs it by accident. The GPU
+    /// learned this once already — `code_scroll_left` has its own line
+    /// in that frontend's replacement reset, added after exactly this
+    /// symptom — and the TUI's three replacement paths had neither the
+    /// origin reset nor the latch clear.
+    ///
+    /// One helper rather than three copies, so a fourth replacement
+    /// path gets the rule by calling it; each **call site** stays
+    /// individually removable, which is what keeps its own row honest.
+    pub fn forget_manual_horizontal_origin(&mut self) {
+        self.view_left = 0;
+        self.manual_left_authority = false;
+    }
+
     /// Width in cells this window's line-number gutter occupies, or `0`
     /// when disabled (UX gutter arc, Q#UX3). `digits(line_count) + PAD`;
     /// the renderer caps this against the window width and applies it as a
