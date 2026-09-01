@@ -3439,9 +3439,10 @@ impl App {
 
     /// Perform [`PointerRoute::MiddlePress`] — GUI Stage 1b B4.
     ///
-    /// Reads the selection [`middle_click_paste_source`] names and ships
-    /// it as a `Paste`, the same wire operation Ctrl-V uses. The daemon
-    /// inserts it; this frontend never edits the document itself.
+    /// Reads the selection [`paste_source_for`] names for this platform
+    /// and ships it as a `Paste`, the same wire operation Ctrl-V uses.
+    /// The daemon inserts it; this frontend never edits the document
+    /// itself.
     fn apply_middle_press(&mut self) {
         #[cfg(test)]
         let is_linux = !self.test_force_non_linux;
@@ -4994,7 +4995,7 @@ mod input_routing_tests {
     /// all.
     ///
     /// The two seam rows cannot see this: mutating
-    /// `middle_click_paste_source` or replacing the dispatch arm with a
+    /// `paste_source_for` or replacing the dispatch arm with a
     /// no-op leaves both of them green, because each asserts a function
     /// in isolation rather than the effect the gesture produces.
     ///
@@ -5085,7 +5086,7 @@ mod input_routing_tests {
         );
     }
 
-    /// P2 — a button the frontend has no semantics for reaches no body:    /// P2 — a button the frontend has no semantics for reaches no body:
+    /// P2 — a button the frontend has no semantics for reaches no body:
     /// nothing local, nothing outbound. The counterpart to the routing
     /// row that calls it claimed-and-dropped.
     #[test]
