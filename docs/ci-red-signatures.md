@@ -1100,17 +1100,23 @@ one loaded machine. One test alone does not carry that argument.
 | **job / flavor** | local (Linux), bare `cargo test --lib` (default features), full-lib load, **not** `scripts/gate` |
 | **required fragments** | `composition machinery added more than 10% overhead` + a ratio; the run also printed `dispatch overhead : 87.9%` and `realistic overhead : 82.1%` |
 | **status** | **ONE occurrence.** Not reproduced in six subsequent full-lib runs — three on the observing tree and three on the same tree with the observing diff reverted |
-| **margin** | **1.879 against a 1.10 budget** (`single=158789 ns, dispatch=298366 ns`). Recorded because U11 taught this registry what a missing margin costs. This is far the largest margin any occurrence of this selector has shown: U6's five were 1.297, 1.182, 1.592, 1.527 and one unrecorded |
-| **what IS established** | the observing diff (`9cb610e`, the TUI horizontal-authority latch) adds work to the paint path, so it was a live suspect. It was tested rather than argued about: three full-lib runs with the diff and three with `src/editor.rs` and `src/window.rs` restored to HEAD. **All six green.** The single failure is therefore not reproducible either way |
+| **margin** | **1.879 against a 1.10 budget** (`single=158789 ns, dispatch=298366 ns`). Recorded because U11 taught this registry what a missing margin costs. It is the largest this selector has shown: U6's were 1.297, 1.182, 1.592, 1.527 and one unrecorded. Against the previous worst of 1.592 that is **1.18× as large as a ratio, or 1.48× as much budget excess** (0.879 over vs 0.592 over) — two different numbers for two different questions, which is why neither is summarized here as a single adjective |
+| **what IS established** | the observing diff (`9cb610e`, the TUI horizontal-authority latch) adds work to the paint path, so it was a live suspect. Three full-lib runs with the diff and three with `src/editor.rs` and `src/window.rs` restored to HEAD: **all six green.** That establishes **non-reproduction in six runs, and nothing more** — this registry's own rule is that reruns establish intermittence only |
 | **what is NOT** | why it fired. The load confound is once again unmeasured — no `/proc/loadavg` reading was taken at the moment of failure, which is the same gap U15 exists to close |
 
 **The margin is the part that does not fit.** 1.879 is not a budget
 missed by a hair; it is the machinery costing nearly twice what the
-budget allows, and it is a third again worse than U6's worst. A
-load-sensitive assertion can produce that, but so can a real
-regression, and this row does not pretend the size of the margin
-resolves the question. What it does establish is that the observing
-diff is not the cause, because six controlled runs say so.
+budget allows. A load-sensitive assertion can produce that, but so can
+a real regression, and this row does not pretend the size of the margin
+resolves the question.
+
+**Nor do the six controlled runs.** An earlier draft of this row said
+they establish that the observing diff is not the cause. They do not: a
+tree that fails intermittently can carry a *changed failure rate* that
+six runs are far too few to see, and treating non-reproduction as
+exoneration is precisely the reasoning this registry refuses when a
+rerun turns a red green. What the controls do is remove the easy
+story — "the diff obviously did it" — and leave the question open.
 
 **If this selector reds alone again, this row is where it goes**, and
 the first thing to capture is a contemporaneous load reading — the one

@@ -319,7 +319,7 @@ Framing
 this base, the panel-replay prerequisite recorded as DISCHARGED by #243,
 and the both-axis effect witness still owed.
 
-**Landed so far** (latest verified code head `9cb610e`)**:** B1's per-target fractional
+**Landed so far** (latest verified code head `a2d5b26`)**:** B1's per-target fractional
 wheel residual (the producer), B2's daemon-side horizontal panel leg,
 B3/B7's shared `scroll_window_columns` with its saturated bound and wrap
 pin, B4's middle-click PRIMARY paste, **B6's minimap wheel routing**,
@@ -392,6 +392,31 @@ setup assertions rather than by reading:
 - **`paint_frame` runs the follow BEFORE resolving the frame's wrap
   mode and content width**, so a geometry or wrap change reaches the
   follow one frame late. L7a and L8 paint twice and say why.
+
+**`a2d5b26` then closed clause 5's replacement half**, which the first
+latch commit had left undone: three TUI paths replace a window's buffer
+— `switch_active_buffer_for`, `install_buffer_in_window` and the
+daemon's `align_primary_document_window` — and **none cleared
+`view_left` or the latch**. Two already reset cursor, selection and
+`view_top` a line at a time; the horizontal origin was simply missing
+from the list. One `Window::forget_manual_horizontal_origin`, three
+call sites, three rows (L8b/L8c/L8d), each firing only on its own call
+site's removal. L8d sits in `daemon.rs` because that function is
+private there.
+
+Two witness repairs in the same commit, both of the same shape — an
+assertion that looked strict and was not:
+
+- **L7a asserted only that the origin came DOWN.** Any arbitrary
+  reduction satisfied that, including an off-by-one that strands a
+  column. It now asserts `widest − viewport` exactly, against a named
+  fixture constant, and is mutation-checked with that off-by-one.
+- **L4's stated rationale was false.** It claimed the caret stays
+  inside the viewport after the vertical wheel; with short filler lines
+  the caret clamped to their end, LEFT of the origin — so the origin
+  discriminated too and the reason given for using the latch instead
+  did not hold. The filler is now 120 columns and the row asserts the
+  caret is still inside, through `pos_to_display`.
 
 **Still owed on this axis: L7b (content shrink), and the GPU's entire
 read side with L2 and L5's GPU leg.** The GPU's four writes remain
