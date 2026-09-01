@@ -405,11 +405,12 @@ inherit — recorded so the next census need not re-decide it.
 
 **A census taken by recall is not a census.** This is the second time
 in this lane a count was stated from memory and found short by review;
-the first was `reshape` call sites that no geometry path reached. Two already reset cursor, selection and
-`view_top` a line at a time; the horizontal origin was simply missing
-from the list. One `Window::forget_manual_horizontal_origin`, four call sites, four
-rows (L8b–L8e), each firing only on its own call site's removal. L8d
-sits in `daemon.rs` because that function is private there.
+the first was `reshape` call sites that no geometry path reached. Three
+of the four already reset cursor, selection and `view_top` a line at a
+time; the horizontal origin was simply missing from the list. One
+`Window::forget_manual_horizontal_origin`, four call sites, four rows
+(L8b–L8e), each firing only on its own call site's removal. L8d sits in
+`daemon.rs` because that function is private there.
 
 Two witness repairs in the same commit, both of the same shape — an
 assertion that looked strict and was not:

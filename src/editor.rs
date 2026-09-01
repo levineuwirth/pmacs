@@ -11069,7 +11069,7 @@ mod tests {
     /// The origin describes the document being shown. Carried into a
     /// successor it renders the new buffer scrolled sideways with
     /// nothing about that buffer to explain it. The GPU has had this
-    /// reset since it hit the symptom; the TUI's three replacement
+    /// reset since it hit the symptom; the TUI's four replacement
     /// paths had neither half.
     ///
     /// *Mutation: drop the `forget_manual_horizontal_origin()` call

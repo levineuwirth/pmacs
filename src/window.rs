@@ -496,7 +496,7 @@ impl Window {
     /// until some later cursor motion repairs it by accident. The GPU
     /// learned this once already — `code_scroll_left` has its own line
     /// in that frontend's replacement reset, added after exactly this
-    /// symptom — and the TUI's three replacement paths had neither the
+    /// symptom — and the TUI's four replacement paths had neither the
     /// origin reset nor the latch clear.
     ///
     /// One helper rather than a copy per site, so a new replacement
