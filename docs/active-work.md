@@ -319,10 +319,23 @@ Framing
 this base, the panel-replay prerequisite recorded as DISCHARGED by #243,
 and the both-axis effect witness still owed.
 
-**Landed so far:** B1's per-target fractional wheel residual (the
-producer), B2's daemon-side horizontal panel leg, B3/B7's shared
-`scroll_window_columns` with its saturated bound and wrap pin, and B4's
-middle-click PRIMARY paste.
+**Landed so far** (head `a4627cd`)**:** B1's per-target fractional
+wheel residual (the producer), B2's daemon-side horizontal panel leg,
+B3/B7's shared `scroll_window_columns` with its saturated bound and wrap
+pin, B4's middle-click PRIMARY paste, and **B5's I-beam**, whose icon is
+re-derived in **`reshape`'s tail** — the one point every geometry settle
+already passes through, reached by the line-number mode, minimap
+arrival, panel appearance, resize and font metrics alike. Three
+production appliers remain, one per cause (pointer motion, menu
+ownership without geometry, geometry), and each fires a disjoint set of
+rows under its own removal.
+
+B5 took three rounds to get there. The first two patched the paths that
+had been noticed — the snapshot arm, then a `set_menu` helper — and both
+times the two appliers masked each other, so a row's documented mutation
+named something the row could not see. **A witness whose mutation is
+masked is not weaker evidence than a real one; it is evidence of
+nothing, and it reads identically in the diff.**
 
 **Landed but NOT yet witnessed** — recovery needs this split, because
 "L1–L8 owed" reads as though none of the mechanism exists:
@@ -335,7 +348,7 @@ middle-click PRIMARY paste.
 - **R4 and R5's residual resets**, as two separate clears beside
   `code_scroll_left` so omitting either is individually visible.
 
-**Owed outright:** B5, B6's routing row, the **L1–L8 rows** for the
+**Owed outright:** B6's routing row, the **L1–L8 rows** for the
 latch above, step 3's fractional both-axis panel witness, R4/R5's own
 replacement witnesses, and **B1's disposal half** — a residual keyed to
 a surface that goes away must go with it, and this frontend does not yet
