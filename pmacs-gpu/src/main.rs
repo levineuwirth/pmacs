@@ -46,13 +46,12 @@ use pmacs_protocol::{
     MAX_STATUSLINE_FACE_BYTES, MAX_STATUSLINE_PROVIDERS, MAX_STATUSLINE_SEGMENT_BYTES,
     MAX_STATUSLINE_TOTAL_TEXT_BYTES, MenuPromptRow, MinibufferRow, Modifiers,
     MouseButton as ProtocolMouseButton, MouseKind as ProtocolMouseKind, PointerKind,
-    SelectionSnapshot, StatuslineSegment, StyleSegment, StyleSpan, TAB_STOP_COLUMNS,
-    TEXT_INPUT_MIN_VERSION, TerminalFrame, UnderlineStyle,
+    SelectionSnapshot, StatuslineSegment, StyleSegment, StyleSpan, TEXT_INPUT_MIN_VERSION,
+    TerminalFrame, UnderlineStyle,
     cell::{Color as CellColor, Style as CellStyle},
     is_builtin_pair_char, is_modeline_face_name,
     panel::{PANEL_MIN_VERSION, PanelFrame, PanelFramePayload},
 };
-use unicode_width::UnicodeWidthChar;
 use wgpu::MultisampleState;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -14099,8 +14098,15 @@ fn expand_chunk_tabs(chunks: Vec<RichChunk>) -> Vec<RichChunk> {
                     source: offset_chunk_source(source, segment_start as u64),
                 });
             }
-            let tab_stop = TAB_STOP_COLUMNS as usize;
-            let tab_width = tab_stop - column % tab_stop;
+            // The tab's width comes from the SHARED rule, derived
+            // rather than recomputed: a second copy of `stop - column %
+            // stop` here is how the rendered column and B7's bound
+            // drift apart.
+            let tab_width = pmacs_protocol::columns::advance_char(
+                u32::try_from(column).unwrap_or(u32::MAX),
+                '\t',
+            ) as usize
+                - column;
             expanded.push(RichChunk {
                 text: " ".repeat(tab_width),
                 color,
@@ -14144,12 +14150,23 @@ fn offset_chunk_source(source: ChunkSource, byte_offset: u64) -> ChunkSource {
     }
 }
 
+/// Advance the projection's running display column across `text`.
+///
+/// **Per-character advance delegates to
+/// [`pmacs_protocol::columns::advance_char`]** so the column this
+/// projection renders at is the same column B7's bound and the caret
+/// follow reckon in. The stream semantics stay local and are the reason
+/// this wrapper exists at all: the column runs across chunks, so
+/// **adornment text shifts a later tab**, and a newline restarts it.
 fn advance_display_column(column: &mut usize, text: &str) {
     for ch in text.chars() {
         if ch == '\n' {
             *column = 0;
         } else {
-            *column += UnicodeWidthChar::width(ch).unwrap_or(0);
+            *column = pmacs_protocol::columns::advance_char(
+                u32::try_from(*column).unwrap_or(u32::MAX),
+                ch,
+            ) as usize;
         }
     }
 }
