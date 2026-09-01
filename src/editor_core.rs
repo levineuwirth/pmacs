@@ -5416,6 +5416,7 @@ impl EditorCore {
                     win.cursor = 0;
                     win.selection = None;
                     win.view_top = 0;
+                    win.forget_manual_horizontal_origin();
                     win.goal_col = None;
                 }
             }

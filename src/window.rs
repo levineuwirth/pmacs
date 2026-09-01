@@ -499,9 +499,25 @@ impl Window {
     /// symptom — and the TUI's three replacement paths had neither the
     /// origin reset nor the latch clear.
     ///
-    /// One helper rather than three copies, so a fourth replacement
+    /// One helper rather than a copy per site, so a new replacement
     /// path gets the rule by calling it; each **call site** stays
     /// individually removable, which is what keeps its own row honest.
+    ///
+    /// **The census, taken by grepping every write of a window's
+    /// `buffer_id` rather than by recalling which paths exist** — an
+    /// earlier version of this doc said "three" and was wrong, because
+    /// it listed the paths someone had thought of. Four production
+    /// sites rebind a live window to a different buffer:
+    /// `EditorCore::switch_active_buffer_for`,
+    /// `EditorCore::install_buffer_in_window`,
+    /// `EditorCore::kill_buffer`'s fallback rebind, and the daemon's
+    /// `align_primary_document_window`. Each has its own row
+    /// (L8b–L8e).
+    ///
+    /// `EditorCore::from_bytes` also assigns `buffer_id`, and is
+    /// **deliberately not on that list**: it builds a fresh core whose
+    /// window has no prior origin to inherit. Named here so the next
+    /// census does not have to re-decide it.
     pub fn forget_manual_horizontal_origin(&mut self) {
         self.view_left = 0;
         self.manual_left_authority = false;

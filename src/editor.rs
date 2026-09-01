@@ -10670,11 +10670,16 @@ mod tests {
         }
     }
 
-    /// Whether the caret is inside the window's horizontal viewport,
-    /// asked the way production asks it: `pos_to_display` returns
-    /// `None` for a position LEFT of the edge (Q#HS7(c′)), which is the
-    /// exact condition that decides whether a vertical wheel can carry
-    /// point at all.
+    /// Whether the caret is inside the window's horizontal viewport —
+    /// **both edges**.
+    ///
+    /// `pos_to_display` returns `None` for a position LEFT of the edge
+    /// (Q#HS7(c′)), which is the condition deciding whether a vertical
+    /// wheel can carry point at all. On its own that is only half the
+    /// question: a caret past the RIGHT edge still returns `Some`, and
+    /// there a normal follow would move the origin — so a row claiming
+    /// the latch is its only discriminator would be wrong in exactly
+    /// the way `is_some()` cannot see. The column bound closes it.
     fn caret_inside_viewport(s: &EditorState) -> bool {
         let core = s.core.borrow();
         let win = core.active_window();
@@ -10683,7 +10688,7 @@ mod tests {
         let buf = reg.get(win.buffer_id).expect("live buffer");
         win.text_view
             .pos_to_display(buf, win.cursor, win.layout_ctx())
-            .is_some()
+            .is_some_and(|coord| coord.col < win.last_content_cols)
     }
 
     /// The state every L-row starts from: a real sideways wheel gesture
@@ -10846,11 +10851,12 @@ mod tests {
         );
         assert!(
             caret_inside_viewport(&s),
-            "setup: and it must still be INSIDE the viewport afterwards. \
-             A caret that landed on a short line would clamp to that \
-             line's end, left of the origin — and then the origin would \
-             discriminate too, so the claim below about the latch being \
-             the only discriminator would be false"
+            "setup: and it must still be INSIDE the viewport afterwards, \
+             on BOTH edges. Past either one a normal follow would move \
+             the origin — left, if the caret clamped to a short line's \
+             end; right, if it ran off the far side — and then the \
+             origin would discriminate too, making the claim below \
+             about the latch being the only discriminator false"
         );
         paint_once(&s, term_size_24x80());
 
@@ -11101,6 +11107,46 @@ mod tests {
             s.core.borrow().active_window().view_left > 0,
             "a stale latch would have frozen the successor's viewport at \
              zero with its caret 300 columns off-screen"
+        );
+    }
+
+    /// L8, replacement leg — **killing the displayed buffer** rebinds
+    /// the window to a fallback, which is a replacement like any other.
+    ///
+    /// This path was missed by the first census, which listed the
+    /// replacement sites someone had thought of rather than the ones a
+    /// grep for `buffer_id` writes turns up. It resets cursor,
+    /// selection and `view_top` a line at a time, exactly like the
+    /// other two in this file, and had the horizontal origin missing
+    /// from the same list.
+    ///
+    /// *Mutation: drop the `forget_manual_horizontal_origin()` call
+    /// from `kill_buffer`'s fallback rebind → this row.*
+    #[test]
+    fn l8e_killing_the_displayed_buffer_clears_the_origin_and_the_latch() {
+        let (s, _) = scrolled_sideways();
+        let doomed = s.core.borrow().active_window().buffer_id;
+
+        s.core
+            .borrow_mut()
+            .kill_buffer(doomed)
+            .expect("the scratch buffer stands as a fallback");
+
+        assert_ne!(
+            s.core.borrow().active_window().buffer_id,
+            doomed,
+            "setup: the window must actually have been rebound, else \
+             this row measures nothing"
+        );
+        assert_eq!(
+            s.core.borrow().active_window().view_left,
+            0,
+            "a fallback rebind must not inherit the dead buffer's \
+             sideways viewport"
+        );
+        assert!(
+            !s.core.borrow().active_window().manual_left_authority,
+            "nor the authority defending it"
         );
     }
 
