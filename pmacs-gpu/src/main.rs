@@ -723,6 +723,8 @@ fn main() {
     let mut app = App {
         mode,
         proxy: Some(proxy),
+        #[cfg(test)]
+        test_force_non_linux: false,
         state: None,
         attach_client,
         pending_events,
@@ -1586,6 +1588,15 @@ struct App {
     /// a non-Option in a borrow.
     proxy: Option<winit::event_loop::EventLoopProxy<AppEvent>>,
     state: Option<State>,
+    /// Test override for B4's platform decision: pretend this build is
+    /// not Linux, so a row can drive the inert branch on a Linux host.
+    ///
+    /// **Needed because no CI leg runs this crate's tests off Linux.**
+    /// Without it the off-Linux contract is asserted nowhere that
+    /// actually executes, and a call-site `unwrap_or(Clipboard)` passes
+    /// everything.
+    #[cfg(test)]
+    test_force_non_linux: bool,
     /// User events received before winit creates `state`. Managed attach
     /// starts its reader before `run_app`, so the initial snapshot may arrive
     /// before `resumed` on backends with a different callback order.
@@ -3432,7 +3443,11 @@ impl App {
     /// it as a `Paste`, the same wire operation Ctrl-V uses. The daemon
     /// inserts it; this frontend never edits the document itself.
     fn apply_middle_press(&mut self) {
-        let Some(source) = middle_click_paste_source() else {
+        #[cfg(test)]
+        let is_linux = !self.test_force_non_linux;
+        #[cfg(not(test))]
+        let is_linux = cfg!(target_os = "linux");
+        let Some(source) = paste_source_for(is_linux) else {
             return;
         };
         let bytes = self
@@ -4249,6 +4264,8 @@ impl EffectHarness {
                     socket: PathBuf::from("/nonexistent-harness-socket"),
                 },
                 proxy: None,
+                #[cfg(test)]
+                test_force_non_linux: false,
                 state,
                 pending_events: Vec::new(),
                 attach_client: Some(client),
@@ -4972,33 +4989,22 @@ mod input_routing_tests {
     }
 
     /// B4 END TO END — a middle press driven through
-    /// `dispatch_window_event` sends **exactly one** `Paste`, carrying
-    /// the **PRIMARY** payload, and its release sends none.
+    /// `dispatch_window_event` produces **exactly one `Paste` carrying
+    /// PRIMARY and nothing else**, and its release produces nothing at
+    /// all.
     ///
-    /// The two seam rows below cannot see this: mutating
+    /// The two seam rows cannot see this: mutating
     /// `middle_click_paste_source` or replacing the dispatch arm with a
     /// no-op leaves both of them green, because each asserts a function
-    /// in isolation rather than the effect the gesture produces. This
-    /// row drives the production path and asserts the payload.
+    /// in isolation rather than the effect the gesture produces.
     ///
-    /// The two selections carry **distinguishable** contents, which is
-    /// the whole point — a row whose PRIMARY and CLIPBOARD stubs said
-    /// the same thing would pass with the wrong one read.
+    /// The two selections carry **distinguishable** contents — a row
+    /// whose PRIMARY and CLIPBOARD stubs said the same thing would pass
+    /// with the wrong one read.
     ///
-    /// **It asserts the whole transcript on BOTH platforms**, not just
-    /// Linux. A Linux-only row leaves the off-Linux contract to a helper
-    /// test, and
-    /// `middle_click_paste_source().unwrap_or(PasteSource::Clipboard)`
-    /// at the call site then restores the rejected clipboard fallback
-    /// while every row stays green: the helper still returns `None` and
-    /// Linux still gets PRIMARY. The inertness has to be asserted where
-    /// the effect would appear.
-    ///
-    /// **Where that mutant is actually caught, stated honestly:** on a
-    /// Linux host the `unwrap_or` never engages — the source is already
-    /// `Some(Primary)` — so no row on this machine can fire it, and a
-    /// green local run is not evidence about it. The `else` branch below
-    /// is what catches it, and it runs on the **non-Linux CI legs**.
+    /// **It asserts the WHOLE `Step`, not "no `Paste`".** Filtering for
+    /// pastes lets any other outbound event through, so a gesture that
+    /// also emitted something spurious would pass.
     #[test]
     fn b4_a_middle_press_sends_exactly_one_paste_carrying_primary() {
         use winit::event::{ElementState, MouseButton};
@@ -5010,52 +5016,76 @@ mod input_routing_tests {
 
         let step = h.feed(&mouse_input(ElementState::Pressed, MouseButton::Middle));
 
-        let pastes: Vec<&pmacs_protocol::FrontendEvent> = step
-            .outbound
-            .iter()
-            .filter(|e| matches!(e, pmacs_protocol::FrontendEvent::Paste { .. }))
-            .collect();
-        if cfg!(target_os = "linux") {
-            assert_eq!(
-                pastes.len(),
-                1,
-                "exactly one paste, got {:?}",
-                step.outbound
-            );
-            match pastes[0] {
-                pmacs_protocol::FrontendEvent::Paste { data, .. } => assert_eq!(
-                    data.as_slice(),
-                    b"PRIMARY-payload",
-                    "B4 pastes the PRIMARY selection, not the clipboard"
-                ),
-                other => panic!("expected a Paste, got {other:?}"),
-            }
-        } else {
-            assert!(
-                pastes.is_empty(),
-                "off Linux the gesture is INERT: B4 rules PRIMARY on Linux \
-                 and nothing else, so no paste of any selection may appear \
-                 here. Got {:?}",
-                step.outbound
-            );
-            assert!(
-                step.local.is_empty(),
-                "and no local effect either: {:?}",
-                step.local
-            );
-        }
+        // The harness's frontend id is whatever the handshake assigned;
+        // the row is about the payload and the shape, not the id.
+        let frontend_id = match step.outbound.first() {
+            Some(pmacs_protocol::FrontendEvent::Paste { frontend_id, .. }) => *frontend_id,
+            other => panic!("expected a Paste first, got {other:?}"),
+        };
+        assert_eq!(
+            step,
+            Step {
+                local: Vec::new(),
+                outbound: vec![pmacs_protocol::FrontendEvent::Paste {
+                    frontend_id,
+                    data: b"PRIMARY-payload".to_vec(),
+                }],
+            },
+            "exactly one PRIMARY paste, no local effect, nothing else"
+        );
 
         let release = h.feed(&mouse_input(ElementState::Released, MouseButton::Middle));
-        assert!(
-            !release
-                .outbound
-                .iter()
-                .any(|e| matches!(e, pmacs_protocol::FrontendEvent::Paste { .. })),
-            "the release pastes nothing; the gesture fires once, on the press"
+        assert_eq!(
+            release,
+            Step {
+                local: Vec::new(),
+                outbound: Vec::new()
+            },
+            "the release does nothing at all; the gesture fires once, on \
+             the press"
         );
     }
 
-    /// P2 — a button the frontend has no semantics for reaches no body:
+    /// B4's OFF-LINUX leg — the gesture is **completely inert**.
+    ///
+    /// B4 rules PRIMARY on Linux and rules nothing else, so off Linux a
+    /// middle press must produce no effect of any kind — not a clipboard
+    /// paste, not anything.
+    ///
+    /// **This row exists because no CI leg runs this crate's tests off
+    /// Linux.** `cargo test -p pmacs-gpu` appears once in `ci.yml`, in
+    /// the Ubuntu-only `gpu-render` job, so a `cfg`-gated row would
+    /// assert the off-Linux contract nowhere that actually executes, and
+    /// `paste_source_for(..).unwrap_or(PasteSource::Clipboard)` at the
+    /// call site would pass everything. The platform is injected instead
+    /// of read, so the branch runs here.
+    ///
+    /// *Mutation: `unwrap_or(PasteSource::Clipboard)` at the call site →
+    /// this row.*
+    #[test]
+    fn b4_off_linux_a_middle_press_is_completely_inert() {
+        use winit::event::{ElementState, MouseButton};
+        let mut h = EffectHarness::new();
+        h.app.test_force_non_linux = true;
+        if let Some(state) = h.app.state.as_mut() {
+            state.set_test_selection(crate::PasteSource::Primary, b"PRIMARY-payload");
+            state.set_test_selection(crate::PasteSource::Clipboard, b"CLIPBOARD-payload");
+        }
+
+        let step = h.feed(&mouse_input(ElementState::Pressed, MouseButton::Middle));
+
+        assert_eq!(
+            step,
+            Step {
+                local: Vec::new(),
+                outbound: Vec::new()
+            },
+            "off Linux the gesture is inert: no paste of any selection, no \
+             local effect, nothing"
+        );
+    }
+
+    /// P2 — a button the frontend has no semantics for reaches no body:    /// P2 — a button the frontend has no semantics for reaches no body:
     /// nothing local, nothing outbound. The counterpart to the routing
     /// row that calls it claimed-and-dropped.
     #[test]
@@ -5430,8 +5460,8 @@ enum PasteSource {
     Primary,
 }
 
-/// The selection a middle click pastes from, or `None` where the
-/// gesture has no ruled meaning.
+/// The selection a middle click pastes from on a given platform, or
+/// `None` where the gesture has no ruled meaning.
 ///
 /// **B4 rules PRIMARY on Linux, and rules nothing else.** Off Linux
 /// there is no PRIMARY selection, and the gesture was inert before this
@@ -5439,8 +5469,15 @@ enum PasteSource {
 /// behaviour on every other platform that no framing approved. It stays
 /// inert, and a fallback needs framing and re-approval rather than a
 /// default chosen here.
-const fn middle_click_paste_source() -> Option<PasteSource> {
-    if cfg!(target_os = "linux") {
+///
+/// **The platform is a PARAMETER, not a `cfg!` read inside.** No CI leg
+/// runs this crate's tests on a non-Linux host — `cargo test -p
+/// pmacs-gpu` appears once, in the Ubuntu-only `gpu-render` job — so a
+/// decision baked in by `cfg!` would leave the off-Linux contract
+/// untested everywhere it actually runs. Taking it as an argument lets
+/// a row drive both outcomes here.
+const fn paste_source_for(is_linux: bool) -> Option<PasteSource> {
+    if is_linux {
         Some(PasteSource::Primary)
     } else {
         None
@@ -14827,21 +14864,18 @@ mod tests {
     /// *Mutation: return `PasteSource::Clipboard` → this row.*
     #[test]
     fn b4_a_middle_click_pastes_the_primary_selection_on_linux() {
-        let source = super::middle_click_paste_source();
-        if cfg!(target_os = "linux") {
-            assert_eq!(
-                source,
-                Some(super::PasteSource::Primary),
-                "B4: the middle button reads PRIMARY on Linux"
-            );
-        } else {
-            assert_eq!(
-                source, None,
-                "B4 rules PRIMARY on Linux and nothing else; off Linux the \
-                 gesture stays inert rather than acquiring an unframed \
-                 clipboard meaning"
-            );
-        }
+        assert_eq!(
+            super::paste_source_for(true),
+            Some(super::PasteSource::Primary),
+            "B4: the middle button reads PRIMARY on Linux"
+        );
+        assert_eq!(
+            super::paste_source_for(false),
+            None,
+            "B4 rules PRIMARY on Linux and nothing else; off Linux the \
+             gesture stays inert rather than acquiring an unframed \
+             clipboard meaning"
+        );
     }
 
     /// B4's routing half — a middle **press** is its own route now, and
