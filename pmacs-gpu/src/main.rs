@@ -3423,6 +3423,26 @@ impl App {
         WheelTarget::Chrome
     }
 
+    /// Perform [`PointerRoute::MiddlePress`] — GUI Stage 1b B4.
+    ///
+    /// Reads the selection [`middle_click_paste_source`] names and ships
+    /// it as a `Paste`, the same wire operation Ctrl-V uses. The daemon
+    /// inserts it; this frontend never edits the document itself.
+    fn apply_middle_press(&mut self) {
+        let source = middle_click_paste_source();
+        let bytes = self
+            .state
+            .as_mut()
+            .and_then(|state| state.read_os_selection(source));
+        if let Some(bytes) = bytes
+            && !bytes.is_empty()
+            && let Some(client) = self.attach_client.as_ref()
+            && let Err(e) = client.send_paste(bytes)
+        {
+            eprintln!("pmacs-gpu: middle-click send_paste failed: {e}");
+        }
+    }
+
     /// Perform [`PointerRoute::Wheel`].
     ///
     /// **GUI Stage 1b B1 reorders this pipeline.** It used to round to
@@ -3578,6 +3598,7 @@ impl App {
             // today nothing to do: a key-up the keyboard family claimed
             // and dropped, a button the pointer family has no semantics
             // for, and an event no family claims at all.
+            Route::Pointer(PointerRoute::MiddlePress) => self.apply_middle_press(),
             Route::Keyboard {
                 action: KeyAction::Release,
                 ..
@@ -4019,12 +4040,16 @@ enum PointerRoute {
     /// opens on the press, so the matching release is deliberately
     /// nothing — see `UnusedButton`.
     RightPress,
-    /// A `MouseInput` this frontend has no semantics for: the right
-    /// button's release, and every middle / back / forward / other
-    /// button in either state. **Claimed by the pointer family and
-    /// dropped**, exactly as it behaved when it fell through to the
-    /// wildcard. Stage 1b's B4 gives the middle button a meaning
-    /// (PRIMARY-selection paste on Linux) and lands here.
+    /// `MouseInput` **pressing** the middle button — GUI Stage 1b's
+    /// B4. On Linux this pastes the **PRIMARY selection**, which is the
+    /// platform convention and a different selection from the one
+    /// Ctrl-V reads. The release is deliberately nothing, like the
+    /// right button's.
+    MiddlePress,
+    /// A `MouseInput` this frontend has no semantics for: the right and
+    /// middle buttons' releases, and every back / forward / other button
+    /// in either state. **Claimed by the pointer family and dropped**,
+    /// exactly as it behaved when it fell through to the wildcard.
     UnusedButton,
     /// `MouseWheel`. The delta is carried raw: converting it to lines
     /// needs the code line height, which is `State`'s to know.
@@ -4042,6 +4067,7 @@ fn route_pointer(event: &WindowEvent) -> Option<PointerRoute> {
         WindowEvent::MouseInput { state, button, .. } => Some(match (button, state) {
             (MouseButton::Left, _) => PointerRoute::Left(*state),
             (MouseButton::Right, ElementState::Pressed) => PointerRoute::RightPress,
+            (MouseButton::Middle, ElementState::Pressed) => PointerRoute::MiddlePress,
             _ => PointerRoute::UnusedButton,
         }),
         WindowEvent::MouseWheel { delta, .. } => Some(PointerRoute::Wheel(*delta)),
@@ -4610,7 +4636,6 @@ mod input_routing_tests {
     #[test]
     fn a_button_without_semantics_is_claimed_and_dropped() {
         for button in [
-            MouseButton::Middle,
             MouseButton::Back,
             MouseButton::Forward,
             MouseButton::Other(9),
@@ -4624,6 +4649,14 @@ mod input_routing_tests {
                 );
             }
         }
+        // **The middle button is no longer semantics-free**: GUI Stage
+        // 1b's B4 gives its PRESS a meaning. Its RELEASE still has none,
+        // so it stays in this row rather than leaving it.
+        assert_eq!(
+            route_one(&mouse_input(ElementState::Released, MouseButton::Middle)),
+            Route::Pointer(PointerRoute::UnusedButton),
+            "a middle release remains nothing, like the right button's"
+        );
     }
 
     /// P1 — the wheel delta is carried **raw**. Converting it to lines
@@ -4939,7 +4972,10 @@ mod input_routing_tests {
     #[test]
     fn an_unused_button_produces_no_effect_of_any_kind() {
         let mut h = EffectHarness::new();
-        let step = h.feed(&mouse_input(ElementState::Pressed, MouseButton::Middle));
+        // `Back`, not `Middle`: B4 gave the middle PRESS a meaning, so
+        // this row moved to a button that still has none rather than
+        // being weakened to accommodate the new one.
+        let step = h.feed(&mouse_input(ElementState::Pressed, MouseButton::Back));
         assert_eq!(
             step,
             Step {
@@ -5076,7 +5112,10 @@ mod input_routing_tests {
                 position: PhysicalPosition::new(4.0, 8.0),
             },
             mouse_input(ElementState::Pressed, MouseButton::Left),
-            mouse_input(ElementState::Pressed, MouseButton::Middle),
+            // `Back`: this row is about ORDER, and it keeps a
+            // semantics-free button so B4's new middle-press meaning
+            // does not quietly become part of what it asserts.
+            mouse_input(ElementState::Pressed, MouseButton::Back),
             WindowEvent::RedrawRequested,
             WindowEvent::Occluded(false),
             WindowEvent::CloseRequested,
@@ -5287,6 +5326,33 @@ const WHEEL_LINES_PER_TICK: f32 = 3.0;
 /// Columns per horizontal wheel notch — B7's "three columns per wheel
 /// tick", the horizontal twin of [`WHEEL_LINES_PER_TICK`].
 const WHEEL_COLUMNS_PER_TICK: f32 = 3.0;
+
+/// Which OS selection a paste gesture reads.
+///
+/// X11 and Wayland carry two: the CLIPBOARD, written by an explicit
+/// copy, and the PRIMARY selection, written merely by selecting text.
+/// **They are different selections with different contents**, and the
+/// platform convention pairs them with different gestures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PasteSource {
+    /// What Ctrl-V reads.
+    Clipboard,
+    /// What a middle click reads on Linux (GUI Stage 1b B4).
+    Primary,
+}
+
+/// The selection a middle click pastes from.
+///
+/// **PRIMARY on Linux** — B4's whole content. Elsewhere there is no
+/// PRIMARY selection, so the gesture falls back to the clipboard rather
+/// than doing nothing, which is the closest available meaning.
+const fn middle_click_paste_source() -> PasteSource {
+    if cfg!(target_os = "linux") {
+        PasteSource::Primary
+    } else {
+        PasteSource::Clipboard
+    }
+}
 
 /// The wire scroll kinds for a banked `(x, y)` tick count, in order.
 ///
@@ -6375,10 +6441,36 @@ impl State {
     /// Read the OS clipboard as bytes (for Ctrl-V → `Paste`). `None` on
     /// any failure (empty / non-text / unavailable).
     fn read_os_clipboard(&mut self) -> Option<Vec<u8>> {
-        match self.os_clipboard()?.get_text() {
+        self.read_os_selection(PasteSource::Clipboard)
+    }
+
+    /// Read one named OS selection.
+    ///
+    /// GUI Stage 1b B4 needs the **PRIMARY** selection, which on Linux
+    /// is a different selection from the clipboard with different
+    /// contents. Reading the clipboard for a middle click would paste
+    /// whatever was last explicitly copied instead of what is currently
+    /// selected — a plausible-looking wrong answer, which is why B4's
+    /// row asserts the source rather than that "a paste happened".
+    fn read_os_selection(&mut self, source: PasteSource) -> Option<Vec<u8>> {
+        let clipboard = self.os_clipboard()?;
+        let read = match source {
+            PasteSource::Clipboard => clipboard.get_text(),
+            #[cfg(target_os = "linux")]
+            PasteSource::Primary => {
+                use arboard::{GetExtLinux, LinuxClipboardKind};
+                clipboard
+                    .get()
+                    .clipboard(LinuxClipboardKind::Primary)
+                    .text()
+            }
+            #[cfg(not(target_os = "linux"))]
+            PasteSource::Primary => clipboard.get_text(),
+        };
+        match read {
             Ok(s) => Some(s.into_bytes()),
             Err(e) => {
-                eprintln!("pmacs-gpu: clipboard read failed: {e}");
+                eprintln!("pmacs-gpu: {source:?} read failed: {e}");
                 None
             }
         }
@@ -14607,6 +14699,65 @@ mod tests {
             r.accumulate(cell, 0.0, 0.2),
             (0, 0),
             "a gesture that scrolled nothing must not complete a tick on arrival"
+        );
+    }
+
+    /// B4 — a middle-click paste reads the **PRIMARY selection** on
+    /// Linux, not the clipboard.
+    ///
+    /// The two are different selections with different contents: the
+    /// clipboard holds what was last explicitly copied, PRIMARY holds
+    /// what is currently selected. Reading the wrong one produces a
+    /// paste — just not the one the platform convention promises — so
+    /// the row asserts the SOURCE rather than that a paste happened.
+    ///
+    /// *Mutation: return `PasteSource::Clipboard` → this row.*
+    #[test]
+    fn b4_a_middle_click_pastes_the_primary_selection_on_linux() {
+        let source = super::middle_click_paste_source();
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                source,
+                super::PasteSource::Primary,
+                "B4: the middle button reads PRIMARY on Linux"
+            );
+        } else {
+            assert_eq!(
+                source,
+                super::PasteSource::Clipboard,
+                "off Linux there is no PRIMARY selection; the clipboard is \
+                 the closest available meaning"
+            );
+        }
+    }
+
+    /// B4's routing half — a middle **press** is its own route now, and
+    /// no longer the claimed-and-dropped `UnusedButton`.
+    ///
+    /// Its RELEASE stays unused, like the right button's: the paste
+    /// happens once, on the press.
+    #[test]
+    fn b4_a_middle_press_routes_to_its_own_variant_and_its_release_does_not() {
+        use winit::event::{ElementState, MouseButton};
+        let press = winit::event::WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: ElementState::Pressed,
+            button: MouseButton::Middle,
+        };
+        let release = winit::event::WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: ElementState::Released,
+            button: MouseButton::Middle,
+        };
+        assert_eq!(
+            super::route_pointer(&press),
+            Some(super::PointerRoute::MiddlePress),
+            "a middle press is B4's gesture"
+        );
+        assert_eq!(
+            super::route_pointer(&release),
+            Some(super::PointerRoute::UnusedButton),
+            "and its release remains nothing, like the right button's"
         );
     }
 
