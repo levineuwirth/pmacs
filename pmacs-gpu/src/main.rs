@@ -3022,11 +3022,11 @@ impl App {
         // highlight; send a hover when the item under the pointer
         // changes from the daemon's current active row.
         if state.menu.is_some() {
-            // B5 — the menu owns this pointer path, and it is not text.
-            // Without this the I-beam that was showing when the menu
-            // opened stays on screen over the menu indefinitely: the
-            // early return below skips the icon application entirely.
-            state.apply_panel_cursor_icon();
+            // No icon application here, deliberately. The menu's icon is
+            // settled when the menu OPENS (`MenuPrompt`), and motion
+            // inside an open menu changes no ownership — a call here
+            // would be a second writer that no row could distinguish
+            // from the first.
             let hit = state.menu_hit(x, y);
             let active = state.menu.as_ref().and_then(|m| m.active);
             if let Some((row, true)) = hit
@@ -7224,6 +7224,13 @@ impl State {
                         anchor_px: self.menu_anchor_px,
                     })
                 };
+                // B5 — menu ownership changes HERE, with no pointer
+                // motion. Opening while an I-beam is showing would leave
+                // it on screen over the menu until the pointer happened
+                // to move; closing would leave the arrow over text for
+                // just as long. The icon is a function of the state, so
+                // it is re-derived where the state changes.
+                self.apply_panel_cursor_icon();
                 self.request_redraw();
                 None
             }
@@ -15059,7 +15066,11 @@ mod tests {
     /// A row whose only positive point sits over an actual glyph cannot
     /// see that: replacing the geometry with a byte hit-test passes it.
     ///
-    /// *Mutation: decide by `hit_test_source_byte` → this row.*
+    /// *Mutation, as executed:* bound `x` by the glyphs' extent —
+    /// `text_left + widest_display_columns * mono_advance` — which is
+    /// byte-hit-test semantics expressed geometrically. The literal
+    /// substitution is not available: `hit_test_source_byte` takes
+    /// `&mut self` and this helper is `&self`.
     #[test]
     fn b5_the_i_beam_covers_the_blank_past_a_short_lines_end() {
         use winit::window::CursorIcon;
@@ -15082,13 +15093,72 @@ mod tests {
         );
     }
 
+    /// B5 — the icon follows the MENU'S LIFECYCLE, which changes with no
+    /// pointer motion at all.
+    ///
+    /// `MenuPrompt` opens and closes the menu. Without re-deriving the
+    /// icon there, opening while an I-beam shows leaves it on screen
+    /// over the menu, and closing leaves the arrow over text — in both
+    /// cases until the pointer happens to move.
+    ///
+    /// Driven through `apply_attach_message`, the production path, and
+    /// asserting `last_cursor_icon` — the value actually written — not
+    /// the decision function.
+    ///
+    /// *Mutations, each firing this row: drop the
+    /// `apply_panel_cursor_icon()` call in the `MenuPrompt` arm; drop
+    /// the `menu.is_some()` guard in `pointer_over_text_content`.*
+    #[test]
+    fn b5_the_icon_follows_the_menus_lifecycle_without_pointer_motion() {
+        use winit::window::CursorIcon;
+        let document = "fn main() {}\n".repeat(40);
+        let Some(mut state) = State::new_headless(640, 480, &document) else {
+            return;
+        };
+        state.line_numbers = LineNumberMode::Absolute;
+        state.pointer_pos = Some((
+            f64::from(state.text_left() + 8.0),
+            f64::from(TEXT_TOP + 4.0),
+        ));
+        state.apply_panel_cursor_icon();
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Text),
+            "setup: an I-beam is showing before the menu opens"
+        );
+
+        let _ = state.apply_attach_message(InstanceMessage::MenuPrompt {
+            buffer_id: BufferId::next(),
+            rows: vec![MenuPromptRow {
+                label: "Cut".into(),
+                separator: false,
+            }],
+            active: Some(0),
+        });
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Default),
+            "opening the menu clears the I-beam without any pointer motion"
+        );
+
+        // Empty rows close it.
+        let _ = state.apply_attach_message(InstanceMessage::MenuPrompt {
+            buffer_id: BufferId::next(),
+            rows: Vec::new(),
+            active: None,
+        });
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Text),
+            "and closing it restores the I-beam, the pointer never having \
+             moved"
+        );
+    }
+
     /// B5 — an open context menu owns its pixels, and they are not text.
     ///
-    /// The menu's motion path returns before the icon is applied, so an
-    /// I-beam showing when the menu opened would stay on screen over the
-    /// menu indefinitely.
-    ///
-    /// *Mutation: drop the `menu.is_some()` guard → this row.*
+    /// The decision half of the lifecycle row above, kept separate so a
+    /// failure says whether the *decision* or the *application* broke.
     #[test]
     fn b5_an_open_menu_is_not_text() {
         use winit::window::CursorIcon;
