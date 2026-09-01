@@ -1884,6 +1884,9 @@ struct State {
     /// caret follow leaves it alone until the cursor position actually
     /// changes. A move fully absorbed by the clamp arms nothing.
     manual_left_authority: bool,
+    /// The icon last written to the window, so a per-motion call is a
+    /// comparison rather than a platform round-trip.
+    last_cursor_icon: Option<winit::window::CursorIcon>,
     /// Stub selections for tests; see [`Self::set_test_selection`].
     #[cfg(test)]
     test_selections: HashMap<PasteSource, Vec<u8>>,
@@ -3038,9 +3041,15 @@ impl App {
             return;
         }
         let surface = state.classify_pointer_surface(x as f32, y as f32);
-        if state.set_panel_divider_hover(surface == PointerSurface::PanelDivider) {
-            state.apply_panel_cursor_icon();
-        }
+        state.set_panel_divider_hover(surface == PointerSurface::PanelDivider);
+        // **Applied on every motion, not only when divider hover flips.**
+        // B5's I-beam changes as the pointer crosses the gutter or the
+        // text's right edge, neither of which touches `hover_divider`;
+        // gating on that flag would leave the icon stale for exactly the
+        // transitions B5 is about. `apply_panel_cursor_icon` writes only
+        // when the icon actually changed, so this costs no extra
+        // `set_cursor` calls.
+        state.apply_panel_cursor_icon();
         match surface {
             PointerSurface::PanelDivider | PointerSurface::PanelBackground => return,
             PointerSurface::PanelCell(coord) => {
@@ -6090,6 +6099,7 @@ impl State {
             last_pointer_down: None,
             minimap_scrub_active: false,
             manual_left_authority: false,
+            last_cursor_icon: None,
             #[cfg(test)]
             test_selections: HashMap::new(),
             wheel_residuals: WheelResiduals::default(),
@@ -8254,14 +8264,68 @@ impl State {
     /// otherwise. Driven from the same `hover_divider` bit the hit test
     /// sets, so the icon cannot advertise a drag target the press would
     /// miss.
-    fn apply_panel_cursor_icon(&self) {
-        if let Some(window) = &self.window {
-            window.set_cursor(if self.panel.hover_divider {
-                winit::window::CursorIcon::RowResize
-            } else {
-                winit::window::CursorIcon::Default
-            });
+    fn apply_panel_cursor_icon(&mut self) {
+        let icon = self.desired_cursor_icon();
+        if self.last_cursor_icon == Some(icon) {
+            return;
         }
+        self.last_cursor_icon = Some(icon);
+        if let Some(window) = &self.window {
+            window.set_cursor(icon);
+        }
+    }
+
+    /// The cursor icon for the current pointer position.
+    ///
+    /// **One owner, deliberately.** GUI Stage 1b's B5 adds an I-beam
+    /// over text content, and §2a's CORRECTION 3 is why it lands here
+    /// rather than at a site of its own: this function's `else` branch
+    /// writes `Default` unconditionally, so a separate I-beam writer
+    /// would be **clobbered by it** on the next motion. The divider's
+    /// `RowResize`, B5's `Text` and the `Default` fallback are decided
+    /// together or not at all.
+    ///
+    /// Order matters: the divider outranks the I-beam, because the
+    /// divider strip is a drag handle and is never text.
+    fn desired_cursor_icon(&self) -> winit::window::CursorIcon {
+        if self.panel.hover_divider {
+            winit::window::CursorIcon::RowResize
+        } else if self.pointer_over_text_content() {
+            winit::window::CursorIcon::Text
+        } else {
+            winit::window::CursorIcon::Default
+        }
+    }
+
+    /// Whether the pointer is over **document text content** — B5's
+    /// "text content only".
+    ///
+    /// Excluded, each for its own reason: the **gutter**, which is left
+    /// of `text_left` and is chrome rather than text; the **minimap**,
+    /// which is a scrub surface; the **panel band**, which owns its own
+    /// pixels; the **status band** and everything below the document's
+    /// text bottom; and anything right of the text bounds.
+    ///
+    /// Geometric rather than a byte hit-test: an I-beam belongs over the
+    /// text *area*, including the blank space past a short line's end,
+    /// and a byte test would flicker the cursor along a ragged right
+    /// margin.
+    fn pointer_over_text_content(&self) -> bool {
+        let Some((x, y)) = self.pointer_pos else {
+            return false;
+        };
+        let (x, y) = (x as f32, y as f32);
+        if self.in_minimap_band(f64::from(x), f64::from(y)) {
+            return false;
+        }
+        if !matches!(
+            self.classify_pointer_surface(x, y),
+            PointerSurface::Elsewhere
+        ) {
+            return false;
+        }
+        let bottom = document_text_bottom(self.config.height, self.fm, self.band_inset());
+        x >= self.text_left() && x < self.text_bounds_right() as f32 && y >= TEXT_TOP && y < bottom
     }
 
     /// Consume the "a font/scale change invalidated the declaration" flag.
@@ -14851,6 +14915,90 @@ mod tests {
             (0, 0),
             "a gesture that scrolled nothing must not complete a tick on arrival"
         );
+    }
+
+    /// B5 — the I-beam appears over **text content only**, and the
+    /// divider outranks it.
+    ///
+    /// The row drives `desired_cursor_icon` across the surfaces the
+    /// contract distinguishes rather than asserting one position: an
+    /// I-beam that appeared over the gutter, the minimap or the band
+    /// would each be a different defect, and a single-point row would
+    /// see none of them.
+    ///
+    /// *Mutation: extend the I-beam over the gutter (drop the
+    /// `x >= text_left()` bound) → this row.*
+    #[test]
+    fn b5_the_i_beam_covers_text_content_and_nothing_else() {
+        use winit::window::CursorIcon;
+        let document = "fn main() {}\n".repeat(40);
+        let Some(mut state) = State::new_headless(640, 480, &document) else {
+            // No adapter here; the row needs a real surface for its
+            // geometry and is skipped rather than asserting on a stub.
+            return;
+        };
+        // Geometry the row can reason about: the text area starts at
+        // `text_left` and ends at `text_bounds_right`.
+        // **A REAL gutter, or the row cannot see its own mutation.**
+        // With line numbers off, `gutter_width_px` is 0 and
+        // `text_left == TEXT_LEFT`, so "extend the I-beam over the
+        // gutter" changes nothing and the row passes a broken build.
+        state.line_numbers = LineNumberMode::Absolute;
+        let text_left = state.text_left();
+        assert!(
+            text_left > TEXT_LEFT,
+            "fixture: a gutter must exist for this row to discriminate"
+        );
+        let inside = (text_left + 4.0, TEXT_TOP + 4.0);
+        let in_gutter = (TEXT_LEFT.midpoint(text_left), TEXT_TOP + 4.0);
+
+        state.pointer_pos = Some((f64::from(inside.0), f64::from(inside.1)));
+        assert_eq!(
+            state.desired_cursor_icon(),
+            CursorIcon::Text,
+            "over text content the cursor is an I-beam"
+        );
+
+        state.pointer_pos = Some((f64::from(in_gutter.0), f64::from(in_gutter.1)));
+        assert_eq!(
+            state.desired_cursor_icon(),
+            CursorIcon::Default,
+            "the gutter is chrome, not text: no I-beam"
+        );
+
+        state.pointer_pos = Some((f64::from(inside.0), 1.0));
+        assert_eq!(
+            state.desired_cursor_icon(),
+            CursorIcon::Default,
+            "above the text top is chrome too"
+        );
+
+        // The divider outranks the I-beam even at a text-content x.
+        state.pointer_pos = Some((f64::from(inside.0), f64::from(inside.1)));
+        state.panel.hover_divider = true;
+        assert_eq!(
+            state.desired_cursor_icon(),
+            CursorIcon::RowResize,
+            "the divider is a drag handle and is never text"
+        );
+    }
+
+    /// B5 — with no pointer position there is no I-beam.
+    ///
+    /// Before the first motion the frontend does not know where the
+    /// pointer is, and guessing `Text` would show an I-beam over
+    /// whatever the window happens to be showing.
+    #[test]
+    fn b5_no_pointer_position_means_no_i_beam() {
+        use winit::window::CursorIcon;
+        let document = "fn main() {}\n".repeat(40);
+        let Some(mut state) = State::new_headless(640, 480, &document) else {
+            // No adapter here; the row needs a real surface for its
+            // geometry and is skipped rather than asserting on a stub.
+            return;
+        };
+        state.pointer_pos = None;
+        assert_eq!(state.desired_cursor_icon(), CursorIcon::Default);
     }
 
     /// B4 — a middle-click paste reads the **PRIMARY selection** on
