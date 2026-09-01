@@ -7671,8 +7671,6 @@ mod tests {
         editor.core.borrow().windows[&panel].cursor
     }
 
-    /// P1 — a press on the band's MODE LINE begins nothing.
-    ///
     /// GUI Stage 1b B2 — a horizontal panel notch reaches the daemon's
     /// window-targeted `view_left` path and MOVES it.
     ///
@@ -7737,6 +7735,8 @@ mod tests {
         );
     }
 
+    /// P1 — a press on the band's MODE LINE begins nothing.
+    ///
     /// The merge made this arm the latch, because `Consumed` and
     /// `Accepted` were the same `true`. The row reads the cursor as well
     /// as the latch: a chrome press must not move point either.

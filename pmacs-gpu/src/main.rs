@@ -8389,13 +8389,7 @@ impl State {
     /// so the witness states which meaning governs rather than
     /// discovering it.
     fn widest_display_columns(&self) -> u32 {
-        let widest = self
-            .current_text
-            .split('\n')
-            .map(|line| line.chars().fold(0usize, advance_display_col))
-            .max()
-            .unwrap_or(0);
-        u32::try_from(widest).unwrap_or(u32::MAX)
+        pmacs_protocol::columns::widest_line_columns(&self.current_text)
     }
 
     /// GUI Stage 1b B3/B7: move the horizontal origin by whole columns.
@@ -12874,20 +12868,16 @@ fn minimap_line_shape(line: &str) -> MinimapLineShape {
     }
 }
 
-/// Advance a display column past one character: tab stops, then
-/// Unicode terminal width.
+/// Advance a display column past one character.
 ///
-/// Shared by the minimap and by B3's widest-line bound so the two
-/// cannot disagree about what a column is. It is the same rule as the
-/// TUI's `display_width::advance_char`; that copy lives in the other
-/// crate.
+/// **Delegates to [`pmacs_protocol::columns::advance_char`]**, which is
+/// where the rule lives. It used to be a private copy of the same
+/// arithmetic, which is exactly the drift this crate and the daemon
+/// must not have: a bound computed one way and a follow computed the
+/// other disagree about where the document ends, invisibly until a tab
+/// or a wide character reaches the edge.
 fn advance_display_col(col: usize, ch: char) -> usize {
-    if ch == '\t' {
-        let tab_stop = TAB_STOP_COLUMNS as usize;
-        col + tab_stop - col % tab_stop
-    } else {
-        col + UnicodeWidthChar::width(ch).unwrap_or(0)
-    }
+    pmacs_protocol::columns::advance_char(u32::try_from(col).unwrap_or(u32::MAX), ch) as usize
 }
 
 fn minimap_style_color(style: CellStyle) -> [f32; 4] {

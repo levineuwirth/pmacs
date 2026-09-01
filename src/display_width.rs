@@ -7,38 +7,23 @@
 //! stop. Offsets are clamped to the supplied slice and offsets inside a UTF-8
 //! code point resolve to the preceding complete-code-point boundary.
 
-use unicode_width::UnicodeWidthChar;
-
 /// Advance `column` past one character.
 ///
-/// A tab reaches the next protocol tab stop; all other characters use their
-/// Unicode terminal width. Control and zero-width characters do not advance.
+/// **Delegates to [`pmacs_protocol::columns::advance_char`]**, which is
+/// where the rule lives so both frontends cannot drift apart on what a
+/// column is. This re-export keeps the existing call sites.
 #[must_use]
 pub fn advance_char(column: u32, ch: char) -> u32 {
-    let width = if ch == '\t' {
-        pmacs_protocol::TAB_STOP_COLUMNS - (column % pmacs_protocol::TAB_STOP_COLUMNS)
-    } else {
-        UnicodeWidthChar::width(ch).unwrap_or(0) as u32
-    };
-    column.saturating_add(width)
+    pmacs_protocol::columns::advance_char(column, ch)
 }
 
-/// Widest line in `text`, in display columns.
+/// Widest line in `text`, in display columns — B7's right bound.
 ///
-/// GUI Stage 1b B7's upper-bound input, shared by both frontends so
-/// they cannot disagree about where the right bound is — the same
-/// reason `scroll::follow_left` is shared.
-///
-/// **This measures SOURCE-TEXT display columns**: tab stops and Unicode
-/// width. Rendered projections — inline adornments, math substitutions
-/// — can occupy a different width on screen and are deliberately not
-/// counted, matching the column rule the rest of this module states.
+/// **Delegates to [`pmacs_protocol::columns::widest_line_columns`]**,
+/// which both frontends call.
 #[must_use]
 pub fn widest_line_columns(text: &str) -> u32 {
-    text.split('\n')
-        .map(|line| line.chars().fold(0, advance_char))
-        .max()
-        .unwrap_or(0)
+    pmacs_protocol::columns::widest_line_columns(text)
 }
 
 /// Display width of the valid UTF-8 prefix of `bytes`.
