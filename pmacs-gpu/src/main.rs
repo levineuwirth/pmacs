@@ -5189,8 +5189,27 @@ mod input_routing_tests {
                 .code_scroll_left
         };
         move_pointer(&mut h, minimap);
+        assert_eq!(
+            h.app.classify_wheel_target(minimap.0, minimap.1),
+            WheelTarget::Minimap,
+            "setup: the probe must be the minimap. Several other targets \
+             are horizontally inert for their own reasons — panel chrome \
+             banks nowhere at all — so a probe that drifted onto one \
+             would satisfy every assertion below without testing B6"
+        );
         let before = left_of(&h);
-        h.feed(&wheel(1.0, 0.0));
+        let step = h.feed(&wheel(1.0, 0.0));
+        // **Inert, not merely unmoved.** An unchanged left edge alone
+        // would still pass if the notch had produced a local effect or
+        // put an event on the wire, so the transcript is asserted empty
+        // beside it.
+        assert!(
+            step.local.is_empty() && step.outbound.is_empty(),
+            "a horizontal notch over the minimap must do nothing at all: \
+             {:?} {:?}",
+            step.local,
+            step.outbound
+        );
         // Unchanged, not merely small: any real horizontal scroll is at
         // least one character advance, which is orders above this.
         assert!(
@@ -5202,7 +5221,17 @@ mod input_routing_tests {
 
         // The same event over text, to show the delta was real and the
         // row is not asserting that horizontal wheels do nothing at all.
+        //
+        // Its discriminator is the left edge, NOT the transcript: a
+        // horizontal document scroll is local and silent, so this leg's
+        // transcript is empty too. Only `code_scroll_left` separates the
+        // two surfaces.
         move_pointer(&mut h, document);
+        assert_eq!(
+            h.app.classify_wheel_target(document.0, document.1),
+            WheelTarget::Document,
+            "setup: the contrast probe must be document text"
+        );
         h.feed(&wheel(1.0, 0.0));
         assert!(
             left_of(&h) > before,
