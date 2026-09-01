@@ -1883,7 +1883,6 @@ struct State {
     /// EFFECTIVELY moved the origin makes it authoritative, and the
     /// caret follow leaves it alone until the cursor position actually
     /// changes. A move fully absorbed by the clamp arms nothing.
-    manual_left_authority: bool,
     /// The icon last written to the window, so a per-motion call is a
     /// comparison rather than a platform round-trip.
     last_cursor_icon: Option<winit::window::CursorIcon>,
@@ -6465,7 +6464,6 @@ impl State {
             last_pointer_sent_byte: None,
             last_pointer_down: None,
             minimap_scrub_active: false,
-            manual_left_authority: false,
             last_cursor_icon: None,
             #[cfg(test)]
             test_selections: HashMap::new(),
@@ -6777,6 +6775,14 @@ impl State {
                 .contains('\n');
         if geometry_changed || !(single_line_edit && self.try_reshape_line(edits[0])) {
             self.reshape();
+        } else {
+            // The incremental path deliberately skips `reshape` — and
+            // skipped clause 3's clamp with it. A one-line edit can
+            // shorten the widest line, which lowers
+            // `widest − viewport`, so the origin has to come down here
+            // too or a keystroke leaves the viewport past the end of
+            // the text.
+            self.clamp_code_scroll_left();
         }
         if geometry_changed && caret_was_painted {
             self.ensure_caret_painted();
@@ -7112,9 +7118,6 @@ impl State {
                 // serves both.
                 self.wheel_residuals.clear_document();
                 self.wheel_residuals.clear_minimap();
-                // Manual horizontal authority is viewport state tied to
-                // the document being shown (lifetime clause 5).
-                self.manual_left_authority = false;
                 self.last_viewport_sent = None;
                 // Vterm Stage 3 — a snapshot ALWAYS leaves terminal
                 // mode, including a terminal→terminal switch. The prior
@@ -9118,29 +9121,39 @@ impl State {
     /// edge, so an origin — and a latch that would defend it — must not
     /// survive.
     ///
-    /// Returns whether the origin actually moved. Clause 2's "effective
-    /// move": one fully absorbed by the clamp arms nothing.
-    fn scroll_by_columns(&mut self, columns: i64) -> bool {
+    /// **This frontend keeps no authority flag**, and the difference
+    /// from the TUI is deliberate. There, `horizontal_follow` runs on
+    /// every paint and would drag the origin back to the caret, so a
+    /// latch is the only thing that can outrank it. Here the follow
+    /// runs only through `ensure_caret_painted`, which Q#F6's
+    /// painted-before policy skips whenever the caret is off screen —
+    /// and a caret the user has scrolled away from is off screen. The
+    /// preservation is **structural**: there is no follow to outrank.
+    ///
+    /// A flag was carried here for a while, written in four places and
+    /// read in none. Giving it a reader would have duplicated the
+    /// painted-before policy and needed a cursor baseline of its own to
+    /// avoid suppressing genuine cursor movement, so it was removed
+    /// rather than completed. The contract is behavioral; the two
+    /// frontends are not required to share a representation.
+    fn scroll_by_columns(&mut self, columns: i64) {
         if self.buffer.wrap() != Wrap::None {
             self.code_scroll_left = 0.0;
-            self.manual_left_authority = false;
-            return false;
+            return;
         }
         let advance = self.mono_advance();
         let width = self.text_bounds_right() as f32 - self.text_left();
         if advance <= 0.0 || width <= 0.0 {
-            return false;
+            return;
         }
         let viewport_cols = (width / advance).floor().max(0.0) as u32;
         let max_left = self.widest_display_columns().saturating_sub(viewport_cols);
         let current = (self.code_scroll_left / advance).round().max(0.0) as i64;
         let next = (current + columns).clamp(0, i64::from(max_left));
         if next == current {
-            return false;
+            return;
         }
         self.code_scroll_left = next as f32 * advance;
-        self.manual_left_authority = true;
-        true
     }
 
     /// Move `code_scroll_left` so the caret's column is on screen
@@ -15927,43 +15940,16 @@ mod tests {
         );
     }
 
-    /// L2 — **the GPU's horizontal origin across geometry changes.**
-    ///
-    /// Two legs, and the framing's expectation about the first was
-    /// wrong in a way worth recording.
-    ///
-    /// *Preserved by a height-only resize.* The framing offers this as
-    /// the row that witnesses **manual authority** on this frontend. It
-    /// does not, and cannot: measured at the head that introduced this
-    /// row, the origin survives a height-only resize with
-    /// `manual_left_authority` **never read anywhere in the frontend**.
-    /// What preserves it is Q#F6's painted-before policy — `resize`
-    /// runs `ensure_caret_painted` only when the caret was painted, and
-    /// a caret the user has scrolled off screen is not painted. So the
-    /// follow that would snap the origin back never runs. The leg is
-    /// kept because the behaviour is required; it is documented here as
-    /// **not** a witness of the latch.
-    ///
-    /// *Clamped by a widening resize* (clause 3). A wider viewport
-    /// LOWERS the maximum `widest − viewport`, and nothing else brings
-    /// the origin down — precisely because the follow is skipped in
-    /// this state. Before `clamp_code_scroll_left` existed, a scroll to
-    /// the right bound at 640px followed by a widen to 1600px left the
-    /// origin **960px past the new maximum**, most of the viewport
-    /// blank and the text off its left edge.
-    ///
-    /// *Mutation: drop `clamp_code_scroll_left()` from `reshape`'s tail
-    /// → the widening leg. Clamp to `max_left - 1` → its exact bound.*
-    #[test]
-    fn l2_the_horizontal_origin_survives_height_and_is_clamped_by_width() {
+    /// A wide document scrolled to its right bound, with the caret left
+    /// at byte 0 — off screen to the left, which is the state every GPU
+    /// row below depends on and the state the follow is skipped in.
+    fn scrolled_to_the_right_bound(width: u32, height: u32) -> Option<(State, BufferId, f32)> {
         let mut text = "w".repeat(400);
         text.push('\n');
         for _ in 0..200 {
             text.push_str("filler\n");
         }
-        let Some(mut state) = State::new_headless(640, 480, &text) else {
-            return;
-        };
+        let mut state = State::new_headless(width, height, &text)?;
         let bid = BufferId::next();
         state.current_buffer_id = Some(bid);
         state.own_cursor = Some(OwnCursor {
@@ -15971,52 +15957,201 @@ mod tests {
             byte: 0,
         });
         // Wrapping is on by default and pins the origin to zero, so
-        // without this both legs would measure nothing.
+        // without this every row here would measure nothing.
         let _ = state.apply_attach_message(InstanceMessage::LineWrapFacts {
             buffer_id: bid,
             wrap: false,
         });
         assert_eq!(state.buffer.wrap(), Wrap::None, "setup: wrap is off");
-
-        // Out to the right bound.
         state.scroll_by_columns(1000);
-        let scrolled = state.code_scroll_left;
-        assert!(scrolled > 0.0, "setup: the origin must have moved");
+        let origin = state.code_scroll_left;
+        assert!(origin > 0.0, "setup: the origin must have moved");
         assert!(
             !state.caret_painted_in_code_clip(),
-            "setup: the caret is off screen, which is the state in which \
-             the follow is skipped — and so the state the origin has to \
-             survive on its own"
+            "setup: the caret must be off screen — that is the state the \
+             follow is skipped in, and so the state these rows are about"
         );
+        Some((state, bid, origin))
+    }
 
-        // Leg 1: a height-only resize leaves the origin alone.
-        state.resize(640, 600);
-        assert!(
-            (state.code_scroll_left - scrolled).abs() < f32::EPSILON,
-            "a taller window is not a horizontal event: {scrolled} -> {}",
-            state.code_scroll_left
-        );
-
-        // Leg 2: a wider one lowers the maximum, and the origin comes
-        // down to meet it — exactly, not merely somewhere lower.
-        state.resize(1600, 600);
+    /// The horizontal maximum `widest − viewport`, in pixels, as the
+    /// production clamp computes it.
+    fn max_left_px(state: &mut State) -> f32 {
         let advance = state.mono_advance();
         let width = state.text_bounds_right() as f32 - state.text_left();
         let cols = (width / advance).floor().max(0.0) as u32;
-        let max_left = state.widest_display_columns().saturating_sub(cols);
+        state.widest_display_columns().saturating_sub(cols) as f32 * advance
+    }
+
+    /// L2 — **the GPU preserves a manual horizontal origin
+    /// structurally**, with no authority flag anywhere.
+    ///
+    /// The framing offers this row as the GPU's manual-authority
+    /// witness and says the height-only resize invokes "a real follow".
+    /// **It does not.** `resize` runs `ensure_caret_painted` only when
+    /// the caret was painted, and the setup every L-row requires — the
+    /// caret outside the manual viewport — is exactly when it is not.
+    /// Q#F6's painted-before policy skips the follow, so there is
+    /// nothing for a latch to outrank. This frontend carried such a
+    /// flag for a while, written in four places and read in none; it
+    /// was removed rather than completed.
+    ///
+    /// So this row witnesses the *policy*, which is what actually holds
+    /// the origin here.
+    ///
+    /// *Mutation: have `resize` call `ensure_caret_painted()`
+    /// unconditionally → this row, and necessarily L7a: an
+    /// unconditional follow snaps the origin to the caret before that
+    /// row's widen, so its "came down from the manual origin" and
+    /// "still non-zero" assertions cannot survive either. The
+    /// dependency is unavoidable, not a witness failing to fire.*
+    #[test]
+    fn l2_a_height_only_resize_preserves_the_horizontal_origin() {
+        let Some((mut state, _bid, origin)) = scrolled_to_the_right_bound(640, 480) else {
+            return;
+        };
+
+        state.resize(640, 600);
+
         assert!(
-            state.code_scroll_left < scrolled,
+            (state.code_scroll_left - origin).abs() < f32::EPSILON,
+            "a taller window is not a horizontal event: {origin} -> {}",
+            state.code_scroll_left
+        );
+    }
+
+    /// L7a, GPU — **a widening resize clamps the origin to the exact
+    /// bound** (clause 3).
+    ///
+    /// A wider viewport LOWERS the maximum `widest − viewport`, and
+    /// nothing else brings the origin down: the follow that would is
+    /// skipped in precisely this state, per L2. Before the clamp
+    /// existed, a scroll to the right bound at 640px followed by a
+    /// widen to 1600px left the origin **960px past the new maximum** —
+    /// most of the viewport blank with the text off its left edge.
+    ///
+    /// *Mutation: drop `clamp_code_scroll_left()` from `reshape`'s tail
+    /// → this row. Clamp to `max_left - 1` → its exact bound.*
+    #[test]
+    fn l7a_gpu_a_widening_resize_clamps_the_origin_to_the_exact_bound() {
+        let Some((mut state, _bid, origin)) = scrolled_to_the_right_bound(640, 480) else {
+            return;
+        };
+
+        state.resize(1600, 480);
+
+        let expected = max_left_px(&mut state);
+        let advance = state.mono_advance();
+        assert!(
+            state.code_scroll_left < origin,
             "a wider viewport must bring the origin down"
         );
         assert!(
-            (state.code_scroll_left - max_left as f32 * advance).abs() < advance / 2.0,
-            "and it must land on `widest − viewport` exactly: {} vs {}",
-            state.code_scroll_left,
-            max_left as f32 * advance
+            (state.code_scroll_left - expected).abs() < advance / 2.0,
+            "and it must land on `widest − viewport` exactly: {} vs {expected}",
+            state.code_scroll_left
         );
         assert!(
             state.code_scroll_left > 0.0,
             "clamped, NOT discarded — the gesture survives at the new bound"
+        );
+    }
+
+    /// L7b, GPU — **a content shrink clamps too, through the
+    /// incremental edit path** (clause 3's other half).
+    ///
+    /// This row exists because that path **bypasses `reshape`**. Q#R1's
+    /// keystroke case re-shapes only the affected line and skips the
+    /// full slice reshape — and skipped the clamp with it. A one-line
+    /// delete can shorten the widest line, which lowers the maximum, so
+    /// a single keystroke could leave the viewport past the end of the
+    /// text with no later event to repair it.
+    ///
+    /// The edit goes through `apply_loro_text_delta_batches`, the
+    /// production delta path, and the row asserts the line count did
+    /// not change — because a line-structure change would fall back to
+    /// the full reshape and witness the wrong branch.
+    ///
+    /// *Mutation: drop `clamp_code_scroll_left()` from the incremental
+    /// branch → this row, and only this row.*
+    #[test]
+    fn l7b_gpu_a_one_line_shrink_clamps_through_the_incremental_path() {
+        let Some((mut state, _bid, origin)) = scrolled_to_the_right_bound(640, 480) else {
+            return;
+        };
+        let lines_before = state.current_line_starts.len();
+
+        // Cut the 400-column line down to 150. One edit, no newline,
+        // no line-count change: Q#R1's incremental case.
+        let shrink = vec![
+            loro::TextDelta::Retain {
+                retain: 150,
+                attributes: None,
+            },
+            loro::TextDelta::Delete { delete: 250 },
+        ];
+        state
+            .apply_loro_text_delta_batches(&[shrink])
+            .expect("the one-line shrink applies");
+        assert_eq!(
+            state.current_line_starts.len(),
+            lines_before,
+            "setup: the line count must not change, or the edit takes \
+             the full-reshape branch and this row witnesses the wrong one"
+        );
+
+        let expected = max_left_px(&mut state);
+        let advance = state.mono_advance();
+        assert!(
+            state.code_scroll_left < origin,
+            "a shorter widest line lowers the maximum: {origin} -> {}",
+            state.code_scroll_left
+        );
+        assert!(
+            (state.code_scroll_left - expected).abs() < advance / 2.0,
+            "and the origin lands on the new bound exactly: {} vs {expected}",
+            state.code_scroll_left
+        );
+    }
+
+    /// L3, GPU — **a genuine cursor move ends the preservation.**
+    ///
+    /// With no flag to clear, the boundary is entirely structural: the
+    /// origin is preserved only while the caret stays off screen, and a
+    /// `CursorByte` that moves it runs `ensure_caret_painted`, whose
+    /// follow pulls the viewport to the new caret. Removing the dead
+    /// flag would otherwise leave the "until the cursor changes" edge
+    /// unwitnessed — the one thing the flag's name claimed to govern.
+    ///
+    /// Driven through `apply_attach_message`, the production receiver.
+    ///
+    /// *Mutation: gate the `ensure_caret_painted()` call in the
+    /// `CursorByte` arm so it does not run on a move → this row.*
+    #[test]
+    fn l3_gpu_a_moved_cursor_pulls_the_viewport_back_to_the_caret() {
+        let Some((mut state, bid, origin)) = scrolled_to_the_right_bound(640, 480) else {
+            return;
+        };
+
+        // A byte the caret is not already on: the arm gates on `moved`,
+        // and re-announcing the same position is deliberately inert.
+        // Column 5 is far left of the manual viewport, so the follow
+        // has somewhere to go.
+        assert_eq!(
+            state.own_cursor.map(|c| c.byte),
+            Some(0),
+            "setup: the caret starts at byte 0"
+        );
+        let _ = state.apply_attach_message(InstanceMessage::CursorByte {
+            buffer_id: bid,
+            byte_pos: 5,
+        });
+
+        assert!(
+            state.code_scroll_left < origin,
+            "a deliberate cursor move outranks a deliberate scroll: the \
+             viewport must chase the caret again: {origin} -> {}",
+            state.code_scroll_left
         );
     }
 
