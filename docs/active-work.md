@@ -319,10 +319,11 @@ Framing
 this base, the panel-replay prerequisite recorded as DISCHARGED by #243,
 and the both-axis effect witness still owed.
 
-**Landed so far** (code head `175cc7b`)**:** B1's per-target fractional
+**Landed so far** (code head `f441d3d`)**:** B1's per-target fractional
 wheel residual (the producer), B2's daemon-side horizontal panel leg,
 B3/B7's shared `scroll_window_columns` with its saturated bound and wrap
-pin, B4's middle-click PRIMARY paste, and **B5's I-beam**, whose icon is
+pin, B4's middle-click PRIMARY paste, **B6's minimap wheel routing**,
+and **B5's I-beam**, whose icon is
 re-derived in **`reshape`'s tail**. Panel inset transitions now terminate
 at `reshape_if_panel_band_changed`: accepted `Present`/`Absent`/row-count
 changes and a geometry declaration disowning the retained frame all
@@ -341,11 +342,14 @@ row's documented mutation named something the row could not see. **A
 witness whose mutation is masked is not weaker evidence than a real
 one; it is evidence of nothing, and it reads identically in the diff.**
 
-At `175cc7b`, all 309 GPU rows pass; workspace clippy with all targets
-and `-D warnings`, fmt and `git diff --check` are clean. Four mutations
-were executed and each fires its named row: omit accepted-frame reflow,
-omit epoch-invalidation reflow, reshape content-only frames, and retain
-divider hover on `Absent`.
+At `175cc7b` — B5's own checkpoint, not the lane's current one — all
+309 GPU rows pass; workspace clippy with all targets and `-D warnings`,
+fmt and `git diff --check` are clean. Four mutations were executed and
+each fires its named row: omit accepted-frame reflow, omit
+epoch-invalidation reflow, reshape content-only frames, and retain
+divider hover on `Absent`. **The lane's current head is `f441d3d` at
+312 GPU rows**; recover from the authoritative remote ref above, not
+from this commit.
 
 **Landed but NOT yet witnessed** — recovery needs this split, because
 "L1–L8 owed" reads as though none of the mechanism exists:
@@ -358,11 +362,38 @@ divider hover on `Absent`.
 - **R4 and R5's residual resets**, as two separate clears beside
   `code_scroll_left` so omitting either is individually visible.
 
-**Owed outright:** B6's routing row, the **L1–L8 rows** for the
-latch above, step 3's fractional both-axis panel witness, R4/R5's own
-replacement witnesses, and **B1's disposal half** — a residual keyed to
-a surface that goes away must go with it, and this frontend does not yet
-track "that buffer is gone".
+**Owed outright:** the **L1–L8 rows** for the latch above, step 3's
+fractional both-axis panel witness, R4/R5's own replacement witnesses,
+and **B1's disposal half** — a residual keyed to a surface that goes
+away must go with it, and this frontend does not yet track "that buffer
+is gone".
+
+**B6 (`2dccc2b`, tightened in `f441d3d`)** is three rows on
+`EffectHarness`, the first production-path coverage `apply_wheel` has
+ever had: a notch over the minimap scrolls the document viewport, a
+part-notch over it cannot complete one over the document, and its
+horizontal axis is inert. Its mechanism had landed with B1; only the
+evidence was owed.
+
+Its fixture is the recovery-relevant part. **Two separate conditions
+each make a horizontal-inertness claim vacuous**, and the default
+harness document has both: four-column lines pin B7's saturated right
+bound to zero, and line wrap — **on by default** — makes
+`scroll_by_columns` return early and pin the left edge, whatever the
+target. Under either, *nothing* scrolls sideways and a row asserting
+"the minimap did not" passes without testing anything. The row uses
+wide lines and turns wrap off through `LineWrapFacts`, asserting the
+wrap landed; `EffectHarness::new()` keeps its 200-line fixture and M22
+rationale untouched, with `with_document` added beside it.
+
+Review then caught the same row asserting the absence of one effect and
+calling it inertness: it pinned neither probe's target (panel chrome is
+horizontally inert too, for unrelated reasons) and discarded both
+`Step`s, so an unchanged `code_scroll_left` was the whole claim. It now
+asserts both targets exactly and an empty transcript on the minimap
+leg. **The contrast leg cannot use the transcript** — a horizontal
+document scroll is local and silent, so both legs' transcripts are
+empty and only `code_scroll_left` separates them.
 
 ### Two gate gaps this lane found, neither fixed here
 
