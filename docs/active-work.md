@@ -383,11 +383,26 @@ the next lane does not rediscover them at review.
 
 ### A local false compile red from the shared target directory
 
-Not a CI signature, so it is **not** in `docs/ci-red-signatures.md` —
-that registry is for CI reds, and a row there would claim a job and
-flavor this has never had. It is a hazard of running a bare cargo
-command instead of `scripts/gate`, and it has now fired **twice in this
-lane**.
+Kept here rather than in `docs/ci-red-signatures.md` because it is a
+**machine-local artifact-state hazard with no CI occurrence** — not
+because the registry cannot represent local reds. It plainly can: it
+carries many `local (Linux)` rows with precise invocation flavors, one
+of them (the `04-lib-crdt` pair) even flavored *"with sibling worktrees
+building concurrently."* This incident's truthful flavor would be
+**local, bare `cargo test -p pmacs-gpu`, globally shared target**, and a
+row could state it exactly. An earlier draft of this entry claimed the
+registry was for CI reds only and that a row would have to invent a job
+and flavor; that was false, and review caught it.
+
+What actually keeps it out is that the registry is live triage policy
+for judging a red *run*, and every occurrence of this one has been on
+this machine, from bypassing `scripts/gate`. **If it ever appears in
+CI it belongs in the registry**, flavored as above — and that is not
+impossible: CI restores artifacts through `Swatinem/rust-cache@v2` from
+a cache shared across branches, so the same mixing has a plausible CI
+analogue. It has simply never been observed there.
+
+It has now fired **twice in this lane**.
 
 **Signature.** From `cargo test -p pmacs-gpu`, four errors against the
 bin `pmacs-gpu` test target:
