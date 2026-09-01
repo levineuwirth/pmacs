@@ -6764,7 +6764,7 @@ impl State {
                 // global core instance, matching the producer's
                 // surviving `last_minibuffer` baseline.
                 self.search_prompt = None;
-                self.set_menu(None);
+                self.menu = None;
                 self.status_facts = None;
                 self.statusline_segments = None;
                 self.status_runs = None;
@@ -6818,14 +6818,6 @@ impl State {
                     self.sync_buffer_dimensions();
                     self.reshape();
                 }
-                // B5 — re-derive the icon AFTER the geometry settles.
-                // `set_menu(None)` above ran before the reshape, so it
-                // decided against the OLD text bounds; a snapshot can
-                // move `text_left` (a different line count changes the
-                // gutter) and the minimap clip. This is not a second
-                // writer of menu state — it is the same rule applied to
-                // the other input the decision reads.
-                self.apply_panel_cursor_icon();
                 self.viewport_send_if_changed(buffer_id)
             }
             InstanceMessage::CrdtOp { buffer_id, op } => {
@@ -7232,7 +7224,11 @@ impl State {
                         anchor_px: self.menu_anchor_px,
                     })
                 };
-                self.set_menu(menu);
+                self.menu = menu;
+                // B5 — menu ownership changed with no pointer motion, so
+                // the icon is re-derived here. This arm changes no
+                // geometry, so it is the only application it needs.
+                self.apply_panel_cursor_icon();
                 self.request_redraw();
                 None
             }
@@ -8320,25 +8316,6 @@ impl State {
         if let Some(drag) = self.panel.drag.as_mut() {
             drag.sent_rows = rows;
         }
-    }
-
-    /// **The single writer of menu state**, so the cursor icon cannot
-    /// drift out of step with it.
-    ///
-    /// GUI Stage 1b B5 makes the icon a function of menu ownership, and
-    /// menu state changes with **no pointer motion**: `MenuPrompt`
-    /// opens and closes it, and a `BufferSnapshot` clears it because a
-    /// popup anchored in the prior buffer would hijack input. Two call
-    /// sites setting the field directly is how one of them ends up
-    /// leaving a stale cursor — which is exactly what happened: the
-    /// snapshot path was missed, and an open-menu arrow survived a
-    /// buffer replacement over document text until the pointer moved.
-    ///
-    /// Routing both through here means a third site added later gets the
-    /// icon for free rather than reintroducing the same defect.
-    fn set_menu(&mut self, menu: Option<MenuLocal>) {
-        self.menu = menu;
-        self.apply_panel_cursor_icon();
     }
 
     /// Apply the cursor icon [`Self::desired_cursor_icon`] chose to the
@@ -10734,6 +10711,15 @@ impl State {
         self.normalize_code_scroll();
         // Full restyle: release any held post-jump frame (Q#M6).
         self.styled_redraw_deadline = None;
+        // B5 — **the one place the cursor icon is re-derived after
+        // geometry.** The I-beam is decided against a boundary that
+        // moves without the pointer: `text_left` with the line-number
+        // mode's digit width, the text clip with minimap presence,
+        // panel appearance, window resize and font metrics. Every one
+        // of those settles by reshaping, so re-deriving here covers
+        // them all at once instead of leaving each new geometry path to
+        // remember a call it will not remember.
+        self.apply_panel_cursor_icon();
         self.request_redraw();
     }
 
@@ -15184,8 +15170,8 @@ mod tests {
     /// would hijack input. Missing that path left an open-menu arrow on
     /// screen over document text until the pointer moved.
     ///
-    /// *Mutation: set `self.menu` directly in the snapshot arm instead
-    /// of through `set_menu` → this row.*
+    /// *Mutation: drop `apply_panel_cursor_icon()` from `reshape`'s
+    /// tail → this row.*
     #[test]
     fn b5_a_buffer_snapshot_closes_the_menu_and_restores_the_i_beam() {
         use winit::window::CursorIcon;
@@ -15239,14 +15225,12 @@ mod tests {
     /// lines therefore moves the text boundary under a stationary
     /// pointer: a pixel that was gutter becomes text, or the reverse.
     ///
-    /// **This is the row that carries the post-reshape application.**
-    /// The menu row above cannot: on the snapshot path `set_menu`'s
-    /// apply and the post-reshape apply both fire, so each masks the
-    /// other and removing either alone leaves that row green. Removing
-    /// this one fires here.
+    /// This row and the menu row above reach the same hook by different
+    /// routes — menu ownership there, geometry here — and are kept
+    /// separate so a failure says which route broke.
     ///
-    /// *Mutation: drop `apply_panel_cursor_icon()` after the reshape →
-    /// this row.*
+    /// *Mutation: drop `apply_panel_cursor_icon()` from `reshape`'s tail
+    /// → this row, the menu row, and the line-number row below.*
     #[test]
     fn b5_a_snapshot_that_moves_the_gutter_moves_the_i_beam_boundary() {
         use winit::window::CursorIcon;
@@ -15318,6 +15302,67 @@ mod tests {
             Some(CursorIcon::Text),
             "the gutter narrowed under a stationary pointer, so the pixel \
              is text now and the icon must say so"
+        );
+    }
+
+    /// B5 — **the central geometry hook**: turning the line-number
+    /// gutter on moves the I-beam boundary under a stationary pointer.
+    ///
+    /// The snapshot arm is only one geometry transition. The
+    /// line-number mode changes `text_left`, and minimap arrival, panel
+    /// appearance, resize and font metrics move the text clip the same
+    /// way. A pointer that never moves can therefore go from text to
+    /// gutter with the icon still saying `Text`. All of them settle by
+    /// reshaping, which is why the re-derivation lives in `reshape`'s
+    /// tail rather than at each call site. This row drives the
+    /// production `InstanceMessage::LineNumbers` arm — not
+    /// `apply_panel_cursor_icon` directly — so it witnesses that hook
+    /// through a path a daemon message really takes.
+    ///
+    /// *Mutation: drop `apply_panel_cursor_icon()` from `reshape`'s tail
+    /// → this row.*
+    #[test]
+    fn b5_turning_the_line_number_gutter_on_moves_the_i_beam_boundary() {
+        use winit::window::CursorIcon;
+        let text = "fn main() {}\n".repeat(40);
+        let Some(mut state) = State::new_headless(640, 480, &text) else {
+            return;
+        };
+        // `Off` is the default: no gutter, so text starts at TEXT_LEFT.
+        assert_eq!(
+            state.line_numbers,
+            LineNumberMode::Off,
+            "setup: the gutter starts off"
+        );
+        let bare_left = state.text_left();
+
+        // A pixel just inside the text with no gutter.
+        let probe = f64::from(bare_left + 2.0);
+        state.pointer_pos = Some((probe, f64::from(TEXT_TOP + 4.0)));
+        state.apply_panel_cursor_icon();
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Text),
+            "setup: the probe pixel is text while the gutter is off"
+        );
+
+        // Turn the gutter on through the daemon message. The pointer
+        // does not move.
+        let _ = state.apply_attach_message(InstanceMessage::LineNumbers {
+            buffer_id: BufferId::next(),
+            mode: LineNumberMode::Absolute,
+        });
+        assert!(
+            probe < f64::from(state.text_left()),
+            "setup: the gutter must have swallowed the probe pixel, else \
+             this row measures nothing"
+        );
+
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Default),
+            "the gutter appeared under a stationary pointer, so the pixel \
+             is chrome now and the icon must say so"
         );
     }
 
