@@ -3965,6 +3965,13 @@ impl EditorState {
     ///   * `ScrollUp` / `ScrollDown` scroll the window under the
     ///     cursor by [`SCROLL_LINES`] lines, without changing the
     ///     buffer cursor or active window.
+    ///   * `ScrollLeft` / `ScrollRight` move that same window's
+    ///     horizontal origin by [`SCROLL_COLUMNS`] columns (GUI Stage
+    ///     1b B7), likewise without changing the cursor or the active
+    ///     window. **Horizontal state is per-window**, so the pane under
+    ///     the pointer is the one that moves; the origin is bounded by
+    ///     `widest − viewport`, saturating at zero, and pinned to zero
+    ///     under wrap.
     ///
     /// Mouse moves with no buttons (`Moved`) and other buttons are
     /// ignored. Clicks on a window's mode line are also ignored
@@ -7037,15 +7044,44 @@ mod tests {
             size,
         };
         let _ = paint_frame(s, FrontendId::LOCAL, &HashMap::new(), &mut grid, size);
-        // B7's bound only exists under truncate: a wrapped line has
-        // nothing past the right edge, and clause 5 pins the origin to
-        // zero. Set AFTER the paint, which writes `last_wrap` from the
-        // view config — a row about the bound must be a truncate row.
-        let mut core = s.core.borrow_mut();
-        let id = core.active_window_id();
-        if let Some(window) = core.windows.get_mut(&id) {
-            window.last_wrap = crate::view::WrapMode::Truncate;
-        }
+    }
+
+    /// Set `ui.line-wrap` for a window's buffer, the way production does.
+    ///
+    /// **Not by writing `last_wrap` directly.** That field is a cache
+    /// the paint fills from this setting; forging it tests a state the
+    /// running editor never reaches, and a row built on a forged cache
+    /// proves nothing about the path that fills it.
+    fn set_line_wrap(s: &EditorState, win_id: WindowId, value: &str) {
+        let buffer_id = s.core.borrow().windows[&win_id].buffer_id;
+        let registry = s
+            .lua_host
+            .lua()
+            .app_data_ref::<std::rc::Rc<std::cell::RefCell<crate::config_registry::ConfigRegistry>>>()
+            .expect("a config registry");
+        registry
+            .borrow_mut()
+            .set_local(
+                buffer_id,
+                "ui.line-wrap",
+                crate::config_registry::ConfigValue::Str(value.to_owned()),
+            )
+            .expect("ui.line-wrap is buffer-local and settable");
+    }
+
+    /// Paint with `ui.line-wrap` set to `truncate` FIRST, and assert the
+    /// paint recorded it — so a row about B7's bound rests on the cache
+    /// production actually writes.
+    fn paint_truncated(s: &EditorState, size: pmacs_protocol::CellSize) {
+        let id = s.core.borrow().active_window_id();
+        set_line_wrap(s, id, "truncate");
+        paint_once(s, size);
+        assert_eq!(
+            s.core.borrow().windows[&id].last_wrap,
+            crate::view::WrapMode::Truncate,
+            "the paint must have recorded truncate from ui.line-wrap; a \
+             row about the right bound is meaningless under wrap"
+        );
     }
 
     fn fresh_with(content: &[u8]) -> EditorState {
@@ -10426,7 +10462,7 @@ mod tests {
         content.extend_from_slice(&b"w".repeat(400));
         content.push(b'\n');
         let mut s = fresh_with(&content);
-        paint_once(&s, term_size_24x80());
+        paint_truncated(&s, term_size_24x80());
         let before = s.core.borrow().active_window().view_left;
 
         s.dispatch_mouse(
@@ -10452,7 +10488,7 @@ mod tests {
         content.extend_from_slice(&b"w".repeat(400));
         content.push(b'\n');
         let mut s = fresh_with(&content);
-        paint_once(&s, term_size_24x80());
+        paint_truncated(&s, term_size_24x80());
 
         s.dispatch_mouse(
             FrontendId::LOCAL,
@@ -10484,7 +10520,7 @@ mod tests {
         content.extend_from_slice(&b"w".repeat(width));
         content.push(b'\n');
         let mut s = fresh_with(&content);
-        paint_once(&s, term_size_24x80());
+        paint_truncated(&s, term_size_24x80());
 
         // Far more notches than the bound can absorb.
         for _ in 0..500 {
@@ -10502,16 +10538,42 @@ mod tests {
             viewport > 0,
             "fixture: the window must have content columns"
         );
-        assert!(
-            u64::from(window.view_left) + u64::from(viewport) >= width as u64,
-            "the final display column must still be reachable: origin {} + \
-             viewport {viewport} against a widest line of {width}",
-            window.view_left
+        // **The exact bound, not a range.** `origin + viewport >= widest`
+        // alone admits every origin up to `widest − 1`, which leaves
+        // almost the whole viewport blank and still passes.
+        assert_eq!(
+            window.view_left,
+            u32::try_from(width)
+                .unwrap_or(u32::MAX)
+                .saturating_sub(viewport),
+            "the origin rests exactly at widest − viewport"
         );
-        assert!(
-            u64::from(window.view_left) < width as u64,
-            "and the origin must not pass every glyph: {} against {width}",
-            window.view_left
+    }
+
+    /// B7's bound **saturates at zero for a buffer narrower than the
+    /// viewport**: `widest − viewport` underflows, and the origin must
+    /// stay at zero rather than wrapping to a huge maximum.
+    ///
+    /// The 400-column rows cannot see this — they never exercise a
+    /// document that fits.
+    #[test]
+    fn b7_a_document_narrower_than_the_viewport_never_scrolls() {
+        use crossterm::event::MouseEventKind;
+        let mut s = fresh_with(b"short\nalso short\n");
+        paint_truncated(&s, term_size_24x80());
+
+        for _ in 0..10 {
+            s.dispatch_mouse(
+                FrontendId::LOCAL,
+                mouse(MouseEventKind::ScrollRight, 5, 5),
+                term_size_24x80(),
+            );
+        }
+
+        assert_eq!(
+            s.core.borrow().active_window().view_left,
+            0,
+            "a document that fits has a maximum origin of zero"
         );
     }
 
@@ -10530,25 +10592,22 @@ mod tests {
         content.extend_from_slice(&b"w".repeat(400));
         content.push(b'\n');
         let mut s = fresh_with(&content);
+        // A REAL wrapped state: `ui.line-wrap` is set to wrap and the
+        // paint records it. Nothing is forged, so the row exercises the
+        // cache production writes.
+        let id = s.core.borrow().active_window_id();
+        set_line_wrap(&s, id, "wrap");
         paint_once(&s, term_size_24x80());
-        // Scroll sideways first, so the row can see the pin rather than
-        // an origin that merely never left zero.
-        s.dispatch_mouse(
-            FrontendId::LOCAL,
-            mouse(MouseEventKind::ScrollRight, 5, 5),
-            term_size_24x80(),
+        assert_eq!(
+            s.core.borrow().windows[&id].last_wrap,
+            crate::view::WrapMode::Wrap,
+            "setup: the paint must have recorded wrap from ui.line-wrap"
         );
-        assert!(
-            s.core.borrow().active_window().view_left > 0,
-            "setup: the origin must be off zero before wrap is applied"
+        assert_eq!(
+            s.core.borrow().active_window().view_left,
+            0,
+            "setup: a wrapped buffer starts pinned at zero"
         );
-        {
-            let mut core = s.core.borrow_mut();
-            let id = core.active_window_id();
-            if let Some(window) = core.windows.get_mut(&id) {
-                window.last_wrap = crate::view::WrapMode::Wrap;
-            }
-        }
 
         s.dispatch_mouse(
             FrontendId::LOCAL,
@@ -10559,7 +10618,93 @@ mod tests {
         assert_eq!(
             s.core.borrow().active_window().view_left,
             0,
-            "wrap pins the origin to zero; a notch under wrap moves nothing"
+            "a right notch under wrap is inert; without the guard it \
+             would move the origin off zero"
+        );
+    }
+
+    /// B2/B7 — a horizontal notch moves the origin of **the document
+    /// surface under the pointer**, not the active window's.
+    ///
+    /// Horizontal state is per-window, and the four single-window rows
+    /// above cannot tell `win_id` from "the active window": a mutant
+    /// that routes every horizontal scroll to the active pane passes
+    /// all of them. This row wheels over the INACTIVE pane.
+    ///
+    /// It also pins that a wheel does not focus — the pane under the
+    /// pointer is named, not activated.
+    ///
+    /// *Mutation: route to the active window instead of `win_id` → this
+    /// row, and only this row.*
+    #[test]
+    fn b7_a_notch_moves_the_pane_under_the_pointer_not_the_active_one() {
+        use crossterm::event::MouseEventKind;
+        let mut content = b"short\n".to_vec();
+        content.extend_from_slice(&b"w".repeat(400));
+        content.push(b'\n');
+        let mut s = fresh_with(&content);
+        s.lua_host
+            .lua()
+            .load("pmacs.window.split_vertical()")
+            .exec()
+            .expect("a vertical split");
+
+        // Both panes truncate, and both painted, so each has a real
+        // viewport width for B7's bound.
+        let ids: Vec<WindowId> = s.core.borrow().windows.keys().copied().collect();
+        assert_eq!(ids.len(), 2, "fixture: exactly two panes");
+        for id in &ids {
+            set_line_wrap(&s, *id, "truncate");
+        }
+        paint_once(&s, term_size_24x80());
+
+        let active = s.core.borrow().active_window_id();
+        let other = *ids.iter().find(|id| **id != active).expect("a second pane");
+        // A 50/50 vertical split: column 60 is inside the right pane.
+        // Whichever pane that is, it must be the one that moves.
+        let target_col: u16 = 60;
+        let under_pointer = {
+            let core = s.core.borrow();
+            window_at_cell(
+                &core,
+                FrontendId::LOCAL,
+                term_size_24x80(),
+                5,
+                u32::from(target_col),
+            )
+            .map_or(other, |(id, _)| id)
+        };
+
+        let before_active = s.core.borrow().windows[&active].view_left;
+        let before_other = s.core.borrow().windows[&other].view_left;
+
+        s.dispatch_mouse(
+            FrontendId::LOCAL,
+            mouse(MouseEventKind::ScrollRight, 5, target_col),
+            term_size_24x80(),
+        );
+
+        let after_active = s.core.borrow().windows[&active].view_left;
+        let after_other = s.core.borrow().windows[&other].view_left;
+        let (moved, still) = if under_pointer == active {
+            ((after_active, before_active), (after_other, before_other))
+        } else {
+            ((after_other, before_other), (after_active, before_active))
+        };
+        assert_eq!(
+            moved.0 - moved.1,
+            SCROLL_COLUMNS as u32,
+            "the pane under the pointer moves by one notch"
+        );
+        assert_eq!(
+            still.0, still.1,
+            "and the other pane's origin is untouched — horizontal state \
+             is per-window"
+        );
+        assert_eq!(
+            s.core.borrow().active_window_id(),
+            active,
+            "a wheel names a pane; it does not focus it"
         );
     }
 
