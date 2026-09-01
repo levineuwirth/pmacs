@@ -319,7 +319,7 @@ Framing
 this base, the panel-replay prerequisite recorded as DISCHARGED by #243,
 and the both-axis effect witness still owed.
 
-**Landed so far** (latest verified code head `a2d5b26`)**:** B1's per-target fractional
+**Landed so far** (latest verified code head `deb3f0b`)**:** B1's per-target fractional
 wheel residual (the producer), B2's daemon-side horizontal panel leg,
 B3/B7's shared `scroll_window_columns` with its saturated bound and wrap
 pin, B4's middle-click PRIMARY paste, **B6's minimap wheel routing**,
@@ -393,16 +393,23 @@ setup assertions rather than by reading:
   mode and content width**, so a geometry or wrap change reaches the
   follow one frame late. L7a and L8 paint twice and say why.
 
-**`a2d5b26` then closed clause 5's replacement half**, which the first
-latch commit had left undone: three TUI paths replace a window's buffer
-— `switch_active_buffer_for`, `install_buffer_in_window` and the
-daemon's `align_primary_document_window` — and **none cleared
-`view_left` or the latch**. Two already reset cursor, selection and
+**Clause 5's replacement half took two passes, and the first census
+was wrong.** `a2d5b26` named "three TUI paths" — the ones that had been
+thought of. A grep for every write of a window's `buffer_id` finds
+**four** production sites: `switch_active_buffer_for`,
+`install_buffer_in_window`, **`kill_buffer`'s fallback rebind**, and
+the daemon's `align_primary_document_window`. None cleared `view_left`
+or the latch. `EditorCore::from_bytes` also assigns one and is
+deliberately excluded — it builds a fresh core with no prior origin to
+inherit — recorded so the next census need not re-decide it.
+
+**A census taken by recall is not a census.** This is the second time
+in this lane a count was stated from memory and found short by review;
+the first was `reshape` call sites that no geometry path reached. Two already reset cursor, selection and
 `view_top` a line at a time; the horizontal origin was simply missing
-from the list. One `Window::forget_manual_horizontal_origin`, three
-call sites, three rows (L8b/L8c/L8d), each firing only on its own call
-site's removal. L8d sits in `daemon.rs` because that function is
-private there.
+from the list. One `Window::forget_manual_horizontal_origin`, four call sites, four
+rows (L8b–L8e), each firing only on its own call site's removal. L8d
+sits in `daemon.rs` because that function is private there.
 
 Two witness repairs in the same commit, both of the same shape — an
 assertion that looked strict and was not:
@@ -416,7 +423,11 @@ assertion that looked strict and was not:
   the caret clamped to their end, LEFT of the origin — so the origin
   discriminated too and the reason given for using the latch instead
   did not hold. The filler is now 120 columns and the row asserts the
-  caret is still inside, through `pos_to_display`.
+  caret is still inside, through `pos_to_display` — **on both edges.**
+  `is_some()` alone rules out only the left one; a caret past the RIGHT
+  edge still returns `Some`, and there a normal follow moves the
+  origin, which is exactly the state the row claims cannot
+  discriminate. The probe requires `col < last_content_cols`.
 
 **Still owed on this axis: L7b (content shrink), and the GPU's entire
 read side with L2 and L5's GPU leg.** The GPU's four writes remain
