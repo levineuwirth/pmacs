@@ -1879,10 +1879,6 @@ struct State {
     /// selection, until release. Never sends `Pointer` events —
     /// the viewport is frontend-owned.
     minimap_scrub_active: bool,
-    /// GUI Stage 1b, Q#S1-11 clause 2: a horizontal wheel that
-    /// EFFECTIVELY moved the origin makes it authoritative, and the
-    /// caret follow leaves it alone until the cursor position actually
-    /// changes. A move fully absorbed by the clamp arms nothing.
     /// The icon last written to the window, so a per-motion call is a
     /// comparison rather than a platform round-trip.
     last_cursor_icon: Option<winit::window::CursorIcon>,
@@ -9116,10 +9112,9 @@ impl State {
     /// Clamping at the widest line's *full* width would let the origin
     /// pass every glyph and leave the viewport blank.
     ///
-    /// **Wrap pins the origin to zero** and clears manual authority
-    /// (lifetime clause 5): a wrapped buffer has nothing past the right
-    /// edge, so an origin — and a latch that would defend it — must not
-    /// survive.
+    /// **Wrap pins the origin to zero** (lifetime clause 5): a wrapped
+    /// buffer has nothing past the right edge, so no horizontal origin
+    /// may survive.
     ///
     /// **This frontend keeps no authority flag**, and the difference
     /// from the TUI is deliberate. There, `horizontal_follow` runs on
@@ -16080,6 +16075,12 @@ mod tests {
             return;
         };
         let lines_before = state.current_line_starts.len();
+        // A full `reshape` clears this hold; the incremental line path
+        // deliberately does not. Keep a sentinel so the checked-in row
+        // proves it reached the branch whose clamp it claims to witness,
+        // rather than relying on a mutation run outside the suite.
+        let incremental_sentinel = std::time::Instant::now() + std::time::Duration::from_mins(1);
+        state.styled_redraw_deadline = Some(incremental_sentinel);
 
         // Cut the 400-column line down to 150. One edit, no newline,
         // no line-count change: Q#R1's incremental case.
@@ -16096,8 +16097,15 @@ mod tests {
         assert_eq!(
             state.current_line_starts.len(),
             lines_before,
-            "setup: the line count must not change, or the edit takes \
-             the full-reshape branch and this row witnesses the wrong one"
+            "setup: the line count must not change, or this is not a \
+             single-line incremental candidate"
+        );
+        assert_eq!(
+            state.styled_redraw_deadline,
+            Some(incremental_sentinel),
+            "setup: a full reshape clears this sentinel; retaining it \
+             proves `try_reshape_line` succeeded and the incremental \
+             clamp branch actually ran"
         );
 
         let expected = max_left_px(&mut state);
@@ -16147,10 +16155,26 @@ mod tests {
             byte_pos: 5,
         });
 
+        assert_eq!(
+            state.own_cursor,
+            Some(OwnCursor {
+                buffer_id: bid,
+                byte: 5,
+            }),
+            "setup: the production receiver must accept the moved cursor"
+        );
+        let advance = state.mono_advance();
+        let expected = 5.0 * advance;
         assert!(
             state.code_scroll_left < origin,
             "a deliberate cursor move outranks a deliberate scroll: the \
              viewport must chase the caret again: {origin} -> {}",
+            state.code_scroll_left
+        );
+        assert!(
+            (state.code_scroll_left - expected).abs() < 0.01,
+            "and normal follow puts column 5 at the left edge exactly: \
+             {} vs {expected}",
             state.code_scroll_left
         );
     }
