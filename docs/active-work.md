@@ -320,15 +320,16 @@ before the rewrite, not after, so nothing depended on a local-only ref
 surviving.
 
 Framing
-`docs/gui-stage1-input-framing.md`, **revision 21** — §2a re-measured at
+`docs/gui-stage1-input-framing.md`, **revision 22** — §2a re-measured at
 this base, the panel-replay prerequisite recorded as DISCHARGED by #243,
 and (revision 21) the GPU's authority recorded as **structural**, its
 lifetime tables made frontend-specific. **The both-axis effect witness
 is no longer owed**; see the completion note below, which is the
 authority on what this lane still has outstanding.
 
-**Landed so far** (latest verified code head `9ec4ff1`; **full gate green
-at `04ebd2f`**, run `20260902T125049Z-4162684`, all 16 steps)**:** B1's per-target fractional
+**Landed so far** (latest verified code head `ef25920`; **full review
+gate green at that exact head**, run `20260902T180422Z-311523`, all 16
+steps)**:** B1's per-target fractional
 wheel residual (the producer), B2's daemon-side horizontal panel leg,
 B3/B7's shared `scroll_window_columns` with its saturated bound and wrap
 pin, B4's middle-click PRIMARY paste, **B6's minimap wheel routing**,
@@ -505,8 +506,38 @@ L8b–L8e, and that bullet's GPU half described the latch that no longer
 exists.
 
 **Owed outright: nothing. The implementation and its evidence are
-complete.** The full pre-PR gate is green at `04ebd2f`; the lane is
-held immediately before opening its PR.
+complete.** The original pre-PR gate is green at `04ebd2f`; after the
+first PR review's two implementation fixes, the full review gate is
+green at code head `ef25920`, run `20260902T180422Z-311523`. PR #247
+remains open and unmerged.
+
+### PR #247 review 1 — presentation and direct panel replacement
+
+Two findings were implementation defects, not documentation residuals.
+
+- **B2 changed `code_scroll_left` without requesting a redraw.** The
+  event loop returns to `ControlFlow::Wait`, and horizontal document
+  scrolling deliberately emits no viewport wire event. The stored
+  origin therefore could remain invisible until unrelated input. The
+  new production-path row asserts both halves independently: the origin
+  changes and the redraw-request count advances exactly once. Removing
+  the request leaves the first assertion green and fires the second.
+- **B1 disposed panel banks on `Absent`, but not on a direct accepted
+  identity replacement.** `ResidualOwner::Panel(BufferId)` cannot
+  distinguish a persistent buffer returning under a new `panel_epoch`,
+  so A's fraction could survive A → B → A and be spent by the successor.
+  Separate mapped and legacy rows drive the real producer through a
+  same-buffer/new-epoch replacement with no `Absent`; omitting either
+  branch's discard fires only that family. A geometry-only re-grid is
+  the negative control: it is the same panel surface, preserves the
+  bank, and fails if `geometry_epoch` is folded into wheel identity.
+
+All four mutations were built and executed, not inferred from grep.
+`PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu` reports **326 passed**.
+The full 16-stage gate at `ef25920` passed fmt, workspace/all-targets
+clippy, lib, lib-crdt, all eight touched acceptance suites, m4, GPU,
+the workspace sweep and diff-check. Reading every stage log finds zero
+`FAILED` lines and zero non-zero-failure `test result:` lines.
 
 The last three closed in order:
 
