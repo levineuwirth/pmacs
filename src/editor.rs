@@ -2956,6 +2956,122 @@ impl EditorState {
         }
     }
 
+    /// Install a frontend view with a bottom panel, for tests that need
+    /// a real panel window to observe an effect on.
+    ///
+    /// **Test support, not production.** It exists because the panel
+    /// receiver's effect is only observable against a live side window,
+    /// and `pmacs-gpu`'s step-3 witness has to see that effect rather
+    /// than the event it emits — the defect it guards is precisely
+    /// "the frontend emits and the receiver discards", which an
+    /// emission-only row reproduces instead of catching.
+    ///
+    /// Returns `(document, panel)`.
+    #[doc(hidden)]
+    pub fn install_panel_view_for_test(
+        &self,
+        frontend_id: FrontendId,
+        with_panel: bool,
+    ) -> (WindowId, Option<WindowId>) {
+        use crate::window::{FrontendView, Layout, LayoutNode, Orientation, Window, WindowParams};
+
+        let mut core = self.core.borrow_mut();
+        let doc_buf = core.active_window().buffer_id;
+        let document = WindowId::next();
+        let doc_view = {
+            let reg = core.registry.borrow();
+            crate::text_view::TextView::new(reg.get(doc_buf).expect("doc"))
+        };
+        core.windows
+            .insert(document, Window::new(document, doc_buf, doc_view));
+        let panel = with_panel.then(|| {
+            let panel_buf = core.registry.borrow_mut().create("*panel*");
+            let panel_id = WindowId::next();
+            let panel_view = {
+                let reg = core.registry.borrow();
+                crate::text_view::TextView::new(reg.get(panel_buf).expect("panel"))
+            };
+            let mut window = Window::new(panel_id, panel_buf, panel_view);
+            let mut params = WindowParams::default();
+            params.side = Some(crate::window::Side::Bottom);
+            params.fixed_rows = Some(4);
+            window.params = params;
+            core.windows.insert(panel_id, window);
+            panel_id
+        });
+        let layout = match panel {
+            Some(panel) => Layout {
+                root: LayoutNode::Split {
+                    orientation: Orientation::Horizontal,
+                    children: vec![LayoutNode::Leaf(document), LayoutNode::Leaf(panel)],
+                    weights: vec![1, 1],
+                },
+            },
+            None => Layout::single(document),
+        };
+        core.register_frontend_view(
+            frontend_id,
+            FrontendView {
+                layout,
+                active: document,
+                fold_projection: false,
+                panel_capable: true,
+                frame_geometry: None,
+                panel_hidden: false,
+            },
+        );
+        (document, panel)
+    }
+
+    /// Replace a window's buffer contents, so a test can give a panel
+    /// something to scroll. Without it the `*panel*` buffer is empty
+    /// and every scroll clamps to zero — a viewport row against it
+    /// would measure nothing.
+    #[doc(hidden)]
+    pub fn seed_window_buffer_for_test(&self, win_id: WindowId, text: &str) {
+        let core = self.core.borrow();
+        let Some(buffer_id) = core.windows.get(&win_id).map(|w| w.buffer_id) else {
+            return;
+        };
+        let registry = core.registry.clone();
+        drop(core);
+        {
+            let mut reg = registry.borrow_mut();
+            if let Ok(buf) = reg.get_mut(buffer_id) {
+                let _ = buf.set_generated_contents(text.as_bytes());
+            }
+        }
+        // **And rebuild the window's view.** `TextView` caches the line
+        // partition it was built with, and `scroll_window` reads its
+        // `line_count` — so a window left holding the pre-seed view
+        // clamps every scroll to zero and a viewport row against it
+        // measures nothing.
+        let view = {
+            let reg = registry.borrow();
+            reg.get(buffer_id).ok().map(crate::text_view::TextView::new)
+        };
+        if let Some(view) = view
+            && let Some(window) = self.core.borrow_mut().windows.get_mut(&win_id)
+        {
+            window.text_view = view;
+        }
+    }
+
+    /// A window's viewport origin, `(view_top, view_left)` — the pair a
+    /// panel-wheel effect moves.
+    #[doc(hidden)]
+    pub fn window_view_origin_for_test(&self, win_id: WindowId) -> Option<(usize, u32)> {
+        let core = self.core.borrow();
+        let window = core.windows.get(&win_id)?;
+        Some((window.view_top, window.view_left))
+    }
+
+    /// The buffer a window is showing.
+    #[doc(hidden)]
+    pub fn window_buffer_for_test(&self, win_id: WindowId) -> Option<crate::buffer::BufferId> {
+        Some(self.core.borrow().windows.get(&win_id)?.buffer_id)
+    }
+
     /// Classify an authenticated panel gesture, WITHOUT applying it
     /// (Q#BP-R4).
     ///

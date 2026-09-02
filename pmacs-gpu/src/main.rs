@@ -21972,6 +21972,18 @@ mod tests {
     // Bottom panel Stage 2B-3 — the GPU band
     // ===================================================================
 
+    fn panel_frame_of_buffer(
+        buffer_id: BufferId,
+        rows: u32,
+        cols: u32,
+        geometry_epoch: u64,
+        panel_epoch: u64,
+    ) -> PanelFrame {
+        let mut frame = panel_frame_of(rows, cols, geometry_epoch, panel_epoch);
+        frame.buffer_id = buffer_id;
+        frame
+    }
+
     fn panel_frame_of(rows: u32, cols: u32, geometry_epoch: u64, panel_epoch: u64) -> PanelFrame {
         let cells = (0..(rows as usize * cols as usize))
             .map(|_| terminal_cell(pmacs_protocol::Glyph::Char('x'), CellStyle::default()))
@@ -22012,13 +22024,17 @@ mod tests {
     /// `Metrics`; a second surface declaration is suppressed by design
     /// and returns `None`.
     fn present_panel_in_harness(h: &mut EffectHarness, panel_epoch: u64) {
+        present_panel_of_buffer(h, BufferId::from_raw(77), panel_epoch);
+    }
+
+    fn present_panel_of_buffer(h: &mut EffectHarness, buffer_id: BufferId, panel_epoch: u64) {
         {
             let state = h.app.state.as_mut().expect("harness state");
             state.set_panel_wire(PANEL_MIN_VERSION);
             let (epoch, total) = state
                 .next_geometry_declaration(GeometryTrigger::Metrics)
                 .expect("metrics always advance the panel geometry epoch");
-            let frame = panel_frame_of(4, total.cols.max(1), epoch, panel_epoch);
+            let frame = panel_frame_of_buffer(buffer_id, 4, total.cols.max(1), epoch, panel_epoch);
             let _ = state.apply_attach_message(InstanceMessage::PanelFrame(
                 PanelFramePayload::Present(frame),
             ));
@@ -22031,36 +22047,51 @@ mod tests {
         let _ = h.read_until_sentinel();
     }
 
-    /// Step 3 — **the panel's fractional wheel, end to end, per axis.**
+    /// The RECEIVER half of step 3: a real editor with a bottom panel,
+    /// seeded with something to scroll in both directions, and with a
+    /// frame geometry accepted.
     ///
-    /// Revision 20 sharpened this witness because its earlier form was
-    /// satisfiable with the mechanism it protects entirely broken: a
-    /// whole tick passes straight through #243's vertical receiver even
-    /// if B1's accumulator discards every sub-tick it is given. So the
-    /// row requires **fractional input** — a first sub-threshold delta
-    /// produces **no** gesture, and accumulated same-panel deltas
-    /// produce **exactly one** — and it requires that on **each axis**
-    /// separately, because a single accumulator fed by both axes passes
-    /// any one-axis row.
+    /// Two things here are load-bearing, and each was found by the row
+    /// failing without it. The panel buffer starts **empty**, and
+    /// `scroll_window` clamps to `line_count - 1`, so an unseeded panel
+    /// cannot scroll at all. And the receiver re-derives the panel grid
+    /// from an accepted geometry declaration — without one, every
+    /// coordinate is outside a grid that does not exist and the gesture
+    /// is `Refused` before it can have any effect.
+    fn panel_receiver() -> (
+        pmacs::editor::EditorState,
+        pmacs::protocol::FrontendId,
+        pmacs::window::WindowId,
+        BufferId,
+    ) {
+        let editor = pmacs::editor::EditorState::new();
+        let fid = pmacs::protocol::FrontendId(4242);
+        let (_document, panel) = editor.install_panel_view_for_test(fid, true);
+        let panel = panel.expect("the fixture installs a panel window");
+        let wide_line = "w".repeat(400);
+        editor.seed_window_buffer_for_test(panel, &format!("{wide_line}\n").repeat(50));
+        let panel_buffer = editor
+            .window_buffer_for_test(panel)
+            .expect("the panel window has a buffer");
+        let _ =
+            editor.accept_semantic_frame_geometry(fid, 1, pmacs_protocol::CellSize::new(24, 80));
+        (editor, fid, panel, panel_buffer)
+    }
+
+    /// The PRODUCER half of step 3: this frontend, presenting a panel
+    /// for the very buffer the receiver is showing — so the gestures it
+    /// emits are about the same window the assertions read — with the
+    /// pointer parked on a panel **cell**.
     ///
-    /// Driven through `dispatch_window_event` and observed on the wire,
-    /// which is where a panel gesture actually goes.
-    ///
-    /// *Mutations: round the notch instead of banking it → the
-    /// sub-threshold legs (a 0.6 delta becomes a whole tick); bank into
-    /// one accumulator per surface instead of per (surface, axis) → the
-    /// second axis's first leg, which the first axis's leftover
-    /// completes.*
-    #[test]
-    fn step3_a_panel_wheel_needs_a_whole_notch_on_each_axis() {
+    /// Panel chrome banks nothing at all, and a probe that drifted onto
+    /// it would satisfy every "nothing moved" assertion for entirely
+    /// the wrong reason, so the target is asserted here.
+    fn panel_producer(panel_buffer: BufferId) -> EffectHarness {
         use winit::dpi::PhysicalPosition;
-        use winit::event::{DeviceId, MouseScrollDelta, TouchPhase};
+        use winit::event::DeviceId;
 
         let mut h = EffectHarness::new();
-        present_panel_in_harness(&mut h, 1);
-
-        // A pixel inside the panel's content, so the wheel target is a
-        // cell rather than the band's chrome.
+        present_panel_of_buffer(&mut h, panel_buffer, 1);
         let (px, py, _, ph) = h
             .app
             .state
@@ -22078,63 +22109,145 @@ mod tests {
                 h.app.classify_wheel_target(point.0, point.1),
                 WheelTarget::PanelCell { .. }
             ),
-            "setup: the probe must be a panel CELL — panel chrome banks \
-             nothing at all, and would satisfy every 'no gesture' \
-             assertion below for the wrong reason"
+            "setup: the probe must be a panel CELL"
         );
+        h
+    }
 
-        let mut wheel = |dx: f32, dy: f32| {
-            h.feed(&WindowEvent::MouseWheel {
-                device_id: DeviceId::dummy(),
-                delta: MouseScrollDelta::LineDelta(dx, -dy),
-                phase: TouchPhase::Moved,
-            })
+    /// Step 3 — **the panel wheel's END-TO-END effect, on both axes,
+    /// driven by fractional input.**
+    ///
+    /// The framing is explicit that an emission-only witness will not
+    /// do: *"Not 'a `PanelPointer` was emitted' — the observable effect
+    /// on the panel's viewport."* The defect it guards is exactly "the
+    /// frontend emits and the receiver discards", and a row that counts
+    /// emitted events reproduces that blind spot rather than catching
+    /// it — it would pass if the vertical axis emitted a horizontal
+    /// gesture, if the receiver dropped it, or if some other event
+    /// accompanied a sub-threshold delta.
+    ///
+    /// So this row runs both halves. The **producer** is this
+    /// frontend's `apply_wheel`, reached through
+    /// `dispatch_window_event`. The **receiver** is a real
+    /// `pmacs::editor::EditorState` with a live panel window, driven
+    /// through `classify_panel_pointer` + `apply_panel_pointer`, the
+    /// pair the daemon itself calls. The assertion is the panel
+    /// window's `(view_top, view_left)`.
+    ///
+    /// Per axis: a first sub-threshold delta moves the viewport by
+    /// **nothing** and puts **nothing** on the wire, and the delta that
+    /// completes the notch moves it by **exactly one step** — once, not
+    /// twice, and not the sum of everything banked.
+    ///
+    /// *Mutations: round the notch instead of banking it → the
+    /// sub-threshold legs; bank into one accumulator per surface rather
+    /// than per (surface, axis) → the second axis's first leg, which
+    /// the first axis's leftover completes; drop `PKind::ScrollLeft` /
+    /// `ScrollRight` from the daemon's panel arm → the horizontal
+    /// completion, which no emission count can see.*
+    #[test]
+    fn step3_a_panel_wheel_moves_the_panel_viewport_once_per_notch_per_axis() {
+        use winit::event::{DeviceId, MouseScrollDelta, TouchPhase};
+
+        let (mut editor, fid, panel, panel_buffer) = panel_receiver();
+        let origin = |editor: &pmacs::editor::EditorState| {
+            editor
+                .window_view_origin_for_test(panel)
+                .expect("the panel window is live")
         };
-        let gestures = |step: &Step| {
+        assert_eq!(origin(&editor), (0, 0), "setup: the panel starts home");
+
+        let mut h = panel_producer(panel_buffer);
+
+        // One turn of the wheel, carried all the way through: the
+        // frontend's events are replayed into the editor exactly as the
+        // daemon replays them.
+        let turn =
+            |h: &mut EffectHarness, editor: &mut pmacs::editor::EditorState, dx: f32, dy: f32| {
+                let step = h.feed(&WindowEvent::MouseWheel {
+                    device_id: DeviceId::dummy(),
+                    delta: MouseScrollDelta::LineDelta(dx, -dy),
+                    phase: TouchPhase::Moved,
+                });
+                let mut replayed = 0usize;
+                for event in &step.outbound {
+                    if let pmacs_protocol::FrontendEvent::PanelPointer {
+                        buffer_id,
+                        coord,
+                        kind,
+                        mods,
+                        ..
+                    } = event
+                    {
+                        let disposition =
+                            editor.classify_panel_pointer(fid, *buffer_id, *coord, *kind);
+                        editor.apply_panel_pointer(fid, &disposition, *coord, *kind, *mods);
+                        replayed += 1;
+                    }
+                }
+                (step, replayed)
+            };
+
+        // Vertical, sub-threshold: nothing on the wire, nothing moves.
+        let (step, replayed) = turn(&mut h, &mut editor, 0.0, 0.6);
+        assert!(
+            step.outbound.is_empty(),
+            "a sub-threshold vertical delta must put NOTHING on the \
+             wire, got {:?}",
             step.outbound
-                .iter()
-                .filter(|e| {
-                    matches!(
-                        e,
-                        pmacs_protocol::FrontendEvent::PanelPointer { .. }
-                            | pmacs_protocol::FrontendEvent::PanelPointerMapped { .. }
-                    )
-                })
-                .count()
-        };
-
-        // Vertical: 0.6 of a notch is not a notch.
-        let step = wheel(0.0, 0.6);
-        assert_eq!(
-            gestures(&step),
-            0,
-            "a sub-threshold vertical delta must reach the panel as \
-             nothing at all"
         );
-        // Horizontal, before the vertical bank is completed: if the two
-        // axes shared one accumulator, this 0.6 would finish the
-        // vertical 0.6 and fire here.
-        let step = wheel(0.6, 0.0);
+        assert_eq!(replayed, 0);
         assert_eq!(
-            gestures(&step),
-            0,
-            "and a sub-threshold horizontal delta must not be completed \
-             by the vertical one banked before it"
+            origin(&editor),
+            (0, 0),
+            "and the panel viewport must not move"
         );
 
-        // Completing each axis produces exactly one gesture, not two,
-        // and not the sum of everything banked so far.
-        let step = wheel(0.0, 0.6);
-        assert_eq!(
-            gestures(&step),
-            1,
-            "0.6 + 0.6 is one vertical notch, and exactly one"
+        // Horizontal, sub-threshold, with the vertical bank still
+        // standing: one accumulator fed by both axes would complete
+        // here and scroll.
+        let (step, _) = turn(&mut h, &mut editor, 0.6, 0.0);
+        assert!(
+            step.outbound.is_empty(),
+            "a sub-threshold horizontal delta must not be completed by \
+             the vertical one banked before it, got {:?}",
+            step.outbound
         );
-        let step = wheel(0.6, 0.0);
         assert_eq!(
-            gestures(&step),
-            1,
-            "and the horizontal axis completes on its own count"
+            origin(&editor),
+            (0, 0),
+            "and still nothing has moved on either axis"
+        );
+
+        // Completing the vertical notch: the viewport moves ONE step
+        // down, and the horizontal origin stays put.
+        let (_, replayed) = turn(&mut h, &mut editor, 0.0, 0.6);
+        assert_eq!(replayed, 1, "one notch is one gesture");
+        let after_vertical = origin(&editor);
+        assert!(
+            after_vertical.0 > 0,
+            "the completed vertical notch must scroll the panel"
+        );
+        assert_eq!(
+            after_vertical.1, 0,
+            "and must not move it sideways: a vertical notch that \
+             emitted a horizontal gesture would show up exactly here"
+        );
+
+        // Completing the horizontal notch: sideways this time, and the
+        // vertical origin does not move again.
+        let (_, replayed) = turn(&mut h, &mut editor, 0.6, 0.0);
+        assert_eq!(replayed, 1, "one notch is one gesture");
+        let after_horizontal = origin(&editor);
+        assert!(
+            after_horizontal.1 > 0,
+            "the completed horizontal notch must scroll the panel \
+             sideways — the axis whose receiver arm did not exist before \
+             B2, and which no emission count can see"
+        );
+        assert_eq!(
+            after_horizontal.0, after_vertical.0,
+            "and must not scroll it vertically a second time"
         );
     }
 

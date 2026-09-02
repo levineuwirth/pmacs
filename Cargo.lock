@@ -2627,6 +2627,7 @@ dependencies = [
  "env_logger",
  "glyphon",
  "loro",
+ "pmacs",
  "pmacs-protocol",
  "pollster",
  "sys-locale",

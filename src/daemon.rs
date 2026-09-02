@@ -6416,58 +6416,9 @@ mod tests {
         fid: FrontendId,
         with_panel: bool,
     ) -> (crate::window::WindowId, Option<crate::window::WindowId>) {
-        use crate::window::{FrontendView, Layout, LayoutNode, Orientation, Window, WindowParams};
-
-        let mut core = editor.core.borrow_mut();
-        let doc_buf = core.active_window().buffer_id;
-        let document = crate::window::WindowId::next();
-        let doc_view = {
-            let reg = core.registry.borrow();
-            crate::text_view::TextView::new(reg.get(doc_buf).expect("doc"))
-        };
-        core.windows
-            .insert(document, Window::new(document, doc_buf, doc_view));
-        let panel = with_panel.then(|| {
-            let panel_buf = core.registry.borrow_mut().create("*panel*");
-            let panel_id = crate::window::WindowId::next();
-            let panel_view = {
-                let reg = core.registry.borrow();
-                crate::text_view::TextView::new(reg.get(panel_buf).expect("panel"))
-            };
-            let mut window = Window::new(panel_id, panel_buf, panel_view);
-            let mut params = WindowParams::default();
-            params.side = Some(crate::window::Side::Bottom);
-            params.fixed_rows = Some(4);
-            window.params = params;
-            core.windows.insert(panel_id, window);
-            panel_id
-        });
-        let layout = match panel {
-            Some(panel) => Layout {
-                root: LayoutNode::Split {
-                    orientation: Orientation::Horizontal,
-                    children: vec![LayoutNode::Leaf(document), LayoutNode::Leaf(panel)],
-                    weights: vec![1, 1],
-                },
-            },
-            None => Layout::single(document),
-        };
-        core.register_frontend_view(
-            fid,
-            FrontendView {
-                layout,
-                active: document,
-                fold_projection: false,
-                // Stage 2B-2 is dark: production negotiation still sets
-                // this `false` for every semantic session, so the
-                // projection is exercised through a test-only view (the
-                // framing's §7.2.2 posture).
-                panel_capable: true,
-                frame_geometry: None,
-                panel_hidden: false,
-            },
-        );
-        (document, panel)
+        // One fixture, shared with `pmacs-gpu`'s step-3 effect witness,
+        // which needs a real panel window to observe an effect on.
+        editor.install_panel_view_for_test(fid, with_panel)
     }
 
     fn session(version: u32, semantic: bool) -> crate::presence::SessionState {
