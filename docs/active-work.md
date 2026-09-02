@@ -301,17 +301,25 @@ waits for a signal that is not coming.
 - **THE FIRST DISPATCH IMMEDIATELY FOUND A RED ON `main`**, which is
   what this lane was built for. See the proptest entry below.
 
-## GUI arc Stage 1b — pointer and scroll — IN REVIEW (PR #247)
+## GUI arc Stage 1b — pointer and scroll — MERGED as `27743fd`
 
-**PR #247** — `https://github.com/levineuwirth/pmacs/pull/247`, opened
-2026-09-02 against `main` at `0ec13b3`, 13 files, on the gate-green
-head. **Not to be merged unprompted.**
+**PR #247 merged 2026-09-02**, at head `72a3488` via
+`--match-head-commit`, with 14/14 CI green on that exact commit and the
+full sixteen-stage local gate green on its code head `ef25920`. The
+merge commit's second parent is `72a3488`, so what landed is what was
+reviewed.
 
-**CI is GREEN at `5fcc3a3`: 14 of 14 checks, zero non-success**, and the
-PR reports `MERGEABLE` / `CLEAN`. The two macOS legs are the long poles
-(13m47s and 21m12s); `Test (crdt)` — the flavor `scripts/gate`'s clippy
-step cannot lint locally — passed at 11m21s. Checks ran against the
-current head, not an earlier one.
+**The canonical base stays `0ec13b3`.** This absorption does not
+advance it to `27743fd`; a docs absorption that renames its own merge
+commit as the base starts a cycle with no end.
+
+The block below keeps its review history rather than collapsing to a
+line. Nine rounds on the implementation, and the shape worth carrying
+forward is that **most findings were against a RECORD, not against
+code** — a count stated from memory, a margin compared against the
+wrong baseline, a reason asserted about a file that had not been read,
+a checkpoint that certified itself. The four that were against code
+were all found by *writing the witness*, never by reading it.
 
 
 **Branch `gui-stage1b-pointer-scroll`, rebased onto `0ec13b3`.** The
