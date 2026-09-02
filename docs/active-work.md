@@ -322,7 +322,8 @@ lifetime tables made frontend-specific. **The both-axis effect witness
 is no longer owed**; see the completion note below, which is the
 authority on what this lane still has outstanding.
 
-**Landed so far** (latest verified code head `9ec4ff1`; **full gate green at `04ebd2f`**)**:** B1's per-target fractional
+**Landed so far** (latest verified code head `9ec4ff1`; **full gate green
+at `04ebd2f`**, run `20260902T125049Z-4162684`, all 16 steps)**:** B1's per-target fractional
 wheel residual (the producer), B2's daemon-side horizontal panel leg,
 B3/B7's shared `scroll_window_columns` with its saturated bound and wrap
 pin, B4's middle-click PRIMARY paste, **B6's minimap wheel routing**,
@@ -499,7 +500,8 @@ L8b–L8e, and that bullet's GPU half described the latch that no longer
 exists.
 
 **Owed outright: nothing. The implementation and its evidence are
-complete**, and the lane's next step is the full pre-PR gate.
+complete.** The full pre-PR gate is green at `04ebd2f`; the lane is
+held immediately before opening its PR.
 
 The last three closed in order:
 
@@ -527,7 +529,8 @@ The last three closed in order:
   local document scroll beside the panel event fails on the completion
   transcript. The focused row is green outside the socket-restricted
   sandbox; package-wide all-target clippy, fmt and `git diff --check`
-  are clean. The full pre-PR gate remains next.
+  are clean. The code later passed the full pre-PR gate at `04ebd2f`;
+  no further gate is owed before the PR.
 - **R4 and R5** (`e5ab16c`).
 - **B1's disposal half** (`241e82e` for panels, `a7006fa` for
   terminals) — and it needed mechanism, not just a row. `BufferId` keying distinguishes panel A from panel B for
@@ -603,10 +606,25 @@ produces: nothing. Fifteen minutes of silence read as progress. The
 question to ask before arming any watch is *if this process died right
 now, would my filter emit anything?*, and here the answer was no.
 
-**A trailing `; echo` in the same launch also swallowed the exit code.**
-`./scripts/gate … > log 2>&1; echo "exit=$?"` reports the *echo's*
-status, so the harness recorded exit 0 for a gate that failed at step
-03. Read the gate's own summary line, never the wrapper's.
+**A trailing `; echo` in the same launch also hid the exit code from
+the caller.** In
+`./scripts/gate … > log 2>&1; echo "exit=$?"`, `$?` is expanded before
+`echo` runs, so the text printed is the **gate's** status. The compound
+shell command itself, however, returns the later **echo's** status —
+normally zero — so the harness recorded exit 0 for a gate that failed
+at step 03. Preserve and re-emit the status explicitly, or read the
+gate's own summary line; do not treat the wrapper's status as the
+gate's.
+
+**A later attempt was terminated by the harness, not by a test red.**
+Run `20260902T124755Z-4122046` reached step `15-sweep`; that stage's log
+contains two compilation lines followed by `Terminated`, with **zero
+`test result:` lines**, and the gate reported `FAILED (exit 143)`.
+The preceding fourteen stages had run successfully, but the sweep had
+not executed a test. This is evidence that the harness's background
+lifetime expired, not evidence about the tree. A monitor must observe
+process exit as well as filtered gate output, and the launch mechanism
+must outlive the full gate.
 
 ### A local false compile red from the shared target directory
 
