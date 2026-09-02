@@ -301,6 +301,471 @@ waits for a signal that is not coming.
 - **THE FIRST DISPATCH IMMEDIATELY FOUND A RED ON `main`**, which is
   what this lane was built for. See the proptest entry below.
 
+## GUI arc Stage 1b — pointer and scroll — IN REVIEW (PR #247)
+
+**PR #247** — `https://github.com/levineuwirth/pmacs/pull/247`, opened
+2026-09-02 against `main` at `0ec13b3`, 13 files, on the gate-green
+head. **Not to be merged unprompted.**
+
+**CI is GREEN at `5fcc3a3`: 14 of 14 checks, zero non-success**, and the
+PR reports `MERGEABLE` / `CLEAN`. The two macOS legs are the long poles
+(13m47s and 21m12s); `Test (crdt)` — the flavor `scripts/gate`'s clippy
+step cannot lint locally — passed at 11m21s. Checks ran against the
+current head, not an earlier one.
+
+
+**Branch `gui-stage1b-pointer-scroll`, rebased onto `0ec13b3`.** The
+**remote ref `githubsucks/gui-stage1b-pointer-scroll` is
+authoritative**; recover with
+`git fetch githubsucks && git checkout -B gui-stage1b-pointer-scroll githubsucks/gui-stage1b-pointer-scroll`.
+
+**The rebase rewrote history**, so that ref was force-pushed. The seven
+pre-rebase framing commits are preserved on
+**`githubsucks/gui-stage1b-prerebase-backup`** (`5c83b15`) — pushed
+before the rewrite, not after, so nothing depended on a local-only ref
+surviving.
+
+Framing
+`docs/gui-stage1-input-framing.md`, **revision 22** — §2a re-measured at
+this base, the panel-replay prerequisite recorded as DISCHARGED by #243,
+and (revision 21) the GPU's authority recorded as **structural**, its
+lifetime tables made frontend-specific. **The both-axis effect witness
+is no longer owed**; see the completion note below, which is the
+authority on what this lane still has outstanding.
+
+**Landed so far** (latest verified code head `ef25920`; **full review
+gate green at that exact head**, run `20260902T180422Z-311523`, all 16
+steps)**:** B1's per-target fractional
+wheel residual (the producer), B2's daemon-side horizontal panel leg,
+B3/B7's shared `scroll_window_columns` with its saturated bound and wrap
+pin, B4's middle-click PRIMARY paste, **B6's minimap wheel routing**,
+and **B5's I-beam**, whose icon is
+re-derived in **`reshape`'s tail**. Panel inset transitions now terminate
+at `reshape_if_panel_band_changed`: accepted `Present`/`Absent`/row-count
+changes and a geometry declaration disowning the retained frame all
+reach the hook, while a content-only frame repaints without rebuilding
+the document. Three production appliers remain, one per cause (pointer
+motion, menu ownership without geometry, geometry).
+
+B5's central-hook correction needed one more pass. Counting ten
+`reshape` call sites did **not** establish that every boundary-changing
+transition reached one: `PanelFrame` synchronized dimensions and
+redrew without reshaping, and advancing `geometry_epoch` disowned the
+retained frame *after* resize/font handling had reshaped against its old
+presentation. The earlier two path patches — the snapshot arm, then a
+`set_menu` helper — had the dual defect: each masked the other, so a
+row's documented mutation named something the row could not see. **A
+witness whose mutation is masked is not weaker evidence than a real
+one; it is evidence of nothing, and it reads identically in the diff.**
+
+At `175cc7b` — B5's own checkpoint, not the lane's current one — all
+309 GPU rows pass; workspace clippy with all targets and `-D warnings`,
+fmt and `git diff --check` are clean. Four mutations were executed and
+each fires its named row: omit accepted-frame reflow, omit
+epoch-invalidation reflow, reshape content-only frames, and retain
+divider hover on `Absent`. **B6's verified checkpoint is `f441d3d` at
+312 GPU rows**; the latest verified code head is named once, at the top
+of this block. The authoritative remote ref above may be ahead with
+documentation-only commits and remains the recovery source. Calling a
+fixed checkpoint the lane's "current head" here would become false in
+the next code commit — the self-certifying checkpoint defect this
+ledger has already recorded elsewhere.
+
+### The latch was never the thing the ledger said it was
+
+**This entry was wrong, and the correction is the recovery-relevant
+part.** It listed the manual horizontal authority latch as "landed but
+not yet witnessed". Writing L1 showed otherwise:
+`manual_left_authority` existed on the GPU, was **written in four
+places and read in none**, and did not exist on the TUI at all. What
+had landed was the arming. The preservation the latch exists for was
+nowhere, on either frontend.
+
+L1 measured it before anything changed: a sideways wheel moved the TUI
+origin to 30, and the next paint put it back to 0. **A horizontal
+scroll was undone by the following frame.** An unread `bool` preserves
+nothing, and "landed but unwitnessed" is exactly how that reads from
+the outside.
+
+**`9cb610e` implements clauses 2–5 for the TUI** and witnesses each:
+L1 preservation across a real `paint_frame`, L3 release on a genuine
+cursor move, L4 a vertical wheel preserving authority, L5 viewport-only,
+L6 an absorbed notch arming nothing, L7a re-clamp on widening, L8 wrap
+clearing the latch. Seven mutations run, each biting its named rows.
+
+Three things the framing's L-table did not anticipate, all surfaced by
+setup assertions rather than by reading:
+
+- **L4's stated hazard cannot arise in the setup the same table
+  mandates.** The vertical wheel carries point only when the caret is
+  INSIDE the viewport — `pos_to_display` returns `None` left of the
+  edge (Q#HS7(c′)) — and every other L-row requires it outside. L4
+  places the caret inside and uses the **latch** as its discriminator,
+  because the origin cannot discriminate there.
+- **Clause 3 needs a mechanism, not an exemption.** `scroll_window`
+  refreshes `manual_left_cursor` to the point it dragged along, so
+  clause 4's "genuine cursor change" stays false. Keying release on the
+  cursor byte alone releases exactly where clause 3 forbids it.
+- **`paint_frame` runs the follow BEFORE resolving the frame's wrap
+  mode and content width**, so a geometry or wrap change reaches the
+  follow one frame late. L7a and L8 paint twice and say why.
+
+**Clause 5's replacement half took two passes, and the first census
+was wrong.** `a2d5b26` named "three TUI paths" — the ones that had been
+thought of. A grep for every write of a window's `buffer_id` finds
+**four** production sites: `switch_active_buffer_for`,
+`install_buffer_in_window`, **`kill_buffer`'s fallback rebind**, and
+the daemon's `align_primary_document_window`. None cleared `view_left`
+or the latch. `EditorCore::from_bytes` also assigns one and is
+deliberately excluded — it builds a fresh core with no prior origin to
+inherit — recorded so the next census need not re-decide it.
+
+**A census taken by recall is not a census.** This is the second time
+in this lane a count was stated from memory and found short by review;
+the first was `reshape` call sites that no geometry path reached. Three
+of the four already reset cursor, selection and `view_top` a line at a
+time; the horizontal origin was simply missing from the list. One
+`Window::forget_manual_horizontal_origin`, four call sites, four rows
+(L8b–L8e), each firing only on its own call site's removal. L8d sits in
+`daemon.rs` because that function is private there.
+
+Two witness repairs in the same commit, both of the same shape — an
+assertion that looked strict and was not:
+
+- **L7a asserted only that the origin came DOWN.** Any arbitrary
+  reduction satisfied that, including an off-by-one that strands a
+  column. It now asserts `widest − viewport` exactly, against a named
+  fixture constant, and is mutation-checked with that off-by-one.
+- **L4's stated rationale was false.** It claimed the caret stays
+  inside the viewport after the vertical wheel; with short filler lines
+  the caret clamped to their end, LEFT of the origin — so the origin
+  discriminated too and the reason given for using the latch instead
+  did not hold. The filler is now 120 columns and the row asserts the
+  caret is still inside, through `pos_to_display` — **on both edges.**
+  `is_some()` alone rules out only the left one; a caret past the RIGHT
+  edge still returns `Some`, and there a normal follow moves the
+  origin, which is exactly the state the row claims cannot
+  discriminate. The probe requires `col < last_content_cols`.
+
+**L7b landed at `feda851`** — clause 3's content half, the shrink that
+lowers `widest − viewport` with the viewport untouched, asserted on the
+exact new bound and firing on both the release mutation and an
+off-by-one.
+
+### The GPU's latch is unreachable, and its real gap was the clamp
+
+`ec6444e`. **The framing's L2 could not witness the latch it was offered
+as evidence for.** It proposes wheel-sideways then a height-only resize
+as the GPU's manual-authority row. Measured before anything was added:
+the origin
+survives that resize with `manual_left_authority` **never read anywhere
+in the frontend**. Q#F6's painted-before policy is what preserves it —
+`resize` runs `ensure_caret_painted` only when the caret was painted,
+and a caret scrolled off screen is not painted, so the follow that
+would snap the origin back never runs. When the caret IS painted it is
+inside the viewport, where `follow_left` returns the origin it was
+given. **The latch is unreachable on this frontend by either branch.**
+
+What the GPU actually lacked was clause 3's clamp, for the same reason:
+nothing brought the origin DOWN when the maximum fell, because the only
+code that would is the follow that is skipped in that state.
+**Measured: scroll to the right bound at 640px, widen to 1600px, and
+the origin stayed 960px past the new maximum** — most of the viewport
+blank, the text off its left edge. `clamp_code_scroll_left` now sits at
+`reshape`'s tail, beside B5's icon hook and for the same reason.
+
+**This was owed to the framing, not to the code: L2's wording promised a
+latch witness this frontend cannot provide. Revision 21 discharges it**
+by naming the painted-before policy as the mechanism and splitting the
+GPU rows by the behavior each actually witnesses.
+
+**Settled (user decision, 2026-09-02): the GPU latch is deleted, not
+completed.** The contract is behavioral, and the two frontends are not
+required to share a representation; a reader would have duplicated the
+painted-before policy and needed a cursor baseline of its own to avoid
+suppressing genuine cursor movement. `manual_left_authority`, its
+initializer and its four writes are gone, and `scroll_by_columns`
+no longer returns an unused `bool`. **GPU authority is structural**,
+and the framing now says so.
+
+The GPU's four rows: **L2** (height-only preserves — the policy, not a
+latch), **L7a** (widening clamps to the exact bound), **L7b** (a
+content shrink clamps **through the incremental edit path**), and
+**L3** (a moved `CursorByte` pulls the viewport back). Each fires on
+its own mutation; L2's also necessarily bites L7a, which its doc names.
+
+**L7b, GPU, is the one that found a live gap.** Q#R1's keystroke case
+re-shapes only the affected line through `try_reshape_line` and skips
+the full `reshape` — **and skipped clause 3's clamp with it**. A
+one-line delete shortening the widest line could leave the viewport
+past the end of the text with no later event to repair it. The clamp
+now runs on that branch too. The row keeps a redraw-deadline sentinel
+that full `reshape` clears, so it positively proves the incremental
+branch ran; unchanged line count alone would only make that branch
+eligible, not establish that `try_reshape_line` succeeded.
+
+**Nothing is landed-but-unwitnessed on this lane any more.** R4 and R5
+now have their replacement rows (`e5ab16c`), one clear omitted at a
+time so neither field hides behind the other's reset; the wrap and
+buffer-replacement clearing that stood here is covered by L8 and
+L8b–L8e, and that bullet's GPU half described the latch that no longer
+exists.
+
+**Owed outright: nothing. The implementation and its evidence are
+complete.** The original pre-PR gate is green at `04ebd2f`; after the
+first PR review's two implementation fixes, the full review gate is
+green at code head `ef25920`, run `20260902T180422Z-311523`. PR #247
+remains open and unmerged.
+
+### PR #247 review 1 — presentation and direct panel replacement
+
+Two findings were implementation defects, not documentation residuals.
+
+- **B2 changed `code_scroll_left` without requesting a redraw.** The
+  event loop returns to `ControlFlow::Wait`, and horizontal document
+  scrolling deliberately emits no viewport wire event. The stored
+  origin therefore could remain invisible until unrelated input. The
+  new production-path row asserts both halves independently: the origin
+  changes and the redraw-request count advances exactly once. Removing
+  the request leaves the first assertion green and fires the second.
+- **B1 disposed panel banks on `Absent`, but not on a direct accepted
+  identity replacement.** `ResidualOwner::Panel(BufferId)` cannot
+  distinguish a persistent buffer returning under a new `panel_epoch`,
+  so A's fraction could survive A → B → A and be spent by the successor.
+  Separate mapped and legacy rows drive the real producer through a
+  same-buffer/new-epoch replacement with no `Absent`; omitting either
+  branch's discard fires only that family. A geometry-only re-grid is
+  the negative control: it is the same panel surface, preserves the
+  bank, and fails if `geometry_epoch` is folded into wheel identity.
+
+All four mutations were built and executed, not inferred from grep.
+`PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu` reports **326 passed**.
+The full 16-stage gate at `ef25920` passed fmt, workspace/all-targets
+clippy, lib, lib-crdt, all eight touched acceptance suites, m4, GPU,
+the workspace sweep and diff-check. Reading every stage log finds zero
+`FAILED` lines and zero non-zero-failure `test result:` lines.
+
+The last three closed in order:
+
+- **step 3's fractional both-axis panel witness** (`302ce14`, rewritten
+  at `e50f38a`). The first version **counted emitted events**, which is
+  the blind spot the framing exists to close — it says so directly:
+  *"Not 'a `PanelPointer` was emitted' — the observable effect on the
+  panel's viewport."* It now runs both halves in one row: this
+  frontend's `apply_wheel` as producer, a real `EditorState` with a live
+  panel window as receiver, and the panel's `(view_top, view_left)` as
+  the assertion. **`pmacs-gpu` gained a DEV-dependency on `pmacs`** for
+  it, and `pmacs` four `#[doc(hidden)]` test-support methods; the
+  daemon's own `semantic_panel_view` delegates to one of them, so there
+  is a single panel fixture rather than two. The mutation that settles
+  it is the receiver-side one no emission count could see: dropping
+  `PKind::ScrollLeft`/`ScrollRight` from the daemon's panel arm fires
+  this row. Review found one residual at `a3b0bb8`: the row said
+  **exactly one step** while asserting only that each origin became
+  greater than zero. `9ec4ff1` pins the exact `(view_top, view_left)`
+  after both completions, asserts the entire sub-threshold `Step` is
+  empty, requires one correctly directed outbound event and no local
+  effect on each completion, and asserts the receiver's geometry
+  declaration returned `Advanced`. Doubling the vertical and horizontal
+  receiver steps fails at `(6, 0)` and `(3, 6)` respectively; adding a
+  local document scroll beside the panel event fails on the completion
+  transcript. The focused row is green outside the socket-restricted
+  sandbox; package-wide all-target clippy, fmt and `git diff --check`
+  are clean. The code later passed the full pre-PR gate at `04ebd2f`;
+  no further gate is owed before the PR.
+- **R4 and R5** (`e5ab16c`).
+- **B1's disposal half** (`241e82e` for panels, `a7006fa` for
+  terminals) — and it needed mechanism, not just a row. `BufferId` keying distinguishes panel A from panel B for
+  free, but **not a panel closed and reopened on the same persistent
+  buffer**, where the successor carries the same key. The `Absent` arm
+  reset eight pieces of panel state one line at a time with the wheel
+  residual missing from the list — the same omission shape as the
+  horizontal origin missing from the TUI's four replacement resets.
+
+**B6 (`2dccc2b`, tightened in `f441d3d`)** is three rows on
+`EffectHarness`, the first production-path coverage `apply_wheel` has
+ever had: a notch over the minimap scrolls the document viewport, a
+part-notch over it cannot complete one over the document, and its
+horizontal axis is inert. Its mechanism had landed with B1; only the
+evidence was owed.
+
+Its fixture is the recovery-relevant part. **Two separate conditions
+each make a horizontal-inertness claim vacuous**, and the default
+harness document has both: four-column lines pin B7's saturated right
+bound to zero, and line wrap — **on by default** — makes
+`scroll_by_columns` return early and pin the left edge, whatever the
+target. Under either, *nothing* scrolls sideways and a row asserting
+"the minimap did not" passes without testing anything. The row uses
+wide lines and turns wrap off through `LineWrapFacts`, asserting the
+wrap landed; `EffectHarness::new()` keeps its 200-line fixture and M22
+rationale untouched, with `with_document` added beside it.
+
+Review then caught the same row asserting the absence of one effect and
+calling it inertness: it pinned neither probe's target (panel chrome is
+horizontally inert too, for unrelated reasons) and discarded both
+`Step`s, so an unchanged `code_scroll_left` was the whole claim. It now
+asserts both targets exactly and an empty transcript on the minimap
+leg. **The contrast leg cannot use the transcript** — a horizontal
+document scroll is local and silent, so both legs' transcripts are
+empty and only `code_scroll_left` separates them.
+
+### Two gate gaps this lane found, neither fixed here
+
+Both are shared infrastructure and belong in their own lane; recorded so
+the next lane does not rediscover them at review.
+
+- **`scripts/gate`'s clippy step runs DEFAULT FEATURES only**, so no
+  `#[cfg(feature = "crdt")]` code is ever linted locally. A
+  `clippy::match_same_arms` on the CRDT lane's new enumeration passed
+  five consecutive all-green gate runs and then redded `Test (crdt)`.
+- **NOTHING RUNS `cargo doc`** — not `scripts/gate`, not any `ci.yml`
+  job — so **broken intra-doc links are ungated across this
+  repository**. `git diff --check` cannot see them (they are
+  syntactically valid) and clippy does not read them. Found when
+  deleting a helper left a dangling `[`link`]` that review caught
+  instead. Running it by hand also surfaces a pre-existing unresolved
+  link, `MathNode` at `pmacs-gpu/src/math_layout.rs:314`.
+
+### `scripts/gate` refuses to run under `nohup`
+
+Not a red — a **refusal**, and worth recording because it looks like
+neither success nor failure. Launched with `nohup`, the gate printed
+
+```
+pmacs: SIGINT is ignored; run this command with SIGINT deliverable
+gate: REFUSING TO RUN (status=1 token=valid) --- no stage has run.
+```
+
+and exited in under a second. `nohup` leaves SIGINT ignored, and the
+gate declines to start in that state rather than run stages nobody can
+interrupt. **The guard is right**; the way it was hit is the lesson.
+Background the gate through the harness's own mechanism, not `nohup`.
+
+**The expensive half was the watch, not the refusal.** A monitor was
+armed on the output file filtering for step banners and test results —
+so a gate that never started produced exactly what a gate still running
+produces: nothing. Fifteen minutes of silence read as progress. The
+question to ask before arming any watch is *if this process died right
+now, would my filter emit anything?*, and here the answer was no.
+
+**A trailing `; echo` in the same launch also hid the exit code from
+the caller.** In
+`./scripts/gate … > log 2>&1; echo "exit=$?"`, `$?` is expanded before
+`echo` runs, so the text printed is the **gate's** status. The compound
+shell command itself, however, returns the later **echo's** status —
+normally zero — so the harness recorded exit 0 for a gate that failed
+at step 03. Preserve and re-emit the status explicitly, or read the
+gate's own summary line; do not treat the wrapper's status as the
+gate's.
+
+**A later attempt was terminated by the harness, not by a test red.**
+Run `20260902T124755Z-4122046` reached step `15-sweep`; that stage's log
+contains two compilation lines followed by `Terminated`, with **zero
+`test result:` lines**, and the gate reported `FAILED (exit 143)`.
+The preceding fourteen stages had run successfully, but the sweep had
+not executed a test. This is evidence that the harness's background
+lifetime expired, not evidence about the tree. A monitor must observe
+process exit as well as filtered gate output, and the launch mechanism
+must outlive the full gate.
+
+### A local false compile red from the shared target directory
+
+Kept here rather than in `docs/ci-red-signatures.md` because it is a
+**machine-local artifact-state hazard with no CI occurrence** — not
+because the registry cannot represent local reds. It plainly can: it
+carries many `local (Linux)` rows with precise invocation flavors, one
+of them (the `04-lib-crdt` pair) even flavored *"with sibling worktrees
+building concurrently."* This incident's truthful flavor would be
+**local, bare `cargo test -p pmacs-gpu`, globally shared target**, and a
+row could state it exactly. An earlier draft of this entry claimed the
+registry was for CI reds only and that a row would have to invent a job
+and flavor; that was false, and review caught it.
+
+What actually keeps it out is that the registry is live triage policy
+for judging a red *run*, and every occurrence of this one has been on
+this machine, from bypassing `scripts/gate`. **If it ever appears in
+CI, that is a new incident and belongs in the registry under the
+actual job and flavor that observed it** — not under this local
+flavor. This evidence neither predicts nor excludes such an
+occurrence. An earlier correction tried to keep that possibility open
+by pointing at `Swatinem/rust-cache@v2`, but that mechanism was not
+verified: the action's default does not cache workspace crates, and
+GitHub cache visibility is scoped rather than shared indiscriminately
+across branches. The unsupported mechanism is withdrawn instead of
+being replaced with the equally unverified claim that CI builds fresh.
+
+It has now fired **twice in this lane**.
+
+**Signature.** From `cargo test -p pmacs-gpu`, four errors against the
+bin `pmacs-gpu` test target:
+
+```
+error[E0433]: cannot find `columns` in `pmacs_protocol`
+     --> pmacs-gpu/src/main.rs:13291:21
+error: could not compile `pmacs-gpu` (bin "pmacs-gpu" test)
+       due to 4 previous errors
+```
+
+**FOUR occurrences now**, all local. The third (at `9cb610e`) gave the
+complete set of four sites, which the second's captured tail had cut to
+three: at that head they were `main.rs:9049`, `:13546`, `:14772` and
+`:14833` — every use of the module the 1b branch added in `9e54cd2`.
+The fourth (2026-09-02, mid-edit) hit the same four uses at
+`:9109`, `:13658`, `:14884` and `:14945`. **Line numbers drift as the
+file grows and are not part of the signature; the module path is**, and
+the count of four is stable across all of them.
+
+An earlier draft of this entry guessed the missing fourth site was
+`widest_display_columns`. The third occurrence shows that guess was
+right — and it was still right not to record it, because a signature
+that is *usually* right is one nobody can match against.
+
+**Why it is false.** Both times, the module was fully present:
+`pmacs-protocol/src/columns.rs` existed and matched HEAD, and
+`pub mod columns;` stood at `pmacs-protocol/src/lib.rs:40` in both the
+worktree and HEAD. Nothing was missing to find.
+
+**What it actually is.** `CARGO_TARGET_DIR` is exported globally on this
+machine — `/home/jeans/build/cargo-target`, one directory shared by
+every checkout — and `main` has no `columns` module at all (the sharing
+refactor is unmerged 1b work). A `pmacs-protocol` artifact built without
+the module therefore sits in the same target directory as the branch
+that needs it, and gets reused. The confirmed facts are the shared
+directory, the module's absence on `main`, and that the red cleared;
+which build deposited the stale artifact — the `main` checkout, or this
+worktree before `9e54cd2` — was not determined, and either has the same
+shape.
+
+**Control.** `touch pmacs-protocol/src/lib.rs` forces the rebuild and
+clears it. **But check before touching**: confirm `pub mod columns;` and
+`columns.rs` are actually present and match HEAD first, because the
+touch would just as happily paper over a real deletion, and this red is
+indistinguishable by eye from that one. The durable fix is not to touch
+at all but to run **`scripts/gate`**, whose per-worktree
+`CARGO_TARGET_DIR` is exactly this problem's remedy — see
+`docs/agent-handoff.md:2609`, which documents the general bare-cargo
+hazard and the environment variable's override of `build.target-dir`,
+but not this signature, its count, or its control.
+
+**The cost of misreading it.** It presents as a compile error naming a
+missing module, which reads as a real regression — a deleted file, a
+dropped `mod` line, a bad rebase. Both times the first instinct was to
+look for what had been removed. Nothing had been.
+
+### And one coverage gap in CI, which shaped B4's design
+
+**No non-Linux leg runs this crate's tests.** `cargo test -p pmacs-gpu`
+appears exactly once in `ci.yml`, in the Ubuntu-only `gpu-render` job;
+the macOS matrix tests the workspace default member only. B4's
+off-Linux contract would therefore have been asserted nowhere that
+executes. **Production still reads `cfg!(target_os = "linux")`**
+(`pmacs-gpu/src/main.rs:3450`); what became injectable is the
+**selection decision taken after** that target fact — `is_linux` is
+obtained from `cfg!` in a non-test build and from a test override
+otherwise, and `paste_source_for(is_linux)` is the part a row can drive
+both ways. Adding a macOS `pmacs-gpu` leg is the real fix and is not
+this lane's.
+
 ## CRDT identity-replace undo — MERGED as #246 (`78346de`)
 
 - **MERGED 2026-08-31T18:56:09Z** at approved head `093d677`, merge

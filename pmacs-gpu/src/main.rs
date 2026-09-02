@@ -46,13 +46,12 @@ use pmacs_protocol::{
     MAX_STATUSLINE_FACE_BYTES, MAX_STATUSLINE_PROVIDERS, MAX_STATUSLINE_SEGMENT_BYTES,
     MAX_STATUSLINE_TOTAL_TEXT_BYTES, MenuPromptRow, MinibufferRow, Modifiers,
     MouseButton as ProtocolMouseButton, MouseKind as ProtocolMouseKind, PointerKind,
-    SelectionSnapshot, StatuslineSegment, StyleSegment, StyleSpan, TAB_STOP_COLUMNS,
-    TEXT_INPUT_MIN_VERSION, TerminalFrame, UnderlineStyle,
+    SelectionSnapshot, StatuslineSegment, StyleSegment, StyleSpan, TEXT_INPUT_MIN_VERSION,
+    TerminalFrame, UnderlineStyle,
     cell::{Color as CellColor, Style as CellStyle},
     is_builtin_pair_char, is_modeline_face_name,
     panel::{PANEL_MIN_VERSION, PanelFrame, PanelFramePayload},
 };
-use unicode_width::UnicodeWidthChar;
 use wgpu::MultisampleState;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -724,6 +723,8 @@ fn main() {
     let mut app = App {
         mode,
         proxy: Some(proxy),
+        #[cfg(test)]
+        test_force_non_linux: false,
         state: None,
         attach_client,
         pending_events,
@@ -1587,6 +1588,15 @@ struct App {
     /// a non-Option in a borrow.
     proxy: Option<winit::event_loop::EventLoopProxy<AppEvent>>,
     state: Option<State>,
+    /// Test override for B4's platform decision: pretend this build is
+    /// not Linux, so a row can drive the inert branch on a Linux host.
+    ///
+    /// **Needed because no CI leg runs this crate's tests off Linux.**
+    /// Without it the off-Linux contract is asserted nowhere that
+    /// actually executes, and a call-site `unwrap_or(Clipboard)` passes
+    /// everything.
+    #[cfg(test)]
+    test_force_non_linux: bool,
     /// User events received before winit creates `state`. Managed attach
     /// starts its reader before `run_app`, so the initial snapshot may arrive
     /// before `resumed` on backends with a different callback order.
@@ -1626,6 +1636,12 @@ struct State {
     /// on a windowless `State`. Test-only.
     #[cfg(test)]
     render_calls: u64,
+    /// How many redraws production requested. Test-only: a headless
+    /// `State` has no [`Window`] to retain the request, so without this
+    /// counter a row can see viewport state change while missing that the
+    /// live event loop will remain asleep and never present it.
+    #[cfg(test)]
+    redraw_requests: std::cell::Cell<u64>,
     // `None` in the headless render-test path (F-014): a windowless State
     // that renders to an offscreen texture instead of a surface.
     window: Option<Arc<Window>>,
@@ -1869,6 +1885,16 @@ struct State {
     /// selection, until release. Never sends `Pointer` events —
     /// the viewport is frontend-owned.
     minimap_scrub_active: bool,
+    /// The icon last written to the window, so a per-motion call is a
+    /// comparison rather than a platform round-trip.
+    last_cursor_icon: Option<winit::window::CursorIcon>,
+    /// Stub selections for tests; see [`Self::set_test_selection`].
+    #[cfg(test)]
+    test_selections: HashMap<PasteSource, Vec<u8>>,
+    /// GUI Stage 1b B1: per-target, per-axis fractional wheel residual.
+    /// Sub-tick deltas are banked here instead of being rounded away
+    /// before routing knows where they were going.
+    wheel_residuals: WheelResiduals,
     /// Q#M7 — `Some(±1)` while a drag sits in the top/bottom edge
     /// band; `about_to_wait` ticks the viewport one line toward the
     /// pointer per [`EDGE_SCROLL_TICK`] and re-runs the drag
@@ -2107,6 +2133,147 @@ enum PointerSurface {
     PanelBackground,
     /// Not the band: the document, the terminal, the minimap, or the chrome.
     Elsewhere,
+}
+
+/// The six wheel targets GUI Stage 1b's B1 owns a residual for.
+///
+/// **`PointerSurface` cannot name these**, which is why this exists
+/// (framing §2a CORRECTION 5): that classifier resolves panel geometry
+/// only, and collapses the document, the terminal, the minimap and the
+/// chrome into a single `Elsewhere` — three of which B1 and B6 must
+/// keep apart.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WheelTarget {
+    /// A cell inside the band. Residual **per panel**, keyed by the
+    /// panel's buffer.
+    PanelCell { buffer: BufferId, coord: CellCoord },
+    /// The divider or the band's background. **The band owns the
+    /// pixel**, so both axes are consumed — and nothing is banked.
+    PanelChrome,
+    /// The terminal clip. Residual **per terminal**, keyed by buffer.
+    Terminal { buffer: BufferId, coord: CellCoord },
+    /// The minimap band. **Its own** residual (B6).
+    Minimap,
+    /// Document text. Shares its residual with [`WheelTarget::Chrome`].
+    Document,
+    /// Anything else outside the band: gutter, margins, status chrome.
+    /// **Shares the document's residual, deliberately** — a wheel that
+    /// strays onto the gutter mid-gesture must not lose the motion.
+    Chrome,
+}
+
+/// Which accumulator a [`WheelTarget`] banks into.
+///
+/// Two targets map to `Document` on purpose, and one target maps to
+/// nothing at all: panel chrome consumes without banking, because a
+/// residual it could share with a cell would let motion over an inert
+/// strip complete a tick the moment the pointer entered a live one —
+/// **a surface-switch jump manufactured by the accumulator itself**,
+/// which is exactly what B1 exists to forbid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+enum ResidualOwner {
+    /// R2's identity: two panels are two owners.
+    Panel(BufferId),
+    /// R3's identity: two terminals are two owners.
+    Terminal(BufferId),
+    /// R5: independent of the document's, though it moves the document.
+    Minimap,
+    /// R4: the document's, shared with chrome.
+    Document,
+}
+
+impl WheelTarget {
+    /// The accumulator this target banks into, or `None` when it banks
+    /// nowhere.
+    fn residual_owner(self) -> Option<ResidualOwner> {
+        match self {
+            Self::PanelCell { buffer, .. } => Some(ResidualOwner::Panel(buffer)),
+            Self::Terminal { buffer, .. } => Some(ResidualOwner::Terminal(buffer)),
+            Self::Minimap => Some(ResidualOwner::Minimap),
+            Self::Document | Self::Chrome => Some(ResidualOwner::Document),
+            Self::PanelChrome => None,
+        }
+    }
+}
+
+/// B1's per-owner, per-axis fractional wheel residual.
+///
+/// **The producer 1b adds.** Before this, `apply_wheel` rounded to
+/// whole lines and returned on zero *before* it knew where the delta
+/// was going, so every sub-tick motion bound for the panel or the
+/// terminal was discarded by a decision taken upstream of routing.
+///
+/// Identity has two halves. The first is the key: a panel residual is
+/// keyed to *that* panel, so a gesture that crosses from panel A to
+/// panel B does not spend A's bank on B (R2, and R3 for terminals).
+/// The second is **disposal** — a residual keyed to a surface that goes
+/// away must go away with it, or it is spent on whatever later takes
+/// that identity.
+///
+/// **Disposal is implemented at both teardowns and at accepted panel
+/// replacement.** The key alone cannot see a surface closed and REOPENED
+/// on the same buffer: the successor carries the same `BufferId`, so
+/// nothing distinguishes it from the surface the user was actually
+/// scrolling. `PanelFramePayload::Absent` clears the panel banks,
+/// accepted `Present`/`PresentMapped` identity replacements clear them
+/// without waiting for an `Absent`, and `exit_terminal_mode` clears the
+/// terminal ones.
+#[derive(Debug, Default)]
+struct WheelResiduals {
+    /// `(owner) -> (x, y)` in fractional ticks, each in `(-1.0, 1.0)`.
+    banks: HashMap<ResidualOwner, (f32, f32)>,
+}
+
+impl WheelResiduals {
+    /// Bank `(dx, dy)` fractional ticks for `owner` and return the whole
+    /// ticks that fall out, keeping the remainder.
+    ///
+    /// `trunc`, not `round`: rounding would spend a half-tick that was
+    /// never delivered and leave a negative remainder behind.
+    fn accumulate(&mut self, owner: ResidualOwner, dx: f32, dy: f32) -> (i64, i64) {
+        let bank = self.banks.entry(owner).or_insert((0.0, 0.0));
+        bank.0 += dx;
+        bank.1 += dy;
+        let ticks_x = bank.0.trunc();
+        let ticks_y = bank.1.trunc();
+        bank.0 -= ticks_x;
+        bank.1 -= ticks_y;
+        (ticks_x as i64, ticks_y as i64)
+    }
+
+    /// Drop the document's bank (shared with chrome) — R4's reset.
+    fn clear_document(&mut self) {
+        self.banks.remove(&ResidualOwner::Document);
+    }
+
+    /// Drop the minimap's bank — R5's reset, separate from R4's because
+    /// B6 gives the minimap its own accumulator and a single combined
+    /// clear would let one omission hide behind the other.
+    fn clear_minimap(&mut self) {
+        self.banks.remove(&ResidualOwner::Minimap);
+    }
+
+    /// Drop every panel bank. Panel chrome consumes both axes and must
+    /// leave nothing that could combine with cell input later, and a
+    /// panel that goes away takes its bank with it (B1's disposal).
+    fn clear_panels(&mut self) {
+        self.banks
+            .retain(|owner, _| !matches!(owner, ResidualOwner::Panel(_)));
+    }
+
+    /// Drop every terminal bank — the same disposal, for the surface
+    /// with the same problem. `Terminal(BufferId)` distinguishes
+    /// terminal A from terminal B, but not leaving a terminal and
+    /// re-entering **the same** one, where the bank's key is unchanged.
+    fn clear_terminals(&mut self) {
+        self.banks
+            .retain(|owner, _| !matches!(owner, ResidualOwner::Terminal(_)));
+    }
+
+    #[cfg(test)]
+    fn bank_of(&self, owner: ResidualOwner) -> Option<(f32, f32)> {
+        self.banks.get(&owner).copied()
+    }
 }
 
 /// A live divider drag (Q#BP15a, parent acceptance 47).
@@ -2869,6 +3036,11 @@ impl App {
         // highlight; send a hover when the item under the pointer
         // changes from the daemon's current active row.
         if state.menu.is_some() {
+            // No icon application here, deliberately. The menu's icon is
+            // settled when the menu OPENS (`MenuPrompt`), and motion
+            // inside an open menu changes no ownership — a call here
+            // would be a second writer that no row could distinguish
+            // from the first.
             let hit = state.menu_hit(x, y);
             let active = state.menu.as_ref().and_then(|m| m.active);
             if let Some((row, true)) = hit
@@ -2888,9 +3060,15 @@ impl App {
             return;
         }
         let surface = state.classify_pointer_surface(x as f32, y as f32);
-        if state.set_panel_divider_hover(surface == PointerSurface::PanelDivider) {
-            state.apply_panel_cursor_icon();
-        }
+        state.set_panel_divider_hover(surface == PointerSurface::PanelDivider);
+        // **Applied on every motion, not only when divider hover flips.**
+        // B5's I-beam changes as the pointer crosses the gutter or the
+        // text's right edge, neither of which touches `hover_divider`;
+        // gating on that flag would leave the icon stale for exactly the
+        // transitions B5 is about. `apply_panel_cursor_icon` writes only
+        // when the icon actually changed, so this costs no extra
+        // `set_cursor` calls.
+        state.apply_panel_cursor_icon();
         match surface {
             PointerSurface::PanelDivider | PointerSurface::PanelBackground => return,
             PointerSurface::PanelCell(coord) => {
@@ -3242,73 +3420,189 @@ impl App {
         }
     }
 
+    /// Resolve a pointer position to the wheel target that owns it.
+    ///
+    /// **This runs BEFORE quantization**, which is the whole point:
+    /// §2a CORRECTION 5 measured that rounding and the `lines == 0`
+    /// return happened upstream of routing, so a sub-tick delta bound
+    /// for the panel or the terminal was discarded before anything knew
+    /// where it was going.
+    ///
+    /// `Chrome` is the fallthrough rather than `Document` so the
+    /// enumeration stays total: every pixel outside the band is one of
+    /// terminal, minimap, document or chrome, and the first three are
+    /// each tested explicitly.
+    fn classify_wheel_target(&mut self, x: f64, y: f64) -> WheelTarget {
+        match self
+            .state
+            .as_ref()
+            .map(|s| s.classify_pointer_surface(x as f32, y as f32))
+        {
+            Some(PointerSurface::PanelCell(_)) => {
+                if let Some((_, _, buffer, coord)) = self.panel_pointer_hit(x, y) {
+                    return WheelTarget::PanelCell { buffer, coord };
+                }
+                // The band owns the pixel even when it maps to no cell.
+                return WheelTarget::PanelChrome;
+            }
+            Some(PointerSurface::PanelDivider | PointerSurface::PanelBackground) => {
+                return WheelTarget::PanelChrome;
+            }
+            Some(PointerSurface::Elsewhere) | None => {}
+        }
+        if let Some((buffer, coord)) = self.terminal_pointer_hit(x, y) {
+            return WheelTarget::Terminal { buffer, coord };
+        }
+        let Some(state) = self.state.as_mut() else {
+            return WheelTarget::Chrome;
+        };
+        if state.in_minimap_band(x, y) {
+            return WheelTarget::Minimap;
+        }
+        if state.hit_test_source_byte(x, y).is_some() {
+            return WheelTarget::Document;
+        }
+        WheelTarget::Chrome
+    }
+
+    /// Perform [`PointerRoute::MiddlePress`] — GUI Stage 1b B4.
+    ///
+    /// Reads the selection [`paste_source_for`] names for this platform
+    /// and ships it as a `Paste`, the same wire operation Ctrl-V uses.
+    /// The daemon inserts it; this frontend never edits the document
+    /// itself.
+    fn apply_middle_press(&mut self) {
+        #[cfg(test)]
+        let is_linux = !self.test_force_non_linux;
+        #[cfg(not(test))]
+        let is_linux = cfg!(target_os = "linux");
+        let Some(source) = paste_source_for(is_linux) else {
+            return;
+        };
+        let bytes = self
+            .state
+            .as_mut()
+            .and_then(|state| state.read_os_selection(source));
+        if let Some(bytes) = bytes
+            && !bytes.is_empty()
+            && let Some(client) = self.attach_client.as_ref()
+            && let Err(e) = client.send_paste(bytes)
+        {
+            eprintln!("pmacs-gpu: middle-click send_paste failed: {e}");
+        }
+    }
+
     /// Perform [`PointerRoute::Wheel`].
+    ///
+    /// **GUI Stage 1b B1 reorders this pipeline.** It used to round to
+    /// whole lines and return on zero *before* consulting the pointer,
+    /// so a sub-tick delta bound for the panel or the terminal was
+    /// discarded by a decision taken upstream of routing. The order is
+    /// now: classify the target, bank the fractional delta against
+    /// **that target's** accumulator, and route only the whole ticks
+    /// that fall out.
     #[allow(clippy::too_many_lines)] // one linear gesture pipeline; splitting hides the order.
     fn apply_wheel(&mut self, delta: MouseScrollDelta) {
-        let Some(state) = self.state.as_mut() else {
+        let Some(state) = self.state.as_ref() else {
             return;
         };
-        // Wheel scroll is local-only: the GPU owns the
-        // viewport. Positive winit y = scroll up = smaller
-        // scroll_top.
-        let lines = match delta {
-            winit::event::MouseScrollDelta::LineDelta(_, y) => {
-                (-y * WHEEL_LINES_PER_TICK).round() as i64
-            }
-            winit::event::MouseScrollDelta::PixelDelta(p) => {
-                (-(p.y as f32) / state.fm.code_line_height()).round() as i64
-            }
-        };
-        if lines == 0 {
-            return;
-        }
-        // Bottom panel Stage 2B-3 — a wheel tick over the band scrolls
-        // the PANEL's window, which is daemon-side state, so it
-        // crosses the wire instead of moving this frontend's local
-        // document `scroll_top`. Falling through would scroll the
-        // document while the pointer is inside the panel.
-        if let Some((x, y)) = state.pointer_pos
-            && matches!(
-                state.classify_pointer_surface(x as f32, y as f32),
-                PointerSurface::PanelCell(_)
-            )
-        {
-            let mods = translate_mods(self.modifiers);
-            let kind = if lines < 0 {
-                ProtocolMouseKind::ScrollUp
-            } else {
-                ProtocolMouseKind::ScrollDown
-            };
-            self.send_panel_pointer_at(x, y, kind, mods);
-            return;
-        }
-        let Some(state) = self.state.as_mut() else {
-            return;
-        };
-        // Vterm Stage 3 — the terminal's scrollback belongs to
-        // the daemon-side view, not to this frontend's local
-        // scroll, so a wheel tick crosses the wire as a
-        // terminal gesture instead of moving `scroll_top`.
-        if state.terminal.is_some() {
-            if let Some((x, y)) = state.pointer_pos
-                && let Some((buffer_id, coord)) = self.terminal_pointer_hit(x, y)
-            {
-                let mods = translate_mods(self.modifiers);
-                let kind = if lines < 0 {
-                    ProtocolMouseKind::ScrollUp
+        // **Fractional deltas in NOTCHES, not lines or columns.** The
+        // notch is the unit that survives the wire: a receiver applies
+        // its own per-notch step (`SCROLL_LINES`), so banking in lines
+        // here would apply the step twice — one notch would move a
+        // panel nine lines while the document moved three. The step is
+        // applied exactly once, at the point of effect; the wire carries
+        // notches.
+        //
+        // Positive winit y = scroll up = smaller scroll_top, hence the
+        // negation.
+        let notch_px_y = state.fm.code_line_height() * WHEEL_LINES_PER_TICK;
+        let notch_px_x = state.mono_advance() * WHEEL_COLUMNS_PER_TICK;
+        let (dx, dy) = match delta {
+            winit::event::MouseScrollDelta::LineDelta(x, y) => (x, -y),
+            winit::event::MouseScrollDelta::PixelDelta(p) => (
+                if notch_px_x > 0.0 {
+                    p.x as f32 / notch_px_x
                 } else {
-                    ProtocolMouseKind::ScrollDown
-                };
-                self.send_terminal_pointer(buffer_id, coord, kind, mods);
+                    0.0
+                },
+                if notch_px_y > 0.0 {
+                    -(p.y as f32) / notch_px_y
+                } else {
+                    0.0
+                },
+            ),
+        };
+        // No pointer position yet — a wheel before the first cursor
+        // motion. The document is the target, which is what this path
+        // did before 1b; dropping the input instead would be a
+        // regression B1 never asked for.
+        let (target, x, y) = match state.pointer_pos {
+            Some((x, y)) => (self.classify_wheel_target(x, y), x, y),
+            None => (WheelTarget::Document, 0.0, 0.0),
+        };
+
+        // The band owns the pixel: consume both axes and bank nothing.
+        // Panel banks are cleared so this motion can never combine with
+        // cell input later, which is the surface-switch jump B1 forbids.
+        if matches!(target, WheelTarget::PanelChrome) {
+            if let Some(state) = self.state.as_mut() {
+                state.wheel_residuals.clear_panels();
             }
             return;
         }
-        let vp = state.scroll_by_lines(lines);
-        if let Some(vp) = vp
-            && let Some(client) = self.attach_client.as_ref()
-            && let Err(e) = client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
-        {
-            eprintln!("pmacs-gpu: wheel send_viewport failed: {e}");
+        let Some(owner) = target.residual_owner() else {
+            return;
+        };
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        let (ticks_x, ticks_y) = state.wheel_residuals.accumulate(owner, dx, dy);
+        if ticks_x == 0 && ticks_y == 0 {
+            return;
+        }
+        let mods = translate_mods(self.modifiers);
+        match target {
+            WheelTarget::PanelChrome => unreachable!("consumed above"),
+            WheelTarget::PanelCell { .. } => {
+                for kind in wheel_kinds(ticks_x, ticks_y) {
+                    self.send_panel_pointer_at(x, y, kind, mods);
+                }
+            }
+            WheelTarget::Terminal { buffer, coord } => {
+                for kind in wheel_kinds(ticks_x, ticks_y) {
+                    self.send_terminal_pointer(buffer, coord, kind, mods);
+                }
+            }
+            WheelTarget::Minimap | WheelTarget::Document | WheelTarget::Chrome => {
+                // The local step, applied exactly once: notches become
+                // lines here and nowhere else.
+                if ticks_y != 0 {
+                    let lines = ticks_y * WHEEL_LINES_PER_TICK as i64;
+                    let vp = self
+                        .state
+                        .as_mut()
+                        .and_then(|state| state.scroll_by_lines(lines));
+                    if let Some(vp) = vp
+                        && let Some(client) = self.attach_client.as_ref()
+                        && let Err(e) =
+                            client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+                    {
+                        eprintln!("pmacs-gpu: wheel send_viewport failed: {e}");
+                    }
+                }
+                // **The minimap's horizontal axis is INERT** (§2a's
+                // enumeration rules it so). It banks vertically like any
+                // other target — B6 gives it its own accumulator — but a
+                // horizontal notch over the minimap must not scroll the
+                // document sideways.
+                if ticks_x != 0
+                    && !matches!(target, WheelTarget::Minimap)
+                    && let Some(state) = self.state.as_mut()
+                {
+                    state.scroll_by_columns(ticks_x * WHEEL_COLUMNS_PER_TICK as i64);
+                }
+            }
         }
     }
 
@@ -3353,6 +3647,7 @@ impl App {
             // today nothing to do: a key-up the keyboard family claimed
             // and dropped, a button the pointer family has no semantics
             // for, and an event no family claims at all.
+            Route::Pointer(PointerRoute::MiddlePress) => self.apply_middle_press(),
             Route::Keyboard {
                 action: KeyAction::Release,
                 ..
@@ -3794,12 +4089,16 @@ enum PointerRoute {
     /// opens on the press, so the matching release is deliberately
     /// nothing — see `UnusedButton`.
     RightPress,
-    /// A `MouseInput` this frontend has no semantics for: the right
-    /// button's release, and every middle / back / forward / other
-    /// button in either state. **Claimed by the pointer family and
-    /// dropped**, exactly as it behaved when it fell through to the
-    /// wildcard. Stage 1b's B4 gives the middle button a meaning
-    /// (PRIMARY-selection paste on Linux) and lands here.
+    /// `MouseInput` **pressing** the middle button — GUI Stage 1b's
+    /// B4. On Linux this pastes the **PRIMARY selection**, which is the
+    /// platform convention and a different selection from the one
+    /// Ctrl-V reads. The release is deliberately nothing, like the
+    /// right button's.
+    MiddlePress,
+    /// A `MouseInput` this frontend has no semantics for: the right and
+    /// middle buttons' releases, and every back / forward / other button
+    /// in either state. **Claimed by the pointer family and dropped**,
+    /// exactly as it behaved when it fell through to the wildcard.
     UnusedButton,
     /// `MouseWheel`. The delta is carried raw: converting it to lines
     /// needs the code line height, which is `State`'s to know.
@@ -3817,6 +4116,7 @@ fn route_pointer(event: &WindowEvent) -> Option<PointerRoute> {
         WindowEvent::MouseInput { state, button, .. } => Some(match (button, state) {
             (MouseButton::Left, _) => PointerRoute::Left(*state),
             (MouseButton::Right, ElementState::Pressed) => PointerRoute::RightPress,
+            (MouseButton::Middle, ElementState::Pressed) => PointerRoute::MiddlePress,
             _ => PointerRoute::UnusedButton,
         }),
         WindowEvent::MouseWheel { delta, .. } => Some(PointerRoute::Wheel(*delta)),
@@ -3953,6 +4253,20 @@ impl EffectHarness {
     /// failure; without it the harness still panics rather than skips,
     /// because these rows are the whole of P2.
     fn new() -> Self {
+        // A document tall enough to scroll. A two-line fixture made the
+        // wheel row pass vacuously: `scroll_by_lines` returns `None`
+        // when there is nothing below the fold, so the row asserted
+        // "every outbound event is a Viewport" over an EMPTY transcript.
+        // Mutation M22 surfaced the first half of that and this fixture
+        // is the second.
+        Self::with_document(&"line\n".repeat(200))
+    }
+
+    /// The same harness over a caller-chosen document, for rows whose
+    /// claim depends on the text's shape — B6's horizontal contrast
+    /// needs lines wider than the viewport, which the default fixture's
+    /// four columns can never provide.
+    fn with_document(document: &str) -> Self {
         let (client_stream, mut daemon) =
             std::os::unix::net::UnixStream::pair().expect("socketpair");
 
@@ -3974,14 +4288,7 @@ impl EffectHarness {
             .set_read_timeout(Some(Self::READ_CEILING))
             .expect("arm the outbound read ceiling");
 
-        // A document tall enough to scroll. A two-line fixture made the
-        // wheel row pass vacuously: `scroll_by_lines` returns `None`
-        // when there is nothing below the fold, so the row asserted
-        // "every outbound event is a Viewport" over an EMPTY transcript.
-        // Mutation M22 surfaced the first half of that and this fixture
-        // is the second.
-        let document = "line\n".repeat(200);
-        let state = State::new_headless(640, 480, &document);
+        let state = State::new_headless(640, 480, document);
         assert!(
             state.is_some(),
             "no wgpu adapter: the 1-pre effect rows are P2's only witness and must not be skipped"
@@ -3993,6 +4300,8 @@ impl EffectHarness {
                     socket: PathBuf::from("/nonexistent-harness-socket"),
                 },
                 proxy: None,
+                #[cfg(test)]
+                test_force_non_linux: false,
                 state,
                 pending_events: Vec::new(),
                 attach_client: Some(client),
@@ -4385,7 +4694,6 @@ mod input_routing_tests {
     #[test]
     fn a_button_without_semantics_is_claimed_and_dropped() {
         for button in [
-            MouseButton::Middle,
             MouseButton::Back,
             MouseButton::Forward,
             MouseButton::Other(9),
@@ -4399,6 +4707,14 @@ mod input_routing_tests {
                 );
             }
         }
+        // **The middle button is no longer semantics-free**: GUI Stage
+        // 1b's B4 gives its PRESS a meaning. Its RELEASE still has none,
+        // so it stays in this row rather than leaving it.
+        assert_eq!(
+            route_one(&mouse_input(ElementState::Released, MouseButton::Middle)),
+            Route::Pointer(PointerRoute::UnusedButton),
+            "a middle release remains nothing, like the right button's"
+        );
     }
 
     /// P1 — the wheel delta is carried **raw**. Converting it to lines
@@ -4690,6 +5006,499 @@ mod input_routing_tests {
         );
     }
 
+    /// A pixel inside the minimap band, and one inside the document
+    /// text. Both are asserted by their rows before use, so a fixture
+    /// whose geometry drifts fails loudly instead of quietly measuring
+    /// the wrong surface.
+    fn minimap_probe(h: &EffectHarness) -> (f64, f64) {
+        let state = h.app.state.as_ref().expect("harness state");
+        let left = minimap_left(state.config.width).expect("the fixture has a minimap band");
+        (f64::from(left + 2.0), f64::from(MINIMAP_TOP + 4.0))
+    }
+
+    fn document_probe(h: &EffectHarness) -> (f64, f64) {
+        let state = h.app.state.as_ref().expect("harness state");
+        (
+            f64::from(state.text_left() + 8.0),
+            f64::from(TEXT_TOP + 4.0),
+        )
+    }
+
+    fn move_pointer(h: &mut EffectHarness, (x, y): (f64, f64)) {
+        h.feed(&WindowEvent::CursorMoved {
+            device_id: DeviceId::dummy(),
+            position: PhysicalPosition::new(x, y),
+        });
+    }
+
+    fn wheel(dx: f32, dy: f32) -> WindowEvent {
+        WindowEvent::MouseWheel {
+            device_id: DeviceId::dummy(),
+            delta: MouseScrollDelta::LineDelta(dx, -dy),
+            phase: TouchPhase::Moved,
+        }
+    }
+
+    /// B6 — a wheel over the **minimap** scrolls the **document
+    /// viewport**, the same effect a wheel over the text has.
+    ///
+    /// The minimap is not a scrollable surface of its own: it is a
+    /// picture of the document, and turning the wheel over a picture of
+    /// the document moves the document. Click and drag over it remain
+    /// scrub, which is a different gesture on the same pixels.
+    ///
+    /// This is the routing half of B6. It reaches `apply_wheel` through
+    /// `dispatch_window_event`, so the classifier, the accumulator and
+    /// the local step are all production code here.
+    ///
+    /// *Mutation: give `WheelTarget::Minimap` its own inert arm ahead of
+    /// the one that applies the local line step → this row. (Deleting it
+    /// from that arm outright would not compile, so the mutation run is
+    /// the compiling equivalent: the minimap reaches no line step.)*
+    #[test]
+    fn b6_a_wheel_over_the_minimap_scrolls_the_document_viewport() {
+        let mut h = EffectHarness::new();
+        let probe = minimap_probe(&h);
+        move_pointer(&mut h, probe);
+        assert_eq!(
+            h.app.classify_wheel_target(probe.0, probe.1),
+            WheelTarget::Minimap,
+            "setup: the probe pixel must be minimap, or this row measures \
+             the document twice"
+        );
+
+        let step = h.feed(&wheel(0.0, 1.0));
+        assert_eq!(
+            step.local,
+            vec![LocalEffect::Scroll {
+                top: WHEEL_LINES_PER_TICK as usize
+            }],
+            "one notch over the minimap moves the document one notch"
+        );
+        assert!(
+            !step.outbound.is_empty(),
+            "a minimap wheel must re-declare the viewport, like any other \
+             document scroll"
+        );
+        assert!(
+            step.outbound
+                .iter()
+                .all(|e| matches!(e, pmacs_protocol::FrontendEvent::Viewport { .. })),
+            "got {:?}",
+            step.outbound
+        );
+    }
+
+    /// L5, GPU leg — a horizontal wheel moves the **viewport only**.
+    ///
+    /// Q#S1-11 ruled (B): carrying point would be a new wire operation,
+    /// which 1b's non-protocol scope forbids. The TUI leg asserts point
+    /// and selection directly; here the stronger statement is available
+    /// — **the wire stays silent**, because on this frontend moving
+    /// point means telling the daemon.
+    ///
+    /// *Mutation: have the horizontal leg send a cursor event → this
+    /// row.*
+    #[test]
+    fn l5_a_horizontal_wheel_on_the_gpu_moves_neither_point_nor_the_wire() {
+        let mut h = EffectHarness::with_document(&format!("{}\n", "wide ".repeat(120)).repeat(200));
+        {
+            let buffer_id = h
+                .app
+                .state
+                .as_ref()
+                .expect("harness state")
+                .current_buffer_id
+                .expect("the harness stands in a buffer");
+            let state = h.app.state.as_mut().expect("harness state");
+            let _ = state.apply_attach_message(InstanceMessage::LineWrapFacts {
+                buffer_id,
+                wrap: false,
+            });
+            assert_eq!(state.buffer.wrap(), Wrap::None, "setup: wrap is off");
+        }
+        let document = document_probe(&h);
+        move_pointer(&mut h, document);
+        assert_eq!(
+            h.app.classify_wheel_target(document.0, document.1),
+            WheelTarget::Document,
+            "setup: document text"
+        );
+        let cursor_before = h.app.state.as_ref().expect("state").own_cursor;
+
+        let step = h.feed(&wheel(1.0, 0.0));
+
+        assert!(
+            h.app.state.as_ref().expect("state").code_scroll_left > 0.0,
+            "setup: the notch must actually have scrolled, or this row \
+             passes by doing nothing"
+        );
+        assert_eq!(
+            h.app.state.as_ref().expect("state").own_cursor,
+            cursor_before,
+            "the horizontal wheel is a viewport gesture"
+        );
+        assert!(
+            step.outbound.is_empty(),
+            "and it tells the daemon nothing: moving point here would be \
+             a wire operation, got {:?}",
+            step.outbound
+        );
+    }
+
+    /// B2, GPU presentation half — changing the frontend-local horizontal
+    /// origin requests the frame that makes the change visible.
+    ///
+    /// The event loop sleeps in `ControlFlow::Wait`, and this axis sends no
+    /// viewport message that could provoke a daemon frame. Inspecting
+    /// `code_scroll_left` alone therefore cannot distinguish a working
+    /// gesture from one whose new origin remains invisible until some
+    /// unrelated repaint.
+    ///
+    /// *Mutation: omit `request_redraw()` from `scroll_by_columns` → this
+    /// row. The origin assertion still passes, proving the redraw counter is
+    /// the discriminator rather than corroboration.*
+    #[test]
+    fn b2_a_gpu_horizontal_wheel_requests_the_frame_that_displays_it() {
+        let mut h = EffectHarness::with_document(&format!("{}\n", "wide ".repeat(120)).repeat(200));
+        {
+            let buffer_id = h
+                .app
+                .state
+                .as_ref()
+                .expect("harness state")
+                .current_buffer_id
+                .expect("the harness stands in a buffer");
+            let state = h.app.state.as_mut().expect("harness state");
+            let _ = state.apply_attach_message(InstanceMessage::LineWrapFacts {
+                buffer_id,
+                wrap: false,
+            });
+            assert_eq!(state.buffer.wrap(), Wrap::None, "setup: wrap is off");
+        }
+        let document = document_probe(&h);
+        move_pointer(&mut h, document);
+        assert_eq!(
+            h.app.classify_wheel_target(document.0, document.1),
+            WheelTarget::Document,
+            "setup: document text"
+        );
+        let state = h.app.state.as_ref().expect("state");
+        let left_before = state.code_scroll_left;
+        let redraws_before = state.redraw_requests.get();
+
+        let step = h.feed(&wheel(1.0, 0.0));
+
+        let state = h.app.state.as_ref().expect("state");
+        assert!(
+            state.code_scroll_left > left_before,
+            "setup: the wheel must change the origin, or a redraw is not owed"
+        );
+        assert_eq!(
+            state.redraw_requests.get(),
+            redraws_before + 1,
+            "the local-only origin change must wake the waiting event loop"
+        );
+        assert!(
+            step.outbound.is_empty(),
+            "the redraw is locally requested, not induced by wire traffic: {:?}",
+            step.outbound
+        );
+    }
+
+    /// Replace the harness's document with a fresh buffer, through the
+    /// production `BufferSnapshot` receiver.
+    fn replace_the_buffer(h: &mut EffectHarness) {
+        let text = "line\n".repeat(200);
+        let doc = loro::LoroDoc::new();
+        doc.get_text(LORO_TEXT_CONTAINER)
+            .insert(0, &text)
+            .expect("insert snapshot text");
+        let state = h.app.state.as_mut().expect("harness state");
+        let _ = state.apply_attach_message(InstanceMessage::BufferSnapshot {
+            buffer_id: BufferId::next(),
+            crdt_snapshot: doc.export(loro::ExportMode::Snapshot).expect("export"),
+        });
+    }
+
+    /// R4 — **the document's residual does not survive a buffer
+    /// replacement.**
+    ///
+    /// The bank is viewport state about the document being shown. Left
+    /// standing across a replacement it completes a notch in the
+    /// successor that the user began in its predecessor — a jump with
+    /// nothing on screen to explain it. The chrome residual is the same
+    /// bank (chrome's owner IS the document's), so one reset serves
+    /// both.
+    ///
+    /// *Mutation: omit `clear_document()` from the snapshot arm → this
+    /// row.*
+    #[test]
+    fn r4_a_buffer_replacement_drops_the_documents_wheel_residual() {
+        let mut h = EffectHarness::new();
+        let document = document_probe(&h);
+        move_pointer(&mut h, document);
+        assert_eq!(
+            h.app.classify_wheel_target(document.0, document.1),
+            WheelTarget::Document,
+            "setup: document text"
+        );
+
+        let step = h.feed(&wheel(0.0, 0.6));
+        assert!(
+            step.local.is_empty(),
+            "setup: 0.6 of a notch banks and does nothing yet: {:?}",
+            step.local
+        );
+
+        replace_the_buffer(&mut h);
+        move_pointer(&mut h, document);
+
+        let step = h.feed(&wheel(0.0, 0.6));
+        assert!(
+            step.local.is_empty(),
+            "the successor starts from zero: a notch begun in the \
+             previous document must not complete in this one, got {:?}",
+            step.local
+        );
+
+        // And the successor's own bank still works, so the row is not
+        // passing by having broken accumulation outright.
+        let step = h.feed(&wheel(0.0, 0.6));
+        assert_eq!(
+            step.local,
+            vec![LocalEffect::Scroll {
+                top: WHEEL_LINES_PER_TICK as usize
+            }],
+            "0.6 + 0.6 within the successor is one notch"
+        );
+    }
+
+    /// R5 — **the minimap's residual is dropped by the same
+    /// replacement, and by its own clear.**
+    ///
+    /// B6 gives the minimap an accumulator independent of the
+    /// document's, so it needs its own reset. Two clears rather than
+    /// one combined call, deliberately: a single "forgot to reset"
+    /// would bite both legs and prove neither field is individually
+    /// covered.
+    ///
+    /// *Mutation: omit `clear_minimap()` from the snapshot arm → this
+    /// row, and not R4.*
+    #[test]
+    fn r5_a_buffer_replacement_drops_the_minimaps_wheel_residual() {
+        let mut h = EffectHarness::new();
+        let minimap = minimap_probe(&h);
+        move_pointer(&mut h, minimap);
+        assert_eq!(
+            h.app.classify_wheel_target(minimap.0, minimap.1),
+            WheelTarget::Minimap,
+            "setup: the minimap band"
+        );
+
+        let step = h.feed(&wheel(0.0, 0.6));
+        assert!(
+            step.local.is_empty(),
+            "setup: 0.6 banks and does nothing yet: {:?}",
+            step.local
+        );
+
+        replace_the_buffer(&mut h);
+        let minimap = minimap_probe(&h);
+        move_pointer(&mut h, minimap);
+        assert_eq!(
+            h.app.classify_wheel_target(minimap.0, minimap.1),
+            WheelTarget::Minimap,
+            "setup: still the minimap after the replacement"
+        );
+
+        let step = h.feed(&wheel(0.0, 0.6));
+        assert!(
+            step.local.is_empty(),
+            "the minimap's bank starts from zero in the successor too, \
+             got {:?}",
+            step.local
+        );
+
+        // And the successor's minimap bank still accumulates, so this
+        // row cannot pass by the accumulator simply being broken —
+        // which every "nothing happened" assertion above would accept.
+        let step = h.feed(&wheel(0.0, 0.6));
+        assert_eq!(
+            step.local,
+            vec![LocalEffect::Scroll {
+                top: WHEEL_LINES_PER_TICK as usize
+            }],
+            "0.6 + 0.6 over the successor's minimap is one notch of \
+             DOCUMENT scroll, which is what a minimap wheel moves"
+        );
+    }
+
+    /// B6 — the minimap banks into **its own** accumulator, so a
+    /// part-notch over it cannot complete a notch over the document.
+    ///
+    /// This is the surface-switch case B1 exists to forbid, and the
+    /// minimap is its sharpest instance precisely *because* both
+    /// surfaces move the same viewport: sharing one bank would look
+    /// harmless and produce a jump the user's last gesture does not
+    /// explain. Two part-notches on different surfaces must stay two
+    /// part-notches.
+    ///
+    /// The third step proves the row is not passing by measuring
+    /// nothing: the same document bank, given the rest of its notch,
+    /// does fire.
+    ///
+    /// *Mutation: map `WheelTarget::Minimap` to `ResidualOwner::Document`
+    /// → this row, at the second step.*
+    #[test]
+    fn b6_a_part_notch_over_the_minimap_does_not_complete_one_over_the_document() {
+        let mut h = EffectHarness::new();
+        let minimap = minimap_probe(&h);
+        let document = document_probe(&h);
+
+        move_pointer(&mut h, minimap);
+        assert_eq!(
+            h.app.classify_wheel_target(minimap.0, minimap.1),
+            WheelTarget::Minimap,
+            "setup: minimap pixel"
+        );
+        let step = h.feed(&wheel(0.0, 0.6));
+        assert!(
+            step.local.is_empty() && step.outbound.is_empty(),
+            "0.6 of a notch is not a notch: {:?} {:?}",
+            step.local,
+            step.outbound
+        );
+
+        move_pointer(&mut h, document);
+        assert_eq!(
+            h.app.classify_wheel_target(document.0, document.1),
+            WheelTarget::Document,
+            "setup: document pixel"
+        );
+        let step = h.feed(&wheel(0.0, 0.6));
+        assert!(
+            step.local.is_empty() && step.outbound.is_empty(),
+            "the minimap's 0.6 must not have been waiting in the \
+             document's bank: {:?} {:?}",
+            step.local,
+            step.outbound
+        );
+
+        // The document's own bank still works: 0.6 + 0.6 completes it.
+        let step = h.feed(&wheel(0.0, 0.6));
+        assert_eq!(
+            step.local,
+            vec![LocalEffect::Scroll {
+                top: WHEEL_LINES_PER_TICK as usize
+            }],
+            "the document's accumulator must still accumulate, or the \
+             step above proves nothing"
+        );
+    }
+
+    /// B6 — the minimap's **horizontal** axis is inert.
+    ///
+    /// It banks vertically like any other target, but a sideways notch
+    /// over a fixed-width picture of the document has nothing to mean,
+    /// so §2a's enumeration rules it inert. The contrast is the point:
+    /// the identical event over document text does scroll sideways.
+    ///
+    /// *Mutation: drop the `!matches!(target, WheelTarget::Minimap)`
+    /// guard from the horizontal leg → this row.*
+    #[test]
+    fn b6_a_horizontal_wheel_over_the_minimap_is_inert() {
+        // Lines far wider than the viewport, so the saturated right
+        // bound leaves somewhere to scroll. The default fixture's four
+        // columns pin `max_left` to zero, which would make the contrast
+        // below vacuous — the setup assertion caught exactly that.
+        let mut h = EffectHarness::with_document(&format!("{}\n", "wide ".repeat(120)).repeat(200));
+        // Wrapping is on by default, and `scroll_by_columns` pins the
+        // left edge to zero while it is — so with wrap left alone, BOTH
+        // legs below would sit still and the row would report inertness
+        // it never tested. Turned off through the daemon message that
+        // production uses.
+        {
+            let buffer_id = h
+                .app
+                .state
+                .as_ref()
+                .expect("harness state")
+                .current_buffer_id
+                .expect("the harness stands in a buffer");
+            let state = h.app.state.as_mut().expect("harness state");
+            let _ = state.apply_attach_message(InstanceMessage::LineWrapFacts {
+                buffer_id,
+                wrap: false,
+            });
+            assert_eq!(
+                state.buffer.wrap(),
+                Wrap::None,
+                "setup: the wrap-off message must have landed on this buffer"
+            );
+        }
+        let minimap = minimap_probe(&h);
+        let document = document_probe(&h);
+
+        let left_of = |h: &EffectHarness| {
+            h.app
+                .state
+                .as_ref()
+                .expect("harness state")
+                .code_scroll_left
+        };
+        move_pointer(&mut h, minimap);
+        assert_eq!(
+            h.app.classify_wheel_target(minimap.0, minimap.1),
+            WheelTarget::Minimap,
+            "setup: the probe must be the minimap. Several other targets \
+             are horizontally inert for their own reasons — panel chrome \
+             banks nowhere at all — so a probe that drifted onto one \
+             would satisfy every assertion below without testing B6"
+        );
+        let before = left_of(&h);
+        let step = h.feed(&wheel(1.0, 0.0));
+        // **Inert, not merely unmoved.** An unchanged left edge alone
+        // would still pass if the notch had produced a local effect or
+        // put an event on the wire, so the transcript is asserted empty
+        // beside it.
+        assert!(
+            step.local.is_empty() && step.outbound.is_empty(),
+            "a horizontal notch over the minimap must do nothing at all: \
+             {:?} {:?}",
+            step.local,
+            step.outbound
+        );
+        // Unchanged, not merely small: any real horizontal scroll is at
+        // least one character advance, which is orders above this.
+        assert!(
+            (left_of(&h) - before).abs() < f32::EPSILON,
+            "a horizontal notch over the minimap must not move the \
+             document sideways: {before} -> {}",
+            left_of(&h)
+        );
+
+        // The same event over text, to show the delta was real and the
+        // row is not asserting that horizontal wheels do nothing at all.
+        //
+        // Its discriminator is the left edge, NOT the transcript: a
+        // horizontal document scroll is local and silent, so this leg's
+        // transcript is empty too. Only `code_scroll_left` separates the
+        // two surfaces.
+        move_pointer(&mut h, document);
+        assert_eq!(
+            h.app.classify_wheel_target(document.0, document.1),
+            WheelTarget::Document,
+            "setup: the contrast probe must be document text"
+        );
+        h.feed(&wheel(1.0, 0.0));
+        assert!(
+            left_of(&h) > before,
+            "setup: the same notch over text must scroll, else the \
+             assertion above is vacuous"
+        );
+    }
+
     /// P2, pointer — motion updates the cached pointer position, which
     /// is the state mutation the drag path later reads. It is not a
     /// `LocalEffect` variant because it is `State`-internal, so the row
@@ -4708,13 +5517,163 @@ mod input_routing_tests {
         );
     }
 
+    /// B5 — the icon is re-applied on **every** motion, not only when
+    /// divider hover flips.
+    ///
+    /// Crossing from text into the gutter changes the icon and does not
+    /// touch `hover_divider`, so the old divider-change gate left the
+    /// I-beam on screen for exactly the transitions B5 is about. The
+    /// unit rows cannot see this: they call `desired_cursor_icon`
+    /// directly and never exercise the gate.
+    ///
+    /// *Mutation: gate the call on `set_panel_divider_hover(..)` again →
+    /// this row.*
+    #[test]
+    fn b5_the_icon_follows_motion_between_text_and_chrome() {
+        let mut h = EffectHarness::new();
+        let (text_x, gutter_x, y) = {
+            let state = h.app.state.as_mut().expect("harness state");
+            state.line_numbers = crate::LineNumberMode::Absolute;
+            let text_left = state.text_left();
+            assert!(
+                text_left > crate::TEXT_LEFT,
+                "fixture: a gutter must exist for this row to discriminate"
+            );
+            (
+                f64::from(text_left + 8.0),
+                f64::from(crate::TEXT_LEFT.midpoint(text_left)),
+                f64::from(crate::TEXT_TOP + 4.0),
+            )
+        };
+
+        h.app.apply_cursor_moved(text_x, y);
+        assert_eq!(
+            h.app.state.as_ref().expect("state").last_cursor_icon,
+            Some(winit::window::CursorIcon::Text),
+            "motion into text sets the I-beam"
+        );
+        assert!(
+            !h.app.state.as_ref().expect("state").panel.hover_divider,
+            "setup: divider hover stays false throughout, so a \
+             divider-gated apply would never run"
+        );
+
+        h.app.apply_cursor_moved(gutter_x, y);
+        assert_eq!(
+            h.app.state.as_ref().expect("state").last_cursor_icon,
+            Some(winit::window::CursorIcon::Default),
+            "motion into the gutter clears it — the gate would have left \
+             the I-beam showing"
+        );
+    }
+
+    /// B4 END TO END — a middle press driven through
+    /// `dispatch_window_event` produces **exactly one `Paste` carrying
+    /// PRIMARY and nothing else**, and its release produces nothing at
+    /// all.
+    ///
+    /// The two seam rows cannot see this: mutating
+    /// `paste_source_for` or replacing the dispatch arm with a
+    /// no-op leaves both of them green, because each asserts a function
+    /// in isolation rather than the effect the gesture produces.
+    ///
+    /// The two selections carry **distinguishable** contents — a row
+    /// whose PRIMARY and CLIPBOARD stubs said the same thing would pass
+    /// with the wrong one read.
+    ///
+    /// **It asserts the WHOLE `Step`, not "no `Paste`".** Filtering for
+    /// pastes lets any other outbound event through, so a gesture that
+    /// also emitted something spurious would pass.
+    #[test]
+    fn b4_a_middle_press_sends_exactly_one_paste_carrying_primary() {
+        use winit::event::{ElementState, MouseButton};
+        let mut h = EffectHarness::new();
+        if let Some(state) = h.app.state.as_mut() {
+            state.set_test_selection(crate::PasteSource::Primary, b"PRIMARY-payload");
+            state.set_test_selection(crate::PasteSource::Clipboard, b"CLIPBOARD-payload");
+        }
+
+        let step = h.feed(&mouse_input(ElementState::Pressed, MouseButton::Middle));
+
+        // The harness's frontend id is whatever the handshake assigned;
+        // the row is about the payload and the shape, not the id.
+        let frontend_id = match step.outbound.first() {
+            Some(pmacs_protocol::FrontendEvent::Paste { frontend_id, .. }) => *frontend_id,
+            other => panic!("expected a Paste first, got {other:?}"),
+        };
+        assert_eq!(
+            step,
+            Step {
+                local: Vec::new(),
+                outbound: vec![pmacs_protocol::FrontendEvent::Paste {
+                    frontend_id,
+                    data: b"PRIMARY-payload".to_vec(),
+                }],
+            },
+            "exactly one PRIMARY paste, no local effect, nothing else"
+        );
+
+        let release = h.feed(&mouse_input(ElementState::Released, MouseButton::Middle));
+        assert_eq!(
+            release,
+            Step {
+                local: Vec::new(),
+                outbound: Vec::new()
+            },
+            "the release does nothing at all; the gesture fires once, on \
+             the press"
+        );
+    }
+
+    /// B4's OFF-LINUX leg — the gesture is **completely inert**.
+    ///
+    /// B4 rules PRIMARY on Linux and rules nothing else, so off Linux a
+    /// middle press must produce no effect of any kind — not a clipboard
+    /// paste, not anything.
+    ///
+    /// **This row exists because no CI leg runs this crate's tests off
+    /// Linux.** `cargo test -p pmacs-gpu` appears once in `ci.yml`, in
+    /// the Ubuntu-only `gpu-render` job, so a `cfg`-gated row would
+    /// assert the off-Linux contract nowhere that actually executes, and
+    /// `paste_source_for(..).unwrap_or(PasteSource::Clipboard)` at the
+    /// call site would pass everything. The platform is injected instead
+    /// of read, so the branch runs here.
+    ///
+    /// *Mutation: `unwrap_or(PasteSource::Clipboard)` at the call site →
+    /// this row.*
+    #[test]
+    fn b4_off_linux_a_middle_press_is_completely_inert() {
+        use winit::event::{ElementState, MouseButton};
+        let mut h = EffectHarness::new();
+        h.app.test_force_non_linux = true;
+        if let Some(state) = h.app.state.as_mut() {
+            state.set_test_selection(crate::PasteSource::Primary, b"PRIMARY-payload");
+            state.set_test_selection(crate::PasteSource::Clipboard, b"CLIPBOARD-payload");
+        }
+
+        let step = h.feed(&mouse_input(ElementState::Pressed, MouseButton::Middle));
+
+        assert_eq!(
+            step,
+            Step {
+                local: Vec::new(),
+                outbound: Vec::new()
+            },
+            "off Linux the gesture is inert: no paste of any selection, no \
+             local effect, nothing"
+        );
+    }
+
     /// P2 — a button the frontend has no semantics for reaches no body:
     /// nothing local, nothing outbound. The counterpart to the routing
     /// row that calls it claimed-and-dropped.
     #[test]
     fn an_unused_button_produces_no_effect_of_any_kind() {
         let mut h = EffectHarness::new();
-        let step = h.feed(&mouse_input(ElementState::Pressed, MouseButton::Middle));
+        // `Back`, not `Middle`: B4 gave the middle PRESS a meaning, so
+        // this row moved to a button that still has none rather than
+        // being weakened to accommodate the new one.
+        let step = h.feed(&mouse_input(ElementState::Pressed, MouseButton::Back));
         assert_eq!(
             step,
             Step {
@@ -4851,7 +5810,10 @@ mod input_routing_tests {
                 position: PhysicalPosition::new(4.0, 8.0),
             },
             mouse_input(ElementState::Pressed, MouseButton::Left),
-            mouse_input(ElementState::Pressed, MouseButton::Middle),
+            // `Back`: this row is about ORDER, and it keeps a
+            // semantics-free button so B4's new middle-press meaning
+            // does not quietly become part of what it asserts.
+            mouse_input(ElementState::Pressed, MouseButton::Back),
             WindowEvent::RedrawRequested,
             WindowEvent::Occluded(false),
             WindowEvent::CloseRequested,
@@ -5058,6 +6020,74 @@ const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_milli
 
 /// Wheel lines scrolled per `MouseScrollDelta::LineDelta` unit.
 const WHEEL_LINES_PER_TICK: f32 = 3.0;
+
+/// Columns per horizontal wheel notch — B7's "three columns per wheel
+/// tick", the horizontal twin of [`WHEEL_LINES_PER_TICK`].
+const WHEEL_COLUMNS_PER_TICK: f32 = 3.0;
+
+/// Which OS selection a paste gesture reads.
+///
+/// X11 and Wayland carry two: the CLIPBOARD, written by an explicit
+/// copy, and the PRIMARY selection, written merely by selecting text.
+/// **They are different selections with different contents**, and the
+/// platform convention pairs them with different gestures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+enum PasteSource {
+    /// What Ctrl-V reads.
+    Clipboard,
+    /// What a middle click reads on Linux (GUI Stage 1b B4).
+    Primary,
+}
+
+/// The selection a middle click pastes from on a given platform, or
+/// `None` where the gesture has no ruled meaning.
+///
+/// **B4 rules PRIMARY on Linux, and rules nothing else.** Off Linux
+/// there is no PRIMARY selection, and the gesture was inert before this
+/// slice; making it paste the CLIPBOARD instead would be a new
+/// behaviour on every other platform that no framing approved. It stays
+/// inert, and a fallback needs framing and re-approval rather than a
+/// default chosen here.
+///
+/// **The platform is a PARAMETER, not a `cfg!` read inside.** No CI leg
+/// runs this crate's tests on a non-Linux host — `cargo test -p
+/// pmacs-gpu` appears once, in the Ubuntu-only `gpu-render` job — so a
+/// decision baked in by `cfg!` would leave the off-Linux contract
+/// untested everywhere it actually runs. Taking it as an argument lets
+/// a row drive both outcomes here.
+const fn paste_source_for(is_linux: bool) -> Option<PasteSource> {
+    if is_linux {
+        Some(PasteSource::Primary)
+    } else {
+        None
+    }
+}
+
+/// The wire scroll kinds for a banked `(x, y)` tick count, in order.
+///
+/// One event per whole tick: a single wheel notch that banks two ticks
+/// must move the receiver twice, and a receiver that coalesces is
+/// making its own decision rather than being handed a rounded one.
+fn wheel_kinds(ticks_x: i64, ticks_y: i64) -> Vec<ProtocolMouseKind> {
+    let mut kinds = Vec::new();
+    let vertical = if ticks_y < 0 {
+        ProtocolMouseKind::ScrollUp
+    } else {
+        ProtocolMouseKind::ScrollDown
+    };
+    for _ in 0..ticks_y.unsigned_abs() {
+        kinds.push(vertical);
+    }
+    let horizontal = if ticks_x < 0 {
+        ProtocolMouseKind::ScrollLeft
+    } else {
+        ProtocolMouseKind::ScrollRight
+    };
+    for _ in 0..ticks_x.unsigned_abs() {
+        kinds.push(horizontal);
+    }
+    kinds
+}
 
 /// Byte range an optimistic Backspace/Delete removes at `cursor`, or
 /// `None` when it can't be predicted locally: buffer edge (the
@@ -5586,6 +6616,8 @@ impl State {
         let mut state = Self {
             #[cfg(test)]
             render_calls: 0,
+            #[cfg(test)]
+            redraw_requests: std::cell::Cell::new(0),
             window,
             device,
             queue,
@@ -5637,6 +6669,10 @@ impl State {
             last_pointer_sent_byte: None,
             last_pointer_down: None,
             minimap_scrub_active: false,
+            last_cursor_icon: None,
+            #[cfg(test)]
+            test_selections: HashMap::new(),
+            wheel_residuals: WheelResiduals::default(),
             edge_scroll_dir: None,
             edge_scroll_last: None,
             styled_redraw_deadline: None,
@@ -5944,6 +6980,14 @@ impl State {
                 .contains('\n');
         if geometry_changed || !(single_line_edit && self.try_reshape_line(edits[0])) {
             self.reshape();
+        } else {
+            // The incremental path deliberately skips `reshape` — and
+            // skipped clause 3's clamp with it. A one-line edit can
+            // shorten the widest line, which lowers
+            // `widest − viewport`, so the origin has to come down here
+            // too or a keystroke leaves the viewport past the end of
+            // the text.
+            self.clamp_code_scroll_left();
         }
         if geometry_changed && caret_was_painted {
             self.ensure_caret_painted();
@@ -6118,10 +7162,54 @@ impl State {
     /// Read the OS clipboard as bytes (for Ctrl-V → `Paste`). `None` on
     /// any failure (empty / non-text / unavailable).
     fn read_os_clipboard(&mut self) -> Option<Vec<u8>> {
-        match self.os_clipboard()?.get_text() {
+        self.read_os_selection(PasteSource::Clipboard)
+    }
+
+    /// Stub selection contents for tests, consulted by
+    /// [`Self::read_os_selection`] before the OS clipboard.
+    ///
+    /// **A test seam in production code, and deliberately so.** B4's
+    /// contract is *which selection* a middle click reads, and the two
+    /// selections cannot be told apart through a real clipboard in a
+    /// unit test — a row that asserts "a paste happened" passes with the
+    /// wrong selection read. This is the smallest seam that lets the row
+    /// assert the payload rather than the seam that chose it.
+    #[cfg(test)]
+    fn set_test_selection(&mut self, source: PasteSource, bytes: &[u8]) {
+        self.test_selections.insert(source, bytes.to_vec());
+    }
+
+    /// Read one named OS selection.
+    ///
+    /// GUI Stage 1b B4 needs the **PRIMARY** selection, which on Linux
+    /// is a different selection from the clipboard with different
+    /// contents. Reading the clipboard for a middle click would paste
+    /// whatever was last explicitly copied instead of what is currently
+    /// selected — a plausible-looking wrong answer, which is why B4's
+    /// row asserts the source rather than that "a paste happened".
+    fn read_os_selection(&mut self, source: PasteSource) -> Option<Vec<u8>> {
+        #[cfg(test)]
+        if let Some(bytes) = self.test_selections.get(&source) {
+            return Some(bytes.clone());
+        }
+        let clipboard = self.os_clipboard()?;
+        let read = match source {
+            PasteSource::Clipboard => clipboard.get_text(),
+            #[cfg(target_os = "linux")]
+            PasteSource::Primary => {
+                use arboard::{GetExtLinux, LinuxClipboardKind};
+                clipboard
+                    .get()
+                    .clipboard(LinuxClipboardKind::Primary)
+                    .text()
+            }
+            #[cfg(not(target_os = "linux"))]
+            PasteSource::Primary => clipboard.get_text(),
+        };
+        match read {
             Ok(s) => Some(s.into_bytes()),
             Err(e) => {
-                eprintln!("pmacs-gpu: clipboard read failed: {e}");
+                eprintln!("pmacs-gpu: {source:?} read failed: {e}");
                 None
             }
         }
@@ -6224,6 +7312,17 @@ impl State {
                 // cursor motion repairs it — a symptom nothing about
                 // the new buffer explains.
                 self.code_scroll_left = 0.0;
+                // GUI Stage 1b R4/R5 — the wheel residuals for the
+                // DOCUMENT and the MINIMAP live in this long-lived
+                // `State` and outlive the buffer, so they reset here
+                // for the same reason `code_scroll_left` does: a new
+                // buffer must not inherit banked motion from the old
+                // one. Two separate lines rather than one clear, so a
+                // mutation that omits either is individually visible —
+                // chrome shares the document's owner, so that one line
+                // serves both.
+                self.wheel_residuals.clear_document();
+                self.wheel_residuals.clear_minimap();
                 self.last_viewport_sent = None;
                 // Vterm Stage 3 — a snapshot ALWAYS leaves terminal
                 // mode, including a terminal→terminal switch. The prior
@@ -6636,7 +7735,7 @@ impl State {
             // close it; otherwise anchor the popup at the remembered
             // right-click pixel.
             InstanceMessage::MenuPrompt { rows, active, .. } => {
-                self.menu = if rows.is_empty() {
+                let menu = if rows.is_empty() {
                     None
                 } else {
                     Some(MenuLocal {
@@ -6645,6 +7744,11 @@ impl State {
                         anchor_px: self.menu_anchor_px,
                     })
                 };
+                self.menu = menu;
+                // B5 — menu ownership changed with no pointer motion, so
+                // the icon is re-derived here. This arm changes no
+                // geometry, so it is the only application it needs.
+                self.apply_panel_cursor_icon();
                 self.request_redraw();
                 None
             }
@@ -6796,12 +7900,15 @@ impl State {
             }
             InstanceMessage::PanelFrame(payload) => {
                 // The band changes the DOCUMENT's pixel height, so a panel
-                // that appears or disappears has to reshape the document
-                // buffers as well as request a repaint. Skipping the
-                // reshape leaves the code layer sized to the old boundary
-                // and the last lines painting under the band.
-                if self.apply_panel_payload(payload) {
-                    self.sync_buffer_dimensions();
+                // that appears, disappears, or changes row count has to
+                // reshape the document buffers. A content-only frame keeps
+                // the same inset and needs only a repaint — reshaping every
+                // live panel frame would put document work on the panel's
+                // ordinary repaint path.
+                let band_before = self.band_inset();
+                if self.apply_panel_payload(payload)
+                    && !self.reshape_if_panel_band_changed(band_before)
+                {
                     self.request_redraw();
                 }
                 None
@@ -6898,6 +8005,10 @@ impl State {
         self.terminal_frame_error_latched = false;
         self.last_terminal_size_sent = None;
         self.last_terminal_pointer_cell = None;
+        // B1's disposal, terminal half. Re-entering the SAME terminal
+        // buffer would otherwise inherit the bank, because the owner
+        // key is the buffer id and it has not changed.
+        self.wheel_residuals.clear_terminals();
     }
 
     /// Drop the band and every cache behind it.
@@ -7033,6 +8144,21 @@ impl State {
             })
     }
 
+    /// Reshape after a panel transition changed the document's bottom.
+    ///
+    /// Both directions terminate here: accepting/removing a frame in
+    /// `apply_attach_message`, and invalidating a retained frame by advancing
+    /// its geometry epoch. Content-only panel frames keep the same inset and
+    /// deliberately avoid the document reshape cost.
+    fn reshape_if_panel_band_changed(&mut self, before: PanelBandInset) -> bool {
+        if self.band_inset() == before {
+            return false;
+        }
+        self.sync_buffer_dimensions();
+        self.reshape();
+        true
+    }
+
     /// The panel band's content rectangle in surface pixels:
     /// `(x, y, width, height)`, cells only — the divider sits above `y`.
     fn panel_content_rect(&self) -> Option<(f32, f32, f32, f32)> {
@@ -7138,6 +8264,7 @@ impl State {
         if !self.panel_family.carries_panel() || self.panel.exhausted {
             return None;
         }
+        let band_before = self.band_inset();
         let (total, advance) = self.declared_cell_total();
         if trigger == GeometryTrigger::Surface
             && self.panel.geometry_epoch != 0
@@ -7158,18 +8285,24 @@ impl State {
             self.panel.drag = None;
             self.panel.hover_divider = false;
             self.panel.declared_advance = None;
+            self.reshape_if_panel_band_changed(band_before);
             return None;
         };
         self.panel.geometry_epoch = next;
         self.panel.declared = Some(total);
         self.panel.declared_advance = advance;
+        // Advancing the epoch makes a retained frame stop being
+        // `presented()` until the daemon answers the new declaration.
+        // That removes its band after resize/font handling has already
+        // performed its own reshape, so settle the final visibility change.
+        self.reshape_if_panel_band_changed(band_before);
         Some((next, total))
     }
 
     /// Apply an inbound `PanelFrame` payload.
     ///
-    /// Returns `true` when the band's appearance changed, so the caller
-    /// can request a redraw without guessing.
+    /// Returns `true` when the retained panel payload changed, so the caller
+    /// can distinguish a repaint/reflow from an atomic rejection or duplicate.
     ///
     /// Validation is atomic: a rejected frame leaves the retained one
     /// exactly as it was, because `PanelFrame::validate` is pure and runs
@@ -7207,6 +8340,14 @@ impl State {
                 self.panel.last_pointer_cell = None;
                 self.panel.gesture_last_content_cell = None;
                 self.panel.last_pointer_generation = None;
+                // B1's disposal half: a residual banked against a
+                // surface that no longer exists must go with it. The
+                // bank is keyed by `BufferId`, which distinguishes
+                // panel A from panel B — but not a panel closed and
+                // REOPENED on the same persistent buffer, where the
+                // successor would inherit a notch the user began in a
+                // panel that is gone.
+                self.wheel_residuals.clear_panels();
                 had
             }
             // §5b G8b — a mapped session REJECTS the legacy family
@@ -7249,6 +8390,13 @@ impl State {
                 {
                     return false;
                 }
+                // B1's disposal half applies to a direct accepted
+                // replacement too, not only to `Absent`. The bank key is
+                // the buffer id, so without this a panel A -> B -> A
+                // sequence can spend A's pre-replacement fraction when A
+                // returns. Run only after every refusal/duplicate check:
+                // an unaccepted successor owns no state to reset.
+                self.discard_replaced_panel_wheel_residual(&frame);
                 // NOTE: the gesture-latch reset on an identity change is
                 // R-d, owned by `panel-pointer-replay`. It is not
                 // duplicated here — two branches resetting the same
@@ -7304,6 +8452,11 @@ impl State {
                     self.panel.last_pointer_cell = None;
                     self.panel.gesture_last_content_cell = None;
                 }
+                // The pointer latch above includes a geometry change; the
+                // wheel bank does not. A fractional notch belongs to the
+                // panel presentation and survives a re-grid of that same
+                // panel, but never a panel/buffer replacement.
+                self.discard_replaced_panel_wheel_residual(&frame);
                 let plan = TerminalPaintPlan::build_grid(
                     frame.size,
                     &frame.cells,
@@ -7315,6 +8468,22 @@ impl State {
                 self.rebuild_panel_text_buffers();
                 true
             }
+        }
+    }
+
+    /// Drop panel wheel state when an accepted frame replaces the panel
+    /// presentation that owned it.
+    ///
+    /// `BufferId` alone is not an identity: a persistent buffer can leave
+    /// and later return as a new `panel_epoch`. Conversely, a geometry-only
+    /// change leaves the same scroll surface in place, so it does not spend
+    /// or discard a fractional notch.
+    fn discard_replaced_panel_wheel_residual(&mut self, successor: &PanelFrame) {
+        let replaced = self.panel.frame.as_ref().is_some_and(|current| {
+            current.buffer_id != successor.buffer_id || current.panel_epoch != successor.panel_epoch
+        });
+        if replaced {
+            self.wheel_residuals.clear_panels();
         }
     }
 
@@ -7734,20 +8903,85 @@ impl State {
         }
     }
 
-    /// Apply the divider hover cursor icon to the real window.
+    /// Apply the cursor icon [`Self::desired_cursor_icon`] chose to the
+    /// real window.
     ///
-    /// `RowResize` while the pointer is on the strip, the default arrow
-    /// otherwise. Driven from the same `hover_divider` bit the hit test
-    /// sets, so the icon cannot advertise a drag target the press would
-    /// miss.
-    fn apply_panel_cursor_icon(&self) {
-        if let Some(window) = &self.window {
-            window.set_cursor(if self.panel.hover_divider {
-                winit::window::CursorIcon::RowResize
-            } else {
-                winit::window::CursorIcon::Default
-            });
+    /// **Three outcomes, not two**, since GUI Stage 1b's B5:
+    /// `RowResize` on the divider strip, `Text` over document text
+    /// content, and the default arrow otherwise. The divider half is
+    /// driven from the same `hover_divider` bit the hit test sets, so
+    /// the icon cannot advertise a drag target the press would miss.
+    ///
+    /// Idempotent: it writes only when the icon actually changed, which
+    /// is what makes calling it on every pointer motion cheap.
+    fn apply_panel_cursor_icon(&mut self) {
+        let icon = self.desired_cursor_icon();
+        if self.last_cursor_icon == Some(icon) {
+            return;
         }
+        self.last_cursor_icon = Some(icon);
+        if let Some(window) = &self.window {
+            window.set_cursor(icon);
+        }
+    }
+
+    /// The cursor icon for the current pointer position.
+    ///
+    /// **One owner, deliberately.** GUI Stage 1b's B5 adds an I-beam
+    /// over text content, and §2a's CORRECTION 3 is why it lands here
+    /// rather than at a site of its own: this function's `else` branch
+    /// writes `Default` unconditionally, so a separate I-beam writer
+    /// would be **clobbered by it** on the next motion. The divider's
+    /// `RowResize`, B5's `Text` and the `Default` fallback are decided
+    /// together or not at all.
+    ///
+    /// Order matters: the divider outranks the I-beam, because the
+    /// divider strip is a drag handle and is never text.
+    fn desired_cursor_icon(&self) -> winit::window::CursorIcon {
+        if self.panel.hover_divider {
+            winit::window::CursorIcon::RowResize
+        } else if self.pointer_over_text_content() {
+            winit::window::CursorIcon::Text
+        } else {
+            winit::window::CursorIcon::Default
+        }
+    }
+
+    /// Whether the pointer is over **document text content** — B5's
+    /// "text content only".
+    ///
+    /// Excluded, each for its own reason: the **gutter**, which is left
+    /// of `text_left` and is chrome rather than text; the **minimap**,
+    /// which is a scrub surface; the **panel band**, which owns its own
+    /// pixels; the **status band** and everything below the document's
+    /// text bottom; and anything right of the text bounds.
+    ///
+    /// Geometric rather than a byte hit-test: an I-beam belongs over the
+    /// text *area*, including the blank space past a short line's end,
+    /// and a byte test would flicker the cursor along a ragged right
+    /// margin.
+    fn pointer_over_text_content(&self) -> bool {
+        // An open context menu covers the document and owns the
+        // pointer; its pixels are chrome however text-like whatever is
+        // painted beneath them may be.
+        if self.menu.is_some() {
+            return false;
+        }
+        let Some((x, y)) = self.pointer_pos else {
+            return false;
+        };
+        let (x, y) = (x as f32, y as f32);
+        if self.in_minimap_band(f64::from(x), f64::from(y)) {
+            return false;
+        }
+        if !matches!(
+            self.classify_pointer_surface(x, y),
+            PointerSurface::Elsewhere
+        ) {
+            return false;
+        }
+        let bottom = document_text_bottom(self.config.height, self.fm, self.band_inset());
+        x >= self.text_left() && x < self.text_bounds_right() as f32 && y >= TEXT_TOP && y < bottom
     }
 
     /// Consume the "a font/scale change invalidated the declaration" flag.
@@ -8087,6 +9321,91 @@ impl State {
         }
         self.normalize_code_scroll();
         self.horizontal_follow(byte);
+        self.request_redraw();
+    }
+
+    /// Widest display line **in the whole document**, in columns —
+    /// B7's upper-bound input.
+    ///
+    /// **It must not read `self.buffer.lines`.** That holds only the
+    /// visible byte slice plus overscan (`rebuild_code_slice`, session
+    /// S1), so a bound taken from it excludes every off-screen line:
+    /// horizontal scrolling would clamp prematurely and the bound would
+    /// change as the view moved vertically. B3 asks for the widest
+    /// display line of the document, so this reads `current_text`.
+    ///
+    /// **Cost is O(document) per call**, and this sits on the wheel
+    /// path. That is a real risk against this project's wall-clock
+    /// budget rows and is recorded rather than pre-optimised: a cache
+    /// needs an invalidation key, and the wrong key is a worse defect
+    /// than a measurable scan.
+    ///
+    /// **Which "display line" this measures is a boundary B3's witness
+    /// must settle.** This counts SOURCE-TEXT display columns — tab
+    /// stops and Unicode width — and therefore excludes rendered
+    /// projections such as inline adornments and math substitutions,
+    /// which can occupy a different width on screen than the bytes they
+    /// stand for. That is consistent with the TUI-derived column rule
+    /// the two frontends share, and it is a choice, not an oversight:
+    /// "widest display line" is readable the other way. Recorded here
+    /// so the witness states which meaning governs rather than
+    /// discovering it.
+    fn widest_display_columns(&self) -> u32 {
+        pmacs_protocol::columns::widest_line_columns(&self.current_text)
+    }
+
+    /// GUI Stage 1b B3/B7: move the horizontal origin by whole columns.
+    ///
+    /// The bound is B7's, stated exactly: `0 ..= widest − viewport`,
+    /// **saturating at zero** for buffers narrower than the viewport.
+    /// Clamping at the widest line's *full* width would let the origin
+    /// pass every glyph and leave the viewport blank.
+    ///
+    /// **Wrap pins the origin to zero** (lifetime clause 5): a wrapped
+    /// buffer has nothing past the right edge, so no horizontal origin
+    /// may survive.
+    ///
+    /// **This frontend keeps no authority flag**, and the difference
+    /// from the TUI is deliberate. There, `horizontal_follow` runs on
+    /// every paint and would drag the origin back to the caret, so a
+    /// latch is the only thing that can outrank it. Here the follow
+    /// runs only through `ensure_caret_painted`, which Q#F6's
+    /// painted-before policy skips whenever the caret is off screen —
+    /// and a caret the user has scrolled away from is off screen. The
+    /// preservation is **structural**: there is no follow to outrank.
+    ///
+    /// A flag was carried here for a while, written in four places and
+    /// read in none. Giving it a reader would have duplicated the
+    /// painted-before policy and needed a cursor baseline of its own to
+    /// avoid suppressing genuine cursor movement, so it was removed
+    /// rather than completed. The contract is behavioral; the two
+    /// frontends are not required to share a representation.
+    fn scroll_by_columns(&mut self, columns: i64) {
+        if self.buffer.wrap() != Wrap::None {
+            let changed = self.code_scroll_left != 0.0;
+            self.code_scroll_left = 0.0;
+            if changed {
+                self.request_redraw();
+            }
+            return;
+        }
+        let advance = self.mono_advance();
+        let width = self.text_bounds_right() as f32 - self.text_left();
+        if advance <= 0.0 || width <= 0.0 {
+            return;
+        }
+        let viewport_cols = (width / advance).floor().max(0.0) as u32;
+        let max_left = self.widest_display_columns().saturating_sub(viewport_cols);
+        let current = (self.code_scroll_left / advance).round().max(0.0) as i64;
+        let next = (current + columns).clamp(0, i64::from(max_left));
+        if next == current {
+            return;
+        }
+        self.code_scroll_left = next as f32 * advance;
+        // Unlike a vertical wheel, this path emits no Viewport and
+        // rebuilds no lines. Nothing else wakes the `ControlFlow::Wait`
+        // event loop, so changing the origin without requesting a frame
+        // leaves the new viewport invisible until an unrelated redraw.
         self.request_redraw();
     }
 
@@ -9995,12 +11314,66 @@ impl State {
         self.normalize_code_scroll();
         // Full restyle: release any held post-jump frame (Q#M6).
         self.styled_redraw_deadline = None;
+        // B5 — **the one place the cursor icon is re-derived after
+        // geometry.** The I-beam is decided against a boundary that
+        // moves without the pointer: `text_left` with the line-number
+        // mode's digit width, the text clip with minimap presence,
+        // panel appearance, window resize and font metrics. Every one
+        // of those settles by reshaping, so re-deriving here covers
+        // them all at once instead of leaving each new geometry path to
+        // remember a call it will not remember.
+        self.apply_panel_cursor_icon();
+        // GUI Stage 1b, lifetime clause 3 — the horizontal origin is
+        // **clamped** by the same settling, for the same reason.
+        self.clamp_code_scroll_left();
         self.request_redraw();
+    }
+
+    /// Bring the horizontal origin back inside `0 ..= widest − viewport`
+    /// (lifetime clause 3).
+    ///
+    /// Geometry and content both move that bound: a **wider** viewport
+    /// lowers it, and so does a shortened widest line.
+    ///
+    /// **Nothing else brings the origin down.** `horizontal_follow`
+    /// would, but it runs only when the caret is painted (Q#F6's
+    /// painted-before policy) — and the caret is not painted precisely
+    /// when the user has scrolled it off screen, which is exactly the
+    /// state a stale origin survives in. Measured before this existed:
+    /// after a scroll to the right bound at 640px and a widen to
+    /// 1600px, the origin stayed 960px past the new maximum, leaving
+    /// most of the viewport blank with the text off its left edge.
+    ///
+    /// Gated on a non-zero origin because it scans the document for the
+    /// widest line, and every reshape paying for that would be a steep
+    /// price for a state most windows are never in.
+    fn clamp_code_scroll_left(&mut self) {
+        if self.code_scroll_left <= 0.0 {
+            return;
+        }
+        if self.buffer.wrap() != Wrap::None {
+            self.code_scroll_left = 0.0;
+            return;
+        }
+        let advance = self.mono_advance();
+        let width = self.text_bounds_right() as f32 - self.text_left();
+        if advance <= 0.0 || width <= 0.0 {
+            return;
+        }
+        let cols = (width / advance).floor().max(0.0) as u32;
+        let max_left = self.widest_display_columns().saturating_sub(cols);
+        let current = (self.code_scroll_left / advance).round().max(0.0) as u32;
+        if current > max_left {
+            self.code_scroll_left = max_left as f32 * advance;
+        }
     }
 
     /// Ask the window to repaint. A no-op headless (no window), where the
     /// render tests drive `render_offscreen` directly (F-014).
     fn request_redraw(&self) {
+        #[cfg(test)]
+        self.redraw_requests
+            .set(self.redraw_requests.get().saturating_add(1));
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -12515,7 +13888,7 @@ fn minimap_line_shape(line: &str) -> MinimapLineShape {
     let mut indent_cols = 0usize;
     let mut in_indent = true;
     for ch in line.trim_end_matches('\r').chars() {
-        let next_col = advance_minimap_col(total_cols, ch);
+        let next_col = advance_display_col(total_cols, ch);
         if in_indent && (ch == ' ' || ch == '\t') {
             indent_cols = next_col;
         } else {
@@ -12529,13 +13902,16 @@ fn minimap_line_shape(line: &str) -> MinimapLineShape {
     }
 }
 
-fn advance_minimap_col(col: usize, ch: char) -> usize {
-    if ch == '\t' {
-        let tab_stop = TAB_STOP_COLUMNS as usize;
-        col + tab_stop - col % tab_stop
-    } else {
-        col + UnicodeWidthChar::width(ch).unwrap_or(0)
-    }
+/// Advance a display column past one character.
+///
+/// **Delegates to [`pmacs_protocol::columns::advance_char`]**, which is
+/// where the rule lives. It used to be a private copy of the same
+/// arithmetic, which is exactly the drift this crate and the daemon
+/// must not have: a bound computed one way and a follow computed the
+/// other disagree about where the document ends, invisibly until a tab
+/// or a wide character reaches the edge.
+fn advance_display_col(col: usize, ch: char) -> usize {
+    pmacs_protocol::columns::advance_char(u32::try_from(col).unwrap_or(u32::MAX), ch) as usize
 }
 
 fn minimap_style_color(style: CellStyle) -> [f32; 4] {
@@ -13757,8 +15133,15 @@ fn expand_chunk_tabs(chunks: Vec<RichChunk>) -> Vec<RichChunk> {
                     source: offset_chunk_source(source, segment_start as u64),
                 });
             }
-            let tab_stop = TAB_STOP_COLUMNS as usize;
-            let tab_width = tab_stop - column % tab_stop;
+            // The tab's width comes from the SHARED rule, derived
+            // rather than recomputed: a second copy of `stop - column %
+            // stop` here is how the rendered column and B7's bound
+            // drift apart.
+            let tab_width = pmacs_protocol::columns::advance_char(
+                u32::try_from(column).unwrap_or(u32::MAX),
+                '\t',
+            ) as usize
+                - column;
             expanded.push(RichChunk {
                 text: " ".repeat(tab_width),
                 color,
@@ -13802,12 +15185,23 @@ fn offset_chunk_source(source: ChunkSource, byte_offset: u64) -> ChunkSource {
     }
 }
 
+/// Advance the projection's running display column across `text`.
+///
+/// **Per-character advance delegates to
+/// [`pmacs_protocol::columns::advance_char`]** so the column this
+/// projection renders at is the same column B7's bound and the caret
+/// follow reckon in. The stream semantics stay local and are the reason
+/// this wrapper exists at all: the column runs across chunks, so
+/// **adornment text shifts a later tab**, and a newline restarts it.
 fn advance_display_column(column: &mut usize, text: &str) {
     for ch in text.chars() {
         if ch == '\n' {
             *column = 0;
         } else {
-            *column += UnicodeWidthChar::width(ch).unwrap_or(0);
+            *column = pmacs_protocol::columns::advance_char(
+                u32::try_from(*column).unwrap_or(u32::MAX),
+                ch,
+            ) as usize;
         }
     }
 }
@@ -14095,6 +15489,1109 @@ fn decoration_kind_to_bg_color(kind: DecorationKind) -> Option<[f32; 4]> {
 
 #[cfg(test)]
 mod tests {
+    use super::{BufferId, ResidualOwner, WheelResiduals, WheelTarget, wheel_kinds};
+    use pmacs_protocol::MouseKind as ProtocolMouseKind;
+
+    /// Distinct ids. `BufferId::next` is the only constructor — the
+    /// inner field is private on purpose — so identity comes from
+    /// allocation order rather than a literal.
+    fn buf(_n: u64) -> BufferId {
+        BufferId::next()
+    }
+
+    /// B1's producer itself: sub-tick deltas are banked, not rounded
+    /// away, and they reach a tick together.
+    ///
+    /// **Not a framed R-row.** The framing's R1 is the CROSS-AXIS row;
+    /// this is the basic accumulation this slice rests on.
+    ///
+    /// This is the row #243 cannot satisfy. Its receiver only ever saw
+    /// whole ticks, so a producer that discards every fraction is
+    /// invisible to it.
+    #[test]
+    fn sub_tick_deltas_bank_and_then_spend_exactly_one_tick() {
+        let mut r = WheelResiduals::default();
+        let owner = ResidualOwner::Document;
+        assert_eq!(
+            r.accumulate(owner, 0.0, 0.4),
+            (0, 0),
+            "first sub-tick moves nothing"
+        );
+        assert_eq!(
+            r.accumulate(owner, 0.0, 0.4),
+            (0, 0),
+            "still short of a tick"
+        );
+        assert_eq!(
+            r.accumulate(owner, 0.0, 0.4),
+            (0, 1),
+            "1.2 banked spends exactly one tick, not two"
+        );
+        let (_, y) = r.bank_of(owner).expect("bank survives");
+        assert!(
+            (y - 0.2).abs() < 1e-5,
+            "the remainder is kept, not dropped: {y}"
+        );
+    }
+
+    /// **R1 — cross-axis.** A sub-tick horizontal motion followed by a
+    /// sub-tick vertical motion over the *same* surface reaches no tick
+    /// on either axis.
+    ///
+    /// *Mutation: one residual per surface instead of one per (surface,
+    /// axis)* — the two half-ticks combine and this row sees a tick.
+    #[test]
+    fn r1_cross_axis_half_ticks_do_not_combine() {
+        let mut r = WheelResiduals::default();
+        let owner = ResidualOwner::Document;
+        assert_eq!(
+            r.accumulate(owner, 0.6, 0.0),
+            (0, 0),
+            "a sub-tick horizontal motion moves nothing"
+        );
+        assert_eq!(
+            r.accumulate(owner, 0.0, 0.6),
+            (0, 0),
+            "and a sub-tick vertical motion over the SAME surface still \
+             reaches no tick on either axis — one accumulator per \
+             surface would have combined 0.6 + 0.6 into a tick here"
+        );
+        // Each axis still reaches its own tick on its own schedule.
+        assert_eq!(r.accumulate(owner, 0.5, 0.5), (1, 1));
+    }
+
+    /// R2 — panel A's bank is not spent on panel B.
+    #[test]
+    fn r2_panel_identity_does_not_leak_across_panels() {
+        let mut r = WheelResiduals::default();
+        let a = ResidualOwner::Panel(buf(1));
+        let b = ResidualOwner::Panel(buf(2));
+        assert_eq!(r.accumulate(a, 0.0, 0.9), (0, 0));
+        assert_eq!(
+            r.accumulate(b, 0.0, 0.2),
+            (0, 0),
+            "panel B starts from zero; sharing would spend A's 0.9 here"
+        );
+    }
+
+    /// R3 — the same, across two terminals.
+    #[test]
+    fn r3_terminal_identity_does_not_leak_across_terminals() {
+        let mut r = WheelResiduals::default();
+        let a = ResidualOwner::Terminal(buf(7));
+        let b = ResidualOwner::Terminal(buf(8));
+        assert_eq!(r.accumulate(a, 0.0, 0.9), (0, 0));
+        assert_eq!(r.accumulate(b, 0.0, 0.2), (0, 0));
+    }
+
+    /// Document and chrome SHARE one bank, deliberately: a gesture that
+    /// strays onto the gutter must not lose its banked motion.
+    ///
+    /// **Not the framing's R4.** That row is the document/chrome
+    /// BUFFER-REPLACEMENT reset, which is still owed.
+    #[test]
+    fn document_and_chrome_share_one_bank() {
+        assert_eq!(
+            WheelTarget::Document.residual_owner(),
+            WheelTarget::Chrome.residual_owner(),
+            "chrome banks into the document's accumulator"
+        );
+        let mut r = WheelResiduals::default();
+        let owner = WheelTarget::Document
+            .residual_owner()
+            .expect("document banks");
+        assert_eq!(r.accumulate(owner, 0.0, 0.7), (0, 0));
+        assert_eq!(
+            r.accumulate(WheelTarget::Chrome.residual_owner().unwrap(), 0.0, 0.7),
+            (0, 1),
+            "the strayed half completes the tick instead of being lost"
+        );
+    }
+
+    /// The minimap moves the document viewport but banks independently
+    /// of it.
+    ///
+    /// **Not the framing's R5.** That row is the minimap's
+    /// BUFFER-REPLACEMENT reset, which is still owed.
+    #[test]
+    fn minimap_bank_is_independent_of_the_documents() {
+        let mut r = WheelResiduals::default();
+        assert_eq!(r.accumulate(ResidualOwner::Minimap, 0.0, 0.9), (0, 0));
+        assert_eq!(
+            r.accumulate(ResidualOwner::Document, 0.0, 0.2),
+            (0, 0),
+            "the document starts from zero despite the minimap's 0.9"
+        );
+    }
+
+    /// The crossing witness §2a requires: partial motion over the band's
+    /// chrome, then partial motion over a cell, **must not reach a
+    /// tick**. Panel chrome banks nowhere and clears what a cell banked.
+    #[test]
+    fn panel_chrome_banks_nothing_and_cannot_combine_with_cell_input() {
+        assert_eq!(
+            WheelTarget::PanelChrome.residual_owner(),
+            None,
+            "the band owns the pixel and banks nothing"
+        );
+        let mut r = WheelResiduals::default();
+        let cell = ResidualOwner::Panel(buf(3));
+        assert_eq!(r.accumulate(cell, 0.0, 0.9), (0, 0));
+        r.clear_panels();
+        assert_eq!(
+            r.accumulate(cell, 0.0, 0.2),
+            (0, 0),
+            "a gesture that scrolled nothing must not complete a tick on arrival"
+        );
+    }
+
+    /// B5 — the I-beam appears over **text content only**, and the
+    /// divider outranks it.
+    ///
+    /// The row drives `desired_cursor_icon` across the surfaces the
+    /// contract distinguishes rather than asserting one position: an
+    /// I-beam that appeared over the gutter, the minimap or the band
+    /// would each be a different defect, and a single-point row would
+    /// see none of them.
+    ///
+    /// *Mutation: extend the I-beam over the gutter (drop the
+    /// `x >= text_left()` bound) → this row.*
+    #[test]
+    fn b5_the_i_beam_covers_text_content_and_nothing_else() {
+        use winit::window::CursorIcon;
+        let document = "fn main() {}\n".repeat(40);
+        let Some(mut state) = State::new_headless(640, 480, &document) else {
+            // No adapter here; the row needs a real surface for its
+            // geometry and is skipped rather than asserting on a stub.
+            return;
+        };
+        // Geometry the row can reason about: the text area starts at
+        // `text_left` and ends at `text_bounds_right`.
+        // **A REAL gutter, or the row cannot see its own mutation.**
+        // With line numbers off, `gutter_width_px` is 0 and
+        // `text_left == TEXT_LEFT`, so "extend the I-beam over the
+        // gutter" changes nothing and the row passes a broken build.
+        state.line_numbers = LineNumberMode::Absolute;
+        let text_left = state.text_left();
+        assert!(
+            text_left > TEXT_LEFT,
+            "fixture: a gutter must exist for this row to discriminate"
+        );
+        let inside = (text_left + 4.0, TEXT_TOP + 4.0);
+        let in_gutter = (TEXT_LEFT.midpoint(text_left), TEXT_TOP + 4.0);
+
+        state.pointer_pos = Some((f64::from(inside.0), f64::from(inside.1)));
+        assert_eq!(
+            state.desired_cursor_icon(),
+            CursorIcon::Text,
+            "over text content the cursor is an I-beam"
+        );
+
+        state.pointer_pos = Some((f64::from(in_gutter.0), f64::from(in_gutter.1)));
+        assert_eq!(
+            state.desired_cursor_icon(),
+            CursorIcon::Default,
+            "the gutter is chrome, not text: no I-beam"
+        );
+
+        state.pointer_pos = Some((f64::from(inside.0), 1.0));
+        assert_eq!(
+            state.desired_cursor_icon(),
+            CursorIcon::Default,
+            "above the text top is chrome too"
+        );
+
+        // The divider outranks the I-beam even at a text-content x.
+        state.pointer_pos = Some((f64::from(inside.0), f64::from(inside.1)));
+        state.panel.hover_divider = true;
+        assert_eq!(
+            state.desired_cursor_icon(),
+            CursorIcon::RowResize,
+            "the divider is a drag handle and is never text"
+        );
+    }
+
+    /// B5 — the I-beam covers text-area BLANK too, not only glyphs.
+    ///
+    /// The ruling is that `pointer_over_text_content` is **geometric**
+    /// rather than a byte hit-test: an I-beam belongs over the text
+    /// area including the space past a short line's end, and a byte test
+    /// would flicker the cursor along a ragged right margin.
+    ///
+    /// A row whose only positive point sits over an actual glyph cannot
+    /// see that: replacing the geometry with a byte hit-test passes it.
+    ///
+    /// *Mutation, as executed:* bound `x` by the glyphs' extent —
+    /// `text_left + widest_display_columns * mono_advance` — which is
+    /// byte-hit-test semantics expressed geometrically. The literal
+    /// substitution is not available: `hit_test_source_byte` takes
+    /// `&mut self` and this helper is `&self`.
+    #[test]
+    fn b5_the_i_beam_covers_the_blank_past_a_short_lines_end() {
+        use winit::window::CursorIcon;
+        // One very short line, so most of the text rectangle's first row
+        // is blank — and the row asks for the I-beam there.
+        let Some(mut state) = State::new_headless(640, 480, "ab\n\n\n") else {
+            return;
+        };
+        state.line_numbers = LineNumberMode::Absolute;
+        let far_right = state.text_bounds_right() as f32 - 8.0;
+        assert!(
+            far_right > state.text_left() + 40.0,
+            "fixture: the row needs blank space well past the line's end"
+        );
+        state.pointer_pos = Some((f64::from(far_right), f64::from(TEXT_TOP + 4.0)));
+        assert_eq!(
+            state.desired_cursor_icon(),
+            CursorIcon::Text,
+            "the text AREA carries the I-beam, not just the glyphs in it"
+        );
+    }
+
+    /// B5 — the icon follows the MENU'S LIFECYCLE, which changes with no
+    /// pointer motion at all.
+    ///
+    /// `MenuPrompt` opens and closes the menu. Without re-deriving the
+    /// icon there, opening while an I-beam shows leaves it on screen
+    /// over the menu, and closing leaves the arrow over text — in both
+    /// cases until the pointer happens to move.
+    ///
+    /// Driven through `apply_attach_message`, the production path, and
+    /// asserting `last_cursor_icon` — the value actually written — not
+    /// the decision function.
+    ///
+    /// *Mutations, each firing this row: drop the
+    /// `apply_panel_cursor_icon()` call in the `MenuPrompt` arm; drop
+    /// the `menu.is_some()` guard in `pointer_over_text_content`.*
+    #[test]
+    fn b5_the_icon_follows_the_menus_lifecycle_without_pointer_motion() {
+        use winit::window::CursorIcon;
+        let document = "fn main() {}\n".repeat(40);
+        let Some(mut state) = State::new_headless(640, 480, &document) else {
+            return;
+        };
+        state.line_numbers = LineNumberMode::Absolute;
+        state.pointer_pos = Some((
+            f64::from(state.text_left() + 8.0),
+            f64::from(TEXT_TOP + 4.0),
+        ));
+        state.apply_panel_cursor_icon();
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Text),
+            "setup: an I-beam is showing before the menu opens"
+        );
+
+        let _ = state.apply_attach_message(InstanceMessage::MenuPrompt {
+            buffer_id: BufferId::next(),
+            rows: vec![MenuPromptRow {
+                label: "Cut".into(),
+                separator: false,
+            }],
+            active: Some(0),
+        });
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Default),
+            "opening the menu clears the I-beam without any pointer motion"
+        );
+
+        // Empty rows close it.
+        let _ = state.apply_attach_message(InstanceMessage::MenuPrompt {
+            buffer_id: BufferId::next(),
+            rows: Vec::new(),
+            active: None,
+        });
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Text),
+            "and closing it restores the I-beam, the pointer never having \
+             moved"
+        );
+    }
+
+    /// B5 — a **buffer snapshot** closes the menu too, and the icon has
+    /// to follow that as well.
+    ///
+    /// `MenuPrompt` is not the only path that clears the menu: a
+    /// snapshot clears it because a popup anchored in the prior buffer
+    /// would hijack input. Missing that path left an open-menu arrow on
+    /// screen over document text until the pointer moved.
+    ///
+    /// *Mutation: drop `apply_panel_cursor_icon()` from `reshape`'s
+    /// tail → this row.*
+    #[test]
+    fn b5_a_buffer_snapshot_closes_the_menu_and_restores_the_i_beam() {
+        use winit::window::CursorIcon;
+        let text = "fn main() {}\n".repeat(40);
+        let Some(mut state) = State::new_headless(640, 480, &text) else {
+            return;
+        };
+        state.line_numbers = LineNumberMode::Absolute;
+        state.pointer_pos = Some((
+            f64::from(state.text_left() + 8.0),
+            f64::from(TEXT_TOP + 4.0),
+        ));
+
+        let _ = state.apply_attach_message(InstanceMessage::MenuPrompt {
+            buffer_id: BufferId::next(),
+            rows: vec![MenuPromptRow {
+                label: "Cut".into(),
+                separator: false,
+            }],
+            active: Some(0),
+        });
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Default),
+            "setup: the open menu owns the pointer"
+        );
+
+        let bid = BufferId::next();
+        let doc = loro::LoroDoc::new();
+        doc.get_text(LORO_TEXT_CONTAINER)
+            .insert(0, &text)
+            .expect("insert snapshot text");
+        let _ = state.apply_attach_message(InstanceMessage::BufferSnapshot {
+            buffer_id: bid,
+            crdt_snapshot: doc.export(loro::ExportMode::Snapshot).expect("export"),
+        });
+
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Text),
+            "the snapshot closed the menu, so the I-beam returns without \
+             the pointer moving"
+        );
+    }
+
+    /// B5 — a snapshot that changes GEOMETRY moves the I-beam boundary,
+    /// with no menu and no pointer motion involved.
+    ///
+    /// `text_left` is `TEXT_LEFT + gutter_width_px`, and the gutter is
+    /// sized from the line count. A snapshot that changes the number of
+    /// lines therefore moves the text boundary under a stationary
+    /// pointer: a pixel that was gutter becomes text, or the reverse.
+    ///
+    /// This row and the menu row above reach the same hook by different
+    /// routes — menu ownership there, geometry here — and are kept
+    /// separate so a failure says which route broke.
+    ///
+    /// *Mutation: drop `apply_panel_cursor_icon()` from `reshape`'s tail
+    /// → every row that reaches the hook through geometry: this one, the
+    /// menu row above, the line-number row, and the two panel rows
+    /// below. That list grows with each new geometry route, which is the
+    /// point of having one hook; the rows are separate so a failure
+    /// names the route.*
+    #[test]
+    fn b5_a_snapshot_that_moves_the_gutter_moves_the_i_beam_boundary() {
+        use winit::window::CursorIcon;
+        // Ten lines: a one-digit gutter.
+        let narrow = "x\n".repeat(9);
+        let Some(mut state) = State::new_headless(640, 480, &narrow) else {
+            return;
+        };
+        state.line_numbers = LineNumberMode::Absolute;
+        let narrow_left = state.text_left();
+
+        // A pixel just left of the current boundary: chrome now.
+        let probe = f64::from(narrow_left - 1.0);
+        state.pointer_pos = Some((probe, f64::from(TEXT_TOP + 4.0)));
+        state.apply_panel_cursor_icon();
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Default),
+            "setup: the probe pixel is gutter under the narrow gutter"
+        );
+
+        // Now a four-digit line count, which widens the gutter and
+        // pushes `text_left` further right — the probe stays chrome —
+        // then back to a one-digit count, which narrows it again.
+        let wide = "x\n".repeat(1200);
+        let bid = BufferId::next();
+        let doc = loro::LoroDoc::new();
+        doc.get_text(LORO_TEXT_CONTAINER)
+            .insert(0, &wide)
+            .expect("insert snapshot text");
+        let _ = state.apply_attach_message(InstanceMessage::BufferSnapshot {
+            buffer_id: bid,
+            crdt_snapshot: doc.export(loro::ExportMode::Snapshot).expect("export"),
+        });
+        assert!(
+            state.text_left() > narrow_left,
+            "setup: a larger line count must widen the gutter, else this \
+             row measures nothing"
+        );
+
+        // A pixel that WAS text under the narrow gutter and is gutter
+        // under the wide one.
+        let inside_wide_gutter = f64::from(narrow_left + 2.0);
+        assert!(
+            inside_wide_gutter < f64::from(state.text_left()),
+            "setup: the probe must now fall inside the wider gutter"
+        );
+        state.pointer_pos = Some((inside_wide_gutter, f64::from(TEXT_TOP + 4.0)));
+        state.apply_panel_cursor_icon();
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Default),
+            "setup: chrome under the wide gutter"
+        );
+
+        // Back to few lines: the same stationary pixel becomes text, and
+        // only the post-reshape application can notice.
+        let doc2 = loro::LoroDoc::new();
+        doc2.get_text(LORO_TEXT_CONTAINER)
+            .insert(0, &narrow)
+            .expect("insert snapshot text");
+        let _ = state.apply_attach_message(InstanceMessage::BufferSnapshot {
+            buffer_id: BufferId::next(),
+            crdt_snapshot: doc2.export(loro::ExportMode::Snapshot).expect("export"),
+        });
+
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Text),
+            "the gutter narrowed under a stationary pointer, so the pixel \
+             is text now and the icon must say so"
+        );
+    }
+
+    /// B5 — **the central geometry hook**: turning the line-number
+    /// gutter on moves the I-beam boundary under a stationary pointer.
+    ///
+    /// The snapshot arm is only one geometry transition. The
+    /// line-number mode changes `text_left`, and minimap arrival, panel
+    /// appearance, resize and font metrics move the text clip the same
+    /// way. A pointer that never moves can therefore go from text to
+    /// gutter with the icon still saying `Text`. All of them settle by
+    /// reshaping, which is why the re-derivation lives in `reshape`'s
+    /// tail rather than at each call site. This row drives the
+    /// production `InstanceMessage::LineNumbers` arm — not
+    /// `apply_panel_cursor_icon` directly — so it witnesses that hook
+    /// through a path a daemon message really takes.
+    ///
+    /// *Mutation: drop `apply_panel_cursor_icon()` from `reshape`'s tail
+    /// → this row.*
+    #[test]
+    fn b5_turning_the_line_number_gutter_on_moves_the_i_beam_boundary() {
+        use winit::window::CursorIcon;
+        let text = "fn main() {}\n".repeat(40);
+        let Some(mut state) = State::new_headless(640, 480, &text) else {
+            return;
+        };
+        // `Off` is the default: no gutter, so text starts at TEXT_LEFT.
+        assert_eq!(
+            state.line_numbers,
+            LineNumberMode::Off,
+            "setup: the gutter starts off"
+        );
+        let bare_left = state.text_left();
+
+        // A pixel just inside the text with no gutter.
+        let probe = f64::from(bare_left + 2.0);
+        state.pointer_pos = Some((probe, f64::from(TEXT_TOP + 4.0)));
+        state.apply_panel_cursor_icon();
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Text),
+            "setup: the probe pixel is text while the gutter is off"
+        );
+
+        // Turn the gutter on through the daemon message. The pointer
+        // does not move.
+        let _ = state.apply_attach_message(InstanceMessage::LineNumbers {
+            buffer_id: BufferId::next(),
+            mode: LineNumberMode::Absolute,
+        });
+        assert!(
+            probe < f64::from(state.text_left()),
+            "setup: the gutter must have swallowed the probe pixel, else \
+             this row measures nothing"
+        );
+
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Default),
+            "the gutter appeared under a stationary pointer, so the pixel \
+             is chrome now and the icon must say so"
+        );
+    }
+
+    /// B5 — accepted panel messages settle the cursor icon through the same
+    /// geometry hook as every other document-boundary change.
+    ///
+    /// The pointer does not move across either transition. A first `Present`
+    /// turns a document pixel into panel content; `Absent` removes a divider
+    /// from under the pointer and clears its hover authority. Both messages
+    /// enter through `apply_attach_message`, the production receiver path.
+    ///
+    /// Content-only frames deliberately do not reshape: the discriminator is
+    /// the panel inset before/after the accepted payload, not merely a changed
+    /// frame.
+    ///
+    /// *Mutations: replace the band-change reshape in the `PanelFrame` arm
+    /// with `request_redraw()` → the appearance leg; omit the `hover_divider`
+    /// clear from `PanelFramePayload::Absent` → the removal leg.*
+    #[test]
+    fn b5_panel_messages_rederive_the_icon_without_pointer_motion() {
+        use winit::window::CursorIcon;
+        let document = "fn main() {}\n".repeat(40);
+        let Some(mut state) = State::new_headless(640, 480, &document) else {
+            return;
+        };
+        state.set_panel_wire(PANEL_MIN_VERSION);
+        let (geometry_epoch, total) = state
+            .next_geometry_declaration(GeometryTrigger::Surface)
+            .expect("a panel session declares its surface");
+        let rows = 4;
+        let frame = panel_frame_of(rows, total.cols.max(1), geometry_epoch, 1);
+
+        // Before the panel appears, a pixel in its future first row belongs
+        // to the document text area.
+        let future_band = PanelBandInset::installed(rows, state.fm);
+        let x = state.text_left() + 8.0;
+        let y = document_text_bottom(state.config.height, state.fm, future_band)
+            + state.fm.divider_height()
+            + state.fm.code_line_height() / 2.0;
+        state.pointer_pos = Some((f64::from(x), f64::from(y)));
+        state.apply_panel_cursor_icon();
+        assert!(
+            state.pointer_over_text_content(),
+            "setup: text before Present"
+        );
+        assert_eq!(state.last_cursor_icon, Some(CursorIcon::Text));
+
+        let _ = state.apply_attach_message(InstanceMessage::PanelFrame(
+            PanelFramePayload::Present(frame),
+        ));
+        assert!(
+            matches!(
+                state.classify_pointer_surface(x, y),
+                PointerSurface::PanelCell(_)
+            ),
+            "setup: Present must put panel content under the stationary pointer"
+        );
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Default),
+            "panel appearance moves the stationary pointer off document text"
+        );
+
+        // Move once onto the divider, then keep the pointer stationary while
+        // Absent removes both the divider and its hover authority.
+        let (_, dy, _, dh) = state.panel_divider_rect().expect("present divider");
+        let divider_point = (state.text_left() + 8.0, dy + dh / 2.0);
+        assert!(state.panel_divider_contains(divider_point.0, divider_point.1));
+        state.pointer_pos = Some((f64::from(divider_point.0), f64::from(divider_point.1)));
+        assert!(state.set_panel_divider_hover(true));
+        state.apply_panel_cursor_icon();
+        assert_eq!(state.last_cursor_icon, Some(CursorIcon::RowResize));
+
+        let _ = state.apply_attach_message(InstanceMessage::PanelFrame(PanelFramePayload::Absent));
+        assert!(state.panel.presented().is_none());
+        assert!(!state.panel.hover_divider);
+        assert!(
+            state.pointer_over_text_content(),
+            "setup: the former divider pixel becomes document text"
+        );
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Text),
+            "panel removal replaces the stale resize icon without pointer motion"
+        );
+    }
+
+    /// B5 — a content-only panel frame does not reshape the document.
+    ///
+    /// Panel content can repaint continuously while its row count and inset
+    /// stay fixed. Routing every accepted frame through `reshape` would put a
+    /// full document rebuild on that ordinary path and would also release the
+    /// post-jump styled-redraw deadline. The deadline is the existing
+    /// observable effect used here to discriminate repaint from reshape.
+    ///
+    /// *Mutation: replace the inset comparison in the `PanelFrame` arm with
+    /// an unconditional `sync_buffer_dimensions(); reshape();` → this row.*
+    #[test]
+    fn b5_a_content_only_panel_frame_repaints_without_reshaping_the_document() {
+        let Some(mut state) = State::new_headless(640, 480, "document\n") else {
+            return;
+        };
+        state.set_panel_wire(PANEL_MIN_VERSION);
+        let (geometry_epoch, total) = state
+            .next_geometry_declaration(GeometryTrigger::Surface)
+            .expect("a panel session declares its surface");
+        let frame = panel_frame_of(4, total.cols.max(1), geometry_epoch, 1);
+        let _ = state.apply_attach_message(InstanceMessage::PanelFrame(
+            PanelFramePayload::Present(frame.clone()),
+        ));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        state.styled_redraw_deadline = Some(deadline);
+        let mut repainted = frame;
+        repainted.cells[0] = terminal_cell(pmacs_protocol::Glyph::Char('y'), CellStyle::default());
+        let inset_before = state.band_inset();
+        let _ = state.apply_attach_message(InstanceMessage::PanelFrame(
+            PanelFramePayload::Present(repainted),
+        ));
+
+        assert_eq!(
+            state.band_inset(),
+            inset_before,
+            "the row count is unchanged"
+        );
+        assert_eq!(
+            state.styled_redraw_deadline,
+            Some(deadline),
+            "a content repaint must not perform a document reshape"
+        );
+    }
+
+    /// B5 — a new geometry declaration temporarily disowns the retained
+    /// panel frame, which is a panel-removal transition of its own.
+    ///
+    /// Resize and font handling reshape before the declaration is advanced.
+    /// Once its epoch changes, `presented()` rejects the old frame and the
+    /// panel inset disappears. This row isolates that later transition from
+    /// frame acceptance by installing the setup frame directly.
+    ///
+    /// *Mutation: omit `reshape_if_panel_band_changed(band_before)` after
+    /// advancing `geometry_epoch` → this row.*
+    #[test]
+    fn b5_geometry_redeclaration_rederives_the_icon_after_disowning_the_panel() {
+        use winit::window::CursorIcon;
+        let document = "fn main() {}\n".repeat(40);
+        let Some(mut state) = State::new_headless(640, 480, &document) else {
+            return;
+        };
+        present_panel(&mut state, 4);
+        let (x, y, _, _) = state.panel_content_rect().expect("present panel");
+        let point = (
+            x + state.text_left() + 8.0,
+            y + state.fm.code_line_height() / 2.0,
+        );
+        assert!(matches!(
+            state.classify_pointer_surface(point.0, point.1),
+            PointerSurface::PanelCell(_)
+        ));
+        state.pointer_pos = Some((f64::from(point.0), f64::from(point.1)));
+        state.apply_panel_cursor_icon();
+        assert_eq!(state.last_cursor_icon, Some(CursorIcon::Default));
+
+        let _ = state
+            .next_geometry_declaration(GeometryTrigger::Metrics)
+            .expect("metrics always advance the panel geometry epoch");
+        assert!(
+            state.panel.presented().is_none(),
+            "the retained frame answers the prior declaration"
+        );
+        assert!(
+            state.pointer_over_text_content(),
+            "setup: without the disowned panel, its former cell is document text"
+        );
+        assert_eq!(
+            state.last_cursor_icon,
+            Some(CursorIcon::Text),
+            "declaration invalidation settles the icon after its final geometry change"
+        );
+    }
+
+    /// A wide document scrolled to its right bound, with the caret left
+    /// at byte 0 — off screen to the left, which is the state every GPU
+    /// row below depends on and the state the follow is skipped in.
+    fn scrolled_to_the_right_bound(width: u32, height: u32) -> Option<(State, BufferId, f32)> {
+        let mut text = "w".repeat(400);
+        text.push('\n');
+        for _ in 0..200 {
+            text.push_str("filler\n");
+        }
+        let mut state = State::new_headless(width, height, &text)?;
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 0,
+        });
+        // Wrapping is on by default and pins the origin to zero, so
+        // without this every row here would measure nothing.
+        let _ = state.apply_attach_message(InstanceMessage::LineWrapFacts {
+            buffer_id: bid,
+            wrap: false,
+        });
+        assert_eq!(state.buffer.wrap(), Wrap::None, "setup: wrap is off");
+        state.scroll_by_columns(1000);
+        let origin = state.code_scroll_left;
+        assert!(origin > 0.0, "setup: the origin must have moved");
+        assert!(
+            !state.caret_painted_in_code_clip(),
+            "setup: the caret must be off screen — that is the state the \
+             follow is skipped in, and so the state these rows are about"
+        );
+        Some((state, bid, origin))
+    }
+
+    /// The horizontal maximum `widest − viewport`, in pixels, as the
+    /// production clamp computes it.
+    fn max_left_px(state: &mut State) -> f32 {
+        let advance = state.mono_advance();
+        let width = state.text_bounds_right() as f32 - state.text_left();
+        let cols = (width / advance).floor().max(0.0) as u32;
+        state.widest_display_columns().saturating_sub(cols) as f32 * advance
+    }
+
+    /// L2 — **the GPU preserves a manual horizontal origin
+    /// structurally**, with no authority flag anywhere.
+    ///
+    /// The framing offers this row as the GPU's manual-authority
+    /// witness and says the height-only resize invokes "a real follow".
+    /// **It does not.** `resize` runs `ensure_caret_painted` only when
+    /// the caret was painted, and the setup every L-row requires — the
+    /// caret outside the manual viewport — is exactly when it is not.
+    /// Q#F6's painted-before policy skips the follow, so there is
+    /// nothing for a latch to outrank. This frontend carried such a
+    /// flag for a while, written in four places and read in none; it
+    /// was removed rather than completed.
+    ///
+    /// So this row witnesses the *policy*, which is what actually holds
+    /// the origin here.
+    ///
+    /// *Mutation: have `resize` call `ensure_caret_painted()`
+    /// unconditionally → this row, and necessarily L7a: an
+    /// unconditional follow snaps the origin to the caret before that
+    /// row's widen, so its "came down from the manual origin" and
+    /// "still non-zero" assertions cannot survive either. The
+    /// dependency is unavoidable, not a witness failing to fire.*
+    #[test]
+    fn l2_a_height_only_resize_preserves_the_horizontal_origin() {
+        let Some((mut state, _bid, origin)) = scrolled_to_the_right_bound(640, 480) else {
+            return;
+        };
+
+        state.resize(640, 600);
+
+        assert!(
+            (state.code_scroll_left - origin).abs() < f32::EPSILON,
+            "a taller window is not a horizontal event: {origin} -> {}",
+            state.code_scroll_left
+        );
+    }
+
+    /// L7a, GPU — **a widening resize clamps the origin to the exact
+    /// bound** (clause 3).
+    ///
+    /// A wider viewport LOWERS the maximum `widest − viewport`, and
+    /// nothing else brings the origin down: the follow that would is
+    /// skipped in precisely this state, per L2. Before the clamp
+    /// existed, a scroll to the right bound at 640px followed by a
+    /// widen to 1600px left the origin **960px past the new maximum** —
+    /// most of the viewport blank with the text off its left edge.
+    ///
+    /// *Mutation: drop `clamp_code_scroll_left()` from `reshape`'s tail
+    /// → this row. Clamp to `max_left - 1` → its exact bound.*
+    #[test]
+    fn l7a_gpu_a_widening_resize_clamps_the_origin_to_the_exact_bound() {
+        let Some((mut state, _bid, origin)) = scrolled_to_the_right_bound(640, 480) else {
+            return;
+        };
+
+        state.resize(1600, 480);
+
+        let expected = max_left_px(&mut state);
+        let advance = state.mono_advance();
+        assert!(
+            state.code_scroll_left < origin,
+            "a wider viewport must bring the origin down"
+        );
+        assert!(
+            (state.code_scroll_left - expected).abs() < advance / 2.0,
+            "and it must land on `widest − viewport` exactly: {} vs {expected}",
+            state.code_scroll_left
+        );
+        assert!(
+            state.code_scroll_left > 0.0,
+            "clamped, NOT discarded — the gesture survives at the new bound"
+        );
+    }
+
+    /// L7b, GPU — **a content shrink clamps too, through the
+    /// incremental edit path** (clause 3's other half).
+    ///
+    /// This row exists because that path **bypasses `reshape`**. Q#R1's
+    /// keystroke case re-shapes only the affected line and skips the
+    /// full slice reshape — and skipped the clamp with it. A one-line
+    /// delete can shorten the widest line, which lowers the maximum, so
+    /// a single keystroke could leave the viewport past the end of the
+    /// text with no later event to repair it.
+    ///
+    /// The edit goes through `apply_loro_text_delta_batches`, the
+    /// production delta path, and the row asserts the line count did
+    /// not change — because a line-structure change would fall back to
+    /// the full reshape and witness the wrong branch.
+    ///
+    /// *Mutation: drop `clamp_code_scroll_left()` from the incremental
+    /// branch → this row, and only this row.*
+    #[test]
+    fn l7b_gpu_a_one_line_shrink_clamps_through_the_incremental_path() {
+        let Some((mut state, _bid, origin)) = scrolled_to_the_right_bound(640, 480) else {
+            return;
+        };
+        let lines_before = state.current_line_starts.len();
+        // A full `reshape` clears this hold; the incremental line path
+        // deliberately does not. Keep a sentinel so the checked-in row
+        // proves it reached the branch whose clamp it claims to witness,
+        // rather than relying on a mutation run outside the suite.
+        let incremental_sentinel = std::time::Instant::now() + std::time::Duration::from_mins(1);
+        state.styled_redraw_deadline = Some(incremental_sentinel);
+
+        // Cut the 400-column line down to 150. One edit, no newline,
+        // no line-count change: Q#R1's incremental case.
+        let shrink = vec![
+            loro::TextDelta::Retain {
+                retain: 150,
+                attributes: None,
+            },
+            loro::TextDelta::Delete { delete: 250 },
+        ];
+        state
+            .apply_loro_text_delta_batches(&[shrink])
+            .expect("the one-line shrink applies");
+        assert_eq!(
+            state.current_line_starts.len(),
+            lines_before,
+            "setup: the line count must not change, or this is not a \
+             single-line incremental candidate"
+        );
+        assert_eq!(
+            state.styled_redraw_deadline,
+            Some(incremental_sentinel),
+            "setup: a full reshape clears this sentinel; retaining it \
+             proves `try_reshape_line` succeeded and the incremental \
+             clamp branch actually ran"
+        );
+
+        let expected = max_left_px(&mut state);
+        let advance = state.mono_advance();
+        assert!(
+            state.code_scroll_left < origin,
+            "a shorter widest line lowers the maximum: {origin} -> {}",
+            state.code_scroll_left
+        );
+        assert!(
+            (state.code_scroll_left - expected).abs() < advance / 2.0,
+            "and the origin lands on the new bound exactly: {} vs {expected}",
+            state.code_scroll_left
+        );
+    }
+
+    /// L3, GPU — **a genuine cursor move ends the preservation.**
+    ///
+    /// With no flag to clear, the boundary is entirely structural: the
+    /// origin is preserved only while the caret stays off screen, and a
+    /// `CursorByte` that moves it runs `ensure_caret_painted`, whose
+    /// follow pulls the viewport to the new caret. Removing the dead
+    /// flag would otherwise leave the "until the cursor changes" edge
+    /// unwitnessed — the one thing the flag's name claimed to govern.
+    ///
+    /// Driven through `apply_attach_message`, the production receiver.
+    ///
+    /// *Mutation: gate the `ensure_caret_painted()` call in the
+    /// `CursorByte` arm so it does not run on a move → this row.*
+    #[test]
+    fn l3_gpu_a_moved_cursor_pulls_the_viewport_back_to_the_caret() {
+        let Some((mut state, bid, origin)) = scrolled_to_the_right_bound(640, 480) else {
+            return;
+        };
+
+        // A byte the caret is not already on: the arm gates on `moved`,
+        // and re-announcing the same position is deliberately inert.
+        // Column 5 is far left of the manual viewport, so the follow
+        // has somewhere to go.
+        assert_eq!(
+            state.own_cursor.map(|c| c.byte),
+            Some(0),
+            "setup: the caret starts at byte 0"
+        );
+        let _ = state.apply_attach_message(InstanceMessage::CursorByte {
+            buffer_id: bid,
+            byte_pos: 5,
+        });
+
+        assert_eq!(
+            state.own_cursor,
+            Some(OwnCursor {
+                buffer_id: bid,
+                byte: 5,
+            }),
+            "setup: the production receiver must accept the moved cursor"
+        );
+        let advance = state.mono_advance();
+        let expected = 5.0 * advance;
+        assert!(
+            state.code_scroll_left < origin,
+            "a deliberate cursor move outranks a deliberate scroll: the \
+             viewport must chase the caret again: {origin} -> {}",
+            state.code_scroll_left
+        );
+        assert!(
+            (state.code_scroll_left - expected).abs() < 0.01,
+            "and normal follow puts column 5 at the left edge exactly: \
+             {} vs {expected}",
+            state.code_scroll_left
+        );
+    }
+
+    /// B5 — an open context menu owns its pixels, and they are not text.
+    ///
+    /// The decision half of the lifecycle row above, kept separate so a
+    /// failure says whether the *decision* or the *application* broke.
+    #[test]
+    fn b5_an_open_menu_is_not_text() {
+        use winit::window::CursorIcon;
+        let document = "fn main() {}\n".repeat(40);
+        let Some(mut state) = State::new_headless(640, 480, &document) else {
+            return;
+        };
+        state.line_numbers = LineNumberMode::Absolute;
+        let over_text = (
+            f64::from(state.text_left() + 8.0),
+            f64::from(TEXT_TOP + 4.0),
+        );
+        state.pointer_pos = Some(over_text);
+        assert_eq!(
+            state.desired_cursor_icon(),
+            CursorIcon::Text,
+            "setup: an I-beam is showing before the menu opens"
+        );
+
+        state.menu = Some(MenuLocal {
+            rows: vec![MenuPromptRow {
+                label: "an item".to_owned(),
+                separator: false,
+            }],
+            active: Some(0),
+            anchor_px: (10.0, 10.0),
+        });
+
+        assert_eq!(
+            state.desired_cursor_icon(),
+            CursorIcon::Default,
+            "the menu owns the pointer; its pixels are chrome"
+        );
+    }
+
+    /// B5 — with no pointer position there is no I-beam.
+    ///
+    /// Before the first motion the frontend does not know where the
+    /// pointer is, and guessing `Text` would show an I-beam over
+    /// whatever the window happens to be showing.
+    #[test]
+    fn b5_no_pointer_position_means_no_i_beam() {
+        use winit::window::CursorIcon;
+        let document = "fn main() {}\n".repeat(40);
+        let Some(mut state) = State::new_headless(640, 480, &document) else {
+            // No adapter here; the row needs a real surface for its
+            // geometry and is skipped rather than asserting on a stub.
+            return;
+        };
+        state.pointer_pos = None;
+        assert_eq!(state.desired_cursor_icon(), CursorIcon::Default);
+    }
+
+    /// B4 — a middle-click paste reads the **PRIMARY selection** on
+    /// Linux, not the clipboard.
+    ///
+    /// The two are different selections with different contents: the
+    /// clipboard holds what was last explicitly copied, PRIMARY holds
+    /// what is currently selected. Reading the wrong one produces a
+    /// paste — just not the one the platform convention promises — so
+    /// the row asserts the SOURCE rather than that a paste happened.
+    ///
+    /// *Mutation: return `PasteSource::Clipboard` → this row.*
+    #[test]
+    fn b4_a_middle_click_pastes_the_primary_selection_on_linux() {
+        assert_eq!(
+            super::paste_source_for(true),
+            Some(super::PasteSource::Primary),
+            "B4: the middle button reads PRIMARY on Linux"
+        );
+        assert_eq!(
+            super::paste_source_for(false),
+            None,
+            "B4 rules PRIMARY on Linux and nothing else; off Linux the \
+             gesture stays inert rather than acquiring an unframed \
+             clipboard meaning"
+        );
+    }
+
+    /// B4's routing half — a middle **press** is its own route now, and
+    /// no longer the claimed-and-dropped `UnusedButton`.
+    ///
+    /// Its RELEASE stays unused, like the right button's: the paste
+    /// happens once, on the press.
+    #[test]
+    fn b4_a_middle_press_routes_to_its_own_variant_and_its_release_does_not() {
+        use winit::event::{ElementState, MouseButton};
+        let press = winit::event::WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: ElementState::Pressed,
+            button: MouseButton::Middle,
+        };
+        let release = winit::event::WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: ElementState::Released,
+            button: MouseButton::Middle,
+        };
+        assert_eq!(
+            super::route_pointer(&press),
+            Some(super::PointerRoute::MiddlePress),
+            "a middle press is B4's gesture"
+        );
+        assert_eq!(
+            super::route_pointer(&release),
+            Some(super::PointerRoute::UnusedButton),
+            "and its release remains nothing, like the right button's"
+        );
+    }
+
+    /// R4 and R5's resets exist and are SEPARATE, so a mutation that
+    /// omits one is individually visible.
+    ///
+    /// **This is not R4/R5's witness.** Those rows require an actual
+    /// buffer replacement through the harness — bank a sub-tick over
+    /// document A, replace the buffer, and see motion over B start from
+    /// zero. That row is still owed; this only pins that the two clears
+    /// are distinct operations rather than one.
+    #[test]
+    fn document_and_minimap_resets_are_separate_operations() {
+        let mut r = WheelResiduals::default();
+        assert_eq!(r.accumulate(ResidualOwner::Document, 0.0, 0.9), (0, 0));
+        assert_eq!(r.accumulate(ResidualOwner::Minimap, 0.0, 0.9), (0, 0));
+        r.clear_document();
+        assert_eq!(r.bank_of(ResidualOwner::Document), None);
+        assert!(
+            r.bank_of(ResidualOwner::Minimap).is_some(),
+            "clearing the document must not clear the minimap, or one \
+             omission hides behind the other"
+        );
+        r.clear_minimap();
+        assert_eq!(r.bank_of(ResidualOwner::Minimap), None);
+    }
+
+    /// One event per whole tick, in a stable order.
+    #[test]
+    fn wheel_kinds_emits_one_event_per_banked_tick() {
+        assert_eq!(wheel_kinds(0, 0), Vec::new());
+        assert_eq!(
+            wheel_kinds(0, 2),
+            vec![ProtocolMouseKind::ScrollDown, ProtocolMouseKind::ScrollDown]
+        );
+        assert_eq!(wheel_kinds(0, -1), vec![ProtocolMouseKind::ScrollUp]);
+        assert_eq!(
+            wheel_kinds(-1, 1),
+            vec![ProtocolMouseKind::ScrollDown, ProtocolMouseKind::ScrollLeft]
+        );
+    }
+
     use super::*;
     use pmacs_protocol::cell::Style;
 
@@ -19585,6 +22082,18 @@ mod tests {
     // Bottom panel Stage 2B-3 — the GPU band
     // ===================================================================
 
+    fn panel_frame_of_buffer(
+        buffer_id: BufferId,
+        rows: u32,
+        cols: u32,
+        geometry_epoch: u64,
+        panel_epoch: u64,
+    ) -> PanelFrame {
+        let mut frame = panel_frame_of(rows, cols, geometry_epoch, panel_epoch);
+        frame.buffer_id = buffer_id;
+        frame
+    }
+
     fn panel_frame_of(rows: u32, cols: u32, geometry_epoch: u64, panel_epoch: u64) -> PanelFrame {
         let cells = (0..(rows as usize * cols as usize))
             .map(|_| terminal_cell(pmacs_protocol::Glyph::Char('x'), CellStyle::default()))
@@ -19613,6 +22122,749 @@ mod tests {
             "installing a first frame changes the band"
         );
         frame
+    }
+
+    /// Bring an `EffectHarness` to a presented panel at `panel_epoch`.
+    ///
+    /// Two harness facts this works around, both asserted rather than
+    /// assumed. It negotiates the **mapped** family, which refuses a
+    /// frame carrying no mapping generation, so this drops to the
+    /// legacy wire like every other panel row here. And it has already
+    /// made its one **surface** declaration, so the re-declaration uses
+    /// `Metrics`; a second surface declaration is suppressed by design
+    /// and returns `None`.
+    fn present_panel_in_harness(h: &mut EffectHarness, panel_epoch: u64) {
+        present_panel_of_buffer(h, BufferId::from_raw(77), panel_epoch);
+    }
+
+    fn present_panel_of_buffer(h: &mut EffectHarness, buffer_id: BufferId, panel_epoch: u64) {
+        {
+            let state = h.app.state.as_mut().expect("harness state");
+            state.set_panel_wire(PANEL_MIN_VERSION);
+            let (epoch, total) = state
+                .next_geometry_declaration(GeometryTrigger::Metrics)
+                .expect("metrics always advance the panel geometry epoch");
+            let frame = panel_frame_of_buffer(buffer_id, 4, total.cols.max(1), epoch, panel_epoch);
+            let _ = state.apply_attach_message(InstanceMessage::PanelFrame(
+                PanelFramePayload::Present(frame),
+            ));
+            assert!(
+                state.panel.presented().is_some(),
+                "setup: the frame must be accepted, or every assertion \
+                 that follows is about a panel that is not there"
+            );
+        }
+        let _ = h.read_until_sentinel();
+    }
+
+    /// The RECEIVER half of step 3: a real editor with a bottom panel,
+    /// seeded with something to scroll in both directions, and with a
+    /// frame geometry accepted.
+    ///
+    /// Two things here are load-bearing, and each was found by the row
+    /// failing without it. The panel buffer starts **empty**, and
+    /// `scroll_window` clamps to `line_count - 1`, so an unseeded panel
+    /// cannot scroll at all. And the receiver re-derives the panel grid
+    /// from an accepted geometry declaration — without one, every
+    /// coordinate is outside a grid that does not exist and the gesture
+    /// is `Refused` before it can have any effect.
+    fn panel_receiver() -> (
+        pmacs::editor::EditorState,
+        pmacs::protocol::FrontendId,
+        pmacs::window::WindowId,
+        BufferId,
+    ) {
+        let editor = pmacs::editor::EditorState::new();
+        let fid = pmacs::protocol::FrontendId(4242);
+        let (_document, panel) = editor.install_panel_view_for_test(fid, true);
+        let panel = panel.expect("the fixture installs a panel window");
+        let wide_line = "w".repeat(400);
+        editor.seed_window_buffer_for_test(panel, &format!("{wide_line}\n").repeat(50));
+        let panel_buffer = editor
+            .window_buffer_for_test(panel)
+            .expect("the panel window has a buffer");
+        assert_eq!(
+            editor.accept_semantic_frame_geometry(fid, 1, pmacs_protocol::CellSize::new(24, 80),),
+            pmacs::editor_core::GeometryUpdate::Advanced,
+            "setup: the receiver must accept the geometry declaration"
+        );
+        (editor, fid, panel, panel_buffer)
+    }
+
+    /// The PRODUCER half of step 3: this frontend, presenting a panel
+    /// for the very buffer the receiver is showing — so the gestures it
+    /// emits are about the same window the assertions read — with the
+    /// pointer parked on a panel **cell**.
+    ///
+    /// Panel chrome banks nothing at all, and a probe that drifted onto
+    /// it would satisfy every "nothing moved" assertion for entirely
+    /// the wrong reason, so the target is asserted here.
+    fn panel_producer(panel_buffer: BufferId) -> EffectHarness {
+        use winit::dpi::PhysicalPosition;
+        use winit::event::DeviceId;
+
+        let mut h = EffectHarness::new();
+        present_panel_of_buffer(&mut h, panel_buffer, 1);
+        let (px, py, _, ph) = h
+            .app
+            .state
+            .as_ref()
+            .expect("harness state")
+            .panel_content_rect()
+            .expect("the panel is presented");
+        let point = (f64::from(px + 4.0), f64::from(py + ph / 2.0));
+        h.feed(&WindowEvent::CursorMoved {
+            device_id: DeviceId::dummy(),
+            position: PhysicalPosition::new(point.0, point.1),
+        });
+        assert!(
+            matches!(
+                h.app.classify_wheel_target(point.0, point.1),
+                WheelTarget::PanelCell { .. }
+            ),
+            "setup: the probe must be a panel CELL"
+        );
+        h
+    }
+
+    /// Step 3 — **the panel wheel's END-TO-END effect, on both axes,
+    /// driven by fractional input.**
+    ///
+    /// The framing is explicit that an emission-only witness will not
+    /// do: *"Not 'a `PanelPointer` was emitted' — the observable effect
+    /// on the panel's viewport."* The defect it guards is exactly "the
+    /// frontend emits and the receiver discards", and a row that counts
+    /// emitted events reproduces that blind spot rather than catching
+    /// it — it would pass if the vertical axis emitted a horizontal
+    /// gesture, if the receiver dropped it, or if some other event
+    /// accompanied a sub-threshold delta.
+    ///
+    /// So this row runs both halves. The **producer** is this
+    /// frontend's `apply_wheel`, reached through
+    /// `dispatch_window_event`. The **receiver** is a real
+    /// `pmacs::editor::EditorState` with a live panel window, driven
+    /// through `classify_panel_pointer` + `apply_panel_pointer`, the
+    /// pair the daemon itself calls. The assertion is the panel
+    /// window's `(view_top, view_left)`.
+    ///
+    /// Per axis: a first sub-threshold delta moves the viewport by
+    /// **nothing** and puts **nothing** on the wire, and the delta that
+    /// completes the notch moves it by **exactly one step** — once, not
+    /// twice, and not the sum of everything banked.
+    ///
+    /// *Mutations: round the notch instead of banking it → the
+    /// sub-threshold legs; bank into one accumulator per surface rather
+    /// than per (surface, axis) → the second axis's first leg, which
+    /// the first axis's leftover completes; drop `PKind::ScrollLeft` /
+    /// `ScrollRight` from the daemon's panel arm → the horizontal
+    /// completion, which no emission count can see; double either
+    /// receiver step → that axis's exact-origin assertion; add a
+    /// frontend-local document scroll beside the panel event → the
+    /// completion transcript.*
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one ordered four-turn sequence; splitting would hide which residual each turn carries"
+    )]
+    fn step3_a_panel_wheel_moves_the_panel_viewport_once_per_notch_per_axis() {
+        use winit::event::{DeviceId, MouseScrollDelta, TouchPhase};
+
+        let (mut editor, fid, panel, panel_buffer) = panel_receiver();
+        let origin = |editor: &pmacs::editor::EditorState| {
+            editor
+                .window_view_origin_for_test(panel)
+                .expect("the panel window is live")
+        };
+        assert_eq!(origin(&editor), (0, 0), "setup: the panel starts home");
+
+        let mut h = panel_producer(panel_buffer);
+
+        // One turn of the wheel, carried all the way through: the
+        // frontend's events are replayed into the editor exactly as the
+        // daemon replays them.
+        let turn =
+            |h: &mut EffectHarness, editor: &mut pmacs::editor::EditorState, dx: f32, dy: f32| {
+                let step = h.feed(&WindowEvent::MouseWheel {
+                    device_id: DeviceId::dummy(),
+                    delta: MouseScrollDelta::LineDelta(dx, -dy),
+                    phase: TouchPhase::Moved,
+                });
+                let mut replayed = 0usize;
+                for event in &step.outbound {
+                    if let pmacs_protocol::FrontendEvent::PanelPointer {
+                        buffer_id,
+                        coord,
+                        kind,
+                        mods,
+                        ..
+                    } = event
+                    {
+                        let disposition =
+                            editor.classify_panel_pointer(fid, *buffer_id, *coord, *kind);
+                        editor.apply_panel_pointer(fid, &disposition, *coord, *kind, *mods);
+                        replayed += 1;
+                    }
+                }
+                (step, replayed)
+            };
+
+        // Vertical, sub-threshold: nothing on the wire, nothing moves.
+        let (step, replayed) = turn(&mut h, &mut editor, 0.0, 0.6);
+        assert_eq!(
+            step,
+            Step {
+                local: Vec::new(),
+                outbound: Vec::new(),
+            },
+            "a sub-threshold vertical delta must have NO local or wire effect"
+        );
+        assert_eq!(replayed, 0);
+        assert_eq!(
+            origin(&editor),
+            (0, 0),
+            "and the panel viewport must not move"
+        );
+
+        // Horizontal, sub-threshold, with the vertical bank still
+        // standing: one accumulator fed by both axes would complete
+        // here and scroll.
+        let (step, replayed) = turn(&mut h, &mut editor, 0.6, 0.0);
+        assert_eq!(
+            step,
+            Step {
+                local: Vec::new(),
+                outbound: Vec::new(),
+            },
+            "a sub-threshold horizontal delta must not be completed by \
+             the vertical one banked before it"
+        );
+        assert_eq!(replayed, 0);
+        assert_eq!(
+            origin(&editor),
+            (0, 0),
+            "and still nothing has moved on either axis"
+        );
+
+        // Completing the vertical notch: the viewport moves ONE step
+        // down, and the horizontal origin stays put.
+        let (step, replayed) = turn(&mut h, &mut editor, 0.0, 0.6);
+        assert!(
+            step.local.is_empty(),
+            "a panel wheel has no frontend-local effect: {:?}",
+            step.local
+        );
+        assert_eq!(
+            step.outbound.len(),
+            1,
+            "one completed notch must emit exactly one event and nothing \
+             alongside it: {:?}",
+            step.outbound
+        );
+        assert!(
+            matches!(
+                step.outbound[0],
+                pmacs_protocol::FrontendEvent::PanelPointer {
+                    kind: pmacs_protocol::MouseKind::ScrollDown,
+                    ..
+                }
+            ),
+            "the vertical notch must be one downward panel gesture: {:?}",
+            step.outbound
+        );
+        assert_eq!(replayed, 1, "one notch is one gesture");
+        let after_vertical = origin(&editor);
+        assert_eq!(
+            after_vertical,
+            (WHEEL_LINES_PER_TICK as usize, 0),
+            "one vertical notch is exactly one line-step, on that axis \
+             only"
+        );
+
+        // Completing the horizontal notch: sideways this time, and the
+        // vertical origin does not move again.
+        let (step, replayed) = turn(&mut h, &mut editor, 0.6, 0.0);
+        assert!(
+            step.local.is_empty(),
+            "a panel wheel has no frontend-local effect: {:?}",
+            step.local
+        );
+        assert_eq!(
+            step.outbound.len(),
+            1,
+            "one completed notch must emit exactly one event and nothing \
+             alongside it: {:?}",
+            step.outbound
+        );
+        assert!(
+            matches!(
+                step.outbound[0],
+                pmacs_protocol::FrontendEvent::PanelPointer {
+                    kind: pmacs_protocol::MouseKind::ScrollRight,
+                    ..
+                }
+            ),
+            "the horizontal notch must be one rightward panel gesture: {:?}",
+            step.outbound
+        );
+        assert_eq!(replayed, 1, "one notch is one gesture");
+        let after_horizontal = origin(&editor);
+        assert_eq!(
+            after_horizontal,
+            (WHEEL_LINES_PER_TICK as usize, WHEEL_COLUMNS_PER_TICK as u32,),
+            "one horizontal notch is exactly one column-step, while the \
+             vertical origin remains unchanged"
+        );
+    }
+
+    /// B1's **disposal half** — a residual banked against a surface that
+    /// goes away does not outlive it.
+    ///
+    /// Identity keying answers panel A versus panel B: the bank is keyed
+    /// by `BufferId`, so a different buffer starts from zero for free.
+    /// **It cannot answer close-and-reopen of the same persistent
+    /// buffer**, which is the case this row builds — the successor
+    /// carries the same id, so nothing about the key distinguishes it
+    /// from the panel the user was actually scrolling. Without an
+    /// explicit discard, a notch begun in a panel that no longer exists
+    /// completes in its replacement.
+    ///
+    /// The `Absent` arm already resets eight pieces of panel state one
+    /// line at a time; the wheel residual was missing from that list,
+    /// exactly as the horizontal origin was missing from the TUI's
+    /// replacement resets.
+    ///
+    /// *Mutation: drop `clear_panels()` from the `Absent` arm → this
+    /// row.*
+    #[test]
+    fn b1_a_panel_that_goes_away_takes_its_wheel_residual_with_it() {
+        use winit::dpi::PhysicalPosition;
+        use winit::event::{DeviceId, MouseScrollDelta, TouchPhase};
+
+        let mut h = EffectHarness::new();
+        present_panel_in_harness(&mut h, 1);
+
+        let cell_probe = |h: &EffectHarness| {
+            let (px, py, _, ph) = h
+                .app
+                .state
+                .as_ref()
+                .expect("harness state")
+                .panel_content_rect()
+                .expect("the panel is presented");
+            (f64::from(px + 4.0), f64::from(py + ph / 2.0))
+        };
+        let point_and_bank = |h: &mut EffectHarness| {
+            let point = cell_probe(h);
+            h.feed(&WindowEvent::CursorMoved {
+                device_id: DeviceId::dummy(),
+                position: PhysicalPosition::new(point.0, point.1),
+            });
+            assert!(
+                matches!(
+                    h.app.classify_wheel_target(point.0, point.1),
+                    WheelTarget::PanelCell { .. }
+                ),
+                "setup: the probe must be a panel CELL"
+            );
+            h.feed(&WindowEvent::MouseWheel {
+                device_id: DeviceId::dummy(),
+                delta: MouseScrollDelta::LineDelta(0.0, -0.6),
+                phase: TouchPhase::Moved,
+            })
+        };
+        let gestures = |step: &Step| {
+            step.outbound
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e,
+                        pmacs_protocol::FrontendEvent::PanelPointer { .. }
+                            | pmacs_protocol::FrontendEvent::PanelPointerMapped { .. }
+                    )
+                })
+                .count()
+        };
+
+        let step = point_and_bank(&mut h);
+        assert_eq!(
+            gestures(&step),
+            0,
+            "setup: 0.6 banks against this panel and sends nothing"
+        );
+
+        // The panel closes, then reopens on the SAME buffer — a new
+        // presentation of a persistent buffer, which `panel_epoch`
+        // distinguishes and `buffer_id` cannot.
+        {
+            let state = h.app.state.as_mut().expect("harness state");
+            let _ =
+                state.apply_attach_message(InstanceMessage::PanelFrame(PanelFramePayload::Absent));
+            assert!(
+                state.panel.presented().is_none(),
+                "setup: the panel is gone"
+            );
+        }
+        let _ = h.read_until_sentinel();
+        present_panel_in_harness(&mut h, 2);
+
+        let step = point_and_bank(&mut h);
+        assert_eq!(
+            gestures(&step),
+            0,
+            "the reopened panel starts from zero: a notch begun in the \
+             panel that closed must not complete in this one"
+        );
+
+        // And the reopened panel's own bank still accumulates. Without
+        // this leg the row passes just as well against an accumulator
+        // that banks nothing at all, which is the state it exists to
+        // rule out.
+        let step = point_and_bank(&mut h);
+        assert_eq!(
+            gestures(&step),
+            1,
+            "0.6 + 0.6 within the reopened panel is one gesture, and \
+             exactly one: {:?}",
+            step.outbound
+        );
+        assert!(
+            matches!(
+                step.outbound.last(),
+                Some(pmacs_protocol::FrontendEvent::PanelPointer {
+                    kind: pmacs_protocol::MouseKind::ScrollDown,
+                    ..
+                })
+            ),
+            "and it is a downward panel scroll: {:?}",
+            step.outbound
+        );
+    }
+
+    /// Exercise B1's panel-disposal rule across a direct, accepted
+    /// `Present` -> `Present` identity replacement, with no intervening
+    /// `Absent` to clear the bank for us.
+    ///
+    /// The same persistent buffer returns under a new `panel_epoch`, which
+    /// is the case `ResidualOwner::Panel(BufferId)` cannot distinguish. A
+    /// first successor half-notch must do nothing; a second must still
+    /// complete, so the row cannot pass against an accumulator that banks
+    /// nothing.
+    fn install_replacement_test_panel(h: &mut EffectHarness, mapped: bool) {
+        let state = h.app.state.as_mut().expect("harness state");
+        state.set_panel_wire(if mapped {
+            pmacs_protocol::PANEL_MAPPING_MIN_VERSION
+        } else {
+            PANEL_MIN_VERSION
+        });
+        let (geometry_epoch, total) = state
+            .next_geometry_declaration(GeometryTrigger::Metrics)
+            .expect("metrics advance the panel geometry");
+        let frame = panel_frame_of_buffer(
+            BufferId::from_raw(77),
+            4,
+            total.cols.max(1),
+            geometry_epoch,
+            1,
+        );
+        let payload = if mapped {
+            PanelFramePayload::PresentMapped {
+                frame,
+                mapping_generation: 1,
+            }
+        } else {
+            PanelFramePayload::Present(frame)
+        };
+        assert!(
+            state.apply_panel_payload(payload),
+            "setup: the initial {} frame must be accepted",
+            if mapped { "mapped" } else { "legacy" }
+        );
+    }
+
+    fn point_at_replacement_test_panel(h: &mut EffectHarness) {
+        use winit::dpi::PhysicalPosition;
+        use winit::event::DeviceId;
+        let (px, py, _, ph) = h
+            .app
+            .state
+            .as_ref()
+            .expect("harness state")
+            .panel_content_rect()
+            .expect("the panel is presented");
+        let point = (f64::from(px + 4.0), f64::from(py + ph / 2.0));
+        h.feed(&WindowEvent::CursorMoved {
+            device_id: DeviceId::dummy(),
+            position: PhysicalPosition::new(point.0, point.1),
+        });
+        assert!(
+            matches!(
+                h.app.classify_wheel_target(point.0, point.1),
+                WheelTarget::PanelCell { .. }
+            ),
+            "setup: the probe must be a panel cell"
+        );
+    }
+
+    fn panel_half_notch(h: &mut EffectHarness) -> Step {
+        use winit::event::{DeviceId, MouseScrollDelta, TouchPhase};
+
+        h.feed(&WindowEvent::MouseWheel {
+            device_id: DeviceId::dummy(),
+            delta: MouseScrollDelta::LineDelta(0.0, -0.6),
+            phase: TouchPhase::Moved,
+        })
+    }
+
+    fn panel_gesture_count(step: &Step) -> usize {
+        step.outbound
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    pmacs_protocol::FrontendEvent::PanelPointer { .. }
+                        | pmacs_protocol::FrontendEvent::PanelPointerMapped { .. }
+                )
+            })
+            .count()
+    }
+
+    fn replace_test_panel_directly(h: &mut EffectHarness, mapped: bool) {
+        let state = h.app.state.as_mut().expect("harness state");
+        let mut successor = state.panel.frame.clone().expect("retained frame");
+        successor.panel_epoch += 1;
+        let payload = if mapped {
+            PanelFramePayload::PresentMapped {
+                frame: successor,
+                mapping_generation: 1,
+            }
+        } else {
+            PanelFramePayload::Present(successor)
+        };
+        assert!(
+            state.apply_panel_payload(payload),
+            "the direct identity replacement must be accepted"
+        );
+        assert_eq!(
+            state.panel.frame.as_ref().map(|frame| frame.panel_epoch),
+            Some(2),
+            "setup: the successor, not the predecessor, is retained"
+        );
+    }
+
+    fn assert_panel_replacement_discards_wheel_residual(mapped: bool) {
+        let mut h = EffectHarness::new();
+        install_replacement_test_panel(&mut h, mapped);
+        point_at_replacement_test_panel(&mut h);
+
+        let step = panel_half_notch(&mut h);
+        assert_eq!(
+            panel_gesture_count(&step),
+            0,
+            "setup: the predecessor banks 0.6 and emits nothing"
+        );
+
+        // Direct replacement: no `Absent`, no pointer motion and the same
+        // buffer id. Only the accepted successor identity can discard the
+        // predecessor's bank.
+        replace_test_panel_directly(&mut h, mapped);
+
+        let step = panel_half_notch(&mut h);
+        assert_eq!(
+            panel_gesture_count(&step),
+            0,
+            "the successor starts from zero; the predecessor's 0.6 is gone: {:?}",
+            step.outbound
+        );
+        let step = panel_half_notch(&mut h);
+        assert_eq!(
+            panel_gesture_count(&step),
+            1,
+            "the successor's own 0.6 + 0.6 still completes exactly once: {:?}",
+            step.outbound
+        );
+        assert!(
+            matches!(
+                step.outbound.last(),
+                Some(
+                    pmacs_protocol::FrontendEvent::PanelPointer {
+                        kind: pmacs_protocol::MouseKind::ScrollDown,
+                        ..
+                    } | pmacs_protocol::FrontendEvent::PanelPointerMapped {
+                        kind: pmacs_protocol::MouseKind::ScrollDown,
+                        ..
+                    }
+                )
+            ),
+            "the completed successor notch is downward: {:?}",
+            step.outbound
+        );
+    }
+
+    /// Current production sessions negotiate the mapped family.
+    ///
+    /// *Mutation: omit the replacement discard from `PresentMapped` →
+    /// this row only.*
+    #[test]
+    fn b1_a_mapped_panel_replacement_discards_the_predecessors_residual() {
+        assert_panel_replacement_discards_wheel_residual(true);
+    }
+
+    /// The legacy family remains supported at the protocol floor.
+    ///
+    /// *Mutation: omit the replacement discard from `Present` → this row
+    /// only.*
+    #[test]
+    fn b1_a_legacy_panel_replacement_discards_the_predecessors_residual() {
+        assert_panel_replacement_discards_wheel_residual(false);
+    }
+
+    /// A geometry declaration re-grids the same panel; it does not replace
+    /// the scroll surface that owns an in-progress fractional notch.
+    ///
+    /// *Mutation: include `geometry_epoch` in
+    /// `discard_replaced_panel_wheel_residual`'s identity comparison → this
+    /// row. The second half-notch no longer completes.*
+    #[test]
+    fn b1_a_panel_geometry_change_preserves_the_same_panels_residual() {
+        let mut h = EffectHarness::new();
+        install_replacement_test_panel(&mut h, false);
+        point_at_replacement_test_panel(&mut h);
+
+        let step = panel_half_notch(&mut h);
+        assert_eq!(
+            panel_gesture_count(&step),
+            0,
+            "setup: the first 0.6 banks against the panel"
+        );
+
+        {
+            let state = h.app.state.as_mut().expect("harness state");
+            let (geometry_epoch, total) = state
+                .next_geometry_declaration(GeometryTrigger::Metrics)
+                .expect("metrics advance the geometry epoch");
+            let mut regridded = state.panel.frame.clone().expect("retained frame");
+            regridded.geometry_epoch = geometry_epoch;
+            regridded.size.cols = total.cols.max(1);
+            regridded.cells.resize(
+                regridded.size.rows as usize * regridded.size.cols as usize,
+                terminal_cell(pmacs_protocol::Glyph::Char('x'), CellStyle::default()),
+            );
+            assert!(
+                state.apply_panel_payload(PanelFramePayload::Present(regridded)),
+                "the matching frame must settle the new geometry"
+            );
+        }
+
+        let step = panel_half_notch(&mut h);
+        assert_eq!(
+            panel_gesture_count(&step),
+            1,
+            "the same panel keeps its fraction across a re-grid: {:?}",
+            step.outbound
+        );
+    }
+
+    /// B1's disposal half, **terminal side** — leaving a terminal and
+    /// re-entering **the same** one starts from zero.
+    ///
+    /// `Terminal(BufferId)` distinguishes terminal A from terminal B
+    /// for free. It cannot distinguish leave-and-re-enter of one
+    /// terminal, because the key does not change — so without an
+    /// explicit discard at teardown, a notch begun before leaving
+    /// completes on the way back in.
+    ///
+    /// `exit_terminal_mode` already dropped four terminal-only caches;
+    /// the wheel residual was missing from that list, exactly as it was
+    /// from the panel's `Absent` arm.
+    ///
+    /// *Mutation: drop `clear_terminals()` from `exit_terminal_mode` →
+    /// this row.*
+    #[test]
+    fn b1_a_terminal_that_is_left_takes_its_wheel_residual_with_it() {
+        use winit::dpi::PhysicalPosition;
+        use winit::event::{DeviceId, MouseScrollDelta, TouchPhase};
+
+        let mut h = EffectHarness::new();
+        let terminal_buffer = BufferId::from_raw(91);
+        // A frame for a buffer this window is not showing is ignored, so
+        // the window has to be on the terminal's buffer first.
+        h.app
+            .state
+            .as_mut()
+            .expect("harness state")
+            .current_buffer_id = Some(terminal_buffer);
+        let enter = |h: &mut EffectHarness| {
+            let state = h.app.state.as_mut().expect("harness state");
+            state.apply_terminal_frame(plain_terminal_frame(terminal_buffer, "hello", 40));
+            assert!(
+                state.terminal.is_some(),
+                "setup: the frame must put this frontend in terminal mode"
+            );
+        };
+        let point = (f64::from(TEXT_LEFT + 8.0), f64::from(TEXT_TOP + 4.0));
+        let bank = |h: &mut EffectHarness| {
+            h.feed(&WindowEvent::CursorMoved {
+                device_id: DeviceId::dummy(),
+                position: PhysicalPosition::new(point.0, point.1),
+            });
+            assert!(
+                matches!(
+                    h.app.classify_wheel_target(point.0, point.1),
+                    WheelTarget::Terminal { .. }
+                ),
+                "setup: the probe must resolve to the TERMINAL, not the \
+                 document underneath it"
+            );
+            h.feed(&WindowEvent::MouseWheel {
+                device_id: DeviceId::dummy(),
+                delta: MouseScrollDelta::LineDelta(0.0, -0.6),
+                phase: TouchPhase::Moved,
+            })
+        };
+
+        enter(&mut h);
+        let step = bank(&mut h);
+        assert!(
+            step.outbound.is_empty(),
+            "setup: 0.6 banks against this terminal and sends nothing, \
+             got {:?}",
+            step.outbound
+        );
+
+        {
+            let state = h.app.state.as_mut().expect("harness state");
+            state.exit_terminal_mode();
+        }
+        let _ = h.read_until_sentinel();
+        enter(&mut h);
+
+        let step = bank(&mut h);
+        assert!(
+            step.outbound.is_empty(),
+            "the re-entered terminal starts from zero: a notch begun \
+             before leaving must not complete on the way back in, got \
+             {:?}",
+            step.outbound
+        );
+
+        // And the re-entered terminal's own bank still works, so this
+        // row cannot pass by having broken accumulation outright.
+        let step = bank(&mut h);
+        assert_eq!(
+            step.outbound.len(),
+            1,
+            "0.6 + 0.6 within the re-entered terminal is one notch, and \
+             exactly one: {:?}",
+            step.outbound
+        );
+        assert!(
+            matches!(
+                step.outbound[0],
+                pmacs_protocol::FrontendEvent::TerminalPointer { .. }
+            ),
+            "and it reaches the terminal, not something else: {:?}",
+            step.outbound
+        );
     }
 
     /// A2B-4 (contrast assertion) — installing a panel moves every

@@ -1083,6 +1083,78 @@ regression in two unrelated subsystems at once is far less likely than
 one loaded machine. If a future run reds **one** of these without the
 other, that is a different incident and should be judged as one.
 
+### U20 — U6's composition test reds ALONE, which U6 says is a new incident
+
+Recorded during GUI Stage 1b, 2026-09-01, local (Linux). **This row
+exists because U6's closing rule says it must**: *"If a future run reds
+one of these without the other, that is a different incident and should
+be judged as one."* This is that run. It is filed separately rather than
+as a sixth U6 occurrence, because U6's selector requires **both** tests
+failing together and its whole argument rests on the pair — a real
+regression in two unrelated subsystems at once being less likely than
+one loaded machine. One test alone does not carry that argument.
+
+| field | value |
+|---|---|
+| **selector** | `--lib editor::tests::composition_overhead_under_ten_percent`, **alone** — `optimistic::tests::criterion_1_end_of_line_typing_completes_sub_frame_per_keystroke` passed in the same run |
+| **job / flavor** | local (Linux), bare `cargo test --lib` (default features), full-lib load, **not** `scripts/gate` |
+| **required fragments** | `composition machinery added more than 10% overhead` + a ratio; the run also printed `dispatch overhead : 87.9%` and `realistic overhead : 82.1%` |
+| **status** | **ONE occurrence.** Not reproduced in six subsequent full-lib runs — three on the observing tree and three on the same tree with the observing diff reverted |
+| **margin** | **1.879 against a 1.10 budget** (`single=158789 ns, dispatch=298366 ns`). Recorded because U11 taught this registry what a missing margin costs. It is the largest this selector has shown: U6's were 1.297, 1.182, 1.592, 1.527 and one unrecorded. Against the previous worst of 1.592: **1.18× as a ratio**; **1.48× as much overhead above the 1.0 no-overhead baseline** (0.879 vs 0.592); **1.58× as much excess over the 1.10 budget** (0.779 vs 0.492). Three numbers for three questions, which is why none is compressed into an adjective — an earlier draft called the middle one "budget excess", which it is not: the budget is 1.10, not 1.0 |
+| **what IS established** | the observing diff (`9cb610e`, the TUI horizontal-authority latch) adds work to the paint path, so it was a live suspect. Three full-lib runs with the diff and three with `src/editor.rs` and `src/window.rs` restored to HEAD: **all six green.** That establishes **non-reproduction in six runs, and nothing more** — this registry's own rule is that reruns establish intermittence only |
+| **what is NOT** | why it fired. The load confound is once again unmeasured — no `/proc/loadavg` reading was taken at the moment of failure, which is the same gap U15 exists to close |
+
+**The margin is the part that does not fit.** 1.879 is not a budget
+missed by a hair; it is the machinery costing nearly twice what the
+budget allows. A load-sensitive assertion can produce that, but so can
+a real regression, and this row does not pretend the size of the margin
+resolves the question.
+
+**Nor do the six controlled runs.** An earlier draft of this row said
+they establish that the observing diff is not the cause. They do not: a
+tree that fails intermittently can carry a *changed failure rate* that
+six runs are far too few to see, and treating non-reproduction as
+exoneration is precisely the reasoning this registry refuses when a
+rerun turns a red green. What the controls do is remove the easy
+story — "the diff obviously did it" — and leave the question open.
+
+**If this selector reds alone again, this row is where it goes**, and
+the first thing to capture is a contemporaneous load reading — the one
+piece of evidence that would separate the two explanations and that
+neither U6 nor this row has at the moment of failure.
+
+### U21 — the canonical PTY test reds ENTIRELY alone, in `03-lib`
+
+Recorded during GUI Stage 1b's pre-PR gate, 2026-09-02, local (Linux).
+**A new incident by U6's rule and U9's, not a fourth occurrence of
+either** — see the relation cells below, which are the point of the row.
+
+| field | value |
+|---|---|
+| **selector** | `--lib process::tests::m6_1_pty_canonical_mode_keeps_kernel_echo`, **alone** — no second selector redded anywhere in the run |
+| **job / flavor** | local (Linux), `scripts/gate` step `03-lib`, per-worktree target dir, inside a full gate |
+| **required fragments** | ``canonical mode should leave echo enabled (no `-echo` flag); stty -a output was: ""`` |
+| **NOT fragments** | the `:LINE` suffix (`src/process.rs:3981` at this head) and the pass/fail counts — both occurrence-specific |
+| **status** | **one occurrence**, `2008 passed; 1 failed; 3 ignored` |
+| **what IS established — two IN-RUN repetitions** | the same selector **passed in step `04-lib-crdt` and step `15-sweep` of the SAME gate run**, on the same tree, minutes after the step-03 red. This establishes within-run intermittence and excludes a deterministic failure on that tree. It does **not** exclude the tree as a cause of an intermittent failure or a changed failure rate. Also green in three subsequent full `--lib` runs and once isolated (`1 passed`, 0.01s) |
+| **what is NOT** | cause. **The load confound is once again not measured at the moment of failure** — the readings that exist were taken afterwards: 1-minute 4.15, 4.38, 6.43, 6.54 with the 5-minute figure at 9.6–10.0, i.e. a genuinely busy machine, but *after* the fact. This is the same gap U15 exists to close and it is still open |
+| **relation to U2 — same family, different selector** | U2's fragment is identical (`stty -a output was: ""`) but its selector names `m6_1_pty_raw_mode_disables_kernel_echo`. Raw passed here |
+| **relation to U9 — the closest row, and still not a match** | U9's selector requires the canonical PTY test **and** `composition_overhead_under_ten_percent` failing together in `11-sweep`. Here the PTY test redded **with no companion at all**, in `03-lib`, and the composition test passed. U9's own framing distinguishes "canonical alone" from *raw*; this is canonical alone from *everything*, which no existing row has shown |
+
+**What this adds to the family is the isolation.** Every prior
+occurrence of this fragment came paired — raw with canonical (U2's
+second), or canonical with a budget test (U9). Here one PTY assertion
+failed by itself in the narrowest step, then the same selector passed
+twice later in the same gate. The fragment establishes only that **the
+supervisor collected empty stdout**; it shows no incorrect termios
+state and does not distinguish among {the child never wrote, PTY
+delivery lost the bytes, event collection missed them}. That is the
+same evidence boundary U2 records.
+
+**Do not fold this into U2 or U9.** Both rows exist because their
+authors resisted the same pull, and each records a combination the
+others cannot see.
+
 ### U7 — a *different* wall-clock render-budget test reds each sweep
 
 Recorded during worker identity Stage 1 review round 3, 2026-08-09.

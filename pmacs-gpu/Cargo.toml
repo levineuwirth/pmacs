@@ -70,3 +70,8 @@ unicode-width = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+# TEST-ONLY, and never a runtime dependency: step 3's panel-wheel
+# witness has to observe the RECEIVER's effect, not the event this
+# frontend emits, because the defect it exists for is precisely
+# "the frontend emits and the receiver discards".
+pmacs = { path = ".." }

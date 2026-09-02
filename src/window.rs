@@ -384,6 +384,24 @@ pub struct Window {
     /// Always `0` while this window's buffer wraps; see
     /// [`LayoutCtx::effective_left`](crate::view::LayoutCtx::effective_left).
     pub view_left: u32,
+    /// GUI Stage 1b, lifetime clause 2 — **the user's horizontal origin
+    /// outranks the caret's**.
+    ///
+    /// Set when a deliberate horizontal scroll *effectively* moves
+    /// [`Self::view_left`]; while set, the caret-following pass
+    /// re-clamps the origin but does not drag it back. Without it a
+    /// sideways wheel is undone by the very next paint, because
+    /// `horizontal_follow` runs on every frame and knows only the
+    /// caret.
+    ///
+    /// Cleared by a genuine cursor move (clause 4), by wrap, and by
+    /// buffer replacement (clause 5).
+    pub manual_left_authority: bool,
+    /// The cursor as it stood when [`Self::manual_left_authority`] was
+    /// armed, so clause 4 can tell a *genuine* cursor change from the
+    /// follow merely running again. Meaningless while the latch is
+    /// clear.
+    pub manual_left_cursor: Position,
     /// Sticky display column for vertical motion.
     pub goal_col: Option<u32>,
     /// Number of text rows that fit in this window's viewport at last
@@ -439,6 +457,8 @@ impl Window {
             selection: None,
             view_top: 0,
             view_left: 0,
+            manual_left_authority: false,
+            manual_left_cursor: 0,
             goal_col: None,
             last_visible_rows: 0,
             last_content_cols: 0,
@@ -465,6 +485,42 @@ impl Window {
             wrap: self.last_wrap,
             view_left: self.view_left,
         }
+    }
+
+    /// Forget a manual horizontal origin because this window is
+    /// adopting a **different buffer** (lifetime clause 5).
+    ///
+    /// The origin is a fact about the document being shown, not about
+    /// the window. Carried into a successor it renders the new buffer
+    /// scrolled sideways with nothing about that buffer to explain it,
+    /// until some later cursor motion repairs it by accident. The GPU
+    /// learned this once already — `code_scroll_left` has its own line
+    /// in that frontend's replacement reset, added after exactly this
+    /// symptom — and the TUI's four replacement paths had neither the
+    /// origin reset nor the latch clear.
+    ///
+    /// One helper rather than a copy per site, so a new replacement
+    /// path gets the rule by calling it; each **call site** stays
+    /// individually removable, which is what keeps its own row honest.
+    ///
+    /// **The census, taken by grepping every write of a window's
+    /// `buffer_id` rather than by recalling which paths exist** — an
+    /// earlier version of this doc said "three" and was wrong, because
+    /// it listed the paths someone had thought of. Four production
+    /// sites rebind a live window to a different buffer:
+    /// `EditorCore::switch_active_buffer_for`,
+    /// `EditorCore::install_buffer_in_window`,
+    /// `EditorCore::kill_buffer`'s fallback rebind, and the daemon's
+    /// `align_primary_document_window`. Each has its own row
+    /// (L8b–L8e).
+    ///
+    /// `EditorCore::from_bytes` also assigns `buffer_id`, and is
+    /// **deliberately not on that list**: it builds a fresh core whose
+    /// window has no prior origin to inherit. Named here so the next
+    /// census does not have to re-decide it.
+    pub fn forget_manual_horizontal_origin(&mut self) {
+        self.view_left = 0;
+        self.manual_left_authority = false;
     }
 
     /// Width in cells this window's line-number gutter occupies, or `0`

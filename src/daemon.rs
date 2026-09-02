@@ -3847,6 +3847,7 @@ fn align_primary_document_window(
         win.cursor = 0;
         win.selection = None;
         win.overlays.clear();
+        win.forget_manual_horizontal_origin();
     }
     Some(win_id)
 }
@@ -5556,6 +5557,98 @@ mod tests {
         );
     }
 
+    /// GUI Stage 1b, lifetime clause 5 — **the daemon's alignment path
+    /// is a buffer replacement too**, and must forget a manual
+    /// horizontal origin like the other two.
+    ///
+    /// `align_primary_document_window` re-points a window at the buffer
+    /// its frontend declares. That is a replacement by any measure: a
+    /// sideways origin carried across it renders the successor scrolled
+    /// with nothing about that buffer to explain it. This row lives
+    /// here rather than beside L8b/L8c because the function is private
+    /// to this module.
+    ///
+    /// The latch is armed the production way — a real wheel gesture
+    /// through `dispatch_mouse` — not by writing the fields, so the row
+    /// cannot pass against a state the running editor never reaches.
+    ///
+    /// **Not `crdt`-gated**, unlike its neighbour above: nothing here
+    /// needs the feature, and gating it would keep it out of the
+    /// default `--lib` leg for no reason — the same blind spot that
+    /// already lets `crdt`-only code go unlinted locally.
+    ///
+    /// *Mutation: drop the `forget_manual_horizontal_origin()` call
+    /// from `align_primary_document_window` → this row.*
+    #[test]
+    fn l8d_the_alignment_path_clears_a_manual_horizontal_origin() {
+        use crate::editor::EditorState;
+        use crate::protocol::FrontendId;
+        use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+
+        let mut editor = EditorState::new();
+        let wide = |name: &str| {
+            let core = editor.core.borrow();
+            let mut content = b"wide\n".to_vec();
+            content.extend_from_slice(&b"w".repeat(400));
+            content.push(b'\n');
+            core.registry
+                .borrow_mut()
+                .create_from_bytes(name.to_owned(), &content)
+        };
+        let first = wide("first");
+        let second = wide("second");
+        let fid = FrontendId(99);
+        let view = build_fresh_frontend_view(&mut editor, false, false);
+        editor.core.borrow_mut().register_frontend_view(fid, view);
+
+        // The window starts on LOCAL's narrow scratch buffer, where
+        // B7's `widest − viewport` bound is zero and every notch is
+        // absorbed. Put a wide buffer under it first — through the very
+        // function under test — so the gesture below can be effective.
+        align_primary_document_window(&mut editor, fid, first);
+
+        for _ in 0..10 {
+            editor.dispatch_mouse(
+                fid,
+                MouseEvent {
+                    kind: MouseEventKind::ScrollRight,
+                    column: 5,
+                    row: 5,
+                    modifiers: KeyModifiers::NONE,
+                },
+                crate::cell::CellSize::new(24, 80),
+            );
+        }
+        let armed = editor
+            .core
+            .borrow()
+            .active_window_for(fid)
+            .expect("the semantic frontend has a window")
+            .view_left;
+        assert!(
+            armed > 0
+                && editor
+                    .core
+                    .borrow()
+                    .active_window_for(fid)
+                    .expect("window")
+                    .manual_left_authority,
+            "setup: a real wheel gesture must have moved the origin and \
+             armed authority, else this row measures nothing"
+        );
+
+        align_primary_document_window(&mut editor, fid, second);
+
+        let win = editor.core.borrow();
+        let win = win.active_window_for(fid).expect("window");
+        assert_eq!(
+            win.view_left, 0,
+            "the successor must not inherit the predecessor's sideways \
+             viewport"
+        );
+        assert!(!win.manual_left_authority, "nor the authority defending it");
+    }
+
     /// B1 input/display alignment: a semantic frontend's window is bound
     /// to LOCAL's attach-time buffer, but the buffer it *displays* is
     /// the one it declares via `Viewport`. `align_primary_document_window`
@@ -6323,58 +6416,9 @@ mod tests {
         fid: FrontendId,
         with_panel: bool,
     ) -> (crate::window::WindowId, Option<crate::window::WindowId>) {
-        use crate::window::{FrontendView, Layout, LayoutNode, Orientation, Window, WindowParams};
-
-        let mut core = editor.core.borrow_mut();
-        let doc_buf = core.active_window().buffer_id;
-        let document = crate::window::WindowId::next();
-        let doc_view = {
-            let reg = core.registry.borrow();
-            crate::text_view::TextView::new(reg.get(doc_buf).expect("doc"))
-        };
-        core.windows
-            .insert(document, Window::new(document, doc_buf, doc_view));
-        let panel = with_panel.then(|| {
-            let panel_buf = core.registry.borrow_mut().create("*panel*");
-            let panel_id = crate::window::WindowId::next();
-            let panel_view = {
-                let reg = core.registry.borrow();
-                crate::text_view::TextView::new(reg.get(panel_buf).expect("panel"))
-            };
-            let mut window = Window::new(panel_id, panel_buf, panel_view);
-            let mut params = WindowParams::default();
-            params.side = Some(crate::window::Side::Bottom);
-            params.fixed_rows = Some(4);
-            window.params = params;
-            core.windows.insert(panel_id, window);
-            panel_id
-        });
-        let layout = match panel {
-            Some(panel) => Layout {
-                root: LayoutNode::Split {
-                    orientation: Orientation::Horizontal,
-                    children: vec![LayoutNode::Leaf(document), LayoutNode::Leaf(panel)],
-                    weights: vec![1, 1],
-                },
-            },
-            None => Layout::single(document),
-        };
-        core.register_frontend_view(
-            fid,
-            FrontendView {
-                layout,
-                active: document,
-                fold_projection: false,
-                // Stage 2B-2 is dark: production negotiation still sets
-                // this `false` for every semantic session, so the
-                // projection is exercised through a test-only view (the
-                // framing's §7.2.2 posture).
-                panel_capable: true,
-                frame_geometry: None,
-                panel_hidden: false,
-            },
-        );
-        (document, panel)
+        // One fixture, shared with `pmacs-gpu`'s step-3 effect witness,
+        // which needs a real panel window to observe an effect on.
+        editor.install_panel_view_for_test(fid, with_panel)
     }
 
     fn session(version: u32, semantic: bool) -> crate::presence::SessionState {
@@ -7669,6 +7713,70 @@ mod tests {
     /// The side window's cursor, for reading a replayed effect.
     fn panel_cursor(editor: &crate::editor::EditorState, panel: crate::window::WindowId) -> u64 {
         editor.core.borrow().windows[&panel].cursor
+    }
+
+    /// GUI Stage 1b B2 — a horizontal panel notch reaches the daemon's
+    /// window-targeted `view_left` path and MOVES it.
+    ///
+    /// This arm used to be claimed and dropped, which is the
+    /// "frontend emits, receiver discards" shape §2a named. The row
+    /// asserts the **effect**, not the emission: `view_left` before and
+    /// after.
+    #[test]
+    fn b2_a_horizontal_panel_notch_moves_the_side_windows_view_left() {
+        let fid = FrontendId(791);
+        let (mut editor, mut states, mut render, _document, panel, epochs) =
+            panel_session_at(PROTOCOL_VERSION, fid);
+        // A CONTENT cell, not chrome: row 0 is inside the grid.
+        let (buffer_id, cell) = {
+            let core = editor.core.borrow();
+            (
+                core.windows[&panel].buffer_id,
+                pmacs_protocol::CellCoord::new(0, 0),
+            )
+        };
+        // **The discriminating setup.** B7's bound is
+        // `widest − viewport`, so a panel whose content fits has a
+        // maximum origin of zero and the move is absorbed by the
+        // clamp — correct behaviour that would read here as a dropped
+        // event. The row needs content wider than the viewport.
+        foreign_edit(&editor, buffer_id, "x".repeat(400).as_bytes());
+        let before = editor
+            .core
+            .borrow()
+            .windows
+            .get(&panel)
+            .map_or(0, |w| w.view_left);
+
+        let generation = live_generation(PanelArm::Mapped, &editor, &mut states, fid);
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut states,
+            &mut render,
+            arm_pointer(
+                PanelArm::Mapped,
+                fid,
+                epochs,
+                buffer_id,
+                generation,
+                cell,
+                pmacs_protocol::MouseKind::ScrollRight,
+            ),
+        );
+
+        let after = editor
+            .core
+            .borrow()
+            .windows
+            .get(&panel)
+            .map_or(0, |w| w.view_left);
+        assert_ne!(
+            after, before,
+            "a horizontal panel notch must move the side window's origin, \
+             not be claimed and dropped"
+        );
     }
 
     /// P1 — a press on the band's MODE LINE begins nothing.

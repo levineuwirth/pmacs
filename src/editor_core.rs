@@ -4075,6 +4075,7 @@ impl EditorCore {
         window.cursor = 0;
         window.selection = None;
         window.view_top = 0;
+        window.forget_manual_horizontal_origin();
         window.goal_col = None;
         Ok(())
     }
@@ -5415,6 +5416,7 @@ impl EditorCore {
                     win.cursor = 0;
                     win.selection = None;
                     win.view_top = 0;
+                    win.forget_manual_horizontal_origin();
                     win.goal_col = None;
                 }
             }
@@ -5650,6 +5652,7 @@ impl EditorCore {
         aw.cursor = 0;
         aw.selection = None;
         aw.view_top = 0;
+        aw.forget_manual_horizontal_origin();
         aw.goal_col = None;
         Ok(())
     }

@@ -37,6 +37,7 @@
 //! directly.
 
 pub mod cell;
+pub mod columns;
 pub mod crdt;
 pub mod ids;
 pub mod message;
