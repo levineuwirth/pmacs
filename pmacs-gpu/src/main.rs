@@ -21851,6 +21851,138 @@ mod tests {
         frame
     }
 
+    /// Step 3 — **the panel's fractional wheel, end to end, per axis.**
+    ///
+    /// Revision 20 sharpened this witness because its earlier form was
+    /// satisfiable with the mechanism it protects entirely broken: a
+    /// whole tick passes straight through #243's vertical receiver even
+    /// if B1's accumulator discards every sub-tick it is given. So the
+    /// row requires **fractional input** — a first sub-threshold delta
+    /// produces **no** gesture, and accumulated same-panel deltas
+    /// produce **exactly one** — and it requires that on **each axis**
+    /// separately, because a single accumulator fed by both axes passes
+    /// any one-axis row.
+    ///
+    /// Driven through `dispatch_window_event` and observed on the wire,
+    /// which is where a panel gesture actually goes.
+    ///
+    /// *Mutations: round the notch instead of banking it → the
+    /// sub-threshold legs (a 0.6 delta becomes a whole tick); bank into
+    /// one accumulator per surface instead of per (surface, axis) → the
+    /// second axis's first leg, which the first axis's leftover
+    /// completes.*
+    #[test]
+    fn step3_a_panel_wheel_needs_a_whole_notch_on_each_axis() {
+        use winit::dpi::PhysicalPosition;
+        use winit::event::{DeviceId, MouseScrollDelta, TouchPhase};
+
+        let mut h = EffectHarness::new();
+        // The harness already declared its surface geometry; answer that
+        // declaration with a frame, through the production receiver.
+        {
+            let state = h.app.state.as_mut().expect("harness state");
+            // The harness negotiates the MAPPED family, which refuses a
+            // frame with no retained mapping generation. Drop to the
+            // legacy wire and re-declare, the way every other panel row
+            // in this file does, then answer that declaration through
+            // the production receiver.
+            state.set_panel_wire(PANEL_MIN_VERSION);
+            // Metrics, not Surface: the harness already made its one
+            // surface declaration, and a second is suppressed by design.
+            let (epoch, total) = state
+                .next_geometry_declaration(GeometryTrigger::Metrics)
+                .expect("metrics always advance the panel geometry epoch");
+            let frame = panel_frame_of(4, total.cols.max(1), epoch, 1);
+            let _ = state.apply_attach_message(InstanceMessage::PanelFrame(
+                PanelFramePayload::Present(frame),
+            ));
+            assert!(
+                state.panel.presented().is_some(),
+                "setup: the frame must be accepted, or every assertion \
+                 below is about a panel that is not there"
+            );
+        }
+        let _ = h.read_until_sentinel();
+
+        // A pixel inside the panel's content, so the wheel target is a
+        // cell rather than the band's chrome.
+        let (px, py, _, ph) = h
+            .app
+            .state
+            .as_ref()
+            .expect("harness state")
+            .panel_content_rect()
+            .expect("the panel is presented");
+        let point = (f64::from(px + 4.0), f64::from(py + ph / 2.0));
+        h.feed(&WindowEvent::CursorMoved {
+            device_id: DeviceId::dummy(),
+            position: PhysicalPosition::new(point.0, point.1),
+        });
+        assert!(
+            matches!(
+                h.app.classify_wheel_target(point.0, point.1),
+                WheelTarget::PanelCell { .. }
+            ),
+            "setup: the probe must be a panel CELL — panel chrome banks \
+             nothing at all, and would satisfy every 'no gesture' \
+             assertion below for the wrong reason"
+        );
+
+        let mut wheel = |dx: f32, dy: f32| {
+            h.feed(&WindowEvent::MouseWheel {
+                device_id: DeviceId::dummy(),
+                delta: MouseScrollDelta::LineDelta(dx, -dy),
+                phase: TouchPhase::Moved,
+            })
+        };
+        let gestures = |step: &Step| {
+            step.outbound
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e,
+                        pmacs_protocol::FrontendEvent::PanelPointer { .. }
+                            | pmacs_protocol::FrontendEvent::PanelPointerMapped { .. }
+                    )
+                })
+                .count()
+        };
+
+        // Vertical: 0.6 of a notch is not a notch.
+        let step = wheel(0.0, 0.6);
+        assert_eq!(
+            gestures(&step),
+            0,
+            "a sub-threshold vertical delta must reach the panel as \
+             nothing at all"
+        );
+        // Horizontal, before the vertical bank is completed: if the two
+        // axes shared one accumulator, this 0.6 would finish the
+        // vertical 0.6 and fire here.
+        let step = wheel(0.6, 0.0);
+        assert_eq!(
+            gestures(&step),
+            0,
+            "and a sub-threshold horizontal delta must not be completed \
+             by the vertical one banked before it"
+        );
+
+        // Completing each axis produces exactly one gesture, not two,
+        // and not the sum of everything banked so far.
+        let step = wheel(0.0, 0.6);
+        assert_eq!(
+            gestures(&step),
+            1,
+            "0.6 + 0.6 is one vertical notch, and exactly one"
+        );
+        let step = wheel(0.6, 0.0);
+        assert_eq!(
+            gestures(&step),
+            1,
+            "and the horizontal axis completes on its own count"
+        );
+    }
+
     /// A2B-4 (contrast assertion) — installing a panel moves every
     /// document-owned boundary by exactly the band's pixel height while
     /// every status-owned boundary stays pixel-identical.
