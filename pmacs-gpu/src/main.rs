@@ -2204,11 +2204,12 @@ impl WheelTarget {
 /// away must go away with it, or it is spent on whatever later takes
 /// that identity.
 ///
-/// **Disposal is NOT implemented yet, and is owed before this slice
-/// ships.** It needs a signal for "this panel/terminal buffer is gone",
-/// which this frontend does not currently track, and it needs its own
-/// witness. It is recorded here rather than stubbed, because a helper
-/// nothing calls reads as a contract met.
+/// **Disposal is implemented at both teardowns**, because the key
+/// alone cannot see a surface closed and REOPENED on the same buffer:
+/// the successor carries the same `BufferId`, so nothing distinguishes
+/// it from the surface the user was actually scrolling.
+/// `PanelFramePayload::Absent` clears the panel banks and
+/// `exit_terminal_mode` clears the terminal ones.
 #[derive(Debug, Default)]
 struct WheelResiduals {
     /// `(owner) -> (x, y)` in fractional ticks, each in `(-1.0, 1.0)`.
@@ -2245,10 +2246,20 @@ impl WheelResiduals {
     }
 
     /// Drop every panel bank. Panel chrome consumes both axes and must
-    /// leave nothing that could combine with cell input later.
+    /// leave nothing that could combine with cell input later, and a
+    /// panel that goes away takes its bank with it (B1's disposal).
     fn clear_panels(&mut self) {
         self.banks
             .retain(|owner, _| !matches!(owner, ResidualOwner::Panel(_)));
+    }
+
+    /// Drop every terminal bank — the same disposal, for the surface
+    /// with the same problem. `Terminal(BufferId)` distinguishes
+    /// terminal A from terminal B, but not leaving a terminal and
+    /// re-entering **the same** one, where the bank's key is unchanged.
+    fn clear_terminals(&mut self) {
+        self.banks
+            .retain(|owner, _| !matches!(owner, ResidualOwner::Terminal(_)));
     }
 
     #[cfg(test)]
@@ -5240,6 +5251,19 @@ mod input_routing_tests {
              got {:?}",
             step.local
         );
+
+        // And the successor's minimap bank still accumulates, so this
+        // row cannot pass by the accumulator simply being broken —
+        // which every "nothing happened" assertion above would accept.
+        let step = h.feed(&wheel(0.0, 0.6));
+        assert_eq!(
+            step.local,
+            vec![LocalEffect::Scroll {
+                top: WHEEL_LINES_PER_TICK as usize
+            }],
+            "0.6 + 0.6 over the successor's minimap is one notch of \
+             DOCUMENT scroll, which is what a minimap wheel moves"
+        );
     }
 
     /// B6 — the minimap banks into **its own** accumulator, so a
@@ -7911,6 +7935,10 @@ impl State {
         self.terminal_frame_error_latched = false;
         self.last_terminal_size_sent = None;
         self.last_terminal_pointer_cell = None;
+        // B1's disposal, terminal half. Re-entering the SAME terminal
+        // buffer would otherwise inherit the bank, because the owner
+        // key is the buffer id and it has not changed.
+        self.wheel_residuals.clear_terminals();
     }
 
     /// Drop the band and every cache behind it.
@@ -22122,7 +22150,7 @@ mod tests {
     /// explicit discard, a notch begun in a panel that no longer exists
     /// completes in its replacement.
     ///
-    /// The `Absent` arm already resets nine pieces of panel state one
+    /// The `Absent` arm already resets eight pieces of panel state one
     /// line at a time; the wheel residual was missing from that list,
     /// exactly as the horizontal origin was missing from the TUI's
     /// replacement resets.
@@ -22207,6 +22235,133 @@ mod tests {
             0,
             "the reopened panel starts from zero: a notch begun in the \
              panel that closed must not complete in this one"
+        );
+
+        // And the reopened panel's own bank still accumulates. Without
+        // this leg the row passes just as well against an accumulator
+        // that banks nothing at all, which is the state it exists to
+        // rule out.
+        let step = point_and_bank(&mut h);
+        assert_eq!(
+            gestures(&step),
+            1,
+            "0.6 + 0.6 within the reopened panel is one gesture, and \
+             exactly one: {:?}",
+            step.outbound
+        );
+        assert!(
+            matches!(
+                step.outbound.last(),
+                Some(pmacs_protocol::FrontendEvent::PanelPointer {
+                    kind: pmacs_protocol::MouseKind::ScrollDown,
+                    ..
+                })
+            ),
+            "and it is a downward panel scroll: {:?}",
+            step.outbound
+        );
+    }
+
+    /// B1's disposal half, **terminal side** — leaving a terminal and
+    /// re-entering **the same** one starts from zero.
+    ///
+    /// `Terminal(BufferId)` distinguishes terminal A from terminal B
+    /// for free. It cannot distinguish leave-and-re-enter of one
+    /// terminal, because the key does not change — so without an
+    /// explicit discard at teardown, a notch begun before leaving
+    /// completes on the way back in.
+    ///
+    /// `exit_terminal_mode` already dropped four terminal-only caches;
+    /// the wheel residual was missing from that list, exactly as it was
+    /// from the panel's `Absent` arm.
+    ///
+    /// *Mutation: drop `clear_terminals()` from `exit_terminal_mode` →
+    /// this row.*
+    #[test]
+    fn b1_a_terminal_that_is_left_takes_its_wheel_residual_with_it() {
+        use winit::dpi::PhysicalPosition;
+        use winit::event::{DeviceId, MouseScrollDelta, TouchPhase};
+
+        let mut h = EffectHarness::new();
+        let terminal_buffer = BufferId::from_raw(91);
+        // A frame for a buffer this window is not showing is ignored, so
+        // the window has to be on the terminal's buffer first.
+        h.app
+            .state
+            .as_mut()
+            .expect("harness state")
+            .current_buffer_id = Some(terminal_buffer);
+        let enter = |h: &mut EffectHarness| {
+            let state = h.app.state.as_mut().expect("harness state");
+            state.apply_terminal_frame(plain_terminal_frame(terminal_buffer, "hello", 40));
+            assert!(
+                state.terminal.is_some(),
+                "setup: the frame must put this frontend in terminal mode"
+            );
+        };
+        let point = (f64::from(TEXT_LEFT + 8.0), f64::from(TEXT_TOP + 4.0));
+        let bank = |h: &mut EffectHarness| {
+            h.feed(&WindowEvent::CursorMoved {
+                device_id: DeviceId::dummy(),
+                position: PhysicalPosition::new(point.0, point.1),
+            });
+            assert!(
+                matches!(
+                    h.app.classify_wheel_target(point.0, point.1),
+                    WheelTarget::Terminal { .. }
+                ),
+                "setup: the probe must resolve to the TERMINAL, not the \
+                 document underneath it"
+            );
+            h.feed(&WindowEvent::MouseWheel {
+                device_id: DeviceId::dummy(),
+                delta: MouseScrollDelta::LineDelta(0.0, -0.6),
+                phase: TouchPhase::Moved,
+            })
+        };
+
+        enter(&mut h);
+        let step = bank(&mut h);
+        assert!(
+            step.outbound.is_empty(),
+            "setup: 0.6 banks against this terminal and sends nothing, \
+             got {:?}",
+            step.outbound
+        );
+
+        {
+            let state = h.app.state.as_mut().expect("harness state");
+            state.exit_terminal_mode();
+        }
+        let _ = h.read_until_sentinel();
+        enter(&mut h);
+
+        let step = bank(&mut h);
+        assert!(
+            step.outbound.is_empty(),
+            "the re-entered terminal starts from zero: a notch begun \
+             before leaving must not complete on the way back in, got \
+             {:?}",
+            step.outbound
+        );
+
+        // And the re-entered terminal's own bank still works, so this
+        // row cannot pass by having broken accumulation outright.
+        let step = bank(&mut h);
+        assert_eq!(
+            step.outbound.len(),
+            1,
+            "0.6 + 0.6 within the re-entered terminal is one notch, and \
+             exactly one: {:?}",
+            step.outbound
+        );
+        assert!(
+            matches!(
+                step.outbound[0],
+                pmacs_protocol::FrontendEvent::TerminalPointer { .. }
+            ),
+            "and it reaches the terminal, not something else: {:?}",
+            step.outbound
         );
     }
 

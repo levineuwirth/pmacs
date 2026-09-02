@@ -315,9 +315,12 @@ before the rewrite, not after, so nothing depended on a local-only ref
 surviving.
 
 Framing
-`docs/gui-stage1-input-framing.md`, **revision 20** — §2a re-measured at
+`docs/gui-stage1-input-framing.md`, **revision 21** — §2a re-measured at
 this base, the panel-replay prerequisite recorded as DISCHARGED by #243,
-and the both-axis effect witness still owed.
+and (revision 21) the GPU's authority recorded as **structural**, its
+lifetime tables made frontend-specific. **The both-axis effect witness
+is no longer owed**; see the completion note below, which is the
+authority on what this lane still has outstanding.
 
 **Landed so far** (latest verified code head `241e82e`)**:** B1's per-target fractional
 wheel residual (the producer), B2's daemon-side horizontal panel leg,
@@ -510,7 +513,7 @@ The last three closed in order:
   just a row. `BufferId` keying distinguishes panel A from panel B for
   free, but **not a panel closed and reopened on the same persistent
   buffer**, where the successor carries the same key. The `Absent` arm
-  reset nine pieces of panel state one line at a time with the wheel
+  reset eight pieces of panel state one line at a time with the wheel
   residual missing from the list — the same omission shape as the
   horizontal origin missing from the TUI's four replacement resets.
 
