@@ -1,12 +1,29 @@
 # GUI arc, Stage 1 — input foundation (framing)
 
-**Status: revision 21 — revision 20's §2a re-measurement at `0ec13b3`
-stands; the GPU lifetime rows now describe structural authority rather
-than a latch that never had a reader.** Revision 18's §2a was measured
+**Status: revision 22 — IMPLEMENTED, IN REVIEW as PR #247. Revision
+21's GPU structural-authority correction stands; the first PR review
+closed one presentation gap and one incomplete disposal path without
+changing a ruling.** Revision 18's §2a was measured
 at `72da24a`. That
 base is now **167 commits back**, and #242 and #243 landed on exactly
 the pointer paths 1b builds on, so every 1b anchor is stale again —
 which §2a's own history predicted would happen.
+
+**Revision 22 closes two review findings in the implementation and in
+the evidence.** First, the GPU's document-horizontal wheel changed
+`code_scroll_left` but requested no redraw. The event loop returns to
+`ControlFlow::Wait`, and this axis deliberately sends no viewport wire
+event, so the stored origin could remain invisible until an unrelated
+frame. B2 now includes a request-count witness whose origin assertion
+still passes when the request is removed — the redraw is the
+discriminator, not inferred from state. Second, B1's panel disposal ran
+on `Absent` only. A direct accepted `Present` → `Present` replacement
+could retain panel A's bank; A → B → A could later spend it. Separate
+mapped and legacy rows drive the real wheel producer across a same-buffer,
+new-`panel_epoch` replacement with no `Absent`. A geometry-only re-grid
+is the negative control: it is still the same panel surface and keeps
+the fraction. **No ruling changes; two paths that failed to implement
+the existing rulings are now covered.**
 
 **All four load-bearing claims were re-verified and all four SURVIVE:**
 
@@ -497,6 +514,13 @@ defect as leaking between kinds but invisible to a kind-level row.
   with panel B (the `buffer_id`/`panel_epoch` replacement acceptance 49
   already models), motion over B must **start from zero**. *Mutation:
   key the residual by "the panel" rather than by panel identity.*
+  **Revision 22 adds the disposal discriminator R2 alone could not
+  supply:** A starting from zero is satisfied by `BufferId` keying even
+  while A's stale bank remains. Drive a direct accepted A → B → A (or
+  same-buffer/new-`panel_epoch`) replacement with no `Absent`; A's first
+  successor half-notch does nothing and its second completes. Run it in
+  both mapped and legacy frame families. A geometry-only successor is a
+  negative control and preserves the bank.
 - **R3 — terminal A→terminal B:** the same, across two terminal
   buffers. *Mutation: key the residual by "the terminal".*
 
@@ -1214,7 +1238,7 @@ The crate has **exactly one** executable `event_loop.exit()`, in
 | # | Contract | Witness | Mutation |
 |---|---|---|---|
 | B1 | Residual per **axis and surface** — primary document, panel document and minimap are distinct owners | deltas discarded | share one accumulator → primary↔panel or document↔minimap surface-switch jump |
-| B2 | Wheel-right raises the leftmost column of the **document surface under the pointer**; wheel-down raises its top line. Primary-document horizontal state stays frontend-local; a panel-document tick reaches the daemon's window-targeted `view_left` path | `x` discarded; panel replay currently claims and drops document `ScrollLeft`/`ScrollRight` | invert a sign → that axis's row; omit the panel effect → primary moves while the panel remains inert |
+| B2 | Wheel-right raises the leftmost column of the **document surface under the pointer**; wheel-down raises its top line. Primary-document horizontal state stays frontend-local; a panel-document tick reaches the daemon's window-targeted `view_left` path | `x` discarded; panel replay currently claims and drops document `ScrollLeft`/`ScrollRight` | invert a sign → that axis's row; omit the panel effect → primary moves while the panel remains inert; omit the GPU local redraw request → `code_scroll_left` changes while the waiting event loop never presents it |
 | B3 | Each document surface clamps at its own content bounds; never a negative origin, and wrap pins horizontal origin to zero | no horizontal scroll to clamp | remove a clamp → **at-bounds row: that surface's origin goes negative and the view blanks**; reuse primary bounds for a panel → unequal-width surface row fails |
 | B4 | Middle-click paste uses **PRIMARY on Linux** | no middle-click path | use `CLIPBOARD` → B4 only |
 | B5 | I-beam over text content only | no I-beam | extend over the gutter → B5 only |

@@ -1636,6 +1636,12 @@ struct State {
     /// on a windowless `State`. Test-only.
     #[cfg(test)]
     render_calls: u64,
+    /// How many redraws production requested. Test-only: a headless
+    /// `State` has no [`Window`] to retain the request, so without this
+    /// counter a row can see viewport state change while missing that the
+    /// live event loop will remain asleep and never present it.
+    #[cfg(test)]
+    redraw_requests: std::cell::Cell<u64>,
     // `None` in the headless render-test path (F-014): a windowless State
     // that renders to an offscreen texture instead of a surface.
     window: Option<Arc<Window>>,
@@ -2204,12 +2210,14 @@ impl WheelTarget {
 /// away must go away with it, or it is spent on whatever later takes
 /// that identity.
 ///
-/// **Disposal is implemented at both teardowns**, because the key
-/// alone cannot see a surface closed and REOPENED on the same buffer:
-/// the successor carries the same `BufferId`, so nothing distinguishes
-/// it from the surface the user was actually scrolling.
-/// `PanelFramePayload::Absent` clears the panel banks and
-/// `exit_terminal_mode` clears the terminal ones.
+/// **Disposal is implemented at both teardowns and at accepted panel
+/// replacement.** The key alone cannot see a surface closed and REOPENED
+/// on the same buffer: the successor carries the same `BufferId`, so
+/// nothing distinguishes it from the surface the user was actually
+/// scrolling. `PanelFramePayload::Absent` clears the panel banks,
+/// accepted `Present`/`PresentMapped` identity replacements clear them
+/// without waiting for an `Absent`, and `exit_terminal_mode` clears the
+/// terminal ones.
 #[derive(Debug, Default)]
 struct WheelResiduals {
     /// `(owner) -> (x, y)` in fractional ticks, each in `(-1.0, 1.0)`.
@@ -5138,6 +5146,66 @@ mod input_routing_tests {
         );
     }
 
+    /// B2, GPU presentation half — changing the frontend-local horizontal
+    /// origin requests the frame that makes the change visible.
+    ///
+    /// The event loop sleeps in `ControlFlow::Wait`, and this axis sends no
+    /// viewport message that could provoke a daemon frame. Inspecting
+    /// `code_scroll_left` alone therefore cannot distinguish a working
+    /// gesture from one whose new origin remains invisible until some
+    /// unrelated repaint.
+    ///
+    /// *Mutation: omit `request_redraw()` from `scroll_by_columns` → this
+    /// row. The origin assertion still passes, proving the redraw counter is
+    /// the discriminator rather than corroboration.*
+    #[test]
+    fn b2_a_gpu_horizontal_wheel_requests_the_frame_that_displays_it() {
+        let mut h = EffectHarness::with_document(&format!("{}\n", "wide ".repeat(120)).repeat(200));
+        {
+            let buffer_id = h
+                .app
+                .state
+                .as_ref()
+                .expect("harness state")
+                .current_buffer_id
+                .expect("the harness stands in a buffer");
+            let state = h.app.state.as_mut().expect("harness state");
+            let _ = state.apply_attach_message(InstanceMessage::LineWrapFacts {
+                buffer_id,
+                wrap: false,
+            });
+            assert_eq!(state.buffer.wrap(), Wrap::None, "setup: wrap is off");
+        }
+        let document = document_probe(&h);
+        move_pointer(&mut h, document);
+        assert_eq!(
+            h.app.classify_wheel_target(document.0, document.1),
+            WheelTarget::Document,
+            "setup: document text"
+        );
+        let state = h.app.state.as_ref().expect("state");
+        let left_before = state.code_scroll_left;
+        let redraws_before = state.redraw_requests.get();
+
+        let step = h.feed(&wheel(1.0, 0.0));
+
+        let state = h.app.state.as_ref().expect("state");
+        assert!(
+            state.code_scroll_left > left_before,
+            "setup: the wheel must change the origin, or a redraw is not owed"
+        );
+        assert_eq!(
+            state.redraw_requests.get(),
+            redraws_before + 1,
+            "the local-only origin change must wake the waiting event loop"
+        );
+        assert!(
+            step.outbound.is_empty(),
+            "the redraw is locally requested, not induced by wire traffic: {:?}",
+            step.outbound
+        );
+    }
+
     /// Replace the harness's document with a fresh buffer, through the
     /// production `BufferSnapshot` receiver.
     fn replace_the_buffer(h: &mut EffectHarness) {
@@ -6548,6 +6616,8 @@ impl State {
         let mut state = Self {
             #[cfg(test)]
             render_calls: 0,
+            #[cfg(test)]
+            redraw_requests: std::cell::Cell::new(0),
             window,
             device,
             queue,
@@ -8320,6 +8390,13 @@ impl State {
                 {
                     return false;
                 }
+                // B1's disposal half applies to a direct accepted
+                // replacement too, not only to `Absent`. The bank key is
+                // the buffer id, so without this a panel A -> B -> A
+                // sequence can spend A's pre-replacement fraction when A
+                // returns. Run only after every refusal/duplicate check:
+                // an unaccepted successor owns no state to reset.
+                self.discard_replaced_panel_wheel_residual(&frame);
                 // NOTE: the gesture-latch reset on an identity change is
                 // R-d, owned by `panel-pointer-replay`. It is not
                 // duplicated here — two branches resetting the same
@@ -8375,6 +8452,11 @@ impl State {
                     self.panel.last_pointer_cell = None;
                     self.panel.gesture_last_content_cell = None;
                 }
+                // The pointer latch above includes a geometry change; the
+                // wheel bank does not. A fractional notch belongs to the
+                // panel presentation and survives a re-grid of that same
+                // panel, but never a panel/buffer replacement.
+                self.discard_replaced_panel_wheel_residual(&frame);
                 let plan = TerminalPaintPlan::build_grid(
                     frame.size,
                     &frame.cells,
@@ -8386,6 +8468,22 @@ impl State {
                 self.rebuild_panel_text_buffers();
                 true
             }
+        }
+    }
+
+    /// Drop panel wheel state when an accepted frame replaces the panel
+    /// presentation that owned it.
+    ///
+    /// `BufferId` alone is not an identity: a persistent buffer can leave
+    /// and later return as a new `panel_epoch`. Conversely, a geometry-only
+    /// change leaves the same scroll surface in place, so it does not spend
+    /// or discard a fractional notch.
+    fn discard_replaced_panel_wheel_residual(&mut self, successor: &PanelFrame) {
+        let replaced = self.panel.frame.as_ref().is_some_and(|current| {
+            current.buffer_id != successor.buffer_id || current.panel_epoch != successor.panel_epoch
+        });
+        if replaced {
+            self.wheel_residuals.clear_panels();
         }
     }
 
@@ -9284,7 +9382,11 @@ impl State {
     /// frontends are not required to share a representation.
     fn scroll_by_columns(&mut self, columns: i64) {
         if self.buffer.wrap() != Wrap::None {
+            let changed = self.code_scroll_left != 0.0;
             self.code_scroll_left = 0.0;
+            if changed {
+                self.request_redraw();
+            }
             return;
         }
         let advance = self.mono_advance();
@@ -9300,6 +9402,11 @@ impl State {
             return;
         }
         self.code_scroll_left = next as f32 * advance;
+        // Unlike a vertical wheel, this path emits no Viewport and
+        // rebuilds no lines. Nothing else wakes the `ControlFlow::Wait`
+        // event loop, so changing the origin without requesting a frame
+        // leaves the new viewport invisible until an unrelated redraw.
+        self.request_redraw();
     }
 
     /// Move `code_scroll_left` so the caret's column is on screen
@@ -11264,6 +11371,9 @@ impl State {
     /// Ask the window to repaint. A no-op headless (no window), where the
     /// render tests drive `render_offscreen` directly (F-014).
     fn request_redraw(&self) {
+        #[cfg(test)]
+        self.redraw_requests
+            .set(self.redraw_requests.get().saturating_add(1));
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -22426,6 +22536,230 @@ mod tests {
                 })
             ),
             "and it is a downward panel scroll: {:?}",
+            step.outbound
+        );
+    }
+
+    /// Exercise B1's panel-disposal rule across a direct, accepted
+    /// `Present` -> `Present` identity replacement, with no intervening
+    /// `Absent` to clear the bank for us.
+    ///
+    /// The same persistent buffer returns under a new `panel_epoch`, which
+    /// is the case `ResidualOwner::Panel(BufferId)` cannot distinguish. A
+    /// first successor half-notch must do nothing; a second must still
+    /// complete, so the row cannot pass against an accumulator that banks
+    /// nothing.
+    fn install_replacement_test_panel(h: &mut EffectHarness, mapped: bool) {
+        let state = h.app.state.as_mut().expect("harness state");
+        state.set_panel_wire(if mapped {
+            pmacs_protocol::PANEL_MAPPING_MIN_VERSION
+        } else {
+            PANEL_MIN_VERSION
+        });
+        let (geometry_epoch, total) = state
+            .next_geometry_declaration(GeometryTrigger::Metrics)
+            .expect("metrics advance the panel geometry");
+        let frame = panel_frame_of_buffer(
+            BufferId::from_raw(77),
+            4,
+            total.cols.max(1),
+            geometry_epoch,
+            1,
+        );
+        let payload = if mapped {
+            PanelFramePayload::PresentMapped {
+                frame,
+                mapping_generation: 1,
+            }
+        } else {
+            PanelFramePayload::Present(frame)
+        };
+        assert!(
+            state.apply_panel_payload(payload),
+            "setup: the initial {} frame must be accepted",
+            if mapped { "mapped" } else { "legacy" }
+        );
+    }
+
+    fn point_at_replacement_test_panel(h: &mut EffectHarness) {
+        use winit::dpi::PhysicalPosition;
+        use winit::event::DeviceId;
+        let (px, py, _, ph) = h
+            .app
+            .state
+            .as_ref()
+            .expect("harness state")
+            .panel_content_rect()
+            .expect("the panel is presented");
+        let point = (f64::from(px + 4.0), f64::from(py + ph / 2.0));
+        h.feed(&WindowEvent::CursorMoved {
+            device_id: DeviceId::dummy(),
+            position: PhysicalPosition::new(point.0, point.1),
+        });
+        assert!(
+            matches!(
+                h.app.classify_wheel_target(point.0, point.1),
+                WheelTarget::PanelCell { .. }
+            ),
+            "setup: the probe must be a panel cell"
+        );
+    }
+
+    fn panel_half_notch(h: &mut EffectHarness) -> Step {
+        use winit::event::{DeviceId, MouseScrollDelta, TouchPhase};
+
+        h.feed(&WindowEvent::MouseWheel {
+            device_id: DeviceId::dummy(),
+            delta: MouseScrollDelta::LineDelta(0.0, -0.6),
+            phase: TouchPhase::Moved,
+        })
+    }
+
+    fn panel_gesture_count(step: &Step) -> usize {
+        step.outbound
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    pmacs_protocol::FrontendEvent::PanelPointer { .. }
+                        | pmacs_protocol::FrontendEvent::PanelPointerMapped { .. }
+                )
+            })
+            .count()
+    }
+
+    fn replace_test_panel_directly(h: &mut EffectHarness, mapped: bool) {
+        let state = h.app.state.as_mut().expect("harness state");
+        let mut successor = state.panel.frame.clone().expect("retained frame");
+        successor.panel_epoch += 1;
+        let payload = if mapped {
+            PanelFramePayload::PresentMapped {
+                frame: successor,
+                mapping_generation: 1,
+            }
+        } else {
+            PanelFramePayload::Present(successor)
+        };
+        assert!(
+            state.apply_panel_payload(payload),
+            "the direct identity replacement must be accepted"
+        );
+        assert_eq!(
+            state.panel.frame.as_ref().map(|frame| frame.panel_epoch),
+            Some(2),
+            "setup: the successor, not the predecessor, is retained"
+        );
+    }
+
+    fn assert_panel_replacement_discards_wheel_residual(mapped: bool) {
+        let mut h = EffectHarness::new();
+        install_replacement_test_panel(&mut h, mapped);
+        point_at_replacement_test_panel(&mut h);
+
+        let step = panel_half_notch(&mut h);
+        assert_eq!(
+            panel_gesture_count(&step),
+            0,
+            "setup: the predecessor banks 0.6 and emits nothing"
+        );
+
+        // Direct replacement: no `Absent`, no pointer motion and the same
+        // buffer id. Only the accepted successor identity can discard the
+        // predecessor's bank.
+        replace_test_panel_directly(&mut h, mapped);
+
+        let step = panel_half_notch(&mut h);
+        assert_eq!(
+            panel_gesture_count(&step),
+            0,
+            "the successor starts from zero; the predecessor's 0.6 is gone: {:?}",
+            step.outbound
+        );
+        let step = panel_half_notch(&mut h);
+        assert_eq!(
+            panel_gesture_count(&step),
+            1,
+            "the successor's own 0.6 + 0.6 still completes exactly once: {:?}",
+            step.outbound
+        );
+        assert!(
+            matches!(
+                step.outbound.last(),
+                Some(
+                    pmacs_protocol::FrontendEvent::PanelPointer {
+                        kind: pmacs_protocol::MouseKind::ScrollDown,
+                        ..
+                    } | pmacs_protocol::FrontendEvent::PanelPointerMapped {
+                        kind: pmacs_protocol::MouseKind::ScrollDown,
+                        ..
+                    }
+                )
+            ),
+            "the completed successor notch is downward: {:?}",
+            step.outbound
+        );
+    }
+
+    /// Current production sessions negotiate the mapped family.
+    ///
+    /// *Mutation: omit the replacement discard from `PresentMapped` →
+    /// this row only.*
+    #[test]
+    fn b1_a_mapped_panel_replacement_discards_the_predecessors_residual() {
+        assert_panel_replacement_discards_wheel_residual(true);
+    }
+
+    /// The legacy family remains supported at the protocol floor.
+    ///
+    /// *Mutation: omit the replacement discard from `Present` → this row
+    /// only.*
+    #[test]
+    fn b1_a_legacy_panel_replacement_discards_the_predecessors_residual() {
+        assert_panel_replacement_discards_wheel_residual(false);
+    }
+
+    /// A geometry declaration re-grids the same panel; it does not replace
+    /// the scroll surface that owns an in-progress fractional notch.
+    ///
+    /// *Mutation: include `geometry_epoch` in
+    /// `discard_replaced_panel_wheel_residual`'s identity comparison → this
+    /// row. The second half-notch no longer completes.*
+    #[test]
+    fn b1_a_panel_geometry_change_preserves_the_same_panels_residual() {
+        let mut h = EffectHarness::new();
+        install_replacement_test_panel(&mut h, false);
+        point_at_replacement_test_panel(&mut h);
+
+        let step = panel_half_notch(&mut h);
+        assert_eq!(
+            panel_gesture_count(&step),
+            0,
+            "setup: the first 0.6 banks against the panel"
+        );
+
+        {
+            let state = h.app.state.as_mut().expect("harness state");
+            let (geometry_epoch, total) = state
+                .next_geometry_declaration(GeometryTrigger::Metrics)
+                .expect("metrics advance the geometry epoch");
+            let mut regridded = state.panel.frame.clone().expect("retained frame");
+            regridded.geometry_epoch = geometry_epoch;
+            regridded.size.cols = total.cols.max(1);
+            regridded.cells.resize(
+                regridded.size.rows as usize * regridded.size.cols as usize,
+                terminal_cell(pmacs_protocol::Glyph::Char('x'), CellStyle::default()),
+            );
+            assert!(
+                state.apply_panel_payload(PanelFramePayload::Present(regridded)),
+                "the matching frame must settle the new geometry"
+            );
+        }
+
+        let step = panel_half_notch(&mut h);
+        assert_eq!(
+            panel_gesture_count(&step),
+            1,
+            "the same panel keeps its fraction across a re-grid: {:?}",
             step.outbound
         );
     }
