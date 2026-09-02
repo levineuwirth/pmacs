@@ -301,7 +301,12 @@ waits for a signal that is not coming.
 - **THE FIRST DISPATCH IMMEDIATELY FOUND A RED ON `main`**, which is
   what this lane was built for. See the proptest entry below.
 
-## GUI arc Stage 1b — pointer and scroll — IMPLEMENTING
+## GUI arc Stage 1b — pointer and scroll — IN REVIEW (PR #247)
+
+**PR #247** — `https://github.com/levineuwirth/pmacs/pull/247`, opened
+2026-09-02 against `main` at `0ec13b3`, 13 files, on the gate-green
+head. **Not to be merged unprompted.**
+
 
 **Branch `gui-stage1b-pointer-scroll`, rebased onto `0ec13b3`.** The
 **remote ref `githubsucks/gui-stage1b-pointer-scroll` is
