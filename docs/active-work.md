@@ -319,7 +319,7 @@ Framing
 this base, the panel-replay prerequisite recorded as DISCHARGED by #243,
 and the both-axis effect witness still owed.
 
-**Landed so far** (latest verified code head `7f7f156`)**:** B1's per-target fractional
+**Landed so far** (latest verified code head `241e82e`)**:** B1's per-target fractional
 wheel residual (the producer), B2's daemon-side horizontal panel leg,
 B3/B7's shared `scroll_window_columns` with its saturated bound and wrap
 pin, B4's middle-click PRIMARY paste, **B6's minimap wheel routing**,
@@ -488,19 +488,31 @@ that full `reshape` clears, so it positively proves the incremental
 branch ran; unchanged line count alone would only make that branch
 eligible, not establish that `try_reshape_line` succeeded.
 
-**Landed but NOT yet witnessed:**
+**Nothing is landed-but-unwitnessed on this lane any more.** R4 and R5
+now have their replacement rows (`e5ab16c`), one clear omitted at a
+time so neither field hides behind the other's reset; the wrap and
+buffer-replacement clearing that stood here is covered by L8 and
+L8b–L8e, and that bullet's GPU half described the latch that no longer
+exists.
 
-- **R4 and R5's residual resets**, as two separate clears beside
-  `code_scroll_left` so omitting either is individually visible.
+**Owed outright: nothing. The implementation and its evidence are
+complete**, and the lane's next step is the full pre-PR gate.
 
-(The wrap and buffer-replacement clearing that stood here is done: the
-TUI's four replacement paths carry L8b–L8e, wrap carries L8, and the
-GPU half of that bullet described the latch that no longer exists.)
+The last three closed in order:
 
-**Owed outright:** step 3's fractional both-axis panel witness, R4/R5's
-own replacement witnesses, and **B1's disposal half** — a residual keyed to a surface that goes
-away must go with it, and this frontend does not yet track "that buffer
-is gone".
+- **step 3's fractional both-axis panel witness** (`302ce14`) — 0.6
+  vertical, then 0.6 horizontal, both reaching nothing, because a
+  single accumulator fed by both axes would have the second complete
+  the first. Rounding instead of banking fires the sub-threshold legs;
+  collapsing the axes fires the cross-axis one.
+- **R4 and R5** (`e5ab16c`).
+- **B1's disposal half** (`241e82e`) — and it needed mechanism, not
+  just a row. `BufferId` keying distinguishes panel A from panel B for
+  free, but **not a panel closed and reopened on the same persistent
+  buffer**, where the successor carries the same key. The `Absent` arm
+  reset nine pieces of panel state one line at a time with the wheel
+  residual missing from the list — the same omission shape as the
+  horizontal origin missing from the TUI's four replacement resets.
 
 **B6 (`2dccc2b`, tightened in `f441d3d`)** is three rows on
 `EffectHarness`, the first production-path coverage `apply_wheel` has
