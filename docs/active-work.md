@@ -322,7 +322,7 @@ lifetime tables made frontend-specific. **The both-axis effect witness
 is no longer owed**; see the completion note below, which is the
 authority on what this lane still has outstanding.
 
-**Landed so far** (latest verified code head `241e82e`)**:** B1's per-target fractional
+**Landed so far** (latest verified code head `e50f38a`)**:** B1's per-target fractional
 wheel residual (the producer), B2's daemon-side horizontal panel leg,
 B3/B7's shared `scroll_window_columns` with its saturated bound and wrap
 pin, B4's middle-click PRIMARY paste, **B6's minimap wheel routing**,
@@ -503,14 +503,23 @@ complete**, and the lane's next step is the full pre-PR gate.
 
 The last three closed in order:
 
-- **step 3's fractional both-axis panel witness** (`302ce14`) — 0.6
-  vertical, then 0.6 horizontal, both reaching nothing, because a
-  single accumulator fed by both axes would have the second complete
-  the first. Rounding instead of banking fires the sub-threshold legs;
-  collapsing the axes fires the cross-axis one.
+- **step 3's fractional both-axis panel witness** (`302ce14`, rewritten
+  at `e50f38a`). The first version **counted emitted events**, which is
+  the blind spot the framing exists to close — it says so directly:
+  *"Not 'a `PanelPointer` was emitted' — the observable effect on the
+  panel's viewport."* It now runs both halves in one row: this
+  frontend's `apply_wheel` as producer, a real `EditorState` with a live
+  panel window as receiver, and the panel's `(view_top, view_left)` as
+  the assertion. **`pmacs-gpu` gained a DEV-dependency on `pmacs`** for
+  it, and `pmacs` three `#[doc(hidden)]` test-support methods; the
+  daemon's own `semantic_panel_view` delegates to one of them, so there
+  is a single panel fixture rather than two. The mutation that settles
+  it is the receiver-side one no emission count could see: dropping
+  `PKind::ScrollLeft`/`ScrollRight` from the daemon's panel arm fires
+  this row.
 - **R4 and R5** (`e5ab16c`).
-- **B1's disposal half** (`241e82e`) — and it needed mechanism, not
-  just a row. `BufferId` keying distinguishes panel A from panel B for
+- **B1's disposal half** (`241e82e` for panels, `a7006fa` for
+  terminals) — and it needed mechanism, not just a row. `BufferId` keying distinguishes panel A from panel B for
   free, but **not a panel closed and reopened on the same persistent
   buffer**, where the successor carries the same key. The `Absent` arm
   reset eight pieces of panel state one line at a time with the wheel
