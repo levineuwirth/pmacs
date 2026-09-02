@@ -8242,6 +8242,14 @@ impl State {
                 self.panel.last_pointer_cell = None;
                 self.panel.gesture_last_content_cell = None;
                 self.panel.last_pointer_generation = None;
+                // B1's disposal half: a residual banked against a
+                // surface that no longer exists must go with it. The
+                // bank is keyed by `BufferId`, which distinguishes
+                // panel A from panel B — but not a panel closed and
+                // REOPENED on the same persistent buffer, where the
+                // successor would inherit a notch the user began in a
+                // panel that is gone.
+                self.wheel_residuals.clear_panels();
                 had
             }
             // §5b G8b — a mapped session REJECTS the legacy family
@@ -21966,6 +21974,35 @@ mod tests {
         frame
     }
 
+    /// Bring an `EffectHarness` to a presented panel at `panel_epoch`.
+    ///
+    /// Two harness facts this works around, both asserted rather than
+    /// assumed. It negotiates the **mapped** family, which refuses a
+    /// frame carrying no mapping generation, so this drops to the
+    /// legacy wire like every other panel row here. And it has already
+    /// made its one **surface** declaration, so the re-declaration uses
+    /// `Metrics`; a second surface declaration is suppressed by design
+    /// and returns `None`.
+    fn present_panel_in_harness(h: &mut EffectHarness, panel_epoch: u64) {
+        {
+            let state = h.app.state.as_mut().expect("harness state");
+            state.set_panel_wire(PANEL_MIN_VERSION);
+            let (epoch, total) = state
+                .next_geometry_declaration(GeometryTrigger::Metrics)
+                .expect("metrics always advance the panel geometry epoch");
+            let frame = panel_frame_of(4, total.cols.max(1), epoch, panel_epoch);
+            let _ = state.apply_attach_message(InstanceMessage::PanelFrame(
+                PanelFramePayload::Present(frame),
+            ));
+            assert!(
+                state.panel.presented().is_some(),
+                "setup: the frame must be accepted, or every assertion \
+                 that follows is about a panel that is not there"
+            );
+        }
+        let _ = h.read_until_sentinel();
+    }
+
     /// Step 3 — **the panel's fractional wheel, end to end, per axis.**
     ///
     /// Revision 20 sharpened this witness because its earlier form was
@@ -21992,32 +22029,7 @@ mod tests {
         use winit::event::{DeviceId, MouseScrollDelta, TouchPhase};
 
         let mut h = EffectHarness::new();
-        // The harness already declared its surface geometry; answer that
-        // declaration with a frame, through the production receiver.
-        {
-            let state = h.app.state.as_mut().expect("harness state");
-            // The harness negotiates the MAPPED family, which refuses a
-            // frame with no retained mapping generation. Drop to the
-            // legacy wire and re-declare, the way every other panel row
-            // in this file does, then answer that declaration through
-            // the production receiver.
-            state.set_panel_wire(PANEL_MIN_VERSION);
-            // Metrics, not Surface: the harness already made its one
-            // surface declaration, and a second is suppressed by design.
-            let (epoch, total) = state
-                .next_geometry_declaration(GeometryTrigger::Metrics)
-                .expect("metrics always advance the panel geometry epoch");
-            let frame = panel_frame_of(4, total.cols.max(1), epoch, 1);
-            let _ = state.apply_attach_message(InstanceMessage::PanelFrame(
-                PanelFramePayload::Present(frame),
-            ));
-            assert!(
-                state.panel.presented().is_some(),
-                "setup: the frame must be accepted, or every assertion \
-                 below is about a panel that is not there"
-            );
-        }
-        let _ = h.read_until_sentinel();
+        present_panel_in_harness(&mut h, 1);
 
         // A pixel inside the panel's content, so the wheel target is a
         // cell rather than the band's chrome.
@@ -22095,6 +22107,106 @@ mod tests {
             gestures(&step),
             1,
             "and the horizontal axis completes on its own count"
+        );
+    }
+
+    /// B1's **disposal half** — a residual banked against a surface that
+    /// goes away does not outlive it.
+    ///
+    /// Identity keying answers panel A versus panel B: the bank is keyed
+    /// by `BufferId`, so a different buffer starts from zero for free.
+    /// **It cannot answer close-and-reopen of the same persistent
+    /// buffer**, which is the case this row builds — the successor
+    /// carries the same id, so nothing about the key distinguishes it
+    /// from the panel the user was actually scrolling. Without an
+    /// explicit discard, a notch begun in a panel that no longer exists
+    /// completes in its replacement.
+    ///
+    /// The `Absent` arm already resets nine pieces of panel state one
+    /// line at a time; the wheel residual was missing from that list,
+    /// exactly as the horizontal origin was missing from the TUI's
+    /// replacement resets.
+    ///
+    /// *Mutation: drop `clear_panels()` from the `Absent` arm → this
+    /// row.*
+    #[test]
+    fn b1_a_panel_that_goes_away_takes_its_wheel_residual_with_it() {
+        use winit::dpi::PhysicalPosition;
+        use winit::event::{DeviceId, MouseScrollDelta, TouchPhase};
+
+        let mut h = EffectHarness::new();
+        present_panel_in_harness(&mut h, 1);
+
+        let cell_probe = |h: &EffectHarness| {
+            let (px, py, _, ph) = h
+                .app
+                .state
+                .as_ref()
+                .expect("harness state")
+                .panel_content_rect()
+                .expect("the panel is presented");
+            (f64::from(px + 4.0), f64::from(py + ph / 2.0))
+        };
+        let point_and_bank = |h: &mut EffectHarness| {
+            let point = cell_probe(h);
+            h.feed(&WindowEvent::CursorMoved {
+                device_id: DeviceId::dummy(),
+                position: PhysicalPosition::new(point.0, point.1),
+            });
+            assert!(
+                matches!(
+                    h.app.classify_wheel_target(point.0, point.1),
+                    WheelTarget::PanelCell { .. }
+                ),
+                "setup: the probe must be a panel CELL"
+            );
+            h.feed(&WindowEvent::MouseWheel {
+                device_id: DeviceId::dummy(),
+                delta: MouseScrollDelta::LineDelta(0.0, -0.6),
+                phase: TouchPhase::Moved,
+            })
+        };
+        let gestures = |step: &Step| {
+            step.outbound
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e,
+                        pmacs_protocol::FrontendEvent::PanelPointer { .. }
+                            | pmacs_protocol::FrontendEvent::PanelPointerMapped { .. }
+                    )
+                })
+                .count()
+        };
+
+        let step = point_and_bank(&mut h);
+        assert_eq!(
+            gestures(&step),
+            0,
+            "setup: 0.6 banks against this panel and sends nothing"
+        );
+
+        // The panel closes, then reopens on the SAME buffer — a new
+        // presentation of a persistent buffer, which `panel_epoch`
+        // distinguishes and `buffer_id` cannot.
+        {
+            let state = h.app.state.as_mut().expect("harness state");
+            let _ =
+                state.apply_attach_message(InstanceMessage::PanelFrame(PanelFramePayload::Absent));
+            assert!(
+                state.panel.presented().is_none(),
+                "setup: the panel is gone"
+            );
+        }
+        let _ = h.read_until_sentinel();
+        present_panel_in_harness(&mut h, 2);
+
+        let step = point_and_bank(&mut h);
+        assert_eq!(
+            gestures(&step),
+            0,
+            "the reopened panel starts from zero: a notch begun in the \
+             panel that closed must not complete in this one"
         );
     }
 
