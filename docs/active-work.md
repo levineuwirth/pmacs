@@ -322,7 +322,7 @@ lifetime tables made frontend-specific. **The both-axis effect witness
 is no longer owed**; see the completion note below, which is the
 authority on what this lane still has outstanding.
 
-**Landed so far** (latest verified code head `e50f38a`)**:** B1's per-target fractional
+**Landed so far** (latest verified code head `9ec4ff1`)**:** B1's per-target fractional
 wheel residual (the producer), B2's daemon-side horizontal panel leg,
 B3/B7's shared `scroll_window_columns` with its saturated bound and wrap
 pin, B4's middle-click PRIMARY paste, **B6's minimap wheel routing**,
@@ -511,12 +511,23 @@ The last three closed in order:
   frontend's `apply_wheel` as producer, a real `EditorState` with a live
   panel window as receiver, and the panel's `(view_top, view_left)` as
   the assertion. **`pmacs-gpu` gained a DEV-dependency on `pmacs`** for
-  it, and `pmacs` three `#[doc(hidden)]` test-support methods; the
+  it, and `pmacs` four `#[doc(hidden)]` test-support methods; the
   daemon's own `semantic_panel_view` delegates to one of them, so there
   is a single panel fixture rather than two. The mutation that settles
   it is the receiver-side one no emission count could see: dropping
   `PKind::ScrollLeft`/`ScrollRight` from the daemon's panel arm fires
-  this row.
+  this row. Review found one residual at `a3b0bb8`: the row said
+  **exactly one step** while asserting only that each origin became
+  greater than zero. `9ec4ff1` pins the exact `(view_top, view_left)`
+  after both completions, asserts the entire sub-threshold `Step` is
+  empty, requires one correctly directed outbound event and no local
+  effect on each completion, and asserts the receiver's geometry
+  declaration returned `Advanced`. Doubling the vertical and horizontal
+  receiver steps fails at `(6, 0)` and `(3, 6)` respectively; adding a
+  local document scroll beside the panel event fails on the completion
+  transcript. The focused row is green outside the socket-restricted
+  sandbox; package-wide all-target clippy, fmt and `git diff --check`
+  are clean. The full pre-PR gate remains next.
 - **R4 and R5** (`e5ab16c`).
 - **B1's disposal half** (`241e82e` for panels, `a7006fa` for
   terminals) — and it needed mechanism, not just a row. `BufferId` keying distinguishes panel A from panel B for
