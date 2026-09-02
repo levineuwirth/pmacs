@@ -5127,6 +5127,121 @@ mod input_routing_tests {
         );
     }
 
+    /// Replace the harness's document with a fresh buffer, through the
+    /// production `BufferSnapshot` receiver.
+    fn replace_the_buffer(h: &mut EffectHarness) {
+        let text = "line\n".repeat(200);
+        let doc = loro::LoroDoc::new();
+        doc.get_text(LORO_TEXT_CONTAINER)
+            .insert(0, &text)
+            .expect("insert snapshot text");
+        let state = h.app.state.as_mut().expect("harness state");
+        let _ = state.apply_attach_message(InstanceMessage::BufferSnapshot {
+            buffer_id: BufferId::next(),
+            crdt_snapshot: doc.export(loro::ExportMode::Snapshot).expect("export"),
+        });
+    }
+
+    /// R4 — **the document's residual does not survive a buffer
+    /// replacement.**
+    ///
+    /// The bank is viewport state about the document being shown. Left
+    /// standing across a replacement it completes a notch in the
+    /// successor that the user began in its predecessor — a jump with
+    /// nothing on screen to explain it. The chrome residual is the same
+    /// bank (chrome's owner IS the document's), so one reset serves
+    /// both.
+    ///
+    /// *Mutation: omit `clear_document()` from the snapshot arm → this
+    /// row.*
+    #[test]
+    fn r4_a_buffer_replacement_drops_the_documents_wheel_residual() {
+        let mut h = EffectHarness::new();
+        let document = document_probe(&h);
+        move_pointer(&mut h, document);
+        assert_eq!(
+            h.app.classify_wheel_target(document.0, document.1),
+            WheelTarget::Document,
+            "setup: document text"
+        );
+
+        let step = h.feed(&wheel(0.0, 0.6));
+        assert!(
+            step.local.is_empty(),
+            "setup: 0.6 of a notch banks and does nothing yet: {:?}",
+            step.local
+        );
+
+        replace_the_buffer(&mut h);
+        move_pointer(&mut h, document);
+
+        let step = h.feed(&wheel(0.0, 0.6));
+        assert!(
+            step.local.is_empty(),
+            "the successor starts from zero: a notch begun in the \
+             previous document must not complete in this one, got {:?}",
+            step.local
+        );
+
+        // And the successor's own bank still works, so the row is not
+        // passing by having broken accumulation outright.
+        let step = h.feed(&wheel(0.0, 0.6));
+        assert_eq!(
+            step.local,
+            vec![LocalEffect::Scroll {
+                top: WHEEL_LINES_PER_TICK as usize
+            }],
+            "0.6 + 0.6 within the successor is one notch"
+        );
+    }
+
+    /// R5 — **the minimap's residual is dropped by the same
+    /// replacement, and by its own clear.**
+    ///
+    /// B6 gives the minimap an accumulator independent of the
+    /// document's, so it needs its own reset. Two clears rather than
+    /// one combined call, deliberately: a single "forgot to reset"
+    /// would bite both legs and prove neither field is individually
+    /// covered.
+    ///
+    /// *Mutation: omit `clear_minimap()` from the snapshot arm → this
+    /// row, and not R4.*
+    #[test]
+    fn r5_a_buffer_replacement_drops_the_minimaps_wheel_residual() {
+        let mut h = EffectHarness::new();
+        let minimap = minimap_probe(&h);
+        move_pointer(&mut h, minimap);
+        assert_eq!(
+            h.app.classify_wheel_target(minimap.0, minimap.1),
+            WheelTarget::Minimap,
+            "setup: the minimap band"
+        );
+
+        let step = h.feed(&wheel(0.0, 0.6));
+        assert!(
+            step.local.is_empty(),
+            "setup: 0.6 banks and does nothing yet: {:?}",
+            step.local
+        );
+
+        replace_the_buffer(&mut h);
+        let minimap = minimap_probe(&h);
+        move_pointer(&mut h, minimap);
+        assert_eq!(
+            h.app.classify_wheel_target(minimap.0, minimap.1),
+            WheelTarget::Minimap,
+            "setup: still the minimap after the replacement"
+        );
+
+        let step = h.feed(&wheel(0.0, 0.6));
+        assert!(
+            step.local.is_empty(),
+            "the minimap's bank starts from zero in the successor too, \
+             got {:?}",
+            step.local
+        );
+    }
+
     /// B6 — the minimap banks into **its own** accumulator, so a
     /// part-notch over it cannot complete a notch over the document.
     ///
