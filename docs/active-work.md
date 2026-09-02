@@ -319,7 +319,7 @@ Framing
 this base, the panel-replay prerequisite recorded as DISCHARGED by #243,
 and the both-axis effect witness still owed.
 
-**Landed so far** (latest verified code head `269c52e`)**:** B1's per-target fractional
+**Landed so far** (latest verified code head `7f7f156`)**:** B1's per-target fractional
 wheel residual (the producer), B2's daemon-side horizontal panel leg,
 B3/B7's shared `scroll_window_columns` with its saturated bound and wrap
 pin, B4's middle-click PRIMARY paste, **B6's minimap wheel routing**,
@@ -347,12 +347,13 @@ At `175cc7b` — B5's own checkpoint, not the lane's current one — all
 fmt and `git diff --check` are clean. Four mutations were executed and
 each fires its named row: omit accepted-frame reflow, omit
 epoch-invalidation reflow, reshape content-only frames, and retain
-divider hover on `Absent`. **The latest verified code head is `f441d3d`
-at 312 GPU rows**; the authoritative remote ref above may be ahead with
-documentation-only commits and remains the recovery source. Calling
-`f441d3d` the lane's "current head" here would become false in the
-commit carrying the sentence — the self-certifying checkpoint defect
-this ledger has already recorded elsewhere.
+divider hover on `Absent`. **B6's verified checkpoint is `f441d3d` at
+312 GPU rows**; the latest verified code head is named once, at the top
+of this block. The authoritative remote ref above may be ahead with
+documentation-only commits and remains the recovery source. Calling a
+fixed checkpoint the lane's "current head" here would become false in
+the next code commit — the self-certifying checkpoint defect this
+ledger has already recorded elsewhere.
 
 ### The latch was never the thing the ledger said it was
 
@@ -437,9 +438,10 @@ off-by-one.
 
 ### The GPU's latch is unreachable, and its real gap was the clamp
 
-`ec6444e`. **The framing's L2 cannot witness what it is offered for.**
-It proposes wheel-sideways then a height-only resize as the GPU's
-manual-authority row. Measured before anything was added: the origin
+`ec6444e`. **The framing's L2 could not witness the latch it was offered
+as evidence for.** It proposes wheel-sideways then a height-only resize
+as the GPU's manual-authority row. Measured before anything was added:
+the origin
 survives that resize with `manual_left_authority` **never read anywhere
 in the frontend**. Q#F6's painted-before policy is what preserves it —
 `resize` runs `ensure_caret_painted` only when the caret was painted,
@@ -456,8 +458,10 @@ the origin stayed 960px past the new maximum** — most of the viewport
 blank, the text off its left edge. `clamp_code_scroll_left` now sits at
 `reshape`'s tail, beside B5's icon hook and for the same reason.
 
-**Owed to the framing, not to the code: L2's wording**, which promises a
-witness this frontend cannot provide.
+**This was owed to the framing, not to the code: L2's wording promised a
+latch witness this frontend cannot provide. Revision 21 discharges it**
+by naming the painted-before policy as the mechanism and splitting the
+GPU rows by the behavior each actually witnesses.
 
 **Settled (user decision, 2026-09-02): the GPU latch is deleted, not
 completed.** The contract is behavioral, and the two frontends are not
@@ -479,7 +483,10 @@ re-shapes only the affected line through `try_reshape_line` and skips
 the full `reshape` — **and skipped clause 3's clamp with it**. A
 one-line delete shortening the widest line could leave the viewport
 past the end of the text with no later event to repair it. The clamp
-now runs on that branch too.
+now runs on that branch too. The row keeps a redraw-deadline sentinel
+that full `reshape` clears, so it positively proves the incremental
+branch ran; unchanged line count alone would only make that branch
+eligible, not establish that `try_reshape_line` succeeded.
 
 **Landed but NOT yet witnessed:**
 

@@ -1,7 +1,9 @@
 # GUI arc, Stage 1 — input foundation (framing)
 
-**Status: revision 20 — §2a RE-MEASURED at `0ec13b3`, and three base
-facts corrected.** Revision 18's §2a was measured at `72da24a`. That
+**Status: revision 21 — revision 20's §2a re-measurement at `0ec13b3`
+stands; the GPU lifetime rows now describe structural authority rather
+than a latch that never had a reader.** Revision 18's §2a was measured
+at `72da24a`. That
 base is now **167 commits back**, and #242 and #243 landed on exactly
 the pointer paths 1b builds on, so every 1b anchor is stale again —
 which §2a's own history predicted would happen.
@@ -794,7 +796,9 @@ undefined, which is the part that decides whether the feature works.
 5. **Wrap and buffer replacement clear it and pin the origin to zero.**
    This is the existing rule (`horizontal_follow`'s wrap branch, and
    the GPU's wrap branch at `:8120`; `:8089` is only the
-`horizontal_follow` call); authority must not survive either.
+`horizontal_follow` call). On the TUI the latch must be cleared too; the
+GPU has no latch, so clearing the origin is the whole representation of
+this rule there.
 
 ##### What B7 and B3 must witness
 
@@ -814,29 +818,30 @@ vacuous witness of exactly the kind this framing keeps producing.
 
 ##### The discriminating setup, required by every row
 
-**Revision 15 stated this for L3 alone. It is required by all of
-them.** Every row below asserts "the origin is X"; if the cursor sits
-*inside* the manually scrolled viewport, `follow_left` returns that
-same origin, so **held authority and released authority produce
-identical state** and the row passes either way. Visible state
-coincides; the assertion proves nothing.
+**Revision 15 stated this for L3 alone. It is required by every row
+whose discriminator is the origin.** If the cursor sits *inside* the
+manually scrolled viewport, `follow_left` returns that same origin, so
+preserved and released authority produce identical visible state and
+an origin assertion proves nothing.
 
-**Setup for L1, L2, L4, L6, L7 and L8, not only L3: the cursor is at a
-column OUTSIDE the manual viewport**, so the two outcomes are
-distinguishable — authority held keeps the wheel origin, authority
-released snaps to the caret's.
+**Setup for L1, L2, L3, L6, L7 and the TUI's L8: the cursor is at a
+column OUTSIDE the manual viewport**, so preservation keeps the wheel
+origin and release snaps to the caret. **L4 is the deliberate
+exception:** the TUI's vertical wheel carries point only when the caret
+is inside, so L4 puts it inside and uses the latch itself — not the
+coincident origin — as its discriminator.
 
-| # | witness | driver (cursor outside the manual viewport throughout) |
+| # | witness | driver (cursor outside unless the row says otherwise) |
 |---|---|---|
 | L1 | preservation, TUI | wheel sideways → **a real paint** (`paint_frame` → `prepare_window_cursor_visible`) |
-| L2 | preservation, GPU | wheel sideways → **a HEIGHT-ONLY `resize`** — real follow, horizontal geometry unchanged |
-| L3 | release | wheel sideways → a genuine cursor-position change, landing outside the manual viewport |
+| L2 | preservation, GPU | wheel sideways → **a HEIGHT-ONLY `resize`**; Q#F6's painted-before policy skips the follow, preserving the origin structurally |
+| L3 | release, **both frontends** | wheel sideways → a genuine cursor-position change outside the manual viewport; TUI releases its latch, GPU accepts a moved `CursorByte` and follows immediately |
 | L4 | cross-axis, **TUI only** | wheel sideways → wheel **vertically**; vertical wheel carries point in the TUI (`scroll_window`), so a naive authority-on-any-cursor-write releases here. Clause 3 says the origin survives |
 | L5 | point and selection unmoved | wheel sideways on both frontends → point and selection byte-identical (clause 1) |
-| L6 | clamp-absorbed motion does not arm | at the bound already, wheel further → origin unchanged **and authority NOT armed**, so the next follow moves normally (clause 2's "effective") |
-| L7a | re-clamp on **viewport widening** | wheel sideways → **widen** the viewport → origin re-clamped to the new maximum, authority still held (clause 3) |
-| L7b | re-clamp on **content shrink** | wheel sideways → **shorten the widest line** so the maximum falls → origin re-clamped, authority still held |
-| L8 | wrap and buffer replacement clear the LATCH | wheel sideways → toggle to `Wrap` (and separately, replace the buffer) → origin zero **and authority cleared**, verified by a following `truncate` toggle where the caret rule governs again (clause 5) |
+| L6 | clamp-absorbed motion does not arm, **TUI only** | at the bound already, wheel further → origin unchanged **and latch NOT armed**, so the next paint follows normally (clause 2's "effective"); the GPU has no authority state to arm |
+| L7a | re-clamp on **viewport widening**, both frontends | wheel sideways → **widen** the viewport → origin re-clamped to the exact new maximum; TUI latch remains held, GPU preservation remains structural |
+| L7b | re-clamp on **content shrink**, both frontends | wheel sideways → **shorten the widest line** so the maximum falls → origin re-clamped exactly; GPU drives the incremental edit path that bypasses full `reshape` |
+| L8 | wrap and buffer replacement clear the **TUI latch** | wheel sideways → toggle to `Wrap` (and separately, replace the buffer) → origin zero and latch cleared, verified by a following `truncate` where the caret rule governs again. GPU origin resets are existing Stage 5 evidence; it has no latch |
 
 **L2 is height-only for the same reason L3 leaves the viewport.** A
 resize that changes width also changes the clamp, so the origin could
@@ -881,10 +886,12 @@ half. **L7b shrinks the content** — the maximum is
 `widest − viewport`, so a shortened widest line lowers it with the
 viewport untouched.
 
-**L8 is not covered by the existing wrap-origin rows.** Those assert the
-origin is zeroed; they cannot see a **stale latch** surviving the wrap,
-which surfaces only on the return to `truncate` when the caret rule
-should have resumed and does not.
+**The TUI's L8 is not covered by its existing wrap-origin rows.** Those
+assert the origin is zeroed; they cannot see a stale TUI latch surviving
+the wrap, which surfaces only on the return to `truncate` when the caret
+rule should have resumed and does not. The GPU has no corresponding
+state: its existing wrap and snapshot rows assert the complete origin
+reset directly.
 
 Mutations. Per §6's dependency-aware rule, each must **bite its named
 rows**; where one *necessarily* breaks dependents, the dependency is
@@ -897,12 +904,16 @@ that does not occur reads afterwards as a witness that failed to fire.
 
 | mutation | must bite | necessary dependents |
 |---|---|---|
-| follow ignores manual authority (always overwrites) | L1, L2 | L4, L7a, L7b — each asserts a preserved origin, which cannot survive an unconditional overwrite |
-| manual authority never releases | **L3 only** | none |
-| authority armed by *any* wheel event, effective or not | L6 | none |
-| re-clamp releases authority instead of preserving it | L7a, L7b | none |
-| wrap/replacement zeroes the origin but leaves the latch set | L8 | none |
-| the wheel path writes point or selection | **L5 only** | none |
+| TUI follow ignores manual authority (always overwrites) | TUI L1 | TUI L7a/L7b — their outside caret makes an unconditional follow discard the preserved origin |
+| GPU resize follows an unpainted caret unconditionally | GPU L2 | GPU L7a — the follow snaps to the caret before the widen, so the clamped gesture cannot remain non-zero |
+| TUI manual authority never releases on a genuine cursor move | TUI L3 only | none |
+| GPU moved `CursorByte` does not run `ensure_caret_painted` | GPU L3 only | none |
+| TUI authority armed by *any* wheel event, effective or not | TUI L6 | none |
+| TUI re-clamp releases authority instead of preserving it | TUI L7a/L7b | none |
+| GPU omits the `reshape`-tail clamp / its exact bound is off by one | GPU L7a | the shared off-by-one also bites GPU L7b's exact bound |
+| GPU omits the incremental-path clamp | GPU L7b only | none |
+| TUI wrap/replacement zeroes the origin but leaves the latch set | TUI L8/L8b–L8e, at the affected site | none |
+| either frontend's wheel path writes point or selection | that frontend's L5 leg | none |
 
 **The two removed dependencies were assumptions, not derivations.**
 
@@ -921,7 +932,8 @@ them** — observed, with the run named, never predicted in advance.
 
 Clause 5's *origin* half is already implemented for the caret path; the
 existing wrap-guard removal named in the B7 row remains its mutation.
-**L8 covers the half that is new — the latch.**
+**TUI L8/L8b–L8e cover the half that is new there — the latch.** The
+GPU has no second half.
 
 ### CORRECTION 6 — B3's right bound is vaguer than B7's, for the same bound
 
