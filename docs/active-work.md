@@ -322,7 +322,7 @@ lifetime tables made frontend-specific. **The both-axis effect witness
 is no longer owed**; see the completion note below, which is the
 authority on what this lane still has outstanding.
 
-**Landed so far** (latest verified code head `9ec4ff1`)**:** B1's per-target fractional
+**Landed so far** (latest verified code head `9ec4ff1`; **full gate green at `04ebd2f`**)**:** B1's per-target fractional
 wheel residual (the producer), B2's daemon-side horizontal panel leg,
 B3/B7's shared `scroll_window_columns` with its saturated bound and wrap
 pin, B4's middle-click PRIMARY paste, **B6's minimap wheel routing**,
