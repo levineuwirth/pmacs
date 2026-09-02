@@ -22073,8 +22073,11 @@ mod tests {
         let panel_buffer = editor
             .window_buffer_for_test(panel)
             .expect("the panel window has a buffer");
-        let _ =
-            editor.accept_semantic_frame_geometry(fid, 1, pmacs_protocol::CellSize::new(24, 80));
+        assert_eq!(
+            editor.accept_semantic_frame_geometry(fid, 1, pmacs_protocol::CellSize::new(24, 80),),
+            pmacs::editor_core::GeometryUpdate::Advanced,
+            "setup: the receiver must accept the geometry declaration"
+        );
         (editor, fid, panel, panel_buffer)
     }
 
@@ -22144,8 +22147,15 @@ mod tests {
     /// than per (surface, axis) → the second axis's first leg, which
     /// the first axis's leftover completes; drop `PKind::ScrollLeft` /
     /// `ScrollRight` from the daemon's panel arm → the horizontal
-    /// completion, which no emission count can see.*
+    /// completion, which no emission count can see; double either
+    /// receiver step → that axis's exact-origin assertion; add a
+    /// frontend-local document scroll beside the panel event → the
+    /// completion transcript.*
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one ordered four-turn sequence; splitting would hide which residual each turn carries"
+    )]
     fn step3_a_panel_wheel_moves_the_panel_viewport_once_per_notch_per_axis() {
         use winit::event::{DeviceId, MouseScrollDelta, TouchPhase};
 
@@ -22190,11 +22200,13 @@ mod tests {
 
         // Vertical, sub-threshold: nothing on the wire, nothing moves.
         let (step, replayed) = turn(&mut h, &mut editor, 0.0, 0.6);
-        assert!(
-            step.outbound.is_empty(),
-            "a sub-threshold vertical delta must put NOTHING on the \
-             wire, got {:?}",
-            step.outbound
+        assert_eq!(
+            step,
+            Step {
+                local: Vec::new(),
+                outbound: Vec::new(),
+            },
+            "a sub-threshold vertical delta must have NO local or wire effect"
         );
         assert_eq!(replayed, 0);
         assert_eq!(
@@ -22206,13 +22218,17 @@ mod tests {
         // Horizontal, sub-threshold, with the vertical bank still
         // standing: one accumulator fed by both axes would complete
         // here and scroll.
-        let (step, _) = turn(&mut h, &mut editor, 0.6, 0.0);
-        assert!(
-            step.outbound.is_empty(),
+        let (step, replayed) = turn(&mut h, &mut editor, 0.6, 0.0);
+        assert_eq!(
+            step,
+            Step {
+                local: Vec::new(),
+                outbound: Vec::new(),
+            },
             "a sub-threshold horizontal delta must not be completed by \
-             the vertical one banked before it, got {:?}",
-            step.outbound
+             the vertical one banked before it"
         );
+        assert_eq!(replayed, 0);
         assert_eq!(
             origin(&editor),
             (0, 0),
@@ -22221,33 +22237,72 @@ mod tests {
 
         // Completing the vertical notch: the viewport moves ONE step
         // down, and the horizontal origin stays put.
-        let (_, replayed) = turn(&mut h, &mut editor, 0.0, 0.6);
-        assert_eq!(replayed, 1, "one notch is one gesture");
-        let after_vertical = origin(&editor);
+        let (step, replayed) = turn(&mut h, &mut editor, 0.0, 0.6);
         assert!(
-            after_vertical.0 > 0,
-            "the completed vertical notch must scroll the panel"
+            step.local.is_empty(),
+            "a panel wheel has no frontend-local effect: {:?}",
+            step.local
         );
         assert_eq!(
-            after_vertical.1, 0,
-            "and must not move it sideways: a vertical notch that \
-             emitted a horizontal gesture would show up exactly here"
+            step.outbound.len(),
+            1,
+            "one completed notch must emit exactly one event and nothing \
+             alongside it: {:?}",
+            step.outbound
+        );
+        assert!(
+            matches!(
+                step.outbound[0],
+                pmacs_protocol::FrontendEvent::PanelPointer {
+                    kind: pmacs_protocol::MouseKind::ScrollDown,
+                    ..
+                }
+            ),
+            "the vertical notch must be one downward panel gesture: {:?}",
+            step.outbound
+        );
+        assert_eq!(replayed, 1, "one notch is one gesture");
+        let after_vertical = origin(&editor);
+        assert_eq!(
+            after_vertical,
+            (WHEEL_LINES_PER_TICK as usize, 0),
+            "one vertical notch is exactly one line-step, on that axis \
+             only"
         );
 
         // Completing the horizontal notch: sideways this time, and the
         // vertical origin does not move again.
-        let (_, replayed) = turn(&mut h, &mut editor, 0.6, 0.0);
-        assert_eq!(replayed, 1, "one notch is one gesture");
-        let after_horizontal = origin(&editor);
+        let (step, replayed) = turn(&mut h, &mut editor, 0.6, 0.0);
         assert!(
-            after_horizontal.1 > 0,
-            "the completed horizontal notch must scroll the panel \
-             sideways — the axis whose receiver arm did not exist before \
-             B2, and which no emission count can see"
+            step.local.is_empty(),
+            "a panel wheel has no frontend-local effect: {:?}",
+            step.local
         );
         assert_eq!(
-            after_horizontal.0, after_vertical.0,
-            "and must not scroll it vertically a second time"
+            step.outbound.len(),
+            1,
+            "one completed notch must emit exactly one event and nothing \
+             alongside it: {:?}",
+            step.outbound
+        );
+        assert!(
+            matches!(
+                step.outbound[0],
+                pmacs_protocol::FrontendEvent::PanelPointer {
+                    kind: pmacs_protocol::MouseKind::ScrollRight,
+                    ..
+                }
+            ),
+            "the horizontal notch must be one rightward panel gesture: {:?}",
+            step.outbound
+        );
+        assert_eq!(replayed, 1, "one notch is one gesture");
+        let after_horizontal = origin(&editor);
+        assert_eq!(
+            after_horizontal,
+            (WHEEL_LINES_PER_TICK as usize, WHEEL_COLUMNS_PER_TICK as u32,),
+            "one horizontal notch is exactly one column-step, while the \
+             vertical origin remains unchanged"
         );
     }
 
