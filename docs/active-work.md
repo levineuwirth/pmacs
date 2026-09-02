@@ -307,6 +307,12 @@ waits for a signal that is not coming.
 2026-09-02 against `main` at `0ec13b3`, 13 files, on the gate-green
 head. **Not to be merged unprompted.**
 
+**CI is GREEN at `5fcc3a3`: 14 of 14 checks, zero non-success**, and the
+PR reports `MERGEABLE` / `CLEAN`. The two macOS legs are the long poles
+(13m47s and 21m12s); `Test (crdt)` — the flavor `scripts/gate`'s clippy
+step cannot lint locally — passed at 11m21s. Checks ran against the
+current head, not an earlier one.
+
 
 **Branch `gui-stage1b-pointer-scroll`, rebased onto `0ec13b3`.** The
 **remote ref `githubsucks/gui-stage1b-pointer-scroll` is
