@@ -1123,6 +1123,37 @@ the first thing to capture is a contemporaneous load reading — the one
 piece of evidence that would separate the two explanations and that
 neither U6 nor this row has at the moment of failure.
 
+### U21 — the canonical PTY test reds ENTIRELY alone, in `03-lib`
+
+Recorded during GUI Stage 1b's pre-PR gate, 2026-09-02, local (Linux).
+**A new incident by U6's rule and U9's, not a fourth occurrence of
+either** — see the relation cells below, which are the point of the row.
+
+| field | value |
+|---|---|
+| **selector** | `--lib process::tests::m6_1_pty_canonical_mode_keeps_kernel_echo`, **alone** — no second selector redded anywhere in the run |
+| **job / flavor** | local (Linux), `scripts/gate` step `03-lib`, per-worktree target dir, inside a full gate |
+| **required fragments** | ``canonical mode should leave echo enabled (no `-echo` flag); stty -a output was: ""`` |
+| **NOT fragments** | the `:LINE` suffix (`src/process.rs:3981` at this head) and the pass/fail counts — both occurrence-specific |
+| **status** | **one occurrence**, `2008 passed; 1 failed; 3 ignored` |
+| **what IS established — an IN-RUN control, the strongest kind** | the same selector **passed in step `04-lib-crdt` and step `15-sweep` of the SAME gate run**, on the same tree, minutes apart. The tree is therefore excluded as a cause without relying on a later rerun at different conditions. Also green in three subsequent full `--lib` runs and once isolated (`1 passed`, 0.01s) |
+| **what is NOT** | cause. **The load confound is once again not measured at the moment of failure** — the readings that exist were taken afterwards: 1-minute 4.15, 4.38, 6.43, 6.54 with the 5-minute figure at 9.6–10.0, i.e. a genuinely busy machine, but *after* the fact. This is the same gap U15 exists to close and it is still open |
+| **relation to U2 — same family, different selector** | U2's fragment is identical (`stty -a output was: ""`) but its selector names `m6_1_pty_raw_mode_disables_kernel_echo`. Raw passed here |
+| **relation to U9 — the closest row, and still not a match** | U9's selector requires the canonical PTY test **and** `composition_overhead_under_ten_percent` failing together in `11-sweep`. Here the PTY test redded **with no companion at all**, in `03-lib`, and the composition test passed. U9's own framing distinguishes "canonical alone" from *raw*; this is canonical alone from *everything*, which no existing row has shown |
+
+**What this adds to the family is the isolation.** Every prior
+occurrence of this fragment came paired — raw with canonical (U2's
+second), or canonical with a budget test (U9). A single PTY assertion
+failing by itself, in the narrowest step, with two green runs of the
+same selector bracketing it in the same gate, is the cleanest evidence
+yet that the fragment reports **a delivery or collection failure rather
+than anything about termios** — which is exactly what U2 says the
+fragment can and cannot show.
+
+**Do not fold this into U2 or U9.** Both rows exist because their
+authors resisted the same pull, and each records a combination the
+others cannot see.
+
 ### U7 — a *different* wall-clock render-budget test reds each sweep
 
 Recorded during worker identity Stage 1 review round 3, 2026-08-09.

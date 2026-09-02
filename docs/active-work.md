@@ -581,6 +581,33 @@ the next lane does not rediscover them at review.
   instead. Running it by hand also surfaces a pre-existing unresolved
   link, `MathNode` at `pmacs-gpu/src/math_layout.rs:314`.
 
+### `scripts/gate` refuses to run under `nohup`
+
+Not a red — a **refusal**, and worth recording because it looks like
+neither success nor failure. Launched with `nohup`, the gate printed
+
+```
+pmacs: SIGINT is ignored; run this command with SIGINT deliverable
+gate: REFUSING TO RUN (status=1 token=valid) --- no stage has run.
+```
+
+and exited in under a second. `nohup` leaves SIGINT ignored, and the
+gate declines to start in that state rather than run stages nobody can
+interrupt. **The guard is right**; the way it was hit is the lesson.
+Background the gate through the harness's own mechanism, not `nohup`.
+
+**The expensive half was the watch, not the refusal.** A monitor was
+armed on the output file filtering for step banners and test results —
+so a gate that never started produced exactly what a gate still running
+produces: nothing. Fifteen minutes of silence read as progress. The
+question to ask before arming any watch is *if this process died right
+now, would my filter emit anything?*, and here the answer was no.
+
+**A trailing `; echo` in the same launch also swallowed the exit code.**
+`./scripts/gate … > log 2>&1; echo "exit=$?"` reports the *echo's*
+status, so the harness recorded exit 0 for a gate that failed at step
+03. Read the gate's own summary line, never the wrapper's.
+
 ### A local false compile red from the shared target directory
 
 Kept here rather than in `docs/ci-red-signatures.md` because it is a
