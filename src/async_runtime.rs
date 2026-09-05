@@ -5,7 +5,7 @@
 //!
 //! This module is the bridge between the Rust worker pool ([T M3.1]) and
 //! the message bus ([T M3.2]) on the producer side, and the Lua
-//! coroutine API ([R44], [R45], [R46]) on the consumer side. It runs
+//! coroutine API (R44, R45, R46) on the consumer side. It runs
 //! exclusively on the main editor thread, so it uses [`Rc`] +
 //! [`RefCell`] for shared state instead of [`Arc`] + [`Mutex`].
 //!
@@ -80,7 +80,7 @@ use crate::message_bus::{BusEnd, MessageBus, SchemaRegistry};
 use crate::syntax::{self as syntax_mod, ParseRequest, ParseTreeBundle};
 use crate::worker::{CancellationToken, WorkerPool};
 
-/// Identifier the runtime hands to Lua so a [`Handle`] knows which
+/// Identifier the runtime hands to Lua so a `Handle` knows which
 /// pending entry it is bound to. Distinct from the bus's
 /// `MessageId` and from the pool's `JobId` --- this is the ID Lua
 /// userdata holds.
@@ -117,7 +117,7 @@ pub enum StreamPayload {
 }
 
 /// One match emitted by [`run_grep`]. Owned strings only --- a worker
-/// holds nothing but its own copy of these bytes ([R31]). The Lua
+/// holds nothing but its own copy of these bytes (R31). The Lua
 /// binding turns each into a `{ file, line, text, match_start,
 /// match_end }` table.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -137,7 +137,7 @@ pub struct GrepMatch {
 }
 
 /// Description of a grep job: where to search, what to look for, and
-/// the limits that bound resource use. Kept owned-only ([R31]) so the
+/// the limits that bound resource use. Kept owned-only (R31) so the
 /// closure dispatched to a worker holds nothing borrowed from the main
 /// thread.
 #[derive(Clone, Debug)]
@@ -1103,7 +1103,7 @@ impl AsyncRuntime {
     ///
     /// T M3.6: this is the milestone-justifying load --- "Lua code
     /// can do expensive things without freezing the editor". All
-    /// arguments cross into the worker by value ([R31]).
+    /// arguments cross into the worker by value (R31).
     pub fn dispatch_grep(
         &self,
         spec: GrepSpec,
@@ -1328,7 +1328,7 @@ impl AsyncRuntime {
     }
 
     /// Settle an externally-registered job with a JSON value. Wakes
-    /// any coroutine parked on the corresponding [`Handle:await()`]
+    /// any coroutine parked on the corresponding `Handle:await()`
     /// on the next [`Self::tick`].
     ///
     /// Idempotent against double-completion: the second call is a

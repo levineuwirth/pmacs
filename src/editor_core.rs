@@ -9,7 +9,7 @@
 //!
 //! # Window model (T M2.8)
 //!
-//! Buffers live in [`BufferRegistry`]. Each [`Window`] points at one
+//! Buffers live in `BufferRegistry`. Each [`Window`] points at one
 //! by [`BufferId`] and owns its own cursor / view-top / goal-column /
 //! [`TextView`]. The [`Layout`] tree maps the cell grid to per-window
 //! viewport rectangles. A single [`WindowId`] is "active": every
@@ -121,7 +121,7 @@ pub enum ResolvedTarget {
     ///
     /// `path` is **normalized** — absolute, tilde-expanded, lexically
     /// clean. This is not free and must not be assumed: normalization
-    /// otherwise happens inside [`Self::set_buffer_path`], which never
+    /// otherwise happens inside `Self::set_buffer_path`, which never
     /// runs on this arm, so a caller resolving `"."` would keep `"."`
     /// (Q#JR8). A handler keying state by path needs the canonical form.
     Directory {
@@ -869,7 +869,7 @@ impl EditorCore {
 
     /// Mutable view of the active frontend's [`FrontendView`].
     ///
-    /// Same fallback semantics as [`active_view`].
+    /// Same fallback semantics as `active_view`.
     pub fn active_view_mut(&mut self) -> &mut FrontendView {
         // Choose the key first to avoid borrowing `self.views`
         // twice with overlapping lifetimes (the fallback path).

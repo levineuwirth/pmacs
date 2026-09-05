@@ -14208,7 +14208,7 @@ fn is_motion_key(key: ProtocolKey) -> bool {
 }
 
 /// Whether to forward a translated key to the daemon (session B2).
-/// Motion keys go through with any modifiers (C-<left> is word
+/// Motion keys go through with any modifiers `(C-<left>` is word
 /// motion). Deletion keys do too: C-BS / C-DEL / M-BS are word-level
 /// deletes in the default keymap — the same editing-command family as
 /// chorded motion, and an unbound chord is a harmless no-op at the

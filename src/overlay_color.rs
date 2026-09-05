@@ -5,7 +5,7 @@
 //! Each attached frontend gets one slot from a fixed palette. The
 //! palette has [`PALETTE_LEN`] entries, mapping slot index → distinct
 //! terminal color. Slots are assigned per Unix uid in the daemon
-//! ([`crate::daemon::DaemonState::color_slot_for_uid`]); same uid
+//! (`crate::daemon::DaemonState::color_slot_for_uid`); same uid
 //! across reconnect → same slot (the M10.9 spec's "stable across
 //! reconnect within a session" criterion).
 //!

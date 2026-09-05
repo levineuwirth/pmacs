@@ -216,7 +216,7 @@ impl CommitScopeActive {
 
 /// One editor session.
 pub struct EditorState {
-    /// World state, mutated by [`pmacs.editor.*`] primitives invoked
+    /// World state, mutated by `pmacs.editor.*` primitives invoked
     /// from inside command bodies.
     pub core: SharedCore,
     /// The embedded Lua VM and its command/keymap registries.
@@ -1432,7 +1432,7 @@ impl EditorState {
     ///   (Q#JR1a) — the same reason the daemon bootstrap and
     ///   `display_file` both fire theirs after their borrow blocks end.
     ///
-    /// A directory resolves to [`ResolvedTarget::Directory`] and is
+    /// A directory resolves to `ResolvedTarget::Directory` and is
     /// dispatched to the directory resolver chain rather than opened as
     /// a buffer (Q#JR6); see [`Self::open_directory_target`].
     #[allow(

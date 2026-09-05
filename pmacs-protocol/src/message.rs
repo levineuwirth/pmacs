@@ -755,7 +755,7 @@ pub enum GoodbyeReason {
     /// are stable wire-format identifiers: they are exactly the
     /// `FrontendCapabilities` / `InstanceCapabilities` field names,
     /// not human-readable descriptions. The frontend translates them
-    /// for display via [`AttachError`]'s formatting. Renaming a
+    /// for display via `AttachError`'s formatting. Renaming a
     /// capability bit requires changing both the field name AND the
     /// missing-string emission in `negotiate_capabilities` in
     /// lockstep — see the M10.7 audit's wire-format-stability
@@ -1042,7 +1042,7 @@ pub enum InstanceMessage {
         items: Vec<InlineAdornment>,
     },
     /// Coarse whole-file styling summary for a minimap / scrollbar
-    /// overview, resolving design-note Open Q#2. One [`Style`] per
+    /// overview, resolving design-note Open Q#2. One `Style` per
     /// source line (the *dominant* style for that line by byte count
     /// across the producer's current spans); the frontend maps minimap
     /// rows to one or more of these. Unlike [`Self::StyleSpans`], this
@@ -1056,7 +1056,7 @@ pub enum InstanceMessage {
     /// minimap rows naturally correspond to code lines.
     ///
     /// Gated on negotiated `semantic_render`; the daemon emits it only
-    /// for sessions that have a [`crate::semantic_render::SemanticRenderState`]
+    /// for sessions that have a `crate::semantic_render::SemanticRenderState`
     /// (structural gating, same as every other semantic family).
     FileStyleSummary {
         /// Buffer this summary describes.
@@ -1618,7 +1618,7 @@ pub struct MinibufferRow {
 
 /// Flat selection state for the wire.
 ///
-/// Mirrors [`crate::window::Selection`] but as a self-contained pair
+/// Mirrors `crate::window::Selection` but as a self-contained pair
 /// of byte offsets — `anchor` is where the selection began,
 /// `active` is the current selection cursor. Either may be the
 /// numerically larger value; callers wanting `(lo, hi)` order
@@ -1627,7 +1627,7 @@ pub struct MinibufferRow {
 /// Kept flat (no nested types) so [`PartialEq`] equality is exactly
 /// wire-representation equality: two `SelectionSnapshot`s compare
 /// equal iff they serialize to identical bytes. The presence-diff
-/// sweep relies on this — see [`crate::presence::SessionRegistry`].
+/// sweep relies on this — see `crate::presence::SessionRegistry`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SelectionSnapshot {
     /// Where the selection began.
@@ -2530,7 +2530,7 @@ pub struct NegotiatedCapabilities {
 /// `FrontendCapabilities` field names (`"multi_frontend"`,
 /// `"crdt_replica"`). These are stable wire-format identifiers, not
 /// human-readable descriptions. User-facing translation is the
-/// frontend's responsibility (see [`AttachError`]'s `Display` impl).
+/// frontend's responsibility (see `AttachError`'s `Display` impl).
 /// Renaming a capability bit requires updating both the field name
 /// and the missing-string emission here in lockstep.
 pub fn negotiate_capabilities(

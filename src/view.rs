@@ -119,7 +119,7 @@ pub struct DisplayCoord {
     /// Which visual row **within** `row`, when the line wraps.
     ///
     /// `0` for every unwrapped line and under
-    /// [`WrapMode::Truncate`](crate::view::WrapMode::Truncate), which is
+    /// [`crate::view::WrapMode::Truncate`], which is
     /// what makes this field additive: code that has never heard of
     /// wrapping keeps computing the right answer.
     pub sub_row: u32,

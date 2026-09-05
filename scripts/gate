@@ -1,17 +1,64 @@
 #!/bin/sh
-# scripts/gate --- run the fixed gate suite in a per-worktree build
-# directory, with isolated ambient roots and durable logs.
+# scripts/gate --- run the gate suite in a per-worktree build directory,
+# with isolated ambient roots and durable logs.
 #
-#   scripts/gate [--acceptance SUITE]... [--protocol] [--print-plan]
-#   scripts/gate [--acceptance SUITE]... [--protocol] --print-plan-named
+#   scripts/gate [--protocol] [--perf] [--docs] [--print-plan]
+#   scripts/gate [--protocol] [--perf] [--docs] --print-plan-named
+#   scripts/gate --print-arming
 #   scripts/gate --print-target-dir
 #   scripts/gate --init
 #   scripts/gate --prune [--force]
 #   scripts/gate --self-test
 #
-# Framing: the archived gate-script framing (revision 4, approved), and
-# the archived gate-protocol-build framing (revision 5, approved) for the
-# crdt build step, --self-test and --print-plan-named.
+# THE PLAN. Six named stages, each test executed once:
+#
+#   fmt         cargo fmt --check
+#   clippy      cargo clippy --workspace --all-targets -- -D warnings
+#   doc         RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps
+#   build       cargo build --workspace
+#   sweep       PMACS_REQUIRE_GPU=1 cargo test --workspace --no-fail-fast
+#                   -- --skip basedpyright
+#   diff-check  git diff --check
+#
+# `--protocol` adds `sweep-luajit`, the same sweep under
+# `--no-default-features --features luajit`, after `sweep`. It is required
+# when `pmacs-protocol` changes, because the non-crdt build is a stated,
+# buildable configuration and the default build no longer exercises it.
+#
+# `--perf` adds `perf`, which runs `scripts/perf-budgets`: every
+# wall-clock budget test by exact name, in debug. Budgets are `#[ignore]`
+# and never part of the sweep, so a loaded machine cannot fail the gate
+# on a clock.
+#
+# `--docs` is the documentation-only plan: fmt, doc and diff-check. A
+# change confined to markdown has nothing for the sweep to find.
+#
+# WHY THE BUILD IS UNCONDITIONAL. The sweep spawns `pmacs-gpu` as a
+# PROCESS, and no `cargo test` invocation produces that binary:
+# `pmacs-gpu` has no `tests/` directory, so cargo never uplifts its bin to
+# `debug/pmacs-gpu`. Without the build, the suites that render through
+# the real binary fail on a cold target directory, and worse, some of
+# them SKIP THEMSELVES and report ok, so the missing build also voids
+# coverage silently. A separate named step, never folded into the sweep
+# command: `cargo build ... && cargo test ...` would report a BUILD
+# failure under the name `sweep`, which is a wrong attribution in the one
+# place this script exists to be trustworthy about.
+#
+# WHY EVERY TEST RUNS ONCE. The earlier plan ran `--lib`, `--lib
+# --features crdt`, `m4_acceptance` and `pmacs-gpu` as their own stages
+# and then swept the workspace, so each unique test executed between
+# 1.65 and 3 times per run. With `crdt` a default feature there is one
+# configuration to test, and the workspace sweep is it.
+#
+# ARMING. A tool-gated test that finds its tool absent prints a skip and
+# reports `ok`; nothing in a gate log distinguishes that from a pass. The
+# matching `PMACS_REQUIRE_*` variable turns the skip into a failure, so
+# this script arms every variable whose tool is installed and prints,
+# before the stages run, each one it could not arm and why, with the
+# suites that will therefore skip. `PMACS_REQUIRE_GPU` is always armed:
+# a machine with no Vulkan adapter fails at the sweep rather than
+# passing it vacuously. `PMACS_REQUIRE_PYRIGHT` is never armed, because
+# the sweep skips basedpyright by name.
 #
 # WHY A PER-WORKTREE TARGET DIRECTORY. This machine exports one
 # CARGO_TARGET_DIR for every checkout, and cargo takes an EXCLUSIVE LOCK
@@ -40,29 +87,33 @@ set -eu
 
 usage() {
     cat >&2 <<'EOF'
-usage: scripts/gate [--acceptance SUITE]... [--protocol] [--print-plan]
-       scripts/gate [--acceptance SUITE]... [--protocol] --print-plan-named
+usage: scripts/gate [--protocol] [--perf] [--docs] [--print-plan]
+       scripts/gate [--protocol] [--perf] [--docs] --print-plan-named
+       scripts/gate --print-arming
        scripts/gate --print-target-dir
        scripts/gate --init
        scripts/gate --prune [--force]
        scripts/gate --self-test
 
-  --acceptance SUITE  a touched acceptance suite to run (repeatable).
-                      the phase's task row stays authoritative for
-                      CHOOSING these; this script only runs what it
-                      is handed. A script cannot infer them from a
-                      working tree, and one that guessed would report
-                      coverage it does not have.
-  --protocol          the change touches PROTOCOL_VERSION; adds the CRDT
-                      workspace sweep on top of the default one, plus
-                      the build that sweep needs (see build-crdt below).
+  --protocol          the change touches pmacs-protocol; adds the same
+                      workspace sweep under --no-default-features
+                      --features luajit, so the non-crdt build stays a
+                      checked configuration.
+  --perf              run the wall-clock budgets too: adds a stage that
+                      runs scripts/perf-budgets, every #[ignore] budget
+                      test by exact name.
+  --docs              the documentation-only plan: fmt, doc, diff-check.
+  --print-arming      print the arming report and exit: which
+                      PMACS_REQUIRE_* variables a run here would arm,
+                      and for each it would not, the missing tool and
+                      the suites that will skip.
   --print-plan        print the exact gate commands and exit. Names are
                       stripped, so every line is runnable as printed.
   --print-plan-named  print the plan as `name<TAB>command` lines and exit
                       --- the same text the runner reads. Exists because
                       a step's NAME is half its contract (a build failure
-                      must be attributed to build-crdt, not sweep-crdt)
-                      and --print-plan cannot show it.
+                      must be attributed to build, not sweep) and
+                      --print-plan cannot show it.
   --print-target-dir  print this worktree's build directory and exit.
                       Creates nothing.
   --init              create the build directory and ownership marker,
@@ -127,36 +178,6 @@ digest8() {
 
 MARKER_NAME='.pmacs-gate-target'
 
-# ---------------------------------------------------------------------
-# Acceptance suite names are INTERPOLATED INTO A COMMAND that the runner
-# evaluates, so they are an injection surface and are validated as one.
-# `--acceptance 'x; rm -rf ~'` must be refused, not executed.
-#
-# The allowlist is what a cargo test target can actually be named:
-# letters, digits, underscore, hyphen. That excludes every shell
-# metacharacter, whitespace, and path separators, so nothing reaching
-# the plan can be anything but a bare target name. A leading hyphen is
-# refused separately --- it is not dangerous, it would just become a
-# stray flag to cargo and fail confusingly.
-# ---------------------------------------------------------------------
-validate_suite() {
-    case $1 in
-        '')
-            echo "gate: --acceptance needs a suite name" >&2
-            exit 2 ;;
-        -*)
-            echo "gate: acceptance suite may not start with '-': $1" >&2
-            exit 2 ;;
-        *[!A-Za-z0-9_-]*)
-            echo "gate: refusing acceptance suite name: $1" >&2
-            echo "gate: names are cargo test targets --- letters, digits," >&2
-            echo "gate: underscore and hyphen only. The name is interpolated" >&2
-            echo "gate: into a command, so anything else is rejected rather" >&2
-            echo "gate: than escaped." >&2
-            exit 2 ;;
-    esac
-}
-
 # The managed root. PMACS_GATE_TARGET_ROOT exists for the behaviour
 # tests and is documented test-only: it is what keeps them from being
 # able to reach the real root.
@@ -195,63 +216,35 @@ ensure_target_dir() {
 # ---------------------------------------------------------------------
 # The plan.
 #
-# Emits one `name<TAB>command` line per gate. CLAUDE.md owns the
-# REASONING for each of these --- why --workspace and
-# never --tests, why --no-fail-fast, why --skip basedpyright, when
-# --protocol applies. What lives here is the executable form, so it
-# cannot be retyped differently each time.
+# Emits one `name<TAB>command` line per gate. CLAUDE.md carries the same
+# stages, and tests/docs_consistency.rs pins its list as a prefix of
+# `--print-plan`, so the two cannot drift apart unnoticed. The header of
+# this file owns the reasoning; what lives here is the executable form,
+# so it cannot be retyped differently each time.
 #
-# --print-plan renders this without running anything, which is what
-# makes drift from section 3 testable.
+# The sweep line carries PMACS_REQUIRE_GPU=1 in its text because that
+# arming is unconditional; the other PMACS_REQUIRE_* variables are
+# exported by arm_tools() before the runner starts, so --print-plan stays
+# identical on every machine and the per-machine facts are in the arming
+# report instead.
 # ---------------------------------------------------------------------
+SWEEP_TAIL='--no-fail-fast -- --skip basedpyright'
 emit_plan() {
     printf 'fmt\tcargo fmt --check\n'
+    if [ "$DOCS" = 1 ]; then
+        printf 'doc\tRUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps\n'
+        printf 'diff-check\tgit diff --check\n'
+        return
+    fi
     printf 'clippy\tcargo clippy --workspace --all-targets -- -D warnings\n'
-    printf 'lib\tcargo test --lib\n'
-    printf 'lib-crdt\tcargo test --lib --features crdt\n'
-    for _s in $ACCEPTANCE; do
-        printf 'acceptance-%s\tcargo test --test %s\n' "$_s" "$_s"
-    done
-    printf 'm4\tcargo test --test m4_acceptance -- --skip basedpyright\n'
-    printf 'gpu\tPMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu\n'
-    # With crdt a default feature the default sweep compiles the suites
-    # that spawn `pmacs-gpu` as a process, and no `cargo test` produces
-    # that binary, so the workspace build is a precondition of every
-    # sweep, not only the crdt one. A separate named step, so a build
-    # failure is attributed to `build` and never to `sweep`.
+    printf 'doc\tRUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps\n'
     printf 'build\tcargo build --workspace\n'
-    printf 'sweep\tcargo test --workspace --no-fail-fast -- --skip basedpyright\n'
+    printf 'sweep\tPMACS_REQUIRE_GPU=1 cargo test --workspace %s\n' "$SWEEP_TAIL"
     if [ "$PROTOCOL" = 1 ]; then
-        # Section 3: touching PROTOCOL_VERSION STRENGTHENS the sweep
-        # line, it does not replace it. Both sweeps run.
-        #
-        # THE BUILD IS A PRECONDITION OF THE SWEEP, not a courtesy. The
-        # crdt sweep spawns `pmacs-gpu` as a PROCESS, and no `cargo
-        # test` run produces that binary: pmacs-gpu has no tests/
-        # directory, so cargo never uplifts its bin to debug/pmacs-gpu.
-        # On a cold target directory the sweep therefore fails twelve
-        # gpu_invocation_acceptance::crdt::* tests on "build pmacs-gpu
-        # before this acceptance suite" --- and, worse, other crdt tests
-        # that render through the real binary SKIP THEMSELVES and report
-        # ok, so the missing build also voids coverage silently.
-        #
-        # WHY ONLY UNDER --protocol, measured rather than reasoned. On
-        # 2026-08-09, on a disposable target directory with
-        # debug/pmacs-gpu asserted ABSENT before each run and each sweep
-        # run alone from that cold state: the DEFAULT sweep exited 0 and
-        # left debug/pmacs-gpu still absent --- it never builds the
-        # binary and never needs it --- while the crdt sweep exited 101
-        # with exactly those twelve failures. So the default gate does
-        # not pay for this build.
-        #
-        # A SEPARATE NAMED STEP, never folded into the sweep command.
-        # `cargo build ... && cargo test ...` would report a BUILD
-        # failure under the name `sweep-crdt`, which is a wrong
-        # attribution in the one place this script exists to be
-        # trustworthy about. --self-test is what witnesses that the
-        # runner names the failing gate as itself.
-        printf 'build-crdt\tcargo build --workspace --no-default-features --features luajit,crdt\n'
-        printf 'sweep-crdt\tcargo test --workspace --features crdt --no-fail-fast -- --skip basedpyright\n'
+        printf 'sweep-luajit\tPMACS_REQUIRE_GPU=1 cargo test --workspace --no-default-features --features luajit %s\n' "$SWEEP_TAIL"
+    fi
+    if [ "$PERF" = 1 ]; then
+        printf 'perf\tscripts/perf-budgets\n'
     fi
     printf 'diff-check\tgit diff --check\n'
 }
@@ -266,19 +259,16 @@ emit_plan() {
 # name and its order and NOTHING about what the runner does when a step
 # fails. That left two stated properties with no way to observe them:
 # a failing gate is attributed to ITSELF (which is the whole reason
-# build-crdt is a separate step rather than `cargo build && cargo
-# test`), and the suite CONTINUES past it rather than aborting. Same
-# shape of argument as --init: verification needs a path it can drive
-# safely, and this one is not a second implementation --- it hands the
-# REAL runner loop a different plan file.
+# build is a separate step rather than `cargo build && cargo test`), and
+# the suite CONTINUES past it rather than aborting. Same shape of
+# argument as --init: verification needs a path it can drive safely, and
+# this one is not a second implementation --- it hands the REAL runner
+# loop a different plan file.
 #
 # THE PLAN IS A LITERAL, and that is the design, not a shortcut. The
 # obvious seam --- letting a caller supply PLAN_FILE --- would work,
 # and it would turn the runner's `eval` into a general command
-# executor. That is the same class of defect this script's own review
-# caught in --acceptance and fixed with a refusal at parse time;
-# reintroducing it in the tool whose purpose is to be trustworthy is
-# not a trade worth making. Nothing external supplies a command here.
+# executor. Nothing external supplies a command here.
 #
 # THREE LINES, AND THE THIRD IS LOAD-BEARING. With the failure LAST, a
 # runner that aborts and a runner that continues produce IDENTICAL
@@ -307,8 +297,74 @@ emit_self_test_plan() {
     # the variable is assigned but never EXPORTED --- which is precisely
     # the regression it exists to catch.
     printf 'self-pass\tsh -c %s\n' "'echo gate-child-tmpdir=\$TMPDIR'"
-    printf 'build-crdt\tfalse\n'
+    printf 'self-fail\tfalse\n'
     printf 'self-sentinel\ttrue\n'
+}
+
+# ---------------------------------------------------------------------
+# Arming.
+#
+# One row per PMACS_REQUIRE_* variable the tree knows: the variable, the
+# tools whose presence it asserts, separated by spaces. `always` arms
+# unconditionally and `never` never arms. tests/gate_script_acceptance.rs
+# pins that every variable named anywhere in src/, tests/ or
+# pmacs-gpu/src/ has a row here, so a new gated test cannot be forgotten
+# by this table.
+#
+# Tools are checked by `command -v`, except an absolute path, which is
+# checked as a file --- the job-control fixture spawns `/bin/bash` by
+# path, not by name, and passes when only `bash` on PATH exists.
+# ---------------------------------------------------------------------
+arming_table() {
+    cat <<'EOF'
+PMACS_REQUIRE_GPU always
+PMACS_REQUIRE_PYRIGHT never
+PMACS_REQUIRE_BASH /bin/bash
+PMACS_REQUIRE_SETSID setsid
+PMACS_REQUIRE_CARGO_BUILD cargo
+PMACS_REQUIRE_LSP rust-analyzer clangd gopls vscode-json-language-server yaml-language-server
+PMACS_REQUIRE_SHELLS bash zsh fish sleep false
+PMACS_REQUIRE_LUA lua
+EOF
+}
+
+tool_present() {
+    case $1 in
+        /*) [ -f "$1" ] ;;
+        lua) command -v lua >/dev/null 2>&1 || command -v luajit >/dev/null 2>&1 ;;
+        *)  command -v "$1" >/dev/null 2>&1 ;;
+    esac
+}
+
+# The suites a variable gates, named so an unarmed row says what will
+# skip. `git grep -l` over the tree at run time: always current, and a
+# variable that gates nothing prints nothing.
+gated_suites() {
+    git grep -l -- "$1" src tests pmacs-gpu/src 2>/dev/null | tr '\n' ' '
+}
+
+# Prints the report and exports every armed variable. Called once, in
+# the run path, before the plan is written.
+arm_tools() {
+    arming_table | while IFS=' ' read -r var tools; do
+        case $tools in
+            always)
+                echo "gate: armed      $var (always; a missing adapter fails the sweep)" ;;
+            never)
+                echo "gate: unarmed    $var: never armed, the sweep skips basedpyright by name; $(gated_suites "$var")" ;;
+            *)
+                missing=''
+                for t in $tools; do
+                    tool_present "$t" || missing="$missing $t"
+                done
+                if [ -z "$missing" ]; then
+                    echo "gate: armed      $var ($tools)"
+                    echo "$var" >> "$ARMED_FILE"
+                else
+                    echo "gate: unarmed    $var: not installed:$missing; skipping in $(gated_suites "$var")"
+                fi ;;
+        esac
+    done
 }
 
 # ---------------------------------------------------------------------
@@ -420,19 +476,18 @@ do_prune() {
 # ---------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------
-ACCEPTANCE=''
 PROTOCOL=0
+PERF=0
+DOCS=0
 FORCE=0
 MODE=run
 
 while [ $# -gt 0 ]; do
     case $1 in
-        --acceptance)
-            [ $# -ge 2 ] || usage
-            validate_suite "$2"
-            ACCEPTANCE="$ACCEPTANCE $2"
-            shift 2 ;;
         --protocol)          PROTOCOL=1; shift ;;
+        --perf)              PERF=1; shift ;;
+        --docs)              DOCS=1; shift ;;
+        --print-arming)      MODE=arming; shift ;;
         --print-plan)        MODE=plan; shift ;;
         --print-plan-named)  MODE=plannamed; shift ;;
         --print-target-dir)  MODE=printdir; shift ;;
@@ -452,36 +507,26 @@ done
 # hid a defect. `--print-plan` pipes through `cut -f2-` so every printed
 # line is a command a reader can copy and run --- and that same cut is
 # why the emitted NAMES never reached a test. Not cosmetic: the entire
-# reason build-crdt is a separate step is that a build failure must be
-# attributed to `build-crdt` rather than to `sweep-crdt`, and with the
-# names stripped, RENAMING THE REAL BUILD STEP TO `sweep-crdt` left the
-# ordering assertion green. The witness could not reach the step it
-# named. --self-test could not either --- it hardcodes the string
-# `build-crdt` in its own synthetic plan, which proves things about the
-# RUNNER and nothing about this emitter.
+# reason build is a separate step is that a build failure must be
+# attributed to `build` rather than to `sweep`, and with the names
+# stripped, renaming the build step left an ordering assertion green.
+# The witness could not reach the step it named. --self-test could not
+# either --- it hardcodes its own synthetic names, which proves things
+# about the RUNNER and nothing about this emitter.
 #
 # --print-plan-named prints emit_plan VERBATIM: the same
 # `name<TAB>command` text the runner reads back from PLAN_FILE, so a
 # test can assert both halves of a real step together and a rename
 # cannot pass.
 #
-# WHY THIS RATHER THAN THE TWO ALTERNATIVES.
-#
-#   Injecting PLAN_FILE would let a test hand the runner a plan and read
-#   the names back, and it would turn the runner's `eval` into a general
-#   command executor --- the same class of defect this script's own
-#   review caught in --acceptance and fixed with a parse-time refusal.
-#   Declined there; declined here for the same reason.
-#
-#   Re-deriving the plan test-side (sourcing this file, or parsing
-#   emit_plan out of it) would be a SECOND implementation of the thing
-#   under test, which is the exact failure being repaired one level up.
-#
-# A DISTINCT MODE, not a modifier on --print-plan: there is then no
-# `--with-names` without `--print-plan` whose behaviour has to be
-# defined, and --print-plan's contract --- runnable lines --- is left
-# exactly as it was. Both modes call emit_plan, and so does the runner,
-# so neither rendering can drift from what actually executes;
+# Injecting PLAN_FILE would let a test hand the runner a plan and read
+# the names back, and it would turn the runner's `eval` into a general
+# command executor. Re-deriving the plan test-side (sourcing this file,
+# or parsing emit_plan out of it) would be a SECOND implementation of
+# the thing under test. A DISTINCT MODE, not a modifier on --print-plan,
+# so --print-plan's contract --- runnable lines --- is left exactly as
+# it was. Both modes call emit_plan, and so does the runner, so neither
+# rendering can drift from what actually executes;
 # tests/gate_script_acceptance.rs pins that the stripped rendering is
 # the named one minus its names, so this stays true by test and not
 # only by reading.
@@ -504,6 +549,12 @@ case $MODE in
     prune)
         do_prune
         exit 0 ;;
+    arming)
+        cd "$(canon "$(worktree_root)")"
+        ARMED_FILE=$(mktemp "${TMPDIR:-/tmp}/pmacs-armed.XXXXXX")
+        arm_tools
+        rm -f "$ARMED_FILE"
+        exit 0 ;;
 esac
 
 # ---------------------------------------------------------------------
@@ -512,7 +563,7 @@ esac
 WT=$(canon "$(worktree_root)")
 cd "$WT"
 
-# R-b (framing SS7c): refuse to start when SIGINT is not deliverable.
+# Refuse to start when SIGINT is not deliverable.
 #
 # HERE, immediately after the worktree resolves and BEFORE any log
 # directory, ambient root or temporary dir exists: a refused run should
@@ -522,7 +573,7 @@ cd "$WT"
 # control sets SIGINT to SIG_IGN; that survives fork AND exec, so every
 # test which signals a child and waits for it hangs to its own
 # deadline. Seven red sweeps were read as a product teardown defect
-# before this was found (framing SS4c).
+# before this was found.
 #
 # The helper owns the classification and the wording; this consumer
 # re-derives neither. It continues only on 0, and otherwise stops after
@@ -547,7 +598,7 @@ cd "$WT"
 if [ "$MODE" != plan ] && [ "$MODE" != plannamed ] && [ "$MODE" != printdir ]; then
     # The guard owns its capture directory: it runs BEFORE the log dir,
     # ambient root and GATE_TMPDIR exist, and must still leave nothing
-    # behind (A8).
+    # behind.
     capture=$(mktemp -d "${TMPDIR:-/tmp}/pmacs-sigint.XXXXXX") || {
         echo 'gate: could not create the SIGINT guard capture directory (status=unavailable token=missing)' >&2
         echo 'gate: REFUSING TO RUN --- no stage has run.' >&2
@@ -613,7 +664,7 @@ if [ "$MODE" != plan ] && [ "$MODE" != plannamed ] && [ "$MODE" != printdir ]; t
             # BOUNDARY error. The captured stderr is UNTRUSTED and is
             # deliberately not surfaced: a helper exiting 1 with no
             # token but the canonical ignored wording would otherwise
-            # tell the operator their environment ignores SIGINT (A6b).
+            # tell the operator their environment ignores SIGINT.
             printf 'gate: SIGINT guard boundary error (status=%s token=%s)\n' \
                 "$sigint_status" "$sigint_token_state" >&2
             printf 'gate: REFUSING TO RUN --- no stage has run.\n' >&2
@@ -626,8 +677,7 @@ TARGET=$(ensure_target_dir "$WT")
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 # $$ as well as the timestamp: two invocations in the same worktree
 # within one second would otherwise share a log directory and overwrite
-# each other's evidence --- which is precisely the U2/U3 failure this
-# logging exists to prevent, reintroduced by a naming choice.
+# each other's evidence.
 LOGDIR="$TARGET/gate-logs/$STAMP-$$"
 mkdir -p "$LOGDIR"
 
@@ -637,12 +687,12 @@ mkdir -p "$LOGDIR"
 # (src/state.rs), so redirecting only the four XDG variables leaves the
 # real state root live on a machine that exports it.
 #
-# Belt and braces rather than a workaround: ambient-root isolation
-# merged as #206 and the in-crate paths resolve roots explicitly. What
-# this covers is everything OUTSIDE that guarantee --- integration
-# suites that spawn the real binary, PTY and daemon fixtures, anything
-# reaching a production resolution path --- where the process under test
-# reads the environment it was handed. HOME is deliberately left alone.
+# Belt and braces rather than a workaround: the in-crate paths resolve
+# roots explicitly. What this covers is everything OUTSIDE that
+# guarantee --- integration suites that spawn the real binary, PTY and
+# daemon fixtures, anything reaching a production resolution path ---
+# where the process under test reads the environment it was handed.
+# HOME is deliberately left alone.
 AMBIENT="$TARGET/gate-ambient/$STAMP-$$"
 mkdir -p "$AMBIENT"
 
@@ -819,12 +869,26 @@ echo "gate: ambient    $AMBIENT"
 # Printed for the same reason as the ambient root: the isolation is
 # observable, and the exit trap removes this too.
 echo "gate: tmpdir     $GATE_TMPDIR"
-[ -n "$ACCEPTANCE" ] && echo "gate: acceptance $ACCEPTANCE"
-[ "$PROTOCOL" = 1 ] && echo "gate: protocol   yes (CRDT build + workspace sweep added)"
+[ "$PROTOCOL" = 1 ] && echo "gate: protocol   yes (the luajit-only sweep is added)"
+[ "$PERF" = 1 ] && echo "gate: perf       yes (scripts/perf-budgets is added)"
+[ "$DOCS" = 1 ] && echo "gate: docs       yes (fmt, doc and diff-check only)"
 if [ "$MODE" = selftest ]; then
     echo "gate: SELF-TEST  hardcoded synthetic plan --- NO real gate runs."
     echo "gate:            the middle step fails ON PURPOSE, so a non-zero"
     echo "gate:            exit is this mode working, not this mode broken."
+fi
+
+# The arming report, then the exports. The report goes to stdout so it
+# sits in the same transcript as the stage verdicts, and to a file in
+# the log directory so a later reader of the logs sees which variables
+# the sweep ran under.
+ARMED_FILE="$LOGDIR/armed.txt"
+: > "$ARMED_FILE"
+if [ "$MODE" != selftest ]; then
+    arm_tools | tee "$LOGDIR/arming.txt"
+    while IFS= read -r var; do
+        [ -n "$var" ] && export "$var=1"
+    done < "$ARMED_FILE"
 fi
 echo
 
@@ -870,8 +934,8 @@ while IFS="$(printf '\t')" read -r name cmd; do
 done < "$PLAN_FILE"
 
 echo
-echo "gate: sweep logs (the U2/U3 remedy --- read these, do not re-run and grep):"
-for f in "$LOGDIR"/*-sweep.log "$LOGDIR"/*-sweep-crdt.log; do
+echo "gate: sweep logs (read these; do not re-run and grep):"
+for f in "$LOGDIR"/*-sweep.log "$LOGDIR"/*-sweep-luajit.log; do
     [ -f "$f" ] && echo "gate:   $f"
 done
 

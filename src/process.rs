@@ -41,7 +41,7 @@
 //!
 //! pmacs's crate-level `unsafe_code = "forbid"` lint stands. Signal
 //! sending uses [`nix`] (safe wrapper around `kill(2)`); PTY
-//! support uses [`portable-pty`], which contains internal `unsafe`
+//! support uses `portable-pty`, which contains internal `unsafe`
 //! but exposes a fully safe surface. PTY line-discipline setup
 //! (raw/canonical mode per spec §sec:repl-supervisor) bridges to
 //! `tcsetattr(3)` via a `/bin/sh` trampoline instead of a local

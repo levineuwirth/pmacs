@@ -311,7 +311,8 @@ pub fn fit_to_line(boxed: &MathBox, ascent_budget: f32, descent_budget: f32) -> 
     Some(boxed.scaled(scale))
 }
 
-/// Lays a [`MathNode`] tree out against the bundled MATH font.
+/// Lays a [`MathNode`](crate::math_parse::MathNode) tree out against the
+/// bundled MATH font.
 pub struct MathLayout<'a> {
     face: Face<'a>,
     constants: MathConstants,

@@ -50,7 +50,7 @@ use crate::view::View;
 /// re-parse, and the [`tree_sitter::InputEdit`] descriptions
 /// accumulated since that prior tree was produced.
 ///
-/// All fields are owned ([R31]) so the closure submitted to a worker
+/// All fields are owned (R31) so the closure submitted to a worker
 /// holds nothing borrowed from the main thread.
 #[derive(Clone, Debug)]
 pub struct ParseRequest {
