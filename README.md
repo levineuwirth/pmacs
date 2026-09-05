@@ -46,7 +46,8 @@ An audit taken on 2026-09-05, kept in the repository as
 changes short of a daily driver on both frontends, and the process
 spending its capacity on records rather than on those changes. Its
 second section sets the order of work that follows. `COHERENCE.md`
-carries the product thesis; planning is kept outside the repository.
+carries the product thesis and `docs/invariants.md` the rules a change
+must not break; planning is kept outside the repository.
 Everything under `docs/archive/`, and `docs/roadmap-2026-07.md`, is
 history rather than direction.
 
