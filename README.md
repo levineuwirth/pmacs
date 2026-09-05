@@ -23,7 +23,7 @@ frontends ship today:
   edits optimistically against a local CRDT replica for
   latency-free typing.
 
-Buffers are optionally CRDT-backed (`loro`, behind `--features crdt`),
+Buffers are CRDT-backed (`loro`; the `crdt` feature is on by default),
 so multiple frontends --- TUI and GPU, local and remote --- can edit
 the same buffers concurrently with live cursor/selection presence.
 
@@ -81,8 +81,8 @@ mode, drives syntax/LSP/pairing/comment behavior, and enables mode-scoped
 keymaps. A persistent project-symbol index (`.pmacs/index.json`) rides the
 same worker infrastructure.
 
-**Collaboration & frontends.** With `--features crdt`, buffers are CRDT-backed
-and any number of frontends attach to one daemon and edit concurrently; peers
+**Collaboration & frontends.** Buffers are CRDT-backed by default, and any
+number of frontends attach to one daemon and edit concurrently; peers
 see each other's cursors and selections as translucent washes. The TUI and GPU
 frontends both host owned full-screen terminal sessions; protocol-v19 terminal
 frames preserve the fixed-cell VT screen while each frontend owns its
@@ -122,8 +122,9 @@ pmacs --gpu --socket NAME FILE      # named instance; bare NAME →
 pmacs --gpu -- --leading-dash       # `--` ends option parsing
 ```
 
-`pmacs --gpu` requires the root `pmacs` binary to be built with the
-`crdt` feature. It discovers a sibling `pmacs-gpu` binary first, then
+`pmacs --gpu` requires the `crdt` feature, which a default build has; a
+build that opts out of it refuses with a message saying so. It
+discovers a sibling `pmacs-gpu` binary first, then
 falls back to `pmacs-gpu` on `PATH`. When `FILE` is present, the daemon
 loads or creates it and completes startup hooks before the GPU window
 appears. Closing the window detaches only that frontend; the daemon
@@ -187,9 +188,8 @@ Builds on the toolchain pinned in `rust-toolchain.toml` (Rust
 `1.95.0`, edition 2024); rustup selects it automatically.
 
 ```sh
-# Coherent root + GPU release build. The package-qualified feature keeps
-# the separate pmacs-gpu package feature-free while enabling CRDT in pmacs.
-cargo build --release --workspace --features pmacs/crdt
+# Root + GPU release build; the default features are luajit and crdt.
+cargo build --release --workspace
 
 target/release/pmacs --gpu README.md # one-command managed GPU file launch
 cargo run --release -- --version     # default-run selects the pmacs binary
@@ -208,7 +208,7 @@ build (see below).
 | -------- | ---------- | ---------------------------------------------------------- |
 | `luajit` | Lua flavor | **Default.** LuaJIT backend via `mlua` (vendored).         |
 | `lua54`  | Lua flavor | Lua 5.4 fallback for hosts without LuaJIT (big-endian, …). |
-| `crdt`   | Buffer     | Opt-in CRDT-backed buffer mode (adds the `loro` dep). v1.0 builds enable it; orthogonal to the flavor. |
+| `crdt`   | Buffer     | **Default.** CRDT-backed buffer mode (adds the `loro` dep); `pmacs --gpu` needs it. Orthogonal to the flavor; opt out with `--no-default-features --features <flavor>`. |
 
 **Exactly one Lua flavor must be enabled** — `luajit` *or* `lua54`, never
 both (and never neither). They map to `mlua`'s mutually-exclusive Lua
@@ -220,10 +220,10 @@ friendlier error — the fix is to build a specific flavor. Supported build
 lines:
 
 ```sh
-cargo build --release                                   # luajit (default)
-cargo build --release --no-default-features --features lua54
-cargo build --release --features crdt                   # luajit + crdt
+cargo build --release                                   # luajit + crdt (default)
 cargo build --release --no-default-features --features lua54,crdt
+cargo build --release --no-default-features --features luajit   # without crdt
+cargo build --release --no-default-features --features lua54
 ```
 
 CI, `cargo hack`, and distro tooling should iterate the flavors

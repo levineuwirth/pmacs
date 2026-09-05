@@ -214,6 +214,12 @@ emit_plan() {
     done
     printf 'm4\tcargo test --test m4_acceptance -- --skip basedpyright\n'
     printf 'gpu\tPMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu\n'
+    # With crdt a default feature the default sweep compiles the suites
+    # that spawn `pmacs-gpu` as a process, and no `cargo test` produces
+    # that binary, so the workspace build is a precondition of every
+    # sweep, not only the crdt one. A separate named step, so a build
+    # failure is attributed to `build` and never to `sweep`.
+    printf 'build\tcargo build --workspace\n'
     printf 'sweep\tcargo test --workspace --no-fail-fast -- --skip basedpyright\n'
     if [ "$PROTOCOL" = 1 ]; then
         # Section 3: touching PROTOCOL_VERSION STRENGTHENS the sweep

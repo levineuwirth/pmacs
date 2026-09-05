@@ -791,17 +791,24 @@ fn the_named_plan_is_the_printed_plan_with_its_names_removed() {
 /// So an unconditional build would be a real cost paid for nothing on
 /// every ordinary lane.
 #[test]
-fn the_crdt_build_is_absent_without_protocol() {
+fn the_workspace_build_precedes_the_default_sweep() {
+    // `crdt` is a default feature, so the default sweep compiles the
+    // suites that spawn `pmacs-gpu` as a process; the build that
+    // produces that binary is a precondition of every sweep.
     let root = tempfile::Builder::new()
         .prefix("g-")
         .tempdir_in(short_root_base())
         .expect("tempdir");
-    let (plan, _, ok) = run(root.path(), &["--print-plan"]);
-    assert!(ok, "--print-plan must succeed");
+    let (plan, _, ok) = run(root.path(), &["--print-plan-named"]);
+    assert!(ok, "--print-plan-named must succeed");
+    let lines: Vec<&str> = plan.lines().collect();
+    let build = lines
+        .iter()
+        .position(|l| *l == "build\tcargo build --workspace")
+        .unwrap_or_else(|| panic!("no workspace build step; plan was:\n{plan}"));
     assert!(
-        !plan.contains("cargo build"),
-        "the default sweep passes on a tree with no pmacs-gpu at all, so a \
-         normal lane must not pay for a workspace build; plan was:\n{plan}"
+        lines[build + 1].starts_with("sweep\t"),
+        "the build must immediately precede the sweep; plan was:\n{plan}"
     );
 }
 

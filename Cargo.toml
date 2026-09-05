@@ -77,14 +77,17 @@ multiple_crate_versions = "allow"
 # with a friendlier message — the fix is to build one flavor. See the
 # feature matrix in README.md; build a non-default flavor with
 # `--no-default-features --features lua54` (audit F-002).
-default = ["luajit"]
+default = ["luajit", "crdt"]
 luajit = ["mlua/luajit", "mlua/vendored"]
 lua54 = ["mlua/lua54", "mlua/vendored"]
-# T M10.2: gate the CRDT-backed buffer mode behind an opt-in feature
-# so v0.1 builds carry zero CRDT overhead (no loro dependency, no
-# field on the Buffer struct layout, no branch on apply_edit). v1.0
-# builds enable `crdt`; the rope-projection redirect from M10.1 means
-# the feature flip is invisible to v0.1 frontends and to workers.
+# `crdt` is a DEFAULT feature: `pmacs --gpu` and optimistic typing over
+# the wire need it, so a plain `cargo build` must produce a binary that
+# has it. The non-crdt build stays a stated, buildable option
+# (`--no-default-features --features luajit`), checked locally by
+# `scripts/gate --protocol` and by one CI leg; it carries no loro
+# dependency, no field on the Buffer struct layout and no branch on
+# apply_edit, and the rope-projection redirect keeps the flip invisible
+# to grid frontends and to workers.
 crdt = ["dep:loro", "pmacs-protocol/crdt"]
 
 [dependencies]

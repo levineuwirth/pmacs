@@ -38,6 +38,7 @@ Always true:
   cargo test --lib --features crdt
   cargo test --test m4_acceptance -- --skip basedpyright
   PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu
+  cargo build --workspace
   cargo test --workspace --no-fail-fast -- --skip basedpyright
   git diff --check
   ```

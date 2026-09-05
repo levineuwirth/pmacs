@@ -102,17 +102,16 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets --no-default-features --features ${{ matrix.lua }} -- -D warnings
-      # pmacs-gpu is Lua-flavor-independent (it depends on pmacs-protocol,
-      # not pmacs), so the root-package clippy above never lints it. Lint
-      # it explicitly or its warnings slip through CI (audit F-001).
-      - run: cargo clippy -p pmacs-gpu --all-targets -- -D warnings
-      # pmacs-protocol is likewise never linted by the root-package
-      # clippy above: the workspace default member is only `pmacs`. The
-      # local `--workspace` gate covers it, so it passes today — CI has
-      # simply never checked, and a warning introduced through a
-      # protocol-only PR would reach `main` unseen.
-      - run: cargo clippy -p pmacs-protocol --all-targets -- -D warnings
+      # `crdt` is a default feature, so the configuration a user builds is
+      # `<flavor>,crdt`; that is what is linted here, for both flavors.
+      # `--workspace` reaches pmacs-gpu and pmacs-protocol, which the
+      # workspace default member (`pmacs` alone) would never lint.
+      - run: cargo clippy --workspace --all-targets --no-default-features --features ${{ matrix.lua }},crdt -- -D warnings
+      # The non-crdt build stays a stated, buildable option. Lint it once,
+      # on the luajit leg, so a `cfg(feature = "crdt")` seam cannot grow
+      # a warning that only the opt-out build shows.
+      - if: matrix.lua == 'luajit'
+        run: cargo clippy --workspace --all-targets --no-default-features --features luajit -- -D warnings
 
   gpu-render:
     name: GPU Render (headless)
@@ -148,7 +147,7 @@ jobs:
         run: cargo test -p pmacs-gpu -- --test-threads=1
 
   test:
-    name: Test (${{ matrix.os }} / ${{ matrix.lua }})
+    name: Test (${{ matrix.os }} / ${{ matrix.lua }}${{ matrix.crdt == '' && ', no crdt' || '' }})
     runs-on: ${{ matrix.os }}
     # 35, not 25: this is the only job whose observed max is minutes
     # rather than seconds, and the only one a cold cache can plausibly
@@ -158,9 +157,19 @@ jobs:
     timeout-minutes: 35
     strategy:
       fail-fast: false
+      # `crdt` is a default feature, so the four platform legs test the
+      # configuration a user builds: `<flavor>,crdt`. Their job names are
+      # unchanged because branch protection requires them by name. The
+      # fifth leg keeps the non-crdt build a checked configuration; it
+      # is the only leg whose name carries a suffix.
       matrix:
         os: [ubuntu-latest, macos-latest]
         lua: [luajit, lua54]
+        crdt: [",crdt"]
+        include:
+          - os: ubuntu-latest
+            lua: luajit
+            crdt: ""
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -205,7 +214,10 @@ jobs:
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
           npm install -g vscode-langservers-extracted@4.10.0 \
                          yaml-language-server@1.15.0
-      - run: cargo build --all-targets --no-default-features --features ${{ matrix.lua }}
+      # `--workspace`, not the root package: the crdt legs run the suites
+      # that spawn `pmacs-gpu` as a process, and a root-only build leaves
+      # that binary absent. No `cargo test` invocation produces it.
+      - run: cargo build --workspace --all-targets --no-default-features --features ${{ matrix.lua }}${{ matrix.crdt }}
       # Several acceptance binaries spawn real daemon / PTY child
       # processes. Keep the harness serial so macOS runners do not
       # expose cross-test process lifecycle races that are unrelated
@@ -246,66 +258,54 @@ jobs:
       # The divergent case itself is pinned on every platform by
       # injecting the foreground group instead (framing Bet 1's stated
       # fallback, after the real fixture failed its own falsifier).
-      - run: cargo test --all-targets --no-default-features --features ${{ matrix.lua }} -- --test-threads=1
+      - run: cargo test --all-targets --no-default-features --features ${{ matrix.lua }}${{ matrix.crdt }} -- --test-threads=1
         env:
           PMACS_REQUIRE_LSP: ${{ runner.os == 'Linux' && '1' || '' }}
           PMACS_REQUIRE_SHELLS: ${{ runner.os == 'Linux' && '1' || '' }}
           PMACS_REQUIRE_LUA: ${{ runner.os == 'Linux' && '1' || '' }}
           PMACS_REQUIRE_SETSID: ${{ runner.os == 'Linux' && '1' || '' }}
           PMACS_REQUIRE_BASH: ${{ runner.os == 'Linux' && '1' || '' }}
-      - run: cargo test --doc --no-default-features --features ${{ matrix.lua }}
+      - run: cargo test --doc --no-default-features --features ${{ matrix.lua }}${{ matrix.crdt }}
       # The workspace default member is only the root `pmacs` package, so
       # the runs above never execute pmacs-protocol's own tests — the
       # shared wire format (encode/decode, transport framing) the daemon,
-      # TUI, and GPU all depend on. Run them explicitly (Lua-flavor
-      # independent, so once is enough; runs on every matrix leg cheaply
-      # off the shared cache).
-      - run: cargo test -p pmacs-protocol --all-targets
+      # TUI, and GPU all depend on. Run them explicitly, under the same
+      # crdt setting as the leg: the crate's feature gates no tests but
+      # changes `cfg!(feature = "crdt")` expressions inside the
+      # capability defaults, so the same tests exercise different values.
+      - run: cargo test -p pmacs-protocol --all-targets --no-default-features --features "${{ matrix.crdt == '' && '' || 'crdt' }}"
 
-  # crdt-test: the reason this job exists is that NOTHING in this
-  # workflow ever enabled the `crdt` feature. Every
-  # `#[cfg(feature = "crdt")]` test was therefore NOT COMPILED — not
-  # skipped, not filtered, not reported. Measured at 4223dd3: 3,467
-  # tests under the `test` job's flags versus 3,746 with `crdt`, so 279
-  # tests had never executed in CI. 186 of them are in the library,
-  # whose `cargo test --lib --features crdt` invocation CLAUDE.md lists
-  # as a REQUIRED pre-PR gate — a required gate CI had never run.
-  #
-  # Eight test binaries also contained zero tests under the old flags.
-  # They built, ran, and reported `ok` with nothing in them.
+  # crdt-test: the GPU-armed sweep of the whole corpus. `crdt` is a
+  # default feature, so the platform legs above already compile every
+  # `#[cfg(feature = "crdt")]` test; what this job alone provides is a
+  # Vulkan adapter (lavapipe) with PMACS_REQUIRE_GPU set, so the suites
+  # that drive a real GPU frontend fail rather than skip when the adapter
+  # is missing.
   #
   # ONE JOB, NOT TWO, and deliberately so. The obvious split — non-GPU
-  # suites here, GPU-requiring ones onto `gpu-render` — was rejected
-  # because `gpu-render` runs `cargo test -p pmacs-gpu`, a DIFFERENT
-  # PACKAGE from the root-package suites that would move there. Splitting
-  # would also require enumerating which suites are GPU-requiring, and a
-  # suite added later would silently land in whichever job did not need
-  # a GPU and skip there forever. Running the whole corpus in one place
-  # with a working adapter cannot develop that hole.
+  # suites on the platform legs, GPU-requiring ones onto `gpu-render` —
+  # was rejected because `gpu-render` runs `cargo test -p pmacs-gpu`, a
+  # DIFFERENT PACKAGE from the root-package suites that would move there.
+  # Splitting would also require enumerating which suites are
+  # GPU-requiring, and a suite added later would silently land in
+  # whichever job did not need a GPU and skip there forever. Running the
+  # whole corpus in one place with a working adapter cannot develop that
+  # hole.
   #
-  # ubuntu-only and luajit-only to start, per the standing guidance to
-  # take macOS from evidence rather than assumption; `crdt` is
-  # orthogonal to the Lua flavor, the same reasoning m5/m6-perf-gates
-  # already apply.
+  # ubuntu-only and luajit-only, per the standing guidance to take macOS
+  # from evidence rather than assumption; `crdt` is orthogonal to the
+  # Lua flavor, the same reasoning m5/m6-perf-gates already apply.
   #
   # The external-tool block from the `test` job is deliberately NOT
   # duplicated here. It gates m4_acceptance, m6_5_repl_acceptance and
-  # m6_8_multi_repl_acceptance, and MEASURED: none of those has a single
-  # dark test, so installing clangd/zsh/fish/lua/rust-analyzer/gopls/npm
-  # servers again would cost minutes to change nothing. The only
-  # tool-gated code in the dark set is src/process.rs, whose two
-  # variables need no install on this runner and are set below.
+  # m6_8_multi_repl_acceptance, none of which needs the adapter, so
+  # installing clangd/zsh/fish/lua/rust-analyzer/gopls/npm servers again
+  # would cost minutes to change nothing. The tool-gated code in
+  # src/process.rs needs no install on this runner and is armed below.
   #
-  # OBSERVED EXECUTION (local, 2026-08-01): the full serialized sweep —
-  # this job's exact test command plus PMACS_REQUIRE_GPU=1 — ran in 366s
-  # (6.1 min) for 3,715 passed / 0 failed / 30 ignored. The ceiling is
-  # 35 rather than something near that for two reasons: a hosted runner
-  # is slower per-core than the measuring machine and renders the GPU
-  # suites through lavapipe rather than a real adapter, and a cold cache
-  # adds a full debug workspace build. 35 matches the `test` job, which
-  # runs the same corpus without `crdt` and whose own observed max is
-  # 17 min — the closest available comparison, and the reason this
-  # number is not smaller.
+  # The ceiling is 35, matching the `test` job: a hosted runner is slower
+  # per-core than a development machine and renders the GPU suites
+  # through lavapipe, and a cold cache adds a full debug workspace build.
   crdt-test:
     name: Test (crdt)
     runs-on: ubuntu-latest
@@ -325,48 +325,18 @@ jobs:
           sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
       - name: Confirm a Vulkan adapter is present
         run: vulkaninfo --summary || true
-      # Lint the crdt targets HERE rather than in the `clippy` job.
-      # Clearing these lints once is not enough: the `clippy` job matrixes
-      # over Lua flavor and never enables `crdt`, so without this step the
-      # crdt targets would drift straight back out of compliance and the
-      # next job to compile them would be red on arrival — which is
-      # exactly the state this lane found and fixed. Keeping it beside
-      # the crdt build and test means one job owns "crdt compiles, lints,
-      # and passes."
-      #
-      # `crdt` is orthogonal to the Lua flavor, so this runs once rather
-      # than matrixed. --keep-going reports every finding in one run
-      # instead of aborting at the first failing target, which is what
-      # made the original inventory of these lints a lower bound rather
-      # than a list.
-      - run: cargo clippy --workspace --all-targets --no-default-features --features luajit,crdt --keep-going -- -D warnings
-      # --workspace, not the root package: a37 and the gpu_* suites
-      # locate the `pmacs-gpu` binary beside `pmacs`, and a root-only
-      # build leaves it absent. This is the documented cause of twelve
-      # gpu_invocation_acceptance failures on a crdt sweep.
-      - run: cargo build --workspace --no-default-features --features luajit,crdt
+      # Default features, which are `luajit,crdt`. --workspace, not the
+      # root package: a37 and the gpu_* suites locate the `pmacs-gpu`
+      # binary beside `pmacs`, and a root-only build leaves it absent.
+      - run: cargo build --workspace
       # Serial for the same reason the `test` job is: these suites spawn
       # real daemons and real PTYs, and this job adds MORE of them.
-      - run: cargo test --all-targets --no-default-features --features luajit,crdt -- --test-threads=1
+      - run: cargo test --all-targets -- --test-threads=1
         env:
           PMACS_REQUIRE_GPU: "1"
           PMACS_REQUIRE_SETSID: "1"
           PMACS_REQUIRE_BASH: "1"
-      - run: cargo test --doc --no-default-features --features luajit,crdt
-      # pmacs-protocol under `crdt`, which nothing else runs. Its own
-      # feature is NOT inert: it gates no tests, so a test census sees
-      # 17 either way, but it changes `cfg!(feature = "crdt")`
-      # EXPRESSIONS inside `InstanceCapabilities::default` and
-      # `FrontendCapabilities::default` — so the same 17 tests exercise
-      # different runtime values. CI had only ever run the non-crdt
-      # ones.
-      #
-      # This is also a blind spot of scripts/feature-census by
-      # construction: it lists the workspace DEFAULT MEMBER (`pmacs`),
-      # so no per-test census of the root package can ever surface a
-      # sibling crate's coverage. The `test` job carries the same
-      # explicit invocation for the same underlying reason.
-      - run: cargo test -p pmacs-protocol --all-targets --features crdt
+      - run: cargo test --doc
 
   acceptance:
     name: M1 Acceptance Gates
@@ -439,15 +409,10 @@ jobs:
           PMACS_M6_CANCEL_MAX_DELAY_MS: "500"
         run: cargo test --release --test m6_perf_acceptance -- --ignored --nocapture --test-threads=1
 
-  # m10-perf-gates: the M10 suites, which were dark for TWO independent
-  # reasons. Both are fixed here.
-  #
-  # 1. They are `crdt`-gated, and nothing in this workflow enabled the
-  #    feature, so they were never compiled. That is this lane's subject.
-  # 2. Even setting `crdt` aside, NO job named them. Grepping this file
-  #    for `--test` before this job existed yielded exactly four suites:
-  #    acceptance, m4_acceptance, m5_perf_acceptance, m6_perf_acceptance.
-  #    Their `#[ignore]` is deliberate; their absence from CI was not.
+  # m10-perf-gates: the M10 suites. They are `crdt`-gated, which the
+  # default features now satisfy, and no other job names them: their
+  # `#[ignore]` is deliberate, so they need an `--ignored` invocation of
+  # their own.
   #
   # luajit-only, for the same reason m5-perf-gates and m6-perf-gates are:
   # the measured paths (CRDT buffer mutation, socket round-trips) do not
@@ -489,6 +454,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: CRDT buffer throughput baselines (soak; asserts nothing)
-        run: cargo test --release --features crdt --test m10_2_perf -- --ignored --nocapture
+        run: cargo test --release --test m10_2_perf -- --ignored --nocapture
       - name: cross-frontend propagation p99 over a real socket
-        run: cargo test --release --features crdt --test m10_11_perf -- --ignored --nocapture
+        run: cargo test --release --test m10_11_perf -- --ignored --nocapture
