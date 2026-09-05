@@ -37,6 +37,24 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// The prune tests read the REAL repository's worktree list
+/// (`git worktree list --porcelain` inside `--prune`), and one of them
+/// registers and prunes a probe worktree in that same repository. libtest
+/// runs the tests of one binary in parallel, so a `list` can observe a
+/// registration mid-write and fail, at which point the gate refuses to
+/// prune on stderr and the test reads an empty stdout. Seen inside the
+/// sweep as "fixture is not discriminating — nothing was eligible" with
+/// nothing after the colon, and before that as the registry's U13 in a
+/// sibling row. Every test that touches the worktree list takes this
+/// lock, so they run one at a time while everything else stays parallel.
+static WORKTREE_LIST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serialize_worktree_list() -> std::sync::MutexGuard<'static, ()> {
+    WORKTREE_LIST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// The SIGINT-deliverability helper the gate and the panel suite share
 /// (the archived gpu-probe-sigint framing §7c).
 fn sigint_helper() -> PathBuf {
@@ -1618,6 +1636,7 @@ fn prune_fixture(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
 
 #[test]
 fn prune_is_a_dry_run_by_default_and_deletes_nothing() {
+    let _serial = serialize_worktree_list();
     let root = tempfile::Builder::new()
         .prefix("g-")
         .tempdir_in(short_root_base())
@@ -1638,6 +1657,7 @@ fn prune_is_a_dry_run_by_default_and_deletes_nothing() {
 
 #[test]
 fn force_deletes_only_the_orphan() {
+    let _serial = serialize_worktree_list();
     let root = tempfile::Builder::new()
         .prefix("g-")
         .tempdir_in(short_root_base())
@@ -1689,6 +1709,7 @@ impl Drop for WorktreePruneGuard {
 
 #[test]
 fn a_registered_worktree_whose_directory_was_deleted_is_prunable() {
+    let _serial = serialize_worktree_list();
     let root = tempfile::Builder::new()
         .prefix("g-")
         .tempdir_in(short_root_base())
@@ -1753,6 +1774,7 @@ fn a_registered_worktree_whose_directory_was_deleted_is_prunable() {
 /// grounds that no test noticed.
 #[test]
 fn prune_outside_a_repository_refuses_and_every_directory_survives() {
+    let _serial = serialize_worktree_list();
     let root = tempfile::Builder::new()
         .prefix("g-")
         .tempdir_in(short_root_base())
@@ -1790,6 +1812,7 @@ fn prune_outside_a_repository_refuses_and_every_directory_survives() {
 /// directory on the strength of a file the script did not understand.
 #[test]
 fn a_multi_line_marker_is_refused_rather_than_read_head_first() {
+    let _serial = serialize_worktree_list();
     let root = tempfile::Builder::new()
         .prefix("g-")
         .tempdir_in(short_root_base())
@@ -1821,6 +1844,7 @@ fn a_multi_line_marker_is_refused_rather_than_read_head_first() {
 /// is how one learns too late that the marker was never written.
 #[test]
 fn skipped_directories_are_reported_with_a_reason() {
+    let _serial = serialize_worktree_list();
     let root = tempfile::Builder::new()
         .prefix("g-")
         .tempdir_in(short_root_base())
