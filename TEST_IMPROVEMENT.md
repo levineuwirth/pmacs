@@ -9,14 +9,14 @@ workflow, and coherence-affecting lanes must state their `COHERENCE.md`
 §20 impact there, not here.
 
 **Every count in this file is a reading, not a constant.** The dark-test
-census in `docs/active-work.md` ("The CRDT half of the test corpus is
+census in `docs/archive/active-work-2026-09.md` ("The CRDT half of the test corpus is
 dark in CI — NEEDS A LANE") moved three times in three weeks. Re-measure
 before acting; the appendix gives the commands.
 
 Method: five parallel read-only audits (dark/gated tests; unit-coverage
 map; Lua-layer coverage; test-quality/flake patterns; CI-vs-local-gate
-delta), findings cross-checked against `docs/active-work.md`,
-`docs/agent-handoff.md` §3/§5, and the memory of prior review rounds.
+delta), findings cross-checked against `docs/archive/active-work-2026-09.md`,
+`docs/archive/agent-handoff-2026-09.md` §3/§5, and the memory of prior review rounds.
 Claims that accuse an existing doc of being wrong were re-verified by
 hand before inclusion.
 
@@ -59,7 +59,7 @@ and a degraded copy exists in another.
 
 ### 1.1 CRDT (known; already a scoped lane — do not re-scope here)
 
-`docs/active-work.md` §"The CRDT half of the test corpus is dark in CI"
+`docs/archive/active-work-2026-09.md` §"The CRDT half of the test corpus is dark in CI"
 carries the full census (273 dark at `74301d1`: 185 library + 88
 integration), the two-part fix shape, and the two standing obstacles
 (`clippy --features crdt` is red on `main`; the `setsid_escapee` ~1-in-5
@@ -329,7 +329,7 @@ test) pass in CI and flake for whoever runs the documented local gate.
   Given §1.2's silent skips, a bite claim on a PATH-gated test is
   meaningless. ~5-line fix: require `cargo test "$@"` to pass on the
   unmodified tree first.
-- **`docs/agent-handoff.md` (§5, "A fix must be COMMITTED before it is
+- **`docs/archive/agent-handoff-2026-09.md` (§5, "A fix must be COMMITTED before it is
   bitten") misdescribes bite's mechanism** — verified: it claims
   restore-by-`git checkout --` (revert to HEAD, destroying uncommitted
   work), but the script has restored from a `mktemp` copy via `cp` +
@@ -371,7 +371,7 @@ test) pass in CI and flake for whoever runs the documented local gate.
    360 min. The day a runner image ships any of the PATH-gated tools
    (§1.2), the basedpyright-class hang burns 6 h × 4 matrix legs with
    no signal. `timeout-minutes: 25` on every job is free insurance.
-3. **The crdt lane** (already scoped in `docs/active-work.md`): CI leg
+3. **The crdt lane** (already scoped in `docs/archive/active-work-2026-09.md`): CI leg
    for `--features luajit,crdt`, GPU-requiring crdt suites onto
    `gpu-render` with `PMACS_REQUIRE_GPU=1` stated as a requirement (or
    a37 runs vacuously), clippy-crdt fixed first. Not re-scoped here.
@@ -453,7 +453,7 @@ else ≤1.5 min.
 
 ## 8. Candidate lanes for the arc (priority order)
 
-1. **CRDT CI lane** — already scoped in `docs/active-work.md`; first
+1. **CRDT CI lane** — already scoped in `docs/archive/active-work-2026-09.md`; first
    task there is deliberate-vs-accidental classification. Blockers:
    clippy-crdt red, a37 vacuity, first-run flake budget.
 2. **Silent-skip arming** (§1.2, §5.4) — install tools + `PMACS_REQUIRE_*`

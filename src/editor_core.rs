@@ -4314,7 +4314,7 @@ impl EditorCore {
     ///   preflights *before* invoking the callback precisely because a
     ///   body creates buffers, registers handles and paints long before
     ///   it asks to display anything — "validating at display time is
-    ///   four mutations too late" (`docs/agent-handoff.md`). A refusal
+    ///   four mutations too late" (`docs/archive/agent-handoff-2026-09.md`). A refusal
     ///   arriving after all of that is not a refusal; it is a partial
     ///   commit with an error return.
     ///

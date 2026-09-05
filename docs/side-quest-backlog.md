@@ -10,7 +10,7 @@ multi-language injections shipped (#122).
 landed work as open — #123 as "PR open" (merged 2026-07-21), #137 as
 "in review" (merged), and HTML/CSS as an unshipped grammar (#146). It is
 the cross-cutting index, so a stale entry here sends someone to build
-something that exists. **`docs/agent-handoff.md` §1a is the authority
+something that exists. **`docs/archive/agent-handoff-2026-09.md` §1a is the authority
 for arc state; this file is the long tail.** Re-check an item here
 against the handoff before starting it.
 
@@ -253,7 +253,7 @@ parity (#137), modeline detection (#132), and the HTML/CSS grammars
 (#146) that were named here as the cleanest remaining one-shot.
 
 **This file no longer sets direction.** `COHERENCE.md` §20 carries the
-priority order and `docs/agent-handoff.md` §1a carries the board; both
+priority order and `docs/archive/agent-handoff-2026-09.md` §1a carries the board; both
 postdate this document and are audited. What remains here is the long
 tail — genuinely useful, genuinely optional. The most-missed editing
 table-stakes are still **word-kills + `C-SPC` set-mark**.

@@ -84,7 +84,7 @@ Plain motion preserves an existing selection instead of dropping it
 | `M-;` | `edit.toggle-comment` (`builtin/runtime/comment.lua`) |
 
 > `M-d` / `M-BS` currently plain-delete the word — they are **not**
-> kill-ring members yet (a named deferral; see `docs/agent-handoff.md`
+> kill-ring members yet (a named deferral; see `docs/archive/agent-handoff-2026-09.md`
 > §6, "word kills"). `edit.kill-line` (below) is the only word/line
 > kill wired into the ring so far.
 
@@ -423,7 +423,7 @@ surface (see §3's intro).
 ## 6. Keeping this file honest
 
 Update this file in the same PR whenever a binding is added, removed,
-or moved — same discipline as `docs/agent-handoff.md`. To re-derive it
+or moved — same discipline as `docs/archive/agent-handoff-2026-09.md`. To re-derive it
 from scratch instead of trusting the table: grep `builtin/` for
 `pmacs.keymap.bind`/`.bind(` and `pmacs.listview.open`, and grep
 `src/editor.rs` / `src/minibuffer.rs` for `from_chord`.
