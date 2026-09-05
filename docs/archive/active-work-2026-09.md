@@ -9,7 +9,7 @@ backlog.
 **#235 merged** (`main` @ `122b8e8`) and **issue #233 is CLOSED**; per
 rule 4 the file-watcher lane is REMOVED — its durable facts are in
 `docs/agent-handoff.md` §1's arc bullet, its full review history in
-`docs/lsp-file-watch-d3-framing.md` and the two PRs. The one framed
+`docs/archive/framings/lsp-file-watch-d3-framing.md` and the two PRs. The one framed
 option deliberately left unbuilt (kernel notification) lives in the
 framing, triggered only if the 4 s idle-latency cap ever matters.
 The canonical-base line below and the handoff anchor moved to
@@ -334,7 +334,7 @@ before the rewrite, not after, so nothing depended on a local-only ref
 surviving.
 
 Framing
-`docs/gui-stage1-input-framing.md`, **revision 22** — §2a re-measured at
+`docs/archive/framings/gui-stage1-input-framing.md`, **revision 22** — §2a re-measured at
 this base, the panel-replay prerequisite recorded as DISCHARGED by #243,
 and (revision 21) the GPU's authority recorded as **structural**, its
 lifetime tables made frontend-specific. **The both-axis effect witness
@@ -781,7 +781,7 @@ this lane's.
   head; 8-stage local gate green on it too.
 
 **Branch `crdt-identity-undo`, based on `aae5b35`.** Framing
-`docs/crdt-identity-undo-framing.md`, **APPROVED at revision 4** after
+`docs/archive/framings/crdt-identity-undo-framing.md`, **APPROVED at revision 4** after
 four review rounds, then **revision 5** as a correction pass answering
 implementation review — followed by **six further review rounds against
 the implementation**, almost all of them against RECORDS rather than
@@ -1006,7 +1006,7 @@ from #171 and #215.
   `/home/jeans/Repos/personal/pmacs-ci-dispatch`.
   **`githubsucks/ci-manual-dispatch` is the authoritative tip** (the
   ref, not a SHA).
-- **Framing `docs/ci-manual-dispatch-framing.md`, revision 3 —
+- **Framing `docs/archive/framings/ci-manual-dispatch-framing.md`, revision 3 —
   APPROVED.** It took three revisions and every one was a correction:
   revision 1 claimed four registry rows needed this (**one does**),
   revision 2's D2 could pass without the two runs ever overlapping, and
@@ -1083,7 +1083,7 @@ from #171 and #215.
   **`githubsucks/parse-budget-diagnosability` is the authoritative
   tip** (the ref, not a SHA). Recover with `git fetch githubsucks &&
   git checkout parse-budget-diagnosability`.
-- **Framing `docs/parse-budget-diagnosability-framing.md`, revision 2 —
+- **Framing `docs/archive/framings/parse-budget-diagnosability-framing.md`, revision 2 —
   APPROVED.** Revision 1 was reviewed and had two defects worth
   keeping: it claimed `dispatch_parse_round_trips_a_rust_source_file`
   was the codebase's **sole** measurement-omitting assertion (false —
@@ -1175,7 +1175,7 @@ from #171 and #215.
   document-panel wheel remains a **named deferral to GUI Stage 1b
   B1–B3**, not a gap.
 - **GUI arc 1b is UNBLOCKED** and rebases onto this merge.
-  `docs/gui-stage1-input-framing.md` revision 13 already amends B1–B3
+  `docs/archive/framings/gui-stage1-input-framing.md` revision 13 already amends B1–B3
   to own the panel-document horizontal surface that this lane's
   re-measurement exposed as unowned.
 - **`docs/ci-red-signatures.md` gained U12** through this lane, and it
@@ -1413,7 +1413,7 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
   **v25**, so 1e's `OpenTarget` is **v26**. **That edit is NOT owed by
   the 1b branch** — this bullet said it was, and said making it here
   would collide at 1b's rebase. **§5b made it, in
-  `docs/gui-stage1-input-framing.md`, and merged as #242**: a canonical
+  `docs/archive/framings/gui-stage1-input-framing.md`, and merged as #242**: a canonical
   document saying v25 is false the moment v25 is taken, and an expected
   rebase conflict was not grounds for leaving it wrong. Corrected here
   because this bullet and the merged-#242 block below it were saying
@@ -1472,7 +1472,7 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
   pending-release drains. **GUI arc 1b is BLOCKED on this lane and
   rebases onto its merge commit.**
 - **No new framing document.** Acceptance 48 is already ruled in
-  `docs/bottom-panel-framing.md`; §5a adds ground truth to it.
+  `docs/archive/framings/bottom-panel-framing.md`; §5a adds ground truth to it.
 - **Current clause split.** DONE: click/focus and terminal activation;
   focused-only auto-scroll with passive `view_top` preserved; lossless
   and coalesced event delivery; panel document selection; terminal
@@ -1558,7 +1558,7 @@ from #171 and #215 — the correction the 1b lane missed, honoured here.
 - **`PROTOCOL_VERSION` is now 25.** `PANEL_MAPPING_MIN_VERSION` is a
   literal 25; `ADVERTISED_PROTOCOL_VERSION` stays pinned at **20**. GUI
   arc 1e's `OpenTarget` moved to **v26**, corrected in
-  `docs/gui-stage1-input-framing.md` by the slice itself.
+  `docs/archive/framings/gui-stage1-input-framing.md` by the slice itself.
 - **Replay effects remain `panel-pointer-replay`'s** — this slice
   shipped the trigger and the state, not the effects. That lane is now
   unblocked and is the next step in the arc.
@@ -1850,7 +1850,7 @@ from #171 and #215.
   opening another one-finding round. The overdue #239/#240 handoff
   absorption must promote this rule; this feature branch does not edit
   the deliberately lagging canonical handoff.
-- **Owns the version correction.** `docs/gui-stage1-input-framing.md`
+- **Owns the version correction.** `docs/archive/framings/gui-stage1-input-framing.md`
   moves 1e's `OpenTarget` to **v26** here — an expected rebase
   conflict on `gui-stage1b-pointer-scroll` is not grounds for leaving
   the canonical document false.
@@ -1921,7 +1921,7 @@ from #171 and #215.
     `docs/probe-sigint-evidence.md`.
   - **The defect now has its own lane:
     `gpu-probe-sigint-teardown`** (pushed; framing revision 9 at
-    `docs/gpu-probe-sigint-framing.md` (revision 9), run provenance at
+    `docs/archive/framings/gpu-probe-sigint-framing.md` (revision 9), run provenance at
     `docs/probe-sigint-evidence.md`). **§5b is held behind it.** That
     lane's framing supersedes every diagnostic claim below; the entries
     here are kept only as the record of how it was found.
@@ -2341,7 +2341,7 @@ from #171 and #215.
   draft said 35: that figure was the `git_status_stage1_acceptance`
   result line immediately below `gate_script_acceptance`'s in the sweep
   log, misread as this suite's.)
-- **Framing revision 12 at `docs/gpu-probe-sigint-framing.md`,
+- **Framing revision 12 at `docs/archive/framings/gpu-probe-sigint-framing.md`,
   approved 2026-08-19 at `1fc0df6` and IMPLEMENTED; **superseded by
   revision 13, approved 2026-08-19 at `5dece3e`** — revision 10 was
   approved at `4fba9f6` and revision 9 at `15c25ec`; neither approval covered the
@@ -2614,7 +2614,7 @@ from #171 and #215.
 - **Branch `gate-tmpdir-isolation`**, base `githubsucks/main` @
   `ca92796` exactly (the #239 merge). **Recover with `git fetch
   githubsucks && git checkout gate-tmpdir-isolation`.**
-- **Framing `docs/gate-script-framing.md`, revision 6 — AWAITING
+- **Framing `docs/archive/framings/gate-script-framing.md`, revision 6 — AWAITING
   APPROVAL, and the PR must not merge before it has it.** An earlier
   version of this bullet claimed "no framing" on the grounds that the
   fix was already recorded as standing. **`AGENTS.md` grants no such
@@ -2712,7 +2712,7 @@ from #171 and #215.
   `4f77491` exactly. **`githubsucks/gui-stage1a-textinput` is the
   authoritative tip** — the ref, not a SHA. Recover with
   `git fetch githubsucks && git checkout gui-stage1a-textinput`.
-- **No new framing.** `docs/gui-stage1-input-framing.md` already governs
+- **No new framing.** `docs/archive/framings/gui-stage1-input-framing.md` already governs
   every Stage 1 slice; A1–A9, the eight Q#S1-9 precedence rules, §8's
   wire contract and §11's gates are ruled there. Writing a 1a framing
   would duplicate an approved document.
@@ -2793,7 +2793,7 @@ from #171 and #215.
 **The lane is rewritten, not removed.** Rule 4 removes a lane when its
 ARC is done, and the arc is Stage 1 as a whole: **five slices remain**.
 
-- **Framing `docs/gui-stage1-input-framing.md`, revision 11, APPROVED**
+- **Framing `docs/archive/framings/gui-stage1-input-framing.md`, revision 11, APPROVED**
   after eight rejected revisions. It is Stage 1's framing for **all**
   slices and governs every later branch; only Stage 0 was framed by the
   arc document itself. Revision 9 is the approved design; 10 recorded a
@@ -2898,7 +2898,7 @@ is listed at the commit that does it, not promised here.
   **Recovery instructions are removed deliberately**: a merged lane that
   still says "checkout the branch" sends a reader to a tip that no
   longer moves. Its content is on `main`.
-- **Framing `docs/gui-arc-framing.md`, revision 3, APPROVED
+- **Framing `docs/archive/framings/gui-arc-framing.md`, revision 3, APPROVED
   2026-08-10** after two review rounds (two blocking findings each
   round, closed). It is **also the framing for Stage 0 itself**, which
   is docs-only; Stages 1–10 each require their own framing before their
@@ -2941,7 +2941,7 @@ behind issue #233 by the 2026-08-10 ruling, refreshed onto the merged
 base (`e2394c7`, a clean merge whose only file shared with #234 was
 this ledger), re-gated 11/11 locally and 14/14 on CI. Durable facts
 are absorbed in `docs/agent-handoff.md` §1; the framing
-(`docs/git-integration-framing.md`, revision 5) and the PR carry the
+(`docs/archive/framings/git-integration-framing.md`, revision 5) and the PR carry the
 full five-round review history.
 
 **What shipped:** `*git-status*` — a `listview` panel over
@@ -2977,7 +2977,7 @@ from #171 and #215.
 the authoritative tip** — the ref, not a SHA. Recover with
 `git fetch githubsucks && git checkout worker-identity-stage1`.
 
-- **Framing `docs/worker-identity-framing.md`, revision 4, APPROVED
+- **Framing `docs/archive/framings/worker-identity-framing.md`, revision 4, APPROVED
   2026-08-09** after four review rounds.
   Scope: `COHERENCE.md` §9's "mechanism without identity", and journey
   step 11 — the last of Priority 1's own work, sitting in another
@@ -3275,7 +3275,7 @@ from #171 and #215.
 authoritative tip** — the ref, not a SHA. Recover with
 `git fetch githubsucks && git checkout gate-protocol-build`.
 
-- **Framing `docs/gate-protocol-build-framing.md`, revision 5.** The
+- **Framing `docs/archive/framings/gate-protocol-build-framing.md`, revision 5.** The
   fix itself is implemented and green at `49bc141`; **its regression
   witness landed separately at `677fd25`**, after review found the
   original witness did not reach the step it named. Narrow by design:
@@ -3613,7 +3613,7 @@ than a test one.
 **Both stages merged and the arc is done**, so rule 4 removes the lane.
 Stage 1 built `docs/ci-red-signatures.md` and audited the incumbents;
 Stage 2 retired **R2** and **R4** with discriminating witnesses. The
-framing `docs/macos-ci-signal-integrity-framing.md` and the registry
+framing `docs/archive/framings/macos-ci-signal-integrity-framing.md` and the registry
 both survive the lane — the registry is the durable artifact this arc
 existed to produce.
 
@@ -3685,7 +3685,7 @@ Durable facts — the corrections, the traps, the census tool — are in
 `docs/agent-handoff.md` §§1/5 per rule 3, so they are not repeated here.
 
 - **MERGED as #209** (`main` @ `c5f7501`, 2026-08-01, two review rounds),
-  framing `docs/ci-crdt-coverage-framing.md` revision 5. The lane had sat
+  framing `docs/archive/framings/ci-crdt-coverage-framing.md` revision 5. The lane had sat
   under "NEEDS A LANE" with no branch and no owner since #166.
 - **CI compiles and runs the CRDT corpus for the first time.**
   `Test (crdt)` runs **3,766** tests where none ran before;
@@ -3765,7 +3765,7 @@ git worktree add ../pmacs-ci-crdt \
 
 **Rewritten as a lane rather than removed**: the arc is not done — Stage
 1 was scoped to binaries-on-tag and everything else in §17 is untouched.
-Framing `docs/distribution-stage1-framing.md` revision 3. Durable facts
+Framing `docs/archive/framings/distribution-stage1-framing.md` revision 3. Durable facts
 are in `docs/agent-handoff.md` §1.
 
 - **Released 2026-08-01.** `v1.1.0-rc.1` (prerelease) then `v1.1.0`,
@@ -3876,7 +3876,7 @@ them) and why `dired`/`listview` were the correct first two families.
 
 - **Branch `reap-ledger-silent-failures`**, worktree
   `../pmacs-reap-ledger`, based on `githubsucks/main` @ `22df6ab`.
-  `docs/reap-ledger-silent-failures-framing.md`, **revision 4**;
+  `docs/archive/framings/reap-ledger-silent-failures-framing.md`, **revision 4**;
   approved at revision 3 after two review rounds (round 1: three
   blocking, two major; round 2: two blocking, two major; all accepted).
   Revision 4 records implementation findings, not a new design round.
@@ -3986,7 +3986,7 @@ has **no branch and no framing yet**.
   collapse) as **#149** — both under "Closed since the last snapshot".
 - Retained, carrying nothing unmerged: branches `folding` / `folding-tui`
   and worktrees `../pmacs-folding` / `../pmacs-folding-tui`. The framings
-  `docs/folding-framing.md` (rev 5) and `docs/folding-stage2-framing.md`
+  `docs/archive/framings/folding-framing.md` (rev 5) and `docs/archive/framings/folding-stage2-framing.md`
   (rev 4) are the approved artifacts Stage 3 re-scouts against.
 - **Stage 3 (GPU) obligations, already named by the framings** — the
   starting point for its own framing doc: GPU collapse at TUI parity;
@@ -4022,7 +4022,7 @@ git worktree add --track \
 ## Closed since the last snapshot
 
 - **Process-signal diagnostic completeness — MERGED as #200**
-  (`main` @ `a2a92bb`), atop Stage A #176. `docs/process-signal-diagnostic-completeness-framing.md`
+  (`main` @ `a2a92bb`), atop Stage A #176. `docs/archive/framings/process-signal-diagnostic-completeness-framing.md`
   revision 6; framing approved at revision 4 after three rounds, then
   five review rounds on the implementation. Durable facts are in
   `docs/agent-handoff.md` §1. **Evidence collection only** — no
@@ -4066,7 +4066,7 @@ git worktree add --track \
   Stage 2 **#178** (`main` @ `fe8b8ba`, **four review rounds**, twelve
   checks green on head `1b44c69` — verified by `head_sha`, not by the
   check summary), both 2026-07-26, both with no protocol change.
-  Approved framing: `docs/terminal-config-and-copy-mode-framing.md` rev
+  Approved framing: `docs/archive/framings/terminal-config-and-copy-mode-framing.md` rev
   4, committed as the first commit of Stage 1's branch; its Q#TC6a
   carries a superseded-in-part box rather than a silent rewrite. Durable
   facts moved to `docs/agent-handoff.md` §1 (the arc bullet) and §4 (the
@@ -4101,7 +4101,7 @@ git worktree add --track \
   (wdired) each still need their own framing**, and the frozen fixture
   shrinks after Stage 3. Durable substrate facts and both new ops lessons
   live in `docs/agent-handoff.md` §§1/5; the implementation notes are
-  `docs/dired-framing.md` §0, S1-1…S1-12. Two named forward items for
+  `docs/archive/framings/dired-framing.md` §0, S1-1…S1-12. Two named forward items for
   Stage 2: `apply_resource_op`'s rename rebind is exact-PathBuf-equality,
   first-match-only, looked up with the raw path while stored paths are
   normalized — so a directory rename strands every buffer under it, and
@@ -4122,7 +4122,7 @@ git worktree add --track \
   grid-only geometry half, with the loop body extracted to
   `sync_terminal_layouts_for_tick` so the exclusivity is structural. No
   protocol change (v20). Durable lessons are in `docs/agent-handoff.md` §5;
-  the framing (`docs/gpu-terminal-input-framing.md` rev 2) carries three
+  the framing (`docs/archive/framings/gpu-terminal-input-framing.md` rev 2) carries three
   falsified hypotheses, the two-pre-image bite matrix, and two named
   out-of-scope items (Q#GT5 interactive-shell echo on a raw PTY, which
   reproduces in-process and so is not the GUI/TUI asymmetry; and a geometry
@@ -4229,7 +4229,7 @@ git worktree add --track \
   target bootstrap uses. Its lane, worktree (`../pmacs-gpu-initial-target`),
   and branch (`gpu-initial-target`) are done; the `-framing` branch is kept.
   Durable substrate facts and both review-round lessons live in
-  `docs/agent-handoff.md` §§1/5 and `docs/gpu-initial-target-framing.md`
+  `docs/agent-handoff.md` §§1/5 and `docs/archive/framings/gpu-initial-target-framing.md`
   rev 3.
 
 - **Folding Stage 2 (grid/daemon collapse) — MERGED as #149** (`main` @
@@ -4272,7 +4272,7 @@ git worktree add --track \
   `tree-sitter-html` 0.23 / `tree-sitter-css` 0.25 crate query constants (no
   in-repo overlay), and HTML's `INJECTIONS_QUERY` lights up `<script>` → js
   and `<style>` → css. Durable lesson recorded in
-  `docs/web-grammars-html-css-framing.md`: the `highlight.rs` capture table
+  `docs/archive/framings/web-grammars-html-css-framing.md`: the `highlight.rs` capture table
   is **global**, so adding a capture name retro-paints every other language —
   check the reverse direction and pin it.
 
@@ -4302,7 +4302,7 @@ git worktree add --track \
   @ `cac4961`, 2026-07-22, after two review rounds). Arc 5's terminal stage
   is complete (compile mode #113, Stage 1 #126, Stage 2 #130, Stage 3 #135).
   Its lane, worktree (`../pmacs-vterm-gpu`), and branch are done; durable
-  substrate facts live in `docs/agent-handoff.md` and `docs/vterm-framing.md`.
+  substrate facts live in `docs/agent-handoff.md` and `docs/archive/framings/vterm-framing.md`.
 
 - **Branches deleted 2026-07-22 (authorized):** `vterm-stage3-framing`
   (Revision 8 framing; its content is carried on `vterm-gpu`, verified as a

@@ -85,7 +85,7 @@ clean. No flaky rerun was needed.
 - `ui.modeline` owns the per-window row within its stage-1
   `{fg,bg,reverse}` mask. `ui.statusline` owns the global echo row's
   foreground only. Search/minibuffer text uses `ui.minibuffer`
-  (`docs/theme-faces-framing.md` Q#TH3/Q#TH5). The two face names are
+  (`docs/archive/framings/theme-faces-framing.md` Q#TH3/Q#TH5). The two face names are
   not synonyms.
 - Modeline width currently counts `char`s, not terminal display
   columns (`editor.rs:2594-2616`). A custom CJK or combining segment
@@ -106,7 +106,7 @@ clean. No flaky rerun was needed.
   `core.status` message. Cursor and scroll deliberately stay
   frontend-derived so they follow the optimistic caret
   (`pmacs-protocol/src/message.rs:764-792`;
-  `docs/pmacs-gpu-status-band-framing.md` Q#S1).
+  `docs/archive/framings/pmacs-gpu-status-band-framing.md` Q#S1).
 - `SemanticRenderState::last_status` is a per-buffer peer-emission
   baseline. `status_facts_msg` frame-polls cheap Rust state and emits
   only on payload change (`src/semantic_render.rs:176-180`,
@@ -147,7 +147,7 @@ clean. No flaky rerun was needed.
 - The status-band framing already rejected it: preformatted cells bake
   TUI layout into a frontend that owns font shaping and would make a
   daemon-formatted cursor visibly lag optimistic typing
-  (`docs/pmacs-gpu-status-band-framing.md` Q#S1).
+  (`docs/archive/framings/pmacs-gpu-status-band-framing.md` Q#S1).
 - Changing that existing variant's shape would be a wire break under an
   already-shipped discriminant. Reusing it unchanged would contradict
   both the frontend-local-rendering boundary and this arc's requirement

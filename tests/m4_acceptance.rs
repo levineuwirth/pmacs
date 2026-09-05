@@ -2004,7 +2004,7 @@ fn m4_6_diag_navigate_commands_and_bindings_are_registered() {
         )
         .eval()
         .expect("keymap.list");
-    // Compile-mode (Q#CM5, docs/compile-mode-framing.md) took the
+    // Compile-mode (Q#CM5, the archived compile-mode framing) took the
     // M-g chords over for the unified dispatchers; the diag commands
     // stay registered and remain the dispatchers' fallback when no
     // compile/grep run has claimed the error source, so the
@@ -10241,7 +10241,7 @@ fn rd8_recursive_delete_refuses_for_a_modified_descendant() {
 /// Criterion 9 — a *clean* recursive delete reconciles descendant
 /// buffers, through both removal phases.
 ///
-/// **Rewritten by dired Stage 2a** (`docs/dired-stage2-framing.md` §6,
+/// **Rewritten by dired Stage 2a** (the archived dired-stage2 framing §6,
 /// Q#RD27 / acceptance 23). This row previously pinned the opposite —
 /// that the descendant buffer stayed orphaned — and gave the reason:
 /// widening reconciliation would have routed N buffers through

@@ -1208,7 +1208,7 @@ reuse that repair rather than reimplement it.
 
 An out-of-range or unknown mode value is **rejected as a whole
 message**, matching `apply_font_facts` rather than clamping --- the
-convention Stage 2 followed (`docs/gui-zoom-framing.md`).
+convention Stage 2 followed (`docs/archive/framings/gui-zoom-framing.md`).
 
 ### 5c.4 Older frontends
 

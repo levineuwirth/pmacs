@@ -9,7 +9,7 @@
 -- `pmacs.session.desktop_mode(true)`. Local-only in v1 (Q#DS9) — a
 -- no-op under a daemon, where each attached frontend has its own layout.
 --
--- Framing: docs/desktop-save-framing.md.
+-- Framing: docs/archive/framings/desktop-save-framing.md.
 
 local enabled = false
 

@@ -246,7 +246,7 @@ ResourceOffer {
 /// Resolution (the `ui.*` dotted-prefix inheritance walk) happens
 /// daemon-side; frontends do exact-name lookup only and apply each face
 /// within its stage-1 component mask
-/// (`docs/theme-faces-framing.md` Q#TH3/Q#TH5: a set face owns its
+/// (`docs/archive/framings/theme-faces-framing.md` Q#TH3/Q#TH5: a set face owns its
 /// surface; `Default` components mean the frontend's plain rendering;
 /// out-of-mask components are never read).
 ///
@@ -262,7 +262,7 @@ ThemeFacts {
 },
 
 /// The GLOBAL font preference (protocol v17, Arc 4 stage 2,
-/// docs/gpu-set-font-framing.md), written by `pmacs.gpu.set_font`.
+/// docs/archive/framings/gpu-set-font-framing.md), written by `pmacs.gpu.set_font`.
 /// Bufferless and authoritative per attachment: every session's
 /// first frame after viewport declaration carries the current
 /// preference — the all-default `(None, None)` included, never

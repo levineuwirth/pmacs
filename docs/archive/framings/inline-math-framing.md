@@ -21,7 +21,7 @@ knows revision 1 can read §0 alone.
 | C3 | "Protocol is v18 … `SUPPORTED=[6..=18]`" (Q#IM1) | Protocol is **v20**, `SUPPORTED=[6..=20]`. v19 = the vterm terminal family; v20 = the GPU initial-target bootstrap. The Q#IM1 *decision* (query font size locally, no protocol change) is unaffected. |
 | C4 | `rebuild_code_slice()` at `pmacs-gpu/src/main.rs:4849` | Now `:6136`. The file grew through vterm Stage 3, tab-width parity and the initial-target work. |
 | C5 | Tier 1 must patch an upstream grammar or ship an overlay; "defers enumerating which grammars need this" | **Already available for `.tex`.** LaTeX Stage 1 (#144) bundles `codebook-tree-sitter-latex`, whose grammar exposes `math_delimiter` and `math_environment`, and the in-repo overlay `builtin/queries/latex/highlights.scm` already captures both. The overlay mechanism this tier proposed is proven, not speculative. Markdown still has no math capture. |
-| C6 | (silent on staging) | A sibling framing, `docs/latex-grammar-math-substrate-framing.md` (rev 3), names this note its parent and **decides Tier 2's staging in Q#LX5**: the parser lands *beside* its Tier 3 consumer, never ahead of it. Recorded in §Tier 2 below so it is not re-litigated. |
+| C6 | (silent on staging) | A sibling framing, `docs/archive/framings/latex-grammar-math-substrate-framing.md` (rev 3), names this note its parent and **decides Tier 2's staging in Q#LX5**: the parser lands *beside* its Tier 3 consumer, never ahead of it. Recorded in §Tier 2 below so it is not re-litigated. |
 | C7 | (silent on contention) | Tier 4's render path is contended. Folding Stage 2 (#149) landed fold projection in the paint path, and its **Stage 3 (GPU) is unframed**. The **bottom-panel arc** is implementing Stage 1 now; its Stage 2 claims both `pmacs-gpu/src/main.rs`'s render path and the next protocol version. Tier 4 must re-scout against whichever lands first. |
 
 Unchanged and re-verified: `InlineAdornment` (`pmacs-protocol/src/message.rs:1391`),
@@ -108,7 +108,7 @@ struct MathSpan { start: BytePos, end: BytePos, kind: MathKind }
 - For buffers with a tree-sitter grammar: a math node in the grammar
   signals scanned injection ranges (reuses the existing `ParseTreeBundle`
   + `Layer` machinery from
-  `docs/multi-language-injections-framing.md`). Each grammar that can
+  `docs/archive/framings/multi-language-injections-framing.md`). Each grammar that can
   contain LaTeX needs a math capture rule — either by patching the
   upstream grammar or shipping an in-repo query overlay.
 
@@ -211,7 +211,7 @@ codepoints (the `\alpha` → `U+03B1` map is ~200 entries for Greek
 definitions, preamble material, or LaTeX3 — only math-mode markup.
 
 **Staging: this tier lands beside Tier 3, never ahead of it (C6).**
-`docs/latex-grammar-math-substrate-framing.md` (rev 3) carved out the
+`docs/archive/framings/latex-grammar-math-substrate-framing.md` (rev 3) carved out the
 frontend-agnostic LaTeX substrate as its own lane and, in **Q#LX5**,
 deliberately excluded this parser from it. Reviewer and author concurred
 and recorded the decision "so it is not re-litigated". The rationale is
@@ -497,7 +497,7 @@ command) look like?
 
 **Proposed:** render the raw LaTeX source with a red wavy underline
 (reuses the existing diagnostic squiggle shader from
-`docs/pmacs-gpu-wavy-squiggles-framing.md`). The expression is still
+`docs/archive/framings/pmacs-gpu-wavy-squiggles-framing.md`). The expression is still
 editable and copy-pasteable; the squiggle signals the parse failure
 without losing the text.
 
@@ -635,7 +635,7 @@ exercises the LSP path.
 
 ## Adjacent prior art in pmacs
 
-- **Multi-language injections** (`docs/multi-language-injections-framing.md`):
+- **Multi-language injections** (`docs/archive/framings/multi-language-injections-framing.md`):
   The `ParseTreeBundle` + `Layer` machinery already supports child
   parse trees at injected ranges. Math detection as a tree-sitter
   injection is a direct extension of this design, not a new mechanism.
@@ -652,21 +652,21 @@ exercises the LSP path.
   pattern but with a `ByteRange` to suppress and a `MathBox` to render
   in its place.
 
-- **GPU squiggle shader** (`docs/pmacs-gpu-wavy-squiggles-framing.md`):
+- **GPU squiggle shader** (`docs/archive/framings/pmacs-gpu-wavy-squiggles-framing.md`):
   Custom WGSL shader for diagnostic underlines demonstrates that
   pmacs-gpu already extends its rendering pipeline beyond basic glyph
   drawing. A stretchy-delimiter assembly pass or math-background pass
   follows the same architectural pattern (vertex buffer → dedicated
   shader → draw call in z-order).
 
-- **Theme-faces** (Themes Arc 4, `docs/theme-faces-framing.md`):
+- **Theme-faces** (Themes Arc 4, `docs/archive/framings/theme-faces-framing.md`):
   The face resolution chain (`face-attribute → color → fallback`)
   would extend naturally to a `math-face` or `math-display-face` for
   themed math colors.
 
 ## Sibling lane (added in revision 2)
 
-`docs/latex-grammar-math-substrate-framing.md` (rev 3) names this note its
+`docs/archive/framings/latex-grammar-math-substrate-framing.md` (rev 3) names this note its
 parent and carves out the frontend-agnostic LaTeX substrate that can land
 without touching a contended file. Revision 1 did not reference it, which
 left the reader of this note unaware that part of its Tier 1 had already

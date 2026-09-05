@@ -285,7 +285,7 @@ observers; they are not the transport implementation.
 - `PermissionDenied`, invalid path bytes at the OS boundary, and other
   non-`NotFound` errors fail startup.
 - **`IsADirectory` is superseded by Journey Stage 1a**
-  (`docs/journey-stage1a-framing.md`). A directory no longer reaches the
+  (`docs/archive/framings/journey-stage1a-framing.md`). A directory no longer reaches the
   load at all: `resolve_target_buffer` answers `ResolvedTarget::Directory`
   ahead of it, so a directory target now *succeeds*, dispatching the
   `path.open-directory` chain and replying `Opened`. Deliberate

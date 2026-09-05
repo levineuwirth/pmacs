@@ -6,7 +6,7 @@
 (re-measure at branch time; this is a reading, not a constant).
 
 **This is Stage B of the lane whose Stage A merged as PR #176**
-(`docs/process-signal-tolerance-framing.md`, revision 4). Stage A made a
+(`docs/archive/framings/process-signal-tolerance-framing.md`, revision 4). Stage A made a
 failing `kill` self-describing and parked every tolerance rule behind
 evidence. Evidence arrived (§1.2). It supports none of the parked rules,
 no identity claim, and — per review round 2 — no claim that today's

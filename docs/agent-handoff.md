@@ -116,8 +116,8 @@ commands, read `docs/active-work.md` immediately after this file.
 - **GUI arc — Stage 0 MERGED as #236, Stage 1-pre MERGED as #237
   (2026-08-12). The arc is OPEN: five Stage 1 slices remain and 1a has
   not started.** Stage 0 framed the arc
-  (`docs/gui-arc-framing.md`); Stage 1 is framed for **all** its slices
-  by `docs/gui-stage1-input-framing.md` (revision 11). 1-pre is the
+  (`docs/archive/framings/gui-arc-framing.md`); Stage 1 is framed for **all** its slices
+  by `docs/archive/framings/gui-stage1-input-framing.md` (revision 11). 1-pre is the
   input seam and changes **no behaviour and no wire**:
   `App::window_event` went from 655 lines to four. Durable facts:
   - **A route carries the DECISION; only running the body gives the
@@ -228,7 +228,7 @@ commands, read `docs/active-work.md` immediately after this file.
   zero jobs and zero pool threads at idle, one attributable job per
   scan, 250 ms under activity backing off to 4 s at rest. Three
   framing review rounds and three implementation review rounds; the
-  framing (`docs/lsp-file-watch-d3-framing.md`) records all of them.
+  framing (`docs/archive/framings/lsp-file-watch-d3-framing.md`) records all of them.
   Durable facts:
   - **A sleep job OCCUPIES A POOL THREAD for its whole duration**
     (`dispatch_sleep` runs `run_sleep` on the pool). N sleeping
@@ -491,7 +491,7 @@ commands, read `docs/active-work.md` immediately after this file.
       protocol message and no version bump.
   - **Stage 5 (#223) is the GPU half, and it closed the arc.** A split
     decided rather than inherited (framing Q#HS1). Framing in
-    `docs/gpu-horizontal-scroll-framing.md`. The GPU is not a grid
+    `docs/archive/framings/gpu-horizontal-scroll-framing.md`. The GPU is not a grid
     consumer, so it could not inherit `view_left`; it has its own
     `code_scroll_left`, in **pixels**, local viewport state with no
     wire and no version bump.
@@ -991,7 +991,7 @@ someone forgot.
   attribution. Its §2 grades the golden journey; **Journey Stage 1a
   moved that grade off "broken at step 3"** — see the arc bullet below.
 - **Journey arc (P1) — Stage 1b-1 LANDED (#203)**
-  (`docs/journey-stage1b1-compile-defaults-framing.md`).
+  (`docs/archive/framings/journey-stage1b1-compile-defaults-framing.md`).
   Journey step 9 moves **Partial → Works**: `C-c c` runs `compile.run`,
   and the first prompt is prefilled from the detected project kind via
   `pmacs.compile.defaults` (seeded `rust = "cargo build"`, extensible
@@ -1034,7 +1034,7 @@ someone forgot.
     table. What is guaranteed is that the failure stays *coherent*: the
     suggestion always describes the directory the run will use.
 - **Journey arc (P1) — Stage 1a LANDED**
-  (`docs/journey-stage1a-framing.md`). `pmacs .` opens a directory
+  (`docs/archive/framings/journey-stage1a-framing.md`). `pmacs .` opens a directory
   instead of exiting 1, on **one** path: `resolve_target_buffer` gained a
   `ResolvedTarget::Directory` arm *ahead* of the load, `EditorState::open`
   became a caller of it rather than a parallel implementation, and the
@@ -1077,7 +1077,7 @@ someone forgot.
   - Stage 1b is the named remainder: compile binding + Cargo defaults,
     LSP spawn guidance, welcome buffer.
 - **Terminal configuration + copy mode arc — COMPLETE**
-  (`docs/terminal-config-and-copy-mode-framing.md` rev 4; Stage 1 #173,
+  (`docs/archive/framings/terminal-config-and-copy-mode-framing.md` rev 4; Stage 1 #173,
   Stage 2 #178; no protocol change in either, still v20). Stage 1 ships
   profiles, scrollback, a per-terminal configurable escape key and the
   `C-c t` opener; Stage 2 ships copy mode — `M-x terminal.copy-mode` /
@@ -1124,7 +1124,7 @@ someone forgot.
     occurrences rather than test presence**, because a single-character
     probe collides with the child's own banner text.
 - **PTY terminate diagnostic LANDED — #176** (merge `bf8878f`,
-  2026-07-26, one review round; `docs/process-signal-tolerance-framing.md`
+  2026-07-26, one review round; `docs/archive/framings/process-signal-tolerance-framing.md`
   rev 4, after three framing rounds). **Diagnostic only — no disposition
   changed.** Every call that failed before still fails, with no state
   transition and no reap-ledger arming; `src/process.rs` is the only
@@ -1187,7 +1187,7 @@ someone forgot.
     inside the same read-then-act window and no portable mechanism closes
     that for a *group* (`pidfd` covers a process; macOS has neither).
 - **Discovery arc (P4) — Stage 1 LANDED (#207)**
-  (`docs/discovery-stage1-command-family-framing.md`, rev 6, three
+  (`docs/archive/framings/discovery-stage1-command-family-framing.md`, rev 6, three
   review rounds). Eleven `help.*` commands over the existing registries,
   indexed by `M-x help`. **§5 moves substrate-without-surface →
   Partial.** No Rust: the data was all reachable from Lua, and the
@@ -1218,7 +1218,7 @@ someone forgot.
     *raising* predicate and asserts the command still runs, so a stage
     that starts evaluating must change that pin knowingly.
 - **Journey arc (P1) — Stage 1b-3 LANDED (#205)**
-  (`docs/journey-stage1b3-welcome-framing.md`, rev 4, three review
+  (`docs/archive/framings/journey-stage1b3-welcome-framing.md`, rev 4, three review
   rounds). The last of the 1b split. An unconfigured launch greets in
   `*scratch*`; `M-x help` renders a cheat sheet. **§18 and the scorecard
   move Missing → Partial**; §2's step-4 row stays Partial.
@@ -1250,7 +1250,7 @@ someone forgot.
     does `session.take()`, the pin asserts
     `pmacs.minibuffer.selected() == "help"` **before** RET.
 - **Journey arc (P1) — Stage 1b-2 LANDED (#204)**
-  (`docs/journey-stage1b2-lsp-guidance-framing.md`, rev 4, three review
+  (`docs/archive/framings/journey-stage1b2-lsp-guidance-framing.md`, rev 4, three review
   rounds). `COHERENCE.md` §1.2's canonical silence: a preconfigured
   language server that is not installed now reports with guidance, marks
   the modeline `LSP:!`, and appears in `M-x lsp.status`. §2's step-6 row
@@ -1290,7 +1290,7 @@ someone forgot.
     than re-key, because after a rename the failure is no longer known to
     apply at the new location.
 - **Reap-ledger silent failures — DIAGNOSTIC, in flight**
-  (`docs/reap-ledger-silent-failures-framing.md`). The lane #200's
+  (`docs/archive/framings/reap-ledger-silent-failures-framing.md`). The lane #200's
   framing §5 parked and its evidence unparked. **Four `kill(2)` results
   are discarded in the group reap ledger**, and each discard has its own
   consequence — three in the persistent ledger, one in the in-drain
@@ -1357,7 +1357,7 @@ someone forgot.
   colliding "Arc 8 — GPU structural parity" label is retired: that scope
   is Half B of **the GUI arc**, which is a name and not a number —
   `COHERENCE.md` §20, Q#GA4.)*
-  (`docs/lean4-mode-framing.md`; #160, #161, #167, #170, #179, #181). pmacs edits Lean 4: `arborium-lean` highlighting, a
+  (`docs/archive/framings/lean4-mode-framing.md`; #160, #161, #167, #170, #179, #181). pmacs edits Lean 4: `arborium-lean` highlighting, a
   `lean4` major mode, `⟨⟩ ⦃⦄ ⟮⟯` pairs, and a `lake serve` language
   server with a Lake-aware outermost root, a lazy toolchain probe, a
   one-shot `lean --server` fallback, and `waitForDiagnostics`. **No
@@ -1463,7 +1463,7 @@ someone forgot.
     (module hierarchy) are framed but not scouted against current
     `main`.
 
-- **Inline math LANDED — #158** (`docs/inline-math-slice-framing.md` rev 3;
+- **Inline math LANDED — #158** (`docs/archive/framings/inline-math-slice-framing.md` rev 3;
   merge `5aa9044`). pmacs renders `$…$` as typeset mathematics in the GPU
   frontend. **No protocol change (still v20); the whole slice lives in
   `pmacs-gpu`**, because `pmacs-gpu` depends only on `pmacs-protocol` and
@@ -1489,7 +1489,7 @@ someone forgot.
   - TUI shows the LaTeX source unchanged. That divergence is recorded
     against `COHERENCE.md` §16, which audits the "no privileged
     frontend" rule.
-- **find-file LANDED — #162** (`docs/dired-framing.md` §10, Q#DR11; merge
+- **find-file LANDED — #162** (`docs/archive/framings/dired-framing.md` §10, Q#DR11; merge
   `2af1ab3`; one review round). `C-x C-f` is the dired arc's **Stage 0**:
   pmacs previously had no discoverable way to open a file by path — no
   such command existed and `pmacs.buffer.find_or_open` had no interactive
@@ -1521,7 +1521,7 @@ someone forgot.
     find-file expands the tilde Lua-side. Loading through the normalized
     path is a named deferral.
 - **dired Stage 1 — the directory view — LANDED — #165**
-  (`docs/dired-framing.md` §0, S1-1…S1-12; merge `c8ec8f3`; one review
+  (`docs/archive/framings/dired-framing.md` §0, S1-1…S1-12; merge `c8ec8f3`; one review
   round). pmacs now has a directory surface: `C-x d` / `C-x C-j` open a
   read-only listing, one buffer per directory named
   `*dired:<canonical path>*`, with a `dired` major mode whose
@@ -1604,7 +1604,7 @@ someone forgot.
   all, because a server-first `Hello` reaches a shipped frontend before it
   can identify itself.
 - **Bottom panel Stage 1 (window placement + TUI side windows) LANDED —
-  #155** (`docs/bottom-panel-framing.md` rev 4; merge `e745068`; two review
+  #155** (`docs/archive/framings/bottom-panel-framing.md` rev 4; merge `e745068`; two review
   rounds). **No protocol change (still v20).** Arc 7's substrate: pmacs now
   has Emacs's `display-buffer` + window parameters, and a buffer can be
   displayed in a fixed-height window pinned to the bottom of the frame that
@@ -1669,7 +1669,7 @@ someone forgot.
     Stage 2 48. All 12 CI checks green at merge.
   - **Stage 2 (the GPU panel band) is COMPLETE: 2A #177, 2B-1 #184,
     2B-2 #187, and 2B-3 (this lane)** —
-    `docs/bottom-panel-stage2-framing.md` rev 6, four
+    `docs/archive/framings/bottom-panel-stage2-framing.md` rev 6, four
     framing review rounds, no open framing items; the rev-5
     implementation split was explicitly approved 2026-07-27 and rev 6
     records PR #184's server-first compatibility and gate correction.
@@ -1873,7 +1873,7 @@ someone forgot.
     is the only thing between today's state and omitting `display`
     resolving to the panel policy.
 - **dired Stage 2 framing LANDED (document only) — #171**
-  (`docs/dired-stage2-framing.md`, revision 9; seven review rounds).
+  (`docs/archive/framings/dired-stage2-framing.md`, revision 9; seven review rounds).
   **Approved as a framing; no runtime code and no implementation
   started.** Load-bearing decisions a reader must not re-derive:
   - **Reconciliation is order-independent, deliberately.** Reply order
@@ -1915,7 +1915,7 @@ someone forgot.
     request responses covers neither `mark_document_stale` (which takes
     no `LspServerId` while creating URI keys across three stores) nor
     `DiagnosticView`, whose URI is fixed at construction.
-- **dired Stage 2a LANDED — #196** (`docs/dired-stage2-framing.md`
+- **dired Stage 2a LANDED — #196** (`docs/archive/framings/dired-stage2-framing.md`
   rev 9, §5/§6/§10 — the substrate transaction only, **no dired
   surface**). Rename and delete reconciliation across the path owners a
   rename actually crosses.
@@ -1946,11 +1946,11 @@ someone forgot.
     Q#GB10's path-backed refusal, Q#GB15's `identity_protected`,
     Q#GB5's `ensure_slot` lock, and the remaining 13 write sites.
 - **Generated-buffer immutability framing LANDED — #188**
-  (`docs/generated-buffer-immutability-framing.md`, revision 7; six
+  (`docs/archive/framings/generated-buffer-immutability-framing.md`, revision 7; six
   review rounds, thirty-two findings). Revision 7 is the governing
   contract for the whole arc.
 - **Resource-op delete guard framing LANDED (document only) — #186**
-  (`docs/resource-op-delete-guard-framing.md`, revision 5; five review
+  (`docs/archive/framings/resource-op-delete-guard-framing.md`, revision 5; five review
   rounds). **Approved as a framing; no runtime code.** It owns the
   urgent **pre-filesystem refusal** for synchronous `apply_resource_op`
   — which on `main` today destroys unsaved work — while #171 owns full
@@ -1974,7 +1974,7 @@ someone forgot.
     Latent — zero production callers — but "both lanes guard deletion"
     reads as the primitive being guarded, and it is not.
 - **GPU initial target LANDED — #148**
-  (`docs/gpu-initial-target-framing.md` rev 3; merge `0dd16a5`; two review
+  (`docs/archive/framings/gpu-initial-target-framing.md` rev 3; merge `0dd16a5`; two review
   rounds). `pmacs --gpu [--socket NAME|PATH] FILE` transports exact Unix path
   bytes plus launcher cwd to the managed GPU client. Protocol v20 adds a
   semantic-session `SessionBootstrapRequest` after `AttachRequest` and an
@@ -1999,7 +1999,7 @@ someone forgot.
   stayed on distinct target buffers after the second attach. All 12 CI checks
   passed.
 - **Folding Stage 1 (headless fold engine) LANDED — #142**
-  (`docs/folding-framing.md` rev 5; merge `c49a8c7`; three review rounds,
+  (`docs/archive/framings/folding-framing.md` rev 5; merge `c49a8c7`; three review rounds,
   round 3 clean). Arc 6's engine — instance-side and headless; **no frontend
   renders a collapse yet** (that is Stage 2). No protocol bump.
   - `src/fold.rs`: a per-buffer `FoldStore` of byte ranges attached as a
@@ -2033,7 +2033,7 @@ someone forgot.
     PIN IT THROUGH THE REAL PATH — a direct-call unit test misses the wiring
     (falsify by revert).
   - **Stage 2 (grid/daemon collapse) LANDED — #149** (merge `6ed4fe9`; five
-    review rounds; `docs/folding-stage2-framing.md` rev 4). Its
+    review rounds; `docs/archive/framings/folding-stage2-framing.md` rev 4). Its
     load-bearing reframe: the TUI had **no non-identity
     source-line↔display-row map** (`view_top + row` was baked into ~13 sites),
     so Stage 2's spine is `src/fold_view.rs`'s `VisibleLineMap` — derived from
@@ -2064,7 +2064,7 @@ someone forgot.
     (parent R2-3), and flipping `FrontendView.fold_projection` to `true` for
     semantic frontends.
 - **One-command GPU invocation LANDED — #141**
-  (`docs/gpu-invocation-framing.md` rev 6; merge `63fbc66`; two implementation
+  (`docs/archive/framings/gpu-invocation-framing.md` rev 6; merge `63fbc66`; two implementation
   reviews). The additive public path is `pmacs --gpu [--socket NAME|PATH]`;
   bare `pmacs [FILE]` remains the TUI. Root owns the CRDT gate, socket
   resolution, sibling-regular-file GPU discovery/PATH fallback, and GPU
@@ -2076,7 +2076,7 @@ someone forgot.
   change. The initial macOS/LuaJIT CI run exceeded an unrelated outline
   performance threshold (147 ms / 100 ms); the complete failed-job rerun
   passed all twelve checks before merge.
-- **Config registry LANDED — #127** (`docs/config-registry-framing.md`
+- **Config registry LANDED — #127** (`docs/archive/framings/config-registry-framing.md`
   rev 3; merge `2e37c04`; two review rounds). `pmacs.config` is the
   typed, introspectable options registry the backlog ranked first, and
   it closes the "config-registry-blocked" deferrals below. It was built
@@ -2117,7 +2117,7 @@ someone forgot.
     their legacy coercion** — the registry is strict, the legacy setters
     stay lenient (`trim_on_save("yes")`, `interval_ms(1500.7)`).
   - `M-x describe-setting` renders into `*help*`.
-- **Mode system wiring LANDED — #129** (`docs/mode-system-wiring-framing.md`;
+- **Mode system wiring LANDED — #129** (`docs/archive/framings/mode-system-wiring-framing.md`;
   merge `b4b925d`; one review round). The existing mode-keymap substrate is
   now live without a protocol change.
   - `Buffer.major_mode: Option<String>` owns the single major mode. The
@@ -2137,7 +2137,7 @@ someone forgot.
     splits render their own mode. Real-daemon acceptance covers all ten framing
     criteria across both Lua backends and Linux/macOS CI.
 - **Modeline language detection LANDED — #132**
-  (`docs/modeline-detection-framing.md` rev 2; merge `1dd47fc`). Fresh loads
+  (`docs/archive/framings/modeline-detection-framing.md` rev 2; merge `1dd47fc`). Fresh loads
   scan bounded Emacs `-*- mode: ... -*-` and Vim/Vi `ft=` / `filetype=`
   modelines without evaluating file content, normalize common editor aliases,
   and give explicit modelines precedence over inferred language.
@@ -2185,7 +2185,7 @@ someone forgot.
     shadowed definitions/references keep ordinary variable styling.
 - **Multi-language injections (#122) LANDED** — the direct continuation
   of the #114–#118 highlight arc; four review rounds, framing
-  `docs/multi-language-injections-framing.md` (Q#IJ1–IJ11). A buffer can
+  `docs/archive/framings/multi-language-injections-framing.md` (Q#IJ1–IJ11). A buffer can
   now hold more than one language: `ParseTreeBundle` holds `Vec<Layer>`
   (root + injected children, depth-ascending, installed atomically so the
   existing `StyleGate` + highlight-cache Arc gates still work). The parse
@@ -2223,7 +2223,7 @@ someone forgot.
   configuration contract. `.jsonc` / `.json5` remain a deliberate
   follow-up because the JSON grammar is strict.
 - **Compile-mode (Arc 5 stage 1, #113) LANDED** (2026-07-14, 7 rounds;
-  framing `docs/compile-mode-framing.md` rev 13). `compile.run` streams
+  framing `docs/archive/framings/compile-mode-framing.md` rev 13). `compile.run` streams
   `/bin/sh -c "exec 2>&1; <cmd>"` into an intercept-read-only
   `*compilation*` buffer via a Lua ANSI parser; once-per-newline error
   rules; unified `error.next`/`error.previous` (M-g n/p, `` C-x ` ``,
@@ -2236,7 +2236,7 @@ someone forgot.
   identity-deduped `Window::ensure_overlay` + `clone_for_split`,
   idempotent atomic `handle:dispose()`.
 - **Editing-conveniences pack (editops, #111) landed** (framing
-  `docs/editing-conveniences-framing.md` rev 6). goto-line, case ops,
+  `docs/archive/framings/editing-conveniences-framing.md` rev 6). goto-line, case ops,
   transpose, zap-to-char, line move/duplicate/join, region
   sort/reverse/dedupe, delete-trailing-whitespace + opt-in
   `pmacs.editops.trim_on_save`. Substrate: `pmacs.killring.kill_range` /
@@ -2244,7 +2244,7 @@ someone forgot.
   lifecycle), and the origin-guard pattern for chain-sensitive
   minibuffer commands.
 - **Auto-pairing (#110) landed — Arc 2 COMPLETE** (framing
-  `docs/auto-pairing-framing.md` rev 6). `BUILTIN_PAIR_CHARS` in
+  `docs/archive/framings/auto-pairing-framing.md` rev 6). `BUILTIN_PAIR_CHARS` in
   pmacs-protocol leave both frontends' optimistic classifiers;
   `builtin/runtime/pair.lua` loads BEFORE lsp.lua (first-didChange
   ordering contract); one-shot typed-edit provenance via
@@ -2252,16 +2252,16 @@ someone forgot.
   Q#AP9). Substrate: `buf:path()`, `pmacs.lsp.buffer_language(buf)`,
   `PMACS_FAKE_LSP_CHANGE_SINK`, `TestDaemon::spawn_with_config`.
 - **Themes (Arc 4) stages 1–3 LANDED; Arc 4 COMPLETE ON `main`.**
-  - Stage 1 (#120, `docs/theme-faces-framing.md` rev 9): named UI faces
+  - Stage 1 (#120, `docs/archive/framings/theme-faces-framing.md` rev 9): named UI faces
     as reserved `ui`/`ui.*` theme entries; transactional split
     syntax/face epochs; protocol-v16 `ThemeFacts`; snapshot/baseline
     symmetry; store-sourced diagnostic-count freeze.
-  - Stage 2 (#124, `docs/gpu-set-font-framing.md` rev 5):
+  - Stage 2 (#124, `docs/archive/framings/gpu-set-font-framing.md` rev 5):
     `pmacs.gpu.set_font` and authoritative protocol-v17 `FontFacts`;
     frontend-local family resolution, live font reload/reflow, and
     visual-run caret geometry.
   - Stage 3 (#125, `statusline-segments`,
-    `docs/statusline-segments-framing.md` rev 3): composable strict
+    `docs/archive/framings/statusline-segments-framing.md` rev 3): composable strict
     `pmacs.statusline` providers; borrow-released per-window evaluation
     with failure latches; legacy-preserving TUI composition; a pure
     built-in LSP provider; dynamic modeline faces; protocol-v18
@@ -2274,7 +2274,7 @@ someone forgot.
     `basedpyright` filtered); `git diff --check` clean. Stage 3 landed
     as #125 and completed Arc 4 on `main`.
 - **Vterm Stage 1 terminal core LANDED ON `main` — #126**
-  (`docs/vterm-framing.md` rev 5; merge `643d1e1`).
+  (`docs/archive/framings/vterm-framing.md` rev 5; merge `643d1e1`).
   - Implementation commits: `bbc1f33` (Stage 1), `962944b` (Darwin signal
     normalization), first-review fixes `f0a235f`, `28f2e6c`, `bf972a7`, and
     second-review hardening `9797ada`; reviewed feature head `fc4e0ce` merged
@@ -2321,7 +2321,7 @@ someone forgot.
     behavioral bite; the original `main`/crate-root bite remains explicitly
     weaker compile-time API evidence.
   - **Stage 3 GPU/protocol LANDED ON `main` — #135** (merge `cac4961`;
-    `docs/vterm-framing.md` Revision 9, criteria 28–37).
+    `docs/archive/framings/vterm-framing.md` Revision 9, criteria 28–37).
     Protocol **v19**: `InstanceMessage::TerminalFrame` (discriminant 26,
     daemon-gated) plus `FrontendEvent::TerminalResize` (11) and
     `TerminalPointer` (12), both frontend-gated — the first bump gating in
@@ -2363,7 +2363,7 @@ someone forgot.
     macOS/LuaJIT CI run timed out waiting for `VTERM_ALT_READY` in the Stage 2
     real-TUI smoke; the complete failed-job rerun passed all 12 checks.
   - **Stage 2 TUI LANDED ON `main` — #130** (merge `86fc1bc`;
-    `docs/vterm-framing.md` Revision 7, criteria 15–27). `TerminalViewKey` keys
+    `docs/archive/framings/vterm-framing.md` Revision 7, criteria 15–27). `TerminalViewKey` keys
     per-frontend/window projection state over one shared process/screen; logical
     row anchors retain
 
@@ -2413,7 +2413,7 @@ someone forgot.
     workspace 2,882 passed across 82 suites (19 ignored, 1 filtered);
     `git diff --check` clean.
 - **Tab-width rendering parity LANDED — #137** (merge `2625ec7`;
-  `docs/tab-width-parity-framing.md` rev 2).
+  `docs/archive/framings/tab-width-parity-framing.md` rev 2).
   Source tabs remain one byte while every buffer
   renderer follows the shared fixed `pmacs_protocol::TAB_STOP_COLUMNS = 8`.
   - `src/display_width.rs` owns allocation-free Unicode/tab-aware byte-to-column
@@ -2480,7 +2480,7 @@ someone forgot.
     prerequisite shipped in #123).
 
 - **GPU terminal input LANDED — #166** (`main` @ `b889873`;
-  `docs/gpu-terminal-input-framing.md` rev 2; one review round). The
+  `docs/archive/framings/gpu-terminal-input-framing.md` rev 2; one review round). The
   dispatcher applied **both** terminal-layout syncs to **every** attached
   frontend each tick. A semantic session satisfies both conditions — a
   `term_sizes` entry from `AttachRequest` *and* a terminal declaration — so
@@ -2558,7 +2558,7 @@ reports a *product* defect that is not there.
 Concretely: `setsid nohup ./scripts/gate … &` is **forbidden**. This
 cost one lane seven red full sweeps and nine framing revisions chasing
 a GPU teardown bug that never existed
-(`docs/gpu-probe-sigint-framing.md` §4c). Long runs do not need it —
+(`docs/archive/framings/gpu-probe-sigint-framing.md` §4c). Long runs do not need it —
 measured, an ordinary tool-level background launch leaves `SIGINT`
 deliverable.
 
@@ -2624,7 +2624,7 @@ Three things it does that a retyped command line kept failing to do:
 section, so the two cannot drift silently. `--init` prepares a
 worktree's build directory; `--prune` reclaims directories whose
 worktree is gone (dry-run unless given `--force`). Framing:
-`docs/gate-script-framing.md`.
+`docs/archive/framings/gate-script-framing.md`.
 
 It is a **convention, not an enforcement** — a bare `cargo test` still
 takes the shared lock. Nothing in-repo can change that while the
@@ -3418,7 +3418,7 @@ servers.
 **The GUI arc — OPEN. Stage 0 MERGED as #236 and Stage 1-pre MERGED as
 #237 (2026-08-12); Stage 1a is next and not started.** See §1's arc
 bullet for what landed.
-`docs/gui-arc-framing.md` is the arc-level frame and is also Stage 0's
+`docs/archive/framings/gui-arc-framing.md` is the arc-level frame and is also Stage 0's
 own framing; Stages 1–10 each need their own before their branch. It
 opened from a daily-driver report: the TUI is daily-drivable, the GUI is
 not. **`COHERENCE.md` §16 now carries a PRODUCT subgrade (Weak) beside
@@ -3536,7 +3536,7 @@ mask widening (gutter bg, wash glyph recolor, statusline bg echo
 surface, chrome bold/italic/underline re-shaping).
 Housekeeping: F-016 `lua_bindings/mod.rs` split paused mid-way
 (tranches 0–2 landed, ~5–8 PRs left; see
-`docs/lua-bindings-split-framing.md`).
+`docs/archive/framings/lua-bindings-split-framing.md`).
 Full cross-cutting index of the non-themes backlog (this list + every
 framing doc's Deferred section + a code sweep, themes excluded, with a
 prioritization north star): `docs/side-quest-backlog.md`.

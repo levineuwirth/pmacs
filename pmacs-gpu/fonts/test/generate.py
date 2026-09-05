@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the four hermetic test faces for the pmacs-gpu font tests.
 
-The gpu-set-font acceptance suite (docs/gpu-set-font-framing.md) needs
+The gpu-set-font acceptance suite (docs/archive/framings/gpu-set-font-framing.md) needs
 family-routing tests that cannot depend on whatever fonts the host has
 installed, so these tiny fixture faces are generated and committed:
 

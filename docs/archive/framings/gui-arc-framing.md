@@ -462,7 +462,7 @@ is the whole objection this section answers.
 **One arc, two halves; the name is "the GUI arc," deliberately a name
 and not a number.** The roadmap's "Arc 8 — GPU structural parity"
 label already collides (the Lean 4 framing also claims Arc 8; the
-collision is recorded in `docs/dired-framing.md`). This arc subsumes
+collision is recorded in `docs/archive/framings/dired-framing.md`). This arc subsumes
 roadmap-Arc-8's scope as its Half B; the numeric label retires.
 
 - **Half A — maturity** (Stages 0–5): the GPU behaves like a competent

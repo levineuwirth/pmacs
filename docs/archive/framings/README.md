@@ -1,0 +1,98 @@
+# Archived framing documents
+
+Every framing that preceded the 2026-09 roadmap, moved here wholesale on 2026-09-05. They are history, not instruction: the obligations they still carry are listed in the roadmap's decide-list, and the rules they established live in `docs/invariants.md`. Line references inside them are as of their own dates.
+
+- `auto-indent-framing.md` — Auto-indent on newline — framing (Arc 2, editing table stakes)
+- `auto-pairing-framing.md` — Auto-pairing — framing (Arc 2, editing table stakes)
+- `autosave-recovery-framing.md` — Autosave + crash recovery — framing (Arc 3 phase 3)
+- `bottom-panel-framing.md` — Bottom panel — framing (window placement + side windows)
+- `bottom-panel-stage2-framing.md` — Bottom panel Stage 2 — the GPU panel band (framing)
+- `bottom-panel-stage3-framing.md` — Framing — Bottom panel Stage 3: the adopter default flip
+- `ci-crdt-coverage-framing.md` — Framing — the CRDT half of the test corpus is dark in CI
+- `ci-manual-dispatch-framing.md` — Manual CI dispatch — a contemporaneous run on any ref
+- `comment-toggle-framing.md` — Comment/uncomment — framing (Arc 2, editing table stakes)
+- `compile-mode-framing.md` — Compile-mode — framing (Arc 5 stage 1, terminal)
+- `config-registry-framing.md` — Config registry — framing (cross-cutting substrate)
+- `context-menu-framing.md` — Right-click context menus — framing + as-built
+- `crdt-identity-undo-framing.md` — Identity-replace undo — a CRDT-version delta is not a text delta
+- `cua-typeover-undo-framing.md` — CUA type-over undo grouping — framing pass
+- `desktop-save-framing.md` — Desktop-save — framing (Arc 3 phase 2)
+- `destination-capture-framing.md` — A destination capture any async continuation can use
+- `dired-framing.md` — Dired — framing
+- `dired-stage2-framing.md` — Dired Stage 2 — marks and operations — framing
+- `discovery-stage1-command-family-framing.md` — Discovery Stage 1 — the describe/list command family
+- `discovery-stage2-framing.md` — Discovery Stage 2 — M-x rows stop being bare names
+- `distribution-stage1-framing.md` — Framing — Distribution Stage 1: binaries on tag
+- `editing-conveniences-framing.md` — Editing conveniences pack — framing (Lua-side, parallel lane)
+- `folding-framing.md` — Folding — framing (Arc 6)
+- `folding-stage2-framing.md` — Folding Stage 2 — grid (daemon-rendered) collapse — framing (Arc 6)
+- `full-grid-resync-framing.md` — Honoring `full_grid` — QoL Stage 1
+- `gate-protocol-build-framing.md` — `scripts/gate --protocol` — the build its sweep depends on
+- `gate-script-framing.md` — `scripts/gate` — per-worktree build isolation, and one gate suite
+- `generated-buffer-immutability-framing.md` — Generated-buffer immutability
+- `git-integration-framing.md` — Git integration — Stage 1: seeing what changed
+- `gpu-attach-robustness-framing.md` — GPU attach robustness — framing + as-built
+- `gpu-chord-forwarding-framing.md` — GPU general chord forwarding — framing + as-built
+- `gpu-golden-harness-framing.md` — GPU headless render harness — framing + as-built
+- `gpu-horizontal-scroll-framing.md` — GPU horizontal scroll — QoL Stage 5
+- `gpu-initial-target-framing.md` — GPU initial target — session-scoped file opening framing
+- `gpu-invocation-framing.md` — GPU invocation — one-command broker framing
+- `gpu-minibuffer-framing.md` — GPU minibuffer — framing + as-built
+- `gpu-probe-sigint-framing.md` — GPU launcher / probe SIGINT teardown — framing
+- `gpu-set-font-framing.md` — GPU font preference — framing (Arc 4 stage 2, `pmacs.gpu.set_font`)
+- `gpu-terminal-input-framing.md` — GPU terminal input — the double terminal-layout sync
+- `gui-arc-framing.md` — The GUI arc — framing
+- `gui-stage1-input-framing.md` — GUI arc, Stage 1 — input foundation (framing)
+- `gui-zoom-framing.md` — GUI zoom — QoL Stage 2
+- `horizontal-scroll-framing.md` — Horizontal scroll — QoL Stage 4
+- `in-buffer-completion-framing.md` — In-buffer completion popup — framing (Arc 1a)
+- `in-buffer-search-framing.md` — In-buffer search — consolidated framing + as-built
+- `inline-math-framing.md` — Inline math rendering — framing
+- `inline-math-slice-framing.md` — Inline math — the first vertical slice (framing)
+- `journey-stage1a-framing.md` — Journey Stage 1a — open a directory, on one path
+- `journey-stage1b1-compile-defaults-framing.md` — Journey Stage 1b-1 — make building discoverable
+- `journey-stage1b2-lsp-guidance-framing.md` — Journey Stage 1b-2 — say when language intelligence did not start
+- `journey-stage1b3-welcome-framing.md` — Journey Stage 1b-3 — say something when the editor opens
+- `json-yaml-framing.md` — JSON + YAML grammars — framing (side quest, highlight family)
+- `kill-ring-framing.md` — Kill ring — framing (Arc 2, editing table stakes) — rev 3
+- `latex-grammar-math-substrate-framing.md` — LaTeX grammar + math parser — framing (inline-math substrate)
+- `lean4-mode-framing.md` — Lean 4 mode — framing (Arc 8)
+- `locals-query-processing-framing.md` — Locals-query processing - syntax-highlight completion
+- `long-lines-framing.md` — Long lines — QoL Stage 3
+- `lsp-file-watch-d3-framing.md` — LSP file watcher D3 — the polling cost — framing
+- `lsp-file-watcher-framing.md` — LSP file watcher — framing
+- `lsp-language-coverage-framing.md` — LSP language coverage: LaTeX (and the Haskell/OCaml question)
+- `lsp-panels-framing.md` — LSP panels — framing (Arc 1b)
+- `lua-bindings-split-framing.md` — Splitting `lua_bindings.rs` — framing (F-016)
+- `macos-ci-signal-integrity-framing.md` — Framing — macOS CI signal integrity: a signature registry, then hardening
+- `modeline-detection-framing.md` — Modeline language detection — side quest
+- `mode-system-wiring-framing.md` — Mode system wiring — side-quest (cross-cutting substrate)
+- `multi-language-injections-framing.md` — Multi-language injections — framing (side quest, highlight family)
+- `package-manager-hardening-framing.md` — Package-manager hardening — framing + as-built
+- `parse-budget-diagnosability-framing.md` — Parse-budget diagnosability — reporting the measurement that failed
+- `persistence-framing.md` — Persistence — framing (Arc 3)
+- `pmacs-gpu-diagnostic-parity-framing.md` — pmacs-gpu diagnostic parity — framing pass
+- `pmacs-gpu-mouse-deferred-framing.md` — Mouse deferred set — framing pass
+- `pmacs-gpu-mouse-framing.md` — pmacs-gpu mouse input — framing pass
+- `pmacs-gpu-perline-reshape-framing.md` — pmacs-gpu per-line incremental reshape — framing pass
+- `pmacs-gpu-quad-backgrounds-framing.md` — pmacs-gpu — quad-background framing
+- `pmacs-gpu-scroll-framing.md` — pmacs-gpu — viewport-scoped rendering & scroll (framing)
+- `pmacs-gpu-status-band-framing.md` — pmacs-gpu status band — framing pass
+- `pmacs-gpu-wavy-squiggles-framing.md` — pmacs-gpu wavy squiggles — framing pass
+- `process-signal-diagnostic-completeness-framing.md` — Framing — make the signal diagnostic discriminating (evidence collection)
+- `process-signal-tolerance-framing.md` — Framing — make the PTY terminate failure self-describing (diagnostic only)
+- `process-teardown-stdin-deadlock-framing.md` — Framing — close child stdin before joining readers (process teardown deadlock)
+- `query-replace-framing.md` — Query-replace — framing (Arc 2 interleave)
+- `r8-fixture-boundary-framing.md` — R8 — the fixture boundary the LSP panel tests never set
+- `reap-ledger-silent-failures-framing.md` — Framing — group cleanup fails silently at four sites
+- `resource-op-delete-guard-framing.md` — Framing — `apply_resource_op` delete destroys unsaved work
+- `statusline-segments-framing.md` — Statusline segments - framing (Arc 4 stage 3)
+- `tab-width-parity-framing.md` — Tab-width rendering parity - side quest
+- `terminal-config-and-copy-mode-framing.md` — Terminal configuration and copy mode
+- `test-ambient-config-isolation-framing.md` — Framing — integration tests use the developer's real ambient roots
+- `theme-faces-framing.md` — Theme faces — framing (Arc 4 stage 1, themes)
+- `tree-primitive-framing.md` — Framing — the tree primitive
+- `ux-arc-framing.md` — UX arc — framing (the gutter, and what it unlocks)
+- `vterm-framing.md` — Vterm — framing (Arc 5 stage 2, three-PR delivery)
+- `web-grammars-html-css-framing.md` — Web grammars (HTML + CSS) + HTML injections — framing
+- `worker-identity-framing.md` — Worker identity — Stage 1: what is running, and what it is doing

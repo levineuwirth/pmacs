@@ -608,7 +608,7 @@ and is not true:
   session**". A prompt raised mid-batch while the user has a minibuffer
   open silently destroys the in-flight prompt and its callbacks.
 - **There is no `y_or_n` helper in the tree** — a named deferral
-  (`docs/dired-framing.md:854`).
+  (`docs/archive/framings/dired-framing.md:854`).
 
 **False, as revision 1 had it:**
 - *"The server-initiated path cannot produce that answer."* It can.
@@ -715,7 +715,7 @@ cannot reach it at any strength. That asynchronous window is #171's, and
 naming it here is what keeps this lane from appearing to close a defect
 it does not close.
 
-The older in-tree note at `docs/dired-framing.md:807-819` (Stage 1-era)
+The older in-tree note at `docs/archive/framings/dired-framing.md:807-819` (Stage 1-era)
 still describes the rename-side lookup defect accurately, but it is
 superseded as a statement of plan by #171's Stage 2 document, which
 exists only on that branch.

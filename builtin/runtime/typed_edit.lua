@@ -36,7 +36,7 @@
 -- into it, and therefore before lsp.lua. That preserves Q#AP7 --- see
 -- pair.lua's header and the load site in `src/editor.rs`.
 --
--- Framing: docs/lean4-mode-framing.md Q#LN10.
+-- Framing: docs/archive/framings/lean4-mode-framing.md Q#LN10.
 
 pmacs.typed_edit = pmacs.typed_edit or {}
 

@@ -180,7 +180,7 @@ limitation is observable today rather than hypothetical.
 ### 1.2 dired declined to invent one, and its case is already scoped
 
 Dired Stage 1 landed a **flat** listing for Emacs parity and deferred
-the recursive case explicitly: `docs/dired-framing.md` §13 names
+the recursive case explicitly: `docs/archive/framings/dired-framing.md` §13 names
 **`i` insert-subdirectory (in-buffer recursive listing)** as deferred.
 
 §14 credits this directly: dired "landed **without** inventing one". That

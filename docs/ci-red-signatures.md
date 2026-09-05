@@ -346,7 +346,7 @@ available to it.
 | **required fragments** | `the flat references row renders verbatim` **and** a `left` value that is the `right` value with a **leading directory removed** |
 | **causal status** | **DIAGNOSED and FIXED — test hermeticity** |
 | **evidence** | reproduced deterministically on one Linux workstation; merge-base control confirmed it on `main` |
-| **disposition** | `tests/m4_acceptance.rs::open_against_fake` now sets `pmacs.project.set_search_boundary` to the fixture directory. `docs/r8-fixture-boundary-framing.md` |
+| **disposition** | `tests/m4_acceptance.rs::open_against_fake` now sets `pmacs.project.set_search_boundary` to the fixture directory. `docs/archive/framings/r8-fixture-boundary-framing.md` |
 
 **Mechanism, established rather than guessed:**
 

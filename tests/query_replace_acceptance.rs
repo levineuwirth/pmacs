@@ -8,7 +8,7 @@
 //! hook (once per `y`, and exactly once for an `!` batch); the
 //! `dispatch_idle`-false gate; and the wrong-buffer/focus-drift abort.
 //!
-//! Framing: docs/query-replace-framing.md.
+//! Framing: the archived query-replace framing.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use pmacs::editor::EditorState;

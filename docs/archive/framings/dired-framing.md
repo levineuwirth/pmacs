@@ -12,9 +12,9 @@ implementation falsified in the approved text (§0); rev 5 adds the
 1's implementation falsified (§0, S1-1…S1-9); rev 7 adds what its first
 review round found (§0, S1-10…S1-12). Deliberately
 unnumbered: the roadmap's Arc 8 is GPU
-structural parity but `docs/lean4-mode-framing.md` also claims Arc 8, so
+structural parity but `docs/archive/framings/lean4-mode-framing.md` also claims Arc 8, so
 the arc space is already forked in uncommitted work. (Rev 2 also cited
-`docs/dap-debugging-framing.md` as part of that fork — wrong: its Arc 7
+`docs/archive/framings/dap-debugging-framing.md` as part of that fork — wrong: its Arc 7
 *matches* the roadmap's Arc 7 = Debugging. R2-5.) Numbering this one
 would mint a third claim; it is ranked when the roadmap is next
 reconciled. Not on `docs/roadmap-2026-07.md` and not in

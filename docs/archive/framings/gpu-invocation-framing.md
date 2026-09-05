@@ -125,7 +125,7 @@ mismatch instead of waiting forever (`pmacs-gpu/src/attach.rs`).
 `ApplicationHandler::resumed`. A connect/handshake failure stays visible in
 the window but is not retried. Later disconnect also requires a manual
 relaunch. Automatic reconnect is an existing named deferral, separate from
-startup (`docs/gpu-attach-robustness-framing.md:175-186`).
+startup (`docs/archive/framings/gpu-attach-robustness-framing.md:175-186`).
 
 The root already has daemon auto-start precedent in `src/daemon_attach.rs`:
 try an existing socket, otherwise spawn `current_exe --daemon --socket PATH`,

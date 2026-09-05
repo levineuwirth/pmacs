@@ -19,7 +19,7 @@ every semantic session, so a GPU frontend silently falls back to the
 non-side target. **Stage 2 flips that bit, under an exact negotiated
 rule, and earns the right to.**
 
-This document is the re-framing `docs/bottom-panel-framing.md` (rev 4)
+This document is the re-framing `docs/archive/framings/bottom-panel-framing.md` (rev 4)
 §2 requires before Stage 2 is implemented. It does **not** restate the
 parent's decisions or replace its acceptance criteria. It records the
 re-scout against current `main`, closes the four scout obligations

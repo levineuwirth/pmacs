@@ -1,6 +1,6 @@
 //! Arc 8 Stage 3b acceptance — the Lean 4 language server.
 //!
-//! `docs/lean4-mode-framing.md` Q#LN7, Q#LN8, Q#LN16; acceptance 22–28,
+//! the archived lean4-mode framing Q#LN7, Q#LN8, Q#LN16; acceptance 22–28,
 //! 24a/24b, 35, 36, 36a, 37.
 //!
 //! No live toolchain required. The server side is `pmacs_fake_lsp`

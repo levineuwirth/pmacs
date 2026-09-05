@@ -236,7 +236,7 @@ doesn't.
 
 The config registry has **no write-back** — settings are declared, not
 saved. The project's remembered-state mechanism is `pmacs.state.read` /
-`write` / `available` (`docs/persistence-framing.md`), used by
+`write` / `available` (`docs/archive/framings/persistence-framing.md`), used by
 `saveplace` and `recentf`. The split is the right one:
 
 - **`pmacs.config`** — what you *declared*: base size, step.

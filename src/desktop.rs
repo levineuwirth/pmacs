@@ -13,7 +13,7 @@
 //! app-data, so they run identically from a `pmacs.session.*` binding
 //! and from the `RunLocal` startup trigger.
 //!
-//! Framing: docs/desktop-save-framing.md.
+//! Framing: docs/archive/framings/desktop-save-framing.md.
 
 use std::collections::HashMap;
 use std::path::Path;

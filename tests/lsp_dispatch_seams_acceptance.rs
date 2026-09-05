@@ -1,7 +1,7 @@
 //! Arc 8 Stage 3a acceptance — LSP notification/response dispatch seams
 //! and `pmacs.fs.canonicalize`.
 //!
-//! `docs/lean4-mode-framing.md` Q#LN9 and Q#LN20, acceptance 29–34 plus
+//! the archived lean4-mode framing Q#LN9 and Q#LN20, acceptance 29–34 plus
 //! 34a/34b.
 //!
 //! This suite deliberately contains **no Lean content**.

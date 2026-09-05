@@ -780,7 +780,7 @@ pub struct AsyncRuntime {
     /// violates R46 and which no refusal sited in a yield helper can
     /// intercept (the scheduler only sees the yielded value after the
     /// coroutine has already suspended). That residual is recorded in
-    /// `docs/worker-identity-framing.md` §2, not claimed closed.
+    /// `docs/archive/framings/worker-identity-framing.md` §2, not claimed closed.
     dispatch_names: RefCell<Vec<String>>,
 }
 

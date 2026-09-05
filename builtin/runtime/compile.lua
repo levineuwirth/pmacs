@@ -1,5 +1,5 @@
 -- compile.lua --- compile-mode / shell-command + unified next-error
--- (Arc 5 stage 1). Framing: docs/compile-mode-framing.md.
+-- (Arc 5 stage 1). Framing: docs/archive/framings/compile-mode-framing.md.
 --
 -- ORDERING CONTRACT: this chunk must load AFTER lsp.lua. It takes
 -- over `M-g n` / `M-g p` for the unified error dispatchers, and

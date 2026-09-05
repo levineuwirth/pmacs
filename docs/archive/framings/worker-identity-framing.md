@@ -68,7 +68,7 @@ grep, parse and — as of the lane merging beside this one — every `git
 status` runs with no indication that anything is happening at all.
 
 **And the git Stage 1 lane in flight right now makes it worse, by its
-own admission.** `docs/git-integration-framing.md` Q#G-5 states it
+own admission.** `docs/archive/framings/git-integration-framing.md` Q#G-5 states it
 plainly: git runs as a spawned process, spawned processes do not appear
 in `*workers*`, and the lane therefore "adds a fifth thing that runs in
 the background and is not attributable from one place". It accepted that

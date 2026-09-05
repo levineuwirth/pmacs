@@ -8,7 +8,7 @@ it. Emacs's `auto-save-mode` + `recover-file`.
 Closes the persistence arc: phase 1 (PR #98) gave the `pmacs.state`
 confined store and `state.remove`; phase 2 (PR #99) gave the all-Rust
 `pmacs.session.*` precedent and `get_or_load_buffer`. Parent decision:
-`docs/persistence-framing.md` Q#PS8.
+`docs/archive/framings/persistence-framing.md` Q#PS8.
 
 ## Ground truth (scouted; file:line as of `a0a4e7f`)
 

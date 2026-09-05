@@ -41,8 +41,8 @@ proceeded without, one a compliance error.
 Two rev-1 claims were **wrong, not merely imprecise**, and are called out
 where they occur: the zero-glyph strut (F2) and the font licence (F6).
 
-Parent arc: `docs/inline-math-framing.md` (rev 2, merged as #154). Sibling
-substrate lane: `docs/latex-grammar-math-substrate-framing.md` (rev 3), whose
+Parent arc: `docs/archive/framings/inline-math-framing.md` (rev 2, merged as #154). Sibling
+substrate lane: `docs/archive/framings/latex-grammar-math-substrate-framing.md` (rev 3), whose
 Stage 1 landed as #144.
 
 This lane builds the **first end-to-end slice** of the parent's four-tier
@@ -621,7 +621,7 @@ overlay for the eventual tree-sitter detection upgrade.
 
 ## 9. Follow-up outside this lane
 
-The parent framing (`docs/inline-math-framing.md`, rev 2, merged as #154)
+The parent framing (`docs/archive/framings/inline-math-framing.md`, rev 2, merged as #154)
 carries the same font error F6 found here: its table row reads "Latin Modern
 Math | Full | OFL (GUST)". It should be corrected to the GUST Font License,
 with the ~717 KiB size, in its own docs change rather than in this branch —

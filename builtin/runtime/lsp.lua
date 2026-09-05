@@ -261,7 +261,7 @@ pmacs.lsp.config.yaml = pmacs.lsp.config.yaml or {
 }
 
 -- LaTeX via `texlab`. Framing:
--- `docs/lsp-language-coverage-framing.md` §3 (the root) and Q#LX1 (no
+-- `docs/archive/framings/lsp-language-coverage-framing.md` §3 (the root) and Q#LX1 (no
 -- settings).
 --
 -- **No `pmacs.lsp.filetypes` entries ship for `.tex`/`.latex`/`.sty`/
@@ -2999,7 +2999,7 @@ function pmacs.lsp.document_symbols()
     for _, sym in ipairs(syms) do
       local tag = SYMBOL_KIND_TAGS[sym.kind] or "symbol"
       rows[#rows + 1] = {
-        -- Tree primitive (docs/tree-primitive-framing.md): `depth` is
+        -- Tree primitive (docs/archive/framings/tree-primitive-framing.md): `depth` is
         -- STRUCTURAL and `text` stays rendered here (Q#TR4). Collapse
         -- only hides rows and never changes a surviving row's depth, so
         -- the indentation below remains correct without the primitive

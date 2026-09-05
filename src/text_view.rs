@@ -1181,7 +1181,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Line wrapping (QoL Stage 3, docs/long-lines-framing.md)
+    // Line wrapping (QoL Stage 3, docs/archive/framings/long-lines-framing.md)
     // -----------------------------------------------------------------
 
     /// Render `text` into a `rows` x `cols` grid and return the glyph of

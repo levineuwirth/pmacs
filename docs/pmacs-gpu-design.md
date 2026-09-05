@@ -290,7 +290,7 @@ override.**
   bundled `fonts/OFL.txt` is shipped alongside the TTF as required
   by the OFL.
 - Lua override: **landed** as `pmacs.gpu.set_font { family?, size? }`
-  (Arc 4 stage 2, `docs/gpu-set-font-framing.md`) — a family NAME
+  (Arc 4 stage 2, `docs/archive/framings/gpu-set-font-framing.md`) — a family NAME
   resolved frontend-locally against the sanitized font database, not
   a path.
 - Missing-glyph fallback: tofu (replacement character `U+FFFD`).
@@ -303,7 +303,7 @@ claimed future customization would need no wire-protocol change, but
 the preference lives daemon-side (init.lua runs in the daemon, and
 every attaching GPU must render consistently), so customization
 shipped as the `FontFacts` fact at protocol v17 —
-`docs/gpu-set-font-framing.md` is the design of record.
+`docs/archive/framings/gpu-set-font-framing.md` is the design of record.
 
 ## Rhythm
 

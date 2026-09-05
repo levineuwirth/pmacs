@@ -194,7 +194,7 @@ corrections to 15's own reasoning:
   1b carries an **end-to-end panel-wheel effect** row. 15's rationale
   *"it is not input work"* was wrong — replay includes terminal mouse
   reporting and click-to-focus. The real reason is **breadth and
-  ownership**: acceptance 48 (`docs/bottom-panel-framing.md:1719`).
+  ownership**: acceptance 48 (`docs/archive/framings/bottom-panel-framing.md:1719`).
 - **Divider and background must BANK NOTHING.** 15 gave them the panel
   cell's residual, which manufactures the surface-switch jump B1
   forbids — motion banked over an inert target, spent on entering a
@@ -278,7 +278,7 @@ written** (§6). **Q#S1-8, Q#S1-9 and Q#S1-10 are RULED.** **1-pre is
 IMPLEMENTED**; 1a onward may begin from this document.
 
 **v26, not v25 — corrected by the panel mapping-generation slice.**
-That slice (`docs/bottom-panel-framing.md` §5b) **took v25** for
+That slice (`docs/archive/framings/bottom-panel-framing.md` §5b) **took v25** for
 `PanelFramePayload::PresentMapped` / `FrontendEvent::PanelPointerMapped`,
 and **it landed ahead of 1e (as #242) because panel-pointer replay
 blocked 1b at the time.** Both have since landed and neither blocks
@@ -621,7 +621,7 @@ lane** carrying parent acceptance 48, with **1b depending on that
 lane**. Two reasons were given, and the one revision 15 gave was wrong:
 
 1. **Replay is broader than 1b, and already owned.** Acceptance 48
-   (`docs/bottom-panel-framing.md:1719`) has `PanelPointer` driving
+   (`docs/archive/framings/bottom-panel-framing.md:1719`) has `PanelPointer` driving
    *"listview row selection, panel selection, terminal mouse reporting,
    and click-to-focus without disturbing the document mirror"*, plus
    activation ordering and coalescing rules. A wheel is one gesture in
@@ -743,7 +743,7 @@ But that function's doc states the premise B7 removes:
 > there are no explicit scroll commands, so **every viewport move
 > originates here**, and Q#HS4's snap-back hazard cannot arise.
 
-**B7 is an explicit horizontal viewport move.** `docs/horizontal-scroll-framing.md`
+**B7 is an explicit horizontal viewport move.** `docs/archive/framings/horizontal-scroll-framing.md`
 is explicit that such commands *"are what re-opens Q#HS4"* (`:189`), and
 Q#HS4 is recorded as **DEFERRED, not answered** (`:202`). The hazard is
 concrete and already cost this project once — §1.5 there quotes
@@ -1006,7 +1006,7 @@ are serialized.
 DISCHARGED.** §2a found, at `72da24a`, that
 `dispatch_semantic_panel_pointer` validated and focused but **replayed
 nothing**, so a panel wheel was dead on both axes — a pre-existing gap
-in **parent acceptance 48** (`docs/bottom-panel-framing.md:1719`), which
+in **parent acceptance 48** (`docs/archive/framings/bottom-panel-framing.md:1719`), which
 owned it.
 
 **#243 repaired it, and it is in this base.** `0ec13b3` contains the
@@ -1558,7 +1558,7 @@ sites. (A) — carrying point, as `scroll_window` does vertically — is
 **not viable in 1b**: the GPU cursor is a mirror of daemon state, the
 only wire operation that positions it also breaks the command chain and
 changes selection, and a new one would break 1b's non-protocol scope.
-This settles `docs/horizontal-scroll-framing.md`'s **Q#HS4** for the
+This settles `docs/archive/framings/horizontal-scroll-framing.md`'s **Q#HS4** for the
 wheel case, which was deferred against exactly this arrival.
 
 ## 11. Gates

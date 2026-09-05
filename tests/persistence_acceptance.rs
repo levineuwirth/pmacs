@@ -8,7 +8,7 @@
 //! `StateDir` app-data) before touching any file, so the suite never
 //! reads or writes a developer's real `~/.local/state/pmacs`.
 //!
-//! Framing: docs/persistence-framing.md.
+//! Framing: the archived persistence framing.
 
 use pmacs::editor::EditorState;
 use pmacs::lua_bindings::StateDir;

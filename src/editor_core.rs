@@ -132,7 +132,7 @@ pub enum ResolvedTarget {
 
 /// Where an asynchronous continuation's result belongs, captured
 /// **synchronously** at request time (Journey Stage 1a, Q#JR14;
-/// generalized by `docs/destination-capture-framing.md`).
+/// generalized by `docs/archive/framings/destination-capture-framing.md`).
 ///
 /// The work that satisfies such a request is asynchronous (a directory
 /// listing is worker-dispatched and must be awaited; so is a `git`

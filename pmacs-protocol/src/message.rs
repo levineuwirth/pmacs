@@ -89,7 +89,7 @@ pub enum Key {
     Unknown(u32),
 }
 
-/// The nine built-in auto-pair characters (docs/auto-pairing-framing.md
+/// The nine built-in auto-pair characters (docs/archive/framings/auto-pairing-framing.md
 /// Q#AP1). Both frontends' optimistic classifiers exclude these so they
 /// always round-trip through daemon dispatch: the typed opener and the
 /// pairing hook's closer then land as adjacent daemon-peer undo units,

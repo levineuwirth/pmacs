@@ -6,7 +6,7 @@
 //! here — Stage 2 (grid) and Stage 3 (GPU) consume the store; the
 //! semantic producer ships it as `FoldState`.
 //!
-//! Design (see `docs/folding-framing.md`, approved rev 5):
+//! Design (see `docs/archive/framings/folding-framing.md`, approved rev 5):
 //!
 //! - **Store = a set of byte ranges** attached to the buffer as a
 //!   [`View`] so it translates across every edit, provenance-blind

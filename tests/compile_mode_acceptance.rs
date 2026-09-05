@@ -1,5 +1,5 @@
 //! Compile-mode acceptance (Arc 5 stage 1,
-//! docs/compile-mode-framing.md, items 1–33; item 34 lives as unit
+//! the archived compile-mode framing, items 1–33; item 34 lives as unit
 //! tests in src/process.rs, item 35 in
 //! `tests/compile_mode_crdt_acceptance.rs`).
 //!

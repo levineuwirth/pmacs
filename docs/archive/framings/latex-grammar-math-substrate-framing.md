@@ -9,7 +9,7 @@ in-flight-lane snapshot; rev 3 folds in two provenance-wording corrections —
 the fork-vs-upstream attribution and the now-discharged provenance diff — and
 relaxes the `Cargo.toml` sequencing note. See §0.1 for the changelog.
 
-Parent arc: `docs/inline-math-framing.md`. That note frames the full
+Parent arc: `docs/archive/framings/inline-math-framing.md`. That note frames the full
 four-tier inline-math renderer; its Tier 4 (GPU render) lands on
 `pmacs-gpu/src/main.rs`, the render path that folding and any future math
 draw pass also contend for. **This lane deliberately carves out only the
@@ -313,7 +313,7 @@ quality pass.
 ### Q#LX5 — The math parser is deferred, not front-run (decided)
 
 `src/math_parse.rs` (LaTeX math → the `MathNode` AST in
-`docs/inline-math-framing.md` §Tier 2, **~500 lines** + a ~200-entry symbol
+`docs/archive/framings/inline-math-framing.md` §Tier 2, **~500 lines** + a ~200-entry symbol
 map) is pure, dependency-free, and conflict-free. Reviewer and author concur:
 **defer it** and land it beside its Tier 3 layout consumer. Rationale, beyond
 the no-build-ahead discipline (folding refuses `BlockAdornments`;
@@ -410,9 +410,9 @@ itself, per Q#LX5.)
 
 ## 7. Prior art in pmacs
 
-- `docs/inline-math-framing.md` — the parent arc; this lane is its Tier 1
+- `docs/archive/framings/inline-math-framing.md` — the parent arc; this lane is its Tier 1
   substrate, with the Tier 2 parser and Tiers 3–4 deferred.
-- `docs/multi-language-injections-framing.md` / PR #122 — the
+- `docs/archive/framings/multi-language-injections-framing.md` / PR #122 — the
   `ParseTreeBundle` + `Layer` injection engine that a future
   `(math_environment) @math` capture rides (Q#LX4).
 - PR #132 (modeline detection) — the extension→language chain

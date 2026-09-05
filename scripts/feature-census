@@ -20,10 +20,10 @@
 # CLAUDE.md gate --- had never executed in CI. Nobody was ignoring a red
 # signal; there was no signal.
 #
-# docs/active-work.md therefore says the figure "moves with every merge
-# and must be re-measured, not quoted." That instruction had no tool, so
-# every re-measurement was a hand-rolled `--list` pipeline. This is that
-# tool.
+# The work ledger of the time therefore said the figure "moves with
+# every merge and must be re-measured, not quoted." That instruction had
+# no tool, so every re-measurement was a hand-rolled `--list` pipeline.
+# This is that tool.
 #
 # EXIT STATUS: 0 when the census completes (and, with --covers, the
 # claim holds); 1 when a --covers claim FAILS; 2 on usage errors; 3 when

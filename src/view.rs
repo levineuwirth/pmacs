@@ -221,7 +221,7 @@ impl LayoutCtx {
 }
 
 /// How a line wider than the viewport is shown --- the long-lines
-/// stage, `docs/long-lines-framing.md`.
+/// stage, `docs/archive/framings/long-lines-framing.md`.
 ///
 /// # Why the renderer is told, rather than asking
 ///
@@ -598,7 +598,7 @@ mod tests {
         assert_eq!(vp.row_offset_of(0, 5), Some(2), "rows below shift up");
     }
 
-    /// C9: §4 of `docs/crdt-identity-undo-framing.md` enumerates every
+    /// C9: §4 of `docs/archive/framings/crdt-identity-undo-framing.md` enumerates every
     /// in-tree `on_edit` override so that the consumers of a
     /// version-only history `Edit` are a closed set. This asserts the
     /// set is still what the census measured.
@@ -707,7 +707,7 @@ mod tests {
         assert_eq!(
             found, expected,
             "C9: the in-tree `on_edit` override set no longer matches the \
-             census in docs/crdt-identity-undo-framing.md §4. Every \
+             census in docs/archive/framings/crdt-identity-undo-framing.md §4. Every \
              override is a consumer of the version-only history `Edit` \
              and needs classifying there."
         );

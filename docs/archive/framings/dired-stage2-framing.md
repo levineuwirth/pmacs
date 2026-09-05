@@ -32,7 +32,7 @@ runtime substrate scouted here. The current PR base and merge parent are
 therefore `7586905`, while `6bee09d` remains the explicit code-census
 anchor.
 
-Continues `docs/dired-framing.md` (rev 7, approved; Stage 0 merged as
+Continues `docs/archive/framings/dired-framing.md` (rev 7, approved; Stage 0 merged as
 #162, Stage 1 as #165). That document's §6 and §7 carry the *approved*
 shape of marks and operations; this one re-verifies every claim in them
 against the tree, corrects what has drifted or was wrong, and adds what a
@@ -447,7 +447,7 @@ one real.**
 ### Round 6 (rev 6 → rev 7) — cross-lane reconciliation with PR #186
 
 Not a review of this document. **PR #186**
-(`docs/resource-op-delete-guard-framing.md`, branch
+(`docs/archive/framings/resource-op-delete-guard-framing.md`, branch
 `resource-op-delete-guard`, based on the same `ad41cf1`) frames a guard
 for `apply_resource_op`'s delete arm that **refuses before touching
 disk** when any affected buffer is modified. Rev 6 said the opposite for
@@ -2923,7 +2923,7 @@ that deserve an undivided reviewer.
   `R` is point-based in §4 rather than an unstated exception.
 - **Symbolic chmod** (`u+x`), needing a mode-expression parser.
 - **`i` (insert subdirectory)** — the recursive in-buffer case, already a
-  named deferral in `docs/dired-framing.md` §13, and the place a shared
+  named deferral in `docs/archive/framings/dired-framing.md` §13, and the place a shared
   tree primitive (`COHERENCE.md` §14) would land.
 - **`!` shell command on marks**, compress, symlink, hardlink.
 - **A no-replace rename primitive** (G6) — `renameat2(RENAME_NOREPLACE)`
@@ -3802,7 +3802,7 @@ self-contradictory).** Two things it got wrong and this corrects:
 - **The line counts were quoted, not measured.** Rev 5 described the
   document as *1,570 lines* — a figure from two revisions earlier — and
   the ledger in turn reported *~2,630*. **Measured at this revision:
-  `docs/dired-stage2-framing.md` is 3,844 lines and
+  `docs/archive/framings/dired-stage2-framing.md` is 3,844 lines and
   `docs/active-work.md` is 1,003.** *A census is a reading, not a
   constant*, and that applies to a framing's count of its own size
   exactly as it applies to its count of the tree. Neither number above

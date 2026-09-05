@@ -12,7 +12,7 @@ wire message exists. This arc wires it end-to-end in both frontends:
 type, see candidates, TAB/RET accept.
 
 Roadmap context: `docs/roadmap-2026-07.md` Arc 1a. Closest wire
-precedent: `docs/gpu-minibuffer-framing.md` (the
+precedent: `docs/archive/framings/gpu-minibuffer-framing.md` (the
 `SearchPrompt`/`MenuPrompt`/`MinibufferPrompt` family). Tightened
 2026-07-07 after a code review pass against the current tree
 (findings folded into Q#C1/C3/C6/C7/C8/C9 below).

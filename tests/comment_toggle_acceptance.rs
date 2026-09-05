@@ -1,4 +1,4 @@
-//! Comment-toggle acceptance (Arc 2, docs/comment-toggle-framing.md).
+//! Comment-toggle acceptance (Arc 2, the archived comment-toggle framing).
 //!
 //! Dispatch-driven: `M-;` through `dispatch_key`, `M-x` through the
 //! real minibuffer. Buffers are file-backed (language detection needs

@@ -1,6 +1,6 @@
 // tests/lsp_latex_acceptance.rs --- LSP language coverage: LaTeX.
 
-//! `docs/lsp-language-coverage-framing.md` §6, one test per bullet.
+//! the archived lsp-language-coverage framing §6, one test per bullet.
 //!
 //! The lane ships exactly one thing: `pmacs.lsp.config.latex`, command
 //! `texlab`, with a function-valued `root` that walks up for texlab's

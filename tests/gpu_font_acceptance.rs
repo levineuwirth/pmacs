@@ -1,5 +1,5 @@
 // gpu_font_acceptance.rs --- gpu-set-font Arc 4 stage 2 acceptance
-// (docs/gpu-set-font-framing.md, acceptance items 2–7; item 1's pins
+// (the archived gpu-set-font framing, acceptance items 2–7; item 1's pins
 // live in src/protocol.rs, item 8's TUI drop arm is a unit in
 // src/frontend.rs, items 9–14 and 16–19 are GPU routes in pmacs-gpu's
 // headless suite, and item 15 is the docs themselves).

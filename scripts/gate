@@ -9,8 +9,8 @@
 #   scripts/gate --prune [--force]
 #   scripts/gate --self-test
 #
-# Framing: docs/gate-script-framing.md (revision 4, approved), and
-# docs/gate-protocol-build-framing.md (revision 5, approved) for the
+# Framing: the archived gate-script framing (revision 4, approved), and
+# the archived gate-protocol-build framing (revision 5, approved) for the
 # crdt build step, --self-test and --print-plan-named.
 #
 # WHY A PER-WORKTREE TARGET DIRECTORY. This machine exports one
@@ -48,8 +48,8 @@ usage: scripts/gate [--acceptance SUITE]... [--protocol] [--print-plan]
        scripts/gate --self-test
 
   --acceptance SUITE  a touched acceptance suite to run (repeatable).
-                      docs/agent-handoff.md section 3 stays authoritative
-                      for CHOOSING these; this script only runs what it
+                      the phase's task row stays authoritative for
+                      CHOOSING these; this script only runs what it
                       is handed. A script cannot infer them from a
                       working tree, and one that guessed would report
                       coverage it does not have.
@@ -195,8 +195,8 @@ ensure_target_dir() {
 # ---------------------------------------------------------------------
 # The plan.
 #
-# Emits one `name<TAB>command` line per gate. docs/agent-handoff.md
-# section 3 owns the REASONING for each of these --- why --workspace and
+# Emits one `name<TAB>command` line per gate. CLAUDE.md owns the
+# REASONING for each of these --- why --workspace and
 # never --tests, why --no-fail-fast, why --skip basedpyright, when
 # --protocol applies. What lives here is the executable form, so it
 # cannot be retyped differently each time.

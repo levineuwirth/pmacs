@@ -307,12 +307,12 @@ Mirrors the #144 / CUDA conventions (`src/syntax.rs` table guards + smokes;
 
 ## 7. Prior art in pmacs
 
-- **LaTeX lane #144** (`docs/latex-grammar-math-substrate-framing.md`) — the
+- **LaTeX lane #144** (`docs/archive/framings/latex-grammar-math-substrate-framing.md`) — the
   grammar-add mechanics, the table-guard/smoke/paint test conventions, and the
   compile-gate-plus-paint-test discipline. (Its overlay convention is not
   needed here.)
 - **Multi-language injections #122**
-  (`docs/multi-language-injections-framing.md`) — the `ParseTreeBundle` +
+  (`docs/archive/framings/multi-language-injections-framing.md`) — the `ParseTreeBundle` +
   `Layer` engine HTML's injections ride.
 - **markdown → rust fenced code** (`src/syntax.rs:848`, tested by
   `src/highlight.rs`'s `grid_paints_injected_child_keyword`) — the working

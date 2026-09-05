@@ -41,10 +41,14 @@ registry, composable statuslines, multi-language syntax processing,
 cross-frontend tab-width parity, a directory browser, a describe/list
 command family, and a bottom panel on both frontends.
 
-Current direction lives in `COHERENCE.md` (the product-coherence thesis
-and its audited priority order) and `docs/agent-handoff.md` (durable
-project state). `docs/roadmap-2026-07.md` is a historical planning
-snapshot and is no longer the authority.
+An audit taken on 2026-09-05, kept in the repository as
+`docs/audits/2026-09-05.md`, found the editor a few dozen small, local
+changes short of a daily driver on both frontends, and the process
+spending its capacity on records rather than on those changes. Its
+second section sets the order of work that follows. `COHERENCE.md`
+carries the product thesis; planning is kept outside the repository.
+Everything under `docs/archive/`, and `docs/roadmap-2026-07.md`, is
+history rather than direction.
 
 Public contributions are open: use, evaluate, file issues, and send
 pull requests.
@@ -347,7 +351,7 @@ builtin/             Lua runtime shipped with the binary
   runtime/              async, lsp, syntax, mcp, fs runtimes
   packages/repl/        the bundled REPL package
 
-docs/                design notes, framing docs, and the roadmap
+docs/                architecture notes and dated audits; framings archived under docs/archive/
 tests/               integration tests (acceptance gates per milestone)
 ```
 

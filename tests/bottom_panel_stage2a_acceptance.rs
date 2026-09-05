@@ -1,5 +1,5 @@
 // bottom_panel_stage2a_acceptance.rs --- bottom-panel Stage 2A
-// (docs/bottom-panel-stage2-framing.md, criteria A2A-1 / A2A-2 / A2A-3).
+// (the archived bottom-panel-stage2 framing, criteria A2A-1 / A2A-2 / A2A-3).
 
 //! Classified §1.3 census routing + the per-window painter extraction.
 //! No wire change.

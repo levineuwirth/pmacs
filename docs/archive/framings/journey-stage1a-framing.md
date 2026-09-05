@@ -353,7 +353,7 @@ into the origin document window, rehoming if a hook closed it
 
 ### 2.9 This deliberately supersedes part of the GPU initial-target framing
 
-`docs/gpu-initial-target-framing.md` Q#GT6 (`:278`) lists `IsADirectory`
+`docs/archive/framings/gpu-initial-target-framing.md` Q#GT6 (`:278`) lists `IsADirectory`
 among initial-target failures; its acceptance 10 (`:550`) requires *"a
 directory/permission-denied target returns a specific failure before
 ready/window creation"*. **1a supersedes the directory half only.**
@@ -1083,6 +1083,6 @@ One feature, one branch, one PR: `journey-stage1a-directory-open`.
    extraction behavior-preserving before anything depends on it.
 5. `tests/journey_acceptance.rs` (§5) + N1, N2, N3, N5, N11.
 6. `COHERENCE.md` §2 verdict table and §20 Priority 1 rewritten per §25;
-   `docs/gpu-initial-target-framing.md` Q#GT6 + acceptance 10 amended for
+   `docs/archive/framings/gpu-initial-target-framing.md` Q#GT6 + acceptance 10 amended for
    the superseded directory case (§2.9); `docs/agent-handoff.md` §1 and
    `docs/active-work.md` updated.

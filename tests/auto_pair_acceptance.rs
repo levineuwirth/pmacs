@@ -1,4 +1,4 @@
-//! Auto-pairing acceptance (Arc 2, docs/auto-pairing-framing.md).
+//! Auto-pairing acceptance (Arc 2, the archived auto-pairing framing).
 //!
 //! Dispatch-driven: pair chars round-trip through `dispatch_key`
 //! (Q#AP1 removed them from both optimistic classifiers, so this IS

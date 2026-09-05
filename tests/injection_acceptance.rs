@@ -6,7 +6,7 @@
 //! the code they exercise (`syntax.rs` / `semantic_render.rs` /
 //! `highlight.rs` / `pmacs-gpu`), where `run_parse`, `scoped_style_spans`,
 //! and `source_color_at` are reachable. See the framing acceptance list in
-//! `docs/multi-language-injections-framing.md`.
+//! the archived multi-language-injections framing.
 
 use std::fmt::Write as _;
 use std::sync::Arc;

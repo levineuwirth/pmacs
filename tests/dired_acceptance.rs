@@ -1,6 +1,6 @@
 // tests/dired_acceptance.rs --- dired arc Stage 1 acceptance.
 
-//! Acceptance for the dired view (`docs/dired-framing.md` §14 items
+//! Acceptance for the dired view (the archived dired framing §14 items
 //! 1-16, Q#DR2-DR10). Item 17 --- "the fixture still passes" --- is a
 //! gate item rather than a test here: `m8_1`/`m8_2`/`m8_3` prove the
 //! `read_dir` opt is additive by continuing to pass unchanged.
@@ -1726,7 +1726,7 @@ fn dired_renders_10k_entries_within_200ms() {
 
 // ---------------------------------------------------------------------------
 // Generated-buffer immutability, Stage 1
-// (docs/generated-buffer-immutability-framing.md §6, Stage 1)
+// (the archived generated-buffer-immutability framing §6, Stage 1)
 // ---------------------------------------------------------------------------
 
 /// Criterion 3 [`main`] --- neither `C-/` nor `M-x buffer.undo` can empty

@@ -1,6 +1,6 @@
 //! dired Stage 2a acceptance — rename and delete reconciliation.
 //!
-//! `docs/dired-stage2-framing.md` §5, §6, §10; acceptance items 23–38
+//! the archived dired-stage2 framing §5, §6, §10; acceptance items 23–38
 //! and 50–55.
 //!
 //! **This suite contains no dired content.** Stage 2a ships no dired

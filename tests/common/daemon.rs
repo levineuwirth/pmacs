@@ -162,7 +162,7 @@ pub fn spawn_daemon_process_with_env(socket_path: &Path, env_vars: &[(&str, &str
         .stdout(Stdio::null())
         .stderr(Stdio::from(stderr));
     // All FIVE storage variables, not just `XDG_CONFIG_HOME`
-    // (`docs/test-ambient-config-isolation-framing.md` §1.6a).
+    // (the archived test-ambient-config-isolation framing §1.6a).
     //
     // `HOME` above is only a *fallback*: it isolates a root only while
     // the corresponding `XDG_*` variable is unset. On a developer

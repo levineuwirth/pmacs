@@ -33,7 +33,7 @@
 -- `set_round_trip_input` would fix it and is rejected — it also makes
 -- `dispatch_idle` report false, so RET would stop inserting a newline.
 --
--- Framing: docs/lean4-mode-framing.md Q#LN11, Q#LN21, Q#LN22.
+-- Framing: docs/archive/framings/lean4-mode-framing.md Q#LN11, Q#LN21, Q#LN22.
 
 pmacs.lean_input = pmacs.lean_input or {}
 

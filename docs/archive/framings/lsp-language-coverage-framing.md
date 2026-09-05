@@ -69,7 +69,7 @@ problem that cannot occur.** Three facts, read rather than assumed:
   `src/syntax.rs:1110-1112` — `name: "latex"`,
   `extensions: &["tex", "latex", "sty", "cls"]`.
 - **Grammar-extension detection sits AHEAD of the LSP filetype map.**
-  The merged `docs/latex-grammar-math-substrate-framing.md:166-171`
+  The merged `docs/archive/framings/latex-grammar-math-substrate-framing.md:166-171`
   states the chain — *modeline → grammar extension → LSP filetype map →
   filename map → shebang* — and concludes that adding those extensions
   "**wires the whole chain with no Lua edit**".
@@ -194,7 +194,7 @@ evidence, which is a one-line change at that point. OCaml needs
 `ocaml-lsp-server` via opam (not packaged for Arch) and is not close.
 
 **Renumbered from Q#HS1 deliberately.** The merged
-`docs/latex-grammar-math-substrate-framing.md` already uses **Q#LX2**
+`docs/archive/framings/latex-grammar-math-substrate-framing.md` already uses **Q#LX2**
 for a different question — its grammar vendoring source (`:83`) — so
 revision 1's Q#LX2 collided with a live ID in the same language area.
 This document's LaTeX questions are Q#LX1 and the root question in §3;

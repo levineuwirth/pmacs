@@ -218,7 +218,7 @@ pinned to the bottom of the frame, resizable by dragging its divider, which
 feature code targets **by policy** instead of by stealing the selected window.
 This is what makes vterm feel like Emacs's vterm rather than `term` in a stolen
 buffer, and it is the presentation substrate flycheck, compile, LSP panels, DAP
-(`docs/dap-debugging-framing.md`, **parked awaiting this arc**), remotes, and
+(`docs/archive/framings/dap-debugging-framing.md`, **parked awaiting this arc**), remotes, and
 MCP surfaces all want.
 
 The feature is a bottom panel. The **missing concept** underneath it is Emacs's
@@ -1398,7 +1398,7 @@ painting another frontend's panel. **Updating the now-stale invariant comment at
   `FrontendEvent::TerminalPointer`. Gated in both directions.
 - **No future version is reserved.** Stage 2 takes the next available version
   at implementation time—v21 if no intervening protocol PR lands—per
-  `docs/dap-debugging-framing.md` Q#DAP8.
+  `docs/archive/framings/dap-debugging-framing.md` Q#DAP8.
 - **Every gate keys on the daemon's own state.** All three events require an
   authenticated semantic session whose claimed `frontend_id` equals the
   transport source and that negotiated the panel version/capability.
@@ -3783,7 +3783,7 @@ existing island" is the kind of impact that gets omitted precisely
 ### Consequence for the GUI arc
 
 This slice takes **v25**, so GUI arc **1e's `OpenTarget` moves to
-v26** — corrected in `docs/gui-stage1-input-framing.md` **by this
+v26** — corrected in `docs/archive/framings/gui-stage1-input-framing.md` **by this
 slice**, because a canonical document that says v25 is false the moment
 this lands. `ADVERTISED_PROTOCOL_VERSION` stays pinned at **20**.
 
@@ -3824,7 +3824,7 @@ beyond buffer and mode scopes; horizontal (`C-x {`/`}`) resize.
 
 ## 8. Prior art in pmacs
 
-Folding Stage 2 (`docs/folding-stage2-framing.md`, `src/fold_view.rs`) for the
+Folding Stage 2 (`docs/archive/framings/folding-stage2-framing.md`, `src/fold_view.rs`) for the
 per-`FrontendView` policy bit, the non-`Default` discipline, and per-window map
 derivation; Vterm Stage 2 for the controller model, the `C-c` escape, and
 per-view projection; Vterm Stage 3 for the whole-grid frame message, `validate`,

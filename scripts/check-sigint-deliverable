@@ -8,9 +8,9 @@
 # anything either of them spawns. Tests that signal a child then wait
 # for it to die will hang until their own deadline and report that as a
 # teardown defect. One lane spent nine framing revisions on exactly that
-# misreading; see docs/gpu-probe-sigint-framing.md §4c.
+# misreading; see the archived gpu-probe-sigint framing §4c.
 #
-# INTERFACE (docs/gpu-probe-sigint-framing.md §7c) --- a validated
+# INTERFACE (the archived gpu-probe-sigint framing §7c) --- a validated
 # (status, token) PAIR. Callers rely on both halves and MUST NOT
 # re-derive the classification:
 #

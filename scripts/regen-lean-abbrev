@@ -10,7 +10,7 @@ an ordinary PR with a visible diff — the diff is the review.
 
 There is no automatic sync and none is wanted: an editor that silently
 re-downloads its input method has a supply-chain problem, not a feature
-(docs/lean4-mode-framing.md Q#LN11).
+(the archived lean4-mode framing Q#LN11).
 
 The emit is an ORDERED SEQUENCE, not a map. Upstream resolves
 equal-length abbreviation ties by source declaration order — 101
@@ -244,7 +244,7 @@ HEADER = """\
 --
 -- Not fetched at runtime and not a package dependency: the input method
 -- has to work offline and on first launch. Upkeep is a documented
--- manual process — see docs/lean4-mode-framing.md Q#LN11.
+-- manual process — see the archived lean4-mode framing Q#LN11.
 
 pmacs = pmacs or {{}}
 

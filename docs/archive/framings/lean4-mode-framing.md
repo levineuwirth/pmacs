@@ -1232,7 +1232,7 @@ the retro-paint, or own the fork.
 
 `pmacs.comment.strings.lean4 = "--"`. Lean's block comment is `/- ... -/`
 and its docstring is `/-- ... -/`; block-comment toggling is an existing
-named deferral of the comment arc (`docs/comment-toggle-framing.md`) and
+named deferral of the comment arc (`docs/archive/framings/comment-toggle-framing.md`) and
 this lane does not front-run it.
 
 ### Q#LN6 — Pair set includes `⟨⟩`, and the degradation is named

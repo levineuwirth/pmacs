@@ -1,6 +1,6 @@
 //! `scripts/gate` — the behaviour a shell script can be held to.
 //!
-//! Framing: `docs/gate-script-framing.md` §4, and §2a for the
+//! Framing: the archived gate-script framing §4, and §2a for the
 //! `TMPDIR` isolation these rows cover (revision 6).
 //!
 //! # Why these tests exist, and why they are shaped like this
@@ -38,7 +38,7 @@ fn repo_root() -> PathBuf {
 }
 
 /// The SIGINT-deliverability helper the gate and the panel suite share
-/// (`docs/gpu-probe-sigint-framing.md` §7c).
+/// (the archived gpu-probe-sigint framing §7c).
 fn sigint_helper() -> PathBuf {
     repo_root().join("scripts/check-sigint-deliverable")
 }

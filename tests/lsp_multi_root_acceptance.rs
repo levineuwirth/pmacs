@@ -1,6 +1,6 @@
 //! Arc 8 Stage 2 acceptance — multi-root LSP server affinity.
 //!
-//! `docs/lean4-mode-framing.md` Q#LN15, acceptance 13–21.
+//! the archived lean4-mode framing Q#LN15, acceptance 13–21.
 //!
 //! This suite deliberately contains **no Lean content**. `ensure_server`
 //! (`builtin/runtime/lsp.lua`) is the single server-affinity function for

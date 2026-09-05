@@ -1,7 +1,7 @@
 # Folding Stage 2 — grid (daemon-rendered) collapse — framing (Arc 6)
 
 **Revision 4 — 2026-07-23. Status: DRAFT for review (rounds 1–3 findings
-addressed).** Parent architecture (`docs/folding-framing.md`, rev 5) is APPROVED
+addressed).** Parent architecture (`docs/archive/framings/folding-framing.md`, rev 5) is APPROVED
 and Stage 1 (the headless fold engine) is MERGED as **#142** (canonical `main` @
 `c49a8c7`). This doc reframes **Stage 2** in detail off that base, per the
 parent's §8/§14. Numbering continues the parent's `Q#FD…` scheme from `Q#FD12`.

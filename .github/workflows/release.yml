@@ -1,7 +1,7 @@
 name: Release
 
 # Distribution Stage 1 — binaries on tag. See
-# docs/distribution-stage1-framing.md.
+# the archived distribution-stage1 framing.
 #
 # Scope is deliberately one stage: build the two shipped binaries when a
 # `v*` tag is pushed and attach them to a GitHub Release. There are no
@@ -345,7 +345,7 @@ jobs:
 
           Channels, in-place update, rollback, signing, reproducible
           builds, package-manager distribution, and Windows. See
-          `docs/distribution-stage1-framing.md` §5.
+          the archived distribution-stage1 framing §5.
           NOTES
           echo "notes written"
 

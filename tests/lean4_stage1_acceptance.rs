@@ -1,4 +1,4 @@
-//! Lean 4 mode, Stage 1 acceptance (Arc 8, `docs/lean4-mode-framing.md`).
+//! Lean 4 mode, Stage 1 acceptance (Arc 8, the archived lean4-mode framing).
 //!
 //! Covers the framing's Stage 1 criteria that live above the Rust
 //! substrate — major mode, modeline aliasing, comment toggle, the pair

@@ -1,5 +1,5 @@
 // bottom_panel_stage1_acceptance.rs --- bottom-panel Stage 1 acceptance
-// (docs/bottom-panel-framing.md, acceptance items 1-35).
+// (the archived bottom-panel framing, acceptance items 1-35).
 
 //! Window placement + TUI side windows. No wire change.
 //!

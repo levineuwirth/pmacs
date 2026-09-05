@@ -17,7 +17,7 @@
 -- 0600 files), are deleted when the buffer is saved or killed, and
 -- survive a crash or a quit with unsaved changes.
 --
--- Framing: docs/autosave-recovery-framing.md.
+-- Framing: docs/archive/framings/autosave-recovery-framing.md.
 
 pmacs.autosave = pmacs.autosave or {}
 

@@ -1,4 +1,4 @@
-//! Line-wrap acceptance (long lines, `docs/long-lines-framing.md`).
+//! Line-wrap acceptance (long lines, the archived long-lines framing).
 //!
 //! `ui.line-wrap` is **buffer-local** (Q#LL2), and buffer-local is the
 //! whole point rather than a nicety: prose wants wrapping and a log file

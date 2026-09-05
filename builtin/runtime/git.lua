@@ -1,5 +1,5 @@
 -- git.lua --- Git integration Stage 1: read-only status and diff.
--- Framing: docs/git-integration-framing.md (revision 5).
+-- Framing: docs/archive/framings/git-integration-framing.md (revision 5).
 --
 -- Two surfaces and nothing else:
 --

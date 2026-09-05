@@ -611,7 +611,7 @@ cmd { name = "editor.switch-buffer",
         }
       end }
 
--- find-file (dired arc Stage 0; docs/dired-framing.md Q#DR11) ----------------
+-- find-file (dired arc Stage 0; docs/archive/framings/dired-framing.md Q#DR11) ----------------
 --
 -- Until now pmacs had no discoverable way to open a file by path: a file
 -- entered a session only from the CLI, an LSP jump, a project-search
@@ -768,7 +768,7 @@ cmd { name = "editor.execute-command",
       end }
 
 -- Workers and project search (T M3.6, T M3.7; grep-mode upgrade per
--- docs/compile-mode-framing.md Q#CM7) ---------------------------------------
+-- docs/archive/framings/compile-mode-framing.md Q#CM7) ---------------------------------------
 --
 -- `pmacs.workers.grep` is the runtime API; the user-facing entry
 -- point is `M-x project.search`, which prompts for a query and

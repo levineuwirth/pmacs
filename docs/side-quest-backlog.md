@@ -16,7 +16,7 @@ against the handoff before starting it.
 
 **Scope.** This is the *side-quest* backlog: self-contained,
 frontend-agnostic-ish work that does **not** belong to the **themes /
-faces main quest** (Arc 4, `docs/theme-faces-framing.md`). Anything about
+faces main quest** (Arc 4, `docs/archive/framings/theme-faces-framing.md`). Anything about
 colors, faces, syntax-highlight *styling*, or semantic-token→color
 mapping is excluded here and lives with the theme workstream — those are
 listed once, at the bottom, so the reader knows they were seen.
@@ -133,7 +133,7 @@ The direct continuation of the #114–#118 grammar/detection stack.
   projection, and minimap widths. GPU expansion retains source-tab provenance,
   so caret, hit, selection, and diagnostic geometry remain byte-correct through
   adornments and soft wraps. Source text and protocol ranges remain raw; this
-  adds no config key or wire change. See `docs/tab-width-parity-framing.md`.
+  adds no config key or wire change. See `docs/archive/framings/tab-width-parity-framing.md`.
 - **Real `read_only` buffer flag** on both edit paths — true immutability
   for panels / REPL / generated buffers.
 - ~~**Mode system wiring**~~ — **SHIPPED as #129.** Per-buffer major modes

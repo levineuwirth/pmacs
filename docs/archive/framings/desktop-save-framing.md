@@ -8,7 +8,7 @@ rebuilds them on startup — Emacs's `desktop.el`, opt-in.
 Builds on phase 1 (PR #98, merged): the `pmacs.state` confined store,
 `state_dir()`, `goto_byte`/`set_view_top`/`view_top`, and saveplace
 (which already restores a file's cursor on open — desktop leans on it).
-Parent decisions: `docs/persistence-framing.md` Q#PS5-7. This doc nails
+Parent decisions: `docs/archive/framings/persistence-framing.md` Q#PS5-7. This doc nails
 the phase-2 implementation against ground truth.
 
 ## Ground truth (scouted; file:line in the commit)

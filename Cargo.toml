@@ -220,7 +220,7 @@ tree-sitter-yaml = "0.7"
 tree-sitter-md = "0.5"
 # LaTeX / TeX (`.tex`/`.latex`/`.sty`/`.cls`) — the "basic LaTeX mode"
 # foothold and the tier-1 detection substrate for the inline-math arc (lane
-# framing `docs/latex-grammar-math-substrate-framing.md`). The canonical crate name
+# framing `docs/archive/framings/latex-grammar-math-substrate-framing.md`). The canonical crate name
 # `tree-sitter-latex` is squatted by a broken 0.1.0 repackage that ships no
 # `scanner.c` for its declared external tokens and therefore CANNOT LINK
 # (undefined `tree_sitter_latex_external_scanner_*`). `codebook-tree-sitter-latex`
@@ -241,7 +241,7 @@ codebook-tree-sitter-latex = "0.6"
 # engine (see `crate::syntax::BUILTIN_LANGUAGES`).
 tree-sitter-html = "0.23"
 tree-sitter-css = "0.25"
-# Lean 4 (`.lean`) — Arc 8 Stage 1 (`docs/lean4-mode-framing.md`, Q#LN1).
+# Lean 4 (`.lean`) — Arc 8 Stage 1 (`docs/archive/framings/lean4-mode-framing.md`, Q#LN1).
 # `leanprover` ships no tree-sitter grammar (Lean parses with its own
 # kernel), so both candidates are third-party. The obvious-looking
 # `tree-sitter-lean4` is NOT usable: it depends on `tree-sitter = "0.25"`

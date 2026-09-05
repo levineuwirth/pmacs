@@ -2903,7 +2903,7 @@ deliberately asserts both sources on opposite sides of a Rust lift.
    **Note what this criterion is NOT.** `dired_acceptance.rs:999`'s
    `status(&s).contains("read-only")` passes both before and after
    adoption, because `BufferError::ReadOnly` and the intercept's own
-   message both contain that substring — the trap `docs/dired-stage2-framing.md`
+   message both contain that substring — the trap `docs/archive/framings/dired-stage2-framing.md`
    §3.1 hands to this lane. Criterion 5 is where the distinction is
    asserted, on the *full* message text; this one must not be counted as
    coverage of the adoption.

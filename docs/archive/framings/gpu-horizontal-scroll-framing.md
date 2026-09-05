@@ -42,7 +42,7 @@ stays the default until it lands.
 
 ## 1. Stage 4's framing was wrong about the hard part
 
-**§1.3 of `docs/horizontal-scroll-framing.md` said the GPU "needs a
+**§1.3 of `docs/archive/framings/horizontal-scroll-framing.md` said the GPU "needs a
 mechanism that does not exist" and called it the fact most likely to
 invert the cost estimate. It was half right and the half it got wrong
 is the expensive half.**

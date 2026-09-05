@@ -119,7 +119,7 @@ detailed in §1.1–§1.3: **substrate without surface**, **the silence
 asymmetry**, and **per-arc coherence debt**.
 
 Coherence-shaped work already in flight at audit time: find-file /
-dired Stage 0 (`C-x C-f`, merged #162, `docs/dired-framing.md`) and its
+dired Stage 0 (`C-x C-f`, merged #162, `docs/archive/framings/dired-framing.md`) and its
 Stage 1 directory view (merged #165), bottom panel Stage 1 (merged #155),
 multi-root LSP affinity (merged #161), the config registry foundation
 (merged #127).
@@ -227,7 +227,7 @@ type"). Working tree-sitter highlighting **actively masks** the failure —
 the user sees colored text and assumes language intelligence is on.
 
 **Journey Stage 1b-2 answers this specific case**
-(`docs/journey-stage1b2-lsp-guidance-framing.md`): the failure is
+(`docs/archive/framings/journey-stage1b2-lsp-guidance-framing.md`): the failure is
 reported once per `(language, root, command)` with the command, the
 language and the errno; `M-x lsp.status` renders a durable `*lsp*` panel;
 and the modeline says `LSP:!` instead of nothing. **The asymmetry itself
@@ -436,8 +436,8 @@ attached column is evidence, separating a daemon-boundary gap from a
 frontend-local one.
 
 Anchors: `COHERENCE.md` §2's ground-truth rows, the GUI arc audit at
-`4bc55e8` (`docs/gui-arc-framing.md` §2), Q#DS9
-(`docs/desktop-save-framing.md`), and `builtin/runtime/welcome.lua`.
+`4bc55e8` (`docs/archive/framings/gui-arc-framing.md` §2), Q#DS9
+(`docs/archive/framings/desktop-save-framing.md`), and `builtin/runtime/welcome.lua`.
 
 **What counts as "advertised in-product", stated because an earlier
 draft of this paragraph got it wrong and mis-graded two steps.** The
@@ -565,7 +565,7 @@ The literal first arrow of the diagram above failed. `load_file`
 then `read_to_end` → EISDIR, which is not `NotFound`, so
 `EditorState::open` returned `Err` and `main` printed and exited.
 
-**Journey Stage 1a fixed that arrow** (`docs/journey-stage1a-framing.md`).
+**Journey Stage 1a fixed that arrow** (`docs/archive/framings/journey-stage1a-framing.md`).
 `resolve_target_buffer` now answers `ResolvedTarget::Directory` *ahead*
 of the load, `pmacs .` lists the directory in dired, `RET` visits a
 file, and a self-insert lands in it — steps 3 and 5 run end to end,
@@ -984,7 +984,7 @@ Facts that define the gap:
   (`docs/keybindings.md`, `src/minibuffer.rs:470`): the shadows are
   intentionally not user-configurable. The completion framing
   considered and rejected buffer-local binds on teardown-lifecycle
-  grounds (`docs/in-buffer-completion-framing.md:93-105`) — the
+  grounds (`docs/archive/framings/in-buffer-completion-framing.md:93-105`) — the
   objection was a *leaked binding outliving its session*, which is an
   argument for a lifetime-owning layer handle, not against layers.
 - **Three hand-synced guard lists** must be updated per shadow:
@@ -1346,7 +1346,7 @@ layering, provenance, and adoption have not followed.**
 - The registry is typed, described, duplicate-rejected, freeze-aware
   (`StartupOnly`), listener-bearing, and introspectable — see §5. Its
   design decisions (always-store overrides, explicit buffer, no ambient
-  scope) are recorded in `docs/config-registry-framing.md`.
+  scope) are recorded in `docs/archive/framings/config-registry-framing.md`.
 - **Two scopes exist** of the ten layers listed above: global and
   buffer-local. Per-language and per-project are patterns (a hook
   calling `set_local`), not scopes. No profile, workspace, machine, or
@@ -1368,7 +1368,7 @@ layering, provenance, and adoption have not followed.**
   pair sets, comment strings, `pmacs.parse.*` — lives in raw Lua
   outside the registry and is therefore invisible to `describe-setting`
   and any future settings UI. The migration list is already written:
-  `docs/config-registry-framing.md` "named deferrals" (table-valued
+  `docs/archive/framings/config-registry-framing.md` "named deferrals" (table-valued
   settings are the hard prerequisite for LSP/pair/comment tables).
 - **The table-valued gap now has a named, shipped instance.**
   `pmacs.terminal.profiles` (#173) is a raw Lua table sitting beside
@@ -1643,7 +1643,7 @@ Primitive-by-primitive against the list above:
   (project files, package dependency graph, worker trees, git status)
   have not adopted, and dired's recursive `i` insert-subdirectory — the
   second real constraint source — remains the deferral in
-  `docs/dired-framing.md` §13. Dired Stage 1 (merged #165) landed
+  `docs/archive/framings/dired-framing.md` §13. Dired Stage 1 (merged #165) landed
   **without** inventing its own, which is what kept this possible.
 - **Structured table / inspector / diff view** ✗ — none. (`describe.*`
   tables are the inspector's data model without a view; the
@@ -1680,7 +1680,7 @@ What does not:
 - **Code actions apply the first action blindly** — no picker (a
   roadmap "dark matter" item still true at audit).
 - **Git integration reaches status and diff, and no further.** Stage 1
-  (`docs/git-integration-framing.md`) ships `*git-status*` — a
+  (`docs/archive/framings/git-integration-framing.md`) ships `*git-status*` — a
   `listview` panel over `git status --porcelain=v2 --branch -z`, with
   RET visiting the file and `d` showing its file-level diff. There is
   still **no stage, revert, blame, or gutter marker** anywhere in the
@@ -1699,7 +1699,7 @@ What does not:
   real; the sentence overstated it, and the framing that found the
   overstatement is the one that closed the gap.
 - No test run/debug affordances (DAP is a future arc,
-  `docs/dap-debugging-framing.md`).
+  `docs/archive/framings/dap-debugging-framing.md`).
 - No missing-tool guidance affordances (§1.2 — the diagnostic that
   *should* say "rust-analyzer not found — install with rustup" says
   nothing).
@@ -1745,7 +1745,7 @@ not choose sat inside the healthiest concern in this document.
    structural no-op) — with the exact set pending verification of §2b's
    inferred cells.
 2. **The daily-driver blocker list is empty.** **Currently nine open**
-   (`docs/gui-arc-framing.md` §3.1): Escape quits, IME absent,
+   (`docs/archive/framings/gui-arc-framing.md` §3.1): Escape quits, IME absent,
    `translate_key` holes, sub-line/horizontal scroll, no DPI, folding
    dead on the GPU, no session restore, no reconnect, the one-window
    ceiling.
@@ -1861,7 +1861,7 @@ Still missing: channels, in-place update, rollback, signing and
 notarization, reproducible builds, package-manager distribution,
 Windows, Intel macOS, RHEL 9 (below the glibc floor), and
 protocol/package-API compatibility reporting. See
-`docs/distribution-stage1-framing.md` §5, where each is a stated
+`docs/archive/framings/distribution-stage1-framing.md` §5, where each is a stated
 non-goal rather than an omission. Installation is `git clone` + `cargo build --release
 --workspace --features pmacs/crdt` (README), which additionally requires
 knowing the feature-flag matrix (luajit vs lua54 × crdt). Runtime
@@ -2112,7 +2112,7 @@ value is invisible until this one exists") is lifted.
 What Stage 1 deliberately did not do is as important as what it did:
 channels, in-place update, rollback, signing, reproducible builds, and
 package-manager distribution are all still absent, and each is a named
-non-goal in `docs/distribution-stage1-framing.md` §5 rather than an
+non-goal in `docs/archive/framings/distribution-stage1-framing.md` §5 rather than an
 oversight. The next increment is a decision about which of those the
 project actually wants, not a continuation of a plan.
 
@@ -2258,7 +2258,7 @@ document is wired into CLAUDE.md/AGENTS.md as required reading:
 - `CHANGELOG.md` (~line 300) — claims a `describe-key` command for
   self-introspection; no such command ever shipped (the Lua API
   `pmacs.describe.key` exists; the interactive command does not).
-- `docs/config-registry-framing.md` (~658) — claims `describe-setting`
+- `docs/archive/framings/config-registry-framing.md` (~658) — claims `describe-setting`
   renders through `src/help.rs`; it hand-builds its own text in
   `builtin/commands/default.lua`.
 - `src/workers_buffer.rs` module doc — says the completions ring caps

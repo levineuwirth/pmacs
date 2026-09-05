@@ -1,5 +1,5 @@
 //! Typed-edit consumer chain acceptance (Arc 8 Stage 4a,
-//! docs/lean4-mode-framing.md Q#LN10, criteria 46a–46h).
+//! the archived lean4-mode framing Q#LN10, criteria 46a–46h).
 //!
 //! The chain owns the single `buffer.after-edit` subscriber that reads
 //! the one-shot typed-edit record (Q#AP9) and offers it to consumers in
