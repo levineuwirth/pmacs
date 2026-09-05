@@ -457,3 +457,22 @@ jobs:
         run: cargo test --release --test m10_2_perf -- --ignored --nocapture
       - name: cross-frontend propagation p99 over a real socket
         run: cargo test --release --test m10_11_perf -- --ignored --nocapture
+      - name: remote CRDT op application at 1 KB, 100 KB and 1 MB
+        run: cargo test --release --test m10_10_perf -- --ignored --nocapture
+
+  # perf-default: every wall-clock budget, in debug, by exact name.
+  # Budgets are `#[ignore]` so the default sweep carries no assertion
+  # that load can fail; this job is where they run on every push, and
+  # scripts/perf-budgets is the one list both it and `scripts/gate
+  # --perf` read. A red here is a measured regression against a budget
+  # in a debug build, which is worth knowing and is not a gate on merge.
+  perf-default:
+    name: Perf budgets (debug)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace
+      - run: scripts/perf-budgets

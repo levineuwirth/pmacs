@@ -421,7 +421,8 @@ fn acc04_stdin_eof_lets_cat_terminate() {
     );
     assert!(
         t0.elapsed() < Duration::from_secs(5),
-        "must not hang on piped stdin"
+        "must not hang on piped stdin; took {:?}",
+        t0.elapsed()
     );
 }
 

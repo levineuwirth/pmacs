@@ -10020,6 +10020,7 @@ mod tests {
         clippy::too_many_lines,
         reason = "perf measurement is intentionally linear"
     )]
+    #[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
     fn composition_overhead_under_ten_percent() {
         use crate::cell::{Cell, CellCoord, CellGrid, CellSize, Glyph, Style};
         use crate::overlay::{StyleSpan, StyleSpanOverlay, VirtualCell, VirtualCellOverlay};

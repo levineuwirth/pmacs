@@ -213,13 +213,10 @@ fn m4_1_incremental_parse_under_5ms() {
     );
 }
 
-/// The parse-on-worker path: dispatch through `AsyncRuntime`,
-/// observe settle, drain the bundle from the side handoff. This
-/// exercises the *full* T M4.1 dispatch shape (vs the synchronous
-/// `run_parse` that the perf gates use), and demonstrates that the
-/// "Parse runs on a worker" task description is satisfied.
-#[test]
-fn m4_1_dispatch_parse_round_trips_via_runtime() {
+/// Dispatch a 200-line parse through the runtime, wait for it to
+/// settle, and return the worker's reported duration; the round trip's
+/// correctness is asserted inside.
+fn dispatch_parse_round_trip_via_runtime() -> u64 {
     let rt = AsyncRuntime::with_pool_size(1);
     let req = ParseRequest {
         source: Arc::from(synthetic_rust_source(200)),
@@ -239,18 +236,35 @@ fn m4_1_dispatch_parse_round_trips_via_runtime() {
     let bundle = rt
         .take_parse_tree(id)
         .expect("parse handoff holds bundle on Complete");
-    match rt.take_result(id) {
-        Some(JobOutcome::Complete(JobResult::Parse { duration_ms })) => {
-            assert!(
-                duration_ms < 100,
-                "200-line parse should be quick: took {duration_ms}ms \
-                 against a 100ms budget"
-            );
-        }
+    let duration_ms = match rt.take_result(id) {
+        Some(JobOutcome::Complete(JobResult::Parse { duration_ms })) => duration_ms,
         other => panic!("unexpected outcome: {other:?}"),
-    }
+    };
     assert_eq!(bundle.root_tree().root_node().kind(), "source_file");
     assert_eq!(bundle.language_name, "rust");
+    duration_ms
+}
+
+/// The parse-on-worker path: dispatch through `AsyncRuntime`,
+/// observe settle, drain the bundle from the side handoff. This
+/// exercises the *full* T M4.1 dispatch shape (vs the synchronous
+/// `run_parse` that the perf gates use), and demonstrates that the
+/// "Parse runs on a worker" task description is satisfied.
+#[test]
+fn m4_1_dispatch_parse_round_trips_via_runtime() {
+    let duration_ms = dispatch_parse_round_trip_via_runtime();
+    eprintln!("200-line parse via the runtime took {duration_ms}ms");
+}
+
+#[test]
+#[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
+fn m4_1_dispatch_parse_via_runtime_stays_under_the_parse_budget() {
+    let duration_ms = dispatch_parse_round_trip_via_runtime();
+    assert!(
+        duration_ms < 100,
+        "200-line parse should be quick: took {duration_ms}ms \
+         against a 100ms budget"
+    );
 }
 
 /// The Lua introspection criterion: walking the parse tree from a
@@ -1708,8 +1722,9 @@ use pmacs::diag::{Diagnostic, DiagnosticSeverity, DiagnosticStore};
 /// `publishDiagnostics` per `didChange`; the test sends the change
 /// and measures wall-clock latency until the diagnostics land in
 /// the manager's store.
-#[test]
-fn m4_6_diagnostics_arrive_within_500ms() {
+/// Send a change to the fake server and measure how long its
+/// diagnostics take to land in the store, waiting up to `deadline`.
+fn diagnostics_latency_after_a_change(deadline: Duration) -> Duration {
     let (sup, mgr) = make_lsp_test_manager();
     let sid = mgr
         .borrow_mut()
@@ -1732,8 +1747,8 @@ fn m4_6_diagnostics_arrive_within_500ms() {
         .expect("didChange");
 
     // Spin the supervisor + LSP ticks until the diag store has
-    // diagnostics for this URI, or the budget runs out.
-    let deadline = edit_at + Duration::from_millis(500);
+    // diagnostics for this URI, or the deadline runs out.
+    let deadline = edit_at + deadline;
     let mut latency: Option<Duration> = None;
     while Instant::now() < deadline {
         sup.borrow_mut().tick();
@@ -1749,15 +1764,30 @@ fn m4_6_diagnostics_arrive_within_500ms() {
     }
     let latency = latency.unwrap_or_else(|| {
         panic!(
-            "diagnostics did not arrive within 500 ms (waited {:?})",
+            "diagnostics did not arrive (waited {:?})",
             edit_at.elapsed()
         );
     });
+    let _ = mgr.borrow_mut().stop(sid);
+    latency
+}
+
+/// Acceptance (1/3), the deadline half: diagnostics arrive after the
+/// triggering edit. The 500 ms budget is the `#[ignore]` sibling.
+#[test]
+fn m4_6_diagnostics_arrive_after_a_change() {
+    let latency = diagnostics_latency_after_a_change(Duration::from_secs(10));
+    eprintln!("diagnostics arrived {latency:?} after the change");
+}
+
+#[test]
+#[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
+fn m4_6_diagnostics_arrive_within_500ms() {
+    let latency = diagnostics_latency_after_a_change(Duration::from_millis(500));
     assert!(
         latency < Duration::from_millis(500),
         "diagnostic latency {latency:?} exceeds 500 ms budget"
     );
-    let _ = mgr.borrow_mut().stop(sid);
 }
 
 /// Acceptance (2/3): navigate-to-next-diagnostic returns the
@@ -2893,8 +2923,9 @@ use pmacs::project_index::{FileEntry, ProjectIndex, Symbol, SymbolKind, SymbolSo
 /// a 100k-file project in under 1 second. We approximate by 100 files
 /// × 1000 symbols each (one million symbols total --- larger than a
 /// typical 100k-file repo's symbol count).
-#[test]
-fn m4_10_search_under_one_second_for_100k_files() {
+/// Index a hundred thousand symbols and search them; asserts a hit and
+/// returns how long the search took.
+fn search_100k_symbols() -> std::time::Duration {
     let mut idx = ProjectIndex::new("/proj");
     for f in 0..100u32 {
         let mut symbols = Vec::with_capacity(1_000);
@@ -2925,6 +2956,19 @@ fn m4_10_search_under_one_second_for_100k_files() {
         !hits.is_empty(),
         "100k-symbol project should return matches"
     );
+    elapsed
+}
+
+#[test]
+fn m4_10_search_finds_matches_in_100k_symbols() {
+    let elapsed = search_100k_symbols();
+    eprintln!("100k-symbol search took {elapsed:?}");
+}
+
+#[test]
+#[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
+fn m4_10_search_under_one_second_for_100k_files() {
+    let elapsed = search_100k_symbols();
     assert!(
         elapsed < std::time::Duration::from_secs(1),
         "100k-symbol search took {elapsed:?}, expected < 1s"

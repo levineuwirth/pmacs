@@ -1697,12 +1697,9 @@ fn dired_open_failure_leaves_the_editor_unchanged() {
 /// 200 ms budget, on the builtin path. Carries the fixture's macOS
 /// ignore gate: hosted macOS debug runners do not consistently satisfy
 /// it.
-#[test]
-#[cfg_attr(
-    target_os = "macos",
-    ignore = "hosted macOS debug runners do not consistently satisfy this timing gate"
-)]
-fn dired_renders_10k_entries_within_200ms() {
+/// Open a directory of ten thousand entries; asserts the render and
+/// returns how long the open took.
+fn render_10k_entries() -> Duration {
     let td = tempfile::tempdir().expect("tempdir");
     for i in 0..10_000 {
         std::fs::write(td.path().join(format!("f{i:05}")), b"").expect("write fixture entry");
@@ -1718,6 +1715,19 @@ fn dired_renders_10k_entries_within_200ms() {
         10_001,
         "header plus one line per entry"
     );
+    elapsed
+}
+
+#[test]
+fn dired_renders_10k_entries() {
+    let elapsed = render_10k_entries();
+    eprintln!("dired rendered 10K entries in {elapsed:?}");
+}
+
+#[test]
+#[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
+fn dired_renders_10k_entries_within_200ms() {
+    let elapsed = render_10k_entries();
     assert!(
         elapsed < Duration::from_millis(200),
         "10K entries must render within 200ms; took {elapsed:?}"

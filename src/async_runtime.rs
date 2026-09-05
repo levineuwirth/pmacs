@@ -2429,8 +2429,10 @@ mod tests {
     /// within 50 ms. We dispatch a 2-second sleep, dispatch the same
     /// key again, and assert the first settles into Cancelled within
     /// 50 ms wall-clock.
-    #[test]
-    fn supersede_cancels_in_flight_job_within_50ms() {
+    /// Dispatch a 2-second sleep, supersede it, and pump until the first
+    /// settles or `deadline` passes; asserts it settled Cancelled and
+    /// returns how long the cancellation took.
+    fn supersede_cancels_in_flight_job_within(deadline: Duration) -> Duration {
         let rt = AsyncRuntime::with_pool_size(1);
         let first = rt.dispatch_sleep(2_000, Some("search"));
         // Let the worker pick the job up so cancel hits a running job.
@@ -2439,16 +2441,33 @@ mod tests {
         let _second = rt.dispatch_sleep(2_000, Some("search"));
         // Pump until the first settles. With 1ms cancel polling, the
         // worker observes the flag in ~1-2 ms; the bus carries the
-        // reply on the next try_recv. 50 ms gives generous slack.
+        // reply on the next try_recv.
         while !rt.is_complete(first) {
             assert!(
-                started.elapsed() < Duration::from_millis(50),
-                "supersede did not cancel within 50ms"
+                started.elapsed() < deadline,
+                "supersede did not cancel within {deadline:?} (waited {:?})",
+                started.elapsed()
             );
             let _ = rt.tick();
             thread::sleep(Duration::from_millis(1));
         }
         assert!(rt.is_cancelled(first), "first job should be Cancelled");
+        started.elapsed()
+    }
+
+    /// Acceptance bullet 1, the deadline half: supersession cancels an
+    /// in-flight job, eventually. The 50 ms budget is the `#[ignore]`
+    /// sibling below.
+    #[test]
+    fn supersede_cancels_in_flight_job() {
+        let took = supersede_cancels_in_flight_job_within(Duration::from_secs(5));
+        eprintln!("supersede cancelled the in-flight job in {took:?}");
+    }
+
+    #[test]
+    #[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
+    fn supersede_cancels_in_flight_job_within_50ms() {
+        supersede_cancels_in_flight_job_within(Duration::from_millis(50));
     }
 
     /// Acceptance bullet 2: queued jobs with the same key are cancelled
@@ -2816,7 +2835,11 @@ mod tests {
         let mut closed = false;
         let start = Instant::now();
         while !closed {
-            assert!(start.elapsed() < deadline, "grep did not close in time");
+            assert!(
+                start.elapsed() < deadline,
+                "grep did not close within {deadline:?} (waited {:?})",
+                start.elapsed()
+            );
             let _ = rt.tick();
             for batch in rt.take_stream_batches() {
                 if batch.id != id {
@@ -2912,11 +2935,14 @@ mod tests {
     /// keep the worker busy past the supersede deadline, then
     /// dispatch a second grep under the same key and assert the
     /// prior settles `Cancelled` within 50 ms of the supersede call.
-    #[test]
-    fn grep_supersede_cancels_predecessor_within_50ms() {
+    /// Dispatch a slow grep, supersede it, and pump until the prior
+    /// closes or `deadline` passes; asserts it closed Cancelled and
+    /// returns how long that took, or `None` when the host finished the
+    /// prior before it could be superseded (a capacity no-op).
+    fn grep_supersede_cancels_predecessor_within(deadline: Duration) -> Option<Duration> {
         // Synthetic load: 5000 small files of non-matching content.
         // Single-fanout sequential scan keeps the worker busy past
-        // the 50 ms deadline without depending on disk speed.
+        // the deadline without depending on disk speed.
         let dir = tempfile::tempdir().expect("tempdir");
         let body: String = "noise noise noise noise noise\n".repeat(50);
         for i in 0..5_000 {
@@ -2936,7 +2962,7 @@ mod tests {
             // capacity-tested no-op.
             let _ = rt.tick();
             let _ = rt.take_stream_batches();
-            return;
+            return None;
         }
         let started = Instant::now();
         let mut succ_spec = GrepSpec::new(dir.path().to_path_buf(), "alpha".to_owned());
@@ -2946,8 +2972,8 @@ mod tests {
         let mut prior_outcome: Option<JobOutcome> = None;
         while !prior_done {
             assert!(
-                started.elapsed() < Duration::from_millis(50),
-                "grep supersede did not cancel within 50ms (elapsed: {:?})",
+                started.elapsed() < deadline,
+                "grep supersede did not cancel within {deadline:?} (elapsed: {:?})",
                 started.elapsed()
             );
             let _ = rt.tick();
@@ -2962,6 +2988,23 @@ mod tests {
             matches!(prior_outcome, Some(JobOutcome::Cancelled)),
             "prior outcome should be Cancelled, got {prior_outcome:?}"
         );
+        Some(started.elapsed())
+    }
+
+    /// Acceptance bullet 2, the deadline half: a new query cancels the
+    /// grep in flight, eventually. The 50 ms budget is the `#[ignore]`
+    /// sibling below.
+    #[test]
+    fn grep_supersede_cancels_predecessor() {
+        if let Some(took) = grep_supersede_cancels_predecessor_within(Duration::from_secs(5)) {
+            eprintln!("grep supersede cancelled the predecessor in {took:?}");
+        }
+    }
+
+    #[test]
+    #[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
+    fn grep_supersede_cancels_predecessor_within_50ms() {
+        grep_supersede_cancels_predecessor_within(Duration::from_millis(50));
     }
 
     /// Acceptance bullet 3 (coalescing): a saturating grep load ---
@@ -3302,12 +3345,10 @@ mod tests {
 
     // ---- T M4.1 dispatch_parse smoke ----------------------------------------
 
-    /// `dispatch_parse` round-trips a real grammar end-to-end:
-    /// settle status is `Complete(Parse{..})`, the bundle is in
-    /// the side handoff, and the tree's root has the language's
-    /// expected top-level node type.
-    #[test]
-    fn dispatch_parse_round_trips_a_rust_source_file() {
+    /// Round-trip a trivial parse and return the worker's reported
+    /// duration in milliseconds; the correctness of the round trip is
+    /// asserted inside.
+    fn dispatch_parse_round_trip() -> u64 {
         let rt = AsyncRuntime::with_pool_size(1);
         let source = b"fn main() { let _x = 1 + 2; }\n";
         let req = ParseRequest {
@@ -3323,20 +3364,36 @@ mod tests {
         let bundle = rt
             .take_parse_tree(id)
             .expect("parse handoff must hold a bundle on Complete");
-        match rt.take_result(id) {
-            Some(JobOutcome::Complete(JobResult::Parse { duration_ms })) => {
-                assert!(
-                    duration_ms < 100,
-                    "trivial parse should be fast: took {duration_ms}ms \
-                     against a 100ms budget"
-                );
-            }
+        let duration_ms = match rt.take_result(id) {
+            Some(JobOutcome::Complete(JobResult::Parse { duration_ms })) => duration_ms,
             other => panic!("unexpected outcome: {other:?}"),
-        }
+        };
         assert_eq!(bundle.language_name, "rust");
         assert_eq!(bundle.root_tree().root_node().kind(), "source_file");
         // take_parse_tree was already drained, so handoff is empty.
         assert_eq!(rt.parse_handoff_len(), 0);
+        duration_ms
+    }
+
+    /// `dispatch_parse` round-trips a real grammar end-to-end:
+    /// settle status is `Complete(Parse{..})`, the bundle is in
+    /// the side handoff, and the tree's root has the language's
+    /// expected top-level node type.
+    #[test]
+    fn dispatch_parse_round_trips_a_rust_source_file() {
+        let duration_ms = dispatch_parse_round_trip();
+        eprintln!("trivial parse took {duration_ms}ms");
+    }
+
+    #[test]
+    #[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
+    fn dispatch_parse_stays_under_the_parse_budget() {
+        let duration_ms = dispatch_parse_round_trip();
+        assert!(
+            duration_ms < 100,
+            "trivial parse should be fast: took {duration_ms}ms \
+             against a 100ms budget"
+        );
     }
 
     /// `take_result` on a parse job drops any leftover handoff entry,

@@ -1408,8 +1408,15 @@ mod crdt {
             .output()
             .expect("run bounded failure probe");
         assert!(!output.status.success());
-        assert!(start.elapsed() >= Duration::from_secs(4));
-        assert!(start.elapsed() < Duration::from_secs(8));
+        let waited = start.elapsed();
+        assert!(
+            waited >= Duration::from_secs(4),
+            "the bounded probe returned before its 4 s floor: {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_secs(8),
+            "the bounded probe overran its 8 s ceiling: {waited:?}"
+        );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             stderr.contains("exit status: 17"),
