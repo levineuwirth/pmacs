@@ -1,0 +1,166 @@
+#!/bin/sh
+# scripts/anchor --- README's generated status block, derived from the tree.
+#
+#   scripts/anchor --print          print the block, exit
+#   scripts/anchor --write          replace README's block in place
+#   scripts/anchor --print --no-count   print without running cargo
+#
+# The block sits in README.md between `<!-- anchor:begin -->` and
+# `<!-- anchor:end -->`. tests/docs_consistency.rs asserts the block in
+# README equals `--print` byte for byte, so a hand-typed version number,
+# a stale feature list or a stale test count fails a test by name rather
+# than misleading the next reader.
+#
+# WHAT IS DERIVED, AND FROM WHERE.
+#
+#   PROTOCOL_VERSION, ADVERTISED_PROTOCOL_VERSION and
+#   SUPPORTED_PROTOCOL_VERSIONS are read from pmacs-protocol/src/message.rs
+#   with anchored patterns; a constant that moves or changes shape makes
+#   this script fail loudly rather than print a stale value.
+#
+#   Default features are read from Cargo.toml's `default = [...]` line.
+#
+#   Test and suite counts come from `cargo test --workspace -- --list`
+#   under the default features on this platform: a test is a `: test`
+#   line, a suite is a `Running` line. The counts are a property of
+#   Linux and the default features (cfg-gated tests differ elsewhere),
+#   and the block says so; tests/docs_consistency.rs compares them only
+#   under that configuration.
+#
+# WHAT IS NOT DERIVED: the stamp. The block's first row names the commit
+# and date the counts were measured at. `--write` sets it to HEAD and
+# today; `--print` carries the existing README stamp forward unchanged
+# (or HEAD and today when README has no block), because a commit cannot
+# contain its own sha and the row is provenance for the counts, not a
+# fact about the tree the test could derive. The rows below the stamp
+# are all derived, and those are what the byte-for-byte comparison
+# holds README to.
+set -eu
+
+usage() {
+    echo "usage: scripts/anchor --print [--no-count] | --write" >&2
+    exit 2
+}
+
+MODE=''
+COUNT=1
+while [ $# -gt 0 ]; do
+    case $1 in
+        --print) MODE=print; shift ;;
+        --write) MODE=write; shift ;;
+        --no-count) COUNT=0; shift ;;
+        *) usage ;;
+    esac
+done
+[ -n "$MODE" ] || usage
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
+    echo "anchor: not inside a git worktree" >&2
+    exit 2
+}
+cd "$ROOT"
+README=README.md
+MESSAGE=pmacs-protocol/src/message.rs
+BEGIN='<!-- anchor:begin -->'
+END='<!-- anchor:end -->'
+
+# Anchored extraction. Each pattern requires the exact declaration shape
+# and exits non-zero on zero or multiple matches: a value this script
+# cannot find is an error, never an empty cell.
+one_line() {
+    _n=$(grep -c -E "$1" "$2" || true)
+    if [ "$_n" -ne 1 ]; then
+        echo "anchor: expected exactly one match for /$1/ in $2, found $_n" >&2
+        exit 3
+    fi
+    grep -E "$1" "$2"
+}
+
+protocol_version=$(one_line '^pub const PROTOCOL_VERSION: u32 = [0-9]+;$' "$MESSAGE" \
+    | sed -E 's/.*= ([0-9]+);/\1/')
+advertised=$(one_line '^pub const ADVERTISED_PROTOCOL_VERSION: u32 = [0-9]+;$' "$MESSAGE" \
+    | sed -E 's/.*= ([0-9]+);/\1/')
+# The supported list spans lines: take everything between the opening
+# `&[` and the closing `];`, then render it as `first..=last` after
+# checking it is contiguous, which is the property the handshake relies
+# on and the shape the prose has always used.
+supported=$(awk '
+    /^pub const SUPPORTED_PROTOCOL_VERSIONS: &\[u32\] = &\[/ { inside = 1; next }
+    inside && /^\];/ { exit }
+    inside { gsub(/[ ,]+/, "\n"); print }
+' "$MESSAGE" | grep -E '^[0-9]+$' || true)
+[ -n "$supported" ] || { echo "anchor: SUPPORTED_PROTOCOL_VERSIONS not found in $MESSAGE" >&2; exit 3; }
+first=$(printf '%s\n' "$supported" | head -1)
+last=$(printf '%s\n' "$supported" | tail -1)
+count=$(printf '%s\n' "$supported" | wc -l | tr -d ' ')
+if [ "$((last - first + 1))" -ne "$count" ]; then
+    echo "anchor: SUPPORTED_PROTOCOL_VERSIONS is not contiguous; refusing to render a range" >&2
+    exit 3
+fi
+supported_range="$first..=$last"
+
+default_features=$(one_line '^default = \[.*\]$' Cargo.toml \
+    | sed -E 's/^default = \[(.*)\]$/\1/; s/"//g; s/, */, /g')
+
+# Test and suite counts. `--list` builds every test target first, which
+# is a no-op after a sweep and a full build on a cold directory.
+if [ "$COUNT" = 1 ]; then
+    # Test names go to stdout and the `Running <target>` lines to stderr,
+    # so both streams are captured; a failed listing exits non-zero and
+    # is refused rather than counted.
+    listing=$(cargo test --workspace -- --list 2>&1) || {
+        echo "anchor: cargo test --workspace -- --list failed" >&2
+        exit 3
+    }
+    tests=$(printf '%s\n' "$listing" | grep -c ': test$' || true)
+    suites=$(printf '%s\n' "$listing" | grep -c '^ *Running ' || true)
+    counts_row="| tests | $tests in $suites suites (\`cargo test --workspace -- --list\`, Linux, default features) |"
+else
+    counts_row=''
+fi
+
+# The stamp: carried forward by --print, refreshed by --write.
+existing_stamp=$(awk -v b="$BEGIN" -v e="$END" '
+    $0 == b { inside = 1; next }
+    $0 == e { inside = 0 }
+    inside && /^\| measured at \|/ { print; exit }
+' "$README" 2>/dev/null || true)
+head_stamp="| measured at | \`$(git rev-parse --short HEAD)\` ($(date -u +%Y-%m-%d)) |"
+if [ "$MODE" = write ] || [ -z "$existing_stamp" ]; then
+    stamp="$head_stamp"
+else
+    stamp="$existing_stamp"
+fi
+
+render() {
+    printf '%s\n' "$BEGIN"
+    printf '| status | value |\n'
+    printf '|---|---|\n'
+    printf '%s\n' "$stamp"
+    printf '| `PROTOCOL_VERSION` | %s |\n' "$protocol_version"
+    printf '| `ADVERTISED_PROTOCOL_VERSION` | %s |\n' "$advertised"
+    printf '| `SUPPORTED_PROTOCOL_VERSIONS` | `%s` |\n' "$supported_range"
+    printf '| default features | %s |\n' "$default_features"
+    [ -n "$counts_row" ] && printf '%s\n' "$counts_row"
+    printf '%s\n' "$END"
+}
+
+case $MODE in
+    print)
+        render ;;
+    write)
+        [ "$COUNT" = 1 ] || { echo "anchor: --write needs the counts; drop --no-count" >&2; exit 2; }
+        block=$(render)
+        if ! grep -qxF "$BEGIN" "$README" || ! grep -qxF "$END" "$README"; then
+            echo "anchor: README.md has no $BEGIN / $END markers" >&2
+            exit 3
+        fi
+        tmp=$(mktemp "$ROOT/.anchor.XXXXXX")
+        awk -v b="$BEGIN" -v e="$END" -v block="$block" '
+            $0 == b { print block; skipping = 1; next }
+            $0 == e { skipping = 0; next }
+            !skipping { print }
+        ' "$README" > "$tmp"
+        mv "$tmp" "$README"
+        echo "anchor: README.md block refreshed at $(git rev-parse --short HEAD)" ;;
+esac

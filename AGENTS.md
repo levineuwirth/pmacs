@@ -4,7 +4,7 @@ Planning lives in `~/apocrypha`. Start every session from
 `~/apocrypha/Negotia/pmacs resume.md`, which names the phase, the
 constraints in force, the harness and the checkpoint protocol. Inside
 this repository the required reading is this file and
-`docs/invariants.md`; everything under `docs/archive/` is history.
+`docs/invariants.md`; the `archive` directory under `docs/` is history.
 
 Always true:
 
