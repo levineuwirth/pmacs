@@ -1530,6 +1530,96 @@ fn the_arming_report_names_the_unarmed_variable_and_its_suites() {
     );
 }
 
+/// `--perf` adds exactly one stage, `scripts/perf-budgets`, after the
+/// sweep and before diff-check, and changes nothing else. Budgets are
+/// `#[ignore]` and never part of the sweep, so this is the only plan
+/// that runs a wall-clock assertion.
+#[test]
+fn perf_adds_exactly_the_budget_stage_before_diff_check() {
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
+    let (default_plan, _, ok) = run(root.path(), &["--print-plan-named"]);
+    assert!(ok);
+    let (perf_plan, err, ok) = run(root.path(), &["--perf", "--print-plan-named"]);
+    assert!(ok, "--perf --print-plan-named must succeed; stderr:\n{err}");
+    let default_lines: Vec<&str> = default_plan.lines().collect();
+    let perf_lines: Vec<&str> = perf_plan.lines().collect();
+    assert_eq!(
+        perf_lines.len(),
+        default_lines.len() + 1,
+        "plan was:\n{perf_plan}"
+    );
+    let n = perf_lines.len();
+    assert_eq!(&perf_lines[..n - 2], &default_lines[..n - 2]);
+    assert_eq!(
+        perf_lines[n - 2],
+        "perf\tscripts/perf-budgets",
+        "plan was:\n{perf_plan}"
+    );
+    assert_eq!(perf_lines[n - 1], default_lines[n - 2]);
+}
+
+/// The budget list names only tests that exist and are `#[ignore]`, so
+/// a renamed budget cannot silently leave the list. Read from the script
+/// text and compared with the tree's `#[ignore = "wall-clock budget…"]`
+/// attributes.
+#[test]
+fn every_budget_in_the_list_is_an_ignored_test_in_the_tree() {
+    let script = std::fs::read_to_string(repo_root().join("scripts/perf-budgets"))
+        .expect("read scripts/perf-budgets");
+    let start = script.find("budgets() {").expect("budget list");
+    let list = &script[start..];
+    let list = &list[..list.find("\nEOF\n").expect("heredoc end")];
+    let listed: std::collections::BTreeSet<String> = list
+        .lines()
+        .filter(|l| l.starts_with("--"))
+        .flat_map(|l| {
+            l.split('\t')
+                .nth(1)
+                .expect("names after the tab")
+                .split(' ')
+                .map(|n| n.rsplit("::").next().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(
+        listed.len() >= 10,
+        "the list has at least ten budgets: {listed:?}"
+    );
+
+    let grep = Command::new("git")
+        .args([
+            "grep",
+            "-A1",
+            "-h",
+            "-F",
+            "#[ignore = \"wall-clock budget",
+            "--",
+            "src",
+            "tests",
+        ])
+        .current_dir(repo_root())
+        .output()
+        .expect("git grep");
+    let ignored: std::collections::BTreeSet<String> = String::from_utf8_lossy(&grep.stdout)
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            l.strip_prefix("fn ")
+                .and_then(|rest| rest.split('(').next())
+                .map(str::to_owned)
+        })
+        .collect();
+    let unlisted: Vec<&String> = ignored.difference(&listed).collect();
+    let missing: Vec<&String> = listed.difference(&ignored).collect();
+    assert!(
+        unlisted.is_empty() && missing.is_empty(),
+        "budgets marked #[ignore] but not listed: {unlisted:?}; listed but not marked: {missing:?}"
+    );
+}
+
 // --- Derivation, marker, canonical paths --------------------------------
 
 #[test]
