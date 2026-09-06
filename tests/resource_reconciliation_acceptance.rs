@@ -68,14 +68,31 @@ fn pump_until<F: Fn(&EditorState) -> bool>(state: &mut EditorState, what: &str, 
     }
 }
 
-/// Pump a fixed number of times without any expectation. Used only to
-/// give a dispatched job every chance to settle before asserting that
-/// something did **not** happen.
+/// Drain the async runtime for 160 ms, waiting for nothing.
+///
+/// **Only before a negative assertion**, and every remaining call site
+/// is one: a failed mutation that must reconcile nothing, and a hook
+/// that must fire exactly once. A drain before a positive assertion is
+/// a readiness wait wearing a fixed sleep, which is what
+/// [`rename_fire_and_forget`] and [`remove_fire_and_forget`] used this
+/// for until they were given the reconciliation's own signal.
 fn pump_a_while(state: &mut EditorState) {
     for _ in 0..80 {
         state.tick_async();
         std::thread::sleep(Duration::from_millis(2));
     }
+}
+
+/// How many times the reconciliation has completed, by kind.
+///
+/// `resource.renamed` and `resource.deleted` fire at the END of the
+/// drain's harvest — after the buffer paths are rebound, after the
+/// delete's two removal phases, and after every earlier-registered
+/// subscriber (`lsp.lua`'s among them) has run, because hook order is
+/// registration order. So an increment here is the whole
+/// reconciliation, which is what a fixed drain could only approximate.
+fn reconciled(state: &EditorState, kind: &str) -> i64 {
+    eval(state, &format!("return _G.__RECONCILED_{kind}"))
 }
 
 /// A canonicalized temp directory. Canonicalized because the buffer
@@ -117,6 +134,20 @@ fn editor() -> EditorState {
     // No language server may spawn from these fixtures. The LSP rows
     // that DO want one configure it explicitly.
     exec(&state, "pmacs.lsp.config = {}");
+    // The counters `reconciled` reads. Registered here, after the
+    // runtime's own subscribers, so an increment means every subscriber
+    // ahead of it has already run for that operation.
+    exec(
+        &state,
+        "_G.__RECONCILED_RENAMES = 0
+         _G.__RECONCILED_DELETES = 0
+         pmacs.hook.add('resource.renamed', function()
+           _G.__RECONCILED_RENAMES = _G.__RECONCILED_RENAMES + 1
+         end)
+         pmacs.hook.add('resource.deleted', function()
+           _G.__RECONCILED_DELETES = _G.__RECONCILED_DELETES + 1
+         end)",
+    );
     state
 }
 
@@ -162,6 +193,7 @@ fn buffer_is_valid(state: &EditorState, global: &str) -> bool {
 /// Fire-and-forget is the shape item 25 pins: the reconciliation must
 /// not live at result consumption.
 fn rename_fire_and_forget(state: &mut EditorState, from: &Path, to: &Path) {
+    let before = reconciled(state, "RENAMES");
     exec(
         state,
         &format!(
@@ -170,16 +202,22 @@ fn rename_fire_and_forget(state: &mut EditorState, from: &Path, to: &Path) {
             lua_str(to)
         ),
     );
-    pump_until(state, "rename lands on disk", |_| to.exists());
     // The rename landing on disk and the reply reaching the main thread
-    // are two events; pump past the first to reach the second.
-    pump_a_while(state);
+    // are two events, and the second is the one every caller asserts
+    // against. It has its own signal, so it is waited for rather than
+    // drained towards: with the 80-tick drain this replaces set to
+    // zero, eleven rows of this suite fail.
+    pump_until(state, "the rename to reconcile", |s| {
+        reconciled(s, "RENAMES") > before
+    });
 }
 
 fn remove_fire_and_forget(state: &mut EditorState, path: &Path) {
+    let before = reconciled(state, "DELETES");
     exec(state, &format!("pmacs.fs.remove(\"{}\")", lua_str(path)));
-    pump_until(state, "remove lands on disk", |_| !path.exists());
-    pump_a_while(state);
+    pump_until(state, "the delete to reconcile", |s| {
+        reconciled(s, "DELETES") > before
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -518,6 +556,9 @@ fn acc37_a_failed_rename_reconciles_nothing_and_fires_no_hook() {
             lua_str(&fx.at("target.txt"))
         ),
     );
+    // RETAINED DRAIN (160 ms): a failed rename reconciles nothing, so
+    // there is no signal to wait for — only a window in which a wrong
+    // hook fire or a wrong buffer move would have to appear.
     pump_a_while(&mut state);
 
     let fired: i64 = eval(&state, "return _G.FIRED");
@@ -573,6 +614,8 @@ fn acc50_the_hooks_fire_once_with_normalized_paths() {
         let n: i64 = eval(s, "return #_G.RENAMES");
         n > 0
     });
+    // RETAINED DRAIN (160 ms): the assertion is EXACTLY one row, so a
+    // second fire needs a window in which to appear.
     pump_a_while(&mut state);
 
     let renames: String = eval(&state, "return table.concat(_G.RENAMES, '|')");
@@ -591,6 +634,7 @@ fn acc50_the_hooks_fire_once_with_normalized_paths() {
         let n: i64 = eval(s, "return #_G.DELETES");
         n > 0
     });
+    // RETAINED DRAIN (160 ms): one row, for the same reason.
     pump_a_while(&mut state);
     let deletes: String = eval(&state, "return table.concat(_G.DELETES, '|')");
     assert_eq!(
@@ -1183,10 +1227,12 @@ fn acc54_a_rename_and_a_delete_on_disjoint_paths_both_reconcile() {
             exec(&state, &remove);
         }
 
-        pump_until(&mut state, "both mutations", |s| {
-            renamed_to.exists() && !deleted.exists() && !buffer_is_valid(s, "GOES")
+        // Both reconciliations, not both disk operations: the
+        // assertions below read the moved buffer's path and the deleted
+        // buffer's validity, so those are what the wait reads.
+        pump_until(&mut state, "both reconciliations", |s| {
+            buffer_path(s, "MOVES").as_deref() == renamed_to.to_str() && !buffer_is_valid(s, "GOES")
         });
-        pump_a_while(&mut state);
 
         assert_eq!(
             buffer_path(&state, "MOVES").as_deref(),

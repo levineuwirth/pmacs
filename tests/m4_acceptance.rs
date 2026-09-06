@@ -338,6 +338,23 @@ fn pump_async<F: Fn(&pmacs::editor::EditorState) -> bool>(
     }
 }
 
+/// Drain the async runtime for `ms`, waiting for nothing.
+///
+/// Every call site guards a NEGATIVE assertion: the pinned parse
+/// grammar must NOT be re-switched by an edit to a shebang or a
+/// modeline, or by a switch away and back. There is no event to wait
+/// for — the claim is that a wrong reparse never lands — so this is the
+/// window in which a wrong one would have to appear. `pump_async`
+/// cannot serve here for the same reason: a wait for a language
+/// *change* would time out on correct code.
+fn drain_async(state: &mut pmacs::editor::EditorState, ms: u64) {
+    let deadline = Instant::now() + Duration::from_millis(ms);
+    while Instant::now() < deadline {
+        state.tick_async();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
 /// Returns the language label of the parse tree currently installed
 /// for the active buffer, or `None` if no parse has settled yet.
 fn current_tree_language(state: &pmacs::editor::EditorState) -> Option<String> {
@@ -7694,12 +7711,9 @@ fn m4_shebang_edit_keeps_pinned_grammar() {
         )
         .exec()
         .expect("rewrite shebang to lua");
-    // Let the reparse settle (manual ticks: the tree stays bash with the
-    // pin, so a `pump_async` for a language *change* would time out).
-    for _ in 0..64 {
-        s.tick_async();
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    // RETAINED DRAIN (128 ms): the assertion below is that the grammar
+    // did NOT change, so this is a window, not a wait.
+    drain_async(&mut s, 128);
     assert_eq!(
         current_tree_language(&s).as_deref(),
         Some("bash"),
@@ -7734,10 +7748,7 @@ fn m4_shebang_edit_keeps_pinned_grammar() {
         ))
         .exec()
         .expect("switch away and back");
-    for _ in 0..64 {
-        s.tick_async();
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    drain_async(&mut s, 128);
     assert_eq!(
         current_tree_language(&s).as_deref(),
         Some("bash"),
@@ -7996,10 +8007,7 @@ fn m4_modeline_language_is_pinned_until_reopen() {
         .expect("edit loaded modeline");
     assert_eq!(language.as_deref(), Some("lua"));
     assert_eq!(mode.as_deref(), Some("lua"));
-    for _ in 0..64 {
-        s.tick_async();
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    drain_async(&mut s, 128);
     assert_eq!(current_tree_language(&s).as_deref(), Some("lua"));
 
     let (language, mode): (Option<String>, Option<String>) = s
