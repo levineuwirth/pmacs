@@ -230,11 +230,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_condition_that_already_holds_returns_without_sleeping() {
-        let start = Instant::now();
-        let value = expect("immediate", Duration::from_secs(5), || Probe::Ready(7));
+    fn a_condition_that_already_holds_is_probed_once() {
+        // The subject is "no sleep", and the probe count says it
+        // exactly: the first probe runs before any sleep, so a second
+        // one can only mean the wait slept first. Elapsed time measured
+        // it indirectly, and a wall-clock assertion in a helper that
+        // compiles into 33 test targets is the class of assertion D12
+        // took out of the default run.
+        let mut probes = 0u32;
+        let value = expect("immediate", Duration::from_secs(5), || {
+            probes += 1;
+            Probe::Ready(7)
+        });
         assert_eq!(value, 7);
-        assert!(start.elapsed() < Duration::from_secs(1));
+        assert_eq!(
+            probes, 1,
+            "a condition true at the first probe must return on it"
+        );
     }
 
     #[test]
