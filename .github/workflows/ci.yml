@@ -61,9 +61,17 @@ concurrency:
 # A stable-toolchain bump invalidates Swatinem's key on every leg at
 # once, and a cold macOS debug build of this workspace plus the suite is
 # the plausible way a HEALTHY run exceeds its ceiling. The test job
-# therefore gets 35 rather than 25 — roughly 2x its observed max — while
-# everything else keeps 25 against a sub-4-minute observed max, except
-# `m6-perf-gates`, which keeps its own tighter 15.
+# therefore gets 45 rather than 25, while everything else keeps 25
+# against a sub-4-minute observed max, except `m6-perf-gates`, which
+# keeps its own tighter 15.
+#
+# 45, NOT 35, AND THE WINDOW ABOVE NO LONGER DESCRIBES THIS JOB. Since
+# `crdt` became a default feature the platform legs compile and run the
+# whole crdt corpus, which macOS had never run: the macOS/luajit leg was
+# cancelled by its own 35-minute step ceiling after 30 min 23 s of
+# tests, with 92 of about 122 targets done and NOTHING failed. That is
+# the cold-cache case arriving as a steady state, so the ceiling rises
+# and the serial harness goes (see the test step).
 #
 # DIAGNOSIS, WRITTEN BEFORE IT HAPPENS: four test legs timing out
 # simultaneously, shortly after a Rust release, is a cold cache and not
@@ -190,12 +198,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    # 35, not 25: this is the only job whose observed max is minutes
-    # rather than seconds, and the only one a cold cache can plausibly
-    # push past a 25-minute ceiling on all four legs at once. See the
-    # note above `jobs:` for the measurements and the cold-cache
-    # diagnosis.
-    timeout-minutes: 35
+    # 45, not 25: this is the only job whose observed max is minutes
+    # rather than seconds, the only one a cold cache can plausibly push
+    # past a 25-minute ceiling on all four legs at once, and the one
+    # whose macOS legs now carry the crdt corpus. See the note above
+    # `jobs:` for the measurements and the cold-cache diagnosis.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       # `crdt` is a default feature, so the four platform legs test the
@@ -260,9 +268,18 @@ jobs:
       # that binary absent. No `cargo test` invocation produces it.
       - run: cargo build --workspace --all-targets --no-default-features --features ${{ matrix.lua }}${{ matrix.crdt }}
       # Several acceptance binaries spawn real daemon / PTY child
-      # processes. Keep the harness serial so macOS runners do not
-      # expose cross-test process lifecycle races that are unrelated
-      # to the behavior under test.
+      # processes, and the Linux legs stay serial for them.
+      #
+      # THE macOS LEGS RUN AT CARGO'S DEFAULT PARALLELISM, which is what
+      # the local gate runs and what every green local sweep of this
+      # corpus has been. Serial was chosen when the macOS legs ran a
+      # smaller corpus; with `crdt` a default feature they run all of it,
+      # and serially they no longer fit — one leg was cancelled at its
+      # step ceiling with nothing failed and about a quarter of the
+      # targets unreached, which reports less than a parallel run that
+      # finishes. A race that surfaces under parallelism is a defect
+      # worth an issue, not a reason to hide it behind a flag that also
+      # hides everything after the cut.
       #
       # PMACS_REQUIRE_* make a missing tool fatal rather than a silent
       # skip, exactly as PMACS_REQUIRE_GPU already does for the headless
@@ -299,7 +316,12 @@ jobs:
       # The divergent case itself is pinned on every platform by
       # injecting the foreground group instead (framing Bet 1's stated
       # fallback, after the real fixture failed its own falsifier).
-      - run: cargo test --all-targets --no-default-features --features ${{ matrix.lua }}${{ matrix.crdt }} -- --test-threads=1
+      #
+      # THE macOS BRANCH YIELDS A SPACE, NOT AN EMPTY STRING, and that is
+      # load-bearing: an empty string is FALSY in a GitHub expression, so
+      # `cond && '' || '--test-threads=1'` returns the flag on every leg
+      # and this whole change would be a no-op that reads as applied.
+      - run: cargo test --all-targets --no-default-features --features ${{ matrix.lua }}${{ matrix.crdt }} -- ${{ runner.os == 'macOS' && ' ' || '--test-threads=1' }}
         env:
           PMACS_REQUIRE_LSP: ${{ runner.os == 'Linux' && '1' || '' }}
           PMACS_REQUIRE_SHELLS: ${{ runner.os == 'Linux' && '1' || '' }}
