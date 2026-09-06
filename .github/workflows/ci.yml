@@ -157,6 +157,16 @@ jobs:
       # a warning that only the opt-out build shows.
       - if: matrix.lua == 'luajit'
         run: cargo clippy --workspace --all-targets --no-default-features --features luajit -- -D warnings
+      # D11's third stage, which the local gate has run since E0.5 and CI
+      # ran nowhere: rustdoc warnings are errors. That stage found 109
+      # rustdoc errors the first time it ran, so its absence here is a
+      # gap in the parity between the two, not a formality. Once, on the
+      # luajit leg, for the same reason the non-crdt lint runs once: the
+      # flavors differ inside mlua and nothing rustdoc reads.
+      - if: matrix.lua == 'luajit'
+        run: cargo doc --workspace --no-deps --no-default-features --features luajit,crdt
+        env:
+          RUSTDOCFLAGS: -D warnings
 
   gpu-render:
     name: GPU Render (headless)
@@ -321,7 +331,13 @@ jobs:
       # load-bearing: an empty string is FALSY in a GitHub expression, so
       # `cond && '' || '--test-threads=1'` returns the flag on every leg
       # and this whole change would be a no-op that reads as applied.
-      - run: cargo test --all-targets --no-default-features --features ${{ matrix.lua }}${{ matrix.crdt }} -- ${{ runner.os == 'macOS' && ' ' || '--test-threads=1' }}
+      #
+      # `--no-fail-fast`, as D11's sweep has: without it one failing
+      # target ends the step, and every target after it reports nothing
+      # at all --- at the tip of this branch that was 51 of 122 targets
+      # silently unrun under one flavor, on a red the owner had already
+      # filed.
+      - run: cargo test --all-targets --no-default-features --features ${{ matrix.lua }}${{ matrix.crdt }} --no-fail-fast -- ${{ runner.os == 'macOS' && ' ' || '--test-threads=1' }}
         env:
           PMACS_REQUIRE_LSP: ${{ runner.os == 'Linux' && '1' || '' }}
           PMACS_REQUIRE_SHELLS: ${{ runner.os == 'Linux' && '1' || '' }}
