@@ -24,6 +24,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+#[cfg(feature = "crdt")]
 use std::thread;
 use std::time::{Duration, Instant};
 

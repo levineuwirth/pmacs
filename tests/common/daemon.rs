@@ -28,10 +28,11 @@ use tempfile::TempDir;
 use pmacs::cell::CellSize;
 #[cfg(feature = "crdt")]
 use pmacs::protocol::AttachRequest;
-use pmacs::protocol::{FrontendCapabilities, Hello};
-use pmacs::transport::read_message;
+use pmacs::protocol::FrontendCapabilities;
 #[cfg(feature = "crdt")]
-use pmacs::transport::write_message;
+use pmacs::protocol::Hello;
+#[cfg(feature = "crdt")]
+use pmacs::transport::{read_message, write_message};
 
 /// A foreground daemon spawned in the test, in its own process group,
 /// reaped with everything it spawned on Drop (`tests/common/reap.rs`).
