@@ -3,13 +3,12 @@
 #
 #   scripts/anchor --print          print the block, exit
 #   scripts/anchor --write          replace README's block in place
-#   scripts/anchor --print --no-count   print without running cargo
 #
 # The block sits in README.md between `<!-- anchor:begin -->` and
 # `<!-- anchor:end -->`. tests/docs_consistency.rs asserts the block in
-# README equals `--print` byte for byte, so a hand-typed version number,
-# a stale feature list or a stale test count fails a test by name rather
-# than misleading the next reader.
+# README equals `--print` byte for byte, so a hand-typed version number
+# or a stale feature list fails a test by name rather than misleading
+# the next reader.
 #
 # WHAT IS DERIVED, AND FROM WHERE.
 #
@@ -20,35 +19,37 @@
 #
 #   Default features are read from Cargo.toml's `default = [...]` line.
 #
-#   Test and suite counts come from `cargo test --workspace -- --list`
-#   under the default features on this platform: a test is a `: test`
-#   line, a suite is a `Running` line. The counts are a property of
-#   Linux and the default features (cfg-gated tests differ elsewhere),
-#   and the block says so; tests/docs_consistency.rs compares them only
-#   under that configuration.
+# WHAT IS NO LONGER HERE: the test and suite counts (D24). They came
+# from `cargo test --workspace -- --list`, which cost 82 to 110 seconds
+# of every sweep that ran the docs test, made one row of the block a
+# property of the machine rather than of the tree, and required a
+# `--write` and a commit from anything that changed the number of tests.
+# In one phase that row produced two defects --- a red on a count nobody
+# had refreshed, and a zero count under CI's colored cargo output --- and
+# it pinned nothing a reader of README needed. Nothing in this script
+# runs cargo now, and `--write` is instant.
 #
-# WHAT IS NOT DERIVED: the stamp. The block's first row names the commit
-# and date the counts were measured at. `--write` sets it to HEAD and
-# today; `--print` carries the existing README stamp forward unchanged
-# (or HEAD and today when README has no block), because a commit cannot
-# contain its own sha and the row is provenance for the counts, not a
-# fact about the tree the test could derive. The rows below the stamp
-# are all derived, and those are what the byte-for-byte comparison
-# holds README to.
+# WHAT IS NOT DERIVED: the stamp. `--write` sets it to HEAD and today,
+# so the sha it carries is the commit the block was generated ON TOP OF:
+# the parent of the commit that will contain it, because a commit cannot
+# contain its own sha. The row is named for that. It was called
+# "measured at", which reads as provenance for a measurement and named,
+# for every commit that ever ran `--write`, a different commit from the
+# one the block shipped in. `--print` carries the existing README stamp
+# forward unchanged (or HEAD and today when README has no block), so the
+# byte-for-byte comparison binds every derived row and not this one.
 set -eu
 
 usage() {
-    echo "usage: scripts/anchor --print [--no-count] | --write" >&2
+    echo "usage: scripts/anchor --print | --write" >&2
     exit 2
 }
 
 MODE=''
-COUNT=1
 while [ $# -gt 0 ]; do
     case $1 in
         --print) MODE=print; shift ;;
         --write) MODE=write; shift ;;
-        --no-count) COUNT=0; shift ;;
         *) usage ;;
     esac
 done
@@ -102,32 +103,13 @@ supported_range="$first..=$last"
 default_features=$(one_line '^default = \[.*\]$' Cargo.toml \
     | sed -E 's/^default = \[(.*)\]$/\1/; s/"//g; s/, */, /g')
 
-# Test and suite counts. `--list` builds every test target first, which
-# is a no-op after a sweep and a full build on a cold directory.
-if [ "$COUNT" = 1 ]; then
-    # Test names go to stdout and the `Running <target>` lines to stderr,
-    # so both streams are captured; a failed listing exits non-zero and
-    # is refused rather than counted. Cargo's color is forced off: CI
-    # sets CARGO_TERM_COLOR=always, and a colored `Running` line carries
-    # escapes the count below would not match.
-    listing=$(CARGO_TERM_COLOR=never cargo test --workspace -- --list 2>&1) || {
-        echo "anchor: cargo test --workspace -- --list failed" >&2
-        exit 3
-    }
-    tests=$(printf '%s\n' "$listing" | grep -c ': test$' || true)
-    suites=$(printf '%s\n' "$listing" | grep -c '^ *Running ' || true)
-    counts_row="| tests | $tests in $suites suites (\`cargo test --workspace -- --list\`, Linux, default features) |"
-else
-    counts_row=''
-fi
-
 # The stamp: carried forward by --print, refreshed by --write.
 existing_stamp=$(awk -v b="$BEGIN" -v e="$END" '
     $0 == b { inside = 1; next }
     $0 == e { inside = 0 }
-    inside && /^\| measured at \|/ { print; exit }
+    inside && /^\| generated after \|/ { print; exit }
 ' "$README" 2>/dev/null || true)
-head_stamp="| measured at | \`$(git rev-parse --short HEAD)\` ($(date -u +%Y-%m-%d)) |"
+head_stamp="| generated after | \`$(git rev-parse --short HEAD)\` ($(date -u +%Y-%m-%d)) |"
 if [ "$MODE" = write ] || [ -z "$existing_stamp" ]; then
     stamp="$head_stamp"
 else
@@ -143,7 +125,6 @@ render() {
     printf '| `ADVERTISED_PROTOCOL_VERSION` | %s |\n' "$advertised"
     printf '| `SUPPORTED_PROTOCOL_VERSIONS` | `%s` |\n' "$supported_range"
     printf '| default features | %s |\n' "$default_features"
-    [ -n "$counts_row" ] && printf '%s\n' "$counts_row"
     printf '%s\n' "$END"
 }
 
@@ -151,7 +132,6 @@ case $MODE in
     print)
         render ;;
     write)
-        [ "$COUNT" = 1 ] || { echo "anchor: --write needs the counts; drop --no-count" >&2; exit 2; }
         block=$(render)
         if ! grep -qxF "$BEGIN" "$README" || ! grep -qxF "$END" "$README"; then
             echo "anchor: README.md has no $BEGIN / $END markers" >&2
@@ -164,5 +144,5 @@ case $MODE in
             !skipping { print }
         ' "$README" > "$tmp"
         mv "$tmp" "$README"
-        echo "anchor: README.md block refreshed at $(git rev-parse --short HEAD)" ;;
+        echo "anchor: README.md block generated after $(git rev-parse --short HEAD)" ;;
 esac

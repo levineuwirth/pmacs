@@ -1,8 +1,10 @@
 //! The four things the documentation is held to, and no more.
 //!
 //! 1. README's generated status block equals `scripts/anchor --print`
-//!    byte for byte, so a hand-edited version number or a stale count
-//!    fails by name.
+//!    byte for byte, so a hand-edited version number or a stale feature
+//!    list fails by name. The block carries no count: D24 took the test
+//!    and suite counts out of it, and rule 2 is what keeps counts out
+//!    of README altogether.
 //! 2. README prose outside that block carries no protocol version and
 //!    no count about the tree; numbers about the tree live in the block,
 //!    where they are derived.
@@ -26,14 +28,8 @@ fn read(rel: &str) -> String {
 }
 
 fn run_script(rel: &str, args: &[&str]) -> String {
-    run_script_env(rel, args, &[])
-}
-
-/// [`run_script`] with environment variables set for the child.
-fn run_script_env(rel: &str, args: &[&str], env: &[(&str, &str)]) -> String {
     let out = Command::new(repo_root().join(rel))
         .args(args)
-        .envs(env.iter().copied())
         .current_dir(repo_root())
         .output()
         .unwrap_or_else(|e| panic!("run {rel}: {e}"));
@@ -57,45 +53,18 @@ fn anchor_block(readme: &str) -> String {
     readme[begin..end + "<!-- anchor:end -->".len()].to_owned() + "\n"
 }
 
-/// Whether this build is the configuration the block's counts describe:
-/// the default features on Linux. Elsewhere the counts legitimately
-/// differ (cfg-gated tests, a different flavor), so the count row is
-/// compared only here and every other row everywhere.
-fn counts_are_comparable() -> bool {
-    cfg!(all(
-        target_os = "linux",
-        feature = "luajit",
-        feature = "crdt"
-    ))
-}
-
+/// Every row of the block is derived from a file in the tree, so the
+/// comparison holds on every platform and every feature flavor. It did
+/// not while the block carried a test count, which is a property of the
+/// machine: that row was compared only under Linux and the default
+/// features, and was the one row this test could not hold anyone to.
 #[test]
 fn readme_status_block_equals_the_anchor_script_output() {
     let readme = read("README.md");
     let block = anchor_block(&readme);
-    let count_arg: &[&str] = if counts_are_comparable() {
-        &["--print"]
-    } else {
-        &["--print", "--no-count"]
-    };
-    // CI sets CARGO_TERM_COLOR=always, and the suite count is read from
-    // cargo's `Running` lines, so the anchor runs here the way it runs
-    // there; a count that depends on the terminal fails in this gate,
-    // not only in CI's.
-    let printed = run_script_env(
-        "scripts/anchor",
-        count_arg,
-        &[("CARGO_TERM_COLOR", "always")],
-    );
+    let printed = run_script("scripts/anchor", &["--print"]);
     let expected: Vec<&str> = printed.lines().collect();
-    let actual: Vec<&str> = if counts_are_comparable() {
-        block.lines().collect()
-    } else {
-        block
-            .lines()
-            .filter(|l| !l.starts_with("| tests |"))
-            .collect()
-    };
+    let actual: Vec<&str> = block.lines().collect();
     assert_eq!(
         actual, expected,
         "README's anchor block differs from `scripts/anchor --print`; run \
