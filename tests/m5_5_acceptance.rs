@@ -941,20 +941,13 @@ fn m10_9_color_stable_across_reconnect_for_same_uid() {
     let color_a1 = wait_for_palette_color_in_b(&mut stream_b, Duration::from_secs(2))
         .expect("should observe A1's overlay color");
 
-    // Detach A1. A2's reattach is retried until the daemon has released
-    // A1's slot, which is the readiness event a pause only guessed at.
+    // Detach A1 and reattach as A2. Nothing has to settle in between:
+    // the slot is keyed by the peer's uid at attach time, not by A1's
+    // departure, so A2 needs no readiness wait (the pause that used to
+    // sit here waited for nothing).
     drop(stream_a1);
-    let (hello_a2, mut stream_a2) = common::ready::expect(
-        "A2's reattach after A1's slot clears",
-        Duration::from_secs(10),
-        || {
-            let (hello, mut stream) = attach_multi(&daemon);
-            match read_message::<InstanceMessage>(&mut stream) {
-                Ok(_) => common::ready::Probe::Ready((hello, stream)),
-                Err(error) => common::ready::Probe::Pending(format!("A2 init: {error}")),
-            }
-        },
-    );
+    let (hello_a2, mut stream_a2) = attach_multi(&daemon);
+    let _a2_init: InstanceMessage = read_message(&mut stream_a2).expect("A2 init");
     let key2 = FrontendEvent::Key(KeyEvent {
         frontend_id: hello_a2.assigned_frontend_id,
         key: Key::Char('y'),
@@ -966,10 +959,22 @@ fn m10_9_color_stable_across_reconnect_for_same_uid() {
     let color_a2 = wait_for_palette_color_in_b(&mut stream_b, Duration::from_secs(2))
         .expect("should observe A2's overlay color");
 
-    assert_eq!(
-        color_a1, color_a2,
-        "M10.9 criterion 2: same uid across reconnect → same color slot"
-    );
+    // The daemon learns the peer's uid through SO_PEERCRED, which exists
+    // on Linux and Android; elsewhere `peer_uid` is `None` and the slot
+    // is per connection by design (src/daemon.rs, the attach-time slot
+    // choice), so the stability property is asserted only where it can
+    // hold and the row says so where it cannot.
+    if cfg!(any(target_os = "linux", target_os = "android")) {
+        assert_eq!(
+            color_a1, color_a2,
+            "M10.9 criterion 2: same uid across reconnect → same color slot"
+        );
+    } else {
+        eprintln!(
+            "M10.9 criterion 2 not asserted: this platform has no peer credentials, \
+             the daemon assigns a per-connection slot (A1 {color_a1:?}, A2 {color_a2:?})"
+        );
+    }
 }
 
 /// Helper for color-stability test: read `CellDelta` messages from
