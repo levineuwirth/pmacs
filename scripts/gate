@@ -296,7 +296,8 @@ emit_self_test_plan() {
     # PARENT before `sh` ever starts, and the row then passes even when
     # the variable is assigned but never EXPORTED --- which is precisely
     # the regression it exists to catch.
-    printf 'self-pass\tsh -c %s\n' "'echo gate-child-tmpdir=\$TMPDIR'"
+    printf 'self-pass\tsh -c %s\n' \
+        "'echo gate-child-tmpdir=\$TMPDIR; echo gate-child-runtime=\$XDG_RUNTIME_DIR; echo gate-child-runtime-mode=\$(ls -ld \"\$XDG_RUNTIME_DIR\" | cut -c1-10)'"
     printf 'self-fail\tfalse\n'
     printf 'self-sentinel\ttrue\n'
 }
@@ -859,6 +860,35 @@ export XDG_CONFIG_HOME="$AMBIENT" XDG_DATA_HOME="$AMBIENT" \
 # no per-stage plumbing to forget.
 export TMPDIR="$GATE_TMPDIR"
 
+# XDG_RUNTIME_DIR: the sixth root, and the only one that addresses
+# SOCKETS rather than stored state.
+#
+# A daemon started by NAME rather than by path --- `--socket default`,
+# or no `--socket` at all --- resolves through `src/socket_path.rs` to
+# `$XDG_RUNTIME_DIR/pmacs/<name>.sock`. Left ambient that is the
+# developer's own `/run/user/<uid>/pmacs`, so such a fixture would bind
+# OUTSIDE the run, and the surviving-daemon step below could not see it
+# either: it matches a daemon by this run's TMPDIR appearing in its
+# argv. No fixture in the tree names a socket that way today, which is
+# the reason the hole has cost nothing so far; this closes it by
+# construction rather than by inspection, on the next one too.
+#
+# UNDER THE RUN'S TMPDIR, so the exit trap reaps it with everything
+# else, and so a daemon that does slip through is visible to the
+# survivor check rather than merely isolated. Its socket suffix
+# (`/run/pmacs/<name>.sock`, 23 bytes for the default name) is shorter
+# than the fixture maximum the reserve above is sized on.
+#
+# 0700 BECAUSE THE PRODUCT REFUSES ANYTHING WIDER. `ensure_runtime_subdir`
+# rejects a runtime directory carrying any group-or-other bit, so an
+# isolation that handed the daemon a 0755 directory would stop it from
+# starting at all --- worse than no isolation, and in a way that reads
+# as a product defect.
+GATE_RUNTIME_DIR="$GATE_TMPDIR/run"
+mkdir -p "$GATE_RUNTIME_DIR"
+chmod 700 "$GATE_RUNTIME_DIR"
+export XDG_RUNTIME_DIR="$GATE_RUNTIME_DIR"
+
 echo "gate: worktree   $WT"
 echo "gate: target dir $TARGET"
 echo "gate: logs       $LOGDIR"
@@ -869,6 +899,7 @@ echo "gate: ambient    $AMBIENT"
 # Printed for the same reason as the ambient root: the isolation is
 # observable, and the exit trap removes this too.
 echo "gate: tmpdir     $GATE_TMPDIR"
+echo "gate: runtime    $GATE_RUNTIME_DIR"
 [ "$PROTOCOL" = 1 ] && echo "gate: protocol   yes (the luajit-only sweep is added)"
 [ "$PERF" = 1 ] && echo "gate: perf       yes (scripts/perf-budgets is added)"
 [ "$DOCS" = 1 ] && echo "gate: docs       yes (fmt, doc and diff-check only)"

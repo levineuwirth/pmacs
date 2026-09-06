@@ -729,10 +729,97 @@ fn the_isolated_tmpdir_reaches_a_spawned_child_under_the_managed_root() {
     .join("01-self-pass.log");
     let seen =
         std::fs::read_to_string(&log).unwrap_or_else(|e| panic!("read {}: {e}", log.display()));
+    let reported = seen
+        .lines()
+        .find_map(|l| l.strip_prefix("gate-child-tmpdir="))
+        .unwrap_or_else(|| panic!("the self-pass child must report its TMPDIR; log:\n{seen}"));
     assert_eq!(
-        seen.trim(),
-        format!("gate-child-tmpdir={announced}"),
+        reported, announced,
         "a spawned child must inherit exactly the announced TMPDIR"
+    );
+}
+
+/// `XDG_RUNTIME_DIR` is isolated too, under the run's own `TMPDIR`.
+///
+/// **The variable that addresses sockets, not stored state.** A daemon
+/// started by NAME rather than by path resolves through
+/// `src/socket_path.rs` to `$XDG_RUNTIME_DIR/pmacs/<name>.sock`. Left
+/// ambient, such a fixture binds under the developer's real
+/// `/run/user/<uid>/pmacs`: outside the run's isolation, and invisible
+/// to the surviving-daemon step, which matches a daemon by this run's
+/// TMPDIR appearing in its argv. No fixture does that today, so this
+/// row pins a property rather than fixing a red --- and the property is
+/// what makes the next such fixture harmless.
+///
+/// Read from a real child's environment, for the same reason the row
+/// above is: the gate exporting a variable proves only that the gate
+/// can export a variable.
+#[test]
+fn the_isolated_runtime_dir_reaches_a_spawned_child_under_the_run_tmpdir() {
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
+    let (out, err, _ok) = run(root.path(), &["--self-test"]);
+
+    let tmpdir = out
+        .lines()
+        .find_map(|l| {
+            l.split_once("gate: tmpdir")
+                .map(|(_, p)| p.trim().to_owned())
+        })
+        .unwrap_or_else(|| panic!("the gate must announce its TMPDIR; stdout:\n{out}"));
+    let announced = out
+        .lines()
+        .find_map(|l| {
+            l.split_once("gate: runtime")
+                .map(|(_, p)| p.trim().to_owned())
+        })
+        .unwrap_or_else(|| panic!("the gate must announce its runtime dir; stdout:\n{out}"));
+
+    assert_eq!(
+        Path::new(&announced).parent().expect("runtime dir parent"),
+        Path::new(&tmpdir),
+        "the runtime dir must sit under the run's own TMPDIR, so the exit \
+         trap reaps it and a daemon that binds there is still visible to \
+         the survivor check; was {announced}"
+    );
+
+    let log = Path::new(
+        err.lines()
+            .find_map(|l| l.split_once("log: ").map(|(_, p)| p.trim()))
+            .unwrap_or_else(|| panic!("expected a log path; stderr:\n{err}")),
+    )
+    .parent()
+    .expect("log directory")
+    .join("01-self-pass.log");
+    let seen =
+        std::fs::read_to_string(&log).unwrap_or_else(|e| panic!("read {}: {e}", log.display()));
+    let reported = seen
+        .lines()
+        .find_map(|l| l.strip_prefix("gate-child-runtime="))
+        .unwrap_or_else(|| {
+            panic!("the self-pass child must report its XDG_RUNTIME_DIR; log:\n{seen}")
+        });
+    assert_eq!(
+        reported, announced,
+        "a spawned child must inherit exactly the announced runtime dir"
+    );
+
+    // The product refuses a runtime directory any wider than 0700
+    // (`ensure_runtime_subdir`), so an isolation that handed the daemon
+    // a group-readable directory would stop it starting at all. Read
+    // from the child as well, because the directory is reaped with the
+    // run and cannot be stat'd once this test regains control.
+    let mode = seen
+        .lines()
+        .find_map(|l| l.strip_prefix("gate-child-runtime-mode="))
+        .unwrap_or_else(|| panic!("the self-pass child must report the mode; log:\n{seen}"));
+    assert_eq!(
+        mode, "drwx------",
+        "the runtime dir must be 0700, which is what \
+         `ensure_runtime_subdir` requires of it before a daemon will bind \
+         there"
     );
 }
 

@@ -48,12 +48,12 @@ tree, never typed.
 <!-- anchor:begin -->
 | status | value |
 |---|---|
-| measured at | `2af5f63` (2026-09-06) |
+| measured at | `7328b58` (2026-09-06) |
 | `PROTOCOL_VERSION` | 25 |
 | `ADVERTISED_PROTOCOL_VERSION` | 20 |
 | `SUPPORTED_PROTOCOL_VERSIONS` | `6..=25` |
 | default features | luajit, crdt |
-| tests | 4576 in 120 suites (`cargo test --workspace -- --list`, Linux, default features) |
+| tests | 4577 in 120 suites (`cargo test --workspace -- --list`, Linux, default features) |
 <!-- anchor:end -->
 
 An audit taken on 2026-09-05, kept in the repository as
