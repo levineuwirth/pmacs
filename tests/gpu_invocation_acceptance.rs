@@ -739,7 +739,12 @@ mod crdt {
         assert_eq!(Path::new(args[1]), socket);
         assert_eq!(Path::new(args[2]), pmacs_binary());
         assert_eq!(args[3], "--initial-target");
-        assert_eq!(Path::new(args[4]), launch_cwd);
+        // The broker forwards the launch directory it resolved, which on
+        // macOS is the canonical path (`/var` is a link to `/private/var`).
+        assert_eq!(
+            Path::new(args[4]),
+            fs::canonicalize(&launch_cwd).expect("canonical launch cwd")
+        );
         assert_eq!(Path::new(args[5]), launcher_home.join("notes.txt"));
 
         let failure = Command::new(pmacs_binary())
@@ -831,8 +836,19 @@ mod crdt {
         fs::create_dir(&cwd).expect("create workspace");
         fs::write(cwd.join("alpha.txt"), "alpha\n").expect("write alpha");
         fs::write(cwd.join("beta.txt"), "beta\n").expect("write beta");
+        // A name that is not UTF-8 is a row only where the filesystem can
+        // hold one: APFS refuses it (EILSEQ), so on macOS the row is skipped
+        // and says so, rather than failing on the fixture.
         let raw_name = OsString::from_vec(vec![b'r', b'a', b'w', 0xff]);
-        fs::write(cwd.join(&raw_name), "raw\n").expect("write non-UTF-8 target");
+        let raw_name = match fs::write(cwd.join(&raw_name), "raw\n") {
+            Ok(()) => Some(raw_name),
+            Err(error) => {
+                eprintln!(
+                    "skipping the non-UTF-8 target: the filesystem refused the name: {error}"
+                );
+                None
+            }
+        };
 
         let existing_socket = temp.path().join("existing-target.sock");
         let mut daemon = spawn_daemon(&existing_socket, &[]);
@@ -843,8 +859,10 @@ mod crdt {
         assert_eq!(same_alpha.buffer_id, alpha.buffer_id);
         assert_eq!(beta.replica.materialize_string(), "beta\n");
         assert_ne!(beta.buffer_id, alpha.buffer_id);
-        let raw = attach_target(&existing_socket, &cwd, Path::new(raw_name.as_os_str()));
-        assert_eq!(raw.replica.materialize_string(), "raw\n");
+        if let Some(raw_name) = &raw_name {
+            let raw = attach_target(&existing_socket, &cwd, Path::new(raw_name.as_os_str()));
+            assert_eq!(raw.replica.materialize_string(), "raw\n");
+        }
         let missing_path = Path::new("new-draft.txt");
         let missing = attach_target(&existing_socket, &cwd, missing_path);
         assert_eq!(missing.replica.materialize_string(), "");
