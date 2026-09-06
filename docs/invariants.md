@@ -275,6 +275,16 @@ frontends, ships with an entry here stating what diverges, why it was
 accepted, and what removes it. An entry is removed when its condition is
 met.
 
+- **Frontend color slots.** A frontend's overlay color is keyed by the
+  connecting peer's Unix uid, so the same user reconnecting keeps its
+  color. The daemon reads that uid with `SO_PEERCRED` (Linux and
+  Android); elsewhere `peer_uid` returns `None` and the slot falls back
+  to the `FrontendId`, stable within a connection and not across one. A
+  token the frontend sent instead would let any peer claim another's
+  identity on a socket the kernel alone authenticates, so the
+  degradation was accepted. Removed when the daemon carries a session
+  identity of its own; until then the acceptance asserts equality only
+  where the credential exists, and prints both colors where it does not.
 - **Line wrap.** Under `ui.line-wrap = "wrap"` both frontends wrap at
   the character. The GPU frontend could wrap by word through
   cosmic-text's Unicode line breaking (UAX #14) and the grid frontend
