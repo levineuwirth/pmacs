@@ -1,0 +1,148 @@
+#!/bin/sh
+# scripts/anchor --- README's generated status block, derived from the tree.
+#
+#   scripts/anchor --print          print the block, exit
+#   scripts/anchor --write          replace README's block in place
+#
+# The block sits in README.md between `<!-- anchor:begin -->` and
+# `<!-- anchor:end -->`. tests/docs_consistency.rs asserts the block in
+# README equals `--print` byte for byte, so a hand-typed version number
+# or a stale feature list fails a test by name rather than misleading
+# the next reader.
+#
+# WHAT IS DERIVED, AND FROM WHERE.
+#
+#   PROTOCOL_VERSION, ADVERTISED_PROTOCOL_VERSION and
+#   SUPPORTED_PROTOCOL_VERSIONS are read from pmacs-protocol/src/message.rs
+#   with anchored patterns; a constant that moves or changes shape makes
+#   this script fail loudly rather than print a stale value.
+#
+#   Default features are read from Cargo.toml's `default = [...]` line.
+#
+# WHAT IS NO LONGER HERE: the test and suite counts (D24). They came
+# from `cargo test --workspace -- --list`, which cost 82 to 110 seconds
+# of every sweep that ran the docs test, made one row of the block a
+# property of the machine rather than of the tree, and required a
+# `--write` and a commit from anything that changed the number of tests.
+# In one phase that row produced two defects --- a red on a count nobody
+# had refreshed, and a zero count under CI's colored cargo output --- and
+# it pinned nothing a reader of README needed. Nothing in this script
+# runs cargo now, and `--write` is instant.
+#
+# WHAT IS NOT DERIVED: the stamp. `--write` sets it to HEAD and today,
+# so the sha it carries is the commit the block was generated ON TOP OF:
+# the parent of the commit that will contain it, because a commit cannot
+# contain its own sha. The row is named for that. It was called
+# "measured at", which reads as provenance for a measurement and named,
+# for every commit that ever ran `--write`, a different commit from the
+# one the block shipped in. `--print` carries the existing README stamp
+# forward unchanged (or HEAD and today when README has no block), so the
+# byte-for-byte comparison binds every derived row and not this one.
+set -eu
+
+usage() {
+    echo "usage: scripts/anchor --print | --write" >&2
+    exit 2
+}
+
+MODE=''
+while [ $# -gt 0 ]; do
+    case $1 in
+        --print) MODE=print; shift ;;
+        --write) MODE=write; shift ;;
+        *) usage ;;
+    esac
+done
+[ -n "$MODE" ] || usage
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
+    echo "anchor: not inside a git worktree" >&2
+    exit 2
+}
+cd "$ROOT"
+README=README.md
+MESSAGE=pmacs-protocol/src/message.rs
+BEGIN='<!-- anchor:begin -->'
+END='<!-- anchor:end -->'
+
+# Anchored extraction. Each pattern requires the exact declaration shape
+# and exits non-zero on zero or multiple matches: a value this script
+# cannot find is an error, never an empty cell.
+one_line() {
+    _n=$(grep -c -E "$1" "$2" || true)
+    if [ "$_n" -ne 1 ]; then
+        echo "anchor: expected exactly one match for /$1/ in $2, found $_n" >&2
+        exit 3
+    fi
+    grep -E "$1" "$2"
+}
+
+protocol_version=$(one_line '^pub const PROTOCOL_VERSION: u32 = [0-9]+;$' "$MESSAGE" \
+    | sed -E 's/.*= ([0-9]+);/\1/')
+advertised=$(one_line '^pub const ADVERTISED_PROTOCOL_VERSION: u32 = [0-9]+;$' "$MESSAGE" \
+    | sed -E 's/.*= ([0-9]+);/\1/')
+# The supported list spans lines: take everything between the opening
+# `&[` and the closing `];`, then render it as `first..=last` after
+# checking it is contiguous, which is the property the handshake relies
+# on and the shape the prose has always used.
+supported=$(awk '
+    /^pub const SUPPORTED_PROTOCOL_VERSIONS: &\[u32\] = &\[/ { inside = 1; next }
+    inside && /^\];/ { exit }
+    inside { gsub(/[ ,]+/, "\n"); print }
+' "$MESSAGE" | grep -E '^[0-9]+$' || true)
+[ -n "$supported" ] || { echo "anchor: SUPPORTED_PROTOCOL_VERSIONS not found in $MESSAGE" >&2; exit 3; }
+first=$(printf '%s\n' "$supported" | head -1)
+last=$(printf '%s\n' "$supported" | tail -1)
+count=$(printf '%s\n' "$supported" | wc -l | tr -d ' ')
+if [ "$((last - first + 1))" -ne "$count" ]; then
+    echo "anchor: SUPPORTED_PROTOCOL_VERSIONS is not contiguous; refusing to render a range" >&2
+    exit 3
+fi
+supported_range="$first..=$last"
+
+default_features=$(one_line '^default = \[.*\]$' Cargo.toml \
+    | sed -E 's/^default = \[(.*)\]$/\1/; s/"//g; s/, */, /g')
+
+# The stamp: carried forward by --print, refreshed by --write.
+existing_stamp=$(awk -v b="$BEGIN" -v e="$END" '
+    $0 == b { inside = 1; next }
+    $0 == e { inside = 0 }
+    inside && /^\| generated after \|/ { print; exit }
+' "$README" 2>/dev/null || true)
+head_stamp="| generated after | \`$(git rev-parse --short HEAD)\` ($(date -u +%Y-%m-%d)) |"
+if [ "$MODE" = write ] || [ -z "$existing_stamp" ]; then
+    stamp="$head_stamp"
+else
+    stamp="$existing_stamp"
+fi
+
+render() {
+    printf '%s\n' "$BEGIN"
+    printf '| status | value |\n'
+    printf '|---|---|\n'
+    printf '%s\n' "$stamp"
+    printf '| `PROTOCOL_VERSION` | %s |\n' "$protocol_version"
+    printf '| `ADVERTISED_PROTOCOL_VERSION` | %s |\n' "$advertised"
+    printf '| `SUPPORTED_PROTOCOL_VERSIONS` | `%s` |\n' "$supported_range"
+    printf '| default features | %s |\n' "$default_features"
+    printf '%s\n' "$END"
+}
+
+case $MODE in
+    print)
+        render ;;
+    write)
+        block=$(render)
+        if ! grep -qxF "$BEGIN" "$README" || ! grep -qxF "$END" "$README"; then
+            echo "anchor: README.md has no $BEGIN / $END markers" >&2
+            exit 3
+        fi
+        tmp=$(mktemp "$ROOT/.anchor.XXXXXX")
+        awk -v b="$BEGIN" -v e="$END" -v block="$block" '
+            $0 == b { print block; skipping = 1; next }
+            $0 == e { skipping = 0; next }
+            !skipping { print }
+        ' "$README" > "$tmp"
+        mv "$tmp" "$README"
+        echo "anchor: README.md block generated after $(git rev-parse --short HEAD)" ;;
+esac

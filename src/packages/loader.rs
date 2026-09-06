@@ -5,7 +5,7 @@
 //! Pure-Rust resolution layer that maps a Lua `require` name (e.g.
 //! `"pmacs-magit"`, `"pmacs-magit.commit"`) to a concrete on-disk file
 //! path within an installed package's tree, gated by the manifest's
-//! [`PackageManifest::exports`] list.
+//! `PackageManifest::exports` list.
 //!
 //! # Why a separate module
 //!

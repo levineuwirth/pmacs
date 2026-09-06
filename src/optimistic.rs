@@ -958,8 +958,9 @@ mod tests {
     /// (cursor at content end after each insert). Mid-line typing
     /// would round-trip and incur daemon-latency for paint per Path
     /// β's documented scope.
-    #[test]
-    fn criterion_1_end_of_line_typing_completes_sub_frame_per_keystroke() {
+    /// Type the pangram end-of-line, asserting every keystroke took the
+    /// optimistic path; returns (total, per keystroke).
+    fn type_pangram_optimistically() -> (std::time::Duration, std::time::Duration) {
         use std::time::Instant;
         let (mut m, _id) = ready_mirror_with_cursor("", 0);
         let fid = FrontendId(2);
@@ -979,8 +980,19 @@ mod tests {
             );
         }
         let elapsed = start.elapsed();
-        let per_keystroke = elapsed / 43; // length of the pangram
+        (elapsed, elapsed / 43) // length of the pangram
+    }
 
+    #[test]
+    fn criterion_1_end_of_line_typing_takes_the_optimistic_path() {
+        let (elapsed, per_keystroke) = type_pangram_optimistically();
+        eprintln!("criterion 1: {per_keystroke:?} per keystroke, {elapsed:?} total");
+    }
+
+    #[test]
+    #[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
+    fn criterion_1_end_of_line_typing_completes_sub_frame_per_keystroke() {
+        let (elapsed, per_keystroke) = type_pangram_optimistically();
         // Upper bound per keystroke: 1ms (60× under frame budget).
         // Loose because CI runners vary; tight enough to catch any
         // synchronous-IO regression that would put criterion 1 at risk.

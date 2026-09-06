@@ -10,13 +10,13 @@ multi-language injections shipped (#122).
 landed work as open — #123 as "PR open" (merged 2026-07-21), #137 as
 "in review" (merged), and HTML/CSS as an unshipped grammar (#146). It is
 the cross-cutting index, so a stale entry here sends someone to build
-something that exists. **`docs/agent-handoff.md` §1a is the authority
+something that exists. **`docs/archive/agent-handoff-2026-09.md` §1a is the authority
 for arc state; this file is the long tail.** Re-check an item here
 against the handoff before starting it.
 
 **Scope.** This is the *side-quest* backlog: self-contained,
 frontend-agnostic-ish work that does **not** belong to the **themes /
-faces main quest** (Arc 4, `docs/theme-faces-framing.md`). Anything about
+faces main quest** (Arc 4, `docs/archive/framings/theme-faces-framing.md`). Anything about
 colors, faces, syntax-highlight *styling*, or semantic-token→color
 mapping is excluded here and lives with the theme workstream — those are
 listed once, at the bottom, so the reader knows they were seen.
@@ -133,7 +133,7 @@ The direct continuation of the #114–#118 grammar/detection stack.
   projection, and minimap widths. GPU expansion retains source-tab provenance,
   so caret, hit, selection, and diagnostic geometry remain byte-correct through
   adornments and soft wraps. Source text and protocol ranges remain raw; this
-  adds no config key or wire change. See `docs/tab-width-parity-framing.md`.
+  adds no config key or wire change. See `docs/archive/framings/tab-width-parity-framing.md`.
 - **Real `read_only` buffer flag** on both edit paths — true immutability
   for panels / REPL / generated buffers.
 - ~~**Mode system wiring**~~ — **SHIPPED as #129.** Per-buffer major modes
@@ -253,7 +253,7 @@ parity (#137), modeline detection (#132), and the HTML/CSS grammars
 (#146) that were named here as the cleanest remaining one-shot.
 
 **This file no longer sets direction.** `COHERENCE.md` §20 carries the
-priority order and `docs/agent-handoff.md` §1a carries the board; both
+priority order and `docs/archive/agent-handoff-2026-09.md` §1a carries the board; both
 postdate this document and are audited. What remains here is the long
 tail — genuinely useful, genuinely optional. The most-missed editing
 table-stakes are still **word-kills + `C-SPC` set-mark**.

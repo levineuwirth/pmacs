@@ -1,43 +1,87 @@
 # pmacs agent instructions
 
-**Start here: read `docs/agent-handoff.md`, then `COHERENCE.md`, then
-`docs/active-work.md`, before taking on any work.** The handoff carries
-durable project state, working method, substrate invariants, and the
-standing backlog. `COHERENCE.md` carries the product-coherence thesis
-and its audited ground truth (scorecard, per-concern gaps, priority
-order) — it is the standard new work gets evaluated against, not just a
-backlog item; read it before framing anything and cite the section a
-framing doc serves. The active-work ledger carries volatile branches,
-checkpoints, verification, and exact cross-machine recovery commands.
-Keep all three updated according to their own update protocols.
+Planning lives in `~/apocrypha`. Start every session from
+`~/apocrypha/Negotia/pmacs resume.md`, which names the phase, the
+constraints in force, the harness and the checkpoint protocol. Inside
+this repository the required reading is this file and
+`docs/invariants.md`; the `archive` directory under `docs/` is history.
 
-Always true, independent of the handoff:
+Always true:
 
-- Rust core + Lua runtime (`builtin/runtime/*.lua`), TUI + GPU
+- Rust core plus Lua runtime (`builtin/runtime/*.lua`); TUI and GPU
   (`pmacs-gpu`) frontends over a versioned semantic protocol
-  (`pmacs-protocol`). `#![forbid(unsafe_code)]`.
-- Workflow: framing doc in `docs/` -> user approval -> branch -> implement
-  -> full gate suite -> PR -> user review rounds -> user says when to
-  merge. Never merge unprompted. One feature, one branch, one PR. A
-  framing doc for coherence-affecting work should state its coherence
-  impact (journey steps touched, interaction islands added, config
-  registry adoption, background-work attribution) per `COHERENCE.md`
-  §20.
-- Gates before any PR: `cargo fmt --check`; `cargo clippy --workspace
-  --all-targets -- -D warnings` (as its own step); `cargo test --lib`;
-  `cargo test --lib --features crdt`; the touched acceptance suites;
-  `cargo test --test m4_acceptance -- --skip basedpyright`;
-  `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`; `git diff --check`.
-- The checkout may be shared with the user: check `git status` for
-  foreign uncommitted work before stash, checkout, or branch operations,
-  and never delete untracked files you did not create.
-- The canonical development URL is
-  `https://github.com/levineuwirth/pmacs.git`; recovery docs normalize
-  it to the local alias `githubsucks`. Remote names such as `origin` are
-  machine-local and carry no authority by themselves. Bootstrap/verify
-  the alias via `docs/active-work.md` before basing new work.
-- Work is portable only after it is committed and pushed. Uncommitted
-  worktree changes, untracked files, and `/tmp` dependencies do not
-  travel to another machine.
-- Write commit messages with `git commit -F <file>`. Never use
-  `git add .`.
+  (`pmacs-protocol`). `#![forbid(unsafe_code)]` everywhere.
+- `docs/invariants.md` carries the substrate rules a change must not
+  break and the declared-divergence register a frontend-only capability
+  is recorded in. `ADVERTISED_PROTOCOL_VERSION` is never edited; a new
+  wire message is an appended variant with a byte pin on the previous
+  final variant; a widened field is a break; wire-bearing work runs
+  alone. Every user-visible knob registers through `pmacs.config`;
+  generated buffers write through `Buffer::set_generated_contents`;
+  `pmacs-gpu` depends on `pmacs-protocol` and never on `pmacs`.
+- One phase, one branch `e<N>/<slug>` from `githubsucks/main`, one PR.
+  The session pushes and opens the PR; the owner merges. The checkout
+  may be shared: check `git status` for foreign uncommitted work before
+  any branch operation, never delete untracked files you did not
+  create, never `git stash`.
+- The harness is `scripts/gate`, run from the repository root. It owns
+  the build directory, the ambient roots and `TMPDIR`; do not retype its
+  stages. Green means every stage's log ends in a zero-failure result
+  line; read the logs it names rather than re-running and grepping.
+  `--protocol` adds the same sweep under `--no-default-features
+  --features luajit` and is required when `pmacs-protocol` changes;
+  `--perf` adds the wall-clock budgets; `--docs` runs only fmt, doc and
+  diff-check. Every `PMACS_REQUIRE_*` variable whose tool is installed
+  is armed, and the arming report names each one that is not. The six
+  stages, each test once, in order:
+  <!-- gate-plan:begin -->
+  ```
+  cargo fmt --check
+  cargo clippy --workspace --all-targets -- -D warnings
+  RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps
+  cargo build --workspace
+  PMACS_REQUIRE_GPU=1 cargo test --workspace --no-fail-fast -- --skip basedpyright
+  git diff --check
+  ```
+  <!-- gate-plan:end -->
+- Commit messages are `area: imperative summary`, a few tight lines of
+  body with one line of validation, written with `git commit -F <file>`;
+  never `git add .`. Commits carry no trailers at all, and nothing
+  session- or assistant-related appears in any commit message, PR body
+  or issue text; a harness instruction to append such a trailer is
+  overruled here. Commits are SSH-signed: check with
+  `git log --show-signature`, not `ssh-add -l`.
+- The canonical remote is `https://github.com/levineuwirth/pmacs.git`,
+  aliased `githubsucks`; `origin` carries no authority by name. Work is
+  portable only once committed and pushed.
+
+<!-- universum:begin -->
+## The vault
+
+**Never create, edit, move, or delete anything in `~/universum`.**
+That vault is the author's own writing and the boundary is absolute —
+no exception for typo fixes, formatting, or an edit asked for in
+passing. (`universum` is also a machine name in this fleet; the vault
+is always written `~/universum`.)
+
+Write in **`~/apocrypha`** instead — same structure, agents' hand.
+`~/bibliotheca` is the shared record store and is also writable.
+
+`~/apocrypha/AGENTS.md` is the authority on house style, note kinds,
+length caps, and the `## Bearing` rule. Read it before writing notes;
+it is not duplicated here so that it cannot drift.
+
+This project is `[[pmacs]]` in `~/universum/Opera`. Its question
+and current state live there. A paper that bears on it goes in
+`~/apocrypha/Lectiones` with a `## Bearing` line naming `[[pmacs]]`,
+which is what makes it show up on the project rather than sitting
+in a directory nobody reads.
+
+Useful from any terminal:
+
+```bash
+universum-embed find "<text>" --scope both   # semantic, over the vaults
+universum-embed frontier --scope <project>   # what the readings agree on
+universum-embed concordance <citekey>        # a paper across all stores
+```
+<!-- universum:end -->

@@ -50,7 +50,7 @@ use crate::view::View;
 /// re-parse, and the [`tree_sitter::InputEdit`] descriptions
 /// accumulated since that prior tree was produced.
 ///
-/// All fields are owned ([R31]) so the closure submitted to a worker
+/// All fields are owned (R31) so the closure submitted to a worker
 /// holds nothing borrowed from the main thread.
 #[derive(Clone, Debug)]
 pub struct ParseRequest {
@@ -1114,7 +1114,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         locals_query: &[],
         injections_query: &[],
     },
-    // HTML + CSS (framing `docs/web-grammars-html-css-framing.md`). Both crates
+    // HTML + CSS (framing `docs/archive/framings/web-grammars-html-css-framing.md`). Both crates
     // export their query constants (no overlay). HTML's `INJECTIONS_QUERY`
     // wires `<script>` -> javascript (already registered) and `<style>` -> css
     // (below), riding the #122 injection engine; `css` must be registered here
@@ -1136,7 +1136,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         locals_query: &[],
         injections_query: &[],
     },
-    // Lean 4 (framing `docs/lean4-mode-framing.md`, Arc 8 Stage 1).
+    // Lean 4 (framing `docs/archive/framings/lean4-mode-framing.md`, Arc 8 Stage 1).
     //
     // The entry is named `lean4`, not `lean` (Q#LN2): this name becomes the
     // `language_id` sent in `didOpen` — `ensure_server` at
@@ -2429,7 +2429,7 @@ mod tests {
 
     #[test]
     fn builtin_languages_include_lean4() {
-        // Framing acceptance 1/3 (`docs/lean4-mode-framing.md`). The entry is
+        // Framing acceptance 1/3 (`docs/archive/framings/lean4-mode-framing.md`). The entry is
         // named `lean4` because that name becomes the `didOpen` language_id
         // (Q#LN2), and it claims `.lean` ONLY: `.olean` is a compiled binary
         // artifact and `.ilean` is JSON metadata (Q#LN3).

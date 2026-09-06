@@ -9,7 +9,7 @@
 //!
 //! # Window model (T M2.8)
 //!
-//! Buffers live in [`BufferRegistry`]. Each [`Window`] points at one
+//! Buffers live in `BufferRegistry`. Each [`Window`] points at one
 //! by [`BufferId`] and owns its own cursor / view-top / goal-column /
 //! [`TextView`]. The [`Layout`] tree maps the cell grid to per-window
 //! viewport rectangles. A single [`WindowId`] is "active": every
@@ -121,7 +121,7 @@ pub enum ResolvedTarget {
     ///
     /// `path` is **normalized** — absolute, tilde-expanded, lexically
     /// clean. This is not free and must not be assumed: normalization
-    /// otherwise happens inside [`Self::set_buffer_path`], which never
+    /// otherwise happens inside `Self::set_buffer_path`, which never
     /// runs on this arm, so a caller resolving `"."` would keep `"."`
     /// (Q#JR8). A handler keying state by path needs the canonical form.
     Directory {
@@ -132,7 +132,7 @@ pub enum ResolvedTarget {
 
 /// Where an asynchronous continuation's result belongs, captured
 /// **synchronously** at request time (Journey Stage 1a, Q#JR14;
-/// generalized by `docs/destination-capture-framing.md`).
+/// generalized by `docs/archive/framings/destination-capture-framing.md`).
 ///
 /// The work that satisfies such a request is asynchronous (a directory
 /// listing is worker-dispatched and must be awaited; so is a `git`
@@ -869,7 +869,7 @@ impl EditorCore {
 
     /// Mutable view of the active frontend's [`FrontendView`].
     ///
-    /// Same fallback semantics as [`active_view`].
+    /// Same fallback semantics as `active_view`.
     pub fn active_view_mut(&mut self) -> &mut FrontendView {
         // Choose the key first to avoid borrowing `self.views`
         // twice with overlapping lifetimes (the fallback path).
@@ -4314,7 +4314,7 @@ impl EditorCore {
     ///   preflights *before* invoking the callback precisely because a
     ///   body creates buffers, registers handles and paints long before
     ///   it asks to display anything — "validating at display time is
-    ///   four mutations too late" (`docs/agent-handoff.md`). A refusal
+    ///   four mutations too late" (`docs/archive/agent-handoff-2026-09.md`). A refusal
     ///   arriving after all of that is not a refusal; it is a partial
     ///   commit with an error return.
     ///

@@ -1,5 +1,5 @@
 // bottom_panel_stage1_acceptance.rs --- bottom-panel Stage 1 acceptance
-// (docs/bottom-panel-framing.md, acceptance items 1-35).
+// (the archived bottom-panel framing, acceptance items 1-35).
 
 //! Window placement + TUI side windows. No wire change.
 //!
@@ -2444,20 +2444,15 @@ fn acc28_child_input_and_the_c_c_escape_work_unchanged_in_a_panel() {
 }
 
 fn wait_for_file(path: &std::path::Path, timeout: Duration) -> Vec<u8> {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        if let Ok(bytes) = std::fs::read(path)
-            && !bytes.is_empty()
-        {
-            return bytes;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "timed out waiting for {}",
-            path.display()
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    ready::expect(
+        &format!("bytes in {}", path.display()),
+        timeout,
+        || match std::fs::read(path) {
+            Ok(bytes) if !bytes.is_empty() => ready::Probe::Ready(bytes),
+            Ok(_) => ready::Probe::Pending("an empty file".to_owned()),
+            Err(error) => ready::Probe::Pending(error.to_string()),
+        },
+    )
 }
 
 /// Tick until the child's screen contains `needle`, so a test that
@@ -2765,3 +2760,5 @@ fn cell_coord_helper_is_used() {
 // write into their real data root.
 #[path = "common/iso.rs"]
 mod iso;
+#[path = "common/ready.rs"]
+mod ready;

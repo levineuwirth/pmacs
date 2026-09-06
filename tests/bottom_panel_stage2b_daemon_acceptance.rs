@@ -1,5 +1,5 @@
 // bottom_panel_stage2b_daemon_acceptance.rs --- bottom-panel Stage 2B-2
-// (docs/bottom-panel-stage2-framing.md §7.2.2; parent acceptance 38, 39
+// (the archived bottom-panel-stage2 framing §7.2.2; parent acceptance 38, 39
 // receiver half, 40, 41 daemon half, 42, 45, 49, 51, 52, plus A2B-1).
 
 //! The daemon panel projection and the epoch machine.

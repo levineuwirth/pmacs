@@ -1,4 +1,4 @@
-//! Editing-conveniences acceptance (docs/editing-conveniences-framing.md).
+//! Editing-conveniences acceptance (the archived editing-conveniences framing).
 //!
 //! Dispatch-driven where a binding exists (`pmacs.command.invoke`
 //! bypasses dispatch — a dead binding would pass vacuously), with

@@ -4,11 +4,14 @@
 #   scripts/feature-census <config-a> <config-b> [--covers <test-name>]
 #
 # Both arguments are `--features` strings, applied with
-# `--no-default-features`. Config A is the baseline (typically CI's
-# flags); config B is the richer one. The script reports every test that
-# exists under B and NOT under A --- the "dark" set.
+# `--no-default-features`, or the word `default`, which means the
+# package's default features and no flag at all. Config A is the
+# baseline (typically CI's flags); config B is the richer one. The
+# script reports every test that exists under B and NOT under A --- the
+# "dark" set.
 #
 #   scripts/feature-census luajit luajit,crdt
+#   scripts/feature-census default luajit,crdt
 #   scripts/feature-census luajit luajit,crdt --covers crdt_undo_keeps_invariant
 #
 # WHY THIS EXISTS. A cargo feature is a COMPILE-TIME gate, so a test
@@ -20,10 +23,10 @@
 # CLAUDE.md gate --- had never executed in CI. Nobody was ignoring a red
 # signal; there was no signal.
 #
-# docs/active-work.md therefore says the figure "moves with every merge
-# and must be re-measured, not quoted." That instruction had no tool, so
-# every re-measurement was a hand-rolled `--list` pipeline. This is that
-# tool.
+# The work ledger of the time therefore said the figure "moves with
+# every merge and must be re-measured, not quoted." That instruction had
+# no tool, so every re-measurement was a hand-rolled `--list` pipeline.
+# This is that tool.
 #
 # EXIT STATUS: 0 when the census completes (and, with --covers, the
 # claim holds); 1 when a --covers claim FAILS; 2 on usage errors; 3 when
@@ -84,7 +87,7 @@
 set -eu
 
 usage() {
-    echo "usage: scripts/feature-census <config-a> <config-b> [--covers <test-name>]" >&2
+    echo "usage: scripts/feature-census <config-a|default> <config-b|default> [--covers <test-name>]" >&2
     exit 2
 }
 
@@ -128,12 +131,24 @@ parse_list() {
     ' | sort -k2
 }
 
+# The cargo feature flags for a config name: none for `default`, else
+# `--no-default-features --features <config>`.
+feature_flags() {
+    if [ "$1" = default ]; then
+        printf ''
+    else
+        printf -- '--no-default-features --features %s' "$1"
+    fi
+}
+
 # $1 = features, $2 = output basename, $3... = extra libtest args
 run_list() {
     features=$1
     out=$2
     shift 2
-    if ! cargo test --all-targets --no-default-features --features "$features" \
+    # Unquoted on purpose: feature_flags emits zero or three words.
+    # shellcheck disable=SC2046
+    if ! cargo test --all-targets $(feature_flags "$features") \
             -- --list "$@" > "$work/$out.raw" 2>&1; then
         echo "feature-census: CONFIGURATION FAILED TO BUILD: --features $features" >&2
         echo "feature-census: refusing to report a census against a config that does not" >&2
@@ -144,9 +159,9 @@ run_list() {
     parse_list < "$work/$out.raw" > "$work/$out.counts"
 }
 
-echo "feature-census: listing A (--features $config_a)" >&2
+echo "feature-census: listing A ($config_a)" >&2
 run_list "$config_a" a
-echo "feature-census: listing B (--features $config_b)" >&2
+echo "feature-census: listing B ($config_b)" >&2
 run_list "$config_b" b
 # BOTH sides need an ignored pass. A test that is #[ignore]d under A as
 # well as B is not "dark and ignored" --- it was already there. Counting
@@ -163,8 +178,8 @@ targets_a=$(wc -l < "$work/a.counts" | tr -d ' ')
 targets_b=$(wc -l < "$work/b.counts" | tr -d ' ')
 
 echo
-echo "  config A: --features $config_a"
-echo "  config B: --features $config_b"
+echo "  config A: $config_a"
+echo "  config B: $config_b"
 echo
 
 # One pass over all four count files, keyed by target, so every derived

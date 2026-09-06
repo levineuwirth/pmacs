@@ -1,5 +1,5 @@
 // discovery_stage2_acceptance.rs --- Discovery Stage 2
-// (docs/discovery-stage2-framing.md §6).
+// (the archived discovery-stage2 framing §6).
 
 //! `M-x` rows stop being bare names.
 //!

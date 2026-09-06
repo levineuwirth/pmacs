@@ -9,7 +9,7 @@
 //! real state dir. The session key is cwd-based, so a save in one
 //! editor and a restore in another (same process) agree on the key.
 //!
-//! Framing: `docs/desktop-save-framing.md`.
+//! Framing: the archived desktop-save framing.
 
 use pmacs::editor::EditorState;
 use pmacs::lua_bindings::StateDir;

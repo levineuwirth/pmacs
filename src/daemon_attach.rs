@@ -191,7 +191,7 @@ fn protocol_fd() -> i32 {
 /// stdin/stdout to it.
 ///
 /// This is the entry point the binary calls. The auto-start step
-/// runs first so [`run_bridge`]'s `Connect` error path is reached
+/// runs first so `run_bridge`'s `Connect` error path is reached
 /// only when *something* genuinely cannot reach the daemon (spawn
 /// failed, timeout fired, etc.).
 // `PathBuf` by value matches the other CLI entry points

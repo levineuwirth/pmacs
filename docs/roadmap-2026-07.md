@@ -5,8 +5,8 @@ Date: 2026-07-07. Produced from a five-way codebase/docs/memory sweep
 terminal, deferred-work inventory across all framing docs).
 
 > **Historical planning snapshot.** Several arcs below have since
-> landed. Use `docs/agent-handoff.md` for durable current state and
-> `docs/active-work.md` for open branches and recovery instructions.
+> landed. Use `docs/archive/agent-handoff-2026-09.md` for durable current state and
+> `docs/archive/active-work-2026-09.md` for open branches and recovery instructions.
 
 **Decision (2026-07-07): push Arc 1 (LSP utility surface), with Arc 2
 (editing table stakes) items interleaved between sub-arcs.**
@@ -124,7 +124,7 @@ after daemon restart, cursor blink, font/theme config (overlaps Arc 4).
 - ~~Merge PR #91 (gutter click classification + fit guard).~~ Landed on
   2026-07-07.
 - Machine-local handoff/experiment files are intentionally untracked; see
-  `docs/agent-handoff.md` §7. They are not repository housekeeping targets.
+  `docs/archive/agent-handoff-2026-09.md` §7. They are not repository housekeeping targets.
 - `V0.2-PREREQUISITES.md` cited twice by CHANGELOG but missing on disk —
   reconstruct or unlink.
 - README still leads with "What v0.1 ships with" — refresh.

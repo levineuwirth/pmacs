@@ -185,7 +185,7 @@ pub fn write(base: &Path, name: &str, content: &[u8]) -> Result<(), StateError> 
     write_inner(base, name, content, None)
 }
 
-/// Like [`write`], but the parent directory is created `0700` and the
+/// Like [`write()`], but the parent directory is created `0700` and the
 /// file written `0600` (Arc 3 Q#AS11).
 ///
 /// Autosave stores **unsaved file contents**, a different class of secret
@@ -196,7 +196,7 @@ pub fn write(base: &Path, name: &str, content: &[u8]) -> Result<(), StateError> 
 /// mode is applied to the temp before the rename, so there is no window
 /// at a laxer mode.
 ///
-/// Permissions are Unix-only; elsewhere this is [`write`].
+/// Permissions are Unix-only; elsewhere this is [`write()`].
 ///
 /// # Errors
 /// Invalid key, or a save failure.

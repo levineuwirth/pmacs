@@ -17,6 +17,17 @@ publish = false
 name = "pmacs-gpu"
 path = "src/main.rs"
 
+[features]
+# Mirrors the root crate's defaults. These features exist only to forward
+# the Lua flavor and `crdt` to the test-only `pmacs` dev-dependency below;
+# the frontend itself has no Lua and no crdt code, so they change nothing
+# in the binary. Selected together with the root's on the command line:
+# `cargo test --workspace --no-default-features --features lua54,crdt`.
+default = ["luajit", "crdt"]
+luajit = ["pmacs/luajit"]
+lua54 = ["pmacs/lua54"]
+crdt = ["pmacs/crdt"]
+
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
@@ -73,5 +84,10 @@ tempfile = "3"
 # TEST-ONLY, and never a runtime dependency: step 3's panel-wheel
 # witness has to observe the RECEIVER's effect, not the event this
 # frontend emits, because the defect it exists for is precisely
-# "the frontend emits and the receiver discards".
-pmacs = { path = ".." }
+# "the frontend emits and the receiver discards". `default-features =
+# false` so that this edge never enables pmacs's own defaults: the Lua
+# flavor and `crdt` come from the features above, so a workspace build
+# with `--no-default-features --features lua54,crdt` does not also get
+# luajit through this edge (mlua allows exactly one flavor), and a
+# `--features luajit` workspace build is a non-crdt build.
+pmacs = { path = "..", default-features = false }

@@ -1,6 +1,6 @@
 //! LaTeX math-mode parser for the first inline-math slice.
 //!
-//! Framing: `docs/inline-math-slice-framing.md` (rev 3), Q#MS2. This parses
+//! Framing: `docs/archive/framings/inline-math-slice-framing.md` (rev 3), Q#MS2. This parses
 //! the deliberately small subset the slice renders — characters, groups,
 //! sub/superscripts and fractions — and nothing else. Every other LaTeX
 //! construct is an error, which Q#MS8 turns into "show the raw source".

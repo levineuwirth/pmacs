@@ -1562,8 +1562,9 @@ local make = function() end
         let _ = syms;
     }
 
-    #[test]
-    fn search_one_million_symbols_under_one_second() {
+    /// Build a million-symbol index and search it; asserts a hit and
+    /// returns how long the search took.
+    fn search_one_million_symbols() -> std::time::Duration {
         // This guards spec acceptance: 100k-file project, sub-1s
         // symbol search. We construct 10 files × 100 000 symbols
         // each so the in-memory shape is realistic, and we look
@@ -1594,6 +1595,19 @@ local make = function() end
         let hits = idx.search("symbol_3_42", 50);
         let elapsed = start.elapsed();
         assert!(!hits.is_empty(), "should find at least one match");
+        elapsed
+    }
+
+    #[test]
+    fn search_one_million_symbols_finds_the_needle() {
+        let elapsed = search_one_million_symbols();
+        eprintln!("million-symbol search took {elapsed:?}");
+    }
+
+    #[test]
+    #[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
+    fn search_one_million_symbols_under_one_second() {
+        let elapsed = search_one_million_symbols();
         assert!(
             elapsed < std::time::Duration::from_secs(1),
             "search took {elapsed:?}, expected < 1s"

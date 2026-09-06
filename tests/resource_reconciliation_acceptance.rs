@@ -1,6 +1,6 @@
 //! dired Stage 2a acceptance — rename and delete reconciliation.
 //!
-//! `docs/dired-stage2-framing.md` §5, §6, §10; acceptance items 23–38
+//! the archived dired-stage2 framing §5, §6, §10; acceptance items 23–38
 //! and 50–55.
 //!
 //! **This suite contains no dired content.** Stage 2a ships no dired
@@ -68,14 +68,31 @@ fn pump_until<F: Fn(&EditorState) -> bool>(state: &mut EditorState, what: &str, 
     }
 }
 
-/// Pump a fixed number of times without any expectation. Used only to
-/// give a dispatched job every chance to settle before asserting that
-/// something did **not** happen.
+/// Drain the async runtime for 160 ms, waiting for nothing.
+///
+/// **Only before a negative assertion**, and every remaining call site
+/// is one: a failed mutation that must reconcile nothing, and a hook
+/// that must fire exactly once. A drain before a positive assertion is
+/// a readiness wait wearing a fixed sleep, which is what
+/// [`rename_fire_and_forget`] and [`remove_fire_and_forget`] used this
+/// for until they were given the reconciliation's own signal.
 fn pump_a_while(state: &mut EditorState) {
     for _ in 0..80 {
         state.tick_async();
         std::thread::sleep(Duration::from_millis(2));
     }
+}
+
+/// How many times the reconciliation has completed, by kind.
+///
+/// `resource.renamed` and `resource.deleted` fire at the END of the
+/// drain's harvest — after the buffer paths are rebound, after the
+/// delete's two removal phases, and after every earlier-registered
+/// subscriber (`lsp.lua`'s among them) has run, because hook order is
+/// registration order. So an increment here is the whole
+/// reconciliation, which is what a fixed drain could only approximate.
+fn reconciled(state: &EditorState, kind: &str) -> i64 {
+    eval(state, &format!("return _G.__RECONCILED_{kind}"))
 }
 
 /// A canonicalized temp directory. Canonicalized because the buffer
@@ -117,6 +134,20 @@ fn editor() -> EditorState {
     // No language server may spawn from these fixtures. The LSP rows
     // that DO want one configure it explicitly.
     exec(&state, "pmacs.lsp.config = {}");
+    // The counters `reconciled` reads. Registered here, after the
+    // runtime's own subscribers, so an increment means every subscriber
+    // ahead of it has already run for that operation.
+    exec(
+        &state,
+        "_G.__RECONCILED_RENAMES = 0
+         _G.__RECONCILED_DELETES = 0
+         pmacs.hook.add('resource.renamed', function()
+           _G.__RECONCILED_RENAMES = _G.__RECONCILED_RENAMES + 1
+         end)
+         pmacs.hook.add('resource.deleted', function()
+           _G.__RECONCILED_DELETES = _G.__RECONCILED_DELETES + 1
+         end)",
+    );
     state
 }
 
@@ -162,6 +193,7 @@ fn buffer_is_valid(state: &EditorState, global: &str) -> bool {
 /// Fire-and-forget is the shape item 25 pins: the reconciliation must
 /// not live at result consumption.
 fn rename_fire_and_forget(state: &mut EditorState, from: &Path, to: &Path) {
+    let before = reconciled(state, "RENAMES");
     exec(
         state,
         &format!(
@@ -170,16 +202,22 @@ fn rename_fire_and_forget(state: &mut EditorState, from: &Path, to: &Path) {
             lua_str(to)
         ),
     );
-    pump_until(state, "rename lands on disk", |_| to.exists());
     // The rename landing on disk and the reply reaching the main thread
-    // are two events; pump past the first to reach the second.
-    pump_a_while(state);
+    // are two events, and the second is the one every caller asserts
+    // against. It has its own signal, so it is waited for rather than
+    // drained towards: with the 80-tick drain this replaces set to
+    // zero, eleven rows of this suite fail.
+    pump_until(state, "the rename to reconcile", |s| {
+        reconciled(s, "RENAMES") > before
+    });
 }
 
 fn remove_fire_and_forget(state: &mut EditorState, path: &Path) {
+    let before = reconciled(state, "DELETES");
     exec(state, &format!("pmacs.fs.remove(\"{}\")", lua_str(path)));
-    pump_until(state, "remove lands on disk", |_| !path.exists());
-    pump_a_while(state);
+    pump_until(state, "the delete to reconcile", |s| {
+        reconciled(s, "DELETES") > before
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -518,6 +556,9 @@ fn acc37_a_failed_rename_reconciles_nothing_and_fires_no_hook() {
             lua_str(&fx.at("target.txt"))
         ),
     );
+    // RETAINED DRAIN (160 ms): a failed rename reconciles nothing, so
+    // there is no signal to wait for — only a window in which a wrong
+    // hook fire or a wrong buffer move would have to appear.
     pump_a_while(&mut state);
 
     let fired: i64 = eval(&state, "return _G.FIRED");
@@ -573,6 +614,8 @@ fn acc50_the_hooks_fire_once_with_normalized_paths() {
         let n: i64 = eval(s, "return #_G.RENAMES");
         n > 0
     });
+    // RETAINED DRAIN (160 ms): the assertion is EXACTLY one row, so a
+    // second fire needs a window in which to appear.
     pump_a_while(&mut state);
 
     let renames: String = eval(&state, "return table.concat(_G.RENAMES, '|')");
@@ -591,6 +634,7 @@ fn acc50_the_hooks_fire_once_with_normalized_paths() {
         let n: i64 = eval(s, "return #_G.DELETES");
         n > 0
     });
+    // RETAINED DRAIN (160 ms): one row, for the same reason.
     pump_a_while(&mut state);
     let deletes: String = eval(&state, "return table.concat(_G.DELETES, '|')");
     assert_eq!(
@@ -1183,10 +1227,12 @@ fn acc54_a_rename_and_a_delete_on_disjoint_paths_both_reconcile() {
             exec(&state, &remove);
         }
 
-        pump_until(&mut state, "both mutations", |s| {
-            renamed_to.exists() && !deleted.exists() && !buffer_is_valid(s, "GOES")
+        // Both reconciliations, not both disk operations: the
+        // assertions below read the moved buffer's path and the deleted
+        // buffer's validity, so those are what the wait reads.
+        pump_until(&mut state, "both reconciliations", |s| {
+            buffer_path(s, "MOVES").as_deref() == renamed_to.to_str() && !buffer_is_valid(s, "GOES")
         });
-        pump_a_while(&mut state);
 
         assert_eq!(
             buffer_path(&state, "MOVES").as_deref(),
@@ -1237,21 +1283,28 @@ fn settle_until<F: Fn(&mut EditorState) -> bool>(
     what: &str,
     predicate: F,
 ) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !predicate(state) {
-        assert!(
-            Instant::now() < deadline,
-            "settle deadline exceeded: {what}"
-        );
-        state.tick_processes();
-        state.tick_lsp();
-        state.tick_async();
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    ready::tick_until(state, what, Duration::from_secs(20), |s| {
+        if predicate(s) {
+            ready::Probe::Ready(())
+        } else {
+            ready::Probe::Pending(format!(
+                "servers {:?}, status {:?}",
+                server_rows(s),
+                status(s)
+            ))
+        }
+    });
 }
 
-fn settle_a_while(state: &mut EditorState) {
-    for _ in 0..120 {
+/// Drive the real frame order for `ms` without waiting for anything.
+///
+/// **Only before a negative assertion.** [`pump_a_while`] ticks the
+/// async bus alone, which cannot carry a second `ensure_server`; a
+/// count that must NOT climb needs the frames a reconciliation pass
+/// actually runs on.
+fn drain_frames(state: &mut EditorState, ms: u64) {
+    let deadline = Instant::now() + Duration::from_millis(ms);
+    while Instant::now() < deadline {
         state.tick_processes();
         state.tick_lsp();
         state.tick_async();
@@ -1394,6 +1447,10 @@ fn error_underlines_per_window(state: &EditorState) -> Vec<(u64, usize)> {
 /// one-window render test while moving the diagnostic overlay to the end
 /// of the stack — caught by the composition-order assertion.
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario: two windows, a rename, and the overlay order in each"
+)]
 fn acc30_diagnostics_re_root_in_every_window_and_keep_their_stack_position() {
     let fx = Fixture::new();
     fx.write("proj/Cargo.toml", "[package]\nname = \"p\"\n");
@@ -1426,7 +1483,11 @@ fn acc30_diagnostics_re_root_in_every_window_and_keep_their_stack_position() {
     // one explicitly.
     exec(&state, "pmacs.window.focus_next()");
     exec(&state, "pmacs.window.switch_buffer(_G.B)");
-    settle_a_while(&mut state);
+    settle_until(&mut state, "the second window's diagnostic overlay", |s| {
+        overlay_kinds_per_window(s)
+            .iter()
+            .all(|(_, kinds)| kinds.contains(&"diagnostic"))
+    });
 
     // Push one more overlay AFTER the diagnostic in each window.
     // Without this the composition-order assertion below cannot bite:
@@ -1482,7 +1543,9 @@ fn acc30_diagnostics_re_root_in_every_window_and_keep_their_stack_position() {
     settle_until(&mut state, "diagnostics for the new URI", |s| {
         diag_count(s, &new_uri) > 0
     });
-    settle_a_while(&mut state);
+    settle_until(&mut state, "the old URI's store emptied", |s| {
+        diag_count(s, &old_uri) == 0
+    });
 
     assert_eq!(
         diag_count(&state, &old_uri),
@@ -1614,8 +1677,22 @@ fn acc32_a_cross_root_rename_re_runs_ensure_server_and_a_same_root_one_reuses() 
         "precondition: one server, rooted at package a"
     );
 
-    rename_fire_and_forget(&mut state, &inside, &fx.at("a/src/moved.rs"));
-    settle_a_while(&mut state);
+    let moved_a = fx.at("a/src/moved.rs");
+    rename_fire_and_forget(&mut state, &inside, &moved_a);
+    // NOT the file on disk: `rename_fire_and_forget` has already waited
+    // for the whole reconciliation, so a disk wait here is true at its
+    // first probe and the count below is read on whatever tick that
+    // happens to be. The LSP reattach is what "reuses the existing
+    // server" is about, and the fake republishes diagnostics on every
+    // didOpen, so diagnostics under the new URI are its proof.
+    let moved_uri_a = file_uri(&moved_a);
+    settle_until(&mut state, "package a reattached at its new uri", |s| {
+        diag_count(s, &moved_uri_a) > 0
+    });
+    // RETAINED DRAIN (150 ms): "reuses" is a claim about a server that
+    // must NOT appear, and no state announces a spawn that never
+    // happens.
+    drain_frames(&mut state, 150);
     assert_eq!(
         server_count(&state),
         1,
@@ -1632,12 +1709,21 @@ fn acc32_a_cross_root_rename_re_runs_ensure_server_and_a_same_root_one_reuses() 
         &fx.at("a/src/moved.rs"),
         &fx.at("b/src/moved.rs"),
     );
-    settle_until(&mut state, "a second server for package b", |s| {
-        server_count(s) == 2
-    });
-    settle_a_while(&mut state);
-
     let root_b = file_uri(&fx.at("b"));
+    settle_until(&mut state, "a server rooted at package b", |s| {
+        server_rows(s).iter().any(|r| r.contains(&root_b))
+    });
+    // The reconciliation for package b having FINISHED, not merely a
+    // second server existing: the row's subject is that a later pass
+    // does not spawn a third, and a count read at the first tick with
+    // two servers gives that no window at all.
+    let moved_uri_b = file_uri(&fx.at("b/src/moved.rs"));
+    settle_until(&mut state, "package b reattached at its new uri", |s| {
+        diag_count(s, &moved_uri_b) > 0
+    });
+    // RETAINED DRAIN (150 ms): the window a per-pass spawn would have
+    // to appear in.
+    drain_frames(&mut state, 150);
     let rows = server_rows(&state);
     assert!(
         rows.iter().any(|r| r.contains(&root_b)),
@@ -1796,7 +1882,13 @@ fn acc34_renaming_the_active_file_through_the_applier_returns_the_same_buffer() 
         response["result"]["applied"], true,
         "the batch must apply: {response:?}"
     );
-    settle_a_while(&mut state);
+    // The buffer following the rename is what every assertion below
+    // reads; the file is already on disk when the response lands, so a
+    // wait on `new.exists()` is true at its first probe.
+    let new_path = new.to_str().expect("utf-8 fixture path").to_owned();
+    settle_until(&mut state, "the open buffer to follow the rename", |s| {
+        buffer_path(s, "B").as_deref() == Some(new_path.as_str())
+    });
 
     assert!(new.exists(), "the rename landed on disk");
     assert!(!old.exists());
@@ -1887,7 +1979,12 @@ fn acc35_when_the_origin_buffer_is_gone_the_applier_restores_nothing() {
         response["result"]["applied"], true,
         "the batch must apply: {response:?}"
     );
-    settle_a_while(&mut state);
+    // The origin buffer being reconciled away is the event the row is
+    // about, and it is what `!buffer_is_valid` asserts; the recreated
+    // file is already on disk when the response lands.
+    settle_until(&mut state, "the origin buffer to be reconciled away", |s| {
+        !buffer_is_valid(s, "B")
+    });
 
     assert!(
         doomed.exists(),
@@ -2001,7 +2098,11 @@ fn a_subscriber_reconciliation_failure_is_reported_and_the_rest_still_reconcile(
     // Rename the parent, so BOTH attachments are in the fan-out.
     let new_uri_b = file_uri(&fx.at("w2/b/src/main.rs"));
     rename_fire_and_forget(&mut state, &fx.at("w"), &fx.at("w2"));
-    settle_a_while(&mut state);
+    settle_until(
+        &mut state,
+        "the reconciliation failure to be reported",
+        |s| status(s).contains("reconciliation failure"),
+    );
 
     // Half one: the failure is surfaced, on both channels, attributed to
     // the operation that failed.
@@ -2050,3 +2151,5 @@ fn a_subscriber_reconciliation_failure_is_reported_and_the_rest_still_reconcile(
 // write into their real data root.
 #[path = "common/iso.rs"]
 mod iso;
+#[path = "common/ready.rs"]
+mod ready;

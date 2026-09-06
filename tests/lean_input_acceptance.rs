@@ -1,5 +1,5 @@
 //! Lean 4 Unicode input method acceptance (Arc 8 Stage 4b,
-//! docs/lean4-mode-framing.md Q#LN11/Q#LN21/Q#LN22, criteria 38–45i).
+//! the archived lean4-mode framing Q#LN11/Q#LN21/Q#LN22, criteria 38–45i).
 //!
 //! Dispatch-driven throughout: `dispatch_key` is the producer that arms
 //! the typed-edit record for a grid frontend. The optimistic CRDT

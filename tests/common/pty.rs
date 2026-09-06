@@ -113,7 +113,7 @@ pub fn spawn_pmacs_in_pty(args: &[&str], envs: &[(&str, &Path)], rows: u16, cols
         cmd.arg(arg);
     }
     // Backfill any of the five storage variables the caller did not set
-    // (`docs/test-ambient-config-isolation-framing.md` §1.6a). Callers
+    // (the archived test-ambient-config-isolation framing §1.6a). Callers
     // pin the roots their assertions read (a per-test `XDG_CONFIG_HOME`,
     // a `PMACS_STATE_HOME` they inspect); the rest would otherwise be
     // inherited, and the child would materialize bundled packages into

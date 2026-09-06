@@ -26,8 +26,8 @@
 -- buffer when that callback runs. Everything under `pmacs.lsp` is
 -- therefore looked up lazily at callback time.
 --
--- Framing: docs/auto-pairing-framing.md; Stage 4a in
--- docs/lean4-mode-framing.md Q#LN10.
+-- Framing: docs/archive/framings/auto-pairing-framing.md; Stage 4a in
+-- docs/archive/framings/lean4-mode-framing.md Q#LN10.
 
 pmacs.pair = pmacs.pair or {}
 

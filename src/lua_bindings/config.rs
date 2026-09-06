@@ -1,7 +1,7 @@
 // lua_bindings/config.rs --- pmacs.config: the configuration registry surface.
 
 //! `pmacs.config.*` --- the Lua surface over [`crate::config_registry`].
-//! Per `docs/config-registry-framing.md`: two scopes, no wire surface,
+//! Per `docs/archive/framings/config-registry-framing.md`: two scopes, no wire surface,
 //! and no runtime chunk (Q#CR14) --- `pmacs.config` is installed here,
 //! entirely from Rust, before any `builtin/runtime/*.lua` chunk
 //! evaluates, exactly like `pmacs.command` and `pmacs.hook` have no

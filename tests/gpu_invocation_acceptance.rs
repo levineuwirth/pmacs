@@ -97,6 +97,8 @@ mod crdt {
     use std::path::PathBuf;
     use std::process::Stdio;
     use std::process::{Child, ChildStdin};
+
+    use common::reap::Reaped;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -122,6 +124,32 @@ mod crdt {
             .parent()
             .expect("test binary directory")
             .join("pmacs-gpu")
+    }
+
+    /// The daemon a report names by `daemon_pid`, terminated on drop
+    /// unless the report says the frontend reaped it. The root-broker
+    /// path leaves its managed daemon running by design (closing the
+    /// window detaches only that frontend), and the daemon sits in a
+    /// process group of its own, so the report's pid is the only handle
+    /// a test has on it.
+    struct DaemonFromReport(Option<u32>);
+
+    impl DaemonFromReport {
+        fn from_facts(facts: &HashMap<String, String>) -> Self {
+            let reaped = facts
+                .get("daemon_reaped")
+                .is_some_and(|value| value == "true");
+            let pid = facts.get("daemon_pid").and_then(|value| value.parse().ok());
+            Self(if reaped { None } else { pid })
+        }
+    }
+
+    impl Drop for DaemonFromReport {
+        fn drop(&mut self) {
+            if let Some(pid) = self.0 {
+                common::reap::reap_pid(pid);
+            }
+        }
     }
 
     fn parse_report(report: &Path) -> HashMap<String, String> {
@@ -152,21 +180,21 @@ mod crdt {
         expected: &str,
         timeout: Duration,
     ) -> HashMap<String, String> {
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            if report.exists() {
+        common::ready::expect(
+            &format!("report {} reaching {key}={expected}", report.display()),
+            timeout,
+            || {
+                if !report.exists() {
+                    return common::ready::Probe::Pending("no report yet".to_owned());
+                }
                 let facts = parse_report(report);
                 if facts.get(key).is_some_and(|value| value == expected) {
-                    return facts;
+                    common::ready::Probe::Ready(facts)
+                } else {
+                    common::ready::Probe::Pending(fs::read_to_string(report).unwrap_or_default())
                 }
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-        panic!(
-            "report {} did not reach {key}={expected}: {}",
-            report.display(),
-            fs::read_to_string(report).unwrap_or_default()
-        );
+            },
+        )
     }
 
     fn signal_pid(pid: u32, signal: Signal) {
@@ -220,7 +248,22 @@ mod crdt {
     /// (§4d). Rust compares `Command::output()` bytes directly; only
     /// the shell consumer needs capture files.
     fn sigint_diagnosis(helper: &Path) -> Result<(), String> {
-        let out = match Command::new(helper).output() {
+        // A stub written moments ago can fail to exec with ETXTBSY: a
+        // sibling test thread that forked while the write descriptor was
+        // open handed a copy to its child, and until that child execs the
+        // file counts as open for writing. Retrying past that window is
+        // what cargo does for freshly linked binaries (issue #250).
+        let mut attempts = 0;
+        let spawned = loop {
+            match Command::new(helper).output() {
+                Err(error) if error.raw_os_error() == Some(26) && attempts < 100 => {
+                    attempts += 1;
+                    thread::sleep(Duration::from_millis(10));
+                }
+                other => break other,
+            }
+        };
+        let out = match spawned {
             // Rust's boundary differs from the shell's: a spawn error
             // has NO status, where a shell turns the same failure into
             // one. Conformance X2, Rust-only.
@@ -345,32 +388,19 @@ mod crdt {
     }
 
     fn wait_for_exit(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
-        let deadline = Instant::now() + timeout;
-        loop {
-            if let Some(status) = child.try_wait().expect("inspect child") {
-                return status;
+        common::ready::expect("the child's exit", timeout, || {
+            match child.try_wait().expect("inspect child") {
+                Some(status) => common::ready::Probe::Ready(status),
+                None => common::ready::Probe::Pending(format!("pid {} still running", child.id())),
             }
-            assert!(
-                Instant::now() < deadline,
-                "child did not exit within {timeout:?}"
-            );
-            thread::sleep(Duration::from_millis(20));
-        }
+        })
     }
 
     fn wait_for_daemon(socket: &Path, child: &mut Child) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline {
-            if let Ok(mut stream) = UnixStream::connect(socket) {
-                let _: Hello = read_message(&mut stream).expect("read daemon Hello");
-                return;
-            }
-            if let Some(status) = child.try_wait().expect("inspect daemon") {
-                panic!("daemon exited before listening: {status}");
-            }
-            thread::sleep(Duration::from_millis(20));
+        if let Err(timeout) = common::ready::wait_for_daemon(socket, child, Duration::from_secs(10))
+        {
+            panic!("{timeout}");
         }
-        panic!("daemon did not listen on {}", socket.display());
     }
 
     fn attach_surviving_frontend(socket: &Path) -> (FrontendId, UnixStream) {
@@ -525,7 +555,9 @@ mod crdt {
         open_raw_target(socket, cwd, path).2
     }
 
-    fn spawn_daemon(socket: &Path, envs: &[(&str, &str)]) -> Child {
+    /// A daemon in its own process group, reaped with everything it
+    /// spawned when dropped (`tests/common/reap.rs`).
+    fn spawn_daemon(socket: &Path, envs: &[(&str, &str)]) -> Reaped {
         let home = socket.parent().expect("socket parent");
         let mut command = Command::new(pmacs_binary());
         command
@@ -539,21 +571,26 @@ mod crdt {
         for (key, value) in envs {
             command.env(key, value);
         }
-        let mut child = command.spawn().expect("spawn daemon");
-        wait_for_daemon(socket, &mut child);
+        let mut child = Reaped::spawn(&mut command).expect("spawn daemon");
+        wait_for_daemon(socket, child.child());
         child
     }
 
+    /// The GPU frontend under a headless managed probe, in its own
+    /// process group. The daemon it spawns puts itself in a group of its
+    /// own (`process_group(0)` in `pmacs-gpu/src/attach.rs`), so that one
+    /// is reaped by pid from the report's `daemon_pid` unless the report
+    /// says the frontend reaped it.
     struct ManagedProbe {
-        child: Child,
+        child: Reaped,
         stdin: Option<ChildStdin>,
         report: PathBuf,
         daemon_pid: Option<u32>,
     }
 
     impl ManagedProbe {
-        fn from_child(mut child: Child, report: &Path) -> Self {
-            let stdin = child.stdin.take().expect("probe stdin");
+        fn from_child(mut child: Reaped, report: &Path) -> Self {
+            let stdin = child.child().stdin.take().expect("probe stdin");
             Self {
                 child,
                 stdin: Some(stdin),
@@ -624,7 +661,10 @@ mod crdt {
             for (key, value) in envs {
                 command.env(key, value);
             }
-            Self::from_child(command.spawn().expect("spawn managed probe"), report)
+            Self::from_child(
+                Reaped::spawn(&mut command).expect("spawn managed probe"),
+                report,
+            )
         }
 
         fn wait_for(&mut self, key: &str, expected: &str) -> HashMap<String, String> {
@@ -645,20 +685,19 @@ mod crdt {
         fn close(mut self) -> std::process::ExitStatus {
             self.stdin.take();
             wait_for_fact(&self.report, "phase", "complete", Duration::from_secs(5));
-            wait_for_exit(&mut self.child, Duration::from_secs(5))
+            wait_for_exit(self.child.child(), Duration::from_secs(5))
         }
     }
 
     impl Drop for ManagedProbe {
         fn drop(&mut self) {
             self.stdin.take();
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            self.child.reap();
             let daemon_reaped = fs::read_to_string(&self.report)
                 .ok()
                 .is_some_and(|report| report.lines().any(|line| line == "daemon_reaped=true"));
             if !daemon_reaped && let Some(pid) = self.daemon_pid {
-                signal_pid(pid, Signal::SIGTERM);
+                common::reap::reap_pid(pid);
             }
         }
     }
@@ -700,7 +739,12 @@ mod crdt {
         assert_eq!(Path::new(args[1]), socket);
         assert_eq!(Path::new(args[2]), pmacs_binary());
         assert_eq!(args[3], "--initial-target");
-        assert_eq!(Path::new(args[4]), launch_cwd);
+        // The broker forwards the launch directory it resolved, which on
+        // macOS is the canonical path (`/var` is a link to `/private/var`).
+        assert_eq!(
+            Path::new(args[4]),
+            fs::canonicalize(&launch_cwd).expect("canonical launch cwd")
+        );
         assert_eq!(Path::new(args[5]), launcher_home.join("notes.txt"));
 
         let failure = Command::new(pmacs_binary())
@@ -761,6 +805,7 @@ mod crdt {
             String::from_utf8_lossy(&output.stderr)
         );
         let facts = parse_report(&report);
+        let _daemon = DaemonFromReport::from_facts(&facts);
         assert_eq!(facts.get("phase").map(String::as_str), Some("complete"));
         // Stage 2B-3: the negotiated session version and the advertised
         // baseline are different facts, and this managed spawn pins both.
@@ -791,8 +836,19 @@ mod crdt {
         fs::create_dir(&cwd).expect("create workspace");
         fs::write(cwd.join("alpha.txt"), "alpha\n").expect("write alpha");
         fs::write(cwd.join("beta.txt"), "beta\n").expect("write beta");
+        // A name that is not UTF-8 is a row only where the filesystem can
+        // hold one: APFS refuses it (EILSEQ), so on macOS the row is skipped
+        // and says so, rather than failing on the fixture.
         let raw_name = OsString::from_vec(vec![b'r', b'a', b'w', 0xff]);
-        fs::write(cwd.join(&raw_name), "raw\n").expect("write non-UTF-8 target");
+        let raw_name = match fs::write(cwd.join(&raw_name), "raw\n") {
+            Ok(()) => Some(raw_name),
+            Err(error) => {
+                eprintln!(
+                    "skipping the non-UTF-8 target: the filesystem refused the name: {error}"
+                );
+                None
+            }
+        };
 
         let existing_socket = temp.path().join("existing-target.sock");
         let mut daemon = spawn_daemon(&existing_socket, &[]);
@@ -803,8 +859,10 @@ mod crdt {
         assert_eq!(same_alpha.buffer_id, alpha.buffer_id);
         assert_eq!(beta.replica.materialize_string(), "beta\n");
         assert_ne!(beta.buffer_id, alpha.buffer_id);
-        let raw = attach_target(&existing_socket, &cwd, Path::new(raw_name.as_os_str()));
-        assert_eq!(raw.replica.materialize_string(), "raw\n");
+        if let Some(raw_name) = &raw_name {
+            let raw = attach_target(&existing_socket, &cwd, Path::new(raw_name.as_os_str()));
+            assert_eq!(raw.replica.materialize_string(), "raw\n");
+        }
         let missing_path = Path::new("new-draft.txt");
         let missing = attach_target(&existing_socket, &cwd, missing_path);
         assert_eq!(missing.replica.materialize_string(), "");
@@ -855,7 +913,7 @@ mod crdt {
         assert_eq!(reopened.replica.materialize_string(), "alpha\nunsaved");
 
         signal_pid(daemon.id(), Signal::SIGTERM);
-        assert!(wait_for_exit(&mut daemon, Duration::from_secs(5)).success());
+        assert!(wait_for_exit(daemon.child(), Duration::from_secs(5)).success());
 
         let spawned_socket = temp.path().join("spawned-target.sock");
         let report = temp.path().join("target-report");
@@ -907,8 +965,10 @@ mod crdt {
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let mut directory =
-            ManagedProbe::from_child(command.spawn().expect("spawn public GPU command"), &report);
+        let mut directory = ManagedProbe::from_child(
+            Reaped::spawn(&mut command).expect("spawn public GPU command"),
+            &report,
+        );
 
         // The public root broker and real managed GPU connector must stay
         // alive through Journey N2's asynchronous dired commit. Snapshot
@@ -984,7 +1044,7 @@ mod crdt {
         let survivor = attach_target(&socket, temp.path(), Path::new("still-alive.txt"));
         assert_eq!(survivor.replica.materialize_string(), "alive\n");
         signal_pid(daemon.id(), Signal::SIGTERM);
-        assert!(wait_for_exit(&mut daemon, Duration::from_secs(5)).success());
+        assert!(wait_for_exit(daemon.child(), Duration::from_secs(5)).success());
     }
 
     #[test]
@@ -1041,7 +1101,7 @@ mod crdt {
         assert_eq!(replica.materialize_string(), "hidden\n");
 
         signal_pid(daemon.id(), Signal::SIGTERM);
-        assert!(wait_for_exit(&mut daemon, Duration::from_secs(5)).success());
+        assert!(wait_for_exit(daemon.child(), Duration::from_secs(5)).success());
     }
 
     #[test]
@@ -1076,7 +1136,7 @@ mod crdt {
         ));
         let _ = attach_surviving_frontend(&kill_socket);
         signal_pid(kill_daemon.id(), Signal::SIGTERM);
-        assert!(wait_for_exit(&mut kill_daemon, Duration::from_secs(5)).success());
+        assert!(wait_for_exit(kill_daemon.child(), Duration::from_secs(5)).success());
 
         let slow_root = temp.path().join("slow-hook");
         fs::create_dir(&slow_root).expect("create slow hook root");
@@ -1129,7 +1189,7 @@ mod crdt {
         );
         assert!(probe.close().success());
         signal_pid(slow_daemon.id(), Signal::SIGTERM);
-        assert!(wait_for_exit(&mut slow_daemon, Duration::from_secs(5)).success());
+        assert!(wait_for_exit(slow_daemon.child(), Duration::from_secs(5)).success());
     }
 
     #[test]
@@ -1151,7 +1211,7 @@ mod crdt {
         assert!(!marker.exists());
         assert!(probe.close().success());
         signal_pid(daemon.id(), Signal::SIGTERM);
-        assert!(wait_for_exit(&mut daemon, Duration::from_secs(5)).success());
+        assert!(wait_for_exit(daemon.child(), Duration::from_secs(5)).success());
     }
 
     #[test]
@@ -1408,8 +1468,15 @@ mod crdt {
             .output()
             .expect("run bounded failure probe");
         assert!(!output.status.success());
-        assert!(start.elapsed() >= Duration::from_secs(4));
-        assert!(start.elapsed() < Duration::from_secs(8));
+        let waited = start.elapsed();
+        assert!(
+            waited >= Duration::from_secs(4),
+            "the bounded probe returned before its 4 s floor: {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_secs(8),
+            "the bounded probe overran its 8 s ceiling: {waited:?}"
+        );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             stderr.contains("exit status: 17"),

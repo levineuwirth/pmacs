@@ -10,7 +10,7 @@
 //! # Lifetime contracts (R53)
 //!
 //! * [`BufferIdLua`] is a `Copy` handle. Lua may store, pass, and re-use
-//!   it freely, but the underlying [`Buffer`] lives in the registry. If
+//!   it freely, but the underlying `Buffer` lives in the registry. If
 //!   the buffer is removed (`pmacs.buffer.remove(id)`), all live handles
 //!   become stale; the next method call on a stale handle returns a
 //!   typed error ([`BindingError::StaleId`]). There is never a
@@ -352,7 +352,7 @@ impl CurrentAttachmentSlot {
 /// Populated by [`install`] with `(name: None, started: Instant::now())`
 /// — correct for the Local-mode editor whose `LuaHost` is constructed
 /// at process boot. Daemon mode overrides via
-/// [`crate::lua::LuaHost::set_local_instance_info`] so the uptime
+/// `crate::lua::LuaHost::set_local_instance_info` so the uptime
 /// reported by `pmacs.instance.identity()` matches what the daemon
 /// hands back over its `Hello`.
 ///
@@ -486,7 +486,7 @@ impl InstalledPackages {
 /// Pushed by the wrapped loader returned from
 /// [`load_package_chunk`] before the package's chunk runs;
 /// popped after the chunk returns (or errors). Used by
-/// [`pmacs.packages.on_unload`] as a fallback when
+/// `pmacs.packages.on_unload` as a fallback when
 /// [`mlua::Function::environment`] returns `None` --- under Lua
 /// 5.4, a closure that doesn't reference any global doesn't
 /// capture `_ENV` as an upvalue, so the env-identity check can't
@@ -677,7 +677,7 @@ pub fn config_u32(lua: &Lua, name: &str, buffer_id: Option<BufferId>, fallback: 
 /// The registry has no ambient current buffer by design, so the caller
 /// names the buffer; passing `None` reads the global layer.
 ///
-/// Falls back to [`WrapMode::Wrap`] rather than `Truncate`, and the
+/// Falls back to `WrapMode::Wrap` rather than `Truncate`, and the
 /// direction matters: the fallback covers a bare core whose runtime
 /// never loaded the builtin, and it must agree with the setting's own
 /// default or a test-constructed editor would silently render in the

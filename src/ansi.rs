@@ -26,7 +26,7 @@
 //! ([`AnsiEvent::SetStyle`] interleaved with [`AnsiEvent::Text`]):
 //! the rope sees only literal text, and the consumer (the M6.4 REPL
 //! view) maintains a single piece of state ("the active style is
-//! whatever the most recent [`SetStyle`] said") and translates to
+//! whatever the most recent `SetStyle` said") and translates to
 //! byte-range style annotations as it appends to the rope.
 //!
 //! # CSI parameters

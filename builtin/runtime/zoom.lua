@@ -1,4 +1,4 @@
--- GUI zoom (QoL Stage 2, framing docs/gui-zoom-framing.md).
+-- GUI zoom (QoL Stage 2, framing docs/archive/framings/gui-zoom-framing.md).
 --
 -- Drives the font preference that already exists: `pmacs.gpu.set_font`
 -- writes it, `semantic_render` relays it as `InstanceMessage::FontFacts`

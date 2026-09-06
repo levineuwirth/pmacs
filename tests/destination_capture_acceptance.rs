@@ -1,6 +1,6 @@
 // tests/destination_capture_acceptance.rs --- the Lua-reachable capture.
 
-//! Acceptance for `docs/destination-capture-framing.md` §7: a
+//! Acceptance for the archived destination-capture framing §7: a
 //! destination any asynchronous continuation can capture, and the
 //! profile that says which of `commit_to`'s preconditions it depends on
 //! (Q#DC-1 … Q#DC-5).
@@ -164,7 +164,7 @@ fn attach_frontend(s: &EditorState, fid: FrontendId) -> WindowId {
 /// view remains, which is what this builds.
 ///
 /// **Recorded honestly, because the framing implies more than the tree
-/// does** (`docs/destination-capture-framing.md` Q#DC-4): with Q#BP6
+/// does** (the archived destination-capture framing Q#DC-4): with Q#BP6
 /// held, a *registered* frontend in a healthy editor always has a live
 /// document window, so the absent document pair is a **defensive**
 /// branch rather than a routine one. It is still the right decision —

@@ -213,13 +213,10 @@ fn m4_1_incremental_parse_under_5ms() {
     );
 }
 
-/// The parse-on-worker path: dispatch through `AsyncRuntime`,
-/// observe settle, drain the bundle from the side handoff. This
-/// exercises the *full* T M4.1 dispatch shape (vs the synchronous
-/// `run_parse` that the perf gates use), and demonstrates that the
-/// "Parse runs on a worker" task description is satisfied.
-#[test]
-fn m4_1_dispatch_parse_round_trips_via_runtime() {
+/// Dispatch a 200-line parse through the runtime, wait for it to
+/// settle, and return the worker's reported duration; the round trip's
+/// correctness is asserted inside.
+fn dispatch_parse_round_trip_via_runtime() -> u64 {
     let rt = AsyncRuntime::with_pool_size(1);
     let req = ParseRequest {
         source: Arc::from(synthetic_rust_source(200)),
@@ -239,18 +236,35 @@ fn m4_1_dispatch_parse_round_trips_via_runtime() {
     let bundle = rt
         .take_parse_tree(id)
         .expect("parse handoff holds bundle on Complete");
-    match rt.take_result(id) {
-        Some(JobOutcome::Complete(JobResult::Parse { duration_ms })) => {
-            assert!(
-                duration_ms < 100,
-                "200-line parse should be quick: took {duration_ms}ms \
-                 against a 100ms budget"
-            );
-        }
+    let duration_ms = match rt.take_result(id) {
+        Some(JobOutcome::Complete(JobResult::Parse { duration_ms })) => duration_ms,
         other => panic!("unexpected outcome: {other:?}"),
-    }
+    };
     assert_eq!(bundle.root_tree().root_node().kind(), "source_file");
     assert_eq!(bundle.language_name, "rust");
+    duration_ms
+}
+
+/// The parse-on-worker path: dispatch through `AsyncRuntime`,
+/// observe settle, drain the bundle from the side handoff. This
+/// exercises the *full* T M4.1 dispatch shape (vs the synchronous
+/// `run_parse` that the perf gates use), and demonstrates that the
+/// "Parse runs on a worker" task description is satisfied.
+#[test]
+fn m4_1_dispatch_parse_round_trips_via_runtime() {
+    let duration_ms = dispatch_parse_round_trip_via_runtime();
+    eprintln!("200-line parse via the runtime took {duration_ms}ms");
+}
+
+#[test]
+#[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
+fn m4_1_dispatch_parse_via_runtime_stays_under_the_parse_budget() {
+    let duration_ms = dispatch_parse_round_trip_via_runtime();
+    assert!(
+        duration_ms < 100,
+        "200-line parse should be quick: took {duration_ms}ms \
+         against a 100ms budget"
+    );
 }
 
 /// The Lua introspection criterion: walking the parse tree from a
@@ -319,6 +333,23 @@ fn pump_async<F: Fn(&pmacs::editor::EditorState) -> bool>(
     let deadline = Instant::now() + Duration::from_secs(2);
     while !predicate(state) {
         assert!(Instant::now() < deadline, "async pump deadline exceeded");
+        state.tick_async();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Drain the async runtime for `ms`, waiting for nothing.
+///
+/// Every call site guards a NEGATIVE assertion: the pinned parse
+/// grammar must NOT be re-switched by an edit to a shebang or a
+/// modeline, or by a switch away and back. There is no event to wait
+/// for — the claim is that a wrong reparse never lands — so this is the
+/// window in which a wrong one would have to appear. `pump_async`
+/// cannot serve here for the same reason: a wait for a language
+/// *change* would time out on correct code.
+fn drain_async(state: &mut pmacs::editor::EditorState, ms: u64) {
+    let deadline = Instant::now() + Duration::from_millis(ms);
+    while Instant::now() < deadline {
         state.tick_async();
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -1708,8 +1739,9 @@ use pmacs::diag::{Diagnostic, DiagnosticSeverity, DiagnosticStore};
 /// `publishDiagnostics` per `didChange`; the test sends the change
 /// and measures wall-clock latency until the diagnostics land in
 /// the manager's store.
-#[test]
-fn m4_6_diagnostics_arrive_within_500ms() {
+/// Send a change to the fake server and measure how long its
+/// diagnostics take to land in the store, waiting up to `deadline`.
+fn diagnostics_latency_after_a_change(deadline: Duration) -> Duration {
     let (sup, mgr) = make_lsp_test_manager();
     let sid = mgr
         .borrow_mut()
@@ -1732,8 +1764,8 @@ fn m4_6_diagnostics_arrive_within_500ms() {
         .expect("didChange");
 
     // Spin the supervisor + LSP ticks until the diag store has
-    // diagnostics for this URI, or the budget runs out.
-    let deadline = edit_at + Duration::from_millis(500);
+    // diagnostics for this URI, or the deadline runs out.
+    let deadline = edit_at + deadline;
     let mut latency: Option<Duration> = None;
     while Instant::now() < deadline {
         sup.borrow_mut().tick();
@@ -1749,15 +1781,30 @@ fn m4_6_diagnostics_arrive_within_500ms() {
     }
     let latency = latency.unwrap_or_else(|| {
         panic!(
-            "diagnostics did not arrive within 500 ms (waited {:?})",
+            "diagnostics did not arrive (waited {:?})",
             edit_at.elapsed()
         );
     });
+    let _ = mgr.borrow_mut().stop(sid);
+    latency
+}
+
+/// Acceptance (1/3), the deadline half: diagnostics arrive after the
+/// triggering edit. The 500 ms budget is the `#[ignore]` sibling.
+#[test]
+fn m4_6_diagnostics_arrive_after_a_change() {
+    let latency = diagnostics_latency_after_a_change(Duration::from_secs(10));
+    eprintln!("diagnostics arrived {latency:?} after the change");
+}
+
+#[test]
+#[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
+fn m4_6_diagnostics_arrive_within_500ms() {
+    let latency = diagnostics_latency_after_a_change(Duration::from_millis(500));
     assert!(
         latency < Duration::from_millis(500),
         "diagnostic latency {latency:?} exceeds 500 ms budget"
     );
-    let _ = mgr.borrow_mut().stop(sid);
 }
 
 /// Acceptance (2/3): navigate-to-next-diagnostic returns the
@@ -2004,7 +2051,7 @@ fn m4_6_diag_navigate_commands_and_bindings_are_registered() {
         )
         .eval()
         .expect("keymap.list");
-    // Compile-mode (Q#CM5, docs/compile-mode-framing.md) took the
+    // Compile-mode (Q#CM5, the archived compile-mode framing) took the
     // M-g chords over for the unified dispatchers; the diag commands
     // stay registered and remain the dispatchers' fallback when no
     // compile/grep run has claimed the error source, so the
@@ -2893,8 +2940,9 @@ use pmacs::project_index::{FileEntry, ProjectIndex, Symbol, SymbolKind, SymbolSo
 /// a 100k-file project in under 1 second. We approximate by 100 files
 /// × 1000 symbols each (one million symbols total --- larger than a
 /// typical 100k-file repo's symbol count).
-#[test]
-fn m4_10_search_under_one_second_for_100k_files() {
+/// Index a hundred thousand symbols and search them; asserts a hit and
+/// returns how long the search took.
+fn search_100k_symbols() -> std::time::Duration {
     let mut idx = ProjectIndex::new("/proj");
     for f in 0..100u32 {
         let mut symbols = Vec::with_capacity(1_000);
@@ -2925,6 +2973,19 @@ fn m4_10_search_under_one_second_for_100k_files() {
         !hits.is_empty(),
         "100k-symbol project should return matches"
     );
+    elapsed
+}
+
+#[test]
+fn m4_10_search_finds_matches_in_100k_symbols() {
+    let elapsed = search_100k_symbols();
+    eprintln!("100k-symbol search took {elapsed:?}");
+}
+
+#[test]
+#[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
+fn m4_10_search_under_one_second_for_100k_files() {
+    let elapsed = search_100k_symbols();
     assert!(
         elapsed < std::time::Duration::from_secs(1),
         "100k-symbol search took {elapsed:?}, expected < 1s"
@@ -7650,12 +7711,9 @@ fn m4_shebang_edit_keeps_pinned_grammar() {
         )
         .exec()
         .expect("rewrite shebang to lua");
-    // Let the reparse settle (manual ticks: the tree stays bash with the
-    // pin, so a `pump_async` for a language *change* would time out).
-    for _ in 0..64 {
-        s.tick_async();
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    // RETAINED DRAIN (128 ms): the assertion below is that the grammar
+    // did NOT change, so this is a window, not a wait.
+    drain_async(&mut s, 128);
     assert_eq!(
         current_tree_language(&s).as_deref(),
         Some("bash"),
@@ -7690,10 +7748,7 @@ fn m4_shebang_edit_keeps_pinned_grammar() {
         ))
         .exec()
         .expect("switch away and back");
-    for _ in 0..64 {
-        s.tick_async();
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    drain_async(&mut s, 128);
     assert_eq!(
         current_tree_language(&s).as_deref(),
         Some("bash"),
@@ -7952,10 +8007,7 @@ fn m4_modeline_language_is_pinned_until_reopen() {
         .expect("edit loaded modeline");
     assert_eq!(language.as_deref(), Some("lua"));
     assert_eq!(mode.as_deref(), Some("lua"));
-    for _ in 0..64 {
-        s.tick_async();
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    drain_async(&mut s, 128);
     assert_eq!(current_tree_language(&s).as_deref(), Some("lua"));
 
     let (language, mode): (Option<String>, Option<String>) = s
@@ -8569,20 +8621,29 @@ fn m4_lua_bundle_debounces_did_change_per_keystroke() {
         .load("pmacs.hook.run('buffer.after-edit')")
         .exec()
         .expect("fire single after-edit");
-    std::thread::sleep(Duration::from_millis(120));
-    s.tick_async();
-    let (sent, version): (i64, i64) = s
-        .lua_host
-        .lua()
-        .load(
-            "
-            local n = #_G.__sent_did_changes
-            local v = n > 0 and _G.__sent_did_changes[n].version or -1
-            return n, v
-            ",
-        )
-        .eval()
-        .expect("count after tick");
+    // The quiet window (75 ms in the bundle) is a timer; tick until it
+    // has fired rather than sleeping past where it is expected to.
+    let (sent, version): (i64, i64) =
+        crate::ready::expect("the quiet-window flush", Duration::from_secs(10), || {
+            s.tick_async();
+            let (n, v): (i64, i64) = s
+                .lua_host
+                .lua()
+                .load(
+                    "
+                    local n = #_G.__sent_did_changes
+                    local v = n > 0 and _G.__sent_did_changes[n].version or -1
+                    return n, v
+                    ",
+                )
+                .eval()
+                .expect("count after tick");
+            if n >= 2 {
+                crate::ready::Probe::Ready((n, v))
+            } else {
+                crate::ready::Probe::Pending(format!("{n} sent, version {v}"))
+            }
+        });
     assert_eq!(sent, 2, "quiet-window tick flushes the pending didChange");
     assert_eq!(version, 5, "tick flush carries the post-edit version");
 }
@@ -10241,7 +10302,7 @@ fn rd8_recursive_delete_refuses_for_a_modified_descendant() {
 /// Criterion 9 — a *clean* recursive delete reconciles descendant
 /// buffers, through both removal phases.
 ///
-/// **Rewritten by dired Stage 2a** (`docs/dired-stage2-framing.md` §6,
+/// **Rewritten by dired Stage 2a** (the archived dired-stage2 framing §6,
 /// Q#RD27 / acceptance 23). This row previously pinned the opposite —
 /// that the descendant buffer stayed orphaned — and gave the reason:
 /// widening reconciliation would have routed N buffers through
@@ -11603,3 +11664,5 @@ fn rd22b_a_failing_resource_item_can_leave_filesystem_state() {
 // write into their real data root.
 #[path = "common/iso.rs"]
 mod iso;
+#[path = "common/ready.rs"]
+mod ready;

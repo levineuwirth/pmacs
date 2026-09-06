@@ -6,7 +6,7 @@
 //! the code they exercise (`syntax.rs` / `semantic_render.rs` /
 //! `highlight.rs` / `pmacs-gpu`), where `run_parse`, `scoped_style_spans`,
 //! and `source_color_at` are reachable. See the framing acceptance list in
-//! `docs/multi-language-injections-framing.md`.
+//! the archived multi-language-injections framing.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -237,8 +237,9 @@ fn injection_cap_surfaced_once_and_rearms_via_lua() {
 /// budget, and the FINAL paragraph still receives an inline layer — the
 /// tail is not silently dropped. This is the measured guard that keeps
 /// child-incrementality (Q#IJ8) out of v1.
-#[test]
-fn many_paragraph_settle_under_budget_with_tail_covered() {
+/// Cold-parse two hundred paragraphs of markdown; asserts the inline
+/// layers and the tail's coverage and returns how long the parse took.
+fn parse_many_paragraphs() -> Duration {
     let reg = SyntaxRegistry::new();
     let n = 200usize;
     let mut src = String::new();
@@ -272,14 +273,6 @@ fn many_paragraph_settle_under_budget_with_tail_covered() {
     let bundle = syntax::run_parse(req).expect("layered markdown parse");
     let elapsed = start.elapsed();
 
-    // Catastrophic-regression guard: cold-parsing ~200 tiny inline layers
-    // is milliseconds of work; a generous ceiling avoids debug/CI flakiness
-    // while still catching a blow-up (e.g. accidental O(n^2) layer work).
-    assert!(
-        elapsed < Duration::from_secs(2),
-        "many-paragraph settle took {elapsed:?}, exceeds the budget"
-    );
-
     let inline_count = bundle
         .layers
         .iter()
@@ -303,6 +296,26 @@ fn many_paragraph_settle_under_budget_with_tail_covered() {
     assert!(
         tail_covered,
         "the final paragraph still receives an inline layer (no tail loss)"
+    );
+    elapsed
+}
+
+#[test]
+fn many_paragraph_settle_covers_the_tail() {
+    let elapsed = parse_many_paragraphs();
+    eprintln!("many-paragraph settle took {elapsed:?}");
+}
+
+#[test]
+#[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
+fn many_paragraph_settle_under_budget_with_tail_covered() {
+    let elapsed = parse_many_paragraphs();
+    // Catastrophic-regression guard: cold-parsing ~200 tiny inline layers
+    // is milliseconds of work; a generous ceiling avoids debug/CI flakiness
+    // while still catching a blow-up (e.g. accidental O(n^2) layer work).
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "many-paragraph settle took {elapsed:?}, exceeds the budget"
     );
 }
 

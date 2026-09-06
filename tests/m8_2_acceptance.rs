@@ -206,12 +206,9 @@ fn dired_open_renders_header_and_one_line_per_entry() {
 // T M8.2 --- 10K entries render under 200 ms
 // ---------------------------------------------------------------------------
 
-#[test]
-#[cfg_attr(
-    target_os = "macos",
-    ignore = "hosted macOS debug runners do not consistently satisfy this timing gate"
-)]
-fn dired_open_renders_10k_entries_under_200ms() {
+/// Open ten thousand entries through the async path; asserts the
+/// render and returns the wall clock from `open()` to settle.
+fn open_10k_entries() -> Duration {
     // Build a directory of 10K small files. The fixture creation
     // itself isn't fast (10K syscalls), so we measure only the
     // dired open() call, not setup.
@@ -258,17 +255,29 @@ fn dired_open_renders_10k_entries_under_200ms() {
     // 200ms ceiling we use the wall-clock from open() to pump
     // settle, which the inner os.clock() reading also captures
     // for cross-checking.
-    assert!(
-        outer_elapsed < Duration::from_millis(200),
-        "M8.2 spec: 10K entries must render within 200ms; took {outer_elapsed:?}"
-    );
-
     // Sanity: the buffer has 1 header + 10000 entry lines.
     let text = active_buffer_text(&mut state);
     let line_count = text.lines().count();
     assert_eq!(
         line_count, 10_001,
         "10K entries + 1 header = 10001 lines; got {line_count}"
+    );
+    outer_elapsed
+}
+
+#[test]
+fn dired_open_renders_10k_entries() {
+    let elapsed = open_10k_entries();
+    eprintln!("dired.open rendered 10K entries in {elapsed:?}");
+}
+
+#[test]
+#[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
+fn dired_open_renders_10k_entries_under_200ms() {
+    let outer_elapsed = open_10k_entries();
+    assert!(
+        outer_elapsed < Duration::from_millis(200),
+        "M8.2 spec: 10K entries must render within 200ms; took {outer_elapsed:?}"
     );
 }
 

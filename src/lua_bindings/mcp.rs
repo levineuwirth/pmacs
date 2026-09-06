@@ -18,7 +18,7 @@ use crate::mcp::{
 };
 
 /// Lua-facing wrapper around [`McpServerId`]. Mirrors
-/// [`LspServerIdLua`].
+/// `LspServerIdLua`.
 #[derive(Copy, Clone)]
 pub struct McpServerIdLua(pub McpServerId);
 
@@ -587,8 +587,8 @@ pub fn install_mcp(lua: &Lua, manager: &SharedMcpManager) -> mlua::Result<()> {
 }
 
 /// Build a fresh [`McpManager`] over `supervisor` and install
-/// `pmacs.mcp.*` over it. Mirrors [`make_lsp_manager`] in shape;
-/// also takes the editor's [`SharedAsyncRuntime`] so MCP responses
+/// `pmacs.mcp.*` over it. Mirrors `make_lsp_manager` in shape;
+/// also takes the editor's `SharedAsyncRuntime` so MCP responses
 /// settle Lua-visible job ids without occupying a worker thread
 /// (T M9.1, Pass-2 finding 1).
 pub fn make_mcp_manager(

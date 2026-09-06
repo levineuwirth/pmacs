@@ -5,7 +5,7 @@
 //! Spec §sec:m5-remote, §sec:v01-remote-scope deliverable 1.
 //!
 //! The `prev`/`next` cell buffers live on the instance, not on the frontend.
-//! [`paint_frame`](crate::editor::paint_frame) writes into `next`; the diff
+//! [`crate::editor::paint_frame`] writes into `next`; the diff
 //! against `prev` produces a [`InstanceMessage::CellDelta`] the transport
 //! ships to the frontend. The frontend (whether in-process TUI or network)
 //! consumes the messages and emits whatever it needs to display them.

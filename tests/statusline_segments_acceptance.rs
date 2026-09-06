@@ -1,5 +1,5 @@
 //! Themes Arc 4 stage 3 acceptance
-//! (`docs/statusline-segments-framing.md` Revision 3, Acceptance 1-27).
+//! (the archived statusline-segments framing Revision 3, Acceptance 1-27).
 //!
 //! Cross-surface matrix:
 //! 1-11: this suite drives the real Lua registry/evaluator and full TUI frame;

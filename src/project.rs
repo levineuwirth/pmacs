@@ -11,7 +11,7 @@
 //!
 //! [`detect_project`] walks upward from a file path looking for a
 //! known marker. Markers are ordered: a deeper match (closer to the
-//! file) wins, but among siblings the order in [`PROJECT_MARKERS`]
+//! file) wins, but among siblings the order in `PROJECT_MARKERS`
 //! ranks language-specific markers above generic VCS roots so that
 //! a `Cargo.toml` next to a `.git` is treated as a Rust project, not
 //! a generic git repo. Walks stop at filesystem roots.

@@ -20,7 +20,7 @@
 --
 -- Not fetched at runtime and not a package dependency: the input method
 -- has to work offline and on first launch. Upkeep is a documented
--- manual process — see docs/lean4-mode-framing.md Q#LN11.
+-- manual process — see docs/archive/framings/lean4-mode-framing.md Q#LN11.
 
 pmacs = pmacs or {}
 

@@ -9,7 +9,7 @@
 -- semantic frontend's RET dispatches into the visit binding instead
 -- of optimistically inserting a newline.
 --
--- Generated-buffer immutability (Q#GB1, docs/generated-buffer-immutability-framing.md):
+-- Generated-buffer immutability (Q#GB1, docs/archive/framings/generated-buffer-immutability-framing.md):
 -- a panel's rope is genuinely read-only, and `render` is its owner's one
 -- authorized door through the lock. The intercept alone protected the
 -- edit path and left the history path open, so `C-/` emptied a panel.
@@ -17,7 +17,7 @@
 --
 -- Panels are buffers, so both frontends render them with zero
 -- protocol change (Q#P2: switch-in-place; the GPU cannot show
--- splits). Framing: docs/lsp-panels-framing.md.
+-- splits). Framing: docs/archive/framings/lsp-panels-framing.md.
 --
 --   pmacs.listview.open {
 --     name = "*references*",
@@ -115,7 +115,7 @@ end
 -- `M-x buffer.undo` did too, and no rebinding can remove that. The
 -- primitive lifts the rope lock, writes, discards the history and
 -- re-asserts the lock, all inside one registry borrow.
--- Tree support (docs/tree-primitive-framing.md, Q#TR1-TR4).
+-- Tree support (docs/archive/framings/tree-primitive-framing.md, Q#TR1-TR4).
 --
 -- A row MAY carry `depth` (0-based, structural) and `id` (a STRING or
 -- NUMBER, consumer-supplied, compared by value). Both optional: a row
@@ -268,7 +268,7 @@ end
 -- the `keys` validator consult the same list. Previously this was a
 -- sequence of `bind(...)` calls and the set existed nowhere as data,
 -- which is why the git framing had to quote it from the source
--- (docs/git-integration-framing.md Q#G-7).
+-- (docs/archive/framings/git-integration-framing.md Q#G-7).
 local FIXED_KEYS = {
   { "RET", "listview.visit" },
   { "SPC", "listview.visit" },

@@ -1,4 +1,4 @@
-//! Folding acceptance (Arc 6, Stage 1 — docs/folding-framing.md).
+//! Folding acceptance (Arc 6, Stage 1 — the archived folding framing).
 //!
 //! Headless coverage of the fold engine over real grammars: the
 //! structural source (derived head line + closer-aware tail across brace

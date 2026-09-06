@@ -1,6 +1,6 @@
 //! Per-frontend terminal viewport, selection, copy, and bell projection.
 //!
-//! A view stores only logical anchors into one [`TerminalScreen`]. Cells,
+//! A view stores only logical anchors into one `TerminalScreen`. Cells,
 //! modes, history, and process state remain session-owned.
 
 use crate::buffer::BufferId;
@@ -384,7 +384,7 @@ impl TerminalManager {
     }
 
     /// Serialize a session's ENTIRE retained range — scrollback plus the
-    /// visible screen — through the same path [`copy_selection`] uses.
+    /// visible screen — through the same path `copy_selection` uses.
     ///
     /// Q#TC7. This deliberately builds a whole-range *selection* and hands
     /// it to the existing serializer rather than walking the rows itself.

@@ -33,10 +33,20 @@ fn editor_state_drop_releases_workers_and_shutdown_is_idempotent() {
         let s = EditorState::new_with_roots(&crate::iso::roots());
         drop(s);
     }
-    // Signal-only shutdown: parked workers exit within their 100ms
-    // park timeout; give them a beat.
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    let after = live_threads();
+    // Signal-only shutdown: parked workers exit within their 100ms park
+    // timeout. Poll the count down rather than sleeping past that.
+    let after = crate::ready::expect(
+        "worker threads released after EditorState drop",
+        std::time::Duration::from_secs(5),
+        || {
+            let after = live_threads();
+            if after <= baseline + 2 {
+                crate::ready::Probe::Ready(after)
+            } else {
+                crate::ready::Probe::Pending(format!("baseline {baseline}, now {after}"))
+            }
+        },
+    );
     assert!(
         after <= baseline + 2,
         "worker threads leak across EditorState drop: \
@@ -67,3 +77,5 @@ fn explicit_shutdown_is_idempotent() {
 // write into their real data root.
 #[path = "common/iso.rs"]
 mod iso;
+#[path = "common/ready.rs"]
+mod ready;
