@@ -75,6 +75,43 @@ concurrency:
 # never set, in the test job below. 35 still beats the 360-minute
 # default by an order of magnitude.
 jobs:
+  # Docs-only changes skip the jobs that compile and run tests. Only paths
+  # under docs/ count as documentation here: README.md, CLAUDE.md and
+  # AGENTS.md are pinned by tests/docs_consistency.rs and therefore run
+  # the matrix like any source change. A job skipped by its `if` reports
+  # success to branch protection, so the required checks stay satisfied;
+  # a workflow-level `paths` filter would leave them pending forever.
+  changes:
+    name: Changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: classify
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            base="origin/${{ github.base_ref }}"
+            git fetch -q origin "${{ github.base_ref }}"
+            changed=$(git diff --name-only "$base"...HEAD)
+          elif [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ] \
+               && git cat-file -e "${{ github.event.before }}" 2>/dev/null; then
+            changed=$(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}")
+          else
+            changed=everything
+          fi
+          echo "changed paths:"; printf '  %s\n' $changed
+          if [ -n "$changed" ] && ! printf '%s\n' $changed | grep -qvE '^docs/'; then
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "docs-only: the test matrix is skipped"
+          else
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          fi
+
   fmt:
     name: Format
     runs-on: ubuntu-latest
@@ -116,6 +153,8 @@ jobs:
   gpu-render:
     name: GPU Render (headless)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -149,6 +188,8 @@ jobs:
   test:
     name: Test (${{ matrix.os }} / ${{ matrix.lua }}${{ matrix.crdt == '' && ', no crdt' || '' }})
     runs-on: ${{ matrix.os }}
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     # 35, not 25: this is the only job whose observed max is minutes
     # rather than seconds, and the only one a cold cache can plausibly
     # push past a 25-minute ceiling on all four legs at once. See the
@@ -309,6 +350,8 @@ jobs:
   crdt-test:
     name: Test (crdt)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
@@ -341,6 +384,8 @@ jobs:
   acceptance:
     name: M1 Acceptance Gates
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -352,6 +397,8 @@ jobs:
   m4-perf-gates:
     name: M4 Perf Gates
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -371,6 +418,8 @@ jobs:
   m5-perf-gates:
     name: M5 Perf Gates
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -394,6 +443,8 @@ jobs:
   m6-perf-gates:
     name: M6 Perf Gates
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -448,6 +499,8 @@ jobs:
   m10-perf-gates:
     name: M10 Perf Gates (crdt)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -469,6 +522,8 @@ jobs:
   perf-default:
     name: Perf budgets (debug)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4

@@ -1620,6 +1620,27 @@ fn every_budget_in_the_list_is_an_ignored_test_in_the_tree() {
     );
 }
 
+/// `--docs` is the documentation-only plan: fmt, doc and diff-check, in
+/// that order and nothing else. A change confined to markdown has
+/// nothing for the sweep to find, and the doc stage is where a
+/// markdown-shaped change in a doc comment would fail.
+#[test]
+fn docs_runs_only_fmt_doc_and_diff_check() {
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
+    let (plan, err, ok) = run(root.path(), &["--docs", "--print-plan-named"]);
+    assert!(ok, "--docs --print-plan-named must succeed; stderr:\n{err}");
+    assert_eq!(
+        plan,
+        "fmt\tcargo fmt --check\n\
+         doc\tRUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps\n\
+         diff-check\tgit diff --check\n",
+        "plan was:\n{plan}"
+    );
+}
+
 // --- Derivation, marker, canonical paths --------------------------------
 
 #[test]
