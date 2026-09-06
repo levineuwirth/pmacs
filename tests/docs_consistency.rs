@@ -26,8 +26,14 @@ fn read(rel: &str) -> String {
 }
 
 fn run_script(rel: &str, args: &[&str]) -> String {
+    run_script_env(rel, args, &[])
+}
+
+/// [`run_script`] with environment variables set for the child.
+fn run_script_env(rel: &str, args: &[&str], env: &[(&str, &str)]) -> String {
     let out = Command::new(repo_root().join(rel))
         .args(args)
+        .envs(env.iter().copied())
         .current_dir(repo_root())
         .output()
         .unwrap_or_else(|e| panic!("run {rel}: {e}"));
@@ -72,7 +78,15 @@ fn readme_status_block_equals_the_anchor_script_output() {
     } else {
         &["--print", "--no-count"]
     };
-    let printed = run_script("scripts/anchor", count_arg);
+    // CI sets CARGO_TERM_COLOR=always, and the suite count is read from
+    // cargo's `Running` lines, so the anchor runs here the way it runs
+    // there; a count that depends on the terminal fails in this gate,
+    // not only in CI's.
+    let printed = run_script_env(
+        "scripts/anchor",
+        count_arg,
+        &[("CARGO_TERM_COLOR", "always")],
+    );
     let expected: Vec<&str> = printed.lines().collect();
     let actual: Vec<&str> = if counts_are_comparable() {
         block.lines().collect()

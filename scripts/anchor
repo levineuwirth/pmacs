@@ -107,8 +107,10 @@ default_features=$(one_line '^default = \[.*\]$' Cargo.toml \
 if [ "$COUNT" = 1 ]; then
     # Test names go to stdout and the `Running <target>` lines to stderr,
     # so both streams are captured; a failed listing exits non-zero and
-    # is refused rather than counted.
-    listing=$(cargo test --workspace -- --list 2>&1) || {
+    # is refused rather than counted. Cargo's color is forced off: CI
+    # sets CARGO_TERM_COLOR=always, and a colored `Running` line carries
+    # escapes the count below would not match.
+    listing=$(CARGO_TERM_COLOR=never cargo test --workspace -- --list 2>&1) || {
         echo "anchor: cargo test --workspace -- --list failed" >&2
         exit 3
     }
