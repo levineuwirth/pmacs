@@ -1296,6 +1296,22 @@ fn settle_until<F: Fn(&mut EditorState) -> bool>(
     });
 }
 
+/// Drive the real frame order for `ms` without waiting for anything.
+///
+/// **Only before a negative assertion.** [`pump_a_while`] ticks the
+/// async bus alone, which cannot carry a second `ensure_server`; a
+/// count that must NOT climb needs the frames a reconciliation pass
+/// actually runs on.
+fn drain_frames(state: &mut EditorState, ms: u64) {
+    let deadline = Instant::now() + Duration::from_millis(ms);
+    while Instant::now() < deadline {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        std::thread::sleep(Duration::from_millis(3));
+    }
+}
+
 fn server_count(state: &EditorState) -> i64 {
     eval(state, "return #pmacs.lsp.list()")
 }
@@ -1661,10 +1677,22 @@ fn acc32_a_cross_root_rename_re_runs_ensure_server_and_a_same_root_one_reuses() 
         "precondition: one server, rooted at package a"
     );
 
-    rename_fire_and_forget(&mut state, &inside, &fx.at("a/src/moved.rs"));
-    settle_until(&mut state, "the rename to land on disk", |_| {
-        fx.at("a/src/moved.rs").exists()
+    let moved_a = fx.at("a/src/moved.rs");
+    rename_fire_and_forget(&mut state, &inside, &moved_a);
+    // NOT the file on disk: `rename_fire_and_forget` has already waited
+    // for the whole reconciliation, so a disk wait here is true at its
+    // first probe and the count below is read on whatever tick that
+    // happens to be. The LSP reattach is what "reuses the existing
+    // server" is about, and the fake republishes diagnostics on every
+    // didOpen, so diagnostics under the new URI are its proof.
+    let moved_uri_a = file_uri(&moved_a);
+    settle_until(&mut state, "package a reattached at its new uri", |s| {
+        diag_count(s, &moved_uri_a) > 0
     });
+    // RETAINED DRAIN (150 ms): "reuses" is a claim about a server that
+    // must NOT appear, and no state announces a spawn that never
+    // happens.
+    drain_frames(&mut state, 150);
     assert_eq!(
         server_count(&state),
         1,
@@ -1681,13 +1709,21 @@ fn acc32_a_cross_root_rename_re_runs_ensure_server_and_a_same_root_one_reuses() 
         &fx.at("a/src/moved.rs"),
         &fx.at("b/src/moved.rs"),
     );
-    settle_until(&mut state, "a second server for package b", |s| {
-        server_count(s) == 2
-    });
     let root_b = file_uri(&fx.at("b"));
     settle_until(&mut state, "a server rooted at package b", |s| {
         server_rows(s).iter().any(|r| r.contains(&root_b))
     });
+    // The reconciliation for package b having FINISHED, not merely a
+    // second server existing: the row's subject is that a later pass
+    // does not spawn a third, and a count read at the first tick with
+    // two servers gives that no window at all.
+    let moved_uri_b = file_uri(&fx.at("b/src/moved.rs"));
+    settle_until(&mut state, "package b reattached at its new uri", |s| {
+        diag_count(s, &moved_uri_b) > 0
+    });
+    // RETAINED DRAIN (150 ms): the window a per-pass spawn would have
+    // to appear in.
+    drain_frames(&mut state, 150);
     let rows = server_rows(&state);
     assert!(
         rows.iter().any(|r| r.contains(&root_b)),
@@ -1846,7 +1882,13 @@ fn acc34_renaming_the_active_file_through_the_applier_returns_the_same_buffer() 
         response["result"]["applied"], true,
         "the batch must apply: {response:?}"
     );
-    settle_until(&mut state, "the batch to land on disk", |_| new.exists());
+    // The buffer following the rename is what every assertion below
+    // reads; the file is already on disk when the response lands, so a
+    // wait on `new.exists()` is true at its first probe.
+    let new_path = new.to_str().expect("utf-8 fixture path").to_owned();
+    settle_until(&mut state, "the open buffer to follow the rename", |s| {
+        buffer_path(s, "B").as_deref() == Some(new_path.as_str())
+    });
 
     assert!(new.exists(), "the rename landed on disk");
     assert!(!old.exists());
@@ -1937,7 +1979,12 @@ fn acc35_when_the_origin_buffer_is_gone_the_applier_restores_nothing() {
         response["result"]["applied"], true,
         "the batch must apply: {response:?}"
     );
-    settle_until(&mut state, "the batch to land on disk", |_| doomed.exists());
+    // The origin buffer being reconciled away is the event the row is
+    // about, and it is what `!buffer_is_valid` asserts; the recreated
+    // file is already on disk when the response lands.
+    settle_until(&mut state, "the origin buffer to be reconciled away", |s| {
+        !buffer_is_valid(s, "B")
+    });
 
     assert!(
         doomed.exists(),
