@@ -1483,7 +1483,6 @@ fn the_arming_report_names_the_unarmed_variable_and_its_suites() {
         "rm",
         "mkdir",
         "tee",
-        "setsid",
     ] {
         let found = Command::new("sh")
             .arg("-c")
@@ -1495,6 +1494,14 @@ fn the_arming_report_names_the_unarmed_variable_and_its_suites() {
             std::os::unix::fs::symlink(&path, bin.join(tool)).expect("symlink tool");
         }
     }
+    // `setsid` is the tool under assertion below, so the test provides
+    // it rather than borrowing the host's (macOS has none): an executable
+    // stub is present in the sense the gate checks, `command -v`, and
+    // `--print-arming` runs nothing that would call it.
+    let stub = bin.join("setsid");
+    std::fs::write(&stub, "#!/bin/sh\nexit 0\n").expect("setsid stub");
+    std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("stub mode");
     let out = Command::new(gate())
         .arg("--print-arming")
         .current_dir(repo_root())
