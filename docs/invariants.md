@@ -205,12 +205,27 @@ unclaimed crash data; adopting clears the old owner's skip cache.
   falsified by revert or by `scripts/bite`. A guard with no production
   caller passes every direct-call test; a test that shares a file with
   the code it pins is bitten by hand-breaking the production line.
+- A sub-crate's acceptance needs a real seam, not a fixture. `pmacs-gpu`
+  links only `pmacs-protocol`, so a decoded-message fixture shows its
+  parts agree with the fixture and nothing more; the acceptance drives
+  the real handshake, outbox, writer and view through
+  `attach::connect_with_sink` and the frontend's `--headless-probe`.
+- Bite against every pre-image a fix could plausibly have taken. A
+  narrower guard can remove the symptom and silently drop what the
+  skipped path also did, and a revert-only bite scores it complete; the
+  pin that catches it passes before the fix and fails against the wrong
+  one.
 - A test that skips on a missing precondition reports `ok`. Tool-gated
   suites are armed with the matching `PMACS_REQUIRE_*` variable where
   the tool is installed, and otherwise judged by elapsed time.
 - A wait predicate weaker than the assertion it guards is a race on
   every platform that happens to lose it. Wait for the exact unit the
   assertion reads (a whole record, a trailing newline), not a prefix.
+- A geometric readout is not a state predicate. `at_bottom`
+  (`scroll_offset == 0`) says the viewport reaches the tail, which a
+  still-anchored view satisfies whenever it is tall enough; pinning
+  *following* means advancing the world and asserting the view came
+  along, and across a height change the invariant is the frozen anchor.
 - A reproduction is a measurement and needs its own positive control:
   assert the precondition the reproduction depends on, in the test,
   before exercising the thing under test.
