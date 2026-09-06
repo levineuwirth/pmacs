@@ -1237,26 +1237,17 @@ fn settle_until<F: Fn(&mut EditorState) -> bool>(
     what: &str,
     predicate: F,
 ) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !predicate(state) {
-        assert!(
-            Instant::now() < deadline,
-            "settle deadline exceeded: {what}"
-        );
-        state.tick_processes();
-        state.tick_lsp();
-        state.tick_async();
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
-fn settle_a_while(state: &mut EditorState) {
-    for _ in 0..120 {
-        state.tick_processes();
-        state.tick_lsp();
-        state.tick_async();
-        std::thread::sleep(Duration::from_millis(3));
-    }
+    ready::tick_until(state, what, Duration::from_secs(20), |s| {
+        if predicate(s) {
+            ready::Probe::Ready(())
+        } else {
+            ready::Probe::Pending(format!(
+                "servers {:?}, status {:?}",
+                server_rows(s),
+                status(s)
+            ))
+        }
+    });
 }
 
 fn server_count(state: &EditorState) -> i64 {
@@ -1394,6 +1385,10 @@ fn error_underlines_per_window(state: &EditorState) -> Vec<(u64, usize)> {
 /// one-window render test while moving the diagnostic overlay to the end
 /// of the stack — caught by the composition-order assertion.
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario: two windows, a rename, and the overlay order in each"
+)]
 fn acc30_diagnostics_re_root_in_every_window_and_keep_their_stack_position() {
     let fx = Fixture::new();
     fx.write("proj/Cargo.toml", "[package]\nname = \"p\"\n");
@@ -1426,7 +1421,11 @@ fn acc30_diagnostics_re_root_in_every_window_and_keep_their_stack_position() {
     // one explicitly.
     exec(&state, "pmacs.window.focus_next()");
     exec(&state, "pmacs.window.switch_buffer(_G.B)");
-    settle_a_while(&mut state);
+    settle_until(&mut state, "the second window's diagnostic overlay", |s| {
+        overlay_kinds_per_window(s)
+            .iter()
+            .all(|(_, kinds)| kinds.contains(&"diagnostic"))
+    });
 
     // Push one more overlay AFTER the diagnostic in each window.
     // Without this the composition-order assertion below cannot bite:
@@ -1482,7 +1481,9 @@ fn acc30_diagnostics_re_root_in_every_window_and_keep_their_stack_position() {
     settle_until(&mut state, "diagnostics for the new URI", |s| {
         diag_count(s, &new_uri) > 0
     });
-    settle_a_while(&mut state);
+    settle_until(&mut state, "the old URI's store emptied", |s| {
+        diag_count(s, &old_uri) == 0
+    });
 
     assert_eq!(
         diag_count(&state, &old_uri),
@@ -1615,7 +1616,9 @@ fn acc32_a_cross_root_rename_re_runs_ensure_server_and_a_same_root_one_reuses() 
     );
 
     rename_fire_and_forget(&mut state, &inside, &fx.at("a/src/moved.rs"));
-    settle_a_while(&mut state);
+    settle_until(&mut state, "the rename to land on disk", |_| {
+        fx.at("a/src/moved.rs").exists()
+    });
     assert_eq!(
         server_count(&state),
         1,
@@ -1635,9 +1638,10 @@ fn acc32_a_cross_root_rename_re_runs_ensure_server_and_a_same_root_one_reuses() 
     settle_until(&mut state, "a second server for package b", |s| {
         server_count(s) == 2
     });
-    settle_a_while(&mut state);
-
     let root_b = file_uri(&fx.at("b"));
+    settle_until(&mut state, "a server rooted at package b", |s| {
+        server_rows(s).iter().any(|r| r.contains(&root_b))
+    });
     let rows = server_rows(&state);
     assert!(
         rows.iter().any(|r| r.contains(&root_b)),
@@ -1796,7 +1800,7 @@ fn acc34_renaming_the_active_file_through_the_applier_returns_the_same_buffer() 
         response["result"]["applied"], true,
         "the batch must apply: {response:?}"
     );
-    settle_a_while(&mut state);
+    settle_until(&mut state, "the batch to land on disk", |_| new.exists());
 
     assert!(new.exists(), "the rename landed on disk");
     assert!(!old.exists());
@@ -1887,7 +1891,7 @@ fn acc35_when_the_origin_buffer_is_gone_the_applier_restores_nothing() {
         response["result"]["applied"], true,
         "the batch must apply: {response:?}"
     );
-    settle_a_while(&mut state);
+    settle_until(&mut state, "the batch to land on disk", |_| doomed.exists());
 
     assert!(
         doomed.exists(),
@@ -2001,7 +2005,11 @@ fn a_subscriber_reconciliation_failure_is_reported_and_the_rest_still_reconcile(
     // Rename the parent, so BOTH attachments are in the fan-out.
     let new_uri_b = file_uri(&fx.at("w2/b/src/main.rs"));
     rename_fire_and_forget(&mut state, &fx.at("w"), &fx.at("w2"));
-    settle_a_while(&mut state);
+    settle_until(
+        &mut state,
+        "the reconciliation failure to be reported",
+        |s| status(s).contains("reconciliation failure"),
+    );
 
     // Half one: the failure is surfaced, on both channels, attributed to
     // the operation that failed.
@@ -2050,3 +2058,5 @@ fn a_subscriber_reconciliation_failure_is_reported_and_the_rest_still_reconcile(
 // write into their real data root.
 #[path = "common/iso.rs"]
 mod iso;
+#[path = "common/ready.rs"]
+mod ready;

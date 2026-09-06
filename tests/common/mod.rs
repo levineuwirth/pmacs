@@ -14,6 +14,8 @@
 //! - [`daemon`]: `pmacs --daemon` subprocess fixture. First
 //!   consumer M5.5 acceptance suite; second consumer M10.11
 //!   doubled-PTY tests.
+//! - [`ready`]: the one readiness wait, a predicate plus a deadline
+//!   that reports elapsed time and the last observed state.
 //! - [`reap`]: a spawned child in its own process group, signalled as a
 //!   group on drop so no daemon outlives its test.
 //! - [`iso`]: isolated bootstrap storage roots, so an in-process
@@ -27,5 +29,6 @@
 pub mod daemon;
 pub mod iso;
 pub mod pty;
+pub mod ready;
 pub mod reap;
 pub mod sigint_conformance;

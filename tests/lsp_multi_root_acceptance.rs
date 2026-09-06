@@ -16,7 +16,6 @@
 //! pass while testing nothing.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use pmacs::editor::EditorState;
 
@@ -122,12 +121,98 @@ fn open(state: &EditorState, path: &Path) {
     );
 }
 
-fn settle(state: &mut EditorState) {
-    for _ in 0..8 {
-        state.tick_processes();
-        state.tick_lsp();
-        std::thread::sleep(Duration::from_millis(2));
-    }
+// --- readiness waits --------------------------------------------------------
+//
+// Each wait ticks the editor's frame order until its predicate holds or
+// `ready::DEADLINE` passes, and reports the elapsed time and the last
+// observed state when it does not (tests/common/ready.rs). The fixed
+// `for _ in 0..8 { tick(); sleep(2ms) }` loop these replace bet 16 ms on the
+// fake server's speed and lost that bet under load, with an assertion
+// failure that named the result of the race and not the race.
+
+/// Tick until exactly `n` servers are listed; returns the rows.
+fn wait_rows(state: &mut EditorState, n: usize) -> Vec<String> {
+    ready::tick_until(
+        state,
+        &format!("{n} listed server(s)"),
+        ready::DEADLINE,
+        |s| {
+            let rows = rows(s);
+            if rows.len() == n {
+                ready::Probe::Ready(rows)
+            } else {
+                ready::Probe::Pending(format!("{rows:?}"))
+            }
+        },
+    )
+}
+
+/// Tick until the active buffer has an attachment whose server has
+/// initialized. A reuse assertion asks what the attach decided, so the
+/// attachment is its readiness event; the server must also be
+/// initialized, because the fixed settle this replaced gave the fake
+/// server that time and three lean4 rows fail against a server still
+/// starting. The server count is asserted afterwards.
+fn wait_attached(state: &mut EditorState) {
+    ready::tick_until(
+        state,
+        "an initialized attachment for the active buffer",
+        ready::DEADLINE,
+        |s| {
+            let kind: String = eval(
+                s,
+                r#"
+                local rec = pmacs.lsp.active_attachment()
+                if not rec then return "none" end
+                for _, srv in ipairs(pmacs.lsp.list()) do
+                  if tostring(srv.id) == tostring(rec.server) then
+                    return tostring(srv.state and srv.state.kind)
+                  end
+                end
+                return "gone"
+                "#,
+            );
+            if kind == "initialized" {
+                ready::Probe::Ready(())
+            } else {
+                ready::Probe::Pending(format!("attachment state {kind}"))
+            }
+        },
+    );
+}
+
+/// Tick until the status line contains `needle`; returns the status.
+fn wait_status_contains(state: &mut EditorState, needle: &str) -> String {
+    ready::tick_until(
+        state,
+        &format!("a status containing {needle:?}"),
+        ready::DEADLINE,
+        |s| {
+            let status = s.core.borrow().status.clone();
+            if status.contains(needle) {
+                ready::Probe::Ready(status)
+            } else {
+                ready::Probe::Pending(format!("{status:?}"))
+            }
+        },
+    );
+    state.core.borrow().status.clone()
+}
+
+/// Tick until the Lua expression `source` evaluates to a value `accept`
+/// approves of; returns that value.
+fn wait_eval<T>(state: &mut EditorState, what: &str, source: &str, accept: impl Fn(&T) -> bool) -> T
+where
+    T: mlua::FromLuaMulti + std::fmt::Debug,
+{
+    ready::tick_until(state, what, ready::DEADLINE, |s| {
+        let value: T = eval(s, source);
+        if accept(&value) {
+            ready::Probe::Ready(value)
+        } else {
+            ready::Probe::Pending(format!("{value:?}"))
+        }
+    })
 }
 
 /// One `language_id|root_uri|cwd|state` row per live server, sorted so
@@ -178,7 +263,7 @@ fn acc13_list_rows_carry_root_uri_and_cwd() {
     fx.bind(&state);
     configure(&state, "rust");
     open(&state, &file);
-    settle(&mut state);
+    wait_rows(&mut state, 1);
 
     let proj = fx.dir("proj");
     let rows = rows(&state);
@@ -212,9 +297,9 @@ fn acc14_two_project_roots_of_one_language_spawn_two_servers() {
     fx.bind(&state);
     configure(&state, "rust");
     open(&state, &first);
-    settle(&mut state);
+    wait_rows(&mut state, 1);
     open(&state, &second);
-    settle(&mut state);
+    wait_rows(&mut state, 2);
 
     let rows = rows(&state);
     assert_eq!(rows.len(), 2, "one server per project root: {rows:?}");
@@ -244,9 +329,9 @@ fn acc15_two_files_in_one_root_reuse_a_single_server() {
     fx.bind(&state);
     configure(&state, "rust");
     open(&state, &first);
-    settle(&mut state);
+    wait_rows(&mut state, 1);
     open(&state, &second);
-    settle(&mut state);
+    wait_attached(&mut state);
 
     let rows = rows(&state);
     assert_eq!(rows.len(), 1, "same root must reuse: {rows:?}");
@@ -279,9 +364,9 @@ fn acc16_shipped_languages_are_unchanged_for_the_single_root_case() {
         fx.bind(&state);
         configure(&state, language);
         open(&state, &first);
-        settle(&mut state);
+        wait_rows(&mut state, 1);
         open(&state, &second);
-        settle(&mut state);
+        wait_attached(&mut state);
 
         let rows = rows(&state);
         assert_eq!(
@@ -336,12 +421,17 @@ fn acc17_function_root_runs_on_the_reuse_path_and_memoizes_per_directory() {
     );
 
     open(&state, &a1);
-    settle(&mut state);
+    wait_eval::<i64>(
+        &mut state,
+        "the resolver called on spawn",
+        "return _G.ROOT_CALLS",
+        |n| *n >= 1,
+    );
     assert_eq!(eval::<i64>(&state, "return _G.ROOT_CALLS"), 1, "spawn path");
 
     // Same directory: served from the memo, so the count does not move.
     open(&state, &a2);
-    settle(&mut state);
+    wait_attached(&mut state);
     assert_eq!(
         eval::<i64>(&state, "return _G.ROOT_CALLS"),
         1,
@@ -352,7 +442,12 @@ fn acc17_function_root_runs_on_the_reuse_path_and_memoizes_per_directory() {
     // path resolves at all — but resolves to the same root, so no second
     // server appears.
     open(&state, &b1);
-    settle(&mut state);
+    wait_eval::<i64>(
+        &mut state,
+        "the resolver called for a new directory",
+        "return _G.ROOT_CALLS",
+        |n| *n >= 2,
+    );
     assert_eq!(
         eval::<i64>(&state, "return _G.ROOT_CALLS"),
         2,
@@ -393,11 +488,11 @@ fn acc18_hand_spawned_server_without_root_uri_is_not_adopted() {
             lua_str(&proj)
         ),
     );
-    settle(&mut state);
+    wait_rows(&mut state, 1);
     assert_eq!(count(&state), 1, "the hand-spawned server is up");
 
     open(&state, &file);
-    settle(&mut state);
+    wait_rows(&mut state, 2);
 
     let rows = rows(&state);
     assert_eq!(rows.len(), 2, "the attach must not adopt it: {rows:?}");
@@ -426,31 +521,27 @@ fn acc19_stopped_server_in_the_matching_root_is_not_reused() {
     fx.bind(&state);
     configure(&state, "rust");
     open(&state, &first);
-    settle(&mut state);
+    wait_rows(&mut state, 1);
     let original: i64 = eval(&state, "return pmacs.lsp.list()[1].id:raw()");
 
     exec(&state, "pmacs.lsp.stop(pmacs.lsp.list()[1].id)");
-    for _ in 0..200 {
-        settle(&mut state);
-        let dead: bool = eval(
-            &state,
-            r#"
-            for _, s in ipairs(pmacs.lsp.list()) do
-              local k = s.state and s.state.kind
-              if k == "stopped" or k == "crashed" then return true end
-            end
-            return false
-            "#,
-        );
-        if dead {
-            break;
-        }
-    }
+    wait_eval::<bool>(
+        &mut state,
+        "the stopped server",
+        r#"
+        for _, s in ipairs(pmacs.lsp.list()) do
+          local k = s.state and s.state.kind
+          if k == "stopped" or k == "crashed" then return true end
+        end
+        return false
+        "#,
+        |dead| *dead,
+    );
 
     open(&state, &second);
-    settle(&mut state);
-    let live: i64 = eval(
-        &state,
+    let live: i64 = wait_eval(
+        &mut state,
+        "a live replacement server",
         r#"
         for _, s in ipairs(pmacs.lsp.list()) do
           local k = s.state and s.state.kind
@@ -460,6 +551,7 @@ fn acc19_stopped_server_in_the_matching_root_is_not_reused() {
         end
         return -1
         "#,
+        |id| *id != -1,
     );
     assert_ne!(live, -1, "a replacement server must exist");
     assert_ne!(live, original, "the dead server must not be reused");
@@ -479,9 +571,9 @@ fn acc20_markerless_files_in_different_directories_share_one_server() {
     fx.bind(&state);
     configure(&state, "rust");
     open(&state, &first);
-    settle(&mut state);
+    wait_rows(&mut state, 1);
     open(&state, &second);
-    settle(&mut state);
+    wait_attached(&mut state);
 
     let rows = rows(&state);
     assert_eq!(
@@ -513,9 +605,9 @@ fn acc21_detected_root_and_markerless_file_get_different_servers() {
     fx.bind(&state);
     configure(&state, "rust");
     open(&state, &inside);
-    settle(&mut state);
+    wait_rows(&mut state, 1);
     open(&state, &loose);
-    settle(&mut state);
+    wait_rows(&mut state, 2);
 
     let rows = rows(&state);
     assert_eq!(rows.len(), 2, "detected and fallback must differ: {rows:?}");
@@ -570,9 +662,9 @@ fn config_string_root_overrides_detection_as_the_affinity_key() {
         ),
     );
     open(&state, &first);
-    settle(&mut state);
+    wait_rows(&mut state, 1);
     open(&state, &second);
-    settle(&mut state);
+    wait_attached(&mut state);
 
     let rows = rows(&state);
     assert_eq!(
@@ -607,7 +699,7 @@ fn config_root_false_reads_as_unset_and_detection_still_wins() {
         ),
     );
     open(&state, &file);
-    settle(&mut state);
+    wait_rows(&mut state, 1);
 
     let rows = rows(&state);
     assert_eq!(rows.len(), 1, "{rows:?}");
@@ -645,7 +737,7 @@ fn a_throwing_root_resolver_leaves_an_attributed_trace() {
         ),
     );
     open(&state, &file);
-    settle(&mut state);
+    wait_status_contains(&mut state, "root resolver");
 
     let msg = status(&state);
     assert!(
@@ -690,7 +782,7 @@ fn a_resolver_returning_nil_declines_silently() {
         ),
     );
     open(&state, &file);
-    settle(&mut state);
+    wait_rows(&mut state, 1);
 
     let msg = status(&state);
     assert!(
@@ -709,3 +801,5 @@ fn a_resolver_returning_nil_declines_silently() {
 // write into their real data root.
 #[path = "common/iso.rs"]
 mod iso;
+#[path = "common/ready.rs"]
+mod ready;

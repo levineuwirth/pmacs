@@ -20,8 +20,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 use super::reap::Reaped;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tempfile::TempDir;
 
@@ -207,44 +206,22 @@ pub fn wait_for_socket_or_exit(
     // connect proves the new daemon has run through `bind` and
     // `listen`. ECONNREFUSED on a stale socket retries until the new
     // daemon takes over.
-    let start = Instant::now();
-    while start.elapsed() < deadline {
-        if let Ok(mut stream) = UnixStream::connect(socket) {
-            // Read the Hello so the daemon's `send_message` succeeds
-            // and doesn't log a "send Hello failed" warning to its
-            // stderr (which our test runner inherits). After reading
-            // we drop without sending AttachRequest; the daemon
-            // observes the disconnect and falls back to accept.
-            stream
-                .set_read_timeout(Some(Duration::from_millis(500)))
-                .ok();
-            let _ = read_message::<Hello>(&mut stream);
-            return Ok(());
-        }
-        // Daemon may have exited early (panic on bind, missing
-        // env, etc.). Surface its exit status + stderr immediately
-        // instead of letting the connect-probe burn the full
-        // deadline.
-        if let Ok(Some(status)) = process.try_wait() {
+    // One readiness wait for every daemon spawner (`tests/common/ready.rs`);
+    // this shape adds the daemon's file-backed stderr to its report. A
+    // daemon that exits before listening is reported at once rather than
+    // after the whole deadline, because the probe observes the child.
+    match super::ready::wait_for_daemon(socket, process, deadline) {
+        Ok(()) => Ok(()),
+        Err(timeout) => {
+            // Kill, then capture whatever stderr is available so the
+            // operator sees the daemon's last words rather than "no
+            // signal."
+            let _ = process.kill();
+            let _ = process.wait();
             let stderr = read_daemon_stderr(socket);
-            return Err(format!(
-                "daemon exited with {status} before socket appeared; \
-                 socket={}\n--- daemon stderr ---\n{stderr}",
-                socket.display()
-            ));
+            Err(format!("{timeout}\n--- daemon stderr ---\n{stderr}"))
         }
-        thread::sleep(Duration::from_millis(20));
     }
-    // Timeout: kill, then capture whatever stderr is available so the
-    // operator sees the daemon's last words rather than "no signal."
-    let _ = process.kill();
-    let _ = process.wait();
-    let stderr = read_daemon_stderr(socket);
-    Err(format!(
-        "daemon did not start listening on {} within {deadline:?}\n\
-         --- daemon stderr ---\n{stderr}",
-        socket.display()
-    ))
 }
 
 fn daemon_stderr_path(socket: &Path) -> PathBuf {

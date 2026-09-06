@@ -180,21 +180,21 @@ mod crdt {
         expected: &str,
         timeout: Duration,
     ) -> HashMap<String, String> {
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            if report.exists() {
+        common::ready::expect(
+            &format!("report {} reaching {key}={expected}", report.display()),
+            timeout,
+            || {
+                if !report.exists() {
+                    return common::ready::Probe::Pending("no report yet".to_owned());
+                }
                 let facts = parse_report(report);
                 if facts.get(key).is_some_and(|value| value == expected) {
-                    return facts;
+                    common::ready::Probe::Ready(facts)
+                } else {
+                    common::ready::Probe::Pending(fs::read_to_string(report).unwrap_or_default())
                 }
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-        panic!(
-            "report {} did not reach {key}={expected}: {}",
-            report.display(),
-            fs::read_to_string(report).unwrap_or_default()
-        );
+            },
+        )
     }
 
     fn signal_pid(pid: u32, signal: Signal) {
@@ -248,7 +248,22 @@ mod crdt {
     /// (§4d). Rust compares `Command::output()` bytes directly; only
     /// the shell consumer needs capture files.
     fn sigint_diagnosis(helper: &Path) -> Result<(), String> {
-        let out = match Command::new(helper).output() {
+        // A stub written moments ago can fail to exec with ETXTBSY: a
+        // sibling test thread that forked while the write descriptor was
+        // open handed a copy to its child, and until that child execs the
+        // file counts as open for writing. Retrying past that window is
+        // what cargo does for freshly linked binaries (issue #250).
+        let mut attempts = 0;
+        let spawned = loop {
+            match Command::new(helper).output() {
+                Err(error) if error.raw_os_error() == Some(26) && attempts < 100 => {
+                    attempts += 1;
+                    thread::sleep(Duration::from_millis(10));
+                }
+                other => break other,
+            }
+        };
+        let out = match spawned {
             // Rust's boundary differs from the shell's: a spawn error
             // has NO status, where a shell turns the same failure into
             // one. Conformance X2, Rust-only.
@@ -373,32 +388,19 @@ mod crdt {
     }
 
     fn wait_for_exit(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
-        let deadline = Instant::now() + timeout;
-        loop {
-            if let Some(status) = child.try_wait().expect("inspect child") {
-                return status;
+        common::ready::expect("the child's exit", timeout, || {
+            match child.try_wait().expect("inspect child") {
+                Some(status) => common::ready::Probe::Ready(status),
+                None => common::ready::Probe::Pending(format!("pid {} still running", child.id())),
             }
-            assert!(
-                Instant::now() < deadline,
-                "child did not exit within {timeout:?}"
-            );
-            thread::sleep(Duration::from_millis(20));
-        }
+        })
     }
 
     fn wait_for_daemon(socket: &Path, child: &mut Child) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline {
-            if let Ok(mut stream) = UnixStream::connect(socket) {
-                let _: Hello = read_message(&mut stream).expect("read daemon Hello");
-                return;
-            }
-            if let Some(status) = child.try_wait().expect("inspect daemon") {
-                panic!("daemon exited before listening: {status}");
-            }
-            thread::sleep(Duration::from_millis(20));
+        if let Err(timeout) = common::ready::wait_for_daemon(socket, child, Duration::from_secs(10))
+        {
+            panic!("{timeout}");
         }
-        panic!("daemon did not listen on {}", socket.display());
     }
 
     fn attach_surviving_frontend(socket: &Path) -> (FrontendId, UnixStream) {

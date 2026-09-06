@@ -109,13 +109,121 @@ fn editor(fx: &Fixture) -> EditorState {
     state
 }
 
-fn settle(state: &mut EditorState) {
+// --- readiness waits --------------------------------------------------------
+//
+// Each wait ticks the editor's frame order until its predicate holds or
+// `ready::DEADLINE` passes, and reports the elapsed time and the last
+// observed state when it does not (tests/common/ready.rs). The fixed
+// `for _ in 0..8 { tick(); sleep(2ms) }` loop these replace bet 16 ms on the
+// fake server's speed and lost that bet under load, with an assertion
+// failure that named the result of the race and not the race.
+
+/// Tick until exactly `n` servers are listed; returns the rows.
+fn wait_rows(state: &mut EditorState, n: usize) -> Vec<String> {
+    ready::tick_until(
+        state,
+        &format!("{n} listed server(s)"),
+        ready::DEADLINE,
+        |s| {
+            let rows = rows(s);
+            if rows.len() == n {
+                ready::Probe::Ready(rows)
+            } else {
+                ready::Probe::Pending(format!("{rows:?}"))
+            }
+        },
+    )
+}
+
+/// Tick until the active buffer has an attachment whose server has
+/// initialized. A reuse assertion asks what the attach decided, so the
+/// attachment is its readiness event; the server must also be
+/// initialized, because the fixed settle this replaced gave the fake
+/// server that time and three lean4 rows fail against a server still
+/// starting. The server count is asserted afterwards.
+fn wait_attached(state: &mut EditorState) {
+    ready::tick_until(
+        state,
+        "an initialized attachment for the active buffer",
+        ready::DEADLINE,
+        |s| {
+            let kind: String = eval(
+                s,
+                r#"
+                local rec = pmacs.lsp.active_attachment()
+                if not rec then return "none" end
+                for _, srv in ipairs(pmacs.lsp.list()) do
+                  if tostring(srv.id) == tostring(rec.server) then
+                    return tostring(srv.state and srv.state.kind)
+                  end
+                end
+                return "gone"
+                "#,
+            );
+            if kind == "initialized" {
+                ready::Probe::Ready(())
+            } else {
+                ready::Probe::Pending(format!("attachment state {kind}"))
+            }
+        },
+    );
+}
+
+/// The fixed drain two rows keep: ten frames, two milliseconds apart,
+/// the shape every LSP suite used before the readiness migration.
+///
+/// `r5_a_dead_attachment_is_never_handed_to_a_command` and
+/// `r6_the_shipped_lean_command_rebuilds_a_dead_attachment` stop the
+/// server at a particular moment of its startup and assert what the
+/// lean runtime does with a record in that state. Waiting for the
+/// attachment record alone stops the server too early and waiting for
+/// initialization stops it too late; both turn the assertions' subject
+/// into a different scenario (a respawn, a rebuild that never
+/// initializes). The moment they need is a property of the lean runtime's
+/// startup sequence that this suite does not expose as a state, so these
+/// two rows keep the original timing, stated here as a fixed drain and
+/// not a readiness wait.
+fn settle_briefly(state: &mut EditorState) {
     for _ in 0..10 {
         state.tick_processes();
         state.tick_lsp();
         state.tick_async();
         std::thread::sleep(Duration::from_millis(2));
     }
+}
+
+/// Tick until the status line contains `needle`; returns the status.
+fn wait_status_contains(state: &mut EditorState, needle: &str) -> String {
+    ready::tick_until(
+        state,
+        &format!("a status containing {needle:?}"),
+        ready::DEADLINE,
+        |s| {
+            let status = s.core.borrow().status.clone();
+            if status.contains(needle) {
+                ready::Probe::Ready(status)
+            } else {
+                ready::Probe::Pending(format!("{status:?}"))
+            }
+        },
+    );
+    state.core.borrow().status.clone()
+}
+
+/// Tick until the Lua expression `source` evaluates to a value `accept`
+/// approves of; returns that value.
+fn wait_eval<T>(state: &mut EditorState, what: &str, source: &str, accept: impl Fn(&T) -> bool) -> T
+where
+    T: mlua::FromLuaMulti + std::fmt::Debug,
+{
+    ready::tick_until(state, what, ready::DEADLINE, |s| {
+        let value: T = eval(s, source);
+        if accept(&value) {
+            ready::Probe::Ready(value)
+        } else {
+            ready::Probe::Pending(format!("{value:?}"))
+        }
+    })
 }
 
 fn open(state: &EditorState, path: &Path) {
@@ -169,7 +277,7 @@ fn acc22_lean_file_in_a_lake_package_spawns_one_server_at_the_package_root() {
     let file = fx.write("pkg/Pkg/Basic.lean", "def x : Nat := 1\n");
     let mut state = editor(&fx);
     open(&state, &file);
-    settle(&mut state);
+    wait_rows(&mut state, 1);
 
     let pkg = fx.dir("pkg").display().to_string();
     assert_eq!(
@@ -313,7 +421,7 @@ fn acc25_string_valued_root_still_works() {
         &format!("pmacs.lsp.config.lean4.root = \"{}\"", lua_str(&pkg)),
     );
     open(&state, &file);
-    settle(&mut state);
+    wait_rows(&mut state, 1);
 
     let want = pkg.display().to_string();
     assert_eq!(
@@ -334,7 +442,7 @@ fn acc26_did_open_carries_the_lean4_language_id() {
     let file = fx.write("pkg/A.lean", "def a := 1\n");
     let mut state = editor(&fx);
     open(&state, &file);
-    settle(&mut state);
+    wait_rows(&mut state, 1);
 
     let lang: String = eval(
         &state,
@@ -457,18 +565,21 @@ fn acc28_an_old_lake_falls_back_and_the_buffer_lands_on_a_live_server() {
     with_fallback(&state, &old_lake);
 
     open(&state, &file);
-    settle(&mut state);
     // The stub's `serve` sleeps rather than dying, so ONLY the probe can
     // have caused a fallback here. That isolation is the point.
-    for _ in 0..40 {
-        state.tick_processes();
-        state.tick_lsp();
-        state.tick_async();
-        std::thread::sleep(Duration::from_millis(5));
-        if attached_state(&state) == "initialized" {
-            break;
-        }
-    }
+    ready::tick_until(
+        &mut state,
+        "the attachment initialized on the fallback server",
+        ready::DEADLINE,
+        |s| {
+            let kind = attached_state(s);
+            if kind == "initialized" {
+                ready::Probe::Ready(())
+            } else {
+                ready::Probe::Pending(kind)
+            }
+        },
+    );
 
     assert_eq!(
         attached_state(&state),
@@ -557,7 +668,12 @@ fn acc27_the_latch_is_one_shot_and_does_not_re_arm() {
     with_fallback(&state, &absent);
 
     open(&state, &file);
-    settle(&mut state);
+    wait_eval::<String>(
+        &mut state,
+        "the fallback command",
+        "return pmacs.lsp.config.lean4.command",
+        |command| *command == fake_lsp_path(),
+    );
     let after_first: String = eval(&state, "return pmacs.lsp.config.lean4.command");
     assert_eq!(after_first, fake_lsp_path(), "the fallback fired once");
 
@@ -590,7 +706,12 @@ fn acc35_latch_preserves_user_config_and_swaps_only_command_and_args() {
     );
 
     open(&state, &file);
-    settle(&mut state);
+    wait_eval::<String>(
+        &mut state,
+        "the fallback command",
+        "return pmacs.lsp.config.lean4.command",
+        |command| *command == fake_lsp_path(),
+    );
 
     let after: String = eval(
         &state,
@@ -684,7 +805,7 @@ fn acc36a_latch_leaves_a_status_line_trace() {
     with_fallback(&state, &absent);
 
     open(&state, &file);
-    settle(&mut state);
+    wait_status_contains(&mut state, "falling back");
 
     let status = state.core.borrow().status.clone();
     assert!(
@@ -729,7 +850,7 @@ fn acc37_wait_for_diagnostics_resolves_through_the_response_seam() {
     let file = fx.write("pkg/A.lean", "def a : Nat := 1\n");
     let mut state = editor(&fx);
     open(&state, &file);
-    settle(&mut state);
+    wait_attached(&mut state);
 
     exec(
         &state,
@@ -741,7 +862,12 @@ fn acc37_wait_for_diagnostics_resolves_through_the_response_seam() {
         end)
         "#,
     );
-    settle(&mut state);
+    wait_eval::<String>(
+        &mut state,
+        "the wait_for_diagnostics callback",
+        "return _G.settled",
+        |v| v != "never",
+    );
 
     assert_eq!(
         eval::<String>(&state, "return _G.settled"),
@@ -780,16 +906,16 @@ fn file_progress_notification_is_recorded_for_its_document() {
     assert_eq!(before, 0);
 
     open(&state, &file);
-    settle(&mut state);
-
-    let uri: String = eval(
-        &state,
+    let uri: String = wait_eval(
+        &mut state,
+        "a recorded fileProgress document",
         r#"
         for k, v in pairs(pmacs.lean.file_progress) do
           if type(v) == "table" and v[1] and v[1].range then return k end
         end
         return "none"
         "#,
+        |uri| uri != "none",
     );
     assert!(
         uri.starts_with("file://") && uri.ends_with("A.lean"),
@@ -812,11 +938,11 @@ fn lean_root_is_canonical_so_a_symlinked_open_reuses_one_server() {
 
     let mut state = editor(&fx);
     open(&state, &real);
-    settle(&mut state);
+    wait_rows(&mut state, 1);
     assert_eq!(rows(&state).len(), 1, "the real path spawns one server");
 
     open(&state, &linked);
-    settle(&mut state);
+    wait_attached(&mut state);
     assert_eq!(
         rows(&state).len(),
         1,
@@ -1066,7 +1192,10 @@ fn r2_an_unconfigured_lean_server_is_disabled_not_failed() {
     exec(&state, "pmacs.editor.set_status(\"\")");
 
     open(&state, &file);
-    settle(&mut state);
+    // Nothing is expected to happen here, so there is no event to wait
+    // for: a bounded drain is the only way to give a wrong spawn or a
+    // wrong status the chance to appear before the negative assertions.
+    tick_for(&mut state, 200);
 
     assert_eq!(
         state.core.borrow().status.clone(),
@@ -1237,7 +1366,7 @@ fn r3_a_failing_wrapper_is_named_truthfully_not_as_lake_serve() {
     with_fallback(&state, &absent);
 
     open(&state, &file);
-    settle(&mut state);
+    wait_status_contains(&mut state, "my-lean-wrapper");
 
     let status = state.core.borrow().status.clone();
     assert!(
@@ -1361,10 +1490,8 @@ fn r4_attribution_names_the_exact_command_and_its_arguments() {
     );
 
     open(&state, &file);
-    settle(&mut state);
-
-    let status = state.core.borrow().status.clone();
     let expected = format!("`{} serve --quiet`", absent.display());
+    let status = wait_status_contains(&mut state, &expected);
     assert!(
         status.contains(&expected),
         "the status names the exact configured command AND its arguments;\n  \
@@ -1462,7 +1589,7 @@ fn r5_a_user_spawned_lean_server_is_not_retired_by_the_fallback() {
             fake_lsp_path()
         ),
     );
-    settle(&mut state);
+    wait_rows(&mut state, 1);
 
     open(&state, &file);
     tick_for(&mut state, 600);
@@ -1580,7 +1707,7 @@ fn r5_a_dead_attachment_is_never_handed_to_a_command() {
         &format!("pmacs.lsp.config.lean4.command = \"{}\"", fake_lsp_path()),
     );
     open(&state, &file);
-    settle(&mut state);
+    settle_briefly(&mut state);
     let first: String = attached_sid(&state);
     assert_ne!(first, "none", "precondition: attached");
 
@@ -1658,7 +1785,7 @@ fn r6_the_shipped_lean_command_rebuilds_a_dead_attachment() {
     let file = fx.write("pkg/A.lean", "def a := 1\n");
     let mut state = editor(&fx);
     open(&state, &file);
-    settle(&mut state);
+    settle_briefly(&mut state);
 
     exec(
         &state,
@@ -1668,7 +1795,21 @@ fn r6_the_shipped_lean_command_rebuilds_a_dead_attachment() {
         pmacs.lsp.stop(rec.server)
         ",
     );
-    tick_for(&mut state, 200);
+    wait_eval::<String>(
+        &mut state,
+        "the stopped attachment",
+        r#"
+        local rec = pmacs.lsp.active_attachment()
+        if not rec then return "none" end
+        for _, s in ipairs(pmacs.lsp.list()) do
+          if tostring(s.id) == tostring(rec.server) then
+            return tostring(s.state and s.state.kind)
+          end
+        end
+        return "gone"
+        "#,
+        |kind| kind == "stopped" || kind == "crashed" || kind == "gone",
+    );
 
     exec(
         &state,
@@ -1887,3 +2028,5 @@ fn r6_no_swap_retires_only_the_failed_root() {
 // write into their real data root.
 #[path = "common/iso.rs"]
 mod iso;
+#[path = "common/ready.rs"]
+mod ready;

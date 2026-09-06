@@ -686,6 +686,14 @@ fn acc13_unterminated_final_line_still_parses() {
     // No trailing newline: complete at EOF, parsed at the terminal
     // event (bite: fails without the finalization pass).
     compile_and_finish(&mut s, "printf 'x.c:3:1: error: no newline'", dir.path());
+    // The exit marker is appended by the terminal event; the unterminated
+    // line is parsed by the finalization pass at that same event. Wait
+    // for the unit the assertion reads, not for the marker.
+    assert!(
+        pump_until(&mut s, 10_000, |s| !compile_errors(s).is_empty()),
+        "the finalization pass never parsed the unterminated line; buffer:\n{}",
+        compilation_text(&s)
+    );
     assert_eq!(
         compile_errors(&s),
         vec![("x.c".to_owned(), 2, 0, Some("error".to_owned()))],

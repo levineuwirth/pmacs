@@ -66,7 +66,6 @@
 use std::fs;
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::thread;
@@ -104,8 +103,9 @@ impl TestDaemon {
         fs::set_permissions(tempdir.path(), fs::Permissions::from_mode(0o700))
             .expect("chmod tempdir 0700");
         let socket_path = tempdir.path().join("pmacs.sock");
-        let process = spawn_pmacs_daemon(&socket_path);
-        wait_for_socket(&socket_path, Duration::from_secs(10)).expect("daemon socket appeared");
+        let mut process = spawn_pmacs_daemon(&socket_path);
+        wait_for_socket(&socket_path, process.child(), Duration::from_secs(10))
+            .expect("daemon socket appeared");
         Self {
             _tempdir: tempdir,
             socket_path,
@@ -143,39 +143,23 @@ fn spawn_pmacs_daemon(socket_path: &Path) -> reap::Reaped {
     reap::Reaped::spawn(&mut cmd).expect("spawn pmacs --daemon")
 }
 
-/// Probe by attempting to connect — `exists()` would let a stale
-/// socket file fool us into thinking the daemon is up before bind.
-fn wait_for_socket(socket: &Path, deadline: Duration) -> Result<(), String> {
-    let start = Instant::now();
-    while start.elapsed() < deadline {
-        if let Ok(mut stream) = UnixStream::connect(socket) {
-            // Drain the daemon's Hello so it doesn't log a "send
-            // Hello failed" warning when our probe drops.
-            stream
-                .set_read_timeout(Some(Duration::from_millis(500)))
-                .ok();
-            let _ = read_message::<Hello>(&mut stream);
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-    Err(format!(
-        "daemon did not start listening on {} within {deadline:?}",
-        socket.display()
-    ))
+/// The shared daemon wait (`tests/common/ready.rs`): connect-probed,
+/// and it reports the child's exit or the last connect error on failure.
+fn wait_for_socket(socket: &Path, process: &mut Child, deadline: Duration) -> Result<(), String> {
+    ready::wait_for_daemon(socket, process, deadline).map_err(|t| t.to_string())
 }
 
 /// Wait up to `deadline` for `predicate` to return true. Returns
 /// `Ok(())` on success, `Err(elapsed)` on timeout.
 fn wait_until<F: FnMut() -> bool>(mut predicate: F, deadline: Duration) -> Result<(), Duration> {
-    let start = Instant::now();
-    while start.elapsed() < deadline {
+    ready::wait("the predicate", deadline, || {
         if predicate() {
-            return Ok(());
+            ready::Probe::Ready(())
+        } else {
+            ready::Probe::Pending(String::new())
         }
-        thread::sleep(Duration::from_millis(20));
-    }
-    Err(start.elapsed())
+    })
+    .map_err(|t| t.elapsed)
 }
 
 /// Wait up to `deadline` for `child` to exit. Returns the exit
@@ -591,3 +575,6 @@ fn daemon_attach_handles_daemon_crash_as_clean_eof() {
 
 #[path = "common/reap.rs"]
 mod reap;
+
+#[path = "common/ready.rs"]
+mod ready;

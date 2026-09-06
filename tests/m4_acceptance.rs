@@ -8613,20 +8613,29 @@ fn m4_lua_bundle_debounces_did_change_per_keystroke() {
         .load("pmacs.hook.run('buffer.after-edit')")
         .exec()
         .expect("fire single after-edit");
-    std::thread::sleep(Duration::from_millis(120));
-    s.tick_async();
-    let (sent, version): (i64, i64) = s
-        .lua_host
-        .lua()
-        .load(
-            "
-            local n = #_G.__sent_did_changes
-            local v = n > 0 and _G.__sent_did_changes[n].version or -1
-            return n, v
-            ",
-        )
-        .eval()
-        .expect("count after tick");
+    // The quiet window (75 ms in the bundle) is a timer; tick until it
+    // has fired rather than sleeping past where it is expected to.
+    let (sent, version): (i64, i64) =
+        crate::ready::expect("the quiet-window flush", Duration::from_secs(10), || {
+            s.tick_async();
+            let (n, v): (i64, i64) = s
+                .lua_host
+                .lua()
+                .load(
+                    "
+                    local n = #_G.__sent_did_changes
+                    local v = n > 0 and _G.__sent_did_changes[n].version or -1
+                    return n, v
+                    ",
+                )
+                .eval()
+                .expect("count after tick");
+            if n >= 2 {
+                crate::ready::Probe::Ready((n, v))
+            } else {
+                crate::ready::Probe::Pending(format!("{n} sent, version {v}"))
+            }
+        });
     assert_eq!(sent, 2, "quiet-window tick flushes the pending didChange");
     assert_eq!(version, 5, "tick flush carries the post-edit version");
 }
@@ -11647,3 +11656,5 @@ fn rd22b_a_failing_resource_item_can_leave_filesystem_state() {
 // write into their real data root.
 #[path = "common/iso.rs"]
 mod iso;
+#[path = "common/ready.rs"]
+mod ready;

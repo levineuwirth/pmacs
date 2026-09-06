@@ -33,7 +33,6 @@
 //! would behave differently here and in CI.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use pmacs::editor::EditorState;
 
@@ -159,12 +158,82 @@ fn open(state: &EditorState, path: &Path) {
     );
 }
 
-fn settle(state: &mut EditorState) {
-    for _ in 0..8 {
-        state.tick_processes();
-        state.tick_lsp();
-        std::thread::sleep(Duration::from_millis(2));
-    }
+// --- readiness waits --------------------------------------------------------
+//
+// Each wait ticks the editor's frame order until its predicate holds or
+// `ready::DEADLINE` passes, and reports the elapsed time and the last
+// observed state when it does not (tests/common/ready.rs). The fixed
+// `for _ in 0..8 { tick(); sleep(2ms) }` loop these replace bet 16 ms on the
+// fake server's speed and lost that bet under load, with an assertion
+// failure that named the result of the race and not the race.
+
+/// Tick until exactly `n` servers are listed; returns the rows.
+fn wait_rows(state: &mut EditorState, n: usize) -> Vec<String> {
+    ready::tick_until(
+        state,
+        &format!("{n} listed server(s)"),
+        ready::DEADLINE,
+        |s| {
+            let rows = rows(s);
+            if rows.len() == n {
+                ready::Probe::Ready(rows)
+            } else {
+                ready::Probe::Pending(format!("{rows:?}"))
+            }
+        },
+    )
+}
+
+/// Tick until the active buffer has an attachment whose server has
+/// initialized. A reuse assertion asks what the attach decided, so the
+/// attachment is its readiness event; the server must also be
+/// initialized, because the fixed settle this replaced gave the fake
+/// server that time and three lean4 rows fail against a server still
+/// starting. The server count is asserted afterwards.
+fn wait_attached(state: &mut EditorState) {
+    ready::tick_until(
+        state,
+        "an initialized attachment for the active buffer",
+        ready::DEADLINE,
+        |s| {
+            let kind: String = eval(
+                s,
+                r#"
+                local rec = pmacs.lsp.active_attachment()
+                if not rec then return "none" end
+                for _, srv in ipairs(pmacs.lsp.list()) do
+                  if tostring(srv.id) == tostring(rec.server) then
+                    return tostring(srv.state and srv.state.kind)
+                  end
+                end
+                return "gone"
+                "#,
+            );
+            if kind == "initialized" {
+                ready::Probe::Ready(())
+            } else {
+                ready::Probe::Pending(format!("attachment state {kind}"))
+            }
+        },
+    );
+}
+
+/// Tick until the status line contains `needle`; returns the status.
+fn wait_status_contains(state: &mut EditorState, needle: &str) -> String {
+    ready::tick_until(
+        state,
+        &format!("a status containing {needle:?}"),
+        ready::DEADLINE,
+        |s| {
+            let status = s.core.borrow().status.clone();
+            if status.contains(needle) {
+                ready::Probe::Ready(status)
+            } else {
+                ready::Probe::Pending(format!("{status:?}"))
+            }
+        },
+    );
+    state.core.borrow().status.clone()
 }
 
 /// One `language_id|root_uri|cwd|state` row per live server.
@@ -412,7 +481,7 @@ fn a_tex_buffer_in_a_git_repo_attaches_at_the_document_directory() {
     fx.mkdir("repo/.git");
     let doc = fx.write("repo/paper/paper.tex", DOC);
     open(&state, &doc);
-    settle(&mut state);
+    wait_rows(&mut state, 1);
 
     let rows = rows(&state);
     assert_eq!(rows.len(), 1, "one latex server: {rows:?}");
@@ -444,7 +513,7 @@ fn a_tex_buffer_attaches_the_latex_server_at_the_marker_root() {
     fx.write("thesis/latexmkrc", "");
     let chapter = fx.write("thesis/chapters/one.tex", "\\section{One}\n");
     open(&state, &chapter);
-    settle(&mut state);
+    wait_rows(&mut state, 1);
 
     let rows = rows(&state);
     assert_eq!(rows.len(), 1, "expected one latex server: {rows:?}");
@@ -472,9 +541,9 @@ fn two_chapters_of_one_thesis_share_a_single_server() {
     let one = fx.write("thesis/chapters/one.tex", "\\section{One}\n");
     let two = fx.write("thesis/appendix/two.tex", "\\section{Two}\n");
     open(&state, &one);
-    settle(&mut state);
+    wait_rows(&mut state, 1);
     open(&state, &two);
-    settle(&mut state);
+    wait_attached(&mut state);
 
     let rows = rows(&state);
     assert_eq!(
@@ -518,9 +587,9 @@ fn two_chapters_share_one_server_under_a_root_search_boundary() {
     let one = fx.write("thesis/chapters/one.tex", "\\section{One}\n");
     let two = fx.write("thesis/appendix/two.tex", "\\section{Two}\n");
     open(&state, &one);
-    settle(&mut state);
+    wait_rows(&mut state, 1);
     open(&state, &two);
-    settle(&mut state);
+    wait_attached(&mut state);
 
     let rows = rows(&state);
     assert_eq!(
@@ -548,9 +617,9 @@ fn two_markerless_documents_in_different_directories_do_not_share_a_server() {
     let one = fx.write("a/one.tex", DOC);
     let two = fx.write("b/two.tex", DOC);
     open(&state, &one);
-    settle(&mut state);
+    wait_rows(&mut state, 1);
     open(&state, &two);
-    settle(&mut state);
+    wait_rows(&mut state, 2);
 
     let rows = rows(&state);
     assert_eq!(rows.len(), 2, "one server per document directory: {rows:?}");
@@ -587,7 +656,7 @@ fn a_missing_texlab_surfaces_installation_guidance() {
     point_command_at(&state, &absent.display().to_string());
     let doc = fx.write("paper/paper.tex", DOC);
     open(&state, &doc);
-    settle(&mut state);
+    wait_status_contains(&mut state, "did not start");
 
     assert!(rows(&state).is_empty(), "nothing may have started");
     let status = status(&state);
@@ -697,3 +766,5 @@ fn latex_root_for_a_document_at_the_filesystem_root_is_the_root() {
 
 #[path = "common/iso.rs"]
 mod iso;
+#[path = "common/ready.rs"]
+mod ready;

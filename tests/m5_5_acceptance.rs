@@ -50,6 +50,40 @@ use common::daemon::{
 };
 
 /// Read the daemon's `Hello`, send our `AttachRequest`, return the Hello.
+/// Attach, read the initial frame, and return; retried until the daemon
+/// has released the previous frontend's slot. A too-early attach fails
+/// at the handshake or at the initial-frame read, and both are the
+/// pending state the wait reports.
+fn reattach_when_slot_clears(daemon: &TestDaemon) {
+    common::ready::expect(
+        "a reattach after the slot clears",
+        Duration::from_secs(10),
+        || {
+            let Ok(mut stream) = UnixStream::connect(daemon.socket_path()) else {
+                return common::ready::Probe::Pending("connect refused".to_owned());
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let Ok(hello) = read_message::<Hello>(&mut stream) else {
+                return common::ready::Probe::Pending("no Hello".to_owned());
+            };
+            let req = AttachRequest {
+                protocol_version: hello.protocol_version,
+                frontend_capabilities: build_default_caps(),
+                initial_size: CellSize::new(24, 80),
+            };
+            if let Err(error) = write_message(&mut stream, &req) {
+                return common::ready::Probe::Pending(format!("AttachRequest: {error}"));
+            }
+            match read_message::<InstanceMessage>(&mut stream) {
+                Ok(_) => common::ready::Probe::Ready(()),
+                Err(error) => common::ready::Probe::Pending(format!("initial frame: {error}")),
+            }
+        },
+    );
+}
+
 fn do_handshake(stream: &mut UnixStream) -> Hello {
     let hello: Hello = read_message(stream).expect("read Hello");
     assert_eq!(hello.protocol_version, ADVERTISED_PROTOCOL_VERSION);
@@ -180,18 +214,10 @@ fn clean_detach_then_reattach() {
         drop(stream);
     }
 
-    // Give the daemon time to clear its attached slot.
-    thread::sleep(Duration::from_millis(300));
-
-    // Reattach should succeed.
-    {
-        let mut stream = daemon.connect();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        let _hello = do_handshake(&mut stream);
-        let _: InstanceMessage = read_message(&mut stream).expect("initial frame");
-    }
+    // Reattach succeeds once the daemon has cleared its attached slot;
+    // the slot clearing is the readiness event, so the reattach is
+    // retried until it goes through rather than attempted after a pause.
+    reattach_when_slot_clears(&daemon);
 
     assert_eq!(daemon.pid(), pid_before);
     assert!(daemon.is_alive(), "daemon should still be running");
@@ -218,21 +244,10 @@ fn ungraceful_disconnect_then_reattach() {
         drop(stream);
     }
 
-    // Daemon needs longer to detect ungraceful close because the read
-    // path has no deterministic wakeup; the per-attach loop polls the
-    // channel with a frame-target timeout (~16 ms by default), so 500
-    // ms is safely above any realistic detection latency.
-    thread::sleep(Duration::from_millis(500));
-
-    // Reattach should succeed.
-    {
-        let mut stream = daemon.connect();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        let _hello = do_handshake(&mut stream);
-        let _: InstanceMessage = read_message(&mut stream).expect("initial frame");
-    }
+    // The daemon detects an ungraceful close on its own poll cadence, so
+    // the reattach is retried until it goes through; the detection is
+    // the readiness event.
+    reattach_when_slot_clears(&daemon);
 
     assert_eq!(daemon.pid(), pid_before);
     assert!(daemon.is_alive(), "daemon should still be running");
@@ -925,13 +940,20 @@ fn m10_9_color_stable_across_reconnect_for_same_uid() {
     let color_a1 = wait_for_palette_color_in_b(&mut stream_b, Duration::from_secs(2))
         .expect("should observe A1's overlay color");
 
-    // Detach A1.
+    // Detach A1. A2's reattach is retried until the daemon has released
+    // A1's slot, which is the readiness event a pause only guessed at.
     drop(stream_a1);
-    thread::sleep(Duration::from_millis(100));
-
-    // A2 reattaches (same test process, same uid).
-    let (hello_a2, mut stream_a2) = attach_multi(&daemon);
-    let _a2_init: InstanceMessage = read_message(&mut stream_a2).expect("A2 init");
+    let (hello_a2, mut stream_a2) = common::ready::expect(
+        "A2's reattach after A1's slot clears",
+        Duration::from_secs(10),
+        || {
+            let (hello, mut stream) = attach_multi(&daemon);
+            match read_message::<InstanceMessage>(&mut stream) {
+                Ok(_) => common::ready::Probe::Ready((hello, stream)),
+                Err(error) => common::ready::Probe::Pending(format!("A2 init: {error}")),
+            }
+        },
+    );
     let key2 = FrontendEvent::Key(KeyEvent {
         frontend_id: hello_a2.assigned_frontend_id,
         key: Key::Char('y'),
