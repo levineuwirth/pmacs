@@ -94,7 +94,7 @@ use pmacs::transport::read_message;
 struct TestDaemon {
     _tempdir: TempDir,
     socket_path: PathBuf,
-    process: Child,
+    process: reap::Reaped,
 }
 
 impl TestDaemon {
@@ -118,24 +118,19 @@ impl TestDaemon {
     }
 
     fn is_alive(&mut self) -> bool {
-        self.process.try_wait().ok().flatten().is_none()
+        self.process.is_alive()
     }
 }
 
-impl Drop for TestDaemon {
-    fn drop(&mut self) {
-        let _ = self.process.kill();
-        let _ = self.process.wait();
-    }
-}
-
-fn spawn_pmacs_daemon(socket_path: &Path) -> Child {
+/// The daemon in its own process group, reaped with everything it
+/// spawned when the fixture drops (`tests/common/reap.rs`).
+fn spawn_pmacs_daemon(socket_path: &Path) -> reap::Reaped {
     // Isolate user config: HOME and XDG_CONFIG_HOME both point at the
     // (currently empty) socket parent directory, so the daemon won't
     // try to read the developer's real `init.lua`.
     let isolated_home = socket_path.parent().expect("socket has parent");
-    Command::new(env!("CARGO_BIN_EXE_pmacs"))
-        .args(["--daemon", "--socket"])
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_pmacs"));
+    cmd.args(["--daemon", "--socket"])
         .arg(socket_path)
         .env("HOME", isolated_home)
         .env("XDG_CONFIG_HOME", isolated_home)
@@ -144,9 +139,8 @@ fn spawn_pmacs_daemon(socket_path: &Path) -> Child {
         .env("PMACS_STATE_HOME", isolated_home)
         .env("XDG_CACHE_HOME", isolated_home)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn pmacs --daemon")
+        .stderr(Stdio::null());
+    reap::Reaped::spawn(&mut cmd).expect("spawn pmacs --daemon")
 }
 
 /// Probe by attempting to connect — `exists()` would let a stale
@@ -594,3 +588,6 @@ fn daemon_attach_handles_daemon_crash_as_clean_eof() {
         "bridge stderr should be empty on crash-EOF, got: {bridge_stderr}",
     );
 }
+
+#[path = "common/reap.rs"]
+mod reap;

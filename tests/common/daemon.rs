@@ -18,6 +18,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+
+use super::reap::Reaped;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -32,12 +34,13 @@ use pmacs::transport::read_message;
 #[cfg(feature = "crdt")]
 use pmacs::transport::write_message;
 
-/// A foreground daemon spawned in the test, with cleanup on Drop.
+/// A foreground daemon spawned in the test, in its own process group,
+/// reaped with everything it spawned on Drop (`tests/common/reap.rs`).
 pub struct TestDaemon {
     /// Tempdir holding the socket and lockfile; auto-cleaned on Drop.
     _tempdir: TempDir,
     socket_path: PathBuf,
-    process: Child,
+    process: Reaped,
 }
 
 impl TestDaemon {
@@ -88,7 +91,7 @@ impl TestDaemon {
         }
         let socket_path = tempdir.path().join("pmacs.sock");
         let mut process = spawn_daemon_process_with_env(&socket_path, env_vars);
-        wait_for_socket_or_exit(&socket_path, &mut process, Duration::from_secs(10))
+        wait_for_socket_or_exit(&socket_path, process.child(), Duration::from_secs(10))
             .expect("daemon socket appeared");
         Self {
             _tempdir: tempdir,
@@ -110,7 +113,7 @@ impl TestDaemon {
     }
 
     pub fn is_alive(&mut self) -> bool {
-        self.process.try_wait().ok().flatten().is_none()
+        self.process.is_alive()
     }
 
     pub fn lockfile_path(&self) -> PathBuf {
@@ -127,14 +130,7 @@ impl TestDaemon {
     }
 }
 
-impl Drop for TestDaemon {
-    fn drop(&mut self) {
-        let _ = self.process.kill();
-        let _ = self.process.wait();
-    }
-}
-
-pub fn spawn_daemon_process(socket_path: &Path) -> Child {
+pub fn spawn_daemon_process(socket_path: &Path) -> Reaped {
     spawn_daemon_process_with_env(socket_path, &[])
 }
 
@@ -151,7 +147,7 @@ pub fn spawn_daemon_process(socket_path: &Path) -> Child {
 /// failures in test error messages instead of leaving operators
 /// with an opaque 10s timeout. File-backed stderr avoids the
 /// deadlock risk of an undrained pipe for long-running daemon tests.
-pub fn spawn_daemon_process_with_env(socket_path: &Path, env_vars: &[(&str, &str)]) -> Child {
+pub fn spawn_daemon_process_with_env(socket_path: &Path, env_vars: &[(&str, &str)]) -> Reaped {
     let isolated_home = socket_path.parent().expect("socket has parent");
     let stderr_path = daemon_stderr_path(socket_path);
     let stderr = fs::File::create(&stderr_path).expect("create daemon stderr log");
@@ -187,7 +183,7 @@ pub fn spawn_daemon_process_with_env(socket_path: &Path, env_vars: &[(&str, &str
     for (key, value) in env_vars {
         cmd.env(key, value);
     }
-    cmd.spawn().expect("spawn pmacs --daemon")
+    Reaped::spawn(&mut cmd).expect("spawn pmacs --daemon")
 }
 
 /// Poll until the daemon's socket is reachable, the daemon exits,

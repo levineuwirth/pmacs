@@ -14,6 +14,8 @@
 //! - [`daemon`]: `pmacs --daemon` subprocess fixture. First
 //!   consumer M5.5 acceptance suite; second consumer M10.11
 //!   doubled-PTY tests.
+//! - [`reap`]: a spawned child in its own process group, signalled as a
+//!   group on drop so no daemon outlives its test.
 //! - [`iso`]: isolated bootstrap storage roots, so an in-process
 //!   editor neither reads the developer's real `init.lua` nor writes
 //!   into their real data root. Most suites include it directly via
@@ -25,4 +27,5 @@
 pub mod daemon;
 pub mod iso;
 pub mod pty;
+pub mod reap;
 pub mod sigint_conformance;

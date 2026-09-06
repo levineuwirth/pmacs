@@ -353,7 +353,7 @@ fn sigkill_daemon_leaves_stale_files_next_start_recovers() {
 
     // First daemon.
     let mut daemon1 = spawn_daemon_process(&socket_path);
-    wait_for_socket_or_exit(&socket_path, &mut daemon1, Duration::from_secs(10))
+    wait_for_socket_or_exit(&socket_path, daemon1.child(), Duration::from_secs(10))
         .expect("daemon 1 socket appeared");
 
     let mut lockfile_path = socket_path.as_os_str().to_os_string();
@@ -383,7 +383,7 @@ fn sigkill_daemon_leaves_stale_files_next_start_recovers() {
 
     // Second daemon must successfully recover.
     let mut daemon2 = spawn_daemon_process(&socket_path);
-    wait_for_socket_or_exit(&socket_path, &mut daemon2, Duration::from_secs(10))
+    wait_for_socket_or_exit(&socket_path, daemon2.child(), Duration::from_secs(10))
         .expect("daemon 2 socket appeared");
 
     // Verify socket is fresh and owner-only (kernel applies umask

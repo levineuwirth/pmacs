@@ -97,6 +97,8 @@ mod crdt {
     use std::path::PathBuf;
     use std::process::Stdio;
     use std::process::{Child, ChildStdin};
+
+    use common::reap::Reaped;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -122,6 +124,32 @@ mod crdt {
             .parent()
             .expect("test binary directory")
             .join("pmacs-gpu")
+    }
+
+    /// The daemon a report names by `daemon_pid`, terminated on drop
+    /// unless the report says the frontend reaped it. The root-broker
+    /// path leaves its managed daemon running by design (closing the
+    /// window detaches only that frontend), and the daemon sits in a
+    /// process group of its own, so the report's pid is the only handle
+    /// a test has on it.
+    struct DaemonFromReport(Option<u32>);
+
+    impl DaemonFromReport {
+        fn from_facts(facts: &HashMap<String, String>) -> Self {
+            let reaped = facts
+                .get("daemon_reaped")
+                .is_some_and(|value| value == "true");
+            let pid = facts.get("daemon_pid").and_then(|value| value.parse().ok());
+            Self(if reaped { None } else { pid })
+        }
+    }
+
+    impl Drop for DaemonFromReport {
+        fn drop(&mut self) {
+            if let Some(pid) = self.0 {
+                common::reap::reap_pid(pid);
+            }
+        }
     }
 
     fn parse_report(report: &Path) -> HashMap<String, String> {
@@ -525,7 +553,9 @@ mod crdt {
         open_raw_target(socket, cwd, path).2
     }
 
-    fn spawn_daemon(socket: &Path, envs: &[(&str, &str)]) -> Child {
+    /// A daemon in its own process group, reaped with everything it
+    /// spawned when dropped (`tests/common/reap.rs`).
+    fn spawn_daemon(socket: &Path, envs: &[(&str, &str)]) -> Reaped {
         let home = socket.parent().expect("socket parent");
         let mut command = Command::new(pmacs_binary());
         command
@@ -539,21 +569,26 @@ mod crdt {
         for (key, value) in envs {
             command.env(key, value);
         }
-        let mut child = command.spawn().expect("spawn daemon");
-        wait_for_daemon(socket, &mut child);
+        let mut child = Reaped::spawn(&mut command).expect("spawn daemon");
+        wait_for_daemon(socket, child.child());
         child
     }
 
+    /// The GPU frontend under a headless managed probe, in its own
+    /// process group. The daemon it spawns puts itself in a group of its
+    /// own (`process_group(0)` in `pmacs-gpu/src/attach.rs`), so that one
+    /// is reaped by pid from the report's `daemon_pid` unless the report
+    /// says the frontend reaped it.
     struct ManagedProbe {
-        child: Child,
+        child: Reaped,
         stdin: Option<ChildStdin>,
         report: PathBuf,
         daemon_pid: Option<u32>,
     }
 
     impl ManagedProbe {
-        fn from_child(mut child: Child, report: &Path) -> Self {
-            let stdin = child.stdin.take().expect("probe stdin");
+        fn from_child(mut child: Reaped, report: &Path) -> Self {
+            let stdin = child.child().stdin.take().expect("probe stdin");
             Self {
                 child,
                 stdin: Some(stdin),
@@ -624,7 +659,10 @@ mod crdt {
             for (key, value) in envs {
                 command.env(key, value);
             }
-            Self::from_child(command.spawn().expect("spawn managed probe"), report)
+            Self::from_child(
+                Reaped::spawn(&mut command).expect("spawn managed probe"),
+                report,
+            )
         }
 
         fn wait_for(&mut self, key: &str, expected: &str) -> HashMap<String, String> {
@@ -645,20 +683,19 @@ mod crdt {
         fn close(mut self) -> std::process::ExitStatus {
             self.stdin.take();
             wait_for_fact(&self.report, "phase", "complete", Duration::from_secs(5));
-            wait_for_exit(&mut self.child, Duration::from_secs(5))
+            wait_for_exit(self.child.child(), Duration::from_secs(5))
         }
     }
 
     impl Drop for ManagedProbe {
         fn drop(&mut self) {
             self.stdin.take();
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            self.child.reap();
             let daemon_reaped = fs::read_to_string(&self.report)
                 .ok()
                 .is_some_and(|report| report.lines().any(|line| line == "daemon_reaped=true"));
             if !daemon_reaped && let Some(pid) = self.daemon_pid {
-                signal_pid(pid, Signal::SIGTERM);
+                common::reap::reap_pid(pid);
             }
         }
     }
@@ -761,6 +798,7 @@ mod crdt {
             String::from_utf8_lossy(&output.stderr)
         );
         let facts = parse_report(&report);
+        let _daemon = DaemonFromReport::from_facts(&facts);
         assert_eq!(facts.get("phase").map(String::as_str), Some("complete"));
         // Stage 2B-3: the negotiated session version and the advertised
         // baseline are different facts, and this managed spawn pins both.
@@ -855,7 +893,7 @@ mod crdt {
         assert_eq!(reopened.replica.materialize_string(), "alpha\nunsaved");
 
         signal_pid(daemon.id(), Signal::SIGTERM);
-        assert!(wait_for_exit(&mut daemon, Duration::from_secs(5)).success());
+        assert!(wait_for_exit(daemon.child(), Duration::from_secs(5)).success());
 
         let spawned_socket = temp.path().join("spawned-target.sock");
         let report = temp.path().join("target-report");
@@ -907,8 +945,10 @@ mod crdt {
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let mut directory =
-            ManagedProbe::from_child(command.spawn().expect("spawn public GPU command"), &report);
+        let mut directory = ManagedProbe::from_child(
+            Reaped::spawn(&mut command).expect("spawn public GPU command"),
+            &report,
+        );
 
         // The public root broker and real managed GPU connector must stay
         // alive through Journey N2's asynchronous dired commit. Snapshot
@@ -984,7 +1024,7 @@ mod crdt {
         let survivor = attach_target(&socket, temp.path(), Path::new("still-alive.txt"));
         assert_eq!(survivor.replica.materialize_string(), "alive\n");
         signal_pid(daemon.id(), Signal::SIGTERM);
-        assert!(wait_for_exit(&mut daemon, Duration::from_secs(5)).success());
+        assert!(wait_for_exit(daemon.child(), Duration::from_secs(5)).success());
     }
 
     #[test]
@@ -1041,7 +1081,7 @@ mod crdt {
         assert_eq!(replica.materialize_string(), "hidden\n");
 
         signal_pid(daemon.id(), Signal::SIGTERM);
-        assert!(wait_for_exit(&mut daemon, Duration::from_secs(5)).success());
+        assert!(wait_for_exit(daemon.child(), Duration::from_secs(5)).success());
     }
 
     #[test]
@@ -1076,7 +1116,7 @@ mod crdt {
         ));
         let _ = attach_surviving_frontend(&kill_socket);
         signal_pid(kill_daemon.id(), Signal::SIGTERM);
-        assert!(wait_for_exit(&mut kill_daemon, Duration::from_secs(5)).success());
+        assert!(wait_for_exit(kill_daemon.child(), Duration::from_secs(5)).success());
 
         let slow_root = temp.path().join("slow-hook");
         fs::create_dir(&slow_root).expect("create slow hook root");
@@ -1129,7 +1169,7 @@ mod crdt {
         );
         assert!(probe.close().success());
         signal_pid(slow_daemon.id(), Signal::SIGTERM);
-        assert!(wait_for_exit(&mut slow_daemon, Duration::from_secs(5)).success());
+        assert!(wait_for_exit(slow_daemon.child(), Duration::from_secs(5)).success());
     }
 
     #[test]
@@ -1151,7 +1191,7 @@ mod crdt {
         assert!(!marker.exists());
         assert!(probe.close().success());
         signal_pid(daemon.id(), Signal::SIGTERM);
-        assert!(wait_for_exit(&mut daemon, Duration::from_secs(5)).success());
+        assert!(wait_for_exit(daemon.child(), Duration::from_secs(5)).success());
     }
 
     #[test]

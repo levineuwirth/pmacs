@@ -933,6 +933,36 @@ while IFS="$(printf '\t')" read -r name cmd; do
     fi
 done < "$PLAN_FILE"
 
+# --- Surviving daemons ---------------------------------------------------
+#
+# A `pmacs --daemon` whose socket sits under this run's TMPDIR was spawned
+# by a test in this run, and a test that is over has no business leaving
+# one alive: the fixture that spawned it either lacks the reaping guard
+# (tests/common/reap.rs) or lost the process to a group of its own. Both
+# are defects in the suite, so the run fails and names the survivors.
+#
+# Matched by argv, never by a pattern this script's own command line
+# could satisfy: field 2 is the executable and field 3 its first
+# argument, so a shell running `grep -- --daemon` does not match itself.
+# The survivors are then signalled by PID, so the reaped TMPDIR does not
+# leave them holding a socket path that no longer exists.
+if [ "$MODE" != selftest ] && [ "$DOCS" != 1 ]; then
+    survivors=$(ps -eo pid=,args= | awk -v tmp="$GATE_TMPDIR" '
+        $2 ~ /(^|\/)pmacs$/ && $3 == "--daemon" && index($0, tmp) > 0 { print $1 }
+    ')
+    if [ -n "$survivors" ]; then
+        echo "gate: [--] daemons        FAILED"
+        echo "gate:      pmacs --daemon processes bound under $GATE_TMPDIR survived the sweep:" >&2
+        for pid in $survivors; do
+            ps -o pid=,args= -p "$pid" >&2 || true
+            kill -TERM "$pid" 2>/dev/null || true
+        done
+        FAILED="$FAILED daemons"
+    else
+        echo "gate: [--] daemons        ok (none survived)"
+    fi
+fi
+
 echo
 echo "gate: sweep logs (read these; do not re-run and grep):"
 for f in "$LOGDIR"/*-sweep.log "$LOGDIR"/*-sweep-luajit.log; do
