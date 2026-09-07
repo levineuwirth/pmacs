@@ -1997,12 +1997,23 @@ fn every_budget_in_the_list_is_an_ignored_test_in_the_tree() {
     );
 }
 
-/// `--docs` is the documentation-only plan: fmt, doc and diff-check, in
-/// that order and nothing else. A change confined to markdown has
-/// nothing for the sweep to find, and the doc stage is where a
-/// markdown-shaped change in a doc comment would fail.
+/// `--docs` is the documentation-only plan: fmt, doc, the
+/// documentation-consistency test and diff-check, in that order and
+/// nothing else. A change confined to markdown has nothing for the rest
+/// of the sweep to find; the doc stage is where a markdown-shaped change
+/// in a doc comment fails, and `docs_consistency` is where a change to
+/// the documentation itself does.
+///
+/// **The test target is the load-bearing line here.** Without it this
+/// plan validated a documentation change with nothing that reads
+/// documentation: `docs/invariants.md`'s line cap and
+/// `docs/divergences.md`'s existence are pinned in that one target and
+/// nowhere else, and a change to exactly those two files is what routes
+/// a run through `--docs`. Measured before the stage existed:
+/// `docs/invariants.md` padded to 304 lines passed `--docs` while
+/// `invariants_md_stays_under_its_line_cap` failed when run directly.
 #[test]
-fn docs_runs_only_fmt_doc_and_diff_check() {
+fn docs_runs_fmt_doc_the_docs_test_and_diff_check() {
     let root = tempfile::Builder::new()
         .prefix("g-")
         .tempdir_in(short_root_base())
@@ -2013,6 +2024,7 @@ fn docs_runs_only_fmt_doc_and_diff_check() {
         plan,
         "fmt\tcargo fmt --check\n\
          doc\tRUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps\n\
+         docs-test\tcargo test --test docs_consistency\n\
          diff-check\tgit diff --check\n",
         "plan was:\n{plan}"
     );

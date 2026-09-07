@@ -30,8 +30,13 @@
 # and never part of the sweep, so a loaded machine cannot fail the gate
 # on a clock.
 #
-# `--docs` is the documentation-only plan: fmt, doc and diff-check. A
-# change confined to markdown has nothing for the sweep to find.
+# `--docs` is the documentation-only plan: fmt, doc, docs-test and
+# diff-check. A change confined to markdown has nothing for the rest of
+# the sweep to find --- but tests/docs_consistency.rs is exactly what
+# such a change CAN break, and for two of the things it pins
+# (docs/invariants.md's line cap, docs/divergences.md's existence) it is
+# the only check in the tree. A plan that stopped at rustdoc validated
+# a documentation change with nothing that reads documentation.
 #
 # WHY THE BUILD IS UNCONDITIONAL. The sweep spawns `pmacs-gpu` as a
 # PROCESS, and no `cargo test` invocation produces that binary:
@@ -102,7 +107,8 @@ usage: scripts/gate [--protocol] [--perf] [--docs] [--print-plan]
   --perf              run the wall-clock budgets too: adds a stage that
                       runs scripts/perf-budgets, every #[ignore] budget
                       test by exact name.
-  --docs              the documentation-only plan: fmt, doc, diff-check.
+  --docs              the documentation-only plan: fmt, doc, the
+                      documentation-consistency test, diff-check.
   --print-arming      print the arming report and exit: which
                       PMACS_REQUIRE_* variables a run here would arm,
                       and for each it would not, the missing tool and
@@ -233,6 +239,11 @@ emit_plan() {
     printf 'fmt\tcargo fmt --check\n'
     if [ "$DOCS" = 1 ]; then
         printf 'doc\tRUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps\n'
+        # ONE TARGET, not the sweep. It is the only one whose subject is
+        # the documentation a `--docs` run changes, and since D24 took
+        # the nested `cargo test -- --list` out of `scripts/anchor` it
+        # costs hundredths of a second to execute.
+        printf 'docs-test\tcargo test --test docs_consistency\n'
         printf 'diff-check\tgit diff --check\n'
         return
     fi
@@ -907,7 +918,7 @@ echo "gate: tmpdir     $GATE_TMPDIR"
 echo "gate: runtime    $GATE_RUNTIME_DIR"
 [ "$PROTOCOL" = 1 ] && echo "gate: protocol   yes (the luajit-only sweep is added)"
 [ "$PERF" = 1 ] && echo "gate: perf       yes (scripts/perf-budgets is added)"
-[ "$DOCS" = 1 ] && echo "gate: docs       yes (fmt, doc and diff-check only)"
+[ "$DOCS" = 1 ] && echo "gate: docs       yes (fmt, doc, docs-test and diff-check only)"
 if [ "$MODE" = selftest ]; then
     echo "gate: SELF-TEST  hardcoded synthetic plan --- NO real gate runs."
     echo "gate:            the middle step fails ON PURPOSE, so a non-zero"

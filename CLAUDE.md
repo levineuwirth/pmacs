@@ -31,10 +31,11 @@ Always true:
   line; read the logs it names rather than re-running and grepping.
   `--protocol` adds the same sweep under `--no-default-features
   --features luajit` and is required when `pmacs-protocol` changes;
-  `--perf` adds the wall-clock budgets; `--docs` runs only fmt, doc and
-  diff-check. Every `PMACS_REQUIRE_*` variable whose tool is installed
-  is armed, and the arming report names each one that is not. The six
-  stages, each test once, in order:
+  `--perf` adds the wall-clock budgets; `--docs` runs fmt, doc, the
+  documentation-consistency test and diff-check. Every
+  `PMACS_REQUIRE_*` variable whose tool is installed is armed, and the
+  arming report names each one that is not. The six stages, each test
+  once, in order:
   <!-- gate-plan:begin -->
   ```
   cargo fmt --check
