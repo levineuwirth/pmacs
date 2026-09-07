@@ -13,8 +13,10 @@
 //! frontend's managed daemon, `process_group(0)` in
 //! `pmacs-gpu/src/attach.rs`) reports its pid so the probe fixture can
 //! signal that daemon by pid. The gate's post-step then fails the run if
-//! any `pmacs --daemon` bound under its `TMPDIR` is still alive, so a
-//! spawner that bypasses this module is caught rather than tolerated.
+//! any `pmacs --daemon` it spawned is still alive --- recognized by this
+//! run's `TMPDIR` in the process's environment, so a socket addressed by
+//! name counts as much as one addressed by path --- and a spawner that
+//! bypasses this module is caught rather than tolerated.
 //!
 //! Why `Drop`. A test that panics between spawn and its own cleanup
 //! never reaches that cleanup; a `Drop` runs during the unwind. Measured

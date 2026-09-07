@@ -867,11 +867,16 @@ export TMPDIR="$GATE_TMPDIR"
 # or no `--socket` at all --- resolves through `src/socket_path.rs` to
 # `$XDG_RUNTIME_DIR/pmacs/<name>.sock`. Left ambient that is the
 # developer's own `/run/user/<uid>/pmacs`, so such a fixture would bind
-# OUTSIDE the run, and the surviving-daemon step below could not see it
-# either: it matches a daemon by this run's TMPDIR appearing in its
-# argv. No fixture in the tree names a socket that way today, which is
-# the reason the hole has cost nothing so far; this closes it by
-# construction rather than by inspection, on the next one too.
+# OUTSIDE the run. No fixture in the tree names a socket that way today,
+# which is the reason the hole has cost nothing so far; this closes it
+# by construction rather than by inspection, on the next one too.
+#
+# ISOLATING THIS WAS ONCE HALF A FIX. While the surviving-daemon step
+# matched a daemon by this run's TMPDIR appearing in its ARGV, moving
+# the variable here put a named daemon inside the run and left it
+# invisible to the check --- so the isolation made the blind spot
+# reachable instead of closing it. The step now establishes ownership
+# from the process's environment; see its own comment below.
 #
 # UNDER THE RUN'S TMPDIR, so the exit trap reaps it with everything
 # else, and so a daemon that does slip through is visible to the
@@ -966,31 +971,86 @@ done < "$PLAN_FILE"
 
 # --- Surviving daemons ---------------------------------------------------
 #
-# A `pmacs --daemon` whose socket sits under this run's TMPDIR was spawned
-# by a test in this run, and a test that is over has no business leaving
-# one alive: the fixture that spawned it either lacks the reaping guard
-# (tests/common/reap.rs) or lost the process to a group of its own. Both
-# are defects in the suite, so the run fails and names the survivors.
+# A `pmacs --daemon` this run spawned and did not reap is a defect in the
+# suite: the fixture that spawned it either lacks the reaping guard
+# (tests/common/reap.rs) or lost the process to a group of its own. So
+# the run fails and names the survivors.
 #
-# Matched by argv, never by a pattern this script's own command line
-# could satisfy: field 2 is the executable and field 3 its first
+# OWNERSHIP IS THE PROCESS'S ENVIRONMENT, NOT ITS ARGV. The first
+# version required this run's TMPDIR to appear in the command line,
+# which holds only when `--socket` was given a PATH. A daemon addressed
+# by NAME --- `--socket e0-review`, or no `--socket` at all --- resolves
+# through `$XDG_RUNTIME_DIR/pmacs/<name>.sock` and never writes that
+# path into argv, so isolating XDG_RUNTIME_DIR above put such a daemon
+# INSIDE the run while leaving it invisible to the check that exists to
+# find it. Measured: a live daemon on `--socket e0-review`, its socket
+# under the run directory, and an empty match list printing `none
+# survived`.
+#
+# The environment is what every child of this shell inherits, and TMPDIR
+# is exported above with a value `mktemp -d` made unique to this
+# invocation. So a process whose environ carries it was execed by this
+# run whatever its socket is called, and a daemon the developer started
+# by hand --- carrying their own TMPDIR --- can never match.
+#
+# THE CANDIDATE SCAN IS STILL ARGV, and still cannot match this script's
+# own command line: field 2 is the executable and field 3 its first
 # argument, so a shell running `grep -- --daemon` does not match itself.
-# The survivors are then signalled by PID, so the reaped TMPDIR does not
+# The survivors are signalled by PID, so the reaped TMPDIR does not
 # leave them holding a socket path that no longer exists.
+#
+# WHERE /proc IS ABSENT --- macOS --- nothing portable reads another
+# process's environment, and this DEGRADES to the argv match it had
+# before and says so on its verdict line: a daemon addressed by name
+# stays invisible there. Linux and Android have the interface.
+#
+# THE PROBE ASKS THIS SHELL, NOT `uname`, and asks about PATH rather
+# than TMPDIR. `/proc/<pid>/environ` is the EXEC-TIME snapshot, so a
+# variable exported after the process started --- TMPDIR, here --- is
+# not in our own copy and cannot be probed with; PATH was inherited, so
+# finding it proves the file exists, is readable, and decodes as
+# NUL-separated `KEY=VALUE`. That a CHILD's environ does carry this
+# run's TMPDIR is a property of exec, and it is pinned with real daemons
+# by tests/gate_script_acceptance.rs rather than assumed here.
 if [ "$MODE" != selftest ] && [ "$DOCS" != 1 ]; then
-    survivors=$(ps -eo pid=,args= | awk -v tmp="$GATE_TMPDIR" '
-        $2 ~ /(^|\/)pmacs$/ && $3 == "--daemon" && index($0, tmp) > 0 { print $1 }
-    ')
+    if tr '\0' '\n' 2>/dev/null < "/proc/$$/environ" | grep -q '^PATH='; then
+        IDENTITY=environ
+        IDENTITY_NOTE='identified by environ'
+    else
+        IDENTITY=argv
+        IDENTITY_NOTE='identified by argv only --- no /proc here, so a daemon addressed by name is invisible'
+    fi
+
+    survivors=''
+    for pid in $(ps -eo pid=,args= | awk '
+        $2 ~ /(^|\/)pmacs$/ && $3 == "--daemon" { print $1 }
+    '); do
+        if [ "$IDENTITY" = environ ]; then
+            # An unreadable environ is NOT a survivor: it is another
+            # user's daemon, a process whose mm is not dumpable, or one
+            # that exited between the scan and this read. Each of those
+            # stays off the list rather than becoming a false red ---
+            # `2>/dev/null` precedes the input redirection so the
+            # shell's own "cannot open" goes there too.
+            tr '\0' '\n' 2>/dev/null < "/proc/$pid/environ" |
+                grep -qxF "TMPDIR=$GATE_TMPDIR" || continue
+        else
+            ps -o args= -p "$pid" 2>/dev/null |
+                grep -qF "$GATE_TMPDIR" || continue
+        fi
+        survivors="$survivors $pid"
+    done
+
     if [ -n "$survivors" ]; then
-        echo "gate: [--] daemons        FAILED"
-        echo "gate:      pmacs --daemon processes bound under $GATE_TMPDIR survived the sweep:" >&2
+        echo "gate: [--] daemons        FAILED ($IDENTITY_NOTE)"
+        echo "gate:      pmacs --daemon processes spawned by this run survived the sweep:" >&2
         for pid in $survivors; do
             ps -o pid=,args= -p "$pid" >&2 || true
             kill -TERM "$pid" 2>/dev/null || true
         done
         FAILED="$FAILED daemons"
     else
-        echo "gate: [--] daemons        ok (none survived)"
+        echo "gate: [--] daemons        ok (none survived; $IDENTITY_NOTE)"
     fi
 fi
 

@@ -745,11 +745,17 @@ fn the_isolated_tmpdir_reaches_a_spawned_child_under_the_managed_root() {
 /// started by NAME rather than by path resolves through
 /// `src/socket_path.rs` to `$XDG_RUNTIME_DIR/pmacs/<name>.sock`. Left
 /// ambient, such a fixture binds under the developer's real
-/// `/run/user/<uid>/pmacs`: outside the run's isolation, and invisible
-/// to the surviving-daemon step, which matches a daemon by this run's
-/// TMPDIR appearing in its argv. No fixture does that today, so this
-/// row pins a property rather than fixing a red --- and the property is
-/// what makes the next such fixture harmless.
+/// `/run/user/<uid>/pmacs`: outside the run's isolation. No fixture does
+/// that today, so this row pins a property rather than fixing a red ---
+/// and the property is what makes the next such fixture harmless.
+///
+/// **Isolation alone was once half the story.** While the
+/// surviving-daemon step matched a daemon by this run's TMPDIR appearing
+/// in its *argv*, this row put a named daemon inside the run and left it
+/// invisible to that check. What the step matches on now is the
+/// environment, and
+/// `a_daemon_this_run_spawned_fails_it_whether_its_socket_was_named_or_pathed`
+/// is where that is held to real daemons.
 ///
 /// Read from a real child's environment, for the same reason the row
 /// above is: the gate exporting a variable proves only that the gate
@@ -862,6 +868,283 @@ fn the_isolated_tmpdir_is_reaped_when_the_run_ends() {
             .expect("gate-tmp parent")
             .exists(),
         "only the per-run directory is reaped, not its parent"
+    );
+}
+
+// --- The surviving-daemon step, against real daemons --------------------
+//
+// The recursion constraint at the top of this file still holds: the row
+// below runs a real gate, but every stage of it is a `cargo` stand-in on
+// PATH that exits 0, so no gate suite runs inside the gate suite. What
+// the run really exercises is the step that comes after the stages — the
+// one that decides whether a `pmacs --daemon` belongs to it.
+
+/// The `cargo` a gate run finds on PATH in the surviving-daemon row.
+///
+/// On its FIRST call it leaks two real `pmacs --daemon` processes into
+/// the run — one addressed by NAME, one by an absolute PATH — and waits
+/// until both have bound, so the run reaches its daemon step with two
+/// daemons that are really listening inside it. Every call then exits 0,
+/// which leaves that step as the only thing able to fail the run: the
+/// verdict under test is `gate: FAILED: daemons` and nothing else.
+///
+/// A stand-in rather than a stub daemon, because the *process* is what
+/// the step reads. Both children are orphaned when this script exits,
+/// which is exactly the shape of the leak the step exists to catch.
+const CARGO_STANDIN: &str = r#"#!/bin/sh
+set -eu
+if [ -e "$PMACS_DAEMON_PROBE_DIR/spawned" ]; then
+    exit 0
+fi
+: > "$PMACS_DAEMON_PROBE_DIR/spawned"
+
+# Addressed by NAME. It resolves through $XDG_RUNTIME_DIR, which the
+# gate isolates under this run's TMPDIR, and the run's paths never
+# reach argv --- the case an argv matcher cannot see.
+"$PMACS_DAEMON_PROBE_BIN" --daemon --socket "$PMACS_DAEMON_PROBE_NAME" \
+    >"$PMACS_DAEMON_PROBE_DIR/named.log" 2>&1 &
+echo "$!" > "$PMACS_DAEMON_PROBE_DIR/named.pid"
+
+# Addressed by an absolute PATH under this run's TMPDIR --- the case an
+# argv matcher could already see.
+"$PMACS_DAEMON_PROBE_BIN" --daemon --socket "$TMPDIR/pathed.sock" \
+    >"$PMACS_DAEMON_PROBE_DIR/pathed.log" 2>&1 &
+echo "$!" > "$PMACS_DAEMON_PROBE_DIR/pathed.pid"
+
+named="$XDG_RUNTIME_DIR/pmacs/$PMACS_DAEMON_PROBE_NAME.sock"
+printf '%s\n' "$named" > "$PMACS_DAEMON_PROBE_DIR/named.socket"
+
+# Bound, not merely spawned: a process that never reached bind(2) would
+# make "the step found a daemon inside the run" a weaker claim than the
+# one this row makes.
+i=0
+while [ "$i" -lt 300 ]; do
+    if [ -S "$named" ] && [ -S "$TMPDIR/pathed.sock" ]; then
+        : > "$PMACS_DAEMON_PROBE_DIR/bound"
+        break
+    fi
+    i=$((i + 1))
+    sleep 0.05
+done
+exit 0
+"#;
+
+/// A real git worktree carrying the real SIGINT helper and the `cargo`
+/// stand-in, plus the probe directory the two exchange state through.
+fn daemon_probe_worktree() -> tempfile::TempDir {
+    let dir = tempfile::Builder::new()
+        .prefix("gp-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
+    let mode = |p: &Path, m: u32| {
+        std::fs::set_permissions(p, std::os::unix::fs::PermissionsExt::from_mode(m))
+            .unwrap_or_else(|e| panic!("chmod {}: {e}", p.display()));
+    };
+    let scripts = dir.path().join("scripts");
+    std::fs::create_dir_all(&scripts).expect("scripts dir");
+    let helper = scripts.join("check-sigint-deliverable");
+    std::fs::copy(sigint_helper(), &helper).expect("copy the real SIGINT helper");
+    mode(&helper, 0o755);
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).expect("bin dir");
+    let cargo = bin.join("cargo");
+    std::fs::write(&cargo, CARGO_STANDIN).expect("write the cargo stand-in");
+    mode(&cargo, 0o755);
+    std::fs::create_dir_all(dir.path().join("probe")).expect("probe dir");
+    let ok = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir.path())
+        .status()
+        .expect("git init");
+    assert!(ok.success(), "the probe worktree must be a git worktree");
+    dir
+}
+
+/// Run a whole gate from the probe worktree, with the stand-in ahead of
+/// the real `cargo` on PATH.
+fn run_gate_with_daemon_probe(wt: &Path, root: &Path, socket_name: &str) -> (String, String, bool) {
+    let path = format!(
+        "{}:{}",
+        wt.join("bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new(gate())
+        .current_dir(wt)
+        .env("PMACS_GATE_TARGET_ROOT", root)
+        .env("PMACS_GATE_ALLOW_ANCESTOR_MARKER", "1")
+        .env("PATH", path)
+        .env("PMACS_DAEMON_PROBE_DIR", wt.join("probe"))
+        .env("PMACS_DAEMON_PROBE_BIN", env!("CARGO_BIN_EXE_pmacs"))
+        .env("PMACS_DAEMON_PROBE_NAME", socket_name)
+        .output()
+        .expect("run scripts/gate");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.success(),
+    )
+}
+
+fn probe_pid(probe: &Path, file: &str) -> Option<u32> {
+    std::fs::read_to_string(probe.join(file))
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+}
+
+/// `ps -o pid=,args=` prints the pid first, so an exact first-field
+/// comparison names a process without the false positives a substring
+/// search over a command line would collect.
+fn survivor_line(stderr: &str, pid: u32) -> Option<&str> {
+    let pid = pid.to_string();
+    stderr
+        .lines()
+        .find(|l| l.split_whitespace().next() == Some(pid.as_str()))
+}
+
+/// Reap the probes by pid before anything can unwind past them. They
+/// carry the *inner* run's TMPDIR, so an enclosing gate's own daemon
+/// step cannot see them: a leak here would be silent.
+struct ReapProbes(Vec<u32>);
+
+impl Drop for ReapProbes {
+    fn drop(&mut self) {
+        for pid in &self.0 {
+            common::reap::reap_pid(*pid);
+        }
+    }
+}
+
+/// A daemon this run spawned fails the run whether its socket was
+/// addressed by NAME or by PATH, and a daemon outside the run is left
+/// alone.
+///
+/// **The case the first version could not see.** That version required
+/// this run's TMPDIR to occur in the process's argv, which is true only
+/// of `--socket <path>`. `--socket <name>` resolves through
+/// `$XDG_RUNTIME_DIR/pmacs/<name>.sock`, and once the gate moved that
+/// variable under the run, such a daemon bound *inside* the run and
+/// still matched nothing — the step printed `none survived` over a live
+/// daemon holding a live socket in its own temporary directory. Reading
+/// the environment instead catches both spellings, because TMPDIR is
+/// what every child of the run inherits.
+///
+/// **Three real processes, because the claim is about processes.** The
+/// two probes are real daemons that really bind, spawned from inside a
+/// stage and orphaned when it exits — the leak shape the step exists
+/// for. The third is a real daemon outside the run, and it must still be
+/// alive afterwards: a check that fails a run for someone else's daemon,
+/// or kills it, is worse than one that misses.
+///
+/// **Where `/proc` is absent** the step says so on its verdict line and
+/// degrades to the old argv match. This row follows that verdict rather
+/// than asserting a capability the platform does not have, so on such a
+/// machine it pins the *stated* degradation: the pathed daemon found,
+/// the named one not.
+#[test]
+fn a_daemon_this_run_spawned_fails_it_whether_its_socket_was_named_or_pathed() {
+    // Spawned BEFORE the gate, so it carries this test process's
+    // TMPDIR and not the run's: outside the run by construction.
+    let mut unrelated = common::daemon::TestDaemon::spawn();
+    let unrelated_pid = unrelated.pid();
+
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
+    let wt = daemon_probe_worktree();
+    let probe = wt.path().join("probe");
+
+    let (out, err, ok) = run_gate_with_daemon_probe(wt.path(), root.path(), "gate-probe");
+
+    let named_pid = probe_pid(&probe, "named.pid");
+    let pathed_pid = probe_pid(&probe, "pathed.pid");
+    let _reaper = ReapProbes(named_pid.into_iter().chain(pathed_pid).collect());
+
+    let named_pid = named_pid
+        .unwrap_or_else(|| panic!("the stand-in must record the named daemon; stdout:\n{out}"));
+    let pathed_pid = pathed_pid
+        .unwrap_or_else(|| panic!("the stand-in must record the pathed daemon; stdout:\n{out}"));
+    assert!(
+        probe.join("bound").exists(),
+        "both probe daemons must have bound before the run reached its \
+         daemon step, or this row proves nothing about a daemon inside \
+         the run; named log:\n{}\npathed log:\n{}",
+        std::fs::read_to_string(probe.join("named.log")).unwrap_or_default(),
+        std::fs::read_to_string(probe.join("pathed.log")).unwrap_or_default()
+    );
+
+    let runtime = out
+        .lines()
+        .find_map(|l| {
+            l.split_once("gate: runtime")
+                .map(|(_, p)| p.trim().to_owned())
+        })
+        .unwrap_or_else(|| panic!("the gate must announce its runtime dir; stdout:\n{out}"));
+    let named_socket = std::fs::read_to_string(probe.join("named.socket")).expect("named.socket");
+    assert!(
+        named_socket.trim().starts_with(&runtime),
+        "the named daemon must have bound INSIDE the run, which is what \
+         makes its invisibility a defect rather than a daemon of someone \
+         else's; socket {} against runtime dir {runtime}",
+        named_socket.trim()
+    );
+
+    let verdict = out
+        .lines()
+        .find(|l| l.contains("[--] daemons"))
+        .unwrap_or_else(|| panic!("the run must report a daemon verdict; stdout:\n{out}"));
+    assert!(
+        verdict.contains("FAILED"),
+        "a surviving daemon must FAIL the step; verdict was: {verdict}"
+    );
+    assert!(!ok, "and must fail the run; stdout:\n{out}stderr:\n{err}");
+    assert!(
+        err.contains("gate: FAILED: daemons"),
+        "the run must fail on the daemon step alone — every stage was a \
+         stand-in that exits 0; stderr:\n{err}"
+    );
+
+    assert!(
+        survivor_line(&err, pathed_pid).is_some(),
+        "the daemon addressed by PATH must be named; stderr:\n{err}"
+    );
+
+    if verdict.contains("argv only") {
+        assert!(
+            survivor_line(&err, named_pid).is_none(),
+            "the verdict says this run identified daemons by argv, under \
+             which a named socket is invisible; naming it would mean the \
+             verdict line lies. Verdict: {verdict}\nstderr:\n{err}"
+        );
+    } else {
+        let line = survivor_line(&err, named_pid).unwrap_or_else(|| {
+            panic!(
+                "the daemon addressed by NAME must be named too — this is \
+                 the case argv matching missed. Verdict: {verdict}\nstderr:\n{err}"
+            )
+        });
+        let tmpdir = out
+            .lines()
+            .find_map(|l| {
+                l.split_once("gate: tmpdir")
+                    .map(|(_, p)| p.trim().to_owned())
+            })
+            .expect("the gate announces its TMPDIR");
+        assert!(
+            !line.contains(&tmpdir),
+            "and its command line must carry no path from this run — that \
+             is precisely why matching on argv could not see it: {line}"
+        );
+    }
+
+    assert!(
+        survivor_line(&err, unrelated_pid).is_none(),
+        "a daemon outside the run must not be named a survivor; stderr:\n{err}"
+    );
+    assert!(
+        unrelated.is_alive(),
+        "and must be left running: the step signals what it names, so a \
+         wrong match kills a daemon it does not own"
     );
 }
 
