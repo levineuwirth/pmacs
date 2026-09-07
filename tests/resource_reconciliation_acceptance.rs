@@ -55,17 +55,28 @@ fn lua_str(path: &Path) -> String {
         .replace('"', "\\\"")
 }
 
-/// Pump the async runtime until `predicate` holds or the deadline
-/// lapses. Quiescence, not a frame count: the whole point of items 24
-/// and 25 is that the reconciliation happens in the drain, and the drain
-/// runs whenever a reply arrives.
-fn pump_until<F: Fn(&EditorState) -> bool>(state: &mut EditorState, what: &str, predicate: F) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !predicate(state) {
-        assert!(Instant::now() < deadline, "pump deadline exceeded: {what}");
-        state.tick_async();
-        std::thread::sleep(Duration::from_millis(2));
-    }
+/// Pump until `probe` is ready or the suite's five seconds lapse.
+/// Quiescence, not a frame count: the whole point of items 24 and 25 is
+/// that the reconciliation happens in the drain, and the drain runs
+/// whenever a reply arrives.
+///
+/// Through [`ready::tick_until`], like [`settle_until`] below, so a
+/// timeout reports the elapsed time, the poll count and the last value
+/// the probe saw. The hand-rolled loop this replaces gave up with
+/// `pump deadline exceeded: <what>` and nothing else, on twelve rows
+/// that rest on this wait. Each probe names its own unit, because a
+/// wait that reports the deadline it missed and not the state it was
+/// waiting on is the shape `tests/common/ready.rs` exists to abolish.
+///
+/// `tick_until` runs the whole frame order where this loop ticked the
+/// async bus alone. Nothing here rests on the narrower tick: every
+/// caller is a positive assertion, and the negative ones drain through
+/// [`pump_a_while`] and [`drain_frames`] instead.
+fn pump_until<F>(state: &mut EditorState, what: &str, probe: F)
+where
+    F: FnMut(&mut EditorState) -> ready::Probe<()>,
+{
+    ready::tick_until(state, what, Duration::from_secs(5), probe);
 }
 
 /// Drain the async runtime for 160 ms, waiting for nothing.
@@ -208,7 +219,12 @@ fn rename_fire_and_forget(state: &mut EditorState, from: &Path, to: &Path) {
     // drained towards: with the 80-tick drain this replaces set to
     // zero, eleven rows of this suite fail.
     pump_until(state, "the rename to reconcile", |s| {
-        reconciled(s, "RENAMES") > before
+        let now = reconciled(s, "RENAMES");
+        if now > before {
+            ready::Probe::Ready(())
+        } else {
+            ready::Probe::Pending(format!("{now} reconciled renames, want more than {before}"))
+        }
     });
 }
 
@@ -216,7 +232,12 @@ fn remove_fire_and_forget(state: &mut EditorState, path: &Path) {
     let before = reconciled(state, "DELETES");
     exec(state, &format!("pmacs.fs.remove(\"{}\")", lua_str(path)));
     pump_until(state, "the delete to reconcile", |s| {
-        reconciled(s, "DELETES") > before
+        let now = reconciled(s, "DELETES");
+        if now > before {
+            ready::Probe::Ready(())
+        } else {
+            ready::Probe::Pending(format!("{now} reconciled deletes, want more than {before}"))
+        }
     });
 }
 
@@ -612,7 +633,11 @@ fn acc50_the_hooks_fire_once_with_normalized_paths() {
     );
     pump_until(&mut state, "rename hook", |s| {
         let n: i64 = eval(s, "return #_G.RENAMES");
-        n > 0
+        if n > 0 {
+            ready::Probe::Ready(())
+        } else {
+            ready::Probe::Pending(format!("{n} rows on resource.renamed"))
+        }
     });
     // RETAINED DRAIN (160 ms): the assertion is EXACTLY one row, so a
     // second fire needs a window in which to appear.
@@ -632,7 +657,11 @@ fn acc50_the_hooks_fire_once_with_normalized_paths() {
     );
     pump_until(&mut state, "delete hook", |s| {
         let n: i64 = eval(s, "return #_G.DELETES");
-        n > 0
+        if n > 0 {
+            ready::Probe::Ready(())
+        } else {
+            ready::Probe::Pending(format!("{n} rows on resource.deleted"))
+        }
     });
     // RETAINED DRAIN (160 ms): one row, for the same reason.
     pump_a_while(&mut state);
@@ -1231,7 +1260,15 @@ fn acc54_a_rename_and_a_delete_on_disjoint_paths_both_reconcile() {
         // assertions below read the moved buffer's path and the deleted
         // buffer's validity, so those are what the wait reads.
         pump_until(&mut state, "both reconciliations", |s| {
-            buffer_path(s, "MOVES").as_deref() == renamed_to.to_str() && !buffer_is_valid(s, "GOES")
+            let moved = buffer_path(s, "MOVES");
+            let gone = !buffer_is_valid(s, "GOES");
+            if moved.as_deref() == renamed_to.to_str() && gone {
+                ready::Probe::Ready(())
+            } else {
+                ready::Probe::Pending(format!(
+                    "moved buffer at {moved:?} (want {renamed_to:?}), deleted buffer gone: {gone}"
+                ))
+            }
         });
 
         assert_eq!(
