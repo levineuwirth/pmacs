@@ -12,11 +12,12 @@ Always true:
   (`pmacs-gpu`) frontends over a versioned semantic protocol
   (`pmacs-protocol`). `#![forbid(unsafe_code)]` everywhere.
 - `docs/invariants.md` carries the substrate rules a change must not
-  break and the declared-divergence register a frontend-only capability
-  is recorded in. `ADVERTISED_PROTOCOL_VERSION` is never edited; a new
-  wire message is an appended variant with a byte pin on the previous
-  final variant; a widened field is a break; wire-bearing work runs
-  alone. Every user-visible knob registers through `pmacs.config`;
+  break, under a 300-line cap; `docs/divergences.md` is the
+  declared-divergence register a frontend-only capability is recorded
+  in, and has no cap. `ADVERTISED_PROTOCOL_VERSION` is never edited;
+  a new wire message is an appended variant with a byte pin on the
+  previous final variant; a widened field is a break; wire-bearing work
+  runs alone. Every user-visible knob registers through `pmacs.config`;
   generated buffers write through `Buffer::set_generated_contents`;
   `pmacs-gpu` depends on `pmacs-protocol` and never on `pmacs`.
 - One phase, one branch `e<N>/<slug>` from `githubsucks/main`, one PR.

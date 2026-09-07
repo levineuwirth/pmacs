@@ -1,4 +1,5 @@
-//! The four things the documentation is held to, and no more.
+//! The five things the documentation is held to, and no more: D14's
+//! four, plus D27's split of the divergence register.
 //!
 //! 1. README's generated status block equals `scripts/anchor --print`
 //!    byte for byte, so a hand-edited version number or a stale feature
@@ -12,6 +13,14 @@
 //!    they list are a prefix of `scripts/gate --print-plan`.
 //! 4. No archived path is referenced from `CLAUDE.md`, `scripts/`,
 //!    `tests/` or `.github/`: history is not instruction.
+//! 5. `docs/invariants.md` stays under its 300-line cap, and the
+//!    declared-divergence register it no longer carries exists at
+//!    `docs/divergences.md` and is named by `CLAUDE.md`. The two halves
+//!    grow by opposite laws — the rules must stay short enough to be
+//!    read whole, the register grows with every accepted difference —
+//!    so under one cap the register squeezes the rules, and a rename
+//!    of either file would otherwise leave a dead route in the
+//!    instruction file no other rule here can see.
 //!
 //! Each assertion prints the offending line, so a red names its cause.
 
@@ -172,6 +181,41 @@ fn no_archived_path_is_referenced_from_instructions_scripts_tests_or_ci() {
         hits.is_empty(),
         "archived documents are referenced from instruction, script, test or CI files:\n{}",
         hits.join("\n")
+    );
+}
+
+/// E0.2's cap, pinned rather than counted by hand. It was stated in the
+/// task row and nowhere in the tree, so the file reached 298 of 300
+/// lines with nothing to say so; the number the failure prints is what
+/// makes the cap actionable.
+#[test]
+fn invariants_md_stays_under_its_line_cap() {
+    const CAP: usize = 300;
+    let lines = read("docs/invariants.md").lines().count();
+    assert!(
+        lines <= CAP,
+        "docs/invariants.md is {lines} lines against E0.2's cap of {CAP}. \
+         The declared-divergence register is not what to cut: it lives in \
+         docs/divergences.md, which has no cap (D27)."
+    );
+}
+
+/// The register has to exist and to be reachable from the instruction
+/// file, or the split just loses it: `CLAUDE.md` is the one route a
+/// session takes into the repository's documentation, and a rename that
+/// left the name behind would be invisible to every other rule here.
+#[test]
+fn divergences_md_exists_and_is_named_by_the_instruction_file() {
+    let register = read("docs/divergences.md");
+    assert!(
+        register.contains("## ") || register.contains("- **"),
+        "docs/divergences.md must carry the register, not just a heading:\n{register}"
+    );
+    let claude = read("CLAUDE.md");
+    assert!(
+        claude.contains("docs/divergences.md"),
+        "CLAUDE.md must name docs/divergences.md; it is the only route \
+         a session has to the declared-divergence register"
     );
 }
 
