@@ -3,8 +3,15 @@
 //! A predicate plus a deadline, reporting elapsed time and the last
 //! observed state when the deadline passes.
 //!
-//! Every wait in the integration suites goes through [`wait`] or
-//! [`tick_until`]; a fixed `thread::sleep` is never a readiness wait.
+//! Every wait in the suites E0.12 audited goes through [`wait`] or
+//! [`tick_until`]: the lean4 and resource-reconciliation suites, m4's
+//! fixed-iteration drains, and m4's D3 file-watch block. In those, a
+//! fixed `thread::sleep` is a window before a negative assertion, named
+//! with its length, and never a readiness wait. The claim is bounded on
+//! purpose: the unconditional timed drains in the other suites were not
+//! audited, `m9_2_acceptance.rs:547` is a declared one, and sweeping
+//! the rest is a planning item and not a row of this phase.
+//!
 //! The reason is the two ways a hand-rolled wait has failed here:
 //!
 //! - a fixed number of ticks with a fixed sleep (`for _ in 0..8 { tick();
