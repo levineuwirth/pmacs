@@ -107,6 +107,43 @@ mechanism, or a rate, since nobody has counted runs and failures over a
 fixed window. The remaining candidates have to be varied inside a gate
 run, one per run.
 
+### U4 — a PTY resize with no observed blank, macOS both flavors
+
+**Reopened 2026-09-08 as NEVER CLOSED**, by the audit below and not by
+a recurrence. U4 was closed 2026-09-05 with "not reproduced since
+2026-08-15; a recurrence is an issue". That is a count of green runs,
+which the rerun rule above forbids as a closer in the same sentence it
+is written in. No mechanism of U4's was removed and none was explained
+--- the row's own `what is NOT` cell said so when it was filed --- so
+nothing retired it and the closure was void when written.
+
+| field | value |
+|---|---|
+| selector | `--test full_grid_resync_acceptance a_pty_resize_blanks_the_host_before_repainting` |
+| job | GitHub Actions, `Test (macos-latest / lua54)` **and** `Test (macos-latest / luajit)`. Flavor is NOT a matching key for this row: it was filed from one lua54 red and then reddened twice on luajit with identical fragments |
+| required fragments | `FG-INV: the post-resize resync must blank the host` + `no CSI 2 J appeared in the` + `bytes emitted after the first painted frame` |
+| occurrences | three, all before the void closure: PR #229 (lua54) and PR #231 attempts 1 and 2 (luajit), 2026-08-15 and earlier. Full evidence in this file's history before 2026-09-05, including #231's five-observation base control and why neither branch diff excludes itself. The Linux observation of 2026-09-07 is #255 and is NOT an occurrence of this row --- the job does not match; see the section below |
+| candidate mechanism | none. No blank was OBSERVED after the mark within the test's fixed 20 s deadline; whether it was never emitted, emitted late, or lost in transport is open, and the deliberate reintroduction of the genuine resync defect produces signature-indistinguishable output, so the fragments cannot discriminate a fixture race from a product regression |
+| retirement | producer-side emission evidence cross-checked against the collected stream. A longer deadline concludes in one direction only: if the clear arrives, "emitted late" is established; if it does not, that is "not observed by the longer deadline" and nothing more. Never a green rerun |
+
+### U5 — Ctrl-C during a reconnect sleep kills the process
+
+**Reopened 2026-09-08 as NEVER CLOSED**, and separately it has now
+recurred. U5 was closed 2026-09-05 with "one occurrence, not
+reproduced; a recurrence is an issue" --- a count of green runs, void
+when written for the same reason as U4's. The recurrence is real and
+postdates the closure, but it is not what reopens the row: the row was
+never shut.
+
+| field | value |
+|---|---|
+| selector | `--test m5_8_acceptance ctrl_c_during_reconnect_sleep_yields_clean_exit` |
+| job | GitHub Actions, `Test (macos-latest / lua54)`. The `:LINE` suffix is not a fragment |
+| required fragments | `Ctrl-C during reconnect sleep should produce a clean exit` + `ExitStatus { code: 1, signal: Some("Interrupt: 2") }` |
+| occurrences | two: PR #229's rerun attempt 2, 2026-08-05; and PR #257 at `b2094ac`, run 34253949749, job `Test (macos-latest / lua54)` (102154957233), `tests/m5_8_acceptance.rs:546`, `test result: FAILED. 7 passed; 1 failed`. The second is filed as **#260**. The `Test (macos-latest / luajit)` leg of that same run passed this selector, so one run establishes nothing about the flavor either way |
+| candidate mechanism | Ctrl-C reached the process as `SIGINT` rather than as the raw-mode key event the test drives, and the process died of the signal instead of exiting cleanly. That is all the exit status shows. Whether the injection preceded raw mode, whether raw mode was lost, or whether the reconnect sleep's handler was not yet installed, are three mechanisms this fragment separates not at all |
+| retirement | diagnosis: a readiness record written by the child as it enters raw mode, so the injection is ordered against setup rather than raced against it. Never a green rerun |
+
 ### U16 — a git invocation finds its working directory deleted
 
 | field | value |
@@ -132,9 +169,37 @@ run, one per run.
 ## Closed rows
 
 Each row's full evidence is in this file's history before 2026-09-05.
-One line per row: what it was, when it closed, and what closed it.
+One line per row: what it was, when it left this section's live half,
+and on what grounds.
 
-| row | what it was | closed | closer |
+**The grounds are not all the same kind, and the word says which.** A
+row with a bare date is a causal closure: its mechanism was removed or
+explained, which is the only retirement the rerun rule allows.
+
+- **VOID** --- the closure was not a closure when it was written. Either
+  it named no mechanism at all and rested on a count of green runs
+  (U4, U5), or it named one that never reached the failing site (R5).
+  A void row was never retired; it was only stopped being looked at,
+  and it is live again above.
+- **INCOMPLETE** --- the closure named a real mechanism that did reach
+  the failing site, but that mechanism did not remove the cause. U8 is
+  the one, and it is falsified rather than suspected.
+- **DISCARDED** --- there was never evidence to retire. The fragments
+  were lost or never captured, so the row could not match anything.
+  This is an admission about the record, not a finding about the code,
+  and it must never be counted as a causal closure.
+- **MERGED** --- the question moved to another row and is live there.
+- **REFERRED** --- not a test, so outside this file; the question lives
+  in a GitHub issue.
+
+Twenty-seven rows are listed on twenty-six lines (A1 and A2 share
+one). Eighteen lines are causal closures and stand: a wall-clock
+assertion made `#[ignore]`, a duplicated test execution removed by the
+one-sweep gate, a fixture race fixed with a readiness gate, a
+hermeticity fault fixed. The eight that are not now say which word they
+are. Counted from the table itself, not carried forward.
+
+| row | what it was | disposition | grounds |
 |---|---|---|---|
 | R1 | `supersede_cancels_in_flight_job_within_50ms` missed its 50 ms budget | 2026-09-05 | the assertion is a wall-clock budget; it is `#[ignore]` and runs in the perf jobs and `scripts/gate --perf` |
 | R2 | `SIGUSR1` delivered before the trap was installed | 2026-08-05 | test race fixed with a readiness gate and an `exec` |
@@ -142,15 +207,15 @@ One line per row: what it was, when it closed, and what closed it.
 | R5 | `async pump deadline exceeded` in the supersede close path, macOS | 2026-09-05, **VOID** | the closure named the `tests/common/ready.rs` migration, which cannot reach an in-crate unit test and so never applied to the failing site. R5 is live again above, as never-closed |
 | R6 | readiness file never published in the panel terminal fixture, macOS | 2026-09-05 | same migration; the wait now reports what the child last wrote |
 | R8 | LSP listview row rendered relative to a stray ancestor marker | 2026-08-08 | test hermeticity fixed |
-| A1, A2 | historical claims with no linked occurrence | 2026-09-05 | nothing was ever measured; a recurrence is an issue |
-| U1 | an unclassifiable local red, fragments not captured | 2026-09-05 | unclassifiable; a recurrence is an issue |
+| A1, A2 | historical claims with no linked occurrence | 2026-09-05, **DISCARDED** | nothing was ever measured, so there was nothing to retire. Discarded for want of evidence; not a causal closure and not a claim about the code |
+| U1 | an unclassifiable local red, fragments not captured | 2026-09-05, **DISCARDED** | the fragments were destroyed by a rerun before anyone read them, so the row could never match anything. Discarded for want of evidence; not a causal closure |
 | U2 | `m6_1_pty_raw_mode_disables_kernel_echo`, `stty -a` output empty | 2026-09-05 | readiness migration; the PTY read now waits for the record it asserts on |
-| U3 | the R7 selector with fragments lost | 2026-09-05 | folded into R7's occurrence count |
-| U4 | `a_pty_resize_blanks_the_host_before_repainting`, macOS, three occurrences | 2026-09-05 | not reproduced since 2026-08-15; a recurrence is an issue. A related Linux observation postdates the closure: #255, and the note below |
-| U5 | `ctrl_c_during_reconnect_sleep_yields_clean_exit`, macOS lua54 | 2026-09-05 | one occurrence, not reproduced; a recurrence is an issue |
+| U3 | the R7 selector with fragments lost | 2026-09-05, **MERGED** | folded into R7's occurrence count. Not a retirement at all: the question is live, in R7 |
+| U4 | `a_pty_resize_blanks_the_host_before_repainting`, macOS, three occurrences | 2026-09-05, **VOID** | the closer was "not reproduced since 2026-08-15", a count of green runs, which the rerun rule forbids. No mechanism was removed or explained. U4 is live again above, as never-closed; the Linux observation #255 postdates the closure and is discussed below |
+| U5 | `ctrl_c_during_reconnect_sleep_yields_clean_exit`, macOS lua54 | 2026-09-05, **VOID** | the closer was "one occurrence, not reproduced", a count of green runs. U5 is live again above, as never-closed, and has since recurred at `b2094ac`: **#260** |
 | U6 | `criterion_1` and `composition_overhead` red together | 2026-09-05 | both are wall-clock budgets, now `#[ignore]` |
 | U7 | a different render-budget test red each sweep (dired, outline) | 2026-09-05 | render budgets, now `#[ignore]` |
-| U8 | `acc28_child_input…`, macOS luajit, fragments destroyed | 2026-09-05 | readiness migration (the R6 family); a recurrence is an issue. It recurred 2026-09-08 on macOS lua54, with fragments this time because of the migration: #259, and again in the next run on the same platform (34222042303, job 102047236847), which is a comment on #259 |
+| U8 | `acc28_child_input…`, macOS luajit, fragments destroyed | 2026-09-05, **INCOMPLETE** | the readiness migration (the R6 family) is a real mechanism and it DID reach this site --- which is why the recurrence has fragments at all --- but it changed what the wait reports, not what the wait waits for, so it never removed a cause. Falsified by #259 on 2026-09-08 (macOS lua54) and again in run 34222042303 (job 102047236847), a comment on #259. See the note below |
 | U9 | a PTY test and a budget test red together in one sweep | 2026-09-05 | the budget half is `#[ignore]`; the PTY half is U2's mechanism |
 | U10 | the budget red rotating between two runs of one commit | 2026-09-05 | budgets `#[ignore]` |
 | U11 | `dispatch_parse_round_trips_a_rust_source_file` missed its parse budget, macOS | 2026-09-05 | the round trip stays in the default run; the 100 ms budget is a separate `#[ignore]` test |
@@ -158,10 +223,40 @@ One line per row: what it was, when it closed, and what closed it.
 | U13 | `skipped_directories_are_reported_with_a_reason` received empty child stdout inside the sweep | 2026-09-05 | the gate runs each test once, in one sweep; a recurrence is an issue |
 | U14 | four selectors red in one gate run across three stages | 2026-09-05 | three are budgets, now `#[ignore]`; the fourth (`state: initializing`) is a readiness wait, migrated |
 | U15 | a rotated multi-red cluster with a load reading | 2026-09-05 | all budgets, now `#[ignore]` |
-| U18 | a Go checksum-database fetch failed before anything was built | 2026-09-05 | not a test; filed as issue #249 |
+| U18 | a Go checksum-database fetch failed before anything was built | 2026-09-05, **REFERRED** | not a test and so out of this file's scope; the question lives in issue #249 |
 | U19 | a terminal bell not observed within a 5 s poll | 2026-09-05 | readiness migration; the wait reports the last frame seen |
 | U20 | `composition_overhead` red alone | 2026-09-05 | a budget, now `#[ignore]` |
 | U21 | `m6_1_pty_canonical_mode_keeps_kernel_echo` red alone in `lib` | 2026-09-05 | U2's mechanism; the gate runs each test once |
+
+### What U8 falsified: reporting is not repair
+
+U8 and R6 closed on the same readiness migration in the same sitting,
+and R5 was swept along with them. R5's closure was void because the
+migration could not reach its site. U8's is a different failure and a
+more instructive one: the migration **did** reach it. That is not a
+guess --- U8's 2026-09-08 recurrence (#259) carries required fragments
+precisely because the migrated wait now reports its elapsed time, its
+poll count and what it last observed, which the pre-migration wait did
+not. The mechanism named in the closer is real, it applied, and it did
+what it claimed.
+
+It was still not a closer. Replacing a fixed drain with a wait that
+*reports* what it saw improves the next occurrence's diagnosis; it
+removes no cause. The closer inferred repair from better instruments,
+and #259 falsified the inference twenty-four days later by producing
+the signature again, on the migrated code, on the same platform, twice
+in consecutive runs.
+
+**The class, so it is not rediscovered.** A closer of the form "the
+wait now reports X" is an INCOMPLETE closure and should never have been
+written as a retirement; a closer of the form "the wait now waits for
+the record it asserts on" is causal, because the fixed drain that ended
+early is gone. R6 (`the wait now reports what the child last wrote`)
+and U19 (`the wait reports the last frame seen`) carry the reporting
+shape and nothing has falsified either, so they stand as written --- on
+notice, not reclassified. U2 (`the PTY read now waits for the record it
+asserts on`) and R4 (`wait_for_file waits for the expected bytes`) are
+the causal form and are not in question.
 
 ### U4's question is open again, on Linux
 
@@ -170,7 +265,9 @@ observed on 2026-09-07 on Linux, in the default-feature sweep of
 `scripts/gate --protocol` at `3abc153` (gate log
 `20260907T195626Z-978397`, step `05-sweep`; 33,566 bytes emitted after
 the first painted frame with no CSI 2 J among them). It postdates U4's
-closure and so reopens the question, and it is filed as #255.
+void closure and is filed as #255. It is not what reopened U4 --- the
+audit above did that, on the closer's own wording --- but it is a
+second reason the question is open.
 
 It is not a recurrence of the row. A row matches only when the job
 matches as well as the selector and the fragments, and U4's job is
