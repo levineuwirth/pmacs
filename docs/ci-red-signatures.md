@@ -56,6 +56,37 @@ race fixed by a readiness gate and an `exec`); only the fragment
 separates them. R2's fixture change touched no product code, so a change
 in how often this row appears is evidence about frequency, not cause.
 
+### R5 — an async pump deadline in the supersede close path
+
+**Reopened 2026-09-08 as NEVER CLOSED.** Not as a recurrence: the
+closure was void when it was written. R5 was closed 2026-09-05 with
+"readiness waits migrated to `tests/common/ready.rs`, which reports
+elapsed and last-observed state; a recurrence is an issue". This row's
+failing site is `pump_async`, a private helper in `src/editor.rs`'s own
+`#[cfg(test)]` module. `tests/common/ready.rs` is compiled into the
+integration targets and an in-crate unit test cannot use it, so that
+migration never reached this site and could not have. The row was never
+retired by anything; it was only stopped being looked at. The one thing
+the closure asserted that was true is that a wait should report what it
+waited on, which is now done here by hand.
+
+| field | value |
+|---|---|
+| selector | `--lib editor::tests::stream_supersede_delivers_cancelled_to_on_close` |
+| job | GitHub Actions, macOS / lua54 |
+| required fragments | `async pump deadline exceeded` |
+| occurrences | two: `main`, run 30555667095, 2026-07-30; and PR #257 at `e78d184`, run 34222042303, job `Test (macos-latest / lua54)` (102047236847), `src/editor.rs:12842`, `test result: FAILED. 2196 passed; 1 failed; 11 ignored`. The panic line moves with `editor.rs` and is not part of the signature |
+| candidate mechanism | the test drives a superseded stream to its `on_close` and pumps `tick_async` until the Lua marker appears, under a fixed 2-second deadline the helper sets itself. Whether two seconds is short for a loaded macOS runner or the close notification is genuinely lost is not known, and the first occurrence's log no longer says anything either way. Unresolved; possible product defect |
+| retirement | diagnosis. The deadline now reports its subject, its elapsed time and its poll count, so the next occurrence says whether it missed by a millisecond or by two seconds --- that is a step toward the diagnosis and is not itself a closer. Never a green rerun |
+
+**The lesson the void closure carries.** A closer that names a mechanism
+has to be checked against the failing site, not against the row's
+description. R6 and U8 were closed on the same migration in the same
+sitting; both of those do fail inside integration targets, so the
+migration does reach them, and U8's 2026-09-08 recurrence carried
+fragments precisely because it had. R5 was swept along with them on a
+resemblance.
+
 ### R7 — managed-retry attach hits a broken pipe under sweep load
 
 | field | value |
@@ -108,7 +139,7 @@ One line per row: what it was, when it closed, and what closed it.
 | R1 | `supersede_cancels_in_flight_job_within_50ms` missed its 50 ms budget | 2026-09-05 | the assertion is a wall-clock budget; it is `#[ignore]` and runs in the perf jobs and `scripts/gate --perf` |
 | R2 | `SIGUSR1` delivered before the trap was installed | 2026-08-05 | test race fixed with a readiness gate and an `exec` |
 | R4 | readiness predicate satisfied by an empty file | 2026-08-05 | `wait_for_file` waits for the expected bytes, with three witness tests |
-| R5 | `async pump deadline exceeded` in the supersede close path, macOS | 2026-09-05 | readiness waits migrated to `tests/common/ready.rs`, which reports elapsed and last-observed state; a recurrence is an issue |
+| R5 | `async pump deadline exceeded` in the supersede close path, macOS | 2026-09-05, **VOID** | the closure named the `tests/common/ready.rs` migration, which cannot reach an in-crate unit test and so never applied to the failing site. R5 is live again above, as never-closed |
 | R6 | readiness file never published in the panel terminal fixture, macOS | 2026-09-05 | same migration; the wait now reports what the child last wrote |
 | R8 | LSP listview row rendered relative to a stray ancestor marker | 2026-08-08 | test hermeticity fixed |
 | A1, A2 | historical claims with no linked occurrence | 2026-09-05 | nothing was ever measured; a recurrence is an issue |
