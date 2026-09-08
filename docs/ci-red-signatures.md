@@ -103,11 +103,12 @@ resemblance.
 What the occurrences establish: the tree is excluded twice over (two
 consecutive gate runs on one worktree differing by one markdown file,
 green then red; several occurrences on documentation-only commits), and
-green reruns number in the dozens; both sweep flavors of the `--protocol`
-plan have produced it, so the Lua flavor is not the discriminator either. What they do not establish: a
-mechanism, or a rate, since nobody has counted runs and failures over a
-fixed window. The remaining candidates have to be varied inside a gate
-run, one per run.
+green reruns number in the dozens; both sweep flavors of the
+`--protocol` plan have produced it, so the Lua flavor is not the
+discriminator either. What they do not establish: a mechanism, or a
+rate, since nobody has counted runs and failures over a fixed window.
+The remaining candidates have to be varied inside a gate run, one per
+run.
 
 ### U4 — a PTY resize with no observed blank, macOS both flavors
 
@@ -145,25 +146,6 @@ never shut.
 | occurrences | two: PR #229's rerun attempt 2, 2026-08-05; and PR #257 at `b2094ac`, run 34253949749, job `Test (macos-latest / lua54)` (102154957233), `tests/m5_8_acceptance.rs:546`, `test result: FAILED. 7 passed; 1 failed`. The second is filed as **#260**. The `Test (macos-latest / luajit)` leg of that same run passed this selector, so one run establishes nothing about the flavor either way |
 | candidate mechanism | Ctrl-C reached the process as `SIGINT` rather than as the raw-mode key event the test drives, and the process died of the signal instead of exiting cleanly. That is all the exit status shows. Whether the injection preceded raw mode, whether raw mode was lost, or whether the reconnect sleep's handler was not yet installed, are three mechanisms this fragment separates not at all |
 | retirement | diagnosis: a readiness record written by the child as it enters raw mode, so the injection is ordered against setup rather than raced against it. Never a green rerun |
-
-### U16 — a git invocation finds its working directory deleted
-
-| field | value |
-|---|---|
-| selector | any `--lib packages::fetcher::tests::*` that runs `git`. First seen as `cache_survives_across_fetcher_instances` alone; widened 2026-09-08 when five of them failed together in one sweep with these fragments, which is what the candidate mechanism predicts --- the doomed working directory is process-global, so every concurrent `git` child in that module is exposed, not one named test |
-| job | local (Linux), the workspace sweep, either flavor: both the default sweep and the LuaJIT-only sweep `--protocol` adds have produced it, in consecutive runs |
-| required fragments | `Unable to read current working directory: No such file or directory` + `remote did not send all necessary objects` |
-| occurrences | **nine**, and the number is the length of this list, recomputed here rather than incremented: **(1--3)** three on 2026-08-31 within eleven hours, the third on `main` after a documentation-only merge; **(4)** gate log `20260908T101700Z-2279879` and **(5)** `20260908T105335Z-2697918`, local sweeps within an hour, one selector each; **(6)** `20260908T110408Z-2820743`, FIVE selectors together --- `cache_survives_across_fetcher_instances`, `fetch_after_upstream_tag_removed_surfaces_at_resolve`, `fetch_clones_into_cache`, `fetch_twice_does_not_reclone_via_sentinel`, `resolve_branch_returns_branch_head` --- all carrying both fragments; **(7)** `20260908T154623Z-3116795`, review round 1's six-stage gate at the branch head `e78d184`, step `05-sweep`: `cache_survives_across_fetcher_instances` alone at `src/packages/fetcher.rs:929`, `test result: FAILED. 2199 passed; 1 failed; 11 ignored` --- the first at a branch head and the first the widened selector caught; **(8)** `20260908T163205Z-3389418`, fix round 1's gate at `68a9767`, step `05-sweep`: TWO selectors, `cache_survives_across_fetcher_instances` at `:929` and `fetch_after_upstream_tag_removed_surfaces_at_resolve` at `:1021`, `test result: FAILED. 2198 passed; 2 failed; 11 ignored`, with step `06-sweep-luajit` of that run clean at 124 targets 4271/0/35; **(9)** `20260908T164713Z-3615153`, the very next run at `d0771fc`, step `06-sweep-luajit`: THREE selectors, the eighth's two plus `fetch_clones_into_cache` at `:889`, `test result: FAILED. 2004 passed; 3 failed; 10 ignored`, while step `05-sweep` of that same run is CLEAN at 124 targets 4571/0/49. **Six of the nine are on 2026-09-08**, items 4 through 9 --- counted, not carried: this field said "four" when the list gave five and "five" when it gave six, having been corrected by incrementing twice. Every one is on a tree touching neither `packages` nor `file_io`. The eighth and ninth are mirror images one run apart, so the sweep flavor is not the discriminator: the row is about the workspace sweep, either flavor. Several intervening sweeps of the same tree were green, so the rate on this machine is neither zero nor one. The count is a floor for the reason R7's is --- an occurrence is recorded only when someone reads a log --- and the three reproductions in the retirement experiment below are deliberate and are NOT counted here |
-| candidate mechanism | `bare_filename_saves_in_cwd` (`src/file_io.rs`) calls `set_current_dir` on a `TempDir`; concurrently this test's `run_git` spawns `git` with no explicit cwd, so the child inherits the temp directory; the parent restores its cwd, which does nothing for the child; the `TempDir` drops under a live `git`. A candidate with a citation, not a demonstrated chain |
-| retirement | run the two selectors concurrently in a tight loop until it reproduces, or remove the process-global mutation (`save_atomic` taking the directory, or that test in a subprocess). A serial guard around `set_current_dir` does not close it: the child outlives the guard |
-
-**Two pushed commit messages carry the superseded day-count.**
-`d0771fc` ("Four occurrences on 2026-09-08") and `b2094ac` ("Five
-occurrences on 2026-09-08") state a number the list above did not
-support when either was written. They are pushed and are not rewritten;
-this is the correction, in the same form as `e78d184`'s above. The PR
-body and the vault records that repeated the number are corrected at
-their own hands, not here.
 
 ### U17 — a supersede race lost the other way, on `main`
 
@@ -233,10 +215,112 @@ are. Counted from the table itself, not carried forward.
 | U13 | `skipped_directories_are_reported_with_a_reason` received empty child stdout inside the sweep | 2026-09-05 | the gate runs each test once, in one sweep; a recurrence is an issue |
 | U14 | four selectors red in one gate run across three stages | 2026-09-05 | three are budgets, now `#[ignore]`; the fourth (`state: initializing`) is a readiness wait, migrated |
 | U15 | a rotated multi-red cluster with a load reading | 2026-09-05 | all budgets, now `#[ignore]` |
+| U16 | a `git` child inheriting a working directory another test deleted | 2026-09-08 | the process-global `set_current_dir` was removed: `bare_filename_saves_in_cwd` now makes the cwd move in a subprocess (`ee28bf8`), and `set_current_dir` no longer occurs anywhere in the workspace. Causal, and demonstrated in both directions --- see below |
 | U18 | a Go checksum-database fetch failed before anything was built | 2026-09-05, **REFERRED** | not a test and so out of this file's scope; the question lives in issue #249 |
 | U19 | a terminal bell not observed within a 5 s poll | 2026-09-05 | readiness migration; the wait reports the last frame seen |
 | U20 | `composition_overhead` red alone | 2026-09-05 | a budget, now `#[ignore]` |
 | U21 | `m6_1_pty_canonical_mode_keeps_kernel_echo` red alone in `lib` | 2026-09-05 | U2's mechanism; the gate runs each test once |
+
+### U16's mechanism, demonstrated and then removed
+
+U16 is the one row here retired on a demonstration rather than an
+argument, so the demonstration stays where the closer can be checked
+against it.
+
+**The chain, link by link.** `bare_filename_saves_in_cwd`
+(`src/file_io.rs`) called `std::env::set_current_dir` onto a `TempDir`
+and back --- the only two occurrences of that call in the entire
+workspace. libtest runs a binary's tests on a thread pool, so
+"concurrently" was the default and not a contrivance.
+`packages::fetcher`'s `run_git` calls `run_git_inner(None, …)`, and
+that function sets `cmd.current_dir(d)` only for `Some(d)`, so with
+`None` the `git` child inherits the process cwd --- production code,
+not fixture code. The parent's restore does nothing for a child already
+running, the `TempDir` then drops underneath a live `git`, and `git`
+reports `Unable to read current working directory`, which is this row's
+first required fragment. That fragment was reproduced standalone, in a
+scratch directory with no pmacs code involved.
+
+**The experiment the row's own retirement cell asked for**, run against
+the gate's lib test binary, 400 iterations per arm, each arm with its
+own `TMPDIR`:
+
+| tree | arm | filters | iterations | failing |
+|---|---|---|---|---|
+| `b2094ac` | treatment | `packages::fetcher::tests` **plus** `file_io::tests::bare_filename_saves_in_cwd` (19 tests) | 400 | **3** |
+| `b2094ac` | control | `packages::fetcher::tests` alone (18 tests) | 400 | 0 |
+| `ee28bf8` | treatment | the same 19 tests | 400 | **0** |
+| `ee28bf8` | control | the same 18 tests | 400 | 0 |
+
+Adding one test to the process took the failure rate from 0/400 to
+3/400, and every failing iteration failed **eight** fetcher selectors at
+once, each carrying both required fragments --- the multi-selector shape
+the row said its mechanism predicts. That is what makes the first two
+rows a demonstration and not a citation.
+
+**What closes the row is the removal, not the last two rows of that
+table.** `ee28bf8` takes the cwd move into a subprocess:
+`Command::current_dir` is per-child, so nothing repoints this process,
+and `set_current_dir` now appears nowhere in the workspace. The
+mechanism is gone by inspection. The 0/400 after the fix is
+corroboration and could not be a closer --- it is a count of green
+runs, which the rerun rule forbids, and 400 iterations of a 3/400
+signature would come up empty about five times in a thousand by chance
+alone.
+
+**What is not closed.** `run_git` still depends on the ambient cwd, and
+a user whose working directory is removed under a package fetch would
+get exactly this error. Nothing has measured whether that is reachable,
+and this row never claimed it: U16 was always about a test mutating the
+process cwd, and it is that which has been removed. The product
+question is separate, unmeasured, and not filed --- naming it here is
+not a claim that it exists.
+
+**Two pushed commit messages carry the superseded day-count.**
+`d0771fc` ("Four occurrences on 2026-09-08") and `b2094ac` ("Five
+occurrences on 2026-09-08") state a number the list below did not
+support when either was written. They are pushed and are not rewritten;
+this is the correction, in the same form as `e78d184`'s below.
+
+**The occurrences it closes on**, kept because a closed row's count is
+the evidence the closure had to answer for: **nine**, and the number is
+the length of this list, recomputed here rather than incremented:
+**(1--3)** three on 2026-08-31 within eleven hours, the third on `main`
+after a documentation-only merge; **(4)** gate log
+`20260908T101700Z-2279879` and **(5)** `20260908T105335Z-2697918`, local
+sweeps within an hour, one selector each; **(6)**
+`20260908T110408Z-2820743`, FIVE selectors together ---
+`cache_survives_across_fetcher_instances`,
+`fetch_after_upstream_tag_removed_surfaces_at_resolve`,
+`fetch_clones_into_cache`, `fetch_twice_does_not_reclone_via_sentinel`,
+`resolve_branch_returns_branch_head` --- all carrying both fragments;
+**(7)** `20260908T154623Z-3116795`, review round 1's six-stage gate at
+the branch head `e78d184`, step `05-sweep`:
+`cache_survives_across_fetcher_instances` alone at
+`src/packages/fetcher.rs:929`, `test result: FAILED. 2199 passed; 1
+failed; 11 ignored` --- the first at a branch head and the first the
+widened selector caught; **(8)** `20260908T163205Z-3389418`, fix round
+1's gate at `68a9767`, step `05-sweep`: TWO selectors,
+`cache_survives_across_fetcher_instances` at `:929` and
+`fetch_after_upstream_tag_removed_surfaces_at_resolve` at `:1021`, `test
+result: FAILED. 2198 passed; 2 failed; 11 ignored`, with step
+`06-sweep-luajit` of that run clean at 124 targets 4271/0/35; **(9)**
+`20260908T164713Z-3615153`, the very next run at `d0771fc`, step
+`06-sweep-luajit`: THREE selectors, the eighth's two plus
+`fetch_clones_into_cache` at `:889`, `test result: FAILED. 2004 passed;
+3 failed; 10 ignored`, while step `05-sweep` of that same run is CLEAN
+at 124 targets 4571/0/49. **Six of the nine are on 2026-09-08**, items 4
+through 9 --- counted, not carried: this field said "four" when the list
+gave five and "five" when it gave six, having been corrected by
+incrementing twice. Every one is on a tree touching neither `packages`
+nor `file_io`. The eighth and ninth are mirror images one run apart, so
+the sweep flavor is not the discriminator: the row is about the
+workspace sweep, either flavor. Several intervening sweeps of the same
+tree were green, so the rate on this machine is neither zero nor one.
+The count is a floor for the reason R7's is --- an occurrence is
+recorded only when someone reads a log --- and the three reproductions
+in the retirement experiment below are deliberate and are NOT counted
+here
 
 ### What U8 falsified: reporting is not repair
 
