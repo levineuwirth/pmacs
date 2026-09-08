@@ -1,6 +1,6 @@
 // compile_mode_crdt_acceptance.rs --- compile-mode over the wire.
 
-//! Compile-mode two-replica acceptance (docs/compile-mode-framing.md,
+//! Compile-mode two-replica acceptance (the archived compile-mode framing,
 //! item 35): a full compile run's generated buffer converges
 //! byte-identically on a mirror replica, and a synthetic accepted
 //! replica edit to that buffer triggers the immediate recovery

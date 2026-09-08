@@ -213,13 +213,10 @@ fn m4_1_incremental_parse_under_5ms() {
     );
 }
 
-/// The parse-on-worker path: dispatch through `AsyncRuntime`,
-/// observe settle, drain the bundle from the side handoff. This
-/// exercises the *full* T M4.1 dispatch shape (vs the synchronous
-/// `run_parse` that the perf gates use), and demonstrates that the
-/// "Parse runs on a worker" task description is satisfied.
-#[test]
-fn m4_1_dispatch_parse_round_trips_via_runtime() {
+/// Dispatch a 200-line parse through the runtime, wait for it to
+/// settle, and return the worker's reported duration; the round trip's
+/// correctness is asserted inside.
+fn dispatch_parse_round_trip_via_runtime() -> u64 {
     let rt = AsyncRuntime::with_pool_size(1);
     let req = ParseRequest {
         source: Arc::from(synthetic_rust_source(200)),
@@ -239,18 +236,35 @@ fn m4_1_dispatch_parse_round_trips_via_runtime() {
     let bundle = rt
         .take_parse_tree(id)
         .expect("parse handoff holds bundle on Complete");
-    match rt.take_result(id) {
-        Some(JobOutcome::Complete(JobResult::Parse { duration_ms })) => {
-            assert!(
-                duration_ms < 100,
-                "200-line parse should be quick: took {duration_ms}ms \
-                 against a 100ms budget"
-            );
-        }
+    let duration_ms = match rt.take_result(id) {
+        Some(JobOutcome::Complete(JobResult::Parse { duration_ms })) => duration_ms,
         other => panic!("unexpected outcome: {other:?}"),
-    }
+    };
     assert_eq!(bundle.root_tree().root_node().kind(), "source_file");
     assert_eq!(bundle.language_name, "rust");
+    duration_ms
+}
+
+/// The parse-on-worker path: dispatch through `AsyncRuntime`,
+/// observe settle, drain the bundle from the side handoff. This
+/// exercises the *full* T M4.1 dispatch shape (vs the synchronous
+/// `run_parse` that the perf gates use), and demonstrates that the
+/// "Parse runs on a worker" task description is satisfied.
+#[test]
+fn m4_1_dispatch_parse_round_trips_via_runtime() {
+    let duration_ms = dispatch_parse_round_trip_via_runtime();
+    eprintln!("200-line parse via the runtime took {duration_ms}ms");
+}
+
+#[test]
+#[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
+fn m4_1_dispatch_parse_via_runtime_stays_under_the_parse_budget() {
+    let duration_ms = dispatch_parse_round_trip_via_runtime();
+    assert!(
+        duration_ms < 100,
+        "200-line parse should be quick: took {duration_ms}ms \
+         against a 100ms budget"
+    );
 }
 
 /// The Lua introspection criterion: walking the parse tree from a
@@ -319,6 +333,23 @@ fn pump_async<F: Fn(&pmacs::editor::EditorState) -> bool>(
     let deadline = Instant::now() + Duration::from_secs(2);
     while !predicate(state) {
         assert!(Instant::now() < deadline, "async pump deadline exceeded");
+        state.tick_async();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Drain the async runtime for `ms`, waiting for nothing.
+///
+/// Every call site guards a NEGATIVE assertion: the pinned parse
+/// grammar must NOT be re-switched by an edit to a shebang or a
+/// modeline, or by a switch away and back. There is no event to wait
+/// for — the claim is that a wrong reparse never lands — so this is the
+/// window in which a wrong one would have to appear. `pump_async`
+/// cannot serve here for the same reason: a wait for a language
+/// *change* would time out on correct code.
+fn drain_async(state: &mut pmacs::editor::EditorState, ms: u64) {
+    let deadline = Instant::now() + Duration::from_millis(ms);
+    while Instant::now() < deadline {
         state.tick_async();
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -1708,8 +1739,9 @@ use pmacs::diag::{Diagnostic, DiagnosticSeverity, DiagnosticStore};
 /// `publishDiagnostics` per `didChange`; the test sends the change
 /// and measures wall-clock latency until the diagnostics land in
 /// the manager's store.
-#[test]
-fn m4_6_diagnostics_arrive_within_500ms() {
+/// Send a change to the fake server and measure how long its
+/// diagnostics take to land in the store, waiting up to `deadline`.
+fn diagnostics_latency_after_a_change(deadline: Duration) -> Duration {
     let (sup, mgr) = make_lsp_test_manager();
     let sid = mgr
         .borrow_mut()
@@ -1732,8 +1764,8 @@ fn m4_6_diagnostics_arrive_within_500ms() {
         .expect("didChange");
 
     // Spin the supervisor + LSP ticks until the diag store has
-    // diagnostics for this URI, or the budget runs out.
-    let deadline = edit_at + Duration::from_millis(500);
+    // diagnostics for this URI, or the deadline runs out.
+    let deadline = edit_at + deadline;
     let mut latency: Option<Duration> = None;
     while Instant::now() < deadline {
         sup.borrow_mut().tick();
@@ -1749,15 +1781,30 @@ fn m4_6_diagnostics_arrive_within_500ms() {
     }
     let latency = latency.unwrap_or_else(|| {
         panic!(
-            "diagnostics did not arrive within 500 ms (waited {:?})",
+            "diagnostics did not arrive (waited {:?})",
             edit_at.elapsed()
         );
     });
+    let _ = mgr.borrow_mut().stop(sid);
+    latency
+}
+
+/// Acceptance (1/3), the deadline half: diagnostics arrive after the
+/// triggering edit. The 500 ms budget is the `#[ignore]` sibling.
+#[test]
+fn m4_6_diagnostics_arrive_after_a_change() {
+    let latency = diagnostics_latency_after_a_change(Duration::from_secs(10));
+    eprintln!("diagnostics arrived {latency:?} after the change");
+}
+
+#[test]
+#[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
+fn m4_6_diagnostics_arrive_within_500ms() {
+    let latency = diagnostics_latency_after_a_change(Duration::from_millis(500));
     assert!(
         latency < Duration::from_millis(500),
         "diagnostic latency {latency:?} exceeds 500 ms budget"
     );
-    let _ = mgr.borrow_mut().stop(sid);
 }
 
 /// Acceptance (2/3): navigate-to-next-diagnostic returns the
@@ -2004,7 +2051,7 @@ fn m4_6_diag_navigate_commands_and_bindings_are_registered() {
         )
         .eval()
         .expect("keymap.list");
-    // Compile-mode (Q#CM5, docs/compile-mode-framing.md) took the
+    // Compile-mode (Q#CM5, the archived compile-mode framing) took the
     // M-g chords over for the unified dispatchers; the diag commands
     // stay registered and remain the dispatchers' fallback when no
     // compile/grep run has claimed the error source, so the
@@ -2893,8 +2940,9 @@ use pmacs::project_index::{FileEntry, ProjectIndex, Symbol, SymbolKind, SymbolSo
 /// a 100k-file project in under 1 second. We approximate by 100 files
 /// × 1000 symbols each (one million symbols total --- larger than a
 /// typical 100k-file repo's symbol count).
-#[test]
-fn m4_10_search_under_one_second_for_100k_files() {
+/// Index a hundred thousand symbols and search them; asserts a hit and
+/// returns how long the search took.
+fn search_100k_symbols() -> std::time::Duration {
     let mut idx = ProjectIndex::new("/proj");
     for f in 0..100u32 {
         let mut symbols = Vec::with_capacity(1_000);
@@ -2925,6 +2973,19 @@ fn m4_10_search_under_one_second_for_100k_files() {
         !hits.is_empty(),
         "100k-symbol project should return matches"
     );
+    elapsed
+}
+
+#[test]
+fn m4_10_search_finds_matches_in_100k_symbols() {
+    let elapsed = search_100k_symbols();
+    eprintln!("100k-symbol search took {elapsed:?}");
+}
+
+#[test]
+#[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
+fn m4_10_search_under_one_second_for_100k_files() {
+    let elapsed = search_100k_symbols();
     assert!(
         elapsed < std::time::Duration::from_secs(1),
         "100k-symbol search took {elapsed:?}, expected < 1s"
@@ -5741,6 +5802,15 @@ fn d3_scaffold(
 }
 
 /// Pump every tick for `ms` milliseconds.
+///
+/// A WINDOW, NEVER A READINESS WAIT. Every call site that preceded a
+/// positive assertion has been migrated to a `ready::` wait on the unit
+/// that assertion reads; what remains is named `RETAINED DRAIN` with
+/// its length and the negative claim it gives a wrong event the chance
+/// to appear in. A fixed drain used as a wait is the mechanism D13
+/// closed R5, R6, U2, U8 and U19 on: it bets on the machine's speed and
+/// loses silently, with the assertion after it reporting the result of
+/// the race rather than the race.
 fn d3_pump(state: &mut pmacs::editor::EditorState, ms: u64) {
     let deadline = Instant::now() + Duration::from_millis(ms);
     while Instant::now() < deadline {
@@ -5751,23 +5821,130 @@ fn d3_pump(state: &mut pmacs::editor::EditorState, ms: u64) {
     }
 }
 
-/// Install the scan-time collector on the group seam. Multi-member
-/// scans fire the seam once per member back-to-back, so calls within
-/// 40 ms collapse to one recorded scan.
+/// Install the scan collector on the group seam. `_after_scan_for_tests`
+/// fires on the SUCCESS arm only, once per member, with the snapshot the
+/// group is about to adopt (`builtin/runtime/lsp.lua`), so a recorded
+/// scan means a baseline exists and the recorded names are what it
+/// folded in. Multi-member scans fire back-to-back, so calls within
+/// 40 ms collapse to one recorded scan time; the snapshot is recorded
+/// unconditionally.
 fn d3_install_scan_collector(state: &mut pmacs::editor::EditorState) {
     state
         .lua_host
         .lua()
         .load(
             "_G.__d3_scans = {}
-             pmacs.lsp._after_scan_for_tests = function(_, _)
+             _G.__d3_snapshot = {}
+             pmacs.lsp._after_scan_for_tests = function(_, cur)
                local t = pmacs.editor.monotonic_ms()
                local s = _G.__d3_scans
                if #s == 0 or t - s[#s] > 40 then s[#s + 1] = t end
+               local names = {}
+               for rel in pairs(cur) do names[#names + 1] = rel end
+               table.sort(names)
+               _G.__d3_snapshot = names
              end",
         )
         .exec()
         .expect("install scan collector");
+}
+
+/// The relative names of the last successful scan's snapshot. Empty
+/// until the collector has seen one.
+fn d3_snapshot_names(state: &pmacs::editor::EditorState) -> Vec<String> {
+    state
+        .lua_host
+        .lua()
+        .load("return _G.__d3_snapshot")
+        .eval::<Vec<String>>()
+        .expect("snapshot probe must not error")
+}
+
+/// Tick until the collector has recorded at least `n` successful scans.
+///
+/// This is what a `d3_pump` before a positive assertion became: a
+/// baseline is the group's own readiness event, and a trigger file
+/// written before it folds into the baseline and is never reported —
+/// which is what every one of those rows failed on when its drain was
+/// set to zero, with the drain's length nowhere in the message.
+fn d3_wait_for_scans(state: &mut pmacs::editor::EditorState, n: usize) {
+    ready::tick_until(
+        state,
+        &format!("{n} successful file-watch scan(s)"),
+        ready::DEADLINE,
+        |s| {
+            let times = d3_scan_times(s);
+            if times.len() >= n {
+                ready::Probe::Ready(())
+            } else {
+                ready::Probe::Pending(format!("{} scans: {times:?}", times.len()))
+            }
+        },
+    );
+}
+
+/// Tick until a successful scan's snapshot carries `name`.
+///
+/// Stronger than [`d3_wait_for_scans`] and needed wherever the file
+/// must be IN the baseline rather than after it: a scan that started
+/// before the file was written completes with a snapshot that lacks it,
+/// so counting scans is not enough.
+fn d3_wait_for_snapshot_containing(state: &mut pmacs::editor::EditorState, name: &str) {
+    ready::tick_until(
+        state,
+        &format!("a baseline snapshot carrying {name}"),
+        ready::DEADLINE,
+        |s| {
+            let names = d3_snapshot_names(s);
+            if names.iter().any(|n| n.contains(name)) {
+                ready::Probe::Ready(())
+            } else {
+                ready::Probe::Pending(format!("{names:?}"))
+            }
+        },
+    );
+}
+
+/// Tick until the row's `pmacs.error` counter has recorded at least `n`
+/// file-watch scan failures.
+fn d3_wait_for_failures(state: &mut pmacs::editor::EditorState, n: i64) {
+    ready::tick_until(
+        state,
+        &format!("{n} reported file-watch scan failure(s)"),
+        ready::DEADLINE,
+        |s| {
+            let seen: i64 = s
+                .lua_host
+                .lua()
+                .load("return _G.__d3_failures")
+                .eval()
+                .expect("failure-counter probe must not error");
+            if seen >= n {
+                ready::Probe::Ready(())
+            } else {
+                ready::Probe::Pending(format!("{seen} failures"))
+            }
+        },
+    );
+}
+
+/// Tick until at least one `fs_walk_tree` job is visible in the workers
+/// snapshot — the unit `m4_24_d3_no_overlap_when_a_walk_outlives_its_interval`
+/// reads before it withholds completions.
+fn d3_wait_for_walk_job(state: &mut pmacs::editor::EditorState) -> i64 {
+    ready::tick_until(
+        state,
+        "a dispatched fs_walk_tree job",
+        ready::DEADLINE,
+        |s| {
+            let walks = d3_walk_job_count(s);
+            if walks >= 1 {
+                ready::Probe::Ready(walks)
+            } else {
+                ready::Probe::Pending(format!("{walks} walk jobs"))
+            }
+        },
+    )
 }
 
 fn d3_scan_times(state: &pmacs::editor::EditorState) -> Vec<f64> {
@@ -5901,7 +6078,11 @@ fn d3_wait_for_walk_cancelled(state: &mut pmacs::editor::EditorState) {
 #[test]
 fn m4_24_d3_idle_is_absent_and_never_sleeps() {
     let (_dir, mut state, _watch) = d3_scaffold("filewatch", None);
-    // Let the baseline land and the backoff start stretching.
+    // RETAINED DRAIN (1200 ms). Both assertions below are negative —
+    // no `sleep` purpose ever, and activity settling to absent — so
+    // this is the window in which a continuously running watcher would
+    // have to show itself, not a wait. Set to zero the row still
+    // passes.
     d3_pump(&mut state, 1200);
 
     let mut absent_seen = 0u32;
@@ -5985,7 +6166,15 @@ fn m4_24_d3_one_walk_job_per_scan_not_per_directory() {
         ),
         "fake never initialized"
     );
-    d3_pump(&mut state, 1500);
+    // The assertion below is that a walk_tree job RAN, so wait for the
+    // group's own completion signal rather than for 1500 ms: set to
+    // zero the drain this replaces fails at `saw 0`.
+    d3_install_scan_collector(&mut state);
+    d3_wait_for_scans(&mut state, 1);
+    // RETAINED DRAIN (600 ms). The read_dir count below is a negative
+    // claim about jobs the watcher must never allocate, so it needs a
+    // window of further scans to be absent from.
+    d3_pump(&mut state, 600);
 
     let (walks, watcher_read_dirs): (i64, i64) = state
         .lua_host
@@ -6086,6 +6275,11 @@ fn m4_24_d3_join_wakes_a_backed_off_group_and_epochs_gate_delivery() {
 
     // Baseline correctness: a post-baseline file is reported to the
     // joiner; the pre-join file never is.
+    //
+    // RETAINED DRAIN (300 ms). The joiner's baseline is the scan the
+    // assertion above already waited for; this is the window in which
+    // a wrongly-delivered `pre.bbb` would appear. Set to zero the row
+    // still passes.
     d3_pump(&mut state, 300);
     let post_uri = format!("file://{}", watch.join("post.bbb").display());
     std::fs::write(watch.join("post.bbb"), b"late\n").expect("write post.bbb");
@@ -6117,7 +6311,12 @@ fn m4_24_d3_join_wakes_a_backed_off_group_and_epochs_gate_delivery() {
 fn m4_24_d3_join_mid_walk_queues_one_immediate_baseline() {
     let (_dir, mut state, watch) = d3_scaffold("filewatchjoin", None);
     let received = watch.join(".received");
-    d3_pump(&mut state, 900);
+    // `trig.aaa` must land AFTER the baseline or it folds into it and
+    // is never reported: wait for the baseline scan, not for 900 ms.
+    // Set to zero the drain this replaces fails at `watcher-1 never
+    // reported trig.aaa`.
+    d3_install_scan_collector(&mut state);
+    d3_wait_for_scans(&mut state, 1);
 
     // Reset the cadence to the floor so the next scan dispatches
     // quickly once the pool is saturated: an .aaa event is observed by
@@ -6200,9 +6399,11 @@ fn m4_24_d3_join_mid_walk_queues_one_immediate_baseline() {
 #[test]
 fn m4_24_d3_no_overlap_when_a_walk_outlives_its_interval() {
     let (_dir, mut state, _watch) = d3_scaffold("filewatch", None);
-    d3_pump(&mut state, 900);
-
-    let before = d3_walk_job_count(&state);
+    // The assertion below reads the walk count, so wait for a walk
+    // rather than for 900 ms: set to zero the drain this replaces
+    // fails at `no walks during warm-up?`, a question about the wait's
+    // length asked by the assertion instead of by the wait.
+    let before = d3_wait_for_walk_job(&mut state);
     assert!(before >= 1, "no walks during warm-up?");
 
     // Withhold completions for ~1.3 s (≥ 2 intervals even after one
@@ -6246,7 +6447,11 @@ fn m4_24_d3_no_overlap_when_a_walk_outlives_its_interval() {
 fn m4_24_d3_retirement_stops_scans_and_a_fresh_group_rebaselines() {
     let (_dir, mut state, watch) = d3_scaffold("filewatchretire", None);
     let received = watch.join(".received");
-    d3_pump(&mut state, 900);
+    // `f1.txt` must land AFTER the baseline: wait for the baseline
+    // scan. Set to zero the drain this replaces fails at `watched file
+    // never reported before retirement`.
+    d3_install_scan_collector(&mut state);
+    d3_wait_for_scans(&mut state, 1);
 
     // Watched: f1 is reported.
     let f1_uri = format!("file://{}", watch.join("f1.txt").display());
@@ -6282,7 +6487,11 @@ fn m4_24_d3_retirement_stops_scans_and_a_fresh_group_rebaselines() {
         .exec()
         .expect("edit 1");
     d3_wait_for_walk_cancelled(&mut state);
-    // Drain the sleeps, then confirm scanning has stopped.
+    // RETAINED DRAINS (1400 ms, then 1500 ms). The assertion is that
+    // the walk count does NOT move, so the first drains the saturating
+    // sleeps out and the second is the window — several scan intervals
+    // wide — in which a group that kept dispatching would be seen to.
+    // Set either to zero the row still passes.
     d3_pump(&mut state, 1400);
     let after_retire = d3_walk_job_count(&state);
     d3_pump(&mut state, 1500);
@@ -6294,9 +6503,13 @@ fn m4_24_d3_retirement_stops_scans_and_a_fresh_group_rebaselines() {
 
     // Unwatched: f2 exists but must never be reported.
     std::fs::write(watch.join("f2.txt"), b"2\n").expect("write f2");
+    // RETAINED DRAIN (400 ms). "Never reported" is negative; this is
+    // the window a retired group would have to report `f2.txt` in. Set
+    // to zero the row still passes.
     d3_pump(&mut state, 400);
 
     // Second edit → re-register → fresh group, fresh baseline.
+    let scans_before_rereg = d3_scan_times(&state).len();
     state
         .lua_host
         .lua()
@@ -6306,7 +6519,11 @@ fn m4_24_d3_retirement_stops_scans_and_a_fresh_group_rebaselines() {
         )
         .exec()
         .expect("edit 2");
-    d3_pump(&mut state, 600);
+    // `f3.txt` must land after the FRESH group's baseline, so wait for
+    // a scan past the re-registration rather than for 600 ms: set to
+    // zero the drain this replaces fails at `the re-registered watcher
+    // never reported a fresh file`.
+    d3_wait_for_scans(&mut state, scans_before_rereg + 1);
     let f3_uri = format!("file://{}", watch.join("f3.txt").display());
     std::fs::write(watch.join("f3.txt"), b"3\n").expect("write f3");
     assert!(
@@ -6332,9 +6549,15 @@ fn m4_24_d3_retirement_stops_scans_and_a_fresh_group_rebaselines() {
 fn m4_24_d3_live_cancel_preserves_snapshot_and_cadence() {
     let (_dir, mut state, watch) = d3_scaffold("filewatch", None);
     let received = watch.join(".received");
-    // bar.txt is in the baseline; it must never produce an event.
+    // bar.txt is in the baseline; it must never produce an event. A
+    // scan that STARTED before the write completes with a snapshot
+    // that lacks it, so the wait is for the snapshot to carry the
+    // file, not for a scan to have happened — and not for 900 ms: set
+    // to zero the drain this replaces fails at `the change was lost
+    // after a live cancel`.
+    d3_install_scan_collector(&mut state);
     std::fs::write(watch.join("bar.txt"), b"b\n").expect("write bar");
-    d3_pump(&mut state, 900);
+    d3_wait_for_snapshot_containing(&mut state, "bar.txt");
 
     // Saturate the pool, then create the change and cancel the walk
     // that would observe it while it is still queued.
@@ -6408,6 +6631,7 @@ fn m4_24_d3_live_cancel_preserves_snapshot_and_cadence() {
 fn m4_24_d3_live_failure_reports_once_and_preserves_snapshot() {
     let (_dir, mut state, watch) = d3_scaffold("filewatch", Some("watched"));
     let received = watch.join(".received");
+    d3_install_scan_collector(&mut state);
     std::fs::write(watch.join("foo.txt"), b"f\n").expect("write foo");
     state
         .lua_host
@@ -6422,10 +6646,23 @@ fn m4_24_d3_live_failure_reports_once_and_preserves_snapshot() {
         )
         .exec()
         .expect("install failure counter");
-    d3_pump(&mut state, 900);
+    // The recovery half reads the snapshot retained across the
+    // failures, so foo.txt must be IN it: wait for the snapshot to
+    // carry the file rather than for 900 ms. Set to zero the drain
+    // this replaces fails at `the group did not resume scanning after
+    // the failure cleared`.
+    d3_wait_for_snapshot_containing(&mut state, "foo.txt");
 
     std::fs::remove_dir_all(&watch).expect("remove watch base");
-    d3_pump(&mut state, 1800);
+    // The count below is read after the failure has been reported, so
+    // wait for the report; set to zero the drain this replaces fails
+    // at `left: 0, right: 1`.
+    d3_wait_for_failures(&mut state, 1);
+    // RETAINED DRAIN (900 ms). "Exactly once, not per attempt" is a
+    // negative claim about the same counter: at the 250 ms floor this
+    // is three further failing scans in which a per-attempt report
+    // would climb.
+    d3_pump(&mut state, 900);
     let failures: i64 = state
         .lua_host
         .lua()
@@ -6497,7 +6734,23 @@ fn m4_24_d3_backoff_lengthens_quiet_gaps_and_a_change_resets() {
         "change never observed"
     );
     let observed_at: f64 = *d3_scan_times(&state).last().expect("scan times");
-    d3_pump(&mut state, 900);
+    // The gap below is measured between two scans at or after
+    // `observed_at`, so wait for that pair rather than for 900 ms: set
+    // to zero the drain this replaces fails at `no scan followed the
+    // change`.
+    ready::tick_until(
+        &mut state,
+        "two scans at or after the observed change",
+        ready::DEADLINE,
+        |s| {
+            let t = d3_scan_times(s);
+            if t.iter().filter(|&&x| x >= observed_at).count() >= 2 {
+                ready::Probe::Ready(())
+            } else {
+                ready::Probe::Pending(format!("scan times {t:?}, change at {observed_at}"))
+            }
+        },
+    );
     let t = d3_scan_times(&state);
     let post_gap = t
         .windows(2)
@@ -6611,7 +6864,12 @@ fn m4_24_d3_fallback_base_is_the_smallest_attachment_dir() {
         ),
         "fake never initialized"
     );
-    d3_pump(&mut state, 900);
+    // `hit.txt` must land AFTER the baseline: wait for the baseline
+    // scan. Set to zero the drain this replaces fails at `the fallback
+    // base must be the lexicographically smallest attachment
+    // directory`.
+    d3_install_scan_collector(&mut state);
+    d3_wait_for_scans(&mut state, 1);
 
     // The smaller directory is watched...
     let hit_uri = format!("file://{}", alpha.join("hit.txt").display());
@@ -6624,6 +6882,9 @@ fn m4_24_d3_fallback_base_is_the_smallest_attachment_dir() {
     );
     // ...and the larger one is not.
     std::fs::write(beta.join("miss.txt"), b"m\n").expect("write miss");
+    // RETAINED DRAIN (900 ms). "Must not be watched" is negative; this
+    // is the window a wrongly-chosen base would report `miss.txt` in.
+    // Set to zero the row still passes.
     d3_pump(&mut state, 900);
     assert!(
         !std::fs::read_to_string(&received)
@@ -6682,7 +6943,11 @@ fn m4_24_d3_configured_root_is_the_bare_string_base() {
         ),
         "fake never initialized"
     );
-    d3_pump(&mut state, 900);
+    // `root_hit.txt` must land AFTER the baseline: wait for the
+    // baseline scan. Set to zero the drain this replaces fails at `a
+    // bare-string watcher did not watch the CONFIGURED root`.
+    d3_install_scan_collector(&mut state);
+    d3_wait_for_scans(&mut state, 1);
 
     // Created before the top-level hit so the negative assertion after
     // the positive one is race-free (both land in the same or an
@@ -7650,12 +7915,9 @@ fn m4_shebang_edit_keeps_pinned_grammar() {
         )
         .exec()
         .expect("rewrite shebang to lua");
-    // Let the reparse settle (manual ticks: the tree stays bash with the
-    // pin, so a `pump_async` for a language *change* would time out).
-    for _ in 0..64 {
-        s.tick_async();
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    // RETAINED DRAIN (128 ms): the assertion below is that the grammar
+    // did NOT change, so this is a window, not a wait.
+    drain_async(&mut s, 128);
     assert_eq!(
         current_tree_language(&s).as_deref(),
         Some("bash"),
@@ -7690,10 +7952,7 @@ fn m4_shebang_edit_keeps_pinned_grammar() {
         ))
         .exec()
         .expect("switch away and back");
-    for _ in 0..64 {
-        s.tick_async();
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    drain_async(&mut s, 128);
     assert_eq!(
         current_tree_language(&s).as_deref(),
         Some("bash"),
@@ -7952,10 +8211,7 @@ fn m4_modeline_language_is_pinned_until_reopen() {
         .expect("edit loaded modeline");
     assert_eq!(language.as_deref(), Some("lua"));
     assert_eq!(mode.as_deref(), Some("lua"));
-    for _ in 0..64 {
-        s.tick_async();
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    drain_async(&mut s, 128);
     assert_eq!(current_tree_language(&s).as_deref(), Some("lua"));
 
     let (language, mode): (Option<String>, Option<String>) = s
@@ -8569,20 +8825,29 @@ fn m4_lua_bundle_debounces_did_change_per_keystroke() {
         .load("pmacs.hook.run('buffer.after-edit')")
         .exec()
         .expect("fire single after-edit");
-    std::thread::sleep(Duration::from_millis(120));
-    s.tick_async();
-    let (sent, version): (i64, i64) = s
-        .lua_host
-        .lua()
-        .load(
-            "
-            local n = #_G.__sent_did_changes
-            local v = n > 0 and _G.__sent_did_changes[n].version or -1
-            return n, v
-            ",
-        )
-        .eval()
-        .expect("count after tick");
+    // The quiet window (75 ms in the bundle) is a timer; tick until it
+    // has fired rather than sleeping past where it is expected to.
+    let (sent, version): (i64, i64) =
+        crate::ready::expect("the quiet-window flush", Duration::from_secs(10), || {
+            s.tick_async();
+            let (n, v): (i64, i64) = s
+                .lua_host
+                .lua()
+                .load(
+                    "
+                    local n = #_G.__sent_did_changes
+                    local v = n > 0 and _G.__sent_did_changes[n].version or -1
+                    return n, v
+                    ",
+                )
+                .eval()
+                .expect("count after tick");
+            if n >= 2 {
+                crate::ready::Probe::Ready((n, v))
+            } else {
+                crate::ready::Probe::Pending(format!("{n} sent, version {v}"))
+            }
+        });
     assert_eq!(sent, 2, "quiet-window tick flushes the pending didChange");
     assert_eq!(version, 5, "tick flush carries the post-edit version");
 }
@@ -10241,7 +10506,7 @@ fn rd8_recursive_delete_refuses_for_a_modified_descendant() {
 /// Criterion 9 — a *clean* recursive delete reconciles descendant
 /// buffers, through both removal phases.
 ///
-/// **Rewritten by dired Stage 2a** (`docs/dired-stage2-framing.md` §6,
+/// **Rewritten by dired Stage 2a** (the archived dired-stage2 framing §6,
 /// Q#RD27 / acceptance 23). This row previously pinned the opposite —
 /// that the descendant buffer stayed orphaned — and gave the reason:
 /// widening reconciliation would have routed N buffers through
@@ -11603,3 +11868,5 @@ fn rd22b_a_failing_resource_item_can_leave_filesystem_state() {
 // write into their real data root.
 #[path = "common/iso.rs"]
 mod iso;
+#[path = "common/ready.rs"]
+mod ready;

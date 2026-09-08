@@ -1,5 +1,5 @@
 //! Compile-mode acceptance (Arc 5 stage 1,
-//! docs/compile-mode-framing.md, items 1–33; item 34 lives as unit
+//! the archived compile-mode framing, items 1–33; item 34 lives as unit
 //! tests in src/process.rs, item 35 in
 //! `tests/compile_mode_crdt_acceptance.rs`).
 //!
@@ -421,7 +421,8 @@ fn acc04_stdin_eof_lets_cat_terminate() {
     );
     assert!(
         t0.elapsed() < Duration::from_secs(5),
-        "must not hang on piped stdin"
+        "must not hang on piped stdin; took {:?}",
+        t0.elapsed()
     );
 }
 
@@ -685,6 +686,14 @@ fn acc13_unterminated_final_line_still_parses() {
     // No trailing newline: complete at EOF, parsed at the terminal
     // event (bite: fails without the finalization pass).
     compile_and_finish(&mut s, "printf 'x.c:3:1: error: no newline'", dir.path());
+    // The exit marker is appended by the terminal event; the unterminated
+    // line is parsed by the finalization pass at that same event. Wait
+    // for the unit the assertion reads, not for the marker.
+    assert!(
+        pump_until(&mut s, 10_000, |s| !compile_errors(s).is_empty()),
+        "the finalization pass never parsed the unterminated line; buffer:\n{}",
+        compilation_text(&s)
+    );
     assert_eq!(
         compile_errors(&s),
         vec![("x.c".to_owned(), 2, 0, Some("error".to_owned()))],

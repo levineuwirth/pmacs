@@ -733,20 +733,16 @@ fn wait_for_published_file(
     timeout: Duration,
     startup: &[(&str, &Path)],
 ) -> Vec<u8> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(bytes) = settled_file(path, expected) {
-            return bytes;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "child never published {expected:?} to {} within {timeout:?}\n  \
-             last read: {:?}\n  startup: {}",
-            path.display(),
-            fs::read(path).ok(),
-            describe_startup(pty, startup)
-        );
-        thread::sleep(Duration::from_millis(20));
+    match common::ready::wait(
+        &format!("the child publishing {expected:?} to {}", path.display()),
+        timeout,
+        || match settled_file(path, expected) {
+            Some(bytes) => common::ready::Probe::Ready(bytes),
+            None => common::ready::Probe::Pending(format!("{:?}", fs::read(path).ok())),
+        },
+    ) {
+        Ok(bytes) => bytes,
+        Err(timeout) => panic!("{timeout}\n  startup: {}", describe_startup(pty, startup)),
     }
 }
 
@@ -768,19 +764,14 @@ fn wait_for_published_file(
 /// content is reported as a diff by the test that owns the expectation,
 /// not as a timeout in a helper that does not.
 fn wait_for_file(path: &Path, expected: &[u8], timeout: Duration) -> Vec<u8> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(bytes) = settled_file(path, expected) {
-            return bytes;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "file never settled: {} (expected {expected:?}, last read {:?})",
-            path.display(),
-            fs::read(path).ok()
-        );
-        thread::sleep(Duration::from_millis(20));
-    }
+    common::ready::expect(
+        &format!("{} settling on {expected:?}", path.display()),
+        timeout,
+        || match settled_file(path, expected) {
+            Some(bytes) => common::ready::Probe::Ready(bytes),
+            None => common::ready::Probe::Pending(format!("{:?}", fs::read(path).ok())),
+        },
+    )
 }
 
 /// `Some(bytes)` once `path` is readable and no longer a write in
@@ -1044,7 +1035,9 @@ fn real_tui_terminal_smoke_restores_host_after_output_input_resize_scroll_copy_a
         .wait_for_exit(Duration::from_secs(5))
         .expect("pmacs should exit after terminal smoke");
     assert!(status.success(), "pmacs exit status: {status:?}");
-    thread::sleep(Duration::from_millis(50));
+    // The reader thread drains the master after the child has exited;
+    // wait for the bytes the assertions below read, not for a moment.
+    wait_for_output(&mut pty, b"\x1b[?1049h", Duration::from_secs(5), startup);
     let output = pty.output();
     assert!(
         output.windows(8).any(|window| window == b"\x1b[?1049h"),

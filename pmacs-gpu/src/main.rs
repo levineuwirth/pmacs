@@ -4071,7 +4071,7 @@ fn route_key_action(state: ElementState) -> KeyAction {
 }
 
 /// The pointer family — Session M-2 pointer input, see
-/// `docs/pmacs-gpu-mouse-framing.md`.
+/// `docs/archive/framings/pmacs-gpu-mouse-framing.md`.
 ///
 /// The button discrimination used to live in the shape of two
 /// overlapping `MouseInput` match arms — left in **either** state, right
@@ -6129,7 +6129,7 @@ fn optimistic_delete_range(
 /// binding (`buffer.tab`) reduces to a plain `insert_char(9)` —
 /// byte-identical to a self-insert, so the local application cannot
 /// diverge from what the daemon will do with the same op. `Enter`
-/// does NOT: since Q#AI1 (docs/auto-indent-framing.md) RET binds
+/// does NOT: since Q#AI1 (docs/archive/framings/auto-indent-framing.md) RET binds
 /// `edit.newline-and-indent`, whose inserted text depends on the
 /// current line's indentation — and round-tripping is also what makes
 /// RET rebindings (e.g. the buffer list's visit binding) reachable
@@ -14208,7 +14208,7 @@ fn is_motion_key(key: ProtocolKey) -> bool {
 }
 
 /// Whether to forward a translated key to the daemon (session B2).
-/// Motion keys go through with any modifiers (C-<left> is word
+/// Motion keys go through with any modifiers `(C-<left>` is word
 /// motion). Deletion keys do too: C-BS / C-DEL / M-BS are word-level
 /// deletes in the default keymap — the same editing-command family as
 /// chorded motion, and an unbound chord is a harmless no-op at the
@@ -15454,7 +15454,7 @@ fn diagnostic_severity_rank(kind: DecorationKind) -> Option<u8> {
 ///
 /// Session 9.1 shipped `Selection`; session 9.2 adds `CurrentLine`.
 /// `SearchMatch` / `SearchMatchActive` wait on a search feature in
-/// pmacs core (Q#4 in `docs/pmacs-gpu-quad-backgrounds-framing.md`),
+/// pmacs core (Q#4 in `docs/archive/framings/pmacs-gpu-quad-backgrounds-framing.md`),
 /// so they continue to return `None` here.
 #[allow(clippy::match_same_arms)] // each `None` arm has a distinct rationale comment.
 fn decoration_kind_to_bg_color(kind: DecorationKind) -> Option<[f32; 4]> {
@@ -19361,7 +19361,7 @@ mod tests {
         assert_eq!(after[2].1, Color::rgb(20, 220, 40));
     }
 
-    /// Worker identity Stage 1 (`docs/worker-identity-framing.md` §6):
+    /// Worker identity Stage 1 (`docs/archive/framings/worker-identity-framing.md` §6):
     /// the GPU half of "both frontends render the segment".
     ///
     /// The activity indicator adds no wire message — it rides the

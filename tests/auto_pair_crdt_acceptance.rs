@@ -1,6 +1,6 @@
 // auto_pair_crdt_acceptance.rs --- auto-pairing over the wire.
 
-//! Auto-pairing two-replica acceptance (docs/auto-pairing-framing.md):
+//! Auto-pairing two-replica acceptance (the archived auto-pairing framing):
 //! a synthetic source replica plus a synthetic observer replica against
 //! a real daemon subprocess.
 //!

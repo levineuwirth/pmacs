@@ -1,0 +1,82 @@
+#!/bin/sh
+# scripts/perf-budgets --- run every wall-clock budget test, by exact name.
+#
+#   scripts/perf-budgets            # debug, the way `scripts/gate --perf` runs it
+#   scripts/perf-budgets --release  # the way the perf CI jobs run it
+#
+# A budget asserts speed: a composition ratio, a per-keystroke time, a
+# supersede window, a parse or render bound. Every one is `#[ignore]` so
+# the default sweep carries no assertion that load can fail, and every
+# one keeps its `eprintln!` measurement. This script is the single list
+# of them, read by `scripts/gate --perf` and by CI's `perf-default` job,
+# so the two cannot run different sets.
+#
+# THE LIST IS BY EXACT NAME, and the run asserts that each name ran. A
+# renamed or deleted test would otherwise turn into `running 0 tests`,
+# which libtest reports as `ok` --- a green that means nothing. The
+# release perf jobs for whole suites (`--test acceptance -- --ignored`,
+# the m4, m5, m6 and m10 gates) are unchanged and not duplicated here.
+set -u
+
+profile=''
+case ${1:-} in
+    --release) profile=--release ;;
+    '') ;;
+    *) echo "usage: scripts/perf-budgets [--release]" >&2; exit 2 ;;
+esac
+
+# One line per invocation: the cargo target selector, then the exact
+# test names it runs. Library tests carry their module path.
+budgets() {
+    cat <<'EOF'
+--lib	editor::tests::composition_overhead_under_ten_percent
+--lib	optimistic::tests::criterion_1_end_of_line_typing_completes_sub_frame_per_keystroke
+--lib	async_runtime::tests::supersede_cancels_in_flight_job_within_50ms
+--lib	async_runtime::tests::grep_supersede_cancels_predecessor_within_50ms
+--lib	async_runtime::tests::dispatch_parse_stays_under_the_parse_budget
+--lib	semantic_render::tests::full_buffer_summary_flatten_scales_on_large_grammar_file
+--lib	project_index::tests::search_one_million_symbols_under_one_second
+--lib	message_bus::tests::round_trip_latency_is_within_budget
+--test dired_acceptance	dired_renders_10k_entries_within_200ms
+--test m8_2_acceptance	dired_open_renders_10k_entries_under_200ms
+--test m8_9_acceptance	outline_5_level_100_entry_renders_within_100ms
+--test m8_6_acceptance	magit_status_refreshes_after_external_commit_within_500ms
+--test m10_10_perf	m10_10_apply_remote_crdt_op_at_1kb m10_10_apply_remote_crdt_op_at_100kb m10_10_apply_remote_crdt_op_at_1mb
+--test m4_acceptance	m4_6_diagnostics_arrive_within_500ms m4_10_search_under_one_second_for_100k_files m4_1_dispatch_parse_via_runtime_stays_under_the_parse_budget
+--test m7_9_acceptance	lint_completes_in_under_one_second_on_thousand_line_package
+--test injection_acceptance	many_paragraph_settle_under_budget_with_tail_covered
+EOF
+}
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/perf-budgets.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT INT TERM
+
+failed=0
+ran_total=0
+budgets | while IFS="$(printf '\t')" read -r target names; do
+    set -- $names
+    expected=$#
+    log="$work/$(printf '%s' "$target" | tr ' -' '__').log"
+    # shellcheck disable=SC2086
+    if cargo test $profile $target -- --ignored --exact "$@" > "$log" 2>&1; then
+        verdict=ok
+    else
+        verdict=FAILED
+    fi
+    ran=$(grep -E '^running [0-9]+ tests?$' "$log" | awk '{s+=$2} END {print s+0}')
+    if [ "$ran" -ne "$expected" ]; then
+        verdict="FAILED (ran $ran of $expected: a name no longer matches)"
+    fi
+    printf 'perf-budgets: %-28s %s\n' "$target" "$verdict"
+    grep -E '^test result:|^test .* (ok|FAILED)$|took|latency|ratio|per keystroke' "$log" | sed 's/^/perf-budgets:     /'
+    case $verdict in
+        ok) ;;
+        *) echo "perf-budgets:     log: $log"; cat "$log" | tail -n 30 | sed 's/^/perf-budgets:     /'; echo "$target" >> "$work/failed" ;;
+    esac
+done
+
+if [ -s "$work/failed" ]; then
+    echo "perf-budgets: FAILED: $(tr '\n' ' ' < "$work/failed")" >&2
+    exit 1
+fi
+echo "perf-budgets: every budget ran and held"

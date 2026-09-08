@@ -181,8 +181,9 @@ fn build_5_level_100_entry_text() -> String {
     s
 }
 
-#[test]
-fn outline_5_level_100_entry_renders_within_100ms() {
+/// Open a five-level, hundred-entry outline; asserts the parse and the
+/// paint and returns how long `open()` took.
+fn open_5_level_100_entry_outline() -> Duration {
     let (mut state, _c, _u) = editor_with_outline();
     let text = build_5_level_100_entry_text();
     let start = Instant::now();
@@ -208,26 +209,23 @@ fn outline_5_level_100_entry_renders_within_100ms() {
         .expect("vis len");
     assert!(vis_len > 0, "visible buffer must be populated by open()");
 
-    // The measurement always runs and is always reported, so a real
-    // regression is still visible in the CI log on every platform.
-    eprintln!("outline open() (parse + render): {elapsed:?} (spec budget 100ms)");
+    elapsed
+}
 
-    // The wall-clock ASSERTION is skipped on macOS, matching the existing
-    // precedent for `composition_overhead_under_ten_percent`
-    // (`src/editor.rs`), which is gated the same way for the same reason.
-    // GitHub's macOS runners are shared and heavily contended: this budget
-    // is the single largest source of CI red on `main` after the vterm PTY
-    // smoke, observed at 147ms and 149ms against a 100ms budget while the
-    // Linux runners land comfortably under it. Keeping the assertion here
-    // trains everyone to ignore red CI, which costs more than the budget
-    // catches — a genuine parse/render regression shows up on Linux, on the
-    // perf gates, and in the number printed above.
-    if !cfg!(target_os = "macos") {
-        assert!(
-            elapsed < Duration::from_millis(100),
-            "open() (parse + render) took {elapsed:?}; spec budget is 100ms"
-        );
-    }
+#[test]
+fn outline_5_level_100_entry_renders() {
+    let elapsed = open_5_level_100_entry_outline();
+    eprintln!("outline open() (parse + render): {elapsed:?} (spec budget 100ms)");
+}
+
+#[test]
+#[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
+fn outline_5_level_100_entry_renders_within_100ms() {
+    let elapsed = open_5_level_100_entry_outline();
+    assert!(
+        elapsed < Duration::from_millis(100),
+        "open() (parse + render) took {elapsed:?}; spec budget is 100ms"
+    );
 }
 
 // ---------------------------------------------------------------------------

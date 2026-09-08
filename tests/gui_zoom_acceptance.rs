@@ -1,4 +1,4 @@
-//! GUI zoom acceptance (`QoL` Stage 2, `docs/gui-zoom-framing.md`).
+//! GUI zoom acceptance (`QoL` Stage 2, the archived gui-zoom framing).
 //!
 //! Zoom drives the font preference that already existed: `set_font`
 //! writes it, `semantic_render` relays it as `FontFacts` at v17, and the

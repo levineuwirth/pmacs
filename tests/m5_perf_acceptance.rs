@@ -63,9 +63,8 @@ use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::thread;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
@@ -84,7 +83,8 @@ use pmacs::transport::{TransportError, read_message, write_message};
 struct TestDaemon {
     _tempdir: TempDir,
     socket_path: PathBuf,
-    process: Child,
+    // Held for its Drop, which reaps the daemon's process group.
+    _process: reap::Reaped,
 }
 
 impl TestDaemon {
@@ -93,8 +93,8 @@ impl TestDaemon {
         fs::set_permissions(tempdir.path(), fs::Permissions::from_mode(0o700))
             .expect("chmod tempdir 0700");
         let socket_path = tempdir.path().join("pmacs.sock");
-        let process = Command::new(env!("CARGO_BIN_EXE_pmacs"))
-            .args(["--daemon", "--socket"])
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_pmacs"));
+        cmd.args(["--daemon", "--socket"])
             .arg(&socket_path)
             .env("HOME", tempdir.path())
             .env("XDG_CONFIG_HOME", tempdir.path())
@@ -103,47 +103,23 @@ impl TestDaemon {
             .env("PMACS_STATE_HOME", tempdir.path())
             .env("XDG_CACHE_HOME", tempdir.path())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn pmacs --daemon");
-        wait_for_socket(&socket_path, Duration::from_secs(10)).expect("daemon socket appears");
+            .stderr(Stdio::null());
+        // In its own process group, reaped with everything it spawned
+        // when the fixture drops (`tests/common/reap.rs`).
+        let process = reap::Reaped::spawn(&mut cmd).expect("spawn pmacs --daemon");
+        let mut process = process;
+        ready::wait_for_daemon(&socket_path, process.child(), Duration::from_secs(10))
+            .expect("daemon socket appears");
         Self {
             _tempdir: tempdir,
             socket_path,
-            process,
+            _process: process,
         }
     }
 
     fn connect(&self) -> UnixStream {
         UnixStream::connect(&self.socket_path).expect("connect")
     }
-}
-
-impl Drop for TestDaemon {
-    fn drop(&mut self) {
-        let _ = self.process.kill();
-        let _ = self.process.wait();
-    }
-}
-
-fn wait_for_socket(socket: &Path, timeout: Duration) -> Result<(), String> {
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        if let Ok(mut stream) = UnixStream::connect(socket) {
-            // Probe by reading the Hello so the daemon's send doesn't
-            // log a warning to stderr.
-            stream
-                .set_read_timeout(Some(Duration::from_millis(500)))
-                .ok();
-            let _ = read_message::<Hello>(&mut stream);
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-    Err(format!(
-        "socket did not appear within {}ms",
-        timeout.as_millis()
-    ))
 }
 
 fn build_default_caps() -> FrontendCapabilities {
@@ -286,3 +262,9 @@ fn keystroke_to_render_p99_under_10ms_over_loopback_local_socket() {
          p50={p50:?}, p90={p90:?}, max={max:?}"
     );
 }
+
+#[path = "common/reap.rs"]
+mod reap;
+
+#[path = "common/ready.rs"]
+mod ready;

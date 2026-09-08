@@ -1,5 +1,5 @@
 // theme_faces_acceptance.rs --- Themes Arc 4 stage 1 acceptance
-// (docs/theme-faces-framing.md, acceptance items 1–19, 24–26, 28–29,
+// (the archived theme-faces framing, acceptance items 1–19, 24–26, 28–29,
 // and 32–33; the GPU routes — 20–23, 27, and 30–31 — live in
 // pmacs-gpu's headless suite; item 34 is a `DiagnosticStore` unit in
 // src/diag.rs).

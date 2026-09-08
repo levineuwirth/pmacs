@@ -23,9 +23,9 @@
 //! [`READDIR_CANCEL_POLL_EVERY`] entries. A directory of 10K entries
 //! observes cancel within a few hundred microseconds; the per-entry
 //! overhead from polling is dominated by the underlying syscalls.
-//! On cancel the function returns [`Err(FsError::Cancelled)`] and
+//! On cancel the function returns `Err(FsError::Cancelled)` and
 //! the runtime translates that into the standard
-//! [`crate::async_runtime::ReplyKind::Cancelled`] settled state.
+//! `crate::async_runtime::ReplyKind::Cancelled` settled state.
 
 use std::io;
 use std::path::Path;

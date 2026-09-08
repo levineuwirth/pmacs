@@ -15,7 +15,7 @@
 //! (Q#AS11) — they hold *unsaved file contents*, a different class of
 //! secret from saveplace's cursor offsets.
 //!
-//! Framing: docs/autosave-recovery-framing.md.
+//! Framing: docs/archive/framings/autosave-recovery-framing.md.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

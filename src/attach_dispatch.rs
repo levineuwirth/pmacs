@@ -83,7 +83,7 @@ impl AttachDispatch {
 }
 
 /// Decide what to do with the (optional) attach request consumed
-/// from `init.lua`'s [`pmacs::lua_bindings::RequestedAttach`] slot.
+/// from `init.lua`'s `pmacs::lua_bindings::RequestedAttach` slot.
 ///
 /// Pure function: takes the parsed target, returns the dispatch
 /// outcome. The wrapping `editor::run` is responsible for actually

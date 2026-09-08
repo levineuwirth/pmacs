@@ -210,8 +210,9 @@ fn magit_status_renders_five_sections_on_typical_repo() {
 // Bullet 2 --- refresh after external commit reflects new state within 500 ms
 // ---------------------------------------------------------------------------
 
-#[test]
-fn magit_status_refreshes_after_external_commit_within_500ms() {
+/// Open a status buffer, commit externally, and pump until the buffer
+/// reflects the commit or `deadline` passes; returns the latency.
+fn refresh_after_external_commit(deadline: Duration) -> Duration {
     let repo = make_test_repo();
     let (mut state, _c, _u) = editor_with_magit();
     open_status(&mut state, repo.path());
@@ -232,9 +233,7 @@ fn magit_status_refreshes_after_external_commit_within_500ms() {
     git_run(repo.path(), &["add", "README.md"]);
     git_run(repo.path(), &["commit", "-m", "second commit"]);
 
-    // Pump until the polling loop reflects the new commit. Acceptance
-    // budget is 500 ms; we use 750 ms to keep the test from being
-    // flaky on slow CI while still failing if polling is broken.
+    // Pump until the polling loop reflects the new commit.
     let started = Instant::now();
     pump_until_with_deadline(
         &mut state,
@@ -251,13 +250,27 @@ fn magit_status_refreshes_after_external_commit_within_500ms() {
                 .eval::<bool>()
                 .unwrap_or(false)
         },
-        Duration::from_millis(750),
+        deadline,
     );
-    let elapsed = started.elapsed();
-    // Soft check on latency: the polling cadence is 250 ms, so on
-    // a healthy run we settle in well under 500 ms. Anything past
-    // 750 ms means the polling loop isn't running --- the deadline
-    // above already enforces that.
+    started.elapsed()
+}
+
+/// Bullet 2, the deadline half: the status buffer refreshes after an
+/// external commit. The polling cadence is 250 ms; ten seconds is the
+/// deadline for it to have happened at all.
+#[test]
+fn magit_status_refreshes_after_external_commit() {
+    let elapsed = refresh_after_external_commit(Duration::from_secs(10));
+    eprintln!("magit status refreshed {elapsed:?} after the external commit");
+}
+
+#[test]
+#[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
+fn magit_status_refreshes_after_external_commit_within_500ms() {
+    // Acceptance budget is 500 ms; 750 ms keeps the assertion clear of
+    // one polling period of jitter while still failing if polling is
+    // slow.
+    let elapsed = refresh_after_external_commit(Duration::from_millis(750));
     assert!(
         elapsed < Duration::from_millis(750),
         "refresh latency {elapsed:?} exceeded 750 ms budget"

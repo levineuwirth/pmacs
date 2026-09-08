@@ -10,7 +10,7 @@
 -- `pmacs.saveplace.enable(false)`. Inert when no state dir is
 -- configured (cfg(test) / no HOME), so the lib suite writes nothing.
 --
--- Framing: docs/persistence-framing.md.
+-- Framing: docs/archive/framings/persistence-framing.md.
 
 pmacs.saveplace = pmacs.saveplace or {}
 

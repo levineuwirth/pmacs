@@ -11,7 +11,7 @@
 //! expansions appear"; **folding is the first**.
 //!
 //! This module is that map — **one derivation/query primitive**
-//! (`docs/folding-stage2-framing.md` Q#FD12), derived from
+//! (`docs/archive/framings/folding-stage2-framing.md` Q#FD12), derived from
 //! [`crate::fold::FoldRegistry::folds`] plus the buffer's line offsets
 //! and **never stored**: the byte-range store in [`crate::fold`] stays
 //! the single source of truth. Instances are short-lived and built

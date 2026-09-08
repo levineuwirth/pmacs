@@ -1,4 +1,4 @@
-//! Kill-ring acceptance (Arc 2, docs/kill-ring-framing.md rev 3).
+//! Kill-ring acceptance (Arc 2, the archived kill-ring framing rev 3).
 //!
 //! Drives the real dispatch surfaces: `dispatch_key` for chords (both
 //! "frontends" via distinct `FrontendId`s — an unregistered id falls

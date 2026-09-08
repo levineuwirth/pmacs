@@ -1,5 +1,5 @@
 //! Shared SIGINT-guard conformance vectors
-//! (`docs/gpu-probe-sigint-framing.md` §7c).
+//! (the archived gpu-probe-sigint framing §7c).
 //!
 //! # Why these live here rather than in each suite
 //!

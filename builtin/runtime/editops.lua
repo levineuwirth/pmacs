@@ -3,7 +3,7 @@
 -- goto-line, case ops, transpose, zap-to-char (a kill-chain member;
 -- killring owns the ring surface), line move/duplicate/join, region
 -- sort/reverse/dedupe, and delete-trailing-whitespace with an opt-in
--- trim-on-save hook. Framing: docs/editing-conveniences-framing.md
+-- trim-on-save hook. Framing: docs/archive/framings/editing-conveniences-framing.md
 -- (Q#EC1..Q#EC10).
 --
 -- House disciplines this file leans on:

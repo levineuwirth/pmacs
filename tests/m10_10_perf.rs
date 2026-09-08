@@ -64,6 +64,7 @@ fn measure_apply_remote(size: usize) -> std::time::Duration {
 }
 
 #[test]
+#[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
 fn m10_10_apply_remote_crdt_op_at_1kb() {
     let elapsed = measure_apply_remote(1024);
     let us = elapsed.as_micros();
@@ -77,6 +78,7 @@ fn m10_10_apply_remote_crdt_op_at_1kb() {
 }
 
 #[test]
+#[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
 fn m10_10_apply_remote_crdt_op_at_100kb() {
     let elapsed = measure_apply_remote(100 * 1024);
     let us = elapsed.as_micros();
@@ -91,6 +93,7 @@ fn m10_10_apply_remote_crdt_op_at_100kb() {
 }
 
 #[test]
+#[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
 fn m10_10_apply_remote_crdt_op_at_1mb() {
     // The 1MB case stresses the path. Under M10.2's 391× finding,
     // byte-native loro operations on multi-MB buffers can take tens

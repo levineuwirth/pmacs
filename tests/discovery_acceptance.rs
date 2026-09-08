@@ -2,7 +2,7 @@
 
 //! `COHERENCE.md` §5 graded discoverability "substrate without surface".
 //! These pins cover the surface:
-//! `docs/discovery-stage1-command-family-framing.md` §4.
+//! the archived discovery-stage1-command-family framing §4.
 //!
 //! **Every command is driven through the real M-x path**, stated once in
 //! `run_from_palette` below. `pmacs.command.invoke_interactive` is *not*

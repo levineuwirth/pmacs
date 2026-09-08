@@ -28,7 +28,7 @@
 //! # Per-attach handler (M5.5f)
 //!
 //! After [`Hello`] / [`AttachRequest`] / version-check / already-attached
-//! checks succeed, the connection enters [`run_per_attach`]:
+//! checks succeed, the connection enters `run_per_attach`:
 //!
 //! - A reader thread blocks on [`crate::transport::read_message`] and
 //!   forwards each [`FrontendEvent`] into an `mpsc` channel.

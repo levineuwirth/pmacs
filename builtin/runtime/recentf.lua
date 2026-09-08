@@ -10,7 +10,7 @@
 -- `pmacs.recentf.enable(false)`. Inert when no state dir is configured
 -- (cfg(test) / no HOME).
 --
--- Framing: docs/persistence-framing.md.
+-- Framing: docs/archive/framings/persistence-framing.md.
 
 pmacs.recentf = pmacs.recentf or {}
 

@@ -587,6 +587,7 @@ mod tests {
     /// (a String topic, a clone of the registry `HashMap`, a Box
     /// per send, etc).
     #[test]
+    #[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
     fn round_trip_latency_is_within_budget() {
         const ITERS: usize = 5_000;
         let reg = registry_with::<u32>("ping");

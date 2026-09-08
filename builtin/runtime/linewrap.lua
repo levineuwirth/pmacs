@@ -1,4 +1,4 @@
--- Long lines (QoL Stage 3, framing docs/long-lines-framing.md).
+-- Long lines (QoL Stage 3, framing docs/archive/framings/long-lines-framing.md).
 --
 -- Declares `ui.line-wrap`. Everything that honors it is Rust: the grid
 -- renderer walks it through `Viewport`, the coordinate mapping takes it

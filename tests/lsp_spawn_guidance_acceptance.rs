@@ -7,7 +7,7 @@
 //!
 //! Pins are labelled **N** (new behaviour, must fail on full revert) or
 //! **P** (preservation, falsified by a named targeted mutation), per
-//! `docs/journey-stage1b2-lsp-guidance-framing.md` §4.
+//! the archived journey-stage1b2-lsp-guidance framing §4.
 //!
 //! **Every fixture points the config at a path that does not exist**,
 //! rather than relying on a real server's absence — a developer with

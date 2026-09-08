@@ -1,7 +1,7 @@
 # GPU probe SIGINT lane — run manifest
 
 Every physical run behind
-`docs/gpu-probe-sigint-framing.md` §4. Pushed so the evidence travels;
+`docs/archive/framings/gpu-probe-sigint-framing.md` §4. Pushed so the evidence travels;
 the log bodies stay machine-local under
 `/home/jeans/build/pmacs-gate-targets/probe-sigint-evidence/` and are
 identified here by SHA-256 prefix and byte count.

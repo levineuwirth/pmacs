@@ -1,5 +1,5 @@
 //! The global GPU font preference (Arc 4 stage 2, framing Q#F3,
-//! `docs/gpu-set-font-framing.md`).
+//! `docs/archive/framings/gpu-set-font-framing.md`).
 //!
 //! One daemon-side preference — family name and/or size — written by
 //! `pmacs.gpu.set_font` and read by the `semantic_render` producer,

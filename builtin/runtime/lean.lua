@@ -1,6 +1,6 @@
 -- builtin/runtime/lean.lua --- Arc 8 Stage 3b: the Lean 4 language server.
 --
--- Framing: `docs/lean4-mode-framing.md` Q#LN7 (lake serve + probe +
+-- Framing: `docs/archive/framings/lean4-mode-framing.md` Q#LN7 (lake serve + probe +
 -- fallback latch), Q#LN8 (Lake-aware outermost root), Q#LN16
 -- (waitForDiagnostics). Stage 1 shipped the grammar, mode, comment
 -- strings and pair set; Stage 3a shipped the notification/response

@@ -77,14 +77,17 @@ multiple_crate_versions = "allow"
 # with a friendlier message — the fix is to build one flavor. See the
 # feature matrix in README.md; build a non-default flavor with
 # `--no-default-features --features lua54` (audit F-002).
-default = ["luajit"]
+default = ["luajit", "crdt"]
 luajit = ["mlua/luajit", "mlua/vendored"]
 lua54 = ["mlua/lua54", "mlua/vendored"]
-# T M10.2: gate the CRDT-backed buffer mode behind an opt-in feature
-# so v0.1 builds carry zero CRDT overhead (no loro dependency, no
-# field on the Buffer struct layout, no branch on apply_edit). v1.0
-# builds enable `crdt`; the rope-projection redirect from M10.1 means
-# the feature flip is invisible to v0.1 frontends and to workers.
+# `crdt` is a DEFAULT feature: `pmacs --gpu` and optimistic typing over
+# the wire need it, so a plain `cargo build` must produce a binary that
+# has it. The non-crdt build stays a stated, buildable option
+# (`--no-default-features --features luajit`), checked locally by
+# `scripts/gate --protocol` and by one CI leg; it carries no loro
+# dependency, no field on the Buffer struct layout and no branch on
+# apply_edit, and the rope-projection redirect keeps the flip invisible
+# to grid frontends and to workers.
 crdt = ["dep:loro", "pmacs-protocol/crdt"]
 
 [dependencies]
@@ -220,7 +223,7 @@ tree-sitter-yaml = "0.7"
 tree-sitter-md = "0.5"
 # LaTeX / TeX (`.tex`/`.latex`/`.sty`/`.cls`) — the "basic LaTeX mode"
 # foothold and the tier-1 detection substrate for the inline-math arc (lane
-# framing `docs/latex-grammar-math-substrate-framing.md`). The canonical crate name
+# framing `docs/archive/framings/latex-grammar-math-substrate-framing.md`). The canonical crate name
 # `tree-sitter-latex` is squatted by a broken 0.1.0 repackage that ships no
 # `scanner.c` for its declared external tokens and therefore CANNOT LINK
 # (undefined `tree_sitter_latex_external_scanner_*`). `codebook-tree-sitter-latex`
@@ -241,7 +244,7 @@ codebook-tree-sitter-latex = "0.6"
 # engine (see `crate::syntax::BUILTIN_LANGUAGES`).
 tree-sitter-html = "0.23"
 tree-sitter-css = "0.25"
-# Lean 4 (`.lean`) — Arc 8 Stage 1 (`docs/lean4-mode-framing.md`, Q#LN1).
+# Lean 4 (`.lean`) — Arc 8 Stage 1 (`docs/archive/framings/lean4-mode-framing.md`, Q#LN1).
 # `leanprover` ships no tree-sitter grammar (Lean parses with its own
 # kernel), so both candidates are third-party. The obvious-looking
 # `tree-sitter-lean4` is NOT usable: it depends on `tree-sitter = "0.25"`

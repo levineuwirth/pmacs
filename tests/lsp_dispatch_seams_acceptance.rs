@@ -1,7 +1,7 @@
 //! Arc 8 Stage 3a acceptance — LSP notification/response dispatch seams
 //! and `pmacs.fs.canonicalize`.
 //!
-//! `docs/lean4-mode-framing.md` Q#LN9 and Q#LN20, acceptance 29–34 plus
+//! the archived lean4-mode framing Q#LN9 and Q#LN20, acceptance 29–34 plus
 //! 34a/34b.
 //!
 //! This suite deliberately contains **no Lean content**.
@@ -17,7 +17,6 @@
 //! a "markerless" case silently detected.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use pmacs::editor::EditorState;
 
@@ -99,16 +98,80 @@ fn open(state: &EditorState, path: &Path) {
     );
 }
 
-/// `tick_async` is what drives the drain: `handle_server_requests` is
-/// wrapped onto `pmacs._async.tick`, so a settle loop without it moves
-/// the LSP state machine while never delivering a single event to Lua.
-fn settle(state: &mut EditorState) {
-    for _ in 0..8 {
-        state.tick_processes();
-        state.tick_lsp();
-        state.tick_async();
-        std::thread::sleep(Duration::from_millis(2));
-    }
+// --- readiness waits --------------------------------------------------------
+//
+// Each wait ticks the editor's frame order until its predicate holds or
+// `ready::DEADLINE` passes, and reports the elapsed time and the last
+// observed state when it does not (tests/common/ready.rs). The fixed
+// `for _ in 0..8 { tick(); sleep(2ms) }` loop these replace bet 16 ms on the
+// fake server's speed and lost that bet under load, with an assertion
+// failure that named the result of the race and not the race.
+
+/// Tick until exactly `n` servers are listed.
+fn wait_count(state: &mut EditorState, n: i64) {
+    ready::tick_until(
+        state,
+        &format!("{n} listed server(s)"),
+        ready::DEADLINE,
+        |s| {
+            let count = server_count(s);
+            if count == n {
+                ready::Probe::Ready(())
+            } else {
+                ready::Probe::Pending(format!("{count} listed"))
+            }
+        },
+    );
+}
+
+/// Tick until the active buffer has an attachment whose server has
+/// initialized. A reuse assertion asks what the attach decided, so the
+/// attachment is its readiness event; the server must also be
+/// initialized, because the fixed settle this replaced gave the fake
+/// server that time and three lean4 rows fail against a server still
+/// starting. The server count is asserted afterwards.
+fn wait_attached(state: &mut EditorState) {
+    ready::tick_until(
+        state,
+        "an initialized attachment for the active buffer",
+        ready::DEADLINE,
+        |s| {
+            let kind: String = eval(
+                s,
+                r#"
+                local rec = pmacs.lsp.active_attachment()
+                if not rec then return "none" end
+                for _, srv in ipairs(pmacs.lsp.list()) do
+                  if tostring(srv.id) == tostring(rec.server) then
+                    return tostring(srv.state and srv.state.kind)
+                  end
+                end
+                return "gone"
+                "#,
+            );
+            if kind == "initialized" {
+                ready::Probe::Ready(())
+            } else {
+                ready::Probe::Pending(format!("attachment state {kind}"))
+            }
+        },
+    );
+}
+
+/// Tick until the Lua expression `source` evaluates to a value `accept`
+/// approves of; returns that value.
+fn wait_eval<T>(state: &mut EditorState, what: &str, source: &str, accept: impl Fn(&T) -> bool) -> T
+where
+    T: mlua::FromLuaMulti + std::fmt::Debug,
+{
+    ready::tick_until(state, what, ready::DEADLINE, |s| {
+        let value: T = eval(s, source);
+        if accept(&value) {
+            ready::Probe::Ready(value)
+        } else {
+            ready::Probe::Pending(format!("{value:?}"))
+        }
+    })
 }
 
 /// A rust project with one file, an attached fake server, and the
@@ -119,7 +182,21 @@ fn attached_rust(state: &mut EditorState, fx: &Fixture) -> PathBuf {
     fx.bind(state);
     configure(state, "rust");
     open(state, &file);
-    settle(state);
+    wait_eval::<String>(
+        state,
+        "the attachment initialized",
+        r#"
+        local rec = pmacs.lsp.active_attachment()
+        if not rec then return "none" end
+        for _, s in ipairs(pmacs.lsp.list()) do
+          if tostring(s.id) == tostring(rec.server) then
+            return tostring(s.state and s.state.kind)
+          end
+        end
+        return "gone"
+        "#,
+        |kind| kind == "initialized",
+    );
     file
 }
 
@@ -147,7 +224,12 @@ fn acc29_notification_reaches_a_registered_subscriber() {
     );
     attached_rust(&mut state, &fx);
 
-    let n: i64 = eval(&state, "return #_G.seen");
+    let n = wait_eval::<i64>(
+        &mut state,
+        "the first pmacs/echo notification",
+        "return #_G.seen",
+        |n| *n >= 1,
+    );
     assert!(
         n >= 1,
         "expected at least one pmacs/echo notification, got {n}"
@@ -208,7 +290,25 @@ fn drive_apply_edit(state: &mut EditorState, file: &Path) {
             lua_str(file)
         ),
     );
-    settle(state);
+    wait_eval::<i64>(
+        state,
+        "the executeCommand response",
+        "return _G.response_hits",
+        |hits| *hits >= 1,
+    );
+    ready::tick_until(
+        state,
+        "the applied edit in the buffer",
+        ready::DEADLINE,
+        |s| {
+            let text = buffer_text(s);
+            if text.contains("ED2") {
+                ready::Probe::Ready(())
+            } else {
+                ready::Probe::Pending(text)
+            }
+        },
+    );
 }
 
 fn buffer_text(state: &EditorState) -> String {
@@ -230,9 +330,11 @@ fn acc30_apply_edit_still_handled_with_a_notification_subscriber() {
         "#,
     );
     let file = attached_rust(&mut state, &fx);
-    assert!(
-        eval::<i64>(&state, "return _G.notes") >= 1,
-        "precondition: the notification subscriber is actually firing"
+    wait_eval::<i64>(
+        &mut state,
+        "the notification subscriber firing",
+        "return _G.notes",
+        |notes| *notes >= 1,
     );
 
     drive_apply_edit(&mut state, &file);
@@ -289,10 +391,11 @@ fn acc31_raising_notification_subscriber_does_not_stop_the_drain() {
         "#,
     );
     let file = attached_rust(&mut state, &fx);
-
-    assert!(
-        eval::<i64>(&state, "return _G.second_hits") >= 1,
-        "a raising subscriber must not starve the ones after it"
+    wait_eval::<i64>(
+        &mut state,
+        "the second subscriber firing past a raising one",
+        "return _G.second_hits",
+        |hits| *hits >= 1,
     );
 
     // And the shared `request` arms still run in a later drain.
@@ -326,7 +429,19 @@ fn acc33_raising_response_handler_does_not_stop_the_drain() {
             lua_str(&file)
         ),
     );
-    settle(&mut state);
+    ready::tick_until(
+        &mut state,
+        "the applied edit in the buffer",
+        ready::DEADLINE,
+        |s| {
+            let text = buffer_text(s);
+            if text.contains("ED2") {
+                ready::Probe::Ready(())
+            } else {
+                ready::Probe::Pending(text)
+            }
+        },
+    );
 
     assert!(
         buffer_text(&state).contains("ED2"),
@@ -369,7 +484,12 @@ fn acc32_response_one_shot_is_removed_even_when_the_handler_raises() {
             "#
         ),
     );
-    settle(&mut state);
+    wait_eval::<i64>(
+        &mut state,
+        "the one-shot reply",
+        "return _G.calls",
+        |calls| *calls >= 1,
+    );
     assert_eq!(
         eval::<i64>(&state, "return _G.calls"),
         1,
@@ -377,7 +497,18 @@ fn acc32_response_one_shot_is_removed_even_when_the_handler_raises() {
     );
 
     exec(&state, &format!("pmacs.lsp.stop({THE_SID})"));
-    settle(&mut state);
+    wait_eval::<bool>(
+        &mut state,
+        "the stopped server",
+        r#"
+        for _, s in ipairs(pmacs.lsp.list()) do
+          local k = s.state and s.state.kind
+          if k == "stopped" or k == "crashed" then return true end
+        end
+        return false
+        "#,
+        |stopped| *stopped,
+    );
     assert_eq!(
         eval::<i64>(&state, "return _G.calls"),
         1,
@@ -406,7 +537,12 @@ fn acc32_response_carries_the_servers_result() {
             "#
         ),
     );
-    settle(&mut state);
+    wait_eval::<i64>(
+        &mut state,
+        "the echoed result",
+        "return _G.echoed or -1",
+        |v| *v != -1,
+    );
 
     // Non-vacuity: without this the seam could "fire" with nil payloads
     // and every count-based assertion above would still pass.
@@ -454,7 +590,12 @@ fn acc34_purge_settles_a_pending_one_shot_when_the_server_dies() {
             "#
         ),
     );
-    settle(&mut state);
+    wait_eval::<String>(
+        &mut state,
+        "the settled one-shot",
+        "return _G.err_msg",
+        |m| m != "never called",
+    );
 
     let msg: String = eval(&state, "return _G.err_msg");
     assert!(
@@ -491,7 +632,19 @@ fn acc34_purge_reaches_a_server_that_is_in_no_attachment() {
             fake_lsp_path()
         ),
     );
-    settle(&mut state);
+    wait_eval::<String>(
+        &mut state,
+        "the orphan server initialized",
+        r#"
+        for _, s in ipairs(pmacs.lsp.list()) do
+          if tostring(s.id) == tostring(_G.orphan) then
+            return tostring(s.state and s.state.kind)
+          end
+        end
+        return "gone"
+        "#,
+        |kind| kind == "initialized",
+    );
 
     exec(
         &state,
@@ -503,7 +656,12 @@ fn acc34_purge_reaches_a_server_that_is_in_no_attachment() {
         pmacs.lsp.stop(_G.orphan)
         "#,
     );
-    settle(&mut state);
+    wait_eval::<String>(
+        &mut state,
+        "the purged one-shot",
+        "return _G.settled",
+        |m| m != "never called",
+    );
 
     let settled: String = eval(&state, "return _G.settled");
     assert_ne!(
@@ -609,11 +767,11 @@ fn acc34b_canonicalizing_resolver_reuses_one_server_across_a_symlink() {
     );
 
     open(&state, &real);
-    settle(&mut state);
+    wait_count(&mut state, 1);
     assert_eq!(server_count(&state), 1, "the real path spawns one server");
 
     open(&state, &linked);
-    settle(&mut state);
+    wait_attached(&mut state);
     assert_eq!(
         server_count(&state),
         1,
@@ -658,9 +816,9 @@ fn acc34b_falsified_by_a_resolver_that_skips_canonicalization() {
     );
 
     open(&state, &real);
-    settle(&mut state);
+    wait_count(&mut state, 1);
     open(&state, &linked);
-    settle(&mut state);
+    wait_count(&mut state, 2);
     assert_eq!(
         server_count(&state),
         2,
@@ -729,3 +887,5 @@ fn acc34a_canonicalize_declines_a_non_utf8_resolution() {
 // write into their real data root.
 #[path = "common/iso.rs"]
 mod iso;
+#[path = "common/ready.rs"]
+mod ready;

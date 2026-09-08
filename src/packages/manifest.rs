@@ -4,7 +4,7 @@
 //!
 //! A package is a versioned, addressable unit of Lua code with declared
 //! metadata, dependencies, and a single entry point. Every package
-//! ships a [`pmacs.toml`] at its root, deserialized into a
+//! ships a `pmacs.toml` at its root, deserialized into a
 //! [`PackageManifest`] at install time (load time only re-stats it).
 //!
 //! v1.0 fields:

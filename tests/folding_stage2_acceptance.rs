@@ -1,5 +1,5 @@
 // folding_stage2_acceptance.rs --- Arc 6 Stage 2 acceptance
-// (docs/folding-stage2-framing.md, acceptance items 1–14).
+// (the archived folding-stage2 framing, acceptance items 1–14).
 
 //! Grid (daemon-rendered) collapse.
 //!

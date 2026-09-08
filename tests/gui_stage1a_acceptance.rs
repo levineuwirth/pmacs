@@ -1,6 +1,6 @@
 //! GUI arc Stage 1a acceptance — `TextInput` at protocol v24.
 //!
-//! Framing: `docs/gui-stage1-input-framing.md` §5 (Q#S1-9 precedence)
+//! Framing: the archived gui-stage1-input framing §5 (Q#S1-9 precedence)
 //! and §6's A1–A9.
 //!
 //! **These rows drive the real dispatch, not the classifier.** 1a's

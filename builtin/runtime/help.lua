@@ -1,5 +1,5 @@
 -- help.lua --- the discovery command family (P4 Stage 1).
--- Framing: docs/discovery-stage1-command-family-framing.md.
+-- Framing: docs/archive/framings/discovery-stage1-command-family-framing.md.
 --
 -- `COHERENCE.md` §5 grades discoverability "substrate without surface —
 -- the sharpest instance of §1.1": the registries already carry

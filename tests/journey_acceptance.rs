@@ -1,7 +1,7 @@
 // tests/journey_acceptance.rs --- the golden product journey.
 
 //! The first cross-subsystem acceptance suite (`COHERENCE.md` §19,
-//! `docs/journey-stage1a-framing.md` §5).
+//! the archived journey-stage1a framing §5).
 //!
 //! Every other suite in the tree pins one subsystem's contract. This one
 //! pins that the subsystems form a usable whole, walking `COHERENCE.md`
@@ -215,7 +215,7 @@ fn launch(path: &Path) -> EditorState {
 //
 // This suite is the one place that must NOT take the
 // `EditorState::new_with_roots` / `open_with_roots` seam
-// (`docs/test-ambient-config-isolation-framing.md` §1.7). Its whole job
+// (the archived test-ambient-config-isolation framing §1.7). Its whole job
 // is to prove the production entry point is wired: an `open` arm with no
 // production caller passes every direct-call test, so the ratchet drives
 // the same `EditorState::open` that `pmacs FILE` does — parameterless,

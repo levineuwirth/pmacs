@@ -18,8 +18,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+
+use super::reap::Reaped;
+use std::time::Duration;
 
 use tempfile::TempDir;
 
@@ -27,17 +28,19 @@ use tempfile::TempDir;
 use pmacs::cell::CellSize;
 #[cfg(feature = "crdt")]
 use pmacs::protocol::AttachRequest;
-use pmacs::protocol::{FrontendCapabilities, Hello};
-use pmacs::transport::read_message;
+use pmacs::protocol::FrontendCapabilities;
 #[cfg(feature = "crdt")]
-use pmacs::transport::write_message;
+use pmacs::protocol::Hello;
+#[cfg(feature = "crdt")]
+use pmacs::transport::{read_message, write_message};
 
-/// A foreground daemon spawned in the test, with cleanup on Drop.
+/// A foreground daemon spawned in the test, in its own process group,
+/// reaped with everything it spawned on Drop (`tests/common/reap.rs`).
 pub struct TestDaemon {
     /// Tempdir holding the socket and lockfile; auto-cleaned on Drop.
     _tempdir: TempDir,
     socket_path: PathBuf,
-    process: Child,
+    process: Reaped,
 }
 
 impl TestDaemon {
@@ -88,7 +91,7 @@ impl TestDaemon {
         }
         let socket_path = tempdir.path().join("pmacs.sock");
         let mut process = spawn_daemon_process_with_env(&socket_path, env_vars);
-        wait_for_socket_or_exit(&socket_path, &mut process, Duration::from_secs(10))
+        wait_for_socket_or_exit(&socket_path, process.child(), Duration::from_secs(10))
             .expect("daemon socket appeared");
         Self {
             _tempdir: tempdir,
@@ -110,7 +113,7 @@ impl TestDaemon {
     }
 
     pub fn is_alive(&mut self) -> bool {
-        self.process.try_wait().ok().flatten().is_none()
+        self.process.is_alive()
     }
 
     pub fn lockfile_path(&self) -> PathBuf {
@@ -127,14 +130,7 @@ impl TestDaemon {
     }
 }
 
-impl Drop for TestDaemon {
-    fn drop(&mut self) {
-        let _ = self.process.kill();
-        let _ = self.process.wait();
-    }
-}
-
-pub fn spawn_daemon_process(socket_path: &Path) -> Child {
+pub fn spawn_daemon_process(socket_path: &Path) -> Reaped {
     spawn_daemon_process_with_env(socket_path, &[])
 }
 
@@ -151,7 +147,7 @@ pub fn spawn_daemon_process(socket_path: &Path) -> Child {
 /// failures in test error messages instead of leaving operators
 /// with an opaque 10s timeout. File-backed stderr avoids the
 /// deadlock risk of an undrained pipe for long-running daemon tests.
-pub fn spawn_daemon_process_with_env(socket_path: &Path, env_vars: &[(&str, &str)]) -> Child {
+pub fn spawn_daemon_process_with_env(socket_path: &Path, env_vars: &[(&str, &str)]) -> Reaped {
     let isolated_home = socket_path.parent().expect("socket has parent");
     let stderr_path = daemon_stderr_path(socket_path);
     let stderr = fs::File::create(&stderr_path).expect("create daemon stderr log");
@@ -162,7 +158,7 @@ pub fn spawn_daemon_process_with_env(socket_path: &Path, env_vars: &[(&str, &str
         .stdout(Stdio::null())
         .stderr(Stdio::from(stderr));
     // All FIVE storage variables, not just `XDG_CONFIG_HOME`
-    // (`docs/test-ambient-config-isolation-framing.md` §1.6a).
+    // (the archived test-ambient-config-isolation framing §1.6a).
     //
     // `HOME` above is only a *fallback*: it isolates a root only while
     // the corresponding `XDG_*` variable is unset. On a developer
@@ -187,7 +183,7 @@ pub fn spawn_daemon_process_with_env(socket_path: &Path, env_vars: &[(&str, &str
     for (key, value) in env_vars {
         cmd.env(key, value);
     }
-    cmd.spawn().expect("spawn pmacs --daemon")
+    Reaped::spawn(&mut cmd).expect("spawn pmacs --daemon")
 }
 
 /// Poll until the daemon's socket is reachable, the daemon exits,
@@ -211,44 +207,22 @@ pub fn wait_for_socket_or_exit(
     // connect proves the new daemon has run through `bind` and
     // `listen`. ECONNREFUSED on a stale socket retries until the new
     // daemon takes over.
-    let start = Instant::now();
-    while start.elapsed() < deadline {
-        if let Ok(mut stream) = UnixStream::connect(socket) {
-            // Read the Hello so the daemon's `send_message` succeeds
-            // and doesn't log a "send Hello failed" warning to its
-            // stderr (which our test runner inherits). After reading
-            // we drop without sending AttachRequest; the daemon
-            // observes the disconnect and falls back to accept.
-            stream
-                .set_read_timeout(Some(Duration::from_millis(500)))
-                .ok();
-            let _ = read_message::<Hello>(&mut stream);
-            return Ok(());
-        }
-        // Daemon may have exited early (panic on bind, missing
-        // env, etc.). Surface its exit status + stderr immediately
-        // instead of letting the connect-probe burn the full
-        // deadline.
-        if let Ok(Some(status)) = process.try_wait() {
+    // One readiness wait for every daemon spawner (`tests/common/ready.rs`);
+    // this shape adds the daemon's file-backed stderr to its report. A
+    // daemon that exits before listening is reported at once rather than
+    // after the whole deadline, because the probe observes the child.
+    match super::ready::wait_for_daemon(socket, process, deadline) {
+        Ok(()) => Ok(()),
+        Err(timeout) => {
+            // Kill, then capture whatever stderr is available so the
+            // operator sees the daemon's last words rather than "no
+            // signal."
+            let _ = process.kill();
+            let _ = process.wait();
             let stderr = read_daemon_stderr(socket);
-            return Err(format!(
-                "daemon exited with {status} before socket appeared; \
-                 socket={}\n--- daemon stderr ---\n{stderr}",
-                socket.display()
-            ));
+            Err(format!("{timeout}\n--- daemon stderr ---\n{stderr}"))
         }
-        thread::sleep(Duration::from_millis(20));
     }
-    // Timeout: kill, then capture whatever stderr is available so the
-    // operator sees the daemon's last words rather than "no signal."
-    let _ = process.kill();
-    let _ = process.wait();
-    let stderr = read_daemon_stderr(socket);
-    Err(format!(
-        "daemon did not start listening on {} within {deadline:?}\n\
-         --- daemon stderr ---\n{stderr}",
-        socket.display()
-    ))
 }
 
 fn daemon_stderr_path(socket: &Path) -> PathBuf {

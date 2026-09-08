@@ -1,6 +1,6 @@
 // tests/worker_identity_acceptance.rs --- worker identity Stage 1.
 
-//! Worker identity Stage 1 (`docs/worker-identity-framing.md` §6,
+//! Worker identity Stage 1 (the archived worker-identity framing §6,
 //! `COHERENCE.md` §9).
 //!
 //! §9 grades the worker model **mechanism without identity**: a job

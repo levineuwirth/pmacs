@@ -3122,7 +3122,7 @@ mod tests {
         /// `undo_crdt_mode` derives an EMPTY replacement edit — and
         /// still attaches the `crdt_op` that `crdt.undo()` produced.
         ///
-        /// **The ruling** (`docs/crdt-identity-undo-framing.md`, and
+        /// **The ruling** (`docs/archive/framings/crdt-identity-undo-framing.md`, and
         /// this is no longer an open question): a visible TEXT delta
         /// and a CRDT-VERSION delta are INDEPENDENT dimensions of
         /// `Edit`, so the behavior is right and the *invariant* was

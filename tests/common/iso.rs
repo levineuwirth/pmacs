@@ -11,7 +11,7 @@
 //! is `unsafe` and `pmacs` is `#![forbid(unsafe_code)]`. So it passes
 //! [`roots`] to `EditorState::new_with_roots` instead.
 //!
-//! See `docs/test-ambient-config-isolation-framing.md`.
+//! See the archived test-ambient-config-isolation framing.
 //!
 //! Included per-file rather than through `mod common;` so a suite that
 //! needs no daemon or PTY fixture does not compile them:

@@ -12,7 +12,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use pmacs::audit::{AuditEngine, AuditReport, Severity};
 
@@ -269,8 +269,9 @@ fn lint_against_in_tree_repl_source_has_no_error_severity_findings() {
 // Bullet 5: 1000-line perf budget
 // ---------------------------------------------------------------------------
 
-#[test]
-fn lint_completes_in_under_one_second_on_thousand_line_package() {
+/// Lint a thousand-line synthetic package; asserts the findings and
+/// returns how long the lint took.
+fn lint_thousand_line_package() -> Duration {
     // Build a 1000-line synthetic source. Mix of patterns so the
     // worst-case (all 15 rules engaged) is exercised, not a tight
     // loop of identical lines that the parser would chew through
@@ -300,10 +301,6 @@ fn lint_completes_in_under_one_second_on_thousand_line_package() {
     let elapsed = t.elapsed();
 
     assert!(
-        elapsed.as_secs_f64() < 1.0,
-        "lint of 1000-line package took {elapsed:?}; spec budget is < 1s"
-    );
-    assert!(
         !findings.is_empty(),
         "synthetic 1000-line file should produce findings (engine alive check)"
     );
@@ -313,5 +310,22 @@ fn lint_completes_in_under_one_second_on_thousand_line_package() {
         "[T M7.9] 1000-line synthetic perf: {:?} for {} findings",
         elapsed,
         findings.len()
+    );
+    elapsed
+}
+
+#[test]
+fn lint_reports_findings_on_a_thousand_line_package() {
+    let elapsed = lint_thousand_line_package();
+    eprintln!("lint of a 1000-line package took {elapsed:?}");
+}
+
+#[test]
+#[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
+fn lint_completes_in_under_one_second_on_thousand_line_package() {
+    let elapsed = lint_thousand_line_package();
+    assert!(
+        elapsed.as_secs_f64() < 1.0,
+        "lint of 1000-line package took {elapsed:?}; spec budget is < 1s"
     );
 }

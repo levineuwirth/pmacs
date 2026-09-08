@@ -14,7 +14,7 @@
 -- edits (any other delta) never auto-open. `C-M-i`
 -- (`completion.at-point`) covers deliberate invocation.
 --
--- Framing: docs/in-buffer-completion-framing.md.
+-- Framing: docs/archive/framings/in-buffer-completion-framing.md.
 
 local MIN_PREFIX = 2 -- typed word length before the popup auto-opens
 local MAX_ROWS = 64 -- cap on candidates published to the session

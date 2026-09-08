@@ -1136,7 +1136,7 @@ fn a28_a30_a_v18_semantic_peer_has_no_terminal_surface() {
 
 // ---- GPU terminal input: the double terminal-layout sync -----------------
 //
-// Acceptance 1, 4 and 7 of `docs/gpu-terminal-input-framing.md`, on the real
+// Acceptance 1, 4 and 7 of the archived gpu-terminal-input framing, on the real
 // path: real daemon, real PTY child, real `pmacs-gpu` attach client.
 //
 // `a37` above passes on the broken tree, and these are shaped around exactly

@@ -284,7 +284,8 @@ mod tests {
         while !t.is_cancelled() {
             assert!(
                 start.elapsed() < Duration::from_secs(1),
-                "cross-thread cancel never observed"
+                "cross-thread cancel never observed (waited {:?})",
+                start.elapsed()
             );
             thread::yield_now();
         }

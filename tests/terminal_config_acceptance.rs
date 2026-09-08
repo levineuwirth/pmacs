@@ -1,5 +1,5 @@
 //! Terminal configuration acceptance (Stage 1 of
-//! `docs/terminal-config-and-copy-mode-framing.md`, criteria 1-12).
+//! the archived terminal-config-and-copy-mode framing, criteria 1-12).
 //!
 //! Deliberately NOT `#[cfg(feature = "crdt")]`: CI never enables that
 //! feature, so a gated suite is written and then never run.

@@ -120,7 +120,7 @@ pub enum Orientation {
 /// An active selection in a window.
 ///
 /// The region runs from `anchor` to the window's `cursor`. Either
-/// endpoint can be the lower bound; [`Selection::range`] returns them
+/// endpoint can be the lower bound; `Selection::range` returns them
 /// in canonical (lo, hi) order. A `Selection` with `anchor == cursor`
 /// is *active but empty*: useful for "shift-click extends" semantics.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

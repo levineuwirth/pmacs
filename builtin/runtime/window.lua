@@ -9,7 +9,7 @@
 -- override -> global -> default), so a project or a mode hook can pin a
 -- taller panel for one buffer with `pmacs.config.set_local`.
 --
--- Framing: docs/bottom-panel-framing.md (Q#BP2, Q#BP5b, Q#BP11).
+-- Framing: docs/archive/framings/bottom-panel-framing.md (Q#BP2, Q#BP5b, Q#BP11).
 
 -- Outer rows (text + mode line) a freshly created panel takes when the
 -- caller supplies no explicit `height`. Only consulted at CREATION: a

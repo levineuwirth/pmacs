@@ -20,7 +20,7 @@
 //!
 //! The supervisor's reader thread already chunks pipe output off the
 //! main thread; the LSP layer just buffers those chunks per server
-//! and parses `Content-Length` frames out of them in [`LspClient::pump`].
+//! and parses `Content-Length` frames out of them in `LspClient::pump`.
 //! Parsing is incremental --- a frame split across two `Stdout` events
 //! is reassembled without re-allocating.
 //!
@@ -43,7 +43,7 @@
 //! # Concurrency
 //!
 //! A single [`LspManager`] lives on the main thread inside the
-//! editor's `Rc<RefCell<...>>`. It mutates one [`ProcessSupervisor`]
+//! editor's `Rc<RefCell<...>>`. It mutates one `ProcessSupervisor`
 //! it shares with `pmacs.process.*`. All inbound bytes arrive on
 //! supervisor reader threads (one per pipe); all outbound writes go
 //! through `ProcessSupervisor::write_stdin` synchronously from the

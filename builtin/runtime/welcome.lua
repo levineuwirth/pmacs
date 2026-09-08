@@ -1,5 +1,5 @@
 -- welcome.lua --- journey step 4: say something when the editor opens.
--- Framing: docs/journey-stage1b3-welcome-framing.md.
+-- Framing: docs/archive/framings/journey-stage1b3-welcome-framing.md.
 --
 -- `COHERENCE.md` §18 graded onboarding "missing entirely": no welcome,
 -- no tutorial, no cheat sheet reachable from inside the editor. The sole

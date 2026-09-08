@@ -6,10 +6,10 @@
 //! validated manually / via the m4 harness; these tests drive the
 //! substrate hermetically.
 //!
-//! Framing: docs/lsp-panels-framing.md.
+//! Framing: the archived lsp-panels framing.
 //!
 //! Generated-buffer immutability Stage 1
-//! (docs/generated-buffer-immutability-framing.md §6) adds the
+//! (the archived generated-buffer-immutability framing §6) adds the
 //! criteria below `refresh_reruns_the_source_and_reseats`: the undo
 //! paths the Q#P3 intercept never guarded, the Q#GB13 ownership rule,
 //! and the Q#GB18 identity routing that ownership makes load-bearing.
@@ -325,7 +325,7 @@ fn refresh_reruns_the_source_and_reseats() {
 
 // ---------------------------------------------------------------------------
 // Generated-buffer immutability, Stage 1
-// (docs/generated-buffer-immutability-framing.md §6, Stage 1)
+// (the archived generated-buffer-immutability framing §6, Stage 1)
 // ---------------------------------------------------------------------------
 
 /// The exact bytes `open_test_panel` renders. Asserted by value, not by

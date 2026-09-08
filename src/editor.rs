@@ -216,7 +216,7 @@ impl CommitScopeActive {
 
 /// One editor session.
 pub struct EditorState {
-    /// World state, mutated by [`pmacs.editor.*`] primitives invoked
+    /// World state, mutated by `pmacs.editor.*` primitives invoked
     /// from inside command bodies.
     pub core: SharedCore,
     /// The embedded Lua VM and its command/keymap registries.
@@ -302,7 +302,7 @@ pub struct EditorState {
     /// are perfectly legal.
     window_drag: HashMap<FrontendId, WindowDragState>,
     /// The bootstrap storage roots this session was constructed
-    /// against (`docs/test-ambient-config-isolation-framing.md`).
+    /// against (`docs/archive/framings/test-ambient-config-isolation-framing.md`).
     ///
     /// [`BootstrapRoots::ambient`] in production. Retained past
     /// construction because [`Self::install_state_dirs`] resolves a root
@@ -617,7 +617,7 @@ impl EditorState {
     }
 
     /// Construct a fresh editor against explicit bootstrap storage
-    /// roots (`docs/test-ambient-config-isolation-framing.md` §1.4).
+    /// roots (`docs/archive/framings/test-ambient-config-isolation-framing.md` §1.4).
     ///
     /// [`Self::new`] is this with [`BootstrapRoots::ambient`], so
     /// production behaviour is unchanged. An integration test passes
@@ -1028,7 +1028,7 @@ impl EditorState {
                 include_str!("../builtin/runtime/linewrap.lua"),
             )
             .expect("load linewrap builtin chunk");
-        // Git integration Stage 1 (docs/git-integration-framing.md):
+        // Git integration Stage 1 (docs/archive/framings/git-integration-framing.md):
         // `*git-status*` and `*git-diff*`. Loaded after `listview.lua`,
         // whose `open` (and whose new optional `keys` table) it drives,
         // and after `window.lua`, which owns `window.panel-height` — the
@@ -1068,7 +1068,7 @@ impl EditorState {
         // `materialize_all` CREATES DIRECTORIES AND WRITES FILES, and
         // it is outside every `cfg` guard — so this, not config
         // loading, is the write half of the ambient-roots exposure
-        // (`docs/test-ambient-config-isolation-framing.md` §1.6). The
+        // (`docs/archive/framings/test-ambient-config-isolation-framing.md` §1.6). The
         // redirected root is consulted first for exactly that reason.
         let bundled_root = roots
             .bundled_runtime_dir()
@@ -1132,7 +1132,7 @@ impl EditorState {
         // config root instead of relying on a guard that does not reach
         // it. (Nor is this the only ambient root: the bundled-package
         // materialization above runs unconditionally and WRITES.) See
-        // `docs/test-ambient-config-isolation-framing.md` §1.2, §1.6.
+        // `docs/archive/framings/test-ambient-config-isolation-framing.md` §1.2, §1.6.
         //
         // The guard is deliberately NOT widened to cover integration
         // tests: production deciding it is under test is how a suite
@@ -1432,7 +1432,7 @@ impl EditorState {
     ///   (Q#JR1a) — the same reason the daemon bootstrap and
     ///   `display_file` both fire theirs after their borrow blocks end.
     ///
-    /// A directory resolves to [`ResolvedTarget::Directory`] and is
+    /// A directory resolves to `ResolvedTarget::Directory` and is
     /// dispatched to the directory resolver chain rather than opened as
     /// a buffer (Q#JR6); see [`Self::open_directory_target`].
     #[allow(
@@ -1451,7 +1451,7 @@ impl EditorState {
     ///
     /// `open` calls `Self::new()` internally, so a roots parameter on
     /// the constructor alone leaves every open-path test ambient
-    /// (`docs/test-ambient-config-isolation-framing.md` §1.7). The two
+    /// (`docs/archive/framings/test-ambient-config-isolation-framing.md` §1.7). The two
     /// entry points therefore gain the parameter together, and `open`
     /// stays a thin ambient caller of this — the golden-journey ratchet
     /// requires that exact public entry point to have a production
@@ -10020,6 +10020,7 @@ mod tests {
         clippy::too_many_lines,
         reason = "perf measurement is intentionally linear"
     )]
+    #[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
     fn composition_overhead_under_ten_percent() {
         use crate::cell::{Cell, CellCoord, CellGrid, CellSize, Glyph, Style};
         use crate::overlay::{StyleSpan, StyleSpanOverlay, VirtualCell, VirtualCellOverlay};

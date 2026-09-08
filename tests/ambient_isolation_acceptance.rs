@@ -1,7 +1,7 @@
 // tests/ambient_isolation_acceptance.rs --- integration tests must not
 // read or write the developer's real ambient roots.
 
-//! Acceptance for `docs/test-ambient-config-isolation-framing.md`.
+//! Acceptance for the archived test-ambient-config-isolation framing.
 //!
 //! # The defect
 //!

@@ -10,7 +10,7 @@
 -- LSP surface already owns every `C-c <letter>`, so `C-c @` is the one
 -- faithful prefix that collides with nothing. Rebind through pmacs.keymap.
 --
--- Framing: docs/folding-framing.md.
+-- Framing: docs/archive/framings/folding-framing.md.
 
 local ed = pmacs.editor
 local fold = pmacs.fold

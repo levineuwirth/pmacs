@@ -14,7 +14,7 @@
 -- (toggle, then move to the next line so repeated `M-;` walks a
 -- block), not `comment-dwim`'s append-comment-at-EOL.
 --
--- Framing: docs/comment-toggle-framing.md.
+-- Framing: docs/archive/framings/comment-toggle-framing.md.
 
 pmacs.comment = pmacs.comment or {}
 

@@ -11,7 +11,7 @@
 -- the moment the cursor moves off the anchor). `buffer.newline` stays
 -- bound-free as the plain-newline escape hatch (Q#AI2).
 --
--- Framing: docs/auto-indent-framing.md.
+-- Framing: docs/archive/framings/auto-indent-framing.md.
 
 pmacs.indent = pmacs.indent or {}
 

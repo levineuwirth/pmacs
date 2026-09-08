@@ -8,7 +8,7 @@
 -- per-entry-tolerant `read_dir` opt it drives (Q#DR6), the only Rust
 -- this stage needed besides exposing the path normalizer.
 --
--- Framing: docs/dired-framing.md (Q#DR1-DR10). Stage 1 is the view:
+-- Framing: docs/archive/framings/dired-framing.md (Q#DR1-DR10). Stage 1 is the view:
 -- listing, navigation, sort, revert, quit. Marks and operations are
 -- Stage 2; the editable wdired layer is Stage 3.
 --
@@ -366,7 +366,7 @@ end
 
 -- Dired's own writes are the only ones that reach the buffer, and this
 -- is the one authorized door (Q#GB1,
--- docs/generated-buffer-immutability-framing.md).
+-- docs/archive/framings/generated-buffer-immutability-framing.md).
 --
 -- `set_generated_contents` lifts the rope's `read_only`, replaces the
 -- whole buffer skipping intercepts, discards the resulting history and

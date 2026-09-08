@@ -59,7 +59,7 @@
 //! - [`UpdatePolicy::UpdateAll`] — ignore the lockfile entirely;
 //!   resolve fresh against current upstream state. Maps to
 //!   `pmacs.packages.update()` (no argument).
-//! - [`UpdatePolicy::UpdateOne(name)`] — re-resolve `name` fresh; for
+//! - `UpdatePolicy::UpdateOne(name)` — re-resolve `name` fresh; for
 //!   every other package, prefer the lockfile's recorded version. Maps
 //!   to `pmacs.packages.update("name")`. The "prefer" semantic
 //!   (rather than "force") means a constraint cascade triggered by

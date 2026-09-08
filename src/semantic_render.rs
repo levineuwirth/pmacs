@@ -5543,8 +5543,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn full_buffer_summary_flatten_scales_on_large_grammar_file() {
+    /// Summarize a 1500-line grammar-backed buffer and return how long
+    /// the flatten took; the summary's presence is asserted inside.
+    fn full_buffer_summary_flatten() -> std::time::Duration {
         // Perf gate (round-1 finding 1): the file-style summary runs the
         // FLATTENER over the WHOLE buffer, not the viewport. The ordered
         // active-set sweep keeps the flatten O(n·log n + Σ active); the
@@ -5569,6 +5570,19 @@ mod tests {
         let summary = scoped_file_summary(&state, bid, false);
         let elapsed = start.elapsed();
         assert!(!summary.is_empty(), "summary produced for a styled buffer");
+        elapsed
+    }
+
+    #[test]
+    fn full_buffer_summary_flattens_a_large_grammar_file() {
+        let elapsed = full_buffer_summary_flatten();
+        eprintln!("full-buffer flatten took {elapsed:?}");
+    }
+
+    #[test]
+    #[ignore = "wall-clock budget; runs under --ignored in the perf jobs and scripts/gate --perf"]
+    fn full_buffer_summary_flatten_scales_on_large_grammar_file() {
+        let elapsed = full_buffer_summary_flatten();
         assert!(
             elapsed < std::time::Duration::from_secs(1),
             "full-buffer flatten took {elapsed:?}; the event sweep must stay \

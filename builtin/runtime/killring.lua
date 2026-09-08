@@ -18,7 +18,7 @@
 -- content joins the ring at yank time via the slot check (an OS copy
 -- only reaches the daemon when pasted). `M-y` never touches the slot.
 --
--- Framing: docs/kill-ring-framing.md.
+-- Framing: docs/archive/framings/kill-ring-framing.md.
 
 pmacs.killring = pmacs.killring or {}
 

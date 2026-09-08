@@ -1,5 +1,5 @@
 // bottom_panel_stage2b_gpu_acceptance.rs --- bottom-panel Stage 2B-3
-// (docs/bottom-panel-stage2-framing.md §7.2.3; A2B-5 and the production
+// (the archived bottom-panel-stage2 framing §7.2.3; A2B-5 and the production
 // re-assertion of 42/43/44/45/51/52 through the real capability flip).
 
 //! Compatible v21 activation and the negotiated `panel_capable` flip.

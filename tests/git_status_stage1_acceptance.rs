@@ -1,5 +1,5 @@
 //! Git integration Stage 1 acceptance —
-//! `docs/git-integration-framing.md` §6, one test per verification
+//! the archived git-integration framing §6, one test per verification
 //! bullet.
 //!
 //! Dispatch-driven wherever a key is claimed: `RET`, `d`, `g`, `n`/`p`

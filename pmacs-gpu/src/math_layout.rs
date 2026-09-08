@@ -1,6 +1,6 @@
 //! OpenType MATH metrics and the math-italic mapping (Tier 3, part one).
 //!
-//! Framing: `docs/inline-math-slice-framing.md` (rev 3), Q#MS6 / Q#MS7.
+//! Framing: `docs/archive/framings/inline-math-slice-framing.md` (rev 3), Q#MS6 / Q#MS7.
 //!
 //! Two consumers read the same bundled font bytes: cosmic-text draws with it,
 //! and this module measures with it. cosmic-text does not expose the MATH
@@ -311,7 +311,8 @@ pub fn fit_to_line(boxed: &MathBox, ascent_budget: f32, descent_budget: f32) -> 
     Some(boxed.scaled(scale))
 }
 
-/// Lays a [`MathNode`] tree out against the bundled MATH font.
+/// Lays a [`MathNode`](crate::math_parse::MathNode) tree out against the
+/// bundled MATH font.
 pub struct MathLayout<'a> {
     face: Face<'a>,
     constants: MathConstants,

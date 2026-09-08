@@ -2,7 +2,7 @@
 
 //! Configuration settings.
 //!
-//! Per `docs/config-registry-framing.md` (revision 3), every editor
+//! Per `docs/archive/framings/config-registry-framing.md` (revision 3), every editor
 //! setting is a named, typed [`ConfigDefinition`] registered in a
 //! [`ConfigRegistry`], mirroring [`crate::command::CommandRegistry`]
 //! and [`crate::hook::HookRegistry`] in shape and error vocabulary:

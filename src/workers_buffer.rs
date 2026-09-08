@@ -277,7 +277,7 @@ fn format_outcome(outcome: &JobOutcome) -> String {
 /// job (e.g. the header, separator, or "(no active jobs)" lines).
 ///
 /// This is what the buffer-local cancel binding uses to translate
-/// "the cursor is here, please cancel" into a [`JobId`].
+/// "the cursor is here, please cancel" into a `JobId`.
 #[must_use]
 pub fn job_id_at_byte(text: &str, pos: usize) -> Option<u64> {
     let pos = pos.min(text.len());

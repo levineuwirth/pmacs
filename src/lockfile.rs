@@ -36,7 +36,7 @@
 //! # Pid is advisory
 //!
 //! The pid in the lockfile is for diagnostic display only ("daemon
-//! already running at <path> (pid 12345)"). We never make a decision
+//! already running at `<path>` (pid 12345)"). We never make a decision
 //! based on it — the `flock` is the source of truth. A stale pid that
 //! happens to match a live unrelated process is harmless: we just
 //! print a slightly misleading error.

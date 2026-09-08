@@ -7,7 +7,7 @@
 //! suite; these tests run hermetic (dabbrev + custom Lua providers)
 //! so no server binary is needed.
 //!
-//! Framing: docs/in-buffer-completion-framing.md.
+//! Framing: the archived in-buffer-completion framing.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use pmacs::editor::EditorState;

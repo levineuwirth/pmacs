@@ -1,5 +1,5 @@
 //! Terminal copy-mode acceptance (Stage 2 of
-//! `docs/terminal-config-and-copy-mode-framing.md`, criteria 13-21).
+//! the archived terminal-config-and-copy-mode framing, criteria 13-21).
 //!
 //! **Deliberately NOT `#[cfg(feature = "crdt")]`.** CI never enables that
 //! feature, so a gated suite is written and then never run — 264 tests are

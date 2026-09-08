@@ -1,5 +1,13 @@
 // lib.rs --- Pmacs library root. Declares the editor's module structure.
 
+// The internal documentation links freely between public and private
+// items: it is read with `--document-private-items` by the people who
+// work on the crate, and a link to a private item from a public doc
+// comment is a link the reader can follow there. The gate builds docs
+// with `-D warnings`, so this one lint is allowed rather than the links
+// degraded to plain text.
+#![allow(rustdoc::private_intra_doc_links)]
+
 //! Pmacs core library.
 //!
 //! This crate is the in-process Rust core of the Pmacs editor. The binary in

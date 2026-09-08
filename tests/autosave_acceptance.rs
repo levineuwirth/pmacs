@@ -5,7 +5,7 @@
 //! state dir. Sweeps are driven directly rather than through the timer,
 //! so the 1-second interval floor never slows the suite.
 //!
-//! Framing: `docs/autosave-recovery-framing.md`.
+//! Framing: the archived autosave-recovery framing.
 
 use pmacs::editor::EditorState;
 use pmacs::lua_bindings::StateDir;

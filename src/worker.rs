@@ -3,7 +3,7 @@
 //! Worker pool primitive (T M3.1).
 //!
 //! Spec contract: a work-stealing thread pool built on
-//! [`std::thread`] and [`crossbeam_deque`] --- explicitly **not** a
+//! [`std::thread`] and `crossbeam_deque` --- explicitly **not** a
 //! generic async runtime ([spec §3 checkpoint 5]). Each worker owns
 //! a local FIFO deque and steals from siblings + a shared injector
 //! when its own deque is empty. Idle workers park on a [`Condvar`];
@@ -32,7 +32,7 @@
 //! No message bus, no result delivery channel, no Lua surface ---
 //! T M3.1 is the raw primitive. Result delivery is a per-call
 //! responsibility: the user closure can capture a
-//! [`crossbeam_channel::Sender`] and send. The typed message bus
+//! `crossbeam_channel::Sender` and send. The typed message bus
 //! (T M3.2) and the coroutine-based async API (T M3.3) build on
 //! top.
 

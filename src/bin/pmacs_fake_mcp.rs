@@ -4,7 +4,7 @@
 //! the M9.1 MCP transport without depending on a real MCP server
 //! being installed.
 //!
-//! Mirrors the shape of [`pmacs_fake_lsp`], but speaks
+//! Mirrors the shape of `pmacs_fake_lsp`, but speaks
 //! newline-delimited JSON-RPC 2.0 (the MCP-stdio framing) instead of
 //! `Content-Length`-framed bodies. One JSON message per line; no
 //! `\n` inside a body.

@@ -147,7 +147,7 @@ pub enum InstallPin {
     /// either via `git rev-parse`).
     Commit(String),
     /// Working-tree symlink installed via
-    /// [`pmacs.packages.install_local`] (T M8.1c). Carries the
+    /// `pmacs.packages.install_local` (T M8.1c). Carries the
     /// source path so the Lua-visible roster entry can show where
     /// the live tree lives. Local-pinned packages are *ephemeral*:
     /// they never enter the lockfile and aren't reproducible across

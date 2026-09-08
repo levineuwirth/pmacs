@@ -32,7 +32,7 @@ pub type SharedTerminalManager = Rc<RefCell<TerminalManager>>;
 pub struct TerminalSpec {
     /// Executable path or name resolved through `PATH`.
     pub command: String,
-    /// Child arguments, excluding argv[0].
+    /// Child arguments, excluding argv0.
     pub args: Vec<String>,
     /// Working directory, or the editor process directory when absent.
     pub cwd: Option<PathBuf>,

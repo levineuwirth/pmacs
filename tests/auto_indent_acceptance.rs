@@ -1,4 +1,4 @@
-//! Auto-indent acceptance (Arc 2, docs/auto-indent-framing.md).
+//! Auto-indent acceptance (Arc 2, the archived auto-indent framing).
 //!
 //! Dispatch-driven: RET through `dispatch_key`, `M-x` through the real
 //! minibuffer. Auto-indent is language-agnostic (Q#AI3 copies bytes),

@@ -1,7 +1,7 @@
 // tests/find_file_acceptance.rs --- dired arc Stage 0 (`C-x C-f`) acceptance.
 
 //! Acceptance for `find-file`, the dired arc's Stage 0
-//! (`docs/dired-framing.md` §14, items 0a-0d, Q#DR11).
+//! (the archived dired framing §14, items 0a-0d, Q#DR11).
 //!
 //! Dispatch-driven throughout: the prompt is opened with a real
 //! `C-x C-f`, filled by typing real keys, and completed with a real

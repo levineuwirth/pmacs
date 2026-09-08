@@ -1,7 +1,7 @@
 // auto_indent_crdt_acceptance.rs --- RET's daemon CRDT round trip.
 
 //! Auto-indent daemon-side wire acceptance (Q#AI6, the second of the
-//! two named GPU seams in docs/auto-indent-framing.md): a synthetic
+//! two named GPU seams in the archived auto-indent framing): a synthetic
 //! attached replica sends pending optimistic self-inserts followed by
 //! a round-tripped Enter, and the daemon must dispatch
 //! `edit.newline-and-indent` and broadcast the resulting multi-byte

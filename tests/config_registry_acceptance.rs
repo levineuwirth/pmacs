@@ -1,4 +1,4 @@
-//! Config-registry acceptance (docs/config-registry-framing.md).
+//! Config-registry acceptance (the archived config-registry framing).
 //!
 //! The registry's own semantics are unit-tested in
 //! `src/config_registry.rs` (value/scope/epoch/listener behavior) and

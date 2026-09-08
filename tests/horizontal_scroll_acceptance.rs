@@ -1,5 +1,5 @@
 //! Horizontal scroll acceptance (`QoL` Stage 4,
-//! `docs/horizontal-scroll-framing.md`).
+//! the archived horizontal-scroll framing).
 //!
 //! Stage 3 shipped `ui.line-wrap`; under `truncate` the text past the
 //! right edge was **unreachable**. Stage 4 makes it reachable by moving

@@ -320,7 +320,7 @@ impl<'a> Iterator for Chunks<'a> {
 ///
 /// The history case's `range` sits at the buffer end, which is where
 /// `derive_replacement_edit` reports a no-difference diff; see
-/// `docs/crdt-identity-undo-framing.md` for the consumer census that
+/// `docs/archive/framings/crdt-identity-undo-framing.md` for the consumer census that
 /// ruled that location harmless.
 #[derive(Clone, Debug)]
 pub struct Edit {

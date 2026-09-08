@@ -1,7 +1,7 @@
 name: Release
 
 # Distribution Stage 1 — binaries on tag. See
-# docs/distribution-stage1-framing.md.
+# the archived distribution-stage1 framing.
 #
 # Scope is deliberately one stage: build the two shipped binaries when a
 # `v*` tag is pushed and attach them to a GitHub Release. There are no
@@ -137,6 +137,13 @@ jobs:
       # non-CRDT release would ship an editor that cannot use the GPU
       # frontend shipped beside it.
       #
+      # NOT PASSED AS A FLAG, because `crdt` is a default feature (D17):
+      # a `--features crdt` here would be redundant, and redundant in a
+      # way that reads as a claim that the default build lacks it. What
+      # keeps the promise above is the `default` line in Cargo.toml,
+      # which `scripts/anchor` puts in README's status block and the
+      # docs test holds it to.
+      #
       # EXPLICIT --bin TARGETS, layer 1 of 2. Cargo auto-discovers
       # src/bin/*.rs, so a plain `--workspace` release build also
       # produces pmacs-audit, pmacs_fake_lsp and pmacs_fake_mcp -- the
@@ -145,7 +152,7 @@ jobs:
       - name: Build the shipped binaries only
         run: |
           set -euo pipefail
-          cargo build --release --bin pmacs --features crdt
+          cargo build --release --bin pmacs
           cargo build --release -p pmacs-gpu
 
       # EXPLICIT STAGED ASSET LIST, layer 2 of 2. Layer 1 alone is not
@@ -345,7 +352,7 @@ jobs:
 
           Channels, in-place update, rollback, signing, reproducible
           builds, package-manager distribution, and Windows. See
-          `docs/distribution-stage1-framing.md` §5.
+          the archived distribution-stage1 framing §5.
           NOTES
           echo "notes written"
 
