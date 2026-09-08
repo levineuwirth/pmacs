@@ -172,7 +172,7 @@ never shut.
 | selector | `--test m5_8_acceptance ctrl_c_during_reconnect_sleep_yields_clean_exit` |
 | job | GitHub Actions, `Test (macos-latest / lua54)`. The `:LINE` suffix is not a fragment |
 | required fragments | `Ctrl-C during reconnect sleep should produce a clean exit` + `ExitStatus { code: 1, signal: Some("Interrupt: 2") }` |
-| occurrences | two: PR #229's rerun attempt 2, 2026-08-05; and PR #257 at `b2094ac`, run 34253949749, job `Test (macos-latest / lua54)` (102154957233), `tests/m5_8_acceptance.rs:546`, `test result: FAILED. 7 passed; 1 failed`. The second is filed as **#260**. The `Test (macos-latest / luajit)` leg of that same run passed this selector, so one run establishes nothing about the flavor either way |
+| occurrences | two: PR #229's rerun attempt 2, recorded 2026-08-09 in `ae6a815` --- the run's own date is not in the record and is not asserted here; and PR #257 at `b2094ac`, run 34253949749, job `Test (macos-latest / lua54)` (102154957233), `tests/m5_8_acceptance.rs:546`, `test result: FAILED. 7 passed; 1 failed`. The second is filed as **#260**. The `Test (macos-latest / luajit)` leg of that same run passed this selector, so one run establishes nothing about the flavor either way |
 | candidate mechanism | Ctrl-C reached the process as `SIGINT` rather than as the raw-mode key event the test drives, and the process died of the signal instead of exiting cleanly. That is all the exit status shows. Whether the injection preceded raw mode, whether raw mode was lost, or whether the reconnect sleep's handler was not yet installed, are three mechanisms this fragment separates not at all |
 | retirement | diagnosis: a readiness record written by the child as it enters raw mode, so the injection is ordered against setup rather than raced against it. Never a green rerun |
 
@@ -213,12 +213,16 @@ explained, which is the only retirement the rerun rule allows.
 - **REFERRED** --- not a test, so outside this file; the question lives
   in a GitHub issue.
 
-Twenty-seven rows are listed on twenty-six lines (A1 and A2 share
-one). Eighteen lines are causal closures and stand: a wall-clock
+Twenty-eight rows are listed on twenty-seven lines (A1 and A2 share
+one). Nineteen lines are causal closures and stand: a wall-clock
 assertion made `#[ignore]`, a duplicated test execution removed by the
 one-sweep gate, a fixture race fixed with a readiness gate, a
-hermeticity fault fixed. The eight that are not now say which word they
-are. Counted from the table itself, not carried forward.
+hermeticity fault fixed, and U16's process-global cwd mutation deleted.
+The eight that are not now say which word they are. **Recount these
+against the table below rather than trusting them**: they were written
+as twenty-seven, twenty-six, eighteen and eight one commit before U16
+closed and moved into it, and were wrong until this line was rewritten
+by counting again.
 
 | row | what it was | disposition | grounds |
 |---|---|---|---|
