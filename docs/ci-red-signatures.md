@@ -431,10 +431,25 @@ last one.** Every push starts a run at the new head, and a record
 committed by that push is written before its own run exists --- so a
 table in the repository is structurally one run behind, and no wording
 fixes that. `gh run list --branch e1/first-ten-minutes` is the live
-list and is what a merge decision reads. Two runs were in flight when
-this section was last edited: **34267354381** at `8cdcda4` and
-**34268588682** at `f7a1221`, started by fix round 2's two pushes.
-Whoever reads them adds their rows.
+list and is what a merge decision reads.
+
+**And on a pull request only the newest run survives.**
+`.github/workflows/ci.yml` sets `concurrency: group:
+ci-${{ github.event.pull_request.number || github.sha }}` with
+`cancel-in-progress` true for `pull_request` events, so each push
+cancels the run still in flight for that PR. Fix round 2 demonstrated
+it three times: runs **34267354381** at `8cdcda4`, **34268588682** at
+`f7a1221` and **34268667347** at `cc11f17` were each cancelled by the
+next push, with no verdict and no logs worth reading. A cancelled run
+is not a green one and not a red one --- it is no evidence at all, and
+must never be counted as a run in this table.
+
+The consequence for a merge decision is worth stating plainly: **this
+branch has exactly one readable CI run at any moment**, the one at its
+current head, and every earlier one was either completed before the
+next push or cancelled by it. Three completed runs are tabulated above.
+The run at whatever head this text is read from is not, by
+construction.
 
 Every C1 record before 2026-09-08 described only the first run, by name
 and as "the first run". Fix round 1 named the first two and was written
