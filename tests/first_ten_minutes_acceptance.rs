@@ -258,6 +258,57 @@ fn the_quit_question_names_the_modified_buffers() {
     assert!(!s.core.borrow().quit, "and must not have quit");
 }
 
+// ---------------------------------------------------------------------------
+// E1.2 --- `C-g` clears the selection
+// ---------------------------------------------------------------------------
+
+/// `C-g` drops a live selection. Driven through the real chord and a
+/// real Shift-motion selection, because the defect was that the one key
+/// every editor uses to get out of a state did not get out of this one.
+#[test]
+fn c_g_clears_a_live_selection() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut s = editor();
+    visit(&s, td.path(), "alpha.txt", "alpha beta\n");
+    exec(&s, "pmacs.editor.goto_byte(0)");
+    s.dispatch_key(FrontendId::LOCAL, key(KeyCode::Right, KeyModifiers::SHIFT));
+    s.dispatch_key(FrontendId::LOCAL, key(KeyCode::Right, KeyModifiers::SHIFT));
+    assert!(
+        eval::<bool>(&s, "return pmacs.editor.region() ~= nil"),
+        "precondition: a selection must be live or the row is vacuous"
+    );
+
+    ctrl(&mut s, 'g');
+    assert!(
+        eval::<bool>(&s, "return pmacs.editor.region() == nil"),
+        "C-g must clear the selection"
+    );
+    assert_eq!(
+        status(&s),
+        "Quit",
+        "and must keep saying so on the status line"
+    );
+}
+
+/// `C-g` leaves the cursor where it was. Clearing a selection is not a
+/// motion, and a `C-g` that also jumped would be a different defect.
+#[test]
+fn clearing_the_selection_does_not_move_the_cursor() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut s = editor();
+    visit(&s, td.path(), "alpha.txt", "alpha beta\n");
+    exec(&s, "pmacs.editor.goto_byte(0)");
+    s.dispatch_key(FrontendId::LOCAL, key(KeyCode::Right, KeyModifiers::SHIFT));
+    let before: i64 = eval(&s, "return pmacs.editor.cursor()");
+
+    ctrl(&mut s, 'g');
+    assert_eq!(
+        eval::<i64>(&s, "return pmacs.editor.cursor()"),
+        before,
+        "C-g must not move point"
+    );
+}
+
 // Isolated bootstrap storage roots: an integration test is compiled
 // without `cfg(test)`, so a raw `EditorState::new()` would read the
 // developer's real `init.lua` and write into their real data root.

@@ -190,9 +190,12 @@ cmd { name = "region.delete",
           ed.set_status("no region")
         end
       end }
+-- E1.2: an ALIAS of `editor.cancel`, kept so a user binding to this
+-- name keeps working. `C-g` now drops the selection itself, so the two
+-- gestures are one operation and must not be able to drift apart.
 cmd { name = "region.cancel",
-      description = "Drop any active selection without changing the cursor.",
-      fn = function() ed.clear_selection() end }
+      description = "Drop any active selection without changing the cursor (alias of editor.cancel).",
+      fn = function() ed.cancel() end }
 
 -- Clipboard (Q#CM6) ----------------------------------------------------------
 -- Copy/cut publish the selection to the OS clipboard (OSC 52 in the TUI,

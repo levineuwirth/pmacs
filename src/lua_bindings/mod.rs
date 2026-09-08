@@ -13826,7 +13826,14 @@ fn install_session(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result
         )?;
     }
     register(editor, lua, core, "quit", |c| c.quit = true)?;
+    // E1.2 --- `C-g` is the universal cancel, so it drops the selection
+    // and with it the mark (a `Selection` IS the mark: one anchor, and
+    // `active_region` reports nothing once it is gone). Done HERE and
+    // not in the Lua command body because every caller of `ed.cancel()`
+    // means the same gesture; a Lua-side clear would leave the
+    // primitive able to say "Quit" while a region stayed live.
     register(editor, lua, core, "cancel", |c| {
+        c.clear_selection();
         c.status = "Quit".into();
     })?;
     {
