@@ -420,11 +420,13 @@ that names a total has to be found and rewritten, and twice it was not.
 | 34220035122 | `8f6784f` | 2026-09-08T11:18:55Z | 11:38:36Z | 12 green, 3 red |
 | 34222042303 | `e78d184` | 11:41:44Z | 12:01:39Z | 13 green, 2 red |
 | 34253949749 | `b2094ac` | 16:54:59Z | 17:09:27Z | 16 green, 1 red |
+| 34269795016 | `04263c6` | 19:35:31Z | 19:59:11Z | 16 green, 1 red |
 
-All three are `pull_request` events with conclusion **failure**, and
-`Docs consistency` is skipped in all three, correctly: the PR's changed
+All four are `pull_request` events with conclusion **failure**, and
+`Docs consistency` is skipped in all four, correctly: the PR's changed
 paths include code. The first two ran trees differing by one markdown
-file; the third ran fix round 1's seven further commits.
+file; the third ran fix round 1's seven commits; the fourth ran fix
+round 2's ten.
 
 **This table holds the runs someone has read, and it can never hold the
 last one.** Every push starts a run at the new head, and a record
@@ -447,9 +449,9 @@ must never be counted as a run in this table.
 The consequence for a merge decision is worth stating plainly: **this
 branch has exactly one readable CI run at any moment**, the one at its
 current head, and every earlier one was either completed before the
-next push or cancelled by it. Three completed runs are tabulated above.
+next push or cancelled by it. Four completed runs are tabulated above.
 The run at whatever head this text is read from is not, by
-construction.
+construction --- including the one this very commit's push starts.
 
 Every C1 record before 2026-09-08 described only the first run, by name
 and as "the first run". Fix round 1 named the first two and was written
@@ -536,6 +538,54 @@ sample is worth.
 Both halves of that are the finding. Neither is quotable without the
 other: the first half alone reads as exoneration, the second alone
 suppresses the only measurement at the head there is.
+
+#### Run 34269795016, at `04263c6`
+
+Sixteen jobs green, one red: `Test (macos-latest / luajit)`, job
+**102208453110**, with **five** failing targets in it --- the largest
+cluster this branch has produced, and the first on this leg.
+
+| suite | selector | message |
+|---|---|---|
+| `bottom_panel_stage1_acceptance` | `acc28_child_input_and_the_c_c_escape_work_unchanged_in_a_panel` | `/ready did not become ready within 5s (waited 5.029068625s, 58 polls); last observed: No such file or directory` |
+| `gpu_font_acceptance` | `v16_peer_never_receives_font_facts_and_v17_does` | `read Hello: Io(Os { code: 35, kind: WouldBlock, … })` |
+| `m5_5_acceptance` | `m10_10_non_replica_frontend_does_not_receive_cursor_byte` | the same `read Hello` WouldBlock |
+| `m8_3_acceptance` | `wdired_external_same_size_same_second_rewrite_aborts` | `could not produce same-second rewrite with distinct nanoseconds` |
+| `theme_faces_acceptance` | `daemon_reships_the_summary_after_a_real_buffer_round_trip` **and** `v15_peer_never_receives_theme_facts_and_v16_does` | the same `read Hello` WouldBlock, twice |
+
+**Dispositions, one per mechanism and none folded on resemblance.**
+
+- The first is **#259**'s selector with all three required fragments, on
+  macOS **luajit** this time where the two earlier occurrences were
+  lua54. #259 states in its own body that the flavor is not the
+  discriminator, so it matches: a **third occurrence**, a comment on
+  #259.
+- The four `read Hello` WouldBlock failures are **not #258** under the
+  matching rule --- #258's selector is
+  `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join` in
+  `statusline_segments_acceptance`, and none of these is that test. Its
+  occurrence count stays at **one**. The last of them is the second
+  occurrence of the `theme_faces` incident already recorded there. All
+  four are a comment on #258, which is the issue for that failing
+  expression, with the difference stated.
+- The `wdired` failure is a **new signature** with no row and no issue:
+  filed as **#261**.
+
+**What the four-in-one-job changes, and what it does not.** Every
+earlier record of `read Hello: WouldBlock` argued it was a per-fixture
+short read timeout, a value the test sets a few lines above the failing
+call. Four selectors across three suites failing that way inside one
+job is the first observation that reading does not fit comfortably:
+either four independent fixtures each chose too small a budget and all
+four lost the same race in the same job, or something job-wide on that
+runner delayed the daemon's server-first `Hello` everywhere. **Neither
+is established** and this file does not choose between them; what would
+is a measurement of how long `Hello` actually took against each
+fixture's budget, which nothing has done. It is recorded because it is
+the first evidence that bears on the question at all.
+
+**None of this was re-run.** The job is the head's own run and it stands
+as read.
 
 ### The macOS reds have a merge-base control, and it excludes nothing
 
