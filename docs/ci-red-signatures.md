@@ -94,7 +94,7 @@ run, one per run.
 | selector | `--test m8_1_acceptance read_dir_supersede_cancels_in_flight_predecessor` |
 | job | GitHub Actions, the serialized crdt sweep (`--test-threads=1`) |
 | required fragments | `first read_dir must be superseded; got ok` |
-| occurrences | two: `main` at `aae5b35`, run 33375945966 (the serialized crdt sweep); and `main` at `d97e137`, run 34205653191, job `Test (macos-latest / luajit)`, the post-merge run of E0 --- which under D23 runs at cargo's DEFAULT parallelism, so the second occurrence carries the selector and the fragment without the serialization the candidate mechanism leans on |
+| occurrences | three: `main` at `aae5b35`, run 33375945966 (the serialized crdt sweep); `main` at `d97e137`, run 34205653191, job `Test (macos-latest / luajit)`; and PR #257 at `8f6784f`, run 34220035122, job `Test (ubuntu-latest / luajit)`. The last two run at cargo's DEFAULT parallelism under D23, and the third is on LINUX, so neither serialization nor macOS is required to produce it. The second is the merge-base control for the third: the same signature is on `d97e137` itself, so the branch did not introduce it |
 | candidate mechanism | the predecessor completed before the cancellation took effect. `--test-threads=1` was the first occurrence's candidate: it serializes the test functions in one executable and so removes one source of contention the test's "in flight" depends on. The second occurrence has no such flag, which does not refute the mechanism --- a fast predecessor is a fast predecessor however the runner got there --- but it does mean serialization is not required to produce it, and the remaining common factor is a macOS or Linux CI runner rather than a scheduling flag. Nothing has measured the predecessor's duration under either, and nothing rules out a real supersede defect |
 | retirement | diagnosis; a witness that holds the predecessor in flight deterministically rather than by load |
 
@@ -119,7 +119,7 @@ One line per row: what it was, when it closed, and what closed it.
 | U5 | `ctrl_c_during_reconnect_sleep_yields_clean_exit`, macOS lua54 | 2026-09-05 | one occurrence, not reproduced; a recurrence is an issue |
 | U6 | `criterion_1` and `composition_overhead` red together | 2026-09-05 | both are wall-clock budgets, now `#[ignore]` |
 | U7 | a different render-budget test red each sweep (dired, outline) | 2026-09-05 | render budgets, now `#[ignore]` |
-| U8 | `acc28_child_input…`, macOS luajit, fragments destroyed | 2026-09-05 | readiness migration (the R6 family); a recurrence is an issue |
+| U8 | `acc28_child_input…`, macOS luajit, fragments destroyed | 2026-09-05 | readiness migration (the R6 family); a recurrence is an issue. It recurred 2026-09-08 on macOS lua54, with fragments this time because of the migration: #259 |
 | U9 | a PTY test and a budget test red together in one sweep | 2026-09-05 | the budget half is `#[ignore]`; the PTY half is U2's mechanism |
 | U10 | the budget red rotating between two runs of one commit | 2026-09-05 | budgets `#[ignore]` |
 | U11 | `dispatch_parse_round_trips_a_rust_source_file` missed its parse budget, macOS | 2026-09-05 | the round trip stays in the default run; the 100 ms budget is a separate `#[ignore]` test |
