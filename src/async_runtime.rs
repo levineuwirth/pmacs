@@ -2513,16 +2513,16 @@ mod tests {
             ids.push(rt.dispatch_sleep(0, Some("k")));
         }
         // Pump until every dispatched id (gate + 100 keyed) settles.
-        const DEADLINE: Duration = Duration::from_secs(3);
+        let deadline = Duration::from_secs(3);
         let start = Instant::now();
         let mut polls = 0u32;
         loop {
             polls += 1;
             let elapsed = start.elapsed();
             assert!(
-                elapsed < DEADLINE,
+                elapsed < deadline,
                 "settle deadline exceeded: the gate and all {} keyed jobs did not \
-                 settle within {DEADLINE:?} (waited {elapsed:?}, {polls} polls; \
+                 settle within {deadline:?} (waited {elapsed:?}, {polls} polls; \
                  gate complete: {}, keyed still pending: {})",
                 ids.len(),
                 rt.is_complete(gate),
@@ -2611,16 +2611,16 @@ mod tests {
         let beta = rt.dispatch_sleep(0, Some("beta"));
         let _alpha2 = rt.dispatch_sleep(0, Some("alpha"));
         // beta should complete cleanly; alpha1 should be cancelled.
-        const DEADLINE: Duration = Duration::from_secs(2);
+        let deadline = Duration::from_secs(2);
         let start = Instant::now();
         let mut polls = 0u32;
         while !(rt.is_complete(beta) && rt.is_complete(alpha1)) {
             polls += 1;
             let elapsed = start.elapsed();
             assert!(
-                elapsed < DEADLINE,
+                elapsed < deadline,
                 "settle deadline exceeded: beta and alpha1 did not both settle \
-                 within {DEADLINE:?} (waited {elapsed:?}, {polls} polls; beta \
+                 within {deadline:?} (waited {elapsed:?}, {polls} polls; beta \
                  complete: {}, alpha1 complete: {})",
                 rt.is_complete(beta),
                 rt.is_complete(alpha1)
