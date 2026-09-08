@@ -94,8 +94,8 @@ run, one per run.
 | selector | `--test m8_1_acceptance read_dir_supersede_cancels_in_flight_predecessor` |
 | job | GitHub Actions, the serialized crdt sweep (`--test-threads=1`) |
 | required fragments | `first read_dir must be superseded; got ok` |
-| occurrences | one, `main` at `aae5b35`, run 33375945966 |
-| candidate mechanism | the predecessor completed before the cancellation took effect. `--test-threads=1` serializes the test functions in one executable and so removes one source of contention the test's "in flight" depends on; nothing measured the predecessor's duration with the flag on versus off, and nothing rules out a real supersede defect |
+| occurrences | two: `main` at `aae5b35`, run 33375945966 (the serialized crdt sweep); and `main` at `d97e137`, run 34205653191, job `Test (macos-latest / luajit)`, the post-merge run of E0 --- which under D23 runs at cargo's DEFAULT parallelism, so the second occurrence carries the selector and the fragment without the serialization the candidate mechanism leans on |
+| candidate mechanism | the predecessor completed before the cancellation took effect. `--test-threads=1` was the first occurrence's candidate: it serializes the test functions in one executable and so removes one source of contention the test's "in flight" depends on. The second occurrence has no such flag, which does not refute the mechanism --- a fast predecessor is a fast predecessor however the runner got there --- but it does mean serialization is not required to produce it, and the remaining common factor is a macOS or Linux CI runner rather than a scheduling flag. Nothing has measured the predecessor's duration under either, and nothing rules out a real supersede defect |
 | retirement | diagnosis; a witness that holds the predecessor in flight deterministically rather than by load |
 
 ## Closed rows
