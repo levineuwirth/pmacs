@@ -309,6 +309,152 @@ fn clearing_the_selection_does_not_move_the_cursor() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// E1.3 --- mark, buffer-wide motion, recenter
+// ---------------------------------------------------------------------------
+
+/// `M->` lands on the buffer's last byte and `M-<` on its first, both
+/// through the real chords. `M->` is the half that cannot be written as
+/// a line jump: on a file with no trailing newline it is the end of the
+/// last line, not its start.
+#[test]
+fn buffer_start_and_end_motion_reach_both_ends() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut s = editor();
+    visit(&s, td.path(), "alpha.txt", "one\ntwo\nthree");
+    let len: i64 = eval(&s, "return pmacs.window.buffer():len()");
+
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char('>'), KeyModifiers::ALT),
+    );
+    assert_eq!(
+        eval::<i64>(&s, "return pmacs.editor.cursor()"),
+        len,
+        "M-> must reach the last byte, not the last line's start"
+    );
+
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char('<'), KeyModifiers::ALT),
+    );
+    assert_eq!(
+        eval::<i64>(&s, "return pmacs.editor.cursor()"),
+        0,
+        "M-< must reach the first byte"
+    );
+}
+
+/// `C-SPC` sets the mark and plain motion then extends the region ---
+/// the whole point of a mark, and the reason it is the same anchor the
+/// Shift-motion commands use rather than a second one.
+#[test]
+fn the_mark_makes_plain_motion_extend_a_region() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut s = editor();
+    visit(&s, td.path(), "alpha.txt", "alpha beta\n");
+    exec(&s, "pmacs.editor.goto_byte(0)");
+    assert!(
+        eval::<bool>(&s, "return pmacs.editor.region() == nil"),
+        "precondition: no region before the mark is set"
+    );
+
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char(' '), KeyModifiers::CONTROL),
+    );
+    assert_eq!(status(&s), "Mark set");
+    assert!(
+        eval::<bool>(&s, "return pmacs.editor.region() == nil"),
+        "a mark at point is an empty region, which reports as none"
+    );
+
+    ctrl(&mut s, 'f');
+    ctrl(&mut s, 'f');
+    ctrl(&mut s, 'f');
+    let region: Vec<i64> = eval(
+        &s,
+        "local r = pmacs.editor.region() return { r.start, r['end'] }",
+    );
+    assert_eq!(
+        region,
+        vec![0, 3],
+        "plain motion after C-SPC must extend the region"
+    );
+}
+
+/// `C-x C-x` swaps the ends and keeps the region. Both halves matter:
+/// an exchange that dropped the mark would leave the user with a
+/// cursor where their region used to be.
+#[test]
+fn exchange_point_and_mark_swaps_the_ends_and_keeps_the_region() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut s = editor();
+    visit(&s, td.path(), "alpha.txt", "alpha beta\n");
+    exec(&s, "pmacs.editor.goto_byte(0)");
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char(' '), KeyModifiers::CONTROL),
+    );
+    ctrl(&mut s, 'f');
+    ctrl(&mut s, 'f');
+    ctrl(&mut s, 'f');
+    assert_eq!(eval::<i64>(&s, "return pmacs.editor.cursor()"), 3);
+
+    ctrl(&mut s, 'x');
+    ctrl(&mut s, 'x');
+    assert_eq!(
+        eval::<i64>(&s, "return pmacs.editor.cursor()"),
+        0,
+        "point must land on the mark"
+    );
+    let region: Vec<i64> = eval(
+        &s,
+        "local r = pmacs.editor.region() return { r.start, r['end'] }",
+    );
+    assert_eq!(region, vec![0, 3], "and the region must survive the swap");
+
+    ctrl(&mut s, 'x');
+    ctrl(&mut s, 'x');
+    assert_eq!(
+        eval::<i64>(&s, "return pmacs.editor.cursor()"),
+        3,
+        "and the swap must be its own inverse"
+    );
+}
+
+/// `C-l` centers the line holding point over the window's `view_top`
+/// and does not move point. The viewport height is set explicitly:
+/// with no frame rendered the fallback would decide the answer, and a
+/// row that cannot tell the two apart pins nothing.
+#[test]
+fn recenter_centers_the_cursor_line_without_moving_point() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut s = editor();
+    let mut body = String::new();
+    for n in 0..100 {
+        use std::fmt::Write as _;
+        writeln!(body, "line {n}").expect("format fixture");
+    }
+    visit(&s, td.path(), "alpha.txt", &body);
+    s.core.borrow_mut().active_window_mut().last_visible_rows = 10;
+    exec(&s, "pmacs.editor.move_to_line(50)");
+    s.core.borrow_mut().active_window_mut().view_top = 0;
+    let point: i64 = eval(&s, "return pmacs.editor.cursor()");
+
+    ctrl(&mut s, 'l');
+    assert_eq!(
+        s.core.borrow().view_top(),
+        45,
+        "C-l must put the cursor line mid-viewport"
+    );
+    assert_eq!(
+        eval::<i64>(&s, "return pmacs.editor.cursor()"),
+        point,
+        "and must not move point"
+    );
+}
+
 // Isolated bootstrap storage roots: an integration test is compiled
 // without `cfg(test)`, so a raw `EditorState::new()` would read the
 // developer's real `init.lua` and write into their real data root.

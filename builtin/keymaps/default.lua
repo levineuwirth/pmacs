@@ -37,6 +37,11 @@ bind("C-<down>", "cursor.paragraph-down")
 bind("M-{",      "cursor.paragraph-up")
 bind("M-}",      "cursor.paragraph-down")
 
+-- Buffer-wide motion (E1.3; classic Emacs M-< / M->) ------------------------
+
+bind("M-<", "cursor.buffer-start")
+bind("M->", "cursor.buffer-end")
+
 -- Page motion (Page Up / Page Down; classic M-v / C-v) ---------------------
 
 bind("<pageup>",   "cursor.page-up")
@@ -129,9 +134,24 @@ bind("C-4", "buffer.undo")
 bind("C-?", "buffer.redo")
 bind("C-S-_", "buffer.redo")
 
+-- Mark and region (E1.3) -----------------------------------------------------
+--
+-- C-SPC sets the mark; plain motion then extends the region, because
+-- `Window::region` is anchor-against-cursor and is recomputed on every
+-- read. C-x C-x swaps the two ends. Terminals that cannot distinguish
+-- Ctrl+Space from NUL deliver this as `Char(' ') + CONTROL` under the
+-- kitty protocol the frontend negotiates; a legacy terminal that
+-- cannot is why `M-x region.set-mark` stays reachable by name.
+bind("C-SPC", "region.set-mark")
+
+-- Recenter (E1.3). C-l is Emacs's recenter, and the terminal's own
+-- redraw is C-l too only in a shell, not in a full-screen program.
+bind("C-l", "window.recenter")
+
 -- Multi-key chords -----------------------------------------------------------
 
 bind("C-x C-s", "buffer.save")
+bind("C-x C-x", "region.exchange-point-and-mark")
 bind("C-x C-c", "editor.quit")
 bind("C-x u",   "buffer.undo")
 bind("C-x r",   "buffer.redo")

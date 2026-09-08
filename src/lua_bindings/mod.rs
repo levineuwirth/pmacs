@@ -7089,6 +7089,7 @@ pub fn install_editor(lua: &Lua, core: &SharedCore) -> mlua::Result<()> {
     }
 
     install_motion(&editor, lua, core)?;
+    install_wide_motion(&editor, lua, core)?;
     install_editing(&editor, lua, core)?;
     install_history(&editor, lua, core)?;
     install_session(&editor, lua, core)?;
@@ -13573,6 +13574,30 @@ fn install_window_module(lua: &Lua, core: &SharedCore) -> mlua::Result<Table> {
     }
 
     Ok(win)
+}
+
+/// E1.3 --- buffer-wide motion and recenter. Its own installer rather
+/// than three more lines in [`install_motion`], which is at clippy's
+/// line ceiling. `move_buffer_end` and `recenter` both need a fact only
+/// the core holds (the text view's line count, the last rendered
+/// viewport height), so neither is a composition a Lua caller could
+/// write for itself.
+fn install_wide_motion(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result<()> {
+    register(
+        editor,
+        lua,
+        core,
+        "move_buffer_start",
+        EditorCore::move_buffer_start,
+    )?;
+    register(
+        editor,
+        lua,
+        core,
+        "move_buffer_end",
+        EditorCore::move_buffer_end,
+    )?;
+    register(editor, lua, core, "recenter", EditorCore::recenter)
 }
 
 fn install_motion(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result<()> {

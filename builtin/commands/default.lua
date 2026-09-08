@@ -38,6 +38,15 @@ cmd { name = "cursor.paragraph-down",
       description = "Move cursor forward to the next paragraph break.",
       fn = function() ed.move_paragraph_down() end }
 
+-- Buffer-wide motion (E1.3). `M-<` / `M->` --- the two motions the
+-- editor had only inside terminal copy mode.
+cmd { name = "cursor.buffer-start",
+      description = "Move to the start of the buffer.",
+      fn = function() ed.move_buffer_start() end }
+cmd { name = "cursor.buffer-end",
+      description = "Move to the end of the buffer.",
+      fn = function() ed.move_buffer_end() end }
+
 -- Buffer editing -------------------------------------------------------------
 
 -- CUA region semantics: with an active selection, Backspace / Delete
@@ -101,6 +110,35 @@ cmd { name = "cursor.select-line-start",
 cmd { name = "cursor.select-line-end",
       description = "Extend selection to end of line.",
       fn = function() ensure_anchor(); ed.move_line_end() end }
+
+-- Mark and region (E1.3). `C-SPC` sets the mark at point through the
+-- same `ensure_anchor` the Shift-motion commands use, so there is one
+-- notion of an anchor and not two: `Window::region` is computed live
+-- from anchor against cursor, which is what makes plain motion after
+-- `C-SPC` extend the region without every motion command knowing.
+cmd { name = "region.set-mark",
+      description = "Set the mark at point; motion then extends the region.",
+      fn = function()
+        ed.begin_selection(ed.cursor())
+        ed.set_status("Mark set")
+      end }
+
+-- `C-x C-x`. An empty region reports nil (anchor == cursor), and there
+-- is nothing to exchange in that case, so the command says so rather
+-- than silently doing nothing.
+cmd { name = "region.exchange-point-and-mark",
+      description = "Exchange point and mark, keeping the region.",
+      fn = function()
+        local r = ed.region()
+        if r == nil then
+          ed.set_status("no region")
+          return
+        end
+        local point = ed.cursor()
+        local mark = (point == r.start) and r["end"] or r.start
+        ed.begin_selection(point)
+        ed.goto_byte(mark)
+      end }
 -- CUA type-over: inserting with an active selection replaces it in a
 -- SINGLE edit (one undo step — `insert_char_over_region` emits one
 -- `Replace`, not a `delete` + `insert` pair). Without a selection it
@@ -367,6 +405,14 @@ cmd { name = "window.split-horizontal",
 cmd { name = "window.split-vertical",
       description = "Split the active window vertically (children sit side-by-side).",
       fn = function() pmacs.window.split_vertical() end }
+-- E1.3: `C-l`. Scrolls the active window so point sits mid-viewport;
+-- point itself does not move. On a semantic frontend the command
+-- reaches the daemon and moves the daemon-side `view_top`; that
+-- frontend scrolls its own replica and follows locally.
+cmd { name = "window.recenter",
+      description = "Scroll so the line holding point is centered.",
+      fn = function() ed.recenter() end }
+
 cmd { name = "window.toggle-line-numbers",
       description = "Toggle the active window's line-number gutter (off / absolute).",
       fn = function()

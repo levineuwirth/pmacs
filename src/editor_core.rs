@@ -38,6 +38,12 @@ use crate::window::{
     QuitAction, Side, Window, WindowId, subtree_min_rows,
 };
 
+/// Viewport height assumed by a command that needs one before any
+/// frame has rendered (`last_visible_rows == 0`). The same twenty rows
+/// `page_step` falls back to, for the same reason: a headless caller
+/// must get a plausible screen rather than a zero-height one.
+const DEFAULT_VIEWPORT_ROWS: usize = 20;
+
 /// T M10.10 post-audit-round-3 F16 — origin of a queued CRDT op.
 ///
 /// Records **whether the originating frontend already applied the
@@ -2599,6 +2605,55 @@ impl EditorCore {
         let aw = self.active_window_mut();
         aw.cursor = new;
         aw.goal_col = None;
+    }
+
+    /// Move point to the very start of the buffer (`M-<`, E1.3).
+    ///
+    /// A named primitive rather than a Lua `move_to_line(0)` because its
+    /// partner below cannot be written that way: there is no line index
+    /// a caller can name for "the last one" without first asking the
+    /// text view how many there are.
+    pub fn move_buffer_start(&mut self) {
+        self.move_to_line(0);
+    }
+
+    /// Move point to the very end of the buffer (`M->`, E1.3).
+    ///
+    /// The last line's *end*, not its start: `move_to_line` clamps to
+    /// the last line and lands at column zero, which is the end of the
+    /// buffer only when it ends in a newline. Composed from the two
+    /// existing motions so a fold-projecting frontend's clamps and the
+    /// goal-column reset stay exactly what every other motion does.
+    pub fn move_buffer_end(&mut self) {
+        let last = self
+            .active_window()
+            .text_view
+            .line_count()
+            .max(1)
+            .saturating_sub(1);
+        self.move_to_line(last);
+        self.move_line_end();
+    }
+
+    /// Scroll so the line holding point sits in the middle of the
+    /// active window's viewport (`C-l`, E1.3).
+    ///
+    /// Point does not move: this is a scroll, and a recenter that also
+    /// jumped would be a different command. The height is the one the
+    /// last frame recorded, with the same headless fallback
+    /// [`Self::page_step`] uses — a window that has never rendered has
+    /// `last_visible_rows == 0`, and dividing that by two would pin
+    /// `view_top` to the cursor line and silently turn `C-l` into
+    /// scroll-to-top.
+    pub fn recenter(&mut self) {
+        let rows = usize::try_from(self.active_window().last_visible_rows).unwrap_or(usize::MAX);
+        let rows = if rows >= 1 {
+            rows
+        } else {
+            DEFAULT_VIEWPORT_ROWS
+        };
+        let line = self.cursor_line();
+        self.set_view_top(line.saturating_sub(rows / 2));
     }
 
     /// Pre-edit unfold (Arc 6, Q#FD5 / Stage 2 Q#FD19). Before a local
