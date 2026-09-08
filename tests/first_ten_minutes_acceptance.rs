@@ -455,6 +455,148 @@ fn recenter_centers_the_cursor_line_without_moving_point() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// E1.4 --- word kills reach the kill ring
+// ---------------------------------------------------------------------------
+
+/// The ring's head text, or the empty string when the ring is empty.
+fn ring_head(s: &EditorState) -> String {
+    eval(s, "local r = pmacs.killring.list() return r[1] or ''")
+}
+
+/// `M-d` kills forward into the ring, and `C-y` brings it back. The
+/// yank is the half that matters: a delete that merely reported a kill
+/// would pass any assertion about the buffer alone.
+#[test]
+fn m_d_kills_the_word_forward_into_the_ring() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut s = editor();
+    visit(&s, td.path(), "alpha.txt", "alpha beta\n");
+    exec(&s, "pmacs.editor.goto_byte(0)");
+
+    alt(&mut s, 'd');
+    assert_eq!(
+        eval::<String>(
+            &s,
+            "local b = pmacs.window.buffer() return b:slice(0, b:len())"
+        ),
+        " beta\n",
+        "M-d must delete the word"
+    );
+    assert_eq!(ring_head(&s), "alpha", "and it must be on the ring");
+
+    ctrl(&mut s, 'y');
+    assert_eq!(
+        eval::<String>(
+            &s,
+            "local b = pmacs.window.buffer() return b:slice(0, b:len())"
+        ),
+        "alpha beta\n",
+        "C-y must bring it back"
+    );
+}
+
+/// `M-BS` kills backward into the ring.
+#[test]
+fn m_backspace_kills_the_word_backward_into_the_ring() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut s = editor();
+    visit(&s, td.path(), "alpha.txt", "alpha beta\n");
+    exec(&s, "pmacs.editor.move_buffer_end()");
+    exec(&s, "pmacs.editor.goto_byte(10)");
+
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Backspace, KeyModifiers::ALT),
+    );
+    assert_eq!(
+        eval::<String>(
+            &s,
+            "local b = pmacs.window.buffer() return b:slice(0, b:len())"
+        ),
+        "alpha \n",
+        "M-BS must delete the previous word"
+    );
+    assert_eq!(ring_head(&s), "beta", "and it must be on the ring");
+}
+
+/// Consecutive backward kills PREPEND. Appending would yank back the
+/// words in the reverse of the order they stood in the buffer, which is
+/// the whole reason the direction is carried into the ring at all.
+#[test]
+fn chained_backward_kills_prepend_rather_than_append() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut s = editor();
+    visit(&s, td.path(), "alpha.txt", "alpha beta\n");
+    exec(&s, "pmacs.editor.goto_byte(10)");
+
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Backspace, KeyModifiers::ALT),
+    );
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Backspace, KeyModifiers::ALT),
+    );
+    assert_eq!(
+        ring_head(&s),
+        "alpha beta",
+        "two backward kills must yank back as they stood in the buffer"
+    );
+    assert_eq!(
+        eval::<String>(
+            &s,
+            "local b = pmacs.window.buffer() return b:slice(0, b:len())"
+        ),
+        "\n",
+        "and both words must be gone"
+    );
+}
+
+/// Consecutive forward kills still append, unchanged.
+#[test]
+fn chained_forward_kills_still_append() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut s = editor();
+    visit(&s, td.path(), "alpha.txt", "alpha beta\n");
+    exec(&s, "pmacs.editor.goto_byte(0)");
+
+    alt(&mut s, 'd');
+    alt(&mut s, 'd');
+    assert_eq!(
+        ring_head(&s),
+        "alpha beta",
+        "two forward kills must accumulate in buffer order"
+    );
+}
+
+/// A word kill at the end of the buffer is a no-op that reports, and it
+/// must not leave a chain the next kill would append to.
+#[test]
+fn a_word_kill_with_nothing_to_kill_reports_and_breaks_the_chain() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut s = editor();
+    visit(&s, td.path(), "alpha.txt", "alpha");
+    exec(&s, "pmacs.editor.goto_byte(0)");
+    alt(&mut s, 'd');
+    assert_eq!(ring_head(&s), "alpha");
+
+    alt(&mut s, 'd');
+    assert_eq!(status(&s), "end of buffer");
+    assert_eq!(
+        ring_head(&s),
+        "alpha",
+        "a failed kill must add nothing to the ring"
+    );
+    assert!(
+        !eval::<bool>(
+            &s,
+            "return pmacs.killring._debug_state(pmacs.frontend.id()).last_kill_id ~= nil"
+        ),
+        "and must leave no chain for the next kill to ride"
+    );
+}
+
 // Isolated bootstrap storage roots: an integration test is compiled
 // without `cfg(test)`, so a raw `EditorState::new()` would read the
 // developer's real `init.lua` and write into their real data root.

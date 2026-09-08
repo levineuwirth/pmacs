@@ -78,7 +78,8 @@ bind("C-M-%", "query-replace-regexp")
 -- CUA-style word-level deletion (the same shortcuts users expect from
 -- IDEs, browsers, terminals on Linux/Windows). C-BS deletes back to
 -- the start of the previous word; C-DEL deletes forward through the
--- next word. Emacs's classic M-BS and M-d remain bound below.
+-- next word. Emacs's classic M-BS and M-d are kills, not deletes
+-- (E1.4); see the note under this block.
 --
 -- Why we also bind C-h: most terminals (anything not implementing the
 -- kitty keyboard protocol) cannot disambiguate Ctrl+Backspace from
@@ -90,8 +91,11 @@ bind("C-M-%", "query-replace-regexp")
 bind("C-BS",  "buffer.delete-word-backward")
 bind("C-h",   "buffer.delete-word-backward")
 bind("C-DEL", "buffer.delete-word-forward")
-bind("M-BS",  "buffer.delete-word-backward")
-bind("M-d",   "buffer.delete-word-forward")
+-- M-BS and M-d are NOT here (E1.4): the Emacs word kills put the text
+-- on the kill ring, so they are bound in `builtin/runtime/killring.lua`
+-- beside C-k and M-y, where the commands they name are defined. The
+-- CUA chords above stay plain deletes, which is what those keys mean in
+-- the editors they are borrowed from.
 
 -- CUA-style Shift+motion selection. Each Shift+arrow extends a
 -- selection from the cursor (anchoring at the current position if no
