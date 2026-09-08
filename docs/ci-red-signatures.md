@@ -426,6 +426,16 @@ All three are `pull_request` events with conclusion **failure**, and
 paths include code. The first two ran trees differing by one markdown
 file; the third ran fix round 1's seven further commits.
 
+**This table holds the runs someone has read, and it can never hold the
+last one.** Every push starts a run at the new head, and a record
+committed by that push is written before its own run exists --- so a
+table in the repository is structurally one run behind, and no wording
+fixes that. `gh run list --branch e1/first-ten-minutes` is the live
+list and is what a merge decision reads. Two runs were in flight when
+this section was last edited: **34267354381** at `8cdcda4` and
+**34268588682** at `f7a1221`, started by fix round 2's two pushes.
+Whoever reads them adds their rows.
+
 Every C1 record before 2026-09-08 described only the first run, by name
 and as "the first run". Fix round 1 named the first two and was written
 fifty seconds after the push that started the third.
