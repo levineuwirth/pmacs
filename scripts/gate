@@ -2,8 +2,9 @@
 # scripts/gate --- run the gate suite in a per-worktree build directory,
 # with isolated ambient roots and durable logs.
 #
-#   scripts/gate [--protocol] [--perf] [--docs] [--print-plan]
-#   scripts/gate [--protocol] [--perf] [--docs] --print-plan-named
+#   scripts/gate [--protocol] [--perf] [--print-plan]
+#   scripts/gate [--protocol] [--perf] --print-plan-named
+#   scripts/gate --docs [--print-plan|--print-plan-named]
 #   scripts/gate --print-arming
 #   scripts/gate --print-target-dir
 #   scripts/gate --init
@@ -37,6 +38,20 @@
 # (docs/invariants.md's line cap, docs/divergences.md's existence) it is
 # the only check in the tree. A plan that stopped at rustdoc validated
 # a documentation change with nothing that reads documentation.
+#
+# `--docs` IS A MODE AND REFUSES THE MODIFIERS. `--protocol` and
+# `--perf` add stages to the full plan; `--docs` REPLACES it. Combining
+# them is not a bigger plan, and until 2026-09-08 it was not an error
+# either: emit_plan returned from its --docs branch before either
+# modifier was consulted, so `scripts/gate --protocol --docs` ran four
+# documentation stages, printed `gate: all gates passed` and exited
+# zero. A caller who asked for the protocol sweep got no sweep at all
+# and no warning that a flag had been dropped --- a green run that
+# means something weaker than what was asked for, which is the one
+# failure mode this script exists to prevent. The combination is now a
+# parse-time usage error, before any log directory or ambient root
+# exists, and tests/gate_script_acceptance.rs holds both the refusal
+# and the plans that must keep working.
 #
 # WHY THE BUILD IS UNCONDITIONAL. The sweep spawns `pmacs-gpu` as a
 # PROCESS, and no `cargo test` invocation produces that binary:
@@ -92,8 +107,9 @@ set -eu
 
 usage() {
     cat >&2 <<'EOF'
-usage: scripts/gate [--protocol] [--perf] [--docs] [--print-plan]
-       scripts/gate [--protocol] [--perf] [--docs] --print-plan-named
+usage: scripts/gate [--protocol] [--perf] [--print-plan]
+       scripts/gate [--protocol] [--perf] --print-plan-named
+       scripts/gate --docs [--print-plan|--print-plan-named]
        scripts/gate --print-arming
        scripts/gate --print-target-dir
        scripts/gate --init
@@ -108,7 +124,11 @@ usage: scripts/gate [--protocol] [--perf] [--docs] [--print-plan]
                       runs scripts/perf-budgets, every #[ignore] budget
                       test by exact name.
   --docs              the documentation-only plan: fmt, doc, the
-                      documentation-consistency test, diff-check.
+                      documentation-consistency test, diff-check. A MODE,
+                      not a modifier: it REPLACES the full plan, so it
+                      cannot be combined with --protocol or --perf, which
+                      add stages to that plan. Asking for both is a usage
+                      error rather than a silently smaller run.
   --print-arming      print the arming report and exit: which
                       PMACS_REQUIRE_* variables a run here would arm,
                       and for each it would not, the missing tool and
@@ -511,6 +531,30 @@ while [ $# -gt 0 ]; do
         *)                   echo "gate: unknown argument: $1" >&2; usage ;;
     esac
 done
+
+# ---------------------------------------------------------------------
+# --docs is a MODE; --protocol and --perf are MODIFIERS of the full
+# plan. Refuse the combination HERE, at parse time, and for every mode
+# --- the print modes included, since a plan printed for a discarded
+# flag is exactly the false evidence at issue.
+#
+# WHY IT IS AN ERROR AND NOT A PRECEDENCE RULE. Before this, emit_plan
+# returned from its --docs branch before consulting either modifier, so
+# `scripts/gate --protocol --docs` ran the four documentation stages and
+# exited ZERO. Every observable said the run succeeded; nothing said a
+# flag had been dropped. There is no defensible winner to pick either:
+# a caller naming both wants something this script cannot express, and
+# guessing which half they meant would make the same green mean two
+# different things on two days.
+#
+# EXIT 2 THROUGH usage(), the same status as an unknown argument,
+# because this IS one --- a request the interface does not have.
+# ---------------------------------------------------------------------
+if [ "$DOCS" = 1 ] && { [ "$PROTOCOL" = 1 ] || [ "$PERF" = 1 ]; }; then
+    echo "gate: --docs is the documentation-only plan and cannot be combined with --protocol or --perf" >&2
+    echo "gate: run them separately --- the --docs plan replaces the full plan rather than adding to it" >&2
+    usage
+fi
 
 # ---------------------------------------------------------------------
 # Mode dispatch.
