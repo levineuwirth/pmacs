@@ -40,6 +40,35 @@ closes when its mechanism is removed or explained, never by a count of
 green runs. A red matching a closed row and postdating its closure
 reopens the question; one predating it corroborates the row.
 
+## What one control run establishes
+
+A merge-base control is one CI run at the base, and one run is one
+sample --- but the two directions are not the same sample, and no
+record may describe them as if they were.
+
+**A positive observation settles existence from one sample.** One run
+at the base in which the signature *does* appear establishes,
+deductively, that the signature is on the base. That is all it
+establishes: existence, never a rate.
+
+**A negative observation settles nothing about absence.** One run at
+the base in which the signature does *not* appear is the rerun rule
+above, applied at the base instead of at the head. A load-dependent
+test is green most of the time over a live defect, so a green control
+is non-reproduction and nothing more.
+
+Both must therefore be hedged, and hedging them **in the same words**
+is right --- both are one sample. Claiming they are the **same weight**
+is wrong, and it is the specific error this section exists to stop
+being rediscovered: a single positive and a single negative are not
+equally weighted evidence. What a green control changes is which way
+the burden falls --- the branch becomes a candidate rather than
+excluded --- not how much evidence there is. It diagnoses nothing.
+
+U17's control is the first kind and this branch's macOS control is the
+second. Each row says which it is, and neither may borrow the other's
+strength.
+
 ## Live rows
 
 ### R3 — live-leader EPERM with an unobservable group
@@ -479,7 +508,7 @@ Both halves of that are the finding. Neither is quotable without the
 other: the first half alone reads as exoneration, the second alone
 suppresses the only measurement at the head there is.
 
-### The macOS reds have a merge-base control, and it points at the branch
+### The macOS reds have a merge-base control, and it excludes nothing
 
 `git merge-base e78d184 githubsucks/main` is `d97e137`, whose post-merge
 run is **34205653191**. Both of its macOS legs were read from their job
@@ -500,9 +529,11 @@ empty for these):
 So all three macOS signatures this branch produced — #259's, #258's and
 the `theme_faces` incident's — ran at the merge base and passed there.
 **The branch is a candidate for all three rather than excluded from
-them**, and the C1 records that reasoned from untouched files are
-superseded: the branch changed a default that every window renders
-through, so an untouched suite is not an unchanged suite.
+them** --- which is a shift in the burden and not a diagnosis, per the
+section on what one control run establishes above --- and the C1 records
+that reasoned from untouched files are superseded: the branch changed a
+default that every window renders through, so an untouched suite is not
+an unchanged suite.
 
 **The weight of this control, in the same words as U17's.** It is one
 CI run at the merge base, which is one sample. U17's control is one such
