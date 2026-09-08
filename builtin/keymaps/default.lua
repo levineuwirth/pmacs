@@ -172,6 +172,10 @@ bind("C-x o",   "window.focus-next")
 bind("C-x O",   "window.focus-prev")
 bind("C-x 0",   "window.close")
 bind("C-x 1",   "window.close-others")
+-- E1.6: the line-number gutter had no chord at all, only M-x. `C-x l`
+-- is free here (Emacs spends it on `count-lines-page`, which pmacs does
+-- not have).
+bind("C-x l",   "window.toggle-line-numbers")
 bind("C-x C-f",     "find-file")
 bind("C-x C-w",     "buffer.write-file")
 bind("C-x k",       "buffer.kill")

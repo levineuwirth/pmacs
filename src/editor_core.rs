@@ -3134,6 +3134,15 @@ impl EditorCore {
         let new_id = WindowId::next();
         let mut new_window = Window::new(new_id, buffer_id, text_view);
         let active = self.active_window_id();
+        // E1.6: the gutter carries across a split. It is a display
+        // preference the user set on the window they are splitting, and
+        // now that the default is ON, *not* carrying it means a user who
+        // turned line numbers off gets them back by pressing `C-x 2` ---
+        // with no way to tell which of the two panes they are looking at
+        // is the one they configured.
+        if let Some(src) = self.windows.get(&active) {
+            new_window.line_numbers = src.line_numbers;
+        }
         // A same-buffer split starts from an empty overlay list and
         // fires no switch hook, so store-backed render overlays
         // (ANSI styling on a compile buffer) would silently vanish

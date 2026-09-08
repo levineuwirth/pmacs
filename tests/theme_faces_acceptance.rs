@@ -81,6 +81,11 @@ fn eval<T: mlua::FromLuaMulti>(s: &EditorState, src: &str) -> T {
 fn editor() -> EditorState {
     let s = EditorState::new_with_roots(&crate::iso::roots());
     exec(&s, "pmacs.lsp.config = {}");
+    // The line-number gutter is ON by default since E1.6; this suite
+    // asserts on painted columns of the text itself, so it starts from
+    // a bare grid rather than re-deriving every column against a gutter
+    // whose width is not its subject.
+    exec(&s, "pmacs.window.set_line_numbers('off')");
     s
 }
 
@@ -187,6 +192,9 @@ fn current_tree_language(state: &EditorState) -> Option<String> {
 fn open_and_wait_for_parse(path: std::path::PathBuf) -> EditorState {
     let mut state = EditorState::open_with_roots(path, &crate::iso::roots()).expect("open file");
     exec(&state, "pmacs.lsp.config = {}");
+    // Same reason as `editor()`: the E1.6 gutter shifts every painted
+    // column, and this suite's subject is the FACE on a cell.
+    exec(&state, "pmacs.window.set_line_numbers('off')");
     pump_async(&mut state, |s| current_tree_language(s).is_some());
     state
 }

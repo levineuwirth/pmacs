@@ -824,6 +824,77 @@ fn revert_buffer_on_a_clean_buffer_asks_nothing_and_clamps_point() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// E1.6 --- defaults
+// ---------------------------------------------------------------------------
+
+/// The line-number gutter is on out of the box. It was off with an
+/// M-x-only toggle, which is not a default anyone chose.
+#[test]
+fn the_line_number_gutter_is_on_by_default() {
+    let s = editor();
+    assert_eq!(
+        eval::<String>(&s, "return pmacs.window.line_numbers()"),
+        "absolute",
+        "a fresh window must show line numbers"
+    );
+}
+
+/// `C-x l` toggles it, both ways, through the real chord: the toggle
+/// had no binding at all before.
+#[test]
+fn c_x_l_toggles_the_gutter_both_ways() {
+    let mut s = editor();
+    ctrl(&mut s, 'x');
+    press(&mut s, KeyCode::Char('l'));
+    assert_eq!(
+        eval::<String>(&s, "return pmacs.window.line_numbers()"),
+        "off",
+        "C-x l must turn the gutter off"
+    );
+
+    ctrl(&mut s, 'x');
+    press(&mut s, KeyCode::Char('l'));
+    assert_eq!(
+        eval::<String>(&s, "return pmacs.window.line_numbers()"),
+        "absolute",
+        "and back on"
+    );
+}
+
+/// A split carries the gutter setting. Without this, a user who turned
+/// the now-default-on gutter off gets it back by pressing `C-x 2`, in
+/// one of the two panes, with nothing to explain the difference.
+#[test]
+fn the_gutter_setting_carries_across_a_split() {
+    let mut s = editor();
+    ctrl(&mut s, 'x');
+    press(&mut s, KeyCode::Char('l'));
+    assert_eq!(
+        eval::<String>(&s, "return pmacs.window.line_numbers()"),
+        "off"
+    );
+
+    ctrl(&mut s, 'x');
+    press(&mut s, KeyCode::Char('2'));
+    let modes: Vec<String> = {
+        let core = s.core.borrow();
+        core.windows
+            .values()
+            .map(|w| format!("{:?}", w.line_numbers))
+            .collect()
+    };
+    assert_eq!(
+        modes.len(),
+        2,
+        "precondition: the split produced two windows"
+    );
+    assert!(
+        modes.iter().all(|m| m == "Off"),
+        "both panes must keep the setting; got {modes:?}"
+    );
+}
+
 // Isolated bootstrap storage roots: an integration test is compiled
 // without `cfg(test)`, so a raw `EditorState::new()` would read the
 // developer's real `init.lua` and write into their real data root.

@@ -294,8 +294,11 @@ mod tests {
         match &msgs[1] {
             InstanceMessage::Cursor(Some(cs)) => {
                 assert!(cs.visible);
-                // Empty *scratch* buffer puts the cursor at row 0, col 0.
-                assert_eq!(cs.coord, CellCoord::new(0, 0));
+                // Empty *scratch* buffer: row 0, and the first content
+                // column, which since E1.6 is past the default-on
+                // line-number gutter ("` 1 `", three cells wide for a
+                // one-line buffer).
+                assert_eq!(cs.coord, CellCoord::new(0, 3));
             }
             InstanceMessage::Cursor(None) => {
                 // Acceptable too — empty state may suppress cursor.

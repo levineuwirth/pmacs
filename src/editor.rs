@@ -7261,6 +7261,11 @@ mod tests {
             .create_from_bytes("test", content);
         let mut core = s.core.borrow_mut();
         let _ = core.switch_active_buffer(new_id);
+        // The line-number gutter is ON by default since E1.6 and eats
+        // the leftmost columns. The render rows below assert on where
+        // the TEXT lands, so this fixture paints a bare grid; the rows
+        // that are about the gutter turn it on for themselves.
+        core.active_window_mut().line_numbers = crate::window::LineNumberMode::Off;
         drop(core);
         s
     }

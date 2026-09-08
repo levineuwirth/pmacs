@@ -1462,13 +1462,14 @@ fn m10_10_criterion_2_no_flicker_for_end_of_line_optimistic_insert() {
         match read_message::<InstanceMessage>(&mut stream) {
             Ok(InstanceMessage::CellDelta { spans, .. }) => {
                 for DiffSpan { start, cells } in spans {
-                    // Look for an 'X' cell at row 0 (the *scratch*
-                    // buffer's only line).
-                    for (offset, cell) in cells.iter().enumerate() {
-                        if start.row == 0
-                            && (start.col as usize + offset) == 0
-                            && matches!(cell.glyph, Glyph::Char('X'))
-                        {
+                    // Look for an 'X' cell on row 0 (the *scratch*
+                    // buffer's only line). The COLUMN is not pinned:
+                    // since E1.6 the line-number gutter is on by
+                    // default and occupies the leftmost cells, and this
+                    // criterion is about the glyph and its style, not
+                    // about where the gutter ends.
+                    for cell in &cells {
+                        if start.row == 0 && matches!(cell.glyph, Glyph::Char('X')) {
                             found_x_cell = Some(cell.clone());
                             break;
                         }
@@ -1481,7 +1482,7 @@ fn m10_10_criterion_2_no_flicker_for_end_of_line_optimistic_insert() {
     }
 
     let cell = found_x_cell.expect(
-        "criterion 2: daemon's CellDelta should carry 'X' at column 0 of row 0 \
+        "criterion 2: daemon's CellDelta should carry 'X' on row 0 \
          after the CrdtOp lands",
     );
 

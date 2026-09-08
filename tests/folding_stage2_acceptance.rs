@@ -63,6 +63,11 @@ fn end_of(line: usize) -> u64 {
 fn editor() -> EditorState {
     let s = EditorState::new_with_roots(&crate::iso::roots());
     exec(&s, "pmacs.lsp.config = {}");
+    // The line-number gutter is ON by default since E1.6. This suite's
+    // subject is fold projection --- which source line renders on which
+    // row --- so it starts from a bare grid, and the rows that ARE about
+    // the gutter turn it on themselves, as they always did.
+    exec(&s, "pmacs.window.set_line_numbers('off')");
     s
 }
 

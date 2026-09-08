@@ -83,7 +83,7 @@ run, one per run.
 | selector | `--lib packages::fetcher::tests::cache_survives_across_fetcher_instances` |
 | job | local (Linux), the workspace sweep |
 | required fragments | `Unable to read current working directory: No such file or directory` + `remote did not send all necessary objects` |
-| occurrences | three on 2026-08-31 within eleven hours, the third on `main` after a documentation-only merge |
+| occurrences | four: three on 2026-08-31 within eleven hours, the third on `main` after a documentation-only merge; the fourth on 2026-09-08 in a local six-stage sweep (gate log `20260908T101700Z-2279879`, step `05-sweep`, `2199 passed; 1 failed`), both fragments present, on a branch touching neither `packages` nor `file_io` |
 | candidate mechanism | `bare_filename_saves_in_cwd` (`src/file_io.rs`) calls `set_current_dir` on a `TempDir`; concurrently this test's `run_git` spawns `git` with no explicit cwd, so the child inherits the temp directory; the parent restores its cwd, which does nothing for the child; the `TempDir` drops under a live `git`. A candidate with a citation, not a demonstrated chain |
 | retirement | run the two selectors concurrently in a tight loop until it reproduces, or remove the process-global mutation (`save_atomic` taking the directory, or that test in a subprocess). A serial guard around `set_current_dir` does not close it: the child outlives the guard |
 
