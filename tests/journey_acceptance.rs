@@ -1376,6 +1376,110 @@ fn journey_step5_declining_the_quit_prompt_keeps_the_editor() {
     );
 }
 
+/// **N** (E1.7) — step 11: background work is reachable by a KEY.
+///
+/// Step 11 is "understand what background work is running", and the
+/// arc framing graded it `Missing` for one reason: `editor.list-workers`
+/// existed and **no binding opened it**. The listing's own `C-c C-k` is
+/// reachable only once you are already inside. So this asserts a
+/// binding, not a route: that a chord resolves to the command, and that
+/// pressing it puts the observability buffer in the window.
+///
+/// `pmacs.command.invoke` would pass with the keymap entry deleted,
+/// which is precisely the state this row exists to end.
+#[test]
+fn journey_step11_a_chord_opens_the_workers_buffer() {
+    if reexec_isolated("journey_step11_a_chord_opens_the_workers_buffer") {
+        return;
+    }
+    let mut s = start_local();
+    let bound: Option<String> = eval(
+        &s,
+        "local b = pmacs.keymap.lookup(\"C-x w\") return b and b.command",
+    );
+    assert_eq!(
+        bound.as_deref(),
+        Some("editor.list-workers"),
+        "step 11(c) wants a binding that reaches the listing, not a route to it"
+    );
+
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char('x'), KeyModifiers::CONTROL),
+    );
+    press(&mut s, KeyCode::Char('w'));
+    pump(&mut s);
+    assert_eq!(
+        active_name(&s),
+        "*workers*",
+        "pressing it must open the observability buffer; status was {:?}",
+        status(&s)
+    );
+}
+
+/// **N** (E1.7) — every other orphan the audit named has a chord too.
+///
+/// A property over the pairs, not five separate rows: what is being
+/// pinned is that each command the audit found unreachable now resolves
+/// from a key, and a table makes an added orphan one line.
+#[test]
+fn journey_step11_the_named_orphans_all_have_chords() {
+    if reexec_isolated("journey_step11_the_named_orphans_all_have_chords") {
+        return;
+    }
+    let s = start_local();
+    for (chord, command) in [
+        ("<f1>", "help"),
+        ("C-x g", "git.status"),
+        ("C-x w", "editor.list-workers"),
+        ("C-x t", "ui.toggle-line-wrap"),
+        ("C-c l", "lsp.status"),
+        ("C-x l", "window.toggle-line-numbers"),
+        ("C-+", "gpu.zoom-in"),
+        ("C-=", "gpu.zoom-in"),
+        ("C--", "gpu.zoom-out"),
+        ("C-0", "gpu.zoom-reset"),
+    ] {
+        let bound: Option<String> = eval(
+            &s,
+            &format!("local b = pmacs.keymap.lookup({chord:?}) return b and b.command"),
+        );
+        assert_eq!(
+            bound.as_deref(),
+            Some(command),
+            "{chord} must reach {command}"
+        );
+    }
+}
+
+/// **N** (E1.7) — and `help.list-keybindings` names them, which is how
+/// a user who does not already know the chord finds it.
+#[test]
+fn journey_step11_the_keybinding_listing_names_the_new_chords() {
+    if reexec_isolated("journey_step11_the_keybinding_listing_names_the_new_chords") {
+        return;
+    }
+    let mut s = start_local();
+    exec(&s, "pmacs.command.invoke('help.list-keybindings')");
+    pump(&mut s);
+    let listing = active_text(&s);
+    for command in [
+        "help",
+        "git.status",
+        "editor.list-workers",
+        "ui.toggle-line-wrap",
+        "lsp.status",
+        "gpu.zoom-in",
+        "gpu.zoom-out",
+        "gpu.zoom-reset",
+    ] {
+        assert!(
+            listing.contains(command),
+            "the keybinding listing must name {command}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Preservation pins (P) — green on the pre-image; see the named mutation
 // ---------------------------------------------------------------------------

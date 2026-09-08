@@ -895,8 +895,169 @@ fn the_gutter_setting_carries_across_a_split() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// E1.7 --- the orphans, and the zoom divergence (D22)
+// ---------------------------------------------------------------------------
+
+/// The zoom chords say WHOSE font they moved. Bound globally (D22),
+/// they reach a grid frontend too, where "zoom: 17.00 px" would read as
+/// a claim about the terminal --- a claim the command cannot make.
+#[test]
+fn the_zoom_chords_name_the_gpu_font_on_a_grid_frontend() {
+    let mut s = editor();
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char('='), KeyModifiers::CONTROL),
+    );
+    let up = status(&s);
+    assert!(
+        up.contains("GPU font") && up.contains("17.00"),
+        "zoom-in must name the GPU font and the new size; got {up:?}"
+    );
+
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char('-'), KeyModifiers::CONTROL),
+    );
+    let down = status(&s);
+    assert!(
+        down.contains("GPU font") && down.contains("16.00"),
+        "zoom-out must too; got {down:?}"
+    );
+
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char('0'), KeyModifiers::CONTROL),
+    );
+    let reset = status(&s);
+    assert!(
+        reset.contains("GPU font"),
+        "and so must reset; got {reset:?}"
+    );
+    assert!(
+        eval::<bool>(&s, "return pmacs.gpu.font().size == nil"),
+        "reset returns the preference to the frontend's own default"
+    );
+}
+
+/// `C-+` is the same gesture as `C-=` on a US layout --- one needs Shift
+/// and one does not --- so both zoom in.
+#[test]
+fn both_zoom_in_spellings_are_bound() {
+    let mut s = editor();
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char('+'), KeyModifiers::CONTROL),
+    );
+    assert!(
+        status(&s).contains("17.00"),
+        "C-+ must zoom in too; got {:?}",
+        status(&s)
+    );
+}
+
+/// E1.7's GPU half: `C-=` pressed **in a real GPU frontend** changes
+/// the font size it renders with.
+///
+/// The whole chain, nothing emulated: a real daemon, the real
+/// `pmacs-gpu` binary attaching through its real handshake, the chord
+/// travelling as a `FrontendEvent::Key`, the daemon's keymap resolving
+/// `gpu.zoom-in`, `pmacs.gpu.set_font` writing the preference,
+/// `semantic_render` relaying `FontFacts`, and the frontend applying it.
+/// The size is read off the frontend's APPLIED metrics, so a `FontFacts`
+/// it rejected as out of range cannot read as a zoom.
+///
+/// **This test's green is worth nothing unless it ran.** Without the
+/// binary built it returns early, so the skip is an assertion failure
+/// under `PMACS_REQUIRE_GPU`, and the probe's own `completion_observed`
+/// is asserted so a run that merely waited out its deadline cannot pass.
+#[test]
+fn c_equals_in_a_headless_gpu_changes_the_font_size() {
+    use std::path::{Path, PathBuf};
+
+    fn gpu_binary() -> PathBuf {
+        Path::new(env!("CARGO_BIN_EXE_pmacs"))
+            .parent()
+            .expect("test binary directory")
+            .join("pmacs-gpu")
+    }
+
+    let required = std::env::var_os("PMACS_REQUIRE_GPU").is_some();
+    let binary = gpu_binary();
+    if !binary.exists() {
+        assert!(
+            !required,
+            "PMACS_REQUIRE_GPU is set but {} is not built; build the workspace first",
+            binary.display()
+        );
+        eprintln!(
+            "skipping the GPU zoom probe: {} is not built",
+            binary.display()
+        );
+        return;
+    }
+
+    let daemon = common::daemon::TestDaemon::spawn_with_env(&[
+        ("PMACS_INSTANCE_SEMANTIC_RENDER", "1"),
+        ("PMACS_INSTANCE_MULTI_FRONTEND", "1"),
+    ]);
+    let report = daemon
+        .socket_path()
+        .parent()
+        .expect("socket parent")
+        .join("gpu-zoom-probe.txt");
+    let output = std::process::Command::new(&binary)
+        .arg("--headless-probe")
+        .arg(daemon.socket_path())
+        .arg(&report)
+        .env("PMACS_GPU_PROBE_ZOOM_KEY", "=")
+        .output()
+        .expect("run the headless GPU zoom probe");
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let no_adapter = output.status.code() == Some(3);
+        assert!(
+            no_adapter && !required,
+            "headless GPU zoom probe failed (status {:?}):\n{stderr}",
+            output.status.code()
+        );
+        eprintln!("skipping the GPU zoom probe: no wgpu adapter available");
+        return;
+    }
+
+    let text = std::fs::read_to_string(&report).expect("probe report");
+    let facts: std::collections::HashMap<&str, &str> = text
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .collect();
+    let fact = |key: &str| facts.get(key).copied().unwrap_or_default();
+
+    assert_eq!(
+        fact("completion_observed"),
+        "true",
+        "a deadline-driven pass must not read as success:\n{text}"
+    );
+    assert_eq!(
+        fact("font_facts_observed"),
+        "true",
+        "the daemon must have relayed a font preference:\n{text}"
+    );
+    let before: u32 = fact("code_font_centi_before").parse().unwrap_or_default();
+    let after: u32 = fact("code_font_centi_after").parse().unwrap_or_default();
+    assert!(
+        after > before,
+        "C-= must make the frontend's applied font size LARGER; \
+         before {before}, after {after}:\n{text}"
+    );
+}
+
+#[path = "common/mod.rs"]
+mod common;
+
 // Isolated bootstrap storage roots: an integration test is compiled
 // without `cfg(test)`, so a raw `EditorState::new()` would read the
 // developer's real `init.lua` and write into their real data root.
-#[path = "common/iso.rs"]
-mod iso;
+// Reached through `common`, which already declares it --- a second
+// `#[path]` module would load the same file twice.
+use common::iso;

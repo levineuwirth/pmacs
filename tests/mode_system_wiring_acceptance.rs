@@ -227,7 +227,15 @@ local function command(name, body)
   }
 end
 
+-- `pmacs.keymap.bind` REFUSES a sequence that is already bound
+-- (`KeymapError::DuplicateBinding`), so a fixture taking over a chord
+-- unbinds first. E1.7 bound the function keys the builtin map used to
+-- leave free, and without this the whole chunk aborted at the first
+-- collision and none of these bindings landed.
 local function global_key(sequence, name)
+  pcall(function()
+    pmacs.keymap.unbind { scope = "global", sequence = sequence }
+  end)
   pmacs.keymap.bind { scope = "global", sequence = sequence, command = name }
 end
 

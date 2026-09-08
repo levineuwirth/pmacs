@@ -798,6 +798,18 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
         let _ = client.send_key(ProtocolKey::Char(chord), Modifiers::CTRL | Modifiers::ALT);
     }
 
+    // E1.7 zoom mode. The chord is sent as CONTROL + the named character
+    // once a snapshot has arrived, and the probe then waits for the font
+    // size it has actually APPLIED to move. Nothing here knows what the
+    // daemon will decide: the fixture names a key, and the report says
+    // what the frontend did with what came back.
+    let zoom_key = std::env::var_os("PMACS_GPU_PROBE_ZOOM_KEY")
+        .and_then(|value| value.into_string().ok())
+        .and_then(|value| value.chars().next());
+    facts.code_font_centi_before = centi_px(state.fm.code_font_size());
+    facts.code_font_centi_after = facts.code_font_centi_before;
+    let mut sent_zoom = false;
+
     // Quiet-observation mode. `PMACS_GPU_PROBE_OBSERVE_MS` makes the probe
     // send NO input and request NO resize, and observe for exactly that long
     // instead of stopping at its usual condition.
@@ -869,6 +881,10 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
                     InstanceMessage::PanelFrame(pmacs_protocol::panel::PanelFramePayload::Absent)
                 );
                 let panel_message = matches!(msg.as_ref(), InstanceMessage::PanelFrame(_));
+                // Noted BEFORE the apply consumes the message; the size
+                // itself is read from the applied metrics afterwards.
+                let msg_kind_was_font_facts =
+                    matches!(msg.as_ref(), InstanceMessage::FontFacts { .. });
                 // The COMPLETE accepted authority, both halves. An
                 // epoch/size triple is not enough: ordinary content,
                 // focus, cursor and mapping-generation updates all leave
@@ -912,6 +928,10 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
                     if panel_absent_payload {
                         facts.panel_absent_observed = true;
                     }
+                }
+                if msg_kind_was_font_facts {
+                    facts.font_facts_observed = true;
+                    facts.code_font_centi_after = centi_px(state.fm.code_font_size());
                 }
                 if is_snapshot {
                     // The dual declaration: a byte viewport for a
@@ -1009,6 +1029,19 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
                 // first: that races the fixture's required PTY evidence and
                 // produces a self-contradictory "successful" probe report
                 // whose later acceptance assertion must reject it.
+                if let Some(chord) = zoom_key {
+                    if !quiet && !sent_zoom && facts.frames + u32::from(is_snapshot) >= 1 {
+                        sent_zoom = true;
+                        let _ = client.send_key(ProtocolKey::Char(chord), Modifiers::CTRL);
+                    }
+                    if facts.font_facts_observed
+                        && facts.code_font_centi_after != facts.code_font_centi_before
+                    {
+                        completion_observed = true;
+                        break;
+                    }
+                    continue;
+                }
                 if expected_panel_text.is_some() {
                     // The panel fixture's completion, stated in its own terms.
                     // `panel_text_observed` alone is not enough: it would let a
@@ -1084,6 +1117,13 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
     let _ = writeln!(out, "last_title={}", facts.last_title.unwrap_or_default());
     let _ = writeln!(out, "last_frame_text={}", facts.last_frame_text);
     let _ = writeln!(out, "input_echo_observed={}", facts.input_echo_observed);
+    let _ = writeln!(out, "font_facts_observed={}", facts.font_facts_observed);
+    let _ = writeln!(
+        out,
+        "code_font_centi_before={}",
+        facts.code_font_centi_before
+    );
+    let _ = writeln!(out, "code_font_centi_after={}", facts.code_font_centi_after);
     let _ = writeln!(out, "completion_observed={completion_observed}");
     let _ = writeln!(out, "disconnect={}", facts.disconnect.unwrap_or_default());
     if let Err(error) = std::fs::write(report, out) {
@@ -1413,7 +1453,36 @@ struct ProbeFacts {
     /// still on the last frame" are different questions and only the first
     /// one is about input reaching the child.
     input_echo_observed: bool,
+    /// E1.7 zoom mode: whether a `FontFacts` ever arrived. Reported
+    /// separately from the sizes so "the daemon said nothing" is
+    /// distinguishable from "it said the same thing".
+    font_facts_observed: bool,
+    /// The code font size, in hundredths of a logical pixel, before the
+    /// zoom chord was sent and as last applied afterwards. Read off the
+    /// APPLIED metrics rather than the message, so a `FontFacts` the
+    /// frontend rejected as out of range cannot read as a zoom.
+    code_font_centi_before: u32,
+    code_font_centi_after: u32,
     disconnect: Option<String>,
+}
+
+/// Hundredths of a logical pixel, for the probe report. Sizes are
+/// validated into `6.0..=72.0` before they ever reach the metrics, so
+/// this is a small, finite, non-negative number by construction; the
+/// guard exists so a NaN from a broken metric cannot be reported as a
+/// plausible size.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "range-checked above; the guard rejects anything the cast could not represent"
+)]
+fn centi_px(size: f32) -> u32 {
+    let hundredths = (size * 100.0).round();
+    if hundredths.is_finite() && (0.0..=1_000_000.0).contains(&hundredths) {
+        hundredths as u32
+    } else {
+        0
+    }
 }
 
 /// The character the probe types into the child. Distinct from anything the

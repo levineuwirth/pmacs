@@ -408,19 +408,21 @@ fn saved_state_beats_a_startup_size_but_never_the_family() {
 }
 
 // ---------------------------------------------------------------------------
-// No keybindings (Q#Z3 = C)
+// Bound on every platform (D22, E1.7 — Q#Z3 overruled)
 // ---------------------------------------------------------------------------
 
-/// This stage ships commands and NO default bindings.
+/// The commands are bound, globally, to the terminal-emulator chords.
 ///
-/// The keymap has no way to say "GPU frontends only" — `Scope` is
-/// `Buffer | Mode | Global` and carries no frontend identity — so a
-/// global binding would capture the chord in the TUI and take away the
-/// terminal's own zoom, which is the very thing the user is pressing it
-/// for. Better an unbound key than one that answers with an apology.
+/// This stage originally shipped NO bindings (Q#Z3): the keymap cannot
+/// say "GPU frontends only" — `Scope` is `Buffer | Mode | Global` and
+/// carries no frontend identity — so a global binding does capture the
+/// chord in a TUI. D22 overruled that, because a zoom command reachable
+/// only through `M-x` is not a zoom control. The mechanism is unchanged
+/// and the cost is paid in words instead: the commands say WHOSE font
+/// they moved, which the row below pins.
 #[test]
-fn the_commands_exist_and_nothing_is_bound() {
-    let (roots, _) = roots_for("no_bindings");
+fn the_commands_exist_and_the_zoom_chords_are_bound() {
+    let (roots, _) = roots_for("bindings");
     let s = session(&roots);
 
     // `pmacs.command.list()` returns plain names, as `help.lua` reads it.
@@ -429,7 +431,7 @@ fn the_commands_exist_and_nothing_is_bound() {
         assert!(names.iter().any(|n| n == want), "{want} is discoverable");
     }
 
-    let bound: Vec<String> = eval(
+    let mut bound: Vec<String> = eval(
         &s,
         r#"local out = {}
            for _, b in ipairs(pmacs.keymap.list()) do
@@ -439,8 +441,32 @@ fn the_commands_exist_and_nothing_is_bound() {
            end
            return out"#,
     );
-    assert!(
-        bound.is_empty(),
-        "no zoom keybinding may be installed by default, found {bound:?}"
+    bound.sort();
+    assert_eq!(
+        bound,
+        vec![
+            "C-+ -> gpu.zoom-in (global)".to_string(),
+            "C-- -> gpu.zoom-out (global)".to_string(),
+            "C-0 -> gpu.zoom-reset (global)".to_string(),
+            "C-= -> gpu.zoom-in (global)".to_string(),
+        ],
+        "D22's four chords, global, and nothing else"
     );
+}
+
+/// And every one of them says whose font it moved, because a grid
+/// frontend reaches these chords too and cannot be left with a message
+/// that reads as a claim about the terminal.
+#[test]
+fn every_zoom_command_names_the_gpu_font() {
+    let (roots, _) = roots_for("names_the_gpu");
+    let s = session(&roots);
+    for command in ["gpu.zoom-in", "gpu.zoom-out", "gpu.zoom-reset"] {
+        exec(&s, &format!("pmacs.command.invoke({command:?})"));
+        let status = s.core.borrow().status.clone();
+        assert!(
+            status.contains("GPU font"),
+            "{command} must name the GPU font; got {status:?}"
+        );
+    }
 }

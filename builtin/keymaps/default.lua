@@ -184,6 +184,34 @@ bind("C-x C-b",     "editor.list-buffers")
 bind("C-x <right>", "editor.next-buffer")
 bind("C-x <left>",  "editor.previous-buffer")
 
+-- The orphans (E1.7) ---------------------------------------------------------
+--
+-- Every command below existed and no chord reached it, which is the
+-- audit's "present but embarrassing": a feature nobody can find is
+-- indistinguishable from one that is missing. `pmacs.keymap.bind`
+-- resolves the command at PRESS time, so these can name commands
+-- defined by runtime chunks that load after this file.
+bind("<f1>",  "help")
+bind("C-x g", "git.status")
+bind("C-x w", "editor.list-workers")
+bind("C-x t", "ui.toggle-line-wrap")
+bind("C-c l", "lsp.status")
+
+-- Zoom (D22) -----------------------------------------------------------------
+--
+-- Bound on EVERY platform, overruling `runtime/zoom.lua`'s original
+-- "no keybindings" rule (Q#Z3): a command reachable only through M-x is
+-- not a zoom control, and the terminal-emulator convention is the one a
+-- TUI user already has in their fingers. `C-+` and `C-=` are the same
+-- gesture on a US layout --- one needs Shift and one does not --- so
+-- both are bound. On a grid frontend these change the GPU font
+-- preference rather than the terminal's own size, which is why the
+-- commands say whose font they moved.
+bind("C-+", "gpu.zoom-in")
+bind("C-=", "gpu.zoom-in")
+bind("C--", "gpu.zoom-out")
+bind("C-0", "gpu.zoom-reset")
+
 -- Cancellation ---------------------------------------------------------------
 --
 -- C-g resets the dispatcher and clears the status line. When pressed
