@@ -1287,6 +1287,95 @@ fn journey_step5_editing_a_file_reached_through_the_directory() {
     );
 }
 
+/// **N** (E1.1) — unsaved work survives the exit key.
+///
+/// Step 5 is "edit immediately"; an editor that discards the edit on
+/// `C-x C-c` without a word has not kept that promise, it has only
+/// postponed breaking it. Driven as keys end to end: the prefix, the
+/// quit chord, the answer, and RET — `editor.quit` invoked
+/// programmatically would pass with the binding gone.
+///
+/// The negative half is asserted BEFORE the answer: after `y` the flag
+/// is set either way, so a test that only looked afterwards would pass
+/// against a build that never prompted at all.
+#[test]
+fn journey_step5_quitting_with_unsaved_work_prompts_first() {
+    if reexec_isolated("journey_step5_quitting_with_unsaved_work_prompts_first") {
+        return;
+    }
+    let mut s = start_local();
+    type_char(&mut s, 'X');
+    assert!(
+        eval::<bool>(
+            &s,
+            "return pmacs.describe.buffer(pmacs.window.buffer()).modified"
+        ),
+        "precondition: the buffer must be modified or the prompt is not owed"
+    );
+
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char('x'), KeyModifiers::CONTROL),
+    );
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    );
+
+    assert!(
+        !s.core.borrow().quit,
+        "C-x C-c with a modified buffer must not quit; status was {:?}",
+        status(&s)
+    );
+    assert!(
+        eval::<bool>(&s, "return pmacs.minibuffer.is_active()"),
+        "it must ask instead"
+    );
+    let prompt: String = eval(&s, "return pmacs.minibuffer.prompt()");
+    assert!(
+        prompt.contains("*scratch*"),
+        "the prompt must name what is at stake; got {prompt:?}"
+    );
+
+    type_char(&mut s, 'y');
+    press(&mut s, KeyCode::Enter);
+    assert!(s.core.borrow().quit, "`y` must exit");
+}
+
+/// **N** (E1.1) — the answer is read, not assumed.
+///
+/// The companion to the row above: `n` leaves the editor running with
+/// the prompt gone. Without this, a prompt that quit on any answer
+/// would satisfy the positive row.
+#[test]
+fn journey_step5_declining_the_quit_prompt_keeps_the_editor() {
+    if reexec_isolated("journey_step5_declining_the_quit_prompt_keeps_the_editor") {
+        return;
+    }
+    let mut s = start_local();
+    type_char(&mut s, 'X');
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char('x'), KeyModifiers::CONTROL),
+    );
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    );
+    assert!(
+        eval::<bool>(&s, "return pmacs.minibuffer.is_active()"),
+        "precondition: the prompt must be up"
+    );
+
+    type_char(&mut s, 'n');
+    press(&mut s, KeyCode::Enter);
+    assert!(!s.core.borrow().quit, "`n` must not exit");
+    assert!(
+        !eval::<bool>(&s, "return pmacs.minibuffer.is_active()"),
+        "and the prompt must be gone"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Preservation pins (P) — green on the pre-image; see the named mutation
 // ---------------------------------------------------------------------------

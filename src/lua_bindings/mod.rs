@@ -14253,6 +14253,22 @@ fn install_minibuffer_query(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::R
         )?;
     }
     {
+        // The prompt string the session was opened with, or nil when no
+        // session is live. Read-only, and the only route to the text
+        // `paint_minibuffer` puts in front of the user: without it a
+        // prompt that names the wrong buffer is unobservable from Lua,
+        // and "the question names what is at stake" is not a property
+        // any test can hold.
+        let cc = core.clone();
+        mb.set(
+            "prompt",
+            lua.create_function(move |_, ()| {
+                let c = cc.borrow();
+                Ok(c.minibuffer.session.as_ref().map(|s| s.prompt.clone()))
+            })?,
+        )?;
+    }
+    {
         let cc = core.clone();
         mb.set(
             "candidates",

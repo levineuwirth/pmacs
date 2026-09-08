@@ -245,15 +245,113 @@ cmd { name = "buffer.save-anyway",
         end
       end }
 
+-- Yes-or-no prompts (E1.1) ---------------------------------------------------
+--
+-- `pmacs.minibuffer.read` had no yes-or-no idiom, so every destructive
+-- command either asked nothing or would have grown its own answer
+-- parser. This is the one idiom, and it is deliberately built on a
+-- SOURCE-LESS read: `resolve_accepted_value` returns the typed text
+-- only when the source is `none` (src/minibuffer.rs), so with a
+-- candidate list RET would take a selection the user never typed --- a
+-- one-key "yes" to a question about losing work.
+--
+-- An unrecognized answer re-prompts rather than being read as "no".
+-- Guessing is safe in one direction and destructive in the other, and
+-- the callers here are exactly the commands that destroy work. Beginning
+-- a session from inside `on_accept` is sound: `Minibuffer::accept` has
+-- already taken the old session, and neither accept path touches the
+-- minibuffer after the callback returns.
+--
+-- `C-g` cancels, which is a "no": `on_cancel` runs `on_no`.
+function pmacs.minibuffer.y_or_n(spec)
+  local prompt = spec.prompt
+  local on_yes = spec.on_yes
+  local on_no = spec.on_no
+  local function ask()
+    pmacs.minibuffer.read {
+      prompt = prompt .. " (y or n) ",
+      on_accept = function(value)
+        local answer = string.lower(value or "")
+        if answer == "y" or answer == "yes" then
+          on_yes()
+        elseif answer == "n" or answer == "no" then
+          if on_no then on_no() end
+        else
+          ed.set_status("please answer y or n")
+          ask()
+        end
+      end,
+      on_cancel = on_no,
+    }
+  end
+  ask()
+end
+
+-- Names of the modified buffers, in registry order. Used by the quit
+-- prompt, which must name what is at stake rather than say "some
+-- buffer": a user who cannot see which file is dirty cannot answer.
+local function modified_buffer_names()
+  local names = {}
+  for _, id in ipairs(pmacs.buffer.list()) do
+    local d = pmacs.describe.buffer(id)
+    if d ~= nil and d.modified then names[#names + 1] = d.name end
+  end
+  return names
+end
+
+-- Kill `id`, asking first when it carries unsaved changes (E1.1). One
+-- helper for both entry points --- `buffer.kill-this` (the buffer in
+-- the window) and `C-x k` (a buffer chosen by name) --- so the two
+-- cannot drift into asking different questions about the same loss.
+local function kill_buffer_with_prompt(id)
+  local d = pmacs.describe.buffer(id)
+  if d == nil then
+    ed.set_status("kill-buffer: no such buffer")
+    return
+  end
+  local function kill()
+    local ok, err = pcall(pmacs.buffer.kill, id)
+    if not ok then
+      ed.set_status("kill-buffer: " .. (tostring(err):match("^[^\n]*") or ""))
+    end
+  end
+  if not d.modified then
+    kill()
+    return
+  end
+  pmacs.minibuffer.y_or_n {
+    prompt = string.format("Buffer %s has unsaved changes; kill anyway?", d.name),
+    on_yes = kill,
+    on_no = function() ed.set_status("kill-buffer cancelled") end,
+  }
+end
+
 -- Editor session -------------------------------------------------------------
 
 cmd { name = "editor.quit",   description = "Exit the editor.",
       fn = function()
+        -- The hook stays the FIRST gate, unchanged: it is a veto, and a
+        -- vetoed quit must not first ask the user a question whose
+        -- answer cannot matter.
         if not pmacs.hook.run("editor.before-quit") then
           ed.set_status("quit vetoed by editor.before-quit")
           return
         end
-        ed.quit()
+        local dirty = modified_buffer_names()
+        if #dirty == 0 then
+          ed.quit()
+          return
+        end
+        local summary = table.concat(dirty, ", ")
+        if #dirty > 3 then
+          summary = table.concat({ dirty[1], dirty[2], dirty[3] }, ", ")
+            .. string.format(" and %d more", #dirty - 3)
+        end
+        pmacs.minibuffer.y_or_n {
+          prompt = string.format("Modified buffers exist (%s); quit anyway?", summary),
+          on_yes = function() ed.quit() end,
+          on_no = function() ed.set_status("quit cancelled") end,
+        }
       end }
 cmd { name = "editor.cancel", description = "Cancel a pending key prefix.",
       fn = function() ed.cancel() end }
@@ -1210,7 +1308,7 @@ cmd { name = "buffer.kill-this",
       description = "Kill the buffer shown in the active window.",
       fn = function()
         local id = pmacs.window.buffer()
-        if id ~= nil then pmacs.buffer.kill(id) end
+        if id ~= nil then kill_buffer_with_prompt(id) end
       end }
 
 -- describe-command (M9.6 acceptance lever) ---------------------------------
