@@ -971,6 +971,12 @@ fn both_zoom_in_spellings_are_bound() {
 /// binary built it returns early, so the skip is an assertion failure
 /// under `PMACS_REQUIRE_GPU`, and the probe's own `completion_observed`
 /// is asserted so a run that merely waited out its deadline cannot pass.
+///
+/// `crdt`-gated for the same reason `a54` is: a daemon built without it
+/// advertises neither `crdt_replica` nor `semantic_render`, so the
+/// attach is refused before a key can be sent, and a non-crdt sweep
+/// would fail here for a reason that has nothing to do with zoom.
+#[cfg(feature = "crdt")]
 #[test]
 fn c_equals_in_a_headless_gpu_changes_the_font_size() {
     use std::path::{Path, PathBuf};
