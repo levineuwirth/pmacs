@@ -94,7 +94,7 @@ run, one per run.
 | selector | `--test m8_1_acceptance read_dir_supersede_cancels_in_flight_predecessor` |
 | job | GitHub Actions, the serialized crdt sweep (`--test-threads=1`) |
 | required fragments | `first read_dir must be superseded; got ok` |
-| occurrences | three: `main` at `aae5b35`, run 33375945966 (the serialized crdt sweep); `main` at `d97e137`, run 34205653191, job `Test (macos-latest / luajit)`; and PR #257 at `8f6784f`, run 34220035122, job `Test (ubuntu-latest / luajit)`. The last two run at cargo's DEFAULT parallelism under D23, and the third is on LINUX, so neither serialization nor macOS is required to produce it. The second is the merge-base control for the third: the same signature is on `d97e137` itself, so the branch did not introduce it |
+| occurrences | three: `main` at `aae5b35`, run 33375945966 (the serialized crdt sweep); `main` at `d97e137`, run 34205653191, job `Test (macos-latest / luajit)`; and PR #257 at `8f6784f`, run 34220035122, job `Test (ubuntu-latest / luajit)`. The last two run at cargo's DEFAULT parallelism under D23, and the third is on LINUX, so neither serialization nor macOS is required to produce it. The second is the merge-base control for the third: the same signature is on `d97e137` itself, so the branch did not introduce it. That control is ONE run at the base, which is one sample: it establishes that the signature exists on `d97e137`, not its rate. PR #257's second run, 34222042303 at the head `e78d184`, is GREEN on `Test (ubuntu-latest / luajit)`, which is non-reproduction and nothing more |
 | candidate mechanism | the predecessor completed before the cancellation took effect. `--test-threads=1` was the first occurrence's candidate: it serializes the test functions in one executable and so removes one source of contention the test's "in flight" depends on. The second occurrence has no such flag, which does not refute the mechanism --- a fast predecessor is a fast predecessor however the runner got there --- but it does mean serialization is not required to produce it, and the remaining common factor is a macOS or Linux CI runner rather than a scheduling flag. Nothing has measured the predecessor's duration under either, and nothing rules out a real supersede defect |
 | retirement | diagnosis; a witness that holds the predecessor in flight deterministically rather than by load |
 
@@ -119,7 +119,7 @@ One line per row: what it was, when it closed, and what closed it.
 | U5 | `ctrl_c_during_reconnect_sleep_yields_clean_exit`, macOS lua54 | 2026-09-05 | one occurrence, not reproduced; a recurrence is an issue |
 | U6 | `criterion_1` and `composition_overhead` red together | 2026-09-05 | both are wall-clock budgets, now `#[ignore]` |
 | U7 | a different render-budget test red each sweep (dired, outline) | 2026-09-05 | render budgets, now `#[ignore]` |
-| U8 | `acc28_child_input…`, macOS luajit, fragments destroyed | 2026-09-05 | readiness migration (the R6 family); a recurrence is an issue. It recurred 2026-09-08 on macOS lua54, with fragments this time because of the migration: #259 |
+| U8 | `acc28_child_input…`, macOS luajit, fragments destroyed | 2026-09-05 | readiness migration (the R6 family); a recurrence is an issue. It recurred 2026-09-08 on macOS lua54, with fragments this time because of the migration: #259, and again in the next run on the same platform (34222042303, job 102047236847), which is a comment on #259 |
 | U9 | a PTY test and a budget test red together in one sweep | 2026-09-05 | the budget half is `#[ignore]`; the PTY half is U2's mechanism |
 | U10 | the budget red rotating between two runs of one commit | 2026-09-05 | budgets `#[ignore]` |
 | U11 | `dispatch_parse_round_trips_a_rust_source_file` missed its parse budget, macOS | 2026-09-05 | the round trip stays in the default run; the 100 ms budget is a separate `#[ignore]` test |
@@ -151,3 +151,97 @@ reintroduction of the genuine resync defect reproducing these same
 fragments, so the symptom cannot discriminate a fixture race from a
 product regression, and the discrimination in #255 is what would settle
 it.
+
+### PR #257 ran CI twice, and the second run is the one on its head
+
+Two runs exist and every C1 record described only the first, by name and
+as "the first run":
+
+- run **34220035122** at `8f6784f`, `pull_request`, **12 green, 3 red**;
+- run **34222042303** at `e78d184`, the pushed head, created
+  2026-09-08T11:41:44Z — eight seconds after the head commit — completed
+  12:01:39Z, conclusion **failure**: **13 green, 2 red**. `Docs
+  consistency` is skipped in both, correctly: the PR's changed paths
+  include code.
+
+The trees the two ran differ by one markdown file. Three things are in
+the second run.
+
+`Test (macos-latest / lua54)`, job 102047236847, failed twice.
+
+1. `acc28_child_input_and_the_c_c_escape_work_unchanged_in_a_panel`,
+   `tests/bottom_panel_stage1_acceptance.rs:2447`, `bytes in
+   /var/folders/.../T/.tmph8ib1k/ready did not become ready within 5s
+   (waited 5.031151625s, 54 polls); last observed: No such file or
+   directory (os error 2)`, `test result: FAILED. 49 passed; 1 failed`.
+   Selector, job and all three required fragments are #259's: a **second
+   occurrence**, twenty minutes after the issue was opened. It is a
+   comment on #259, which is what that issue's own first line requires.
+2. `editor::tests::stream_supersede_delivers_cancelled_to_on_close`,
+   `src/editor.rs:12842`, `async pump deadline exceeded`, `test result:
+   FAILED. 2196 passed; 1 failed; 11 ignored`. The message, the path and
+   the platform are closed row **R5**'s, and this postdates its closure,
+   so it reopens R5's question. R5 is live again above, as never-closed.
+
+`Test (macos-latest / luajit)`, job 102047236931, failed once:
+`v15_peer_never_receives_theme_facts_and_v16_does`,
+`tests/theme_faces_acceptance.rs:1383`, `read Hello: Io(Os { code: 35,
+kind: WouldBlock, message: "Resource temporarily unavailable" })`, `test
+result: FAILED. 26 passed; 1 failed`. Under this file's matching rule
+that is **not** #258. #258's selector is
+`a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join` in
+`statusline_segments_acceptance`; a test-name match is never sufficient
+and here even the test name differs. It is a new incident that shares
+#258's failing expression — a fixture-set short read timeout on the
+daemon's server-first `Hello`, here 250 ms set four lines above the
+failing call. It is recorded as a comment on #258 with that difference
+stated, because folding it in on resemblance is what the matching rule
+forbids; whether the two share a mechanism is unestablished. The suite
+is one this branch edited (two `set_line_numbers('off')` lines in
+`editor()` and `open_and_wait_for_parse`, nowhere near `probe`).
+
+`Test (ubuntu-latest / luajit)` is green in this run, so U17 did not
+reproduce at the head. That is non-reproduction and nothing more.
+
+### The macOS reds have a merge-base control, and it points at the branch
+
+`git merge-base e78d184 githubsucks/main` is `d97e137`, whose post-merge
+run is **34205653191**. Both of its macOS legs were read from their job
+logs (`gh run view --job <id> --log`; the API logs endpoint returns
+empty for these):
+
+- `Test (macos-latest / lua54)`, job 101994444426: **zero failures in
+  the whole job** — 120 `test result: ok` lines and not one `test
+  result: FAILED`. It ran
+  `acc28_child_input_and_the_c_c_escape_work_unchanged_in_a_panel ...
+  ok`, `v15_peer_never_receives_theme_facts_and_v16_does ... ok` and
+  `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join ... ok`.
+- `Test (macos-latest / luajit)`, job 101994444326: exactly one failure
+  in the whole job, `read_dir_supersede_cancels_in_flight_predecessor`
+  (U17's second occurrence). It ran `acc28... ok`, `a16_26... ok` and
+  `v15_peer... ok`.
+
+So all three macOS signatures this branch produced — #259's, #258's and
+the `theme_faces` incident's — ran at the merge base and passed there.
+**The branch is a candidate for all three rather than excluded from
+them**, and the C1 records that reasoned from untouched files are
+superseded: the branch changed a default that every window renders
+through, so an untouched suite is not an unchanged suite.
+
+**The weight of this control, in the same words as U17's.** It is one
+CI run at the merge base, which is one sample. U17's control is one such
+run in which the signature *did* appear, which establishes that the
+signature exists on `d97e137` and not its rate. This is one such run in
+which three signatures did *not* appear, and by the rerun rule above,
+applied at the base instead of at the head, that is non-reproduction and
+nothing more: a single green run does not establish absence in a
+load-dependent test. What the control changes is which way the burden
+falls, not how much evidence there is, and it diagnoses nothing.
+
+`e78d184`'s commit message states #258's non-causation flatly — "which
+is upstream of everything this branch changes --- the read that failed
+precedes the AttachRequest" — without the "an argument from the failing
+expression, not a measurement" qualifier that the passes, the PR body
+and the four issues all carry. That claim is superseded by the control
+above. The commit is pushed and is not rewritten; this is the
+correction.
