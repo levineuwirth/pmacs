@@ -597,6 +597,233 @@ fn a_word_kill_with_nothing_to_kill_reports_and_breaks_the_chain() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// E1.5 --- buffer commands
+// ---------------------------------------------------------------------------
+
+/// `C-x k` prefills the buffer in the window, so RET is the common
+/// case, and the unsaved check is the same one `buffer.kill-this` runs.
+#[test]
+fn c_x_k_prefills_the_current_buffer_and_kills_it_on_return() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut s = editor();
+    visit(&s, td.path(), "alpha.txt", "alpha\n");
+    let beta = visit(&s, td.path(), "beta.txt", "beta\n");
+
+    ctrl(&mut s, 'x');
+    press(&mut s, KeyCode::Char('k'));
+    assert!(
+        eval::<bool>(&s, "return pmacs.minibuffer.is_active()"),
+        "C-x k must open a prompt"
+    );
+    assert_eq!(
+        eval::<String>(&s, "return pmacs.minibuffer.contents()"),
+        beta,
+        "the prompt must be prefilled with the buffer in the window"
+    );
+
+    press(&mut s, KeyCode::Enter);
+    assert!(
+        !buffer_names(&s).contains(&beta),
+        "RET on the prefill must kill it; buffers are {:?}",
+        buffer_names(&s)
+    );
+}
+
+/// And it inherits the unsaved-work question rather than having its own.
+#[test]
+fn c_x_k_asks_when_the_named_buffer_is_modified() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut s = editor();
+    visit(&s, td.path(), "alpha.txt", "alpha\n");
+    let beta = visit(&s, td.path(), "beta.txt", "beta\n");
+    type_str(&mut s, "X");
+
+    ctrl(&mut s, 'x');
+    press(&mut s, KeyCode::Char('k'));
+    press(&mut s, KeyCode::Enter);
+    let asked = prompt(&s);
+    assert!(
+        asked.contains(&beta) && asked.contains("kill anyway"),
+        "the kill must ask about unsaved work; got {asked:?}"
+    );
+    assert!(buffer_names(&s).contains(&beta), "and must not have killed");
+}
+
+/// `C-x C-w` writes to a new path and the buffer ADOPTS it: the bytes
+/// land on disk, the buffer is clean, and a later `C-x C-s` saves to the
+/// new file rather than the old one.
+#[test]
+fn c_x_c_w_writes_to_a_new_path_and_adopts_it() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut s = editor();
+    let alpha = visit(&s, td.path(), "alpha.txt", "alpha\n");
+    type_str(&mut s, "X");
+
+    ctrl(&mut s, 'x');
+    ctrl(&mut s, 'w');
+    assert!(
+        eval::<bool>(&s, "return pmacs.minibuffer.is_active()"),
+        "C-x C-w must open a prompt"
+    );
+    type_str(&mut s, "zeta-out.txt");
+    press(&mut s, KeyCode::Enter);
+
+    let target = td.path().join("zeta-out.txt");
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("the written file must exist"),
+        "Xalpha\n",
+        "the buffer's bytes must be what landed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&alpha).expect("the original must still be there"),
+        "alpha\n",
+        "and the original file must be untouched"
+    );
+    assert_eq!(
+        eval::<Option<String>>(&s, "return pmacs.editor.file_path()").as_deref(),
+        Some(target.display().to_string().as_str()),
+        "the buffer must adopt the new path"
+    );
+    assert!(
+        !eval::<bool>(
+            &s,
+            "return pmacs.describe.buffer(pmacs.window.buffer()).modified"
+        ),
+        "and must be clean afterwards"
+    );
+
+    type_str(&mut s, "Y");
+    ctrl(&mut s, 'x');
+    ctrl(&mut s, 's');
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("read back"),
+        "XYalpha\n",
+        "a later C-x C-s must save to the adopted path"
+    );
+}
+
+/// An existing file at the destination is a question. The buffer has
+/// never read that file, so nothing in the editor knows what is in it.
+#[test]
+fn c_x_c_w_asks_before_it_overwrites_and_a_refusal_keeps_the_file() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut s = editor();
+    visit(&s, td.path(), "alpha.txt", "alpha\n");
+    let occupied = td.path().join("occupied.txt");
+    std::fs::write(&occupied, b"do not lose me\n").expect("write occupant");
+
+    ctrl(&mut s, 'x');
+    ctrl(&mut s, 'w');
+    type_str(&mut s, "occupied.txt");
+    press(&mut s, KeyCode::Enter);
+    let asked = prompt(&s);
+    assert!(
+        asked.contains("exists") && asked.contains("overwrite"),
+        "an existing destination must be a question; got {asked:?}"
+    );
+
+    type_str(&mut s, "n");
+    press(&mut s, KeyCode::Enter);
+    assert_eq!(
+        std::fs::read_to_string(&occupied).expect("read back"),
+        "do not lose me\n",
+        "`n` must leave the file alone"
+    );
+}
+
+/// And `y` overwrites it.
+#[test]
+fn c_x_c_w_overwrites_on_yes() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut s = editor();
+    visit(&s, td.path(), "alpha.txt", "alpha\n");
+    let occupied = td.path().join("occupied.txt");
+    std::fs::write(&occupied, b"old\n").expect("write occupant");
+
+    ctrl(&mut s, 'x');
+    ctrl(&mut s, 'w');
+    type_str(&mut s, "occupied.txt");
+    press(&mut s, KeyCode::Enter);
+    type_str(&mut s, "y");
+    press(&mut s, KeyCode::Enter);
+    assert_eq!(
+        std::fs::read_to_string(&occupied).expect("read back"),
+        "alpha\n",
+        "`y` must overwrite"
+    );
+}
+
+/// `revert-buffer` asks before discarding unsaved edits, and reloads
+/// what is on disk when the answer is yes.
+#[test]
+fn revert_buffer_asks_then_reloads_from_disk() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut s = editor();
+    let alpha = visit(&s, td.path(), "alpha.txt", "alpha\n");
+    type_str(&mut s, "X");
+    std::fs::write(&alpha, b"changed underneath\n").expect("rewrite");
+
+    m_x(&mut s, "revert-buffer");
+    let asked = prompt(&s);
+    assert!(
+        asked.contains("Discard unsaved changes"),
+        "a modified revert must ask; got {asked:?}"
+    );
+
+    type_str(&mut s, "y");
+    press(&mut s, KeyCode::Enter);
+    assert_eq!(
+        eval::<String>(
+            &s,
+            "local b = pmacs.window.buffer() return b:slice(0, b:len())"
+        ),
+        "changed underneath\n",
+        "the buffer must hold what is on disk"
+    );
+    assert!(
+        !eval::<bool>(
+            &s,
+            "return pmacs.describe.buffer(pmacs.window.buffer()).modified"
+        ),
+        "and must be clean"
+    );
+}
+
+/// A clean buffer reverts without a question, and point survives inside
+/// the new extent rather than dangling past it.
+#[test]
+fn revert_buffer_on_a_clean_buffer_asks_nothing_and_clamps_point() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut s = editor();
+    let alpha = visit(&s, td.path(), "alpha.txt", "a long first line\n");
+    exec(&s, "pmacs.editor.move_buffer_end()");
+    let before: i64 = eval(&s, "return pmacs.editor.cursor()");
+    assert!(
+        before > 3,
+        "precondition: point must be past the new length"
+    );
+    std::fs::write(&alpha, b"ab\n").expect("rewrite shorter");
+
+    m_x(&mut s, "revert-buffer");
+    assert!(
+        !eval::<bool>(&s, "return pmacs.minibuffer.is_active()"),
+        "a clean revert must not ask"
+    );
+    assert_eq!(
+        eval::<String>(
+            &s,
+            "local b = pmacs.window.buffer() return b:slice(0, b:len())"
+        ),
+        "ab\n"
+    );
+    let len: i64 = eval(&s, "return pmacs.window.buffer():len()");
+    assert!(
+        eval::<i64>(&s, "return pmacs.editor.cursor()") <= len,
+        "point must be clamped into the reloaded buffer"
+    );
+}
+
 // Isolated bootstrap storage roots: an integration test is compiled
 // without `cfg(test)`, so a raw `EditorState::new()` would read the
 // developer's real `init.lua` and write into their real data root.

@@ -881,6 +881,104 @@ cmd { name = "find-file",
         }
       end }
 
+-- Write-file and revert (E1.5) ----------------------------------------------
+--
+-- `C-x C-w` roots its prompt exactly where `find-file` does, so the two
+-- halves of "which directory am I in" cannot disagree. An existing file
+-- at the destination is a question, not a refusal and not a silent
+-- overwrite: this buffer has never read that file, so nothing in the
+-- editor knows whether losing it matters.
+cmd { name = "buffer.write-file",
+      description = "Write the buffer to another path and adopt it.",
+      fn = function()
+        local root = find_file_root()
+        pmacs.minibuffer.read {
+          prompt = "Write file (" .. (root or ".") .. "): ",
+          source = "files",
+          source_root = root,
+          history = "find-file",
+          on_accept = function(value)
+            if value == nil or value == "" then return end
+            local path = find_file_resolve(root, value)
+            local ok, reason = ed.write_file(path)
+            if ok then return end
+            if reason ~= "exists" then
+              ed.set_status("write-file: " .. tostring(reason))
+              return
+            end
+            pmacs.minibuffer.y_or_n {
+              prompt = string.format("%s exists; overwrite?", path),
+              on_yes = function()
+                local wrote, why = ed.write_file(path, true)
+                if not wrote then
+                  ed.set_status("write-file: " .. tostring(why))
+                end
+              end,
+              on_no = function() ed.set_status("write-file cancelled") end,
+            }
+          end,
+        }
+      end }
+
+-- `revert-buffer` throws away unsaved edits by design, so it asks
+-- exactly when there are some. The reload keeps undo history: a revert
+-- the user did not mean is otherwise unrecoverable.
+cmd { name = "revert-buffer",
+      description = "Reload the buffer from its file, discarding unsaved edits.",
+      fn = function()
+        local function revert()
+          local ok, why = ed.revert_file()
+          if not ok then
+            ed.set_status("revert-buffer: " .. tostring(why))
+          end
+        end
+        local id = pmacs.window.buffer()
+        local d = id ~= nil and pmacs.describe.buffer(id) or nil
+        if d == nil then
+          ed.set_status("revert-buffer: no buffer")
+          return
+        end
+        if not d.modified then
+          revert()
+          return
+        end
+        pmacs.minibuffer.y_or_n {
+          prompt = string.format("Discard unsaved changes to %s and reload from disk?", d.name),
+          on_yes = revert,
+          on_no = function() ed.set_status("revert-buffer cancelled") end,
+        }
+      end }
+
+-- `C-x k`. The buffer to kill is chosen by name, prefilled with the one
+-- in the window --- RET is then the common case --- and the unsaved
+-- check is `buffer.kill-this`'s, through the same helper.
+cmd { name = "buffer.kill",
+      description = "Kill a buffer chosen by name.",
+      fn = function()
+        local current = pmacs.window.buffer()
+        local initial = ""
+        if current ~= nil then
+          local d = pmacs.describe.buffer(current)
+          if d ~= nil then initial = d.name end
+        end
+        pmacs.minibuffer.read {
+          prompt = "Kill buffer: ",
+          source = "buffers",
+          initial = initial,
+          on_accept = function(value)
+            if value == nil or value == "" then return end
+            for _, id in ipairs(pmacs.buffer.list()) do
+              local d = pmacs.describe.buffer(id)
+              if d ~= nil and d.name == value then
+                kill_buffer_with_prompt(id)
+                return
+              end
+            end
+            ed.set_status("kill-buffer: no buffer named " .. value)
+          end,
+        }
+      end }
+
 -- Command palette (M-x) ------------------------------------------------------
 --
 -- Opens the minibuffer with a "commands" completion source, then

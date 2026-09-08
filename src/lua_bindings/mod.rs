@@ -13850,6 +13850,52 @@ fn install_session(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result
             lua.create_function(move |_, ()| Ok(cc.borrow_mut().save_ignoring_disk_changes()))?,
         )?;
     }
+    {
+        // E1.5 --- `C-x C-w`. Returns `(true)` or `(false, reason)`,
+        // where the reason is the literal `"exists"` for the one
+        // refusal the caller can do something about: the command then
+        // asks, and retries with `force`. A single status string would
+        // make the caller parse prose to tell a refusal from a failure.
+        let cc = core.clone();
+        editor.set(
+            "write_file",
+            lua.create_function(
+                move |_,
+                      (path, force): (String, Option<bool>)|
+                      -> mlua::Result<(bool, Option<String>)> {
+                    let path = std::path::PathBuf::from(path);
+                    match cc
+                        .borrow_mut()
+                        .write_active_buffer_to(&path, force.unwrap_or(false))
+                    {
+                        Ok(()) => Ok((true, None)),
+                        Err(crate::editor_core::WriteFileRefusal::Exists) => {
+                            Ok((false, Some("exists".to_owned())))
+                        }
+                        Err(crate::editor_core::WriteFileRefusal::Failed(message)) => {
+                            Ok((false, Some(message)))
+                        }
+                    }
+                },
+            )?,
+        )?;
+    }
+    {
+        // E1.5 --- `revert-buffer`. The modified check is the caller's:
+        // this reloads unconditionally, because a command that refused
+        // a modified buffer could not implement "yes, throw my edits
+        // away", which is the only reason to run it.
+        let cc = core.clone();
+        editor.set(
+            "revert_file",
+            lua.create_function(move |_, ()| -> mlua::Result<(bool, Option<String>)> {
+                match cc.borrow_mut().revert_active_buffer() {
+                    Ok(()) => Ok((true, None)),
+                    Err(message) => Ok((false, Some(message))),
+                }
+            })?,
+        )?;
+    }
     register(editor, lua, core, "quit", |c| c.quit = true)?;
     // E1.2 --- `C-g` is the universal cancel, so it drops the selection
     // and with it the mark (a `Selection` IS the mark: one anchor, and

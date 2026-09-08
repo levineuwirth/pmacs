@@ -38,6 +38,17 @@ use crate::window::{
     QuitAction, Side, Window, WindowId, subtree_min_rows,
 };
 
+/// Why [`EditorCore::write_active_buffer_to`] declined (E1.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriteFileRefusal {
+    /// A file already exists at the requested path and the caller did
+    /// not force. The buffer has never read that file, so overwriting it
+    /// is a decision only the user can make.
+    Exists,
+    /// The write itself failed; the message is the underlying error.
+    Failed(String),
+}
+
 /// Viewport height assumed by a command that needs one before any
 /// frame has rendered (`last_visible_rows == 0`). The same twenty rows
 /// `page_step` falls back to, for the same reason: a headless caller
@@ -2605,6 +2616,108 @@ impl EditorCore {
         let aw = self.active_window_mut();
         aw.cursor = new;
         aw.goal_col = None;
+    }
+
+    /// Write the active buffer to `path` and adopt it as the buffer's
+    /// own file (`C-x C-w`, E1.5).
+    ///
+    /// Adoption is the whole point: after this the buffer *is* the new
+    /// file, so `C-x C-s` saves there, the recorded [`FileMeta`] is the
+    /// one just written (a later save compares against the right file),
+    /// and the name follows the path the way [`Buffer::set_path_derived_name`]
+    /// makes it follow one at open.
+    ///
+    /// Refuses an existing file unless `force`, because the caller's
+    /// path came from a prompt and the user cannot see what is already
+    /// there. Unlike [`Self::save`] this cannot ask "did it change since
+    /// we read it" — the buffer never read this file — so *any* file at
+    /// the path is a refusal, and the answer is the user's.
+    ///
+    /// # Errors
+    ///
+    /// [`WriteFileRefusal::Exists`] when a file is already at `path` and
+    /// `force` is false; [`WriteFileRefusal::Failed`] when the write
+    /// itself failed.
+    pub fn write_active_buffer_to(
+        &mut self,
+        path: &Path,
+        force: bool,
+    ) -> Result<(), WriteFileRefusal> {
+        let id = self.active_buffer_id();
+        if !force && crate::file_io::current_meta(path).is_ok() {
+            return Err(WriteFileRefusal::Exists);
+        }
+        let content = {
+            let reg = self.registry.borrow();
+            let buffer = reg
+                .get(id)
+                .map_err(|e| WriteFileRefusal::Failed(e.to_string()))?;
+            let len = buffer.len();
+            let mut content = vec![0u8; usize::try_from(len).unwrap_or(usize::MAX)];
+            if len > 0 {
+                buffer.snapshot_rope().slice(0, len, &mut content);
+            }
+            content
+        };
+        let meta = save_atomic(path, &content)
+            .map_err(|e| WriteFileRefusal::Failed(format!("write failed: {e}")))?;
+        let display = path.display().to_string();
+        if let Ok(buf) = self.registry.borrow_mut().get_mut(id) {
+            buf.set_path_derived_name(display.clone());
+            buf.mark_clean();
+        }
+        self.set_buffer_path(id, Some(path.to_path_buf()));
+        self.set_buffer_meta(id, Some(meta));
+        self.status = format!("wrote {display}");
+        Ok(())
+    }
+
+    /// Reload the active buffer from its backing file (`revert-buffer`,
+    /// E1.5).
+    ///
+    /// The replace is announced through [`Self::notify_buffer_edit`],
+    /// not through [`Self::apply_active_edit`]: a revert is exactly an
+    /// external change, and it is the only local edit that can leave
+    /// point past the end of the buffer, which is the clamp that path
+    /// carries and the other does not.
+    ///
+    /// Undo history is deliberately kept. A revert the user did not mean
+    /// is otherwise unrecoverable, and the rope entry the edit pushes is
+    /// what makes `C-x u` bring the work back.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the buffer has no backing file, when the
+    /// file cannot be read, or when the replace is refused.
+    pub fn revert_active_buffer(&mut self) -> Result<(), String> {
+        let id = self.active_buffer_id();
+        let Some(path) = self.active_buffer_path() else {
+            return Err("no file to revert from".into());
+        };
+        let (bytes, meta) = crate::file_io::load_file(&path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let len = self.active_buffer_len();
+        let edit = {
+            let mut reg = self.registry.borrow_mut();
+            let buffer = reg.get_mut(id).map_err(|e| e.to_string())?;
+            buffer
+                .apply_edit(EditOp::Replace {
+                    range: Range { start: 0, end: len },
+                    bytes: &bytes,
+                })
+                .map_err(|e| e.to_string())?
+        };
+        if let Some(crdt_op) = edit.crdt_op.as_ref() {
+            self.pending_crdt_ops
+                .push((CrdtOpOrigin::DaemonKey, id, (**crdt_op).clone()));
+        }
+        self.notify_buffer_edit(id, &edit);
+        if let Ok(buf) = self.registry.borrow_mut().get_mut(id) {
+            buf.set_file_meta(Some(meta));
+            buf.mark_clean();
+        }
+        self.status = format!("reverted {}", path.display());
+        Ok(())
     }
 
     /// Move point to the very start of the buffer (`M-<`, E1.3).
