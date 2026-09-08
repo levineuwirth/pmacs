@@ -75,7 +75,7 @@ waited on, which is now done here by hand.
 | selector | `--lib editor::tests::stream_supersede_delivers_cancelled_to_on_close` |
 | job | GitHub Actions, macOS / lua54 |
 | required fragments | `async pump deadline exceeded` |
-| occurrences | two: `main`, run 30555667095, 2026-07-30; and PR #257 at `e78d184`, run 34222042303, job `Test (macos-latest / lua54)` (102047236847), `src/editor.rs:12842`, `test result: FAILED. 2196 passed; 1 failed; 11 ignored`. The panic line moves with `editor.rs` and is not part of the signature |
+| occurrences | two: `main`, run 30555667095, 2026-07-30; and PR #257 at `e78d184`, run 34222042303, job `Test (macos-latest / lua54)` (102047236847), `src/editor.rs:12842`, `test result: FAILED. 2196 passed; 1 failed; 11 ignored`. The panic line moves with `editor.rs` and is not part of the signature. The next run, 34253949749 at `b2094ac`, ran this selector on both macOS legs and passed: non-reproduction and nothing more |
 | candidate mechanism | the test drives a superseded stream to its `on_close` and pumps `tick_async` until the Lua marker appears, under a fixed 2-second deadline the helper sets itself. Whether two seconds is short for a loaded macOS runner or the close notification is genuinely lost is not known, and the first occurrence's log no longer says anything either way. Unresolved; possible product defect |
 | retirement | diagnosis. The deadline now reports its subject, its elapsed time and its poll count, so the next occurrence says whether it missed by a millisecond or by two seconds --- that is a step toward the diagnosis and is not itself a closer. Never a green rerun |
 
@@ -162,7 +162,7 @@ never shut.
 | selector | `--test m8_1_acceptance read_dir_supersede_cancels_in_flight_predecessor` |
 | job | GitHub Actions, the serialized crdt sweep (`--test-threads=1`) |
 | required fragments | `first read_dir must be superseded; got ok` |
-| occurrences | three: `main` at `aae5b35`, run 33375945966 (the serialized crdt sweep); `main` at `d97e137`, run 34205653191, job `Test (macos-latest / luajit)`; and PR #257 at `8f6784f`, run 34220035122, job `Test (ubuntu-latest / luajit)`. The last two run at cargo's DEFAULT parallelism under D23, and the third is on LINUX, so neither serialization nor macOS is required to produce it. The second is the merge-base control for the third: the same signature is on `d97e137` itself, so the branch did not introduce it. That control is ONE run at the base, which is one sample: it establishes that the signature exists on `d97e137`, not its rate. PR #257's second run, 34222042303 at the head `e78d184`, is GREEN on `Test (ubuntu-latest / luajit)`, which is non-reproduction and nothing more |
+| occurrences | three: `main` at `aae5b35`, run 33375945966 (the serialized crdt sweep); `main` at `d97e137`, run 34205653191, job `Test (macos-latest / luajit)`; and PR #257 at `8f6784f`, run 34220035122, job `Test (ubuntu-latest / luajit)`. The last two run at cargo's DEFAULT parallelism under D23, and the third is on LINUX, so neither serialization nor macOS is required to produce it. The second is the merge-base control for the third: the same signature is on `d97e137` itself, so the branch did not introduce it. That control is ONE run at the base, which is one sample: it establishes that the signature exists on `d97e137`, not its rate. PR #257's second run, 34222042303 at `e78d184`, is GREEN on `Test (ubuntu-latest / luajit)`, and so is its third, 34253949749 at the head `b2094ac`. Two green runs are two samples: non-reproduction and nothing more |
 | candidate mechanism | the predecessor completed before the cancellation took effect. `--test-threads=1` was the first occurrence's candidate: it serializes the test functions in one executable and so removes one source of contention the test's "in flight" depends on. The second occurrence has no such flag, which does not refute the mechanism --- a fast predecessor is a fast predecessor however the runner got there --- but it does mean serialization is not required to produce it, and the remaining common factor is a macOS or Linux CI runner rather than a scheduling flag. Nothing has measured the predecessor's duration under either, and nothing rules out a real supersede defect |
 | retirement | diagnosis; a witness that holds the predecessor in flight deterministically rather than by load |
 
@@ -280,20 +280,32 @@ fragments, so the symptom cannot discriminate a fixture race from a
 product regression, and the discrimination in #255 is what would settle
 it.
 
-### PR #257 ran CI twice, and the second run is the one on its head
+### PR #257's CI runs
 
-Two runs exist and every C1 record described only the first, by name and
-as "the first run":
+**A count of runs does not go in a heading, or anywhere else that has
+to stay true.** This section was headed "PR #257 ran CI twice" and
+opened "Two runs exist" while a third was already running; the heading
+before it said the same about one. A table takes a new row; a sentence
+that names a total has to be found and rewritten, and twice it was not.
 
-- run **34220035122** at `8f6784f`, `pull_request`, **12 green, 3 red**;
-- run **34222042303** at `e78d184`, the pushed head, created
-  2026-09-08T11:41:44Z — eight seconds after the head commit — completed
-  12:01:39Z, conclusion **failure**: **13 green, 2 red**. `Docs
-  consistency` is skipped in both, correctly: the PR's changed paths
-  include code.
+| run | sha | created | completed | verdict |
+|---|---|---|---|---|
+| 34220035122 | `8f6784f` | 2026-09-08T11:18:55Z | 11:38:36Z | 12 green, 3 red |
+| 34222042303 | `e78d184` | 11:41:44Z | 12:01:39Z | 13 green, 2 red |
+| 34253949749 | `b2094ac` | 16:54:59Z | 17:09:27Z | 16 green, 1 red |
 
-The trees the two ran differ by one markdown file. Three things are in
-the second run.
+All three are `pull_request` events with conclusion **failure**, and
+`Docs consistency` is skipped in all three, correctly: the PR's changed
+paths include code. The first two ran trees differing by one markdown
+file; the third ran fix round 1's seven further commits.
+
+Every C1 record before 2026-09-08 described only the first run, by name
+and as "the first run". Fix round 1 named the first two and was written
+fifty seconds after the push that started the third.
+
+#### Run 34222042303, at `e78d184`
+
+Three things are in it.
 
 `Test (macos-latest / lua54)`, job 102047236847, failed twice.
 
@@ -330,6 +342,48 @@ is one this branch edited (two `set_line_numbers('off')` lines in
 
 `Test (ubuntu-latest / luajit)` is green in this run, so U17 did not
 reproduce at the head. That is non-reproduction and nothing more.
+
+#### Run 34253949749, at the pushed head `b2094ac`
+
+Sixteen jobs green, one red: `Test (macos-latest / lua54)`, job
+**102154957233**, which ran 120 targets. 119 ended `test result: ok`
+and one ended
+
+```
+thread 'ctrl_c_during_reconnect_sleep_yields_clean_exit' (63826) panicked at tests/m5_8_acceptance.rs:546:5:
+Ctrl-C during reconnect sleep should produce a clean exit; status: ExitStatus { code: 1, signal: Some("Interrupt: 2") }
+test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.73s
+```
+
+Selector, job and **both** required fragments are U5's, verbatim; the
+`:LINE` suffix is not a fragment. U5 is live above as never-closed, and
+this is its second occurrence, filed as **#260**.
+
+**What this run's greens do and do not establish.** Four selectors this
+branch is a candidate for ran in it and passed, each on **both** macOS
+legs (jobs 102154957233 and 102154957288):
+
+- `acc28_child_input_and_the_c_c_escape_work_unchanged_in_a_panel` (#259);
+- `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join` (#258);
+- `v15_peer_never_receives_theme_facts_and_v16_does` (the `theme_faces`
+  incident);
+- `editor::tests::stream_supersede_delivers_cancelled_to_on_close` (R5).
+
+That is **non-reproduction and nothing more**. By the rerun rule it
+establishes no absence, exonerates nothing and diagnoses nothing; these
+are load-dependent tests and one green run at the head is one sample.
+
+**And it is the only head-side evidence the merge decision has.** It is
+the single CI run at the pushed sha, and in it the branch's three
+candidate regressions and its reopened row each had a chance to recur
+across a delta of seven commits, and none did. That is a fact about the
+record, not about the code: it is worth having precisely because there
+is nothing else at the head, and it is worth nothing more than one
+sample is worth.
+
+Both halves of that are the finding. Neither is quotable without the
+other: the first half alone reads as exoneration, the second alone
+suppresses the only measurement at the head there is.
 
 ### The macOS reds have a merge-base control, and it points at the branch
 
