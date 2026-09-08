@@ -424,23 +424,82 @@ mod tests {
         assert_ne!(meta_at_load, now);
     }
 
+    /// The env var the parent sets so the child body refuses to run as a
+    /// stray `--ignored` selection. Named, not positional: libtest gives a
+    /// test function no arguments.
+    const BARE_FILENAME_CHILD: &str = "PMACS_TEST_BARE_FILENAME_CHILD";
+
+    /// `Path::parent()` of a bare filename returns `Some("")` (empty path),
+    /// not `None`. Treat that as "save in cwd".
+    ///
+    /// **The cwd is a child's, never this process's.** The obvious spelling
+    /// — `set_current_dir` onto a `TempDir` and back — is a process-global
+    /// mutation, and libtest runs this binary's tests on a thread pool, so
+    /// it repoints the cwd of every *other* test running at that instant.
+    /// `packages::fetcher`'s `run_git` spawns `git` with no explicit cwd
+    /// (`run_git_inner`'s `None` arm), so those children inherit whatever
+    /// this test had installed; the parent's restore does nothing for a
+    /// child already running, and the `TempDir` then drops underneath a
+    /// live `git`, which reports `Unable to read current working
+    /// directory`. That is registry row U16, demonstrated by its own
+    /// retirement experiment on 2026-09-08: 400 iterations of the fetcher
+    /// module with this test in the process failed 3 times, 400 without it
+    /// failed 0. A serial guard does not close it — the `git` child
+    /// outlives any guard the parent can hold.
+    ///
+    /// So the cwd move happens in a subprocess: `Command::current_dir` is
+    /// per-child and touches nothing here. The child is this same test
+    /// binary re-executed against the one `#[ignore]`d body below, which
+    /// keeps the subject `save_atomic` on a real bare path rather than a
+    /// stand-in for it.
     #[test]
     fn bare_filename_saves_in_cwd() {
-        // `Path::parent()` of a bare filename returns Some("") (empty path),
-        // not None. Treat that as "save in cwd". Run inside a tempdir so we
-        // don't litter the workspace.
         let dir = TempDir::new().unwrap();
-        let prev_cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
-        let result = save_atomic(Path::new("bare.txt"), b"x");
-        // Restore cwd before any assertion that might unwind the test.
-        std::env::set_current_dir(&prev_cwd).unwrap();
-        let meta = result.expect("bare filename should save in cwd");
-        assert_eq!(meta.size, 1);
+        let exe = std::env::current_exe().expect("this test binary");
+        let out = std::process::Command::new(&exe)
+            .args([
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "file_io::tests::bare_filename_saves_in_the_child_cwd",
+            ])
+            .current_dir(dir.path())
+            .env(BARE_FILENAME_CHILD, "1")
+            .output()
+            .expect("re-execute this test binary as the child");
+        assert!(
+            out.status.success(),
+            "the child saving a bare filename must succeed; status {:?}\n\
+             stdout:\n{}\nstderr:\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
 
-        // Verify the file landed in the tempdir.
+        // Verify from HERE that the file landed in the child's cwd: the
+        // child asserting it could pass against a file it wrote anywhere.
         let (bytes, _) = load_file(&dir.path().join("bare.txt")).unwrap();
         assert_eq!(bytes, b"x");
+    }
+
+    /// The child half of [`bare_filename_saves_in_cwd`]: saves a bare
+    /// filename into whatever cwd the parent gave this process.
+    ///
+    /// `#[ignore]` so the sweep never runs it on its own, where the cwd
+    /// would be the workspace root and the save would litter it. The env
+    /// var makes that refusal explicit rather than leaving a hand-typed
+    /// `--ignored` run to write `bare.txt` into the repository.
+    #[test]
+    #[ignore = "child process of bare_filename_saves_in_cwd; needs that parent's cwd"]
+    fn bare_filename_saves_in_the_child_cwd() {
+        assert!(
+            std::env::var_os(BARE_FILENAME_CHILD).is_some(),
+            "run this only through bare_filename_saves_in_cwd, which sets \
+             {BARE_FILENAME_CHILD} and a cwd to write into",
+        );
+        let meta =
+            save_atomic(Path::new("bare.txt"), b"x").expect("bare filename should save in cwd");
+        assert_eq!(meta.size, 1);
     }
 
     #[test]
