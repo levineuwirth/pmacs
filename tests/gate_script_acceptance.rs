@@ -172,6 +172,28 @@ fn run(root: &Path, args: &[&str]) -> (String, String, bool) {
     run_in(&repo_root(), root, args)
 }
 
+/// [`run`], but reporting the exit **code** rather than only whether it
+/// was zero.
+///
+/// A usage error is exit 2 and nothing else: a test that accepted any
+/// non-zero status would pass on a script that crashed, or that ran the
+/// gates and failed them, which is the opposite of refusing before
+/// anything runs.
+fn run_code(root: &Path, args: &[&str]) -> (String, String, Option<i32>) {
+    let out = Command::new(gate())
+        .args(args)
+        .current_dir(repo_root())
+        .env("PMACS_GATE_TARGET_ROOT", root)
+        .env("PMACS_GATE_ALLOW_ANCESTOR_MARKER", "1")
+        .output()
+        .expect("run scripts/gate");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code(),
+    )
+}
+
 // --- The plan is the six named stages -----------------------------------
 //
 // The script is authoritative for the fixed gates; `--print-plan` and
@@ -2028,6 +2050,80 @@ fn docs_runs_fmt_doc_the_docs_test_and_diff_check() {
          diff-check\tgit diff --check\n",
         "plan was:\n{plan}"
     );
+}
+
+/// **`--docs` is a mode; `--protocol` and `--perf` are modifiers of the
+/// full plan; asking for both is a usage error, not a smaller run.**
+///
+/// It was *accepted and dropped* until 2026-09-08. `emit_plan` returns
+/// from its `--docs` branch before either modifier is consulted, so
+/// `scripts/gate --protocol --docs` emitted the four documentation
+/// stages, ran them, printed `gate: all gates passed` and exited
+/// **zero**. Nothing in the output said a flag had been ignored: a
+/// caller who asked for the protocol sweep got no sweep at all and a
+/// green verdict for the ask. That combination was written into two
+/// session prompts before a review round found it by reading the
+/// emitter — nobody could have found it by running it, which is the
+/// point.
+///
+/// **The refusal is at parse time, so it binds the print modes too.** A
+/// plan *printed* for a combination the runner would not honour is the
+/// same false evidence in a cheaper form, and `--print-plan-named` is
+/// exactly what a session reaches for to record what it is about to
+/// run. Exit 2, never 1: this is a request the interface does not have,
+/// the same class as an unknown argument, and it must be
+/// distinguishable from a gate that ran and failed.
+#[test]
+fn docs_refuses_the_full_plan_modifiers_rather_than_discarding_them() {
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
+
+    for args in [
+        vec!["--protocol", "--docs"],
+        vec!["--docs", "--protocol"],
+        vec!["--perf", "--docs"],
+        vec!["--docs", "--perf"],
+        vec!["--protocol", "--perf", "--docs"],
+        vec!["--protocol", "--docs", "--print-plan"],
+        vec!["--docs", "--perf", "--print-plan-named"],
+    ] {
+        let (out, err, code) = run_code(root.path(), &args);
+        assert_eq!(
+            code,
+            Some(2),
+            "{args:?} must be a usage error (exit 2), never a run and never \
+             a plan; stdout:\n{out}stderr:\n{err}"
+        );
+        assert!(
+            out.is_empty(),
+            "{args:?} must print NO plan --- a printed plan for a discarded \
+             flag is the defect itself; stdout:\n{out}"
+        );
+        assert!(
+            err.contains("--docs") && err.contains("cannot be combined"),
+            "{args:?} must say which flags conflict, so the caller can tell \
+             this from an unknown argument; stderr:\n{err}"
+        );
+        assert!(
+            err.contains("--protocol") && err.contains("--perf"),
+            "{args:?} must name both modifiers by name; stderr:\n{err}"
+        );
+    }
+
+    // And the three plans that remain legal are untouched: the refusal
+    // must not be a blanket rejection of the modifiers.
+    for args in [
+        vec!["--docs", "--print-plan-named"],
+        vec!["--protocol", "--print-plan-named"],
+        vec!["--perf", "--print-plan-named"],
+        vec!["--protocol", "--perf", "--print-plan-named"],
+    ] {
+        let (plan, err, code) = run_code(root.path(), &args);
+        assert_eq!(code, Some(0), "{args:?} must still succeed; stderr:\n{err}");
+        assert!(!plan.is_empty(), "{args:?} must still print its plan");
+    }
 }
 
 // --- Derivation, marker, canonical paths --------------------------------

@@ -2216,10 +2216,26 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 mod tests {
     use super::*;
 
-    fn pump_until<F: Fn() -> bool>(rt: &AsyncRuntime, f: F) {
-        let deadline = Instant::now() + Duration::from_secs(2);
+    /// Tick the runtime until `f` holds, or panic on a 2-second deadline.
+    ///
+    /// `what` names the condition; the panic carries it with the
+    /// deadline, the elapsed time and the number of times `f` was asked,
+    /// so a red log says which wait gave up and how long it waited.
+    /// `tests/common/ready.rs` does this for the integration suites and
+    /// is unreachable from an in-crate unit test, so the reporting is
+    /// carried inward here.
+    fn pump_until<F: Fn() -> bool>(rt: &AsyncRuntime, what: &str, f: F) {
+        const DEADLINE: Duration = Duration::from_secs(2);
+        let start = Instant::now();
+        let mut polls = 0u32;
         while !f() {
-            assert!(Instant::now() < deadline, "runtime tick deadline exceeded");
+            polls += 1;
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed < DEADLINE,
+                "runtime tick deadline exceeded: {what} did not settle \
+                 within {DEADLINE:?} (waited {elapsed:?}, {polls} polls)"
+            );
             let _ = rt.tick();
             thread::sleep(Duration::from_millis(1));
         }
@@ -2353,7 +2369,7 @@ mod tests {
     fn dispatch_sum_completes_with_correct_value() {
         let rt = AsyncRuntime::with_pool_size(2);
         let id = rt.dispatch_compute_sum(10, None);
-        pump_until(&rt, || rt.is_complete(id));
+        pump_until(&rt, "the compute_sum job", || rt.is_complete(id));
         match rt.take_result(id) {
             Some(JobOutcome::Complete(JobResult::Sum(v))) => assert_eq!(v, 55),
             other => panic!("unexpected outcome: {other:?}"),
@@ -2364,7 +2380,7 @@ mod tests {
     fn dispatch_sleep_completes_with_unit() {
         let rt = AsyncRuntime::with_pool_size(1);
         let id = rt.dispatch_sleep(5, None);
-        pump_until(&rt, || rt.is_complete(id));
+        pump_until(&rt, "the sleep job", || rt.is_complete(id));
         match rt.take_result(id) {
             Some(JobOutcome::Complete(JobResult::Unit)) => {}
             other => panic!("unexpected outcome: {other:?}"),
@@ -2378,7 +2394,7 @@ mod tests {
         // Yield to ensure the worker has noticed and started sleeping.
         thread::sleep(Duration::from_millis(20));
         rt.cancel(id);
-        pump_until(&rt, || rt.is_complete(id));
+        pump_until(&rt, "the cancelled sleep job", || rt.is_complete(id));
         assert!(rt.is_cancelled(id));
         assert!(matches!(rt.take_result(id), Some(JobOutcome::Cancelled)));
     }
@@ -2390,7 +2406,9 @@ mod tests {
         for n in 1..=20u64 {
             ids.push((n, rt.dispatch_compute_sum(n, None)));
         }
-        pump_until(&rt, || ids.iter().all(|(_, id)| rt.is_complete(*id)));
+        pump_until(&rt, "all twenty compute_sum jobs", || {
+            ids.iter().all(|(_, id)| rt.is_complete(*id))
+        });
         for (n, id) in ids {
             let expected = n * (n + 1) / 2;
             match rt.take_result(id) {
@@ -2495,9 +2513,21 @@ mod tests {
             ids.push(rt.dispatch_sleep(0, Some("k")));
         }
         // Pump until every dispatched id (gate + 100 keyed) settles.
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Duration::from_secs(3);
+        let start = Instant::now();
+        let mut polls = 0u32;
         loop {
-            assert!(Instant::now() < deadline, "settle deadline exceeded");
+            polls += 1;
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed < deadline,
+                "settle deadline exceeded: the gate and all {} keyed jobs did not \
+                 settle within {deadline:?} (waited {elapsed:?}, {polls} polls; \
+                 gate complete: {}, keyed still pending: {})",
+                ids.len(),
+                rt.is_complete(gate),
+                ids.iter().filter(|id| !rt.is_complete(**id)).count()
+            );
             let _ = rt.tick();
             if rt.is_complete(gate) && ids.iter().all(|id| rt.is_complete(*id)) {
                 break;
@@ -2551,11 +2581,16 @@ mod tests {
             // Try to take_result eventually; even if the worker
             // hasn't replied yet, the cancel token is flipped.
             // Pump until it settles into Cancelled.
-            let deadline = Instant::now() + Duration::from_millis(500);
+            const DEADLINE: Duration = Duration::from_millis(500);
+            let start = Instant::now();
+            let mut polls = 0u32;
             while !rt.is_complete(*id) {
+                polls += 1;
+                let elapsed = start.elapsed();
                 assert!(
-                    Instant::now() < deadline,
-                    "prior id {id} did not get cancelled"
+                    elapsed < DEADLINE,
+                    "prior id {id} did not get cancelled within {DEADLINE:?} \
+                     (waited {elapsed:?}, {polls} polls)"
                 );
                 let _ = rt.tick();
                 thread::sleep(Duration::from_millis(1));
@@ -2576,9 +2611,20 @@ mod tests {
         let beta = rt.dispatch_sleep(0, Some("beta"));
         let _alpha2 = rt.dispatch_sleep(0, Some("alpha"));
         // beta should complete cleanly; alpha1 should be cancelled.
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Duration::from_secs(2);
+        let start = Instant::now();
+        let mut polls = 0u32;
         while !(rt.is_complete(beta) && rt.is_complete(alpha1)) {
-            assert!(Instant::now() < deadline, "settle deadline exceeded");
+            polls += 1;
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed < deadline,
+                "settle deadline exceeded: beta and alpha1 did not both settle \
+                 within {deadline:?} (waited {elapsed:?}, {polls} polls; beta \
+                 complete: {}, alpha1 complete: {})",
+                rt.is_complete(beta),
+                rt.is_complete(alpha1)
+            );
             let _ = rt.tick();
             thread::sleep(Duration::from_millis(1));
         }
@@ -3187,7 +3233,7 @@ mod tests {
     fn workers_snapshot_records_completed_ring() {
         let rt = AsyncRuntime::with_pool_size(1);
         let id = rt.dispatch_compute_sum(10, None);
-        pump_until(&rt, || rt.is_complete(id));
+        pump_until(&rt, "the compute_sum job", || rt.is_complete(id));
         let snap = rt.workers_snapshot();
         assert!(
             snap.active.iter().all(|j| j.id != id),
@@ -3211,10 +3257,10 @@ mod tests {
     fn workers_completed_ring_orders_newest_first() {
         let rt = AsyncRuntime::with_pool_size(1);
         let first = rt.dispatch_compute_sum(1, None);
-        pump_until(&rt, || rt.is_complete(first));
+        pump_until(&rt, "the first compute_sum job", || rt.is_complete(first));
         thread::sleep(Duration::from_millis(2));
         let second = rt.dispatch_compute_sum(2, None);
-        pump_until(&rt, || rt.is_complete(second));
+        pump_until(&rt, "the second compute_sum job", || rt.is_complete(second));
         let snap = rt.workers_snapshot();
         // Newest first means the second-dispatched job is at index 0.
         assert_eq!(snap.completed[0].id, second);
@@ -3229,7 +3275,7 @@ mod tests {
         let mut ids = Vec::new();
         for _ in 0..(COMPLETED_RING_CAP + 16) {
             let id = rt.dispatch_compute_sum(1, None);
-            pump_until(&rt, || rt.is_complete(id));
+            pump_until(&rt, "a ring-filling compute_sum job", || rt.is_complete(id));
             ids.push(id);
         }
         let snap = rt.workers_snapshot();
@@ -3264,7 +3310,7 @@ mod tests {
         for _ in 0..1000 {
             let id = rt.dispatch_sleep(5, None);
             rt.cancel(id);
-            pump_until(&rt, || rt.is_complete(id));
+            pump_until(&rt, "a cancelled sleep job", || rt.is_complete(id));
             let _ = rt.take_result(id);
         }
         assert_eq!(rt.pending_len(), 0, "pending leaked across 1000 cycles");
@@ -3360,7 +3406,7 @@ mod tests {
             injection_aliases: Arc::new(std::collections::HashMap::new()),
         };
         let id = rt.dispatch_parse(req, None);
-        pump_until(&rt, || rt.is_complete(id));
+        pump_until(&rt, "the parse job", || rt.is_complete(id));
         let bundle = rt
             .take_parse_tree(id)
             .expect("parse handoff must hold a bundle on Complete");
@@ -3410,7 +3456,7 @@ mod tests {
             injection_aliases: Arc::new(std::collections::HashMap::new()),
         };
         let id = rt.dispatch_parse(req, None);
-        pump_until(&rt, || rt.is_complete(id));
+        pump_until(&rt, "the parse job", || rt.is_complete(id));
         // Don't drain the bundle --- take_result should clean it.
         assert_eq!(rt.parse_handoff_len(), 1);
         let _ = rt.take_result(id);

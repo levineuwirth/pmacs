@@ -1,23 +1,20 @@
 # pmacs keybindings — reference
 
-**Last verified against `main` @ `f8096ff` (2026-07-20).** This is a
-snapshot, not generated output — when a PR adds, removes, or rebinds a
-key, update this file in the same PR (see §6). If you're an agent and
-this file looks stale against the code it cites, trust the code.
-
 pmacs keys come from two independent places:
 
 - **The Lua keymap** (§1–2) — `pmacs.keymap.bind{...}` calls, resolved
   by the Rust dispatcher against whatever `init.lua` has bound at
   runtime. Fully user-rebindable: unbind or rebind any of these from
-  init.lua (§5).
+  init.lua (§5). `pmacs.keymap.bind` REFUSES a sequence that is already
+  bound, so taking over a default chord means `pmacs.keymap.unbind`
+  first.
 - **Rust-hardcoded modal shadows** (§3) — isearch, query-replace,
   the minibuffer/prompt, the completion popup, and the context menu
   each shadow the Lua keymap while active: `EditorInstance::dispatch_key`
-  (`src/editor.rs:658-733`) checks these modes, highest-priority first,
-  before a key ever reaches the Lua dispatcher. **Not user-configurable**
-  — there is no `pmacs.keymap` surface for them; changing one means
-  editing the mode's `from_chord` decoder in Rust.
+  checks these modes, highest-priority first, before a key ever reaches
+  the Lua dispatcher. **Not user-configurable** — there is no
+  `pmacs.keymap` surface for them; changing one means editing the mode's
+  `from_chord` decoder in Rust.
 
 Notation matches what `pmacs.keymap.bind` accepts: `C-` = Ctrl, `M-` =
 Alt/Meta, `S-` = Shift, bare letters/punctuation self-insert when
@@ -25,200 +22,183 @@ unmodified. Named keys are angle-bracketed (`<left>`, `<up>`, `<home>`)
 or all-caps (`RET`, `BS`/Backspace, `DEL`/Delete, `TAB`, `SPC`).
 Sequences separated by spaces (`C-x C-s`) are chords typed in order.
 
-## 1. Global keymap
+## 1. Lua keymap
 
-Source: `builtin/keymaps/default.lua` unless noted. All bound at
-`scope = "global"`.
+**Generated.** Everything between the markers below is rendered from
+`KeymapStack::iter_all` — the same source `pmacs.keymap.list()` and
+`M-x help.list-keybindings` read — and pinned byte for byte by
+`tests/keybindings_doc_acceptance.rs`. Do not edit it by hand; after
+changing a binding, regenerate:
 
-### Cursor motion
+```text
+PMACS_WRITE_KEYBINDINGS=1 cargo test --test keybindings_doc_acceptance
+```
 
-| Key | Command |
-|---|---|
-| `C-a` / `<home>` | `cursor.line-start` |
-| `C-e` / `<end>` | `cursor.line-end` |
-| `C-f` / `<right>` | `cursor.right` |
-| `C-b` / `<left>` | `cursor.left` |
-| `C-n` / `<down>` | `cursor.down` |
-| `C-p` / `<up>` | `cursor.up` |
-| `C-<left>` / `M-b` | `cursor.word-left` |
-| `C-<right>` / `M-f` | `cursor.word-right` |
-| `C-<up>` / `M-{` | `cursor.paragraph-up` |
-| `C-<down>` / `M-}` | `cursor.paragraph-down` |
-| `<pageup>` / `M-v` | `cursor.page-up` |
-| `<pagedown>` / `C-v` | `cursor.page-down` |
-| `M-g g` / `M-g M-g` | `cursor.goto-line` (`builtin/runtime/editops.lua`) |
+This is what the file's own §2 note used to admit it could not manage:
+the table had missed a `TAB` binding and nothing could tell. The
+buffer-local panel keymaps below are NOT in here, because they exist
+only while a panel does; §3's modal keys are not either, because they
+are not in the keymap at all.
 
-### Selection (CUA shift-select)
+<!-- keymap:begin -->
 
-Plain motion preserves an existing selection instead of dropping it
-(Emacs-flavored default, not strict CUA).
+### Scope: global
 
 | Key | Command |
 |---|---|
-| `S-<left>` / `S-<right>` | `cursor.select-left` / `cursor.select-right` |
-| `S-<up>` / `S-<down>` | `cursor.select-up` / `cursor.select-down` |
-| `S-<home>` / `S-<end>` | `cursor.select-line-start` / `cursor.select-line-end` |
-| `C-S-<left>` / `C-S-<right>` | `cursor.select-word-left` / `cursor.select-word-right` |
-| `C-S-<up>` / `C-S-<down>` | `cursor.select-paragraph-up` / `cursor.select-paragraph-down` |
-
-### Editing
-
-| Key | Command |
-|---|---|
+| `<down>` | `cursor.down` |
+| `<end>` | `cursor.line-end` |
+| `<f1>` | `help` |
+| `<home>` | `cursor.line-start` |
+| `<left>` | `cursor.left` |
+| `<pagedown>` | `cursor.page-down` |
+| `<pageup>` | `cursor.page-up` |
+| `<right>` | `cursor.right` |
+| `<up>` | `cursor.up` |
 | `BS` | `buffer.delete-backward` |
-| `DEL` / `C-d` | `buffer.delete-forward` |
-| `RET` | `edit.newline-and-indent` |
-| `TAB` | `buffer.tab` |
-| `C-BS` / `C-h` | `buffer.delete-word-backward` (see §4 for the `C-h` rationale) |
-| `M-BS` | `buffer.delete-word-backward` |
+| `C-+` | `gpu.zoom-in` |
+| `C--` | `gpu.zoom-out` |
+| `C-/` | `buffer.undo` |
+| `C-0` | `gpu.zoom-reset` |
+| `C-4` | `buffer.undo` |
+| `C-<down>` | `cursor.paragraph-down` |
+| `C-<left>` | `cursor.word-left` |
+| `C-<right>` | `cursor.word-right` |
+| `C-<up>` | `cursor.paragraph-up` |
+| `C-=` | `gpu.zoom-in` |
+| `C-?` | `buffer.redo` |
+| `C-BS` | `buffer.delete-word-backward` |
 | `C-DEL` | `buffer.delete-word-forward` |
-| `M-d` | `buffer.delete-word-forward` |
-| `M-u` | `edit.upcase` (`editops.lua`) |
-| `M-l` | `edit.downcase` (`editops.lua`) |
-| `M-c` | `edit.capitalize` (`editops.lua`) |
-| `C-t` | `edit.transpose-chars` (`editops.lua`) |
-| `M-t` | `edit.transpose-words` (`editops.lua`) |
-| `M-z` | `edit.zap-to-char` (`editops.lua`) |
-| `M-<up>` / `M-<down>` | `edit.move-line-up` / `edit.move-line-down` (`editops.lua`) |
-| `M-^` | `edit.join-line` (`editops.lua`) |
-| `M-;` | `edit.toggle-comment` (`builtin/runtime/comment.lua`) |
-
-> `M-d` / `M-BS` currently plain-delete the word — they are **not**
-> kill-ring members yet (a named deferral; see `docs/archive/agent-handoff-2026-09.md`
-> §6, "word kills"). `edit.kill-line` (below) is the only word/line
-> kill wired into the ring so far.
-
-### Clipboard & kill ring
-
-| Key | Command |
-|---|---|
-| `M-w` | `edit.copy` |
-| `C-w` | `edit.cut` |
-| `C-y` | `edit.paste` |
-| `C-x h` | `edit.select-all` (Emacs `mark-whole-buffer`) |
-| `C-k` | `edit.kill-line` (`builtin/runtime/killring.lua`) |
-| `M-y` | `edit.yank-pop` — replace the just-yanked text with the previous kill, immediately after `C-y` (`killring.lua`) |
-
-### Undo / redo
-
-Multiple bindings exist because terminals disagree on how `Ctrl+/`
-encodes; see §4.
-
-| Key | Command |
-|---|---|
-| `C-/` / `C-_` / `C-4` / `C-x u` | `buffer.undo` |
-| `C-?` / `C-S-_` / `C-x r` | `buffer.redo` |
-
-### Search & replace
-
-Once a search is running, `C-s`/`C-r` step to the next/previous match
-and `M-r` toggles literal↔regex — those are Rust-hardcoded isearch
-keys, not Lua bindings (§3).
-
-| Key | Command |
-|---|---|
-| `C-s` | `search.forward` (starts isearch) |
-| `C-r` | `search.backward` (starts isearch) |
-| `C-M-s` | `search.forward-regex` |
-| `C-M-r` | `search.backward-regex` |
-| `M-%` | `query-replace` (starts an interactive replace session, §3) |
 | `C-M-%` | `query-replace-regexp` |
-
-### Multi-key (`C-x`) chords
-
-| Key | Command |
-|---|---|
-| `C-x C-s` | `buffer.save` |
-| `C-x C-c` | `editor.quit` |
-| `C-x 2` | `window.split-horizontal` |
-| `C-x 3` | `window.split-vertical` |
-| `C-x o` / `C-x O` | `window.focus-next` / `window.focus-prev` |
+| `C-M-i` | `completion.at-point` |
+| `C-M-r` | `search.backward-regex` |
+| `C-M-s` | `search.forward-regex` |
+| `C-S-<down>` | `cursor.select-paragraph-down` |
+| `C-S-<left>` | `cursor.select-word-left` |
+| `C-S-<right>` | `cursor.select-word-right` |
+| `C-S-<up>` | `cursor.select-paragraph-up` |
+| `C-S-_` | `buffer.redo` |
+| `C-SPC` | `region.set-mark` |
+| `C-_` | `buffer.undo` |
+| `C-a` | `cursor.line-start` |
+| `C-b` | `cursor.left` |
+| `C-c @ C-M-h` | `fold.close-all` |
+| `C-c @ C-M-s` | `fold.open-all` |
+| `C-c @ C-c` | `fold.toggle` |
+| `C-c @ C-h` | `fold.close` |
+| `C-c @ C-s` | `fold.open` |
+| `C-c H` | `lsp.hover-doc` |
+| `C-c a` | `lsp.code-actions` |
+| `C-c c` | `compile.run` |
+| `C-c f` | `lsp.format-buffer` |
+| `C-c h` | `lsp.hover` |
+| `C-c i` | `lsp.inlay-hints` |
+| `C-c l` | `lsp.status` |
+| `C-c o` | `lsp.document-symbols` |
+| `C-c r` | `lsp.rename` |
+| `C-c s` | `lsp.signature-help` |
+| `C-c t` | `terminal` |
+| `C-c y` | `lsp.semantic-tokens` |
+| `C-d` | `buffer.delete-forward` |
+| `C-e` | `cursor.line-end` |
+| `C-f` | `cursor.right` |
+| `C-g` | `editor.cancel` |
+| `C-h` | `buffer.delete-word-backward` |
+| `C-k` | `edit.kill-line` |
+| `C-l` | `window.recenter` |
+| `C-n` | `cursor.down` |
+| `C-p` | `cursor.up` |
+| `C-r` | `search.backward` |
+| `C-s` | `search.forward` |
+| `C-t` | `edit.transpose-chars` |
+| `C-v` | `cursor.page-down` |
+| `C-w` | `edit.cut` |
 | `C-x 0` | `window.close` |
 | `C-x 1` | `window.close-others` |
+| `C-x 2` | `window.split-horizontal` |
+| `C-x 3` | `window.split-vertical` |
+| `C-x <left>` | `editor.previous-buffer` |
+| `C-x <right>` | `editor.next-buffer` |
+| `C-x C-^` | `window.shrink` |
+| `C-x C-b` | `editor.list-buffers` |
+| `C-x C-c` | `editor.quit` |
+| `C-x C-f` | `find-file` |
+| `C-x C-j` | `dired-jump` |
+| `C-x C-r` | `recent-files` |
+| `C-x C-s` | `buffer.save` |
+| `C-x C-w` | `buffer.write-file` |
+| `C-x C-x` | `region.exchange-point-and-mark` |
+| `C-x O` | `window.focus-prev` |
+| `C-x ^` | `window.enlarge` |
+| `C-x `` | `error.next` |
 | `C-x b` | `editor.switch-buffer` |
-| `C-x C-b` | `editor.list-buffers` (opens the `*buffer-list*` panel, §2) |
-| `C-x <right>` / `C-x <left>` | `editor.next-buffer` / `editor.previous-buffer` |
-| `C-x C-r` | `recent-files` (`builtin/runtime/recentf.lua`) |
-
-### Command palette & cancellation
-
-| Key | Command |
-|---|---|
-| `M-x` | `editor.execute-command` — prompts (via the minibuffer, §3) for any command by name |
-| `C-g` | `editor.cancel` — resets the dispatcher / clears an unfinished prefix |
-
-### Completion
-
-| Key | Command |
-|---|---|
-| `C-M-i` | `completion.at-point` (`builtin/runtime/completion.lua`) — opens the popup; popup navigation is Rust-hardcoded (§3) |
-
-### LSP
-
-Source: `builtin/runtime/lsp.lua`. `M-.` follows the cross-editor
-go-to-definition convention; the rest sit on the `C-c` prefix to keep
-printable letters free for self-insert.
-
-| Key | Command |
-|---|---|
+| `C-x d` | `dired` |
+| `C-x g` | `git.status` |
+| `C-x h` | `edit.select-all` |
+| `C-x k` | `buffer.kill` |
+| `C-x l` | `window.toggle-line-numbers` |
+| `C-x o` | `window.focus-next` |
+| `C-x r` | `buffer.redo` |
+| `C-x t` | `ui.toggle-line-wrap` |
+| `C-x u` | `buffer.undo` |
+| `C-x w` | `editor.list-workers` |
+| `C-y` | `edit.paste` |
+| `DEL` | `buffer.delete-forward` |
+| `M-!` | `shell.command` |
+| `M-%` | `query-replace` |
+| `M-,` | `lsp.jump-back` |
 | `M-.` | `lsp.go-to-definition` |
-| `M-?` | `lsp.find-references` (opens `*references*` panel, §2) |
-| `M-,` | `lsp.jump-back` (unwind the cross-file jump ring) |
-| `C-c o` | `lsp.document-symbols` (opens `*outline*` panel, §2) |
-| `C-c r` | `lsp.rename` |
-| `C-c a` | `lsp.code-actions` |
-| `C-c i` | `lsp.inlay-hints` |
-| `C-c y` | `lsp.semantic-tokens` |
-| `C-c h` | `lsp.hover` |
-| `C-c H` | `lsp.hover-doc` (opens `*lsp-help*` panel, §2) |
-| `C-c s` | `lsp.signature-help` |
-| `C-c f` | `lsp.format-buffer` |
+| `M-;` | `edit.toggle-comment` |
+| `M-<` | `cursor.buffer-start` |
+| `M-<down>` | `edit.move-line-down` |
+| `M-<up>` | `edit.move-line-up` |
+| `M->` | `cursor.buffer-end` |
+| `M-?` | `lsp.find-references` |
+| `M-BS` | `edit.kill-word-backward` |
+| `M-^` | `edit.join-line` |
+| `M-b` | `cursor.word-left` |
+| `M-c` | `edit.capitalize` |
+| `M-d` | `edit.kill-word-forward` |
+| `M-f` | `cursor.word-right` |
+| `M-g M-g` | `cursor.goto-line` |
+| `M-g g` | `cursor.goto-line` |
+| `M-g n` | `error.next` |
+| `M-g p` | `error.previous` |
+| `M-l` | `edit.downcase` |
+| `M-t` | `edit.transpose-words` |
+| `M-u` | `edit.upcase` |
+| `M-v` | `cursor.page-up` |
+| `M-w` | `edit.copy` |
+| `M-x` | `editor.execute-command` |
+| `M-y` | `edit.yank-pop` |
+| `M-z` | `edit.zap-to-char` |
+| `M-{` | `cursor.paragraph-up` |
+| `M-}` | `cursor.paragraph-down` |
+| `RET` | `edit.newline-and-indent` |
+| `S-<down>` | `cursor.select-down` |
+| `S-<end>` | `cursor.select-line-end` |
+| `S-<home>` | `cursor.select-line-start` |
+| `S-<left>` | `cursor.select-left` |
+| `S-<right>` | `cursor.select-right` |
+| `S-<up>` | `cursor.select-up` |
+| `TAB` | `buffer.tab` |
 
-`builtin/runtime/lsp.lua` initially binds `M-g n` / `M-g p` to
-diagnostic navigation. `compile.lua` loads afterward and deliberately
-replaces them with the unified error dispatcher below.
-
-### Compile, shell command, and unified errors
-
-Source: `builtin/runtime/compile.lua`.
+### Scope: mode:dired
 
 | Key | Command |
 |---|---|
-| `M-g n` / `M-g p` | `error.next` / `error.previous` — compile/grep errors when that source has claimed navigation, otherwise LSP diagnostics |
-| `` C-x ` `` | `error.next` |
-| `M-!` | `shell.command` — asynchronous output in `*shell-command*` |
-| `C-c c` | `compile.run` — prompts, prefilled from the detected project kind |
+| `<down>` | `cursor.down` |
+| `<up>` | `cursor.up` |
+| `RET` | `dired.visit` |
+| `^` | `dired.parent` |
+| `f` | `dired.visit` |
+| `g` | `dired.revert` |
+| `n` | `cursor.down` |
+| `p` | `cursor.up` |
+| `q` | `dired.quit` |
+| `s` | `dired.sort-cycle` |
 
-`M-x help` is the **index of the discovery family**, rendered as a
-`*help*` buffer inside the editor, and is what the startup welcome
-points at. The family — all reachable by name, none bound to a key:
-
-| Command | Shows |
-|---|---|
-| `help.describe-command` | a command's description and bindings |
-| `help.describe-setting` | a setting's type, default, effective value |
-| `help.describe-key` | what a chord runs in **this** buffer |
-| `help.describe-mode` | the active buffer's major mode |
-| `help.describe-buffer` | the active buffer |
-| `help.describe-hook` | a hook and its listeners |
-| `help.where-is` | which keys run a command |
-| `help.list-commands` | every command with its description |
-| `help.list-keybindings` | every binding, grouped by scope |
-| `help.list-settings` | every registered setting |
-| `help.apropos` | substring search over names **and** descriptions |
-
-`editor.describe-command` and `editor.describe-setting` still work as
-deprecated aliases of their `help.*` counterparts. It is the root of
-the eventual help family (`help.keys` and friends arrive with the
-discovery arc), so it takes no keybinding yet — `C-h` is **not** free:
-it deletes a word because non-kitty terminals cannot tell Ctrl+Backspace
-from Ctrl+H.
-
-`compile.recompile` is available through `M-x`, and through `g` inside
-`*compilation*`; no global key is assigned to it. `C-c c` is unreachable
-from inside a terminal window (`C-c` is consumed as the escape key) and
-inside a repl buffer (which binds `C-c` at buffer scope); `M-x
-compile.run` still works in both.
+<!-- keymap:end -->
 
 ## 2. Buffer-local panel keymaps
 
@@ -422,8 +402,10 @@ surface (see §3's intro).
 
 ## 6. Keeping this file honest
 
-Update this file in the same PR whenever a binding is added, removed,
-or moved — same discipline as `docs/archive/agent-handoff-2026-09.md`. To re-derive it
-from scratch instead of trusting the table: grep `builtin/` for
-`pmacs.keymap.bind`/`.bind(` and `pmacs.listview.open`, and grep
+§1 is generated and pinned; a binding added without regenerating fails
+`tests/keybindings_doc_acceptance.rs` by name. §2 to §5 are hand-written
+because nothing derives them: panel keymaps exist only while a panel
+does, and §3's decoders are Rust `match` arms with no registry to read.
+Update those in the same PR as the change they describe. To re-derive
+them from scratch: grep `builtin/` for `pmacs.listview.open`, and
 `src/editor.rs` / `src/minibuffer.rs` for `from_chord`.

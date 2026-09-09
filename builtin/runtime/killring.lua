@@ -43,6 +43,8 @@ local KILL_CHAIN = {
   ["edit.cut"] = true,
   ["edit.zap-to-char"] = true,
   ["edit.zap-up-to-char"] = true,
+  ["edit.kill-word-forward"] = true,
+  ["edit.kill-word-backward"] = true,
 }
 
 -- Q#EC6 pending-prompt marker: fid -> true while a kill-producing
@@ -113,7 +115,12 @@ end
 -- current head (another frontend's push in between means the head is
 -- not ours — append would corrupt their entry). Mirrors the head to
 -- the acting frontend's OS clipboard either way.
-local function kill_push(fid, text)
+-- `backward` PREPENDS on a chained kill (E1.4). A backward kill walks
+-- leftward, so appending would store the words in the reverse of the
+-- order they stood in the buffer: M-BS M-BS over "alpha beta" would
+-- yank back "betaalpha ". Emacs's rule, and the only one under which a
+-- chain of backward kills yanks back what was deleted.
+local function kill_push(fid, text, backward)
   -- Q#EC6 fail-safe: an uncommitted prompt marker means an armed
   -- kill prompt never resolved (silent session replacement bypasses
   -- on_cancel). Refuse to append no matter what last_command and the
@@ -131,7 +138,11 @@ local function kill_push(fid, text)
     and ring[1].id == last_kill_id[fid]
   local head
   if chained then
-    ring[1].text = ring[1].text .. text
+    if backward then
+      ring[1].text = text .. ring[1].text
+    else
+      ring[1].text = ring[1].text .. text
+    end
     head = ring[1]
   else
     head = push_entry(text)
@@ -385,7 +396,7 @@ end
 -- break the acting frontend's chain and report status. Invalid
 -- arguments error BEFORE any ring or buffer mutation: misuse of a
 -- programmatic API, not a user outcome.
-function pmacs.killring.kill_range(start, stop)
+function pmacs.killring.kill_range(start, stop, direction)
   local buf = pmacs.window.buffer()
   if not buf then
     error("pmacs.killring.kill_range: no active buffer")
@@ -398,6 +409,10 @@ function pmacs.killring.kill_range(start, stop)
     or start >= stop or stop > buf:len() then
     error("pmacs.killring.kill_range: expected integers "
       .. "0 <= start < stop <= buffer length")
+  end
+  if direction ~= nil and direction ~= "forward" and direction ~= "backward" then
+    error("pmacs.killring.kill_range: direction must be "
+      .. "nil, 'forward' or 'backward'")
   end
   local fid = pmacs.frontend.id()
   local text = buf:slice(start, stop)
@@ -414,7 +429,7 @@ function pmacs.killring.kill_range(start, stop)
     ed.set_status("kill altered by buffer intercept; ring not updated")
     return false, "transformed", estart, estop, einserted
   end
-  kill_push(fid, text)
+  kill_push(fid, text, direction == "backward")
   return true
 end
 
@@ -458,6 +473,42 @@ function pmacs.killring.commit_kill_prompt()
   return was_armed
 end
 
+-- Word kills (E1.4). `M-d` and `M-BS` were plain deletes: the text went
+-- nowhere and `C-y` could not bring it back. Both find their boundary
+-- by running the motion the editor already agrees is a word step, so a
+-- kill and a `C-<arrow>` word jump can never disagree about where a
+-- word ends, and both restore point before the delete so the kill's
+-- range is the only thing the motion accomplished.
+function pmacs.killring.kill_word_forward()
+  local fid = pmacs.frontend.id()
+  local start = ed.cursor()
+  ed.move_word_right()
+  local stop = ed.cursor()
+  ed.goto_byte(start)
+  if stop <= start then
+    fail_kill(fid)
+    ed.set_status("end of buffer")
+    return false
+  end
+  return pmacs.killring.kill_range(start, stop, "forward")
+end
+
+function pmacs.killring.kill_word_backward()
+  local fid = pmacs.frontend.id()
+  local stop = ed.cursor()
+  ed.move_word_left()
+  local start = ed.cursor()
+  if start >= stop then
+    ed.goto_byte(stop)
+    fail_kill(fid)
+    ed.set_status("beginning of buffer")
+    return false
+  end
+  -- Point is already at `start`, which is where the text goes; the
+  -- delete removes what is to its right.
+  return pmacs.killring.kill_range(start, stop, "backward")
+end
+
 -- Q#KR11: a detached frontend's chain/session state must not outlive
 -- it (ids are monotonic; these tables would grow forever).
 pmacs.hook.add("frontend.detached", function(fid)
@@ -478,5 +529,22 @@ pmacs.command.define {
   fn = function() pmacs.killring.yank_pop() end,
 }
 
+pmacs.command.define {
+  name = "edit.kill-word-forward",
+  description = "Kill forward to the end of the next word (into the kill ring).",
+  fn = function() pmacs.killring.kill_word_forward() end,
+}
+
+pmacs.command.define {
+  name = "edit.kill-word-backward",
+  description = "Kill back to the start of the previous word (into the kill ring).",
+  fn = function() pmacs.killring.kill_word_backward() end,
+}
+
 pmacs.keymap.bind { scope = "global", sequence = "C-k", command = "edit.kill-line" }
 pmacs.keymap.bind { scope = "global", sequence = "M-y", command = "edit.yank-pop" }
+-- E1.4: the Emacs word kills take the ring. The CUA chords bound in
+-- `keymaps/default.lua` (C-BS, C-DEL, C-h) stay plain deletes, which is
+-- what those keys mean in the editors they come from.
+pmacs.keymap.bind { scope = "global", sequence = "M-d", command = "edit.kill-word-forward" }
+pmacs.keymap.bind { scope = "global", sequence = "M-BS", command = "edit.kill-word-backward" }

@@ -248,7 +248,8 @@ local function index_text()
     lines[#lines + 1] = string.format("  %-26s %s", name, description_of(name))
   end
   lines[#lines + 1] = ""
-  lines[#lines + 1] = "The full keymap reference is docs/keybindings.md."
+  lines[#lines + 1] =
+    "Every binding: M-x help.list-keybindings (docs/keybindings.md is that list, generated)."
   return table.concat(lines, "\n") .. "\n"
 end
 

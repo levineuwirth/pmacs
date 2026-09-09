@@ -6,15 +6,16 @@
 -- Nothing here knows a metric, an advance, or what resolves --- the
 -- no-pixels invariant (src/font_pref.rs) holds through this module.
 --
--- NO KEYBINDINGS, deliberately (Q#Z3). `keymap_stack::Scope` is
--- Buffer | Mode | Global and carries no frontend identity, so "bind
--- this on GPU frontends only" is not expressible; and `FrontendEvent`
--- has no command-invocation variant, so the GPU cannot ask for a
--- command by name either. A global binding would capture C-+/C-- in
--- the TUI and take away the terminal's own zoom --- the very thing the
--- user is pressing the key for. Commands are discoverable via M-x and
--- one line to bind in init.lua; capability-aware binding is its own
--- lane.
+-- KEYBINDINGS live in `builtin/keymaps/default.lua` (D22, E1.7),
+-- overruling this module's original Q#Z3 rule of binding nothing. That
+-- rule was right about the mechanism and wrong about the outcome:
+-- `keymap_stack::Scope` still carries no frontend identity, so "bind
+-- this on GPU frontends only" is still not expressible, and a global
+-- C-+/C-- does reach a TUI. But a zoom command nobody can press is not
+-- a zoom control, and the cost of the collision is one status line ---
+-- so the commands below say WHOSE font they moved, and a grid frontend
+-- gets an answer rather than silence. Capability-aware binding, when it
+-- lands, is what retires the divergence.
 
 pmacs.zoom = pmacs.zoom or {}
 
@@ -196,12 +197,20 @@ function pmacs.zoom.restore()
   return px
 end
 
+-- D22: every message names the GPU font, because these chords are bound
+-- globally and a grid frontend reaches them too. "zoom: 17.00 px" on a
+-- terminal reads as a claim about the terminal, which the command
+-- cannot make: what it moved is the preference a GPU session renders
+-- with, now if one is attached and at its next start if none is.
+local function zoom_status(px, why)
+  return why or string.format("zoom: GPU font %.2f px (applies to GPU sessions)", px)
+end
+
 pmacs.command.define {
   name = "gpu.zoom-in",
   description = "Increase the GPU frontend's font size by one step",
   fn = function()
-    local px, why = pmacs.zoom.increase()
-    pmacs.editor.set_status(why or string.format("zoom: %.2f px", px))
+    pmacs.editor.set_status(zoom_status(pmacs.zoom.increase()))
   end,
 }
 
@@ -209,8 +218,7 @@ pmacs.command.define {
   name = "gpu.zoom-out",
   description = "Decrease the GPU frontend's font size by one step",
   fn = function()
-    local px, why = pmacs.zoom.decrease()
-    pmacs.editor.set_status(why or string.format("zoom: %.2f px", px))
+    pmacs.editor.set_status(zoom_status(pmacs.zoom.decrease()))
   end,
 }
 
@@ -219,6 +227,7 @@ pmacs.command.define {
   description = "Return the GPU frontend to its own default font size",
   fn = function()
     pmacs.zoom.reset()
-    pmacs.editor.set_status("zoom: reset to the frontend default")
+    pmacs.editor.set_status(
+      "zoom: GPU font back to its default (applies to GPU sessions)")
   end,
 }

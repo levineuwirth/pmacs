@@ -38,6 +38,15 @@ cmd { name = "cursor.paragraph-down",
       description = "Move cursor forward to the next paragraph break.",
       fn = function() ed.move_paragraph_down() end }
 
+-- Buffer-wide motion (E1.3). `M-<` / `M->` --- the two motions the
+-- editor had only inside terminal copy mode.
+cmd { name = "cursor.buffer-start",
+      description = "Move to the start of the buffer.",
+      fn = function() ed.move_buffer_start() end }
+cmd { name = "cursor.buffer-end",
+      description = "Move to the end of the buffer.",
+      fn = function() ed.move_buffer_end() end }
+
 -- Buffer editing -------------------------------------------------------------
 
 -- CUA region semantics: with an active selection, Backspace / Delete
@@ -101,6 +110,35 @@ cmd { name = "cursor.select-line-start",
 cmd { name = "cursor.select-line-end",
       description = "Extend selection to end of line.",
       fn = function() ensure_anchor(); ed.move_line_end() end }
+
+-- Mark and region (E1.3). `C-SPC` sets the mark at point through the
+-- same `ensure_anchor` the Shift-motion commands use, so there is one
+-- notion of an anchor and not two: `Window::region` is computed live
+-- from anchor against cursor, which is what makes plain motion after
+-- `C-SPC` extend the region without every motion command knowing.
+cmd { name = "region.set-mark",
+      description = "Set the mark at point; motion then extends the region.",
+      fn = function()
+        ed.begin_selection(ed.cursor())
+        ed.set_status("Mark set")
+      end }
+
+-- `C-x C-x`. An empty region reports nil (anchor == cursor), and there
+-- is nothing to exchange in that case, so the command says so rather
+-- than silently doing nothing.
+cmd { name = "region.exchange-point-and-mark",
+      description = "Exchange point and mark, keeping the region.",
+      fn = function()
+        local r = ed.region()
+        if r == nil then
+          ed.set_status("no region")
+          return
+        end
+        local point = ed.cursor()
+        local mark = (point == r.start) and r["end"] or r.start
+        ed.begin_selection(point)
+        ed.goto_byte(mark)
+      end }
 -- CUA type-over: inserting with an active selection replaces it in a
 -- SINGLE edit (one undo step — `insert_char_over_region` emits one
 -- `Replace`, not a `delete` + `insert` pair). Without a selection it
@@ -190,9 +228,12 @@ cmd { name = "region.delete",
           ed.set_status("no region")
         end
       end }
+-- E1.2: an ALIAS of `editor.cancel`, kept so a user binding to this
+-- name keeps working. `C-g` now drops the selection itself, so the two
+-- gestures are one operation and must not be able to drift apart.
 cmd { name = "region.cancel",
-      description = "Drop any active selection without changing the cursor.",
-      fn = function() ed.clear_selection() end }
+      description = "Drop any active selection without changing the cursor (alias of editor.cancel).",
+      fn = function() ed.cancel() end }
 
 -- Clipboard (Q#CM6) ----------------------------------------------------------
 -- Copy/cut publish the selection to the OS clipboard (OSC 52 in the TUI,
@@ -245,15 +286,113 @@ cmd { name = "buffer.save-anyway",
         end
       end }
 
+-- Yes-or-no prompts (E1.1) ---------------------------------------------------
+--
+-- `pmacs.minibuffer.read` had no yes-or-no idiom, so every destructive
+-- command either asked nothing or would have grown its own answer
+-- parser. This is the one idiom, and it is deliberately built on a
+-- SOURCE-LESS read: `resolve_accepted_value` returns the typed text
+-- only when the source is `none` (src/minibuffer.rs), so with a
+-- candidate list RET would take a selection the user never typed --- a
+-- one-key "yes" to a question about losing work.
+--
+-- An unrecognized answer re-prompts rather than being read as "no".
+-- Guessing is safe in one direction and destructive in the other, and
+-- the callers here are exactly the commands that destroy work. Beginning
+-- a session from inside `on_accept` is sound: `Minibuffer::accept` has
+-- already taken the old session, and neither accept path touches the
+-- minibuffer after the callback returns.
+--
+-- `C-g` cancels, which is a "no": `on_cancel` runs `on_no`.
+function pmacs.minibuffer.y_or_n(spec)
+  local prompt = spec.prompt
+  local on_yes = spec.on_yes
+  local on_no = spec.on_no
+  local function ask()
+    pmacs.minibuffer.read {
+      prompt = prompt .. " (y or n) ",
+      on_accept = function(value)
+        local answer = string.lower(value or "")
+        if answer == "y" or answer == "yes" then
+          on_yes()
+        elseif answer == "n" or answer == "no" then
+          if on_no then on_no() end
+        else
+          ed.set_status("please answer y or n")
+          ask()
+        end
+      end,
+      on_cancel = on_no,
+    }
+  end
+  ask()
+end
+
+-- Names of the modified buffers, in registry order. Used by the quit
+-- prompt, which must name what is at stake rather than say "some
+-- buffer": a user who cannot see which file is dirty cannot answer.
+local function modified_buffer_names()
+  local names = {}
+  for _, id in ipairs(pmacs.buffer.list()) do
+    local d = pmacs.describe.buffer(id)
+    if d ~= nil and d.modified then names[#names + 1] = d.name end
+  end
+  return names
+end
+
+-- Kill `id`, asking first when it carries unsaved changes (E1.1). One
+-- helper for both entry points --- `buffer.kill-this` (the buffer in
+-- the window) and `C-x k` (a buffer chosen by name) --- so the two
+-- cannot drift into asking different questions about the same loss.
+local function kill_buffer_with_prompt(id)
+  local d = pmacs.describe.buffer(id)
+  if d == nil then
+    ed.set_status("kill-buffer: no such buffer")
+    return
+  end
+  local function kill()
+    local ok, err = pcall(pmacs.buffer.kill, id)
+    if not ok then
+      ed.set_status("kill-buffer: " .. (tostring(err):match("^[^\n]*") or ""))
+    end
+  end
+  if not d.modified then
+    kill()
+    return
+  end
+  pmacs.minibuffer.y_or_n {
+    prompt = string.format("Buffer %s has unsaved changes; kill anyway?", d.name),
+    on_yes = kill,
+    on_no = function() ed.set_status("kill-buffer cancelled") end,
+  }
+end
+
 -- Editor session -------------------------------------------------------------
 
 cmd { name = "editor.quit",   description = "Exit the editor.",
       fn = function()
+        -- The hook stays the FIRST gate, unchanged: it is a veto, and a
+        -- vetoed quit must not first ask the user a question whose
+        -- answer cannot matter.
         if not pmacs.hook.run("editor.before-quit") then
           ed.set_status("quit vetoed by editor.before-quit")
           return
         end
-        ed.quit()
+        local dirty = modified_buffer_names()
+        if #dirty == 0 then
+          ed.quit()
+          return
+        end
+        local summary = table.concat(dirty, ", ")
+        if #dirty > 3 then
+          summary = table.concat({ dirty[1], dirty[2], dirty[3] }, ", ")
+            .. string.format(" and %d more", #dirty - 3)
+        end
+        pmacs.minibuffer.y_or_n {
+          prompt = string.format("Modified buffers exist (%s); quit anyway?", summary),
+          on_yes = function() ed.quit() end,
+          on_no = function() ed.set_status("quit cancelled") end,
+        }
       end }
 cmd { name = "editor.cancel", description = "Cancel a pending key prefix.",
       fn = function() ed.cancel() end }
@@ -266,6 +405,14 @@ cmd { name = "window.split-horizontal",
 cmd { name = "window.split-vertical",
       description = "Split the active window vertically (children sit side-by-side).",
       fn = function() pmacs.window.split_vertical() end }
+-- E1.3: `C-l`. Scrolls the active window so point sits mid-viewport;
+-- point itself does not move. On a semantic frontend the command
+-- reaches the daemon and moves the daemon-side `view_top`; that
+-- frontend scrolls its own replica and follows locally.
+cmd { name = "window.recenter",
+      description = "Scroll so the line holding point is centered.",
+      fn = function() ed.recenter() end }
+
 cmd { name = "window.toggle-line-numbers",
       description = "Toggle the active window's line-number gutter (off / absolute).",
       fn = function()
@@ -730,6 +877,104 @@ cmd { name = "find-file",
             if not ok then
               pmacs.editor.set_status("find-file: " .. tostring(err))
             end
+          end,
+        }
+      end }
+
+-- Write-file and revert (E1.5) ----------------------------------------------
+--
+-- `C-x C-w` roots its prompt exactly where `find-file` does, so the two
+-- halves of "which directory am I in" cannot disagree. An existing file
+-- at the destination is a question, not a refusal and not a silent
+-- overwrite: this buffer has never read that file, so nothing in the
+-- editor knows whether losing it matters.
+cmd { name = "buffer.write-file",
+      description = "Write the buffer to another path and adopt it.",
+      fn = function()
+        local root = find_file_root()
+        pmacs.minibuffer.read {
+          prompt = "Write file (" .. (root or ".") .. "): ",
+          source = "files",
+          source_root = root,
+          history = "find-file",
+          on_accept = function(value)
+            if value == nil or value == "" then return end
+            local path = find_file_resolve(root, value)
+            local ok, reason = ed.write_file(path)
+            if ok then return end
+            if reason ~= "exists" then
+              ed.set_status("write-file: " .. tostring(reason))
+              return
+            end
+            pmacs.minibuffer.y_or_n {
+              prompt = string.format("%s exists; overwrite?", path),
+              on_yes = function()
+                local wrote, why = ed.write_file(path, true)
+                if not wrote then
+                  ed.set_status("write-file: " .. tostring(why))
+                end
+              end,
+              on_no = function() ed.set_status("write-file cancelled") end,
+            }
+          end,
+        }
+      end }
+
+-- `revert-buffer` throws away unsaved edits by design, so it asks
+-- exactly when there are some. The reload keeps undo history: a revert
+-- the user did not mean is otherwise unrecoverable.
+cmd { name = "revert-buffer",
+      description = "Reload the buffer from its file, discarding unsaved edits.",
+      fn = function()
+        local function revert()
+          local ok, why = ed.revert_file()
+          if not ok then
+            ed.set_status("revert-buffer: " .. tostring(why))
+          end
+        end
+        local id = pmacs.window.buffer()
+        local d = id ~= nil and pmacs.describe.buffer(id) or nil
+        if d == nil then
+          ed.set_status("revert-buffer: no buffer")
+          return
+        end
+        if not d.modified then
+          revert()
+          return
+        end
+        pmacs.minibuffer.y_or_n {
+          prompt = string.format("Discard unsaved changes to %s and reload from disk?", d.name),
+          on_yes = revert,
+          on_no = function() ed.set_status("revert-buffer cancelled") end,
+        }
+      end }
+
+-- `C-x k`. The buffer to kill is chosen by name, prefilled with the one
+-- in the window --- RET is then the common case --- and the unsaved
+-- check is `buffer.kill-this`'s, through the same helper.
+cmd { name = "buffer.kill",
+      description = "Kill a buffer chosen by name.",
+      fn = function()
+        local current = pmacs.window.buffer()
+        local initial = ""
+        if current ~= nil then
+          local d = pmacs.describe.buffer(current)
+          if d ~= nil then initial = d.name end
+        end
+        pmacs.minibuffer.read {
+          prompt = "Kill buffer: ",
+          source = "buffers",
+          initial = initial,
+          on_accept = function(value)
+            if value == nil or value == "" then return end
+            for _, id in ipairs(pmacs.buffer.list()) do
+              local d = pmacs.describe.buffer(id)
+              if d ~= nil and d.name == value then
+                kill_buffer_with_prompt(id)
+                return
+              end
+            end
+            ed.set_status("kill-buffer: no buffer named " .. value)
           end,
         }
       end }
@@ -1210,7 +1455,7 @@ cmd { name = "buffer.kill-this",
       description = "Kill the buffer shown in the active window.",
       fn = function()
         local id = pmacs.window.buffer()
-        if id ~= nil then pmacs.buffer.kill(id) end
+        if id ~= nil then kill_buffer_with_prompt(id) end
       end }
 
 -- describe-command (M9.6 acceptance lever) ---------------------------------

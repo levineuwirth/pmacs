@@ -66,8 +66,12 @@ impl Session {
                 pmacs::text_view::TextView::new(reg.get(buffer_id).expect("buffer"))
             };
             let window = WindowId::next();
-            core.windows
-                .insert(window, Window::new(window, buffer_id, text_view));
+            let mut document_window = Window::new(window, buffer_id, text_view);
+            // The gutter is ON by default since E1.6. This suite asserts
+            // on the panel band's painted cells, so its windows paint a
+            // bare grid; the gutter's own behavior is pinned elsewhere.
+            document_window.line_numbers = pmacs::window::LineNumberMode::Off;
+            core.windows.insert(window, document_window);
             core.register_frontend_view(
                 FID,
                 FrontendView {
@@ -185,6 +189,23 @@ fn open_panel(session: &Session, name: &str, rows: u32) {
              pmacs.window.display(PANEL_BUF, {{ side = \"bottom\", height = {rows} }})"
         ),
     );
+    // Same reason as `Session::new`: the E1.6 gutter is on for every
+    // window a `display` mints too, and this suite reads the band's
+    // painted cells column by column.
+    let side: Vec<WindowId> = session
+        .state
+        .core
+        .borrow()
+        .windows
+        .iter()
+        .filter(|(_, window)| window.is_side())
+        .map(|(id, _)| *id)
+        .collect();
+    for id in side {
+        if let Some(window) = session.state.core.borrow_mut().windows.get_mut(&id) {
+            window.line_numbers = pmacs::window::LineNumberMode::Off;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

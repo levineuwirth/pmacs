@@ -37,6 +37,11 @@ bind("C-<down>", "cursor.paragraph-down")
 bind("M-{",      "cursor.paragraph-up")
 bind("M-}",      "cursor.paragraph-down")
 
+-- Buffer-wide motion (E1.3; classic Emacs M-< / M->) ------------------------
+
+bind("M-<", "cursor.buffer-start")
+bind("M->", "cursor.buffer-end")
+
 -- Page motion (Page Up / Page Down; classic M-v / C-v) ---------------------
 
 bind("<pageup>",   "cursor.page-up")
@@ -73,7 +78,8 @@ bind("C-M-%", "query-replace-regexp")
 -- CUA-style word-level deletion (the same shortcuts users expect from
 -- IDEs, browsers, terminals on Linux/Windows). C-BS deletes back to
 -- the start of the previous word; C-DEL deletes forward through the
--- next word. Emacs's classic M-BS and M-d remain bound below.
+-- next word. Emacs's classic M-BS and M-d are kills, not deletes
+-- (E1.4); see the note under this block.
 --
 -- Why we also bind C-h: most terminals (anything not implementing the
 -- kitty keyboard protocol) cannot disambiguate Ctrl+Backspace from
@@ -85,8 +91,11 @@ bind("C-M-%", "query-replace-regexp")
 bind("C-BS",  "buffer.delete-word-backward")
 bind("C-h",   "buffer.delete-word-backward")
 bind("C-DEL", "buffer.delete-word-forward")
-bind("M-BS",  "buffer.delete-word-backward")
-bind("M-d",   "buffer.delete-word-forward")
+-- M-BS and M-d are NOT here (E1.4): the Emacs word kills put the text
+-- on the kill ring, so they are bound in `builtin/runtime/killring.lua`
+-- beside C-k and M-y, where the commands they name are defined. The
+-- CUA chords above stay plain deletes, which is what those keys mean in
+-- the editors they are borrowed from.
 
 -- CUA-style Shift+motion selection. Each Shift+arrow extends a
 -- selection from the cursor (anchoring at the current position if no
@@ -129,9 +138,24 @@ bind("C-4", "buffer.undo")
 bind("C-?", "buffer.redo")
 bind("C-S-_", "buffer.redo")
 
+-- Mark and region (E1.3) -----------------------------------------------------
+--
+-- C-SPC sets the mark; plain motion then extends the region, because
+-- `Window::region` is anchor-against-cursor and is recomputed on every
+-- read. C-x C-x swaps the two ends. Terminals that cannot distinguish
+-- Ctrl+Space from NUL deliver this as `Char(' ') + CONTROL` under the
+-- kitty protocol the frontend negotiates; a legacy terminal that
+-- cannot is why `M-x region.set-mark` stays reachable by name.
+bind("C-SPC", "region.set-mark")
+
+-- Recenter (E1.3). C-l is Emacs's recenter, and the terminal's own
+-- redraw is C-l too only in a shell, not in a full-screen program.
+bind("C-l", "window.recenter")
+
 -- Multi-key chords -----------------------------------------------------------
 
 bind("C-x C-s", "buffer.save")
+bind("C-x C-x", "region.exchange-point-and-mark")
 bind("C-x C-c", "editor.quit")
 bind("C-x u",   "buffer.undo")
 bind("C-x r",   "buffer.redo")
@@ -148,11 +172,45 @@ bind("C-x o",   "window.focus-next")
 bind("C-x O",   "window.focus-prev")
 bind("C-x 0",   "window.close")
 bind("C-x 1",   "window.close-others")
+-- E1.6: the line-number gutter had no chord at all, only M-x. `C-x l`
+-- is free here (Emacs spends it on `count-lines-page`, which pmacs does
+-- not have).
+bind("C-x l",   "window.toggle-line-numbers")
 bind("C-x C-f",     "find-file")
+bind("C-x C-w",     "buffer.write-file")
+bind("C-x k",       "buffer.kill")
 bind("C-x b",       "editor.switch-buffer")
 bind("C-x C-b",     "editor.list-buffers")
 bind("C-x <right>", "editor.next-buffer")
 bind("C-x <left>",  "editor.previous-buffer")
+
+-- The orphans (E1.7) ---------------------------------------------------------
+--
+-- Every command below existed and no chord reached it, which is the
+-- audit's "present but embarrassing": a feature nobody can find is
+-- indistinguishable from one that is missing. `pmacs.keymap.bind`
+-- resolves the command at PRESS time, so these can name commands
+-- defined by runtime chunks that load after this file.
+bind("<f1>",  "help")
+bind("C-x g", "git.status")
+bind("C-x w", "editor.list-workers")
+bind("C-x t", "ui.toggle-line-wrap")
+bind("C-c l", "lsp.status")
+
+-- Zoom (D22) -----------------------------------------------------------------
+--
+-- Bound on EVERY platform, overruling `runtime/zoom.lua`'s original
+-- "no keybindings" rule (Q#Z3): a command reachable only through M-x is
+-- not a zoom control, and the terminal-emulator convention is the one a
+-- TUI user already has in their fingers. `C-+` and `C-=` are the same
+-- gesture on a US layout --- one needs Shift and one does not --- so
+-- both are bound. On a grid frontend these change the GPU font
+-- preference rather than the terminal's own size, which is why the
+-- commands say whose font they moved.
+bind("C-+", "gpu.zoom-in")
+bind("C-=", "gpu.zoom-in")
+bind("C--", "gpu.zoom-out")
+bind("C-0", "gpu.zoom-reset")
 
 -- Cancellation ---------------------------------------------------------------
 --

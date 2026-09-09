@@ -7261,6 +7261,11 @@ mod tests {
             .create_from_bytes("test", content);
         let mut core = s.core.borrow_mut();
         let _ = core.switch_active_buffer(new_id);
+        // The line-number gutter is ON by default since E1.6 and eats
+        // the leftmost columns. The render rows below assert on where
+        // the TEXT lands, so this fixture paints a bare grid; the rows
+        // that are about the gutter turn it on for themselves.
+        core.active_window_mut().line_numbers = crate::window::LineNumberMode::Off;
         drop(core);
         s
     }
@@ -12831,12 +12836,25 @@ mod tests {
     /// Drive `tick_async` until `predicate` is true, sleeping briefly
     /// between ticks so workers have a chance to send replies. Panics
     /// after a 2-second deadline so a stuck test doesn't hang CI.
-    fn pump_async<F: Fn(&EditorState) -> bool>(state: &mut EditorState, predicate: F) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    ///
+    /// `what` names the condition being waited on, and the panic carries
+    /// it with the deadline, the elapsed time and the number of times the
+    /// predicate was asked. A red log then says which wait gave up and
+    /// how long it waited, instead of the bare verdict that made R5
+    /// unreadable. This is `tests/common/ready.rs`'s reporting, carried
+    /// inward by hand: that module is compiled into the integration
+    /// targets and an in-crate unit test cannot reach it.
+    fn pump_async<F: Fn(&EditorState) -> bool>(state: &mut EditorState, what: &str, predicate: F) {
+        const DEADLINE: Duration = Duration::from_secs(2);
+        let start = std::time::Instant::now();
+        let mut polls = 0u32;
         while !predicate(state) {
+            polls += 1;
+            let elapsed = start.elapsed();
             assert!(
-                std::time::Instant::now() < deadline,
-                "async pump deadline exceeded"
+                elapsed < DEADLINE,
+                "async pump deadline exceeded: {what} did not settle \
+                 within {DEADLINE:?} (waited {elapsed:?}, {polls} polls)"
             );
             state.tick_async();
             std::thread::sleep(Duration::from_millis(2));
@@ -12867,9 +12885,11 @@ mod tests {
             )
             .expect("spawn coroutine");
 
-        pump_async(&mut state, |s| {
-            lua_get::<i64>(s, "PMACS_TEST_RESULT").is_some()
-        });
+        pump_async(
+            &mut state,
+            "PMACS_TEST_RESULT to be set by the awaiting coroutine",
+            |s| lua_get::<i64>(s, "PMACS_TEST_RESULT").is_some(),
+        );
 
         assert_eq!(lua_get::<i64>(&state, "PMACS_TEST_RESULT"), Some(55));
     }
@@ -12894,9 +12914,11 @@ mod tests {
                 "#,
             )
             .expect("dispatch by name");
-        pump_async(&mut state, |s| {
-            lua_get::<i64>(s, "PMACS_TEST_RESULT").is_some()
-        });
+        pump_async(
+            &mut state,
+            "PMACS_TEST_RESULT to be set by the dispatch-by-name coroutine",
+            |s| lua_get::<i64>(s, "PMACS_TEST_RESULT").is_some(),
+        );
         assert_eq!(lua_get::<i64>(&state, "PMACS_TEST_RESULT"), Some(28));
     }
 
@@ -12933,9 +12955,11 @@ mod tests {
                 "#,
             )
             .expect("spawn cancelled coroutine");
-        pump_async(&mut state, |s| {
-            lua_get::<String>(s, "PMACS_TEST_TAG").is_some()
-        });
+        pump_async(
+            &mut state,
+            "PMACS_TEST_TAG to carry the cancellation tag",
+            |s| lua_get::<String>(s, "PMACS_TEST_TAG").is_some(),
+        );
         assert_eq!(
             lua_get::<String>(&state, "PMACS_TEST_TAG"),
             Some("cancelled".to_string()),
@@ -12968,9 +12992,11 @@ mod tests {
                 ",
             )
             .expect("install callback");
-        pump_async(&mut state, |s| {
-            lua_get::<String>(s, "PMACS_TEST_STATUS").is_some()
-        });
+        pump_async(
+            &mut state,
+            "PMACS_TEST_STATUS to be set by the completion callback",
+            |s| lua_get::<String>(s, "PMACS_TEST_STATUS").is_some(),
+        );
         assert_eq!(
             lua_get::<String>(&state, "PMACS_TEST_STATUS"),
             Some("ok".to_string())
@@ -13001,7 +13027,7 @@ mod tests {
                 ",
             )
             .expect("spawn fan-out");
-        pump_async(&mut state, |s| {
+        pump_async(&mut state, "PMACS_TEST_DONE to reach 5", |s| {
             lua_get::<i64>(s, "PMACS_TEST_DONE") == Some(5)
         });
         // sum_{i=1..5} of i*(i+1)/2 = 1 + 3 + 6 + 10 + 15 = 35
@@ -13039,10 +13065,14 @@ mod tests {
                 ",
             )
             .expect("spawn pair of supersede-keyed coroutines");
-        pump_async(&mut state, |s| {
-            lua_get::<String>(s, "PMACS_TEST_FIRST_TAG").is_some()
-                && lua_get::<i64>(s, "PMACS_TEST_SECOND").is_some()
-        });
+        pump_async(
+            &mut state,
+            "PMACS_TEST_FIRST_TAG and PMACS_TEST_SECOND to both be set",
+            |s| {
+                lua_get::<String>(s, "PMACS_TEST_FIRST_TAG").is_some()
+                    && lua_get::<i64>(s, "PMACS_TEST_SECOND").is_some()
+            },
+        );
         assert_eq!(
             lua_get::<String>(&state, "PMACS_TEST_FIRST_TAG"),
             Some("cancelled".to_string())
@@ -13077,7 +13107,7 @@ mod tests {
                 ",
             )
             .expect("spawn stream");
-        pump_async(&mut state, |s| {
+        pump_async(&mut state, "PMACS_STREAM_CLOSED to be set", |s| {
             lua_get::<String>(s, "PMACS_STREAM_CLOSED").is_some()
         });
         assert_eq!(lua_get::<i64>(&state, "PMACS_STREAM_TOTAL"), Some(1024));
@@ -13146,10 +13176,14 @@ mod tests {
                 ",
             )
             .expect("spawn supersede pair");
-        pump_async(&mut state, |s| {
-            lua_get::<String>(s, "PMACS_FIRST_STATUS").is_some()
-                && lua_get::<String>(s, "PMACS_SECOND_STATUS").is_some()
-        });
+        pump_async(
+            &mut state,
+            "PMACS_FIRST_STATUS and PMACS_SECOND_STATUS to both be set",
+            |s| {
+                lua_get::<String>(s, "PMACS_FIRST_STATUS").is_some()
+                    && lua_get::<String>(s, "PMACS_SECOND_STATUS").is_some()
+            },
+        );
         assert_eq!(
             lua_get::<String>(&state, "PMACS_FIRST_STATUS"),
             Some("cancelled".to_string())
@@ -13189,10 +13223,14 @@ mod tests {
                 ",
             )
             .expect("dispatch by name with supersede");
-        pump_async(&mut state, |s| {
-            lua_get::<String>(s, "PMACS_TEST_TAG").is_some()
-                && lua_get::<i64>(s, "PMACS_TEST_VALUE").is_some()
-        });
+        pump_async(
+            &mut state,
+            "PMACS_TEST_TAG and PMACS_TEST_VALUE to both be set",
+            |s| {
+                lua_get::<String>(s, "PMACS_TEST_TAG").is_some()
+                    && lua_get::<i64>(s, "PMACS_TEST_VALUE").is_some()
+            },
+        );
         assert_eq!(
             lua_get::<String>(&state, "PMACS_TEST_TAG"),
             Some("cancelled".to_string())
@@ -13248,7 +13286,7 @@ mod tests {
             .lua_host
             .eval(Some("test"), &script)
             .expect("dispatch grep");
-        pump_async(&mut state, |s| {
+        pump_async(&mut state, "PMACS_GREP_CLOSED to be set", |s| {
             lua_get::<String>(s, "PMACS_GREP_CLOSED").is_some()
         });
         // 3 matches: a.txt:2 + c.txt:1 + c.txt:3
@@ -13317,10 +13355,14 @@ mod tests {
             .lua_host
             .eval(Some("test"), &script)
             .expect("dispatch grep pair");
-        pump_async(&mut state, |s| {
-            lua_get::<String>(s, "PMACS_GREP_FIRST_STATUS").is_some()
-                && lua_get::<String>(s, "PMACS_GREP_SECOND_STATUS").is_some()
-        });
+        pump_async(
+            &mut state,
+            "PMACS_GREP_FIRST_STATUS and PMACS_GREP_SECOND_STATUS to both be set",
+            |s| {
+                lua_get::<String>(s, "PMACS_GREP_FIRST_STATUS").is_some()
+                    && lua_get::<String>(s, "PMACS_GREP_SECOND_STATUS").is_some()
+            },
+        );
         let first = lua_get::<String>(&state, "PMACS_GREP_FIRST_STATUS").unwrap_or_default();
         // First either ran-to-completion (extremely fast host) or got
         // cancelled. Both are acceptable outcomes for the supersede
@@ -13483,7 +13525,9 @@ mod tests {
         );
         // Pump until the job settles into Cancelled.
         let id_u64 = u64::try_from(id_pre_cancel).expect("non-negative id");
-        pump_async(&mut state, |s| s.async_runtime.is_cancelled(id_u64));
+        pump_async(&mut state, "the superseded job to settle Cancelled", |s| {
+            s.async_runtime.is_cancelled(id_u64)
+        });
     }
 
     /// R46 enforcement: package code that yields a non-Handle is
@@ -13657,13 +13701,16 @@ mod tests {
 
         // Pump until the `*search-results*` buffer carries the close
         // marker that our `on_close` handler appends.
-        pump_async(&mut state, |s| {
-            let _ = s.lua_host.lua().globals().set("PMACS_TEST_BODY", "");
-            let _ = s
-                .lua_host
-                .lua()
-                .load(
-                    r#"
+        pump_async(
+            &mut state,
+            "*search-results* to carry the close marker",
+            |s| {
+                let _ = s.lua_host.lua().globals().set("PMACS_TEST_BODY", "");
+                let _ = s
+                    .lua_host
+                    .lua()
+                    .load(
+                        r#"
                 for _, id in ipairs(pmacs.buffer.list()) do
                     if pmacs.describe.buffer(id).name == "*search-results*" then
                         _G.PMACS_TEST_BODY = id:slice(0, id:len())
@@ -13671,10 +13718,11 @@ mod tests {
                     end
                 end
                 "#,
-                )
-                .exec();
-            lua_get::<String>(s, "PMACS_TEST_BODY").is_some_and(|b| b.contains("-- search "))
-        });
+                    )
+                    .exec();
+                lua_get::<String>(s, "PMACS_TEST_BODY").is_some_and(|b| b.contains("-- search "))
+            },
+        );
 
         let body = lua_get::<String>(&state, "PMACS_TEST_BODY").expect("body captured");
         assert!(

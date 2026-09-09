@@ -463,7 +463,11 @@ impl Window {
             last_visible_rows: 0,
             last_content_cols: 0,
             last_wrap: crate::view::WrapMode::Truncate,
-            line_numbers: LineNumberMode::Off,
+            // E1.6 --- ON by default. The gutter is what every editor a
+            // user arrives from shows, and the toggle was M-x-only, so
+            // "off" was not a default anyone had chosen. `C-x l` and
+            // `window.set-line-numbers` turn it off per window.
+            line_numbers: LineNumberMode::Absolute,
             params: WindowParams::default(),
         }
     }

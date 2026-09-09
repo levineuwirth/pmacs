@@ -3689,41 +3689,56 @@ mod tests {
     #[test]
     fn line_numbers_emitted_on_toggle_then_suppressed() {
         // UX gutter (protocol v13): the daemon ships the per-window gutter
-        // mode. Off is the default → no message; toggling on emits
-        // `LineNumbers { enabled: true }`; an unchanged next frame suppresses.
+        // mode. E1.6 turned the gutter ON by default, so the FIRST frame
+        // now carries the mode --- which is what a semantic frontend
+        // needs, since it lays the gutter out itself and would otherwise
+        // never learn the default at all. Toggling emits the new mode;
+        // an unchanged next frame suppresses.
         let state = empty_state();
         let mut s = local();
         let buffer_id = active_buffer(&state);
         s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
 
-        // Default (gutter off): no LineNumbers on the first frame.
         let first = s.render_frame(&state);
         assert!(
-            !first
-                .iter()
-                .any(|m| matches!(m, InstanceMessage::LineNumbers { .. })),
-            "off gutter must not emit LineNumbers"
-        );
-
-        // Toggle the active window on → next frame emits the mode.
-        state.core.borrow_mut().active_window_mut().line_numbers =
-            crate::window::LineNumberMode::Absolute;
-        let on = s.render_frame(&state);
-        assert!(
-            on.iter().any(|m| matches!(
+            first.iter().any(|m| matches!(
                 m,
                 InstanceMessage::LineNumbers {
                     mode: crate::window::LineNumberMode::Absolute,
                     ..
                 }
             )),
-            "toggling the gutter on must emit LineNumbers with the mode"
+            "the default-on gutter must reach the frontend on the first frame"
         );
 
-        // No further change → suppressed.
+        // Unchanged → suppressed.
         let again = s.render_frame(&state);
         assert!(
             !again
+                .iter()
+                .any(|m| matches!(m, InstanceMessage::LineNumbers { .. })),
+            "an unchanged gutter mode must not re-emit"
+        );
+
+        // Toggle the active window OFF → next frame emits the new mode.
+        state.core.borrow_mut().active_window_mut().line_numbers =
+            crate::window::LineNumberMode::Off;
+        let off = s.render_frame(&state);
+        assert!(
+            off.iter().any(|m| matches!(
+                m,
+                InstanceMessage::LineNumbers {
+                    mode: crate::window::LineNumberMode::Off,
+                    ..
+                }
+            )),
+            "toggling the gutter off must emit LineNumbers with the mode"
+        );
+
+        // And still suppresses when nothing moves.
+        let settled = s.render_frame(&state);
+        assert!(
+            !settled
                 .iter()
                 .any(|m| matches!(m, InstanceMessage::LineNumbers { .. })),
             "an unchanged gutter mode must not re-emit"
@@ -4512,14 +4527,15 @@ mod tests {
         // authoritative empty statusline segments (Q#SL8), and the
         // buffer's authoritative wrap mode (v22 — a semantic frontend
         // lays out locally, so it has to be told on the first frame or
-        // it never learns the setting at all).
+        // it never learns the setting at all), and the window's gutter
+        // mode, for the same reason once E1.6 made it default-on.
         let first = s.render_frame(&state);
         assert_eq!(
             first.len(),
-            8,
+            9,
             "first frame ships StyleSpans + Decorations + FileStyleSummary \
              + StatusFacts + ThemeFacts + FontFacts + StatuslineSegments \
-             + LineWrapFacts"
+             + LineWrapFacts + LineNumbers"
         );
         assert_semantic_only(&first);
         let (style_full, _) = style_segments(&first).expect("StyleSpans present");

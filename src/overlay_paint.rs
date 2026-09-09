@@ -362,6 +362,17 @@ mod tests {
     use crate::editor::EditorState;
     use crate::protocol::SelectionSnapshot;
 
+    /// An editor whose window paints a BARE grid. The line-number
+    /// gutter is on by default since E1.6, and every presence
+    /// coordinate below is a column index into the painted text; the
+    /// gutter's own width is pinned where the gutter is the subject.
+    fn state_without_gutter() -> EditorState {
+        let state = EditorState::new();
+        state.core.borrow_mut().active_window_mut().line_numbers =
+            crate::window::LineNumberMode::Off;
+        state
+    }
+
     fn empty_grid(size: CellSize) -> Vec<Cell> {
         vec![Cell::default(); (size.rows * size.cols) as usize]
     }
@@ -421,7 +432,7 @@ mod tests {
 
     #[test]
     fn cursor_at_origin_paints_cell_and_label_below() {
-        let state = EditorState::new();
+        let state = state_without_gutter();
         let size = CellSize::new(24, 80);
         let mut cells = empty_grid(size);
         let mut grid = make_grid(&mut cells, size);
@@ -444,7 +455,7 @@ mod tests {
 
     #[test]
     fn frontend_beyond_26_paints_cursor_no_label() {
-        let state = EditorState::new();
+        let state = state_without_gutter();
         let size = CellSize::new(24, 80);
         let mut cells = empty_grid(size);
         let mut grid = make_grid(&mut cells, size);
@@ -485,7 +496,7 @@ mod tests {
     fn selection_paints_underline_on_visible_cells() {
         // Construct a state with some buffer content so selection
         // has cells to paint.
-        let state = EditorState::new();
+        let state = state_without_gutter();
         // Insert a few chars so cursor positions 0..5 are valid.
         state.core.borrow_mut().insert_char('h');
         state.core.borrow_mut().insert_char('i');

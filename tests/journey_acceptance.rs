@@ -1287,6 +1287,199 @@ fn journey_step5_editing_a_file_reached_through_the_directory() {
     );
 }
 
+/// **N** (E1.1) — unsaved work survives the exit key.
+///
+/// Step 5 is "edit immediately"; an editor that discards the edit on
+/// `C-x C-c` without a word has not kept that promise, it has only
+/// postponed breaking it. Driven as keys end to end: the prefix, the
+/// quit chord, the answer, and RET — `editor.quit` invoked
+/// programmatically would pass with the binding gone.
+///
+/// The negative half is asserted BEFORE the answer: after `y` the flag
+/// is set either way, so a test that only looked afterwards would pass
+/// against a build that never prompted at all.
+#[test]
+fn journey_step5_quitting_with_unsaved_work_prompts_first() {
+    if reexec_isolated("journey_step5_quitting_with_unsaved_work_prompts_first") {
+        return;
+    }
+    let mut s = start_local();
+    type_char(&mut s, 'X');
+    assert!(
+        eval::<bool>(
+            &s,
+            "return pmacs.describe.buffer(pmacs.window.buffer()).modified"
+        ),
+        "precondition: the buffer must be modified or the prompt is not owed"
+    );
+
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char('x'), KeyModifiers::CONTROL),
+    );
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    );
+
+    assert!(
+        !s.core.borrow().quit,
+        "C-x C-c with a modified buffer must not quit; status was {:?}",
+        status(&s)
+    );
+    assert!(
+        eval::<bool>(&s, "return pmacs.minibuffer.is_active()"),
+        "it must ask instead"
+    );
+    let prompt: String = eval(&s, "return pmacs.minibuffer.prompt()");
+    assert!(
+        prompt.contains("*scratch*"),
+        "the prompt must name what is at stake; got {prompt:?}"
+    );
+
+    type_char(&mut s, 'y');
+    press(&mut s, KeyCode::Enter);
+    assert!(s.core.borrow().quit, "`y` must exit");
+}
+
+/// **N** (E1.1) — the answer is read, not assumed.
+///
+/// The companion to the row above: `n` leaves the editor running with
+/// the prompt gone. Without this, a prompt that quit on any answer
+/// would satisfy the positive row.
+#[test]
+fn journey_step5_declining_the_quit_prompt_keeps_the_editor() {
+    if reexec_isolated("journey_step5_declining_the_quit_prompt_keeps_the_editor") {
+        return;
+    }
+    let mut s = start_local();
+    type_char(&mut s, 'X');
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char('x'), KeyModifiers::CONTROL),
+    );
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    );
+    assert!(
+        eval::<bool>(&s, "return pmacs.minibuffer.is_active()"),
+        "precondition: the prompt must be up"
+    );
+
+    type_char(&mut s, 'n');
+    press(&mut s, KeyCode::Enter);
+    assert!(!s.core.borrow().quit, "`n` must not exit");
+    assert!(
+        !eval::<bool>(&s, "return pmacs.minibuffer.is_active()"),
+        "and the prompt must be gone"
+    );
+}
+
+/// **N** (E1.7) — step 11: background work is reachable by a KEY.
+///
+/// Step 11 is "understand what background work is running", and the
+/// arc framing graded it `Missing` for one reason: `editor.list-workers`
+/// existed and **no binding opened it**. The listing's own `C-c C-k` is
+/// reachable only once you are already inside. So this asserts a
+/// binding, not a route: that a chord resolves to the command, and that
+/// pressing it puts the observability buffer in the window.
+///
+/// `pmacs.command.invoke` would pass with the keymap entry deleted,
+/// which is precisely the state this row exists to end.
+#[test]
+fn journey_step11_a_chord_opens_the_workers_buffer() {
+    if reexec_isolated("journey_step11_a_chord_opens_the_workers_buffer") {
+        return;
+    }
+    let mut s = start_local();
+    let bound: Option<String> = eval(
+        &s,
+        "local b = pmacs.keymap.lookup(\"C-x w\") return b and b.command",
+    );
+    assert_eq!(
+        bound.as_deref(),
+        Some("editor.list-workers"),
+        "step 11(c) wants a binding that reaches the listing, not a route to it"
+    );
+
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char('x'), KeyModifiers::CONTROL),
+    );
+    press(&mut s, KeyCode::Char('w'));
+    pump(&mut s);
+    assert_eq!(
+        active_name(&s),
+        "*workers*",
+        "pressing it must open the observability buffer; status was {:?}",
+        status(&s)
+    );
+}
+
+/// **N** (E1.7) — every other orphan the audit named has a chord too.
+///
+/// A property over the pairs, not five separate rows: what is being
+/// pinned is that each command the audit found unreachable now resolves
+/// from a key, and a table makes an added orphan one line.
+#[test]
+fn journey_step11_the_named_orphans_all_have_chords() {
+    if reexec_isolated("journey_step11_the_named_orphans_all_have_chords") {
+        return;
+    }
+    let s = start_local();
+    for (chord, command) in [
+        ("<f1>", "help"),
+        ("C-x g", "git.status"),
+        ("C-x w", "editor.list-workers"),
+        ("C-x t", "ui.toggle-line-wrap"),
+        ("C-c l", "lsp.status"),
+        ("C-x l", "window.toggle-line-numbers"),
+        ("C-+", "gpu.zoom-in"),
+        ("C-=", "gpu.zoom-in"),
+        ("C--", "gpu.zoom-out"),
+        ("C-0", "gpu.zoom-reset"),
+    ] {
+        let bound: Option<String> = eval(
+            &s,
+            &format!("local b = pmacs.keymap.lookup({chord:?}) return b and b.command"),
+        );
+        assert_eq!(
+            bound.as_deref(),
+            Some(command),
+            "{chord} must reach {command}"
+        );
+    }
+}
+
+/// **N** (E1.7) — and `help.list-keybindings` names them, which is how
+/// a user who does not already know the chord finds it.
+#[test]
+fn journey_step11_the_keybinding_listing_names_the_new_chords() {
+    if reexec_isolated("journey_step11_the_keybinding_listing_names_the_new_chords") {
+        return;
+    }
+    let mut s = start_local();
+    exec(&s, "pmacs.command.invoke('help.list-keybindings')");
+    pump(&mut s);
+    let listing = active_text(&s);
+    for command in [
+        "help",
+        "git.status",
+        "editor.list-workers",
+        "ui.toggle-line-wrap",
+        "lsp.status",
+        "gpu.zoom-in",
+        "gpu.zoom-out",
+        "gpu.zoom-reset",
+    ] {
+        assert!(
+            listing.contains(command),
+            "the keybinding listing must name {command}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Preservation pins (P) — green on the pre-image; see the named mutation
 // ---------------------------------------------------------------------------

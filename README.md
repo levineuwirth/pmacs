@@ -169,6 +169,40 @@ loaded after the builtin runtime so plain assignments override
 defaults --- keybindings, `pmacs.lsp.config`, theme overrides, and
 package installs all live there.
 
+### The first ten minutes
+
+Enough keys to work without reading anything else. `<f1>` opens the
+cheat sheet and `M-x help.list-keybindings` lists every binding there
+is; `docs/keybindings.md` is that list, generated.
+
+| Key | What it does |
+|---|---|
+| `M-x` | run a command by name |
+| `<f1>` | help |
+| `C-x C-f` | open a file |
+| `C-x C-s` | save |
+| `C-x C-w` | write the buffer to another path and adopt it |
+| `C-x C-c` | quit --- asks first if anything is unsaved |
+| `C-x k` | kill a buffer --- asks first if it is unsaved |
+| `C-x b` | switch buffer |
+| `C-SPC` | set the mark; motion then extends the region |
+| `C-x C-x` | exchange point and mark |
+| `M-<` / `M->` | start / end of buffer |
+| `C-l` | recenter the view on the cursor |
+| `C-g` | cancel: drops the selection, the mark, and any prompt |
+| `M-d` / `M-BS` | kill the next / previous word into the kill ring |
+| `C-y` / `M-y` | yank / cycle older kills |
+| `C-x l` | toggle the line-number gutter |
+| `C-x t` | toggle line wrap |
+| `C-+` `C-=` / `C--` / `C-0` | GPU font bigger / smaller / default |
+| `C-x g` | git status |
+| `C-x w` | what background work is running |
+| `C-c l` | LSP status |
+
+Every one of these is rebindable from `init.lua`; `pmacs.keymap.bind`
+refuses a chord that is already bound, so take one over with
+`pmacs.keymap.unbind` first.
+
 ## Install
 
 Download an archive from the

@@ -7089,6 +7089,7 @@ pub fn install_editor(lua: &Lua, core: &SharedCore) -> mlua::Result<()> {
     }
 
     install_motion(&editor, lua, core)?;
+    install_wide_motion(&editor, lua, core)?;
     install_editing(&editor, lua, core)?;
     install_history(&editor, lua, core)?;
     install_session(&editor, lua, core)?;
@@ -13575,6 +13576,30 @@ fn install_window_module(lua: &Lua, core: &SharedCore) -> mlua::Result<Table> {
     Ok(win)
 }
 
+/// E1.3 --- buffer-wide motion and recenter. Its own installer rather
+/// than three more lines in [`install_motion`], which is at clippy's
+/// line ceiling. `move_buffer_end` and `recenter` both need a fact only
+/// the core holds (the text view's line count, the last rendered
+/// viewport height), so neither is a composition a Lua caller could
+/// write for itself.
+fn install_wide_motion(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result<()> {
+    register(
+        editor,
+        lua,
+        core,
+        "move_buffer_start",
+        EditorCore::move_buffer_start,
+    )?;
+    register(
+        editor,
+        lua,
+        core,
+        "move_buffer_end",
+        EditorCore::move_buffer_end,
+    )?;
+    register(editor, lua, core, "recenter", EditorCore::recenter)
+}
+
 fn install_motion(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result<()> {
     register(editor, lua, core, "move_left", EditorCore::move_left)?;
     register(editor, lua, core, "move_right", EditorCore::move_right)?;
@@ -13825,8 +13850,61 @@ fn install_session(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result
             lua.create_function(move |_, ()| Ok(cc.borrow_mut().save_ignoring_disk_changes()))?,
         )?;
     }
+    {
+        // E1.5 --- `C-x C-w`. Returns `(true)` or `(false, reason)`,
+        // where the reason is the literal `"exists"` for the one
+        // refusal the caller can do something about: the command then
+        // asks, and retries with `force`. A single status string would
+        // make the caller parse prose to tell a refusal from a failure.
+        let cc = core.clone();
+        editor.set(
+            "write_file",
+            lua.create_function(
+                move |_,
+                      (path, force): (String, Option<bool>)|
+                      -> mlua::Result<(bool, Option<String>)> {
+                    let path = std::path::PathBuf::from(path);
+                    match cc
+                        .borrow_mut()
+                        .write_active_buffer_to(&path, force.unwrap_or(false))
+                    {
+                        Ok(()) => Ok((true, None)),
+                        Err(crate::editor_core::WriteFileRefusal::Exists) => {
+                            Ok((false, Some("exists".to_owned())))
+                        }
+                        Err(crate::editor_core::WriteFileRefusal::Failed(message)) => {
+                            Ok((false, Some(message)))
+                        }
+                    }
+                },
+            )?,
+        )?;
+    }
+    {
+        // E1.5 --- `revert-buffer`. The modified check is the caller's:
+        // this reloads unconditionally, because a command that refused
+        // a modified buffer could not implement "yes, throw my edits
+        // away", which is the only reason to run it.
+        let cc = core.clone();
+        editor.set(
+            "revert_file",
+            lua.create_function(move |_, ()| -> mlua::Result<(bool, Option<String>)> {
+                match cc.borrow_mut().revert_active_buffer() {
+                    Ok(()) => Ok((true, None)),
+                    Err(message) => Ok((false, Some(message))),
+                }
+            })?,
+        )?;
+    }
     register(editor, lua, core, "quit", |c| c.quit = true)?;
+    // E1.2 --- `C-g` is the universal cancel, so it drops the selection
+    // and with it the mark (a `Selection` IS the mark: one anchor, and
+    // `active_region` reports nothing once it is gone). Done HERE and
+    // not in the Lua command body because every caller of `ed.cancel()`
+    // means the same gesture; a Lua-side clear would leave the
+    // primitive able to say "Quit" while a region stayed live.
     register(editor, lua, core, "cancel", |c| {
+        c.clear_selection();
         c.status = "Quit".into();
     })?;
     {
@@ -14250,6 +14328,22 @@ fn install_minibuffer_query(mb: &Table, lua: &Lua, core: &SharedCore) -> mlua::R
         mb.set(
             "contents",
             lua.create_function(move |_, ()| Ok(cc.borrow().minibuffer.contents()))?,
+        )?;
+    }
+    {
+        // The prompt string the session was opened with, or nil when no
+        // session is live. Read-only, and the only route to the text
+        // `paint_minibuffer` puts in front of the user: without it a
+        // prompt that names the wrong buffer is unobservable from Lua,
+        // and "the question names what is at stake" is not a property
+        // any test can hold.
+        let cc = core.clone();
+        mb.set(
+            "prompt",
+            lua.create_function(move |_, ()| {
+                let c = cc.borrow();
+                Ok(c.minibuffer.session.as_ref().map(|s| s.prompt.clone()))
+            })?,
         )?;
     }
     {

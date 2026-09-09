@@ -32,3 +32,27 @@ whole. Under one cap a growing register squeezes the rules.
   not yet reachable in the GPU frontend. Removed when a word-wrap mode
   ships on both frontends with the difference in breaking rules stated,
   and horizontal reach of truncated text exists on the GPU.
+- **Zoom chords on a grid frontend (D22).** `C-+` and `C-=` zoom in,
+  `C--` out and `C-0` resets, as **global** bindings, so a grid frontend
+  reaches them too and the terminal's own zoom chords are shadowed while
+  pmacs runs. The keymap cannot express "GPU frontends only":
+  `keymap_stack::Scope` is `Buffer | Mode | Global` and carries no
+  frontend identity, and `FrontendEvent` has no command-invocation
+  variant, so a GPU frontend cannot ask for a command by name either.
+  The alternative was leaving the zoom commands reachable only through
+  `M-x`, which is not a zoom control. What a grid frontend gets is
+  therefore an answer instead of silence: the commands change the GPU
+  font preference --- live for an attached GPU session, and at the next
+  one otherwise --- and the status line names the GPU font and the new
+  size, `zoom: GPU font 17.00 px (applies to GPU sessions)`, or `zoom:
+  GPU font back to its default (applies to GPU sessions)` on a reset.
+  The line does NOT distinguish "now" from "next session", which is a
+  shortfall against what this entry asks and not a thing it delivers: no
+  frontend-kind fact is reachable from Lua (`pmacs.frontend.id()`
+  returns an id and nothing else), and adding an accessor was rejected
+  as core surface E1 does not authorize. A grid user is therefore told
+  which sessions the change applies to, never when it took effect. `Q#Z3` (ship no bindings) and `Q#GA8` are
+  recorded as overruled for this entry's duration. Removed when
+  capability-aware keymap resolution lands, at which point the chords
+  bind on GPU frontends only and the grid frontend keeps its terminal's
+  zoom.

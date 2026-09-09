@@ -32,6 +32,10 @@ fn session(name: &str) -> EditorState {
     }
     let state = EditorState::new_with_roots(&roots);
     state.install_state_dirs();
+    // The line-number gutter is ON by default since E1.6, and it eats
+    // content columns. This suite is about where the TEXT breaks, so it
+    // paints against a bare grid.
+    exec(&state, "pmacs.window.set_line_numbers('off')");
     state
 }
 

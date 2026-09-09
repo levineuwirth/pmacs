@@ -38,6 +38,23 @@ use crate::window::{
     QuitAction, Side, Window, WindowId, subtree_min_rows,
 };
 
+/// Why [`EditorCore::write_active_buffer_to`] declined (E1.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriteFileRefusal {
+    /// A file already exists at the requested path and the caller did
+    /// not force. The buffer has never read that file, so overwriting it
+    /// is a decision only the user can make.
+    Exists,
+    /// The write itself failed; the message is the underlying error.
+    Failed(String),
+}
+
+/// Viewport height assumed by a command that needs one before any
+/// frame has rendered (`last_visible_rows == 0`). The same twenty rows
+/// `page_step` falls back to, for the same reason: a headless caller
+/// must get a plausible screen rather than a zero-height one.
+const DEFAULT_VIEWPORT_ROWS: usize = 20;
+
 /// T M10.10 post-audit-round-3 F16 — origin of a queued CRDT op.
 ///
 /// Records **whether the originating frontend already applied the
@@ -2601,6 +2618,157 @@ impl EditorCore {
         aw.goal_col = None;
     }
 
+    /// Write the active buffer to `path` and adopt it as the buffer's
+    /// own file (`C-x C-w`, E1.5).
+    ///
+    /// Adoption is the whole point: after this the buffer *is* the new
+    /// file, so `C-x C-s` saves there, the recorded [`FileMeta`] is the
+    /// one just written (a later save compares against the right file),
+    /// and the name follows the path the way [`Buffer::set_path_derived_name`]
+    /// makes it follow one at open.
+    ///
+    /// Refuses an existing file unless `force`, because the caller's
+    /// path came from a prompt and the user cannot see what is already
+    /// there. Unlike [`Self::save`] this cannot ask "did it change since
+    /// we read it" — the buffer never read this file — so *any* file at
+    /// the path is a refusal, and the answer is the user's.
+    ///
+    /// # Errors
+    ///
+    /// [`WriteFileRefusal::Exists`] when a file is already at `path` and
+    /// `force` is false; [`WriteFileRefusal::Failed`] when the write
+    /// itself failed.
+    pub fn write_active_buffer_to(
+        &mut self,
+        path: &Path,
+        force: bool,
+    ) -> Result<(), WriteFileRefusal> {
+        let id = self.active_buffer_id();
+        if !force && crate::file_io::current_meta(path).is_ok() {
+            return Err(WriteFileRefusal::Exists);
+        }
+        let content = {
+            let reg = self.registry.borrow();
+            let buffer = reg
+                .get(id)
+                .map_err(|e| WriteFileRefusal::Failed(e.to_string()))?;
+            let len = buffer.len();
+            let mut content = vec![0u8; usize::try_from(len).unwrap_or(usize::MAX)];
+            if len > 0 {
+                buffer.snapshot_rope().slice(0, len, &mut content);
+            }
+            content
+        };
+        let meta = save_atomic(path, &content)
+            .map_err(|e| WriteFileRefusal::Failed(format!("write failed: {e}")))?;
+        let display = path.display().to_string();
+        if let Ok(buf) = self.registry.borrow_mut().get_mut(id) {
+            buf.set_path_derived_name(display.clone());
+            buf.mark_clean();
+        }
+        self.set_buffer_path(id, Some(path.to_path_buf()));
+        self.set_buffer_meta(id, Some(meta));
+        self.status = format!("wrote {display}");
+        Ok(())
+    }
+
+    /// Reload the active buffer from its backing file (`revert-buffer`,
+    /// E1.5).
+    ///
+    /// The replace is announced through [`Self::notify_buffer_edit`],
+    /// not through [`Self::apply_active_edit`]: a revert is exactly an
+    /// external change, and it is the only local edit that can leave
+    /// point past the end of the buffer, which is the clamp that path
+    /// carries and the other does not.
+    ///
+    /// Undo history is deliberately kept. A revert the user did not mean
+    /// is otherwise unrecoverable, and the rope entry the edit pushes is
+    /// what makes `C-x u` bring the work back.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the buffer has no backing file, when the
+    /// file cannot be read, or when the replace is refused.
+    pub fn revert_active_buffer(&mut self) -> Result<(), String> {
+        let id = self.active_buffer_id();
+        let Some(path) = self.active_buffer_path() else {
+            return Err("no file to revert from".into());
+        };
+        let (bytes, meta) = crate::file_io::load_file(&path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let len = self.active_buffer_len();
+        let edit = {
+            let mut reg = self.registry.borrow_mut();
+            let buffer = reg.get_mut(id).map_err(|e| e.to_string())?;
+            buffer
+                .apply_edit(EditOp::Replace {
+                    range: Range { start: 0, end: len },
+                    bytes: &bytes,
+                })
+                .map_err(|e| e.to_string())?
+        };
+        if let Some(crdt_op) = edit.crdt_op.as_ref() {
+            self.pending_crdt_ops
+                .push((CrdtOpOrigin::DaemonKey, id, (**crdt_op).clone()));
+        }
+        self.notify_buffer_edit(id, &edit);
+        if let Ok(buf) = self.registry.borrow_mut().get_mut(id) {
+            buf.set_file_meta(Some(meta));
+            buf.mark_clean();
+        }
+        self.status = format!("reverted {}", path.display());
+        Ok(())
+    }
+
+    /// Move point to the very start of the buffer (`M-<`, E1.3).
+    ///
+    /// A named primitive rather than a Lua `move_to_line(0)` because its
+    /// partner below cannot be written that way: there is no line index
+    /// a caller can name for "the last one" without first asking the
+    /// text view how many there are.
+    pub fn move_buffer_start(&mut self) {
+        self.move_to_line(0);
+    }
+
+    /// Move point to the very end of the buffer (`M->`, E1.3).
+    ///
+    /// The last line's *end*, not its start: `move_to_line` clamps to
+    /// the last line and lands at column zero, which is the end of the
+    /// buffer only when it ends in a newline. Composed from the two
+    /// existing motions so a fold-projecting frontend's clamps and the
+    /// goal-column reset stay exactly what every other motion does.
+    pub fn move_buffer_end(&mut self) {
+        let last = self
+            .active_window()
+            .text_view
+            .line_count()
+            .max(1)
+            .saturating_sub(1);
+        self.move_to_line(last);
+        self.move_line_end();
+    }
+
+    /// Scroll so the line holding point sits in the middle of the
+    /// active window's viewport (`C-l`, E1.3).
+    ///
+    /// Point does not move: this is a scroll, and a recenter that also
+    /// jumped would be a different command. The height is the one the
+    /// last frame recorded, with the same headless fallback
+    /// [`Self::page_step`] uses — a window that has never rendered has
+    /// `last_visible_rows == 0`, and dividing that by two would pin
+    /// `view_top` to the cursor line and silently turn `C-l` into
+    /// scroll-to-top.
+    pub fn recenter(&mut self) {
+        let rows = usize::try_from(self.active_window().last_visible_rows).unwrap_or(usize::MAX);
+        let rows = if rows >= 1 {
+            rows
+        } else {
+            DEFAULT_VIEWPORT_ROWS
+        };
+        let line = self.cursor_line();
+        self.set_view_top(line.saturating_sub(rows / 2));
+    }
+
     /// Pre-edit unfold (Arc 6, Q#FD5 / Stage 2 Q#FD19). Before a local
     /// point-anchored edit, unfold every fold containing the active point
     /// so an edit inside a collapsed region reveals it rather than
@@ -2966,6 +3134,15 @@ impl EditorCore {
         let new_id = WindowId::next();
         let mut new_window = Window::new(new_id, buffer_id, text_view);
         let active = self.active_window_id();
+        // E1.6: the gutter carries across a split. It is a display
+        // preference the user set on the window they are splitting, and
+        // now that the default is ON, *not* carrying it means a user who
+        // turned line numbers off gets them back by pressing `C-x 2` ---
+        // with no way to tell which of the two panes they are looking at
+        // is the one they configured.
+        if let Some(src) = self.windows.get(&active) {
+            new_window.line_numbers = src.line_numbers;
+        }
         // A same-buffer split starts from an empty overlay list and
         // fires no switch hook, so store-backed render overlays
         // (ANSI styling on a compile buffer) would silently vanish
