@@ -480,19 +480,32 @@ impl std::fmt::Display for GpuInitError {
 /// one. The `ui.caret` face is the registered half: its fg is the
 /// caret's color, relayed through `ThemeFacts`.
 ///
-/// **"Only through a typed wire variant" overstates it, and the
-/// alternative is named here so it is rejected rather than omitted.**
-/// E2.1 gave this crate a second channel to the user's config
-/// directory: `pmacs-gpu/src/geometry.rs` duplicates the core's
-/// `resolve_config_dir` and reads and writes a file there. A blink
-/// interval could physically travel that way. It must not --- an
-/// unversioned side file is a second configuration path for a knob
-/// `pmacs.config` already owns, it is read once at startup so a session
-/// runs stale, and it is exactly the off-path hardcode the roadmap's
-/// "no new dispatch shadow" rule points away from. The accurate claim
-/// is that no *supported* channel exists for a GPU preference outside a
-/// typed wire variant, and E2 is not a wire phase. Owed to the next
-/// phase that carries GPU preferences over the wire.
+/// **"Only through a typed wire variant" overstates it, and this phase
+/// built two channels that physically could carry one, so both are
+/// named here and rejected rather than omitted.**
+///
+/// The first is the config directory. E2.1 gave this crate its own
+/// route there: `pmacs-gpu/src/geometry.rs` duplicates the core's
+/// `resolve_config_dir` and reads and writes a file beside it. A blink
+/// interval could travel that way. It must not --- an unversioned side
+/// file is a second configuration path for a knob `pmacs.config`
+/// already owns, it is read once at startup so a session runs stale,
+/// and it is exactly the off-path hardcode the roadmap's "no new
+/// dispatch shadow" rule points away from.
+///
+/// The second is argv and the environment, which E2.7 demonstrated in
+/// this same crate with `PMACS_GPU_PROBE_ZOOM_WHEEL` (`:1054`). That
+/// one is rejected *harder*, and for a different kind of reason: the
+/// probe variable selects a test mode and is not a preference, whereas
+/// a blink interval read from the environment would be a user-visible
+/// knob that does not register through `pmacs.config` --- a direct
+/// violation of a stated invariant, not a design objection to be
+/// weighed.
+///
+/// The accurate claim is therefore that no *supported* channel exists
+/// for a GPU preference outside a typed wire variant, and E2 is not a
+/// wire phase. Owed to the next phase that carries GPU preferences
+/// over the wire.
 const CARET_BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 /// The caret's alpha while the window is unfocused (E2.6): steady and
 /// dimmed, so a background window shows where its point is without
