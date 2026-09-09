@@ -1062,6 +1062,85 @@ leg and passed. One run, non-reproduction and nothing more; what it
 establishes is that the condition D30 named did not fire on the one
 run that could have fired it.
 
+### `main` after E2: run 34396945488 at `ea8c93a`, and it is GREEN
+
+E2 merged as `ea8c93a` (PR #262) on 2026-09-09, and its post-merge
+`push` run is **34396945488**: 18 jobs on one attempt, **17 success, 1
+skipped, ZERO failures** (created 19:45:28Z, completed 20:00:29Z). The
+skip is `Docs consistency`, correctly, since the push changed code.
+**This is the first fully green post-merge run in three phases**: E0's
+was 34205653191 and E1's 34349759554, both red, both on U17 alone by the
+end.
+
+Read from the job logs and not from the verdict line. Every one of the
+six test legs carries **zero** `WouldBlock`, **zero** `test result:
+FAILED`, and 122 or 123 `test result: ok`:
+
+| leg | job | `WouldBlock` | `FAILED` | `ok` |
+|---|---|---|---|---|
+| `Test (macos-latest / luajit)` | 102618943080 | 0 | 0 | 123 |
+| `Test (macos-latest / lua54)` | 102618943054 | 0 | 0 | 123 |
+| `Test (ubuntu-latest / luajit)` | 102618943024 | 0 | 0 | 123 |
+| `Test (ubuntu-latest / lua54)` | 102618942991 | 0 | 0 | 123 |
+| `Test (ubuntu-latest / luajit, no crdt)` | 102618943181 | 0 | 0 | 123 |
+| `Test (crdt)` | 102618942960 | 0 | 0 | 122 |
+
+**#258's own selector ran on the leg it fails on and passed.**
+`a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join ... ok`
+appears in five of the six legs — every leg that carries it; it is
+absent from the no-crdt leg, which does not build it. U16's
+`bare_filename_saves_in_cwd` ran in all six and passed. No `deadline
+exceeded`, no `Interrupt: 2`, no `first read_dir must be superseded`.
+
+**D31's revocation condition is not met.** D31 revokes E2's merge
+disposition if #258's selector recurs on `main` after the merge or a
+diagnosis shows a product defect. Neither happened. By the rerun rule
+this is **non-reproduction and nothing more**: it retires nothing, and
+the counts of record are unchanged — **#258 stays at four occurrences
+and the `read Hello` family at twelve**, which this file states is a
+floor. E2's accepted risks stay accepted, undiagnosed and open.
+
+### E3's local gate: two intermittents, both filed, neither this branch's
+
+`e3/gui-scroll-and-current-line` ran `scripts/gate --protocol` twice.
+Both runs are recorded here rather than re-run away, and the reds in
+both are in code the branch does not touch.
+
+**Run `20260909T203257Z-3490194`** — `doc`, `sweep` and `sweep-luajit`
+red. Two of the three were the branch's own and were fixed: a
+`[`Self::text_bounds_right`]` intra-doc link written inside a
+constant's doc comment, where `Self` is the constant; and
+`theme_faces_acceptance`'s literal count of the stage-1 face inventory,
+which E3.3's `ui.current-line` moves from thirteen to fourteen. The
+third was **#251's second occurrence** — `bundled package `repl` failed
+to load`, panic at `src/editor.rs:1113` — matched to #251 **by its
+required fragments and not by name**, the selectors being different
+from the first occurrence's. Two selectors failed together this time,
+five log lines apart at the head of a 2,248-line log.
+
+That occurrence also **settles the question #251 was filed with.**
+`write_if_changed` (`src/builtin_packages.rs:258`) is a content compare
+followed by a bare `fs::write`, with no temporary-name-and-rename and no
+lock; `fs::write` opens `O_TRUNC`, so a concurrent reader can observe a
+zero-length or partial `init.lua`. `tests/common/iso.rs:43` justifies
+sharing the root on the ground that materialization is "content-gated
+and idempotent" — and **idempotent is not atomic**: the gate makes
+repeated writes converge, while the failure is a concurrent read of an
+intermediate state. So the co-failure has a demonstrated shared object,
+which is what this file's own widening rule asks for.
+
+**Run `20260909T204440Z-3628136`** at the fixed tip — seven of eight
+stages ok, `sweep-luajit` green over 125 targets, and `sweep` red on
+one target: `daemon_attach::tests::ensure_running_invokes_spawner_then_waits_for_socket_to_appear`,
+`expected Ok, got Err(AutoStartTimeout`, filed as **#264**. Also a
+fixture defect with a demonstrated mechanism: the fixture's spawner
+holds its listener for exactly 500 ms, so the test's success window is
+that 500 ms and not the 2 s deadline, and a polling thread descheduled
+past it finds nothing to connect to and then correctly runs out the
+deadline. Widening the deadline would change nothing. The `-p pmacs
+--lib` binary took **20.67 s** in that run against **15.08 s** in the
+previous one, which is the load proxy.
+
 ### The macOS reds have a merge-base control, and it excludes nothing
 
 `git merge-base e78d184 githubsucks/main` is `d97e137`, whose post-merge
