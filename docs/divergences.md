@@ -51,8 +51,8 @@ whole. Under one cap a growing register squeezes the rules.
   frontend-kind fact is reachable from Lua (`pmacs.frontend.id()`
   returns an id and nothing else), and adding an accessor was rejected
   as core surface E1 does not authorize. A grid user is therefore told
-  which sessions the change applies to, never when it took effect. `Q#Z3` (ship no bindings) and `Q#GA8` are
-  recorded as overruled for this entry's duration. Removed when
-  capability-aware keymap resolution lands, at which point the chords
-  bind on GPU frontends only and the grid frontend keeps its terminal's
-  zoom.
+  which sessions the change applies to, never when it took effect.
+  `Q#Z3` (ship no bindings) and `Q#GA8` are recorded as overruled for
+  this entry's duration. Removed when capability-aware keymap
+  resolution lands, at which point the chords bind on GPU frontends
+  only and the grid frontend keeps its terminal's zoom.

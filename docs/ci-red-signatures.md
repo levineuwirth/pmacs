@@ -187,6 +187,28 @@ never shut.
 | candidate mechanism | the predecessor completed before the cancellation took effect. `--test-threads=1` was the first occurrence's candidate: it serializes the test functions in one executable and so removes one source of contention the test's "in flight" depends on. The second occurrence has no such flag, which does not refute the mechanism --- a fast predecessor is a fast predecessor however the runner got there --- but it does mean serialization is not required to produce it, and the remaining common factor is a macOS or Linux CI runner rather than a scheduling flag. Nothing has measured the predecessor's duration under either, and nothing rules out a real supersede defect |
 | retirement | diagnosis; a witness that holds the predecessor in flight deterministically rather than by load |
 
+### U19 — a terminal bell not observed within a 5 s poll
+
+**Reopened 2026-09-09 as NEVER CLOSED**, on R5's ground and not on a
+recurrence. U19 was closed 2026-09-05 with "readiness migration; the
+wait reports the last frame seen". Its selector is an in-crate unit
+test, and `tests/common/ready.rs` compiles into the integration targets
+only, so the migration could not reach the site; and the site is
+unchanged --- `src/daemon.rs:5294-5298` is the loop the row was filed
+on, untouched since `dc92257`, asserting `Instant::now() < deadline`
+with the message `initial terminal bell timed out` and reporting no
+elapsed time, no poll count and no last-observed value. The closer
+names a report that does not exist.
+
+| field | value |
+|---|---|
+| selector | `--lib daemon::tests::terminal_bell_baseline_suppresses_history_and_delivers_each_new_bell_once` |
+| job | local (Linux), the workspace sweep of `scripts/gate` (step `07-sweep` of the eight-stage gate of the time) |
+| required fragments | `initial terminal bell timed out` |
+| occurrences | one: 2026-08-31, gate log `20260831T174104Z-3438184`, `src/daemon.rs:5296`, `1988 passed; 2 failed` --- the same run as U16's second occurrence, recorded separately because the selectors and fragments differ. It passed in all three stages of the next gate run, at `ea786a2` (log `20260831T174716Z-3535694`): non-reproduction and nothing more |
+| candidate mechanism | a 5-second poll over `bell_count(buffer_id) != Some(1)` with `tick_processes()` and a 10 ms sleep per turn. Whether the bell never arrived or arrived late the loop cannot tell apart, and the panic carries no elapsed value, so this occurrence's margin is unrecoverable. Unresolved |
+| retirement | diagnosis. The loop reporting its elapsed time, poll count and last-observed count would be a step toward it and is not a closer --- R5's lesson and U8's. Never a green rerun |
+
 ## Closed rows
 
 Each row's full evidence is in this file's history before 2026-09-05.
@@ -199,12 +221,15 @@ explained, which is the only retirement the rerun rule allows.
 
 - **VOID** --- the closure was not a closure when it was written. Either
   it named no mechanism at all and rested on a count of green runs
-  (U4, U5), or it named one that never reached the failing site (R5).
+  (U4, U5), or it named one that never reached the failing site (R5,
+  U19).
   A void row was never retired; it was only stopped being looked at,
   and it is live again above.
 - **INCOMPLETE** --- the closure named a real mechanism that did reach
   the failing site, but that mechanism did not remove the cause. U8 is
-  the one, and it is falsified rather than suspected.
+  one, falsified rather than suspected; R6 is the other, ruled by the
+  form of its closer, and its case is worse: the closer made the row
+  unmatchable at its own site.
 - **DISCARDED** --- there was never evidence to retire. The fragments
   were lost or never captured, so the row could not match anything.
   This is an admission about the record, not a finding about the code,
@@ -214,15 +239,16 @@ explained, which is the only retirement the rerun rule allows.
   in a GitHub issue.
 
 Twenty-eight rows are listed on twenty-seven lines (A1 and A2 share
-one). Nineteen lines are causal closures and stand: a wall-clock
+one). Seventeen lines are causal closures and stand: a wall-clock
 assertion made `#[ignore]`, a duplicated test execution removed by the
 one-sweep gate, a fixture race fixed with a readiness gate, a
 hermeticity fault fixed, and U16's process-global cwd mutation deleted.
-The eight that are not now say which word they are. **Recount these
+The ten that are not now say which word they are. **Recount these
 against the table below rather than trusting them**: they were written
 as twenty-seven, twenty-six, eighteen and eight one commit before U16
-closed and moved into it, and were wrong until this line was rewritten
-by counting again.
+closed and moved into it, then as nineteen and eight while R6 and U19
+stood "on notice" with bare dates, and each time were wrong until this
+line was rewritten by counting again.
 
 | row | what it was | disposition | grounds |
 |---|---|---|---|
@@ -230,7 +256,7 @@ by counting again.
 | R2 | `SIGUSR1` delivered before the trap was installed | 2026-08-05 | test race fixed with a readiness gate and an `exec` |
 | R4 | readiness predicate satisfied by an empty file | 2026-08-05 | `wait_for_file` waits for the expected bytes, with three witness tests |
 | R5 | `async pump deadline exceeded` in the supersede close path, macOS | 2026-09-05, **VOID** | the closure named the `tests/common/ready.rs` migration, which cannot reach an in-crate unit test and so never applied to the failing site. R5 is live again above, as never-closed |
-| R6 | readiness file never published in the panel terminal fixture, macOS | 2026-09-05 | same migration; the wait now reports what the child last wrote |
+| R6 | readiness file never published in the panel terminal fixture, macOS | 2026-09-05, **INCOMPLETE** | U8's migration and U8's class, on the same test: it reached the site (`tests/bottom_panel_stage1_acceptance.rs:2446` is `ready::expect`) and changed what the wait reports, not what it waits for, and that test has failed three times since as #259. Worse, the migration replaced `timed out waiting for`, one of this row's two required fragments, so the row cannot match at its own site and its "not recurred" was earned by construction. Ruled at C1's close by the form of the closer; see the note below |
 | R8 | LSP listview row rendered relative to a stray ancestor marker | 2026-08-08 | test hermeticity fixed |
 | A1, A2 | historical claims with no linked occurrence | 2026-09-05, **DISCARDED** | nothing was ever measured, so there was nothing to retire. Discarded for want of evidence; not a causal closure and not a claim about the code |
 | U1 | an unclassifiable local red, fragments not captured | 2026-09-05, **DISCARDED** | the fragments were destroyed by a rerun before anyone read them, so the row could never match anything. Discarded for want of evidence; not a causal closure |
@@ -250,7 +276,7 @@ by counting again.
 | U15 | a rotated multi-red cluster with a load reading | 2026-09-05 | all budgets, now `#[ignore]` |
 | U16 | a `git` child inheriting a working directory another test deleted | 2026-09-08 | the process-global `set_current_dir` was removed: `bare_filename_saves_in_cwd` now makes the cwd move in a subprocess (`ee28bf8`), and `set_current_dir` no longer occurs anywhere in the workspace. Causal, and demonstrated in both directions --- see below |
 | U18 | a Go checksum-database fetch failed before anything was built | 2026-09-05, **REFERRED** | not a test and so out of this file's scope; the question lives in issue #249 |
-| U19 | a terminal bell not observed within a 5 s poll | 2026-09-05 | readiness migration; the wait reports the last frame seen |
+| U19 | a terminal bell not observed within a 5 s poll | 2026-09-05, **VOID** | the closer named the `tests/common/ready.rs` migration, which cannot reach an in-crate unit test --- R5's ground exactly --- and the loop at `src/daemon.rs:5294-5298` is unchanged since `dc92257` and reports nothing. Ruled at C1's close. U19 is live again above, as never-closed |
 | U20 | `composition_overhead` red alone | 2026-09-05 | a budget, now `#[ignore]` |
 | U21 | `m6_1_pty_canonical_mode_keeps_kernel_echo` red alone in `lib` | 2026-09-05 | U2's mechanism; the gate runs each test once |
 
@@ -380,10 +406,20 @@ written as a retirement; a closer of the form "the wait now waits for
 the record it asserts on" is causal, because the fixed drain that ended
 early is gone. R6 (`the wait now reports what the child last wrote`)
 and U19 (`the wait reports the last frame seen`) carry the reporting
-shape and nothing has falsified either, so they stand as written --- on
-notice, not reclassified. U2 (`the PTY read now waits for the record it
-asserts on`) and R4 (`wait_for_file waits for the expected bytes`) are
-the causal form and are not in question.
+shape, and at C1's close the rule was applied to them by the form of
+the closer rather than by waiting for a red, because U8 is the proof
+that a recurrence only makes the incompleteness visible. Checked
+against each failing site: R6's site is migrated, so the closer reached
+it and removed no cause --- INCOMPLETE, U8's class on U8's own test ---
+and the migration replaced the string one of R6's required fragments
+names, so the row could never fire again while the failure it was filed
+for went on happening under #259's fragments. U19's selector is an
+in-crate `--lib` test the migration cannot reach, and its loop reports
+nothing --- VOID, R5's ground. U2 (`the PTY read now waits for the
+record it asserts on`) and R4 (`wait_for_file waits for the expected
+bytes`) are the causal form and are not in question. U14's fourth
+closer has the reporting shape too and stays unclassified: its selector
+is not recoverable from the row, so its site cannot be read.
 
 ### U4's question is open again, on Linux
 
@@ -417,16 +453,30 @@ that names a total has to be found and rewritten, and twice it was not.
 
 | run | sha | created | completed | verdict |
 |---|---|---|---|---|
-| 34220035122 | `8f6784f` | 2026-09-08T11:18:55Z | 11:38:36Z | 12 green, 3 red |
-| 34222042303 | `e78d184` | 11:41:44Z | 12:01:39Z | 13 green, 2 red |
-| 34253949749 | `b2094ac` | 16:54:59Z | 17:09:27Z | 16 green, 1 red |
-| 34269795016 | `04263c6` | 19:35:31Z | 19:59:11Z | 16 green, 1 red |
+| 34220035122 | `8f6784f` | 2026-09-08T11:18:55Z | 11:38:36Z | 14 green, 3 red, 1 skipped |
+| 34222042303 | `e78d184` | 11:41:44Z | 12:01:39Z | 15 green, 2 red, 1 skipped |
+| 34253949749 | `b2094ac` | 16:54:59Z | 17:09:27Z | 16 green, 1 red, 1 skipped |
+| 34269795016 | `04263c6` | 19:35:31Z | 19:59:11Z | 16 green, 1 red, 1 skipped |
+| 34272480226 | `d7fd465` | 20:02:42Z | 20:21:44Z | 16 green, 1 red, 1 skipped |
 
-All four are `pull_request` events with conclusion **failure**, and
-`Docs consistency` is skipped in all four, correctly: the PR's changed
-paths include code. The first two ran trees differing by one markdown
-file; the third ran fix round 1's seven commits; the fourth ran fix
-round 2's ten.
+Every verdict is counted from the jobs endpoint,
+`repos/levineuwirth/pmacs/actions/runs/<id>/jobs?per_page=100`: each
+run has **18 jobs on one attempt**, one of them `Docs consistency`,
+skipped correctly because the PR's changed paths include code. **The
+first two verdicts are corrected.** Every C1 record until the closing
+round stated them as 12 green and 13 green, this table included, and
+the wrong pair reached nine artifacts, both review passes among them.
+The endpoint gives `{failure: 3, skipped: 1, success: 14}` and
+`{failure: 2, skipped: 1, success: 15}`, and no counting convention
+yields 12 and 13 here and 16 for the other three. The pushed records
+that carry 12 and 13 are not rewritten; this is the correction, in the
+form `e78d184`'s commit message is corrected below.
+
+All five are `pull_request` events with conclusion **failure**. The
+first two ran trees differing by one markdown file; the third ran fix
+round 1's seven commits; the fourth ran fix round 2's first ten; the
+fifth, at the head the branch merged from, ran the eleventh, which is
+the commit that recorded the fourth.
 
 **This table holds the runs someone has read, and it can never hold the
 last one.** Every push starts a run at the new head, and a record
@@ -446,12 +496,18 @@ next push, with no verdict and no logs worth reading. A cancelled run
 is not a green one and not a red one --- it is no evidence at all, and
 must never be counted as a run in this table.
 
-The consequence for a merge decision is worth stating plainly: **this
-branch has exactly one readable CI run at any moment**, the one at its
-current head, and every earlier one was either completed before the
-next push or cancelled by it. Four completed runs are tabulated above.
-The run at whatever head this text is read from is not, by
-construction --- including the one this very commit's push starts.
+The consequence for a merge decision is worth stating plainly: **only
+the newest completed run describes the current head.** Every completed
+run stays readable --- five are tabulated above --- and each is
+evidence about the tree it ran and about nothing pushed after it. An
+earlier version of this paragraph said the branch had "exactly one
+readable CI run at any moment", four lines under a table of four
+readable runs; what it meant is the sentence before this one. What
+stays true by construction is the other half: the run at whatever
+head this text is read from is not tabulated, because the push that
+commits the text is what starts it. The branch stopped moving at
+`d7fd465` and merged, so its fifth run could at last be read and
+tabulated here, from `main`, by the next phase's first commit.
 
 Every C1 record before 2026-09-08 described only the first run, by name
 and as "the first run". Fix round 1 named the first two and was written
@@ -564,10 +620,13 @@ cluster this branch has produced, and the first on this leg.
   matching rule --- #258's selector is
   `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join` in
   `statusline_segments_acceptance`, and none of these is that test. Its
-  occurrence count stays at **one**. The last of them is the second
-  occurrence of the `theme_faces` incident already recorded there. All
-  four are a comment on #258, which is the issue for that failing
-  expression, with the difference stated.
+  occurrence count was one when this was written and is **two** since
+  the next run, below; the earlier wording, "stays at one", is
+  corrected here rather than rewritten in the pushed commit that
+  carries it. The last of them is the second occurrence of the
+  `theme_faces` incident already recorded there. All four are a comment
+  on #258, which is the issue for that failing expression, with the
+  difference stated.
 - The `wdired` failure is a **new signature** with no row and no issue:
   filed as **#261**.
 
@@ -584,8 +643,72 @@ is a measurement of how long `Hello` actually took against each
 fixture's budget, which nothing has done. It is recorded because it is
 the first evidence that bears on the question at all.
 
-**None of this was re-run.** The job is the head's own run and it stands
-as read.
+**None of this was re-run.** The job stands as read.
+
+#### Run 34272480226, at the head `d7fd465`
+
+Sixteen jobs green, one red: `Test (macos-latest / luajit)`, job
+**102217330515**, one failing target against 119 `test result: ok`:
+
+```
+---- a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join stdout ----
+thread 'a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join' (114814) panicked at tests/statusline_segments_acceptance.rs:996:54:
+called `Result::unwrap()` on an `Err` value: Io(Os { code: 35, kind: WouldBlock, message: "Resource temporarily unavailable" })
+test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.26s
+```
+
+Selector, job and all three required fragments are **#258's**, at the
+same site and with the same result line as its first occurrence in run
+34220035122: **#258's second occurrence**, commented there on
+2026-09-09. Not a rerun --- a different tree twenty-nine commits later
+--- and under the rerun rule a second occurrence is a second
+occurrence. This head is the one the branch merged from, so this run
+is the first on the branch that could be read after the branch stopped
+moving, and the first that a record could hold without being one run
+behind.
+
+**The `read Hello` family is at seven occurrences**, across four
+suites and five selectors, twice under #258's own selector. Counted
+from every macOS job log of every completed run on the branch and at
+the base, by the failing expression's `WouldBlock` and not by the
+literal string `read Hello`, which the two a16_26 occurrences do not
+carry (their panic is the bare `Result::unwrap()`; a grep for the
+string gives five and a grep for `WouldBlock` gives seven):
+
+| # | run | sha | suite | selector |
+|---|---|---|---|---|
+| 1 | 34220035122 | `8f6784f` | `statusline_segments_acceptance` | `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join` |
+| 2 | 34222042303 | `e78d184` | `theme_faces_acceptance` | `v15_peer_never_receives_theme_facts_and_v16_does` |
+| 3 | 34269795016 | `04263c6` | `gpu_font_acceptance` | `v16_peer_never_receives_font_facts_and_v17_does` |
+| 4 | 34269795016 | `04263c6` | `m5_5_acceptance` | `m10_10_non_replica_frontend_does_not_receive_cursor_byte` |
+| 5 | 34269795016 | `04263c6` | `theme_faces_acceptance` | `daemon_reships_the_summary_after_a_real_buffer_round_trip` |
+| 6 | 34269795016 | `04263c6` | `theme_faces_acceptance` | `v15_peer_never_receives_theme_facts_and_v16_does` |
+| 7 | 34272480226 | `d7fd465` | `statusline_segments_acceptance` | `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join` |
+
+**Zero at the merge base**, where all four of those selectors ran and
+passed on both macOS legs of run 34205653191. The comment on #258 of
+2026-09-09 says six; it is one short of its own list, and this is the
+correction of record.
+
+**What #258's mechanism has that no other live row has is a
+measurement**, taken by C1's end-to-end round and re-checked at its
+close: on Linux, on one machine, bounding a ratio. `run_daemon` binds
+the listener (`src/daemon.rs:470`) before it constructs `EditorState`
+(`:479`), and `wait_for_daemon` in `tests/common/ready.rs` declares
+readiness on a successful `connect` while discarding its own 500 ms
+`Hello` read, so a fixture's budget covers only the residual boot and
+the failure needs bind-to-serving above roughly 700 ms. Over 1,500
+interleaved boots at `d97e137` and `d7fd465` the probe's
+connect-to-`Hello` is p50 50.14 ms and 50.13 ms with none of 600 idle
+probes over 100 ms, and the boot the branch's 407 added Lua lines
+lengthen moves p50 13.93 to 14.28 ms, paired mean +0.401 ms;
+`src/daemon.rs` is byte-identical between the shas and
+`ACCEPT_POLL_INTERVAL` is 50 ms at both, so the probe pays one whole
+accept quantum and a16_26's real headroom is 150 ms, not 200. That is
+why D30 calls #258 a fixture/daemon contract defect that predates the
+branch. The limit in the same breath: it bounds what the branch added,
+and it is not the interval on a macOS runner, which at C1's close no
+record had measured. #258 carries anything measured since.
 
 ### The macOS reds have a merge-base control, and it excludes nothing
 

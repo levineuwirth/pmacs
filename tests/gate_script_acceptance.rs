@@ -2112,7 +2112,7 @@ fn docs_refuses_the_full_plan_modifiers_rather_than_discarding_them() {
         );
     }
 
-    // And the three plans that remain legal are untouched: the refusal
+    // And the four plans that remain legal are untouched: the refusal
     // must not be a blanket rejection of the modifiers.
     for args in [
         vec!["--docs", "--print-plan-named"],
@@ -2124,6 +2124,56 @@ fn docs_refuses_the_full_plan_modifiers_rather_than_discarding_them() {
         assert_eq!(code, Some(0), "{args:?} must still succeed; stderr:\n{err}");
         assert!(!plan.is_empty(), "{args:?} must still print its plan");
     }
+}
+
+/// A run writes the invocation it was asked for into its log directory,
+/// one argument per line with the script first, so a recorded green can
+/// be audited afterwards for WHICH plan it validated. `plan.txt` says
+/// what ran; before this nothing said what was asked, and the two
+/// differed silently: `--docs` and the once-accepted `--protocol --docs`
+/// produced byte-identical four-line plans, so a green recorded against
+/// the wrong spelling could not be told from one recorded against the
+/// right one.
+#[test]
+fn the_log_directory_records_the_invocation_verbatim() {
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
+    let (_out, err, _ok) = run(root.path(), &["--self-test"]);
+    let logdir = Path::new(
+        err.lines()
+            .find_map(|l| l.split_once("log: ").map(|(_, p)| p.trim()))
+            .unwrap_or_else(|| panic!("expected a log path; stderr:\n{err}")),
+    )
+    .parent()
+    .expect("log directory")
+    .to_path_buf();
+    let argv = std::fs::read_to_string(logdir.join("argv.txt")).unwrap_or_else(|e| {
+        panic!(
+            "argv.txt must be written beside plan.txt in {}: {e}",
+            logdir.display()
+        )
+    });
+    let lines: Vec<&str> = argv.lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "one line per argument with the script first; was:\n{argv}"
+    );
+    assert!(
+        lines[0].ends_with("scripts/gate"),
+        "the first line names the script as invoked; was {}",
+        lines[0]
+    );
+    assert_eq!(
+        lines[1], "--self-test",
+        "the argument as given; was:\n{argv}"
+    );
+    assert!(
+        logdir.join("plan.txt").is_file(),
+        "and plan.txt sits beside it, so what ran and what was asked can be compared"
+    );
 }
 
 // --- Derivation, marker, canonical paths --------------------------------
