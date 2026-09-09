@@ -479,6 +479,20 @@ impl std::fmt::Display for GpuInitError {
 /// `LineWrapFacts`), each of which took a wire phase, and E2 is not
 /// one. The `ui.caret` face is the registered half: its fg is the
 /// caret's color, relayed through `ThemeFacts`.
+///
+/// **"Only through a typed wire variant" overstates it, and the
+/// alternative is named here so it is rejected rather than omitted.**
+/// E2.1 gave this crate a second channel to the user's config
+/// directory: `pmacs-gpu/src/geometry.rs` duplicates the core's
+/// `resolve_config_dir` and reads and writes a file there. A blink
+/// interval could physically travel that way. It must not --- an
+/// unversioned side file is a second configuration path for a knob
+/// `pmacs.config` already owns, it is read once at startup so a session
+/// runs stale, and it is exactly the off-path hardcode the roadmap's
+/// "no new dispatch shadow" rule points away from. The accurate claim
+/// is that no *supported* channel exists for a GPU preference outside a
+/// typed wire variant, and E2 is not a wire phase. Owed to the next
+/// phase that carries GPU preferences over the wire.
 const CARET_BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 /// The caret's alpha while the window is unfocused (E2.6): steady and
 /// dimmed, so a background window shows where its point is without
