@@ -35,11 +35,15 @@ Always true:
   the lint stage no plan this harness prints denies warnings outside
   the default feature set, and a `cfg(feature = "crdt")` seam grew a
   warning that only CI could see; the stage is CI's own `Lint (luajit)`
-  second step, verbatim:
+  second step, verbatim, and the two lines below are pinned as exactly
+  what the flag adds (`tests/docs_consistency.rs`), so this sentence
+  cannot again describe a variant the script does not run:
+  <!-- gate-plan-protocol:begin -->
   ```
   cargo clippy --workspace --all-targets --no-default-features --features luajit -- -D warnings
   PMACS_REQUIRE_GPU=1 cargo test --workspace --no-default-features --features luajit --no-fail-fast -- --skip basedpyright
   ```
+  <!-- gate-plan-protocol:end -->
   `--perf` adds the wall-clock budgets; `--docs` runs fmt, doc, the
   documentation-consistency test and diff-check. Every
   `PMACS_REQUIRE_*` variable whose tool is installed is armed, and the

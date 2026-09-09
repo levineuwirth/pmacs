@@ -9,8 +9,12 @@
 //! 2. README prose outside that block carries no protocol version and
 //!    no count about the tree; numbers about the tree live in the block,
 //!    where they are derived.
-//! 3. `CLAUDE.md` and `AGENTS.md` are identical, and the gate stages
-//!    they list are a prefix of `scripts/gate --print-plan`.
+//! 3. `CLAUDE.md` and `AGENTS.md` are identical; the gate stages they
+//!    list are a prefix of `scripts/gate --print-plan`; and the
+//!    commands they attribute to `--protocol` are exactly what that
+//!    flag adds to it. The prefix alone cannot see a stage inserted
+//!    mid-plan, which is how the prose came to describe one added
+//!    stage after the script grew two.
 //! 4. No archived path is referenced from `CLAUDE.md`, `scripts/`,
 //!    `tests/` or `.github/`: history is not instruction.
 //! 5. `docs/invariants.md` stays under its 300-line cap, and the
@@ -115,25 +119,30 @@ fn claude_md_and_agents_md_are_identical() {
     );
 }
 
-/// The stages CLAUDE.md lists between its gate-plan markers are a prefix
-/// of `scripts/gate --print-plan`, line for line, so the instruction
-/// file cannot describe a gate the script does not run.
-#[test]
-fn claude_md_gate_stages_are_a_prefix_of_the_printed_plan() {
-    let claude = read("CLAUDE.md");
-    let begin = claude
-        .find("<!-- gate-plan:begin -->")
-        .expect("CLAUDE.md has a gate-plan:begin marker");
-    let end = claude
-        .find("<!-- gate-plan:end -->")
-        .expect("CLAUDE.md has a gate-plan:end marker");
-    let listed: Vec<String> = claude[begin..end]
+/// The commands between one pair of `<!-- name:begin -->` /
+/// `<!-- name:end -->` markers, fence and indentation stripped.
+fn marked_commands(doc: &str, marker: &str) -> Vec<String> {
+    let begin = doc
+        .find(&format!("<!-- {marker}:begin -->"))
+        .unwrap_or_else(|| panic!("CLAUDE.md has a {marker}:begin marker"));
+    let end = doc
+        .find(&format!("<!-- {marker}:end -->"))
+        .unwrap_or_else(|| panic!("CLAUDE.md has a {marker}:end marker"));
+    doc[begin..end]
         .lines()
         .skip(1)
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with("```"))
         .map(str::to_owned)
-        .collect();
+        .collect()
+}
+
+/// The stages CLAUDE.md lists between its gate-plan markers are a prefix
+/// of `scripts/gate --print-plan`, line for line, so the instruction
+/// file cannot describe a gate the script does not run.
+#[test]
+fn claude_md_gate_stages_are_a_prefix_of_the_printed_plan() {
+    let listed = marked_commands(&read("CLAUDE.md"), "gate-plan");
     assert!(!listed.is_empty(), "CLAUDE.md lists at least one stage");
     let plan = run_script("scripts/gate", &["--print-plan"]);
     let printed: Vec<&str> = plan.lines().collect();
@@ -143,6 +152,41 @@ fn claude_md_gate_stages_are_a_prefix_of_the_printed_plan() {
          CLAUDE.md lists:\n  {}\nthe script prints:\n  {}",
         listed.join("\n  "),
         printed.join("\n  ")
+    );
+}
+
+/// The commands CLAUDE.md attributes to `--protocol` are **exactly** the
+/// lines that flag adds to the printed plan.
+///
+/// The default block is pinned as a *prefix*, which by construction
+/// cannot see a stage inserted into the middle of the plan: when
+/// `--protocol` grew `clippy-luajit` (`16fddd4`) the prefix pin stayed
+/// green while this file's prose still described the flag as adding one
+/// stage, the sweep. So this one is an equality and it bites in both
+/// directions --- a stage dropped from the script fails it as loudly as
+/// a command retyped here.
+#[test]
+fn claude_md_protocol_commands_are_exactly_what_the_flag_adds() {
+    let listed = marked_commands(&read("CLAUDE.md"), "gate-plan-protocol");
+    assert!(
+        !listed.is_empty(),
+        "CLAUDE.md lists at least one --protocol command"
+    );
+    let default = run_script("scripts/gate", &["--print-plan"]);
+    let protocol = run_script("scripts/gate", &["--protocol", "--print-plan"]);
+    let added: Vec<String> = protocol
+        .lines()
+        .filter(|line| !default.lines().any(|d| d == *line))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        added,
+        listed,
+        "CLAUDE.md's `--protocol` commands must be exactly the lines that flag \
+         adds to `scripts/gate --print-plan`.\n\
+         CLAUDE.md lists:\n  {}\nthe flag adds:\n  {}",
+        listed.join("\n  "),
+        added.join("\n  ")
     );
 }
 
