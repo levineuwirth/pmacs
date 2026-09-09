@@ -1728,16 +1728,15 @@ fn protocol_adds_the_luajit_clippy_and_the_luajit_sweep_and_nothing_else() {
 /// `--protocol` plan then had a `luajit` sweep and no `luajit` lint.
 #[test]
 fn every_feature_set_the_plan_sweeps_is_also_linted_with_denied_warnings() {
-    let root = tempfile::Builder::new()
-        .prefix("g-")
-        .tempdir_in(short_root_base())
-        .expect("tempdir");
-
     /// A command's feature configuration, canonicalized so a clippy line
     /// and a sweep line that build the same code compare equal. Token
     /// based rather than substring based: the two commands differ in
     /// every other flag, and `--no-fail-fast` sits between `--features`
     /// and the `--` in one of them but not the other.
+    ///
+    /// Declared before the first statement, which
+    /// `clippy::items_after_statements` requires and which is the same
+    /// placement rule the gated-test helpers in `tests/` follow.
     fn feature_set(line: &str) -> String {
         let mut toks = line.split_whitespace();
         let mut no_default = false;
@@ -1751,6 +1750,11 @@ fn every_feature_set_the_plan_sweeps_is_also_linted_with_denied_warnings() {
         }
         format!("no_default={no_default} features={features}")
     }
+
+    let root = tempfile::Builder::new()
+        .prefix("g-")
+        .tempdir_in(short_root_base())
+        .expect("tempdir");
 
     for flags in [vec!["--print-plan"], vec!["--protocol", "--print-plan"]] {
         let (plan, err, ok) = run(root.path(), &flags);
