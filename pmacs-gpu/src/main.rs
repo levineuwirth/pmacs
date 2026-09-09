@@ -2629,6 +2629,49 @@ impl WheelTarget {
             Self::PanelChrome => None,
         }
     }
+
+    /// Whether **this frontend** applies the scroll, rather than the
+    /// daemon (E3.4).
+    ///
+    /// This is the one fact that decides the vertical bank's unit, and
+    /// it is a property of the target rather than of the gesture: a
+    /// locally scrolled target banks in lines, because the step is
+    /// applied here and a line is a unit a precise-pixel device can
+    /// deliver; a daemon-scrolled one banks in notches, because the
+    /// receiver applies its own `SCROLL_LINES` and banking lines here
+    /// would apply the step twice.
+    ///
+    /// `PanelChrome` never reaches this — it is consumed before the
+    /// bank — and answers `false` as the safe side of the split.
+    const fn scrolls_locally(self) -> bool {
+        matches!(self, Self::Minimap | Self::Document | Self::Chrome)
+    }
+}
+
+/// Vertical wheel motion in **lines** (E3.4).
+///
+/// A discrete notch is [`WHEEL_LINES_PER_TICK`] lines by definition, so
+/// a mouse wheel is unchanged by this conversion. A precise-pixel
+/// device contributes one line per `line_px` of *logical* travel, which
+/// is the whole of the row: measured in notches, its remainder could
+/// never be smaller than three lines, so the smallest scroll a trackpad
+/// could produce was a three-line jump after banking three lines' worth
+/// of pixels.
+///
+/// `line_px` is logical and the delta is physical (E2.2), hence the
+/// division by `scale`. A non-positive `line_px` yields zero rather
+/// than an infinity that would bank a nonsense tick.
+fn wheel_dy_lines(delta: MouseScrollDelta, scale: f32, line_px: f32) -> f32 {
+    match delta {
+        MouseScrollDelta::LineDelta(_, y) => -y * WHEEL_LINES_PER_TICK,
+        MouseScrollDelta::PixelDelta(p) => {
+            if line_px > 0.0 && scale > 0.0 {
+                -(p.y as f32) / scale / line_px
+            } else {
+                0.0
+            }
+        }
+    }
 }
 
 /// B1's per-owner, per-axis fractional wheel residual.
@@ -4116,7 +4159,7 @@ impl App {
             }
             return;
         }
-        let (dx, dy) = match delta {
+        let (dx, dy_notches) = match delta {
             winit::event::MouseScrollDelta::LineDelta(x, y) => (x, -y),
             // A pixel delta is physical (E2.2); the notch is logical.
             winit::event::MouseScrollDelta::PixelDelta(p) => (
@@ -4132,6 +4175,9 @@ impl App {
                 },
             ),
         };
+        // E3.4 — the same motion measured in LINES, for the targets
+        // this frontend scrolls itself.
+        let dy_lines = wheel_dy_lines(delta, state.scale, state.fm.code_line_height());
         // No pointer position yet — a wheel before the first cursor
         // motion. The document is the target, which is what this path
         // did before 1b; dropping the input instead would be a
@@ -4139,6 +4185,21 @@ impl App {
         let (target, x, y) = match state.pointer_pos {
             Some((x, y)) => (self.classify_wheel_target(x, y), x, y),
             None => (WheelTarget::Document, 0.0, 0.0),
+        };
+        // **The vertical unit is the target's, and this is where it is
+        // chosen (E3.4).** A panel or a terminal is scrolled by the
+        // *daemon*, which applies its own per-notch `SCROLL_LINES`, so
+        // those banks must stay in notches or the step is applied
+        // twice. The document, minimap and chrome are scrolled here, so
+        // their bank is in lines — and a line is a unit a precise-pixel
+        // device can actually deliver, where a three-line notch is not.
+        // Before this row every target banked notches, so a trackpad
+        // had to travel three lines' worth of pixels before the
+        // document moved at all, and then moved three lines at once.
+        let dy = if target.scrolls_locally() {
+            dy_lines
+        } else {
+            dy_notches
         };
 
         // The band owns the pixel: consume both axes and bank nothing.
@@ -4174,10 +4235,16 @@ impl App {
                 }
             }
             WheelTarget::Minimap | WheelTarget::Document | WheelTarget::Chrome => {
-                // The local step, applied exactly once: notches become
-                // lines here and nowhere else.
+                // E3.4 — `ticks_y` is ALREADY lines for these targets
+                // (see the unit choice above), so there is no step to
+                // apply here. The multiplication that used to live on
+                // this line moved into `wheel_dy_lines`, where a notch
+                // becomes three lines *before* banking rather than
+                // after — which is the whole of this row, because a
+                // remainder kept in notches can never be smaller than
+                // three lines.
                 if ticks_y != 0 {
-                    let lines = ticks_y * WHEEL_LINES_PER_TICK as i64;
+                    let lines = ticks_y;
                     let vp = self
                         .state
                         .as_mut()
@@ -5976,6 +6043,142 @@ mod input_routing_tests {
         );
     }
 
+    /// A precise-pixel wheel event: `PixelDelta`, the shape a trackpad
+    /// sends, in **physical** pixels. Positive `up_px` scrolls up, like
+    /// [`wheel`]'s argument.
+    fn pixel_wheel(up_px: f64) -> WindowEvent {
+        WindowEvent::MouseWheel {
+            device_id: DeviceId::dummy(),
+            delta: MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, up_px)),
+            phase: TouchPhase::Moved,
+        }
+    }
+
+    /// E3.4 — **a precise-pixel device scrolls by a line.**
+    ///
+    /// One line-height of trackpad travel moves the document one line.
+    /// Before this row the bank was in notches, so that same travel was
+    /// a third of a step and produced *nothing*; three line-heights
+    /// then produced a three-line jump. The row asserts both halves of
+    /// that: the single line fires, and the sub-line remainder banks
+    /// rather than being discarded or spent early.
+    ///
+    /// *Mutation: give `WheelTarget::Document` the notch unit by making
+    /// `scrolls_locally` return `false` for it → the one-line step
+    /// scrolls nothing and this row fails at its first assertion.*
+    #[test]
+    fn e3_4_a_precise_pixel_device_scrolls_by_a_single_line() {
+        let mut h = EffectHarness::new();
+        let document = document_probe(&h);
+        move_pointer(&mut h, document);
+        assert_eq!(
+            h.app.classify_wheel_target(document.0, document.1),
+            WheelTarget::Document,
+            "setup: document text"
+        );
+        let (line_px, scale) = {
+            let state = h.app.state.as_ref().expect("harness state");
+            (
+                f64::from(state.fm.code_line_height()),
+                f64::from(state.scale),
+            )
+        };
+
+        // Exactly one line of travel, downward.
+        let step = h.feed(&pixel_wheel(-line_px * scale));
+        assert_eq!(
+            step.local,
+            vec![LocalEffect::Scroll { top: 1 }],
+            "one line-height of trackpad travel is one line of scroll, \
+             where a notch-banked frontend would still be waiting"
+        );
+
+        // A third of a line banks and does nothing; three of them make
+        // the next line. Nothing is discarded and nothing is spent
+        // early.
+        let third = -line_px * scale / 3.0;
+        for i in 0..2 {
+            let step = h.feed(&pixel_wheel(third));
+            assert!(
+                step.local.is_empty(),
+                "a sub-line remainder banks rather than scrolling (feed {i}): {:?}",
+                step.local
+            );
+        }
+        let step = h.feed(&pixel_wheel(third));
+        assert_eq!(
+            step.local,
+            vec![LocalEffect::Scroll { top: 2 }],
+            "and the third completes the line the first two began"
+        );
+    }
+
+    /// E3.4 changes the **unit**, not the mouse wheel: one discrete
+    /// notch is still [`WHEEL_LINES_PER_TICK`] lines.
+    ///
+    /// The conversion moved from after the bank to before it, and this
+    /// row is what says the move was unit-preserving for the device
+    /// that reports in notches.
+    ///
+    /// *Mutation: drop the `* WHEEL_LINES_PER_TICK` from
+    /// `wheel_dy_lines`'s `LineDelta` arm → a notch scrolls one line
+    /// and this row fails.*
+    #[test]
+    fn e3_4_a_discrete_notch_still_scrolls_three_lines() {
+        let mut h = EffectHarness::new();
+        let document = document_probe(&h);
+        move_pointer(&mut h, document);
+        let step = h.feed(&wheel(0.0, 1.0));
+        assert_eq!(
+            step.local,
+            vec![LocalEffect::Scroll {
+                top: WHEEL_LINES_PER_TICK as usize
+            }],
+            "a whole notch is unchanged by E3.4"
+        );
+        assert!(
+            (wheel_dy_lines(
+                MouseScrollDelta::LineDelta(0.0, -1.0),
+                1.0,
+                BASE_CODE_LINE_HEIGHT
+            ) - WHEEL_LINES_PER_TICK)
+                .abs()
+                < f32::EPSILON,
+            "and the conversion says so directly"
+        );
+    }
+
+    /// The unit split itself, enumerated: **only the targets this
+    /// frontend scrolls bank in lines.**
+    ///
+    /// A panel or a terminal is scrolled by the daemon, which applies
+    /// its own `SCROLL_LINES` per notch, so banking lines for those
+    /// would apply the step twice — one notch would move a panel nine
+    /// lines. That failure is already caught end to end by the panel
+    /// wheel rows, which drive fractional input through to the panel's
+    /// own viewport; this row pins the decision those rows depend on,
+    /// so a reader can see the split without reconstructing it.
+    #[test]
+    fn e3_4_only_locally_scrolled_targets_bank_in_lines() {
+        let buffer = BufferId::next();
+        let coord = pmacs_protocol::cell::CellCoord { row: 0, col: 0 };
+        assert!(WheelTarget::Document.scrolls_locally());
+        assert!(WheelTarget::Minimap.scrolls_locally());
+        assert!(WheelTarget::Chrome.scrolls_locally());
+        assert!(
+            !WheelTarget::PanelCell { buffer, coord }.scrolls_locally(),
+            "the daemon scrolls a panel and applies its own per-notch step"
+        );
+        assert!(
+            !WheelTarget::Terminal { buffer, coord }.scrolls_locally(),
+            "and a terminal"
+        );
+        assert!(
+            !WheelTarget::PanelChrome.scrolls_locally(),
+            "panel chrome banks nothing at all; false is the safe side"
+        );
+    }
+
     /// A pixel inside the minimap band, and one inside the document
     /// text. Both are asserted by their rows before use, so a fixture
     /// whose geometry drifts fails loudly instead of quietly measuring
@@ -6008,6 +6211,23 @@ mod input_routing_tests {
             phase: TouchPhase::Moved,
         }
     }
+
+    /// A vertical wheel delta that is **more than half and less than
+    /// all** of one local scroll step, for the banking rows below.
+    ///
+    /// `wheel`'s argument is notches, which is what a `LineDelta`
+    /// means. E3.4 made the locally scrolled targets — document,
+    /// minimap and chrome — bank in **lines**, so "not yet a step" is
+    /// now a fraction of one line rather than of a three-line notch,
+    /// and 0.6 of a line is 0.2 of a notch. Those rows are about
+    /// *banking* and are untouched by the unit; only the magnitude that
+    /// means "not yet" moved, and two of these still complete exactly
+    /// one step, which is what keeps each row's second half honest.
+    const PART_STEP: f32 = 0.6 / WHEEL_LINES_PER_TICK;
+
+    /// What one completed local step now scrolls: one line, where
+    /// before E3.4 the smallest possible scroll was a whole notch.
+    const ONE_STEP_LINES: usize = 1;
 
     /// B6 — a wheel over the **minimap** scrolls the **document
     /// viewport**, the same effect a wheel over the text has.
@@ -6214,17 +6434,17 @@ mod input_routing_tests {
             "setup: document text"
         );
 
-        let step = h.feed(&wheel(0.0, 0.6));
+        let step = h.feed(&wheel(0.0, PART_STEP));
         assert!(
             step.local.is_empty(),
-            "setup: 0.6 of a notch banks and does nothing yet: {:?}",
+            "setup: 0.6 of a line banks and does nothing yet: {:?}",
             step.local
         );
 
         replace_the_buffer(&mut h);
         move_pointer(&mut h, document);
 
-        let step = h.feed(&wheel(0.0, 0.6));
+        let step = h.feed(&wheel(0.0, PART_STEP));
         assert!(
             step.local.is_empty(),
             "the successor starts from zero: a notch begun in the \
@@ -6234,13 +6454,14 @@ mod input_routing_tests {
 
         // And the successor's own bank still works, so the row is not
         // passing by having broken accumulation outright.
-        let step = h.feed(&wheel(0.0, 0.6));
+        let step = h.feed(&wheel(0.0, PART_STEP));
         assert_eq!(
             step.local,
             vec![LocalEffect::Scroll {
-                top: WHEEL_LINES_PER_TICK as usize
+                top: ONE_STEP_LINES
             }],
-            "0.6 + 0.6 within the successor is one notch"
+            "0.6 + 0.6 within the successor is one LINE, which is E3.4's \
+             smallest scroll; before it, the smallest was three"
         );
     }
 
@@ -6266,10 +6487,10 @@ mod input_routing_tests {
             "setup: the minimap band"
         );
 
-        let step = h.feed(&wheel(0.0, 0.6));
+        let step = h.feed(&wheel(0.0, PART_STEP));
         assert!(
             step.local.is_empty(),
-            "setup: 0.6 banks and does nothing yet: {:?}",
+            "setup: 0.6 of a line banks and does nothing yet: {:?}",
             step.local
         );
 
@@ -6282,7 +6503,7 @@ mod input_routing_tests {
             "setup: still the minimap after the replacement"
         );
 
-        let step = h.feed(&wheel(0.0, 0.6));
+        let step = h.feed(&wheel(0.0, PART_STEP));
         assert!(
             step.local.is_empty(),
             "the minimap's bank starts from zero in the successor too, \
@@ -6293,13 +6514,13 @@ mod input_routing_tests {
         // And the successor's minimap bank still accumulates, so this
         // row cannot pass by the accumulator simply being broken —
         // which every "nothing happened" assertion above would accept.
-        let step = h.feed(&wheel(0.0, 0.6));
+        let step = h.feed(&wheel(0.0, PART_STEP));
         assert_eq!(
             step.local,
             vec![LocalEffect::Scroll {
-                top: WHEEL_LINES_PER_TICK as usize
+                top: ONE_STEP_LINES
             }],
-            "0.6 + 0.6 over the successor's minimap is one notch of \
+            "0.6 + 0.6 over the successor's minimap is one LINE of \
              DOCUMENT scroll, which is what a minimap wheel moves"
         );
     }
@@ -6332,10 +6553,10 @@ mod input_routing_tests {
             WheelTarget::Minimap,
             "setup: minimap pixel"
         );
-        let step = h.feed(&wheel(0.0, 0.6));
+        let step = h.feed(&wheel(0.0, PART_STEP));
         assert!(
             step.local.is_empty() && step.outbound.is_empty(),
-            "0.6 of a notch is not a notch: {:?} {:?}",
+            "0.6 of a line is not a line: {:?} {:?}",
             step.local,
             step.outbound
         );
@@ -6346,21 +6567,21 @@ mod input_routing_tests {
             WheelTarget::Document,
             "setup: document pixel"
         );
-        let step = h.feed(&wheel(0.0, 0.6));
+        let step = h.feed(&wheel(0.0, PART_STEP));
         assert!(
             step.local.is_empty() && step.outbound.is_empty(),
-            "the minimap's 0.6 must not have been waiting in the \
+            "the minimap's part-line must not have been waiting in the \
              document's bank: {:?} {:?}",
             step.local,
             step.outbound
         );
 
         // The document's own bank still works: 0.6 + 0.6 completes it.
-        let step = h.feed(&wheel(0.0, 0.6));
+        let step = h.feed(&wheel(0.0, PART_STEP));
         assert_eq!(
             step.local,
             vec![LocalEffect::Scroll {
-                top: WHEEL_LINES_PER_TICK as usize
+                top: ONE_STEP_LINES
             }],
             "the document's accumulator must still accumulate, or the \
              step above proves nothing"
