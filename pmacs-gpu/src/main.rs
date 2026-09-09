@@ -688,6 +688,15 @@ const SCROLLBAR_RIGHT: f32 = 3.0;
 const SCROLLBAR_MIN_THUMB_HEIGHT: f32 = 24.0;
 const SCROLLBAR_TRACK_BG: [f32; 4] = [0.10, 0.10, 0.14, 0.55];
 const SCROLLBAR_THUMB_FILL: [f32; 4] = [0.72, 0.72, 0.84, 0.42];
+/// E3.3 — how opaque the own-caret current-line wash is painted, given
+/// the `ui.current-line` face's background color.
+///
+/// The face carries a color and not an alpha (`cell::Style` has none),
+/// and a fully opaque whole-line band would hide the syntax coloring
+/// under it. This matches the alpha the peer-presence wash already uses
+/// for the same shape, so an own line and a peer's line read as the
+/// same kind of mark.
+const CURRENT_LINE_WASH_ALPHA: f32 = 0.22;
 /// Q#M7 — dragging within this many pixels of the text area's top or
 /// bottom edge auto-scrolls toward the pointer.
 const EDGE_SCROLL_BAND: f32 = 24.0;
@@ -14168,6 +14177,7 @@ impl State {
         let slice = &self.current_text[vstart as usize..vend as usize];
         let line_offsets = line_byte_offsets(slice);
         let mut rects = Vec::new();
+        self.collect_own_current_line_rects(&mut rects, &line_offsets, vstart, vend);
         self.collect_own_decoration_rects(&mut rects, &line_offsets, vstart, vend);
         self.collect_peer_rects(buffer_id, &line_offsets, vstart, vend, &mut rects);
         self.collect_gutter_sign_rects(&mut rects, &line_offsets, vstart, vend);
@@ -14228,13 +14238,79 @@ impl State {
         }
     }
 
-    /// Own-window `Selection` washes from `current_decorations`. The
-    /// caret already marks the own cursor, so the own *`CurrentLine`*
-    /// wash is deliberately NOT rendered — a whole-line highlight on
-    /// every cursor line reads as a persistent selection, which is not
-    /// wanted as default editor behavior (revising Q#B4: the caret is
-    /// the own-cursor indicator; the line wash isn't). Peer presence
-    /// still shows other frontends' lines via `collect_peer_rects`.
+    /// E3.3 — the own-caret current-line wash, painted **only** when
+    /// the `ui.current-line` face resolves.
+    ///
+    /// # Why it is synthesized here rather than received
+    ///
+    /// The daemon deliberately emits no `CurrentLine` decoration to a
+    /// semantic frontend: deriving one would force a whole-buffer line
+    /// table on every frame, and this frontend already has `CursorByte`
+    /// and a local line table. So `current_decorations` never carries
+    /// one, and the wash has to be built from the own cursor — which is
+    /// exactly what `collect_peer_rects` already does for *other*
+    /// frontends' lines, using the same `source_line_range`.
+    ///
+    /// # Why a face and not a setting
+    ///
+    /// The gate has to be something the daemon can already tell this
+    /// crate. Every config-derived GPU preference on the wire is its
+    /// own typed variant — `StatusFacts`, `LineNumbers`, `ThemeFacts`,
+    /// `FontFacts`, `LineWrapFacts` — and each took a wire phase; a
+    /// `pmacs.config` Boolean would need a sixth and E3 is not a wire
+    /// phase. A face needs none: it is one more name in the
+    /// `Vec<ThemeFace>` `ThemeFacts` already carries.
+    ///
+    /// # Why absent means off
+    ///
+    /// `ThemeFacts`'s own contract is that a face absent from the table
+    /// is unset and the frontend uses its own default for that surface.
+    /// This surface's default is *not painting*, established when the
+    /// wash was dropped: a whole-line highlight under every caret reads
+    /// as a persistent selection, and the caret is already the
+    /// own-cursor indicator (revising Q#B4). So the face turns the wash
+    /// on and colors it in one act, and a user who sets no face sees
+    /// exactly what they saw before this row.
+    fn collect_own_current_line_rects(
+        &self,
+        rects: &mut Vec<MinimapRect>,
+        line_offsets: &[u64],
+        vstart: u64,
+        vend: u64,
+    ) {
+        let Some(style) = self.faces.get("ui.current-line") else {
+            return;
+        };
+        let Some(color) = cell_color_to_glyphon(style.bg) else {
+            return;
+        };
+        let Some(own) = self.own_cursor else {
+            return;
+        };
+        if self.current_buffer_id != Some(own.buffer_id) {
+            return;
+        }
+        let (lo, hi) = source_line_range(&self.current_text, own.byte);
+        if let Some((lo, hi)) = clip_rebase_range(lo, hi, vstart, vend) {
+            self.push_glyph_extent_rects(
+                rects,
+                line_offsets,
+                lo,
+                hi,
+                glyphon_to_rgba(color, CURRENT_LINE_WASH_ALPHA),
+                None,
+            );
+        }
+    }
+
+    /// Own-window `Selection` washes from `current_decorations`.
+    ///
+    /// `CurrentLine` is skipped here and always has been: the daemon
+    /// sends none to a semantic frontend, so this loop could only ever
+    /// see one from a grid-shaped payload, and E3.3's own wash is
+    /// synthesized by [`Self::collect_own_current_line_rects`] instead.
+    /// Peer presence still shows other frontends' lines via
+    /// `collect_peer_rects`.
     fn collect_own_decoration_rects(
         &self,
         rects: &mut Vec<MinimapRect>,
@@ -20592,6 +20668,94 @@ mod tests {
         // Nothing blinks without a caret, or in terminal mode.
         state.own_cursor = None;
         assert_eq!(state.next_caret_blink(later), None);
+    }
+
+    /// E3.3 — **the own-caret current-line wash appears only when the
+    /// `ui.current-line` face is set**, and it is on the caret's line.
+    ///
+    /// The two halves are one row on purpose. A wash that painted
+    /// unconditionally would be the behavior Q#B4 was revised to
+    /// remove, and a face that changed nothing would be a knob one
+    /// frontend ignores — which is the defect this row was
+    /// re-specified to avoid. Absent-means-off is `ThemeFacts`'s own
+    /// contract read at this surface: the frontend's default here is
+    /// not painting.
+    ///
+    /// *Mutation: delete the `self.faces.get("ui.current-line")?` guard
+    /// → the unthemed leg fails. Delete the `own.byte` line lookup and
+    /// wash the whole slice → the line-only leg fails.*
+    #[test]
+    fn e3_3_the_current_line_wash_is_off_until_the_face_is_set() {
+        let doc = "alpha\nbravo\ncharlie\ndelta\n";
+        let Some(mut state) = headless_or_skip(320, 240, doc) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        // The caret sits on "bravo", bytes [6, 12).
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 8,
+        });
+
+        let unthemed = state.decoration_background_vertex_bytes();
+        assert!(
+            unthemed.is_empty(),
+            "with no ui.current-line face this frontend paints exactly \
+             what it painted before E3.3: nothing"
+        );
+
+        let _ = state.apply_attach_message(InstanceMessage::ThemeFacts {
+            faces: vec![theme_face(
+                "ui.current-line",
+                CellStyle {
+                    bg: CellColor::Rgb(40, 60, 90),
+                    ..CellStyle::default()
+                },
+            )],
+        });
+        let themed = state.decoration_background_vertex_bytes();
+        assert!(
+            !themed.is_empty(),
+            "setting the face turns the wash on: it is the control, not \
+             only the color"
+        );
+
+        // On the caret's line and nowhere else: moving the caret to
+        // another line must change what is painted.
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 20,
+        });
+        let moved = state.decoration_background_vertex_bytes();
+        assert!(
+            !moved.is_empty() && moved != themed,
+            "the wash follows the caret rather than washing the buffer"
+        );
+
+        // A cursor in another buffer washes nothing here.
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: BufferId::next(),
+            byte: 8,
+        });
+        assert!(
+            state.decoration_background_vertex_bytes().is_empty(),
+            "a cursor in a buffer this window is not showing paints no \
+             wash in the one it is"
+        );
+
+        // And clearing the face turns it back off, so the control is
+        // live rather than latched at attach.
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 8,
+        });
+        let _ = state.apply_attach_message(InstanceMessage::ThemeFacts { faces: Vec::new() });
+        assert!(
+            state.decoration_background_vertex_bytes().is_empty(),
+            "an empty ThemeFacts table unsets the face and the wash goes \
+             with it"
+        );
     }
 
     /// E2.4 — each surface-creation failure is one line naming what

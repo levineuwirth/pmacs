@@ -69,3 +69,32 @@ whole. Under one cap a growing register squeezes the rules.
   chords bind on GPU frontends only, the grid frontend keeps its
   terminal's zoom, and the Cmd table becomes a frontend-scoped binding
   the keymap can see and `describe-key` can name.
+- **Vertical scrollbar (E3.1).** The GPU frontend paints a track and
+  thumb in its right gutter, draggable, with a press on bare track
+  paging one screenful toward it; the grid frontend has none, and
+  gets none, because a terminal's scrollbar is the terminal
+  emulator's and a second one painted in cells would compete with
+  it. The two frontends therefore disagree about what a document
+  taller than the window looks like: the GPU shows how far down it
+  is and where, the grid says so only in the mode line's `Top` /
+  `Bot` / percentage readout, which is the same fact at a coarser
+  resolution rather than a missing one. Removed when the grid
+  frontend gains a cell-drawn scroll indicator, or when the mode
+  line's readout is ruled sufficient and this entry becomes a
+  statement of intent rather than a shortfall.
+- **Own-caret current-line wash (E3.3).** Under a set
+  `ui.current-line` face the GPU frontend washes the line its own
+  caret is on; the grid frontend does not, and neither does the
+  daemon's semantic projection, which deliberately emits no
+  `CurrentLine` decoration because deriving one would force a
+  whole-buffer line table on every frame. So the face is honored by
+  one frontend and inert in the other, and a user who sets it in
+  `init.lua` sees it only in the GUI. The face was chosen over a
+  `pmacs.config` setting precisely because it is the channel that
+  exists: every config-derived GPU preference on the wire is its own
+  typed variant and each took a wire phase, while a face is one more
+  name in a `Vec<ThemeFace>` an existing variant already carries.
+  Peer presence is unaffected and already washes other frontends'
+  lines on both. Removed when the grid frontend paints the same wash
+  from the same face, which needs no wire work — only a decoration
+  the grid renderer synthesizes locally, as this one is.
