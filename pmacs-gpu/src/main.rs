@@ -391,6 +391,87 @@ fn probe_mono_advance(font_system: &mut FontSystem, family: &str, metrics: Metri
     (total_width > 0.0 && cells > 0.0).then_some(total_width / cells)
 }
 
+/// What can fail between "the event loop is up" and "there is a
+/// surface to draw on" (E2.4). Each was a panic; each is now one
+/// actionable line on stderr and a non-zero exit, because a missing
+/// adapter on a headless box or a broken driver is a condition the
+/// user can act on and a backtrace is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GpuInitStage {
+    /// The windowing system refused a window.
+    Window,
+    /// wgpu could not wrap the window in a surface.
+    Surface,
+    /// No adapter accepted the surface.
+    Adapter,
+    /// The adapter refused a device.
+    Device,
+}
+
+impl GpuInitStage {
+    /// What failed, as the line's subject.
+    fn what(self) -> &'static str {
+        match self {
+            Self::Window => "could not create a window",
+            Self::Surface => "could not create a rendering surface for the window",
+            Self::Adapter => "no GPU adapter accepted the window's surface",
+            Self::Device => "the GPU adapter refused a device",
+        }
+    }
+
+    /// What to try, as the line's tail.
+    fn hint(self) -> &'static str {
+        match self {
+            Self::Window => "is a display (Wayland or X11) available to this process?",
+            Self::Surface => {
+                "the windowing system and the GPU backend disagree; try WGPU_BACKEND=gl or WGPU_BACKEND=vulkan"
+            }
+            Self::Adapter => {
+                "pmacs-gpu needs Vulkan, Metal or GL; `pmacs` without --gpu is the terminal frontend"
+            }
+            Self::Device => {
+                "the driver may be broken or out of memory; try another adapter with WGPU_ADAPTER_NAME"
+            }
+        }
+    }
+}
+
+/// A surface-creation failure (E2.4): the stage and the underlying
+/// error's own text. The typed errors are not kept because none of
+/// them is constructible outside its crate, and a line is what the
+/// user gets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GpuInitError {
+    stage: GpuInitStage,
+    detail: String,
+}
+
+impl GpuInitError {
+    /// The process exit status for this failure: distinct from the
+    /// headless probe's `3` for "no adapter" so the two are never
+    /// confused in a log, and from `1`, which managed attach uses.
+    const EXIT_CODE: i32 = 4;
+
+    fn at(stage: GpuInitStage, error: &dyn std::fmt::Display) -> Self {
+        Self {
+            stage,
+            detail: error.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for GpuInitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: {}; {}",
+            self.stage.what(),
+            self.detail.replace('\n', " "),
+            self.stage.hint()
+        )
+    }
+}
+
 /// A bell is a whole-client flash for this long (E2.3): visible, and
 /// over before the next keystroke.
 const BELL_FLASH: std::time::Duration = std::time::Duration::from_millis(120);
@@ -793,10 +874,14 @@ fn main() {
         geometry,
         geometry_path,
         geometry_dirty_since: None,
+        exit_code: 0,
     };
     event_loop
         .run_app(&mut app)
         .expect("winit event loop run_app");
+    if app.exit_code != 0 {
+        std::process::exit(app.exit_code);
+    }
 }
 
 /// Drive a real attach session headlessly and write a probe report.
@@ -1751,6 +1836,10 @@ struct App {
     /// When the geometry last changed without having been written since;
     /// the deadline pump writes it [`GEOMETRY_SAVE_DELAY`] later.
     geometry_dirty_since: Option<std::time::Instant>,
+    /// The status `main` exits with after the loop ends (E2.4): zero
+    /// unless surface creation failed, in which case the failure was
+    /// printed and the loop was asked to exit.
+    exit_code: i32,
 }
 
 fn defer_app_event(
@@ -4613,6 +4702,7 @@ impl EffectHarness {
                 geometry: geometry::WindowGeometry::default(),
                 geometry_path: None,
                 geometry_dirty_since: None,
+                exit_code: 0,
             },
             daemon,
             sentinel_seq: 0,
@@ -6366,7 +6456,17 @@ impl ApplicationHandler<AppEvent> for App {
         if self.state.is_some() {
             return;
         }
-        self.state = Some(State::new(event_loop, CONNECTING_TEXT, self.geometry));
+        // E2.4 — a surface that cannot be made is one line and an exit,
+        // not a panic: the line says what failed and what to try.
+        match State::new(event_loop, CONNECTING_TEXT, self.geometry) {
+            Ok(state) => self.state = Some(state),
+            Err(error) => {
+                eprintln!("pmacs-gpu: {error}");
+                self.exit_code = GpuInitError::EXIT_CODE;
+                event_loop.exit();
+                return;
+            }
+        }
         if let Some(client) = self.attach_client.as_ref()
             && let Some(state) = self.state.as_mut()
         {
@@ -6875,7 +6975,7 @@ impl State {
         event_loop: &ActiveEventLoop,
         initial_text: &str,
         geometry: geometry::WindowGeometry,
-    ) -> Self {
+    ) -> Result<Self, GpuInitError> {
         // E2.1 — the stored geometry is LOGICAL, and winit converts it at
         // creation with the scale of the display the window lands on,
         // which is what makes a size saved on a 2× monitor open at the
@@ -6890,25 +6990,29 @@ impl State {
             attributes = attributes
                 .with_position(winit::dpi::LogicalPosition::new(f64::from(x), f64::from(y)));
         }
-        let window = Arc::new(event_loop.create_window(attributes).expect("create window"));
+        let window = Arc::new(
+            event_loop
+                .create_window(attributes)
+                .map_err(|e| GpuInitError::at(GpuInitStage::Window, &e))?,
+        );
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance
             .create_surface(window.clone())
-            .expect("create surface");
+            .map_err(|e| GpuInitError::at(GpuInitStage::Surface, &e))?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
         }))
-        .expect("request_adapter");
+        .map_err(|e| GpuInitError::at(GpuInitStage::Adapter, &e))?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("pmacs-gpu device"),
             required_features: wgpu::Features::empty(),
             required_limits: wgpu::Limits::default(),
             ..wgpu::DeviceDescriptor::default()
         }))
-        .expect("request_device");
+        .map_err(|e| GpuInitError::at(GpuInitStage::Device, &e))?;
 
         let inner_size = window.inner_size();
         let surface_caps = surface.get_capabilities(&adapter);
@@ -6942,7 +7046,7 @@ impl State {
             &[],
         );
         state.set_scale_factor(scale);
-        state
+        Ok(state)
     }
 
     /// Build a windowless `State` that renders to an offscreen texture, for
@@ -19116,6 +19220,39 @@ mod tests {
         assert!(
             !state.bell_flash_active(now + BELL_FLASH + std::time::Duration::from_millis(1)),
             "over after {BELL_FLASH:?}"
+        );
+    }
+
+    /// E2.4 — each surface-creation failure is one line naming what
+    /// failed, the driver's own words, and what to try; the exit status
+    /// is its own number.
+    #[test]
+    fn a_surface_failure_is_one_actionable_line() {
+        for stage in [
+            GpuInitStage::Window,
+            GpuInitStage::Surface,
+            GpuInitStage::Adapter,
+            GpuInitStage::Device,
+        ] {
+            let error = GpuInitError::at(stage, &"driver said\nno");
+            let line = error.to_string();
+            assert!(line.starts_with(stage.what()), "{line}");
+            assert!(
+                line.contains("driver said no"),
+                "the detail is folded to one line: {line}"
+            );
+            assert!(line.ends_with(stage.hint()), "{line}");
+            assert!(!line.contains('\n'), "one line: {line:?}");
+        }
+        assert!(
+            GpuInitStage::Adapter.hint().contains("terminal frontend"),
+            "the adapter line points at the frontend that needs no GPU"
+        );
+        assert_eq!(GpuInitError::EXIT_CODE, 4);
+        assert_ne!(
+            GpuInitError::EXIT_CODE,
+            3,
+            "the headless probe's no-adapter status"
         );
     }
 

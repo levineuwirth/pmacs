@@ -158,7 +158,21 @@ pub enum ManagedAttachError {
         daemon_status: Option<String>,
         /// Startup deadline used for this attempt.
         timeout: Duration,
+        /// Where the spawned daemon's stderr was captured (E2.4), so a
+        /// daemon that printed why it could not start can be read.
+        stderr_log: Option<PathBuf>,
     },
+}
+
+/// Where a daemon this frontend spawns writes its stderr (E2.4): beside
+/// the socket, so it lives in the runtime directory the socket already
+/// proved writable and dies with it. Before this the stream went to
+/// `/dev/null`, and a daemon-side attach failure was undiagnosable from
+/// `pmacs --gpu`.
+pub fn daemon_stderr_path(socket_path: &Path) -> PathBuf {
+    let mut name = socket_path.as_os_str().to_os_string();
+    name.push(".stderr");
+    PathBuf::from(name)
 }
 
 impl std::fmt::Display for ManagedAttachError {
@@ -185,6 +199,7 @@ impl std::fmt::Display for ManagedAttachError {
                 connect,
                 daemon_status,
                 timeout,
+                stderr_log,
             } => {
                 write!(
                     f,
@@ -193,6 +208,9 @@ impl std::fmt::Display for ManagedAttachError {
                 )?;
                 if let Some(status) = daemon_status {
                     write!(f, " (spawned daemon {status})")?;
+                }
+                if let Some(log) = stderr_log {
+                    write!(f, "; the daemon's stderr is in {}", log.display())?;
                 }
                 Ok(())
             }
@@ -778,13 +796,20 @@ pub fn connect_managed_with_target_and_sink(
 
 fn spawn_daemon(daemon_executable: &Path, socket_path: &Path) -> io::Result<Child> {
     let mut command = Command::new(daemon_executable);
+    // E2.4 — stderr goes to a file the failure message names. A file
+    // that cannot be created falls back to the null device rather than
+    // refusing the spawn: the daemon matters more than its log.
+    let stderr = match fs::File::create(daemon_stderr_path(socket_path)) {
+        Ok(file) => Stdio::from(file),
+        Err(_) => Stdio::null(),
+    };
     command
         .arg("--daemon")
         .arg("--socket")
         .arg(socket_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(stderr);
     command.process_group(0);
     command.spawn()
 }
@@ -890,6 +915,7 @@ where
                         connect: error,
                         daemon_status,
                         timeout,
+                        stderr_log: Some(daemon_stderr_path(socket_path)),
                     });
                 }
                 thread::sleep(
@@ -1952,6 +1978,7 @@ mod tests {
             connect: io::Error::new(io::ErrorKind::NotFound, "still absent"),
             daemon_status: Some("exit status: 17".to_owned()),
             timeout: Duration::from_millis(1),
+            stderr_log: Some(PathBuf::from("/tmp/unused.sock.stderr")),
         };
         let message = error.to_string();
         assert!(
@@ -1959,5 +1986,56 @@ mod tests {
             "unexpected timeout message: {message}"
         );
         assert!(!message.contains("5 seconds"));
+        // E2.4 — the message names the captured stderr.
+        assert!(
+            message.ends_with("; the daemon's stderr is in /tmp/unused.sock.stderr"),
+            "the failure must name the daemon's stderr file: {message}"
+        );
+    }
+
+    /// E2.4 — a spawned daemon's stderr is captured beside the socket,
+    /// and a startup failure's message names the file, so what the
+    /// daemon printed before dying can be read. The "daemon" here is a
+    /// shell that prints one line and exits, which is exactly the shape
+    /// a real daemon refusing its socket has.
+    #[test]
+    fn a_spawned_daemons_stderr_is_captured_beside_the_socket() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("d.sock");
+        let executable = dir.path().join("fake-daemon");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\necho 'fake daemon: refusing to start' >&2\nexit 7\n",
+        )
+        .expect("write fake daemon");
+        std::fs::set_permissions(
+            &executable,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .expect("chmod");
+        let error = connect_managed_inner(
+            &socket,
+            &executable,
+            |path| UnixStream::connect(path),
+            spawn_daemon,
+            Duration::from_millis(300),
+            Duration::from_millis(20),
+            None,
+            |_| true,
+        )
+        .err()
+        .expect("no daemon listens, so the attach times out");
+        let log = daemon_stderr_path(&socket);
+        let message = error.to_string();
+        assert!(
+            message.contains(&log.display().to_string()),
+            "the failure names the stderr file: {message}"
+        );
+        let captured = std::fs::read_to_string(&log).expect("the stderr file exists");
+        assert_eq!(captured, "fake daemon: refusing to start\n");
+        assert!(
+            matches!(error, ManagedAttachError::StartupTimeout { .. }),
+            "{error:?}"
+        );
     }
 }
