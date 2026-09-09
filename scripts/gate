@@ -21,10 +21,29 @@
 #                   -- --skip basedpyright
 #   diff-check  git diff --check
 #
-# `--protocol` adds `sweep-luajit`, the same sweep under
-# `--no-default-features --features luajit`, after `sweep`. It is required
-# when `pmacs-protocol` changes, because the non-crdt build is a stated,
-# buildable configuration and the default build no longer exercises it.
+# `--protocol` adds TWO stages under `--no-default-features --features
+# luajit`: `clippy-luajit`, after `clippy`, and `sweep-luajit`, the same
+# sweep, after `sweep`. It is required when `pmacs-protocol` changes,
+# because the non-crdt build is a stated, buildable configuration and the
+# default build no longer exercises it.
+#
+# WHY THE LINT STAGE EXISTS, and it is not symmetry. Until 2026-09-09
+# this script set `-D warnings` in exactly ONE stage, `clippy`, and that
+# stage ran under DEFAULT FEATURES. `sweep-luajit` passes no RUSTFLAGS at
+# all, so a warning reachable only without `crdt` was invisible to every
+# plan this script could print --- `--protocol` included. E2 shipped one:
+# `tests/gui_desktop_basics_acceptance.rs` declared a helper at module
+# scope whose only caller was `#[cfg(feature = "crdt")]`, so the opt-out
+# build saw dead code. `cargo test --workspace --no-default-features
+# --features luajit --no-run` FINISHED, with the defect as a warning, and
+# CI's two `-D warnings` legs went red on it at the head. The local
+# harness and CI were different predicates and only CI knew. This stage
+# is CI's own `Lint (luajit)` second step, verbatim, so they are the same
+# predicate again.
+#
+# BEFORE THE SWEEP, NOT BESIDE IT. It sits with the lints, where a
+# minutes-long compile failure is reported in seconds and named as a
+# lint rather than as a sweep.
 #
 # `--perf` adds `perf`, which runs `scripts/perf-budgets`: every
 # wall-clock budget test by exact name, in debug. Budgets are `#[ignore]`
@@ -116,10 +135,12 @@ usage: scripts/gate [--protocol] [--perf] [--print-plan]
        scripts/gate --prune [--force]
        scripts/gate --self-test
 
-  --protocol          the change touches pmacs-protocol; adds the same
-                      workspace sweep under --no-default-features
-                      --features luajit, so the non-crdt build stays a
-                      checked configuration.
+  --protocol          the change touches pmacs-protocol; adds a clippy
+                      stage and the same workspace sweep under
+                      --no-default-features --features luajit, so the
+                      non-crdt build stays a checked configuration and a
+                      warning only that build shows is an error here as
+                      it is on CI.
   --perf              run the wall-clock budgets too: adds a stage that
                       runs scripts/perf-budgets, every #[ignore] budget
                       test by exact name.
@@ -268,6 +289,9 @@ emit_plan() {
         return
     fi
     printf 'clippy\tcargo clippy --workspace --all-targets -- -D warnings\n'
+    if [ "$PROTOCOL" = 1 ]; then
+        printf 'clippy-luajit\tcargo clippy --workspace --all-targets --no-default-features --features luajit -- -D warnings\n'
+    fi
     printf 'doc\tRUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps\n'
     printf 'build\tcargo build --workspace\n'
     printf 'sweep\tPMACS_REQUIRE_GPU=1 cargo test --workspace %s\n' "$SWEEP_TAIL"
@@ -969,7 +993,7 @@ echo "gate: ambient    $AMBIENT"
 # observable, and the exit trap removes this too.
 echo "gate: tmpdir     $GATE_TMPDIR"
 echo "gate: runtime    $GATE_RUNTIME_DIR"
-[ "$PROTOCOL" = 1 ] && echo "gate: protocol   yes (the luajit-only sweep is added)"
+[ "$PROTOCOL" = 1 ] && echo "gate: protocol   yes (the luajit-only clippy and sweep are added)"
 [ "$PERF" = 1 ] && echo "gate: perf       yes (scripts/perf-budgets is added)"
 [ "$DOCS" = 1 ] && echo "gate: docs       yes (fmt, doc, docs-test and diff-check only)"
 if [ "$MODE" = selftest ]; then

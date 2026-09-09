@@ -29,13 +29,24 @@ Always true:
   the build directory, the ambient roots and `TMPDIR`; do not retype its
   stages. Green means every stage's log ends in a zero-failure result
   line; read the logs it names rather than re-running and grepping.
-  `--protocol` adds the same sweep under `--no-default-features
-  --features luajit` and is required when `pmacs-protocol` changes;
+  `--protocol` adds two stages under `--no-default-features --features
+  luajit` --- `clippy-luajit` after `clippy` and `sweep-luajit` after
+  `sweep` --- and is required when `pmacs-protocol` changes. Without
+  the lint stage no plan this harness prints denies warnings outside
+  the default feature set, and a `cfg(feature = "crdt")` seam grew a
+  warning that only CI could see; the stage is CI's own `Lint (luajit)`
+  second step, verbatim:
+  ```
+  cargo clippy --workspace --all-targets --no-default-features --features luajit -- -D warnings
+  PMACS_REQUIRE_GPU=1 cargo test --workspace --no-default-features --features luajit --no-fail-fast -- --skip basedpyright
+  ```
   `--perf` adds the wall-clock budgets; `--docs` runs fmt, doc, the
   documentation-consistency test and diff-check. Every
   `PMACS_REQUIRE_*` variable whose tool is installed is armed, and the
-  arming report names each one that is not. The six stages, each test
-  once, in order:
+  arming report names each one that is not. The six default stages,
+  each test once, in order (the block below is pinned as a prefix of
+  `scripts/gate --print-plan` by `tests/docs_consistency.rs`, so it is
+  the default plan and not the `--protocol` one):
   <!-- gate-plan:begin -->
   ```
   cargo fmt --check
