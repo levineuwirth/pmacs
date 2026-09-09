@@ -116,6 +116,36 @@ previous run, 34369540895 at `e5417f6`, is recorded on the branch in
 nothing on the branch can reach a `Hello` read; the branch is a
 candidate for none of this family and is excluded from none of it.
 
+### Run 34394087819, PR #262 at its closing tip `ab117cb`
+
+**The first record in this file written from `main` about a branch head
+after that head's run had finished.** Under the status quo it could not
+exist: recording it would have moved the tip and started the run that
+replaced it. That is the whole of what the registry-location ruling
+bought, and this section is the demonstration rather than the argument.
+
+| field | value |
+|---|---|
+| run | 34394087819, `pull_request`, one attempt |
+| head | `ab117cb`, C2's closing tip |
+| window | started 2026-09-09T19:16:36Z, completed 19:33:38Z |
+| verdict | 18 jobs: **17 success, 1 skipped, ZERO failures** |
+| the skip | `Docs consistency`, correctly: the push changed code |
+
+**The branch's first fully green head.** Read from the job log rather
+than the verdict line: in the whole **5,571-line** `Test (macos-latest
+/ luajit)` job (102609387017), `WouldBlock` appears **zero** times,
+there is no `test result: FAILED` against **123** `test result: ok`,
+and **#258's own selector ran on the leg it fails on and passed** ---
+`a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join ... ok`.
+
+**By the rerun rule above this is non-reproduction and nothing more.**
+It does not retire #258, does not show the tree innocent, and does not
+lower any count: **#258 stays at four occurrences and the family at
+twelve**, and both remain floors. A load-dependent failure is green
+most of the time over a live defect, which is exactly why this section
+records the green as a sample and not as a closure.
+
 ### The `read Hello` family is at TWELVE
 
 Twelve occurrences across **five suites** and **six selectors**,
