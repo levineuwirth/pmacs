@@ -69,6 +69,199 @@ U17's control is the first kind and this branch's macOS control is the
 second. Each row says which it is, and neither may borrow the other's
 strength.
 
+## Counts of record
+
+The counts this file is the register for, stated once here rather than
+recomputed from the run sections, and corrected here where a run
+section states them lower.
+
+**Landed on `main` rather than on a phase branch**, under the
+registry-location ruling of 2026-09-09. A record committed on a phase
+branch cannot describe its own head: the commit moves the tip and
+starts the run it would then have to record. `7b6c519` is that fixed
+point's proof rather than its assertion — it exists only to record run
+34369540895, and its own push produced 34373256548, which it therefore
+could not name. On `main` the loop breaks. A commit here changes no
+branch, and under `ci.yml`'s changed-paths rule — `code=false` when
+every changed path is under `docs/` — it starts none of the nine jobs
+that compile or run tests, so it can describe a branch's run after
+that run has completed.
+
+Three phases in a row shipped this debt into the next phase's first
+commit (E0's rode E1's as `559e8bf`, E1's rode E2's as `f6f36bb`).
+E2's does not.
+
+### Run 34373256548, PR #262 at the head `7b6c519`
+
+The run the branch could not record. Read from the jobs endpoint and
+the failing job's log.
+
+| field | value |
+|---|---|
+| run | 34373256548, `pull_request`, one attempt |
+| head | `7b6c519` |
+| window | started 2026-09-09T15:53:52Z, completed 16:11:45Z |
+| verdict | 18 jobs: **16 success, 1 failure, 1 skipped** |
+| the failure | `Test (macos-latest / luajit)`, job 102539566398 |
+| failing target | `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join`, `tests/statusline_segments_acceptance.rs:996:54`, `WouldBlock`, `test result: FAILED. 10 passed; 1 failed` |
+| the skip | `Docs consistency`, correctly: the push changed code |
+
+`WouldBlock` appears **exactly once** in the whole job log. This is
+**#258's fourth occurrence** and the family's twelfth, and it is the
+second consecutive red on this branch carrying that selector. The
+previous run, 34369540895 at `e5417f6`, is recorded on the branch in
+`7b6c519`.
+
+`src/daemon.rs` has **no diff at all** in `dbe40a1..7b6c519`, so
+nothing on the branch can reach a `Hello` read; the branch is a
+candidate for none of this family and is excluded from none of it.
+
+### The `read Hello` family is at TWELVE
+
+Twelve occurrences across **five suites** and **six selectors**,
+counted by fetching the failing job of every run on PR #257 and PR
+#262, grepping `WouldBlock`, and extracting the panicking thread and
+site of each hit. Per-job counts: 1, 1, 4, 1, 2, 2, 1.
+
+| # | run | sha | suite | selector |
+|---|---|---|---|---|
+| 1 | 34220035122 | `8f6784f` | `statusline_segments_acceptance` | `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join` |
+| 2 | 34222042303 | `e78d184` | `theme_faces_acceptance` | `v15_peer_never_receives_theme_facts_and_v16_does` |
+| 3 | 34269795016 | `04263c6` | `gpu_font_acceptance` | `v16_peer_never_receives_font_facts_and_v17_does` |
+| 4 | 34269795016 | `04263c6` | `m5_5_acceptance` | `m10_10_non_replica_frontend_does_not_receive_cursor_byte` |
+| 5 | 34269795016 | `04263c6` | `theme_faces_acceptance` | `daemon_reships_the_summary_after_a_real_buffer_round_trip` |
+| 6 | 34269795016 | `04263c6` | `theme_faces_acceptance` | `v15_peer_never_receives_theme_facts_and_v16_does` |
+| 7 | 34272480226 | `d7fd465` | `statusline_segments_acceptance` | `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join` |
+| 8 | 34358682895 | `65648ec` | `m11_5_semantic_acceptance` | `daemon_routes_semantic_family_to_semantic_session_only` |
+| 9 | 34358682895 | `65648ec` | `theme_faces_acceptance` | `daemon_reships_the_summary_after_a_real_buffer_round_trip` |
+| 10 | 34369540895 | `e5417f6` | `statusline_segments_acceptance` | `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join` |
+| 11 | 34369540895 | `e5417f6` | `theme_faces_acceptance` | `daemon_reships_the_summary_after_a_real_buffer_round_trip` |
+| 12 | 34373256548 | `7b6c519` | `statusline_segments_acceptance` | `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join` |
+
+The six selectors are `a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join`
+(four), `daemon_reships_the_summary_after_a_real_buffer_round_trip`
+(three), `v15_peer_never_receives_theme_facts_and_v16_does` (two), and
+`v16_peer_never_receives_font_facts_and_v17_does`,
+`m10_10_non_replica_frontend_does_not_receive_cursor_byte` and
+`daemon_routes_semantic_family_to_semantic_session_only` (one each).
+
+Zero `WouldBlock` in all three failing macOS **lua54** jobs
+(102040771394, 102047236847, 102154957233) and **zero at the merge
+base**. The count is a floor: nobody has counted runs, so an
+occurrence is recorded only when someone reads a log.
+
+### #258 is at FOUR occurrences
+
+Its own selector, job and all three required fragments, four times:
+run 34220035122 at `8f6784f`; run 34272480226 at `d7fd465` (the
+occurrence D30 dispositioned); run 34369540895 at `e5417f6`; and run
+34373256548 at `7b6c519`. The last two are **consecutive runs on one
+branch whose shas differ by 83 lines of markdown**, which excludes the
+diff between them as the cause and establishes nothing whatever about
+frequency. Two consecutive runs are two occurrences, not a rate.
+
+D30's revocation condition is written for `main`, and runs 34369540895
+and 34373256548 are `pull_request` runs on a branch, so neither meets
+it. Whether a recurrence on the next phase's head should carry that
+weight is the owner's.
+
+### What PR #262's own branch commits say, and why it differs
+
+`ee97842`, `ba3e737` and `7b6c519` carry run sections written on the
+branch, each true when written and each one run behind for the
+structural reason above. Two of their sentences are superseded by this
+section: the family stated **at eleven** with an eleven-row table
+(`7b6c519`, which recomputed it before run 34373256548 existed), and
+**#258's third occurrence** as the highest count named there. Both
+sentences stand where they were written, as this file's correction form
+requires; this section is the count of record where they disagree with
+it.
+
+### The local gate red at `7b6c519`: seven async pump deadlines, filed as #263
+
+Not a CI red. Gate log `20260909T154216Z-2666527`, step
+`07-sweep-luajit`, target `-p pmacs --lib`: `running 2019 tests` ending
+`FAILED. 2001 passed; 7 failed; 11 ignored ... finished in 19.41s`.
+Seven `async_runtime::tests::` failures, filed as **#263** because the
+signature matched no row here.
+
+**Required fragments**: (`runtime tick deadline exceeded` **or**
+`keyless job stalled`) **and** `did not settle within 2s`, with the
+`src/async_runtime.rs` line numbers excluded. The disjunction is
+load-bearing: `keyless_dispatch_is_unaffected_by_supersede` panics at a
+hand-rolled loop (`:2650`) carrying neither of the other fragments, so
+a conjunction would drop a member. The bare `runtime tick deadline
+exceeded` string is **older than `68a4a14`**, which only appended the
+subject, elapsed time and poll count, and it appears in **exactly one**
+retained gate-log directory — this red.
+
+**They are one row, and the log's own ordering proves it.** The seven
+are printed consecutively at log lines 58–64, each reporting
+2.0000–2.0010 s, so they started and completed together at the head of
+the run; forty-nine tests completed before the first was reported.
+Inside that window the partition is exact with no counter-example on
+either side: **every async_runtime test that waited on a real worker
+reply failed (7 of 7), and every one that did not passed (5 of 5)** —
+including `a_failed_or_cancelled_resource_job_is_not_harvested`, which
+injects its replies with `rt.workers.send`, and
+`take_result_while_running_returns_none`, which dispatches a 500 ms
+sleep but asserts a disjunction that never waits. The discriminator is
+waiting, not dispatching.
+
+**What they share is one process and one ~2-second window — NOT one
+runtime.** Each of the seven builds its own `AsyncRuntime`
+(`with_pool_size(1|2|4)`, `src/async_runtime.rs:840`) and its own
+`WorkerPool` with its own threads, injector, stealers and parker
+condvar (`src/worker.rs:196`); neither type holds a static. The pool
+sizes across the seven are 1, 1, 1, 2, 2, 2 and 4, and all seven failed
+alike. **No object in the tree explains the co-failure, and that
+absence is the finding** — it is what separates this row from U16,
+which was widened on a *demonstrated* process-global object
+(`set_current_dir`, twice in the workspace, both in one test) plus a
+3-of-400-against-0-of-400 experiment. There is no such object here and
+no such experiment. So the mechanism question is not "why did the pool
+stall", there being no *the* pool, but "what made seven independent
+worker pools all fail to run inside one two-second window while their
+main threads ran at full rate".
+
+**Not U17.** U17's `pump_until` *succeeded* and the **value** was wrong
+(`first read_dir must be superseded; got ok`,
+`tests/m8_1_acceptance.rs:278`): its predecessor ran too *fast* for the
+cancel to land. Every #263 failure is the opposite sign — nothing
+settled at all and the deadline fired. U17 must not be widened onto
+this row.
+
+**Load is BOUNDED, not established, and the proxy is already in every
+stage log.** Forty-nine tests completed before the first of the seven
+was reported at t = 2.000 s, so roughly 56 completions in the first two
+seconds against 2008 in 19.41 s: **the failure window ran about 3.7×
+slower than the rest of its own run.** Across runs, the same
+`-p pmacs --lib` luajit target on the same tree, machine and day took
+**19.41 s** (this red), **15.23 s** (green) and **5.16 s** (green), and
+the default-feature `--lib` target across that day's eleven gate logs
+ranged **5.26 s to 20.24 s, every one green**. The red sits at the slow
+end of an envelope green runs already occupy. **This diagnoses
+nothing.** What it establishes is that the per-target `finished in`
+line answers "was this run slow?" without a `/proc/loadavg` sample, so
+no new instrument is owed.
+
+**Retirement**: diagnosis, never a green rerun. A later
+`scripts/gate --protocol` at `7b6c519` did not reproduce the seven
+(log `20260909T162011Z-2832095`, eight of eight); by the rerun rule
+above that is non-reproduction and nothing more, and it retires
+nothing. The discriminating instrument is whether the **worker**
+threads were runnable at the deadline, which the pump does not report.
+
+**One thing for the owner before this is called a product defect.**
+`pump_until`'s `DEADLINE` is a fixed 2 s wall-clock assertion running
+in the **default** sweep, in a module whose three genuine wall-clock
+budgets (`dispatch_parse_stays_under_the_parse_budget`,
+`grep_supersede_cancels_predecessor_within_50ms`,
+`supersede_cancels_in_flight_job_within_50ms`) are `#[ignore]`d and
+print `ignored, wall-clock budget` in this same log. Against a measured
+3.8× dispersion on one machine on one day, that is D12's budget rule
+applied unevenly.
+
 ## Live rows
 
 ### R3 — live-leader EPERM with an unobservable group
@@ -108,7 +301,7 @@ waited on, which is now done here by hand.
 | required fragments | `async pump deadline exceeded` |
 | occurrences | two: `main`, run 30555667095, 2026-07-30; and PR #257 at `e78d184`, run 34222042303, job `Test (macos-latest / lua54)` (102047236847), `src/editor.rs:12842`, `test result: FAILED. 2196 passed; 1 failed; 11 ignored`. The panic line moves with `editor.rs` and is not part of the signature. The next run, 34253949749 at `b2094ac`, ran this selector on both macOS legs and passed: non-reproduction and nothing more |
 | candidate mechanism | the test drives a superseded stream to its `on_close` and pumps `tick_async` until the Lua marker appears, under a fixed 2-second deadline the helper sets itself. Whether two seconds is short for a loaded macOS runner or the close notification is genuinely lost is not known, and the first occurrence's log no longer says anything either way. Unresolved; possible product defect |
-| retirement | diagnosis. The deadline now reports its subject, its elapsed time and its poll count, so the next occurrence says whether it missed by a millisecond or by two seconds --- that is a step toward the diagnosis and is not itself a closer. Never a green rerun |
+| retirement | diagnosis. The deadline now reports its subject, its elapsed time and its poll count, so the next occurrence says whether it missed by a millisecond or by two seconds --- that is a step toward the diagnosis and is not itself a closer. Never a green rerun. **THE DISCRIMINATOR, and it is one number that already exists.** R5 shares its waiting shape, its `--lib` binary and the very ancestry of its reporting with #263 (`68a4a14` carried R5's reporting inward to `pump_until`), and the one measurement that separates *the pump was starved* from *the reply never came* is the poll count --- which **R5 has never been observed with**, both occurrences above predating that commit. So the next occurrence decides it, and nothing else has to be built: **~2000 polls in 2 s** means the pump ran at full rate and nothing settled, which excludes starvation, is the same window #263 saw, and merges the two rows under a second selector; **a small count** means the pump itself was starved, which is a different mechanism, and #263 is not R5. Recorded at C2's close so the next reader of this row does not re-derive it |
 
 **The lesson the void closure carries.** A closer that names a mechanism
 has to be checked against the failing site, not against the row's
