@@ -995,3 +995,86 @@ non-reproduction and nothing more, and `tests/theme_faces_acceptance.rs`
 is a file this branch edits, while `tests/m11_5_semantic_acceptance.rs`
 is not. Both are a comment on #258 with the matching-rule difference
 stated, as the rule above requires: neither is #258's selector.
+
+### PR #262's CI run at the fix-round head `e5417f6`
+
+Run **34369540895**, `pull_request`, head `e5417f6`, one attempt, 18
+jobs, created 2026-09-09T15:19:58Z, completed 15:40:22Z, conclusion
+`failure`: **16 green, 1 red, 1 skipped** (`Docs consistency`, skipped
+correctly). Counted from the jobs endpoint. Nothing was re-run.
+
+**The build break is gone from CI, on both legs that carried it.**
+`Lint (luajit)` (102526900610) and `Test (ubuntu-latest / luajit, no
+crdt)` (102526964980) are **green**, against red at `65648ec` on the
+same two. `0c4eab2` fixed the defect and `16fddd4` made it a local red
+rather than a remote one. **U18/#249 did not recur either**: `Test
+(ubuntu-latest / luajit)` (102526965020) is green, so the leg that
+produced zero test evidence in the previous run produced a full job
+here.
+
+**The one red is `Test (macos-latest / luajit)`, job 102526965146, with
+two failing targets — and one of them is #258's own selector.**
+
+```
+---- a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join stdout ----
+thread 'a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join' (120331) panicked at tests/statusline_segments_acceptance.rs:996:54:
+called `Result::unwrap()` on an `Err` value: Io(Os { code: 35, kind: WouldBlock, message: "Resource temporarily unavailable" })
+test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.83s
+```
+
+Selector, job leg, site and all three required fragments are **#258's**,
+identical to its first occurrence in run 34220035122 and its second in
+run 34272480226, down to the `10 passed; 1 failed` result line. **This
+is #258's third occurrence, and its first on this branch** --- both
+earlier ones are PR #257's. Not a rerun: a different tree.
+
+```
+---- daemon_reships_the_summary_after_a_real_buffer_round_trip stdout ----
+thread 'daemon_reships_the_summary_after_a_real_buffer_round_trip' (122161) panicked at tests/theme_faces_acceptance.rs:1034:50:
+read Hello: Io(Os { code: 35, kind: WouldBlock, message: "Resource temporarily unavailable" })
+test result: FAILED. 26 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.42s
+```
+
+That is family member 5's **fourth** occurrence, and its second in
+consecutive runs on this branch.
+
+**The family is at eleven**, recomputed from the enumeration in the
+section above plus these two. Still **five suites and six selectors** ---
+both selectors are already in the list, so the count moves and the
+spread does not:
+
+| # | run | sha | suite | selector |
+|---|---|---|---|---|
+| 1–7 | (PR #257) | `8f6784f` … `d7fd465` | four suites | five selectors; enumerated above |
+| 8 | 34358682895 | `65648ec` | `m11_5_semantic_acceptance` | `daemon_routes_semantic_family_to_semantic_session_only` |
+| 9 | 34358682895 | `65648ec` | `theme_faces_acceptance` | `daemon_reships_the_summary_after_a_real_buffer_round_trip` |
+| **10** | **34369540895** | **`e5417f6`** | **`statusline_segments_acceptance`** | **`a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join`** |
+| **11** | **34369540895** | **`e5417f6`** | **`theme_faces_acceptance`** | **`daemon_reships_the_summary_after_a_real_buffer_round_trip`** |
+
+**What this bears on, stated rather than decided here.**
+
+- **#258 has now fired on `e2/gui-desktop-basics` under its own
+  selector**, which no earlier run on this branch did. D30's revocation
+  condition is written for `main` --- "if #258's selector recurs on
+  `main` after the merge" --- and this is a `pull_request` run on a
+  branch, so **the condition as written is not met by this**. Whether a
+  recurrence on the *next* phase's head should carry the same weight is
+  the owner's, and it is raised here because the disposition that
+  accepted #258 rested on a Linux measurement whose macOS half is now
+  taken and adverse.
+- **This branch is a candidate for none of it and excluded from none of
+  it.** `tests/theme_faces_acceptance.rs` is a file it edits;
+  `tests/statusline_segments_acceptance.rs` is not, and nothing in E2 or
+  in fix round 1 touches the daemon's boot path --- `src/daemon.rs` has
+  no diff in `dbe40a1..e5417f6` at all. Fix round 1's own six commits
+  are a moved test helper, a harness stage and its witness, two markdown
+  files and one doc comment; none of them can reach a `Hello` read.
+- **The measurement is the reading that fits.** On this leg boot to
+  first `Hello` is p50 597.50 ms with 71 of 88 boots past the readiness
+  wait's 500 ms, so a fixture whose budget starts at "connected" is
+  racing a daemon that is not yet serving. Two fixtures losing that race
+  in one job is what the measurement predicts, and it is what this job
+  shows.
+
+Both are a comment on #258 with the matching-rule difference stated:
+target 1 **is** #258, target 2 is the family and not #258.
