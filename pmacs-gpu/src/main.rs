@@ -673,7 +673,7 @@ const MINIMAP_THUMB_BORDER: [f32; 4] = [0.86, 0.86, 0.96, 0.7];
 /// `SCROLLBAR_WIDTH + SCROLLBAR_RIGHT` is less than [`MINIMAP_RIGHT`],
 /// which was already dead margin between the minimap's right edge and
 /// the surface's. Painting inside it means the scrollbar moves **no**
-/// other geometry: [`minimap_left`], [`Self::text_bounds_right`], the
+/// other geometry: [`minimap_left`], [`State::text_bounds_right`], the
 /// line-number gutter and every hit test are unchanged, so this row
 /// adds a control without reflowing the document. Reserving a fresh
 /// strip would have been the alternative, and it would have made the
