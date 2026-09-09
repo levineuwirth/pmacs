@@ -2332,10 +2332,21 @@ fn m10_10_f14_production_path_keystroke_flows_to_broadcast() {
 fn m10_10_non_replica_frontend_does_not_receive_cursor_byte() {
     let daemon = TestDaemon::spawn();
     let mut stream = daemon.connect();
-    stream
-        .set_read_timeout(Some(Duration::from_millis(500)))
-        .unwrap();
-    let _hello = do_handshake(&mut stream);
+    let hello = common::hello_measure::hello_within(
+        &mut stream,
+        "m5_5_acceptance::m10_10::handshake",
+        Duration::from_millis(500),
+    );
+    assert_eq!(hello.protocol_version, ADVERTISED_PROTOCOL_VERSION);
+    write_message(
+        &mut stream,
+        &AttachRequest {
+            protocol_version: hello.protocol_version,
+            frontend_capabilities: build_default_caps(),
+            initial_size: CellSize::new(24, 80),
+        },
+    )
+    .expect("write AttachRequest");
 
     // Read a handful of incoming frames; assert none is CursorByte.
     // 16 frames is enough to cover at least a couple of per-tick

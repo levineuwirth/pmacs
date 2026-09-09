@@ -990,10 +990,11 @@ fn a16_26_real_daemon_v17_gate_v18_first_frame_and_late_join() {
 
     fn probe(daemon: &TestDaemon, version: u32) -> (bool, bool) {
         let mut stream = daemon.connect();
-        stream
-            .set_read_timeout(Some(Duration::from_millis(200)))
-            .unwrap();
-        let hello: Hello = read_message(&mut stream).unwrap();
+        let hello: Hello = common::hello_measure::hello_within(
+            &mut stream,
+            "statusline_segments_acceptance::a16_26::probe",
+            Duration::from_millis(200),
+        );
         write_message(
             &mut stream,
             &AttachRequest {

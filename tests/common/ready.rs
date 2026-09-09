@@ -205,10 +205,25 @@ pub fn wait_for_daemon(
         deadline,
         || match std::os::unix::net::UnixStream::connect(socket) {
             Ok(mut stream) => {
+                // MEASUREMENT INSTRUMENT (#258): the discarded Hello read
+                // is timed against its 500 ms budget and recorded; the
+                // readiness verdict is unchanged.
                 stream
-                    .set_read_timeout(Some(Duration::from_millis(500)))
+                    .set_read_timeout(Some(Duration::from_secs(20)))
                     .ok();
-                let _ = pmacs::transport::read_message::<pmacs::protocol::Hello>(&mut stream);
+                let start = std::time::Instant::now();
+                let result =
+                    pmacs::transport::read_message::<pmacs::protocol::Hello>(&mut stream);
+                let outcome = match &result {
+                    Ok(_) => "ok".to_owned(),
+                    Err(error) => format!("{error:?}"),
+                };
+                record_hello_sample(
+                    "ready::wait_for_daemon(first connect, boot included)",
+                    Duration::from_millis(500),
+                    start.elapsed(),
+                    &outcome,
+                );
                 Probe::Ready(())
             }
             Err(connect) => match child.try_wait() {
@@ -219,6 +234,28 @@ pub fn wait_for_daemon(
             },
         },
     )
+}
+
+/// MEASUREMENT INSTRUMENT (#258): append one `Hello` timing sample to
+/// the checkout-root file the last-sorted suite reports. Duplicated
+/// from `common/hello_measure.rs` because this file is included by
+/// path in suites that have no `common` module.
+fn record_hello_sample(site: &str, budget: Duration, elapsed: Duration, outcome: &str) {
+    use std::io::Write;
+    let line = format!(
+        "HELLO-MEASURE\t{site}\t{}\t{:.2}\t{outcome}\n",
+        budget.as_millis(),
+        elapsed.as_secs_f64() * 1000.0
+    );
+    eprint!("{line}");
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("hello-measure.tsv");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = file.write_all(line.as_bytes());
+    }
 }
 
 /// The tick interval for [`tick_until`]: an in-process editor's frame

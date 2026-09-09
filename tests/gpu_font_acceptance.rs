@@ -230,10 +230,11 @@ fn v16_peer_never_receives_font_facts_and_v17_does() {
     /// deadline.
     fn probe(daemon: &TestDaemon, version: u32) -> (bool, bool) {
         let mut stream = daemon.connect();
-        stream
-            .set_read_timeout(Some(Duration::from_millis(250)))
-            .unwrap();
-        let hello: Hello = read_message(&mut stream).expect("read Hello");
+        let hello: Hello = common::hello_measure::hello_within(
+            &mut stream,
+            "gpu_font_acceptance::v16_peer::probe",
+            Duration::from_millis(250),
+        );
         let fid = hello.assigned_frontend_id;
         write_message(
             &mut stream,

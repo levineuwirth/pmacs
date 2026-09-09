@@ -27,6 +27,7 @@
 #![allow(dead_code)] // not every integration-test file uses every helper
 
 pub mod daemon;
+pub mod hello_measure;
 pub mod iso;
 pub mod pty;
 pub mod ready;

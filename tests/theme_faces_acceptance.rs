@@ -999,7 +999,7 @@ fn daemon_reships_the_summary_after_a_real_buffer_round_trip() {
     // was summary-silent forever.
     use common::daemon::{TestDaemon, build_default_caps};
     use pmacs::protocol::{AttachRequest, FrontendCapabilities, Hello, Key};
-    use pmacs::transport::{read_message, write_message};
+    use pmacs::transport::write_message;
 
     let daemon = TestDaemon::spawn_with_config(
         r#"
@@ -1023,10 +1023,11 @@ fn daemon_reships_the_summary_after_a_real_buffer_round_trip() {
     );
 
     let mut stream = daemon.connect();
-    stream
-        .set_read_timeout(Some(Duration::from_millis(250)))
-        .unwrap();
-    let hello: Hello = read_message(&mut stream).expect("read Hello");
+    let hello: Hello = common::hello_measure::hello_within(
+        &mut stream,
+        "theme_faces_acceptance::daemon_reships::probe",
+        Duration::from_millis(250),
+    );
     let fid = hello.assigned_frontend_id;
     write_message(
         &mut stream,
@@ -1377,10 +1378,11 @@ fn v15_peer_never_receives_theme_facts_and_v16_does() {
     /// deadline.
     fn probe(daemon: &TestDaemon, version: u32) -> (bool, bool) {
         let mut stream = daemon.connect();
-        stream
-            .set_read_timeout(Some(Duration::from_millis(250)))
-            .unwrap();
-        let hello: Hello = read_message(&mut stream).expect("read Hello");
+        let hello: Hello = common::hello_measure::hello_within(
+            &mut stream,
+            "theme_faces_acceptance::v15_peer::probe",
+            Duration::from_millis(250),
+        );
         let fid = hello.assigned_frontend_id;
         write_message(
             &mut stream,
